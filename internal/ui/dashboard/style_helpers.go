@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 func (m Model) formatStatus(job *db.Job) string {
@@ -21,6 +22,9 @@ func (m Model) formatStatus(job *db.Job) string {
 }
 
 func (m Model) formatStatusValue(job *db.Job, status string) string {
+	if display := queueblock.Display(job, nil); display.Blocked && status == db.StatusQueued {
+		return "… blocked"
+	}
 	switch status {
 	case db.StatusRunning:
 		stale := m.isJobStatusStale(job)

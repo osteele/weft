@@ -126,7 +126,7 @@ func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.C
 		}
 		flashCmd := m.flash.Set(msg.message, false)
 		m.refreshing = true
-		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig))
+		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig, m.cloudInstances))
 	}
 	// Instance-based mode: just refresh unplaced
 	return m, m.flash.Set(msg.message, false)
@@ -159,7 +159,7 @@ func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd
 	m.clampCursor()
 	if m.mode == watchModeSystem {
 		m.refreshing = true
-		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig))
+		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig, m.cloudInstances))
 	}
 	return m, flashCmd
 }
@@ -188,7 +188,7 @@ func (m watchModel) handleMoveExecuteDone(msg moveExecuteDoneMsg) (tea.Model, te
 	flashCmd := m.flash.Set(fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc), false)
 	if m.mode == watchModeSystem {
 		m.refreshing = true
-		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig))
+		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig, m.cloudInstances))
 	}
 	return m, flashCmd
 }
@@ -216,7 +216,7 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 		}
 		if m.mode == watchModeSystem {
 			m.refreshing = true
-			cmds = append(cmds, refreshWatchSystem(m.database, m.appConfig))
+			cmds = append(cmds, refreshWatchSystem(m.database, m.appConfig, m.cloudInstances))
 		}
 		return m, tea.Batch(cmds...)
 	}
@@ -464,7 +464,7 @@ func (m watchModel) handleSystemTick() (tea.Model, tea.Cmd) {
 	}
 	m.refreshing = true
 	return m, tea.Batch(
-		refreshWatchSystem(m.database, m.appConfig),
+		refreshWatchSystem(m.database, m.appConfig, m.cloudInstances),
 		scheduleWatchAllTick(),
 	)
 }
@@ -476,17 +476,18 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 		return m, nil
 	}
 	m.err = nil
-	m.cloudInstances = msg.snapshot.Launches
+	snapshot := msg.snapshot
+	m.cloudInstances = snapshot.Launches
 	m.onPremHosts = msg.snapshot.OnPremHosts
 	m.unplacedJobs = msg.snapshot.UnplacedJobs
 
 	// Update instanceIDs from discovered instances
-	m.instanceIDs = make([]int64, len(msg.snapshot.Launches))
-	for i, ci := range msg.snapshot.Launches {
+	m.instanceIDs = make([]int64, len(snapshot.Launches))
+	for i, ci := range snapshot.Launches {
 		m.instanceIDs[i] = ci.ID
 	}
 
-	cmds := m.mergeSnapshot(msg.snapshot)
+	cmds := m.mergeSnapshot(snapshot)
 	m.rebuildReplacementCache()
 
 	for _, host := range m.onPremHosts {

@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -188,6 +189,7 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 				m.hosts[i].QueuedJobCount = result.QueueStatus.QueuedJobCount
 				m.hosts[i].CurrentQueueJob = result.QueueStatus.CurrentJob
 				m.hosts[i].QueueStopPending = result.QueueStatus.StopPending
+				m.hosts[i].BlockedQueueJobs = result.QueueStatus.BlockedReasons
 
 				if result.HostWarning == "" && !result.QueueStatus.RunnerActive && !m.queueStoppedWarnedHosts[result.Host] {
 					queuedCount, _ := db.CountQueuedByHost(m.database, result.Host)
@@ -207,6 +209,7 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 	if result.HostWarning != "" {
 		cmds = append(cmds, m.setFlash(fmt.Sprintf("Sync warning (%s): %s", result.Host, result.HostWarning), true))
 	}
+	queueblock.Apply(m.allJobs, queueblock.FromHosts(m.hosts))
 
 	if result.Updated > 0 {
 		cmds = append(cmds, m.refreshJobs())

@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 // renderStructuredBlock renders an instance block's structured lines, making
@@ -486,7 +487,8 @@ func formatWatchSummaryLine(launchedAt time.Time, views []cloudInstanceView, now
 // ---------------------------------------------------------------------------
 
 func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
-	status := job.EffectiveStatus()
+	display := queueblock.Display(job, nil)
+	status := display.Status
 	duration := "—"
 	if job.StartTime > 0 {
 		d := time.Duration(time.Now().Unix()-job.StartTime) * time.Second
@@ -496,13 +498,17 @@ func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 	if desc == "" {
 		desc = campaign.TruncateCommand(job.Command, 50)
 	}
-	return fmt.Sprintf("#%-4d  %s  %-10s  %-*s  %s",
+	row := fmt.Sprintf("#%-4d  %s  %-10s  %-*s  %s",
 		job.ID,
 		renderWatchJobStatusText(status, status, watchInstanceBlockOptions{}),
 		duration,
 		projectWidth, campaign.JobProjectLabel(job),
 		desc,
 	)
+	if display.Blocked {
+		row += "  " + watchDimStyle.Render(display.Reason)
+	}
+	return row
 }
 
 // formatUnplacedJobRows formats all unplaced jobs as a table with dynamically

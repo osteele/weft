@@ -1,6 +1,9 @@
 package queuerunner
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestParseStatus(t *testing.T) {
 	tests := []struct {
@@ -48,6 +51,24 @@ STOP:yes`,
 			},
 		},
 		{
+			name: "blocked reasons",
+			output: `RUNNER:yes
+CURRENT:
+DEPTH:2
+BLOCKED:554:benchmark gate: cpu=9%>5%
+BLOCKED:555:gpu gate: all a100 GPUs are in use
+STOP:no`,
+			want: StatusInfo{
+				RunnerActive:   true,
+				QueuedJobCount: 2,
+				BlockedReasons: map[int64]string{
+					554: "benchmark gate: cpu=9%>5%",
+					555: "gpu gate: all a100 GPUs are in use",
+				},
+				StopPending: false,
+			},
+		},
+		{
 			name:   "empty output",
 			output: "",
 			want: StatusInfo{
@@ -86,6 +107,9 @@ STOP:yes`,
 			}
 			if got.StopPending != tt.want.StopPending {
 				t.Errorf("StopPending = %v, want %v", got.StopPending, tt.want.StopPending)
+			}
+			if !reflect.DeepEqual(got.BlockedReasons, tt.want.BlockedReasons) {
+				t.Errorf("BlockedReasons = %#v, want %#v", got.BlockedReasons, tt.want.BlockedReasons)
 			}
 		})
 	}

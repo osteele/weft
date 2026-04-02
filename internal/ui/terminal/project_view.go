@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 type projectGroup struct {
@@ -350,7 +351,11 @@ func formatProjectWatchRow(job *db.Job, bucket string, now time.Time) string {
 	if desc == "" {
 		desc = job.EffectiveCommand()
 	}
-	return fmt.Sprintf("#%-5d %-16s %-12s %-14s %-12s %s", job.ID, status, host, dir, when, desc)
+	row := fmt.Sprintf("#%-5d %-16s %-12s %-14s %-12s %s", job.ID, status, host, dir, when, desc)
+	if display := queueblock.Display(job, nil); display.Blocked {
+		row += "  " + display.Reason
+	}
+	return row
 }
 
 func formatProjectLaunchRow(inst *db.Launch, now time.Time) string {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,13 +14,14 @@ import (
 // State tracks the runner's persistent state, saved to {queue}.state.json.
 // Compatible with the bash runner's state format.
 type State struct {
-	mu         sync.RWMutex
-	Cursor     string                      `json:"cursor"`
-	CursorLine int                         `json:"cursor_line"`
-	Pending    []int64                     `json:"pending"`
-	Current    *int64                      `json:"current"`
-	Running    map[string]RunningJobState  `json:"running,omitempty"`
-	Finished   map[string]FinishedJobState `json:"finished,omitempty"`
+	mu             sync.RWMutex
+	Cursor         string                      `json:"cursor"`
+	CursorLine     int                         `json:"cursor_line"`
+	Pending        []int64                     `json:"pending"`
+	PendingReasons map[string]string           `json:"pending_reasons,omitempty"`
+	Current        *int64                      `json:"current"`
+	Running        map[string]RunningJobState  `json:"running,omitempty"`
+	Finished       map[string]FinishedJobState `json:"finished,omitempty"`
 
 	// StopRequested is not persisted — it's set from the command log each time.
 	StopRequested bool `json:"-"`
@@ -71,9 +73,10 @@ type FinishedJobState struct {
 // NewState creates an empty state.
 func NewState() *State {
 	return &State{
-		Pending:  []int64{},
-		Running:  make(map[string]RunningJobState),
-		Finished: make(map[string]FinishedJobState),
+		Pending:        []int64{},
+		PendingReasons: make(map[string]string),
+		Running:        make(map[string]RunningJobState),
+		Finished:       make(map[string]FinishedJobState),
 	}
 }
 
@@ -102,6 +105,9 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.Pending == nil {
 		s.Pending = []int64{}
+	}
+	if s.PendingReasons == nil {
+		s.PendingReasons = make(map[string]string)
 	}
 	return s, nil
 }
@@ -187,6 +193,14 @@ func (s *State) AddPending(jobID int64) {
 	s.addPendingLocked(jobID)
 }
 
+// AddPendingWithReason adds a job ID to the end of the pending list and records
+// a transient gate reason for UI surfaces.
+func (s *State) AddPendingWithReason(jobID int64, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addPendingWithReasonLocked(jobID, reason)
+}
+
 // PriorityPending moves a job to the front of the pending list.
 func (s *State) PriorityPending(jobID int64) {
 	s.mu.Lock()
@@ -215,6 +229,7 @@ func (s *State) popPendingLocked() (int64, bool) {
 	}
 	jobID := s.Pending[0]
 	s.Pending = s.Pending[1:]
+	s.clearPendingReasonLocked(fmt.Sprintf("%d", jobID))
 	return jobID, true
 }
 
@@ -272,6 +287,7 @@ func (s *State) SetRunning(jobID string, state RunningJobState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Running[jobID] = state
+	s.clearPendingReasonLocked(jobID)
 	s.updateCurrentLocked()
 }
 
@@ -280,6 +296,7 @@ func (s *State) AddRunning(jobID string, state RunningJobState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Running[jobID] = state
+	s.clearPendingReasonLocked(jobID)
 	s.updateCurrentLocked()
 }
 
@@ -322,19 +339,31 @@ func (s *State) CurrentJobID() (int64, bool) {
 }
 
 func (s *State) addPendingLocked(jobID int64) {
-	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
-	s.Pending = append(s.Pending, jobID)
-	s.clearFinishedLocked(fmt.Sprintf("%d", jobID))
+	s.queuePendingLocked(jobID)
+	s.clearPendingReasonLocked(fmt.Sprintf("%d", jobID))
+}
+
+func (s *State) addPendingWithReasonLocked(jobID int64, reason string) {
+	s.queuePendingLocked(jobID)
+	jobIDStr := fmt.Sprintf("%d", jobID)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		s.clearPendingReasonLocked(jobIDStr)
+		return
+	}
+	s.PendingReasons[jobIDStr] = reason
 }
 
 func (s *State) priorityPendingLocked(jobID int64) {
 	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
 	s.Pending = slices.Insert(s.Pending, 0, jobID)
 	s.clearFinishedLocked(fmt.Sprintf("%d", jobID))
+	s.clearPendingReasonLocked(fmt.Sprintf("%d", jobID))
 }
 
 func (s *State) removePendingLocked(jobID int64) {
 	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
+	s.clearPendingReasonLocked(fmt.Sprintf("%d", jobID))
 }
 
 func (s *State) removeRunningLocked(jobID string) {
@@ -347,10 +376,21 @@ func (s *State) recordFinishedLocked(jobID string, exitCode int, finishedAt int6
 		ExitCode:   exitCode,
 		FinishedAt: finishedAt,
 	}
+	s.clearPendingReasonLocked(jobID)
 }
 
 func (s *State) clearFinishedLocked(jobID string) {
 	delete(s.Finished, jobID)
+}
+
+func (s *State) clearPendingReasonLocked(jobID string) {
+	delete(s.PendingReasons, jobID)
+}
+
+func (s *State) queuePendingLocked(jobID int64) {
+	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
+	s.Pending = append(s.Pending, jobID)
+	s.clearFinishedLocked(fmt.Sprintf("%d", jobID))
 }
 
 // TotalAllotment returns the sum of all running jobs' local_allotment values.

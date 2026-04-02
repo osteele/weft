@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/ui/terminal"
@@ -462,6 +463,7 @@ func showJob(database *sql.DB, id int64) error {
 
 func printJobs(database *sql.DB, jobs []*db.Job) error {
 	applyAttemptOutcomeOverrides(database, jobs)
+	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
 
 	switch listFormat {
 	case "json":

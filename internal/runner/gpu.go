@@ -320,26 +320,35 @@ func (inv *GPUInventory) deviceMemCheck(state *State, device string, memRequired
 
 // PickBestGPUForClass finds the best available GPU device for a given class.
 // Returns the device index and true, or "" and false if none available.
-// Checks both our own reservations and actual VRAM usage (from DeviceMemSnapshot)
-// to avoid placing jobs on devices where other users have consumed memory.
 func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, memRequired int) (string, bool) {
+	device, _, ok := inv.PickBestGPUForClassWithReason(state, className, memRequired)
+	return device, ok
+}
+
+// PickBestGPUForClassWithReason finds the best available GPU device for a given class.
+// Returns a user-facing reason when no device can currently satisfy the request.
+func (inv *GPUInventory) PickBestGPUForClassWithReason(state *State, className string, memRequired int) (string, string, bool) {
 	candidates := inv.DevicesByClass(className)
 	if len(candidates) == 0 {
 		slog.Debug("no matching GPU devices for class", "component", "gpu", "class", className, "total_devices", len(inv.Devices))
-		return "", false
+		return "", fmt.Sprintf("no GPU matching class %s", className), false
 	}
 
 	bestDevice := ""
 	bestFreeMiB := -1
+	busyCount := 0
+	memBlockedCount := 0
 
 	for _, device := range candidates {
 		if DeviceHasRunningJob(state, device) {
 			slog.Debug("GPU device busy", "component", "gpu", "class", className, "device", device)
+			busyCount++
 			continue
 		}
 		freeMiB, ok := inv.deviceMemCheck(state, device, memRequired)
 		if !ok {
 			slog.Debug("GPU device rejected for insufficient memory", "component", "gpu", "class", className, "device", device, "need_gb", memRequired, "free_mib", freeMiB)
+			memBlockedCount++
 			continue
 		}
 		if freeMiB > bestFreeMiB {
@@ -349,42 +358,56 @@ func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, mem
 	}
 
 	if bestDevice == "" {
-		return "", false
+		switch {
+		case busyCount == len(candidates):
+			return "", fmt.Sprintf("all %s GPUs are in use", className), false
+		case memBlockedCount > 0:
+			return "", fmt.Sprintf("no %s GPU currently has %dGB free", className, memRequired), false
+		default:
+			return "", fmt.Sprintf("no %s GPU is currently available", className), false
+		}
 	}
 	slog.Debug("GPU device selected", "component", "gpu", "class", className, "device", bestDevice, "free_mib", bestFreeMiB)
-	return bestDevice, true
+	return bestDevice, "", true
 }
 
 // CanStartGPUJob checks if a job can start based on GPU constraints.
 // Returns true if the job can start, along with the resolved GPU devices.
 // Checks both our own reservations and actual VRAM usage (from DeviceMemSnapshot).
 func (inv *GPUInventory) CanStartGPUJob(state *State, job *RunnerJob) (bool, []string) {
+	canStart, devices, _ := inv.CanStartGPUJobWithReason(state, job)
+	return canStart, devices
+}
+
+// CanStartGPUJobWithReason checks if a job can start based on GPU constraints.
+// Returns a user-facing reason when the GPU gate blocks the job.
+func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) (bool, []string, string) {
 	// GPU class-based job
 	if job.Data.GPUClass != "" {
 		memPerDevice := GetJobGPUMem(job.Data, DefaultGPUMemGB)
-		device, ok := inv.PickBestGPUForClass(state, job.Data.GPUClass, memPerDevice)
+		device, reason, ok := inv.PickBestGPUForClassWithReason(state, job.Data.GPUClass, memPerDevice)
 		if !ok {
-			return false, nil
+			return false, nil, reason
 		}
-		return true, []string{device}
+		return true, []string{device}, ""
 	}
 
 	devices := GetJobGPUDevices(job.Data)
 	if len(devices) == 0 {
 		// CPU-only job — always allowed
-		return true, nil
+		return true, nil, ""
 	}
 
 	memPerDevice := GetJobGPUMem(job.Data, DefaultGPUMemGB)
 	for _, device := range devices {
 		if DeviceHasRunningJob(state, device) {
-			return false, nil
+			return false, nil, fmt.Sprintf("GPU %s is already in use", device)
 		}
 		if _, ok := inv.deviceMemCheck(state, device, memPerDevice); !ok {
-			return false, nil
+			return false, nil, fmt.Sprintf("GPU %s does not currently have %dGB free", device, memPerDevice)
 		}
 	}
-	return true, devices
+	return true, devices, ""
 }
 
 // DefaultGPUMemGB is the default GPU memory reservation when a job uses a GPU.

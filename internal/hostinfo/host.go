@@ -78,6 +78,7 @@ type Host struct {
 	QueuedJobCount    int              // Number of jobs waiting in queue
 	CurrentQueueJob   string           // Job ID currently running in queue
 	QueueStopPending  bool             // Whether stop signal file exists
+	BlockedQueueJobs  map[int64]string // Queued jobs held by a gate, with reason
 	SyncWarning       string           // Latest session-only sync warning shown in the TUI
 
 	// Running jobs on this host
@@ -477,18 +478,20 @@ func (h *Host) UpdateFrom(source *Host) {
 	// Queue fields
 	if source.QueueStatus != QueueCheckUnknown {
 		h.QueueStatus = source.QueueStatus
-	}
-	if source.QueueRunnerActive {
 		h.QueueRunnerActive = source.QueueRunnerActive
-	}
-	if source.QueuedJobCount != 0 {
 		h.QueuedJobCount = source.QueuedJobCount
-	}
-	if source.CurrentQueueJob != "" {
 		h.CurrentQueueJob = source.CurrentQueueJob
-	}
-	if source.QueueStopPending {
 		h.QueueStopPending = source.QueueStopPending
+	}
+	if source.BlockedQueueJobs != nil {
+		if len(source.BlockedQueueJobs) == 0 {
+			h.BlockedQueueJobs = nil
+		} else {
+			h.BlockedQueueJobs = make(map[int64]string, len(source.BlockedQueueJobs))
+			for jobID, reason := range source.BlockedQueueJobs {
+				h.BlockedQueueJobs[jobID] = reason
+			}
+		}
 	}
 	if source.RunningJobs != nil {
 		h.RunningJobs = source.RunningJobs

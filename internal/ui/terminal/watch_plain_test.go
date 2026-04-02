@@ -60,3 +60,50 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 		t.Fatalf("output should omit redundant provider line ID, got:\n%s", out)
 	}
 }
+
+func TestReloadActiveLaunchesFiltersTerminalStatuses(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	runningID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("create running launch: %v", err)
+	}
+	failedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("create failed launch: %v", err)
+	}
+
+	launches, err := reloadActiveLaunches(database, []int64{runningID, failedID, 999999})
+	if err != nil {
+		t.Fatalf("reloadActiveLaunches: %v", err)
+	}
+	if len(launches) != 1 {
+		t.Fatalf("reloadActiveLaunches returned %d launches, want 1", len(launches))
+	}
+	if launches[0].ID != runningID {
+		t.Fatalf("reloadActiveLaunches returned launch %d, want %d", launches[0].ID, runningID)
+	}
+}
+
+func TestIsActiveCloudLaunchStatus(t *testing.T) {
+	tests := map[string]bool{
+		db.LaunchStatusLaunching: true,
+		db.LaunchStatusRunning:   true,
+		db.LaunchStatusGrace:     true,
+		db.LaunchStatusFailed:    false,
+		db.LaunchStatusCompleted: false,
+	}
+	for status, expected := range tests {
+		if got := isActiveCloudLaunchStatus(status); got != expected {
+			t.Fatalf("isActiveCloudLaunchStatus(%q) = %t, want %t", status, got, expected)
+		}
+	}
+}

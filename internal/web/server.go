@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -260,6 +261,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	filteredJobs := filterJobsByView(jobs, selectedView)
 	filteredJobs = filterJobsByHost(filteredJobs, selectedHost, hostSyncTimes)
 	sortJobsForView(filteredJobs, selectedView)
+	blockedLookup := queueblock.FromHosts(hosts)
 
 	showGPU := false
 	showProject := false
@@ -276,7 +278,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			showProject = true
 		}
 		// Get status with progress if available
-		status := formatJobStatus(job)
+		status := formatJobStatusWithLookup(job, blockedLookup)
 		if job.Status == db.StatusRunning {
 			if jp, ok := s.getJobProgress(job.ID); ok {
 				if pctText := progress.FormatPhaseProgress(jp.phase, jp.rawPct); pctText != "" {
@@ -289,12 +291,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			Host:        job.TargetDisplay(),
 			Project:     job.Project,
 			Status:      status,
-			StatusClass: jobStatusClass(job),
+			StatusClass: jobStatusClassWithLookup(job, blockedLookup),
 			Time:        formatJobTime(job),
 			GPU:         gpu,
 			Description: job.EffectiveDescription(),
 			Tags:        job.Tags,
-			TooltipHTML: buildJobTooltipHTML(job),
+			TooltipHTML: buildJobTooltipHTML(job, blockedLookup),
 		})
 	}
 
@@ -488,8 +490,15 @@ func formatLastUpdated(t time.Time) string {
 
 // jobStatusClass returns a CSS class name for the job status
 func jobStatusClass(job *db.Job) string {
+	return jobStatusClassWithLookup(job, nil)
+}
+
+func jobStatusClassWithLookup(job *db.Job, lookup queueblock.Lookup) string {
 	if job == nil {
 		return ""
+	}
+	if display := queueblock.Display(job, lookup); display.Blocked {
+		return "job-pending"
 	}
 	switch job.Status {
 	case db.StatusRunning, db.StatusStarting:
@@ -513,7 +522,7 @@ func jobStatusClass(job *db.Job) string {
 }
 
 // buildJobTooltipHTML creates an HTML tooltip with job details in columnar format
-func buildJobTooltipHTML(job *db.Job) template.HTML {
+func buildJobTooltipHTML(job *db.Job, lookup queueblock.Lookup) template.HTML {
 	if job == nil {
 		return ""
 	}
@@ -551,6 +560,10 @@ func buildJobTooltipHTML(job *db.Job) template.HTML {
 	// Command
 	cmd := job.EffectiveCommand()
 	writeRow("Command", cmd, true)
+
+	if display := queueblock.Display(job, lookup); display.Blocked {
+		writeRow("Blocked", display.Reason, true)
+	}
 
 	// Timing
 	if job.StartTime > 0 {

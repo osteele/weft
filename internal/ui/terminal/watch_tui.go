@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -177,6 +178,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 
 	unplaced, _ := db.ListUnplacedJobs(database)
 	onPremJobs, _ := db.ListActiveOnPremJobs(database)
+	queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 
 	m := watchModel{
 		mode:           mode,
@@ -232,7 +234,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		flash:          flash.State{Message: flashMessage},
 	}
 
-	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
+	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false, nil)
 	if err != nil {
 		model.err = err
 		return model

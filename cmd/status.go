@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
@@ -583,13 +584,19 @@ func printJobStatusLine(job *db.Job) {
 
 func printJobStatus(job *db.Job, exitOnComplete bool) {
 	effectiveStatus := job.EffectiveStatus()
+	display := queueblock.Display(job, nil)
 
 	fmt.Printf("Job ID:   %d\n", job.ID)
 	fmt.Printf("Target:   %s\n", job.TargetDisplay())
 	if gpuDev := job.GPUDevice(); gpuDev != "" {
 		fmt.Printf("GPU:      %s\n", gpuDev)
 	}
-	fmt.Printf("Status:   %s\n", effectiveStatus)
+	if display.Blocked {
+		fmt.Printf("Status:   %s\n", display.Status)
+		fmt.Printf("Reason:   %s\n", display.Reason)
+	} else {
+		fmt.Printf("Status:   %s\n", effectiveStatus)
+	}
 
 	if job.Description != "" {
 		fmt.Printf("Desc:     %s\n", job.Description)

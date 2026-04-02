@@ -87,6 +87,7 @@ type Job struct {
 	LaunchID             *int64         // Cloud instance ID if this job is part of a cloud instance
 	CampaignJobIndex     *int           // Position within a cloud campaign sequence, if assigned
 	LatestRunID          *int64         // Latest execution attempt row for this logical job
+	QueueBlockedReason   string         // Transient UI-only queue gate reason; not persisted
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync

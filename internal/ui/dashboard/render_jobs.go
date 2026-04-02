@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 func (m Model) renderWithModal(background, message string) string {
@@ -896,6 +897,11 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	}
 
 	status := job.EffectiveStatus()
+	if display := queueblock.Display(job, nil); display.Blocked {
+		b.WriteString(labelStyle.Render("Blocked"))
+		b.WriteString(valueStyle.Render(display.Reason))
+		b.WriteString("\n")
+	}
 	if status == db.StatusQueued || status == db.StatusRunning || status == db.StatusStarting || status == db.StatusPaused {
 		b.WriteString(labelStyle.Render("CPU"))
 		b.WriteString(valueStyle.Render(m.formatCPUAllotmentDisplay(job)))

@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
@@ -17,6 +18,7 @@ func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
 		return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
 	}
 	m.allJobs = msg.jobs
+	queueblock.Apply(m.allJobs, queueblock.FromHosts(m.hosts))
 	if msg.jobDependencies != nil {
 		m.jobDependencies = msg.jobDependencies
 	}
@@ -163,6 +165,7 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 		}
 	}
 	m.hostsQueriedThisSession[msg.hostName] = true
+	queueblock.Apply(m.allJobs, queueblock.FromHosts(m.hosts))
 	if len(cmds) == 0 {
 		return m, nil
 	}

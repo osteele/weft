@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 const projectWatchSyncInterval = 30 * time.Second
@@ -46,6 +47,7 @@ func loadProjectWatchGroups(database *sql.DB, recentWindow time.Duration) ([]pro
 		}
 		activeJobs = append(activeJobs, jobs...)
 	}
+	queueblock.Apply(activeJobs, queueblock.Fetch(activeJobs, 5*time.Second))
 
 	recentJobs, err := db.ListRecentTerminalJobs(database, time.Now().Add(-recentWindow).Unix())
 	if err != nil {

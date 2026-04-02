@@ -441,6 +441,14 @@ func (w *Worker) doSync(host string) {
 		result.HostFull = hostStatus.Host
 		if hostStatus.ExtraOutput != "" {
 			result.QueueStatus = queuerunner.ParseStatus(hostStatus.ExtraOutput)
+			if result.HostFull != nil {
+				result.HostFull.QueueStatus = hostinfo.QueueCheckChecked
+				result.HostFull.QueueRunnerActive = result.QueueStatus.RunnerActive
+				result.HostFull.QueuedJobCount = result.QueueStatus.QueuedJobCount
+				result.HostFull.CurrentQueueJob = result.QueueStatus.CurrentJob
+				result.HostFull.QueueStopPending = result.QueueStatus.StopPending
+				result.HostFull.BlockedQueueJobs = result.QueueStatus.BlockedReasons
+			}
 		}
 	}
 }

@@ -64,6 +64,23 @@ parser.add_argument("--output-dir", default="outputs")
 	assertSetEqual(t, refs, []string{"hf:gpt2"})
 }
 
+func TestPyScanPythonHFRefs_IgnoresMIMETypes(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "a.py", `
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "text/plain",
+}
+
+MODEL_CONFIGS = {
+    "base": "meta-llama/Llama-3-8B",
+}
+`)
+
+	refs := ScanPythonHFRefs(dir)
+	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
+}
+
 func TestPyScanPythonHFRefs_ModelArgBlockWithSlashDefault(t *testing.T) {
 	dir := t.TempDir()
 	writePyFile(t, dir, "a.py", `
@@ -167,6 +184,8 @@ func TestPyScanIsHFModelID(t *testing.T) {
 		{"cache/model", false},
 		{"output/model", false},
 		{"checkpoint/run-1", false},
+		{"application/json", false},
+		{"text/plain", false},
 		{`org\model`, false},
 	}
 

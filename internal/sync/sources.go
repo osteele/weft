@@ -3,6 +3,7 @@ package sync
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -317,12 +318,30 @@ func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []stri
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderrBuf.String()); msg != "" {
+		msg := strings.TrimSpace(stderrBuf.String())
+		if isIgnorableRsyncError(err, msg) {
+			return nil
+		}
+		if msg != "" {
 			return fmt.Errorf("rsync to %s:%s: %s: %w", host, remoteDir, msg, err)
 		}
 		return fmt.Errorf("rsync to %s:%s: %w", host, remoteDir, err)
 	}
 	return nil
+}
+
+func isIgnorableRsyncError(err error, stderr string) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	if exitErr.ExitCode() != 24 {
+		return false
+	}
+
+	lower := strings.ToLower(stderr)
+	return strings.Contains(lower, "file has vanished") ||
+		strings.Contains(lower, "vanished before they could be transferred")
 }
 
 // SyncTree rsyncs a directory tree to a remote host. The local snapshot is

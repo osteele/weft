@@ -34,6 +34,39 @@ func TryFetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Du
 	return cachedInfo, host, nil
 }
 
+// TryFetchHostStatusCombined is the pool-aware version of FetchHostStatusCombined.
+func TryFetchHostStatusCombined(database *sql.DB, hostName string, extraCommand string, timeout time.Duration) (*HostStatusResult, error) {
+	combined := hostinfo.HostInfoCommand +
+		`; echo "` + HostStatusSeparator + `"; ` +
+		extraCommand
+
+	stdout, stderr, err := ssh.TryRunWithTimeout(hostName, combined, timeout)
+	if err != nil {
+		errMsg := strings.TrimSpace(stderr)
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		return nil, &HostInfoError{Host: hostName, Message: errMsg, Err: err}
+	}
+
+	result := &HostStatusResult{}
+	parts := strings.SplitN(stdout, HostStatusSeparator, 2)
+
+	host := hostinfo.ParseHostInfo(parts[0])
+	host.Name = hostName
+	cachedInfo := hostinfo.CachedInfoFromHost(host)
+	db.SaveCachedHostInfo(database, cachedInfo)
+	result.HostInfo = cachedInfo
+	result.Host = host
+	result.HostOutput = parts[0]
+
+	if len(parts) == 2 {
+		result.ExtraOutput = strings.TrimSpace(parts[1])
+	}
+
+	return result, nil
+}
+
 // FetchAndCacheHostInfo runs the host info command via SSH, parses the output,
 // and saves the result to the DB cache. Returns the cached info or an error.
 func FetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Duration) (*db.CachedHostInfo, error) {

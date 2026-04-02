@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -667,7 +668,7 @@ func (m *Monitor) refreshHostInfo(hostName string) {
 	}
 	defer m.hostRefreshing.Delete(hostName)
 
-	_, host, err := ops.TryFetchAndCacheHostInfo(m.db, hostName, 10*time.Second)
+	hostStatus, err := ops.TryFetchHostStatusCombined(m.db, hostName, queuerunner.StatusCommand(), 10*time.Second)
 	if err != nil && errors.Is(err, ssh.ErrPoolBusy) {
 		return // Pool busy, skip this refresh cycle
 	}
@@ -685,7 +686,17 @@ func (m *Monitor) refreshHostInfo(hostName string) {
 		return
 	}
 
+	host := hostStatus.Host
 	host.Status = hostinfo.HostStatusOnline
+	if hostStatus.ExtraOutput != "" {
+		queueStatus := queuerunner.ParseStatus(hostStatus.ExtraOutput)
+		host.QueueStatus = hostinfo.QueueCheckChecked
+		host.QueueRunnerActive = queueStatus.RunnerActive
+		host.QueuedJobCount = queueStatus.QueuedJobCount
+		host.CurrentQueueJob = queueStatus.CurrentJob
+		host.QueueStopPending = queueStatus.StopPending
+		host.BlockedQueueJobs = queueStatus.BlockedReasons
+	}
 	m.updateHostInfo(host)
 }
 

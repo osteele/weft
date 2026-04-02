@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 // JobItem wraps a db.Job for use in bubbles/list
@@ -171,6 +172,9 @@ func formatJobStatus(job *db.Job) string {
 
 // formatActualStatus returns display string for the verified status
 func formatActualStatus(job *db.Job) string {
+	if display := queueblock.Display(job, nil); display.Blocked {
+		return "◌ blocked"
+	}
 	switch job.EffectiveStatus() {
 	case db.StatusCompleted:
 		if job.ExitCode != nil {

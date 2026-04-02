@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -273,9 +274,16 @@ func refreshWatchInstancesFromDB(database *sql.DB, instanceIDs []int64, quitAfte
 	}
 }
 
-func refreshWatchSystem(database *sql.DB, cfg *config.Config) tea.Cmd {
+func refreshWatchSystem(database *sql.DB, cfg *config.Config, previousLaunches []*db.Launch) tea.Cmd {
+	previousLaunchIDs := make([]int64, 0, len(previousLaunches))
+	for _, launch := range previousLaunches {
+		if launch == nil {
+			continue
+		}
+		previousLaunchIDs = append(previousLaunchIDs, launch.ID)
+	}
 	return func() tea.Msg {
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false, previousLaunchIDs)
 		return watchAllRefreshedMsg{snapshot: snapshot, err: err}
 	}
 }
@@ -358,6 +366,7 @@ func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}
 		}
+		queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 		unplacedJobs, err := db.ListUnplacedJobs(database)
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}

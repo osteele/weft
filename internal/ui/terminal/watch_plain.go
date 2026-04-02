@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 type onPremHostSummary struct {
@@ -36,7 +37,7 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 
 	for {
 		performFastSync(database, false)
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true, nil)
 		if err != nil {
 			return err
 		}
@@ -55,7 +56,7 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 	}
 }
 
-func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool) (watchSystemSnapshot, error) {
+func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool, previousLaunchIDs []int64) (watchSystemSnapshot, error) {
 	if refresh {
 		syncCloudState(cfg, database, reconciler, false)
 	}
@@ -63,6 +64,12 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	cloudInstances, err := db.ListRunningLaunches(database)
 	if err != nil {
 		return watchSystemSnapshot{}, fmt.Errorf("list running cloud instances: %w", err)
+	}
+	if len(cloudInstances) == 0 && len(previousLaunchIDs) > 0 {
+		cloudInstances, err = reloadActiveLaunches(database, previousLaunchIDs)
+		if err != nil {
+			return watchSystemSnapshot{}, err
+		}
 	}
 
 	instanceUpdates := make(map[int64]campaign.InstanceUpdate, len(cloudInstances))
@@ -86,6 +93,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	if err != nil {
 		return watchSystemSnapshot{}, fmt.Errorf("list active on-prem jobs: %w", err)
 	}
+	queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 
 	unplacedJobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
@@ -98,6 +106,33 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 		OnPremHosts:     groupOnPremHosts(onPremJobs),
 		UnplacedJobs:    unplacedJobs,
 	}, nil
+}
+
+func reloadActiveLaunches(database *sql.DB, launchIDs []int64) ([]*db.Launch, error) {
+	launches := make([]*db.Launch, 0, len(launchIDs))
+	for _, launchID := range launchIDs {
+		launch, err := db.GetLaunch(database, launchID)
+		if err != nil {
+			return nil, fmt.Errorf("reload cloud instance %d: %w", launchID, err)
+		}
+		if launch == nil {
+			continue
+		}
+		if !isActiveCloudLaunchStatus(launch.Status) {
+			continue
+		}
+		launches = append(launches, launch)
+	}
+	return launches, nil
+}
+
+func isActiveCloudLaunchStatus(status string) bool {
+	switch status {
+	case db.LaunchStatusRunning, db.LaunchStatusLaunching, db.LaunchStatusGrace:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s watchSystemSnapshot) IsEmpty() bool {
@@ -186,11 +221,23 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 		b.WriteString("  none\n")
 	} else {
 		for _, host := range snapshot.OnPremHosts {
-			running, queued := countHostJobStates(host.Jobs)
-			if queued > 0 {
+			running, queued, blocked := countHostJobStates(host.Jobs)
+			switch {
+			case blocked > 0 && queued > 0:
+				b.WriteString(fmt.Sprintf("  %s  %d running  %d blocked  %d queued\n", host.Name, running, blocked, queued))
+			case blocked > 0:
+				b.WriteString(fmt.Sprintf("  %s  %d running  %d blocked\n", host.Name, running, blocked))
+			case queued > 0:
 				b.WriteString(fmt.Sprintf("  %s  %d running  %d queued\n", host.Name, running, queued))
-			} else {
+			default:
 				b.WriteString(fmt.Sprintf("  %s  %d running\n", host.Name, running))
+			}
+			for _, job := range host.Jobs {
+				display := queueblock.Display(job, nil)
+				if !display.Blocked {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("    #%d  blocked  %s\n", job.ID, display.Reason))
 			}
 		}
 	}
@@ -221,16 +268,18 @@ func formatUnplacedJobsSection(jobs []*db.Job) string {
 	return b.String()
 }
 
-func countHostJobStates(jobs []*db.Job) (running, queued int) {
+func countHostJobStates(jobs []*db.Job) (running, queued, blocked int) {
 	for _, job := range jobs {
-		switch job.EffectiveStatus() {
+		switch queueblock.Display(job, nil).Status {
+		case "blocked":
+			blocked++
 		case db.StatusQueued:
 			queued++
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			running++
 		}
 	}
-	return running, queued
+	return running, queued, blocked
 }
 
 // watchJobsPlain watches specific jobs by ID, printing their status periodically
@@ -245,6 +294,7 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
 		warnings := syncWatchedJobHostsQuiet(database, jobIDs)
 
 		allTerminal := true
+		watchedJobs := make([]*db.Job, 0, len(jobIDs))
 		for i, jobID := range jobIDs {
 			if i > 0 {
 				fmt.Println("---")
@@ -258,6 +308,10 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
 				fmt.Printf("Job %d not found\n", jobID)
 				continue
 			}
+			watchedJobs = append(watchedJobs, job)
+		}
+		queueblock.Apply(watchedJobs, queueblock.Fetch(watchedJobs, 5*time.Second))
+		for _, job := range watchedJobs {
 			printJobStatus(job, false)
 			if !isTerminalStatus(job.EffectiveStatus()) {
 				allTerminal = false

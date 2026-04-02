@@ -2,6 +2,7 @@ package sync
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -194,6 +195,46 @@ func TestBuildRsyncArgsFiltersBeforeExcludes(t *testing.T) {
 	}
 	if firstFilter > firstExclude {
 		t.Errorf("--filter (index %d) should come before --exclude (index %d)", firstFilter, firstExclude)
+	}
+}
+
+func TestIsIgnorableRsyncError(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		stderr string
+		want   bool
+	}{
+		{
+			name:   "vanished file warning",
+			script: "exit 24",
+			stderr: "file has vanished",
+			want:   true,
+		},
+		{
+			name:   "non-vanished rsync failure",
+			script: "exit 24",
+			stderr: "permission denied",
+			want:   false,
+		},
+		{
+			name:   "different exit code",
+			script: "exit 23",
+			stderr: "file has vanished",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := exec.Command("sh", "-c", tt.script).Run()
+			if err == nil {
+				t.Fatal("expected command to fail")
+			}
+			if got := isIgnorableRsyncError(err, tt.stderr); got != tt.want {
+				t.Fatalf("isIgnorableRsyncError(...) = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

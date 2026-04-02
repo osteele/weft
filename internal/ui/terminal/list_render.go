@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 type jobListLayout struct {
@@ -255,6 +256,9 @@ func formatJobListStatus(job *db.Job) string {
 	}
 
 	status := job.EffectiveStatus()
+	if display := queueblock.Display(job, nil); display.Blocked {
+		status = "blocked"
+	}
 	if status == db.StatusCompleted && job.ExitCode != nil {
 		if *job.ExitCode == 0 {
 			return "completed ok"

@@ -238,6 +238,9 @@ func isHFModelID(s string) bool {
 	if s == "" {
 		return false
 	}
+	if isLikelyMIMEType(s) {
+		return false
+	}
 	if strings.HasPrefix(s, ".") || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") {
 		return false
 	}
@@ -265,6 +268,33 @@ func isHFModelID(s string) bool {
 			return false
 		}
 	}
+	return true
+}
+
+func isLikelyMIMEType(s string) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(s)), "/")
+	if len(parts) != 2 {
+		return false
+	}
+
+	switch parts[0] {
+	case "application", "audio", "font", "image", "message", "model", "multipart", "text", "video":
+	default:
+		return false
+	}
+
+	for _, r := range parts[1] {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '.', '-', '+':
+			continue
+		default:
+			return false
+		}
+	}
+
 	return true
 }
 

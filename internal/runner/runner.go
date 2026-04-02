@@ -264,14 +264,18 @@ func (r *Runner) tryStartNextJob() {
 
 	// Check exclusive constraints
 	if AnyRunningExclusive(r.state, r.queueDir) {
-		r.state.AddPending(jobID)
+		r.state.AddPendingWithReason(jobID, "exclusive gate: waiting for another exclusive job to finish")
 		r.saveState()
 		return
 	}
 
 	runningCount := r.state.RunningCount()
 	if HasExclusiveOrBenchmarkTag(rj) && runningCount > 0 {
-		r.state.AddPending(jobID)
+		reason := fmt.Sprintf("exclusive gate: waiting for %d running job(s) to finish", runningCount)
+		if HasBenchmarkTag(rj) {
+			reason = fmt.Sprintf("benchmark gate: waiting for %d running job(s) to finish", runningCount)
+		}
+		r.state.AddPendingWithReason(jobID, reason)
 		r.saveState()
 		return
 	}
@@ -285,13 +289,13 @@ func (r *Runner) tryStartNextJob() {
 				r.benchmarkLastReason = reason
 			}
 			r.benchmarkIdleCount = 0
-			r.state.AddPending(jobID)
+			r.state.AddPendingWithReason(jobID, "benchmark gate: "+reason)
 			r.saveState()
 			return
 		}
 		r.benchmarkIdleCount++
 		if r.benchmarkIdleCount < r.benchCfg.IdleSamples {
-			r.state.AddPending(jobID)
+			r.state.AddPendingWithReason(jobID, fmt.Sprintf("benchmark gate: confirming idle (%d/%d)", r.benchmarkIdleCount, r.benchCfg.IdleSamples))
 			r.saveState()
 			return
 		}
@@ -305,7 +309,7 @@ func (r *Runner) tryStartNextJob() {
 		currentAllotment := r.state.TotalAllotment()
 		nextAllotment := r.jobAllotment(job)
 		if currentAllotment+nextAllotment > r.cpuConfig.HostUtilizationTarget {
-			r.state.AddPending(jobID)
+			r.state.AddPendingWithReason(jobID, fmt.Sprintf("cpu gate: %d%% + %d%% > %d%% target", currentAllotment, nextAllotment, r.cpuConfig.HostUtilizationTarget))
 			r.saveState()
 			return
 		}
@@ -321,9 +325,15 @@ func (r *Runner) tryStartNextJob() {
 	var resolvedGPUDevices []string
 	if jobHasGPU {
 		var canStart bool
-		canStart, resolvedGPUDevices = r.gpuInv.CanStartGPUJob(r.state, rj)
+		var gpuReason string
+		canStart, resolvedGPUDevices, gpuReason = r.gpuInv.CanStartGPUJobWithReason(r.state, rj)
 		if !canStart {
-			r.state.AddPending(jobID)
+			if gpuReason == "" {
+				gpuReason = "gpu gate: waiting for requested GPU capacity"
+			} else {
+				gpuReason = "gpu gate: " + gpuReason
+			}
+			r.state.AddPendingWithReason(jobID, gpuReason)
 			r.saveState()
 			return
 		}

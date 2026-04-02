@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 const hostRecentSyncWindow = 48 * time.Hour
@@ -160,13 +161,24 @@ func isRecentHistory(job *db.Job) bool {
 }
 
 func formatJobStatus(job *db.Job) string {
+	return formatJobStatusWithLookup(job, nil)
+}
+
+func formatJobStatusWithLookup(job *db.Job, lookup queueblock.Lookup) string {
 	if job.PendingStatus != nil {
 		return formatPendingStatus(*job.PendingStatus)
 	}
-	return formatActualStatus(job)
+	return formatActualStatusWithLookup(job, lookup)
 }
 
 func formatActualStatus(job *db.Job) string {
+	return formatActualStatusWithLookup(job, nil)
+}
+
+func formatActualStatusWithLookup(job *db.Job, lookup queueblock.Lookup) string {
+	if display := queueblock.Display(job, lookup); display.Blocked {
+		return "◌ blocked"
+	}
 	switch job.Status {
 	case db.StatusCompleted:
 		if job.ExitCode != nil {
