@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -48,14 +50,25 @@ type Result struct {
 
 // Meta is the sidecar metadata written alongside trained models.
 type Meta struct {
-	TrainedAt string         `json:"trained_at"`
-	JobCount  int            `json:"job_count"`
-	DBPaths   []string       `json:"db_paths"`
-	Models    map[string]any `json:"models"`
+	TrainedAt     string         `json:"trained_at"`
+	JobCount      int            `json:"job_count"`
+	DBPaths       []string       `json:"db_paths"`
+	Models        map[string]any `json:"models"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+}
+
+const ExpectedModelSchemaVersion = 2
+
+var modelArtifactNames = []string{"duration", "peak_rss_kb", "max_gpu_mem_mib"}
+
+type ModelSchemaStatus struct {
+	Changed bool
+	Reason  string
 }
 
 var predictFunc = Predict
 var predictBatchFunc = PredictBatch
+var modelSchemaWarnOnce sync.Once
 
 // ResolvePredict routes prediction calls through the package test seam.
 func ResolvePredict(cfg Config, host, project, gpuClass, command string) (*Result, error) {
@@ -129,6 +142,77 @@ func ReadMeta(cfg Config) (*Meta, error) {
 	return &meta, nil
 }
 
+// ModelSchemaStatus reports whether the trained-model artifacts match the
+// current expected on-disk schema.
+func CheckModelSchema(cfg Config) ModelSchemaStatus {
+	modelDir := cfg.modelDir()
+	if modelDir == "" {
+		return ModelSchemaStatus{}
+	}
+
+	meta, err := ReadMeta(cfg)
+	if err == nil && meta.SchemaVersion > 0 && meta.SchemaVersion != ExpectedModelSchemaVersion {
+		return ModelSchemaStatus{
+			Changed: true,
+			Reason:  fmt.Sprintf("model schema version is %d (expected %d)", meta.SchemaVersion, ExpectedModelSchemaVersion),
+		}
+	}
+	if err == nil && meta.SchemaVersion == 0 {
+		return ModelSchemaStatus{
+			Changed: true,
+			Reason:  fmt.Sprintf("model schema version is missing (expected %d)", ExpectedModelSchemaVersion),
+		}
+	}
+
+	for _, name := range modelArtifactNames {
+		path := filepath.Join(modelDir, fmt.Sprintf("%s.joblib", name))
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			continue
+		}
+		if !info.IsDir() {
+			return ModelSchemaStatus{
+				Changed: true,
+				Reason:  fmt.Sprintf("model artifact %s uses the legacy file layout", filepath.Base(path)),
+			}
+		}
+	}
+
+	return ModelSchemaStatus{}
+}
+
+func removeModelArtifacts(cfg Config) error {
+	modelDir := cfg.modelDir()
+	if modelDir == "" {
+		return nil
+	}
+
+	paths := []string{cfg.metaPath()}
+	for _, name := range modelArtifactNames {
+		paths = append(paths, filepath.Join(modelDir, fmt.Sprintf("%s.joblib", name)))
+	}
+	for _, path := range paths {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func warnIfModelSchemaChanged(cfg Config) {
+	status := CheckModelSchema(cfg)
+	if !status.Changed {
+		return
+	}
+	modelSchemaWarnOnce.Do(func() {
+		slog.Warn(
+			"predictor models use an incompatible schema; rebuild them with `weft retrain --if-schema-changed` or `just build`",
+			"component", "predictor",
+			"reason", status.Reason,
+		)
+	})
+}
+
 // NeedsRetrain returns true if models are stale or missing.
 // It compares the job_count in meta.json against currentJobCount.
 func NeedsRetrain(cfg Config, currentJobCount int) bool {
@@ -143,6 +227,11 @@ func NeedsRetrain(cfg Config, currentJobCount int) bool {
 func Train(cfg Config) error {
 	if cfg.ProjectPath == "" {
 		return fmt.Errorf("predictor: project_path not configured")
+	}
+	if status := CheckModelSchema(cfg); status.Changed {
+		if err := removeModelArtifacts(cfg); err != nil {
+			return fmt.Errorf("predictor: remove incompatible models: %w", err)
+		}
 	}
 
 	args := []string{"run", "--project", cfg.ProjectPath, "job-estimator", "train"}
@@ -161,6 +250,7 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 	if cfg.ProjectPath == "" {
 		return nil, fmt.Errorf("predictor: project_path not configured")
 	}
+	warnIfModelSchemaChanged(cfg)
 
 	args := []string{
 		"run", "--project", cfg.ProjectPath, "job-estimator", "predict",
@@ -214,6 +304,7 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 	if len(jobs) == 0 {
 		return nil, nil
 	}
+	warnIfModelSchemaChanged(cfg)
 
 	input, err := json.Marshal(jobs)
 	if err != nil {

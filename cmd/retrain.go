@@ -22,6 +22,8 @@ The predictor must be configured in ~/.config/weft/config.toml:
 	RunE: runRetrain,
 }
 
+var retrainIfSchemaChanged bool
+
 func runRetrain(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -30,7 +32,19 @@ func runRetrain(cmd *cobra.Command, args []string) error {
 
 	pcfg := buildPredictorConfig(cfg)
 	if !pcfg.Configured() {
+		if retrainIfSchemaChanged {
+			fmt.Fprintln(cmd.OutOrStdout(), "Predictor not configured; skipping schema check.")
+			return nil
+		}
 		return fmt.Errorf("predictor not configured: set predictor.project_path in %s", config.ConfigPath())
+	}
+	if retrainIfSchemaChanged {
+		status := predictor.CheckModelSchema(pcfg)
+		if !status.Changed {
+			fmt.Fprintln(cmd.OutOrStdout(), "Predictor models already match the current schema.")
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Predictor model schema changed: %s\n", status.Reason)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Training models from %d database(s)...\n", len(pcfg.DBPaths))
@@ -54,4 +68,20 @@ func runRetrain(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "  Models:     %d\n", len(meta.Models))
 
 	return nil
+}
+
+func init() {
+	rootCmd.AddCommand(retrainCmd)
+	retrainCmd.Flags().BoolVar(
+		&retrainIfSchemaChanged,
+		"if-schema-changed",
+		false,
+		"Only retrain when the stored predictor model schema is incompatible with the current code",
+	)
+	estimationTrainCmd.Flags().BoolVar(
+		&retrainIfSchemaChanged,
+		"if-schema-changed",
+		false,
+		"Only retrain when the stored predictor model schema is incompatible with the current code",
+	)
 }

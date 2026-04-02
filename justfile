@@ -8,6 +8,7 @@ default:
 build:
     #!/usr/bin/env bash
     set -euo pipefail
+    go run . retrain --if-schema-changed
     echo "Building weft binary and agent binaries in parallel..."
     pids=()
     just build-agents &
@@ -21,6 +22,7 @@ build:
 install:
     #!/usr/bin/env bash
     set -euo pipefail
+    go run . retrain --if-schema-changed
     echo "Building and installing in parallel..."
     pids=()
     just build-agents &

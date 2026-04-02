@@ -236,6 +236,69 @@ func TestNeedsRetrain(t *testing.T) {
 	})
 }
 
+func TestCheckModelSchema(t *testing.T) {
+	writeMeta := func(t *testing.T, dir string, meta Meta) {
+		t.Helper()
+		data, err := json.Marshal(meta)
+		if err != nil {
+			t.Fatalf("marshal meta: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "meta.json"), data, 0644); err != nil {
+			t.Fatalf("write meta: %v", err)
+		}
+	}
+
+	t.Run("missing schema version is incompatible", func(t *testing.T) {
+		dir := t.TempDir()
+		writeMeta(t, dir, Meta{
+			TrainedAt: "2024-01-01",
+			JobCount:  80,
+		})
+
+		status := CheckModelSchema(Config{ProjectPath: "/path", ModelDir: dir})
+		if !status.Changed {
+			t.Fatal("expected missing schema version to be incompatible")
+		}
+	})
+
+	t.Run("legacy file layout is incompatible", func(t *testing.T) {
+		dir := t.TempDir()
+		writeMeta(t, dir, Meta{
+			TrainedAt:     "2024-01-01",
+			JobCount:      80,
+			SchemaVersion: ExpectedModelSchemaVersion,
+		})
+		if err := os.WriteFile(filepath.Join(dir, "duration.joblib"), []byte("legacy"), 0644); err != nil {
+			t.Fatalf("write legacy model: %v", err)
+		}
+
+		status := CheckModelSchema(Config{ProjectPath: "/path", ModelDir: dir})
+		if !status.Changed {
+			t.Fatal("expected legacy file layout to be incompatible")
+		}
+	})
+
+	t.Run("current schema with directory artifacts is compatible", func(t *testing.T) {
+		dir := t.TempDir()
+		writeMeta(t, dir, Meta{
+			TrainedAt:     "2024-01-01",
+			JobCount:      80,
+			SchemaVersion: ExpectedModelSchemaVersion,
+		})
+		for _, name := range modelArtifactNames {
+			path := filepath.Join(dir, fmt.Sprintf("%s.joblib", name))
+			if err := os.Mkdir(path, 0755); err != nil {
+				t.Fatalf("mkdir %s: %v", path, err)
+			}
+		}
+
+		status := CheckModelSchema(Config{ProjectPath: "/path", ModelDir: dir})
+		if status.Changed {
+			t.Fatalf("expected current schema to be compatible, got %q", status.Reason)
+		}
+	})
+}
+
 func TestPredictedGPUMemGB(t *testing.T) {
 	memGB, ok := PredictedGPUMemGB(&Prediction{Upper: 2050})
 	if !ok {
