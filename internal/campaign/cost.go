@@ -38,13 +38,10 @@ type CostEstimate struct {
 // phase describes what is happening, resolved/total track items.
 type EstimateProgressFunc func(phase string, resolved, total int)
 
-// EstimateCosts computes per-group cost estimates using the predictor for duration.
-// If predCfg is nil or not configured, falls back to 1hr/job estimates.
-// If r2Client is non-nil, UV manifests are fetched to estimate cold uv sync costs.
-// If survivalModel is non-nil, computes survival probability and risk-adjusted cost.
-// If referenceDLPerf > 0, run durations are scaled by referenceDLPerf/offerDLPerf
-// to account for GPU performance differences across strategies.
-func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, referenceDLPerf float64, onProgress EstimateProgressFunc) []CostEstimate {
+// EstimateCosts computes per-group cost estimates using predictor-backed
+// durations when available. Without predictions, feasible GPUs default to the
+// same runtime baseline instead of local DLPerf scaling.
+func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Collect inputs for all three estimation steps (fast, in-memory)
@@ -109,7 +106,7 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		allPredictions = estimate.EstimateJobDurations(predCfg, allBatchJobs)
+		allPredictions = estimateJobDurations(predCfg, allBatchJobs)
 	}()
 
 	wg.Wait()
@@ -168,28 +165,16 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
 
 		var runEst estimate.Estimate
-		predictedJobs := 0
 		for _, job := range go_.Group.Jobs {
 			if pred, ok := allPredictions[job.ID]; ok {
 				est.JobDurations[job.ID] = pred.Mean
 				runEst = runEst.Add(pred)
-				predictedJobs++
 			} else {
 				runEst = runEst.Add(estimate.DefaultJobDuration)
 			}
 			jobsDone++
 			if onProgress != nil {
 				onProgress("Estimating durations", jobsDone, len(allBatchJobs))
-			}
-		}
-
-		// Use DLPerf scaling only when the predictor had no per-job durations.
-		// When predictions exist, they are already candidate-GPU specific.
-		if predictedJobs == 0 && referenceDLPerf > 0 && go_.Offer.DLPerf > 0 {
-			ratio := referenceDLPerf / go_.Offer.DLPerf
-			runEst = runEst.Scale(ratio)
-			for id, dur := range est.JobDurations {
-				est.JobDurations[id] = time.Duration(float64(dur) * ratio)
 			}
 		}
 
@@ -544,7 +529,6 @@ func SummarizeTradeoffComparison(estimates []CostEstimate, selectedPerGroup []in
 // predictor-based estimates aren't available.
 func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
 	estimates := make([]CostEstimate, 0, len(offers))
-	referenceDLPerf := MedianDLPerfFromGroupOffers(offers)
 	for _, o := range offers {
 		if o.Offer == nil {
 			continue
@@ -555,9 +539,6 @@ func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
 		}
 		setupHrs := 0.5
 		runHrs := float64(numJobs)
-		if referenceDLPerf > 0 && o.Offer.DLPerf > 0 {
-			runHrs *= referenceDLPerf / o.Offer.DLPerf
-		}
 		totalHrs := runHrs + setupHrs
 		totalTime := time.Duration(totalHrs * float64(time.Hour))
 		totalCost := totalHrs * o.Offer.CostPerHour

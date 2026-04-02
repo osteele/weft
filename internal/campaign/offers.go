@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 // parseCUDAVersionFloat converts a CUDA major.minor string (e.g. "12.4") to
@@ -298,6 +299,13 @@ func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel,
 	return RankGroupOffersWithProfile(raw, survivalModel, jobDurationHrs, setupFactory, strategy.Profile(), minSurvival)
 }
 
+// RankGroupOffersWithPredictor ranks offers using predictor-backed runtimes when
+// available. When the predictor cannot model a job, feasible offers fall back to
+// equal runtime so cost, setup, and survival break ties.
+func RankGroupOffersWithPredictor(raw []GroupRawOffers, predCfg *predictor.Config, survivalModel *bidding.SurvivalModel, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
+	return rankGroupOffersForPlanning(raw, predCfg, survivalModel, setupFactory, strategy.Profile(), minSurvival)
+}
+
 func RankGroupOffersWithProfile(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, profile bidding.ScoreProfile, minSurvival float64) []GroupOffer {
 	results := make([]GroupOffer, len(raw))
 	for i, r := range raw {
@@ -356,6 +364,13 @@ func medianDLPerf(offers []cloud.Offer) float64 {
 func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	raw := FetchGroupRawOffers(clients, groups)
 	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
+}
+
+// FetchGroupOffersWithPredictor searches and ranks offers using predictor-backed
+// runtimes when available, and a neutral runtime fallback otherwise.
+func FetchGroupOffersWithPredictor(clients []cloud.Client, groups []InstanceGroup, predCfg *predictor.Config, survivalModel *bidding.SurvivalModel, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
+	raw := FetchGroupRawOffers(clients, groups)
+	return RankGroupOffersWithPredictor(raw, predCfg, survivalModel, setupFactory, strategy, minSurvival)
 }
 
 // GroupingCandidate holds a candidate grouping of jobs with its raw offers.

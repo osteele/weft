@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -20,18 +21,19 @@ const DefaultMaxCloudAttempts = 3
 
 // RelaunchConfig configures automatic relaunch of orphaned cloud jobs.
 type RelaunchConfig struct {
-	Clients       []cloud.Client
-	R2Cfg         cloud.R2Config
-	CreateOpts    cloud.CreateOpts
-	LaunchOpts    LaunchOpts
-	MaxAttempts   int // default DefaultMaxCloudAttempts
-	SurvivalModel *bidding.SurvivalModel
-	MinSurvival   float64 // 0 to disable survival filtering
-	Strategy      bidding.SelectionStrategy
-	Database      *sql.DB
-	ResetJobs     map[int64]int64      // jobID → failed instanceID; when non-nil, only relaunch these jobs
-	SetupFactory  SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
-	RetryBudget   *RetryBudget         // optional hard stop limits for retry instances
+	Clients         []cloud.Client
+	R2Cfg           cloud.R2Config
+	CreateOpts      cloud.CreateOpts
+	LaunchOpts      LaunchOpts
+	MaxAttempts     int // default DefaultMaxCloudAttempts
+	SurvivalModel   *bidding.SurvivalModel
+	MinSurvival     float64 // 0 to disable survival filtering
+	Strategy        bidding.SelectionStrategy
+	Database        *sql.DB
+	PredictorConfig *predictor.Config
+	ResetJobs       map[int64]int64      // jobID → failed instanceID; when non-nil, only relaunch these jobs
+	SetupFactory    SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
+	RetryBudget     *RetryBudget         // optional hard stop limits for retry instances
 }
 
 // RetryBudget defines hard retry-stop limits by retry tier.
@@ -189,7 +191,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	if strategy == "" {
 		strategy = bidding.StrategyCheap
 	}
-	groupOffers := FetchGroupOffers(cfg.Clients, groups, cfg.SurvivalModel, 1.0, cfg.SetupFactory, strategy, cfg.MinSurvival)
+	groupOffers := FetchGroupOffersWithPredictor(cfg.Clients, groups, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, cfg.MinSurvival)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup

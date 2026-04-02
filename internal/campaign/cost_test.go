@@ -18,7 +18,7 @@ func TestEstimateCosts_NoPredictions(t *testing.T) {
 		},
 	}
 
-	estimates := EstimateCosts(nil, groupOffers, nil, nil, nil, nil, 0, nil)
+	estimates := EstimateCosts(nil, groupOffers, nil, nil, nil, nil, nil)
 
 	if len(estimates) != 1 {
 		t.Fatalf("expected 1 estimate, got %d", len(estimates))
@@ -48,9 +48,43 @@ func TestEstimateCosts_NilOffer(t *testing.T) {
 		},
 	}
 
-	estimates := EstimateCosts(nil, groupOffers, nil, nil, nil, nil, 0, nil)
+	estimates := EstimateCosts(nil, groupOffers, nil, nil, nil, nil, nil)
 	if estimates[0].TotalCost != 0 {
 		t.Errorf("nil offer should have 0 cost, got %f", estimates[0].TotalCost)
+	}
+}
+
+func TestEstimateReuseGroup_NoPredictionsDoesNotScaleByDLPerf(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "H200",
+			GPUMemGB:        141,
+			DLPerf:          40,
+			InetDownMbps:    1000,
+			InetUpMbps:      1000,
+			Status:          db.LaunchStatusRunning,
+		},
+	}
+
+	est, ok := EstimateReuseGroup(nil, group, cap, nil, nil)
+	if !ok {
+		t.Fatal("expected reuse estimate")
+	}
+
+	wantRun := 2 * estimate.DefaultJobDuration.Mean
+	if est.Breakdown.Run.Mean != wantRun {
+		t.Fatalf("Run.Mean = %v, want %v", est.Breakdown.Run.Mean, wantRun)
+	}
+	if est.JobDurations[1] != estimate.DefaultJobDuration.Mean {
+		t.Fatalf("job 1 duration = %v, want %v", est.JobDurations[1], estimate.DefaultJobDuration.Mean)
+	}
+	if est.JobDurations[2] != estimate.DefaultJobDuration.Mean {
+		t.Fatalf("job 2 duration = %v, want %v", est.JobDurations[2], estimate.DefaultJobDuration.Mean)
 	}
 }
 

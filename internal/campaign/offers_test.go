@@ -5,6 +5,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
@@ -713,5 +714,32 @@ func TestApproximateEstimates_MatchesGroupOfferCount(t *testing.T) {
 		if est.TotalCost <= 0 {
 			t.Error("estimate TotalCost should be positive")
 		}
+	}
+}
+
+func TestApproximateEstimates_UsesNeutralRuntimeAcrossOffers(t *testing.T) {
+	offers := []GroupOffer{
+		{
+			Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}},
+			Offer: &cloud.Offer{ProviderID: "rtx4090", CostPerHour: 0.33, GPUName: "RTX 4090", DLPerf: 25},
+		},
+		{
+			Group: InstanceGroup{Jobs: []*db.Job{{ID: 2}}},
+			Offer: &cloud.Offer{ProviderID: "h200", CostPerHour: 3.23, GPUName: "H200", DLPerf: 40},
+		},
+	}
+
+	estimates := ApproximateEstimates(offers)
+	if len(estimates) != 2 {
+		t.Fatalf("expected 2 estimates, got %d", len(estimates))
+	}
+	if estimates[0].Breakdown.Run.Mean != time.Hour {
+		t.Fatalf("first run mean = %v, want 1h", estimates[0].Breakdown.Run.Mean)
+	}
+	if estimates[1].Breakdown.Run.Mean != time.Hour {
+		t.Fatalf("second run mean = %v, want 1h", estimates[1].Breakdown.Run.Mean)
+	}
+	if estimates[0].TotalTime != estimates[1].TotalTime {
+		t.Fatalf("TotalTime differs across offers: %v vs %v", estimates[0].TotalTime, estimates[1].TotalTime)
 	}
 }

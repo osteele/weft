@@ -582,14 +582,12 @@ func requestMoveOptions(
 
 			survivalModel := buildSurvivalModel(database)
 			overheadModel := buildOverheadModel(database)
+			predCfg := buildPredictorConfig(cfg)
 			setupFactory := campaign.OfferSetupOverheadFactory(database, overheadModel)
-
-			// Estimate 1hr job duration as fallback
-			jobDurationHrs := 1.0
 
 			seen := make(map[string]bool) // deduplicate by offer key
 			for _, strategy := range strategies {
-				ranked := campaign.RankGroupOffers(rawOffers, survivalModel, jobDurationHrs, setupFactory, strategy, 0)
+				ranked := campaign.RankGroupOffersWithPredictor(rawOffers, &predCfg, survivalModel, setupFactory, strategy, 0)
 				if len(ranked) == 0 || ranked[0].Offer == nil {
 					continue
 				}
@@ -690,9 +688,10 @@ func requestMoveExecute(
 		}
 
 		// Compute estimates for auto-budget
+		predCfg := buildPredictorConfig(cfg)
 		survivalModel := buildSurvivalModel(database)
 		groupOffer := campaign.GroupOffer{Group: group, Offer: &offer}
-		estimates := campaign.EstimateCosts(database, []campaign.GroupOffer{groupOffer}, nil, nil, nil, survivalModel, 0, nil)
+		estimates := campaign.EstimateCosts(database, []campaign.GroupOffer{groupOffer}, &predCfg, nil, nil, survivalModel, nil)
 		if len(estimates) > 0 {
 			launchOpts.ApplyAutoBudget(estimates)
 		}

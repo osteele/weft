@@ -33,16 +33,18 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
+	predCfg := buildPredictorConfig(cfg)
 	relaunchCfg := campaign.RelaunchConfig{
-		Clients:       clients,
-		R2Cfg:         r2Cfg,
-		LaunchOpts:    campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
-		MaxAttempts:   campaign.DefaultMaxCloudAttempts + extraAttempts,
-		SurvivalModel: survivalModel,
-		MinSurvival:   campaignLaunchMinSurvival,
-		Database:      database,
-		ResetJobs:     resetJobs,
-		SetupFactory:  campaign.OfferSetupOverheadFactory(database, overheadModel),
+		Clients:         clients,
+		R2Cfg:           r2Cfg,
+		LaunchOpts:      campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
+		MaxAttempts:     campaign.DefaultMaxCloudAttempts + extraAttempts,
+		SurvivalModel:   survivalModel,
+		MinSurvival:     campaignLaunchMinSurvival,
+		Database:        database,
+		PredictorConfig: &predCfg,
+		ResetJobs:       resetJobs,
+		SetupFactory:    campaign.OfferSetupOverheadFactory(database, overheadModel),
 		RetryBudget: &campaign.RetryBudget{
 			FirstTimeLimit: cfg.RetryFirstTimeLimit(),
 			FirstCostCents: cfg.RetryFirstCostLimitCents(),

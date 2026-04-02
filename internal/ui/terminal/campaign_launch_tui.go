@@ -857,7 +857,6 @@ func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cache
 	ch := m.progressCh
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
-	referenceDLPerf := campaign.MedianDLPerfFromRawOffers(m.cachedRawOffers)
 	return func() tea.Msg {
 		var onProgress func(string, int, int)
 		if reportProgress {
@@ -868,7 +867,7 @@ func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cache
 				}
 			}
 		}
-		estimates := campaign.EstimateCosts(m.database, offers, predConfig, overheadModel, nil, survivalModel, referenceDLPerf, onProgress)
+		estimates := campaign.EstimateCosts(m.database, offers, predConfig, overheadModel, nil, survivalModel, onProgress)
 		return estimatesLoadedMsg{estimates: estimates, cacheKey: cacheKey}
 	}
 }
@@ -1940,7 +1939,6 @@ func (m launchModel) launchInstances() tea.Cmd {
 		launchGroupOffers := prep.LaunchGroupOffers
 		selectedEstimates := prep.Estimates
 		selectedReuse := prep.StrategyPlan.ReuseAssignments
-		referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(launchGroupOffers)
 		if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(selectedEstimates) > 0 {
 			opts.ApplyAutoBudget(selectedEstimates)
 		}
@@ -1964,7 +1962,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		// If async estimation has not finished yet, compute estimates now so
 		// launched campaigns still persist estimated_cost_cents.
 		if len(selectedEstimates) == 0 {
-			selectedEstimates = campaign.EstimateCosts(m.database, launchGroupOffers, predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
+			selectedEstimates = campaign.EstimateCosts(m.database, launchGroupOffers, predCfg, overheadModel, nil, survivalModel, nil)
 		}
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()

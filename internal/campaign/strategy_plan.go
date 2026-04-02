@@ -16,6 +16,8 @@ import (
 )
 
 var resolvePredictBatch = predictor.ResolvePredictBatch
+var estimateJobDurations = estimate.EstimateJobDurations
+var estimateJobDuration = estimate.EstimateJobDuration
 
 // StrategyPlan combines reuse assignments with the best new-instance
 // candidate for a strategy. DisplayOffers/DisplayEstimates are aligned with the
@@ -240,8 +242,7 @@ func buildStrategyPlanForSplitRaw(
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
 	splitOffers := rankGroupOffersForPlanning(splitRaw, predCfg, survivalModel, setupFactory, profile, minSurvival)
-	splitReferenceDLPerf := MedianDLPerfFromRawOffers(splitRaw)
-	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, splitReferenceDLPerf, nil)
+	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, nil)
 
 	reuseDecisions := chooseReuseGroups(
 		database,
@@ -251,7 +252,6 @@ func buildStrategyPlanForSplitRaw(
 		predCfg,
 		overheadModel,
 		profile,
-		splitReferenceDLPerf,
 	)
 
 	reused := make(map[int]reuseGroupDecision, len(reuseDecisions))
@@ -346,17 +346,40 @@ func rankGroupOffersForPlanning(
 			}
 		}
 
-		results[i] = rankOfferWithProfile(
+		results[i], _ = rankOfferWithPredictedRuntime(
 			r.Group,
 			r.Offers,
 			survivalModel,
-			1.0,
 			setupOverhead,
 			profile,
 			minSurvival,
+			neutralOfferRuntimePredictions(r.Group, r.Offers),
 		)
 	}
 	return results
+}
+
+func neutralOfferRuntimePredictions(group InstanceGroup, offers []cloud.Offer) map[string]offerRuntimePrediction {
+	jobCount := len(group.Jobs)
+	if jobCount < 1 {
+		jobCount = 1
+	}
+	jobDurations := make([]time.Duration, jobCount)
+	totalRunHrs := 0.0
+	for i := range jobDurations {
+		jobDurations[i] = estimate.DefaultJobDuration.Mean
+		totalRunHrs += estimate.DefaultJobDuration.Mean.Hours()
+	}
+
+	predicted := make(map[string]offerRuntimePrediction, len(offers))
+	for _, offer := range offers {
+		predicted[offerPredictionKey(offer)] = offerRuntimePrediction{
+			totalRunHrs:  totalRunHrs,
+			jobDurations: append([]time.Duration(nil), jobDurations...),
+			complete:     true,
+		}
+	}
+	return predicted
 }
 
 func predictOfferRuntimes(
@@ -562,7 +585,6 @@ func chooseReuseGroups(
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
 	profile bidding.ScoreProfile,
-	referenceDLPerf float64,
 ) []reuseGroupDecision {
 	if len(reusable) == 0 || len(splitGroups) == 0 {
 		return nil
@@ -580,7 +602,7 @@ func chooseReuseGroups(
 		bestIdx := -1
 		var bestEstimate CostEstimate
 		for i, cap := range working {
-			est, ok := EstimateReuseGroup(database, group, cap, predCfg, overheadModel, referenceDLPerf)
+			est, ok := EstimateReuseGroup(database, group, cap, predCfg, overheadModel)
 			if !ok {
 				continue
 			}
@@ -647,7 +669,6 @@ func EstimateReuseGroup(
 	cap InstanceCapacity,
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
-	referenceDLPerf float64,
 ) (CostEstimate, bool) {
 	if ok, _ := MatchGroupToInstance(group, cap); !ok {
 		return CostEstimate{}, false
@@ -691,25 +712,14 @@ func EstimateReuseGroup(
 
 	var runEst estimate.Estimate
 	jobDurations := make(map[int64]time.Duration, len(group.Jobs))
-	predictedJobs := 0
 	gpuLabel := offer.GPUName
 	if gpuLabel == "" {
 		gpuLabel = inst.GPUClass
 	}
 	for _, job := range group.Jobs {
-		pred, ok := estimate.EstimateJobDuration(predCfg, gpuLabel, job)
+		pred, _ := estimateJobDuration(predCfg, gpuLabel, job)
 		runEst = runEst.Add(pred)
 		jobDurations[job.ID] = pred.Mean
-		if ok {
-			predictedJobs++
-		}
-	}
-	if predictedJobs == 0 && referenceDLPerf > 0 && inst.DLPerf > 0 {
-		ratio := referenceDLPerf / inst.DLPerf
-		runEst = runEst.Scale(ratio)
-		for id, dur := range jobDurations {
-			jobDurations[id] = time.Duration(float64(dur) * ratio)
-		}
 	}
 
 	total := waitEst.Add(provision).Add(jobSetup).Add(runEst).Add(upload)
@@ -850,14 +860,6 @@ func ScoreEstimatesWithProfile(estimates []CostEstimate, profile bidding.ScorePr
 	return w.Cost*totalCost + w.Time*totalCompletionTime
 }
 
-func medianDLPerfFromCandidates(candidates []GroupingCandidate) float64 {
-	var all []GroupRawOffers
-	for _, cand := range candidates {
-		all = append(all, cand.Raw...)
-	}
-	return MedianDLPerfFromRawOffers(all)
-}
-
 // BestCandidateForStrategy selects the candidate grouping with the lowest
 // estimate-based weighted score for the given strategy.
 func BestCandidateForStrategy(
@@ -890,10 +892,9 @@ func BestCandidateForProfile(
 	}
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
-	referenceDLPerf := medianDLPerfFromCandidates(candidates)
 	for i, cand := range candidates {
 		offers := rankGroupOffersForPlanning(cand.Raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
-		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
+		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, nil)
 		score := ScoreEstimatesWithProfile(estimates, profile)
 		if i == 0 || score < bestScore {
 			bestScore = score

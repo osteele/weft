@@ -107,7 +107,47 @@ func TestScoreEstimates_UsesTotalJobCompletionTime(t *testing.T) {
 	}
 }
 
-func TestBestCandidateForStrategy_UsesEstimatedRuntimeNotPlaceholderGroupingScore(t *testing.T) {
+func TestBestCandidateForStrategy_UsesPredictorRuntimeAcrossGroupingCandidates(t *testing.T) {
+	originalPredictBatch := resolvePredictBatch
+	originalEstimateJobDurations := estimateJobDurations
+	t.Cleanup(func() {
+		resolvePredictBatch = originalPredictBatch
+		estimateJobDurations = originalEstimateJobDurations
+	})
+
+	stubPredict := func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 7200.0
+			if job.GPUClass == "H200" {
+				mean = 300.0
+			}
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+			}
+		}
+		return results, nil
+	}
+	resolvePredictBatch = stubPredict
+	estimateJobDurations = func(_ *predictor.Config, jobs []predictor.BatchJob) map[int64]estimate.Estimate {
+		results, err := stubPredict(predictor.Config{}, jobs)
+		if err != nil {
+			return nil
+		}
+		estimates := make(map[int64]estimate.Estimate, len(results))
+		for id, result := range results {
+			if result == nil || result.DurationS == nil {
+				continue
+			}
+			estimates[id] = estimate.FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper)
+		}
+		return estimates
+	}
+
 	grouped := GroupingCandidate{
 		Label: "grouped",
 		Groups: []InstanceGroup{{
@@ -149,7 +189,7 @@ func TestBestCandidateForStrategy_UsesEstimatedRuntimeNotPlaceholderGroupingScor
 	result := BestCandidateForStrategy(
 		nil,
 		[]GroupingCandidate{grouped, parallel},
-		nil,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
 		nil,
 		nil,
 		bidding.StrategyFastest,
@@ -210,6 +250,35 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing
 	}
 	if offers[0].Offer.ProviderID != "rtx3090" {
 		t.Fatalf("expected predictor-backed ranking to avoid H200, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestRankGroupOffersWithPredictor_UsesNeutralFallbackWithoutPredictions(t *testing.T) {
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 8,
+			Jobs:     []*db.Job{{ID: 548}},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25},
+			{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40},
+		},
+	}}
+
+	offers := RankGroupOffersWithPredictor(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyFastest,
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "rtx4090" {
+		t.Fatalf("expected neutral fallback to prefer cheaper adequate offer, got %s", offers[0].Offer.ProviderID)
 	}
 }
 
