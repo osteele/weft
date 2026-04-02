@@ -41,11 +41,21 @@ type Prediction struct {
 	NCalibration    int     `json:"n_calibration,omitempty"`
 }
 
+// RuntimeMetadata describes how a duration prediction was produced.
+type RuntimeMetadata struct {
+	Source                  string  `json:"source,omitempty"`
+	Confidence              float64 `json:"confidence,omitempty"`
+	Feasible                *bool   `json:"feasible,omitempty"`
+	AnalyticalDurationS     float64 `json:"analytical_duration_s,omitempty"`
+	AnalyticalPeakMemoryMiB float64 `json:"analytical_peak_memory_mib,omitempty"`
+}
+
 // Result holds predictions for all targets.
 type Result struct {
-	DurationS    *Prediction `json:"duration_s"`
-	PeakRSSKB    *Prediction `json:"peak_rss_kb"`
-	MaxGPUMemMiB *Prediction `json:"max_gpu_mem_mib"`
+	DurationS        *Prediction      `json:"duration_s"`
+	DurationMetadata *RuntimeMetadata `json:"duration_metadata,omitempty"`
+	PeakRSSKB        *Prediction      `json:"peak_rss_kb"`
+	MaxGPUMemMiB     *Prediction      `json:"max_gpu_mem_mib"`
 }
 
 // Meta is the sidecar metadata written alongside trained models.
@@ -262,10 +272,16 @@ func cloneResult(result *Result) *Result {
 	if result == nil {
 		return nil
 	}
+	var metadata *RuntimeMetadata
+	if result.DurationMetadata != nil {
+		cloned := *result.DurationMetadata
+		metadata = &cloned
+	}
 	return &Result{
-		DurationS:    clonePrediction(result.DurationS),
-		PeakRSSKB:    clonePrediction(result.PeakRSSKB),
-		MaxGPUMemMiB: clonePrediction(result.MaxGPUMemMiB),
+		DurationS:        clonePrediction(result.DurationS),
+		DurationMetadata: metadata,
+		PeakRSSKB:        clonePrediction(result.PeakRSSKB),
+		MaxGPUMemMiB:     clonePrediction(result.MaxGPUMemMiB),
 	}
 }
 

@@ -51,13 +51,3 @@ func EstimateJobDurations(predCfg *predictor.Config, batchJobs []predictor.Batch
 	}
 	return estimates
 }
-
-// EstimateCloudRuntime scales a local duration estimate by the ratio of GPU
-// performance scores. localDLPerf and cloudDLPerf are deep-learning benchmark
-// scores; higher is faster.
-func EstimateCloudRuntime(localEst Estimate, localDLPerf, cloudDLPerf float64) Estimate {
-	if localDLPerf <= 0 || cloudDLPerf <= 0 {
-		return localEst
-	}
-	return localEst.Scale(localDLPerf / cloudDLPerf)
-}

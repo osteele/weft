@@ -30,13 +30,11 @@ type CloudOffering struct {
 // localGPUName is the GPU on the host where the job is queued.
 // queueDepth is how many jobs are ahead in the queue.
 // avgJobMinutes is the average recent job runtime in minutes.
-// localDLPerf is the deep-learning perf score of the local GPU (for scaling).
 func BuildCloudOfferings(
 	localGPUName string,
 	localGPUMemGB float64,
 	queueDepth int,
 	avgJobMinutes float64,
-	localDLPerf float64,
 	cloudOffers []cloud.Offer,
 ) []CloudOffering {
 	var offerings []CloudOffering
@@ -64,9 +62,7 @@ func BuildCloudOfferings(
 		})
 		estSetupMin := (startup.Mean + provision.Mean).Minutes()
 
-		localEst := estimate.Constant(estimate.DurFromMinutes(avgJobMinutes))
-		cloudRunEst := estimate.EstimateCloudRuntime(localEst, localDLPerf, offer.DLPerf)
-		estRunMin := cloudRunEst.Mean.Minutes()
+		estRunMin := avgJobMinutes
 
 		totalHours := (estSetupMin + estRunMin) / 60.0
 		estCost := totalHours * offer.CostPerHour

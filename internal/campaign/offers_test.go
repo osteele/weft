@@ -554,9 +554,9 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 		t.Error("8GB group MaxGPUMemGB=0 — should be set to VRAM tier (12)")
 	}
 
-	// Step 2: Verify MaxGPUMemGB caps DLPerf in offer selection.
-	// With MaxGPUMemGB=12, the fastest strategy should prefer a cheap GPU
-	// over an H200 because H200's DLPerf advantage is nullified.
+	// Step 2: Verify the legacy fallback selector stays neutral on runtime.
+	// Even with oversized offers present, the fastest strategy should prefer a
+	// cheap adequate GPU when no estimator-backed runtime is available.
 	offers := []cloud.Offer{
 		{ProviderID: "rtx3090", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
 		{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
@@ -565,7 +565,7 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 	_, best := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5),
 		bidding.StrategyFastest, group8GB.MaxGPUMemGB)
 	if best.ProviderID == "h200" {
-		t.Errorf("fastest strategy picked H200 for 8GB group with MaxGPUMemGB=%d — DLPerf capping failed",
+		t.Errorf("fastest strategy picked H200 for 8GB group with MaxGPUMemGB=%d — neutral runtime fallback failed",
 			group8GB.MaxGPUMemGB)
 	}
 	t.Logf("fastest strategy picked %s ($%.2f/hr) for 8GB group", best.GPUName, best.CostPerHour)
@@ -592,7 +592,7 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 	}
 
 	// Step 3b: Verify offer selection on parallel candidate's 8GB groups
-	// avoids H200. This is the end-to-end check: parallel group → BestOffer.
+	// avoids H200 under the neutral runtime fallback.
 	for _, g := range parallelGroups {
 		if g.GPUMemGB != 8 {
 			continue

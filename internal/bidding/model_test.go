@@ -248,7 +248,7 @@ func TestExpectedWallclockTime(t *testing.T) {
 	}
 }
 
-func TestBestOffer_FastStrategy_PrefersHighDLPerf(t *testing.T) {
+func TestBestOffer_FastStrategy_UsesNeutralRuntimeFallback(t *testing.T) {
 	model := &SurvivalModel{
 		GlobalSurvived:   18,
 		GlobalTotal:      20,
@@ -263,8 +263,8 @@ func TestBestOffer_FastStrategy_PrefersHighDLPerf(t *testing.T) {
 	}
 
 	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast, 0)
-	if best.ProviderID != "expensive-fast" {
-		t.Errorf("fast strategy should prefer high DLPerf, got %s", best.ProviderID)
+	if best.ProviderID != "cheap-slow" {
+		t.Errorf("fast strategy should prefer cheaper offer when runtime ties, got %s", best.ProviderID)
 	}
 
 	// Cost strategy should prefer the cheap one
@@ -281,8 +281,8 @@ func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 	}
 
 	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFast, 0)
-	if best.ProviderID != "high-perf" {
-		t.Errorf("fast strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
+	if best.ProviderID != "low-perf" {
+		t.Errorf("fast strategy with nil model should use neutral runtime fallback, got %s", best.ProviderID)
 	}
 }
 
@@ -300,13 +300,14 @@ func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 		{ProviderID: "risky-fast", GPUName: "A100", CostPerHour: 0.30, DLPerf: 20.0, Reliability: 0.50},
 	}
 
-	// Fastest should pick highest DLPerf (happy-path time, no survival adjustment)
+	// Fastest uses happy-path time, so with equal runtime it can still pick the
+	// cheaper risky offer while fast may be pushed away by retry-adjusted time.
 	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFastest, 0)
 	if best.ProviderID != "risky-fast" {
-		t.Errorf("fastest strategy should pick highest DLPerf, got %s", best.ProviderID)
+		t.Errorf("fastest strategy should prefer cheap happy-path winner, got %s", best.ProviderID)
 	}
 
-	// Fast strategy with same model might prefer the reliable one
+	// Fast strategy with the same model might prefer the reliable one.
 	_, bestFast := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast, 0)
 	// Just verify fastest and fast can differ (fastest ignores survival)
 	_ = bestFast
@@ -378,8 +379,8 @@ func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 	}
 
 	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
-	if best.ProviderID != "high-perf" {
-		t.Errorf("fastest strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
+	if best.ProviderID != "low-perf" {
+		t.Errorf("fastest strategy with nil model should use neutral runtime fallback, got %s", best.ProviderID)
 	}
 }
 
@@ -398,14 +399,20 @@ func TestBestOffer_FastestRejectsPathologicallyExpensive(t *testing.T) {
 }
 
 func TestBestOffer_CheapBreaksTiesByTime(t *testing.T) {
-	// Two offers at the same price: cheap strategy should prefer the faster one
-	// due to the small time weight.
+	// Two offers at the same price and runtime: cheap strategy should prefer the
+	// one with lower setup overhead due to the small time weight.
 	offers := []cloud.Offer{
 		{ProviderID: "slow", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 5.0},
 		{ProviderID: "fast", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 20.0},
 	}
 
-	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyCheap, 0)
+	setup := func(o cloud.Offer) float64 {
+		if o.ProviderID == "fast" {
+			return 0.25
+		}
+		return 1.0
+	}
+	_, best := BestOffer(nil, offers, 2.0, setup, StrategyCheap, 0)
 	if best.ProviderID != "fast" {
 		t.Errorf("cheap should break ties by time, got %s", best.ProviderID)
 	}
@@ -541,39 +548,37 @@ func TestFilterOffersBySurvival_EmptyOffers(t *testing.T) {
 	}
 }
 
-// TestBestOffer_MaxGPUMemGB_CapsEffectiveDLPerf verifies that when maxGPUMemGB
-// is set, the fastest strategy prefers a cheaper GPU over an expensive one
-// with higher DLPerf, because the oversized GPU's DLPerf is capped.
-func TestBestOffer_MaxGPUMemGB_CapsEffectiveDLPerf(t *testing.T) {
+// TestBestOffer_MaxGPUMemGB_NoLongerAffectsLegacyFallback verifies that
+// maxGPUMemGB is ignored by the neutral-runtime fallback selector.
+func TestBestOffer_MaxGPUMemGB_NoLongerAffectsLegacyFallback(t *testing.T) {
 	offers := []cloud.Offer{
 		{ProviderID: "rtx3090", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
 		{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
 	}
 
-	// Without ceiling: fastest picks H200 (higher DLPerf)
+	// Without ceiling: cheapest adequate offer wins because runtime ties.
 	_, bestNoCeiling := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
-	if bestNoCeiling.ProviderID != "h200" {
-		t.Errorf("without ceiling, fastest should pick H200, got %s", bestNoCeiling.ProviderID)
+	if bestNoCeiling.ProviderID != "rtx3090" {
+		t.Errorf("without ceiling, fastest should pick cheapest offer under neutral runtime fallback, got %s", bestNoCeiling.ProviderID)
 	}
 
-	// With ceiling at 12GB: fastest picks RTX 3090 because H200's DLPerf is
-	// capped (no speed advantage), and the cost weight breaks the tie.
+	// With a ceiling: the result is unchanged because speed is not inferred here.
 	_, bestWithCeiling := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 12)
 	if bestWithCeiling.ProviderID != "rtx3090" {
-		t.Errorf("with maxGPUMemGB=12, fastest should pick RTX 3090 (cheaper, same effective speed), got %s",
+		t.Errorf("with maxGPUMemGB=12, fastest should still pick RTX 3090, got %s",
 			bestWithCeiling.ProviderID)
 	}
 }
 
 // TestBestOffer_MaxGPUMemGB_Zero_NoEffect verifies that maxGPUMemGB=0 has no
-// effect on scoring (backward compatible).
+// effect on the neutral-runtime fallback scoring.
 func TestBestOffer_MaxGPUMemGB_Zero_NoEffect(t *testing.T) {
 	offers := []cloud.Offer{
 		{ProviderID: "cheap", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
 		{ProviderID: "fast", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
 	}
 	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
-	if best.ProviderID != "fast" {
-		t.Errorf("maxGPUMemGB=0 should not affect scoring, expected fast, got %s", best.ProviderID)
+	if best.ProviderID != "cheap" {
+		t.Errorf("maxGPUMemGB=0 should not affect scoring, expected cheap, got %s", best.ProviderID)
 	}
 }

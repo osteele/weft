@@ -124,31 +124,3 @@ func TestEstimateJobDuration_NilConfig(t *testing.T) {
 		t.Errorf("fallback Mean = %v, want %v", est.Mean, DefaultJobDuration.Mean)
 	}
 }
-
-func TestEstimateCloudRuntime(t *testing.T) {
-	local := Constant(60 * time.Minute)
-
-	// Cloud GPU is 2x faster
-	scaled := EstimateCloudRuntime(local, 100, 200)
-	if scaled.Mean != 30*time.Minute {
-		t.Errorf("scaled Mean = %v, want 30m", scaled.Mean)
-	}
-
-	// Cloud GPU is 0.5x speed
-	slower := EstimateCloudRuntime(local, 200, 100)
-	if slower.Mean != 120*time.Minute {
-		t.Errorf("slower Mean = %v, want 120m", slower.Mean)
-	}
-}
-
-func TestEstimateCloudRuntime_ZeroPerf(t *testing.T) {
-	local := Constant(60 * time.Minute)
-	same := EstimateCloudRuntime(local, 0, 100)
-	if same.Mean != local.Mean {
-		t.Errorf("zero localDLPerf should return local estimate unchanged")
-	}
-	same2 := EstimateCloudRuntime(local, 100, 0)
-	if same2.Mean != local.Mean {
-		t.Errorf("zero cloudDLPerf should return local estimate unchanged")
-	}
-}

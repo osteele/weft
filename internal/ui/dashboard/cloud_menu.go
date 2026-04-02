@@ -203,7 +203,6 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 			24.0,
 			queueDepth,
 			avgJobMin,
-			0,
 			offers,
 		)
 

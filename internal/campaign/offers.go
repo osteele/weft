@@ -40,8 +40,7 @@ func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
 		MinDiskGB:      group.DiskGB,
 		MinReliability: cloud.DefaultMinReliability,
 		// MaxGPUMemGB is intentionally NOT passed to the search filter.
-		// It signals "no performance advantage above this tier" and is used
-		// by BestOffer to cap effective DLPerf, not to exclude offers.
+		// It is a scheduler-side planning hint, not a hard offer filter.
 	}
 	if group.HasComputeIntensiveJob() {
 		c.MinCPUCoresEffective = intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", 16)

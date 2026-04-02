@@ -18,11 +18,11 @@ type SelectionStrategy string
 const (
 	// StrategyCheap minimizes expected dollar cost (including retry risk).
 	StrategyCheap SelectionStrategy = "cheap"
-	// StrategyFast minimizes expected wall-clock time (prefers higher DLPerf,
-	// weighted by survival probability).
+	// StrategyFast minimizes expected wall-clock time, weighted by survival
+	// probability when retry risk is modeled.
 	StrategyFast SelectionStrategy = "fast"
 	// StrategyFastest minimizes happy-path wall-clock time with minimal cost
-	// sensitivity (enough to avoid pathologically expensive offers).
+	// sensitivity.
 	StrategyFastest SelectionStrategy = "fastest"
 )
 
@@ -250,7 +250,7 @@ func (m *SurvivalModel) PriceBucketFor(gpuFamily string, pricePerHour float64) P
 //
 // Each attempt costs setup + run time. With survival probability p, the
 // expected number of attempts is 1/p. The caller is responsible for any
-// DLPerf scaling of jobDurationHrs.
+// runtime scaling.
 func ExpectedWallclockTime(jobDurationHrs, setupOverheadHrs, survivalProb float64) float64 {
 	if survivalProb <= 0 {
 		return math.Inf(1)
@@ -292,11 +292,9 @@ func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float6
 //
 // If the model is nil, survival probability defaults to 1.0 (no retry risk).
 //
-// maxGPUMemGB signals "no performance advantage above this VRAM tier." When
-// set, offers with GPUMemGB above the ceiling have their effective DLPerf
-// capped to the median DLPerf of offers at or below the ceiling. This ensures
-// oversized GPUs get no speed advantage, so the cost weight in any strategy
-// naturally prefers cheaper options.
+// This is a legacy fallback selector. It does not infer GPU speed differences
+// from DLPerf or VRAM tiers; callers that have estimator-backed runtimes should
+// use those directly before reaching this layer.
 func BestOfferForJobGroup(model *SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead OfferSetupFunc, strategy SelectionStrategy, maxGPUMemGB int) (int, cloud.Offer) {
 	return BestOfferForJobGroupWithProfile(model, offers, totalRunHrs, jobCount, setupOverhead, strategy.Profile(), maxGPUMemGB)
 }
@@ -312,16 +310,6 @@ func BestOfferForJobGroupWithProfile(model *SurvivalModel, offers []cloud.Offer,
 	}
 
 	w := profile.Weights()
-	medianDLPerf := MedianOfferDLPerf(offers)
-
-	// When maxGPUMemGB is set, compute a reference DLPerf from the cheapest
-	// offer that meets the minimum memory. Offers above the ceiling get their
-	// DLPerf capped to this reference — no speed advantage for oversized GPUs.
-	// If ALL offers exceed the ceiling, they all get equal effective DLPerf.
-	var ceilingDLPerf float64
-	if maxGPUMemGB > 0 {
-		ceilingDLPerf = minDLPerfAboveThreshold(offers)
-	}
 
 	return bestOfferByScore(offers, func(o cloud.Offer) float64 {
 		setup := setupOverhead(o)
@@ -331,18 +319,7 @@ func BestOfferForJobGroupWithProfile(model *SurvivalModel, offers []cloud.Offer,
 			surv = model.OfferSurvival(o)
 		}
 
-		// Scale run duration by GPU performance relative to median.
-		// When maxGPUMemGB is set, cap the effective DLPerf so oversized GPUs
-		// don't get a speed advantage.
-		effectiveDLPerf := o.DLPerf
-		if ceilingDLPerf > 0 && o.GPUMemGB > float64(maxGPUMemGB) && effectiveDLPerf > ceilingDLPerf {
-			effectiveDLPerf = ceilingDLPerf
-		}
-
 		runHrs := totalRunHrs
-		if effectiveDLPerf > 0 && medianDLPerf > 0 {
-			runHrs = totalRunHrs * (medianDLPerf / effectiveDLPerf)
-		}
 
 		cost := ExpectedCost(o.CostPerHour, runHrs, setup, surv)
 		completionHrs := aggregateJobCompletionTimeHrs(runHrs, setup, jobCount)
@@ -357,22 +334,6 @@ func BestOfferForJobGroupWithProfile(model *SurvivalModel, offers []cloud.Offer,
 
 		return w.Cost*cost + w.Time*completionScore
 	})
-}
-
-// minDLPerfAboveThreshold returns the minimum DLPerf across all offers that
-// have DLPerf data. This is used as the "no speed advantage" reference: when
-// maxGPUMemGB is set, oversized GPUs have their DLPerf capped to this value,
-// meaning they're scored as no faster than the slowest available option.
-// Since all strategies have a non-zero cost weight, the cheapest GPU wins
-// among equals.
-func minDLPerfAboveThreshold(offers []cloud.Offer) float64 {
-	var min float64
-	for _, o := range offers {
-		if o.DLPerf > 0 && (min == 0 || o.DLPerf < min) {
-			min = o.DLPerf
-		}
-	}
-	return min
 }
 
 // bestOfferByScore returns the offer with the lowest score value.

@@ -161,6 +161,7 @@ func TestPredictionJSONParsing(t *testing.T) {
 	t.Run("full result with epistemic", func(t *testing.T) {
 		data := `{
 			"duration_s": {"mean":120.5,"std":30.2,"lower":60.1,"upper":180.9,"epistemic_factor":1.8,"n_calibration":50},
+			"duration_metadata": {"source":"learned+analytical","confidence":0.625,"feasible":true,"analytical_duration_s":90.0,"analytical_peak_memory_mib":2048.0},
 			"peak_rss_kb": {"mean":1024.0,"std":100.0,"lower":824.0,"upper":1224.0},
 			"max_gpu_mem_mib": null
 		}`
@@ -176,6 +177,18 @@ func TestPredictionJSONParsing(t *testing.T) {
 		}
 		if r.DurationS.NCalibration != 50 {
 			t.Errorf("DurationS.NCalibration = %v, want 50", r.DurationS.NCalibration)
+		}
+		if r.DurationMetadata == nil {
+			t.Fatal("DurationMetadata is nil")
+		}
+		if r.DurationMetadata.Source != "learned+analytical" {
+			t.Errorf("DurationMetadata.Source = %q, want learned+analytical", r.DurationMetadata.Source)
+		}
+		if r.DurationMetadata.Confidence != 0.625 {
+			t.Errorf("DurationMetadata.Confidence = %v, want 0.625", r.DurationMetadata.Confidence)
+		}
+		if r.DurationMetadata.Feasible == nil || !*r.DurationMetadata.Feasible {
+			t.Errorf("DurationMetadata.Feasible = %v, want true", r.DurationMetadata.Feasible)
 		}
 		if r.PeakRSSKB == nil {
 			t.Fatal("PeakRSSKB is nil")

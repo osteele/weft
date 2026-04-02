@@ -130,7 +130,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	cmd.Flags().IntVar(&campaignLaunchMaxGPUMem, "max-gpu-mem", 0, "Maximum GPU memory in GB (overrides auto-derived ceiling from predictor; 0 = auto)")
 	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
-	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize wall-clock time), or 'fastest' (highest raw DLPerf)")
+	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize expected completion time), or 'fastest' (minimize happy-path runtime)")
 	cmd.Flags().Float64Var(&campaignLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
 	cmd.Flags().BoolVar(&campaignLaunchSkipWorkdirDelete, "skip-workdir-deletion", false, "Don't delete working directories after job completion (for debugging)")
 	cmd.Flags().StringVar(&campaignLaunchProject, "project", "", "Filter unplaced jobs by project name")

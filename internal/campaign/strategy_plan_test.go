@@ -11,11 +11,35 @@ import (
 	"github.com/osteele/weft/internal/predictor"
 )
 
-func TestRankGroupOffers_MultiJobGroupUsesTotalDuration(t *testing.T) {
+func TestRankGroupOffersWithPredictor_MultiJobGroupUsesTotalDuration(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 3600.0
+			if job.GPUClass == "H100" {
+				mean = 600.0
+			}
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+			}
+		}
+		return results, nil
+	}
+
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",
 		Jobs: []*db.Job{
-			{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4},
+			{ID: 1, Command: "python train.py --epochs 1"},
+			{ID: 2, Command: "python train.py --epochs 1"},
+			{ID: 3, Command: "python train.py --epochs 1"},
+			{ID: 4, Command: "python train.py --epochs 1"},
 		},
 	}
 	raw := []GroupRawOffers{{
@@ -34,7 +58,14 @@ func TestRankGroupOffers_MultiJobGroupUsesTotalDuration(t *testing.T) {
 		}
 	}
 
-	offers := RankGroupOffers(raw, nil, 1.0, setupFactory, bidding.StrategyFastest, 0)
+	offers := RankGroupOffersWithPredictor(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		setupFactory,
+		bidding.StrategyFastest,
+		0,
+	)
 	if len(offers) != 1 || offers[0].Offer == nil {
 		t.Fatalf("expected ranked offer, got %#v", offers)
 	}
