@@ -118,6 +118,44 @@ func TestFilterJobsByPlacementScope_NoFilterReturnsInput(t *testing.T) {
 	}
 }
 
+func TestFilterJobsByHostFlag_StrictHostMatch(t *testing.T) {
+	prevHost := listHost
+	listHost = "cool30"
+	t.Cleanup(func() { listHost = prevHost })
+
+	jobs := []*db.Job{
+		{ID: 1, Host: "cool30"},
+		{ID: 2, Host: "rental:444"},
+		{ID: 3, Host: ""},
+		{ID: 4, Host: db.LaunchHost(17)},
+	}
+
+	filtered := filterJobsByHostFlag(jobs)
+	if len(filtered) != 1 {
+		t.Fatalf("expected only 1 host-matching job, got %d", len(filtered))
+	}
+	if filtered[0].ID != 1 {
+		t.Fatalf("expected job 1 to remain, got job %d", filtered[0].ID)
+	}
+}
+
+func TestFilterJobsByHostFlag_NoHostFlagReturnsInput(t *testing.T) {
+	prevHost := listHost
+	listHost = ""
+	t.Cleanup(func() { listHost = prevHost })
+
+	jobs := []*db.Job{
+		{ID: 1, Host: "cool30"},
+		{ID: 2, Host: "rental:444"},
+		{ID: 3, Host: ""},
+	}
+
+	filtered := filterJobsByHostFlag(jobs)
+	if len(filtered) != len(jobs) {
+		t.Fatalf("expected unfiltered jobs, got %d", len(filtered))
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

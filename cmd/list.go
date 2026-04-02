@@ -253,6 +253,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		jobs = filterJobsByFailureState(jobs, failedOnly)
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
 		jobs = db.FilterByFreshStatus(jobs, hostFilterHosts)
+		jobs = filterJobsByHostFlag(jobs)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		jobs = db.FilterJobsByProject(jobs, listProject)
 		jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
@@ -276,6 +277,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
+	jobs = filterJobsByHostFlag(jobs)
 	jobs = jobsWithEffectiveStatus(jobs, statusFilter)
 	jobs = filterJobsByFailureState(jobs, failedOnly)
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
@@ -356,9 +358,7 @@ func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string,
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 	jobs = db.FilterJobsByProject(jobs, listProject)
 	jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
-	if listHost != "" {
-		jobs = db.FilterByHost(jobs, []string{listHost})
-	}
+	jobs = filterJobsByHostFlag(jobs)
 	return jobs
 }
 
@@ -385,6 +385,13 @@ func filterJobsByPlacementScope(jobs []*db.Job, wantRental, wantInventory bool) 
 		}
 	}
 	return filtered
+}
+
+func filterJobsByHostFlag(jobs []*db.Job) []*db.Job {
+	if listHost == "" {
+		return jobs
+	}
+	return db.FilterByHost(jobs, []string{listHost})
 }
 
 func filterJobsByFailureState(jobs []*db.Job, failedOnly bool) []*db.Job {
