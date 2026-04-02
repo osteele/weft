@@ -443,6 +443,46 @@ func TestGetAttemptOutcomesByLaunch(t *testing.T) {
 	}
 }
 
+func TestCloseLaunchAttempts_CompletedSetsExitCode(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	insertTestJob(t, database, 1, "echo done", "/tmp", StatusRunning, withLaunch(instanceID))
+
+	if err := CloseLaunchAttempts(database, instanceID, AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("CloseLaunchAttempts(completed): %v", err)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	}
+	if job.ExitCode == nil || *job.ExitCode != 0 {
+		t.Fatalf("job exit_code = %v, want 0", job.ExitCode)
+	}
+
+	var lastSynced string
+	if err := database.QueryRow(
+		`SELECT COALESCE(last_synced_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		1,
+	).Scan(&lastSynced); err != nil {
+		t.Fatalf("query last_synced_status: %v", err)
+	}
+	if lastSynced != StatusCompleted {
+		t.Fatalf("last_synced_status = %q, want %q", lastSynced, StatusCompleted)
+	}
+}
+
 func TestResetLaunchJobs_PreservesCanceledJobs(t *testing.T) {
 	database := setupTestDB(t)
 

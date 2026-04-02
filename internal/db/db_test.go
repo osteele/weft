@@ -2864,6 +2864,90 @@ func TestCleanupStaleAttempts_SkipsJobsWithCompletedAttempt(t *testing.T) {
 	}
 }
 
+func TestStartupRepair_FixesCompletedCloudAttemptsMissingExitCode(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "weft-completed-repair-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+
+	cleanup := SetDBPath(tmpFile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	endTime := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, end_time = ?, exit_code = NULL, last_synced_status = ?, cloud_outcome = ?
+		 WHERE job_id = ? AND end_time IS NULL`,
+		StatusCompleted, endTime, StatusRunning, AttemptOutcomeCompleted, jobID,
+	); err != nil {
+		t.Fatalf("inject broken completed attempt: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != StatusDead {
+		t.Fatalf("pre-condition job status = %q, want %q", job.Status, StatusDead)
+	}
+
+	database.Close()
+
+	database, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("job status after repair = %q, want %q", job.Status, StatusCompleted)
+	}
+	if job.ExitCode == nil || *job.ExitCode != 0 {
+		t.Fatalf("job exit_code after repair = %v, want 0", job.ExitCode)
+	}
+
+	var lastSynced string
+	if err := database.QueryRow(
+		`SELECT COALESCE(last_synced_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&lastSynced); err != nil {
+		t.Fatalf("query repaired last_synced_status: %v", err)
+	}
+	if lastSynced != StatusCompleted {
+		t.Fatalf("last_synced_status after repair = %q, want %q", lastSynced, StatusCompleted)
+	}
+}
+
 // TestRepairOrphanedCompletedAttempts verifies that the repair migration
 // correctly associates orphaned completed attempts with the correct launch
 // by finding a sibling launch that ran other jobs from the same original launch.

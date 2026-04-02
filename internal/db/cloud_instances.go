@@ -1246,10 +1246,43 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 		attemptStatus = StatusCompleted
 	}
 	now := time.Now().Unix()
+	if outcome == AttemptOutcomeCompleted {
+		_, err := database.Exec(
+			`UPDATE job_attempts
+			 SET status = ?, cloud_outcome = ?, end_time = COALESCE(end_time, ?),
+			     exit_code = COALESCE(exit_code, 0), last_synced_status = ?, pending_status = NULL
+			 WHERE launch_id = ? AND end_time IS NULL`,
+			attemptStatus, outcome, now, StatusCompleted, instanceID,
+		)
+		return err
+	}
 	_, err := database.Exec(
-		`UPDATE job_attempts SET status = ?, cloud_outcome = ?, end_time = COALESCE(end_time, ?)
+		`UPDATE job_attempts
+		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(end_time, ?), pending_status = NULL
 		 WHERE launch_id = ? AND end_time IS NULL`,
 		attemptStatus, outcome, now, instanceID,
+	)
+	return err
+}
+
+// repairCompletedCloudAttemptsMissingExitCode fixes synthetic completion rows
+// created by CloseLaunchAttempts before it populated exit_code=0. Without this,
+// the job_status view derives a terminal cloud attempt as "dead".
+func repairCompletedCloudAttemptsMissingExitCode(database *sql.DB) error {
+	_, err := database.Exec(
+		`UPDATE job_attempts
+		 SET exit_code = COALESCE(exit_code, 0),
+		     last_synced_status = ?,
+		     pending_status = NULL
+		 WHERE launch_id IS NOT NULL
+		   AND status = ?
+		   AND cloud_outcome = ?
+		   AND end_time IS NOT NULL
+		   AND (exit_code IS NULL OR last_synced_status IS NULL OR last_synced_status != ?)`,
+		StatusCompleted,
+		StatusCompleted,
+		AttemptOutcomeCompleted,
+		StatusCompleted,
 	)
 	return err
 }
