@@ -242,8 +242,9 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
-	splitOffers := rankGroupOffersForPlanning(splitRaw, predCfg, survivalModel, setupFactory, profile, minSurvival)
+	splitOffers, splitPredictions := rankGroupOffersForPlanningWithPredictions(splitRaw, predCfg, survivalModel, setupFactory, profile, minSurvival)
 	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, nil)
+	splitEstimates = applySelectedOfferRuntimePredictions(splitEstimates, splitPredictions)
 
 	reuseDecisions := chooseReuseGroups(
 		database,
@@ -323,8 +324,21 @@ func rankGroupOffersForPlanning(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) []GroupOffer {
+	offers, _ := rankGroupOffersForPlanningWithPredictions(raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
+	return offers
+}
+
+func rankGroupOffersForPlanningWithPredictions(
+	raw []GroupRawOffers,
+	predCfg *predictor.Config,
+	survivalModel *bidding.SurvivalModel,
+	setupFactory SetupOverheadFactory,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+) ([]GroupOffer, []offerRuntimePrediction) {
 	predicted := predictOfferRuntimes(raw, predCfg)
 	results := make([]GroupOffer, len(raw))
+	selected := make([]offerRuntimePrediction, len(raw))
 	for i, r := range raw {
 		if r.Err != nil {
 			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
@@ -347,10 +361,14 @@ func rankGroupOffersForPlanning(
 				offerPredictions,
 			); ok {
 				results[i] = ranked
+				if ranked.Offer != nil {
+					selected[i] = offerPredictions[offerPredictionKey(*ranked.Offer)]
+				}
 				continue
 			}
 		}
 
+		neutral := neutralOfferRuntimePredictions(r.Group, r.Offers)
 		results[i], _ = rankOfferWithPredictedRuntime(
 			r.Group,
 			r.Offers,
@@ -358,10 +376,13 @@ func rankGroupOffersForPlanning(
 			setupOverhead,
 			profile,
 			minSurvival,
-			neutralOfferRuntimePredictions(r.Group, r.Offers),
+			neutral,
 		)
+		if results[i].Offer != nil {
+			selected[i] = neutral[offerPredictionKey(*results[i].Offer)]
+		}
 	}
-	return results
+	return results, selected
 }
 
 func neutralOfferRuntimePredictions(group InstanceGroup, offers []cloud.Offer) map[string]offerRuntimePrediction {
@@ -1076,8 +1097,9 @@ func BestCandidateForProfile(
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
 	for i, cand := range candidates {
-		offers := rankGroupOffersForPlanning(cand.Raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
+		offers, selectedPredictions := rankGroupOffersForPlanningWithPredictions(cand.Raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
 		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, nil)
+		estimates = applySelectedOfferRuntimePredictions(estimates, selectedPredictions)
 		score := ScoreEstimatesWithProfile(estimates, profile)
 		if i == 0 || score < bestScore {
 			bestScore = score
@@ -1091,4 +1113,96 @@ func BestCandidateForProfile(
 		}
 	}
 	return best
+}
+
+func applySelectedOfferRuntimePredictions(estimates []CostEstimate, selected []offerRuntimePrediction) []CostEstimate {
+	if len(estimates) == 0 || len(selected) == 0 {
+		return estimates
+	}
+	adjusted := append([]CostEstimate(nil), estimates...)
+	for i := range adjusted {
+		if i >= len(selected) {
+			break
+		}
+		adjusted[i] = applySelectedOfferRuntimePrediction(adjusted[i], selected[i])
+	}
+	return adjusted
+}
+
+func applySelectedOfferRuntimePrediction(est CostEstimate, pred offerRuntimePrediction) CostEstimate {
+	if est.Offer.Offer == nil || !pred.complete || !pred.feasible || len(est.Group.Jobs) == 0 {
+		return est
+	}
+
+	jobDurations := pred.jobDurations
+	runHours := pred.totalRunHrs
+	if len(pred.adjustedJobDurations) == len(est.Group.Jobs) {
+		jobDurations = pred.adjustedJobDurations
+	}
+	if pred.adjustedRunHrs > 0 {
+		runHours = pred.adjustedRunHrs
+	}
+	if runHours <= 0 || len(jobDurations) != len(est.Group.Jobs) {
+		return est
+	}
+
+	est.JobDurations = make(map[int64]time.Duration, len(est.Group.Jobs))
+	for idx, job := range est.Group.Jobs {
+		if job == nil {
+			continue
+		}
+		est.JobDurations[job.ID] = jobDurations[idx]
+	}
+
+	runMean := time.Duration(runHours * float64(time.Hour))
+	est.Breakdown.Run = rescaleEstimateMean(est.Breakdown.Run, runMean)
+	total := est.Breakdown.Startup.
+		Add(est.Breakdown.SSHSetup).
+		Add(est.Breakdown.Provision).
+		Add(est.Breakdown.JobSetup).
+		Add(est.Breakdown.Run).
+		Add(est.Breakdown.Upload)
+	est.Breakdown.Total = total
+	est.TotalTime = total.Mean
+
+	costRate := est.Offer.Offer.CostPerHour
+	est.TotalCost = total.Mean.Hours() * costRate
+	if costRate == 0 {
+		est.RiskAdjustedCost = 0
+	} else if est.SurvivalProb > 0 {
+		est.RiskAdjustedCost = bidding.ExpectedCost(costRate, est.Breakdown.Run.Mean.Hours(), est.SetupOverhead.Hours(), est.SurvivalProb)
+	}
+
+	return est
+}
+
+func rescaleEstimateMean(base estimate.Estimate, mean time.Duration) estimate.Estimate {
+	if mean <= 0 {
+		return estimate.Estimate{}
+	}
+	if base.Mean <= 0 {
+		return estimate.Constant(mean)
+	}
+
+	factor := mean.Seconds() / base.Mean.Seconds()
+	lower := scaleDuration(base.Lower, factor)
+	upper := scaleDuration(base.Upper, factor)
+	if lower > mean {
+		lower = mean
+	}
+	if upper < mean {
+		upper = mean
+	}
+	return estimate.Estimate{
+		Mean:  mean,
+		Lower: lower,
+		Upper: upper,
+	}
+}
+
+func scaleDuration(duration time.Duration, factor float64) time.Duration {
+	if factor <= 0 || duration <= 0 {
+		return 0
+	}
+	return time.Duration(float64(duration) * factor)
 }

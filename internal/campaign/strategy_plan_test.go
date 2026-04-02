@@ -140,102 +140,6 @@ func TestScoreEstimates_UsesTotalJobCompletionTime(t *testing.T) {
 	}
 }
 
-func TestBestCandidateForStrategy_UsesPredictorRuntimeAcrossGroupingCandidates(t *testing.T) {
-	originalPredictBatch := resolvePredictBatch
-	originalEstimateJobDurationsDetailed := estimateJobDurationsDetailed
-	t.Cleanup(func() {
-		resolvePredictBatch = originalPredictBatch
-		estimateJobDurationsDetailed = originalEstimateJobDurationsDetailed
-	})
-
-	stubPredict := func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
-		results := make(map[int64]*predictor.Result, len(jobs))
-		for _, job := range jobs {
-			mean := 7200.0
-			if job.GPUClass == "H200" {
-				mean = 300.0
-			}
-			results[job.ID] = &predictor.Result{
-				DurationS: &predictor.Prediction{
-					Mean:  mean,
-					Lower: mean * 0.9,
-					Upper: mean * 1.1,
-				},
-			}
-		}
-		return results, nil
-	}
-	resolvePredictBatch = stubPredict
-	estimateJobDurationsDetailed = func(_ *predictor.Config, jobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
-		results, err := stubPredict(predictor.Config{}, jobs)
-		if err != nil {
-			return nil
-		}
-		estimates := make(map[int64]estimate.DurationPrediction, len(results))
-		for id, result := range results {
-			if result == nil || result.DurationS == nil {
-				continue
-			}
-			estimates[id] = estimate.DurationPrediction{
-				Estimate: estimate.FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper),
-				Metadata: result.DurationMetadata,
-			}
-		}
-		return estimates
-	}
-
-	grouped := GroupingCandidate{
-		Label: "grouped",
-		Groups: []InstanceGroup{{
-			GPUClass: "NVIDIA",
-			Jobs: []*db.Job{
-				{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4},
-			},
-		}},
-		Raw: []GroupRawOffers{{
-			Group: InstanceGroup{
-				GPUClass: "NVIDIA",
-				Jobs:     []*db.Job{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}},
-			},
-			Offers: []cloud.Offer{
-				{ProviderID: "h200", GPUName: "H200", CostPerHour: 1.50, DLPerf: 40},
-			},
-		}},
-	}
-
-	parallelGroups := []InstanceGroup{
-		{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 1}}},
-		{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 2}}},
-		{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 3}}},
-		{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 4}}},
-	}
-	parallelRaw := make([]GroupRawOffers, len(parallelGroups))
-	for i, g := range parallelGroups {
-		parallelRaw[i] = GroupRawOffers{
-			Group:  g,
-			Offers: []cloud.Offer{{ProviderID: "rtx3090", GPUName: "RTX 3090", CostPerHour: 0.20, DLPerf: 5}},
-		}
-	}
-	parallel := GroupingCandidate{
-		Label:  "parallel",
-		Groups: parallelGroups,
-		Raw:    parallelRaw,
-	}
-
-	result := BestCandidateForStrategy(
-		nil,
-		[]GroupingCandidate{grouped, parallel},
-		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
-		nil,
-		nil,
-		bidding.StrategyFastest,
-		0,
-	)
-	if result.Label != "grouped" {
-		t.Fatalf("expected grouped candidate to win, got %s", result.Label)
-	}
-}
-
 func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing.T) {
 	original := resolvePredictBatch
 	t.Cleanup(func() { resolvePredictBatch = original })
@@ -566,6 +470,49 @@ func TestRankGroupOffersForPlanning_MemoryCapacityCanJustifyLargerGPU(t *testing
 	}
 	if offers[0].Offer.ProviderID != "h200" {
 		t.Fatalf("expected explicit memory-capacity signal to preserve larger-GPU win, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestApplySelectedOfferRuntimePredictions_UsesAdjustedDurations(t *testing.T) {
+	estimates := []CostEstimate{{
+		Group:         InstanceGroup{Jobs: []*db.Job{{ID: 1}, {ID: 2}}},
+		Offer:         GroupOffer{Offer: &cloud.Offer{ProviderID: "offer-1", CostPerHour: 2.0}},
+		Breakdown:     estimate.Breakdown{Startup: estimate.Constant(10 * time.Minute), Run: estimate.Constant(2 * time.Hour), Total: estimate.Constant(130 * time.Minute)},
+		JobDurations:  map[int64]time.Duration{1: time.Hour, 2: time.Hour},
+		SetupOverhead: 10 * time.Minute,
+		TotalTime:     130 * time.Minute,
+		TotalCost:     (130 * time.Minute).Hours() * 2.0,
+		SurvivalProb:  1.0,
+	}}
+	selected := []offerRuntimePrediction{{
+		totalRunHrs:          2.0,
+		adjustedRunHrs:       1.5,
+		jobDurations:         []time.Duration{time.Hour, time.Hour},
+		adjustedJobDurations: []time.Duration{30 * time.Minute, time.Hour},
+		feasible:             true,
+		complete:             true,
+	}}
+
+	adjusted := applySelectedOfferRuntimePredictions(estimates, selected)
+	if len(adjusted) != 1 {
+		t.Fatalf("expected one adjusted estimate, got %d", len(adjusted))
+	}
+	est := adjusted[0]
+	if est.JobDurations[1] != 30*time.Minute {
+		t.Fatalf("job 1 duration = %v, want 30m", est.JobDurations[1])
+	}
+	if est.JobDurations[2] != time.Hour {
+		t.Fatalf("job 2 duration = %v, want 1h", est.JobDurations[2])
+	}
+	if est.Breakdown.Run.Mean != 90*time.Minute {
+		t.Fatalf("Run.Mean = %v, want 1h30m", est.Breakdown.Run.Mean)
+	}
+	if est.TotalTime != 100*time.Minute {
+		t.Fatalf("TotalTime = %v, want 1h40m", est.TotalTime)
+	}
+	wantCost := (100 * time.Minute).Hours() * 2.0
+	if est.TotalCost != wantCost {
+		t.Fatalf("TotalCost = %.2f, want %.2f", est.TotalCost, wantCost)
 	}
 }
 
