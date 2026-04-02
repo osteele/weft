@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/bidding"
@@ -146,6 +147,59 @@ func TestLaunchModelView_ShowsRawOfferSummaryWhilePlanning(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
 		}
+	}
+}
+
+func TestLaunchModelView_RawOfferSummaryAggregatesDuplicateSpecs(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{
+			GPUClass:    "NVIDIA",
+			GPUMemGB:    8,
+			MaxGPUMemGB: 12,
+			Jobs: []*db.Job{
+				{ID: 1, Description: "a"},
+			},
+		},
+		{
+			GPUClass:    "NVIDIA",
+			GPUMemGB:    8,
+			MaxGPUMemGB: 12,
+			Jobs: []*db.Job{
+				{ID: 2, Description: "b"},
+			},
+		},
+		{
+			Jobs: []*db.Job{
+				{ID: 3, Description: "c"},
+			},
+		},
+	}
+	items, selected, cursor := buildItemsFromGroups(groups)
+	m := launchModel{
+		groups:      groups,
+		items:       items,
+		selected:    selected,
+		cursor:      cursor,
+		loading:     true,
+		instanceIDs: nil,
+		cachedRawOffers: []campaign.GroupRawOffers{
+			{Group: groups[0], Offers: make([]cloud.Offer, 64)},
+			{Group: groups[1], Offers: make([]cloud.Offer, 64)},
+			{Group: groups[2], Offers: make([]cloud.Offer, 64)},
+		},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"NVIDIA ≥8GB ≤12GB (2 groups): 2x 64 direct offers",
+		"Unspecified GPU: 64 direct offers",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "NVIDIA ≥8GB ≤12GB: 64 direct offers\n  NVIDIA ≥8GB ≤12GB: 64 direct offers") {
+		t.Fatalf("expected duplicate summary lines to be aggregated, got:\n%s", out)
 	}
 }
 
@@ -532,6 +586,82 @@ func TestLaunchModelView_InlineWatchHidesInventoryBeforeRegistration(t *testing.
 	if strings.Contains(out, "Inventory Hosts") {
 		t.Fatalf("did not expect inventory host table before registration, got:\n%s", out)
 	}
+}
+
+func TestLaunchModelView_ShowsLaunchLivenessSummaryWhileLaunching(t *testing.T) {
+	m := launchModel{
+		launching:             true,
+		launchStartedAt:       time.Now().Add(-65 * time.Second),
+		lastLaunchProgressAt:  time.Now().Add(-30 * time.Second),
+		registeredInstanceIDs: []int64{11},
+		expectedInstanceCount: 3,
+		launchStatusCounts: map[string]int{
+			db.LaunchStatusLaunching: 1,
+			db.LaunchStatusRunning:   1,
+		},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"Launching instances...",
+		"elapsed:",
+		"instances discovered: 1/3",
+		"instance states: launching 1, running 1",
+		"No launch callbacks for",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in output, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestLaunchModelUpdate_LaunchHeartbeatBackfillsInstancesAndStartsInlineWatch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusLaunching})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusLaunching,
+		Provider:   "vastai",
+		GPUSpec:    "A40",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	model, cmd := launchModel{
+		launching:               true,
+		database:                database,
+		appConfig:               &config.Config{},
+		campaignID:              campaignID,
+		inlineWatchEnabled:      true,
+		registeredInstanceIDSet: make(map[int64]struct{}),
+	}.Update(launchHeartbeatMsg{
+		instanceIDs: []int64{instanceID},
+		statusCounts: map[string]int{
+			db.LaunchStatusLaunching: 1,
+		},
+	})
+	got := model.(launchModel)
+	if got.inlineWatch == nil || !got.inlineWatchUsed {
+		t.Fatal("expected inline watch to start from heartbeat backfill")
+	}
+	if len(got.registeredInstanceIDs) != 1 || got.registeredInstanceIDs[0] != instanceID {
+		t.Fatalf("registeredInstanceIDs = %v, want [%d]", got.registeredInstanceIDs, instanceID)
+	}
+	if cmd == nil {
+		t.Fatal("expected heartbeat update to schedule follow-up command(s)")
+	}
+}
+
+func TestLaunchModelHandleKey_CtrlCQuitsWhileLaunching(t *testing.T) {
+	model, cmd := launchModel{launching: true}.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if model.(launchModel).launching != true {
+		t.Fatal("expected model to remain in launching state until quit command executes")
+	}
+	assertQuitCmd(t, cmd)
 }
 
 func assertQuitCmd(t *testing.T, cmd tea.Cmd) {

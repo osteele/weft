@@ -33,6 +33,11 @@ var (
 	launchErrStyle      = tuiFailedStyle
 )
 
+const (
+	launchHeartbeatInterval = 2 * time.Second
+	launchStallThreshold    = 20 * time.Second
+)
+
 // renderRow writes a styled line with cursor prefix to b.
 func renderRow(b *strings.Builder, style lipgloss.Style, line string, isCursor bool) {
 	if isCursor {
@@ -243,6 +248,10 @@ type launchModel struct {
 
 	instanceIDs             []int64
 	expectedInstanceCount   int
+	launchStartedAt         time.Time
+	lastLaunchProgressAt    time.Time
+	launchStatusCounts      map[string]int
+	launchHeartbeatErr      error
 	inlineWatchEnabled      bool
 	inlineWatchUsed         bool
 	registeredInstanceIDs   []int64
@@ -309,6 +318,13 @@ type instancesLaunchedMsg struct {
 	instanceIDs []int64
 	errors      []error
 	err         error
+}
+
+type launchHeartbeatMsg struct {
+	instanceIDs  []int64
+	statusCounts map[string]int
+	err          error
+	polledAt     time.Time
 }
 
 type campaignCreatedMsg struct {
@@ -925,6 +941,36 @@ func waitForAssetStage(ch chan assetStageChangedMsg) tea.Cmd {
 	}
 }
 
+func (m launchModel) waitForLaunchHeartbeat() tea.Cmd {
+	if !m.launching {
+		return nil
+	}
+	database := m.database
+	campaignID := m.campaignID
+	return tea.Tick(launchHeartbeatInterval, func(t time.Time) tea.Msg {
+		out := launchHeartbeatMsg{polledAt: t}
+		if database == nil || campaignID == 0 {
+			return out
+		}
+		instances, err := db.GetCampaignInstances(database, campaignID)
+		if err != nil {
+			out.err = err
+			return out
+		}
+		if len(instances) == 0 {
+			return out
+		}
+		out.instanceIDs = make([]int64, 0, len(instances))
+		out.statusCounts = make(map[string]int)
+		for _, inst := range instances {
+			out.instanceIDs = append(out.instanceIDs, inst.ID)
+			out.statusCounts[inst.Status]++
+		}
+		sort.Slice(out.instanceIDs, func(i, j int) bool { return out.instanceIDs[i] < out.instanceIDs[j] })
+		return out
+	})
+}
+
 func hasLaunchR2Config(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
@@ -1019,7 +1065,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.inlineWatch != nil {
 		switch msg.(type) {
-		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg, switchToLaunchMsg, assetStageStartedMsg, assetStageChangedMsg:
+		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg, switchToLaunchMsg, assetStageStartedMsg, assetStageChangedMsg, launchHeartbeatMsg:
 		default:
 			next, cmd, handled := m.updateInlineWatch(msg)
 			if handled {
@@ -1172,6 +1218,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case campaignCreatedMsg:
 		m.campaignID = msg.campaignID
+		m.lastLaunchProgressAt = time.Now()
 		if m.inlineWatch != nil {
 			m.inlineWatch.campaignID = msg.campaignID
 			if m.inlineWatch.launchedAt.IsZero() {
@@ -1181,6 +1228,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case launchPhaseMsg:
+		m.lastLaunchProgressAt = time.Now()
 		if msg.groupIndex < 0 {
 			m.campaignPhase = msg.phase
 		} else {
@@ -1223,6 +1271,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case launchInstanceRegisteredMsg:
+		m.lastLaunchProgressAt = time.Now()
 		if _, ok := m.registeredInstanceIDSet[msg.instanceID]; !ok {
 			m.registeredInstanceIDSet[msg.instanceID] = struct{}{}
 			m.registeredInstanceIDs = append(m.registeredInstanceIDs, msg.instanceID)
@@ -1244,6 +1293,36 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = next
 		if watchCmd != nil {
 			cmds = append(cmds, watchCmd)
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
+
+	case launchHeartbeatMsg:
+		cmds := make([]tea.Cmd, 0, 2)
+		if msg.err != nil {
+			m.launchHeartbeatErr = msg.err
+		} else {
+			m.launchHeartbeatErr = nil
+			if len(msg.statusCounts) > 0 {
+				m.launchStatusCounts = msg.statusCounts
+			}
+			for _, id := range msg.instanceIDs {
+				if _, ok := m.registeredInstanceIDSet[id]; ok {
+					continue
+				}
+				m.registeredInstanceIDSet[id] = struct{}{}
+				m.registeredInstanceIDs = append(m.registeredInstanceIDs, id)
+			}
+			next, watchCmd := m.maybeStartInlineWatch()
+			m = next
+			if watchCmd != nil {
+				cmds = append(cmds, watchCmd)
+			}
+		}
+		if m.launching {
+			cmds = append(cmds, m.waitForLaunchHeartbeat())
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -1312,7 +1391,14 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.launching && m.inlineWatch == nil {
-		return m, nil // ignore keys while launching
+		switch msg.String() {
+		case "q", "esc", "ctrl+c":
+			return m, m.quitOrSwitchToWatch("Launch continues in background.")
+		case "ctrl+z":
+			return m, tea.Suspend
+		default:
+			return m, nil // ignore other keys while launching
+		}
 	}
 
 	switch msg.String() {
@@ -1346,6 +1432,10 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.launching = true
 		m.expectedInstanceCount = 0
+		m.launchStartedAt = time.Now()
+		m.lastLaunchProgressAt = m.launchStartedAt
+		m.launchStatusCounts = nil
+		m.launchHeartbeatErr = nil
 		m.registeredInstanceIDs = nil
 		m.registeredInstanceIDSet = make(map[int64]struct{})
 		m.inlineWatch = nil
@@ -1359,6 +1449,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.groupDone = make(map[int]bool)
 		cmds := []tea.Cmd{
 			m.spinner.Tick,
+			m.waitForLaunchHeartbeat(),
 			m.launchInstances(),
 			m.waitForCampaignCreated(),
 			waitForLaunchPlanReady(m.planCh),
@@ -1596,34 +1687,77 @@ func renderRawOfferSummary(b *strings.Builder, raw []campaign.GroupRawOffers) {
 	if len(raw) == 0 {
 		return
 	}
+	type specSummary struct {
+		totalGroups int
+		statuses    map[string]int
+	}
+
+	statusFor := func(go_ campaign.GroupRawOffers) string {
+		switch {
+		case go_.Err != nil:
+			return "search error"
+		case len(go_.Offers) == 0:
+			return "0 direct offers"
+		case len(go_.Offers) == 1:
+			return "1 direct offer"
+		default:
+			return fmt.Sprintf("%d direct offers", len(go_.Offers))
+		}
+	}
+	specLabelFor := func(group campaign.InstanceGroup) string {
+		spec := strings.TrimSpace(group.GPUSpec())
+		if spec == "" || spec == "GPU" {
+			return "Unspecified GPU"
+		}
+		return spec
+	}
+
 	matchedGroups := 0
+	summaries := make(map[string]*specSummary)
+	order := make([]string, 0, len(raw))
 	for _, go_ := range raw {
 		if go_.Err == nil && len(go_.Offers) > 0 {
 			matchedGroups++
 		}
+		spec := specLabelFor(go_.Group)
+		summary, ok := summaries[spec]
+		if !ok {
+			summary = &specSummary{statuses: make(map[string]int)}
+			summaries[spec] = summary
+			order = append(order, spec)
+		}
+		summary.totalGroups++
+		summary.statuses[statusFor(go_)]++
 	}
 	b.WriteString(launchDimStyle.Render(fmt.Sprintf(" Direct offers found for %d/%d GPU groups.", matchedGroups, len(raw))))
 	b.WriteString("\n")
 
-	limit := min(len(raw), 5)
+	limit := min(len(order), 5)
 	for i := 0; i < limit; i++ {
-		go_ := raw[i]
-		status := ""
-		switch {
-		case go_.Err != nil:
-			status = "search error"
-		case len(go_.Offers) == 0:
-			status = "0 direct offers"
-		case len(go_.Offers) == 1:
-			status = "1 direct offer"
-		default:
-			status = fmt.Sprintf("%d direct offers", len(go_.Offers))
+		spec := order[i]
+		summary := summaries[spec]
+		if summary == nil {
+			continue
 		}
-		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s: %s", go_.Group.GPUSpec(), status)))
+		statusParts := make([]string, 0, len(summary.statuses))
+		for status, count := range summary.statuses {
+			if count > 1 {
+				statusParts = append(statusParts, fmt.Sprintf("%dx %s", count, status))
+			} else {
+				statusParts = append(statusParts, status)
+			}
+		}
+		sort.Strings(statusParts)
+		status := strings.Join(statusParts, ", ")
+		if summary.totalGroups > 1 {
+			b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s (%d groups): %s", spec, summary.totalGroups, status)))
+		} else {
+			b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s: %s", spec, status)))
+		}
 		b.WriteString("\n")
 	}
-	if len(raw) > limit {
-		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  … %d more GPU groups", len(raw)-limit)))
+	if len(order) > limit {
+		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  … %d more GPU specs", len(order)-limit)))
 		b.WriteString("\n")
 	}
 }
@@ -2001,6 +2135,78 @@ func (m launchModel) launchPhaseLabel(groupIndex int, phase string) string {
 	return phase
 }
 
+func (m launchModel) launchElapsedLine() string {
+	if m.launchStartedAt.IsZero() {
+		return ""
+	}
+	elapsed := time.Since(m.launchStartedAt).Truncate(time.Second)
+	if elapsed < time.Second {
+		elapsed = time.Second
+	}
+	return fmt.Sprintf("elapsed: %s", elapsed)
+}
+
+func (m launchModel) launchKnownInstancesLine() string {
+	known := len(m.registeredInstanceIDs)
+	if m.expectedInstanceCount > 0 {
+		return fmt.Sprintf("instances discovered: %d/%d", known, m.expectedInstanceCount)
+	}
+	return fmt.Sprintf("instances discovered: %d", known)
+}
+
+func formatLaunchStatusCounts(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	remaining := make(map[string]int, len(counts))
+	for status, count := range counts {
+		remaining[status] = count
+	}
+	orderedStatuses := []string{
+		db.LaunchStatusPlanned,
+		db.LaunchStatusLaunching,
+		db.LaunchStatusRunning,
+		db.LaunchStatusGrace,
+		db.LaunchStatusCompleted,
+		db.LaunchStatusFailed,
+		db.LaunchStatusCancelled,
+	}
+	parts := make([]string, 0, len(counts))
+	for _, status := range orderedStatuses {
+		count, ok := remaining[status]
+		if !ok || count == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", status, count))
+		delete(remaining, status)
+	}
+	if len(remaining) > 0 {
+		extra := make([]string, 0, len(remaining))
+		for status := range remaining {
+			extra = append(extra, status)
+		}
+		sort.Strings(extra)
+		for _, status := range extra {
+			parts = append(parts, fmt.Sprintf("%s %d", status, remaining[status]))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "instance states: " + strings.Join(parts, ", ")
+}
+
+func (m launchModel) launchStallLine() string {
+	if m.lastLaunchProgressAt.IsZero() {
+		return ""
+	}
+	stalledFor := time.Since(m.lastLaunchProgressAt)
+	if stalledFor < launchStallThreshold {
+		return ""
+	}
+	return fmt.Sprintf("No launch callbacks for %s; checking DB state...", stalledFor.Truncate(time.Second))
+}
+
 func (m launchModel) renderInlineLaunchOverview() string {
 	if m.inlineWatch == nil || !m.launching {
 		return ""
@@ -2019,6 +2225,24 @@ func (m launchModel) renderInlineLaunchOverview() string {
 	b.WriteString("\n")
 
 	pendingLines := 0
+	if elapsed := m.launchElapsedLine(); elapsed != "" {
+		b.WriteString(fmt.Sprintf("  · %s\n", elapsed))
+		pendingLines++
+	}
+	b.WriteString(fmt.Sprintf("  · %s\n", m.launchKnownInstancesLine()))
+	pendingLines++
+	if stateLine := formatLaunchStatusCounts(m.launchStatusCounts); stateLine != "" {
+		b.WriteString(fmt.Sprintf("  · %s\n", stateLine))
+		pendingLines++
+	}
+	if stall := m.launchStallLine(); stall != "" {
+		b.WriteString("  · " + launchErrStyle.Render(stall) + "\n")
+		pendingLines++
+	}
+	if m.launchHeartbeatErr != nil {
+		b.WriteString("  · " + launchErrStyle.Render(fmt.Sprintf("DB launch refresh failed: %v", m.launchHeartbeatErr)) + "\n")
+		pendingLines++
+	}
 	if m.campaignPhase != "" {
 		b.WriteString(fmt.Sprintf("  · %s\n", m.campaignPhase))
 		pendingLines++
@@ -2118,6 +2342,29 @@ func (m launchModel) View() string {
 			b.WriteString(fmt.Sprintf(" (%s)", m.campaignPhase))
 		}
 		b.WriteString("\n")
+		if elapsed := m.launchElapsedLine(); elapsed != "" {
+			b.WriteString("  · ")
+			b.WriteString(elapsed)
+			b.WriteString("\n")
+		}
+		b.WriteString("  · ")
+		b.WriteString(m.launchKnownInstancesLine())
+		b.WriteString("\n")
+		if stateLine := formatLaunchStatusCounts(m.launchStatusCounts); stateLine != "" {
+			b.WriteString("  · ")
+			b.WriteString(stateLine)
+			b.WriteString("\n")
+		}
+		if stall := m.launchStallLine(); stall != "" {
+			b.WriteString("  · ")
+			b.WriteString(launchErrStyle.Render(stall))
+			b.WriteString("\n")
+		}
+		if m.launchHeartbeatErr != nil {
+			b.WriteString("  · ")
+			b.WriteString(launchErrStyle.Render(fmt.Sprintf("DB launch refresh failed: %v", m.launchHeartbeatErr)))
+			b.WriteString("\n")
+		}
 		// Per-group progress lines
 		for _, idx := range sortedIntKeys(m.groupPhases, m.groupDone) {
 			spec := fmt.Sprintf("group %d", idx)
