@@ -166,6 +166,7 @@ func (p *RelayProcessor) handleSubmit(ctx context.Context, req *coordinatorrelay
 		GPU:         req.Submit.GPU,
 		GPUClass:    req.Submit.GPUClass,
 		GPUMemGB:    req.Submit.GPUMemGB,
+		GPUMemMaxGB: req.Submit.GPUMemMaxGB,
 		DepSpec:     req.Submit.DepSpec,
 		Inputs:      req.Submit.Inputs,
 		Outputs:     req.Submit.Outputs,

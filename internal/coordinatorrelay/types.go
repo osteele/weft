@@ -51,6 +51,7 @@ type SubmitJobPayload struct {
 	GPU         string   `json:"gpu,omitempty"`
 	GPUClass    string   `json:"gpu_class,omitempty"`
 	GPUMemGB    *int     `json:"gpu_mem_gb,omitempty"`
+	GPUMemMaxGB *int     `json:"gpu_mem_max_gb,omitempty"`
 	DepSpec     string   `json:"dep_spec,omitempty"`
 	Inputs      []string `json:"inputs,omitempty"`
 	Outputs     []string `json:"outputs,omitempty"`

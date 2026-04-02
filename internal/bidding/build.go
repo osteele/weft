@@ -3,6 +3,8 @@ package bidding
 import (
 	"database/sql"
 	"sort"
+
+	jobdb "github.com/osteele/weft/internal/db"
 )
 
 // InstanceOutcome holds the data needed to build the survival model from one instance.
@@ -23,11 +25,13 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
-		  AND launched_at IS NOT NULL
+		  AND termination_reason != ?
+		  AND provider_instance_id IS NOT NULL
+		  AND provider_instance_id != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
 		ORDER BY id
-	`)
+	`, jobdb.TerminationReasonCancelled)
 	if err != nil {
 		return nil, err
 	}

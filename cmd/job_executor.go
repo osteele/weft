@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/session"
@@ -99,6 +100,7 @@ type queueJobOptions struct {
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
 	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
 	GPUMemGB     *int   // GPU memory reservation in GB per device
+	GPUMemMaxGB  *int   // GPU memory ceiling in GB; soft cap for offer selection
 	Dependencies []queueDependency
 	AutoStart    bool
 	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
@@ -157,7 +159,11 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if gpu == "" {
 		gpu = extractGPUFromEnvVars(opts.EnvVars)
 	}
-	gpuMemGB, _ := resolveEffectiveGPUMem(opts.GPUMemGB, gpu, opts.GPUClass, opts.Host, opts.Project, opts.Command)
+	cfg, _ := config.Load()
+	gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, opts.GPUMemGB, gpu, opts.GPUClass, opts.Host, opts.Project, opts.Command, 0)
+	if opts.GPUMemMaxGB != nil {
+		gpuMemMaxGB = opts.GPUMemMaxGB
+	}
 
 	params := ops.QueueJobParams{
 		Host:        opts.Host,
@@ -170,6 +176,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		GPU:         gpu,
 		GPUClass:    opts.GPUClass,
 		GPUMemGB:    gpuMemGB,
+		GPUMemMaxGB: gpuMemMaxGB,
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 		Inputs:      opts.Inputs,
 		Outputs:     opts.Outputs,

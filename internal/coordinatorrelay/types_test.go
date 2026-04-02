@@ -7,6 +7,7 @@ import (
 
 func TestRequestAckJSONRoundTrip(t *testing.T) {
 	gpuMem := 24
+	gpuMemMax := 48
 	payload := Request{
 		RequestID: "req-123",
 		CreatedAt: "2026-03-15T12:00:00Z",
@@ -23,6 +24,7 @@ func TestRequestAckJSONRoundTrip(t *testing.T) {
 			Command:     "python train.py",
 			Description: "train",
 			GPUMemGB:    &gpuMem,
+			GPUMemMaxGB: &gpuMemMax,
 			Inputs:      []string{"file:/tmp/config.json"},
 		},
 		Source: &SourceBundleRef{
@@ -52,6 +54,9 @@ func TestRequestAckJSONRoundTrip(t *testing.T) {
 	}
 	if decoded.Submit == nil || decoded.Submit.Command != payload.Submit.Command {
 		t.Fatalf("decoded submit mismatch: %+v", decoded.Submit)
+	}
+	if decoded.Submit.GPUMemMaxGB == nil || *decoded.Submit.GPUMemMaxGB != gpuMemMax {
+		t.Fatalf("decoded submit GPU ceiling mismatch: %+v", decoded.Submit)
 	}
 
 	ack := Ack{

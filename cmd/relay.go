@@ -54,6 +54,7 @@ func relaySubmitJob(database *sql.DB, cfg *config.Config, client *coordinatorrel
 			GPU:         params.GPU,
 			GPUClass:    params.GPUClass,
 			GPUMemGB:    params.GPUMemGB,
+			GPUMemMaxGB: params.GPUMemMaxGB,
 			DepSpec:     params.DepSpec,
 			Inputs:      params.Inputs,
 			Outputs:     params.Outputs,

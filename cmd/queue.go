@@ -386,7 +386,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	if queueDraft {
 		gpu := extractGPUFromEnvVars(queueEnvVars)
-		gpuMemGB, _ := resolveEffectiveGPUMem(nil, gpu, "", host, projectName, command)
+		gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, nil, gpu, "", host, projectName, command, 0)
 		depSpec := encodeQueueDependencies(deps)
 		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, gpu, depSpec)
 		if err != nil {
@@ -413,6 +413,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			if err := db.SetJobGPUMemGB(database, jobID, gpuMemGB); err != nil {
 				db.DeleteJob(database, jobID)
 				return fmt.Errorf("record draft GPU memory: %w", err)
+			}
+		}
+		if gpuMemMaxGB != nil {
+			if err := db.SetJobGPUMemMaxGB(database, jobID, gpuMemMaxGB); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft GPU memory ceiling: %w", err)
 			}
 		}
 		if projectName != "" {

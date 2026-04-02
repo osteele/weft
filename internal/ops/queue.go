@@ -71,6 +71,7 @@ type QueueJobParams struct {
 	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
 	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
 	GPUMemGB     *int   // GPU memory reservation in GB per device
+	GPUMemMaxGB  *int   // GPU memory ceiling in GB; soft cap for offer selection
 	DepSpec      string
 	CPUAllotment *int
 	OutputDirs   []string // convention-based output directories from .weft.toml
@@ -166,6 +167,14 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 				db.DeleteJob(database, jobID)
 			}
 			return 0, fmt.Errorf("record GPU memory: %w", err)
+		}
+	}
+	if params.GPUMemMaxGB != nil {
+		if err := db.SetJobGPUMemMaxGB(database, jobID, params.GPUMemMaxGB); err != nil {
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
+			return 0, fmt.Errorf("record GPU memory ceiling: %w", err)
 		}
 	}
 	if params.GPUClass != "" {

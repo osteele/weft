@@ -169,13 +169,12 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		incrementalInputs := subtractInputs(job.Inputs, cap.ProvisionedInputs)
 		incrementalDiskGB := estimateInputsDisk(incrementalInputs)
 
-		// Add UV sync disk if r2 client is available
-		if r2Client != nil {
-			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			if localDir != "" {
-				uvBytes := estimateGroupUVBytes([]string{localDir}, r2Client)
-				incrementalDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
-			}
+		// Account for cold uv sync disk from the local cache when available,
+		// and fall back to R2 when a client is provided.
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if localDir != "" {
+			uvBytes := estimateGroupUVBytes([]string{localDir}, r2Client)
+			incrementalDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
 		}
 
 		if incrementalDiskGB > 0 && incrementalDiskGB > cap.DiskFreeGB {
