@@ -53,7 +53,8 @@ Remote Hosts (titan, atlas)
   tears down on completion. Failed jobs enter a grace period for resubmission
 - **Auto-relaunch on instance failure**: When a cloud instance fails or hits an
   infrastructure error, `weft campaign watch` automatically relaunches orphaned
-  jobs on a new instance (up to 3 attempts per job)
+  jobs on a new instance (up to 3 attempts per job), bounded by configurable
+  retry time/cost limits
 - **Stall detection**: Adaptive timeouts detect stuck instances (bootstrap stall,
   setup phase stall) using survival analysis on historical durations — thresholds
   are learned per command and workspace, with automatic fallback
@@ -719,6 +720,20 @@ bucket = "my-results-bucket"
 account_id = "..."
 access_key_id = "..."
 secret_access_key = "..."
+```
+
+### Campaign Retry Limits
+
+Set hard retry guardrails for cloud relaunches in watch mode (auto and manual
+`r` retries). For each retry tier, weft stops when either time or cost is
+reached, whichever comes first.
+
+```toml
+[campaign]
+retry_first_time_limit = "45m" # First retry tier
+retry_first_cost_limit = 1.0    # USD
+retry_next_time_limit = "45m"   # Second+ retry tiers
+retry_next_cost_limit = 0.25    # USD
 ```
 
 ### Source Excludes

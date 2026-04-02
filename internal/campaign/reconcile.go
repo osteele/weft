@@ -284,8 +284,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				if errors.Is(providerErr, cloud.ErrInstanceNotFound) {
 					providerErr = nil
 				} else {
-					slog.Warn("ShowInstance failed, skipping", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", providerErr)
-					return false, false
+					slog.Warn("ShowInstance failed; continuing with provider_err fallback", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", providerErr)
 				}
 			}
 		}

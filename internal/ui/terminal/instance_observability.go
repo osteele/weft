@@ -64,7 +64,9 @@ func formatBootstrapWaiting(update campaign.InstanceUpdate, now time.Time) strin
 	const base = "waiting for bootstrap activity"
 	ci := update.Launch
 	var start time.Time
-	if ci.LaunchedAt != nil && *ci.LaunchedAt > 0 {
+	if origin := ci.BootstrapOrigin(); origin != nil && *origin > 0 {
+		start = time.Unix(*origin, 0)
+	} else if ci.LaunchedAt != nil && *ci.LaunchedAt > 0 {
 		start = time.Unix(*ci.LaunchedAt, 0)
 	} else if ci.CreatedAt > 0 {
 		start = time.Unix(ci.CreatedAt, 0)
@@ -80,22 +82,26 @@ func formatBootstrapWaiting(update campaign.InstanceUpdate, now time.Time) strin
 	if elapsed < time.Second {
 		return base
 	}
-
-	remaining, ok := update.BootstrapDurations.ConditionalMedian(elapsed)
-	if !ok {
-		return fmt.Sprintf("%s (%s elapsed)", base, elapsed)
-	}
-
-	// Cap estimate at termination deadline
 	termAfter := update.BootstrapTerminateAfter
 	if termAfter == 0 {
 		termAfter = campaign.BootstrapTerminateTimeout
 	}
-	if deadlineRemaining := termAfter - elapsed; deadlineRemaining > 0 && remaining > deadlineRemaining {
+	deadlineRemaining := termAfter - elapsed
+	deadlineText := fmt.Sprintf("terminate in %s", deadlineRemaining.Truncate(time.Second))
+	if deadlineRemaining <= 0 {
+		deadlineText = fmt.Sprintf("termination overdue by %s", (-deadlineRemaining).Truncate(time.Second))
+	}
+
+	remaining, ok := update.BootstrapDurations.ConditionalMedian(elapsed)
+	if !ok {
+		return fmt.Sprintf("%s (%s elapsed, %s)", base, elapsed, deadlineText)
+	}
+	// Cap estimate at termination deadline.
+	if deadlineRemaining > 0 && remaining > deadlineRemaining {
 		remaining = deadlineRemaining
 	}
 
-	return fmt.Sprintf("%s (%s elapsed, est ~%s remaining)", base, elapsed, remaining.Truncate(time.Second))
+	return fmt.Sprintf("%s (%s elapsed, est ~%s remaining, %s)", base, elapsed, remaining.Truncate(time.Second), deadlineText)
 }
 
 func observedRunningJob(update campaign.InstanceUpdate) *db.Job {

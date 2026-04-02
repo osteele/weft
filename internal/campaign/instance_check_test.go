@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -565,6 +566,46 @@ func TestCheckInstance_LoadingStatusUnderTimeout(t *testing.T) {
 	})
 	if action.Kind != ActionNone {
 		t.Fatalf("action.Kind = %d, want ActionNone (%d) — instance still within timeout", action.Kind, ActionNone)
+	}
+}
+
+func TestCheckInstance_LoadingStatusUsesCreatedAtFallback(t *testing.T) {
+	createdAt := time.Now().Add(-6 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			CreatedAt:          createdAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusLoading},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+}
+
+func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
+	launchedAt := time.Now().Add(-7 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderErr: fmt.Errorf("provider API timeout"),
+		JobState:    JobState{},
+		Now:         time.Now(),
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs to be true")
 	}
 }
 

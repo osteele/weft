@@ -196,17 +196,39 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 4. Empty provider status timeout
-	if p.ProviderInst != nil && p.ProviderInst.Status == "" && ci.LaunchedAt != nil {
-		age := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
-		if age > maxEmptyStatusTime {
-			return InstanceAction{
-				Kind:              ActionEmptyStatusTimeout,
-				TerminalStatus:    db.LaunchStatusFailed,
-				TerminationReason: db.TerminationReasonInfraFailure,
-				StallMessage:      "provider instance has empty status — terminating",
-				DestroyProvider:   true,
-				ResetJobs:         true,
-				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+	if p.ProviderInst != nil && p.ProviderInst.Status == "" {
+		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
+			age := p.Now.Sub(*lifecycleStart)
+			if age > maxEmptyStatusTime {
+				return InstanceAction{
+					Kind:              ActionEmptyStatusTimeout,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+					StallMessage:      "provider instance has empty status — terminating",
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
+			}
+		}
+	}
+
+	// 4a. Provider status unavailable timeout: if polling repeatedly fails and
+	// no job/phase progress is visible, fail closed instead of wedging forever.
+	if p.ProviderInst == nil && p.ProviderErr != nil && (ci.Status == db.LaunchStatusLaunching || ci.Status == db.LaunchStatusRunning) &&
+		!p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
+		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
+			age := p.Now.Sub(*lifecycleStart)
+			if age > maxPreRunningStatusTime {
+				return InstanceAction{
+					Kind:              ActionEmptyStatusTimeout,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+					StallMessage:      fmt.Sprintf("provider status unavailable for %s — terminating", age.Truncate(time.Second)),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
 			}
 		}
 	}
@@ -215,17 +237,19 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	// Covers "created", "loading", and any other non-running, non-terminal status.
 	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
 	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
-		!isProviderTerminal(p.ProviderInst) && ci.LaunchedAt != nil {
-		age := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
-		if age > maxPreRunningStatusTime {
-			return InstanceAction{
-				Kind:              ActionEmptyStatusTimeout,
-				TerminalStatus:    db.LaunchStatusFailed,
-				TerminationReason: db.TerminationReasonInfraFailure,
-				StallMessage:      fmt.Sprintf("provider instance stuck in %q status — terminating", p.ProviderInst.Status),
-				DestroyProvider:   true,
-				ResetJobs:         true,
-				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+		!isProviderTerminal(p.ProviderInst) {
+		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
+			age := p.Now.Sub(*lifecycleStart)
+			if age > maxPreRunningStatusTime {
+				return InstanceAction{
+					Kind:              ActionEmptyStatusTimeout,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+					StallMessage:      fmt.Sprintf("provider instance stuck in %q status — terminating", p.ProviderInst.Status),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
 			}
 		}
 	}

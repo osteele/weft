@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	toml "github.com/pelletier/go-toml"
@@ -128,6 +130,16 @@ type CampaignConfig struct {
 	// GPUWarmup enables a lightweight CUDA warmup before the first GPU benchmark
 	// job on a cloud instance. Default: false (disabled).
 	GPUWarmup bool `yaml:"gpu_warmup" toml:"gpu_warmup"`
+
+	// RetryFirstTimeLimit is the hard wall-clock cap for the first cloud retry
+	// attempt (e.g. "45m"). Empty uses the default.
+	RetryFirstTimeLimit string `yaml:"retry_first_time_limit" toml:"retry_first_time_limit"`
+	// RetryFirstCostLimit is the hard spend cap (USD) for the first cloud retry attempt.
+	RetryFirstCostLimit float64 `yaml:"retry_first_cost_limit" toml:"retry_first_cost_limit"`
+	// RetryNextTimeLimit is the hard wall-clock cap for second+ cloud retry attempts.
+	RetryNextTimeLimit string `yaml:"retry_next_time_limit" toml:"retry_next_time_limit"`
+	// RetryNextCostLimit is the hard spend cap (USD) for second+ cloud retry attempts.
+	RetryNextCostLimit float64 `yaml:"retry_next_cost_limit" toml:"retry_next_cost_limit"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
@@ -440,6 +452,71 @@ func (c *Config) DefaultGracePeriod() string {
 		return c.Campaign.GracePeriod
 	}
 	return "5m"
+}
+
+const (
+	defaultRetryFirstTimeLimit = 45 * time.Minute
+	defaultRetryNextTimeLimit  = 45 * time.Minute
+	defaultRetryFirstCostUSD   = 1.00
+	defaultRetryNextCostUSD    = 0.25
+)
+
+func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback
+	}
+	if d < 0 {
+		return fallback
+	}
+	return d
+}
+
+func costUSDToCents(usd float64, fallback float64) int {
+	value := usd
+	if value == 0 {
+		value = fallback
+	}
+	if value < 0 {
+		value = fallback
+	}
+	return int(math.Round(value * 100))
+}
+
+// RetryFirstTimeLimit returns the configured first-retry time limit, defaulting to 45m.
+func (c *Config) RetryFirstTimeLimit() time.Duration {
+	if c == nil {
+		return defaultRetryFirstTimeLimit
+	}
+	return parseDurationOrDefault(c.Campaign.RetryFirstTimeLimit, defaultRetryFirstTimeLimit)
+}
+
+// RetryNextTimeLimit returns the configured subsequent-retry time limit, defaulting to 45m.
+func (c *Config) RetryNextTimeLimit() time.Duration {
+	if c == nil {
+		return defaultRetryNextTimeLimit
+	}
+	return parseDurationOrDefault(c.Campaign.RetryNextTimeLimit, defaultRetryNextTimeLimit)
+}
+
+// RetryFirstCostLimitCents returns the configured first-retry cost limit in cents, defaulting to $1.00.
+func (c *Config) RetryFirstCostLimitCents() int {
+	if c == nil {
+		return costUSDToCents(defaultRetryFirstCostUSD, defaultRetryFirstCostUSD)
+	}
+	return costUSDToCents(c.Campaign.RetryFirstCostLimit, defaultRetryFirstCostUSD)
+}
+
+// RetryNextCostLimitCents returns the configured subsequent-retry cost limit in cents, defaulting to $0.25.
+func (c *Config) RetryNextCostLimitCents() int {
+	if c == nil {
+		return costUSDToCents(defaultRetryNextCostUSD, defaultRetryNextCostUSD)
+	}
+	return costUSDToCents(c.Campaign.RetryNextCostLimit, defaultRetryNextCostUSD)
 }
 
 // SourceExcludeDirs returns the effective global source exclude patterns.

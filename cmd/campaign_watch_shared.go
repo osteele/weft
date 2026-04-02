@@ -43,6 +43,12 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 		Database:      database,
 		ResetJobs:     resetJobs,
 		SetupFactory:  campaign.OfferSetupOverheadFactory(database, overheadModel),
+		RetryBudget: &campaign.RetryBudget{
+			FirstTimeLimit: cfg.RetryFirstTimeLimit(),
+			FirstCostCents: cfg.RetryFirstCostLimitCents(),
+			NextTimeLimit:  cfg.RetryNextTimeLimit(),
+			NextCostCents:  cfg.RetryNextCostLimitCents(),
+		},
 	}
 
 	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)

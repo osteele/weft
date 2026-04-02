@@ -46,6 +46,7 @@ type watchInstanceSyncResultMsg struct{}
 type retryResultMsg struct {
 	instanceIDs []int64
 	skipped     int
+	budgetSkip  int
 	err         error
 }
 

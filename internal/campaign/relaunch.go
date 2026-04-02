@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
+	"time"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
@@ -29,12 +31,24 @@ type RelaunchConfig struct {
 	Database      *sql.DB
 	ResetJobs     map[int64]int64      // jobID → failed instanceID; when non-nil, only relaunch these jobs
 	SetupFactory  SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
+	RetryBudget   *RetryBudget         // optional hard stop limits for retry instances
+}
+
+// RetryBudget defines hard retry-stop limits by retry tier.
+// "First" applies to the first retry attempt for a job; "Next" applies to
+// second and subsequent retries.
+type RetryBudget struct {
+	FirstTimeLimit time.Duration
+	FirstCostCents int
+	NextTimeLimit  time.Duration
+	NextCostCents  int
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
 type RelaunchResult struct {
 	InstanceIDs []int64 // newly launched instance DB IDs
-	Skipped     int     // jobs exceeding max attempts
+	Skipped     int     // jobs skipped (max attempts + budget limits + no offers)
+	BudgetSkip  int     // jobs skipped due to retry budget limits
 	Errors      []error
 }
 
@@ -73,10 +87,11 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		if j.HasTag(db.TagInventory) {
 			continue
 		}
-		count, err := countAttemptsForRelaunch(cfg.Database, j.ID)
+		facts, err := attemptFactsForRelaunch(cfg.Database, j.ID)
 		if err != nil {
 			continue
 		}
+		count := facts.Count
 		if count == 0 && !j.HasTag(db.TagRental) {
 			continue
 		}
@@ -91,6 +106,29 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			})
 			result.Skipped++
 			continue
+		}
+		if cfg.RetryBudget != nil && count > 0 {
+			elapsed, spendCents := launchElapsedAndSpendCents(facts.LastLaunch, time.Now())
+			if exceeded, detail := exceedsRetryBudget(*cfg.RetryBudget, count, elapsed, spendCents); exceeded {
+				slog.Info("job exceeds retry budget, skipping",
+					"component", "relaunch",
+					"job_id", j.ID,
+					"attempts", count,
+					"elapsed", elapsed.Truncate(time.Second),
+					"spend_cents", spendCents,
+					"detail", detail)
+				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+					EventKind:     db.EventRelaunchSkippedMaxAttempts,
+					JobID:         j.ID,
+					GPUSpec:       j.GPUClass,
+					AttemptNumber: count,
+					MaxAttempts:   maxAttempts,
+					Detail:        detail,
+				})
+				result.Skipped++
+				result.BudgetSkip++
+				continue
+			}
 		}
 		eligible = append(eligible, j)
 	}
@@ -322,15 +360,80 @@ func mostRecentDiskFullGB(database *sql.DB, group InstanceGroup) int {
 // countAttemptsForRelaunch returns the number of launch attempts for a job,
 // scoped to the campaign of the job's most recent attempt. This prevents
 // attempts from earlier campaigns from exhausting the retry budget.
-func countAttemptsForRelaunch(database *sql.DB, jobID int64) (int, error) {
+type relaunchAttemptFacts struct {
+	Count      int
+	LastLaunch *db.Launch
+}
+
+func attemptFactsForRelaunch(database *sql.DB, jobID int64) (relaunchAttemptFacts, error) {
 	attempts, err := db.GetLaunchAttempts(database, jobID)
 	if err != nil || len(attempts) == 0 {
-		return 0, err
+		return relaunchAttemptFacts{}, err
 	}
 	lastAttempt := attempts[len(attempts)-1]
 	ci, err := db.GetLaunch(database, lastAttempt.LaunchID)
-	if err != nil || ci == nil || ci.CampaignID == nil {
-		return db.CountLaunchAttempts(database, jobID)
+	if err != nil || ci == nil {
+		count, countErr := db.CountLaunchAttempts(database, jobID)
+		return relaunchAttemptFacts{Count: count, LastLaunch: nil}, countErr
 	}
-	return db.CountLaunchAttemptsInCampaign(database, jobID, *ci.CampaignID)
+	if ci.CampaignID == nil {
+		count, countErr := db.CountLaunchAttempts(database, jobID)
+		return relaunchAttemptFacts{Count: count, LastLaunch: ci}, countErr
+	}
+	count, countErr := db.CountLaunchAttemptsInCampaign(database, jobID, *ci.CampaignID)
+	return relaunchAttemptFacts{Count: count, LastLaunch: ci}, countErr
+}
+
+func launchElapsedAndSpendCents(ci *db.Launch, now time.Time) (time.Duration, int) {
+	if ci == nil {
+		return 0, 0
+	}
+	startUnix := ci.CreatedAt
+	if ci.LaunchedAt != nil && *ci.LaunchedAt > 0 {
+		startUnix = *ci.LaunchedAt
+	}
+	if startUnix <= 0 {
+		return 0, 0
+	}
+	start := time.Unix(startUnix, 0)
+	end := now
+	if ci.EndedAt != nil && *ci.EndedAt > 0 {
+		end = time.Unix(*ci.EndedAt, 0)
+	}
+	if end.Before(start) {
+		end = start
+	}
+	elapsed := end.Sub(start)
+
+	if ci.ActualSpendCents > 0 {
+		return elapsed, ci.ActualSpendCents
+	}
+	if ci.CostPerHourCents <= 0 || elapsed <= 0 {
+		return elapsed, 0
+	}
+	cents := int(math.Round(elapsed.Hours() * float64(ci.CostPerHourCents)))
+	if cents < 0 {
+		cents = 0
+	}
+	return elapsed, cents
+}
+
+func exceedsRetryBudget(budget RetryBudget, attemptCount int, elapsed time.Duration, spendCents int) (bool, string) {
+	limitTime := budget.NextTimeLimit
+	limitCost := budget.NextCostCents
+	tier := "subsequent"
+	if attemptCount == 1 {
+		limitTime = budget.FirstTimeLimit
+		limitCost = budget.FirstCostCents
+		tier = "first"
+	}
+	if limitTime > 0 && elapsed >= limitTime {
+		return true, fmt.Sprintf("%s retry budget exceeded: elapsed %s >= limit %s",
+			tier, elapsed.Truncate(time.Second), limitTime.Truncate(time.Second))
+	}
+	if limitCost > 0 && spendCents >= limitCost {
+		return true, fmt.Sprintf("%s retry budget exceeded: spend $%.2f >= limit $%.2f",
+			tier, float64(spendCents)/100.0, float64(limitCost)/100.0)
+	}
+	return false, ""
 }

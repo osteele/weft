@@ -97,6 +97,9 @@ func TestFormatBootstrapWaitingShowsElapsedTime(t *testing.T) {
 	if !strings.Contains(activity.Bootstrap, "elapsed") {
 		t.Fatalf("bootstrap = %q, want elapsed time", activity.Bootstrap)
 	}
+	if !strings.Contains(activity.Bootstrap, "terminate in") {
+		t.Fatalf("bootstrap = %q, want termination countdown", activity.Bootstrap)
+	}
 }
 
 func TestFormatBootstrapWaitingShowsConditionalEstimate(t *testing.T) {
@@ -122,6 +125,9 @@ func TestFormatBootstrapWaitingShowsConditionalEstimate(t *testing.T) {
 	if !strings.Contains(activity.Bootstrap, "remaining") {
 		t.Fatalf("bootstrap = %q, want remaining estimate", activity.Bootstrap)
 	}
+	if !strings.Contains(activity.Bootstrap, "terminate in") {
+		t.Fatalf("bootstrap = %q, want termination countdown", activity.Bootstrap)
+	}
 }
 
 func TestFormatBootstrapWaitingNoEstimateWhenPastAllDurations(t *testing.T) {
@@ -145,6 +151,32 @@ func TestFormatBootstrapWaitingNoEstimateWhenPastAllDurations(t *testing.T) {
 	}
 	if strings.Contains(activity.Bootstrap, "remaining") {
 		t.Fatalf("bootstrap = %q, should not show remaining when past all durations", activity.Bootstrap)
+	}
+	if !strings.Contains(activity.Bootstrap, "terminate in") {
+		t.Fatalf("bootstrap = %q, want termination countdown", activity.Bootstrap)
+	}
+}
+
+func TestFormatBootstrapWaitingUsesBootstrapOrigin(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	providerRunningAt := time.Now().Add(-2 * time.Minute).Unix()
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                 211,
+			Status:             db.LaunchStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "12345",
+			GPUSpec:            "A100",
+			LaunchedAt:         &launchedAt,
+			ProviderRunningAt:  &providerRunningAt,
+		},
+	}, time.Now())
+
+	if strings.Contains(activity.Bootstrap, "30m") {
+		t.Fatalf("bootstrap = %q, should use provider running origin instead of launched_at", activity.Bootstrap)
+	}
+	if !strings.Contains(activity.Bootstrap, "2m") {
+		t.Fatalf("bootstrap = %q, want elapsed near 2m from bootstrap origin", activity.Bootstrap)
 	}
 }
 

@@ -410,6 +410,17 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 		return m, m.checkAllDone()
 	}
 	if len(msg.instanceIDs) == 0 {
+		if msg.budgetSkip > 0 {
+			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+				EventKind:  db.EventRetryMaxAttempts,
+				CampaignID: m.campaignID,
+				JobCount:   msg.budgetSkip,
+				Detail:     "retry budget exceeded",
+			})
+			m.retryExtraAttempts = 0
+			m.retryResult = fmt.Sprintf("Retry: %d job(s) exceeded retry budget, giving up", msg.budgetSkip)
+			return m, m.checkAllDone()
+		}
 		if msg.skipped > 0 {
 			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 				EventKind:  db.EventRetryMaxAttempts,

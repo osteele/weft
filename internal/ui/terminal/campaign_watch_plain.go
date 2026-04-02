@@ -169,6 +169,10 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 									fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
 									return
 								}
+								if outcome != nil && outcome.BudgetSkip > 0 && len(outcome.InstanceIDs) == 0 {
+									fmt.Printf("instance %d: %d job(s) exceeded retry budget, giving up\n", instanceID, outcome.BudgetSkip)
+									return
+								}
 								if outcome != nil && outcome.Skipped > 0 && len(outcome.InstanceIDs) == 0 {
 									fmt.Printf("instance %d: %d job(s) exceeded max cloud attempts, giving up\n", instanceID, outcome.Skipped)
 									return

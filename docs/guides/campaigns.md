@@ -312,12 +312,22 @@ In `~/.config/weft/config.toml`:
 default_image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
 max_runtime = "4h"
 
+[campaign]
+retry_first_time_limit = "45m" # first retry tier
+retry_first_cost_limit = 1.0    # USD
+retry_next_time_limit = "45m"   # second+ retry tiers
+retry_next_cost_limit = 0.25    # USD
+
 [vastai.r2]
 bucket = "my-results-bucket"
 account_id = "..."
 access_key_id = "..."
 secret_access_key = "..."
 ```
+
+Retry limits apply to both automatic relaunch and manual `r` retries in watch
+mode. Each retry tier stops when either its time limit or cost limit is
+reached, whichever happens first.
 
 ### Source sync
 

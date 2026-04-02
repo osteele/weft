@@ -145,7 +145,7 @@ terminated the instance after a timeout.
 
 **Timeouts:**
 - Empty provider status: 1 minute (`maxEmptyStatusTime`)
-- Stuck in "created" status: 5 minutes (`maxCreatedStatusTime`)
+- Stuck in pre-running provider status (`created`, `loading`, etc.): 5 minutes (`maxPreRunningStatusTime`)
 - Bootstrap stalled (running but no progress): adaptive, default 15 minutes
 - Setup phase stalled (`uv sync`, etc.): adaptive, default 15m warn / 25m terminate
 
@@ -155,11 +155,15 @@ the `r` key in the watch TUI to force a manual retry with extra attempts.
 
 ### Jobs exceeded max retry attempts
 
-After 3 cloud attempts per job (default), auto-retry stops. The watch TUI
-shows "N job(s) exceeded max cloud attempts, giving up".
+After 3 cloud attempts per job (default), auto-retry stops. Retries can also
+stop earlier when retry budget limits are reached (time/cost, whichever comes
+first). The watch UI shows either "exceeded max cloud attempts" or
+"exceeded retry budget".
 
-**Action:** Press `r` in the watch TUI to add extra retry attempts, or
-re-launch with `weft instance launch`.
+**Action:** Press `r` in the watch TUI to add extra retry attempts (still
+subject to retry budget), re-launch with `weft instance launch`, or adjust
+`[campaign] retry_*_time_limit` / `retry_*_cost_limit` in
+`~/.config/weft/config.toml`.
 
 ### Disk full during execution
 

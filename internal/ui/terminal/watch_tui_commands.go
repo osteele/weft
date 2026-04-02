@@ -35,7 +35,11 @@ func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 		if result == nil {
 			return retryResultMsg{}
 		}
-		return retryResultMsg{instanceIDs: result.InstanceIDs, skipped: result.Skipped}
+		return retryResultMsg{
+			instanceIDs: result.InstanceIDs,
+			skipped:     result.Skipped,
+			budgetSkip:  result.BudgetSkip,
+		}
 	}
 }
 
