@@ -123,6 +123,10 @@ sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
 
+`[tool.weft]` metadata is applied when submitting a new job (`weft run`). During
+`weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.
+Use `weft retry --gpu/--gpu-class/--gpu-mem` when you want explicit overrides.
+
 ### Avoiding GPU over-provisioning
 
 The `gpu-mem` value sets a **floor** — the minimum VRAM required. The default
@@ -178,8 +182,9 @@ weft run --input local:data/conllu/ -- uv run python src/extract_representations
 rsync as extra paths — they bypass default sync excludes (like `cache/`). Use
 subdirectories rather than syncing an entire large `data/` tree.
 
-On restart (`weft job restart`), script metadata is re-scanned so updated
-`local:` declarations take effect without manual `--input` flags.
+On restart (`weft job restart`), weft re-scans input/output metadata so updated
+`local:` declarations take effect without manual `--input` flags. GPU keys from
+`[tool.weft]` are also re-applied, and explicit retry flags still win.
 
 ### Checking data locality
 

@@ -3,9 +3,11 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/spf13/cobra"
 )
 
 func TestRestartCommandAliases(t *testing.T) {
@@ -53,7 +55,7 @@ func TestRestartCloudJob_RefreshesProjectMetadata(t *testing.T) {
 		t.Fatalf("mark failed: %v", err)
 	}
 
-	if err := restartJob(database, jobID); err != nil {
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
 		t.Fatalf("restartJob failed: %v", err)
 	}
 
@@ -98,7 +100,7 @@ func TestRestartJob_RemovesProcessedTag(t *testing.T) {
 		t.Fatalf("add processed tag: %v", err)
 	}
 
-	if err := restartJob(database, jobID); err != nil {
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
 		t.Fatalf("restartJob failed: %v", err)
 	}
 
@@ -109,4 +111,138 @@ func TestRestartJob_RemovesProcessedTag(t *testing.T) {
 	if job.HasTag(db.ProcessedTag) {
 		t.Fatalf("job still has processed tag after restart")
 	}
+}
+
+func TestRestartQueuedJob_NoError(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+}
+
+func TestParseRestartOverrides_ParsesGPUAndMem(t *testing.T) {
+	restartGPU = "nvidia>=24GB"
+	restartGPUClass = ""
+	restartGPUMem = 0
+
+	cmd := &cobra.Command{Use: "retry"}
+	addRestartFlags(cmd)
+	if err := cmd.Flags().Set("gpu", "nvidia>=24GB"); err != nil {
+		t.Fatalf("set gpu flag: %v", err)
+	}
+
+	overrides, err := parseRestartOverrides(cmd)
+	if err != nil {
+		t.Fatalf("parseRestartOverrides: %v", err)
+	}
+	if overrides.GPUClass != "nvidia" {
+		t.Fatalf("GPUClass = %q, want nvidia", overrides.GPUClass)
+	}
+	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24", overrides.GPUMemGB)
+	}
+}
+
+func TestRestartQueuedJob_UpdatesGPUOverrides(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	overrides := restartOverrides{
+		GPUClass:  "nvidia",
+		GPUMemGB:  intPtrRestart(24),
+		HasAny:    true,
+		HasGPUMem: true,
+	}
+
+	if err := restartJob(database, jobID, overrides); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !strings.EqualFold(job.GPUClass, "nvidia") {
+		t.Fatalf("GPUClass = %q, want nvidia", job.GPUClass)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24", job.GPUMemGB)
+	}
+}
+
+func TestRestartQueuedJob_ReappliesScriptGPUMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# gpu-mem = 24
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	oldMem := 8
+	if err := db.SetJobGPUMemGB(database, jobID, &oldMem); err != nil {
+		t.Fatalf("set gpu mem: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24", job.GPUMemGB)
+	}
+}
+
+func TestRestartQueuedJob_OverrideBeatsScriptMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# gpu-mem = 24
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	overrides := restartOverrides{
+		GPUMemGB:  intPtrRestart(32),
+		HasAny:    true,
+		HasGPUMem: true,
+	}
+
+	if err := restartJob(database, jobID, overrides); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 32 {
+		t.Fatalf("GPUMemGB = %v, want 32", job.GPUMemGB)
+	}
+}
+
+func intPtrRestart(v int) *int {
+	return &v
 }

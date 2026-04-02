@@ -309,6 +309,7 @@ func init() {
 	addStatusFlags(jobStatusCmd)
 	jobCmd.AddCommand(jobStatusCmd)
 	jobCmd.AddCommand(jobDescribeCmd)
+	addRestartFlags(jobRestartCmd)
 	jobCmd.AddCommand(jobRestartCmd)
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobWatchCmd)

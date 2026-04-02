@@ -626,27 +626,37 @@ weft telemetry 42 --json
 
 ### weft job restart
 
-Restart a job using its saved metadata.
+Requeue one or more jobs using the same job ID.
 
 ```bash
-weft job restart <job-id>
+weft job restart <job-id>...
 ```
 
-This kills the existing session (if any) and starts a new one with the same command and working directory, creating a new job ID.
+For terminal jobs (`killed`, `dead`, `failed`, `canceled`, `completed`), this
+archives the prior run attempt and sets the job back to `queued`.
 
-**Note:** For most use cases, `run --from <id>` is more flexible as it allows overriding settings.
+For jobs that are already `queued`, `restart`/`retry` is a no-op unless you pass
+override flags such as `--gpu`, `--gpu-class`, or `--gpu-mem`.
 
 ### weft retry
 
-Clone a previous job and queue it again with the same host, directory, command, description, and environment variables. Dependencies are not copied so the retried job starts as soon as it reaches the front of the queue.
+Alias for `weft job restart`.
 
 ```bash
-weft retry <job-id>
+weft retry <job-id>...
 weft job retry <job-id>   # Alias
 ```
 
-The command prints the new job ID and whether it was queued immediately or deferred until the host is online.
-Queued jobs that previously depended on the retried job automatically update their dependency to the new job ID.
+GPU override flags are supported:
+
+```bash
+weft retry 548 549 --gpu nvidia>=24GB
+weft retry 548 549 --gpu-class nvidia --gpu-mem 24
+```
+
+`retry` re-syncs project-derived inputs/outputs and re-reads `[tool.weft]`
+script metadata for GPU defaults. Explicit `retry` flags (`--gpu`,
+`--gpu-class`, `--gpu-mem`) take precedence over script metadata.
 
 ### weft job move
 
