@@ -39,7 +39,7 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 		return HostDataEntry{}, err
 	}
 	if _, stderr, err := hostCommandRunner(ctx, host, cmd); err != nil {
-		return HostDataEntry{}, fmt.Errorf("download %s on %s: %s: %w", asset, host, stderr, err)
+		return HostDataEntry{}, formatHFDownloadError(host, asset, stderr, err)
 	}
 
 	entries, err := ScanHFCacheDetailed(host)
@@ -53,6 +53,34 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 	}
 
 	return HostDataEntry{}, fmt.Errorf("asset %s downloaded on %s but not found in HF cache scan", asset, host)
+}
+
+func formatHFDownloadError(host string, asset DataAsset, stderr string, runErr error) error {
+	stderr = normalizeShellStderr(stderr)
+	repoType, _ := hfRepoType(asset.Kind)
+	lowerStderr := strings.ToLower(stderr)
+	if strings.Contains(lowerStderr, "repository not found") {
+		return fmt.Errorf(
+			"download %s on %s: Hugging Face %s repo %q not found; update the job input (expected hf:<model> or hf-dataset:<dataset>) or authenticate with HF_TOKEN for private repos: %w",
+			asset,
+			host,
+			repoType,
+			asset.ID,
+			runErr,
+		)
+	}
+	if stderr == "" {
+		return fmt.Errorf("download %s on %s failed: %w", asset, host, runErr)
+	}
+	return fmt.Errorf("download %s on %s failed: %s: %w", asset, host, stderr, runErr)
+}
+
+func normalizeShellStderr(stderr string) string {
+	parts := strings.Fields(stderr)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ")
 }
 
 func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {

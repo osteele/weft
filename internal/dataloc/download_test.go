@@ -2,6 +2,7 @@ package dataloc
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,59 @@ func TestRunHostCommand_LocalhostUsesLocalRunner(t *testing.T) {
 	}
 	if stdout != "ok" || stderr != "" {
 		t.Fatalf("unexpected outputs stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestDownloadAssetToHost_RepoNotFoundMessageIsActionable(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+
+	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
+		if strings.Contains(command, "df -Pk") {
+			return "123456789\n", "", nil
+		}
+		return "", "Error: Repository not found.\nCheck the `repo_id` and `repo_type` parameters.\n", errors.New("exit status 1")
+	}
+
+	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFModel, ID: "application/json"}, "main")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Hugging Face model repo \"application/json\" not found") {
+		t.Fatalf("unexpected error message: %q", msg)
+	}
+	if !strings.Contains(msg, "update the job input") {
+		t.Fatalf("expected remediation guidance in message: %q", msg)
+	}
+	if strings.Contains(msg, "repo_id") || strings.Contains(msg, "repo_type") {
+		t.Fatalf("message leaked low-level huggingface_hub args: %q", msg)
+	}
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("message contains newlines: %q", msg)
+	}
+}
+
+func TestDownloadAssetToHost_GenericStderrIsNormalized(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+
+	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
+		if strings.Contains(command, "df -Pk") {
+			return "123456789\n", "", nil
+		}
+		return "", "first line\nsecond line\n", errors.New("exit status 1")
+	}
+
+	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFModel, ID: "gpt2"}, "main")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "first line second line") {
+		t.Fatalf("stderr should be normalized to single line: %q", msg)
+	}
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("message contains newlines: %q", msg)
 	}
 }
