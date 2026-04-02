@@ -134,6 +134,13 @@ func filterLaunchJobsByProject(jobs []*db.Job) []*db.Job {
 	return deps.FilterLaunchJobsByProject(jobs)
 }
 
+func filterLaunchJobsForScope(jobs []*db.Job, projectFilter string) []*db.Job {
+	if projectFilter != "" {
+		return db.FilterJobsByProject(jobs, projectFilter)
+	}
+	return filterLaunchJobsByProject(jobs)
+}
+
 func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 	if deps.FilterRentalLaunchJobs == nil {
 		return jobs

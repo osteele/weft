@@ -264,7 +264,7 @@ func (m watchModel) buildInstanceCapacities() []campaign.InstanceCapacity {
 	var result []campaign.InstanceCapacity
 
 	switch m.mode {
-	case watchModeCampaign:
+	case watchModeCampaign, watchModeInstances:
 		for _, id := range m.instanceIDs {
 			u, ok := m.updates[id]
 			if !ok || u.Launch == nil {

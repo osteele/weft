@@ -68,7 +68,7 @@ func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 		return LaunchResult{Err: providerErr}, nil
 	}
 	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
+	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, "", reconciling, fromWatch, inlineWatchEnabled)
 
 	restore := logging.Suppress()
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())

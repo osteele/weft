@@ -134,6 +134,7 @@ type launchModel struct {
 	appConfig               *config.Config
 	launchOpts              campaign.LaunchOpts
 	gpuFilter               string // --gpu filter to reapply after reconciliation
+	projectFilter           string // project scope when launching from project watch
 	reconciler              *campaign.Reconciler
 	reconcileDropped        int
 
@@ -319,7 +320,7 @@ func (m *launchModel) adjustOffset() {
 	}
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, projectFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) launchModel {
 	items, selected, cursor := buildItemsFromGroups(groups)
 
 	s := spinner.New()
@@ -346,6 +347,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		phaseCh:                 make(chan launchPhaseMsg, 16),
 		instanceCh:              make(chan launchInstanceRegisteredMsg, len(groups)),
 		gpuFilter:               gpuFilter,
+		projectFilter:           projectFilter,
 		estimateCache:           make(map[string][]campaign.CostEstimate),
 		reconciler:              campaign.NewReconciler(),
 		spinner:                 s,
@@ -374,6 +376,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 	clients := m.clients
 	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
+	projectFilter := m.projectFilter
 	reconciler := m.reconciler
 	return func() tea.Msg {
 		r2Client, _ := buildR2Client(cfg)
@@ -385,7 +388,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 			return reconcileDoneMsg{}
 		}
 		jobs = filterRentalLaunchJobs(jobs)
-		jobs = filterLaunchJobsByProject(jobs)
+		jobs = filterLaunchJobsForScope(jobs, projectFilter)
 
 		groups := campaign.PrepareGroups(jobs, database, gpuFilter, r2Client)
 
@@ -800,7 +803,7 @@ func (m launchModel) quitOrSwitchToWatch(flash string) tea.Cmd {
 func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.inlineWatch != nil {
 		switch msg.(type) {
-		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg:
+		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg, switchToLaunchMsg:
 		default:
 			next, cmd, handled := m.updateInlineWatch(msg)
 			if handled {

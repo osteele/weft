@@ -43,6 +43,7 @@ type watchRouterModel struct {
 	homeMode      watchMode // which mode to return to after launch
 	projectFilter string
 	projectRecent time.Duration // recent window for project mode
+	projectSync   bool          // preserve project watch sync mode across launch round-trips
 	instanceIDs   []int64       // instance IDs for instance-based modes
 	r2Client      *r2.Client    // R2 client for instance-based modes
 	autoMode      bool          // initial auto-pilot state for new watch models
@@ -84,6 +85,7 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 		homeMode:      watchModeProject,
 		projectFilter: projectFilter,
 		projectRecent: recentWindow,
+		projectSync:   syncEnabled,
 		autoMode:      autoMode,
 	}
 }
@@ -158,7 +160,7 @@ func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
 		w.autoMode = m.autoMode
 		return w
 	case m.homeMode == watchModeProject:
-		w := newProjectWatchModel(m.database, m.config, m.projectRecent, true, m.projectFilter)
+		w := newProjectWatchModel(m.database, m.config, m.projectRecent, m.projectSync, m.projectFilter)
 		w.projectStatus = flash
 		w.autoMode = m.autoMode
 		return w
@@ -180,7 +182,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 			return launchPlanReadyMsg{err: fmt.Errorf("list unplaced jobs: %w", err)}
 		}
 		jobs = filterRentalLaunchJobs(jobs)
-		jobs = filterLaunchJobsByProject(jobs)
+		jobs = filterLaunchJobsForScope(jobs, m.projectFilter)
 		if len(jobs) == 0 {
 			return launchPlanReadyMsg{flash: "No jobs need rental GPUs."}
 		}
@@ -204,7 +206,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 
 		clients, providerErr := buildCloudClients(cfg)
 		predCfg := buildPredictorConfig(cfg)
-		model := newLaunchModel(database, clients, providerErr, cfg, groups, opts, &predCfg, "", true, true, true)
+		model := newLaunchModel(database, clients, providerErr, cfg, groups, opts, &predCfg, "", m.projectFilter, true, true, true)
 		return launchPlanReadyMsg{model: &model}
 	}
 }
