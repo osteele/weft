@@ -176,6 +176,54 @@ func TestTrainingExamplesViewSeparatesRequestedAndActualHardware(t *testing.T) {
 	}
 }
 
+func TestTrainingExamplesViewNormalizesVendorAndMemorySuffixes(t *testing.T) {
+	database := SetupTestDB(t)
+
+	if err := SaveCachedHostInfo(database, &CachedHostInfo{
+		Name:        "cool100",
+		CPUCount:    64,
+		CPUModel:    "AMD EPYC",
+		CPUFreq:     "3.2 GHz",
+		MemTotal:    "256G",
+		GPUsJSON:    `[{"Index":0,"Name":"NVIDIA A100 80GB PCIe","MemTotal":"81920MiB"}]`,
+		LastUpdated: 5678,
+	}); err != nil {
+		t.Fatalf("SaveCachedHostInfo: %v", err)
+	}
+
+	jobID, err := RecordQueued(database, "cool100", "/tmp/proj", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	meta := &JobMetadata{
+		Resource: &ResourceUsage{
+			GPUDevices: "0",
+		},
+	}
+	if err := SetJobMetadata(database, jobID, meta); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	if err := RecordCompletionByID(database, jobID, 0, job.StartTime+60); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+
+	var actualGPUClass string
+	if err := database.QueryRow(`SELECT actual_gpu_class FROM training_examples WHERE job_id = ?`, jobID).Scan(&actualGPUClass); err != nil {
+		t.Fatalf("QueryRow(training_examples): %v", err)
+	}
+	if actualGPUClass != "a100" {
+		t.Fatalf("actual_gpu_class = %q, want a100", actualGPUClass)
+	}
+}
+
 func int64Ptr(v int64) *int64 {
 	return &v
 }

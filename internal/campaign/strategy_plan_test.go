@@ -275,9 +275,9 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing
 			GPUMemGB:    8,
 			MaxGPUMemGB: 12,
 			Jobs: []*db.Job{
-				{ID: 548, Project: "head-type-ontology", Command: "python train.py --model gpt2 --batch-size 8"},
-				{ID: 549, Project: "head-type-ontology", Command: "python train.py --model gpt2 --batch-size 8"},
-				{ID: 553, Project: "head-type-ontology", Command: "python train.py --model gpt2 --batch-size 8"},
+				{ID: 548, Project: "head-type-ontology", Command: "uv run python scripts/head_count_regularization_sweep.py --device cuda --head-counts 24"},
+				{ID: 549, Project: "head-type-ontology", Command: "uv run python scripts/head_count_regularization_sweep.py --device cuda --head-counts 48"},
+				{ID: 553, Project: "head-type-ontology", Command: "uv run python scripts/parametric_type_recognition.py --device cuda"},
 			},
 		},
 		Offers: []cloud.Offer{
@@ -300,6 +300,109 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing
 	}
 	if offers[0].Offer.ProviderID != "rtx3090" {
 		t.Fatalf("expected predictor-backed ranking to avoid H200, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200ForPythiaScaling(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 2200.0
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+				MaxGPUMemMiB: &predictor.Prediction{
+					Mean:  9600.0,
+					Lower: 8192.0,
+					Upper: 11556.7,
+				},
+			}
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass:    "NVIDIA",
+			GPUMemGB:    20,
+			MaxGPUMemGB: 24,
+			Jobs: []*db.Job{
+				{ID: 550, Project: "head-type-ontology", Command: "uv run python scripts/pythia_scaling.py --device cuda"},
+			},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+			{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		bidding.StrategyFast.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "rtx4090" {
+		t.Fatalf("expected predictor-backed ranking to avoid H200 for pythia scaling, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200ForBenchmarkJob(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 800.0
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+			}
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "GPU",
+			Jobs: []*db.Job{
+				{ID: 552, Project: "llm-performance-models", Command: "rm -rf ~/.cache/llm-performance-models/ && uv sync && uv run llm-perf benchmark --ablation --cross-model && uv run llm-perf benchmark-inference"},
+			},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+			{ProviderID: "h200nvl", GPUName: "H200 NVL", GPUMemGB: 141, CostPerHour: 2.53, DLPerf: 40.0},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		bidding.StrategyFast.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "rtx4090" {
+		t.Fatalf("expected predictor-backed ranking to avoid H200 NVL for benchmark job, got %s", offers[0].Offer.ProviderID)
 	}
 }
 

@@ -11,17 +11,24 @@ func sqlNormalizeGPUClassExpr(expr string) string {
 	cleaned := fmt.Sprintf("lower(trim(coalesce(%s, '')))", expr)
 	for _, token := range []string{
 		"nvidia", "geforce", "tesla", "amd", "radeon", "instinct",
-		"pcie", "sxm5", "sxm4", "sxm3", "sxm2", "sxm", "nvl72", "nvl36", "nvl32", "nvl",
-		"120gb", "96gb", "94gb", "80gb", "64gb", "48gb", "40gb", "32gb", "24gb", "20gb", "16gb", "12gb", "10gb", "8gb", "6gb", "5gb", "4gb", "2gb",
+		" ", "-", "_", ".", "/", "(", ")", "[", "]",
 	} {
-		cleaned = fmt.Sprintf("replace(%s, '%s', '')", cleaned, token)
-	}
-	for _, token := range []string{" ", "-", "_", ".", "/", "(", ")", "[", "]"} {
 		cleaned = fmt.Sprintf("replace(%s, '%s', '')", cleaned, token)
 	}
 	return fmt.Sprintf(`
 		CASE
 			WHEN NULLIF(%[1]s, '') IS NULL THEN NULL
+			WHEN %[1]s LIKE '%%b200%%' THEN 'b200'
+			WHEN %[1]s LIKE '%%h200%%' THEN 'h200'
+			WHEN %[1]s LIKE '%%h100%%' THEN 'h100'
+			WHEN %[1]s LIKE '%%a100%%' THEN 'a100'
+			WHEN %[1]s LIKE '%%l40s%%' THEN 'l40s'
+			WHEN %[1]s LIKE '%%l40%%' THEN 'l40'
+			WHEN %[1]s LIKE '%%a40%%' THEN 'a40'
+			WHEN %[1]s LIKE '%%a10g%%' THEN 'a10g'
+			WHEN %[1]s LIKE '%%a10%%' THEN 'a10'
+			WHEN %[1]s LIKE '%%m2max%%' THEN 'm2max'
+			WHEN instr(%[1]s, 'rtx') > 0 THEN substr(%[1]s, instr(%[1]s, 'rtx'))
 			WHEN %[1]s GLOB '[0-9][0-9][0-9][0-9]' OR %[1]s GLOB '[0-9][0-9][0-9][0-9]ti' THEN 'rtx' || %[1]s
 			ELSE %[1]s
 		END`, cleaned)
