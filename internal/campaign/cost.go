@@ -168,10 +168,12 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
 
 		var runEst estimate.Estimate
+		predictedJobs := 0
 		for _, job := range go_.Group.Jobs {
 			if pred, ok := allPredictions[job.ID]; ok {
 				est.JobDurations[job.ID] = pred.Mean
 				runEst = runEst.Add(pred)
+				predictedJobs++
 			} else {
 				runEst = runEst.Add(estimate.DefaultJobDuration)
 			}
@@ -181,10 +183,9 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 			}
 		}
 
-		// Scale run durations by GPU performance when a reference is available.
-		// The predictor returns similar estimates regardless of GPU class, so
-		// we scale by DLPerf ratio to differentiate cheap vs fast GPUs.
-		if referenceDLPerf > 0 && go_.Offer.DLPerf > 0 {
+		// Use DLPerf scaling only when the predictor had no per-job durations.
+		// When predictions exist, they are already candidate-GPU specific.
+		if predictedJobs == 0 && referenceDLPerf > 0 && go_.Offer.DLPerf > 0 {
 			ratio := referenceDLPerf / go_.Offer.DLPerf
 			runEst = runEst.Scale(ratio)
 			for id, dur := range est.JobDurations {

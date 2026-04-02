@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"database/sql"
+	"fmt"
 	"math"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 )
+
+var resolvePredictBatch = predictor.ResolvePredictBatch
 
 // StrategyPlan combines reuse assignments with the best new-instance
 // candidate for a strategy. DisplayOffers/DisplayEstimates are aligned with the
@@ -236,7 +239,7 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
-	splitOffers := RankGroupOffersWithProfile(splitRaw, survivalModel, 1.0, setupFactory, profile, minSurvival)
+	splitOffers := rankGroupOffersForPlanning(splitRaw, predCfg, survivalModel, setupFactory, profile, minSurvival)
 	splitReferenceDLPerf := MedianDLPerfFromRawOffers(splitRaw)
 	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, splitReferenceDLPerf, nil)
 
@@ -299,6 +302,256 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	return plan
+}
+
+type offerRuntimePrediction struct {
+	totalRunHrs  float64
+	jobDurations []time.Duration
+	complete     bool
+}
+
+func rankGroupOffersForPlanning(
+	raw []GroupRawOffers,
+	predCfg *predictor.Config,
+	survivalModel *bidding.SurvivalModel,
+	setupFactory SetupOverheadFactory,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+) []GroupOffer {
+	predicted := predictOfferRuntimes(raw, predCfg)
+	results := make([]GroupOffer, len(raw))
+	for i, r := range raw {
+		if r.Err != nil {
+			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
+			continue
+		}
+
+		setupOverhead := bidding.ConstantSetup(0.5)
+		if setupFactory != nil {
+			setupOverhead = setupFactory(r.Group)
+		}
+
+		if offerPredictions, ok := predicted[i]; ok {
+			if ranked, ok := rankOfferWithPredictedRuntime(
+				r.Group,
+				r.Offers,
+				survivalModel,
+				setupOverhead,
+				profile,
+				minSurvival,
+				offerPredictions,
+			); ok {
+				results[i] = ranked
+				continue
+			}
+		}
+
+		results[i] = rankOfferWithProfile(
+			r.Group,
+			r.Offers,
+			survivalModel,
+			1.0,
+			setupOverhead,
+			profile,
+			minSurvival,
+		)
+	}
+	return results
+}
+
+func predictOfferRuntimes(
+	raw []GroupRawOffers,
+	predCfg *predictor.Config,
+) map[int]map[string]offerRuntimePrediction {
+	if predCfg == nil || !predCfg.Configured() {
+		return nil
+	}
+
+	type batchRef struct {
+		groupIdx int
+		offerKey string
+		jobIdx   int
+	}
+	type runtimeAccum struct {
+		jobDurations []time.Duration
+		count        int
+	}
+
+	expected := make(map[int]map[string]int)
+	refs := make(map[int64]batchRef)
+	batchJobs := make([]predictor.BatchJob, 0)
+	var nextID int64 = 1
+
+	for groupIdx, groupRaw := range raw {
+		if len(groupRaw.Group.Jobs) == 0 {
+			continue
+		}
+		expected[groupIdx] = make(map[string]int)
+		for _, offer := range groupRaw.Offers {
+			key := offerPredictionKey(offer)
+			expected[groupIdx][key] = len(groupRaw.Group.Jobs)
+			for jobIdx, job := range groupRaw.Group.Jobs {
+				if job == nil || job.Command == "" {
+					continue
+				}
+				batchJobs = append(batchJobs, predictor.BatchJob{
+					ID:       nextID,
+					Command:  job.Command,
+					Project:  job.Project,
+					GPUClass: offer.GPUName,
+				})
+				refs[nextID] = batchRef{groupIdx: groupIdx, offerKey: key, jobIdx: jobIdx}
+				nextID++
+			}
+		}
+	}
+
+	if len(batchJobs) == 0 {
+		return nil
+	}
+
+	results, err := resolvePredictBatch(*predCfg, batchJobs)
+	if err != nil || results == nil {
+		return nil
+	}
+
+	accums := make(map[int]map[string]*runtimeAccum)
+	for id, ref := range refs {
+		result := results[id]
+		if result == nil || result.DurationS == nil {
+			continue
+		}
+
+		groupAccums := accums[ref.groupIdx]
+		if groupAccums == nil {
+			groupAccums = make(map[string]*runtimeAccum)
+			accums[ref.groupIdx] = groupAccums
+		}
+
+		accum := groupAccums[ref.offerKey]
+		if accum == nil {
+			accum = &runtimeAccum{
+				jobDurations: make([]time.Duration, expected[ref.groupIdx][ref.offerKey]),
+			}
+			groupAccums[ref.offerKey] = accum
+		}
+
+		accum.jobDurations[ref.jobIdx] = time.Duration(result.DurationS.Mean * float64(time.Second))
+		accum.count++
+	}
+
+	predicted := make(map[int]map[string]offerRuntimePrediction)
+	for groupIdx, groupAccums := range accums {
+		predicted[groupIdx] = make(map[string]offerRuntimePrediction, len(groupAccums))
+		for key, accum := range groupAccums {
+			complete := accum.count == expected[groupIdx][key]
+			totalRunHrs := 0.0
+			if complete {
+				for _, dur := range accum.jobDurations {
+					if dur <= 0 {
+						complete = false
+						break
+					}
+					totalRunHrs += dur.Hours()
+				}
+			}
+			predicted[groupIdx][key] = offerRuntimePrediction{
+				totalRunHrs:  totalRunHrs,
+				jobDurations: append([]time.Duration(nil), accum.jobDurations...),
+				complete:     complete,
+			}
+		}
+	}
+
+	return predicted
+}
+
+func rankOfferWithPredictedRuntime(
+	group InstanceGroup,
+	offers []cloud.Offer,
+	survivalModel *bidding.SurvivalModel,
+	setupOverhead bidding.OfferSetupFunc,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+	predicted map[string]offerRuntimePrediction,
+) (GroupOffer, bool) {
+	result := GroupOffer{Group: group}
+	if len(offers) == 0 {
+		return result, true
+	}
+
+	offers, _ = filterOffersByCUDACompat(offers, group.Image)
+	if len(offers) == 0 {
+		return result, true
+	}
+
+	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
+	result.RejectedGroups = rejected
+	if len(filtered) == 0 {
+		return result, true
+	}
+
+	w := profile.Weights()
+	bestScore := math.Inf(1)
+	var best cloud.Offer
+	found := false
+
+	for _, offer := range filtered {
+		runtime, ok := predicted[offerPredictionKey(offer)]
+		if !ok || !runtime.complete {
+			continue
+		}
+
+		setup := setupOverhead(offer)
+		surv := 1.0
+		if survivalModel != nil {
+			surv = survivalModel.OfferSurvival(offer)
+		}
+
+		cost := bidding.ExpectedCost(offer.CostPerHour, runtime.totalRunHrs, setup, surv)
+		completionHrs := predictedCompletionHours(runtime.jobDurations, setup)
+		if !profile.UseHappyPathTime && surv > 0 && surv < 1 {
+			completionHrs /= surv
+		}
+
+		score := w.Cost*cost + w.Time*completionHrs
+		if !found || score < bestScore {
+			bestScore = score
+			best = offer
+			result.SurvivalProb = surv
+			found = true
+		}
+	}
+
+	if !found {
+		return GroupOffer{}, false
+	}
+
+	result.Offer = &best
+	return result, true
+}
+
+func predictedCompletionHours(jobDurations []time.Duration, setupHrs float64) float64 {
+	total := float64(len(jobDurations)) * setupHrs
+	cumulative := 0.0
+	for _, dur := range jobDurations {
+		cumulative += dur.Hours()
+		total += cumulative
+	}
+	return total
+}
+
+func offerPredictionKey(offer cloud.Offer) string {
+	return fmt.Sprintf(
+		"%s|%s|%s|%.6f|%.6f|%.6f|%d",
+		offer.Provider,
+		offer.ProviderID,
+		offer.GPUName,
+		offer.GPUMemGB,
+		offer.CostPerHour,
+		offer.DLPerf,
+		offer.NumGPUs,
+	)
 }
 
 func chooseReuseGroups(
@@ -438,16 +691,20 @@ func EstimateReuseGroup(
 
 	var runEst estimate.Estimate
 	jobDurations := make(map[int64]time.Duration, len(group.Jobs))
+	predictedJobs := 0
 	gpuLabel := offer.GPUName
 	if gpuLabel == "" {
 		gpuLabel = inst.GPUClass
 	}
 	for _, job := range group.Jobs {
-		pred, _ := estimate.EstimateJobDuration(predCfg, gpuLabel, job)
+		pred, ok := estimate.EstimateJobDuration(predCfg, gpuLabel, job)
 		runEst = runEst.Add(pred)
 		jobDurations[job.ID] = pred.Mean
+		if ok {
+			predictedJobs++
+		}
 	}
-	if referenceDLPerf > 0 && inst.DLPerf > 0 {
+	if predictedJobs == 0 && referenceDLPerf > 0 && inst.DLPerf > 0 {
 		ratio := referenceDLPerf / inst.DLPerf
 		runEst = runEst.Scale(ratio)
 		for id, dur := range jobDurations {
@@ -635,7 +892,7 @@ func BestCandidateForProfile(
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
 	referenceDLPerf := medianDLPerfFromCandidates(candidates)
 	for i, cand := range candidates {
-		offers := RankGroupOffersWithProfile(cand.Raw, survivalModel, 1.0, setupFactory, profile, minSurvival)
+		offers := rankGroupOffersForPlanning(cand.Raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
 		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
 		score := ScoreEstimatesWithProfile(estimates, profile)
 		if i == 0 || score < bestScore {

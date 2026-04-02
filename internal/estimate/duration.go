@@ -38,7 +38,7 @@ func EstimateJobDurations(predCfg *predictor.Config, batchJobs []predictor.Batch
 		return nil
 	}
 
-	results, err := predictor.PredictBatch(*predCfg, batchJobs)
+	results, err := predictor.ResolvePredictBatch(*predCfg, batchJobs)
 	if err != nil || results == nil {
 		return nil
 	}

@@ -55,10 +55,16 @@ type Meta struct {
 }
 
 var predictFunc = Predict
+var predictBatchFunc = PredictBatch
 
 // ResolvePredict routes prediction calls through the package test seam.
 func ResolvePredict(cfg Config, host, project, gpuClass, command string) (*Result, error) {
 	return predictFunc(cfg, host, project, gpuClass, command)
+}
+
+// ResolvePredictBatch routes batch prediction calls through the package test seam.
+func ResolvePredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
+	return predictBatchFunc(cfg, jobs)
 }
 
 // Configured returns true if the predictor has a project path set.

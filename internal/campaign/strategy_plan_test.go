@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 func TestRankGroupOffers_MultiJobGroupUsesTotalDuration(t *testing.T) {
@@ -156,6 +157,59 @@ func TestBestCandidateForStrategy_UsesEstimatedRuntimeNotPlaceholderGroupingScor
 	)
 	if result.Label != "grouped" {
 		t.Fatalf("expected grouped candidate to win, got %s", result.Label)
+	}
+}
+
+func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 3600.0
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+			}
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass:    "NVIDIA",
+			GPUMemGB:    8,
+			MaxGPUMemGB: 12,
+			Jobs: []*db.Job{
+				{ID: 548, Project: "head-type-ontology", Command: "python train.py --model gpt2 --batch-size 8"},
+				{ID: 549, Project: "head-type-ontology", Command: "python train.py --model gpt2 --batch-size 8"},
+				{ID: 553, Project: "head-type-ontology", Command: "python train.py --model gpt2 --batch-size 8"},
+			},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx3090", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+			{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		bidding.StrategyFastest.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "rtx3090" {
+		t.Fatalf("expected predictor-backed ranking to avoid H200, got %s", offers[0].Offer.ProviderID)
 	}
 }
 
