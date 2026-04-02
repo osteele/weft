@@ -53,6 +53,17 @@ It should not own cloud-offer search, retry budgeting, or launch strategy.
 available. It should not infer that a larger-memory GPU is faster just because
 its `DLPerf` or VRAM tier is higher.
 
+When estimator runtime metadata is available, `weft` is also responsible for
+using it consistently across execution paths:
+
+- new-offer ranking and reusable-instance scoring should use the same
+  semantics-aware runtime adjustment path
+- low-confidence predictions with `bottleneck=unknown` should be shrunk toward
+  a neutral baseline
+- explicit `memory_capacity` signals may justify paying for a larger GPU
+- `benefits_from_additional_vram=false` should suppress oversized-GPU wins when
+  the predicted speedup is otherwise weak
+
 ## Fallback Policy
 
 When `job-estimator` cannot provide a runtime:
@@ -69,8 +80,11 @@ speed heuristic.
 The implementation target is:
 
 1. `job-estimator` predicts per-candidate runtimes and memory use.
-2. `weft` ranks offers from those predictions.
-3. `weft` falls back to neutral runtime assumptions instead of `DLPerf`-based speed guesses.
+2. `weft` ranks both new offers and reusable instances from those predictions.
+3. `weft` applies the same semantics-aware runtime adjustment before scoring
+   either path.
+4. `weft` falls back to neutral runtime assumptions instead of `DLPerf`-based
+   speed guesses.
 
 That keeps analytical and learned runtime modeling in the estimator stack while
 leaving orchestration and economic tradeoffs in `weft`.

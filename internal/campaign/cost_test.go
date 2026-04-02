@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 func TestEstimateCosts_NoPredictions(t *testing.T) {
@@ -85,6 +86,88 @@ func TestEstimateReuseGroup_NoPredictionsDoesNotScaleByDLPerf(t *testing.T) {
 	}
 	if est.JobDurations[2] != estimate.DefaultJobDuration.Mean {
 		t.Fatalf("job 2 duration = %v, want %v", est.JobDurations[2], estimate.DefaultJobDuration.Mean)
+	}
+}
+
+func TestEstimateReuseGroup_ShrinksLowConfidenceUnknownRuntime(t *testing.T) {
+	original := estimateJobDurationDetailed
+	t.Cleanup(func() { estimateJobDurationDetailed = original })
+
+	neutral := false
+	estimateJobDurationDetailed = func(_ *predictor.Config, _ string, job *db.Job) (estimate.DurationPrediction, bool) {
+		return estimate.DurationPrediction{
+			Estimate: estimate.Constant(30 * time.Minute),
+			Metadata: &predictor.RuntimeMetadata{
+				Source:                     "learned",
+				Confidence:                 0.7,
+				Bottleneck:                 "unknown",
+				MemoryHeadroomMiB:          128 * 1024,
+				BenefitsFromAdditionalVRAM: &neutral,
+			},
+		}, true
+	}
+
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "H200",
+			GPUMemGB:        141,
+			DLPerf:          40,
+			InetDownMbps:    1000,
+			InetUpMbps:      1000,
+			Status:          db.LaunchStatusRunning,
+		},
+	}
+
+	est, ok := EstimateReuseGroup(nil, group, cap, &predictor.Config{ProjectPath: "/tmp/job-estimator"}, nil)
+	if !ok {
+		t.Fatal("expected reuse estimate")
+	}
+
+	if est.Breakdown.Run.Mean <= time.Hour+45*time.Minute {
+		t.Fatalf("Run.Mean = %v, want strong shrink toward neutral fallback", est.Breakdown.Run.Mean)
+	}
+	if est.JobDurations[1] <= 55*time.Minute {
+		t.Fatalf("job 1 duration = %v, want shrink away from raw 30m prediction", est.JobDurations[1])
+	}
+}
+
+func TestEstimateReuseGroup_RejectsEstimatorInfeasibleReuse(t *testing.T) {
+	original := estimateJobDurationDetailed
+	t.Cleanup(func() { estimateJobDurationDetailed = original })
+
+	infeasible := false
+	estimateJobDurationDetailed = func(_ *predictor.Config, _ string, job *db.Job) (estimate.DurationPrediction, bool) {
+		return estimate.DurationPrediction{
+			Estimate: estimate.Constant(30 * time.Minute),
+			Metadata: &predictor.RuntimeMetadata{
+				Source:   "learned",
+				Feasible: &infeasible,
+			},
+		}, true
+	}
+
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs:     []*db.Job{{ID: 1}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 4090",
+			GPUMemGB:        24,
+			InetDownMbps:    1000,
+			InetUpMbps:      1000,
+			Status:          db.LaunchStatusRunning,
+		},
+	}
+
+	if _, ok := EstimateReuseGroup(nil, group, cap, &predictor.Config{ProjectPath: "/tmp/job-estimator"}, nil); ok {
+		t.Fatal("expected estimator-infeasible reuse to be rejected")
 	}
 }
 

@@ -140,6 +140,7 @@ The predictor receives:
 For each target, the predictor returns:
 
 - `duration_s`
+- `duration_metadata`
 - `peak_rss_kb`
 - `max_gpu_mem_mib`
 
@@ -152,6 +153,20 @@ Each prediction includes:
 
 Within weft, those bounds are treated conservatively for capacity checks and as
 uncertainty intervals for downstream scoring.
+
+When `duration_metadata` is present, it also carries runtime provenance and
+runtime-semantics fields such as:
+
+- `source`
+- `confidence`
+- `feasible`
+- `bottleneck`
+- `memory_headroom_mib`
+- `benefits_from_additional_vram`
+
+Campaign planning and reusable-instance scoring use that metadata to shrink weak
+or poorly explained speedups toward a neutral baseline, while still trusting
+explicit memory-capacity signals.
 
 ### Retraining
 
@@ -218,6 +233,14 @@ The estimate is the sum of:
 - job setup
 - run time
 - upload
+
+When predictor-backed job runtimes are available, both new cloud offers and
+reuse candidates use the same semantics-aware runtime adjustment before cost and
+time scoring:
+
+- low-confidence `unknown` bottlenecks are blended toward a neutral runtime
+- predictions that say extra VRAM will not help are conservative on oversized GPUs
+- explicit `memory_capacity` signals can still justify moving to a larger GPU
 
 ### Runtime phase model
 

@@ -560,27 +560,34 @@ func applyRuntimeMetadataAdjustments(predicted map[int]map[string]offerRuntimePr
 		}
 
 		for key, pred := range offerPredictions {
-			if !pred.complete || !pred.feasible {
-				offerPredictions[key] = pred
-				continue
-			}
-
-			adjusted := make([]time.Duration, len(pred.jobDurations))
-			totalAdjustedHrs := 0.0
-			for jobIdx, dur := range pred.jobDurations {
-				confidence := runtimePredictionConfidence(nil)
-				if jobIdx < len(pred.metadata) {
-					confidence = runtimePredictionConfidence(pred.metadata[jobIdx])
-				}
-				adjusted[jobIdx] = blendDuration(neutralByJob[jobIdx], dur, confidence)
-				totalAdjustedHrs += adjusted[jobIdx].Hours()
-			}
-			pred.adjustedJobDurations = adjusted
-			pred.adjustedRunHrs = totalAdjustedHrs
-			offerPredictions[key] = pred
+			offerPredictions[key] = adjustRuntimePrediction(pred, neutralByJob)
 		}
 		predicted[groupIdx] = offerPredictions
 	}
+}
+
+func adjustRuntimePrediction(pred offerRuntimePrediction, neutralByJob []time.Duration) offerRuntimePrediction {
+	if !pred.complete || !pred.feasible {
+		return pred
+	}
+
+	adjusted := make([]time.Duration, len(pred.jobDurations))
+	totalAdjustedHrs := 0.0
+	for jobIdx, dur := range pred.jobDurations {
+		neutral := estimate.DefaultJobDuration.Mean
+		if jobIdx < len(neutralByJob) && neutralByJob[jobIdx] > 0 {
+			neutral = neutralByJob[jobIdx]
+		}
+		confidence := runtimePredictionConfidence(nil)
+		if jobIdx < len(pred.metadata) {
+			confidence = runtimePredictionConfidence(pred.metadata[jobIdx])
+		}
+		adjusted[jobIdx] = blendDuration(neutral, dur, confidence)
+		totalAdjustedHrs += adjusted[jobIdx].Hours()
+	}
+	pred.adjustedJobDurations = adjusted
+	pred.adjustedRunHrs = totalAdjustedHrs
+	return pred
 }
 
 func runtimePredictionConfidence(metadata *predictor.RuntimeMetadata) float64 {
@@ -912,6 +919,9 @@ func EstimateReuseGroup(
 	var runEst estimate.Estimate
 	jobDurations := make(map[int64]time.Duration, len(group.Jobs))
 	jobRuntimeMetadata := make(map[int64]predictor.RuntimeMetadata, len(group.Jobs))
+	jobDurationList := make([]time.Duration, 0, len(group.Jobs))
+	jobMetadataList := make([]*predictor.RuntimeMetadata, 0, len(group.Jobs))
+	runtimePred := offerRuntimePrediction{feasible: true, complete: true}
 	gpuLabel := offer.GPUName
 	if gpuLabel == "" {
 		gpuLabel = inst.GPUClass
@@ -920,9 +930,24 @@ func EstimateReuseGroup(
 		pred, _ := estimateJobDurationDetailed(predCfg, gpuLabel, job)
 		runEst = runEst.Add(pred.Estimate)
 		jobDurations[job.ID] = pred.Estimate.Mean
+		jobDurationList = append(jobDurationList, pred.Estimate.Mean)
+		if pred.Estimate.Mean <= 0 {
+			runtimePred.complete = false
+		}
 		if pred.Metadata != nil {
 			jobRuntimeMetadata[job.ID] = *pred.Metadata
+			if pred.Metadata.Feasible != nil && !*pred.Metadata.Feasible {
+				runtimePred.feasible = false
+			}
 		}
+		jobMetadataList = append(jobMetadataList, pred.Metadata)
+	}
+	runtimePred.jobDurations = jobDurationList
+	runtimePred.metadata = jobMetadataList
+	runtimePred.totalRunHrs = runEst.Mean.Hours()
+	runtimePred = adjustRuntimePrediction(runtimePred, makeDefaultNeutralDurations(len(group.Jobs)))
+	if !runtimePred.feasible {
+		return CostEstimate{}, false
 	}
 
 	total := waitEst.Add(provision).Add(jobSetup).Add(runEst).Add(upload)
@@ -950,6 +975,7 @@ func EstimateReuseGroup(
 	if costRate == 0 {
 		est.RiskAdjustedCost = 0
 	}
+	est = applySelectedOfferRuntimePrediction(est, runtimePred)
 	return est, true
 }
 
@@ -1155,18 +1181,14 @@ func applySelectedOfferRuntimePrediction(est CostEstimate, pred offerRuntimePred
 	}
 
 	runMean := time.Duration(runHours * float64(time.Hour))
-	est.Breakdown.Run = rescaleEstimateMean(est.Breakdown.Run, runMean)
-	total := est.Breakdown.Startup.
-		Add(est.Breakdown.SSHSetup).
-		Add(est.Breakdown.Provision).
-		Add(est.Breakdown.JobSetup).
-		Add(est.Breakdown.Run).
-		Add(est.Breakdown.Upload)
-	est.Breakdown.Total = total
-	est.TotalTime = total.Mean
+	oldRun := est.Breakdown.Run
+	est.Breakdown.Run = rescaleEstimateMean(oldRun, runMean)
+	delta := est.Breakdown.Run.Mean - oldRun.Mean
+	est.Breakdown.Total = shiftEstimate(est.Breakdown.Total, delta)
+	est.TotalTime = est.Breakdown.Total.Mean
 
 	costRate := est.Offer.Offer.CostPerHour
-	est.TotalCost = total.Mean.Hours() * costRate
+	est.TotalCost = est.TotalTime.Hours() * costRate
 	if costRate == 0 {
 		est.RiskAdjustedCost = 0
 	} else if est.SurvivalProb > 0 {
@@ -1205,4 +1227,30 @@ func scaleDuration(duration time.Duration, factor float64) time.Duration {
 		return 0
 	}
 	return time.Duration(float64(duration) * factor)
+}
+
+func shiftEstimate(base estimate.Estimate, delta time.Duration) estimate.Estimate {
+	shift := func(value time.Duration) time.Duration {
+		value += delta
+		if value < 0 {
+			return 0
+		}
+		return value
+	}
+	return estimate.Estimate{
+		Mean:  shift(base.Mean),
+		Lower: shift(base.Lower),
+		Upper: shift(base.Upper),
+	}
+}
+
+func makeDefaultNeutralDurations(jobCount int) []time.Duration {
+	if jobCount < 0 {
+		jobCount = 0
+	}
+	neutral := make([]time.Duration, jobCount)
+	for i := range neutral {
+		neutral[i] = estimate.DefaultJobDuration.Mean
+	}
+	return neutral
 }
