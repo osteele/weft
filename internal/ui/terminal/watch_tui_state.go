@@ -49,6 +49,9 @@ func (m watchModel) selectableRowCount() int {
 	switch {
 	case m.mode.isInstanceBased():
 		count := m.selectableCloudRowCount()
+		for _, host := range m.onPremHosts {
+			count += len(host.Jobs)
+		}
 		count += len(m.unplacedJobs)
 		return count
 	case m.mode == watchModeSystem:
@@ -196,7 +199,7 @@ func (m watchModel) selectedCloudJob() *db.Job {
 }
 
 func (m watchModel) selectedOnPremJob() *db.Job {
-	if m.mode != watchModeSystem {
+	if !(m.mode == watchModeSystem || m.mode.isInstanceBased()) {
 		return nil
 	}
 	index := m.cursor - m.selectableCloudRowCount()
@@ -230,8 +233,18 @@ func (m watchModel) selectedUnplacedJob() *db.Job {
 		}
 		return m.unplacedJobs[index]
 	default:
-		// In campaign/instance mode, selectable rows are: instance headers + jobs, then unplaced jobs
+		// In campaign/instance mode, selectable rows are: instance headers + jobs,
+		// then on-prem host jobs, then unplaced jobs.
 		index := m.cursor - m.selectableCloudRowCount()
+		if index < 0 {
+			return nil
+		}
+		for _, host := range m.onPremHosts {
+			if index < len(host.Jobs) {
+				return nil
+			}
+			index -= len(host.Jobs)
+		}
 		if index < 0 || index >= len(m.unplacedJobs) {
 			return nil
 		}

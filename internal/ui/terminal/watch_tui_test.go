@@ -590,6 +590,143 @@ func TestSystemWatchModelSelectableRowCountIncludesCloudJobs(t *testing.T) {
 	}
 }
 
+func TestInstanceWatchModelViewShowsInventoryHosts(t *testing.T) {
+	cloudInstance := &db.Launch{
+		ID:       5,
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	}
+
+	m := watchModel{
+		mode:        watchModeInstances,
+		width:       120,
+		height:      20,
+		instanceIDs: []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
+			5: {
+				Launch: cloudInstance,
+				Jobs: []*db.Job{
+					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/proj", Project: "EXP-ALPHA", Description: "train"},
+				},
+			},
+		},
+		onPremHosts: []onPremHostSummary{
+			{
+				Name: "cool30",
+				Jobs: []*db.Job{
+					{ID: 41, Status: db.StatusQueued, Host: "cool30", WorkingDir: "/tmp/project-beta", Project: "BETA", Description: "eval model"},
+				},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"Instance 5 — A100 — running",
+		"Inventory Hosts (1 active)",
+		"cool30",
+		"BETA",
+		"eval model",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestInstanceWatchModelSelectableRowCountIncludesOnPremJobs(t *testing.T) {
+	cloudInstance := &db.Launch{
+		ID:       5,
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	}
+
+	m := watchModel{
+		mode:        watchModeInstances,
+		width:       120,
+		height:      20,
+		instanceIDs: []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
+			5: {
+				Launch: cloudInstance,
+				Jobs: []*db.Job{
+					{ID: 88, Status: db.StatusRunning},
+					{ID: 89, Status: db.StatusQueued},
+				},
+			},
+		},
+		onPremHosts: []onPremHostSummary{
+			{Name: "cool30", Jobs: []*db.Job{{ID: 41, Status: db.StatusRunning, Host: "cool30"}}},
+		},
+		unplacedJobs:   []*db.Job{{ID: 123, Status: db.StatusQueued}},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	// 1 instance header + 2 cloud jobs + 1 on-prem job + 1 unplaced
+	if got := m.selectableRowCount(); got != 5 {
+		t.Errorf("selectableRowCount() = %d, want 5", got)
+	}
+}
+
+func TestInstanceWatchModelSelectedOnPremJob(t *testing.T) {
+	cloudInstance := &db.Launch{
+		ID:       5,
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	}
+	job88 := &db.Job{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/proj", Description: "train"}
+	onPremJob := &db.Job{ID: 41, Status: db.StatusQueued, Host: "cool30", WorkingDir: "/tmp/project-beta", Description: "eval"}
+
+	m := watchModel{
+		mode:        watchModeInstances,
+		width:       120,
+		height:      20,
+		instanceIDs: []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
+			5: {
+				Launch: cloudInstance,
+				Jobs:   []*db.Job{job88},
+			},
+		},
+		onPremHosts:    []onPremHostSummary{{Name: "cool30", Jobs: []*db.Job{onPremJob}}},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	m.cursor = 2 // cloud header + one cloud job, then first on-prem job
+	if got := m.selectedOnPremJob(); got == nil || got.ID != onPremJob.ID {
+		t.Fatalf("cursor 2: expected on-prem job %d, got %v", onPremJob.ID, got)
+	}
+}
+
+func TestInstanceWatchModelUpdate_OnPremRefreshUpdatesHosts(t *testing.T) {
+	m := watchModel{
+		mode:           watchModeInstances,
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	updatedModel, _ := m.Update(watchOnPremRefreshedMsg{
+		onPremHosts: []onPremHostSummary{
+			{Name: "cool30", Jobs: []*db.Job{{ID: 41, Status: db.StatusQueued, Host: "cool30"}}},
+		},
+		unplacedJobs: []*db.Job{{ID: 123, Status: db.StatusQueued}},
+	})
+	got := updatedModel.(watchModel)
+
+	if len(got.onPremHosts) != 1 || got.onPremHosts[0].Name != "cool30" {
+		t.Fatalf("onPremHosts = %+v, want cool30", got.onPremHosts)
+	}
+	if len(got.unplacedJobs) != 1 || got.unplacedJobs[0].ID != 123 {
+		t.Fatalf("unplacedJobs = %+v, want job 123", got.unplacedJobs)
+	}
+}
+
 func watchTestInt64Ptr(v int64) *int64 { return &v }
 
 func watchTestIntPtr(v int) *int { return &v }

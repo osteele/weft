@@ -79,10 +79,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		job := m.selectedUnplacedJob()
 		if job == nil {
-			// Try on-prem job (system mode)
-			if m.mode == watchModeSystem {
-				job = m.selectedOnPremJob()
-			}
+			job = m.selectedOnPremJob()
 		}
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {
 			return m, nil
@@ -92,10 +89,8 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var job *db.Job
 		if j := m.selectedCloudJob(); j != nil && j.EffectiveStatus() == db.StatusRunning {
 			job = j
-		} else if m.mode == watchModeSystem {
-			if j := m.selectedOnPremJob(); j != nil && j.EffectiveStatus() == db.StatusRunning {
-				job = j
-			}
+		} else if j := m.selectedOnPremJob(); j != nil && j.EffectiveStatus() == db.StatusRunning {
+			job = j
 		}
 		if job == nil {
 			if j := m.selectedUnplacedJob(); j != nil && j.EffectiveStatus() == db.StatusQueued {

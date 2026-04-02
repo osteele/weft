@@ -176,6 +176,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	}
 
 	unplaced, _ := db.ListUnplacedJobs(database)
+	onPremJobs, _ := db.ListActiveOnPremJobs(database)
 
 	m := watchModel{
 		mode:           mode,
@@ -196,6 +197,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		launchedAt:     launchedAt,
 		initInfo:       initInfo,
 		reconciler:     campaign.NewReconciler(),
+		onPremHosts:    groupOnPremHosts(onPremJobs),
 		unplacedJobs:   unplaced,
 	}
 	m.rebuildReplacementCache()
@@ -524,7 +526,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.mode == watchModeSystem {
+		if m.mode == watchModeSystem || m.mode.isInstanceBased() {
 			m.onPremHosts = msg.onPremHosts
 		}
 		if m.mode == watchModeSystem || m.mode.isInstanceBased() {

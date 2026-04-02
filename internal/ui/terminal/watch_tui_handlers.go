@@ -309,7 +309,7 @@ func (m watchModel) handleInstanceSyncTick() (tea.Model, tea.Cmd) {
 			campaign.MaybeSweepOrphanedInstances(m.database, m.cloudClients)
 			return watchSyncDoneMsg{}
 		},
-		refreshWatchUnplacedJobs(m.database),
+		refreshWatchOnPrem(m.database),
 		scheduleSyncTick(),
 	)
 }

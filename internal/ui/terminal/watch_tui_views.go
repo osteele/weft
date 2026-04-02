@@ -148,6 +148,25 @@ func (m watchModel) renderInstanceView() (string, int) {
 		addLine("")
 	}
 
+	if len(m.onPremHosts) > 0 {
+		projectWidth := len("PROJECT")
+		for _, host := range m.onPremHosts {
+			for _, job := range host.Jobs {
+				if w := len(campaign.JobProjectLabel(job)); w > projectWidth {
+					projectWidth = w
+				}
+			}
+		}
+		addLine(watchTitleStyle.Render(fmt.Sprintf("Inventory Hosts (%d active)", len(m.onPremHosts))))
+		for _, host := range m.onPremHosts {
+			addLine(watchStatusStyle.Render("  " + host.Name))
+			for _, job := range host.Jobs {
+				addSelectable("    " + truncate(m.formatOnPremJobRow(job, projectWidth), max(width-4, 40)))
+			}
+		}
+		addLine("")
+	}
+
 	// Unplaced jobs section (instance-based modes)
 	if !m.launchPending && len(m.unplacedJobs) > 0 {
 		addLine(watchTitleStyle.Render(fmt.Sprintf("Unplaced Jobs (%d)", len(m.unplacedJobs))))
