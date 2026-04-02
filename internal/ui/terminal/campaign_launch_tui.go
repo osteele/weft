@@ -973,6 +973,11 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 	if !m.inlineWatchEnabled || m.inlineWatch != nil {
 		return m, nil
 	}
+	// Start inline watch only after at least one instance is known, so launch
+	// feedback appears immediately and we avoid showing unrelated inventory rows.
+	if len(m.registeredInstanceIDs) == 0 {
+		return m, nil
+	}
 	var r2Client *r2.Client
 	if m.appConfig != nil {
 		r2Client, _ = buildR2Client(m.appConfig)
@@ -1215,9 +1220,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchExecutionPlanMsg:
 		m.expectedInstanceCount = msg.expectedInstanceCount
-		next, watchCmd := m.maybeStartInlineWatch()
-		m = next
-		return m, watchCmd
+		return m, nil
 
 	case launchInstanceRegisteredMsg:
 		if _, ok := m.registeredInstanceIDSet[msg.instanceID]; !ok {
@@ -1354,8 +1357,6 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.campaignPhase = ""
 		m.groupPhases = make(map[int]string)
 		m.groupDone = make(map[int]bool)
-		next, watchCmd := m.maybeStartInlineWatch()
-		m = next
 		cmds := []tea.Cmd{
 			m.spinner.Tick,
 			m.launchInstances(),
@@ -1363,9 +1364,6 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			waitForLaunchPlanReady(m.planCh),
 			waitForLaunchPhase(m.phaseCh),
 			waitForLaunchInstanceRegistered(m.instanceCh),
-		}
-		if watchCmd != nil {
-			cmds = append(cmds, watchCmd)
 		}
 		return m, tea.Batch(cmds...)
 
@@ -1475,10 +1473,23 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "right":
-		if m.focusArea == focusTradeoffs {
-			m.tradeoffDisclosed = true
-			m.tradeoffRowsDirty = true
+		tradeoffs := m.visibleTradeoffs()
+		if len(tradeoffs) == 0 {
+			return m, nil
 		}
+		// Disclose from anywhere, anchoring on the current active strategy.
+		if m.focusArea != focusTradeoffs {
+			m.focusArea = focusTradeoffs
+			m.tradeoffCursor = 0
+			for i, option := range tradeoffs {
+				if option.ID == m.activeTradeoff {
+					m.tradeoffCursor = i
+					break
+				}
+			}
+		}
+		m.tradeoffDisclosed = true
+		m.tradeoffRowsDirty = true
 		return m, nil
 
 	case "left":
@@ -1768,6 +1779,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			}
 			return -1
 		}
+		sendCampaignPhase("launching worker instances")
 
 		prep, err := prepareLaunchExecutionPlan(
 			database,
@@ -2039,6 +2051,9 @@ func (m launchModel) renderInlineWatchView() string {
 		prefix += launchErrStyle.Render(fmt.Sprintf("Launch error: %v", m.err)) + "\n\n"
 	}
 	prefix += m.renderInlineLaunchOverview()
+	if m.launching && len(m.registeredInstanceIDs) == 0 {
+		return prefix
+	}
 	prefixLines := countRenderedLines(prefix)
 
 	watch := *m.inlineWatch

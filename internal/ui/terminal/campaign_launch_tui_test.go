@@ -462,6 +462,78 @@ func TestLaunchModelAdoptTradeoffOptions_MapsFastestToFastWhenTwoOptions(t *test
 	}
 }
 
+func TestLaunchModelHandleKey_RightDisclosesActiveTradeoffWithoutS(t *testing.T) {
+	m := launchModel{
+		focusArea:       focusJobs,
+		activeTradeoff:  "fast-endpoint",
+		tradeoffOptions: []campaign.TradeoffOption{{ID: "cheap"}, {ID: "fast-endpoint"}},
+	}
+
+	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRight})
+	got := model.(launchModel)
+
+	if got.focusArea != focusTradeoffs {
+		t.Fatalf("focusArea = %v, want focusTradeoffs", got.focusArea)
+	}
+	if !got.tradeoffDisclosed {
+		t.Fatal("expected tradeoffDisclosed to be true")
+	}
+	if got.tradeoffCursor != 1 {
+		t.Fatalf("tradeoffCursor = %d, want 1", got.tradeoffCursor)
+	}
+}
+
+func TestLaunchModelUpdate_LaunchExecutionPlanDoesNotStartInlineWatchBeforeRegistration(t *testing.T) {
+	model, cmd := launchModel{
+		launching:               true,
+		inlineWatchEnabled:      true,
+		registeredInstanceIDSet: make(map[int64]struct{}),
+	}.Update(launchExecutionPlanMsg{expectedInstanceCount: 2})
+
+	got := model.(launchModel)
+	if got.expectedInstanceCount != 2 {
+		t.Fatalf("expectedInstanceCount = %d, want 2", got.expectedInstanceCount)
+	}
+	if got.inlineWatch != nil {
+		t.Fatal("expected inline watch to remain nil until first registration")
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command, got %T", cmd)
+	}
+}
+
+func TestLaunchModelView_InlineWatchHidesInventoryBeforeRegistration(t *testing.T) {
+	inlineWatch := watchModel{
+		mode:           watchModeInstances,
+		launchPending:  true,
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		initInfo:       map[int64]initialInstanceInfo{},
+		jobProgressHWM: map[int64]int{},
+		height:         20,
+		width:          100,
+	}
+	m := launchModel{
+		launching:     true,
+		inlineWatch:   &inlineWatch,
+		campaignPhase: "launching worker instances",
+		height:        20,
+		width:         100,
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Launching instances...") {
+		t.Fatalf("expected launch overview header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "launching worker instances") {
+		t.Fatalf("expected campaign phase in launch overview, got:\n%s", out)
+	}
+	if strings.Contains(out, "Inventory Hosts") {
+		t.Fatalf("did not expect inventory host table before registration, got:\n%s", out)
+	}
+}
+
 func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
 	t.Helper()
 	if cmd == nil {
