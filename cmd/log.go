@@ -189,10 +189,12 @@ func runLog(cmd *cobra.Command, args []string) error {
 		}
 		if len(jobsToSync) > 0 {
 			timeout := FastSyncTimeout
+			cloudTimeout := FastCloudSyncTimeout
 			if logSync {
-				timeout = DefaultSyncTimeout
+				timeout = NormalSyncTimeout
+				cloudTimeout = NormalCloudSyncTimeout
 			}
-			quickSyncJobs(database, jobsToSync, timeout)
+			quickSyncJobs(database, jobsToSync, timeout, cloudTimeout)
 		}
 	}
 

@@ -69,7 +69,7 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		jobsToSync = append(jobsToSync, job)
 	}
 	if len(jobsToSync) > 0 {
-		quickSyncJobs(database, jobsToSync, FastSyncTimeout)
+		quickSyncJobs(database, jobsToSync, FastSyncTimeout, FastCloudSyncTimeout)
 	}
 
 	var jsonResults []telemetryOutput

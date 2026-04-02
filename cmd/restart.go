@@ -54,7 +54,7 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		jobsToSync = append(jobsToSync, job)
 	}
 	if len(jobsToSync) > 0 {
-		quickSyncJobs(database, jobsToSync, FastSyncTimeout)
+		quickSyncJobs(database, jobsToSync, FastSyncTimeout, FastCloudSyncTimeout)
 	}
 
 	var errors []string

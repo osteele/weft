@@ -1019,11 +1019,11 @@ func deployAgentsToHosts(hosts []string) {
 	}
 }
 
-// quickSyncJobs performs a fast sync for a set of jobs before display commands.
-// It skips jobs in terminal states, separates on-prem vs rental jobs, and syncs
-// each type appropriately. Sync failures are silently ignored.
+// quickSyncJobs performs a bounded sync for a set of jobs before display
+// commands. It skips jobs in terminal states, separates on-prem vs rental jobs,
+// and syncs each type appropriately. Sync failures are silently ignored.
 // Returns unreachable on-prem hosts (caller may optionally warn).
-func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout time.Duration) []string {
+func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout time.Duration) []string {
 	hostsToSync := make(map[string]struct{})
 	needsRentalSync := false
 
@@ -1045,7 +1045,7 @@ func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout time.Duration) [
 		_, unreachable = performSyncWithTimeoutForHosts(database, hosts, sshTimeout, false)
 	}
 	if needsRentalSync {
-		syncRentalJobsStatus(database)
+		syncRentalJobsStatusFunc(database, cloudTimeout)
 	}
 	return unreachable
 }

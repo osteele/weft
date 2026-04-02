@@ -306,6 +306,7 @@ func init() {
 	jobCmd.AddCommand(jobRunCmd)
 	jobCmd.AddCommand(jobLogCmd)
 	jobCmd.AddCommand(jobKillCmd)
+	addStatusFlags(jobStatusCmd)
 	jobCmd.AddCommand(jobStatusCmd)
 	jobCmd.AddCommand(jobDescribeCmd)
 	jobCmd.AddCommand(jobRestartCmd)
@@ -525,6 +526,8 @@ var (
 	jobInfoNoSync bool
 )
 
+var quickSyncJobsFunc = quickSyncJobs
+
 func runJobInfo(cmd *cobra.Command, args []string) error {
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
@@ -549,10 +552,12 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		if len(jobsToSync) > 0 {
 			timeout := FastSyncTimeout
+			cloudTimeout := FastCloudSyncTimeout
 			if jobInfoSync {
-				timeout = DefaultSyncTimeout
+				timeout = NormalSyncTimeout
+				cloudTimeout = NormalCloudSyncTimeout
 			}
-			quickSyncJobs(database, jobsToSync, timeout)
+			quickSyncJobsFunc(database, jobsToSync, timeout, cloudTimeout)
 		}
 	}
 

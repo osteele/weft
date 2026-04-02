@@ -38,6 +38,8 @@ var (
 	statusSSHTimeout  time.Duration
 )
 
+var syncRentalJobsStatusFunc = syncRentalJobsStatusWithTimeout
+
 var statusCmd = &cobra.Command{
 	Use:   "status [job-id]...",
 	Short: "Check the status of jobs",
@@ -74,14 +76,18 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
-	statusCmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (30s timeout)")
-	statusCmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
-	statusCmd.Flags().BoolVar(&statusFast, "fast", false, "Use quick 2s timeout (default is 5s)")
-	statusCmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job(s) to complete before returning")
-	statusCmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
-	statusCmd.Flags().DurationVar(&statusWaitTimeout, "timeout", 0, "Alias for --wait-timeout")
-	statusCmd.Flags().MarkHidden("timeout")
-	statusCmd.Flags().DurationVarP(&statusSSHTimeout, "ssh-timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
+	addStatusFlags(statusCmd)
+}
+
+func addStatusFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (30s timeout)")
+	cmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
+	cmd.Flags().BoolVar(&statusFast, "fast", false, "Use quick 2s timeout (default is 5s)")
+	cmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job(s) to complete before returning")
+	cmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
+	cmd.Flags().DurationVar(&statusWaitTimeout, "timeout", 0, "Alias for --wait-timeout")
+	cmd.Flags().MarkHidden("timeout")
+	cmd.Flags().DurationVarP(&statusSSHTimeout, "ssh-timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -174,7 +180,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			startQueueRunnersForHosts(database, hosts)
 		}
 		if needsRentalSync {
-			syncRentalJobsStatus(database)
+			syncRentalJobsStatusFunc(database, preDisplayCloudSyncTimeout(statusSync))
 		}
 	}
 
@@ -203,7 +209,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		printSingleJobStatus(database, jobID, job, singleJob, needsSync)
+		printSingleJobStatus(database, jobID, job, singleJob, needsSync || statusNoSync)
 	}
 
 	if statusWait {
@@ -540,10 +546,21 @@ func shouldAttemptSync(status string) bool {
 	}
 }
 
-// syncRentalJobsStatus runs a bounded cloud sync for rental jobs.
+func preDisplayCloudSyncTimeout(fullSync bool) time.Duration {
+	if fullSync {
+		return NormalCloudSyncTimeout
+	}
+	return FastCloudSyncTimeout
+}
+
+func syncRentalJobsStatus(database *sql.DB) bool {
+	return syncRentalJobsStatusWithTimeout(database, FastCloudSyncTimeout)
+}
+
+// syncRentalJobsStatusWithTimeout runs a bounded cloud sync for rental jobs.
 // Also runs a fast DB-only repair for jobs stuck on completed launches.
 // Returns true if the cloud sync completed within the timeout.
-func syncRentalJobsStatus(database *sql.DB) bool {
+func syncRentalJobsStatusWithTimeout(database *sql.DB, timeout time.Duration) bool {
 	cfg, err := config.Load()
 	if err != nil {
 		return true
@@ -567,7 +584,7 @@ func syncRentalJobsStatus(database *sql.DB) bool {
 	}
 	backfillHFDownloadObservations(database)
 
-	_, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), FastCloudSyncTimeout, false)
+	_, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false)
 	return completed
 }
 
