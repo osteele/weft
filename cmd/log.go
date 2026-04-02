@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -92,32 +94,35 @@ var (
 
 func init() {
 	rootCmd.AddCommand(logCmd)
+	addLogFlags(logCmd)
+}
 
+func addLogFlags(cmd *cobra.Command) {
 	// Job log flags
-	logCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log in real-time")
-	logCmd.Flags().IntVarP(&logLines, "lines", "n", 50, "Number of lines to show (last N lines)")
-	logCmd.Flags().IntVar(&logLines, "tail", 50, "Number of lines to show (alias for --lines)")
-	logCmd.Flags().IntVar(&logFrom, "from", 0, "Show lines starting from line N")
-	logCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
-	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
-	logCmd.Flags().BoolVar(&logFull, "full", false, "Show the entire log (alias for --from 1)")
-	logCmd.Flags().DurationVarP(&logTimeout, "timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
-	logCmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
-	logCmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
+	cmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log in real-time")
+	cmd.Flags().IntVarP(&logLines, "lines", "n", 50, "Number of lines to show (last N lines)")
+	cmd.Flags().IntVar(&logLines, "tail", 50, "Number of lines to show (alias for --lines)")
+	cmd.Flags().IntVar(&logFrom, "from", 0, "Show lines starting from line N")
+	cmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
+	cmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
+	cmd.Flags().BoolVar(&logFull, "full", false, "Show the entire log (alias for --from 1)")
+	cmd.Flags().DurationVarP(&logTimeout, "timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
+	cmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
+	cmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
 
 	// Operations log flags
-	logCmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
-	logCmd.Flags().Int64Var(&logOpsJob, "job", 0, "Filter operations by job ID (requires --ops)")
-	logCmd.Flags().StringVar(&logOpsHost, "host", "", "Filter operations by host (requires --ops)")
-	logCmd.Flags().StringVar(&logOpsOp, "op", "", "Filter by operation type (requires --ops)")
-	logCmd.Flags().StringVar(&logOpsSince, "since", "", "Show operations since duration (e.g., 1h, 30m) (requires --ops)")
-	logCmd.Flags().BoolVar(&logOpsErrors, "errors", false, "Show only operations with errors (requires --ops)")
+	cmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
+	cmd.Flags().Int64Var(&logOpsJob, "job", 0, "Filter operations by job ID (requires --ops)")
+	cmd.Flags().StringVar(&logOpsHost, "host", "", "Filter operations by host (requires --ops)")
+	cmd.Flags().StringVar(&logOpsOp, "op", "", "Filter by operation type (requires --ops)")
+	cmd.Flags().StringVar(&logOpsSince, "since", "", "Show operations since duration (e.g., 1h, 30m) (requires --ops)")
+	cmd.Flags().BoolVar(&logOpsErrors, "errors", false, "Show only operations with errors (requires --ops)")
 
 	// Lifecycle events flags
-	logCmd.Flags().BoolVar(&logEvents, "events", false, "Show lifecycle events (relaunch/reconcile/retry decisions)")
-	logCmd.Flags().StringVar(&logEventsKind, "kind", "", "Filter events by kind or prefix (e.g., relaunch, reconcile.bootstrap_timeout)")
-	logCmd.Flags().Int64Var(&logEventsLaunch, "launch", 0, "Filter events by launch/instance ID")
-	logCmd.Flags().BoolVar(&logEventsStats, "stats", false, "Show aggregate event statistics (requires --events)")
+	cmd.Flags().BoolVar(&logEvents, "events", false, "Show lifecycle events (relaunch/reconcile/retry decisions)")
+	cmd.Flags().StringVar(&logEventsKind, "kind", "", "Filter events by kind or prefix (e.g., relaunch, reconcile.bootstrap_timeout)")
+	cmd.Flags().Int64Var(&logEventsLaunch, "launch", 0, "Filter events by launch/instance ID")
+	cmd.Flags().BoolVar(&logEventsStats, "stats", false, "Show aggregate event statistics (requires --events)")
 }
 
 // validateLogArgs validates command arguments based on whether --ops is used
@@ -895,19 +900,19 @@ func tryLogFromR2(cmd *cobra.Command, job *db.Job) error {
 
 // runOpsLog displays the operations log with optional filtering
 func runOpsLog(cmd *cobra.Command) error {
-	// Read entries from log file
-	logPath := oplog.DefaultLogPath()
-	entries, err := oplog.ReadEntries(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("No operations log found. Operations logging may be disabled or no operations have been logged yet.")
-			return nil
+	if !logNoSync {
+		if err := syncOpsLogSources(); err != nil && logSync {
+			return err
 		}
+	}
+
+	entries, err := readOpsEntries()
+	if err != nil {
 		return fmt.Errorf("read operations log: %w", err)
 	}
 
 	if len(entries) == 0 {
-		fmt.Println("Operations log is empty.")
+		fmt.Println("No operations log found. Operations logging may be disabled or no operations have been logged yet.")
 		return nil
 	}
 
@@ -942,6 +947,103 @@ func runOpsLog(cmd *cobra.Command) error {
 	}
 
 	return nil
+}
+
+func syncOpsLogSources() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil
+	}
+
+	r2Client, err := buildR2Client(cfg)
+	if err != nil || r2Client == nil {
+		return err
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	instanceIDs := make(map[int64]struct{})
+	if logOpsJob != 0 {
+		job, err := db.GetJobByID(database, logOpsJob)
+		if err == nil && job != nil && job.LaunchID != nil {
+			instanceIDs[*job.LaunchID] = struct{}{}
+		}
+	}
+	if instanceID, ok := parseLaunchHostInstanceID(logOpsHost); ok {
+		instanceIDs[instanceID] = struct{}{}
+	}
+
+	timeout := FastCloudSyncTimeout
+	if logSync {
+		timeout = NormalCloudSyncTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return syncCloudInstanceOpslogs(ctx, r2Client, database, instanceIDs, false)
+}
+
+func readOpsEntries() ([]oplog.Entry, error) {
+	var entries []oplog.Entry
+
+	if localEntries, err := oplog.ReadEntries(oplog.DefaultLogPath()); err == nil {
+		entries = append(entries, localEntries...)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	for _, path := range cachedInstanceOpslogPaths() {
+		instanceID, ok := instanceIDFromOpslogPath(path)
+		if !ok {
+			continue
+		}
+		cachedEntries, err := oplog.ReadEntries(path)
+		if err != nil {
+			return nil, err
+		}
+		host := db.LaunchHost(instanceID)
+		for i := range cachedEntries {
+			if cachedEntries[i].Host == "" {
+				cachedEntries[i].Host = host
+			}
+		}
+		entries = append(entries, cachedEntries...)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Time.Before(entries[j].Time)
+	})
+	return entries, nil
+}
+
+func cachedInstanceOpslogPaths() []string {
+	paths, err := oplog.ListSyncedInstanceLogPaths()
+	if err != nil {
+		return nil
+	}
+	return paths
+}
+
+func instanceIDFromOpslogPath(path string) (int64, bool) {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	id, err := strconv.ParseInt(name, 10, 64)
+	return id, err == nil
+}
+
+func parseLaunchHostInstanceID(host string) (int64, bool) {
+	if !db.IsLaunchHost(host) {
+		return 0, false
+	}
+	_, idText, ok := strings.Cut(host, ":")
+	if !ok {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(idText, 10, 64)
+	return id, err == nil
 }
 
 // formatOpsEntry formats and prints a single operations log entry

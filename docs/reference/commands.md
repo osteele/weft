@@ -550,31 +550,79 @@ View the full log file for a job.
 
 ```bash
 weft log <job-id> [flags]
+weft job log <job-id> [flags]   # Alias
+weft log --ops [flags]
+weft log --events [flags]
 ```
 
 **Flags:**
 - `-f, --follow`: Follow log in real-time (like `tail -f`)
 - `-n, --lines N`: Number of lines to show (default: 50)
+- `--tail N`: Alias for `--lines`
 - `--from N`: Show lines starting from line N
 - `--to N`: Show lines up to line N
 - `--grep PATTERN`: Filter lines matching pattern
+- `--full`: Show the entire log (`--from 1`)
+- `-t, --timeout DURATION`: SSH timeout for slow connections
+- `--sync`: Perform a full sync before showing the log
+- `--no-sync`: Skip status and cloud-log sync
+- `--ops`: Show the operations log instead of a job log
+- `--job ID`: Filter `--ops` output by job ID
+- `--host HOST`: Filter `--ops` output by host
+- `--op NAME`: Filter `--ops` output by operation name
+- `--since DURATION`: Filter `--ops` output to a recent time window
+- `--errors`: Show only `--ops` entries that include an error
+- `--events`: Show structured lifecycle events instead of a job log
+- `--kind PREFIX`: Filter `--events` output by event kind or prefix
+- `--launch ID`: Filter `--events` output by launch / instance ID
+- `--stats`: Show aggregate statistics for `--events`
 
 **Examples:**
 ```bash
 weft log 42           # Last 50 lines
 weft log 42 -f        # Follow (like tail -f)
 weft log 42 -n 100    # Last 100 lines
+weft log 42 --tail 30 # Alias for --lines
 weft log 42 --from 100 --to 200  # Lines 100-200
 weft log 42 --from 500           # From line 500 onwards
 weft log 42 --to 100             # First 100 lines
 weft log 42 --grep error         # Lines containing "error"
 weft log 42 -f --grep epoch      # Follow, filter for "epoch"
+weft log 42 --full               # Entire log
+weft log --ops --job 42          # Operations for a job
+weft log --ops --host vastai:17  # Operations for a rental instance
+weft log --events --kind relaunch
 ```
 
 **Notes:**
 - `--from`/`--to` cannot be used with `-n`/`--lines`
 - `--follow` cannot be used with `--to`
 - `--grep` can be combined with any other option
+- `--ops` and `--events` do not take a job ID positional argument
+
+### weft telemetry
+
+Show telemetry for a job's latest attempt.
+
+```bash
+weft telemetry <job-id> [job-id...]
+weft job telemetry <job-id> [job-id...]   # Alias
+```
+
+The command reads the latest attempt's synced telemetry samples, prints the
+time range, and summarizes GPU utilisation, temperature / clock data when
+available, plus per-GPU memory and activity data from the richer telemetry
+stream.
+
+**Flags:**
+- `--json`: Emit machine-readable JSON
+
+**Examples:**
+```bash
+weft telemetry 42
+weft telemetry 42 43
+weft telemetry 42 --json
+```
 
 ### weft job restart
 

@@ -201,6 +201,37 @@ func TestGlobalLogger(t *testing.T) {
 	}
 }
 
+func TestGlobalLoggerSyncKeepsLoggerActive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "global.log")
+
+	if err := Init(path, DefaultMaxSize); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	Log(OpCLICommand, WithDetail("before sync"))
+	if err := Sync(); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	Log(OpCLICommand, WithDetail("after sync"))
+
+	if err := Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	entries, err := ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries after sync, got %d", len(entries))
+	}
+	if entries[0].Detail != "before sync" || entries[1].Detail != "after sync" {
+		t.Fatalf("unexpected entries: %+v", entries)
+	}
+}
+
 func TestNoopLoggerBeforeInit(t *testing.T) {
 	// Reset to noop logger
 	defaultMu.Lock()

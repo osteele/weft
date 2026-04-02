@@ -52,7 +52,7 @@ var jobLogCmd = &cobra.Command{
 	Aliases: []string{"logs"},
 	Short:   "View log output from a job",
 	Long:    logCmd.Long,
-	Args:    usageArgs(cobra.MinimumNArgs(1)),
+	Args:    validateLogArgs,
 	RunE:    runLog,
 }
 
@@ -345,13 +345,7 @@ func init() {
 	addJobAddFlagAliases(jobRunCmd)
 
 	// Copy flags from log command to job log
-	jobLogCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log in real-time")
-	jobLogCmd.Flags().IntVarP(&logLines, "lines", "n", 50, "Number of lines to show (last N lines)")
-	jobLogCmd.Flags().IntVar(&logFrom, "from", 0, "Show lines starting from line N")
-	jobLogCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
-	jobLogCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
-	jobLogCmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
-	jobLogCmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
+	addLogFlags(jobLogCmd)
 
 	// Use shared list flags helper (defined in list.go)
 	addListFlags(jobListCmd)

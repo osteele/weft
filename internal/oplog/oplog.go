@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -92,6 +93,7 @@ type Entry struct {
 type Logger interface {
 	Log(op string, opts ...Option)
 	LogJob(op string, jobID int64, host string, opts ...Option)
+	Sync() error
 	Close() error
 }
 
@@ -163,6 +165,7 @@ type noopLogger struct{}
 
 func (noopLogger) Log(op string, opts ...Option)                              {}
 func (noopLogger) LogJob(op string, jobID int64, host string, opts ...Option) {}
+func (noopLogger) Sync() error                                                { return nil }
 func (noopLogger) Close() error                                               { return nil }
 
 var (
@@ -209,6 +212,14 @@ func Close() error {
 	err := defaultLogger.Close()
 	defaultLogger = &noopLogger{}
 	return err
+}
+
+// Sync flushes buffered writes for the global logger without disabling it.
+func Sync() error {
+	defaultMu.RLock()
+	l := defaultLogger
+	defaultMu.RUnlock()
+	return l.Sync()
 }
 
 // Log logs an operation using the global logger.
@@ -325,6 +336,16 @@ func (l *fileLogger) Close() error {
 	return err
 }
 
+func (l *fileLogger) Sync() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.file == nil {
+		return nil
+	}
+	return l.file.Sync()
+}
+
 // ReadEntries reads all entries from a log file.
 // Returns entries in chronological order.
 func ReadEntries(path string) ([]Entry, error) {
@@ -362,6 +383,49 @@ func ReadRecentFrom(path string, n int) ([]Entry, error) {
 		return entries, nil
 	}
 	return entries[len(entries)-n:], nil
+}
+
+// SyncedInstanceLogDir returns the directory used for cached instance ops logs.
+func SyncedInstanceLogDir() string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		home = "/tmp"
+	}
+	return filepath.Join(home, ".cache", "weft", "cloud-instance-ops")
+}
+
+// SyncedInstanceLogPath returns the cache path for an instance ops log.
+func SyncedInstanceLogPath(instanceID int64) string {
+	return filepath.Join(SyncedInstanceLogDir(), fmt.Sprintf("%d.jsonl", instanceID))
+}
+
+// WriteSyncedInstanceLog stores a cached copy of an instance ops log.
+func WriteSyncedInstanceLog(instanceID int64, data []byte) error {
+	if err := os.MkdirAll(SyncedInstanceLogDir(), 0755); err != nil {
+		return fmt.Errorf("create synced ops log dir: %w", err)
+	}
+	return os.WriteFile(SyncedInstanceLogPath(instanceID), data, 0644)
+}
+
+// ListSyncedInstanceLogPaths returns cached instance ops log paths.
+func ListSyncedInstanceLogPaths() ([]string, error) {
+	entries, err := os.ReadDir(SyncedInstanceLogDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var paths []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		paths = append(paths, filepath.Join(SyncedInstanceLogDir(), entry.Name()))
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 // FilterOptions for filtering log entries.

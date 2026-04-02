@@ -70,6 +70,9 @@ const (
 	DefaultSyncTimeout = 5 * time.Second
 	// NormalSyncTimeout is used for explicit sync commands
 	NormalSyncTimeout = 30 * time.Second
+	// cloudInstanceOpslogLookback controls how far back full sync caches
+	// instance-level ops logs for later `weft log --ops` inspection.
+	cloudInstanceOpslogLookback = 7 * 24 * time.Hour
 )
 
 func init() {
@@ -625,6 +628,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			fmt.Fprintf(os.Stderr, "Warning: cloud job %d live telemetry sync failed: %v\n", jobID, err)
 		}
 	}
+	if err := syncCloudInstanceOpslogs(ctx, r2Client, database, nil, verbose); err != nil && verbose {
+		fmt.Fprintf(os.Stderr, "Warning: instance ops log sync failed: %v\n", err)
+	}
 
 	for instanceID := range updatedInstanceIDs {
 		updateInstanceTerminationReason(database, instanceID)
@@ -865,6 +871,67 @@ func syncCloudLiveTelemetry(ctx context.Context, r2Client *r2.Client, database *
 
 	if err := db.InsertTelemetrySamples(database, jobID, samples); err != nil {
 		return fmt.Errorf("insert telemetry: %w", err)
+	}
+	return nil
+}
+
+func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database *sql.DB, instanceIDs map[int64]struct{}, verbose bool) error {
+	if r2Client == nil || database == nil {
+		return nil
+	}
+	if instanceIDs == nil {
+		instanceIDs = make(map[int64]struct{})
+		running, err := db.ListRunningLaunches(database)
+		if err != nil {
+			return fmt.Errorf("list running launches: %w", err)
+		}
+		for _, launch := range running {
+			instanceIDs[launch.ID] = struct{}{}
+		}
+
+		recent, err := db.ListRecentlyTerminalLaunches(database, cloudInstanceOpslogLookback)
+		if err != nil {
+			return fmt.Errorf("list recent terminal launches: %w", err)
+		}
+		for _, launch := range recent {
+			instanceIDs[launch.ID] = struct{}{}
+		}
+	}
+
+	ids := make([]int64, 0, len(instanceIDs))
+	for instanceID := range instanceIDs {
+		if instanceID > 0 {
+			ids = append(ids, instanceID)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	for _, instanceID := range ids {
+		if err := syncCloudInstanceOpslog(ctx, r2Client, instanceID); err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: instance %d ops log sync failed: %v\n", instanceID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceID int64) error {
+	if r2Client == nil || instanceID <= 0 {
+		return nil
+	}
+	data, err := r2Client.GetObject(ctx, r2keys.InstanceOpslog(instanceID))
+	if err != nil {
+		if r2.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get instance ops log: %w", err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	if err := oplog.WriteSyncedInstanceLog(instanceID, data); err != nil {
+		return fmt.Errorf("cache instance ops log: %w", err)
 	}
 	return nil
 }

@@ -144,13 +144,15 @@ func isR2MissingKey(stderr string) bool {
 	return false
 }
 
-// uploadOpslog flushes the oplog and uploads it to R2, then re-initializes for continued use.
+// uploadOpslog snapshots the current ops log and uploads it to R2.
 func uploadOpslog(bucket string, instanceID int64, logDir string) {
 	uploadOpslogMu.Lock()
 	defer uploadOpslogMu.Unlock()
 
 	oplogPath := filepath.Join(logDir, agentOpslogFile)
-	oplog.Close() // flush
+	if err := oplog.Sync(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: sync opslog before upload: %v\n", err)
+	}
 
 	key := r2keys.InstanceOpslog(instanceID)
 	data, err := os.ReadFile(oplogPath)
@@ -158,10 +160,5 @@ func uploadOpslog(bucket string, instanceID int64, logDir string) {
 		if err := r2PutReader(bucket, key, strings.NewReader(string(data))); err != nil {
 			fmt.Fprintf(os.Stderr, "upload opslog: %v\n", err)
 		}
-	}
-
-	// Re-open for continued logging
-	if err := oplog.Init(oplogPath, 0); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: re-init opslog: %v\n", err)
 	}
 }
