@@ -616,12 +616,15 @@ func TestNormalizeTerminalLaunchJobs_FailedInstanceOrphansRunningJobs(t *testing
 	database := setupTestDB(t)
 
 	instanceID, err := CreateLaunch(database, &Launch{
-		Status:   LaunchStatusFailed,
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX 4090",
 	})
 	if err != nil {
 		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonProviderFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
 	}
 
 	insertTestJob(t, database, 1, "echo running", "/tmp", StatusRunning, withLaunch(instanceID))
@@ -648,6 +651,51 @@ func TestNormalizeTerminalLaunchJobs_FailedInstanceOrphansRunningJobs(t *testing
 	}
 	if outcomes[1] != AttemptOutcomeOrphaned {
 		t.Fatalf("attempt outcome = %q, want %q", outcomes[1], AttemptOutcomeOrphaned)
+	}
+}
+
+func TestNormalizeTerminalLaunchJobs_JobFailureClosesAttemptsAsFailed(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "echo running", "/tmp", StatusRunning, withLaunch(instanceID))
+
+	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 0", n)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusFailed)
+	}
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("job launch_id = %v, want %d", job.LaunchID, instanceID)
+	}
+
+	outcomes, err := GetAttemptOutcomesByLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByLaunch: %v", err)
+	}
+	if outcomes[1] != AttemptOutcomeFailed {
+		t.Fatalf("attempt outcome = %q, want %q", outcomes[1], AttemptOutcomeFailed)
 	}
 }
 
@@ -708,6 +756,48 @@ func TestResetJobsOnTerminalLaunches_SkipsCompletedInstances(t *testing.T) {
 	}
 	if failedJob.Status != StatusQueued {
 		t.Fatalf("failed-instance job status = %q, want %q", failedJob.Status, StatusQueued)
+	}
+}
+
+func TestResetJobsOnTerminalLaunches_JobFailureDoesNotMarkForRelaunch(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "echo test", "/tmp", StatusRunning, withLaunch(instanceID))
+
+	resetMap, err := ResetJobsOnTerminalLaunches(database)
+	if err != nil {
+		t.Fatalf("ResetJobsOnTerminalLaunches: %v", err)
+	}
+	if len(resetMap) != 0 {
+		t.Fatalf("ResetJobsOnTerminalLaunches reset %d jobs, want 0", len(resetMap))
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusFailed)
+	}
+
+	outcomes, err := GetAttemptOutcomesByLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByLaunch: %v", err)
+	}
+	if outcomes[1] != AttemptOutcomeFailed {
+		t.Fatalf("attempt outcome = %q, want %q", outcomes[1], AttemptOutcomeFailed)
 	}
 }
 

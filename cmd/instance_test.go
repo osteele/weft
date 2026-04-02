@@ -6,7 +6,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
+func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
@@ -46,18 +46,18 @@ func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if job.Status != db.StatusQueued {
-		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
+	if job.Status != db.StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusFailed)
 	}
-	if job.Host != "" {
-		t.Fatalf("job host = %q, want empty", job.Host)
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("job launch_id = %v, want %d", job.LaunchID, instanceID)
 	}
 
 	outcomes, err := db.GetAttemptOutcomesByLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get outcomes: %v", err)
 	}
-	if outcomes[jobID] != db.AttemptOutcomeOrphaned {
-		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeOrphaned)
+	if outcomes[jobID] != db.AttemptOutcomeFailed {
+		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeFailed)
 	}
 }

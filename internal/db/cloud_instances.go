@@ -1526,13 +1526,38 @@ func NormalizeTerminalLaunchJobs(database *sql.DB, instanceID int64) (int64, err
 		return 0, nil
 	}
 
+	reset, outcome := terminalLaunchJobDisposition(ci)
+	if outcome == "" {
+		return 0, nil
+	}
+	if reset {
+		return ResetLaunchJobs(database, instanceID, outcome)
+	}
+	return 0, CloseLaunchAttempts(database, instanceID, outcome)
+}
+
+func terminalLaunchJobDisposition(ci *Launch) (reset bool, outcome string) {
+	if ci == nil {
+		return false, ""
+	}
+
 	switch ci.Status {
 	case LaunchStatusFailed:
-		return ResetLaunchJobs(database, instanceID, AttemptOutcomeOrphaned)
+		if IsRetryableTermination(ci) {
+			return true, AttemptOutcomeOrphaned
+		}
+		switch ci.TerminationReason {
+		case TerminationReasonCancelled:
+			return false, AttemptOutcomeCancelled
+		case TerminationReasonCompleted:
+			return false, AttemptOutcomeCompleted
+		default:
+			return false, AttemptOutcomeFailed
+		}
 	case LaunchStatusCancelled:
-		return ResetLaunchJobs(database, instanceID, AttemptOutcomeCancelled)
+		return true, AttemptOutcomeCancelled
 	default:
-		return 0, nil
+		return false, ""
 	}
 }
 
@@ -1546,7 +1571,7 @@ func NormalizeTerminalLaunchJobs(database *sql.DB, instanceID int64) (int64, err
 func ResetJobsOnTerminalLaunches(database *sql.DB) (map[int64]int64, error) {
 	// Find non-terminal jobs on failed/cancelled instances.
 	rows, err := database.Query(`
-		SELECT js.id, ci.id
+		SELECT js.id, ci.id, ci.status, COALESCE(ci.termination_reason, '')
 		FROM launches ci
 		JOIN job_status js ON js.launch_id = ci.id
 		WHERE ci.status IN (?, ?)
@@ -1565,10 +1590,16 @@ func ResetJobsOnTerminalLaunches(database *sql.DB) (map[int64]int64, error) {
 	instanceSet := make(map[int64]bool)
 	for rows.Next() {
 		var jobID, instanceID int64
-		if err := rows.Scan(&jobID, &instanceID); err != nil {
+		var launchStatus, terminationReason string
+		if err := rows.Scan(&jobID, &instanceID, &launchStatus, &terminationReason); err != nil {
 			return nil, err
 		}
-		resetMap[jobID] = instanceID
+		if reset, _ := terminalLaunchJobDisposition(&Launch{
+			Status:            launchStatus,
+			TerminationReason: terminationReason,
+		}); reset {
+			resetMap[jobID] = instanceID
+		}
 		instanceSet[instanceID] = true
 	}
 	if err := rows.Err(); err != nil {

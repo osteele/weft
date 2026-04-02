@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -334,6 +335,106 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 	}
 	if outcomes[jobID] != db.AttemptOutcomeOrphaned {
 		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeOrphaned)
+	}
+}
+
+func TestAllowCompletedMarkerFallback_AllowsQueuedUnplacedPlaceholder(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, end_time = ?
+		 WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusCanceled, int64(1000), jobID,
+	); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, db.StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status: %v", err)
+	}
+
+	var status string
+	var currentLaunchID sql.NullInt64
+	if err := database.QueryRow(`SELECT status, launch_id FROM job_status WHERE id = ?`, jobID).Scan(&status, &currentLaunchID); err != nil {
+		t.Fatalf("query job_status: %v", err)
+	}
+	if status != db.StatusQueued {
+		t.Fatalf("status = %q, want %q", status, db.StatusQueued)
+	}
+	if currentLaunchID.Valid {
+		t.Fatalf("launch_id = %v, want NULL", currentLaunchID)
+	}
+	if !allowCompletedMarkerFallback(status, currentLaunchID) {
+		t.Fatal("allowCompletedMarkerFallback = false, want true")
+	}
+}
+
+func TestAllowCompletedMarkerFallback_BlocksRelaunchedJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	originalLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch (original): %v", err)
+	}
+	replacementLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch (replacement): %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, originalLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID (original): %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, end_time = ?
+		 WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusCanceled, int64(1000), jobID,
+	); err != nil {
+		t.Fatalf("close original attempt: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", &replacementLaunchID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt (replacement): %v", err)
+	}
+
+	var status string
+	var currentLaunchID sql.NullInt64
+	if err := database.QueryRow(`SELECT status, launch_id FROM job_status WHERE id = ?`, jobID).Scan(&status, &currentLaunchID); err != nil {
+		t.Fatalf("query job_status: %v", err)
+	}
+	if status != db.StatusQueued {
+		t.Fatalf("status = %q, want %q", status, db.StatusQueued)
+	}
+	if !currentLaunchID.Valid || currentLaunchID.Int64 != replacementLaunchID {
+		t.Fatalf("launch_id = %v, want %d", currentLaunchID, replacementLaunchID)
+	}
+	if allowCompletedMarkerFallback(status, currentLaunchID) {
+		t.Fatal("allowCompletedMarkerFallback = true, want false")
 	}
 }
 

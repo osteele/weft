@@ -473,10 +473,17 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		// Check current job status directly — skip if already terminal
+		// Check current job status directly — skip if already terminal.
+		// If the exact latest-run marker is missing, only fall back to an
+		// older completion marker for the queued, unplaced placeholder state
+		// created by cleanup/reset. Never apply a stale completion marker to a
+		// newer attempt that is already attached to a replacement launch.
 		var currentStatus string
-		var latestRunID sql.NullInt64
-		if err := database.QueryRow("SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil || db.IsTerminalStatus(currentStatus) {
+		var latestRunID, launchID sql.NullInt64
+		if err := database.QueryRow(
+			"SELECT status, latest_run_id, launch_id FROM job_status WHERE id = ? AND tombstoned = 0",
+			jobID,
+		).Scan(&currentStatus, &latestRunID, &launchID); err != nil || db.IsTerminalStatus(currentStatus) {
 			// Keep live-log chunks: they are the primary log source for `weft log`.
 			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
 			continue
@@ -487,9 +494,14 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			runID = latestRunID.Int64
 		}
 		if !markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, runID)) {
-			// Fallback: the latest attempt may have a different run_id than the
-			// one that actually ran (e.g., after cleanupStaleAttempts replaced
-			// the attempt). Check for any completed marker for this job.
+			// Fallback: the latest attempt may be a queued, unplaced placeholder
+			// created by cleanup/reset while the real execution belonged to the
+			// immediately prior run. In that narrow case, accept an older
+			// completion marker for this job. Do not do this once the job has
+			// been re-launched onto a new instance.
+			if !allowCompletedMarkerFallback(currentStatus, launchID) {
+				continue
+			}
 			if altKey, ok := markers.AnyCompletedKey(jobID); ok {
 				runID = r2keys.ExtractRunID(altKey)
 			} else {
@@ -654,6 +666,10 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	backfillHFDownloadObservations(database)
 
 	return updated
+}
+
+func allowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
+	return currentStatus == db.StatusQueued && !launchID.Valid
 }
 
 // recordCloudDownloadObservation derives effective HF download bandwidth from
