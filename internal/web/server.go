@@ -397,21 +397,23 @@ func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Ti
 		if host == nil {
 			continue
 		}
-		// Skip hosts that haven't been synced recently (e.g. decommissioned hosts)
-		if !isHostRecentlySynced(host.Name, hostSyncTimes) {
-			continue
-		}
+		recentlySynced := isHostRecentlySynced(host.Name, hostSyncTimes)
+		displayStatus := statusLabel(host.Status)
 		statusClass := hostStatusClass(host.Status)
+		if !recentlySynced {
+			displayStatus = "stale"
+			statusClass = "status-unknown"
+		}
 
 		// Dim hosts that are offline or have stale data
 		isStale := !host.LastCheck.IsZero() && time.Since(host.LastCheck) > staleThreshold
-		dimmed := host.Status != hostinfo.HostStatusOnline || isStale
+		dimmed := host.Status != hostinfo.HostStatusOnline || isStale || !recentlySynced
 
 		// Show metrics for online hosts even if data is stale (will be dimmed visually).
 		// Only hide metrics for offline/checking hosts where we have no valid data.
 		cpuText := "--"
 		ramText := "--"
-		if host.Status == hostinfo.HostStatusOnline {
+		if host.Status == hostinfo.HostStatusOnline && recentlySynced {
 			if pct, ok := hostinfo.HostCPULoadPercent(host); ok {
 				cpuText = fmt.Sprintf("%d%%", pct)
 			}
@@ -421,7 +423,7 @@ func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Ti
 		}
 		summaries = append(summaries, hostSummary{
 			Name:   host.Name,
-			Status: statusLabel(host.Status),
+			Status: displayStatus,
 			CPU:    cpuText,
 			RAM:    ramText,
 			Style:  statusClass,

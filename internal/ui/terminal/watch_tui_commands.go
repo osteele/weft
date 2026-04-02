@@ -200,15 +200,15 @@ func (m watchModel) requestOnPremSyncs() {
 // Job preservation
 // ---------------------------------------------------------------------------
 
-func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.Job {
+func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) ([]*db.Job, bool) {
 	if instanceID == 0 {
-		return jobs
+		return jobs, false
 	}
 	if len(jobs) == 0 && len(prevJobs) > 0 {
-		return prevJobs
+		return prevJobs, true
 	}
 	if len(jobs) == 0 {
-		return jobs
+		return jobs, false
 	}
 
 	currentJobIDs := make(map[int64]struct{})
@@ -219,10 +219,11 @@ func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.
 		currentJobIDs[job.ID] = struct{}{}
 	}
 	if len(currentJobIDs) == 0 {
-		return jobs
+		return jobs, false
 	}
 
 	preserved := make([]*db.Job, 0, len(jobs))
+	usedPreservedAttachment := false
 	for _, job := range jobs {
 		if job == nil {
 			preserved = append(preserved, nil)
@@ -241,8 +242,9 @@ func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.
 		preservedInstanceID := instanceID
 		jobCopy.LaunchID = &preservedInstanceID
 		preserved = append(preserved, &jobCopy)
+		usedPreservedAttachment = true
 	}
-	return preserved
+	return preserved, usedPreservedAttachment
 }
 
 // ---------------------------------------------------------------------------

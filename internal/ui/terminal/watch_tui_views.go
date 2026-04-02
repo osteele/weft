@@ -203,6 +203,9 @@ func (m watchModel) renderInstanceView() (string, int) {
 		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))
 	}
+	if m.hasPreservedJobAttachment() {
+		addLine(watchDimStyle.Render("Note: some terminal instance rows are using last-known job attachment (degraded data)."))
+	}
 
 	return b.String(), selectedVisualLine
 }
@@ -325,6 +328,9 @@ func (m watchModel) renderSystemView() (string, int) {
 			footerParts = append(footerParts, watchDimStyle.Render(detail))
 		}
 	}
+	if m.hasPreservedJobAttachment() {
+		footerParts = append(footerParts, watchDimStyle.Render("using last-known terminal job attachment"))
+	}
 
 	// Retry status in footer for system mode
 	if m.retrying {
@@ -374,6 +380,15 @@ func (m watchModel) renderSystemView() (string, int) {
 	// For system mode, scrolling is done via watchScrollStart above, so we
 	// return -1 to skip applyViewport's cursor-based slicing.
 	return b.String(), -1
+}
+
+func (m watchModel) hasPreservedJobAttachment() bool {
+	for _, preserved := range m.preservedJobAttachment {
+		if preserved {
+			return true
+		}
+	}
+	return false
 }
 
 // applyViewport slices rendered content to fit the terminal height.

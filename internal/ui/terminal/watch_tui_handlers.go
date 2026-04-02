@@ -17,8 +17,10 @@ import (
 // ---------------------------------------------------------------------------
 
 func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
+	m.ensurePreservedJobAttachmentMap()
 	if msg.closed {
 		clearWatchJobProgressHWM(m.jobProgressHWM, m.updates[msg.instanceID])
+		delete(m.preservedJobAttachment, msg.instanceID)
 		if m.mode == watchModeSystem {
 			delete(m.channels, msg.instanceID)
 			delete(m.clients, msg.instanceID)
@@ -28,7 +30,15 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 
 	prev := m.updates[msg.instanceID]
 	if msg.update.Launch != nil && campaign.IsInstanceTerminal(msg.update.Launch.Status) {
-		msg.update.Jobs = preserveWatchCurrentJobs(msg.update.Launch.ID, prev.Jobs, msg.update.Jobs)
+		var usedPreservedAttachment bool
+		msg.update.Jobs, usedPreservedAttachment = preserveWatchCurrentJobs(msg.update.Launch.ID, prev.Jobs, msg.update.Jobs)
+		if usedPreservedAttachment {
+			m.preservedJobAttachment[msg.instanceID] = true
+		} else {
+			delete(m.preservedJobAttachment, msg.instanceID)
+		}
+	} else {
+		delete(m.preservedJobAttachment, msg.instanceID)
 	}
 	updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
 	m.updates[msg.instanceID] = msg.update
@@ -329,6 +339,7 @@ func (m watchModel) handleInstanceSyncDone() (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) handleJobsRefreshed(msg watchJobsRefreshedMsg) (tea.Model, tea.Cmd) {
+	m.ensurePreservedJobAttachmentMap()
 	// Track instances that transitioned to retryable-failed via reconciliation,
 	// so we can trigger auto-relaunch (handleWatchUpdate handles the watch-channel path).
 	var newlyFailed *db.Launch
@@ -347,9 +358,16 @@ func (m watchModel) handleJobsRefreshed(msg watchJobsRefreshedMsg) (tea.Model, t
 	for id, jobs := range msg.jobs {
 		u := m.updates[id]
 		if u.Launch != nil && campaign.IsInstanceTerminal(u.Launch.Status) {
-			u.Jobs = preserveWatchCurrentJobs(u.Launch.ID, u.Jobs, jobs)
+			var usedPreservedAttachment bool
+			u.Jobs, usedPreservedAttachment = preserveWatchCurrentJobs(u.Launch.ID, u.Jobs, jobs)
+			if usedPreservedAttachment {
+				m.preservedJobAttachment[id] = true
+			} else {
+				delete(m.preservedJobAttachment, id)
+			}
 		} else {
 			u.Jobs = jobs
+			delete(m.preservedJobAttachment, id)
 		}
 		if outcomes, ok := msg.outcomes[id]; ok {
 			u.JobAttemptOutcomes = outcomes
@@ -610,6 +628,7 @@ func (m watchModel) handleProjectSyncTick() (tea.Model, tea.Cmd) {
 }
 
 func (m *watchModel) mergeSnapshot(snapshot watchSystemSnapshot) []tea.Cmd {
+	m.ensurePreservedJobAttachmentMap()
 	active := make(map[int64]bool, len(snapshot.Launches))
 	var cmds []tea.Cmd
 
@@ -636,8 +655,15 @@ func (m *watchModel) mergeSnapshot(snapshot watchSystemSnapshot) []tea.Cmd {
 	for id := range m.updates {
 		if !active[id] {
 			delete(m.updates, id)
+			delete(m.preservedJobAttachment, id)
 		}
 	}
 
 	return cmds
+}
+
+func (m *watchModel) ensurePreservedJobAttachmentMap() {
+	if m.preservedJobAttachment == nil {
+		m.preservedJobAttachment = map[int64]bool{}
+	}
 }

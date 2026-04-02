@@ -145,7 +145,9 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 			if msg.info.Status == HostStatusOffline && h.Status == HostStatusOnline {
 				m.hostFailCount[msg.hostName]++
 				if m.hostFailCount[msg.hostName] < 3 {
-					// Not enough failures yet; keep existing host data
+					// Not enough failures yet; keep existing metrics but mark
+					// status as checking so stale/degraded state is visible.
+					m.hosts[i].Status = HostStatusChecking
 					break
 				}
 			} else if msg.info.Status == HostStatusOnline {

@@ -192,7 +192,7 @@ func TestHandleCluster_ReturnsHTML(t *testing.T) {
 	}
 }
 
-func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
+func TestBuildHostSummaries_IncludesStaleHosts(t *testing.T) {
 	now := time.Now()
 	hosts := []*hostinfo.Host{
 		{Name: "host-beta", Status: hostinfo.HostStatusOnline},
@@ -204,28 +204,44 @@ func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 		name          string
 		syncTimes     map[string]time.Time
 		wantHostNames []string
+		wantStatuses  map[string]string
 	}{
 		{
-			name: "only recently synced hosts shown",
+			name: "stale hosts are retained and labeled",
 			syncTimes: map[string]time.Time{
 				"host-beta":  now.Add(-1 * time.Hour),
 				"host-alpha": now.Add(-24 * time.Hour),
 				"lm2":        now.Add(-30 * 24 * time.Hour), // 30 days ago
 			},
-			wantHostNames: []string{"host-alpha", "host-beta"},
+			wantHostNames: []string{"host-alpha", "host-beta", "lm2"},
+			wantStatuses: map[string]string{
+				"host-alpha": "online",
+				"host-beta":  "online",
+				"lm2":        "stale",
+			},
 		},
 		{
-			name: "host with no sync time excluded",
+			name: "host with no sync time marked stale",
 			syncTimes: map[string]time.Time{
 				"host-beta":  now.Add(-1 * time.Hour),
 				"host-alpha": now.Add(-1 * time.Hour),
 			},
-			wantHostNames: []string{"host-alpha", "host-beta"},
+			wantHostNames: []string{"host-alpha", "host-beta", "lm2"},
+			wantStatuses: map[string]string{
+				"host-alpha": "online",
+				"host-beta":  "online",
+				"lm2":        "stale",
+			},
 		},
 		{
-			name:          "empty sync times shows no hosts",
+			name:          "empty sync times marks all stale",
 			syncTimes:     map[string]time.Time{},
-			wantHostNames: []string{},
+			wantHostNames: []string{"host-alpha", "host-beta", "lm2"},
+			wantStatuses: map[string]string{
+				"host-alpha": "stale",
+				"host-beta":  "stale",
+				"lm2":        "stale",
+			},
 		},
 		{
 			name: "all hosts recently synced",
@@ -235,6 +251,11 @@ func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 				"lm2":        now.Add(-1 * time.Hour),
 			},
 			wantHostNames: []string{"host-alpha", "host-beta", "lm2"},
+			wantStatuses: map[string]string{
+				"host-alpha": "online",
+				"host-beta":  "online",
+				"lm2":        "offline",
+			},
 		},
 	}
 
@@ -252,6 +273,15 @@ func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 			for i, want := range tt.wantHostNames {
 				if gotNames[i] != want {
 					t.Errorf("host[%d] = %q, want %q", i, gotNames[i], want)
+				}
+			}
+			for _, s := range summaries {
+				wantStatus, ok := tt.wantStatuses[s.Name]
+				if !ok {
+					continue
+				}
+				if s.Status != wantStatus {
+					t.Errorf("status for %s = %q, want %q", s.Name, s.Status, wantStatus)
 				}
 			}
 		})

@@ -62,6 +62,9 @@ type watchModel struct {
 	cloudClients   []cloud.Client // for orphan sweep
 	jobProgressHWM map[int64]int
 	syncWorker     *hostsync.Worker
+	// Tracks instances where the view is showing preserved job attachment data
+	// because snapshot/transition data was inconsistent.
+	preservedJobAttachment map[int64]bool
 
 	// --- Instance-based mode fields ---
 	campaignID          int64
@@ -181,26 +184,27 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 
 	m := watchModel{
-		mode:           mode,
-		database:       database,
-		appConfig:      cfg,
-		r2Client:       r2Client,
-		ctx:            ctx,
-		cancel:         cancel,
-		spinner:        s,
-		instanceIDs:    instanceIDs,
-		updates:        make(map[int64]campaign.InstanceUpdate),
-		channels:       make(map[int64]<-chan campaign.InstanceUpdate),
-		clients:        clients,
-		cloudClients:   allCloudClients,
-		jobProgressHWM: make(map[int64]int),
-		syncWorker:     sw,
-		campaignID:     campaignID,
-		launchedAt:     launchedAt,
-		initInfo:       initInfo,
-		reconciler:     campaign.NewReconciler(),
-		onPremHosts:    groupOnPremHosts(onPremJobs),
-		unplacedJobs:   unplaced,
+		mode:                   mode,
+		database:               database,
+		appConfig:              cfg,
+		r2Client:               r2Client,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		spinner:                s,
+		instanceIDs:            instanceIDs,
+		updates:                make(map[int64]campaign.InstanceUpdate),
+		channels:               make(map[int64]<-chan campaign.InstanceUpdate),
+		clients:                clients,
+		cloudClients:           allCloudClients,
+		jobProgressHWM:         make(map[int64]int),
+		syncWorker:             sw,
+		preservedJobAttachment: map[int64]bool{},
+		campaignID:             campaignID,
+		launchedAt:             launchedAt,
+		initInfo:               initInfo,
+		reconciler:             campaign.NewReconciler(),
+		onPremHosts:            groupOnPremHosts(onPremJobs),
+		unplacedJobs:           unplaced,
 	}
 	m.rebuildReplacementCache()
 	return m
@@ -218,20 +222,21 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 	allCloudClients, _ := buildCloudClients(cfg)
 
 	model := watchModel{
-		mode:           watchModeSystem,
-		database:       database,
-		appConfig:      cfg,
-		r2Client:       r2Client,
-		ctx:            ctx,
-		cancel:         cancel,
-		spinner:        s,
-		updates:        map[int64]campaign.InstanceUpdate{},
-		channels:       map[int64]<-chan campaign.InstanceUpdate{},
-		clients:        map[int64]cloud.Client{},
-		cloudClients:   allCloudClients,
-		jobProgressHWM: map[int64]int{},
-		syncWorker:     sw,
-		flash:          flash.State{Message: flashMessage},
+		mode:                   watchModeSystem,
+		database:               database,
+		appConfig:              cfg,
+		r2Client:               r2Client,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		spinner:                s,
+		updates:                map[int64]campaign.InstanceUpdate{},
+		channels:               map[int64]<-chan campaign.InstanceUpdate{},
+		clients:                map[int64]cloud.Client{},
+		cloudClients:           allCloudClients,
+		jobProgressHWM:         map[int64]int{},
+		syncWorker:             sw,
+		preservedJobAttachment: map[int64]bool{},
+		flash:                  flash.State{Message: flashMessage},
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false, nil)

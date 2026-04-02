@@ -274,6 +274,8 @@ type launchModel struct {
 // Messages
 type reconcileDoneMsg struct {
 	groups []campaign.InstanceGroup
+	err    error
+	warn   string
 }
 
 type rawOffersLoadedMsg struct {
@@ -524,26 +526,28 @@ func (m launchModel) Init() tea.Cmd {
 // returns a refreshed job/group list.
 func (m launchModel) runReconciliation() tea.Cmd {
 	database := m.database
-	clients := m.clients
 	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
 	projectFilter := m.projectFilter
 	reconciler := m.reconciler
 	return func() tea.Msg {
 		r2Client, _ := buildR2Client(cfg)
-		syncCloudStateWithClients(cfg, database, reconciler, clients, r2Client, false)
+		var warn string
+		if _, completed := syncCloudStateWithTimeout(cfg, database, reconciler, FastCloudSyncTimeout, false); !completed {
+			warn = fmt.Sprintf("Cloud sync timed out after %s; showing last known DB state.", FastCloudSyncTimeout)
+		}
 
 		// Re-query unplaced jobs since reconciliation may have freed some
 		jobs, err := db.ListUnplacedJobs(database)
 		if err != nil {
-			return reconcileDoneMsg{}
+			return reconcileDoneMsg{err: fmt.Errorf("refresh unplaced jobs after reconciliation: %w", err)}
 		}
 		jobs = filterRentalLaunchJobs(jobs)
 		jobs = filterLaunchJobsForScope(jobs, projectFilter)
 
 		groups := campaign.PrepareGroups(jobs, database, gpuFilter, r2Client)
 
-		return reconcileDoneMsg{groups: groups}
+		return reconcileDoneMsg{groups: groups, warn: warn}
 	}
 }
 
@@ -1043,8 +1047,16 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case reconcileDoneMsg:
 		m.reconciling = false
+		if msg.err != nil {
+			m.statusHint = fmt.Sprintf("Reconciliation failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.warn != "" {
+			m.statusHint = msg.warn
+		}
 		if msg.groups == nil {
-			return m, nil // reconciliation failed, keep current state
+			m.statusHint = "Reconciliation returned no data; keeping current state."
+			return m, nil
 		}
 		if len(msg.groups) == 0 {
 			// All jobs got placed during reconciliation

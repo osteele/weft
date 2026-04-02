@@ -848,7 +848,10 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 // are terminal. Called before displaying campaign data.
 func reconcileBeforeDisplay(database *sql.DB, timeout time.Duration) {
 	cfg, _ := config.Load()
-	result, _ := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false)
+	result, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false)
+	if !completed {
+		fmt.Fprintf(os.Stderr, "Warning: cloud sync timed out after %s; displaying last known state.\n", timeout)
+	}
 	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
 		fmt.Printf("Reconciled %d dead instance(s)\n", result.ReconcileResult.Reconciled)
 	}
