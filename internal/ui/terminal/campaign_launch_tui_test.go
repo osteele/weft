@@ -649,9 +649,9 @@ func TestLaunchModelView_ShowsLaunchLivenessSummaryWhileLaunching(t *testing.T) 
 	for _, want := range []string{
 		"Launching instances...",
 		"elapsed:",
-		"instances discovered: 1/3",
+		"new instances discovered: 1/3",
 		"instance states: launching 1, running 1",
-		"No launch callbacks for",
+		"No new-instance launch callbacks for",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in output, got:\n%s", want, out)

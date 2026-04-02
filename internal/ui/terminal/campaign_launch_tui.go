@@ -2150,9 +2150,9 @@ func (m launchModel) launchElapsedLine() string {
 func (m launchModel) launchKnownInstancesLine() string {
 	known := len(m.registeredInstanceIDs)
 	if m.expectedInstanceCount > 0 {
-		return fmt.Sprintf("instances discovered: %d/%d", known, m.expectedInstanceCount)
+		return fmt.Sprintf("new instances discovered: %d/%d", known, m.expectedInstanceCount)
 	}
-	return fmt.Sprintf("instances discovered: %d", known)
+	return fmt.Sprintf("new instances discovered: %d", known)
 }
 
 func formatLaunchStatusCounts(counts map[string]int) string {
@@ -2205,7 +2205,7 @@ func (m launchModel) launchStallLine() string {
 	if stalledFor < launchStallThreshold {
 		return ""
 	}
-	return fmt.Sprintf("No launch callbacks for %s; checking DB state...", stalledFor.Truncate(time.Second))
+	return fmt.Sprintf("No new-instance launch callbacks for %s; checking DB state...", stalledFor.Truncate(time.Second))
 }
 
 func (m launchModel) renderInlineLaunchOverview() string {
