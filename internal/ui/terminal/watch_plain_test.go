@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 )
 
 func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
@@ -111,11 +112,11 @@ func TestIsActiveCloudLaunchStatus(t *testing.T) {
 func TestFormatWatchPlainSnapshot_ShowsCloudDegradedReason(t *testing.T) {
 	snapshot := watchSystemSnapshot{
 		CloudDegraded: true,
-		CloudReason:   "using last-known rental instances (degraded data)",
+		CloudReason:   degraded.CloudLastKnownRentalsReason(),
 	}
 
 	out := formatWatchPlainSnapshot(snapshot, time.Unix(0, 0))
-	if !strings.Contains(out, "note: using last-known rental instances (degraded data)") {
+	if !strings.Contains(out, "note: "+degraded.CloudLastKnownRentalsReason()) {
 		t.Fatalf("output missing degraded cloud reason, got:\n%s", out)
 	}
 }

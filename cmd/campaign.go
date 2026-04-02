@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
@@ -850,7 +851,7 @@ func reconcileBeforeDisplay(database *sql.DB, timeout time.Duration) {
 	cfg, _ := config.Load()
 	result, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false)
 	if !completed {
-		fmt.Fprintf(os.Stderr, "Warning: cloud sync timed out after %s; displaying last known state.\n", timeout)
+		fmt.Fprintf(os.Stderr, "Warning: %s.\n", degraded.CloudSyncTimedOutShowingLastKnownState(timeout.String()))
 	}
 	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
 		fmt.Printf("Reconciled %d dead instance(s)\n", result.ReconcileResult.Reconciled)

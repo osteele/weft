@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -204,7 +205,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 		addLine(watchDimStyle.Render(hint))
 	}
 	if m.hasPreservedJobAttachment() {
-		addLine(watchDimStyle.Render("Note: some terminal instance rows are using last-known job attachment (degraded data)."))
+		addLine(watchDimStyle.Render(degraded.TerminalJobAttachmentDegradedNote()))
 	}
 
 	return b.String(), selectedVisualLine
@@ -332,7 +333,7 @@ func (m watchModel) renderSystemView() (string, int) {
 		}
 	}
 	if m.hasPreservedJobAttachment() {
-		footerParts = append(footerParts, watchDimStyle.Render("using last-known terminal job attachment"))
+		footerParts = append(footerParts, watchDimStyle.Render(degraded.TerminalJobAttachmentDegradedFooter()))
 	}
 
 	// Retry status in footer for system mode

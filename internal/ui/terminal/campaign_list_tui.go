@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/logging"
 )
 
@@ -368,7 +369,7 @@ func syncCampaignListTUIData(database *sql.DB, full bool) []string {
 	}
 	cfg, _ := config.Load()
 	if _, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false); !completed {
-		return []string{fmt.Sprintf("Cloud sync timed out after %s; waiting for DB updates.", timeout)}
+		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
@@ -98,7 +99,7 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, _ *http.Request) {
 		if live, ok := liveMap[spec.Name]; ok {
 			h.Status = statusLabel(live.Status)
 			if !isHostRecentlySynced(spec.Name, hostSyncTimes) {
-				h.Status = "stale"
+				h.Status = degraded.HostStatusStale
 			}
 			if pct, ok := hostinfo.HostCPULoadPercent(live); ok {
 				h.CPULoad = fmt.Sprintf("%d%%", pct)

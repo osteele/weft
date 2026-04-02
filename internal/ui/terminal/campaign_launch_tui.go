@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
@@ -534,7 +535,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		r2Client, _ := buildR2Client(cfg)
 		var warn string
 		if _, completed := syncCloudStateWithTimeout(cfg, database, reconciler, FastCloudSyncTimeout, false); !completed {
-			warn = fmt.Sprintf("Cloud sync timed out after %s; showing last known DB state.", FastCloudSyncTimeout)
+			warn = degraded.CloudSyncTimedOutShowingLastKnownState(FastCloudSyncTimeout.String()) + "."
 		}
 
 		// Re-query unplaced jobs since reconciliation may have freed some

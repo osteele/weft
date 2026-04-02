@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/queueblock"
 )
@@ -78,7 +79,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 		}
 		if len(cloudInstances) > 0 {
 			cloudDegraded = true
-			cloudReason = "using last-known rental instances (degraded data)"
+			cloudReason = degraded.CloudLastKnownRentalsReason()
 		}
 	}
 

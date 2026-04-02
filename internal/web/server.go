@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/monitor"
@@ -401,7 +402,7 @@ func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Ti
 		displayStatus := statusLabel(host.Status)
 		statusClass := hostStatusClass(host.Status)
 		if !recentlySynced {
-			displayStatus = "stale"
+			displayStatus = degraded.HostStatusStale
 			statusClass = "status-stale"
 		}
 

@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
@@ -48,13 +49,13 @@ func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Project: "GAMMA", Description: "benchmark", GPUClass: "A100"},
 		},
 		jobProgressHWM: map[int64]int{},
-		cloudReason:    "using last-known rental instances (degraded data)",
+		cloudReason:    degraded.CloudLastKnownRentalsReason(),
 	}
 
 	out := stripANSI(m.View())
 	for _, expected := range []string{
 		"Rental Instances (1)",
-		"note: using last-known rental instances (degraded data)",
+		"note: " + degraded.CloudLastKnownRentalsReason(),
 		"Inventory Hosts (1 active)",
 		"Unplaced Jobs (1)",
 		"[u] unplace",
