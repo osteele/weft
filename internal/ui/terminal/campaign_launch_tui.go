@@ -44,17 +44,134 @@ func renderRow(b *strings.Builder, style lipgloss.Style, line string, isCursor b
 	b.WriteString(style.Render(prefix + line))
 }
 
-// formatPartialErrors renders a list of launch failure messages.
-func formatPartialErrors(errors []string) string {
+// formatPartialErrors renders a list of launch failure messages, wrapping long
+// lines so the full error remains readable in narrow terminals.
+func formatPartialErrors(errors []string, width int) string {
 	var b strings.Builder
-	b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(errors))))
-	b.WriteString("\n")
+	header := fmt.Sprintf("%d planned launch(es) failed:", len(errors))
+	if width > 0 {
+		header = truncateDisplayWidth(header, width)
+	}
+	b.WriteString(launchErrStyle.Render(header))
 	for _, errMsg := range errors {
-		b.WriteString("  - ")
-		b.WriteString(errMsg)
 		b.WriteString("\n")
+		for i, line := range wrapPrefixedText(errMsg, width, "  - ", "    ") {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(line)
+		}
 	}
 	return b.String()
+}
+
+func wrapPrefixedText(text string, width int, firstPrefix string, continuationPrefix string) []string {
+	if width <= 0 {
+		return []string{firstPrefix + text}
+	}
+	available := width - lipgloss.Width(firstPrefix)
+	if available < 8 {
+		return []string{firstPrefix + truncateDisplayWidth(text, max(width-lipgloss.Width(firstPrefix), 1))}
+	}
+
+	wrapped := wrapDisplayWidth(text, available)
+	lines := make([]string, 0, len(wrapped))
+	for i, line := range wrapped {
+		prefix := continuationPrefix
+		if i == 0 {
+			prefix = firstPrefix
+		}
+		lines = append(lines, prefix+line)
+	}
+	return lines
+}
+
+func wrapDisplayWidth(text string, width int) []string {
+	if width <= 0 || lipgloss.Width(text) <= width {
+		return []string{text}
+	}
+
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+
+	lines := make([]string, 0, 4)
+	current := ""
+	currentWidth := 0
+
+	flush := func() {
+		if current == "" {
+			return
+		}
+		lines = append(lines, current)
+		current = ""
+		currentWidth = 0
+	}
+
+	for _, word := range words {
+		segments := splitTokenByDisplayWidth(word, width)
+		for idx, segment := range segments {
+			segmentWidth := lipgloss.Width(segment)
+			if current == "" {
+				current = segment
+				currentWidth = segmentWidth
+				continue
+			}
+			if idx == 0 && currentWidth+1+segmentWidth <= width {
+				current += " " + segment
+				currentWidth += 1 + segmentWidth
+				continue
+			}
+			flush()
+			current = segment
+			currentWidth = segmentWidth
+		}
+	}
+	flush()
+	return lines
+}
+
+func splitTokenByDisplayWidth(token string, width int) []string {
+	if width <= 0 || lipgloss.Width(token) <= width {
+		return []string{token}
+	}
+
+	parts := make([]string, 0, lipgloss.Width(token)/width+1)
+	var b strings.Builder
+	currentWidth := 0
+	for _, r := range token {
+		runeWidth := lipgloss.Width(string(r))
+		if currentWidth+runeWidth > width && b.Len() > 0 {
+			parts = append(parts, b.String())
+			b.Reset()
+			currentWidth = 0
+		}
+		b.WriteRune(r)
+		currentWidth += runeWidth
+		if currentWidth >= width {
+			parts = append(parts, b.String())
+			b.Reset()
+			currentWidth = 0
+		}
+	}
+	if b.Len() > 0 {
+		parts = append(parts, b.String())
+	}
+	return parts
+}
+
+func formatTradeoffColumnHeader(table campaign.CostTable) string {
+	strategyWidth := max(1, table.TimeColOffset-4)
+	timeHeader := truncateDisplayWidth("duration", max(table.TimeWidth, 1))
+	rateHeader := truncateDisplayWidth("burn", max(table.RateWidth, 1))
+	return fmt.Sprintf("  %-*s  %-*s  %-*s  %s  %s",
+		strategyWidth, "option",
+		max(table.TimeWidth, len(timeHeader)), timeHeader,
+		max(table.RateWidth, len(rateHeader)), rateHeader,
+		"total cost",
+		"instances",
+	)
 }
 
 // listItem is a union type for the flat list of items in the launch selector.
@@ -1955,7 +2072,7 @@ func (m launchModel) View() string {
 		b.WriteString("\n")
 		if len(m.partialErrors) > 0 {
 			b.WriteString("\n")
-			b.WriteString(formatPartialErrors(m.partialErrors))
+			b.WriteString(formatPartialErrors(m.partialErrors, m.width))
 			b.WriteString("\nPress Enter, Esc, or q to continue.\n")
 		}
 		return b.String()
@@ -2096,6 +2213,8 @@ func (m launchModel) View() string {
 				b.WriteString("\n")
 				rows := m.cachedTradeoffRows
 				summaryTable := campaign.FormatStrategySummary(rows)
+				b.WriteString(launchDimStyle.Render(formatTradeoffColumnHeader(summaryTable)))
+				b.WriteString("\n")
 
 				// Build final lines, splicing detail rows if disclosed
 				var finalLines []campaign.CostLine

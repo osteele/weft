@@ -55,6 +55,14 @@ func (m watchModel) renderInstanceView() (string, int) {
 	if width <= 0 {
 		width = 100
 	}
+	hasVisibleInstances := false
+	for _, id := range m.instanceIDs {
+		if !m.cachedHiddenIDs[id] {
+			hasVisibleInstances = true
+			break
+		}
+	}
+	showInstanceHeader := hasVisibleInstances || m.done
 	selectableIndex := 0
 	selectedVisualLine := -1
 	lineCount := 0
@@ -77,7 +85,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	// Header
-	if m.campaignID > 0 {
+	if showInstanceHeader && m.campaignID > 0 {
 		var header string
 		switch m.mode {
 		case watchModeCampaign:
@@ -93,9 +101,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 		addLine(watchTitleStyle.Render(header))
 		addLine("")
 	}
-	if summary := formatWatchSummaryLine(m.launchedAt, m.instanceViews(), now, m.estimateSummaryLine); summary != "" {
-		addLine(summary)
-		addLine("")
+	if showInstanceHeader {
+		if summary := formatWatchSummaryLine(m.launchedAt, m.instanceViews(), now, m.estimateSummaryLine); summary != "" {
+			addLine(summary)
+			addLine("")
+		}
 	}
 
 	for _, id := range m.instanceIDs {
@@ -150,9 +160,10 @@ func (m watchModel) renderInstanceView() (string, int) {
 
 	// Partial launch errors
 	if len(m.partialErrors) > 0 && !m.partialErrorsRetried {
-		b.WriteString(formatPartialErrors(m.partialErrors))
+		block := formatPartialErrors(m.partialErrors, width)
+		b.WriteString(block)
 		b.WriteString("\n")
-		countLine()
+		lineCount += strings.Count(block, "\n") + 1
 	}
 
 	// Retry status

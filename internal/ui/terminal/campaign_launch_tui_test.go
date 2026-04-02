@@ -37,6 +37,42 @@ func TestLaunchModelView_ShowsPartialFailures(t *testing.T) {
 	}
 }
 
+func TestFormatPartialErrors_WrapsLongLines(t *testing.T) {
+	out := formatPartialErrors([]string{
+		"NVIDIA ≥8GB ≤12GB: search replacement offer: replacement offer price $0.08/hr exceeds 25% cap over original offer $0.06/hr",
+	}, 72)
+
+	if !strings.Contains(out, "1 planned launch(es) failed:") {
+		t.Fatalf("missing header, got:\n%s", out)
+	}
+	for _, want := range []string{
+		"replacement offer price",
+		"$0.08/hr exceeds 25% cap",
+		"original offer $0.06/hr",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing wrapped segment %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "\n") < 2 {
+		t.Fatalf("expected wrapped output, got:\n%s", out)
+	}
+}
+
+func TestFormatTradeoffColumnHeader_ShowsRateAndTotalCost(t *testing.T) {
+	header := formatTradeoffColumnHeader(campaign.CostTable{
+		TimeColOffset: 14,
+		TimeWidth:     12,
+		RateWidth:     8,
+	})
+
+	for _, want := range []string{"option", "duration", "burn", "total cost", "instances"} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("header missing %q, got: %q", want, header)
+		}
+	}
+}
+
 func TestLaunchModelView_ShowsCostPlaceholderWhileLoadingOffers(t *testing.T) {
 	groups := []campaign.InstanceGroup{
 		{
@@ -341,6 +377,9 @@ func TestLaunchModelView_InlineWatchShowsLaunchOverviewBeforeRegistration(t *tes
 	}
 	if strings.Contains(out, "Unplaced Jobs") {
 		t.Fatalf("did not expect unplaced jobs section before registration, got:\n%s", out)
+	}
+	if strings.Contains(out, "Launched") {
+		t.Fatalf("did not expect watch header before registration, got:\n%s", out)
 	}
 }
 
