@@ -28,7 +28,10 @@ func EnsureRcloneConfig(host string, r2Cfg cloud.R2Config) error {
 	configContent := cloud.GenerateRcloneConfig(r2Cfg)
 	writeCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat >> %s << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConfigPath, configContent)
 	if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
-		return fmt.Errorf("write rclone config on %s: %s", host, strings.TrimSpace(stderr))
+		if s := strings.TrimSpace(stderr); s != "" {
+			return fmt.Errorf("write rclone config on %s: %s", host, s)
+		}
+		return fmt.Errorf("write rclone config on %s: %w", host, err)
 	}
 
 	return nil

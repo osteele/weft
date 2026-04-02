@@ -120,6 +120,7 @@ var transitions = []TransitionRule{
 	{From: Killed, To: Queued, UpdatesSynced: false},
 	{From: Canceled, To: Paused, UpdatesSynced: false},
 	{From: Canceled, To: Queued, UpdatesSynced: false},
+	{From: Canceled, To: Failed, UpdatesSynced: true},
 
 	// --- Authoritative overrides (R2 completion can fix race conditions) ---
 	{From: Failed, To: Completed, UpdatesSynced: true, Authoritative: true},

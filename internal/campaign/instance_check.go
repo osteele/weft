@@ -488,7 +488,7 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	// R2 markers may override below with a more specific reason.
 	reason := db.TerminationReasonUnknown
 	if ci.LaunchedAt != nil && inst != nil && inst.Status != "" {
-		reason = inst.Status // echo provider status: "exited", "error", "destroyed", etc.
+		reason = db.TerminationReasonProviderFailure
 	}
 	reason = failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
 
