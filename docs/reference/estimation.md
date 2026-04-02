@@ -28,14 +28,55 @@ The code is split across:
 
 `weft export training-data` exports per-run JSONL records with:
 
-- command, project, host, GPU class, backend, and tenant
+- command, project, host, backend, tenant, and tags
+- requested placement (`requested_gpu`, `requested_gpu_class`, `cpu_allotment`, `gpu_mem_gb`)
+- actual runtime hardware (`cpu_count`, `cpu_model`, `cpu_freq`, `mem_total`,
+  `actual_gpu_name`, `gpu_names`, `gpu_count`, `gpu_vram_per_device_mib`,
+  `gpu_vram_total_mib`, `actual_gpu_class`)
 - start/end times and total duration
 - peak RSS, peak GPU memory, and mean CPU usage
-- host hardware metadata
+- raw `job_metadata` and `placement_meta`
 - time-series telemetry sampled during execution
 
 This is the training feed for the external `job-estimator` project that weft
 invokes through `uv`.
+
+#### Stable SQLite contract
+
+The stable SQLite contract for estimator consumers is the `training_examples`
+view. `job_run_training_examples` is a compatibility view that selects the same
+columns from `training_examples`.
+
+Core columns include:
+
+- run identity and timing: `run_id`, `job_id`, `host`, `status`, `start_time`,
+  `end_time`, `duration_s`, `exit_code`
+- command metadata: `working_dir`, `command`, `project`, `tags`, `backend`
+- requested placement: `requested_gpu`, `requested_gpu_class`,
+  `cpu_allotment`, `gpu_mem_gb`
+- actual runtime hardware: `cpu_count`, `cpu_model`, `cpu_freq`, `mem_total`,
+  `actual_gpu_name`, `gpu_names`, `gpu_count`, `gpu_vram_per_device_mib`,
+  `gpu_vram_total_mib`, `actual_gpu_class`
+- telemetry/resource fields: `job_metadata`, `placement_meta`, `peak_rss_kb`,
+  `max_gpu_mem_mib`, `cpu_mean`
+
+Semantics:
+
+- `host` is the actual host recorded on the completed attempt in
+  `job_attempts.host`.
+- `requested_gpu` and `requested_gpu_class` come from the logical job spec on
+  `jobs`; they are not treated as actual hardware.
+- Actual CPU/GPU columns are populated from the best-known host inventory
+  snapshot in `host_info_cache`, with cloud-launch fallbacks from `launches`
+  when host inventory is unavailable.
+- When `job_metadata.resource.gpu_devices` or
+  `job_metadata.telemetry.assigned_gpu_indices` is present, weft narrows GPU
+  hardware fields to those assigned devices. Otherwise the hardware columns
+  reflect the best-known host-level inventory for that attempt.
+
+`weft export training-data` exposes the same semantic fields in JSONL, so
+estimator consumers do not need to join internal tables such as
+`host_info_cache`.
 
 ### Cloud phase telemetry
 

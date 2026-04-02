@@ -1,16 +1,13 @@
 package cmd
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/spf13/cobra"
 )
 
@@ -47,28 +44,46 @@ func init() {
 
 // trainingDataRecord is the JSONL output format for job-estimator.
 type trainingDataRecord struct {
-	RunID              int64                 `json:"run_id"`
-	JobID              int64                 `json:"job_id"`
-	Host               string                `json:"host"`
-	WorkingDir         string                `json:"working_dir,omitempty"`
-	Command            string                `json:"command"`
-	Project            string                `json:"project,omitempty"`
-	GPUClass           string                `json:"gpu_class,omitempty"`
-	Backend            string                `json:"backend"`
-	Tenant             string                `json:"tenant"`
-	StartTime          int64                 `json:"start_time"`
-	EndTime            int64                 `json:"end_time"`
-	DurationS          int64                 `json:"duration_s"`
-	ExitCode           int                   `json:"exit_code"`
-	FailureReason      string                `json:"failure_reason,omitempty"`
-	ErrorDiagnosis     string                `json:"error_diagnosis,omitempty"`
-	PeakRSSKB          int64                 `json:"peak_rss_kb,omitempty"`
-	MaxGPUMiB          int64                 `json:"max_gpu_mem_mib,omitempty"`
-	CPUMean            float64               `json:"cpu_mean,omitempty"`
-	AssignedGPUIndices []string              `json:"assigned_gpu_indices,omitempty"`
-	HostSpecs          *trainingHostSpecs    `json:"host_specs,omitempty"`
-	Timeseries         []db.TimeseriesSample `json:"timeseries,omitempty"`
-	TelemetryV2        *trainingTelemetryV2  `json:"telemetry_v2,omitempty"`
+	RunID               int64                 `json:"run_id"`
+	JobID               int64                 `json:"job_id"`
+	Host                string                `json:"host"`
+	WorkingDir          string                `json:"working_dir,omitempty"`
+	Command             string                `json:"command"`
+	Project             string                `json:"project,omitempty"`
+	Tags                []string              `json:"tags,omitempty"`
+	GPUClass            string                `json:"gpu_class,omitempty"`
+	RequestedGPU        string                `json:"requested_gpu,omitempty"`
+	RequestedGPUClass   string                `json:"requested_gpu_class,omitempty"`
+	CPUAllotment        *int                  `json:"cpu_allotment,omitempty"`
+	GPUMemGB            *int                  `json:"gpu_mem_gb,omitempty"`
+	Backend             string                `json:"backend"`
+	Tenant              string                `json:"tenant"`
+	Status              string                `json:"status"`
+	StartTime           int64                 `json:"start_time"`
+	EndTime             int64                 `json:"end_time"`
+	DurationS           int64                 `json:"duration_s"`
+	ExitCode            int                   `json:"exit_code"`
+	FailureReason       string                `json:"failure_reason,omitempty"`
+	ErrorDiagnosis      string                `json:"error_diagnosis,omitempty"`
+	CPUCount            int                   `json:"cpu_count,omitempty"`
+	CPUModel            string                `json:"cpu_model,omitempty"`
+	CPUFreq             string                `json:"cpu_freq,omitempty"`
+	MemTotal            string                `json:"mem_total,omitempty"`
+	ActualGPUName       string                `json:"actual_gpu_name,omitempty"`
+	GPUNames            []string              `json:"gpu_names,omitempty"`
+	GPUCount            int                   `json:"gpu_count,omitempty"`
+	GPUVRAMPerDeviceMiB int                   `json:"gpu_vram_per_device_mib,omitempty"`
+	GPUVRAMTotalMiB     int                   `json:"gpu_vram_total_mib,omitempty"`
+	ActualGPUClass      string                `json:"actual_gpu_class,omitempty"`
+	JobMetadata         *db.JobMetadata       `json:"job_metadata,omitempty"`
+	PlacementMeta       *db.PlacementMeta     `json:"placement_meta,omitempty"`
+	PeakRSSKB           int64                 `json:"peak_rss_kb,omitempty"`
+	MaxGPUMiB           int64                 `json:"max_gpu_mem_mib,omitempty"`
+	CPUMean             float64               `json:"cpu_mean,omitempty"`
+	AssignedGPUIndices  []string              `json:"assigned_gpu_indices,omitempty"`
+	HostSpecs           *trainingHostSpecs    `json:"host_specs,omitempty"`
+	Timeseries          []db.TimeseriesSample `json:"timeseries,omitempty"`
+	TelemetryV2         *trainingTelemetryV2  `json:"telemetry_v2,omitempty"`
 }
 
 type trainingTelemetryV2 struct {
@@ -93,11 +108,6 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
-
-	hostSpecs, err := loadTrainingHostSpecs(database)
-	if err != nil {
-		return fmt.Errorf("load host specs: %w", err)
-	}
 
 	// Parse since filter
 	var sinceTime time.Time
@@ -133,43 +143,63 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 
 	for _, run := range runs {
 		rec := trainingDataRecord{
-			RunID:          run.RunID,
-			JobID:          run.JobID,
-			Host:           run.Host,
-			WorkingDir:     run.WorkingDir,
-			Command:        run.Command,
-			Project:        run.Project,
-			GPUClass:       run.GPUClass,
-			Backend:        run.Backend,
-			Tenant:         run.Tenant,
-			StartTime:      run.StartTime,
-			EndTime:        run.EndTime,
-			DurationS:      run.DurationS,
-			ExitCode:       run.ExitCode,
-			FailureReason:  run.FailureReason,
-			ErrorDiagnosis: run.ErrorDiagnosis,
-			HostSpecs:      hostSpecs[run.Host],
+			RunID:               run.RunID,
+			JobID:               run.JobID,
+			Host:                run.Host,
+			WorkingDir:          run.WorkingDir,
+			Command:             run.Command,
+			Project:             run.Project,
+			Tags:                append([]string(nil), run.Tags...),
+			GPUClass:            run.GPUClass,
+			RequestedGPU:        run.RequestedGPU,
+			RequestedGPUClass:   run.RequestedGPUClass,
+			CPUAllotment:        cloneIntPtr(run.CPUAllotment),
+			GPUMemGB:            cloneIntPtr(run.GPUMemGB),
+			Backend:             run.Backend,
+			Tenant:              run.Tenant,
+			Status:              run.Status,
+			StartTime:           run.StartTime,
+			EndTime:             run.EndTime,
+			DurationS:           run.DurationS,
+			ExitCode:            run.ExitCode,
+			FailureReason:       run.FailureReason,
+			ErrorDiagnosis:      run.ErrorDiagnosis,
+			CPUCount:            run.CPUCount,
+			CPUModel:            run.CPUModel,
+			CPUFreq:             run.CPUFreq,
+			MemTotal:            run.MemTotal,
+			ActualGPUName:       run.ActualGPUName,
+			GPUNames:            append([]string(nil), run.GPUNames...),
+			GPUCount:            run.GPUCount,
+			GPUVRAMPerDeviceMiB: run.GPUVRAMPerDeviceMiB,
+			GPUVRAMTotalMiB:     run.GPUVRAMTotalMiB,
+			ActualGPUClass:      run.ActualGPUClass,
+			JobMetadata:         run.Metadata,
+			PlacementMeta:       run.PlacementMeta,
+			PeakRSSKB:           run.PeakRSSKB,
+			MaxGPUMiB:           run.MaxGPUMemMiB,
+			CPUMean:             run.CPUMean,
+			HostSpecs:           runtimeHostSpecsFromRun(run),
 		}
 
-		// Extract resource usage from metadata
-		if run.Metadata != nil && run.Metadata.Resource != nil {
-			ru := run.Metadata.Resource
-			if ru.PeakRSSKB != nil {
+		if rec.JobMetadata != nil && rec.JobMetadata.Resource != nil {
+			ru := rec.JobMetadata.Resource
+			if rec.PeakRSSKB == 0 && ru.PeakRSSKB != nil {
 				rec.PeakRSSKB = *ru.PeakRSSKB
 			}
-			if ru.MaxGPUMemMiB != nil {
+			if rec.MaxGPUMiB == 0 && ru.MaxGPUMemMiB != nil {
 				rec.MaxGPUMiB = *ru.MaxGPUMemMiB
 			}
 		}
-		if run.Metadata != nil && run.Metadata.CPU != nil && run.Metadata.CPU.Mean != nil {
-			rec.CPUMean = *run.Metadata.CPU.Mean
+		if rec.JobMetadata != nil && rec.JobMetadata.CPU != nil && rec.JobMetadata.CPU.Mean != nil && rec.CPUMean == 0 {
+			rec.CPUMean = *rec.JobMetadata.CPU.Mean
 		}
-		if run.Metadata != nil {
-			if run.Metadata.Telemetry != nil {
-				rec.AssignedGPUIndices = append([]string(nil), run.Metadata.Telemetry.AssignedGPUIndices...)
-				rec.TelemetryV2 = &trainingTelemetryV2{Summary: run.Metadata.Telemetry}
-			} else if run.Metadata.Resource != nil && run.Metadata.Resource.GPUDevices != "" {
-				rec.AssignedGPUIndices = splitCSV(run.Metadata.Resource.GPUDevices)
+		if rec.JobMetadata != nil {
+			if rec.JobMetadata.Telemetry != nil {
+				rec.AssignedGPUIndices = append([]string(nil), rec.JobMetadata.Telemetry.AssignedGPUIndices...)
+				rec.TelemetryV2 = &trainingTelemetryV2{Summary: rec.JobMetadata.Telemetry}
+			} else if rec.JobMetadata.Resource != nil && rec.JobMetadata.Resource.GPUDevices != "" {
+				rec.AssignedGPUIndices = splitCSV(rec.JobMetadata.Resource.GPUDevices)
 			}
 		}
 
@@ -200,64 +230,36 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func loadTrainingHostSpecs(database *sql.DB) (map[string]*trainingHostSpecs, error) {
-	cachedHosts, err := db.LoadAllCachedHosts(database)
-	if err != nil {
-		return nil, err
-	}
-
-	specs := make(map[string]*trainingHostSpecs, len(cachedHosts))
-	for _, cached := range cachedHosts {
-		specs[cached.Name] = cachedHostToTrainingSpecs(cached)
-	}
-	return specs, nil
-}
-
-func cachedHostToTrainingSpecs(cached *db.CachedHostInfo) *trainingHostSpecs {
-	if cached == nil {
+func runtimeHostSpecsFromRun(run db.TrainingJobRun) *trainingHostSpecs {
+	if run.CPUCount == 0 &&
+		run.CPUModel == "" &&
+		run.CPUFreq == "" &&
+		run.MemTotal == "" &&
+		len(run.GPUNames) == 0 &&
+		run.GPUCount == 0 &&
+		run.GPUVRAMPerDeviceMiB == 0 &&
+		run.GPUVRAMTotalMiB == 0 {
 		return nil
 	}
 
-	result := &trainingHostSpecs{
-		CPUCount: cached.CPUCount,
-		CPUModel: cached.CPUModel,
-		CPUFreq:  cached.CPUFreq,
-		MemTotal: cached.MemTotal,
+	return &trainingHostSpecs{
+		CPUCount:            run.CPUCount,
+		CPUModel:            run.CPUModel,
+		CPUFreq:             run.CPUFreq,
+		MemTotal:            run.MemTotal,
+		GPUNames:            append([]string(nil), run.GPUNames...),
+		GPUCount:            run.GPUCount,
+		GPUVRAMPerDeviceMiB: run.GPUVRAMPerDeviceMiB,
+		GPUVRAMTotalMiB:     run.GPUVRAMTotalMiB,
 	}
-
-	var gpus []hostinfo.GPUInfo
-	if err := json.Unmarshal([]byte(cached.GPUsJSON), &gpus); err != nil {
-		return result
-	}
-
-	result.GPUCount = len(gpus)
-	result.GPUNames = make([]string, 0, len(gpus))
-	for _, gpu := range gpus {
-		if gpu.Name != "" {
-			result.GPUNames = append(result.GPUNames, gpu.Name)
-		}
-		vram := parseMiB(gpu.MemTotal)
-		if vram > 0 {
-			result.GPUVRAMTotalMiB += vram
-			if result.GPUVRAMPerDeviceMiB == 0 {
-				result.GPUVRAMPerDeviceMiB = vram
-			}
-		}
-	}
-
-	return result
 }
 
-func parseMiB(value string) int {
-	cleaned := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(value, "MiB"), "MB"))
-	if cleaned == "" {
-		return 0
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
 	}
-	n, err := strconv.Atoi(cleaned)
-	if err != nil {
-		return 0
-	}
-	return n
+	cloned := *value
+	return &cloned
 }
 
 func splitCSV(value string) []string {

@@ -32,8 +32,14 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 	if err := db.SetJobProject(database, jobID, "proj"); err != nil {
 		t.Fatalf("SetJobProject: %v", err)
 	}
-	if err := db.SetJobGPUClass(database, jobID, "3090"); err != nil {
+	if err := db.SetJobGPU(database, jobID, "0"); err != nil {
+		t.Fatalf("SetJobGPU: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "a100"); err != nil {
 		t.Fatalf("SetJobGPUClass: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{"benchmark"}); err != nil {
+		t.Fatalf("SetJobTags: %v", err)
 	}
 	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
 		t.Fatalf("UpdateQueuedToRunning: %v", err)
@@ -106,8 +112,17 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 	if rec.Host != "cool30" || rec.Command != "python train.py --epochs 10" {
 		t.Fatalf("record identity = %+v", rec)
 	}
-	if rec.WorkingDir != "/tmp/proj" || rec.Project != "proj" || rec.GPUClass != "3090" {
+	if rec.WorkingDir != "/tmp/proj" || rec.Project != "proj" || rec.GPUClass != "a100" {
 		t.Fatalf("record metadata = %+v", rec)
+	}
+	if rec.RequestedGPU != "0" || rec.RequestedGPUClass != "a100" {
+		t.Fatalf("requested placement = %+v", rec)
+	}
+	if rec.ActualGPUName != "RTX 3090" || rec.ActualGPUClass != "rtx3090" {
+		t.Fatalf("actual gpu = %+v", rec)
+	}
+	if len(rec.Tags) != 1 || rec.Tags[0] != "benchmark" {
+		t.Fatalf("tags = %+v", rec.Tags)
 	}
 	if rec.StartTime == 0 || rec.EndTime == 0 || rec.DurationS != 42 {
 		t.Fatalf("record timing = %+v", rec)
@@ -132,6 +147,9 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 	}
 	if rec.HostSpecs.GPUVRAMPerDeviceMiB != 24576 || rec.HostSpecs.GPUVRAMTotalMiB != 24576 {
 		t.Fatalf("gpu vram = %+v", rec.HostSpecs)
+	}
+	if rec.CPUCount != 32 || rec.CPUModel != "AMD Ryzen" || rec.GPUCount != 1 {
+		t.Fatalf("top-level hardware = %+v", rec)
 	}
 }
 

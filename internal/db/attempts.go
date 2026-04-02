@@ -7,6 +7,39 @@ import (
 	"time"
 )
 
+func sqlNormalizeGPUClassExpr(expr string) string {
+	cleaned := fmt.Sprintf("lower(trim(coalesce(%s, '')))", expr)
+	for _, token := range []string{
+		"nvidia", "geforce", "tesla", "amd", "radeon", "instinct",
+		"pcie", "sxm5", "sxm4", "sxm3", "sxm2", "sxm", "nvl72", "nvl36", "nvl32", "nvl",
+		"120gb", "96gb", "94gb", "80gb", "64gb", "48gb", "40gb", "32gb", "24gb", "20gb", "16gb", "12gb", "10gb", "8gb", "6gb", "5gb", "4gb", "2gb",
+	} {
+		cleaned = fmt.Sprintf("replace(%s, '%s', '')", cleaned, token)
+	}
+	for _, token := range []string{" ", "-", "_", ".", "/", "(", ")", "[", "]"} {
+		cleaned = fmt.Sprintf("replace(%s, '%s', '')", cleaned, token)
+	}
+	return fmt.Sprintf(`
+		CASE
+			WHEN NULLIF(%[1]s, '') IS NULL THEN NULL
+			WHEN %[1]s GLOB '[0-9][0-9][0-9][0-9]' OR %[1]s GLOB '[0-9][0-9][0-9][0-9]ti' THEN 'rtx' || %[1]s
+			ELSE %[1]s
+		END`, cleaned)
+}
+
+func sqlParseMemoryMiBExpr(expr string) string {
+	cleaned := fmt.Sprintf("lower(replace(trim(coalesce(%s, '')), ' ', ''))", expr)
+	return fmt.Sprintf(`
+		CASE
+			WHEN NULLIF(%[1]s, '') IS NULL THEN NULL
+			WHEN %[1]s GLOB '*gib' THEN CAST(replace(%[1]s, 'gib', '') AS INTEGER) * 1024
+			WHEN %[1]s GLOB '*gb' THEN CAST(replace(%[1]s, 'gb', '') AS INTEGER) * 1024
+			WHEN %[1]s GLOB '*mib' THEN CAST(replace(%[1]s, 'mib', '') AS INTEGER)
+			WHEN %[1]s GLOB '*mb' THEN CAST(replace(%[1]s, 'mb', '') AS INTEGER)
+			ELSE CAST(%[1]s AS INTEGER)
+		END`, cleaned)
+}
+
 // dbExecer is the common interface for *sql.DB and *sql.Tx.
 type dbExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
@@ -540,55 +573,201 @@ func createTrainingExamplesView(db *sql.DB) error {
 	if _, err := db.Exec(`DROP VIEW IF EXISTS training_examples`); err != nil {
 		return err
 	}
-	// Also drop old name if present
-	db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`)
+	if _, err := db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`); err != nil {
+		return err
+	}
 
-	_, err := db.Exec(`
+	selectedGPUClassExpr := sqlNormalizeGPUClassExpr(`json_extract(je.value, '$.Name')`)
+	launchGPUClassExpr := sqlNormalizeGPUClassExpr(`COALESCE(base.launch_resolved_gpu_name, base.launch_gpu_class)`)
+	gpuMemExpr := sqlParseMemoryMiBExpr(`json_extract(je.value, '$.MemTotal')`)
+
+	createTrainingExamplesSQL := fmt.Sprintf(`
 		CREATE VIEW training_examples AS
+		WITH completed_runs AS (
+			SELECT
+				ja.id AS run_id,
+				ja.job_id,
+				ja.attempt_number,
+				ja.status,
+				ja.host,
+				ja.start_time,
+				ja.end_time,
+				ja.exit_code,
+				ja.job_metadata,
+				ja.placement_meta,
+				ja.cost,
+				ja.launch_id,
+				ja.error_message,
+				ja.failure_reason,
+				ja.error_diagnosis,
+				j.working_dir,
+				j.command,
+				j.description,
+				j.gpu,
+				j.gpu_class,
+				j.cpu_allotment,
+				j.gpu_mem_gb,
+				j.env_vars,
+				j.tags,
+				j.dep_spec,
+				j.inputs,
+				j.outputs,
+				j.output_dirs,
+				j.produces,
+				j.needs,
+				j.project,
+				COALESCE(ja.backend, j.backend, 'queue-runner') AS backend,
+				hic.cpu_count,
+				hic.cpu_model,
+				hic.cpu_freq,
+				hic.mem_total,
+				hic.gpus_json,
+				hic.last_updated AS host_hardware_last_updated,
+				l.resolved_gpu_name AS launch_resolved_gpu_name,
+				l.gpu_class AS launch_gpu_class,
+				l.num_gpus AS launch_gpu_count,
+				l.gpu_mem_gb AS launch_gpu_mem_gb,
+				NULLIF(REPLACE(COALESCE(json_extract(ja.job_metadata, '$.resource.gpu_devices'), ''), ' ', ''), '') AS assigned_gpu_devices_csv,
+				CASE
+					WHEN json_type(ja.job_metadata, '$.telemetry.assigned_gpu_indices') = 'array'
+					THEN json_extract(ja.job_metadata, '$.telemetry.assigned_gpu_indices')
+				END AS assigned_gpu_indices_json
+			FROM job_attempts ja
+			JOIN jobs j ON j.id = ja.job_id
+			LEFT JOIN host_info_cache hic ON hic.name = ja.host
+			LEFT JOIN launches l ON l.id = ja.launch_id
+			WHERE ja.start_time IS NOT NULL AND ja.end_time IS NOT NULL
+		),
+		selected_gpu_inventory AS (
+			SELECT
+				cr.run_id,
+				json_extract(je.value, '$.Index') AS gpu_index,
+				NULLIF(json_extract(je.value, '$.Name'), '') AS gpu_name,
+				%s AS gpu_vram_mib,
+				%s AS gpu_class
+			FROM completed_runs cr
+			JOIN json_each(CASE
+				WHEN cr.gpus_json IS NOT NULL AND trim(cr.gpus_json) != '' THEN cr.gpus_json
+				ELSE '[]'
+			END) je
+			WHERE
+				(cr.assigned_gpu_devices_csv IS NULL AND cr.assigned_gpu_indices_json IS NULL)
+				OR (
+					cr.assigned_gpu_devices_csv IS NOT NULL
+					AND instr(',' || cr.assigned_gpu_devices_csv || ',', ',' || CAST(json_extract(je.value, '$.Index') AS TEXT) || ',') > 0
+				)
+				OR (
+					cr.assigned_gpu_indices_json IS NOT NULL
+					AND EXISTS (
+						SELECT 1
+						FROM json_each(COALESCE(cr.assigned_gpu_indices_json, '[]')) idx
+						WHERE CAST(idx.value AS TEXT) = CAST(json_extract(je.value, '$.Index') AS TEXT)
+					)
+				)
+				OR (
+					(cr.assigned_gpu_devices_csv IS NOT NULL OR cr.assigned_gpu_indices_json IS NOT NULL)
+					AND json_extract(je.value, '$.Index') IS NULL
+				)
+		),
+		selected_gpu_summary AS (
+			SELECT
+				sgi.run_id,
+				COUNT(*) AS selected_gpu_count,
+				COUNT(DISTINCT sgi.gpu_name) AS selected_gpu_unique_name_count,
+				MIN(sgi.gpu_name) AS first_gpu_name,
+				COALESCE(json_group_array(sgi.gpu_name), '[]') AS gpu_names,
+				COUNT(DISTINCT sgi.gpu_class) AS selected_gpu_unique_class_count,
+				MIN(sgi.gpu_class) AS first_gpu_class,
+				CASE
+					WHEN COUNT(DISTINCT sgi.gpu_vram_mib) = 1 THEN MIN(sgi.gpu_vram_mib)
+				END AS gpu_vram_per_device_mib,
+				SUM(COALESCE(sgi.gpu_vram_mib, 0)) AS gpu_vram_total_mib
+			FROM selected_gpu_inventory sgi
+			GROUP BY sgi.run_id
+		)
 		SELECT
-			ja.id AS run_id,
-			ja.job_id,
-			ja.end_time AS archived_at,
+			base.run_id,
+			base.job_id,
+			base.end_time AS archived_at,
 			'' AS archive_reason,
-			ja.status,
-			ja.host,
-			j.working_dir,
-			j.command,
-			j.description,
-			j.gpu,
-			j.gpu_class,
-			j.cpu_allotment,
-			j.gpu_mem_gb,
-			j.env_vars,
-			j.tags,
-			j.dep_spec,
-			j.inputs,
-			j.outputs,
-			j.output_dirs,
-			j.produces,
-			j.needs,
-			j.project,
-			COALESCE(ja.backend, j.backend, 'queue-runner') AS backend,
-			CASE WHEN COALESCE(ja.backend, j.backend, 'queue-runner') = 'vastai' THEN 'single' ELSE 'multi' END AS tenant,
-			ja.start_time,
-			ja.end_time,
+			base.status,
+			base.host,
+			base.working_dir,
+			base.command,
+			base.description,
+			base.gpu,
+			base.gpu_class,
+			base.gpu AS requested_gpu,
+			base.gpu_class AS requested_gpu_class,
+			base.cpu_allotment,
+			base.gpu_mem_gb,
+			base.env_vars,
+			base.tags,
+			base.dep_spec,
+			base.inputs,
+			base.outputs,
+			base.output_dirs,
+			base.produces,
+			base.needs,
+			base.project,
+			base.backend,
+			CASE WHEN base.backend = 'vastai' THEN 'single' ELSE 'multi' END AS tenant,
+			base.start_time,
+			base.end_time,
 			CASE
-				WHEN ja.start_time IS NOT NULL AND ja.end_time IS NOT NULL THEN ja.end_time - ja.start_time
+				WHEN base.start_time IS NOT NULL AND base.end_time IS NOT NULL THEN base.end_time - base.start_time
 				ELSE NULL
 			END AS duration_s,
-			ja.exit_code,
-			ja.job_metadata,
-			ja.placement_meta,
-			ja.cost,
-			ja.attempt_number - 1 AS retry_count,
-			ja.launch_id,
-			ja.error_message,
-			ja.failure_reason,
-			ja.error_diagnosis
-		FROM job_attempts ja
-		JOIN jobs j ON j.id = ja.job_id
-		WHERE ja.start_time IS NOT NULL AND ja.end_time IS NOT NULL
-	`)
+			base.exit_code,
+			base.job_metadata,
+			base.placement_meta,
+			base.cost,
+			base.attempt_number - 1 AS retry_count,
+			base.launch_id,
+			base.error_message,
+			base.failure_reason,
+			base.error_diagnosis,
+			base.cpu_count,
+			base.cpu_model,
+			base.cpu_freq,
+			base.mem_total,
+			CASE
+				WHEN gpu.selected_gpu_unique_name_count = 1 THEN gpu.first_gpu_name
+				WHEN NULLIF(trim(base.launch_resolved_gpu_name), '') IS NOT NULL THEN base.launch_resolved_gpu_name
+			END AS actual_gpu_name,
+			CASE
+				WHEN gpu.gpu_names IS NOT NULL THEN gpu.gpu_names
+				WHEN NULLIF(trim(base.launch_resolved_gpu_name), '') IS NOT NULL THEN json_array(base.launch_resolved_gpu_name)
+			END AS gpu_names,
+			COALESCE(gpu.selected_gpu_count, base.launch_gpu_count) AS gpu_count,
+			COALESCE(
+				gpu.gpu_vram_per_device_mib,
+				CASE WHEN base.launch_gpu_mem_gb IS NOT NULL THEN base.launch_gpu_mem_gb * 1024 END
+			) AS gpu_vram_per_device_mib,
+			COALESCE(
+				gpu.gpu_vram_total_mib,
+				CASE
+					WHEN base.launch_gpu_mem_gb IS NOT NULL AND base.launch_gpu_count IS NOT NULL
+					THEN base.launch_gpu_mem_gb * 1024 * base.launch_gpu_count
+				END
+			) AS gpu_vram_total_mib,
+			CASE
+				WHEN gpu.selected_gpu_unique_class_count = 1 THEN gpu.first_gpu_class
+				WHEN NULLIF(%s, '') IS NOT NULL THEN %s
+			END AS actual_gpu_class,
+			base.host_hardware_last_updated,
+			CAST(json_extract(base.job_metadata, '$.resource.peak_rss_kb') AS INTEGER) AS peak_rss_kb,
+			CAST(json_extract(base.job_metadata, '$.resource.max_gpu_mem_mib') AS INTEGER) AS max_gpu_mem_mib,
+			CAST(json_extract(base.job_metadata, '$.cpu.mean') AS REAL) AS cpu_mean
+		FROM completed_runs base
+		LEFT JOIN selected_gpu_summary gpu ON gpu.run_id = base.run_id
+	`, gpuMemExpr, selectedGPUClassExpr, launchGPUClassExpr, launchGPUClassExpr)
+
+	if _, err := db.Exec(createTrainingExamplesSQL); err != nil {
+		return err
+	}
+
+	_, err := db.Exec(`CREATE VIEW job_run_training_examples AS SELECT * FROM training_examples`)
 	return err
 }
 
