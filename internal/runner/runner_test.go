@@ -167,6 +167,26 @@ func TestNewRunner_DefaultTelemetryDoesNotReuseCPUInterval(t *testing.T) {
 	}
 }
 
+func TestTryStartNextJob_RequeuesUnreadableJobFile(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(303)
+	jobFile := filepath.Join(r.queueDir, "job-303.json")
+	if err := os.WriteFile(jobFile, []byte("{not-json"), 0644); err != nil {
+		t.Fatalf("write malformed job file: %v", err)
+	}
+	r.state.AddPending(jobID)
+
+	r.tryStartNextJob()
+
+	if got := r.state.Pending; len(got) != 1 || got[0] != jobID {
+		t.Fatalf("pending = %v, want [%d]", got, jobID)
+	}
+	if got := r.state.RunningCount(); got != 0 {
+		t.Fatalf("running count = %d, want 0", got)
+	}
+}
+
 // TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists verifies that
 // refreshRunningJobs does not mark a job as orphaned when the waitForJob
 // goroutine is still tracking the process (i.e., the process has exited

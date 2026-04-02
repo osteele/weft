@@ -256,6 +256,8 @@ func (r *Runner) tryStartNextJob() {
 	job, err := ReadJobFile(r.queueDir, jobID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Job %d: cannot read job file: %v\n", jobID, err)
+		r.state.AddPending(jobID)
+		r.saveState()
 		return
 	}
 	rj := &RunnerJob{Data: job, ID: jobID}

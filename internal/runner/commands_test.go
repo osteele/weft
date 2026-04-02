@@ -50,6 +50,28 @@ func TestProcessCommands_Add(t *testing.T) {
 	}
 }
 
+func TestProcessCommands_AddSkipsPendingWhenJobFileWriteFails(t *testing.T) {
+	rootDir := t.TempDir()
+	cmdFile := filepath.Join(rootDir, "default.commands")
+	queueDir := filepath.Join(rootDir, "missing", "queue")
+	state := NewState()
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo hello", Dir: "/tmp"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, queueDir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(state.Pending) != 0 {
+		t.Fatalf("expected no pending jobs when job file write fails, got %v", state.Pending)
+	}
+}
+
 func TestProcessCommands_Priority(t *testing.T) {
 	dir := t.TempDir()
 	cmdFile := filepath.Join(dir, "default.commands")

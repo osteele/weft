@@ -90,14 +90,15 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 		switch cmd.Op {
 		case opsqueue.OpAdd:
 			if cmd.Job != nil {
-				state.addPendingLocked(cmd.Job.ID)
 				// Write job data file for later use.
 				if err := writeJobFile(cp.queueDir, cmd.Job); err != nil {
 					// Log but don't fail.
 					fmt.Fprintf(os.Stderr, "warning: write job file: %v\n", err)
+				} else {
+					state.addPendingLocked(cmd.Job.ID)
+					// Cancel any pending stop — new work arrived.
+					state.StopRequested = false
 				}
-				// Cancel any pending stop — new work arrived.
-				state.StopRequested = false
 			}
 
 		case opsqueue.OpPriority:

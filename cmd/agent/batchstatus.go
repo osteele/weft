@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
@@ -24,7 +23,11 @@ func batchStatus(jobIDs []int64) {
 	stateFile := filepath.Join(homeDir, ".cache", "weft", "queue", ops.DefaultQueueName+".state.json")
 
 	// Load runner state
-	state, _ := runner.LoadState(stateFile)
+	state, err := runner.LoadState(stateFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: load state %s: %v\n", stateFile, err)
+		state = runner.NewState()
+	}
 
 	pendingSet := make(map[int64]bool, len(state.Pending))
 	for _, id := range state.Pending {
@@ -33,25 +36,6 @@ func batchStatus(jobIDs []int64) {
 
 	for _, jobID := range jobIDs {
 		idStr := strconv.FormatInt(jobID, 10)
-
-		// Check finished map first
-		if finished, ok := state.Finished[idStr]; ok {
-			fr := readFailureReason(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, finished.ExitCode, finished.FinishedAt, fr)
-			continue
-		}
-
-		// Check status file
-		statusFile := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
-		if statusContent, err := os.ReadFile(statusFile); err == nil {
-			exitCodeStr := strings.TrimSpace(string(statusContent))
-			var exitCode int
-			fmt.Sscanf(exitCodeStr, "%d", &exitCode)
-			mtime := fileMtime(statusFile)
-			fr := readFailureReason(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, exitCode, mtime, fr)
-			continue
-		}
 
 		// Check if current
 		if state.Current != nil && *state.Current == jobID {
@@ -82,6 +66,25 @@ func batchStatus(jobIDs []int64) {
 			default:
 				fmt.Printf("JOB|%d|RUNNING|%s\n", jobID, gpuDevs)
 			}
+			continue
+		}
+
+		// Check status file
+		statusFile := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
+		if statusContent, err := os.ReadFile(statusFile); err == nil {
+			exitCodeStr := strings.TrimSpace(string(statusContent))
+			var exitCode int
+			fmt.Sscanf(exitCodeStr, "%d", &exitCode)
+			mtime := fileMtime(statusFile)
+			fr := readFailureReason(logDir, jobID)
+			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, exitCode, mtime, fr)
+			continue
+		}
+
+		// Fall back to finished state when the status file is unavailable.
+		if finished, ok := state.Finished[idStr]; ok {
+			fr := readFailureReason(logDir, jobID)
+			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, finished.ExitCode, finished.FinishedAt, fr)
 			continue
 		}
 
@@ -126,43 +129,23 @@ func gpuDevicesForJob(state *runner.State, idStr string) string {
 // checkProcessState reads the PID file and checks process state.
 // Returns "running", "paused", or "" (not found).
 func checkProcessState(logDir string, jobID int64) string {
-	pidFile := filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID))
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return ""
-	}
-	pidStr := strings.TrimSpace(string(data))
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil || pid <= 0 {
-		return ""
-	}
-
-	// Check if process exists
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return ""
-	}
-	// Signal 0 checks if process exists without sending a signal
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return ""
-	}
-
-	// Check if stopped (paused) by reading /proc/PID/stat on Linux
-	statPath := fmt.Sprintf("/proc/%d/stat", pid)
-	statData, err := os.ReadFile(statPath)
-	if err == nil {
-		// Format: pid (comm) state ...
-		statStr := string(statData)
-		// Find state field after the closing paren
-		if idx := strings.LastIndex(statStr, ") "); idx >= 0 {
-			fields := strings.Fields(statStr[idx+2:])
-			if len(fields) > 0 && fields[0] == "T" {
-				return "paused"
-			}
+	pgidPath := filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID))
+	if pgid, ok := runner.ReadPIDFile(pgidPath); ok && runner.CheckPIDAlive(pgid) {
+		if runner.CheckProcessStopped(pgid) {
+			return "paused"
 		}
+		return "running"
 	}
 
-	return "running"
+	pidPath := filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID))
+	if pid, ok := runner.ReadPIDFile(pidPath); ok && runner.CheckPIDAlive(pid) {
+		if runner.CheckProcessStopped(pid) {
+			return "paused"
+		}
+		return "running"
+	}
+
+	return ""
 }
 
 // parseBatchStatusArgs parses "batch-status id1 id2 ..." arguments.

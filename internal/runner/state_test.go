@@ -62,6 +62,17 @@ func TestState_PendingOperations(t *testing.T) {
 	}
 }
 
+func TestState_AddPendingClearsFinished(t *testing.T) {
+	s := NewState()
+	s.RecordFinished("42", 0, 1234)
+
+	s.AddPending(42)
+
+	if _, ok := s.Finished["42"]; ok {
+		t.Fatal("expected AddPending to clear finished entry for requeued job")
+	}
+}
+
 func TestState_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

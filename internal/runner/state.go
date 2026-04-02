@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -117,7 +118,33 @@ func (s *State) Save(path string) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0644)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp state: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp state: %w", err)
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp state: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace state: %w", err)
+	}
+	return nil
 }
 
 // pruneFinished removes finished entries older than 24 hours.
@@ -297,11 +324,13 @@ func (s *State) CurrentJobID() (int64, bool) {
 func (s *State) addPendingLocked(jobID int64) {
 	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
 	s.Pending = append(s.Pending, jobID)
+	s.clearFinishedLocked(fmt.Sprintf("%d", jobID))
 }
 
 func (s *State) priorityPendingLocked(jobID int64) {
 	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
 	s.Pending = slices.Insert(s.Pending, 0, jobID)
+	s.clearFinishedLocked(fmt.Sprintf("%d", jobID))
 }
 
 func (s *State) removePendingLocked(jobID int64) {
@@ -318,6 +347,10 @@ func (s *State) recordFinishedLocked(jobID string, exitCode int, finishedAt int6
 		ExitCode:   exitCode,
 		FinishedAt: finishedAt,
 	}
+}
+
+func (s *State) clearFinishedLocked(jobID string) {
+	delete(s.Finished, jobID)
 }
 
 // TotalAllotment returns the sum of all running jobs' local_allotment values.

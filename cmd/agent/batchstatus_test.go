@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/runner"
 )
 
 // TestBatchStatusExitCodeWithSignalSuffix validates that exit codes are correctly
@@ -123,4 +128,114 @@ func TestParseBatchStatusArgs(t *testing.T) {
 			t.Fatal("parseBatchStatusArgs() error = nil, want error")
 		}
 	})
+}
+
+func TestBatchStatus_PrefersQueuedOverFinishedState(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	stateFile := filepath.Join(queueDir, "default.state.json")
+	stateJSON := `{"pending":[42],"finished":{"42":{"exit_code":0,"finished_at":123}}}`
+	if err := os.WriteFile(stateFile, []byte(stateJSON), 0644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{42})
+	})
+
+	if strings.TrimSpace(output) != "JOB|42|QUEUED" {
+		t.Fatalf("batchStatus output = %q, want %q", strings.TrimSpace(output), "JOB|42|QUEUED")
+	}
+}
+
+func TestBatchStatus_HandlesInvalidStateFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	stateFile := filepath.Join(queueDir, "default.state.json")
+	if err := os.WriteFile(stateFile, []byte("{invalid"), 0644); err != nil {
+		t.Fatalf("write invalid state file: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{99})
+	})
+
+	if strings.TrimSpace(output) != "JOB|99|DEAD" {
+		t.Fatalf("batchStatus output = %q, want %q", strings.TrimSpace(output), "JOB|99|DEAD")
+	}
+}
+
+func TestCheckProcessState_UsesPortableStoppedDetection(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(501)
+	logFile := filepath.Join(logDir, "job.log")
+	proc, err := runner.StartProcess("sleep 30", t.TempDir(), nil, logFile)
+	if err != nil {
+		t.Fatalf("StartProcess: %v", err)
+	}
+	paths := runner.NewJobPaths(logDir, jobID)
+	if err := proc.WritePIDFiles(paths); err != nil {
+		t.Fatalf("WritePIDFiles: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = proc.Kill()
+		_ = proc.Cmd.Wait()
+	})
+
+	if err := proc.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatalf("Signal(SIGSTOP): %v", err)
+	}
+	t.Cleanup(func() {
+		_ = proc.Signal(syscall.SIGCONT)
+	})
+
+	state := ""
+	for i := 0; i < 20; i++ {
+		state = checkProcessState(logDir, jobID)
+		if state == "paused" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if state != "paused" {
+		t.Fatalf("checkProcessState() = %q, want paused", state)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return buf.String()
 }
