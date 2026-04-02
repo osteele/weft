@@ -106,7 +106,7 @@ func TestPrepareLaunchExecutionPlan_RevalidatesReusableInstances(t *testing.T) {
 	}
 }
 
-func TestLaunchModelUpdate_PlanReadyStartsInlineWatchAfterRegistration(t *testing.T) {
+func TestLaunchModelUpdate_RegistrationStartsInlineWatchBeforePlanReady(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
@@ -126,19 +126,19 @@ func TestLaunchModelUpdate_PlanReadyStartsInlineWatchAfterRegistration(t *testin
 		registeredInstanceIDSet: make(map[int64]struct{}),
 	}.Update(launchInstanceRegisteredMsg{instanceID: instanceID})
 	got := model.(launchModel)
-	if got.inlineWatchUsed {
-		t.Fatal("inline watch started before the launch plan was ready")
+	if !got.inlineWatchUsed {
+		t.Fatal("expected inline watch to start when launch begins registering instances")
+	}
+	if got.inlineWatch == nil {
+		t.Fatal("expected inline watch model")
 	}
 
 	model, cmd := got.Update(launchExecutionPlanMsg{expectedInstanceCount: 1})
 	got = model.(launchModel)
 	if !got.inlineWatchUsed {
-		t.Fatal("expected inline watch to start once plan and registrations aligned")
+		t.Fatal("expected inline watch to remain active after plan readiness")
 	}
-	if got.inlineWatch == nil {
-		t.Fatal("expected inline watch model")
-	}
-	if cmd == nil {
-		t.Fatal("expected inline watch init command")
+	if cmd != nil {
+		t.Fatalf("expected no extra watch init once inline watch is already running, got %T", cmd)
 	}
 }

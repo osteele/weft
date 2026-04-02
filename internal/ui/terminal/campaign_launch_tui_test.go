@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -205,7 +206,7 @@ func TestLaunchModelView_ErrorHasNoDismissPrompt(t *testing.T) {
 	}
 }
 
-func TestLaunchModelUpdate_SwitchesToInlineWatchWhenAllInstancesRegistered(t *testing.T) {
+func TestLaunchModelUpdate_StartsInlineWatchOnFirstRegistration(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	firstID, err := db.CreateLaunch(database, &db.Launch{
@@ -237,23 +238,23 @@ func TestLaunchModelUpdate_SwitchesToInlineWatchWhenAllInstancesRegistered(t *te
 
 	model, cmd := m.Update(launchInstanceRegisteredMsg{instanceID: firstID})
 	got := model.(launchModel)
-	if got.inlineWatchUsed {
-		t.Fatal("inline watch should not start until all planned instances are registered")
-	}
-	if cmd == nil {
-		t.Fatal("expected follow-up registration wait command")
-	}
-
-	model, cmd = got.Update(launchInstanceRegisteredMsg{instanceID: secondID})
-	got = model.(launchModel)
 	if !got.inlineWatchUsed {
-		t.Fatal("expected inline watch handoff once all planned instances are registered")
+		t.Fatal("expected inline watch to start on first registration")
 	}
 	if got.inlineWatch == nil {
 		t.Fatal("expected inline watch model")
 	}
 	if cmd == nil {
-		t.Fatal("expected inline watch init command")
+		t.Fatal("expected registration wait and watch init commands")
+	}
+
+	model, cmd = got.Update(launchInstanceRegisteredMsg{instanceID: secondID})
+	got = model.(launchModel)
+	if got.inlineWatch == nil {
+		t.Fatal("expected inline watch model")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up watch command")
 	}
 
 	out := stripANSI(got.View())
@@ -308,6 +309,80 @@ func TestLaunchModelUpdate_InlineWatchKeepsRunningWithPartialFailures(t *testing
 	}
 	if !strings.Contains(out, "Instance 42 — A40 — launching") {
 		t.Fatalf("expected watch view to remain visible, got:\n%s", out)
+	}
+}
+
+func TestLaunchModelView_InlineWatchShowsLaunchOverviewBeforeRegistration(t *testing.T) {
+	inlineWatch := watchModel{
+		mode:           watchModeInstances,
+		launchPending:  true,
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		initInfo:       map[int64]initialInstanceInfo{},
+		jobProgressHWM: map[int64]int{},
+		height:         20,
+		width:          100,
+	}
+	m := launchModel{
+		launching:     true,
+		inlineWatch:   &inlineWatch,
+		campaignPhase: "preparing campaign launch",
+		height:        20,
+		width:         100,
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Launching instances...") {
+		t.Fatalf("expected launch overview header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "preparing campaign launch") {
+		t.Fatalf("expected campaign phase in launch overview, got:\n%s", out)
+	}
+	if strings.Contains(out, "Unplaced Jobs") {
+		t.Fatalf("did not expect unplaced jobs section before registration, got:\n%s", out)
+	}
+}
+
+func TestLaunchModelUpdate_InstancesLaunchedAddsReuseInstancesToInlineWatch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusLaunching,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	inlineWatch := watchModel{
+		mode:           watchModeInstances,
+		launchPending:  true,
+		database:       database,
+		ctx:            context.Background(),
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		initInfo:       map[int64]initialInstanceInfo{},
+		jobProgressHWM: map[int64]int{},
+	}
+	model, cmd := launchModel{
+		database:    database,
+		inlineWatch: &inlineWatch,
+		launching:   true,
+	}.Update(instancesLaunchedMsg{instanceIDs: []int64{instanceID}})
+	got := model.(launchModel)
+	if got.inlineWatch == nil {
+		t.Fatal("expected inline watch to remain active")
+	}
+	if len(got.inlineWatch.instanceIDs) != 1 || got.inlineWatch.instanceIDs[0] != instanceID {
+		t.Fatalf("inline watch instanceIDs = %v, want [%d]", got.inlineWatch.instanceIDs, instanceID)
+	}
+	if got.inlineWatch.launchPending {
+		t.Fatal("expected launchPending to clear after launch completion")
+	}
+	if cmd == nil {
+		t.Fatal("expected watch command for newly added instance")
 	}
 }
 

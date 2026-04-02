@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -124,6 +125,26 @@ func (p *stringPromise) await() (string, error) {
 	return p.val, p.err
 }
 
+type AssetStageKind string
+
+const (
+	AssetStageKindAgent  AssetStageKind = "agent"
+	AssetStageKindSource AssetStageKind = "source"
+)
+
+// AssetStageStatus describes the current coarse-grained state of one staged
+// asset. Ready indicates that the final R2 key is available.
+type AssetStageStatus struct {
+	Key   string
+	Kind  AssetStageKind
+	Label string
+	Phase string
+	Ready bool
+	Err   error
+}
+
+type AssetStageReporter func(AssetStageStatus)
+
 // R2AssetStager uploads shared campaign assets in the background so group
 // launches can start as soon as their own dependencies are ready.
 type R2AssetStager struct {
@@ -133,12 +154,68 @@ type R2AssetStager struct {
 	cancel         context.CancelFunc
 	agentKey       *stringPromise
 	sourcePromises map[string]*stringPromise
+	reporter       AssetStageReporter
+
+	statusMu sync.RWMutex
+	statuses map[string]AssetStageStatus
+}
+
+func (s *R2AssetStager) setStatus(status AssetStageStatus) {
+	if s == nil {
+		return
+	}
+	s.statusMu.Lock()
+	if s.statuses == nil {
+		s.statuses = make(map[string]AssetStageStatus)
+	}
+	s.statuses[status.Key] = status
+	reporter := s.reporter
+	s.statusMu.Unlock()
+	if reporter != nil {
+		reporter(status)
+	}
+}
+
+// SnapshotStatuses returns a shallow copy of current asset statuses keyed by
+// asset key ("agent" or local source dir).
+func (s *R2AssetStager) SnapshotStatuses() map[string]AssetStageStatus {
+	if s == nil {
+		return nil
+	}
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
+	out := make(map[string]AssetStageStatus, len(s.statuses))
+	for key, status := range s.statuses {
+		out[key] = status
+	}
+	return out
+}
+
+func (s *R2AssetStager) AssetCounts() (ready, total int) {
+	if s == nil {
+		return 0, 0
+	}
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
+	total = len(s.statuses)
+	for _, status := range s.statuses {
+		if status.Ready {
+			ready++
+		}
+	}
+	return ready, total
 }
 
 // StartR2AssetStaging starts uploading the agent binary and source tarballs to
 // R2 in the background. Group launches can wait only on the directories they
 // need instead of blocking on all assets globally.
 func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2AssetStager, error) {
+	return StartR2AssetStagingWithReporter(r2Cfg, groups, nil)
+}
+
+// StartR2AssetStagingWithReporter starts uploading shared assets and reports
+// coarse asset phase changes via reporter.
+func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGroup, reporter AssetStageReporter) (*R2AssetStager, error) {
 	agentVersion, err := agentdeploy.LocalAgentVersion()
 	if err != nil {
 		return nil, fmt.Errorf("local agent version: %w", err)
@@ -162,7 +239,15 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 		cancel:         uploadCancel,
 		agentKey:       newStringPromise(),
 		sourcePromises: make(map[string]*stringPromise),
+		reporter:       reporter,
+		statuses:       make(map[string]AssetStageStatus),
 	}
+	stager.setStatus(AssetStageStatus{
+		Key:   "agent",
+		Kind:  AssetStageKindAgent,
+		Label: "agent",
+		Phase: "queued",
+	})
 
 	allSourceDirs := make(map[string]bool)
 	for _, g := range groups {
@@ -172,6 +257,12 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 	}
 	for localDir := range allSourceDirs {
 		stager.sourcePromises[localDir] = newStringPromise()
+		stager.setStatus(AssetStageStatus{
+			Key:   localDir,
+			Kind:  AssetStageKindSource,
+			Label: filepath.Base(localDir),
+			Phase: "queued",
+		})
 	}
 
 	// Log periodic warnings so the user knows the upload is still in progress.
@@ -191,7 +282,24 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 		}
 	}()
 	go func() {
-		agentR2Key, err := agentdeploy.EnsureAgentInR2(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch, io.Discard)
+		agentR2Key, err := agentdeploy.EnsureAgentInR2WithProgress(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch, io.Discard, func(phase string) {
+			stager.setStatus(AssetStageStatus{
+				Key:   "agent",
+				Kind:  AssetStageKindAgent,
+				Label: "agent",
+				Phase: phase,
+				Ready: phase == "ready",
+			})
+		})
+		if err != nil {
+			stager.setStatus(AssetStageStatus{
+				Key:   "agent",
+				Kind:  AssetStageKindAgent,
+				Label: "agent",
+				Phase: "error",
+				Err:   err,
+			})
+		}
 		stager.agentKey.resolve(agentR2Key, err)
 	}()
 
@@ -202,12 +310,27 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 		uploadWg.Add(1)
 		go func() {
 			defer uploadWg.Done()
-			key, err := weftsync.UploadSourceToR2(uploadCtx, r2Client, localDir)
+			key, err := weftsync.UploadSourceToR2WithProgress(uploadCtx, r2Client, localDir, func(phase string) {
+				stager.setStatus(AssetStageStatus{
+					Key:   localDir,
+					Kind:  AssetStageKindSource,
+					Label: filepath.Base(localDir),
+					Phase: phase,
+					Ready: phase == "ready",
+				})
+			})
 			if err != nil {
 				oplog.Log(oplog.OpR2UploadSource,
 					oplog.WithDetailf("dir: %s", localDir),
 					oplog.WithError(err),
 				)
+				stager.setStatus(AssetStageStatus{
+					Key:   localDir,
+					Kind:  AssetStageKindSource,
+					Label: filepath.Base(localDir),
+					Phase: "error",
+					Err:   err,
+				})
 				promise.resolve("", fmt.Errorf("upload source %s: %w", localDir, err))
 				return
 			}
@@ -419,6 +542,72 @@ func LaunchCampaign(
 	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
 	onInstanceRegistered func(group InstanceGroup, instanceID int64),
 ) (*LaunchResult, error) {
+	return launchCampaignWithStager(
+		nil,
+		clients,
+		database,
+		groups,
+		offers,
+		estimates,
+		survivalModel,
+		opts,
+		r2Cfg,
+		createOptsForProvider,
+		onPhase,
+		onCampaignCreated,
+		onInstanceRegistered,
+	)
+}
+
+// LaunchCampaignWithAssetStager reuses a caller-provided asset stager so
+// uploads can begin before launch confirmation.
+func LaunchCampaignWithAssetStager(
+	stager *R2AssetStager,
+	clients []cloud.Client,
+	database *sql.DB,
+	groups []InstanceGroup,
+	offers []cloud.Offer,
+	estimates []CostEstimate,
+	survivalModel *bidding.SurvivalModel,
+	opts LaunchOpts,
+	r2Cfg cloud.R2Config,
+	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
+	onPhase func(group InstanceGroup, phase string),
+	onCampaignCreated func(id int64),
+	onInstanceRegistered func(group InstanceGroup, instanceID int64),
+) (*LaunchResult, error) {
+	return launchCampaignWithStager(
+		stager,
+		clients,
+		database,
+		groups,
+		offers,
+		estimates,
+		survivalModel,
+		opts,
+		r2Cfg,
+		createOptsForProvider,
+		onPhase,
+		onCampaignCreated,
+		onInstanceRegistered,
+	)
+}
+
+func launchCampaignWithStager(
+	preparedStager *R2AssetStager,
+	clients []cloud.Client,
+	database *sql.DB,
+	groups []InstanceGroup,
+	offers []cloud.Offer, // parallel to groups
+	estimates []CostEstimate, // parallel to groups; may be nil
+	survivalModel *bidding.SurvivalModel,
+	opts LaunchOpts,
+	r2Cfg cloud.R2Config,
+	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
+	onPhase func(group InstanceGroup, phase string),
+	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
+	onInstanceRegistered func(group InstanceGroup, instanceID int64),
+) (*LaunchResult, error) {
 	if len(groups) == 0 {
 		return nil, ErrNoLaunchGroups
 	}
@@ -429,11 +618,19 @@ func LaunchCampaign(
 	if onPhase != nil {
 		onPhase(InstanceGroup{GPUClass: "campaign"}, "staging agent and sources")
 	}
-	stager, err := StartR2AssetStaging(r2Cfg, groups)
-	if err != nil {
-		return nil, err
+	stager := preparedStager
+	ownedStager := false
+	var err error
+	if stager == nil {
+		stager, err = StartR2AssetStaging(r2Cfg, groups)
+		if err != nil {
+			return nil, err
+		}
+		ownedStager = true
 	}
-	defer stager.Close()
+	if ownedStager {
+		defer stager.Close()
+	}
 
 	// Compute total estimated cost from estimates
 	var estimatedCostCents int

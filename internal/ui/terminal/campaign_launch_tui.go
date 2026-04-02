@@ -3,8 +3,10 @@ package terminal
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -119,6 +121,7 @@ type launchModel struct {
 	planCh           chan launchExecutionPlanMsg
 	phaseCh          chan launchPhaseMsg
 	instanceCh       chan launchInstanceRegisteredMsg
+	assetStageCh     chan assetStageChangedMsg
 
 	instanceIDs             []int64
 	expectedInstanceCount   int
@@ -137,6 +140,9 @@ type launchModel struct {
 	projectFilter           string // project scope when launching from project watch
 	reconciler              *campaign.Reconciler
 	reconcileDropped        int
+	assetStageSignature     string
+	assetStageErr           error
+	assetStager             *campaign.R2AssetStager
 
 	// Cached tradeoff display data — recomputed only when tradeoffRowsDirty.
 	cachedTradeoffRows    []campaign.StrategySummaryRow
@@ -201,6 +207,16 @@ type launchExecutionPlanMsg struct {
 type launchInstanceRegisteredMsg struct {
 	instanceID int64
 	groupIndex int
+}
+
+type assetStageStartedMsg struct {
+	signature string
+	stager    *campaign.R2AssetStager
+	err       error
+}
+
+type assetStageChangedMsg struct {
+	signature string
 }
 
 // offersMatch returns true if both slices select the same best offer per group.
@@ -295,6 +311,22 @@ func countGroupJobs(groups []campaign.InstanceGroup) int {
 	return n
 }
 
+func launchAssetStageSignature(groups []campaign.InstanceGroup) string {
+	seen := make(map[string]struct{})
+	dirs := make([]string, 0)
+	for _, group := range groups {
+		for _, dir := range group.SourceDirs() {
+			if _, ok := seen[dir]; ok {
+				continue
+			}
+			seen[dir] = struct{}{}
+			dirs = append(dirs, dir)
+		}
+	}
+	sort.Strings(dirs)
+	return strings.Join(dirs, "|")
+}
+
 // pageSize returns the number of item rows visible in the job list area.
 // It reserves lines for the title, cost table, help bar, and padding.
 func (m launchModel) pageSize() int {
@@ -346,6 +378,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		planCh:                  make(chan launchExecutionPlanMsg, 1),
 		phaseCh:                 make(chan launchPhaseMsg, 16),
 		instanceCh:              make(chan launchInstanceRegisteredMsg, len(groups)),
+		assetStageCh:            make(chan assetStageChangedMsg, 64),
 		gpuFilter:               gpuFilter,
 		projectFilter:           projectFilter,
 		estimateCache:           make(map[string][]campaign.CostEstimate),
@@ -362,6 +395,7 @@ func (m launchModel) Init() tea.Cmd {
 		m.spinner.Tick,
 		m.fetchRawOffers(false),
 		m.prefetchHFSizes(),
+		m.startAssetStagingForGroups(m.groups),
 	}
 	if m.reconciling {
 		cmds = append(cmds, m.runReconciliation())
@@ -759,6 +793,48 @@ func waitForLaunchInstanceRegistered(ch chan launchInstanceRegisteredMsg) tea.Cm
 	}
 }
 
+func waitForAssetStage(ch chan assetStageChangedMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func hasLaunchR2Config(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	r2Cfg := cfg.Vastai.R2
+	return strings.TrimSpace(r2Cfg.AccountID) != "" &&
+		strings.TrimSpace(r2Cfg.AccessKeyID) != "" &&
+		strings.TrimSpace(r2Cfg.SecretAccessKey) != "" &&
+		strings.TrimSpace(r2Cfg.Bucket) != ""
+}
+
+func (m launchModel) startAssetStagingForGroups(groups []campaign.InstanceGroup) tea.Cmd {
+	if !hasLaunchR2Config(m.appConfig) || len(groups) == 0 {
+		return nil
+	}
+	signature := launchAssetStageSignature(groups)
+	if signature == "" || signature == m.assetStageSignature {
+		return nil
+	}
+	phaseCh := m.assetStageCh
+	r2Cfg := m.appConfig.Vastai.R2.ToCloudR2Config()
+	return func() tea.Msg {
+		stager, err := campaign.StartR2AssetStagingWithReporter(r2Cfg, groups, func(_ campaign.AssetStageStatus) {
+			select {
+			case phaseCh <- assetStageChangedMsg{signature: signature}:
+			default:
+			}
+		})
+		return assetStageStartedMsg{signature: signature, stager: stager, err: err}
+	}
+}
+
 func (m launchModel) updateInlineWatch(msg tea.Msg) (launchModel, tea.Cmd, bool) {
 	if m.inlineWatch == nil {
 		return m, nil, false
@@ -772,10 +848,7 @@ func (m launchModel) updateInlineWatch(msg tea.Msg) (launchModel, tea.Cmd, bool)
 }
 
 func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
-	if !m.inlineWatchEnabled || m.inlineWatch != nil || m.expectedInstanceCount == 0 {
-		return m, nil
-	}
-	if len(m.registeredInstanceIDs) < m.expectedInstanceCount {
+	if !m.inlineWatchEnabled || m.inlineWatch != nil {
 		return m, nil
 	}
 	var r2Client *r2.Client
@@ -783,6 +856,11 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 		r2Client, _ = buildR2Client(m.appConfig)
 	}
 	inlineWatch := newInstanceWatchModel(m.database, append([]int64(nil), m.registeredInstanceIDs...), r2Client, m.appConfig)
+	inlineWatch.launchPending = m.launching
+	inlineWatch.campaignID = m.campaignID
+	if inlineWatch.launchedAt.IsZero() && m.campaignID != 0 {
+		inlineWatch.launchedAt = time.Now()
+	}
 	if summary := campaign.SummarizeEstimates(m.costEstimates); summary != nil {
 		inlineWatch.estimateSummaryLine = summary.FormatLine()
 	}
@@ -801,9 +879,20 @@ func (m launchModel) quitOrSwitchToWatch(flash string) tea.Cmd {
 }
 
 func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = sizeMsg.Width
+		m.height = sizeMsg.Height
+		m.adjustOffset()
+		if m.inlineWatch != nil {
+			next, cmd, _ := m.updateInlineWatch(msg)
+			return next, cmd
+		}
+		return m, nil
+	}
+
 	if m.inlineWatch != nil {
 		switch msg.(type) {
-		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg, switchToLaunchMsg:
+		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg, switchToLaunchMsg, assetStageStartedMsg, assetStageChangedMsg:
 		default:
 			next, cmd, handled := m.updateInlineWatch(msg)
 			if handled {
@@ -824,12 +913,6 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return lm, cmd
 		}
 		return result, cmd
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.adjustOffset()
-		return m, nil
 
 	case hfPrefetchDoneMsg:
 		return m, nil // cache is warmed; EstimateCosts will benefit
@@ -875,7 +958,16 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
 			m.tradeoffRowsDirty = true
 			m.cachedTradeoffRows = nil
-			return m, m.fetchRawOffers(false)
+			if m.assetStager != nil {
+				m.assetStager.Close()
+			}
+			m.assetStager = nil
+			m.assetStageSignature = ""
+			m.assetStageErr = nil
+			return m, tea.Batch(
+				m.fetchRawOffers(false),
+				m.startAssetStagingForGroups(msg.groups),
+			)
 		}
 		return m, nil
 
@@ -945,6 +1037,12 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case campaignCreatedMsg:
 		m.campaignID = msg.campaignID
+		if m.inlineWatch != nil {
+			m.inlineWatch.campaignID = msg.campaignID
+			if m.inlineWatch.launchedAt.IsZero() {
+				m.inlineWatch.launchedAt = time.Now()
+			}
+		}
 		return m, nil
 
 	case launchPhaseMsg:
@@ -960,6 +1058,30 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForLaunchPhase(m.phaseCh)
 		}
 		return m, nil
+
+	case assetStageStartedMsg:
+		if msg.signature != launchAssetStageSignature(m.groups) {
+			if msg.stager != nil {
+				msg.stager.Close()
+			}
+			return m, nil
+		}
+		if m.assetStager != nil && m.assetStager != msg.stager {
+			m.assetStager.Close()
+		}
+		m.assetStager = msg.stager
+		m.assetStageSignature = msg.signature
+		m.assetStageErr = msg.err
+		if msg.err != nil {
+			return m, nil
+		}
+		return m, waitForAssetStage(m.assetStageCh)
+
+	case assetStageChangedMsg:
+		if msg.signature != m.assetStageSignature {
+			return m, waitForAssetStage(m.assetStageCh)
+		}
+		return m, waitForAssetStage(m.assetStageCh)
 
 	case launchExecutionPlanMsg:
 		m.expectedInstanceCount = msg.expectedInstanceCount
@@ -980,6 +1102,11 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.launching {
 			cmds = append(cmds, waitForLaunchInstanceRegistered(m.instanceCh))
 		}
+		if m.inlineWatch != nil {
+			if cmd := m.inlineWatch.addInstance(msg.instanceID); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 		next, watchCmd := m.maybeStartInlineWatch()
 		m = next
 		if watchCmd != nil {
@@ -992,9 +1119,21 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case instancesLaunchedMsg:
 		m.launching = false
+		inlineWatchCmds := make([]tea.Cmd, 0)
+		if m.inlineWatch != nil {
+			m.inlineWatch.launchPending = false
+			for _, id := range msg.instanceIDs {
+				if cmd := m.inlineWatch.addInstance(id); cmd != nil {
+					inlineWatchCmds = append(inlineWatchCmds, cmd)
+				}
+			}
+		}
 		if msg.err != nil {
 			m.err = msg.err
 			if m.inlineWatch != nil {
+				if len(inlineWatchCmds) > 0 {
+					return m, tea.Batch(inlineWatchCmds...)
+				}
 				return m, nil
 			}
 			return m, m.quitOrSwitchToWatch(fmt.Sprintf("Launch error: %v", msg.err))
@@ -1015,6 +1154,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					unplaced, _ := db.ListUnplacedJobs(m.database)
 					m.inlineWatch.partialErrorJobs = unplaced
 				}
+			}
+			if len(inlineWatchCmds) > 0 {
+				return m, tea.Batch(inlineWatchCmds...)
 			}
 			return m, nil
 		}
@@ -1082,14 +1224,20 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.campaignPhase = ""
 		m.groupPhases = make(map[int]string)
 		m.groupDone = make(map[int]bool)
-		return m, tea.Batch(
+		next, watchCmd := m.maybeStartInlineWatch()
+		m = next
+		cmds := []tea.Cmd{
 			m.spinner.Tick,
 			m.launchInstances(),
 			m.waitForCampaignCreated(),
 			waitForLaunchPlanReady(m.planCh),
 			waitForLaunchPhase(m.phaseCh),
 			waitForLaunchInstanceRegistered(m.instanceCh),
-		)
+		}
+		if watchCmd != nil {
+			cmds = append(cmds, watchCmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case "q", "esc", "ctrl+c":
 		return m, m.quitOrSwitchToWatch("Launch canceled.")
@@ -1450,6 +1598,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
+	assetStager := m.assetStager
 
 	return func() tea.Msg {
 		defer close(planCh)
@@ -1542,7 +1691,8 @@ func (m launchModel) launchInstances() tea.Cmd {
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		sendCampaignPhase("preparing campaign launch")
 
-		result, err := campaign.LaunchCampaign(
+		result, err := campaign.LaunchCampaignWithAssetStager(
+			assetStager,
 			clients, database, launchGroups, offers, selectedEstimates, survivalModel, opts, r2Cfg,
 			func(provider cloud.Provider) (cloud.CreateOpts, error) {
 				return createOptsForProvider(cfg, provider)
@@ -1590,6 +1740,187 @@ func uniqueReuseInstanceIDs(assignments []campaign.ReuseAssignment) []int64 {
 	return ids
 }
 
+func countRenderedLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n")
+}
+
+func formatAssetStatusDetail(status campaign.AssetStageStatus, fallbackLabel string) string {
+	label := strings.TrimSpace(status.Label)
+	if label == "" {
+		label = fallbackLabel
+	}
+	phase := status.Phase
+	switch {
+	case status.Err != nil:
+		return fmt.Sprintf("%s: error (%v)", label, status.Err)
+	case status.Ready:
+		return fmt.Sprintf("%s: ready", label)
+	case phase != "":
+		return fmt.Sprintf("%s: %s", label, phase)
+	default:
+		return fmt.Sprintf("%s: pending", label)
+	}
+}
+
+func (m launchModel) formatAssetProgressForDirs(dirs []string) string {
+	if m.assetStager == nil {
+		return ""
+	}
+	statuses := m.assetStager.SnapshotStatuses()
+	if len(statuses) == 0 {
+		return ""
+	}
+
+	total := 1
+	ready := 0
+	details := make([]string, 0, len(dirs)+1)
+
+	agentStatus, ok := statuses["agent"]
+	if ok {
+		if agentStatus.Ready {
+			ready++
+		} else {
+			details = append(details, formatAssetStatusDetail(agentStatus, "agent"))
+		}
+	} else {
+		details = append(details, "agent: pending")
+	}
+
+	for _, dir := range dirs {
+		total++
+		status, ok := statuses[dir]
+		label := filepath.Base(dir)
+		if !ok {
+			details = append(details, fmt.Sprintf("%s: pending", label))
+			continue
+		}
+		if status.Ready {
+			ready++
+			continue
+		}
+		details = append(details, formatAssetStatusDetail(status, label))
+	}
+
+	percent := 0
+	if total > 0 {
+		percent = ready * 100 / total
+	}
+	if len(details) == 0 {
+		return fmt.Sprintf("staging (%d/%d assets ready, %d%%)", ready, total, percent)
+	}
+	return fmt.Sprintf("staging (%d/%d assets ready, %d%%; %s)", ready, total, percent, strings.Join(details, "; "))
+}
+
+func (m launchModel) formatBackgroundAssetSummary() string {
+	if m.assetStageErr != nil {
+		return fmt.Sprintf("Pre-staging unavailable: %v", m.assetStageErr)
+	}
+	if m.assetStager == nil {
+		return ""
+	}
+	ready, total := m.assetStager.AssetCounts()
+	if total == 0 {
+		return ""
+	}
+	statuses := m.assetStager.SnapshotStatuses()
+	details := make([]string, 0, total)
+	if status, ok := statuses["agent"]; ok && !status.Ready {
+		details = append(details, formatAssetStatusDetail(status, "agent"))
+	}
+	keys := make([]string, 0, len(statuses))
+	for key, status := range statuses {
+		if key == "agent" || status.Ready {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		details = append(details, formatAssetStatusDetail(statuses[key], filepath.Base(key)))
+	}
+	percent := ready * 100 / total
+	if len(details) == 0 {
+		return fmt.Sprintf("Pre-staging assets in background: %d/%d ready (%d%%)", ready, total, percent)
+	}
+	return fmt.Sprintf("Pre-staging assets in background: %d/%d ready (%d%%; %s)", ready, total, percent, strings.Join(details, "; "))
+}
+
+func (m launchModel) launchPhaseLabel(groupIndex int, phase string) string {
+	if groupIndex >= 0 && strings.HasPrefix(phase, "staging (") {
+		if groupIndex < len(m.groups) {
+			if enriched := m.formatAssetProgressForDirs(m.groups[groupIndex].SourceDirs()); enriched != "" {
+				return enriched
+			}
+		}
+	}
+	return phase
+}
+
+func (m launchModel) renderInlineLaunchOverview() string {
+	if m.inlineWatch == nil || !m.launching {
+		return ""
+	}
+	var b strings.Builder
+	spinnerText := m.spinner.View()
+	if m.inlineWatch != nil {
+		spinnerText = m.inlineWatch.spinner.View()
+	}
+	b.WriteString(spinnerText)
+	if m.campaignID != 0 {
+		b.WriteString(fmt.Sprintf(" Launching instances... (campaign %d)", m.campaignID))
+	} else {
+		b.WriteString(" Launching instances...")
+	}
+	b.WriteString("\n")
+
+	pendingLines := 0
+	if m.campaignPhase != "" {
+		b.WriteString(fmt.Sprintf("  · %s\n", m.campaignPhase))
+		pendingLines++
+	}
+	for _, idx := range sortedIntKeys(m.groupPhases, m.groupDone) {
+		if m.groupDone[idx] {
+			continue
+		}
+		spec := fmt.Sprintf("group %d", idx)
+		if idx >= 0 && idx < len(m.groups) {
+			spec = m.groups[idx].GPUSpec()
+		}
+		phase := m.launchPhaseLabel(idx, m.groupPhases[idx])
+		b.WriteString(fmt.Sprintf("  · %s: %s\n", spec, phase))
+		pendingLines++
+	}
+	if pendingLines > 0 {
+		b.WriteString("\n")
+		return b.String()
+	}
+	return b.String()
+}
+
+func (m launchModel) renderInlineWatchView() string {
+	if m.inlineWatch == nil {
+		return ""
+	}
+	prefix := ""
+	if m.err != nil {
+		prefix += launchErrStyle.Render(fmt.Sprintf("Launch error: %v", m.err)) + "\n\n"
+	}
+	prefix += m.renderInlineLaunchOverview()
+	prefixLines := countRenderedLines(prefix)
+
+	watch := *m.inlineWatch
+	if m.width > 0 {
+		watch.width = m.width
+	}
+	if m.height > 0 {
+		watch.height = max(1, m.height-prefixLines)
+	}
+	return prefix + watch.View()
+}
+
 func (m launchModel) View() string {
 	var b strings.Builder
 
@@ -1603,11 +1934,7 @@ func (m launchModel) View() string {
 		b.WriteString("\n")
 	}
 	if m.inlineWatch != nil {
-		if m.err != nil {
-			b.WriteString(launchErrStyle.Render(fmt.Sprintf("Launch error: %v", m.err)))
-			b.WriteString("\n\n")
-		}
-		b.WriteString(m.inlineWatch.View())
+		b.WriteString(m.renderInlineWatchView())
 		return b.String()
 	}
 
@@ -1655,7 +1982,7 @@ func (m launchModel) View() string {
 			if m.groupDone[idx] {
 				b.WriteString(fmt.Sprintf("  ✓ %s\n", spec))
 			} else {
-				phase := m.groupPhases[idx]
+				phase := m.launchPhaseLabel(idx, m.groupPhases[idx])
 				b.WriteString(fmt.Sprintf("  · %s: %s\n", spec, phase))
 			}
 		}
@@ -1688,6 +2015,10 @@ func (m launchModel) View() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+	if assetSummary := m.formatBackgroundAssetSummary(); assetSummary != "" {
+		b.WriteString(launchDimStyle.Render(assetSummary))
+		b.WriteString("\n\n")
+	}
 
 	selected := m.selectedCountByGroup()
 

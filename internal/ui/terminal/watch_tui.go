@@ -68,6 +68,7 @@ type watchModel struct {
 	estimateSummaryLine string // pre-formatted estimate line from launch; empty if unavailable
 	initInfo            map[int64]initialInstanceInfo
 	reconciler          *campaign.Reconciler
+	launchPending       bool
 
 	// Retry state (instance-based modes)
 	retrying             bool
@@ -351,6 +352,32 @@ func (m *watchModel) startWatchingInstance(instanceID int64) tea.Cmd {
 	m.clients[instanceID] = client
 	m.channels[instanceID] = ch
 	return waitForUpdate(instanceID, ch)
+}
+
+func (m *watchModel) addInstance(instanceID int64) tea.Cmd {
+	for _, existing := range m.instanceIDs {
+		if existing == instanceID {
+			return nil
+		}
+	}
+	m.instanceIDs = append(m.instanceIDs, instanceID)
+	if m.initInfo == nil {
+		m.initInfo = make(map[int64]initialInstanceInfo)
+	}
+	ci, _ := db.GetLaunch(m.database, instanceID)
+	jobs, _ := db.GetLaunchJobsIncludingAttempts(m.database, instanceID)
+	outcomes, _ := db.GetAttemptOutcomesByLaunch(m.database, instanceID)
+	m.initInfo[instanceID] = initialInstanceInfo{ci: ci, jobs: jobs, outcomes: outcomes}
+	if m.campaignID == 0 {
+		if campaignID, launchedAt := campaignInfoFromInstances(m.database, []int64{instanceID}); campaignID > 0 {
+			m.campaignID = campaignID
+			if m.launchedAt.IsZero() {
+				m.launchedAt = launchedAt
+			}
+		}
+	}
+	m.rebuildReplacementCache()
+	return m.startWatchingInstance(instanceID)
 }
 
 // waitForUpdate reads the next value from an instance watch channel.

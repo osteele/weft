@@ -72,6 +72,9 @@ func (m watchModel) handleCheckDone() (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) handleCheckDoneResult(msg watchCheckDoneResultMsg) (tea.Model, tea.Cmd) {
+	if m.launchPending {
+		return m, scheduleCheckDone()
+	}
 	if !msg.allTerminal {
 		return m, scheduleCheckDone()
 	}

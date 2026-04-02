@@ -139,7 +139,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	// Unplaced jobs section (instance-based modes)
-	if len(m.unplacedJobs) > 0 {
+	if !m.launchPending && len(m.unplacedJobs) > 0 {
 		addLine(watchTitleStyle.Render(fmt.Sprintf("Unplaced Jobs (%d)", len(m.unplacedJobs))))
 		formattedRows := m.formatUnplacedJobRows(m.unplacedJobs, max(width-4, 40))
 		for i := range m.unplacedJobs {
@@ -162,7 +162,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 		addLine(m.retryResult)
 	}
 
-	if !m.done {
+	if !m.done && !m.launchPending {
 		hint := "u unplace  x kill  t terminate  s submit  m move  q quit (instances run in background)"
 		if !m.retrying && m.hasRetryableFailures() {
 			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  q quit (instances run in background)"
