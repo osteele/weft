@@ -1687,9 +1687,10 @@ func renderRawOfferSummary(b *strings.Builder, raw []campaign.GroupRawOffers) {
 	if len(raw) == 0 {
 		return
 	}
-	type specSummary struct {
-		totalGroups int
-		statuses    map[string]int
+	type summaryRow struct {
+		label  string
+		status string
+		groups int
 	}
 
 	statusFor := func(go_ campaign.GroupRawOffers) string {
@@ -1704,61 +1705,63 @@ func renderRawOfferSummary(b *strings.Builder, raw []campaign.GroupRawOffers) {
 			return fmt.Sprintf("%d direct offers", len(go_.Offers))
 		}
 	}
-	specLabelFor := func(group campaign.InstanceGroup) string {
-		spec := strings.TrimSpace(group.GPUSpec())
-		if spec == "" || spec == "GPU" {
-			return "Unspecified GPU"
-		}
-		return spec
-	}
 
 	matchedGroups := 0
-	summaries := make(map[string]*specSummary)
-	order := make([]string, 0, len(raw))
+	rows := make([]summaryRow, 0, len(raw))
 	for _, go_ := range raw {
 		if go_.Err == nil && len(go_.Offers) > 0 {
 			matchedGroups++
 		}
-		spec := specLabelFor(go_.Group)
-		summary, ok := summaries[spec]
-		if !ok {
-			summary = &specSummary{statuses: make(map[string]int)}
-			summaries[spec] = summary
-			order = append(order, spec)
+		row := summaryRow{
+			label:  launchSummaryGPUSpec(go_.Group),
+			status: statusFor(go_),
+			groups: 1,
 		}
-		summary.totalGroups++
-		summary.statuses[statusFor(go_)]++
+		if n := len(rows); n > 0 && rows[n-1].label == row.label && rows[n-1].status == row.status {
+			rows[n-1].groups++
+			continue
+		}
+		rows = append(rows, row)
 	}
 	b.WriteString(launchDimStyle.Render(fmt.Sprintf(" Direct offers found for %d/%d GPU groups.", matchedGroups, len(raw))))
 	b.WriteString("\n")
 
-	limit := min(len(order), 5)
+	limit := min(len(rows), 5)
 	for i := 0; i < limit; i++ {
-		spec := order[i]
-		summary := summaries[spec]
-		if summary == nil {
-			continue
+		row := rows[i]
+		label := row.label
+		if row.groups > 1 {
+			label = fmt.Sprintf("%s (%d groups)", row.label, row.groups)
 		}
-		statusParts := make([]string, 0, len(summary.statuses))
-		for status, count := range summary.statuses {
-			if count > 1 {
-				statusParts = append(statusParts, fmt.Sprintf("%dx %s", count, status))
-			} else {
-				statusParts = append(statusParts, status)
-			}
-		}
-		sort.Strings(statusParts)
-		status := strings.Join(statusParts, ", ")
-		if summary.totalGroups > 1 {
-			b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s (%d groups): %s", spec, summary.totalGroups, status)))
-		} else {
-			b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s: %s", spec, status)))
-		}
+		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s: %s", label, row.status)))
 		b.WriteString("\n")
 	}
-	if len(order) > limit {
-		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  … %d more GPU specs", len(order)-limit)))
+	if len(rows) > limit {
+		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  … %d more GPU groups", len(rows)-limit)))
 		b.WriteString("\n")
+	}
+}
+
+func launchSummaryGPUSpec(group campaign.InstanceGroup) string {
+	if group.GPUClass == "" && group.GPUMemGB <= 0 && group.MaxGPUMemGB <= 0 {
+		return "Unspecified GPU"
+	}
+	if group.GPUMemGB <= 0 || group.MaxGPUMemGB <= 0 {
+		return group.GPUSpec()
+	}
+
+	prefix := strings.TrimSpace(group.GPUClass)
+	if prefix != "" {
+		prefix += " "
+	}
+
+	switch {
+	case group.MaxGPUMemGB == group.GPUMemGB:
+		return fmt.Sprintf("%s%d GB", prefix, group.GPUMemGB)
+	case group.MaxGPUMemGB > group.GPUMemGB:
+		return fmt.Sprintf("%s%d-%d GB", prefix, group.GPUMemGB, group.MaxGPUMemGB)
+	default:
+		return group.GPUSpec()
 	}
 }
 

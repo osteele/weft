@@ -191,15 +191,59 @@ func TestLaunchModelView_RawOfferSummaryAggregatesDuplicateSpecs(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"NVIDIA ≥8GB ≤12GB (2 groups): 2x 64 direct offers",
+		"NVIDIA 8-12 GB (2 groups): 64 direct offers",
 		"Unspecified GPU: 64 direct offers",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "NVIDIA ≥8GB ≤12GB: 64 direct offers\n  NVIDIA ≥8GB ≤12GB: 64 direct offers") {
+	if strings.Contains(out, "NVIDIA 8-12 GB: 64 direct offers\n  NVIDIA 8-12 GB: 64 direct offers") {
 		t.Fatalf("expected duplicate summary lines to be aggregated, got:\n%s", out)
+	}
+}
+
+func TestLaunchModelView_RawOfferSummaryKeepsDifferentStatusesSeparate(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{
+			GPUClass:    "NVIDIA",
+			GPUMemGB:    8,
+			MaxGPUMemGB: 12,
+			Jobs: []*db.Job{
+				{ID: 1, Description: "a"},
+			},
+		},
+		{
+			GPUClass:    "NVIDIA",
+			GPUMemGB:    8,
+			MaxGPUMemGB: 12,
+			Jobs: []*db.Job{
+				{ID: 2, Description: "b"},
+			},
+		},
+	}
+	items, selected, cursor := buildItemsFromGroups(groups)
+	m := launchModel{
+		groups:      groups,
+		items:       items,
+		selected:    selected,
+		cursor:      cursor,
+		loading:     true,
+		instanceIDs: nil,
+		cachedRawOffers: []campaign.GroupRawOffers{
+			{Group: groups[0], Offers: []cloud.Offer{{ProviderID: "a", Provider: cloud.ProviderVastai}}},
+			{Group: groups[1]},
+		},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"NVIDIA 8-12 GB: 1 direct offer",
+		"NVIDIA 8-12 GB: 0 direct offers",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
 	}
 }
 
