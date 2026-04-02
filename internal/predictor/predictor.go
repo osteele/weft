@@ -288,14 +288,15 @@ func PredictedGPUMemCeilingGB(p *Prediction) (int, bool) {
 }
 
 // ResolveGPUMem returns the effective GPU memory floor and ceiling for a job.
-// The floor uses the maximum of explicit, OOM floor, predictor, and fallback.
-// The ceiling snaps the predictor's upper bound to the next standard VRAM tier.
+// Explicit floors win for placement, but a predictor-derived ceiling is still
+// returned when available so the estimator can ignore performance gains from
+// oversized GPUs. Without an explicit floor, the floor uses the maximum of the
+// predictor, OOM floor, and fallback. The ceiling snaps the predictor's upper
+// bound to the next standard VRAM tier.
 // Returns (floor, ceiling, predicted) where ceiling is nil if no prediction available.
 func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (floor *int, ceiling *int, predicted bool) {
-	if explicit != nil {
-		return explicit, nil, false
-	}
-	if !needsGPU {
+	hasGPURequest := needsGPU || explicit != nil
+	if !hasGPURequest {
 		return nil, nil, false
 	}
 
@@ -312,6 +313,18 @@ func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuC
 				ceilingGB = capGB
 			}
 		}
+	}
+
+	if explicit != nil {
+		memGB := *explicit
+		var ceilingPtr *int
+		if ceilingGB > 0 {
+			if ceilingGB < memGB {
+				ceilingGB = memGB
+			}
+			ceilingPtr = &ceilingGB
+		}
+		return explicit, ceilingPtr, false
 	}
 
 	memGB := max(predictedGB, oomFloorGB, fallbackGB)

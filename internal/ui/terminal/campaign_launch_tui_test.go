@@ -330,6 +330,24 @@ func TestLaunchModelAdoptTradeoffOptions_PrefersMiddleForFast(t *testing.T) {
 	}
 }
 
+func TestLaunchModelAdoptTradeoffOptions_MapsFastestToFastWhenTwoOptions(t *testing.T) {
+	m := launchModel{
+		launchOpts: campaign.LaunchOpts{Strategy: bidding.StrategyFastest},
+	}
+
+	m.adoptTradeoffOptions([]campaign.TradeoffOption{
+		{ID: "cheap", Label: "cheap"},
+		{ID: "fast-endpoint", Label: "fast"},
+	})
+
+	if m.activeTradeoff != "fast-endpoint" {
+		t.Fatalf("activeTradeoff = %q, want fast-endpoint", m.activeTradeoff)
+	}
+	if m.tradeoffCursor != 1 {
+		t.Fatalf("tradeoffCursor = %d, want 1", m.tradeoffCursor)
+	}
+}
+
 func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
 	t.Helper()
 	if cmd == nil {

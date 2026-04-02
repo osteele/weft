@@ -302,11 +302,23 @@ func TestResolveGPUMem_ReturnsCeiling(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit value disables ceiling", func(t *testing.T) {
+	t.Run("explicit value preserves predictor ceiling", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: 20 * 1024}}, nil // 20GB
+		}
 		explicit := 48
-		_, ceiling, _ := ResolveGPUMem(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0)
-		if ceiling != nil {
-			t.Fatalf("ceiling should be nil with explicit value, got %d", *ceiling)
+		floor, ceiling, predicted := ResolveGPUMem(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		if floor == nil || *floor != explicit {
+			t.Fatalf("floor = %v, want %d", floor, explicit)
+		}
+		if predicted {
+			t.Fatal("predicted should be false when explicit floor wins")
+		}
+		if ceiling == nil {
+			t.Fatal("ceiling should still be present with explicit floor")
+		}
+		if *ceiling != explicit {
+			t.Fatalf("ceiling = %d, want %d", *ceiling, explicit)
 		}
 	})
 

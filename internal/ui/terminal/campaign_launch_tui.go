@@ -525,7 +525,7 @@ func tradeoffDisplayLabel(option campaign.TradeoffOption, index int) string {
 	return fmt.Sprintf("tradeoff %d", index+1)
 }
 
-func strategyMatchesTradeoffLabel(strategy bidding.SelectionStrategy, label string) bool {
+func strategyMatchesTradeoffLabel(strategy bidding.SelectionStrategy, label string, optionCount int) bool {
 	if label == "" {
 		return false
 	}
@@ -538,7 +538,7 @@ func strategyMatchesTradeoffLabel(strategy bidding.SelectionStrategy, label stri
 	case bidding.StrategyFast:
 		return label == "fast"
 	case bidding.StrategyFastest:
-		return label == "fastest"
+		return label == "fastest" || (optionCount == 2 && label == "fast")
 	default:
 		return false
 	}
@@ -560,7 +560,7 @@ func (m *launchModel) adoptTradeoffOptions(options []campaign.TradeoffOption) {
 		}
 	}
 	for i, option := range m.tradeoffOptions {
-		if strategyMatchesTradeoffLabel(m.launchOpts.Strategy, option.Label) {
+		if strategyMatchesTradeoffLabel(m.launchOpts.Strategy, option.Label, len(m.tradeoffOptions)) {
 			m.activeTradeoff = option.ID
 			m.tradeoffCursor = i
 			return

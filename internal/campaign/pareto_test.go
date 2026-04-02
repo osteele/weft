@@ -42,8 +42,8 @@ func TestBuildParetoTradeoffOptions_LabelsTwoPointFrontier(t *testing.T) {
 	if len(options) != 2 {
 		t.Fatalf("expected 2 frontier options, got %d", len(options))
 	}
-	if options[0].Label != "cheap" || options[1].Label != "fastest" {
-		t.Fatalf("labels = %#v, want cheap/fastest", options)
+	if options[0].Label != "cheap" || options[1].Label != "fast" {
+		t.Fatalf("labels = %#v, want cheap/fast", options)
 	}
 }
 

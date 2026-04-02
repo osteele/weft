@@ -48,7 +48,7 @@ func BuildParetoTradeoffOptions(plans map[string]StrategyPlan) []TradeoffOption 
 		options[0].Label = "cheap/fast/fastest"
 	case 2:
 		options[0].Label = "cheap"
-		options[1].Label = "fastest"
+		options[1].Label = "fast"
 	default:
 		options[0].Label = "cheap"
 		options[len(options)-1].Label = "fastest"
