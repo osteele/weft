@@ -543,7 +543,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 
 	total := campaign.TotalEstimatedCostFromEstimates(estimates)
 	fmt.Printf("\nEstimated total: ~$%.2f\n", total)
-	fmt.Println("To launch interactively: weft campaign launch")
+	fmt.Println("To launch interactively: weft launch instances")
 	return nil
 }
 

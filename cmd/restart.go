@@ -307,7 +307,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return err
 		}
 		fmt.Printf("Reset job %d to queued (cloud instance no longer available)\n", jobID)
-		fmt.Printf("  Use 'weft campaign launch' to run on a new instance\n")
+		fmt.Printf("  Use 'weft launch instances' to run on a new instance\n")
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}
