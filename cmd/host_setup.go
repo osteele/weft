@@ -90,6 +90,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	// Step 4: Deploy agent binary
 	fmt.Fprintf(os.Stderr, "  [%d/%d] Deploying agent...", nextStep(), totalSteps)
 	deployed, agentErr := agentdeploy.EnsureAgentUpToDate(host, spec)
+	agentReady := agentErr == nil
 	if agentErr != nil {
 		if errors.Is(agentErr, agentdeploy.ErrAgentNotAvailable) {
 			fmt.Fprintf(os.Stderr, " skipped (binary not built; run 'just build-agents')\n")
@@ -135,15 +136,19 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	// Step 7: Start queue runner (unless --no-runner)
 	if !hostSetupNoRunner {
 		fmt.Fprintf(os.Stderr, "  [%d/%d] Starting queue runner...", nextStep(), totalSteps)
-		envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
-		runner := queuerunner.NewRunner(host)
-		started, runnerErr := runner.EnsureStarted(envVars, r2Bucket)
-		if runnerErr != nil {
-			fmt.Fprintf(os.Stderr, " warning: %v\n", runnerErr)
-		} else if started {
-			fmt.Fprintf(os.Stderr, " started\n")
+		if !agentReady {
+			fmt.Fprintf(os.Stderr, " skipped (agent unavailable)\n")
 		} else {
-			fmt.Fprintf(os.Stderr, " already running\n")
+			envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
+			runner := queuerunner.NewRunner(host)
+			started, runnerErr := runner.EnsureStarted(envVars, r2Bucket)
+			if runnerErr != nil {
+				fmt.Fprintf(os.Stderr, " warning: %v\n", runnerErr)
+			} else if started {
+				fmt.Fprintf(os.Stderr, " started\n")
+			} else {
+				fmt.Fprintf(os.Stderr, " already running\n")
+			}
 		}
 	}
 

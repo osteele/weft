@@ -172,7 +172,7 @@ build-agents:
                 '--exclude=weft' '--exclude=placement.test' \
                 ./ "${WEFT_MACOS_BUILDER_HOST}:${REMOTE_DIR}/"
             ssh "${WEFT_MACOS_BUILDER_HOST}" \
-                "cd ${REMOTE_DIR} && GOOS=darwin GOARCH=arm64 go build ${LDFLAGS} -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent"
+                "cd ${REMOTE_DIR} && mkdir -p internal/agentdeploy/binaries && GOOS=darwin GOARCH=arm64 go build -buildvcs=false -ldflags '${LDFLAGS}' -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent"
             rsync -az \
                 "${WEFT_MACOS_BUILDER_HOST}:${REMOTE_DIR}/internal/agentdeploy/binaries/weft-agent-darwin-arm64" \
                 internal/agentdeploy/binaries/weft-agent-darwin-arm64

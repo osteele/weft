@@ -10,17 +10,15 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/osteele/weft/internal/agentdeploy"
+	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/queuerunner"
-	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
@@ -527,33 +525,8 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 // Returns (true, nil) if the runner was started, (false, nil) if already running,
 // or (false, error) if starting failed.
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
-	queue = defaultQueueName
-
-	// Deploy agent binary if out of date
-	if spec := inventory.FindHost(host); spec != nil {
-		agentdeploy.EnsureAgentUpToDate(host, *spec) //nolint:errcheck // best-effort
-	}
-
-	// Deploy notify script if Slack is configured
-	slackWebhook := slack.GetWebhook()
-	slack.DeployNotifyScript(host, slackWebhook)
-
-	// Build environment variables for the runner
-	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
-
-	// Load R2 bucket from config for inventory host uploads
-	var r2Bucket string
-	if cfg, err := config.Load(); err == nil && cfg.Vastai.R2.Bucket != "" {
-		r2Bucket = cfg.Vastai.R2.Bucket
-		// Deploy rclone config to inventory host (best-effort)
-		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-		if err := agentdeploy.EnsureRcloneConfig(host, r2Cfg); err != nil {
-			slog.Warn("failed to deploy rclone config", "host", host, "error", err)
-		}
-	}
-
-	runner := queuerunner.NewRunner(host)
-	return runner.EnsureStarted(envVars, r2Bucket)
+	_ = queue
+	return hostsyncapp.EnsureQueueRunnerStarted(host)
 }
 
 func runQueueStart(cmd *cobra.Command, args []string) error {

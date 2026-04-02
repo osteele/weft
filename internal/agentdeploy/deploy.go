@@ -14,7 +14,8 @@ import (
 const remoteBinDir = "~/.cache/weft/bin"
 
 // EnsureAgentUpToDate checks whether the remote agent is current, and if not,
-// cross-compiles and deploys it. Returns true if a new binary was deployed.
+// deploys a matching local build or falls back to a native build on the host.
+// Returns true if a new binary was deployed.
 func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 	localVer, err := LocalAgentVersion()
 	if err != nil {
@@ -23,7 +24,8 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 
 	remoteVer, err := RemoteAgentVersion(host)
 	if errors.Is(err, ErrAgentIncompatible) {
-		// Binary exists but is broken (e.g. wrong arch). Deploy the correct build.
+		// Binary exists but is broken (e.g. wrong arch or libc mismatch).
+		// Redeploy using a build path that can produce a runnable binary.
 		slog.Warn("agent incompatible, redeploying", "component", "agentdeploy", "host", host, "error", err)
 	} else if err != nil {
 		return false, fmt.Errorf("remote agent version on %s: %w", host, err)
@@ -33,7 +35,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, nil
 	}
 
-	binaryPath, err := EnsureBuilt(localVer, spec.OS, spec.Arch, "")
+	binaryPath, err := EnsureBuilt(localVer, spec.OS, spec.Arch)
 	if errors.Is(err, ErrAgentNotAvailable) {
 		// No pre-built binary — build natively on the remote host.
 		if err := BuildOnHost(host, localVer); err != nil {

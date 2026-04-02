@@ -16,7 +16,7 @@ var ErrAgentNotAvailable = errors.New("agent binary not available for this platf
 
 // ExtractFunc is the function signature for extracting an agent binary.
 // Tests can replace it with SetExtractFunc to avoid requiring real binaries.
-type ExtractFunc func(version, goos, goarch, variant, outputPath string) error
+type ExtractFunc func(version, goos, goarch, outputPath string) error
 
 var extractFunc ExtractFunc = defaultExtractFunc
 
@@ -29,26 +29,21 @@ func SetExtractFunc(fn ExtractFunc) func() {
 }
 
 // CachePath returns the local cache path for a built agent binary.
-// Layout: ~/.cache/weft/builds/<version>/<goos>-<goarch>[-<variant>]/weft-agent
-// variant is optional (empty string = default build).
-func CachePath(version, goos, goarch, variant string) string {
+// Layout: ~/.cache/weft/builds/<version>/<goos>-<goarch>/weft-agent
+func CachePath(version, goos, goarch string) string {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
 		cacheDir = filepath.Join(os.Getenv("HOME"), ".cache")
 	}
 	key := goos + "-" + goarch
-	if variant != "" {
-		key += "-" + variant
-	}
 	return filepath.Join(cacheDir, "weft", "builds", version, key, "weft-agent")
 }
 
 // EnsureBuilt checks the local build cache and extracts the agent binary from
 // the binaries/ directory if the cached binary is missing. Returns the path to
 // the binary, or ErrAgentNotAvailable if no binary exists for this platform.
-// variant is optional (empty = default build); used to select e.g. "u20" for Ubuntu 20.04 compatible builds.
-func EnsureBuilt(version, goos, goarch, variant string) (string, error) {
-	path := CachePath(version, goos, goarch, variant)
+func EnsureBuilt(version, goos, goarch string) (string, error) {
+	path := CachePath(version, goos, goarch)
 
 	if _, err := os.Stat(path); err == nil {
 		return path, nil
@@ -58,7 +53,7 @@ func EnsureBuilt(version, goos, goarch, variant string) (string, error) {
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 
-	if err := extractFunc(version, goos, goarch, variant, path); err != nil {
+	if err := extractFunc(version, goos, goarch, path); err != nil {
 		return "", err
 	}
 
@@ -80,7 +75,7 @@ func BinariesVersion() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func defaultExtractFunc(version, goos, goarch, variant, outputPath string) error {
+func defaultExtractFunc(version, goos, goarch, outputPath string) error {
 	root, err := RepoRoot()
 	if err != nil {
 		return fmt.Errorf("%w: run 'just build-agents' first: %w", ErrAgentNotAvailable, err)
@@ -88,9 +83,6 @@ func defaultExtractFunc(version, goos, goarch, variant, outputPath string) error
 
 	binDir := filepath.Join(root, "internal", "agentdeploy", "binaries")
 	binName := fmt.Sprintf("weft-agent-%s-%s", goos, goarch)
-	if variant != "" {
-		binName += "-" + variant
-	}
 	srcPath := filepath.Join(binDir, binName)
 
 	// Check VERSION matches before opening the binary

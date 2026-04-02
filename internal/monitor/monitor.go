@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/db"
@@ -20,9 +21,7 @@ import (
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
-	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/session"
-	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -928,12 +927,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 
 // ensureQueueRunnerStarted checks if queue runner is running and starts it if not.
 func ensureQueueRunnerStarted(host string) (bool, error) {
-	slackWebhook := slack.GetWebhook()
-	slack.DeployNotifyScript(host, slackWebhook)
-	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
-
-	runner := queuerunner.NewRunner(host)
-	return runner.EnsureStarted(envVars, "")
+	return hostsyncapp.EnsureQueueRunnerStarted(host)
 }
 
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely.

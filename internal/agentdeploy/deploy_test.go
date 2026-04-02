@@ -9,7 +9,7 @@ import (
 )
 
 func TestCachePath(t *testing.T) {
-	path := CachePath("abc123def456", "linux", "amd64", "")
+	path := CachePath("abc123def456", "linux", "amd64")
 
 	if !strings.Contains(path, "weft/builds/abc123def456/linux-amd64/weft-agent") {
 		t.Errorf("unexpected cache path: %s", path)
@@ -27,8 +27,8 @@ func TestCachePath(t *testing.T) {
 }
 
 func TestCachePath_DifferentPlatforms(t *testing.T) {
-	linux := CachePath("v1", "linux", "amd64", "")
-	darwin := CachePath("v1", "darwin", "arm64", "")
+	linux := CachePath("v1", "linux", "amd64")
+	darwin := CachePath("v1", "darwin", "arm64")
 
 	if linux == darwin {
 		t.Error("linux and darwin cache paths should differ")
@@ -42,8 +42,8 @@ func TestCachePath_DifferentPlatforms(t *testing.T) {
 }
 
 func TestCachePath_DifferentVersions(t *testing.T) {
-	v1 := CachePath("abc123", "linux", "amd64", "")
-	v2 := CachePath("def456", "linux", "amd64", "")
+	v1 := CachePath("abc123", "linux", "amd64")
+	v2 := CachePath("def456", "linux", "amd64")
 
 	if v1 == v2 {
 		t.Error("different versions should produce different cache paths")
@@ -57,7 +57,7 @@ func TestCachePath_DifferentVersions(t *testing.T) {
 }
 
 func TestCachePath_Structure(t *testing.T) {
-	path := CachePath("deadbeef1234", "linux", "amd64", "")
+	path := CachePath("deadbeef1234", "linux", "amd64")
 
 	// Should be: <cache>/weft/builds/<version>/<os>-<arch>/weft-agent
 	parts := strings.Split(path, string(filepath.Separator))
@@ -87,21 +87,9 @@ func TestCachePath_Structure(t *testing.T) {
 	}
 }
 
-func TestCachePath_WithVariant(t *testing.T) {
-	noVariant := CachePath("v1", "linux", "amd64", "")
-	withVariant := CachePath("v1", "linux", "amd64", "u20")
-
-	if noVariant == withVariant {
-		t.Error("variant should produce a different cache path")
-	}
-	if !strings.Contains(withVariant, "linux-amd64-u20") {
-		t.Errorf("variant path missing platform+variant: %s", withVariant)
-	}
-}
-
 func TestEnsureBuilt_CacheHit(t *testing.T) {
 	version := "test-cache-hit-" + t.Name()
-	path := CachePath(version, "linux", "amd64", "")
+	path := CachePath(version, "linux", "amd64")
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -111,7 +99,7 @@ func TestEnsureBuilt_CacheHit(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(version, "linux", "amd64", "")
+	got, err := EnsureBuilt(version, "linux", "amd64")
 	if err != nil {
 		t.Fatalf("EnsureBuilt: %v", err)
 	}
@@ -122,24 +110,23 @@ func TestEnsureBuilt_CacheHit(t *testing.T) {
 
 func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 	var captured struct {
-		version, goos, goarch, variant, outputPath string
+		version, goos, goarch, outputPath string
 	}
 
-	cleanup := SetExtractFunc(func(version, goos, goarch, variant, outputPath string) error {
+	cleanup := SetExtractFunc(func(version, goos, goarch, outputPath string) error {
 		captured.version = version
 		captured.goos = goos
 		captured.goarch = goarch
-		captured.variant = variant
 		captured.outputPath = outputPath
 		return os.WriteFile(outputPath, []byte("fake-agent"), 0o755)
 	})
 	defer cleanup()
 
 	version := "test-mock-extract-" + t.Name()
-	path := CachePath(version, "linux", "amd64", "")
+	path := CachePath(version, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(version, "linux", "amd64", "")
+	got, err := EnsureBuilt(version, "linux", "amd64")
 	if err != nil {
 		t.Fatalf("EnsureBuilt: %v", err)
 	}
@@ -156,9 +143,6 @@ func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 	if captured.goarch != "amd64" {
 		t.Errorf("GOARCH = %q, want %q", captured.goarch, "amd64")
 	}
-	if captured.variant != "" {
-		t.Errorf("variant = %q, want %q", captured.variant, "")
-	}
 	if captured.outputPath != path {
 		t.Errorf("output path = %q, want %q", captured.outputPath, path)
 	}
@@ -166,7 +150,7 @@ func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 
 func TestEnsureBuilt_CacheHit_SkipsExtract(t *testing.T) {
 	version := "test-skip-extract-" + t.Name()
-	path := CachePath(version, "linux", "amd64", "")
+	path := CachePath(version, "linux", "amd64")
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -177,7 +161,7 @@ func TestEnsureBuilt_CacheHit_SkipsExtract(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(version, "linux", "amd64", "")
+	got, err := EnsureBuilt(version, "linux", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,10 +187,10 @@ func TestEnsureBuilt_ExtractFromFilesystem(t *testing.T) {
 		t.Skipf("cannot determine local agent version: %v", err)
 	}
 
-	path := CachePath(localVersion, "linux", "amd64", "")
+	path := CachePath(localVersion, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(localVersion, "linux", "amd64", "")
+	got, err := EnsureBuilt(localVersion, "linux", "amd64")
 	if err != nil {
 		t.Skipf("agent binary not available (run 'just build-agents' first): %v", err)
 	}

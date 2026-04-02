@@ -26,7 +26,7 @@ func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, go
 		return key, nil
 	}
 
-	localPath, err := EnsureBuilt(version, goos, goarch, "")
+	localPath, err := EnsureBuilt(version, goos, goarch)
 	if errors.Is(err, ErrAgentNotAvailable) {
 		slog.Info("agent binary not in cache, building via Fly builder", "component", "agentdeploy")
 		localPath, err = BuildViaFly(version, goos, goarch, output)

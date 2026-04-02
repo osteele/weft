@@ -155,7 +155,7 @@ var ErrAgentIncompatible = errors.New("agent binary incompatible")
 func RemoteAgentVersion(host string) (string, error) {
 	// Use a two-step check: first test if the binary exists, then run it.
 	// This distinguishes "not installed" (return "") from "exists but crashes"
-	// (return ErrAgentIncompatible), so callers can deploy the correct variant.
+	// (return ErrAgentIncompatible), so callers can rebuild or redeploy it.
 	checkCmd := fmt.Sprintf(
 		`if [ ! -f %s ]; then echo "not-installed"; exit 0; fi; %s --version 2>&1`,
 		remoteAgentPath, remoteAgentPath,

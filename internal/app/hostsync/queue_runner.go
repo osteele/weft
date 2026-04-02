@@ -1,36 +1,51 @@
 package hostsync
 
 import (
-	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/osteele/weft/internal/agentdeploy"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/slack"
 )
 
 var (
-	findHostSpecFunc        = inventory.FindHost
-	ensureAgentUpToDateFunc = agentdeploy.EnsureAgentUpToDate
+	findHostSpecFunc         = inventory.FindHost
+	ensureAgentUpToDateFunc  = agentdeploy.EnsureAgentUpToDate
+	ensureRcloneConfigFunc   = agentdeploy.EnsureRcloneConfig
+	loadConfigFunc           = config.Load
+	getSlackWebhookFunc      = slack.GetWebhook
+	deployNotifyScriptFunc   = slack.DeployNotifyScript
+	buildRunnerEnvPrefixFunc = slack.BuildRunnerEnvPrefix
+	ensureRunnerStartedFunc  = func(host, envPrefix, r2Bucket string) (bool, error) {
+		runner := queuerunner.NewRunner(host)
+		return runner.EnsureStarted(envPrefix, r2Bucket)
+	}
 )
 
 // EnsureQueueRunnerStarted ensures the queue runner is present and running.
 func EnsureQueueRunnerStarted(host string) (bool, error) {
 	if spec := findHostSpecFunc(host); spec != nil {
 		if _, err := ensureAgentUpToDateFunc(host, *spec); err != nil {
-			if !errors.Is(err, agentdeploy.ErrAgentNotAvailable) {
-				return false, fmt.Errorf("agent deploy failed: %w", err)
-			}
+			return false, fmt.Errorf("agent deploy failed: %w", err)
 		}
 	}
 
-	slackWebhook := slack.GetWebhook()
-	slack.DeployNotifyScript(host, slackWebhook)
-	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
+	var r2Bucket string
+	if cfg, err := loadConfigFunc(); err == nil && cfg != nil && cfg.Vastai.R2.Bucket != "" {
+		r2Bucket = cfg.Vastai.R2.Bucket
+		if err := ensureRcloneConfigFunc(host, cfg.Vastai.R2.ToCloudR2Config()); err != nil {
+			slog.Warn("failed to deploy rclone config", "host", host, "error", err)
+		}
+	}
 
-	runner := queuerunner.NewRunner(host)
-	started, err := runner.EnsureStarted(envVars, "")
+	slackWebhook := getSlackWebhookFunc()
+	deployNotifyScriptFunc(host, slackWebhook)
+	envVars := buildRunnerEnvPrefixFunc(slackWebhook)
+
+	started, err := ensureRunnerStartedFunc(host, envVars, r2Bucket)
 	if err != nil {
 		return false, fmt.Errorf("queue runner start failed: %w", err)
 	}
