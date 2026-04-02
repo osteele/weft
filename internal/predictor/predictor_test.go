@@ -299,6 +299,55 @@ func TestCheckModelSchema(t *testing.T) {
 	})
 }
 
+func TestPredictBatchCachesResultsAcrossCalls(t *testing.T) {
+	clearPredictionCache()
+	original := runPredictBatchCLI
+	t.Cleanup(func() {
+		runPredictBatchCLI = original
+		clearPredictionCache()
+	})
+
+	calls := 0
+	runPredictBatchCLI = func(_ Config, jobs []BatchJob) ([]byte, error) {
+		calls++
+		entries := make([]map[string]any, 0, len(jobs))
+		for _, job := range jobs {
+			entries = append(entries, map[string]any{
+				"id": job.ID,
+				"duration_s": map[string]any{
+					"mean":  float64(3600),
+					"std":   float64(60),
+					"lower": float64(3500),
+					"upper": float64(3700),
+				},
+			})
+		}
+		return json.Marshal(entries)
+	}
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: t.TempDir()}
+	first, err := PredictBatch(cfg, []BatchJob{
+		{ID: 1, Project: "p", GPUClass: "RTX 4090", Command: "python train.py"},
+		{ID: 2, Project: "p", GPUClass: "RTX 4090", Command: "python train.py"},
+	})
+	if err != nil {
+		t.Fatalf("PredictBatch first: %v", err)
+	}
+	second, err := PredictBatch(cfg, []BatchJob{
+		{ID: 3, Project: "p", GPUClass: "RTX 4090", Command: "python train.py"},
+	})
+	if err != nil {
+		t.Fatalf("PredictBatch second: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("runPredictBatchCLI calls = %d, want 1", calls)
+	}
+	if first[1] == nil || first[2] == nil || second[3] == nil {
+		t.Fatalf("expected cached predictions for all ids, got %#v / %#v", first, second)
+	}
+}
+
 func TestPredictedGPUMemGB(t *testing.T) {
 	memGB, ok := PredictedGPUMemGB(&Prediction{Upper: 2050})
 	if !ok {

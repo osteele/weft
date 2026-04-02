@@ -69,6 +69,22 @@ type ModelSchemaStatus struct {
 var predictFunc = Predict
 var predictBatchFunc = PredictBatch
 var modelSchemaWarnOnce sync.Once
+var runPredictCLI = runPredictCLIImpl
+var runPredictBatchCLI = runPredictBatchCLIImpl
+var predictionCache = struct {
+	mu      sync.RWMutex
+	entries map[predictionCacheKey]*Result
+}{
+	entries: make(map[predictionCacheKey]*Result),
+}
+
+type predictionCacheKey struct {
+	modelDir string
+	host     string
+	project  string
+	gpuClass string
+	command  string
+}
 
 // ResolvePredict routes prediction calls through the package test seam.
 func ResolvePredict(cfg Config, host, project, gpuClass, command string) (*Result, error) {
@@ -199,6 +215,60 @@ func removeModelArtifacts(cfg Config) error {
 	return nil
 }
 
+func clearPredictionCache() {
+	predictionCache.mu.Lock()
+	defer predictionCache.mu.Unlock()
+	predictionCache.entries = make(map[predictionCacheKey]*Result)
+}
+
+func predictionKey(cfg Config, host, project, gpuClass, command string) predictionCacheKey {
+	return predictionCacheKey{
+		modelDir: cfg.modelDir(),
+		host:     host,
+		project:  project,
+		gpuClass: gpuClass,
+		command:  command,
+	}
+}
+
+func cachedPrediction(key predictionCacheKey) (*Result, bool) {
+	predictionCache.mu.RLock()
+	defer predictionCache.mu.RUnlock()
+	result, ok := predictionCache.entries[key]
+	if !ok {
+		return nil, false
+	}
+	return cloneResult(result), true
+}
+
+func storePrediction(key predictionCacheKey, result *Result) {
+	if result == nil {
+		return
+	}
+	predictionCache.mu.Lock()
+	defer predictionCache.mu.Unlock()
+	predictionCache.entries[key] = cloneResult(result)
+}
+
+func clonePrediction(pred *Prediction) *Prediction {
+	if pred == nil {
+		return nil
+	}
+	cloned := *pred
+	return &cloned
+}
+
+func cloneResult(result *Result) *Result {
+	if result == nil {
+		return nil
+	}
+	return &Result{
+		DurationS:    clonePrediction(result.DurationS),
+		PeakRSSKB:    clonePrediction(result.PeakRSSKB),
+		MaxGPUMemMiB: clonePrediction(result.MaxGPUMemMiB),
+	}
+}
+
 func warnIfModelSchemaChanged(cfg Config) {
 	status := CheckModelSchema(cfg)
 	if !status.Changed {
@@ -228,6 +298,7 @@ func Train(cfg Config) error {
 	if cfg.ProjectPath == "" {
 		return fmt.Errorf("predictor: project_path not configured")
 	}
+	clearPredictionCache()
 	if status := CheckModelSchema(cfg); status.Changed {
 		if err := removeModelArtifacts(cfg); err != nil {
 			return fmt.Errorf("predictor: remove incompatible models: %w", err)
@@ -251,32 +322,21 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 		return nil, fmt.Errorf("predictor: project_path not configured")
 	}
 	warnIfModelSchemaChanged(cfg)
-
-	args := []string{
-		"run", "--project", cfg.ProjectPath, "job-estimator", "predict",
-		"--model-dir", cfg.modelDir(),
-		"--command", command,
-	}
-	if host != "" {
-		args = append(args, "--host", host)
-	}
-	if project != "" {
-		args = append(args, "--project", project)
-	}
-	if gpuClass != "" {
-		args = append(args, "--gpu-class", gpuClass)
+	key := predictionKey(cfg, host, project, gpuClass, command)
+	if result, ok := cachedPrediction(key); ok {
+		return result, nil
 	}
 
-	cmd := exec.Command("uv", args...)
-	out, err := cmd.Output()
+	out, err := runPredictCLI(cfg, host, project, gpuClass, command)
 	if err != nil {
-		return nil, fmt.Errorf("predictor predict: %w", err)
+		return nil, err
 	}
 
 	var result Result
 	if err := json.Unmarshal(out, &result); err != nil {
 		return nil, fmt.Errorf("predictor: parse output: %w", err)
 	}
+	storePrediction(key, &result)
 	return &result, nil
 }
 
@@ -306,6 +366,75 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 	}
 	warnIfModelSchemaChanged(cfg)
 
+	results := make(map[int64]*Result, len(jobs))
+	missingJobs := make([]BatchJob, 0, len(jobs))
+	keysByBatchID := make(map[int64]predictionCacheKey)
+	idsByKey := make(map[predictionCacheKey][]int64)
+	for _, job := range jobs {
+		key := predictionKey(cfg, job.Host, job.Project, job.GPUClass, job.Command)
+		if cached, ok := cachedPrediction(key); ok {
+			results[job.ID] = cached
+			continue
+		}
+		if _, seen := idsByKey[key]; !seen {
+			missingJobs = append(missingJobs, job)
+			keysByBatchID[job.ID] = key
+		}
+		idsByKey[key] = append(idsByKey[key], job.ID)
+	}
+	if len(missingJobs) == 0 {
+		return results, nil
+	}
+
+	out, err := runPredictBatchCLI(cfg, missingJobs)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []batchResultEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, fmt.Errorf("predictor: parse batch output: %w", err)
+	}
+
+	for _, e := range entries {
+		key, ok := keysByBatchID[e.ID]
+		if !ok {
+			continue
+		}
+		r := e.Result
+		storePrediction(key, &r)
+		for _, id := range idsByKey[key] {
+			results[id] = cloneResult(&r)
+		}
+	}
+	return results, nil
+}
+
+func runPredictCLIImpl(cfg Config, host, project, gpuClass, command string) ([]byte, error) {
+	args := []string{
+		"run", "--project", cfg.ProjectPath, "job-estimator", "predict",
+		"--model-dir", cfg.modelDir(),
+		"--command", command,
+	}
+	if host != "" {
+		args = append(args, "--host", host)
+	}
+	if project != "" {
+		args = append(args, "--project", project)
+	}
+	if gpuClass != "" {
+		args = append(args, "--gpu-class", gpuClass)
+	}
+
+	cmd := exec.Command("uv", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("predictor predict: %w", err)
+	}
+	return out, nil
+}
+
+func runPredictBatchCLIImpl(cfg Config, jobs []BatchJob) ([]byte, error) {
 	input, err := json.Marshal(jobs)
 	if err != nil {
 		return nil, fmt.Errorf("predictor: marshal batch input: %w", err)
@@ -322,18 +451,7 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("predictor predict-batch: %w", err)
 	}
-
-	var entries []batchResultEntry
-	if err := json.Unmarshal(out, &entries); err != nil {
-		return nil, fmt.Errorf("predictor: parse batch output: %w", err)
-	}
-
-	results := make(map[int64]*Result, len(entries))
-	for _, e := range entries {
-		r := e.Result
-		results[e.ID] = &r
-	}
-	return results, nil
+	return out, nil
 }
 
 // EnsureAndPredict retrains if stale, then predicts.
