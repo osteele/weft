@@ -35,10 +35,11 @@ import (
 //   go test -tags multihost -v ./internal/ops -run "Integration_MultiHost" -timeout 300s
 
 const (
-	multihostQueueDir  = "~/.cache/weft/queue"
-	multihostLogDir    = "~/.cache/weft/logs"
+	multihostHomeDir   = "/tmp/weft-multihost-integration"
+	multihostQueueDir  = multihostHomeDir + "/.cache/weft/queue"
+	multihostLogDir    = multihostHomeDir + "/.cache/weft/logs"
 	multihostBinPath   = "~/.cache/weft/bin/weft-agent"
-	multihostQueueName = "gotest-multihost"
+	multihostQueueName = ops.DefaultQueueName
 )
 
 type multihostTestHost struct {
@@ -73,16 +74,12 @@ func multihostCleanup(t *testing.T, host string, jobIDs []int64) {
 	sshCmd := fmt.Sprintf(`
 		if [ -f %s/%s.runner.pid ]; then
 			kill $(cat %s/%s.runner.pid) 2>/dev/null || true
-			rm -f %s/%s.runner.pid
 		fi
-		rm -f %s/%s.* %s/runner-%s.log 2>/dev/null
-		rm -f %s/%s.commands %s/%s.state.json 2>/dev/null
+		rm -rf %s 2>/dev/null
 	`,
 		multihostQueueDir, multihostQueueName,
 		multihostQueueDir, multihostQueueName,
-		multihostQueueDir, multihostQueueName,
-		multihostQueueDir, multihostQueueName, multihostQueueDir, multihostQueueName,
-		multihostQueueDir, multihostQueueName, multihostQueueDir, multihostQueueName,
+		multihostHomeDir,
 	)
 	multihostSSHRunMayFail(t, host, sshCmd)
 
@@ -103,7 +100,7 @@ func multihostStartRunner(t *testing.T, host string) string {
 	multihostSSHRun(t, host, fmt.Sprintf("mkdir -p %s %s", multihostQueueDir, multihostLogDir))
 
 	// Start runner
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' '%s run-queue %s'", session, multihostBinPath, multihostQueueName)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' 'HOME=%s %s run-queue'", session, multihostHomeDir, multihostBinPath)
 	multihostSSHRun(t, host, tmuxCmd)
 
 	// Wait for PID file

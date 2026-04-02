@@ -435,9 +435,12 @@ type queueEntry struct {
 // fetchQueueEntryFromRemote reads the queue entry for a job from the remote commands file.
 // Uses the production remote.SSHHost.GetLastCommandForJob() for the SSH call.
 func fetchQueueEntryFromRemote(host, queueName string, jobID int64, timeout time.Duration) (*queueEntry, error) {
+	if queueName != DefaultQueueName {
+		return nil, fmt.Errorf("unsupported queue %q", queueName)
+	}
 	// Use production code path for SSH call
 	sshHost := remote.NewSSHHost(host, timeout)
-	content, err := sshHost.GetLastCommandForJob(queueName, jobID)
+	content, err := sshHost.GetLastCommandForJob(jobID)
 	if err != nil {
 		return nil, err
 	}

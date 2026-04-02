@@ -26,13 +26,12 @@ func RunnerCommand(envPrefix, r2Bucket string) string {
 	if r2Bucket != "" {
 		cmd += fmt.Sprintf(" --r2-bucket=%s", r2Bucket)
 	}
-	cmd += fmt.Sprintf(" %s", opsqueue.DefaultQueueName)
 	return cmd
 }
 
 // RunnerSessionName returns the tmux session name for the queue runner.
 func RunnerSessionName() string {
-	return fmt.Sprintf("weft-queue-%s", opsqueue.DefaultQueueName)
+	return "weft-queue-" + opsqueue.DefaultQueueName
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
@@ -70,12 +69,12 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 	return true, nil
 }
 
-// Runner models a queue runner on a specific host/queue combination.
+// Runner models the default queue runner on a specific host.
 type Runner struct {
 	host string
 }
 
-// NewRunner creates a runner manager for the given host and queue.
+// NewRunner creates a runner manager for the given host.
 func NewRunner(host string) *Runner {
 	return &Runner{host: host}
 }
@@ -83,7 +82,7 @@ func NewRunner(host string) *Runner {
 // Host returns the runner host.
 func (r *Runner) Host() string { return r.host }
 
-// Queue returns the queue name.
+// Queue returns the runner's queue name.
 func (r *Runner) Queue() string { return opsqueue.DefaultQueueName }
 
 // SessionName returns the tmux session associated with this runner.

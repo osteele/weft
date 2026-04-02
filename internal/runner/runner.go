@@ -65,10 +65,10 @@ type Config struct {
 }
 
 // DefaultConfig returns a configuration with standard paths.
-func DefaultConfig(queueName string) Config {
+func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		QueueName: queueName,
+		QueueName: opsqueue.DefaultQueueName,
 		QueueDir:  filepath.Join(home, ".cache", "weft", "queue"),
 		LogDir:    filepath.Join(home, ".cache", "weft", "logs"),
 	}
@@ -76,15 +76,19 @@ func DefaultConfig(queueName string) Config {
 
 // New creates a new Runner with the given configuration.
 func New(cfg Config) *Runner {
+	queueName := cfg.QueueName
+	if queueName == "" {
+		queueName = opsqueue.DefaultQueueName
+	}
 	return &Runner{
-		queueName:       cfg.QueueName,
+		queueName:       queueName,
 		queueDir:        cfg.QueueDir,
 		logDir:          cfg.LogDir,
-		commandsFile:    filepath.Join(cfg.QueueDir, cfg.QueueName+".commands"),
-		stateFile:       filepath.Join(cfg.QueueDir, cfg.QueueName+".state.json"),
-		currentFile:     filepath.Join(cfg.QueueDir, cfg.QueueName+".current"),
-		pidFile:         filepath.Join(cfg.QueueDir, cfg.QueueName+".runner.pid"),
-		runnerLog:       filepath.Join(cfg.QueueDir, "runner-"+cfg.QueueName+".log"),
+		commandsFile:    filepath.Join(cfg.QueueDir, queueName+".commands"),
+		stateFile:       filepath.Join(cfg.QueueDir, queueName+".state.json"),
+		currentFile:     filepath.Join(cfg.QueueDir, queueName+".current"),
+		pidFile:         filepath.Join(cfg.QueueDir, queueName+".runner.pid"),
+		runnerLog:       filepath.Join(cfg.QueueDir, "runner-"+queueName+".log"),
 		cpuConfig:       DefaultCPUConfig(),
 		telemetryConfig: DefaultTelemetryConfig(),
 		benchCfg:        DefaultBenchmarkConfig(),

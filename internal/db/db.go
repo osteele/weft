@@ -3025,8 +3025,8 @@ func ReplaceDepSpecID(spec string, oldID, newID int64) (string, bool) {
 	return strings.Join(parts, ","), true
 }
 
-// ListQueued returns queued jobs for a host and queue name
-func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
+// ListQueued returns queued jobs for a host.
+func ListQueued(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, StatusQueued, host)
 }

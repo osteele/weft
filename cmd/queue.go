@@ -570,7 +570,7 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 
 	// Query jobs from database - this is the source of truth
 	// Get queued jobs for this host/queue
-	queuedJobs, err := db.ListQueued(database, host, defaultQueueName)
+	queuedJobs, err := db.ListQueued(database, host)
 	if err != nil {
 		return fmt.Errorf("list queued jobs: %w", err)
 	}

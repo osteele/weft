@@ -29,10 +29,11 @@ import (
 //   SSH_TEST_HOST=user@host go test -tags integration -v ./internal/runner -run "Integration" -timeout 120s
 
 const (
-	remoteQueueDir = "~/.cache/weft/queue"
-	remoteLogDir   = "~/.cache/weft/logs"
+	testHomeDir    = "/tmp/weft-runner-integration"
+	remoteQueueDir = testHomeDir + "/.cache/weft/queue"
+	remoteLogDir   = testHomeDir + "/.cache/weft/logs"
 	remoteBinPath  = "~/.cache/weft/bin/weft-agent"
-	testQueueName  = "gotest"
+	testQueueName  = opsqueue.DefaultQueueName
 )
 
 func getTestHost(t *testing.T) string {
@@ -50,19 +51,15 @@ func getTestHost(t *testing.T) string {
 func cleanupTestQueue(t *testing.T, host string) {
 	t.Helper()
 	cmd := fmt.Sprintf(`
-		rm -f %s/%s.* %s/runner-%s.log 2>/dev/null
-		rm -f %s/%s.commands %s/%s.state.json 2>/dev/null
 		# Kill any existing test runner
 		if [ -f %s/%s.runner.pid ]; then
 			kill $(cat %s/%s.runner.pid) 2>/dev/null || true
-			rm -f %s/%s.runner.pid
 		fi
+		rm -rf %s 2>/dev/null
 	`,
-		remoteQueueDir, testQueueName, remoteQueueDir, testQueueName,
-		remoteQueueDir, testQueueName, remoteQueueDir, testQueueName,
 		remoteQueueDir, testQueueName,
 		remoteQueueDir, testQueueName,
-		remoteQueueDir, testQueueName,
+		testHomeDir,
 	)
 	sshRun(t, host, cmd)
 }
@@ -119,7 +116,7 @@ func TestIntegration_GoRunnerStartStop(t *testing.T) {
 
 	// Start the runner in background via tmux
 	session := fmt.Sprintf("rj-gotest-%s", testQueueName)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' '%s run-queue %s'", session, remoteBinPath, testQueueName)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' 'HOME=%s %s run-queue'", session, testHomeDir, remoteBinPath)
 	sshRun(t, host, tmuxCmd)
 
 	// Wait for PID file to appear
@@ -193,7 +190,7 @@ func TestIntegration_GoRunnerJobExecution(t *testing.T) {
 
 	// Start the runner
 	session := fmt.Sprintf("rj-gotest-exec-%s", testQueueName)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' '%s run-queue %s'", session, remoteBinPath, testQueueName)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' 'HOME=%s %s run-queue'", session, testHomeDir, remoteBinPath)
 	sshRun(t, host, tmuxCmd)
 	defer sshRunMayFail(t, host, fmt.Sprintf("tmux kill-session -t '%s' 2>/dev/null", session))
 
@@ -327,7 +324,7 @@ func skipIfNoAgent(t *testing.T, host string) {
 func startTestRunner(t *testing.T, host, sessionSuffix string) func() {
 	t.Helper()
 	session := fmt.Sprintf("rj-gotest-%s-%s", sessionSuffix, testQueueName)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' '%s run-queue %s'", session, remoteBinPath, testQueueName)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' 'HOME=%s %s run-queue'", session, testHomeDir, remoteBinPath)
 	sshRun(t, host, tmuxCmd)
 	time.Sleep(3 * time.Second)
 	return func() {

@@ -34,7 +34,6 @@ func TestOpsLogInitialization(t *testing.T) {
 	oplog.Log(oplog.OpAgentStop, oplog.WithDetail("signal: SIGTERM"))
 	oplog.Close()
 
-	// Verify log entries were written
 	entries, err := oplog.ReadEntries(logPath)
 	if err != nil {
 		t.Fatalf("read entries: %v", err)
@@ -55,7 +54,6 @@ func TestOpsLogInitialization(t *testing.T) {
 }
 
 func TestAgentOpConstants(t *testing.T) {
-	// Verify agent-specific op constants exist and have correct prefixes
 	ops := []string{
 		oplog.OpAgentStart,
 		oplog.OpAgentStop,
@@ -69,14 +67,40 @@ func TestAgentOpConstants(t *testing.T) {
 }
 
 func TestAgentLogPathRespectsHome(t *testing.T) {
-	// Save and restore HOME
 	origHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", origHome)
 
 	os.Setenv("HOME", "/custom/home")
-	// agentLogPath uses os.UserHomeDir which may cache, so we test the structure
 	path := agentLogPath()
 	if !strings.HasSuffix(path, "agent-operations.log") {
 		t.Errorf("expected path to end with 'agent-operations.log', got %s", path)
 	}
+}
+
+func TestParseRunQueueArgs(t *testing.T) {
+	t.Run("accepts no queue name", func(t *testing.T) {
+		r2Bucket, err := parseRunQueueArgs(nil)
+		if err != nil {
+			t.Fatalf("parseRunQueueArgs() error = %v", err)
+		}
+		if r2Bucket != "" {
+			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want empty", r2Bucket)
+		}
+	})
+
+	t.Run("accepts explicit default queue for compatibility", func(t *testing.T) {
+		r2Bucket, err := parseRunQueueArgs([]string{"default", "--r2-bucket=test-bucket"})
+		if err != nil {
+			t.Fatalf("parseRunQueueArgs() error = %v", err)
+		}
+		if r2Bucket != "test-bucket" {
+			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want test-bucket", r2Bucket)
+		}
+	})
+
+	t.Run("rejects non-default queue", func(t *testing.T) {
+		if _, err := parseRunQueueArgs([]string{"gpu"}); err == nil {
+			t.Fatal("parseRunQueueArgs() error = nil, want error")
+		}
+	})
 }

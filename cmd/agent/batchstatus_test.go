@@ -106,3 +106,21 @@ func TestBatchStatusParsesStatusFileWithSignalSuffix(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBatchStatusArgs(t *testing.T) {
+	t.Run("accepts explicit default queue for compatibility", func(t *testing.T) {
+		jobIDs, err := parseBatchStatusArgs([]string{"--queue", "default", "101", "202"})
+		if err != nil {
+			t.Fatalf("parseBatchStatusArgs() error = %v", err)
+		}
+		if len(jobIDs) != 2 || jobIDs[0] != 101 || jobIDs[1] != 202 {
+			t.Fatalf("parseBatchStatusArgs() jobIDs = %v, want [101 202]", jobIDs)
+		}
+	})
+
+	t.Run("rejects non-default queue", func(t *testing.T) {
+		if _, err := parseBatchStatusArgs([]string{"--queue", "gpu", "101"}); err == nil {
+			t.Fatal("parseBatchStatusArgs() error = nil, want error")
+		}
+	})
+}

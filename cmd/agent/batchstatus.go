@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,18 +9,19 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
 )
 
 // batchStatus reads job state files and runner state to produce batch status
 // output for the given job IDs. Output format: one JOB|... line per job.
-func batchStatus(queueName string, jobIDs []int64) {
+func batchStatus(jobIDs []int64) {
 	homeDir, _ := os.UserHomeDir()
 	if homeDir == "" {
 		homeDir = "/tmp"
 	}
 	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
-	stateFile := filepath.Join(homeDir, ".cache", "weft", "queue", queueName+".state.json")
+	stateFile := filepath.Join(homeDir, ".cache", "weft", "queue", ops.DefaultQueueName+".state.json")
 
 	// Load runner state
 	state, _ := runner.LoadState(stateFile)
@@ -163,18 +165,23 @@ func checkProcessState(logDir string, jobID int64) string {
 	return "running"
 }
 
-// parseBatchStatusArgs parses "batch-status [queue] id1 id2 ..." arguments.
-func parseBatchStatusArgs(args []string) (queueName string, jobIDs []int64) {
-	queueName = "default"
+// parseBatchStatusArgs parses "batch-status id1 id2 ..." arguments.
+// It still accepts "--queue default" for compatibility, but rejects any other queue.
+func parseBatchStatusArgs(args []string) (jobIDs []int64, err error) {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--queue" && i+1 < len(args) {
-			queueName = args[i+1]
+			if args[i+1] != ops.DefaultQueueName {
+				return nil, fmt.Errorf("unsupported queue %q; only %q is supported", args[i+1], ops.DefaultQueueName)
+			}
 			i++
 			continue
+		}
+		if args[i] == "--queue" {
+			return nil, errors.New("missing value after --queue")
 		}
 		if id, err := strconv.ParseInt(args[i], 10, 64); err == nil {
 			jobIDs = append(jobIDs, id)
 		}
 	}
-	return
+	return jobIDs, nil
 }

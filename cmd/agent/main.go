@@ -59,8 +59,12 @@ func main() {
 
 	// Handle batch-status subcommand
 	if len(os.Args) > 1 && os.Args[1] == "batch-status" {
-		queueName, jobIDs := parseBatchStatusArgs(os.Args[2:])
-		batchStatus(queueName, jobIDs)
+		jobIDs, err := parseBatchStatusArgs(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "batch-status: %v\n", err)
+			os.Exit(2)
+		}
+		batchStatus(jobIDs)
 		return
 	}
 
@@ -90,16 +94,12 @@ func main() {
 }
 
 func runQueue(args []string) {
-	var r2Bucket string
-	queueName := ops.DefaultQueueName
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "--r2-bucket=") {
-			r2Bucket = arg[len("--r2-bucket="):]
-		} else {
-			queueName = arg
-		}
+	r2Bucket, err := parseRunQueueArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "run-queue: %v\n", err)
+		os.Exit(2)
 	}
-	cfg := runner.DefaultConfig(queueName)
+	cfg := runner.DefaultConfig()
 	r := runner.New(cfg)
 	if r2Bucket != "" {
 		setupInventoryR2(r, r2Bucket)
@@ -108,4 +108,19 @@ func runQueue(args []string) {
 		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func parseRunQueueArgs(args []string) (string, error) {
+	var r2Bucket string
+	for _, arg := range args {
+		switch {
+		case strings.HasPrefix(arg, "--r2-bucket="):
+			r2Bucket = arg[len("--r2-bucket="):]
+		case arg == ops.DefaultQueueName:
+			// Accept the legacy positional default queue name for compatibility.
+		default:
+			return "", fmt.Errorf("unsupported queue %q; only %q is supported", arg, ops.DefaultQueueName)
+		}
+	}
+	return r2Bucket, nil
 }

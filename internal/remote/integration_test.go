@@ -161,7 +161,7 @@ func TestSSHHostIntegration_AppendToQueue(t *testing.T) {
 	}
 
 	// Verify the command was appended to the commands file
-	inCommands, err := sshHost.IsJobInCommandsFile("default", testJobID)
+	inCommands, err := sshHost.IsJobInCommandsFile(testJobID)
 	if err != nil {
 		t.Fatalf("IsJobInCommandsFile failed: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestSSHHostIntegration_AppendToQueueWithArtifactEnvVars(t *testing.T) {
 	}
 
 	// Verify the command was appended to the commands file with env vars
-	content, err := sshHost.GetLastCommandForJob("default", testJobID)
+	content, err := sshHost.GetLastCommandForJob(testJobID)
 	if err != nil {
 		t.Fatalf("GetLastCommandForJob failed: %v", err)
 	}
