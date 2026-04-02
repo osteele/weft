@@ -19,6 +19,7 @@ func TestRankGroupOffersWithPredictor_MultiJobGroupUsesTotalDuration(t *testing.
 		results := make(map[int64]*predictor.Result, len(jobs))
 		for _, job := range jobs {
 			mean := 3600.0
+			meta := &predictor.RuntimeMetadata{Source: "empirical", Confidence: 1.0}
 			if job.GPUClass == "H100" {
 				mean = 600.0
 			}
@@ -28,6 +29,7 @@ func TestRankGroupOffersWithPredictor_MultiJobGroupUsesTotalDuration(t *testing.
 					Lower: mean * 0.9,
 					Upper: mean * 1.1,
 				},
+				DurationMetadata: meta,
 			}
 		}
 		return results, nil
@@ -140,11 +142,9 @@ func TestScoreEstimates_UsesTotalJobCompletionTime(t *testing.T) {
 
 func TestBestCandidateForStrategy_UsesPredictorRuntimeAcrossGroupingCandidates(t *testing.T) {
 	originalPredictBatch := resolvePredictBatch
-	originalEstimateJobDurations := estimateJobDurations
 	originalEstimateJobDurationsDetailed := estimateJobDurationsDetailed
 	t.Cleanup(func() {
 		resolvePredictBatch = originalPredictBatch
-		estimateJobDurations = originalEstimateJobDurations
 		estimateJobDurationsDetailed = originalEstimateJobDurationsDetailed
 	})
 
@@ -166,20 +166,6 @@ func TestBestCandidateForStrategy_UsesPredictorRuntimeAcrossGroupingCandidates(t
 		return results, nil
 	}
 	resolvePredictBatch = stubPredict
-	estimateJobDurations = func(_ *predictor.Config, jobs []predictor.BatchJob) map[int64]estimate.Estimate {
-		results, err := stubPredict(predictor.Config{}, jobs)
-		if err != nil {
-			return nil
-		}
-		estimates := make(map[int64]estimate.Estimate, len(results))
-		for id, result := range results {
-			if result == nil || result.DurationS == nil {
-				continue
-			}
-			estimates[id] = estimate.FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper)
-		}
-		return estimates
-	}
 	estimateJobDurationsDetailed = func(_ *predictor.Config, jobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
 		results, err := stubPredict(predictor.Config{}, jobs)
 		if err != nil {
@@ -455,6 +441,131 @@ func TestRankGroupOffersForPlanning_ShrinksLowConfidenceRuntimeDeltas(t *testing
 	}
 	if offers[0].Offer.ProviderID != "rtx3090" {
 		t.Fatalf("expected low-confidence learned speedup to be shrunk away, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestRankGroupOffersForPlanning_UnknownOversizedVRAMStaysConservative(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	neutral := false
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 3600.0
+			meta := &predictor.RuntimeMetadata{
+				Source:                     "learned",
+				Confidence:                 0.7,
+				Bottleneck:                 "unknown",
+				MemoryHeadroomMiB:          12 * 1024,
+				BenefitsFromAdditionalVRAM: &neutral,
+			}
+			if job.GPUClass == "H200" {
+				mean = 3000.0
+				meta.MemoryHeadroomMiB = 128 * 1024
+			}
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+				DurationMetadata: meta,
+			}
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "NVIDIA",
+			Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.30},
+			{ProviderID: "h200", GPUName: "H200", CostPerHour: 1.00},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		bidding.StrategyFast.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "rtx4090" {
+		t.Fatalf("expected unknown oversized-VRAM speedup to be shrunk away, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestRankGroupOffersForPlanning_MemoryCapacityCanJustifyLargerGPU(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	helps := true
+	neutral := false
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 3600.0
+			meta := &predictor.RuntimeMetadata{
+				Source:                     "learned",
+				Confidence:                 0.7,
+				Bottleneck:                 "unknown",
+				MemoryHeadroomMiB:          10 * 1024,
+				BenefitsFromAdditionalVRAM: &neutral,
+			}
+			if job.GPUClass == "H200" {
+				mean = 2400.0
+				meta = &predictor.RuntimeMetadata{
+					Source:                     "learned",
+					Confidence:                 0.7,
+					Bottleneck:                 "memory_capacity",
+					MemoryHeadroomMiB:          96 * 1024,
+					BenefitsFromAdditionalVRAM: &helps,
+				}
+			}
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+				DurationMetadata: meta,
+			}
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "NVIDIA",
+			Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.30},
+			{ProviderID: "h200", GPUName: "H200", CostPerHour: 1.00},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		bidding.StrategyFast.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "h200" {
+		t.Fatalf("expected explicit memory-capacity signal to preserve larger-GPU win, got %s", offers[0].Offer.ProviderID)
 	}
 }
 

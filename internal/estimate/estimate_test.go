@@ -114,13 +114,13 @@ func TestEstimateProvision_NoModel(t *testing.T) {
 	}
 }
 
-func TestEstimateJobDuration_NilConfig(t *testing.T) {
+func TestEstimateJobDurationDetailed_NilConfig(t *testing.T) {
 	job := &db.Job{ID: 1, Command: "echo hello"}
-	est, hasPred := EstimateJobDuration(nil, "A100", job)
+	pred, hasPred := EstimateJobDurationDetailed(nil, "A100", job)
 	if hasPred {
 		t.Error("nil config should not produce a prediction")
 	}
-	if est.Mean != DefaultJobDuration.Mean {
-		t.Errorf("fallback Mean = %v, want %v", est.Mean, DefaultJobDuration.Mean)
+	if pred.Estimate.Mean != DefaultJobDuration.Mean {
+		t.Errorf("fallback Mean = %v, want %v", pred.Estimate.Mean, DefaultJobDuration.Mean)
 	}
 }

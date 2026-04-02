@@ -20,14 +20,6 @@ type DurationPrediction struct {
 	Metadata *predictor.RuntimeMetadata
 }
 
-// EstimateJobDuration wraps the ML predictor for a single job.
-// Returns (estimate, true) when a prediction is available, or
-// (DefaultJobDuration, false) as a fallback.
-func EstimateJobDuration(predCfg *predictor.Config, gpuClass string, job *db.Job) (Estimate, bool) {
-	pred, ok := EstimateJobDurationDetailed(predCfg, gpuClass, job)
-	return pred.Estimate, ok
-}
-
 // EstimateJobDurationDetailed returns a single-job prediction plus runtime metadata.
 func EstimateJobDurationDetailed(predCfg *predictor.Config, gpuClass string, job *db.Job) (DurationPrediction, bool) {
 	if predCfg == nil || !predCfg.Configured() {
@@ -43,21 +35,6 @@ func EstimateJobDurationDetailed(predCfg *predictor.Config, gpuClass string, job
 		Estimate: FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper),
 		Metadata: result.DurationMetadata,
 	}, true
-}
-
-// EstimateJobDurations predicts durations for multiple jobs in a single
-// subprocess call. Returns a map from job ID to Estimate, or nil if the
-// predictor is not configured or the batch call fails.
-func EstimateJobDurations(predCfg *predictor.Config, batchJobs []predictor.BatchJob) map[int64]Estimate {
-	detailed := EstimateJobDurationsDetailed(predCfg, batchJobs)
-	if detailed == nil {
-		return nil
-	}
-	estimates := make(map[int64]Estimate, len(detailed))
-	for id, pred := range detailed {
-		estimates[id] = pred.Estimate
-	}
-	return estimates
 }
 
 // EstimateJobDurationsDetailed predicts durations for multiple jobs in a single

@@ -17,8 +17,6 @@ import (
 )
 
 var resolvePredictBatch = predictor.ResolvePredictBatch
-var estimateJobDurations = estimate.EstimateJobDurations
-var estimateJobDuration = estimate.EstimateJobDuration
 var estimateJobDurationsDetailed = estimate.EstimateJobDurationsDetailed
 var estimateJobDurationDetailed = estimate.EstimateJobDurationDetailed
 
@@ -566,7 +564,7 @@ func applyRuntimeMetadataAdjustments(predicted map[int]map[string]offerRuntimePr
 
 func runtimePredictionConfidence(metadata *predictor.RuntimeMetadata) float64 {
 	if metadata == nil {
-		return 1
+		return 0.25
 	}
 	confidence := metadata.Confidence
 	if confidence < 0 {
@@ -576,15 +574,62 @@ func runtimePredictionConfidence(metadata *predictor.RuntimeMetadata) float64 {
 		confidence = 1
 	}
 
+	multiplier := 0.35
 	switch metadata.Source {
 	case "empirical":
 		return 1.0
 	case "learned+analytical":
-		return confidence
+		multiplier = 1.0
 	case "learned":
-		return confidence * 0.5
+		multiplier = 0.5
+	}
+	confidence *= multiplier
+
+	if metadata.Bottleneck == "memory_capacity" {
+		switch {
+		case metadata.Feasible != nil && !*metadata.Feasible:
+			confidence = max(confidence, 0.95)
+		case metadata.BenefitsFromAdditionalVRAM != nil && *metadata.BenefitsFromAdditionalVRAM:
+			confidence = max(confidence, 0.8)
+		default:
+			confidence = max(confidence, 0.7)
+		}
+		return clamp01(confidence)
+	}
+
+	if metadata.Bottleneck == "unknown" && metadata.Source != "empirical" {
+		confidence *= 0.5
+		if metadata.BenefitsFromAdditionalVRAM != nil && !*metadata.BenefitsFromAdditionalVRAM {
+			confidence *= oversizedVRAMConfidenceFactor(metadata.MemoryHeadroomMiB)
+		}
+	}
+
+	return clamp01(confidence)
+}
+
+func oversizedVRAMConfidenceFactor(headroomMiB float64) float64 {
+	switch {
+	case headroomMiB >= 64*1024:
+		return 0.1
+	case headroomMiB >= 32*1024:
+		return 0.2
+	case headroomMiB >= 16*1024:
+		return 0.35
+	case headroomMiB >= 8*1024:
+		return 0.5
 	default:
-		return confidence * 0.35
+		return 0.75
+	}
+}
+
+func clamp01(value float64) float64 {
+	switch {
+	case value < 0:
+		return 0
+	case value > 1:
+		return 1
+	default:
+		return value
 	}
 }
 
