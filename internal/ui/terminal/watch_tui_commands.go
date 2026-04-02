@@ -374,8 +374,10 @@ func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 			return watchOnPremRefreshedMsg{err: err}
 		}
 		return watchOnPremRefreshedMsg{
-			onPremHosts:  groupOnPremHosts(onPremJobs),
-			unplacedJobs: unplacedJobs,
+			updateOnPremHosts:  true,
+			onPremHosts:        groupOnPremHosts(onPremJobs),
+			updateUnplacedJobs: true,
+			unplacedJobs:       unplacedJobs,
 		}
 	}
 }
@@ -386,7 +388,10 @@ func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}
 		}
-		return watchOnPremRefreshedMsg{unplacedJobs: unplacedJobs}
+		return watchOnPremRefreshedMsg{
+			updateUnplacedJobs: true,
+			unplacedJobs:       unplacedJobs,
+		}
 	}
 }
 

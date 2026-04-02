@@ -73,9 +73,11 @@ type watchSyncResultMsg struct {
 }
 
 type watchOnPremRefreshedMsg struct {
-	onPremHosts  []onPremHostSummary
-	unplacedJobs []*db.Job
-	err          error
+	updateOnPremHosts  bool
+	onPremHosts        []onPremHostSummary
+	updateUnplacedJobs bool
+	unplacedJobs       []*db.Job
+	err                error
 }
 
 type watchUnplaceDoneMsg struct {

@@ -715,15 +715,43 @@ func TestInstanceWatchModelUpdate_OnPremRefreshUpdatesHosts(t *testing.T) {
 	}
 
 	updatedModel, _ := m.Update(watchOnPremRefreshedMsg{
+		updateOnPremHosts: true,
 		onPremHosts: []onPremHostSummary{
 			{Name: "cool30", Jobs: []*db.Job{{ID: 41, Status: db.StatusQueued, Host: "cool30"}}},
 		},
-		unplacedJobs: []*db.Job{{ID: 123, Status: db.StatusQueued}},
+		updateUnplacedJobs: true,
+		unplacedJobs:       []*db.Job{{ID: 123, Status: db.StatusQueued}},
 	})
 	got := updatedModel.(watchModel)
 
 	if len(got.onPremHosts) != 1 || got.onPremHosts[0].Name != "cool30" {
 		t.Fatalf("onPremHosts = %+v, want cool30", got.onPremHosts)
+	}
+	if len(got.unplacedJobs) != 1 || got.unplacedJobs[0].ID != 123 {
+		t.Fatalf("unplacedJobs = %+v, want job 123", got.unplacedJobs)
+	}
+}
+
+func TestInstanceWatchModelUpdate_UnplacedOnlyRefreshPreservesOnPremHosts(t *testing.T) {
+	m := watchModel{
+		mode: watchModeInstances,
+		onPremHosts: []onPremHostSummary{
+			{Name: "cool30", Jobs: []*db.Job{{ID: 41, Status: db.StatusQueued, Host: "cool30"}}},
+		},
+		unplacedJobs: []*db.Job{{ID: 88, Status: db.StatusQueued}},
+		updates:      map[int64]campaign.InstanceUpdate{},
+		channels:     map[int64]<-chan campaign.InstanceUpdate{},
+		clients:      map[int64]cloud.Client{},
+	}
+
+	updatedModel, _ := m.Update(watchOnPremRefreshedMsg{
+		updateUnplacedJobs: true,
+		unplacedJobs:       []*db.Job{{ID: 123, Status: db.StatusQueued}},
+	})
+	got := updatedModel.(watchModel)
+
+	if len(got.onPremHosts) != 1 || got.onPremHosts[0].Name != "cool30" {
+		t.Fatalf("onPremHosts = %+v, want preserved cool30", got.onPremHosts)
 	}
 	if len(got.unplacedJobs) != 1 || got.unplacedJobs[0].ID != 123 {
 		t.Fatalf("unplacedJobs = %+v, want job 123", got.unplacedJobs)

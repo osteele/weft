@@ -535,10 +535,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.mode == watchModeSystem || m.mode.isInstanceBased() {
+		if (m.mode == watchModeSystem || m.mode.isInstanceBased()) && msg.updateOnPremHosts {
 			m.onPremHosts = msg.onPremHosts
 		}
-		if m.mode == watchModeSystem || m.mode.isInstanceBased() {
+		if (m.mode == watchModeSystem || m.mode.isInstanceBased()) && msg.updateUnplacedJobs {
 			m.unplacedJobs = msg.unplacedJobs
 			m.clampCursor()
 		}
