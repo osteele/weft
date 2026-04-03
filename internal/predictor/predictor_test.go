@@ -2,6 +2,7 @@ package predictor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -477,8 +478,15 @@ func TestPredict_BlocksCurrentModelWhenSchemaChanges(t *testing.T) {
 	if result != nil {
 		t.Fatalf("expected nil result on schema mismatch, got %#v", result)
 	}
+	var unavailable *UnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("error = %T, want *UnavailableError", err)
+	}
 	if !strings.Contains(err.Error(), "current model use is blocked") {
 		t.Fatalf("error = %q, want schema-block message", err)
+	}
+	if unavailable.Status.SchemaReason == "" {
+		t.Fatal("expected unavailable status to include schema reason")
 	}
 	if predictCalls.Load() != 0 {
 		t.Fatalf("runPredictCLI calls = %d, want 0", predictCalls.Load())
@@ -497,6 +505,102 @@ func TestPredict_BlocksCurrentModelWhenSchemaChanges(t *testing.T) {
 		retrainedMeta, err := ReadMeta(cfg)
 		return err == nil && retrainedMeta.SchemaVersion == ExpectedModelSchemaVersion
 	}, "background schema rebuild did not finish swapping models")
+}
+
+func TestGetStatusReportsBackgroundRebuild(t *testing.T) {
+	backgroundRetrains.mu.Lock()
+	backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+	backgroundRetrains.mu.Unlock()
+
+	originalCountTrainingRows := countTrainingRows
+	t.Cleanup(func() {
+		countTrainingRows = originalCountTrainingRows
+		backgroundRetrains.mu.Lock()
+		backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+		backgroundRetrains.mu.Unlock()
+	})
+
+	modelDir := t.TempDir()
+	meta := Meta{
+		TrainedAt:     "2024-01-01T00:00:00Z",
+		JobCount:      50,
+		SchemaVersion: ExpectedModelSchemaVersion,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "meta.json"), data, 0644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	countTrainingRows = func(Config) (int, error) { return 120, nil }
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir, RetrainInterval: 50}
+	state := backgroundState(cfg)
+	state.statusMu.Lock()
+	state.running = true
+	state.reason = "70 new completed jobs since last training"
+	state.startedAt = time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	state.statusMu.Unlock()
+
+	status := GetStatus(cfg)
+	if !status.Ready {
+		t.Fatal("expected compatible predictor to be ready")
+	}
+	if !status.Stale {
+		t.Fatal("expected stale status")
+	}
+	if !status.BackgroundRebuildRunning {
+		t.Fatal("expected background rebuild to be running")
+	}
+	if status.BackgroundRebuildReason == "" {
+		t.Fatal("expected rebuild reason")
+	}
+	if status.NewCompletedJobs != 70 {
+		t.Fatalf("NewCompletedJobs = %d, want 70", status.NewCompletedJobs)
+	}
+}
+
+func TestGetStatusReportsSchemaBlock(t *testing.T) {
+	backgroundRetrains.mu.Lock()
+	backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+	backgroundRetrains.mu.Unlock()
+
+	originalCountTrainingRows := countTrainingRows
+	t.Cleanup(func() {
+		countTrainingRows = originalCountTrainingRows
+		backgroundRetrains.mu.Lock()
+		backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+		backgroundRetrains.mu.Unlock()
+	})
+
+	modelDir := t.TempDir()
+	meta := Meta{
+		TrainedAt:     "2024-01-01T00:00:00Z",
+		JobCount:      50,
+		SchemaVersion: ExpectedModelSchemaVersion - 1,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "meta.json"), data, 0644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	countTrainingRows = func(Config) (int, error) { return 60, nil }
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir, RetrainInterval: 50}
+
+	status := GetStatus(cfg)
+	if status.Ready {
+		t.Fatal("expected schema-incompatible predictor to be blocked")
+	}
+	if !status.SchemaIncompatible {
+		t.Fatal("expected schema incompatibility")
+	}
+	if status.SchemaReason == "" {
+		t.Fatal("expected schema reason")
+	}
 }
 
 func TestPredictBatchCachesResultsAcrossCalls(t *testing.T) {

@@ -171,6 +171,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if err := ensurePredictorUsableFunc(cmd, cfg, "campaign planning"); err != nil {
+		return err
+	}
 
 	// For non-interactive and dry-run modes, reconcile synchronously.
 	// For TUI mode, reconciliation runs in the background (see below).

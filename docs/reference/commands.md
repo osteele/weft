@@ -135,6 +135,20 @@ hard-coding job IDs into downstream commands. When a producer fails and you
 retry it with a version suffix (`:100`), all consumers keyed to that version
 pick up the replacement automatically.
 
+### weft estimation
+
+Inspect or rebuild the command-level predictor models.
+
+```bash
+weft estimation status
+weft estimation train [--if-schema-changed]
+weft retrain [--if-schema-changed]
+```
+
+`status` reports whether the predictor is ready, rebuilding in the background,
+or blocked by a schema mismatch. `train` and the top-level `retrain` alias
+force an immediate rebuild from the configured job databases.
+
 ### weft data
 
 Query data locality and request HF asset downloads onto specific hosts.

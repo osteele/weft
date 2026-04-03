@@ -182,6 +182,7 @@ prediction with that model and starts a background rebuild instead.
 You can also rebuild immediately with:
 
 ```bash
+weft estimation status
 weft retrain
 ```
 

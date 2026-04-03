@@ -506,6 +506,9 @@ Weft can predict job duration and resource usage based on historical data.
 # Predict duration/resources for a command on a specific host
 weft predict --host atlas 'python train.py'
 
+# Show whether the predictor is ready, rebuilding, or blocked by schema mismatch
+weft estimation status
+
 # Force retrain models from all configured job databases
 weft retrain
 
@@ -513,9 +516,12 @@ weft retrain
 weft export training-data
 ```
 
-Models are stored at `~/.cache/weft/models/` and auto-retrain when 50+ new
-jobs complete. Configure the training data source via `predictor.project_path`
-in `~/.config/weft/config.toml`. See
+Models are stored at `~/.cache/weft/models/`. When 50+ new jobs complete, weft
+rebuilds stale but schema-compatible models in the background and keeps using
+the current compatible model until the swap completes. If the stored model
+schema is incompatible with the current code, prediction is blocked until the
+rebuild finishes. Configure the training data source via
+`predictor.project_path` in `~/.config/weft/config.toml`. See
 [Estimation and Modeling](docs/reference/estimation.md) for the full pipeline.
 
 ### Command-to-Resource Estimation

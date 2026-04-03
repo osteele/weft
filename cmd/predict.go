@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/osteele/weft/internal/config"
@@ -46,7 +47,15 @@ func runPredict(cmd *cobra.Command, args []string) error {
 
 	result, err := predictor.Predict(pcfg, predictHost, predictProject, predictGPUClass, command)
 	if err != nil {
+		var unavailable *predictor.UnavailableError
+		if errors.As(err, &unavailable) {
+			return fmt.Errorf("%s", formatPredictorBlocked(unavailable.Status))
+		}
 		return err
+	}
+	status := predictor.GetStatus(pcfg)
+	if status.BackgroundRebuildRunning {
+		fmt.Fprintln(cmd.ErrOrStderr(), formatPredictorRefreshNotice(status))
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Duration: %s\n", predictor.FormatDuration(result.DurationS))

@@ -56,6 +56,27 @@ type RuntimeMetadata struct {
 	AnalyticalPeakMemoryMiB    float64 `json:"analytical_peak_memory_mib,omitempty"`
 }
 
+// Status describes the current usability and refresh state of predictor models.
+type Status struct {
+	Configured                 bool
+	Ready                      bool
+	ModelDir                   string
+	ModelAvailable             bool
+	TrainedAt                  string
+	JobCount                   int
+	CurrentJobCount            int
+	NewCompletedJobs           int
+	RetrainInterval            int
+	Stale                      bool
+	SchemaIncompatible         bool
+	SchemaReason               string
+	BackgroundRebuildRunning   bool
+	BackgroundRebuildReason    string
+	BackgroundRebuildStartedAt time.Time
+	CountError                 string
+	MetaError                  string
+}
+
 // Result holds predictions for all targets.
 type Result struct {
 	DurationS        *Prediction      `json:"duration_s"`
@@ -80,6 +101,30 @@ var modelArtifactNames = []string{"duration", "peak_rss_kb", "max_gpu_mem_mib"}
 type ModelSchemaStatus struct {
 	Changed bool
 	Reason  string
+}
+
+// UnavailableError reports that predictor models cannot be used right now.
+type UnavailableError struct {
+	Status Status
+}
+
+func (e *UnavailableError) Error() string {
+	if e == nil {
+		return "predictor unavailable"
+	}
+	if e.Status.SchemaIncompatible {
+		if e.Status.BackgroundRebuildRunning {
+			return fmt.Sprintf(
+				"predictor models use an incompatible schema (%s); current model use is blocked while a background rebuild is in progress",
+				e.Status.SchemaReason,
+			)
+		}
+		return fmt.Sprintf(
+			"predictor models use an incompatible schema (%s); current model use is blocked until rebuilt",
+			e.Status.SchemaReason,
+		)
+	}
+	return "predictor unavailable"
 }
 
 var predictFunc = Predict
@@ -115,6 +160,8 @@ type backgroundRetrainState struct {
 	useMu          sync.RWMutex
 	statusMu       sync.Mutex
 	running        bool
+	reason         string
+	startedAt      time.Time
 	nextStaleCheck time.Time
 }
 
@@ -188,6 +235,56 @@ func ReadMeta(cfg Config) (*Meta, error) {
 		return nil, err
 	}
 	return &meta, nil
+}
+
+// GetStatus reports predictor readiness, model freshness, and any background rebuild.
+func GetStatus(cfg Config) Status {
+	status := Status{
+		Configured:      cfg.Configured(),
+		ModelDir:        cfg.modelDir(),
+		RetrainInterval: cfg.retrainInterval(),
+	}
+	if !status.Configured {
+		return status
+	}
+
+	if meta, err := ReadMeta(cfg); err == nil {
+		status.ModelAvailable = true
+		status.TrainedAt = meta.TrainedAt
+		status.JobCount = meta.JobCount
+	} else {
+		status.MetaError = err.Error()
+	}
+
+	schema := CheckModelSchema(cfg)
+	status.SchemaIncompatible = schema.Changed
+	status.SchemaReason = schema.Reason
+
+	if currentJobCount, err := countTrainingRows(cfg); err == nil {
+		status.CurrentJobCount = currentJobCount
+		if status.ModelAvailable {
+			status.NewCompletedJobs = max(0, currentJobCount-status.JobCount)
+			status.Stale = NeedsRetrain(cfg, currentJobCount)
+		}
+	} else {
+		status.CountError = err.Error()
+	}
+
+	state := backgroundState(cfg)
+	state.statusMu.Lock()
+	status.BackgroundRebuildRunning = state.running
+	status.BackgroundRebuildReason = state.reason
+	status.BackgroundRebuildStartedAt = state.startedAt
+	state.statusMu.Unlock()
+
+	status.Ready = status.ModelAvailable && !status.SchemaIncompatible
+	return status
+}
+
+// EnsureReady checks whether the configured predictor models are usable.
+// Stale-but-compatible models trigger a background rebuild while remaining usable.
+func EnsureReady(cfg Config) error {
+	return preparePredictorForUse(cfg)
 }
 
 // ModelSchemaStatus reports whether the trained-model artifacts match the
@@ -564,6 +661,8 @@ func maybeStartBackgroundRetrain(cfg Config, reason string) bool {
 		return false
 	}
 	state.running = true
+	state.reason = reason
+	state.startedAt = nowFunc()
 	state.statusMu.Unlock()
 
 	go func() {
@@ -577,6 +676,8 @@ func maybeStartBackgroundRetrain(cfg Config, reason string) bool {
 
 		state.statusMu.Lock()
 		state.running = false
+		state.reason = ""
+		state.startedAt = time.Time{}
 		state.nextStaleCheck = nowFunc().Add(backgroundRetrainCheckInterval)
 		state.statusMu.Unlock()
 	}()

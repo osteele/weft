@@ -234,6 +234,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err := cfg.ValidateCommand(command); err != nil {
 		return err
 	}
+	if err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction"); err != nil {
+		return err
+	}
 
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided

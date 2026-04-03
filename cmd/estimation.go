@@ -9,7 +9,8 @@ var estimationCmd = &cobra.Command{
 resource usage from historical data.
 
 Subcommands:
-  train   Retrain job-estimator models from historical data`,
+  train   Retrain job-estimator models from historical data
+  status  Show predictor model readiness and refresh state`,
 }
 
 var estimationTrainCmd = &cobra.Command{
