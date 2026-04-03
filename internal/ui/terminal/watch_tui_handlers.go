@@ -400,6 +400,16 @@ func (m watchModel) handleJobsRefreshed(msg watchJobsRefreshedMsg) (tea.Model, t
 
 func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 	m.retrying = false
+	if msg.notReplacedReasons != nil {
+		m.failedReplaceReason = msg.notReplacedReasons
+	} else if len(msg.instanceIDs) > 0 {
+		m.failedReplaceReason = map[int64]string{}
+	}
+	if msg.budgetBlockedByInst != nil {
+		m.budgetBlockedFailed = msg.budgetBlockedByInst
+	} else if len(msg.instanceIDs) > 0 {
+		m.budgetBlockedFailed = map[int64]bool{}
+	}
 	if msg.err != nil {
 		_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 			EventKind:  db.EventRetryError,
@@ -477,6 +487,12 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 		}
 		if cmd := m.startWatchingInstance(id); cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+		if m.database != nil {
+			if launched, err := db.GetLaunch(m.database, id); err == nil && launched != nil && launched.ReplacedInstanceID != nil {
+				delete(m.failedReplaceReason, *launched.ReplacedInstanceID)
+				delete(m.budgetBlockedFailed, *launched.ReplacedInstanceID)
+			}
 		}
 	}
 	m.partialErrorJobs = nil

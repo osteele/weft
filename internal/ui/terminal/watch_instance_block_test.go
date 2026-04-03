@@ -246,6 +246,26 @@ func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlockShowsReplacementReasonForFailedInstance(t *testing.T) {
+	update := campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                501,
+			Status:            db.LaunchStatusFailed,
+			Provider:          "vastai",
+			GPUSpec:           "RTX 3090",
+			TerminationReason: db.TerminationReasonProviderFailure,
+		},
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
+		plain:             true,
+		replacementReason: "retry budget exceeded: spend $3.00 >= limit $2.00",
+	})
+	if !strings.Contains(out, "Replacement: not launched - retry budget exceeded: spend $3.00 >= limit $2.00") {
+		t.Fatalf("expected replacement reason in output, got:\n%s", out)
+	}
+}
+
 func TestFormatPreviousInstanceLineChain(t *testing.T) {
 	now := time.Unix(3600, 0)
 	donors := []*db.Launch{

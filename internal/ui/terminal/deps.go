@@ -47,7 +47,7 @@ type Dependencies struct {
 	PerformFastSync                                   func(*sql.DB, bool) (bool, []string)
 	PerformSyncWithTimeoutForHostsDetailed            func(*sql.DB, []string, time.Duration, bool) (bool, []string, []string)
 	PerformSyncWithTimeoutForHostsDetailedWithOptions func(*sql.DB, []string, time.Duration, bool, bool) (bool, []string, []string)
-	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int) (*campaign.RelaunchResult, error)
+	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64) (*campaign.RelaunchResult, error)
 	BuildStaleDataNote                                func(*sql.DB, []string) string
 	PrintJobStatus                                    func(*db.Job, bool)
 	SyncRentalJobsStatus                              func(*sql.DB) bool
@@ -183,11 +183,11 @@ func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts [
 	return deps.PerformSyncWithTimeoutForHostsDetailedWithOptions(database, hosts, timeout, verbose, startQueueRunner)
 }
 
-func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAttempts int) (*campaign.RelaunchResult, error) {
+func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAttempts int, retryBudgetMultiplierByFailedInstance map[int64]float64) (*campaign.RelaunchResult, error) {
 	if deps.AttemptRelaunchOrphanedJobs == nil {
 		return &campaign.RelaunchResult{}, nil
 	}
-	return deps.AttemptRelaunchOrphanedJobs(database, cfg, extraAttempts)
+	return deps.AttemptRelaunchOrphanedJobs(database, cfg, extraAttempts, retryBudgetMultiplierByFailedInstance)
 }
 
 func buildStaleDataNote(database *sql.DB, hosts []string) string {

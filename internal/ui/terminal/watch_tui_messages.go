@@ -44,10 +44,12 @@ type watchInstanceSyncResultMsg struct{}
 
 // retryResultMsg carries the result of retrying failed instances.
 type retryResultMsg struct {
-	instanceIDs []int64
-	skipped     int
-	budgetSkip  int
-	err         error
+	instanceIDs         []int64
+	skipped             int
+	budgetSkip          int
+	notReplacedReasons  map[int64]string
+	budgetBlockedByInst map[int64]bool
+	err                 error
 }
 
 // retryBackoffMsg triggers a delayed retry attempt after no offers were found.

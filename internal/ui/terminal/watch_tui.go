@@ -80,13 +80,16 @@ type watchModel struct {
 	launchPending       bool
 
 	// Retry state (instance-based modes)
-	retrying             bool
-	retryResult          string
-	retryAttempt         int
-	retryExtraAttempts   int
-	partialErrors        []string
-	partialErrorJobs     []*db.Job
-	partialErrorsRetried bool
+	retrying              bool
+	retryResult           string
+	retryAttempt          int
+	retryExtraAttempts    int
+	retryBudgetMultiplier map[int64]float64
+	partialErrors         []string
+	partialErrorJobs      []*db.Job
+	partialErrorsRetried  bool
+	failedReplaceReason   map[int64]string
+	budgetBlockedFailed   map[int64]bool
 
 	// --- System-mode fields ---
 	cloudInstances []*db.Launch
@@ -213,6 +216,9 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		reconciler:             campaign.NewReconciler(),
 		onPremHosts:            groupOnPremHosts(onPremJobs),
 		unplacedJobs:           unplaced,
+		retryBudgetMultiplier:  map[int64]float64{},
+		failedReplaceReason:    map[int64]string{},
+		budgetBlockedFailed:    map[int64]bool{},
 	}
 	m.rebuildReplacementCache()
 	return m

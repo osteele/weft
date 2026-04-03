@@ -27,8 +27,9 @@ import (
 func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 	database := m.database
 	cfg := m.appConfig
+	retryBudgetMultipliers := m.retryBudgetMultiplier
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts, retryBudgetMultipliers)
 		if err != nil {
 			return retryResultMsg{err: err}
 		}
@@ -36,9 +37,11 @@ func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 			return retryResultMsg{}
 		}
 		return retryResultMsg{
-			instanceIDs: result.InstanceIDs,
-			skipped:     result.Skipped,
-			budgetSkip:  result.BudgetSkip,
+			instanceIDs:         result.InstanceIDs,
+			skipped:             result.Skipped,
+			budgetSkip:          result.BudgetSkip,
+			notReplacedReasons:  result.NotReplacedReasons,
+			budgetBlockedByInst: result.BudgetBlocked,
 		}
 	}
 }
@@ -163,7 +166,7 @@ func (m watchModel) autoLaunchForUnplacedJobs() tea.Cmd {
 	database := m.database
 	cfg := m.appConfig
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil)
 		if err != nil {
 			return autoLaunchDoneMsg{err: err}
 		}

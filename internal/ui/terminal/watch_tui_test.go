@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -755,6 +756,63 @@ func TestInstanceWatchModelUpdate_UnplacedOnlyRefreshPreservesOnPremHosts(t *tes
 	}
 	if len(got.unplacedJobs) != 1 || got.unplacedJobs[0].ID != 123 {
 		t.Fatalf("unplacedJobs = %+v, want job 123", got.unplacedJobs)
+	}
+}
+
+func TestWatchModelHandleKey_BudgetRetryDoublesInstanceMultiplier(t *testing.T) {
+	failedID := int64(88)
+	m := watchModel{
+		mode:        watchModeInstances,
+		instanceIDs: []int64{failedID},
+		cursor:      0, // instance header row
+		updates: map[int64]campaign.InstanceUpdate{
+			failedID: {
+				Launch: &db.Launch{
+					ID:                failedID,
+					Status:            db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonProviderFailure,
+				},
+			},
+		},
+		retryBudgetMultiplier: map[int64]float64{},
+		budgetBlockedFailed:   map[int64]bool{failedID: true},
+	}
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	got := updated.(watchModel)
+
+	if !got.retrying {
+		t.Fatal("expected retrying=true after B")
+	}
+	if got.retryBudgetMultiplier[failedID] != 2 {
+		t.Fatalf("retryBudgetMultiplier[%d] = %.1f, want 2.0", failedID, got.retryBudgetMultiplier[failedID])
+	}
+	if cmd == nil {
+		t.Fatal("expected retry command after B")
+	}
+}
+
+func TestWatchModelHandleKey_TogglesHelpOverlayInInstanceMode(t *testing.T) {
+	m := watchModel{
+		mode:                  watchModeInstances,
+		width:                 120,
+		height:                20,
+		retryBudgetMultiplier: map[int64]float64{},
+	}
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	got := updated.(watchModel)
+	if !got.projectHelp {
+		t.Fatal("expected help overlay to open")
+	}
+	view := stripANSI(got.View())
+	if !strings.Contains(view, "Watch Keybindings") {
+		t.Fatalf("expected watch help view, got:\n%s", view)
+	}
+
+	updated, _ = got.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	got = updated.(watchModel)
+	if got.projectHelp {
+		t.Fatal("expected help overlay to close on Esc")
 	}
 }
 

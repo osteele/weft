@@ -36,6 +36,9 @@ func (m watchModel) View() string {
 	if m.movePicker.active {
 		return m.movePicker.View(m.width, m.height)
 	}
+	if m.projectHelp && m.mode != watchModeProject {
+		return m.renderWatchHelpView()
+	}
 
 	switch {
 	case m.mode.isInstanceBased():
@@ -134,6 +137,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 					resolvedJobsOverride:     &resolved,
 					dimJobStatuses:           true,
 					predecessors:             donors,
+					replacementReason:        m.failedReplaceReason[id],
 				})
 				renderStructuredBlock(structured, addSelectable, addLine)
 			} else {
@@ -144,7 +148,8 @@ func (m watchModel) renderInstanceView() (string, int) {
 		}
 
 		structured := formatWatchInstanceBlockStructured(u, m.jobProgressHWM, watchInstanceBlockOptions{
-			predecessors: donors,
+			predecessors:      donors,
+			replacementReason: m.failedReplaceReason[id],
 		})
 		renderStructuredBlock(structured, addSelectable, addLine)
 		addLine("")
@@ -195,11 +200,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	if !m.done && !m.launchPending {
-		hint := "u unplace  x kill  t terminate  s submit  m move  q quit (instances run in background)"
+		hint := "u unplace  x kill  t terminate  s submit  m move  ? help  q quit (instances run in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  B budget+retry  ? help  q quit (instances run in background)"
 		} else if len(m.unplacedJobs) > 0 {
-			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  ? help  q quit (instances run in background)"
 		}
 		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))
@@ -272,7 +277,8 @@ func (m watchModel) renderSystemView() (string, int) {
 			update := normalizeWatchInstanceUpdate(m.updates[ci.ID], ci)
 			donors := m.cachedReplacementChains[ci.ID]
 			structured := formatWatchInstanceBlockStructured(update, m.jobProgressHWM, watchInstanceBlockOptions{
-				predecessors: donors,
+				predecessors:      donors,
+				replacementReason: m.failedReplaceReason[ci.ID],
 			})
 			if len(structured) == 0 {
 				continue
@@ -343,9 +349,9 @@ func (m watchModel) renderSystemView() (string, int) {
 		footerParts = append(footerParts, m.retryResult)
 	}
 
-	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [r] retry  [q] quit"
+	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [r] retry  [B] budget+retry  [?] help  [q] quit"
 	if !m.hasRetryableFailures() {
-		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [q] quit"
+		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [?] help  [q] quit"
 	}
 	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
@@ -582,6 +588,11 @@ func (m watchModel) formatUnplacedJobRows(jobs []*db.Job, availWidth int) []stri
 }
 
 func (m watchModel) selectedStatusDetail() string {
+	if instID := m.selectedCloudInstanceID(); instID != 0 {
+		if reason := m.failedReplaceReason[instID]; reason != "" {
+			return fmt.Sprintf("instance #%d not replaced: %s", instID, reason)
+		}
+	}
 	job := m.selectedUnplacedJob()
 	if job == nil || len(job.PlacementReasons) == 0 {
 		return ""
@@ -745,6 +756,47 @@ func (m watchModel) renderProjectHelpView() string {
 			continue
 		}
 		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(lines[idx], m.width)))
+		b.WriteString("\n")
+	}
+	b.WriteString(watchDimStyle.Render(truncateDisplayWidth("? close help", m.width)))
+	return b.String()
+}
+
+func (m watchModel) renderWatchHelpView() string {
+	rows := max(1, m.height-1)
+	lines := []string{
+		"Watch Keybindings",
+		"",
+		"Navigation:",
+		"  up/down (or j/k) move selection",
+		"  pgup/pgdown (or Ctrl+u/Ctrl+d) page up/down",
+		"  g/G jump top/bottom",
+		"",
+		"Actions:",
+		"  u unplace selected queued job",
+		"  x kill selected running job",
+		"  t terminate selected cloud instance",
+		"  s submit selected unplaced job",
+		"  m move selected queued cloud job",
+		"  l open launch planner",
+		"  r retry failed instances",
+		"  B double retry budget for selected failed instance and retry",
+		"  a toggle auto-pilot",
+		"",
+		"Help:",
+		"  ? toggle this help",
+		"  q or Esc close help",
+	}
+
+	var b strings.Builder
+	b.WriteString(watchTitleStyle.Render(truncateDisplayWidth(lines[0], m.width)))
+	b.WriteString("\n")
+	for i := 1; i < rows; i++ {
+		if i >= len(lines) {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(lines[i], m.width)))
 		b.WriteString("\n")
 	}
 	b.WriteString(watchDimStyle.Render(truncateDisplayWidth("? close help", m.width)))

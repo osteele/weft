@@ -70,3 +70,41 @@ func TestLaunchElapsedAndSpendCents(t *testing.T) {
 		t.Fatalf("actual spend should win, got %d", cents)
 	}
 }
+
+func TestApplyRetryBudgetMultiplier_FirstRetry(t *testing.T) {
+	budget := RetryBudget{
+		FirstTimeLimit: 10 * time.Minute,
+		FirstCostCents: 100,
+		NextTimeLimit:  20 * time.Minute,
+		NextCostCents:  50,
+	}
+	scaled := applyRetryBudgetMultiplier(budget, 1, 2.0)
+	if scaled.FirstTimeLimit != 20*time.Minute {
+		t.Fatalf("first time limit = %s, want 20m", scaled.FirstTimeLimit)
+	}
+	if scaled.FirstCostCents != 200 {
+		t.Fatalf("first cost = %d, want 200", scaled.FirstCostCents)
+	}
+	if scaled.NextTimeLimit != budget.NextTimeLimit || scaled.NextCostCents != budget.NextCostCents {
+		t.Fatal("next-tier limits should remain unchanged for first retry scaling")
+	}
+}
+
+func TestApplyRetryBudgetMultiplier_SubsequentRetry(t *testing.T) {
+	budget := RetryBudget{
+		FirstTimeLimit: 10 * time.Minute,
+		FirstCostCents: 100,
+		NextTimeLimit:  15 * time.Minute,
+		NextCostCents:  30,
+	}
+	scaled := applyRetryBudgetMultiplier(budget, 2, 2.0)
+	if scaled.NextTimeLimit != 30*time.Minute {
+		t.Fatalf("next time limit = %s, want 30m", scaled.NextTimeLimit)
+	}
+	if scaled.NextCostCents != 60 {
+		t.Fatalf("next cost = %d, want 60", scaled.NextCostCents)
+	}
+	if scaled.FirstTimeLimit != budget.FirstTimeLimit || scaled.FirstCostCents != budget.FirstCostCents {
+		t.Fatal("first-tier limits should remain unchanged for subsequent retry scaling")
+	}
+}

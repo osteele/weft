@@ -20,6 +20,7 @@ type watchInstanceBlockOptions struct {
 	dimJobStatuses           bool
 	now                      time.Time
 	predecessors             []*db.Launch // replacement chain, most-recent-first
+	replacementReason        string
 }
 
 func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.Launch) campaign.InstanceUpdate {
@@ -83,6 +84,9 @@ func formatWatchInstanceBlockStructured(update campaign.InstanceUpdate, jobProgr
 	}
 	if prevLine := formatPreviousInstanceLine(opts.predecessors, opts.now); prevLine != "" {
 		addLine(prevLine)
+	}
+	if ci.Status == db.LaunchStatusFailed && opts.replacementReason != "" {
+		addLine(fmt.Sprintf("  Replacement: not launched - %s", opts.replacementReason))
 	}
 
 	if len(update.Jobs) == 0 {

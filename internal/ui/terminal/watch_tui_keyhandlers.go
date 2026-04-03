@@ -25,6 +25,14 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.movePicker.active {
 		return m.handleMovePickerKey(msg)
 	}
+	if m.projectHelp {
+		switch msg.String() {
+		case "?", "esc", "q", "enter":
+			m.projectHelp = false
+			return m, nil
+		}
+		return m, nil
+	}
 
 	if m.mode == watchModeProject {
 		return m.handleProjectKey(msg)
@@ -72,6 +80,27 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.retryExtraAttempts = campaign.DefaultMaxCloudAttempts
 			return m, m.retryFailedInstances(m.retryExtraAttempts)
 		}
+	case "B":
+		if m.retrying {
+			return m, nil
+		}
+		instID := m.selectedCloudInstanceID()
+		if instID == 0 {
+			return m, m.flash.Set("Select a failed instance header row first", true)
+		}
+		if !m.budgetBlockedFailed[instID] {
+			return m, m.flash.Set("Selected instance was not blocked by retry budget", true)
+		}
+		scale := m.retryBudgetMultiplier[instID]
+		if scale <= 0 {
+			scale = 1
+		}
+		scale *= 2
+		m.retryBudgetMultiplier[instID] = scale
+		m.retryAttempt = 0
+		m.retrying = true
+		m.retryResult = fmt.Sprintf("Retry: doubled budget for failed instance %d (x%.1f)", instID, scale)
+		return m, m.retryFailedInstances(0)
 	case "u":
 		// Try cloud job row first
 		if job := m.selectedCloudJob(); job != nil && job.EffectiveStatus() == db.StatusQueued {
@@ -156,6 +185,9 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		))
 	case "a":
 		return m.handleToggleAutoPilot()
+	case "?":
+		m.projectHelp = true
+		return m, nil
 	}
 	return m, nil
 }

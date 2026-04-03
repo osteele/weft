@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,10 @@ type RelaunchConfig struct {
 	ResetJobs       map[int64]int64      // jobID → failed instanceID; when non-nil, only relaunch these jobs
 	SetupFactory    SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
 	RetryBudget     *RetryBudget         // optional hard stop limits for retry instances
+	// RetryBudgetMultiplierByFailedInstance scales the applicable retry-budget
+	// tier (first vs subsequent) for jobs that were orphaned from a specific
+	// failed instance. Used by watch-mode budget raise.
+	RetryBudgetMultiplierByFailedInstance map[int64]float64
 }
 
 // RetryBudget defines hard retry-stop limits by retry tier.
@@ -52,6 +57,12 @@ type RelaunchResult struct {
 	Skipped     int     // jobs skipped (max attempts + budget limits + no offers)
 	BudgetSkip  int     // jobs skipped due to retry budget limits
 	Errors      []error
+	// NotReplacedReasons explains why orphaned jobs from a failed instance were
+	// not relaunched on this pass.
+	NotReplacedReasons map[int64]string // failed instance ID -> reason
+	// BudgetBlocked marks failed instances whose orphaned jobs were skipped due
+	// to retry budget limits.
+	BudgetBlocked map[int64]bool // failed instance ID -> true
 }
 
 // RelaunchOrphanedJobs finds unplaced cloud jobs, filters by attempt count,
@@ -83,7 +94,10 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	// Single pass: filter to cloud jobs and check attempt count.
 	// Attempts are scoped to the job's current campaign so that prior
 	// campaigns (earlier `launch` commands) don't exhaust the retry budget.
-	result := &RelaunchResult{}
+	result := &RelaunchResult{
+		NotReplacedReasons: map[int64]string{},
+		BudgetBlocked:      map[int64]bool{},
+	}
 	var eligible []*db.Job
 	for _, j := range unplaced {
 		if j.HasTag(db.TagInventory) {
@@ -97,6 +111,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		if count == 0 && !j.HasTag(db.TagRental) {
 			continue
 		}
+		failedInstanceID := failedInstanceForJob(j.ID, facts.LastLaunch, cfg.ResetJobs)
 		if count >= maxAttempts {
 			slog.Debug("job exceeds max attempts, skipping", "component", "relaunch", "job_id", j.ID, "attempts", count, "max_attempts", maxAttempts)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
@@ -107,11 +122,13 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				MaxAttempts:   maxAttempts,
 			})
 			result.Skipped++
+			recordNotReplacedReason(result, failedInstanceID, "max cloud attempts reached")
 			continue
 		}
 		if cfg.RetryBudget != nil && count > 0 {
+			budget := applyRetryBudgetMultiplier(*cfg.RetryBudget, count, budgetMultiplierForFailedInstance(cfg, failedInstanceID))
 			elapsed, spendCents := launchElapsedAndSpendCents(facts.LastLaunch, time.Now())
-			if exceeded, detail := exceedsRetryBudget(*cfg.RetryBudget, count, elapsed, spendCents); exceeded {
+			if exceeded, detail := exceedsRetryBudget(budget, count, elapsed, spendCents); exceeded {
 				slog.Info("job exceeds retry budget, skipping",
 					"component", "relaunch",
 					"job_id", j.ID,
@@ -129,6 +146,10 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				})
 				result.Skipped++
 				result.BudgetSkip++
+				recordNotReplacedReason(result, failedInstanceID, summarizeBudgetDetail(detail))
+				if failedInstanceID != 0 {
+					result.BudgetBlocked[failedInstanceID] = true
+				}
 				continue
 			}
 		}
@@ -205,6 +226,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				JobCount:  len(gOffer.Group.Jobs),
 			})
 			result.Skipped += len(gOffer.Group.Jobs)
+			recordGroupNotReplacedReasons(result, cfg.ResetJobs, gOffer.Group, "no offers available")
 			continue
 		}
 		if gOffer.Err != nil {
@@ -215,6 +237,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				ErrorText: gOffer.Err.Error(),
 			})
 			result.Errors = append(result.Errors, gOffer.Err)
+			recordGroupNotReplacedReasons(result, cfg.ResetJobs, gOffer.Group, "offer query failed")
 			continue
 		}
 		launchGroups = append(launchGroups, gOffer.Group)
@@ -316,12 +339,15 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 					ErrorText: err.Error(),
 				})
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
+				recordGroupNotReplacedReasons(result, cfg.ResetJobs, group, "launch failed")
 				return
 			}
 			if hasPredecessor {
 				if setErr := db.SetLaunchReplacedID(cfg.Database, instanceID, predecessorID); setErr != nil {
 					slog.Warn("failed to set replaced_instance_id", "component", "relaunch", "instance", instanceID, "error", setErr)
 				}
+				delete(result.NotReplacedReasons, predecessorID)
+				delete(result.BudgetBlocked, predecessorID)
 			}
 			slog.Info("launched instance for relaunch", "component", "relaunch", "instance", instanceID, "job_count", len(group.Jobs), "gpu_spec", group.GPUSpec())
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
@@ -336,6 +362,94 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+func recordNotReplacedReason(result *RelaunchResult, failedInstanceID int64, reason string) {
+	if result == nil || failedInstanceID == 0 || reason == "" {
+		return
+	}
+	if existing, ok := result.NotReplacedReasons[failedInstanceID]; ok {
+		if existing == reason {
+			return
+		}
+		result.NotReplacedReasons[failedInstanceID] = "multiple reasons (" + existing + "; " + reason + ")"
+		return
+	}
+	result.NotReplacedReasons[failedInstanceID] = reason
+}
+
+func recordGroupNotReplacedReasons(result *RelaunchResult, resetJobs map[int64]int64, group InstanceGroup, reason string) {
+	if len(resetJobs) == 0 {
+		return
+	}
+	seen := map[int64]bool{}
+	for _, j := range group.Jobs {
+		failedID := resetJobs[j.ID]
+		if failedID == 0 || seen[failedID] {
+			continue
+		}
+		seen[failedID] = true
+		recordNotReplacedReason(result, failedID, reason)
+	}
+}
+
+func failedInstanceForJob(jobID int64, lastLaunch *db.Launch, resetJobs map[int64]int64) int64 {
+	if len(resetJobs) > 0 {
+		if id := resetJobs[jobID]; id != 0 {
+			return id
+		}
+	}
+	if lastLaunch != nil {
+		return lastLaunch.ID
+	}
+	return 0
+}
+
+func budgetMultiplierForFailedInstance(cfg RelaunchConfig, failedInstanceID int64) float64 {
+	if failedInstanceID == 0 {
+		return 1
+	}
+	if len(cfg.RetryBudgetMultiplierByFailedInstance) == 0 {
+		return 1
+	}
+	m := cfg.RetryBudgetMultiplierByFailedInstance[failedInstanceID]
+	if m <= 0 {
+		return 1
+	}
+	return m
+}
+
+func applyRetryBudgetMultiplier(budget RetryBudget, attemptCount int, multiplier float64) RetryBudget {
+	if multiplier <= 1 {
+		return budget
+	}
+	scaled := budget
+	if attemptCount == 1 {
+		if scaled.FirstTimeLimit > 0 {
+			scaled.FirstTimeLimit = time.Duration(float64(scaled.FirstTimeLimit) * multiplier)
+		}
+		if scaled.FirstCostCents > 0 {
+			scaled.FirstCostCents = int(math.Round(float64(scaled.FirstCostCents) * multiplier))
+		}
+		return scaled
+	}
+	if scaled.NextTimeLimit > 0 {
+		scaled.NextTimeLimit = time.Duration(float64(scaled.NextTimeLimit) * multiplier)
+	}
+	if scaled.NextCostCents > 0 {
+		scaled.NextCostCents = int(math.Round(float64(scaled.NextCostCents) * multiplier))
+	}
+	return scaled
+}
+
+func summarizeBudgetDetail(detail string) string {
+	if detail == "" {
+		return "retry budget exceeded"
+	}
+	if strings.HasPrefix(detail, "first retry budget exceeded") || strings.HasPrefix(detail, "subsequent retry budget exceeded") {
+		return detail
+	}
+	return "retry budget exceeded: " + detail
 }
 
 // mostRecentDiskFullGB returns the disk_gb of the most recent cloud instance
