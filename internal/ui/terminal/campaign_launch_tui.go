@@ -229,27 +229,29 @@ type launchModel struct {
 	winningCandidate *campaign.CandidateResult
 	reuseAssignments []campaign.ReuseAssignment
 
-	campaignID       int64
-	reconciling      bool // true while background reconciliation is in progress
-	loading          bool
-	launching        bool
-	done             bool
-	err              error
-	statusHint       string // transient hint shown below the cost table (cleared on next action)
-	partialErrors    []string
-	fromWatch        bool
-	campaignPhase    string              // campaign-level phase text
-	groupPhases      map[int]string      // groupIndex -> current phase
-	groupDone        map[int]bool        // groupIndex -> registered
-	estimateProgress estimateProgressMsg // latest estimation progress
-	planProgress     planProgressMsg     // latest launch-plan build progress
-	progressCh       chan estimateProgressMsg
-	planProgressCh   chan planProgressMsg
-	campaignCh       chan campaignCreatedMsg
-	planCh           chan launchExecutionPlanMsg
-	phaseCh          chan launchPhaseMsg
-	instanceCh       chan launchInstanceRegisteredMsg
-	assetStageCh     chan assetStageChangedMsg
+	campaignID        int64
+	reconciling       bool // true while background reconciliation is in progress
+	loading           bool
+	launching         bool
+	done              bool
+	err               error
+	statusHint        string // transient hint shown below the cost table (cleared on next action)
+	partialErrors     []string
+	fromWatch         bool
+	campaignPhase     string              // campaign-level phase text
+	groupPhases       map[int]string      // groupIndex -> current phase
+	groupDone         map[int]bool        // groupIndex -> registered
+	estimateProgress  estimateProgressMsg // latest estimation progress
+	planProgress      planProgressMsg     // latest launch-plan build progress
+	planGeneration    int                 // increments when raw offers are refreshed
+	refiningTradeoffs bool                // true while richer frontier samples load in the background
+	progressCh        chan estimateProgressMsg
+	planProgressCh    chan planProgressMsg
+	campaignCh        chan campaignCreatedMsg
+	planCh            chan launchExecutionPlanMsg
+	phaseCh           chan launchPhaseMsg
+	instanceCh        chan launchInstanceRegisteredMsg
+	assetStageCh      chan assetStageChangedMsg
 
 	instanceIDs             []int64
 	expectedInstanceCount   int
@@ -311,6 +313,8 @@ type profilePlansLoadedMsg struct {
 	options    []campaign.TradeoffOption
 	err        error
 	background bool // true if this is a background refresh (don't show loading state)
+	fullSet    bool
+	generation int
 }
 
 type hfPrefetchDoneMsg struct{} // no-op; side effect is warming the HF size cache
@@ -331,6 +335,7 @@ type planProgressMsg struct {
 	current    int
 	total      int
 	background bool
+	generation int
 }
 
 type instancesLaunchedMsg struct {
@@ -634,6 +639,8 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 	survivalModel := m.survivalModel
 	minSurvival := m.launchOpts.MinSurvival
 	ch := m.planProgressCh
+	generation := m.planGeneration
+	profiles, fullSet := tradeoffProfilesForLaunchBatch(background)
 	build := func() tea.Msg {
 		var onProgress campaign.PlanProgressFunc
 		if !background {
@@ -645,12 +652,12 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 					current:    progress.Current,
 					total:      progress.Total,
 					background: background,
+					generation: generation,
 				}:
 				default:
 				}
 			}
 		}
-		profiles := bidding.ParetoSamplingProfiles()
 		plans := campaign.BuildProfilePlansFromSplitRawWithProgress(
 			database,
 			clients,
@@ -665,12 +672,30 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 			onProgress,
 		)
 		options := campaign.BuildParetoTradeoffOptions(plans)
-		return profilePlansLoadedMsg{plans: plans, options: options, background: background}
+		return profilePlansLoadedMsg{
+			plans:      plans,
+			options:    options,
+			background: background,
+			fullSet:    fullSet,
+			generation: generation,
+		}
 	}
 	if background {
 		return build
 	}
 	return tea.Batch(build, waitForPlanProgress(ch))
+}
+
+func tradeoffProfilesForLaunchBatch(background bool) ([]bidding.ScoreProfile, bool) {
+	if background {
+		return bidding.ParetoSamplingProfiles(), true
+	}
+	profiles := []bidding.ScoreProfile{
+		bidding.StrategyCheap.Profile(),
+		bidding.StrategyFast.Profile(),
+		bidding.StrategyFastest.Profile(),
+	}
+	return profiles, len(bidding.ParetoSamplingProfiles()) <= len(profiles)
 }
 
 // prefetchHFSizes warms the HF model size cache in parallel with offer fetching.
@@ -1243,9 +1268,11 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 			return m, m.quitOrSwitchToWatch(fmt.Sprintf("Launch error: %v", msg.err))
 		}
+		m.planGeneration++
 		m.cachedRawOffers = msg.raw
 		m.reusable = append([]campaign.InstanceCapacity(nil), msg.reusable...)
 		m.tradeoffRowsDirty = true
+		m.refiningTradeoffs = false
 		if !msg.background {
 			m.loading = true
 			m.planProgress = planProgressMsg{}
@@ -1254,6 +1281,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.buildProfilePlans(msg.background)
 
 	case profilePlansLoadedMsg:
+		if msg.generation != m.planGeneration {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.loading = false
 			m.err = msg.err
@@ -1274,9 +1304,16 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = false
 			m.planProgress = planProgressMsg{}
 		}
+		if msg.fullSet {
+			m.refiningTradeoffs = false
+		}
 		key := offerIdentity(m.groupOffers)
 		if offersMatch(oldOffers, m.groupOffers) && m.costEstimates != nil {
 			m.refreshTradeoffRowsIfNeeded()
+			if !msg.background && !msg.fullSet {
+				m.refiningTradeoffs = true
+				return m, m.buildProfilePlans(true)
+			}
 			return m, nil
 		}
 		m.costEstimates = m.activeTradeoffEstimates()
@@ -1284,6 +1321,10 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.costEstimates = m.estimateCache[key]
 		}
 		m.refreshTradeoffRowsIfNeeded()
+		if !msg.background && !msg.fullSet {
+			m.refiningTradeoffs = true
+			return m, m.buildProfilePlans(true)
+		}
 		return m, nil
 
 	case estimateProgressMsg:
@@ -1294,6 +1335,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case planProgressMsg:
+		if msg.generation != m.planGeneration {
+			return m, nil
+		}
 		if !msg.background {
 			m.planProgress = msg
 		}
@@ -2639,6 +2683,10 @@ func (m launchModel) View() string {
 	}
 	if m.statusHint != "" && m.inlineWatch == nil {
 		b.WriteString(launchDimStyle.Render(m.statusHint))
+		b.WriteString("\n")
+	}
+	if m.refiningTradeoffs && m.inlineWatch == nil {
+		b.WriteString(launchDimStyle.Render("Refining additional tradeoff options in background..."))
 		b.WriteString("\n")
 	}
 	if m.inlineWatch != nil {

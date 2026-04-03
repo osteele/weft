@@ -290,6 +290,97 @@ func TestLaunchModelUpdate_RawOffersKickOffPlanBuild(t *testing.T) {
 	}
 }
 
+func TestTradeoffProfilesForLaunchBatch_UsesEndpointsFirst(t *testing.T) {
+	profiles, fullSet := tradeoffProfilesForLaunchBatch(false)
+	if fullSet {
+		t.Fatal("expected initial launch batch to be a partial profile set")
+	}
+	gotIDs := []string{profiles[0].ID, profiles[1].ID, profiles[2].ID}
+	wantIDs := []string{
+		bidding.StrategyCheap.Profile().ID,
+		bidding.StrategyFast.Profile().ID,
+		bidding.StrategyFastest.Profile().ID,
+	}
+	for i := range wantIDs {
+		if gotIDs[i] != wantIDs[i] {
+			t.Fatalf("profile %d = %q, want %q", i, gotIDs[i], wantIDs[i])
+		}
+	}
+
+	backgroundProfiles, backgroundFullSet := tradeoffProfilesForLaunchBatch(true)
+	if !backgroundFullSet {
+		t.Fatal("expected background launch batch to use the full profile set")
+	}
+	if len(backgroundProfiles) <= len(profiles) {
+		t.Fatalf("background profile count = %d, want > %d", len(backgroundProfiles), len(profiles))
+	}
+}
+
+func TestLaunchModelUpdate_ProfilePlansLoaded_StartsBackgroundRefinement(t *testing.T) {
+	model, cmd := launchModel{
+		loading:        true,
+		planGeneration: 1,
+		estimateCache:  make(map[string][]campaign.CostEstimate),
+	}.Update(profilePlansLoadedMsg{
+		plans: map[string]campaign.StrategyPlan{
+			"cheap":   {},
+			"fast":    {},
+			"fastest": {},
+		},
+		options: []campaign.TradeoffOption{
+			{ID: "cheap", Label: "cheap"},
+			{ID: "fast", Label: "fast"},
+			{ID: "fastest", Label: "fastest"},
+		},
+		fullSet:    false,
+		generation: 1,
+	})
+
+	got := model.(launchModel)
+	if got.loading {
+		t.Fatal("expected loading to clear after initial tradeoff plans arrive")
+	}
+	if !got.refiningTradeoffs {
+		t.Fatal("expected background tradeoff refinement to start after the initial profile batch")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up background refinement command")
+	}
+}
+
+func TestLaunchModelUpdate_ProfilePlansLoaded_IgnoresStaleGeneration(t *testing.T) {
+	initialPlans := map[string]campaign.StrategyPlan{
+		"fast": {},
+	}
+	model, cmd := launchModel{
+		planGeneration: 2,
+		tradeoffPlans:  initialPlans,
+		activeTradeoff: "fast",
+	}.Update(profilePlansLoadedMsg{
+		plans: map[string]campaign.StrategyPlan{
+			"cheap": {},
+		},
+		options:    []campaign.TradeoffOption{{ID: "cheap", Label: "cheap"}},
+		fullSet:    true,
+		background: true,
+		generation: 1,
+	})
+
+	got := model.(launchModel)
+	if len(got.tradeoffPlans) != 1 {
+		t.Fatalf("stale result replaced current tradeoff plans: %#v", got.tradeoffPlans)
+	}
+	if _, ok := got.tradeoffPlans["fast"]; !ok {
+		t.Fatalf("stale result replaced current tradeoff plans: %#v", got.tradeoffPlans)
+	}
+	if got.activeTradeoff != "fast" {
+		t.Fatalf("activeTradeoff = %q, want fast", got.activeTradeoff)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no follow-up command for stale result, got %T", cmd)
+	}
+}
+
 func TestLaunchModelUpdate_ReconcileNoJobsQuits(t *testing.T) {
 	model, cmd := launchModel{reconciling: true}.Update(reconcileDoneMsg{groups: []campaign.InstanceGroup{}})
 	got := model.(launchModel)
