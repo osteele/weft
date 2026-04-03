@@ -48,7 +48,7 @@ func addProjectWatchFlags(cmd *cobra.Command) {
 }
 
 func openJobsDB() (*sql.DB, error) {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

@@ -879,7 +879,7 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -953,7 +953,7 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -996,7 +996,7 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 }
 
 func runCampaignShow(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

@@ -39,7 +39,7 @@ func init() {
 func runCheck(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

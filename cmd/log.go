@@ -171,7 +171,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--follow cannot be used with --to")
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -962,7 +962,7 @@ func syncOpsLogSources() error {
 		return err
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -1078,7 +1078,7 @@ func formatOpsEntry(entry oplog.Entry) {
 
 // runEventsLog displays lifecycle events from the database.
 func runEventsLog(cmd *cobra.Command) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

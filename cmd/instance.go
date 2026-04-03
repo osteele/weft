@@ -160,7 +160,7 @@ func getGraceInstance(database *sql.DB, instanceID int64) (*db.Launch, error) {
 }
 
 func runInstanceList(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -217,7 +217,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 }
 
 func runInstanceStatus(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

@@ -945,9 +945,21 @@ func Open() (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenForReading tries Open() first; on any failure it falls back to
+// OpenReadOnly() so that read-only commands still work when the database file
+// is locked or read-only.
+func OpenForReading() (*sql.DB, error) {
+	database, err := Open()
+	if err != nil {
+		slog.Warn("database not writable, opening read-only (startup repair deferred)", "error", err)
+		database, err = OpenReadOnly()
+	}
+	return database, err
+}
+
 // OpenReadOnly opens the database in read-only mode without running schema
-// migrations. Use this as a fallback when Open() fails with SQLITE_BUSY, so
-// read-only commands can still display data.
+// migrations. Use this as a fallback when Open() fails with SQLITE_BUSY or
+// SQLITE_READONLY, so read-only commands can still display data.
 func OpenReadOnly() (*sql.DB, error) {
 	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&mode=ro", dbPath)
 	database, err := sql.Open("sqlite", connStr)

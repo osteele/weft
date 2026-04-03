@@ -58,7 +58,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		database, err := db.Open()
+		database, err := db.OpenForReading()
 		if err != nil {
 			return fmt.Errorf("open database: %w", err)
 		}
@@ -76,7 +76,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

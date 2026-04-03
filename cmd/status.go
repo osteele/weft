@@ -91,11 +91,7 @@ func addStatusFlags(cmd *cobra.Command) {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
-	if err != nil && db.IsDatabaseLocked(err) {
-		slog.Warn("database busy, opening read-only (schema migrations deferred)")
-		database, err = db.OpenReadOnly()
-	}
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

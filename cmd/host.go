@@ -126,7 +126,7 @@ func runHostInfo(cmd *cobra.Command, args []string) error {
 		return runInstanceStatus(cmd, []string{instanceID})
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

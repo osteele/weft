@@ -139,7 +139,7 @@ func runDataWhere(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -248,7 +248,7 @@ func runDataFetch(_ *cobra.Command, args []string) error {
 }
 
 func runDataRequests(_ *cobra.Command, _ []string) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

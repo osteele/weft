@@ -124,7 +124,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		return runJobWatch(cmd, args)
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

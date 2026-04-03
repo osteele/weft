@@ -51,7 +51,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		return usageErrorf("invalid instance ID %q", args[0])
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
