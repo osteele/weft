@@ -37,8 +37,9 @@ var (
 )
 
 const (
-	launchHeartbeatInterval = 2 * time.Second
-	launchStallThreshold    = 20 * time.Second
+	launchHeartbeatInterval       = 2 * time.Second
+	launchStallThreshold          = 20 * time.Second
+	initialOfferShortlistPerGroup = 10
 )
 
 // renderRow writes a styled line with cursor prefix to b.
@@ -712,6 +713,9 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 	ch := m.planProgressCh
 	generation := m.planGeneration
 	specs, fullSet := tradeoffPlanSpecsForLaunchBatch(background)
+	if !background {
+		splitRaw = shortlistRawOffersForInteractive(splitRaw)
+	}
 	build := func() tea.Msg {
 		var onProgress campaign.PlanProgressFunc
 		if !background {
@@ -756,6 +760,100 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 		return build
 	}
 	return tea.Batch(build, waitForPlanProgress(ch))
+}
+
+func shortlistRawOffersForInteractive(raw []campaign.GroupRawOffers) []campaign.GroupRawOffers {
+	if len(raw) == 0 {
+		return nil
+	}
+	shortlisted := make([]campaign.GroupRawOffers, len(raw))
+	for i, groupRaw := range raw {
+		shortlisted[i] = groupRaw
+		if len(groupRaw.Offers) <= initialOfferShortlistPerGroup {
+			shortlisted[i].Offers = append([]cloud.Offer(nil), groupRaw.Offers...)
+			continue
+		}
+		shortlisted[i].Offers = shortlistOffers(groupRaw.Offers, initialOfferShortlistPerGroup)
+	}
+	return shortlisted
+}
+
+func shortlistOffers(offers []cloud.Offer, limit int) []cloud.Offer {
+	if len(offers) <= limit || limit <= 0 {
+		return append([]cloud.Offer(nil), offers...)
+	}
+
+	added := make(map[string]struct{}, limit)
+	selected := make([]cloud.Offer, 0, min(limit, len(offers)))
+	add := func(offer cloud.Offer) {
+		if len(selected) >= limit {
+			return
+		}
+		key := offer.Key()
+		if _, ok := added[key]; ok {
+			return
+		}
+		added[key] = struct{}{}
+		selected = append(selected, offer)
+	}
+
+	appendFromSorted := func(sorted []cloud.Offer, quota int) {
+		for _, offer := range sorted {
+			if len(selected) >= limit || quota <= 0 {
+				return
+			}
+			before := len(selected)
+			add(offer)
+			if len(selected) > before {
+				quota--
+			}
+		}
+	}
+
+	byCost := append([]cloud.Offer(nil), offers...)
+	sort.Slice(byCost, func(i, j int) bool {
+		if byCost[i].CostPerHour == byCost[j].CostPerHour {
+			return byCost[i].DLPerf > byCost[j].DLPerf
+		}
+		return byCost[i].CostPerHour < byCost[j].CostPerHour
+	})
+
+	byPerf := append([]cloud.Offer(nil), offers...)
+	sort.Slice(byPerf, func(i, j int) bool {
+		if byPerf[i].DLPerf == byPerf[j].DLPerf {
+			return byPerf[i].CostPerHour < byPerf[j].CostPerHour
+		}
+		return byPerf[i].DLPerf > byPerf[j].DLPerf
+	})
+
+	byPerfPerDollar := append([]cloud.Offer(nil), offers...)
+	sort.Slice(byPerfPerDollar, func(i, j int) bool {
+		left := offerPerfPerDollar(byPerfPerDollar[i])
+		right := offerPerfPerDollar(byPerfPerDollar[j])
+		if left == right {
+			return byPerfPerDollar[i].CostPerHour < byPerfPerDollar[j].CostPerHour
+		}
+		return left > right
+	})
+
+	appendFromSorted(byCost, min(4, limit))
+	appendFromSorted(byPerf, min(3, max(limit-len(selected), 0)))
+	appendFromSorted(byPerfPerDollar, min(3, max(limit-len(selected), 0)))
+	appendFromSorted(byCost, limit-len(selected))
+	return selected
+}
+
+func offerPerfPerDollar(offer cloud.Offer) float64 {
+	if offer.CostPerHour <= 0 {
+		if offer.DLPerf > 0 {
+			return offer.DLPerf
+		}
+		return 0
+	}
+	if offer.DLPerf <= 0 {
+		return 0
+	}
+	return offer.DLPerf / offer.CostPerHour
 }
 
 func tradeoffPlanSpecsForLaunchBatch(background bool) ([]campaign.ProfilePlanSpec, bool) {

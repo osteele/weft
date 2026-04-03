@@ -181,9 +181,11 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	reportStartupPhase("Checking predictor status...")
-	if err := ensurePredictorUsableFunc(cmd, cfg, "campaign planning"); err != nil {
-		return err
+	if !launchInteractive {
+		reportStartupPhase("Checking predictor status...")
+		if err := ensurePredictorUsableFunc(cmd, cfg, "campaign planning"); err != nil {
+			return err
+		}
 	}
 
 	// For non-interactive and dry-run modes, reconcile synchronously.
