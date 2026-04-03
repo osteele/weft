@@ -544,19 +544,27 @@ func applyRuntimeMetadataAdjustments(predicted map[int]map[string]offerRuntimePr
 		neutralByJob := make([]time.Duration, jobCount)
 		for jobIdx := 0; jobIdx < jobCount; jobIdx++ {
 			var samples []time.Duration
+			var trustedSamples []time.Duration
 			for _, pred := range offerPredictions {
 				if !pred.complete || !pred.feasible || jobIdx >= len(pred.jobDurations) {
 					continue
 				}
-				if pred.jobDurations[jobIdx] > 0 {
-					samples = append(samples, pred.jobDurations[jobIdx])
+				if pred.jobDurations[jobIdx] <= 0 {
+					continue
+				}
+				samples = append(samples, pred.jobDurations[jobIdx])
+				if runtimePredictionConfidence(metadataAt(pred.metadata, jobIdx)) >= 0.5 {
+					trustedSamples = append(trustedSamples, pred.jobDurations[jobIdx])
 				}
 			}
-			if len(samples) == 0 {
+			switch {
+			case len(trustedSamples) > 0:
+				neutralByJob[jobIdx] = minDuration(trustedSamples)
+			case len(samples) == 0:
 				neutralByJob[jobIdx] = estimate.DefaultJobDuration.Mean
-				continue
+			default:
+				neutralByJob[jobIdx] = medianDuration(samples)
 			}
-			neutralByJob[jobIdx] = medianDuration(samples)
 		}
 
 		for key, pred := range offerPredictions {
@@ -588,6 +596,13 @@ func adjustRuntimePrediction(pred offerRuntimePrediction, neutralByJob []time.Du
 	pred.adjustedJobDurations = adjusted
 	pred.adjustedRunHrs = totalAdjustedHrs
 	return pred
+}
+
+func metadataAt(metadata []*predictor.RuntimeMetadata, jobIdx int) *predictor.RuntimeMetadata {
+	if jobIdx < 0 || jobIdx >= len(metadata) {
+		return nil
+	}
+	return metadata[jobIdx]
 }
 
 func runtimePredictionConfidence(metadata *predictor.RuntimeMetadata) float64 {
@@ -633,6 +648,19 @@ func runtimePredictionConfidence(metadata *predictor.RuntimeMetadata) float64 {
 	}
 
 	return clamp01(confidence)
+}
+
+func minDuration(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	best := durations[0]
+	for _, dur := range durations[1:] {
+		if dur < best {
+			best = dur
+		}
+	}
+	return best
 }
 
 func oversizedVRAMConfidenceFactor(headroomMiB float64) float64 {

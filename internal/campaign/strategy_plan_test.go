@@ -296,6 +296,168 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200ForBenchmar
 	}
 }
 
+func TestRankGroupOffersWithPredictor_RealWorkloadShapesAvoidOversizedH200AcrossStrategies(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	feasible := true
+	noExtraVRAM := false
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			result := &predictor.Result{
+				DurationS: &predictor.Prediction{},
+			}
+
+			switch {
+			case job.Project == "head-type-ontology" && job.Command == "uv run python scripts/pythia_scaling.py --device cuda":
+				result.DurationS = &predictor.Prediction{Mean: 1200, Lower: 1080, Upper: 1320}
+				result.DurationMetadata = &predictor.RuntimeMetadata{
+					Source:                     "learned+analytical",
+					Confidence:                 0.9,
+					Feasible:                   &feasible,
+					Bottleneck:                 "compute",
+					MemoryHeadroomMiB:          4 * 1024,
+					BenefitsFromAdditionalVRAM: &noExtraVRAM,
+				}
+				if job.GPUClass == "H200" {
+					result.DurationS = &predictor.Prediction{Mean: 1020, Lower: 918, Upper: 1122}
+					result.DurationMetadata = &predictor.RuntimeMetadata{
+						Source:                     "learned",
+						Confidence:                 0.15,
+						Feasible:                   &feasible,
+						Bottleneck:                 "unknown",
+						MemoryHeadroomMiB:          110 * 1024,
+						BenefitsFromAdditionalVRAM: &noExtraVRAM,
+					}
+				}
+			case job.Project == "head-type-ontology" && (job.Command == "uv run python scripts/head_count_regularization_sweep.py --device cuda --head-counts 24" || job.Command == "uv run python scripts/head_count_regularization_sweep.py --device cuda --head-counts 48" || job.Command == "uv run python scripts/parametric_type_recognition.py --device cuda"):
+				result.DurationS = &predictor.Prediction{Mean: 840, Lower: 756, Upper: 924}
+				result.DurationMetadata = &predictor.RuntimeMetadata{
+					Source:                     "learned+analytical",
+					Confidence:                 0.9,
+					Feasible:                   &feasible,
+					Bottleneck:                 "compute",
+					MemoryHeadroomMiB:          10 * 1024,
+					BenefitsFromAdditionalVRAM: &noExtraVRAM,
+				}
+				if job.GPUClass == "H200" {
+					result.DurationS = &predictor.Prediction{Mean: 720, Lower: 648, Upper: 792}
+					result.DurationMetadata = &predictor.RuntimeMetadata{
+						Source:                     "learned",
+						Confidence:                 0.15,
+						Feasible:                   &feasible,
+						Bottleneck:                 "unknown",
+						MemoryHeadroomMiB:          120 * 1024,
+						BenefitsFromAdditionalVRAM: &noExtraVRAM,
+					}
+				}
+			case job.Project == "llm-performance-models" && job.Command == "rm -rf ~/.cache/llm-performance-models/ && uv sync && uv run llm-perf benchmark --ablation --cross-model && uv run llm-perf benchmark-inference":
+				result.DurationS = &predictor.Prediction{Mean: 1680, Lower: 1512, Upper: 1848}
+				result.DurationMetadata = &predictor.RuntimeMetadata{
+					Source:     "empirical",
+					Confidence: 1.0,
+					Feasible:   &feasible,
+				}
+				if job.GPUClass == "H200 NVL" {
+					result.DurationS = &predictor.Prediction{Mean: 1440, Lower: 1296, Upper: 1584}
+					result.DurationMetadata = &predictor.RuntimeMetadata{
+						Source:                     "learned",
+						Confidence:                 0.15,
+						Feasible:                   &feasible,
+						Bottleneck:                 "unknown",
+						MemoryHeadroomMiB:          118 * 1024,
+						BenefitsFromAdditionalVRAM: &noExtraVRAM,
+					}
+				}
+			default:
+				t.Fatalf("unexpected batch job: %#v", job)
+			}
+
+			results[job.ID] = result
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{
+		{
+			Group: InstanceGroup{
+				GPUClass:    "NVIDIA",
+				GPUMemGB:    20,
+				MaxGPUMemGB: 24,
+				Jobs: []*db.Job{
+					{ID: 550, Project: "head-type-ontology", Command: "uv run python scripts/pythia_scaling.py --device cuda"},
+				},
+			},
+			Offers: []cloud.Offer{
+				{ProviderID: "rtx4090-20", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+				{ProviderID: "h200-20", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+			},
+		},
+		{
+			Group: InstanceGroup{
+				GPUClass:    "NVIDIA",
+				GPUMemGB:    8,
+				MaxGPUMemGB: 12,
+				Jobs: []*db.Job{
+					{ID: 548, Project: "head-type-ontology", Command: "uv run python scripts/head_count_regularization_sweep.py --device cuda --head-counts 24"},
+					{ID: 549, Project: "head-type-ontology", Command: "uv run python scripts/head_count_regularization_sweep.py --device cuda --head-counts 48"},
+					{ID: 553, Project: "head-type-ontology", Command: "uv run python scripts/parametric_type_recognition.py --device cuda"},
+				},
+			},
+			Offers: []cloud.Offer{
+				{ProviderID: "rtx3090-8", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+				{ProviderID: "rtx4090-8", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+				{ProviderID: "h200-8", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+			},
+		},
+		{
+			Group: InstanceGroup{
+				GPUClass: "GPU",
+				Jobs: []*db.Job{
+					{ID: 552, Project: "llm-performance-models", Command: "rm -rf ~/.cache/llm-performance-models/ && uv sync && uv run llm-perf benchmark --ablation --cross-model && uv run llm-perf benchmark-inference"},
+				},
+			},
+			Offers: []cloud.Offer{
+				{ProviderID: "rtx4090-generic", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+				{ProviderID: "h200nvl-generic", GPUName: "H200 NVL", GPUMemGB: 141, CostPerHour: 2.53, DLPerf: 40.0},
+			},
+		},
+	}
+
+	expected := map[bidding.SelectionStrategy][]string{
+		bidding.StrategyCheap:   {"RTX 4090", "RTX 3090", "RTX 4090"},
+		bidding.StrategyFast:    {"RTX 4090", "RTX 3090", "RTX 4090"},
+		bidding.StrategyFastest: {"RTX 4090", "RTX 3090", "RTX 4090"},
+	}
+
+	for _, strategy := range []bidding.SelectionStrategy{
+		bidding.StrategyCheap,
+		bidding.StrategyFast,
+		bidding.StrategyFastest,
+	} {
+		offers := RankGroupOffersWithPredictor(
+			raw,
+			&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+			nil,
+			nil,
+			strategy,
+			0,
+		)
+		if len(offers) != len(raw) {
+			t.Fatalf("%s: expected %d ranked groups, got %d", strategy, len(raw), len(offers))
+		}
+		for i, wantGPU := range expected[strategy] {
+			if offers[i].Offer == nil {
+				t.Fatalf("%s group %d: expected ranked offer, got %#v", strategy, i, offers[i])
+			}
+			if offers[i].Offer.GPUName != wantGPU {
+				t.Fatalf("%s group %d: selected GPU %q, want %q", strategy, i, offers[i].Offer.GPUName, wantGPU)
+			}
+		}
+	}
+}
+
 func TestRankGroupOffersForPlanning_ShrinksLowConfidenceRuntimeDeltas(t *testing.T) {
 	original := resolvePredictBatch
 	t.Cleanup(func() { resolvePredictBatch = original })
@@ -425,7 +587,7 @@ func TestRankGroupOffersForPlanning_MemoryCapacityCanJustifyLargerGPU(t *testing
 				BenefitsFromAdditionalVRAM: &neutral,
 			}
 			if job.GPUClass == "H200" {
-				mean = 2400.0
+				mean = 1200.0
 				meta = &predictor.RuntimeMetadata{
 					Source:                     "learned",
 					Confidence:                 0.7,
