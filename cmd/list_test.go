@@ -156,6 +156,72 @@ func TestFilterJobsByHostFlag_NoHostFlagReturnsInput(t *testing.T) {
 	}
 }
 
+func TestValidateListGroupingOptionsUnknownValue(t *testing.T) {
+	prevGroupBy := listGroupBy
+	prevFormat := listFormat
+	listGroupBy = "bogus"
+	listFormat = "table"
+	t.Cleanup(func() {
+		listGroupBy = prevGroupBy
+		listFormat = prevFormat
+	})
+
+	err := validateListGroupingOptions()
+	if err == nil {
+		t.Fatal("expected error for unknown group-by value")
+	}
+	if !strings.Contains(err.Error(), "supported: status") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateListGroupingOptionsRejectsJSON(t *testing.T) {
+	prevGroupBy := listGroupBy
+	prevFormat := listFormat
+	listGroupBy = "status"
+	listFormat = "json"
+	t.Cleanup(func() {
+		listGroupBy = prevGroupBy
+		listFormat = prevFormat
+	})
+
+	err := validateListGroupingOptions()
+	if err == nil {
+		t.Fatal("expected error for --group-by with json format")
+	}
+	if !strings.Contains(err.Error(), "table output only") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrintJobsGroupedStatus(t *testing.T) {
+	prevGroupBy := listGroupBy
+	prevFormat := listFormat
+	listGroupBy = "status"
+	listFormat = "table"
+	t.Cleanup(func() {
+		listGroupBy = prevGroupBy
+		listFormat = prevFormat
+	})
+
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusRunning, Host: "cool30", Project: "proj", Description: "run"},
+		{ID: 2, Status: db.StatusQueued, Host: "cool30", Project: "proj", Description: "wait"},
+	}
+	out := captureStdout(t, func() {
+		if err := printJobs(nil, jobs); err != nil {
+			t.Fatalf("printJobs: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Running (1):") {
+		t.Fatalf("expected grouped running section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("expected grouped queued section, got:\n%s", out)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

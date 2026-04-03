@@ -249,6 +249,7 @@ weft data where hf:meta-llama/Llama-3-8B
 weft data fetch hf:meta-llama/Llama-3-8B --host cool100
 weft log 42 -f
 weft job list --running
+weft jobs list --group-by status --unprocessed
 weft plan submit plan.yaml
 ```
 

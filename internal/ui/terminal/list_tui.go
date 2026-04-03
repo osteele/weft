@@ -39,6 +39,7 @@ type listTUIModel struct {
 	syncWorker       *hostsync.Worker
 	ctx              context.Context
 	cancel           context.CancelFunc
+	groupedByStatus  bool
 }
 
 type listJobsLoadedMsg struct {
@@ -75,7 +76,7 @@ var (
 	listTUIEmptyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
 )
 
-func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool) error {
+func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var sw *hostsync.Worker
@@ -86,15 +87,16 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	}
 
 	model := listTUIModel{
-		database:       database,
-		args:           append([]string(nil), args...),
-		title:          title,
-		jobs:           jobs,
-		syncEnabled:    syncEnabled,
-		syncInProgress: syncEnabled,
-		syncWorker:     sw,
-		ctx:            ctx,
-		cancel:         cancel,
+		database:        database,
+		args:            append([]string(nil), args...),
+		title:           title,
+		jobs:            jobs,
+		syncEnabled:     syncEnabled,
+		syncInProgress:  syncEnabled,
+		syncWorker:      sw,
+		ctx:             ctx,
+		cancel:          cancel,
+		groupedByStatus: groupedByStatus,
 	}
 
 	restore := logging.Suppress()
@@ -266,6 +268,10 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m listTUIModel) View() string {
+	if m.groupedByStatus {
+		return m.groupedView()
+	}
+
 	if m.width <= 0 || m.height <= 0 {
 		return "Loading..."
 	}
@@ -304,6 +310,42 @@ func (m listTUIModel) View() string {
 
 	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(rows), m.width)))
 	return b.String()
+}
+
+func (m listTUIModel) groupedView() string {
+	if m.width <= 0 || m.height <= 0 {
+		return "Loading..."
+	}
+
+	var b strings.Builder
+	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
+	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
+	b.WriteString("\n")
+
+	body := renderJobListGroupedStatusPlain(m.jobs, m.width)
+	body = strings.TrimSuffix(body, "\n")
+	if body == "" {
+		body = "None"
+	}
+	bodyLines := strings.Split(body, "\n")
+	for _, line := range bodyLines {
+		b.WriteString(truncateDisplayWidth(line, m.width))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.groupedFooterText(), m.width)))
+	return b.String()
+}
+
+func (m listTUIModel) groupedFooterText() string {
+	state := fmt.Sprintf("[%d jobs]", len(m.jobs))
+	if m.syncInProgress {
+		state += " syncing..."
+	}
+	if m.statusMessage != "" {
+		state += " " + m.statusMessage
+	}
+	return state + " q:quit"
 }
 
 func (m listTUIModel) footerText(rows int) string {

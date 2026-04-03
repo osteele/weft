@@ -128,8 +128,8 @@ func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.
 	return nil
 }
 
-func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool) error {
-	return runListTUI(database, args, jobs, title, syncEnabled)
+func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool) error {
+	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus)
 }
 
 func ListOutputWidth() int {
@@ -146,6 +146,10 @@ func RenderJobListPlain(jobs []*db.Job, width int) string {
 
 func RenderJobListPlainWithOptions(jobs []*db.Job, width int, columnKeys []string, noTruncate bool) string {
 	return renderJobListPlainWithOptions(jobs, width, columnKeys, noTruncate)
+}
+
+func RenderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
+	return renderJobListGroupedStatusPlain(jobs, width)
 }
 
 func ResolveColumns(keys []string, defaultKeys []string) ([]ColumnDef, error) {

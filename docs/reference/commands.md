@@ -369,6 +369,8 @@ Query and search job history from the local database.
 
 ```bash
 weft job list [flags]
+weft list jobs [flags]      # Alias
+weft jobs list [flags]      # Alias
 ```
 
 **Flags:**
@@ -389,6 +391,10 @@ weft job list [flags]
 - `--show ID`: Show detailed info for a specific job
 - `--cleanup DAYS`: Delete jobs older than N days
 - `--sync`: Sync job statuses from remote hosts before listing
+- `--group-by status`: Group table output by status sections (`Running`, `Queued`, `Completions`, `Failures`, `Killed/Canceled`)
+
+`--group-by status` only supports table/plain output; combining it with
+`--format json` or `--format tsv` returns an error.
 
 **Examples:**
 ```bash
@@ -403,6 +409,8 @@ weft job list --inventory              # Inventory-only or inventory-assigned jo
 weft job list --tag exp-012            # Jobs with a tag
 weft job list --status unprocessed     # Jobs missing the processed tag
 weft job list --search training        # Search jobs
+weft job list --group-by status        # Grouped status view
+weft job list --group-by status --watch # Grouped live view (TUI on interactive terminals)
 weft job list 12::14                   # List jobs 12 through 14
 weft job list 12...13                  # Alternative range syntax
 weft job list 12,13,14                 # Comma-separated IDs
