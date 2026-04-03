@@ -244,9 +244,11 @@ type launchModel struct {
 	estimateProgress  estimateProgressMsg // latest estimation progress
 	planProgress      planProgressState   // launch-plan build progress by profile lane
 	planGeneration    int                 // increments when raw offers are refreshed
+	groupRevision     int                 // increments when groups change
 	refiningTradeoffs bool                // true while richer frontier samples load in the background
 	progressCh        chan estimateProgressMsg
 	planProgressCh    chan planProgressMsg
+	onPremProgressCh  chan onPremProgressMsg
 	campaignCh        chan campaignCreatedMsg
 	planCh            chan launchExecutionPlanMsg
 	phaseCh           chan launchPhaseMsg
@@ -280,6 +282,10 @@ type launchModel struct {
 	projectFilter           string // project scope when launching from project watch
 	reconciler              *campaign.Reconciler
 	reconcileDropped        int
+	onPremChecking          bool
+	onPremPhase             string
+	onPremChecked           int
+	onPremTotal             int
 	assetStageSignature     string
 	assetStageErr           error
 	assetStager             *campaign.R2AssetStager
@@ -306,6 +312,7 @@ type rawOffersLoadedMsg struct {
 	reusable   []campaign.InstanceCapacity
 	err        error
 	background bool // true if this is a background refresh (don't show loading state)
+	revision   int
 }
 
 type profilePlansLoadedMsg struct {
@@ -318,6 +325,17 @@ type profilePlansLoadedMsg struct {
 }
 
 type hfPrefetchDoneMsg struct{} // no-op; side effect is warming the HF size cache
+
+type onPremProgressMsg struct {
+	phase   string
+	current int
+	total   int
+}
+
+type onPremDoneMsg struct {
+	groups []campaign.InstanceGroup
+	err    error
+}
 
 type estimatesLoadedMsg struct {
 	estimates []campaign.CostEstimate
@@ -561,6 +579,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		survivalModel:           buildSurvivalModel(database),
 		progressCh:              make(chan estimateProgressMsg, 1),
 		planProgressCh:          make(chan planProgressMsg, 8),
+		onPremProgressCh:        make(chan onPremProgressMsg, 16),
 		assetStageCh:            make(chan assetStageChangedMsg, 64),
 		gpuFilter:               gpuFilter,
 		projectFilter:           projectFilter,
@@ -570,6 +589,8 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		fromWatch:               fromWatch,
 		inlineWatchEnabled:      inlineWatchEnabled,
 		registeredInstanceIDSet: make(map[int64]struct{}),
+		groupRevision:           1,
+		onPremChecking:          hasLaunchGroupsOnPremRefresh() && len(groups) > 0,
 	}
 	m.resetLaunchChannels(len(groups))
 	return m
@@ -594,6 +615,9 @@ func (m launchModel) Init() tea.Cmd {
 	}
 	if m.reconciling {
 		cmds = append(cmds, m.runReconciliation())
+	}
+	if m.onPremChecking {
+		cmds = append(cmds, m.runOnPremRefresh(), waitForOnPremProgress(m.onPremProgressCh))
 	}
 	return tea.Batch(cmds...)
 }
@@ -632,6 +656,7 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 	clients := m.clients
 	providerErr := m.providerErr
 	database := m.database
+	revision := m.groupRevision
 	return func() tea.Msg {
 		reusable, _ := campaign.FindReusableInstances(database)
 		if len(clients) == 0 && len(reusable) == 0 {
@@ -639,7 +664,7 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 			if err == nil {
 				err = fmt.Errorf("no rental providers available")
 			}
-			return rawOffersLoadedMsg{err: err}
+			return rawOffersLoadedMsg{err: err, revision: revision}
 		}
 		splitRaw := make([]campaign.GroupRawOffers, len(groups))
 		for i, g := range groups {
@@ -648,7 +673,29 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 		if len(clients) > 0 {
 			splitRaw = campaign.FetchGroupRawOffers(clients, groups)
 		}
-		return rawOffersLoadedMsg{raw: splitRaw, reusable: reusable, background: background}
+		return rawOffersLoadedMsg{raw: splitRaw, reusable: reusable, background: background, revision: revision}
+	}
+}
+
+func (m launchModel) runOnPremRefresh() tea.Cmd {
+	database := m.database
+	cfg := m.appConfig
+	gpuFilter := m.gpuFilter
+	projectFilter := m.projectFilter
+	ch := m.onPremProgressCh
+	return func() tea.Msg {
+		groups, err := refreshLaunchGroupsWithOnPrem(database, cfg, gpuFilter, projectFilter, func(current, total int) {
+			select {
+			case ch <- onPremProgressMsg{current: current, total: total}:
+			default:
+			}
+		}, func(phase string) {
+			select {
+			case ch <- onPremProgressMsg{phase: phase}:
+			default:
+			}
+		})
+		return onPremDoneMsg{groups: groups, err: err}
 	}
 }
 
@@ -1018,6 +1065,16 @@ func waitForPlanProgress(ch chan planProgressMsg) tea.Cmd {
 	}
 }
 
+func waitForOnPremProgress(ch chan onPremProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
 // waitForLaunchPhase returns a Cmd that reads one launch phase update.
 func waitForLaunchPhase(ch chan launchPhaseMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -1176,6 +1233,54 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 	return m, inlineWatch.Init()
 }
 
+func (m *launchModel) resetForUpdatedGroups(groups []campaign.InstanceGroup) tea.Cmd {
+	m.groups = groups
+	m.groupRevision++
+	m.items, m.selected, m.cursor = buildItemsFromGroups(m.groups)
+	m.loading = true
+	m.groupOffers = nil
+	m.cachedRawOffers = nil
+	m.reusable = nil
+	m.tradeoffPlans = nil
+	m.tradeoffOptions = nil
+	m.activeTradeoff = ""
+	m.reuseAssignments = nil
+	m.winningCandidate = nil
+	m.costEstimates = nil
+	m.estimateCache = make(map[string][]campaign.CostEstimate)
+	m.tradeoffRowsDirty = true
+	m.cachedTradeoffRows = nil
+	m.planProgress.reset()
+	m.refiningTradeoffs = false
+	if m.assetStager != nil {
+		m.assetStager.Close()
+	}
+	m.assetStager = nil
+	m.assetStageSignature = ""
+	m.assetStageErr = nil
+	return tea.Batch(
+		m.fetchRawOffers(false),
+		m.startAssetStagingForGroups(groups),
+	)
+}
+
+func (m launchModel) onPremStatusLine() string {
+	if !m.onPremChecking {
+		return ""
+	}
+	var details []string
+	if m.onPremPhase != "" {
+		details = append(details, strings.TrimSuffix(m.onPremPhase, "..."))
+	}
+	if m.onPremTotal > 0 {
+		details = append(details, fmt.Sprintf("%d/%d job(s)", m.onPremChecked, m.onPremTotal))
+	}
+	if len(details) == 0 {
+		return "Checking on-prem placement in background..."
+	}
+	return fmt.Sprintf("Checking on-prem placement in background: %s", strings.Join(details, " | "))
+}
+
 // quitOrSwitchToWatch returns tea.Quit for standalone launch, or
 // switchToWatchMsg when embedded in the watch router.
 func (m launchModel) quitOrSwitchToWatch(flash string) tea.Cmd {
@@ -1258,36 +1363,14 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.reconcileDropped = 0
 			}
-			m.groups = msg.groups
-			m.items, m.selected, m.cursor = buildItemsFromGroups(m.groups)
-			m.loading = true
-			m.groupOffers = nil
-			m.cachedRawOffers = nil
-			m.reusable = nil
-			m.tradeoffPlans = nil
-			m.tradeoffOptions = nil
-			m.activeTradeoff = ""
-			m.reuseAssignments = nil
-			m.winningCandidate = nil
-			m.costEstimates = nil
-			m.estimateCache = make(map[string][]campaign.CostEstimate)
-			m.tradeoffRowsDirty = true
-			m.cachedTradeoffRows = nil
-			m.planProgress.reset()
-			if m.assetStager != nil {
-				m.assetStager.Close()
-			}
-			m.assetStager = nil
-			m.assetStageSignature = ""
-			m.assetStageErr = nil
-			return m, tea.Batch(
-				m.fetchRawOffers(false),
-				m.startAssetStagingForGroups(msg.groups),
-			)
+			return m, m.resetForUpdatedGroups(msg.groups)
 		}
 		return m, nil
 
 	case rawOffersLoadedMsg:
+		if msg.revision != m.groupRevision {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.loading = false
 			m.err = msg.err
@@ -1304,6 +1387,45 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshTradeoffRowsIfNeeded()
 		return m, m.buildProfilePlans(msg.background)
+
+	case onPremProgressMsg:
+		if msg.phase != "" {
+			m.onPremPhase = msg.phase
+		}
+		if msg.total > 0 {
+			m.onPremTotal = msg.total
+			m.onPremChecked = msg.current
+		}
+		if m.onPremChecking {
+			return m, waitForOnPremProgress(m.onPremProgressCh)
+		}
+		return m, nil
+
+	case onPremDoneMsg:
+		m.onPremChecking = false
+		m.onPremPhase = ""
+		m.onPremChecked = 0
+		m.onPremTotal = 0
+		if msg.err != nil {
+			m.statusHint = fmt.Sprintf("On-prem placement check failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.groups == nil {
+			return m, nil
+		}
+		if len(msg.groups) == 0 {
+			m.err = fmt.Errorf("no jobs need rental GPUs (all placed on-prem)")
+			return m, m.quitOrSwitchToWatch("All jobs placed on-prem.")
+		}
+		if groupsChanged(m.groups, msg.groups) {
+			oldCount := countGroupJobs(m.groups)
+			newCount := countGroupJobs(msg.groups)
+			if newCount < oldCount {
+				m.statusHint = fmt.Sprintf("Placed %d job(s) on on-prem hosts; refreshing rental options.", oldCount-newCount)
+			}
+			return m, m.resetForUpdatedGroups(msg.groups)
+		}
+		return m, nil
 
 	case profilePlansLoadedMsg:
 		if msg.generation != m.planGeneration {
@@ -1596,9 +1718,11 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.done {
 			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
 		}
-		if m.loading || m.reconciling {
+		if m.loading || m.reconciling || m.onPremChecking {
 			status := "Loading launch data"
 			switch {
+			case m.onPremChecking:
+				status = "Checking on-prem placement"
 			case m.reconciling:
 				status = "Reconciling"
 			case m.fetchingOffers():
@@ -2033,6 +2157,15 @@ func formatPlanProgressLine(msg planProgressMsg) string {
 		return "Planner progress..."
 	}
 	return text + "..."
+}
+
+func hasRenderableTradeoffDetails(estimates []campaign.CostEstimate) bool {
+	for _, est := range estimates {
+		if est.Offer.Offer != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // groupHasOffer reports whether the group at groupIdx has a matching offer.
@@ -2728,6 +2861,10 @@ func (m launchModel) View() string {
 		b.WriteString(launchDimStyle.Render(m.statusHint))
 		b.WriteString("\n")
 	}
+	if line := m.onPremStatusLine(); line != "" && m.inlineWatch == nil {
+		b.WriteString(launchDimStyle.Render(line))
+		b.WriteString("\n")
+	}
 	if m.refiningTradeoffs && m.inlineWatch == nil {
 		b.WriteString(launchDimStyle.Render("Refining additional tradeoff options in background..."))
 		b.WriteString("\n")
@@ -2943,7 +3080,7 @@ func (m launchModel) View() string {
 					finalLines = append(finalLines, line)
 					if m.tradeoffDisclosed && i < len(rows) && rows[i].Active && rows[i].Disclosed {
 						activeEstimates := m.cachedActiveEstimates
-						if activeEstimates != nil {
+						if hasRenderableTradeoffDetails(activeEstimates) && !rows[i].Loading {
 							indent := strings.Repeat(" ", summaryTable.TimeColOffset)
 							// When the winning candidate differs from split groups,
 							// pass nil for selection (all jobs selected) since the

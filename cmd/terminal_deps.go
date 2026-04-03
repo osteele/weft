@@ -32,6 +32,7 @@ func init() {
 		AttemptRelaunchOrphanedJobs:                       attemptRelaunchOrphanedJobs,
 		BuildStaleDataNote:                                buildStaleDataNote,
 		PrintJobStatus:                                    printJobStatus,
+		RefreshLaunchGroupsWithOnPrem:                     refreshLaunchGroupsWithOnPrem,
 		SyncRentalJobsStatus:                              syncRentalJobsStatus,
 		SyncCloudState:                                    terminalSyncCloudState,
 		SyncCloudStateWithTimeout:                         terminalSyncCloudStateWithTimeout,

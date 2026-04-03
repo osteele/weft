@@ -222,12 +222,15 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	jobs = filterLaunchJobsByProject(jobs)
 
-	// Pre-filter: try on-prem placement for unplaced jobs.
-	// Jobs that can now be placed on-prem are assigned and removed from the rental list.
-	if len(jobs) > 0 {
-		reportStartupPhase(fmt.Sprintf("Probing on-prem hosts for %d job(s)...", len(jobs)))
+	// Pre-filter on-prem placement synchronously only for non-interactive launch
+	// paths. The interactive TUI does this in the background so rental planning
+	// can start immediately.
+	if !launchInteractive {
+		if len(jobs) > 0 {
+			reportStartupPhase(fmt.Sprintf("Probing on-prem hosts for %d job(s)...", len(jobs)))
+		}
+		jobs = prefilterOnPremWithProgress(database, jobs, cfg, newLaunchProgressReporter(cmd.ErrOrStderr(), "Checking on-prem placement", len(jobs)), reportStartupPhase)
 	}
-	jobs = prefilterOnPremWithProgress(database, jobs, cfg, newLaunchProgressReporter(cmd.ErrOrStderr(), "Checking on-prem placement", len(jobs)), reportStartupPhase)
 
 	if len(jobs) == 0 {
 		fmt.Println("No jobs need rental GPUs.")
@@ -307,6 +310,29 @@ func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 		}
 	}
 	return filtered
+}
+
+func filterLaunchJobsForScope(jobs []*db.Job, projectFilter string) []*db.Job {
+	if projectFilter != "" {
+		return db.FilterJobsByProject(jobs, projectFilter)
+	}
+	return filterLaunchJobsByProject(jobs)
+}
+
+func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilter string, projectFilter string, onProgress func(int, int), onPhase func(string)) ([]campaign.InstanceGroup, error) {
+	jobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		return nil, fmt.Errorf("list unplaced jobs: %w", err)
+	}
+	jobs = filterRentalLaunchJobs(jobs)
+	jobs = filterLaunchJobsForScope(jobs, projectFilter)
+	jobs = prefilterOnPremWithProgress(database, jobs, cfg, onProgress, onPhase)
+
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		slog.Warn("failed to build R2 client for disk estimation", "error", err)
+	}
+	return campaign.PrepareGroups(jobs, database, gpuFilter, r2Client), nil
 }
 
 // prefilterOnPrem tries to place unplaced jobs on on-prem hosts before launching

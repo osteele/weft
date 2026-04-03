@@ -290,6 +290,33 @@ func TestLaunchModelUpdate_RawOffersKickOffPlanBuild(t *testing.T) {
 	}
 }
 
+func TestLaunchModelUpdate_RawOffersLoaded_IgnoresStaleRevision(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{
+			GPUClass: "A100",
+			GPUMemGB: 80,
+			Jobs:     []*db.Job{{ID: 7, Description: "train"}},
+		},
+	}
+	existing := []campaign.GroupRawOffers{{Group: groups[0], Offers: []cloud.Offer{{ProviderID: "current", Provider: cloud.ProviderVastai}}}}
+	model, cmd := launchModel{
+		groups:          groups,
+		groupRevision:   2,
+		cachedRawOffers: existing,
+	}.Update(rawOffersLoadedMsg{
+		raw:      []campaign.GroupRawOffers{{Group: groups[0], Offers: []cloud.Offer{{ProviderID: "stale", Provider: cloud.ProviderRunpod}}}},
+		revision: 1,
+	})
+
+	got := model.(launchModel)
+	if len(got.cachedRawOffers) != 1 || got.cachedRawOffers[0].Offers[0].ProviderID != "current" {
+		t.Fatalf("stale raw offers replaced current state: %#v", got.cachedRawOffers)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no follow-up command for stale raw offers, got %T", cmd)
+	}
+}
+
 func TestFormatPlanProgressLines_ShowsConcurrentProfileLanes(t *testing.T) {
 	var state planProgressState
 	state.update(planProgressMsg{
@@ -417,6 +444,43 @@ func TestLaunchModelUpdate_ProfilePlansLoaded_IgnoresStaleGeneration(t *testing.
 	}
 }
 
+func TestLaunchModelView_DoesNotShowNoOffersWhileTradeoffRowLoading(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs: []*db.Job{
+				{ID: 580, Description: "train", WorkingDir: "/tmp/project", Project: "head-type-ontology"},
+			},
+		},
+	}
+	items, selected, cursor := buildItemsFromGroups(groups)
+	m := launchModel{
+		groups:          groups,
+		items:           items,
+		selected:        selected,
+		cursor:          cursor,
+		cachedRawOffers: []campaign.GroupRawOffers{{Group: groups[0]}},
+		cachedTradeoffRows: []campaign.StrategySummaryRow{{
+			Label:     "cheap",
+			Active:    true,
+			Disclosed: true,
+			Loading:   true,
+		}},
+		costEstimates:     []campaign.CostEstimate{{}},
+		tradeoffDisclosed: true,
+		activeTradeoff:    "cheap",
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "estimating...") {
+		t.Fatalf("expected loading tradeoff row, got:\n%s", out)
+	}
+	if strings.Contains(out, "No offers found for any group.") {
+		t.Fatalf("unexpected no-offers detail while tradeoff row is still loading:\n%s", out)
+	}
+}
+
 func TestLaunchModelUpdate_ReconcileNoJobsQuits(t *testing.T) {
 	model, cmd := launchModel{reconciling: true}.Update(reconcileDoneMsg{groups: []campaign.InstanceGroup{}})
 	got := model.(launchModel)
@@ -449,6 +513,71 @@ func TestLaunchModelUpdate_PartialFailuresStayOpen(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Fatalf("expected no quit command for partial failures, got %T", cmd)
+	}
+}
+
+func TestLaunchModelUpdate_OnPremDoneRefreshesGroups(t *testing.T) {
+	oldGroups := []campaign.InstanceGroup{
+		{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1, Description: "old-a"}}},
+		{GPUClass: "H100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 2, Description: "old-b"}}},
+	}
+	newGroups := []campaign.InstanceGroup{
+		{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1, Description: "old-a"}}},
+	}
+	model, cmd := launchModel{
+		groups:         oldGroups,
+		groupRevision:  3,
+		onPremChecking: true,
+		estimateCache:  map[string][]campaign.CostEstimate{"cached": {{}}},
+	}.Update(onPremDoneMsg{groups: newGroups})
+
+	got := model.(launchModel)
+	if got.onPremChecking {
+		t.Fatal("expected on-prem background check to clear")
+	}
+	if got.groupRevision != 4 {
+		t.Fatalf("groupRevision = %d, want 4", got.groupRevision)
+	}
+	if len(got.groups) != 1 || got.groups[0].GPUClass != "A100" {
+		t.Fatalf("groups = %#v, want refreshed single group", got.groups)
+	}
+	if !got.loading {
+		t.Fatal("expected loading to restart after on-prem refresh")
+	}
+	if len(got.estimateCache) != 0 {
+		t.Fatalf("estimate cache = %#v, want reset", got.estimateCache)
+	}
+	if !strings.Contains(got.statusHint, "Placed 1 job(s) on on-prem hosts") {
+		t.Fatalf("statusHint = %q, want on-prem placement notice", got.statusHint)
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up fetch command after on-prem refresh")
+	}
+}
+
+func TestLaunchModelHandleKey_EnterWaitsForOnPremBackground(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1, Description: "train"}}},
+	}
+	items, selected, cursor := buildItemsFromGroups(groups)
+	model, cmd := launchModel{
+		groups:         groups,
+		items:          items,
+		selected:       selected,
+		cursor:         cursor,
+		onPremChecking: true,
+		onPremPhase:    "Collecting on-prem metrics for 2 host(s)...",
+	}.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	got := model.(launchModel)
+	if got.launching {
+		t.Fatal("expected launch to remain blocked while on-prem check is running")
+	}
+	if !strings.Contains(got.statusHint, "Checking on-prem placement") {
+		t.Fatalf("statusHint = %q, want on-prem wait message", got.statusHint)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command while waiting on background on-prem check, got %T", cmd)
 	}
 }
 

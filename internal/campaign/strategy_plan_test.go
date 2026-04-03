@@ -46,6 +46,7 @@ func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
 		t.Fatalf("expected cheap profile plan, got %#v", plans)
 	}
 	for _, phase := range []string{
+		"Estimating raw-offer runtimes",
 		"Planning tradeoff profiles",
 		"Ranking direct-offer groups",
 		"Estimating direct-offer costs",
@@ -54,6 +55,89 @@ func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
 		if !seen[phase] {
 			t.Fatalf("expected progress phase %q, got %#v", phase, seen)
 		}
+	}
+}
+
+func TestPruneReuseCandidates_LimitsPoolAndKeepsStrongCandidates(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		GPUMemGB: 12,
+		Jobs: []*db.Job{{
+			ID:     1,
+			Inputs: []string{"hf:model-a", "hf:model-b"},
+		}},
+	}
+
+	working := make([]InstanceCapacity, 0, maxReuseCandidatesPerGroup+8)
+	for i := 0; i < maxReuseCandidatesPerGroup+8; i++ {
+		working = append(working, InstanceCapacity{
+			Instance: &db.Launch{
+				ID:              int64(100 + i),
+				Status:          db.LaunchStatusRunning,
+				GPUClass:        "NVIDIA",
+				ResolvedGPUName: "RTX 3090",
+				GPUMemGB:        24,
+				DLPerf:          5,
+			},
+			ProvisionedInputs: []string{},
+			RunningJobCount:   10 + i,
+			DiskFreeGB:        20,
+		})
+	}
+	working = append(working, InstanceCapacity{
+		Instance: &db.Launch{
+			ID:              7,
+			Status:          db.LaunchStatusGrace,
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 4090",
+			GPUMemGB:        24,
+			DLPerf:          20,
+		},
+		ProvisionedInputs: []string{"hf:model-a", "hf:model-b"},
+		DiskFreeGB:        200,
+	})
+	working = append(working, InstanceCapacity{
+		Instance: &db.Launch{
+			ID:              8,
+			Status:          db.LaunchStatusRunning,
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "H100",
+			GPUMemGB:        80,
+			DLPerf:          40,
+		},
+		ProvisionedInputs: []string{"hf:model-a"},
+		RunningJobCount:   0,
+		DiskFreeGB:        200,
+	})
+	working = append(working, InstanceCapacity{
+		Instance: &db.Launch{
+			ID:              9,
+			Status:          db.LaunchStatusRunning,
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 2060",
+			GPUMemGB:        8,
+			DLPerf:          50,
+		},
+		DiskFreeGB: 200,
+	})
+
+	candidates := pruneReuseCandidates(group, working)
+	if len(candidates) != maxReuseCandidatesPerGroup {
+		t.Fatalf("pruned candidate count = %d, want %d", len(candidates), maxReuseCandidatesPerGroup)
+	}
+
+	seen := map[int64]bool{}
+	for _, candidate := range candidates {
+		seen[candidate.cap.Instance.ID] = true
+	}
+	if !seen[7] {
+		t.Fatalf("expected grace candidate to survive pruning, got %#v", candidates)
+	}
+	if !seen[8] {
+		t.Fatalf("expected strong running candidate to survive pruning, got %#v", candidates)
+	}
+	if seen[9] {
+		t.Fatalf("expected incompatible low-memory candidate to be pruned, got %#v", candidates)
 	}
 }
 

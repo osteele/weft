@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +91,12 @@ type planEvaluator struct {
 
 	reuseMu        sync.Mutex
 	reuseEstimates map[string]reuseEstimateCacheEntry
+
+	reusePredictionMu sync.Mutex
+	reusePredictions  map[string]map[int64]estimate.DurationPrediction
+
+	reuseInputMu    sync.Mutex
+	reuseInputBytes map[string]int64
 }
 
 type reuseEstimateCacheEntry struct {
@@ -104,15 +112,17 @@ func newPlanEvaluator(
 	minSurvival float64,
 ) *planEvaluator {
 	return &planEvaluator{
-		database:       database,
-		predCfg:        predCfg,
-		overheadModel:  overheadModel,
-		survivalModel:  survivalModel,
-		minSurvival:    minSurvival,
-		setupFactory:   OfferSetupOverheadFactory(database, overheadModel),
-		rawEvalCache:   make(map[string]map[int]map[string]offerRuntimePrediction),
-		estimateCache:  make(map[string][]CostEstimate),
-		reuseEstimates: make(map[string]reuseEstimateCacheEntry),
+		database:         database,
+		predCfg:          predCfg,
+		overheadModel:    overheadModel,
+		survivalModel:    survivalModel,
+		minSurvival:      minSurvival,
+		setupFactory:     OfferSetupOverheadFactory(database, overheadModel),
+		rawEvalCache:     make(map[string]map[int]map[string]offerRuntimePrediction),
+		estimateCache:    make(map[string][]CostEstimate),
+		reuseEstimates:   make(map[string]reuseEstimateCacheEntry),
+		reusePredictions: make(map[string]map[int64]estimate.DurationPrediction),
+		reuseInputBytes:  make(map[string]int64),
 	}
 }
 
@@ -334,6 +344,7 @@ func buildProfilePlansFromSplitRawWithSession(
 	}
 
 	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival)
+	reportPlanProgress(onProgress, "Estimating raw-offer runtimes", fmt.Sprintf("%d direct offer(s)", countRawOffers(splitRaw)), 0, 0)
 	splitEval := evaluator.evaluateRawOffers(splitRaw)
 
 	workerLimit := planProfileWorkerLimit(len(validProfiles))
@@ -414,6 +425,8 @@ func buildStrategyPlanForSplitRaw(
 		reusable,
 		evaluator,
 		profile,
+		onProgress,
+		progressLabel,
 	)
 
 	reused := make(map[int]reuseGroupDecision, len(reuseDecisions))
@@ -571,10 +584,43 @@ func (e *planEvaluator) estimateReuseGroup(group InstanceGroup, cap InstanceCapa
 		return cached.estimate, cached.ok
 	}
 
-	est, ok := EstimateReuseGroup(e.database, group, cap, e.predCfg, e.overheadModel)
+	est, ok := estimateReuseGroupWithSharedData(reuseEstimateContext{evaluator: e}, group, cap)
 	e.reuseEstimates[key] = reuseEstimateCacheEntry{estimate: est, ok: ok}
 	e.reuseMu.Unlock()
 	return est, ok
+}
+
+func (e *planEvaluator) reuseDurationPredictions(group InstanceGroup, gpuLabel string) map[int64]estimate.DurationPrediction {
+	key := reusePredictionCacheKey(group, gpuLabel)
+
+	e.reusePredictionMu.Lock()
+	if cached, ok := e.reusePredictions[key]; ok {
+		e.reusePredictionMu.Unlock()
+		return cached
+	}
+	predictions := estimateReuseDurationsDetailed(e.predCfg, gpuLabel, group.Jobs)
+	e.reusePredictions[key] = predictions
+	e.reusePredictionMu.Unlock()
+	return predictions
+}
+
+func (e *planEvaluator) reuseDownloadBytes(inputs []string) int64 {
+	key := reuseInputsCacheKey(inputs)
+
+	e.reuseInputMu.Lock()
+	if cached, ok := e.reuseInputBytes[key]; ok {
+		e.reuseInputMu.Unlock()
+		return cached
+	}
+	var totalBytes int64
+	if len(inputs) > 0 {
+		if resolved, err := dataloc.ResolveInputSizes(inputs, nil); err == nil {
+			totalBytes = resolved
+		}
+	}
+	e.reuseInputBytes[key] = totalBytes
+	e.reuseInputMu.Unlock()
+	return totalBytes
 }
 
 func reuseEstimateCacheKey(group InstanceGroup, cap InstanceCapacity) string {
@@ -595,6 +641,35 @@ func reuseEstimateCacheKey(group InstanceGroup, cap InstanceCapacity) string {
 		fmt.Sprintf("%d", int64(cap.GraceRemaining/time.Second)),
 		strings.Join(inputs, ","),
 	}, "|")
+}
+
+func reusePredictionCacheKey(group InstanceGroup, gpuLabel string) string {
+	jobIDs := make([]string, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		if job == nil {
+			jobIDs = append(jobIDs, "0")
+			continue
+		}
+		jobIDs = append(jobIDs, fmt.Sprintf("%d", job.ID))
+	}
+	return gpuLabel + "|" + strings.Join(jobIDs, ",")
+}
+
+func reuseInputsCacheKey(inputs []string) string {
+	if len(inputs) == 0 {
+		return ""
+	}
+	cloned := append([]string(nil), inputs...)
+	slices.Sort(cloned)
+	return strings.Join(cloned, ",")
+}
+
+func countRawOffers(raw []GroupRawOffers) int {
+	total := 0
+	for _, groupRaw := range raw {
+		total += len(groupRaw.Offers)
+	}
+	return total
 }
 
 func rawOfferEvaluationCacheKey(raw []GroupRawOffers) string {
@@ -1171,6 +1246,8 @@ func chooseReuseGroups(
 	reusable []InstanceCapacity,
 	evaluator *planEvaluator,
 	profile bidding.ScoreProfile,
+	onProgress PlanProgressFunc,
+	progressLabel string,
 ) []reuseGroupDecision {
 	if len(reusable) == 0 || len(splitGroups) == 0 {
 		return nil
@@ -1179,24 +1256,63 @@ func chooseReuseGroups(
 	working := cloneInstanceCapacities(reusable)
 	var decisions []reuseGroupDecision
 	for idx, group := range splitGroups {
+		candidates := pruneReuseCandidates(group, working)
+		reportPlanProgressForLane(
+			onProgress,
+			"Checking reusable instances",
+			progressLabel,
+			fmt.Sprintf("group %d/%d across %d reusable instance(s), scoring top %d", idx+1, len(splitGroups), len(working), len(candidates)),
+			idx+1,
+			len(splitGroups),
+		)
+
 		newScore := math.Inf(1)
 		if idx < len(splitEstimates) {
 			newScore = ScoreEstimatesWithProfile([]CostEstimate{splitEstimates[idx]}, profile)
 		}
 
+		type reuseScore struct {
+			idx   int
+			score float64
+			est   CostEstimate
+			ok    bool
+		}
 		bestScore := math.Inf(1)
 		bestIdx := -1
 		var bestEstimate CostEstimate
-		for i, cap := range working {
-			est, ok := evaluator.estimateReuseGroup(group, cap)
-			if !ok {
+		results := make(chan reuseScore, len(candidates))
+		workerLimit := reuseEstimateWorkerLimit(len(candidates))
+		sem := make(chan struct{}, workerLimit)
+		var wg sync.WaitGroup
+		for _, candidate := range candidates {
+			wg.Add(1)
+			go func(candidate reuseCandidate) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				est, ok := evaluator.estimateReuseGroup(group, candidate.cap)
+				if !ok {
+					results <- reuseScore{idx: candidate.idx}
+					return
+				}
+				results <- reuseScore{
+					idx:   candidate.idx,
+					score: ScoreEstimatesWithProfile([]CostEstimate{est}, profile),
+					est:   est,
+					ok:    true,
+				}
+			}(candidate)
+		}
+		wg.Wait()
+		close(results)
+		for result := range results {
+			if !result.ok {
 				continue
 			}
-			score := ScoreEstimatesWithProfile([]CostEstimate{est}, profile)
-			if score < bestScore {
-				bestScore = score
-				bestIdx = i
-				bestEstimate = est
+			if result.score < bestScore {
+				bestScore = result.score
+				bestIdx = result.idx
+				bestEstimate = result.est
 			}
 		}
 
@@ -1211,6 +1327,102 @@ func chooseReuseGroups(
 	}
 
 	return decisions
+}
+
+const maxReuseCandidatesPerGroup = 12
+
+type reuseCandidate struct {
+	idx   int
+	cap   InstanceCapacity
+	score float64
+}
+
+func pruneReuseCandidates(group InstanceGroup, working []InstanceCapacity) []reuseCandidate {
+	if len(working) == 0 {
+		return nil
+	}
+
+	groupInputs := group.AllInputs()
+	candidates := make([]reuseCandidate, 0, len(working))
+	for idx, cap := range working {
+		if !quickReuseCompatible(group, cap) {
+			continue
+		}
+		candidates = append(candidates, reuseCandidate{
+			idx:   idx,
+			cap:   cap,
+			score: reuseHeuristicScore(group, groupInputs, cap),
+		})
+	}
+	if len(candidates) <= maxReuseCandidatesPerGroup {
+		return candidates
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+	return append([]reuseCandidate(nil), candidates[:maxReuseCandidatesPerGroup]...)
+}
+
+func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
+	inst := cap.Instance
+	if inst == nil {
+		return false
+	}
+	if cap.GraceRemaining > 0 && cap.GraceRemaining < MinGraceRemaining {
+		return false
+	}
+	if group.GPUClass != "" &&
+		!strings.EqualFold(group.GPUClass, inst.GPUClass) &&
+		!strings.EqualFold(group.GPUClass, inst.ResolvedGPUName) {
+		return false
+	}
+	if group.GPUMemGB > 0 && inst.GPUMemGB > 0 && group.GPUMemGB > inst.GPUMemGB {
+		return false
+	}
+	return true
+}
+
+func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap InstanceCapacity) float64 {
+	inst := cap.Instance
+	if inst == nil {
+		return math.Inf(-1)
+	}
+
+	score := 0.0
+	if inst.Status == db.LaunchStatusGrace {
+		score += 1000
+	}
+	score += float64(countOverlap(groupInputs, cap.ProvisionedInputs)) * 25
+	score -= float64(cap.RunningJobCount) * 20
+	score += inst.DLPerf * 2
+	if inst.GPUMemGB > 0 && group.GPUMemGB > 0 {
+		headroom := inst.GPUMemGB - group.GPUMemGB
+		if headroom < 0 {
+			return math.Inf(-1)
+		}
+		score -= float64(headroom) * 0.5
+	}
+	if cap.DiskFreeGB > 0 {
+		score += math.Min(float64(cap.DiskFreeGB), 200) * 0.05
+	}
+	return score
+}
+
+func reuseEstimateWorkerLimit(total int) int {
+	if total <= 1 {
+		return 1
+	}
+	limit := runtime.NumCPU()
+	if limit < 2 {
+		limit = 2
+	}
+	if limit > 8 {
+		limit = 8
+	}
+	if total < limit {
+		return total
+	}
+	return limit
 }
 
 func cloneInstanceCapacities(instances []InstanceCapacity) []InstanceCapacity {
@@ -1256,6 +1468,41 @@ func EstimateReuseGroup(
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
 ) (CostEstimate, bool) {
+	return estimateReuseGroupWithSharedData(reuseEstimateContext{
+		database:      database,
+		predCfg:       predCfg,
+		overheadModel: overheadModel,
+	}, group, cap)
+}
+
+type reuseEstimateContext struct {
+	database      *sql.DB
+	predCfg       *predictor.Config
+	overheadModel *estimate.OverheadModel
+	evaluator     *planEvaluator
+}
+
+func (c reuseEstimateContext) predictions(group InstanceGroup, gpuLabel string) map[int64]estimate.DurationPrediction {
+	if c.evaluator != nil {
+		return c.evaluator.reuseDurationPredictions(group, gpuLabel)
+	}
+	return estimateReuseDurationsDetailed(c.predCfg, gpuLabel, group.Jobs)
+}
+
+func (c reuseEstimateContext) downloadBytes(inputs []string) int64 {
+	if c.evaluator != nil {
+		return c.evaluator.reuseDownloadBytes(inputs)
+	}
+	if len(inputs) == 0 {
+		return 0
+	}
+	if totalBytes, err := dataloc.ResolveInputSizes(inputs, nil); err == nil {
+		return totalBytes
+	}
+	return 0
+}
+
+func estimateReuseGroupWithSharedData(ctx reuseEstimateContext, group InstanceGroup, cap InstanceCapacity) (CostEstimate, bool) {
 	if ok, _ := MatchGroupToInstance(group, cap); !ok {
 		return CostEstimate{}, false
 	}
@@ -1275,12 +1522,9 @@ func EstimateReuseGroup(
 	}
 
 	incrementalInputs := subtractInputs(group.AllInputs(), cap.ProvisionedInputs)
-	downloadBytes := int64(0)
-	if totalBytes, err := dataloc.ResolveInputSizes(incrementalInputs, nil); err == nil {
-		downloadBytes = totalBytes
-	}
+	downloadBytes := ctx.downloadBytes(incrementalInputs)
 
-	ctx := estimate.InstanceContext{
+	instanceCtx := estimate.InstanceContext{
 		DataCenter:      inst.DataCenter,
 		DLPerf:          inst.DLPerf,
 		InetDownMbps:    inst.InetDownMbps,
@@ -1288,13 +1532,13 @@ func EstimateReuseGroup(
 		DownloadedBytes: downloadBytes,
 	}
 
-	bw := effectiveDownloadBandwidth(database, &offer, cloud.MbpsToBytesPerSec(inst.InetDownMbps))
+	bw := effectiveDownloadBandwidth(ctx.database, &offer, cloud.MbpsToBytesPerSec(inst.InetDownMbps))
 	provision := estimate.EstimateProvision(estimate.ProvisionInput{
 		ModelDownloadBytes:   downloadBytes,
 		BandwidthBytesPerSec: bw,
 	})
-	jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
-	upload := estimate.EstimateUpload(overheadModel, ctx)
+	jobSetup := estimate.EstimateJobSetup(ctx.overheadModel, instanceCtx)
+	upload := estimate.EstimateUpload(ctx.overheadModel, instanceCtx)
 
 	var runEst estimate.Estimate
 	jobDurations := make(map[int64]time.Duration, len(group.Jobs))
@@ -1306,7 +1550,7 @@ func EstimateReuseGroup(
 	if gpuLabel == "" {
 		gpuLabel = inst.GPUClass
 	}
-	reusePredictions := estimateReuseDurationsDetailed(predCfg, gpuLabel, group.Jobs)
+	reusePredictions := ctx.predictions(group, gpuLabel)
 	for idx, job := range group.Jobs {
 		pred := estimate.DurationPrediction{Estimate: estimate.DefaultJobDuration}
 		if got, ok := reusePredictions[int64(idx+1)]; ok {

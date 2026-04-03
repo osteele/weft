@@ -50,6 +50,7 @@ type Dependencies struct {
 	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64) (*campaign.RelaunchResult, error)
 	BuildStaleDataNote                                func(*sql.DB, []string) string
 	PrintJobStatus                                    func(*db.Job, bool)
+	RefreshLaunchGroupsWithOnPrem                     func(*sql.DB, *config.Config, string, string, func(int, int), func(string)) ([]campaign.InstanceGroup, error)
 	SyncRentalJobsStatus                              func(*sql.DB) bool
 	SyncCloudState                                    func(*config.Config, *sql.DB, *campaign.Reconciler, bool) CloudSyncResult
 	SyncCloudStateWithTimeout                         func(*config.Config, *sql.DB, *campaign.Reconciler, time.Duration, bool) (CloudSyncResult, bool)
@@ -201,6 +202,17 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	if deps.PrintJobStatus != nil {
 		deps.PrintJobStatus(job, exitOnComplete)
 	}
+}
+
+func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilter string, projectFilter string, onProgress func(int, int), onPhase func(string)) ([]campaign.InstanceGroup, error) {
+	if deps.RefreshLaunchGroupsWithOnPrem == nil {
+		return nil, nil
+	}
+	return deps.RefreshLaunchGroupsWithOnPrem(database, cfg, gpuFilter, projectFilter, onProgress, onPhase)
+}
+
+func hasLaunchGroupsOnPremRefresh() bool {
+	return deps.RefreshLaunchGroupsWithOnPrem != nil
 }
 
 func syncRentalJobsStatus(database *sql.DB) bool {
