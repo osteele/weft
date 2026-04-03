@@ -190,11 +190,12 @@ func TestSeedWorkers_PhoneTreeFanOut(t *testing.T) {
 
 func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 	manifest := BootstrapManifest{
-		AgentR2Key: "agent/v1/linux-amd64",
-		Sources:    []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
-		DonorMode:  true,
-		HFModels:   []string{"meta-llama/Llama-3-8B", "openai/whisper-large-v3"},
-		DonorID:    "42",
+		AgentR2Key:   "agent/v1/linux-amd64",
+		Sources:      []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
+		DonorMode:    true,
+		HFModels:     []string{"meta-llama/Llama-3-8B", "openai/whisper-large-v3"},
+		DonorID:      "42",
+		DBInstanceID: 42,
 	}
 
 	script := GenerateBootstrapScript(manifest)
@@ -202,6 +203,12 @@ func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 	// Should contain uv sync
 	if !strings.Contains(script, "uv sync") {
 		t.Error("donor script should run uv sync")
+	}
+	if !strings.Contains(script, "deps_installing") {
+		t.Error("donor script should report dependency install start")
+	}
+	if !strings.Contains(script, "deps_installed") {
+		t.Error("donor script should report dependency install completion")
 	}
 
 	// Should download HF models
@@ -241,6 +248,9 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 	// Should launch weft-agent run-campaign via nohup
 	if !strings.Contains(script, "nohup weft-agent run-campaign") {
 		t.Error("worker script should launch weft-agent run-campaign")
+	}
+	if !strings.Contains(script, "agent_starting") {
+		t.Error("worker script should report agent startup")
 	}
 	if !strings.Contains(script, "--instance-id=7") {
 		t.Error("worker script should pass instance ID")
@@ -284,6 +294,9 @@ func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 	}
 	if !strings.Contains(script, "gpt2-xl") {
 		t.Error("worker script should reference GPT-2 XL model")
+	}
+	if !strings.Contains(script, "sources_extracting:0/1") {
+		t.Error("worker script should report source extraction progress")
 	}
 
 	// HF downloads should appear before the agent launch

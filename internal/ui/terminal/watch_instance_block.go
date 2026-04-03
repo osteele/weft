@@ -55,7 +55,7 @@ func formatWatchInstanceBlockStructured(update campaign.InstanceUpdate, jobProgr
 		return nil
 	}
 
-	lines := []watchInstanceLine{{text: formatWatchInstanceHeaderLine(ci, update.Instance, opts)}}
+	lines := []watchInstanceLine{{text: formatWatchInstanceHeaderLine(update, opts)}}
 	addLine := func(text string) { lines = append(lines, watchInstanceLine{text: text}) }
 	addJobLine := func(text string, jobID int64) {
 		lines = append(lines, watchInstanceLine{text: text, jobID: jobID})
@@ -175,8 +175,9 @@ func watchActivePhaseStatus(phase string) (int64, string) {
 	}
 }
 
-func formatWatchInstanceHeaderLine(ci *db.Launch, inst *cloud.Instance, opts watchInstanceBlockOptions) string {
-	statusLabel := watchInstanceStatusLabel(ci, inst)
+func formatWatchInstanceHeaderLine(update campaign.InstanceUpdate, opts watchInstanceBlockOptions) string {
+	ci := update.Launch
+	statusLabel := watchInstanceStatusLabel(update)
 	if label := ci.GraceStatusLabel(); label != "" {
 		statusLabel = label
 	}
@@ -199,7 +200,9 @@ func formatWatchInstanceHeaderLine(ci *db.Launch, inst *cloud.Instance, opts wat
 	return header
 }
 
-func watchInstanceStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
+func watchInstanceStatusLabel(update campaign.InstanceUpdate) string {
+	ci := update.Launch
+	inst := update.Instance
 	if ci == nil {
 		return ""
 	}
@@ -211,10 +214,27 @@ func watchInstanceStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
 	if ci.Status == db.LaunchStatusRunning && isWatchProviderTerminal(inst.Status) {
 		return ci.Status + " (" + inst.Status + ")"
 	}
+	if isWatchBootstrapPending(update) {
+		return "bootstrapping"
+	}
 	if ci.Status == db.LaunchStatusLaunching {
 		return inst.Status
 	}
 	return ci.Status
+}
+
+func isWatchBootstrapPending(update campaign.InstanceUpdate) bool {
+	ci := update.Launch
+	if ci == nil || ci.Status != db.LaunchStatusRunning {
+		return false
+	}
+	if update.InstancePhase != "" || update.Heartbeat != nil || update.BootstrapStage == "ready" {
+		return false
+	}
+	if update.Instance == nil || update.Instance.Status == "" {
+		return false
+	}
+	return !isWatchProviderTerminal(update.Instance.Status)
 }
 
 func isWatchProviderTerminal(status string) bool {
@@ -229,7 +249,7 @@ func isWatchProviderTerminal(status string) bool {
 
 func watchStatusBlockStyle(displayStatus, dbStatus string) lipgloss.Style {
 	switch displayStatus {
-	case cloud.ProviderStatusLoading, "launching", "provisioning":
+	case cloud.ProviderStatusLoading, "launching", "provisioning", "bootstrapping":
 		return watchDimStyle
 	case db.LaunchStatusCompleted:
 		return watchCompletedStyle

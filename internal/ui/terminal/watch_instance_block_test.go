@@ -351,24 +351,37 @@ func TestWatchInstanceStatusLabel(t *testing.T) {
 		name           string
 		dbStatus       string
 		providerStatus string
+		phase          string
+		bootstrapStage string
+		hasHeartbeat   bool
 		want           string
 	}{
-		{"running+running", db.LaunchStatusRunning, cloud.ProviderStatusRunning, "running"},
-		{"running+loading", db.LaunchStatusRunning, cloud.ProviderStatusLoading, "running"},
-		{"running+created", db.LaunchStatusRunning, cloud.ProviderStatusCreated, "running"},
-		{"running+exited", db.LaunchStatusRunning, cloud.ProviderStatusExited, "running (exited)"},
-		{"running+destroyed", db.LaunchStatusRunning, cloud.ProviderStatusDestroyed, "running (destroyed)"},
-		{"running+error", db.LaunchStatusRunning, cloud.ProviderStatusError, "running (error)"},
-		{"launching+loading", db.LaunchStatusLaunching, cloud.ProviderStatusLoading, "loading"},
-		{"launching+running", db.LaunchStatusLaunching, cloud.ProviderStatusRunning, "running"},
-		{"completed+exited", db.LaunchStatusCompleted, cloud.ProviderStatusExited, "completed"},
-		{"failed+destroyed", db.LaunchStatusFailed, cloud.ProviderStatusDestroyed, "failed"},
+		{"running+running-pre-agent", db.LaunchStatusRunning, cloud.ProviderStatusRunning, "", "", false, "bootstrapping"},
+		{"running+loading", db.LaunchStatusRunning, cloud.ProviderStatusLoading, "", "", false, "bootstrapping"},
+		{"running+created", db.LaunchStatusRunning, cloud.ProviderStatusCreated, "", "", false, "bootstrapping"},
+		{"running+exited", db.LaunchStatusRunning, cloud.ProviderStatusExited, "", "", false, "running (exited)"},
+		{"running+destroyed", db.LaunchStatusRunning, cloud.ProviderStatusDestroyed, "", "", false, "running (destroyed)"},
+		{"running+error", db.LaunchStatusRunning, cloud.ProviderStatusError, "", "", false, "running (error)"},
+		{"running+phase-visible", db.LaunchStatusRunning, cloud.ProviderStatusRunning, "setup:42", "", false, "running"},
+		{"running+ready-stage", db.LaunchStatusRunning, cloud.ProviderStatusRunning, "", "ready", false, "running"},
+		{"running+heartbeat", db.LaunchStatusRunning, cloud.ProviderStatusRunning, "", "", true, "running"},
+		{"launching+loading", db.LaunchStatusLaunching, cloud.ProviderStatusLoading, "", "", false, "loading"},
+		{"launching+running", db.LaunchStatusLaunching, cloud.ProviderStatusRunning, "", "", false, "running"},
+		{"completed+exited", db.LaunchStatusCompleted, cloud.ProviderStatusExited, "", "", false, "completed"},
+		{"failed+destroyed", db.LaunchStatusFailed, cloud.ProviderStatusDestroyed, "", "", false, "failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ci := &db.Launch{Status: tt.dbStatus}
-			inst := &cloud.Instance{Status: tt.providerStatus}
-			got := watchInstanceStatusLabel(ci, inst)
+			update := campaign.InstanceUpdate{
+				Launch:         &db.Launch{Status: tt.dbStatus},
+				Instance:       &cloud.Instance{Status: tt.providerStatus},
+				InstancePhase:  tt.phase,
+				BootstrapStage: tt.bootstrapStage,
+			}
+			if tt.hasHeartbeat {
+				update.Heartbeat = &campaign.HeartbeatSample{Ts: time.Now().Unix()}
+			}
+			got := watchInstanceStatusLabel(update)
 			if got != tt.want {
 				t.Errorf("watchInstanceStatusLabel(db=%q, provider=%q) = %q, want %q",
 					tt.dbStatus, tt.providerStatus, got, tt.want)

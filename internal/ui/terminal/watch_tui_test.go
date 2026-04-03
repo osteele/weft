@@ -125,8 +125,8 @@ func TestFormatWatchInstanceBlockUsesDBStatusWhenProviderLoading(t *testing.T) {
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
-	if !strings.Contains(out, "Instance 111 — A100 — running") {
-		t.Fatalf("expected DB running status in header (not raw provider loading), got:\n%s", out)
+	if !strings.Contains(out, "Instance 111 — A100 — bootstrapping") {
+		t.Fatalf("expected conservative bootstrap status in header, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Bootstrap: waiting for bootstrap activity") {
 		t.Fatalf("expected bootstrap fallback in output, got:\n%s", out)

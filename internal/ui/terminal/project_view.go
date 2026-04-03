@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/queueblock"
 )
@@ -362,7 +363,7 @@ func formatProjectLaunchRow(inst *db.Launch, now time.Time) string {
 	if inst == nil {
 		return ""
 	}
-	status := watchInstanceStatusLabel(inst, nil)
+	status := watchInstanceStatusLabel(campaign.InstanceUpdate{Launch: inst})
 	if label := inst.GraceStatusLabel(); label != "" {
 		status = label
 	}

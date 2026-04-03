@@ -589,17 +589,28 @@ func BootstrapStageLabel(stage string) string {
 	if after, ok := strings.CutPrefix(stage, "downloading_models:"); ok {
 		return "downloading models (" + after + ")"
 	}
+	if after, ok := strings.CutPrefix(stage, "sources_extracting:"); ok {
+		return "extracting sources (" + after + ")"
+	}
 	switch stage {
-	case "agent_installed":
+	case "agent_installing":
 		return "installing agent"
-	case "sources_extracted":
+	case "agent_installed":
+		return "agent installed"
+	case "sources_extracting":
 		return "extracting sources"
-	case "deps_installed":
+	case "sources_extracted":
+		return "sources extracted"
+	case "deps_installing":
 		return "installing dependencies"
+	case "deps_installed":
+		return "dependencies installed"
 	case bootstrapStageReady:
 		return "ready"
 	case "starting_jobs":
 		return "starting jobs"
+	case "agent_starting":
+		return "starting agent"
 	default:
 		return stage
 	}

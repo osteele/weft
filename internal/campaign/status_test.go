@@ -110,6 +110,29 @@ func TestInstancePhaseLabel(t *testing.T) {
 	}
 }
 
+func TestBootstrapStageLabel(t *testing.T) {
+	tests := []struct {
+		stage string
+		want  string
+	}{
+		{"agent_installing", "installing agent"},
+		{"agent_installed", "agent installed"},
+		{"sources_extracting:1/3", "extracting sources (1/3)"},
+		{"sources_extracted", "sources extracted"},
+		{"deps_installing", "installing dependencies"},
+		{"deps_installed", "dependencies installed"},
+		{"downloading_models:2/5", "downloading models (2/5)"},
+		{"starting_jobs", "starting jobs"},
+		{"agent_starting", "starting agent"},
+		{"ready", "ready"},
+	}
+	for _, tt := range tests {
+		if got := BootstrapStageLabel(tt.stage); got != tt.want {
+			t.Errorf("BootstrapStageLabel(%q) = %q, want %q", tt.stage, got, tt.want)
+		}
+	}
+}
+
 func TestJobAttemptProgressKey_UsesLatestRunID(t *testing.T) {
 	runID := int64(77)
 	jobs := []*db.Job{

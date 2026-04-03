@@ -45,6 +45,7 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 
 	// Download and install agent binary
 	b.WriteString("# Install agent binary\n")
+	writeStageMarker(&b, manifest.DBInstanceID, "agent_installing")
 	b.WriteString(fmt.Sprintf(
 		"rclone copyto \"r2:$R2_BUCKET/%s\" /usr/local/bin/weft-agent\n",
 		manifest.AgentR2Key,
@@ -54,13 +55,18 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 	b.WriteString("\n")
 
 	// Download and extract source tarballs
-	for _, src := range manifest.Sources {
+	sourceCount := len(manifest.Sources)
+	if sourceCount > 0 {
+		writeStageMarker(&b, manifest.DBInstanceID, fmt.Sprintf("sources_extracting:0/%d", sourceCount))
+	}
+	for i, src := range manifest.Sources {
 		b.WriteString(fmt.Sprintf("# Extract source to %s\n", src.RemoteDir))
 		b.WriteString(fmt.Sprintf("mkdir -p %q\n", src.RemoteDir))
 		b.WriteString(fmt.Sprintf(
 			"rclone copyto \"r2:$R2_BUCKET/%s\" /tmp/src.tar.gz && tar xzf /tmp/src.tar.gz -C %q && rm -f /tmp/src.tar.gz\n",
 			src.R2Key, src.RemoteDir,
 		))
+		writeStageMarker(&b, manifest.DBInstanceID, fmt.Sprintf("sources_extracting:%d/%d", i+1, sourceCount))
 	}
 	writeStageMarker(&b, manifest.DBInstanceID, "sources_extracted")
 	b.WriteString("\n")
@@ -101,6 +107,7 @@ func writeHFDownloads(b *strings.Builder, models []string, instanceID int64) {
 // runs uv sync, downloads HF models, writes ready marker to R2.
 func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
 	// Run uv sync in each source directory
+	writeStageMarker(b, manifest.DBInstanceID, "deps_installing")
 	for _, src := range manifest.Sources {
 		b.WriteString(fmt.Sprintf("# Run uv sync in %s\n", src.RemoteDir))
 		b.WriteString(fmt.Sprintf("cd %q && uv sync 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
@@ -124,6 +131,7 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 // launches weft-agent run-campaign via nohup.
 func generateWorkerBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
 	b.WriteString("# Launch campaign agent\n")
+	writeStageMarker(b, manifest.DBInstanceID, "agent_starting")
 	b.WriteString(fmt.Sprintf("nohup weft-agent run-campaign"+
 		" --r2-bucket=$R2_BUCKET"+
 		" --instance-id=%d",
