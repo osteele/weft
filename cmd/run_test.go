@@ -1,9 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 func TestParseCdPrefix(t *testing.T) {
@@ -84,5 +90,57 @@ func TestPathHasHomePrefix(t *testing.T) {
 				t.Errorf("pathHasHomePrefix(%q, %q) = %v, want %v", tt.dir, tt.home, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSubmitJobToCloudReuse_AckReceived(t *testing.T) {
+	prev := submitJobsToInstanceFunc
+	t.Cleanup(func() { submitJobsToInstanceFunc = prev })
+
+	submitJobsToInstanceFunc = func(context.Context, *sql.DB, *r2.Client, int64, []*db.Job) error {
+		return nil
+	}
+
+	outcome, _, err := submitJobToCloudReuse(nil, nil, 42, &db.Job{ID: 1})
+	if err != nil {
+		t.Fatalf("submitJobToCloudReuse: %v", err)
+	}
+	if outcome != cloudReuseAckReceived {
+		t.Fatalf("outcome = %v, want %v", outcome, cloudReuseAckReceived)
+	}
+}
+
+func TestSubmitJobToCloudReuse_AckNotObserved(t *testing.T) {
+	prev := submitJobsToInstanceFunc
+	t.Cleanup(func() { submitJobsToInstanceFunc = prev })
+
+	submitJobsToInstanceFunc = func(context.Context, *sql.DB, *r2.Client, int64, []*db.Job) error {
+		return context.DeadlineExceeded
+	}
+
+	outcome, _, err := submitJobToCloudReuse(nil, nil, 42, &db.Job{ID: 1})
+	if err != nil {
+		t.Fatalf("submitJobToCloudReuse: %v", err)
+	}
+	if outcome != cloudReuseAckNotObserved {
+		t.Fatalf("outcome = %v, want %v", outcome, cloudReuseAckNotObserved)
+	}
+}
+
+func TestSubmitJobToCloudReuse_SubmitFailure(t *testing.T) {
+	prev := submitJobsToInstanceFunc
+	t.Cleanup(func() { submitJobsToInstanceFunc = prev })
+
+	wantErr := errors.New("r2 unavailable")
+	submitJobsToInstanceFunc = func(context.Context, *sql.DB, *r2.Client, int64, []*db.Job) error {
+		return wantErr
+	}
+
+	outcome, _, err := submitJobToCloudReuse(nil, nil, 42, &db.Job{ID: 1})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if outcome != cloudReuseSubmitFailed {
+		t.Fatalf("outcome = %v, want %v", outcome, cloudReuseSubmitFailed)
 	}
 }

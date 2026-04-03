@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,12 +15,14 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -90,9 +93,41 @@ var (
 	runNeeds       []string
 	runDryRun      bool
 	runNoSync      bool
+
+	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
 
 const defaultGPUMemGB = ops.DefaultGPUMemGB
+
+const (
+	runCloudReuseAckWaitTimeout  = 250 * time.Millisecond
+	runCloudReuseAckPollInterval = 50 * time.Millisecond
+)
+
+type cloudReuseSubmitOutcome int
+
+const (
+	cloudReuseSubmitFailed cloudReuseSubmitOutcome = iota
+	cloudReuseAckReceived
+	cloudReuseAckNotObserved
+)
+
+func submitJobToCloudReuse(database *sql.DB, r2Client *r2.Client, instanceID int64, job *db.Job) (cloudReuseSubmitOutcome, time.Duration, error) {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), runCloudReuseAckWaitTimeout)
+	defer cancel()
+	ctx = controlplane.WithGraceAckPollInterval(ctx, runCloudReuseAckPollInterval)
+
+	err := submitJobsToInstanceFunc(ctx, database, r2Client, instanceID, []*db.Job{job})
+	duration := time.Since(start)
+	if err == nil {
+		return cloudReuseAckReceived, duration, nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return cloudReuseAckNotObserved, duration, nil
+	}
+	return cloudReuseSubmitFailed, duration, err
+}
 
 func init() {
 	rootCmd.AddCommand(runCmd)
@@ -582,10 +617,31 @@ func runRun(cmd *cobra.Command, args []string) error {
 				if err == nil {
 					job, _ := db.GetJobByID(database, jobID)
 					if job != nil {
-						if err := campaign.SubmitJobsToInstance(context.Background(), database, r2Client, placementPlan.Fast.Reuse.InstanceID, []*db.Job{job}); err == nil {
+						instanceID := placementPlan.Fast.Reuse.InstanceID
+						outcome, dur, submitErr := submitJobToCloudReuse(database, r2Client, instanceID, job)
+						switch outcome {
+						case cloudReuseAckReceived:
+							oplog.Log(oplog.OpCloudSetJobInstance,
+								oplog.WithJobID(jobID),
+								oplog.WithDetailf("instance=%d ack=received", instanceID),
+								oplog.WithDuration(dur))
 							fmt.Printf("Job #%d submitted to rental instance #%d (%s)\n",
-								jobID, placementPlan.Fast.Reuse.InstanceID, placementPlan.Fast.Reuse.DisplayName)
+								jobID, instanceID, placementPlan.Fast.Reuse.DisplayName)
 							return nil
+						case cloudReuseAckNotObserved:
+							oplog.Log(oplog.OpCloudSetJobInstance,
+								oplog.WithJobID(jobID),
+								oplog.WithDetailf("instance=%d ack=not_observed timeout_ms=%d", instanceID, runCloudReuseAckWaitTimeout.Milliseconds()),
+								oplog.WithDuration(dur))
+							fmt.Printf("Job #%d sent to rental instance #%d (%s); acknowledgment not yet received. Check status later.\n",
+								jobID, instanceID, placementPlan.Fast.Reuse.DisplayName)
+							return nil
+						default:
+							oplog.Log(oplog.OpCloudSetJobInstance,
+								oplog.WithJobID(jobID),
+								oplog.WithDetailf("instance=%d ack=error", instanceID),
+								oplog.WithDuration(dur),
+								oplog.WithError(submitErr))
 						}
 					}
 				}

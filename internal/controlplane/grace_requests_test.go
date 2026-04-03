@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -102,5 +103,50 @@ func TestSendGraceReleaseReturnsRejectedAck(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already terminating") {
 		t.Fatalf("error = %v, want rejection message", err)
+	}
+}
+
+func TestWaitForGraceCommandAckHonorsPollIntervalFromContext(t *testing.T) {
+	store := &fakeGraceStore{objects: make(map[string][]byte)}
+	const (
+		instanceID = int64(9)
+		requestID  = "req-123"
+	)
+	ackKey := GraceCommandAckKey(instanceID, requestID)
+
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		ack := GraceCommandAck{
+			RequestID:  requestID,
+			Kind:       GraceCommandJobs,
+			ReceivedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			Accepted:   true,
+		}
+		data, _ := json.Marshal(ack)
+		store.mu.Lock()
+		store.objects[ackKey] = data
+		store.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	ctx = WithGraceAckPollInterval(ctx, 50*time.Millisecond)
+
+	ack, err := WaitForGraceCommandAck(ctx, store, instanceID, requestID)
+	if err != nil {
+		t.Fatalf("WaitForGraceCommandAck: %v", err)
+	}
+	if ack == nil || ack.RequestID != requestID {
+		t.Fatalf("ack = %+v, want request %q", ack, requestID)
+	}
+}
+
+func TestWaitForGraceCommandAckUsesDefaultPollInterval(t *testing.T) {
+	store := &fakeGraceStore{objects: make(map[string][]byte)}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_, err := WaitForGraceCommandAck(ctx, store, 1, "req-default")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
 	}
 }

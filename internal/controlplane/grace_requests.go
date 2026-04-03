@@ -29,6 +29,19 @@ type GraceCommandAck struct {
 	Message    string           `json:"message,omitempty"`
 }
 
+const defaultGraceAckPollInterval = 500 * time.Millisecond
+
+type graceAckPollIntervalKey struct{}
+
+// WithGraceAckPollInterval sets the polling interval used while waiting for
+// grace command acknowledgments. Non-positive values are ignored.
+func WithGraceAckPollInterval(ctx context.Context, interval time.Duration) context.Context {
+	if interval <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, graceAckPollIntervalKey{}, interval)
+}
+
 type GraceStore interface {
 	PutObject(ctx context.Context, key string, body io.Reader, contentType string) error
 	GetObject(ctx context.Context, key string) ([]byte, error)
@@ -101,7 +114,11 @@ func WaitForGraceCommandAck(ctx context.Context, store GraceStore, instanceID in
 	if requestID == "" {
 		return nil, fmt.Errorf("request ID is required")
 	}
-	ticker := time.NewTicker(500 * time.Millisecond)
+	pollInterval := defaultGraceAckPollInterval
+	if interval, ok := ctx.Value(graceAckPollIntervalKey{}).(time.Duration); ok && interval > 0 {
+		pollInterval = interval
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	key := GraceCommandAckKey(instanceID, requestID)
