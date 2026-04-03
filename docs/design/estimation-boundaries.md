@@ -29,13 +29,14 @@ It should not own scheduler policy, cloud pricing, or ranking across offers.
 - parsing commands into workload features
 - calling `llm-performance-models` to derive analytical features per candidate GPU
 - fitting and serving learned predictions for duration, peak RSS, and GPU memory
-- model schema versioning, retraining, and cache compatibility
+- model schema versioning, retraining, cache compatibility, and freshness reporting
 
 It should answer questions such as:
 
 - "How long is this command likely to run on this candidate GPU?"
 - "How much GPU memory is it likely to use?"
 - "How confident is that prediction?"
+- "Are these trained artifacts ready, stale, or blocked by a schema mismatch?"
 
 It should not own cloud-offer search, retry budgeting, or launch strategy.
 
@@ -52,6 +53,10 @@ It should not own cloud-offer search, retry budgeting, or launch strategy.
 `weft` should treat estimator-produced runtimes as authoritative when they are
 available. It should not infer that a larger-memory GPU is faster just because
 its `DLPerf` or VRAM tier is higher.
+
+`weft` should also treat `job-estimator status` as the source of truth for
+model freshness and schema readiness, instead of recomputing freshness from
+local row counts alone.
 
 When estimator runtime metadata is available, `weft` is also responsible for
 using it consistently across execution paths:

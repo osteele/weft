@@ -173,6 +173,10 @@ explicit memory-capacity signals.
 Models live in `~/.cache/weft/models/`. Weft checks the model metadata before
 prediction.
 
+`weft estimation status` reports the estimator-owned model state, including
+whether the current artifacts are ready, stale, rebuilding, or blocked by a
+schema mismatch.
+
 When enough new completed jobs have accumulated, it starts a background retrain
 and keeps using the current compatible model until the rebuild finishes.
 

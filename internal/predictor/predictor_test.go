@@ -603,6 +603,125 @@ func TestGetStatusReportsSchemaBlock(t *testing.T) {
 	}
 }
 
+func TestGetStatusUsesEstimatorStatusWhenAvailable(t *testing.T) {
+	originalRunStatusCLI := runStatusCLI
+	originalCountTrainingRows := countTrainingRows
+	t.Cleanup(func() {
+		runStatusCLI = originalRunStatusCLI
+		countTrainingRows = originalCountTrainingRows
+	})
+
+	runStatusCLI = func(Config) ([]byte, error) {
+		return []byte(`{
+			"ready": true,
+			"model_present": true,
+			"schema_compatible": true,
+			"schema_reason": "",
+			"schema_version": 3,
+			"expected_schema_version": 3,
+			"trained_at": "2026-04-03T00:00:00Z",
+			"job_count": 120,
+			"training_snapshot": {
+				"total_rows": 150,
+				"duration_training_rows": 120,
+				"peak_rss_rows": 90,
+				"max_gpu_mem_rows": 80,
+				"max_run_id": 120,
+				"max_created_at": 1000
+			},
+			"current_snapshot": {
+				"total_rows": 162,
+				"duration_training_rows": 132,
+				"peak_rss_rows": 99,
+				"max_gpu_mem_rows": 88,
+				"max_run_id": 132,
+				"max_created_at": 1200
+			},
+			"snapshot_changed": true,
+			"duration_rows_since_training": 12,
+			"retrain_interval": 10,
+			"stale": true
+		}`), nil
+	}
+	countTrainingRows = func(Config) (int, error) {
+		t.Fatal("countTrainingRows should not be used when estimator status is available")
+		return 0, nil
+	}
+
+	status := GetStatus(Config{ProjectPath: t.TempDir(), ModelDir: t.TempDir(), RetrainInterval: 10})
+	if !status.Ready {
+		t.Fatal("expected ready predictor status")
+	}
+	if status.JobCount != 120 {
+		t.Fatalf("JobCount = %d, want 120", status.JobCount)
+	}
+	if status.CurrentJobCount != 132 {
+		t.Fatalf("CurrentJobCount = %d, want 132", status.CurrentJobCount)
+	}
+	if status.NewCompletedJobs != 12 {
+		t.Fatalf("NewCompletedJobs = %d, want 12", status.NewCompletedJobs)
+	}
+	if !status.Stale {
+		t.Fatal("expected stale predictor status")
+	}
+}
+
+func TestGetStatusCachesEstimatorStatusWithinTTL(t *testing.T) {
+	backgroundRetrains.mu.Lock()
+	backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+	backgroundRetrains.mu.Unlock()
+
+	originalRunStatusCLI := runStatusCLI
+	originalNowFunc := nowFunc
+	originalTTL := predictorStatusCacheTTL
+	t.Cleanup(func() {
+		runStatusCLI = originalRunStatusCLI
+		nowFunc = originalNowFunc
+		predictorStatusCacheTTL = originalTTL
+		backgroundRetrains.mu.Lock()
+		backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+		backgroundRetrains.mu.Unlock()
+	})
+
+	var calls atomic.Int32
+	runStatusCLI = func(Config) ([]byte, error) {
+		calls.Add(1)
+		return []byte(`{
+			"ready": true,
+			"model_present": true,
+			"schema_compatible": true,
+			"schema_reason": "",
+			"expected_schema_version": 3,
+			"current_snapshot": {
+				"total_rows": 10,
+				"duration_training_rows": 10,
+				"peak_rss_rows": 10,
+				"max_gpu_mem_rows": 10
+			},
+			"duration_rows_since_training": 0,
+			"retrain_interval": 50,
+			"stale": false
+		}`), nil
+	}
+
+	currentTime := time.Date(2026, time.April, 3, 10, 0, 0, 0, time.UTC)
+	nowFunc = func() time.Time { return currentTime }
+	predictorStatusCacheTTL = 5 * time.Second
+
+	cfg := Config{ProjectPath: t.TempDir(), ModelDir: t.TempDir()}
+	_ = GetStatus(cfg)
+	_ = GetStatus(cfg)
+	if calls.Load() != 1 {
+		t.Fatalf("runStatusCLI calls = %d, want 1 within cache TTL", calls.Load())
+	}
+
+	currentTime = currentTime.Add(6 * time.Second)
+	_ = GetStatus(cfg)
+	if calls.Load() != 2 {
+		t.Fatalf("runStatusCLI calls = %d, want 2 after cache TTL", calls.Load())
+	}
+}
+
 func TestPredictBatchCachesResultsAcrossCalls(t *testing.T) {
 	clearPredictionCache()
 	original := runPredictBatchCLI

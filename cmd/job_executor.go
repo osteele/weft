@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
@@ -160,7 +159,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if gpu == "" {
 		gpu = extractGPUFromEnvVars(opts.EnvVars)
 	}
-	cfg, _ := config.Load()
+	cfg, _ := loadPredictorConfig()
 	gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, opts.GPUMemGB, gpu, opts.GPUClass, opts.Host, opts.Project, opts.Command, 0)
 	if opts.GPUMemMaxGB != nil {
 		gpuMemMaxGB = opts.GPUMemMaxGB

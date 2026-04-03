@@ -77,6 +77,32 @@ type Status struct {
 	MetaError                  string
 }
 
+type estimatorSnapshot struct {
+	TotalRows            int  `json:"total_rows"`
+	DurationTrainingRows int  `json:"duration_training_rows"`
+	PeakRSSRows          int  `json:"peak_rss_rows"`
+	MaxGPUMemRows        int  `json:"max_gpu_mem_rows"`
+	MaxRunID             *int `json:"max_run_id"`
+	MaxCreatedAt         *int `json:"max_created_at"`
+}
+
+type estimatorModelStatus struct {
+	Ready                     bool               `json:"ready"`
+	ModelPresent              bool               `json:"model_present"`
+	SchemaCompatible          bool               `json:"schema_compatible"`
+	SchemaReason              string             `json:"schema_reason"`
+	SchemaVersion             *int               `json:"schema_version"`
+	ExpectedSchemaVersion     int                `json:"expected_schema_version"`
+	TrainedAt                 string             `json:"trained_at"`
+	JobCount                  *int               `json:"job_count"`
+	TrainingSnapshot          *estimatorSnapshot `json:"training_snapshot"`
+	CurrentSnapshot           estimatorSnapshot  `json:"current_snapshot"`
+	SnapshotChanged           bool               `json:"snapshot_changed"`
+	DurationRowsSinceTraining int                `json:"duration_rows_since_training"`
+	RetrainInterval           int                `json:"retrain_interval"`
+	Stale                     bool               `json:"stale"`
+}
+
 // Result holds predictions for all targets.
 type Result struct {
 	DurationS        *Prediction      `json:"duration_s"`
@@ -94,7 +120,7 @@ type Meta struct {
 	SchemaVersion int            `json:"schema_version,omitempty"`
 }
 
-const ExpectedModelSchemaVersion = 2
+const ExpectedModelSchemaVersion = 3
 
 var modelArtifactNames = []string{"duration", "peak_rss_kb", "max_gpu_mem_mib"}
 
@@ -132,8 +158,10 @@ var predictBatchFunc = PredictBatch
 var runPredictCLI = runPredictCLIImpl
 var runPredictBatchCLI = runPredictBatchCLIImpl
 var runTrainCLI = runTrainCLIImpl
+var runStatusCLI = runStatusCLIImpl
 var countTrainingRows = countTrainingRowsImpl
 var backgroundRetrainCheckInterval = time.Minute
+var predictorStatusCacheTTL = 5 * time.Second
 var nowFunc = time.Now
 var predictionCache = struct {
 	mu      sync.RWMutex
@@ -163,6 +191,8 @@ type backgroundRetrainState struct {
 	reason         string
 	startedAt      time.Time
 	nextStaleCheck time.Time
+	cachedStatus   Status
+	cachedAt       time.Time
 }
 
 // ResolvePredict routes prediction calls through the package test seam.
@@ -239,6 +269,17 @@ func ReadMeta(cfg Config) (*Meta, error) {
 
 // GetStatus reports predictor readiness, model freshness, and any background rebuild.
 func GetStatus(cfg Config) Status {
+	status := baseStatus(cfg)
+	state := backgroundState(cfg)
+	state.statusMu.Lock()
+	status.BackgroundRebuildRunning = state.running
+	status.BackgroundRebuildReason = state.reason
+	status.BackgroundRebuildStartedAt = state.startedAt
+	state.statusMu.Unlock()
+	return status
+}
+
+func baseStatus(cfg Config) Status {
 	status := Status{
 		Configured:      cfg.Configured(),
 		ModelDir:        cfg.modelDir(),
@@ -248,36 +289,56 @@ func GetStatus(cfg Config) Status {
 		return status
 	}
 
-	if meta, err := ReadMeta(cfg); err == nil {
-		status.ModelAvailable = true
-		status.TrainedAt = meta.TrainedAt
-		status.JobCount = meta.JobCount
-	} else {
-		status.MetaError = err.Error()
-	}
-
-	schema := CheckModelSchema(cfg)
-	status.SchemaIncompatible = schema.Changed
-	status.SchemaReason = schema.Reason
-
-	if currentJobCount, err := countTrainingRows(cfg); err == nil {
-		status.CurrentJobCount = currentJobCount
-		if status.ModelAvailable {
-			status.NewCompletedJobs = max(0, currentJobCount-status.JobCount)
-			status.Stale = NeedsRetrain(cfg, currentJobCount)
-		}
-	} else {
-		status.CountError = err.Error()
-	}
-
 	state := backgroundState(cfg)
 	state.statusMu.Lock()
-	status.BackgroundRebuildRunning = state.running
-	status.BackgroundRebuildReason = state.reason
-	status.BackgroundRebuildStartedAt = state.startedAt
+	if !state.cachedAt.IsZero() && nowFunc().Sub(state.cachedAt) < predictorStatusCacheTTL {
+		cached := state.cachedStatus
+		state.statusMu.Unlock()
+		return cached
+	}
 	state.statusMu.Unlock()
 
-	status.Ready = status.ModelAvailable && !status.SchemaIncompatible
+	if estimatorStatus, err := loadEstimatorStatus(cfg); err == nil {
+		status.ModelAvailable = estimatorStatus.ModelPresent
+		status.TrainedAt = estimatorStatus.TrainedAt
+		if estimatorStatus.JobCount != nil {
+			status.JobCount = *estimatorStatus.JobCount
+		}
+		status.CurrentJobCount = estimatorStatus.CurrentSnapshot.DurationTrainingRows
+		status.NewCompletedJobs = estimatorStatus.DurationRowsSinceTraining
+		status.Stale = estimatorStatus.Stale
+		status.SchemaIncompatible = !estimatorStatus.SchemaCompatible
+		status.SchemaReason = estimatorStatus.SchemaReason
+		status.Ready = estimatorStatus.Ready
+	} else {
+		if meta, metaErr := ReadMeta(cfg); metaErr == nil {
+			status.ModelAvailable = true
+			status.TrainedAt = meta.TrainedAt
+			status.JobCount = meta.JobCount
+		} else {
+			status.MetaError = metaErr.Error()
+		}
+
+		schema := localModelSchemaStatus(cfg)
+		status.SchemaIncompatible = schema.Changed
+		status.SchemaReason = schema.Reason
+
+		if currentJobCount, countErr := countTrainingRows(cfg); countErr == nil {
+			status.CurrentJobCount = currentJobCount
+			if status.ModelAvailable {
+				status.NewCompletedJobs = max(0, currentJobCount-status.JobCount)
+				status.Stale = NeedsRetrain(cfg, currentJobCount)
+			}
+		} else {
+			status.CountError = countErr.Error()
+		}
+		status.Ready = status.ModelAvailable && !status.SchemaIncompatible
+	}
+
+	state.statusMu.Lock()
+	state.cachedStatus = status
+	state.cachedAt = nowFunc()
+	state.statusMu.Unlock()
 	return status
 }
 
@@ -290,6 +351,17 @@ func EnsureReady(cfg Config) error {
 // ModelSchemaStatus reports whether the trained-model artifacts match the
 // current expected on-disk schema.
 func CheckModelSchema(cfg Config) ModelSchemaStatus {
+	status := baseStatus(cfg)
+	if status.SchemaIncompatible {
+		return ModelSchemaStatus{
+			Changed: true,
+			Reason:  status.SchemaReason,
+		}
+	}
+	return ModelSchemaStatus{}
+}
+
+func localModelSchemaStatus(cfg Config) ModelSchemaStatus {
 	modelDir := cfg.modelDir()
 	if modelDir == "" {
 		return ModelSchemaStatus{}
@@ -326,6 +398,24 @@ func CheckModelSchema(cfg Config) ModelSchemaStatus {
 	return ModelSchemaStatus{}
 }
 
+func loadEstimatorStatus(cfg Config) (*estimatorModelStatus, error) {
+	if cfg.ProjectPath == "" {
+		return nil, fmt.Errorf("predictor: project_path not configured")
+	}
+	if _, err := os.Stat(cfg.ProjectPath); err != nil {
+		return nil, fmt.Errorf("predictor: project_path unavailable: %w", err)
+	}
+	out, err := runStatusCLI(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var status estimatorModelStatus
+	if err := json.Unmarshal(out, &status); err != nil {
+		return nil, fmt.Errorf("predictor: parse status output: %w", err)
+	}
+	return &status, nil
+}
+
 func removeModelArtifacts(cfg Config) error {
 	modelDir := cfg.modelDir()
 	if modelDir == "" {
@@ -348,6 +438,14 @@ func clearPredictionCache() {
 	predictionCache.mu.Lock()
 	defer predictionCache.mu.Unlock()
 	predictionCache.entries = make(map[predictionCacheKey]*Result)
+}
+
+func invalidateStatusCache(cfg Config) {
+	state := backgroundState(cfg)
+	state.statusMu.Lock()
+	state.cachedStatus = Status{}
+	state.cachedAt = time.Time{}
+	state.statusMu.Unlock()
 }
 
 func predictionKey(cfg Config, host, project, gpuClass, command string) predictionCacheKey {
@@ -457,6 +555,7 @@ func Train(cfg Config) error {
 		return err
 	}
 	clearPredictionCache()
+	invalidateStatusCache(cfg)
 	return nil
 }
 
@@ -636,19 +735,28 @@ func maybeScheduleBackgroundRetrain(cfg Config) {
 	state.nextStaleCheck = now.Add(backgroundRetrainCheckInterval)
 	state.statusMu.Unlock()
 
-	currentJobCount, err := countTrainingRows(cfg)
-	if err != nil {
-		slog.Debug("predictor stale-check skipped", "component", "predictor", "error", err)
+	status := GetStatus(cfg)
+	if status.SchemaIncompatible {
 		return
 	}
-	if !NeedsRetrain(cfg, currentJobCount) {
+	if status.CountError != "" {
+		slog.Debug(
+			"predictor stale-check skipped",
+			"component", "predictor",
+			"error", status.CountError,
+		)
+		return
+	}
+	if !status.Stale {
 		return
 	}
 
 	reason := "stale models"
-	if meta, err := ReadMeta(cfg); err == nil {
-		delta := currentJobCount - meta.JobCount
-		reason = fmt.Sprintf("%d new completed jobs since last training", delta)
+	if status.NewCompletedJobs > 0 {
+		reason = fmt.Sprintf(
+			"%d new duration-training rows since last training",
+			status.NewCompletedJobs,
+		)
 	}
 	maybeStartBackgroundRetrain(cfg, reason)
 }
@@ -660,6 +768,8 @@ func maybeStartBackgroundRetrain(cfg Config, reason string) bool {
 		state.statusMu.Unlock()
 		return false
 	}
+	state.cachedAt = time.Time{}
+	state.cachedStatus = Status{}
 	state.running = true
 	state.reason = reason
 	state.startedAt = nowFunc()
@@ -679,6 +789,8 @@ func maybeStartBackgroundRetrain(cfg Config, reason string) bool {
 		state.reason = ""
 		state.startedAt = time.Time{}
 		state.nextStaleCheck = nowFunc().Add(backgroundRetrainCheckInterval)
+		state.cachedAt = time.Time{}
+		state.cachedStatus = Status{}
 		state.statusMu.Unlock()
 	}()
 	return true
@@ -767,6 +879,36 @@ func runTrainCLIImpl(cfg Config, modelDir string) error {
 	cmd := exec.Command("uv", args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func runStatusCLIImpl(cfg Config) ([]byte, error) {
+	args := []string{
+		"run",
+		"--project",
+		cfg.ProjectPath,
+		"job-estimator",
+		"status",
+		"--model-dir",
+		cfg.modelDir(),
+		"--retrain-interval",
+		fmt.Sprintf("%d", cfg.retrainInterval()),
+	}
+	for _, db := range cfg.DBPaths {
+		args = append(args, "--db", db)
+	}
+
+	cmd := exec.Command("uv", args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("predictor status: %w", err)
+	}
+	if stderr.Len() > 0 {
+		slog.Debug("predictor status stderr", "stderr", stderr.String())
+	}
+	return stdout.Bytes(), nil
 }
 
 func swapModelDir(srcDir, dstDir string) error {
