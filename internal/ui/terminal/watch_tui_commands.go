@@ -56,15 +56,15 @@ func (m watchModel) hasRetryableFailures() bool {
 	return len(m.partialErrors) > 0 && !m.partialErrorsRetried
 }
 
-func (m watchModel) countFailedInstances() int {
+func (m watchModel) countRetryableFailedInstances() int {
 	count := 0
 	for _, id := range m.instanceIDs {
 		u, ok := m.updates[id]
-		if ok && u.Launch != nil && u.Launch.Status == db.LaunchStatusFailed {
+		if ok && u.Launch != nil && db.IsRetryableTermination(u.Launch) {
 			count++
 		}
 	}
-	if len(m.partialErrorJobs) > 0 {
+	if len(m.partialErrors) > 0 && !m.partialErrorsRetried {
 		count++
 	}
 	return count

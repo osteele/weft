@@ -194,7 +194,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 
 	// Retry status
 	if m.retrying {
-		addLine(m.spinner.View() + fmt.Sprintf(" Retrying %d failed instance(s)...", m.countFailedInstances()))
+		addLine(m.spinner.View() + fmt.Sprintf(" Retrying %d retryable failed instance(s)...", m.countRetryableFailedInstances()))
 	} else if m.retryResult != "" {
 		addLine(m.retryResult)
 	}
@@ -344,7 +344,7 @@ func (m watchModel) renderSystemView() (string, int) {
 
 	// Retry status in footer for system mode
 	if m.retrying {
-		footerParts = append(footerParts, m.spinner.View()+fmt.Sprintf(" Retrying %d failed instance(s)...", m.countFailedInstances()))
+		footerParts = append(footerParts, m.spinner.View()+fmt.Sprintf(" Retrying %d retryable failed instance(s)...", m.countRetryableFailedInstances()))
 	} else if m.retryResult != "" {
 		footerParts = append(footerParts, m.retryResult)
 	}

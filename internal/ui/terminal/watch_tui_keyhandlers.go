@@ -15,7 +15,17 @@ import (
 func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 	m.autoMode = !m.autoMode
 	if m.autoMode {
-		return m, tea.Batch(m.flash.Set("Auto-pilot ON", false), m.runAutoPilot())
+		cmds := []tea.Cmd{m.flash.Set("Auto-pilot ON", false)}
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if !m.retrying && m.hasRetryableFailures() {
+			m.retryAttempt = 0
+			m.retrying = true
+			m.retryResult = ""
+			cmds = append(cmds, m.retryFailedInstances(0))
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, m.flash.Set("Auto-pilot OFF", false)
 }

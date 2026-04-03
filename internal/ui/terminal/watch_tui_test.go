@@ -792,6 +792,88 @@ func TestWatchModelHandleKey_BudgetRetryDoublesInstanceMultiplier(t *testing.T) 
 	}
 }
 
+func TestWatchModelHandleToggleAutoPilot_TriggersImmediateRetryForExistingRetryableFailures(t *testing.T) {
+	retryableID := int64(465)
+	nonRetryableID := int64(464)
+	m := watchModel{
+		mode:        watchModeInstances,
+		instanceIDs: []int64{retryableID, nonRetryableID},
+		updates: map[int64]campaign.InstanceUpdate{
+			retryableID: {
+				Launch: &db.Launch{
+					ID:                retryableID,
+					Status:            db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+				},
+			},
+			nonRetryableID: {
+				Launch: &db.Launch{
+					ID:                nonRetryableID,
+					Status:            db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonJobFailure,
+				},
+			},
+		},
+	}
+
+	updated, cmd := m.handleToggleAutoPilot()
+	got := updated.(watchModel)
+
+	if !got.autoMode {
+		t.Fatal("expected autoMode=true after toggle")
+	}
+	if !got.retrying {
+		t.Fatal("expected retrying=true when retryable failures already exist")
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil command batch after enabling auto-pilot")
+	}
+}
+
+func TestWatchModelView_RetryStatusCountsOnlyRetryableFailures(t *testing.T) {
+	retryableID := int64(465)
+	jobFailureA := int64(464)
+	jobFailureB := int64(466)
+	m := watchModel{
+		mode:        watchModeInstances,
+		width:       120,
+		height:      20,
+		retrying:    true,
+		instanceIDs: []int64{retryableID, jobFailureA, jobFailureB},
+		updates: map[int64]campaign.InstanceUpdate{
+			retryableID: {
+				Launch: &db.Launch{
+					ID:                retryableID,
+					Status:            db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+				},
+			},
+			jobFailureA: {
+				Launch: &db.Launch{
+					ID:                jobFailureA,
+					Status:            db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonJobFailure,
+				},
+			},
+			jobFailureB: {
+				Launch: &db.Launch{
+					ID:                jobFailureB,
+					Status:            db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonJobFailure,
+				},
+			},
+		},
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Retrying 1 retryable failed instance(s)...") {
+		t.Fatalf("expected retry status to count only retryable failures, got:\n%s", out)
+	}
+	if strings.Contains(out, "Retrying 3 failed instance(s)...") {
+		t.Fatalf("retry status should not count non-retryable failures, got:\n%s", out)
+	}
+}
+
 func TestWatchModelHandleKey_TogglesHelpOverlayInInstanceMode(t *testing.T) {
 	m := watchModel{
 		mode:                  watchModeInstances,
