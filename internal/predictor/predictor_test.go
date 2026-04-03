@@ -2,12 +2,10 @@ package predictor
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -419,7 +417,7 @@ func TestPredict_StartsBackgroundRetrainWhenStale(t *testing.T) {
 	}, "background retrain did not finish swapping models")
 }
 
-func TestPredict_BlocksCurrentModelWhenSchemaChanges(t *testing.T) {
+func TestPredict_RebuildsSynchronouslyWhenSchemaChanges(t *testing.T) {
 	clearPredictionCache()
 	backgroundRetrains.mu.Lock()
 	backgroundRetrains.states = make(map[string]*backgroundRetrainState)
@@ -452,9 +450,9 @@ func TestPredict_BlocksCurrentModelWhenSchemaChanges(t *testing.T) {
 		return []byte(`{"duration_s":{"mean":3600,"std":60,"lower":3500,"upper":3700}}`), nil
 	}
 
-	started := make(chan string, 1)
+	var trainDir string
 	runTrainCLI = func(_ Config, trainModelDir string) error {
-		started <- trainModelDir
+		trainDir = trainModelDir
 		meta := Meta{
 			TrainedAt:     "2024-01-02T00:00:00Z",
 			JobCount:      50,
@@ -472,39 +470,29 @@ func TestPredict_BlocksCurrentModelWhenSchemaChanges(t *testing.T) {
 
 	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir}
 	result, err := Predict(cfg, "", "proj", "RTX 4090", "python train.py")
-	if err == nil {
-		t.Fatal("expected schema-mismatch prediction to fail")
+	if err != nil {
+		t.Fatalf("expected synchronous rebuild + prediction to succeed, got: %v", err)
 	}
-	if result != nil {
-		t.Fatalf("expected nil result on schema mismatch, got %#v", result)
+	if result == nil {
+		t.Fatal("expected non-nil result after synchronous schema rebuild")
 	}
-	var unavailable *UnavailableError
-	if !errors.As(err, &unavailable) {
-		t.Fatalf("error = %T, want *UnavailableError", err)
+	if result.DurationS == nil || result.DurationS.Mean != 3600 {
+		t.Fatalf("duration_s mean = %v, want 3600", result.DurationS)
 	}
-	if !strings.Contains(err.Error(), "current model use is blocked") {
-		t.Fatalf("error = %q, want schema-block message", err)
+	if trainDir == modelDir {
+		t.Fatalf("expected schema rebuild to use a temp dir, got model dir %q", modelDir)
 	}
-	if unavailable.Status.SchemaReason == "" {
-		t.Fatal("expected unavailable status to include schema reason")
-	}
-	if predictCalls.Load() != 0 {
-		t.Fatalf("runPredictCLI calls = %d, want 0", predictCalls.Load())
+	if predictCalls.Load() != 1 {
+		t.Fatalf("runPredictCLI calls = %d, want 1", predictCalls.Load())
 	}
 
-	select {
-	case trainModelDir := <-started:
-		if trainModelDir == modelDir {
-			t.Fatalf("expected schema rebuild to use a temp model dir, got %q", trainModelDir)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("background schema rebuild did not start")
+	retrainedMeta, err := ReadMeta(cfg)
+	if err != nil {
+		t.Fatalf("read meta after rebuild: %v", err)
 	}
-
-	waitFor(t, 2*time.Second, func() bool {
-		retrainedMeta, err := ReadMeta(cfg)
-		return err == nil && retrainedMeta.SchemaVersion == ExpectedModelSchemaVersion
-	}, "background schema rebuild did not finish swapping models")
+	if retrainedMeta.SchemaVersion != ExpectedModelSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", retrainedMeta.SchemaVersion, ExpectedModelSchemaVersion)
+	}
 }
 
 func TestGetStatusReportsBackgroundRebuild(t *testing.T) {
