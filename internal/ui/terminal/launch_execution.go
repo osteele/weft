@@ -31,6 +31,7 @@ func prepareLaunchExecutionPlan(
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
+	onProgress campaign.PlanProgressFunc,
 ) (launchExecutionPlan, error) {
 	selectedGroups, requestedJobs := selectLaunchGroups(groups, selected)
 	plan := launchExecutionPlan{
@@ -45,7 +46,7 @@ func prepareLaunchExecutionPlan(
 		return plan, providerErr
 	}
 
-	plans, _ := campaign.BuildProfilePlans(
+	plans, _ := campaign.BuildProfilePlansWithProgress(
 		database,
 		clients,
 		selectedGroups,
@@ -55,6 +56,7 @@ func prepareLaunchExecutionPlan(
 		survivalModel,
 		[]bidding.ScoreProfile{profile},
 		minSurvival,
+		onProgress,
 	)
 	strategyPlan, ok := plans[profile.ID]
 	if !ok {

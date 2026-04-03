@@ -48,6 +48,17 @@ type reuseGroupDecision struct {
 	estimate   CostEstimate
 }
 
+// PlanProgress reports coarse-grained progress while constructing launch plans.
+type PlanProgress struct {
+	Phase   string
+	Detail  string
+	Current int
+	Total   int
+}
+
+// PlanProgressFunc receives launch-plan progress updates.
+type PlanProgressFunc func(PlanProgress)
+
 // BuildStrategyPlans builds a reusable/new-instance launch plan for each
 // strategy. The split groups are the original launch groups shown in the UI.
 func BuildStrategyPlans(
@@ -101,6 +112,32 @@ func BuildProfilePlans(
 	profiles []bidding.ScoreProfile,
 	minSurvival float64,
 ) (map[string]StrategyPlan, []GroupRawOffers) {
+	return BuildProfilePlansWithProgress(
+		database,
+		clients,
+		splitGroups,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		profiles,
+		minSurvival,
+		nil,
+	)
+}
+
+func BuildProfilePlansWithProgress(
+	database *sql.DB,
+	clients []cloud.Client,
+	splitGroups []InstanceGroup,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	profiles []bidding.ScoreProfile,
+	minSurvival float64,
+	onProgress PlanProgressFunc,
+) (map[string]StrategyPlan, []GroupRawOffers) {
 	plans := make(map[string]StrategyPlan, len(profiles))
 	if len(splitGroups) == 0 {
 		return plans, nil
@@ -133,6 +170,7 @@ func BuildProfilePlans(
 		offerSession,
 		profiles,
 		minSurvival,
+		onProgress,
 	), splitRaw
 }
 
@@ -150,6 +188,34 @@ func BuildProfilePlansFromSplitRaw(
 	survivalModel *bidding.SurvivalModel,
 	profiles []bidding.ScoreProfile,
 	minSurvival float64,
+) map[string]StrategyPlan {
+	return BuildProfilePlansFromSplitRawWithProgress(
+		database,
+		clients,
+		splitGroups,
+		splitRaw,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		profiles,
+		minSurvival,
+		nil,
+	)
+}
+
+func BuildProfilePlansFromSplitRawWithProgress(
+	database *sql.DB,
+	clients []cloud.Client,
+	splitGroups []InstanceGroup,
+	splitRaw []GroupRawOffers,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	profiles []bidding.ScoreProfile,
+	minSurvival float64,
+	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
 	var offerSession *offerSearchSession
 	switch {
@@ -178,6 +244,7 @@ func BuildProfilePlansFromSplitRaw(
 		offerSession,
 		profiles,
 		minSurvival,
+		onProgress,
 	)
 }
 
@@ -192,16 +259,19 @@ func buildProfilePlansFromSplitRawWithSession(
 	offerSession *offerSearchSession,
 	profiles []bidding.ScoreProfile,
 	minSurvival float64,
+	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
 	plans := make(map[string]StrategyPlan, len(profiles))
 	if len(splitGroups) == 0 {
 		return plans
 	}
 
-	for _, profile := range profiles {
+	totalProfiles := len(profiles)
+	for idx, profile := range profiles {
 		if !profile.Valid() {
 			continue
 		}
+		reportPlanProgress(onProgress, "Planning tradeoff profiles", profile.ID, idx+1, totalProfiles)
 		plans[profile.ID] = buildStrategyPlanForSplitRaw(
 			database,
 			splitGroups,
@@ -213,6 +283,8 @@ func buildProfilePlansFromSplitRawWithSession(
 			offerSession,
 			profile,
 			minSurvival,
+			onProgress,
+			profileProgressLabel(profile.ID, idx+1, totalProfiles),
 		)
 	}
 
@@ -230,6 +302,8 @@ func buildStrategyPlanForSplitRaw(
 	offerSession *offerSearchSession,
 	profile bidding.ScoreProfile,
 	minSurvival float64,
+	onProgress PlanProgressFunc,
+	progressLabel string,
 ) StrategyPlan {
 	plan := StrategyPlan{
 		Profile:          profile,
@@ -242,10 +316,13 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
+	reportPlanProgress(onProgress, "Ranking direct-offer groups", progressLabel, 0, 0)
 	splitOffers, splitPredictions := rankGroupOffersForPlanningWithPredictions(splitRaw, predCfg, survivalModel, setupFactory, profile, minSurvival)
+	reportPlanProgress(onProgress, "Estimating direct-offer costs", progressLabel, 0, 0)
 	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, nil)
 	splitEstimates = applySelectedOfferRuntimePredictions(splitEstimates, splitPredictions)
 
+	reportPlanProgress(onProgress, "Checking reusable instances", progressLabel, 0, 0)
 	reuseDecisions := chooseReuseGroups(
 		database,
 		splitGroups,
@@ -284,8 +361,9 @@ func buildStrategyPlanForSplitRaw(
 		return plan
 	}
 
+	reportPlanProgress(onProgress, "Fetching merged and parallel candidates", progressLabel, 0, 0)
 	candidates := fetchCandidateGroupingsWithSession(offerSession, remainingGroups)
-	result := BestCandidateForProfile(database, candidates, predCfg, overheadModel, survivalModel, profile, minSurvival)
+	result := BestCandidateForProfileWithProgress(database, candidates, predCfg, overheadModel, survivalModel, profile, minSurvival, onProgress, progressLabel)
 	if len(result.Groups) == 0 {
 		return plan
 	}
@@ -1143,6 +1221,20 @@ func BestCandidateForProfile(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) CandidateResult {
+	return BestCandidateForProfileWithProgress(database, candidates, predCfg, overheadModel, survivalModel, profile, minSurvival, nil, "")
+}
+
+func BestCandidateForProfileWithProgress(
+	database *sql.DB,
+	candidates []GroupingCandidate,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+	onProgress PlanProgressFunc,
+	progressLabel string,
+) CandidateResult {
 	bestScore := math.Inf(1)
 	var best CandidateResult
 	if len(candidates) == 0 {
@@ -1151,6 +1243,11 @@ func BestCandidateForProfile(
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
 	for i, cand := range candidates {
+		detail := cand.Label
+		if progressLabel != "" {
+			detail = fmt.Sprintf("%s: %s", progressLabel, cand.Label)
+		}
+		reportPlanProgress(onProgress, "Scoring candidate groupings", detail, i+1, len(candidates))
 		offers, selectedPredictions := rankGroupOffersForPlanningWithPredictions(cand.Raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
 		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, nil)
 		estimates = applySelectedOfferRuntimePredictions(estimates, selectedPredictions)
@@ -1167,6 +1264,25 @@ func BestCandidateForProfile(
 		}
 	}
 	return best
+}
+
+func reportPlanProgress(onProgress PlanProgressFunc, phase, detail string, current, total int) {
+	if onProgress == nil {
+		return
+	}
+	onProgress(PlanProgress{
+		Phase:   phase,
+		Detail:  detail,
+		Current: current,
+		Total:   total,
+	})
+}
+
+func profileProgressLabel(profileID string, current, total int) string {
+	if total <= 0 {
+		return profileID
+	}
+	return fmt.Sprintf("%s (%d/%d)", profileID, current, total)
 }
 
 func applySelectedOfferRuntimePredictions(estimates []CostEstimate, selected []offerRuntimePrediction) []CostEstimate {

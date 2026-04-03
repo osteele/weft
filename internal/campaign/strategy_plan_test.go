@@ -11,6 +11,52 @@ import (
 	"github.com/osteele/weft/internal/predictor"
 )
 
+func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+	}
+	splitRaw := []GroupRawOffers{{
+		Group: group,
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx3090", GPUName: "RTX 3090", CostPerHour: 0.30},
+		},
+	}}
+
+	seen := map[string]bool{}
+	plans := BuildProfilePlansFromSplitRawWithProgress(
+		nil,
+		nil,
+		[]InstanceGroup{group},
+		splitRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		[]bidding.ScoreProfile{bidding.StrategyCheap.Profile()},
+		0,
+		func(progress PlanProgress) {
+			if progress.Phase != "" {
+				seen[progress.Phase] = true
+			}
+		},
+	)
+
+	if _, ok := plans[bidding.StrategyCheap.Profile().ID]; !ok {
+		t.Fatalf("expected cheap profile plan, got %#v", plans)
+	}
+	for _, phase := range []string{
+		"Planning tradeoff profiles",
+		"Ranking direct-offer groups",
+		"Estimating direct-offer costs",
+		"Checking reusable instances",
+	} {
+		if !seen[phase] {
+			t.Fatalf("expected progress phase %q, got %#v", phase, seen)
+		}
+	}
+}
+
 func TestRankGroupOffersWithPredictor_MultiJobGroupUsesTotalDuration(t *testing.T) {
 	original := resolvePredictBatch
 	t.Cleanup(func() { resolvePredictBatch = original })

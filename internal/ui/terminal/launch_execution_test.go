@@ -90,6 +90,7 @@ func TestPrepareLaunchExecutionPlan_RevalidatesReusableInstances(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("prepareLaunchExecutionPlan: %v", err)

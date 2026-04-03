@@ -241,7 +241,9 @@ type launchModel struct {
 	groupPhases      map[int]string      // groupIndex -> current phase
 	groupDone        map[int]bool        // groupIndex -> registered
 	estimateProgress estimateProgressMsg // latest estimation progress
+	planProgress     planProgressMsg     // latest launch-plan build progress
 	progressCh       chan estimateProgressMsg
+	planProgressCh   chan planProgressMsg
 	campaignCh       chan campaignCreatedMsg
 	planCh           chan launchExecutionPlanMsg
 	phaseCh          chan launchPhaseMsg
@@ -320,6 +322,14 @@ type estimatesLoadedMsg struct {
 type estimateProgressMsg struct {
 	phase           string // e.g., "Resolving model sizes", "Estimating job durations"
 	resolved, total int
+}
+
+type planProgressMsg struct {
+	phase      string
+	detail     string
+	current    int
+	total      int
+	background bool
 }
 
 type instancesLaunchedMsg struct {
@@ -520,6 +530,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		overheadModel:           buildOverheadModel(database),
 		survivalModel:           buildSurvivalModel(database),
 		progressCh:              make(chan estimateProgressMsg, 1),
+		planProgressCh:          make(chan planProgressMsg, 8),
 		assetStageCh:            make(chan assetStageChangedMsg, 64),
 		gpuFilter:               gpuFilter,
 		projectFilter:           projectFilter,
@@ -621,9 +632,25 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
 	minSurvival := m.launchOpts.MinSurvival
-	return func() tea.Msg {
+	ch := m.planProgressCh
+	build := func() tea.Msg {
+		var onProgress campaign.PlanProgressFunc
+		if !background {
+			onProgress = func(progress campaign.PlanProgress) {
+				select {
+				case ch <- planProgressMsg{
+					phase:      progress.Phase,
+					detail:     progress.Detail,
+					current:    progress.Current,
+					total:      progress.Total,
+					background: background,
+				}:
+				default:
+				}
+			}
+		}
 		profiles := bidding.ParetoSamplingProfiles()
-		plans := campaign.BuildProfilePlansFromSplitRaw(
+		plans := campaign.BuildProfilePlansFromSplitRawWithProgress(
 			database,
 			clients,
 			groups,
@@ -634,10 +661,15 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 			survivalModel,
 			profiles,
 			minSurvival,
+			onProgress,
 		)
 		options := campaign.BuildParetoTradeoffOptions(plans)
 		return profilePlansLoadedMsg{plans: plans, options: options, background: background}
 	}
+	if background {
+		return build
+	}
+	return tea.Batch(build, waitForPlanProgress(ch))
 }
 
 // prefetchHFSizes warms the HF model size cache in parallel with offer fetching.
@@ -925,6 +957,16 @@ func waitForProgress(ch chan estimateProgressMsg) tea.Cmd {
 	}
 }
 
+func waitForPlanProgress(ch chan planProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
 // waitForLaunchPhase returns a Cmd that reads one launch phase update.
 func waitForLaunchPhase(ch chan launchPhaseMsg) tea.Cmd {
 	return func() tea.Msg {
@@ -1180,6 +1222,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
 			m.tradeoffRowsDirty = true
 			m.cachedTradeoffRows = nil
+			m.planProgress = planProgressMsg{}
 			if m.assetStager != nil {
 				m.assetStager.Close()
 			}
@@ -1204,6 +1247,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tradeoffRowsDirty = true
 		if !msg.background {
 			m.loading = true
+			m.planProgress = planProgressMsg{}
 		}
 		m.refreshTradeoffRowsIfNeeded()
 		return m, m.buildProfilePlans(msg.background)
@@ -1227,6 +1271,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.groupOffers = m.rankCachedOffers()
 		if !msg.background {
 			m.loading = false
+			m.planProgress = planProgressMsg{}
 		}
 		key := offerIdentity(m.groupOffers)
 		if offersMatch(oldOffers, m.groupOffers) && m.costEstimates != nil {
@@ -1244,6 +1289,15 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.estimateProgress = msg
 		if m.costEstimates == nil {
 			return m, waitForProgress(m.progressCh)
+		}
+		return m, nil
+
+	case planProgressMsg:
+		if !msg.background {
+			m.planProgress = msg
+		}
+		if m.buildingPlans() {
+			return m, waitForPlanProgress(m.planProgressCh)
 		}
 		return m, nil
 
@@ -1879,6 +1933,20 @@ func (m launchModel) buildingPlans() bool {
 	return m.loading && m.rawOffersLoaded() && m.tradeoffPlans == nil
 }
 
+func formatPlanProgress(msg planProgressMsg) string {
+	if msg.phase == "" {
+		return "Building launch plan from raw offers..."
+	}
+	text := msg.phase
+	if msg.current > 0 && msg.total > 0 {
+		text = fmt.Sprintf("%s (%d/%d)", text, msg.current, msg.total)
+	}
+	if msg.detail != "" {
+		text += ": " + msg.detail
+	}
+	return text + "..."
+}
+
 // groupHasOffer reports whether the group at groupIdx has a matching offer.
 // Returns false when offers haven't been fetched yet (nil slice).
 func (m launchModel) groupHasOffer(groupIdx int) bool {
@@ -2011,6 +2079,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			predCfg,
 			overheadModel,
 			survivalModel,
+			nil,
 		)
 		if err != nil {
 			sendLaunchPlanReady(0, nil)
@@ -2789,7 +2858,7 @@ func (m launchModel) View() string {
 			b.WriteString("\n")
 			renderRawOfferSummary(&b, m.cachedRawOffers)
 			b.WriteString(m.spinner.View())
-			b.WriteString(launchDimStyle.Render(" Building launch plan from raw offers..."))
+			b.WriteString(launchDimStyle.Render(" " + formatPlanProgress(m.planProgress)))
 			b.WriteString("\n")
 		} else if m.groupOffers != nil {
 			b.WriteString("\n")

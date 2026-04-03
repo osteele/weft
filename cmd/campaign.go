@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -160,6 +161,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	launchInteractive := useTUI && !campaignLaunchYes
+	reportStartupPhase := newLaunchStartupReporter(cmd.ErrOrStderr())
 
 	database, err := db.Open()
 	if err != nil {
@@ -171,6 +173,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	reportStartupPhase("Checking predictor status...")
 	if err := ensurePredictorUsableFunc(cmd, cfg, "campaign planning"); err != nil {
 		return err
 	}
@@ -179,9 +182,11 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// For TUI mode, reconciliation runs in the background (see below).
 	needsSyncReconcile := !launchInteractive || campaignLaunchDryRun
 	if needsSyncReconcile {
+		reportStartupPhase("Refreshing cloud state...")
 		reconcileBeforeDisplay(database, FastCloudSyncTimeout)
 	}
 
+	reportStartupPhase("Loading unplaced jobs...")
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
 		return fmt.Errorf("list unplaced jobs: %w", err)
@@ -211,7 +216,10 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Pre-filter: try on-prem placement for unplaced jobs.
 	// Jobs that can now be placed on-prem are assigned and removed from the rental list.
-	jobs = prefilterOnPrem(database, jobs, cfg)
+	if len(jobs) > 0 {
+		reportStartupPhase(fmt.Sprintf("Checking on-prem placement for %d job(s)...", len(jobs)))
+	}
+	jobs = prefilterOnPremWithProgress(database, jobs, cfg, newLaunchProgressReporter(cmd.ErrOrStderr(), "Checked on-prem placement", len(jobs)))
 
 	if len(jobs) == 0 {
 		fmt.Println("No jobs need rental GPUs.")
@@ -223,6 +231,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		slog.Warn("failed to build R2 client for disk estimation", "error", err)
 	}
 
+	reportStartupPhase("Preparing rental GPU groups...")
 	groups := campaign.PrepareGroups(jobs, database, campaignLaunchGPU, r2Client)
 
 	if len(groups) == 0 {
@@ -295,8 +304,16 @@ func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 // prefilterOnPrem tries to place unplaced jobs on on-prem hosts before launching
 // rental instances. Returns the subset of jobs that still need rental.
 func prefilterOnPrem(database *sql.DB, jobs []*db.Job, cfg *config.Config) []*db.Job {
+	return prefilterOnPremWithProgress(database, jobs, cfg, nil)
+}
+
+func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int)) []*db.Job {
 	var remaining []*db.Job
-	for _, j := range jobs {
+	total := len(jobs)
+	for i, j := range jobs {
+		if onProgress != nil {
+			onProgress(i+1, total)
+		}
 		constraints := placement.ConstraintsFromJob(j)
 		predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
 		plan, err := placement.Evaluate(placement.EvaluateRequest{
@@ -331,7 +348,8 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
 	fmt.Println("Searching for GPU offers...")
-	prep, err := terminal.PrepareLaunchExecutionPlan(
+	reportPlanProgress := newPlanProgressPrinter(os.Stderr)
+	prep, err := terminal.PrepareLaunchExecutionPlanWithProgress(
 		database,
 		clients,
 		providerErr,
@@ -342,6 +360,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		&predCfg,
 		overheadModel,
 		survivalModel,
+		reportPlanProgress,
 	)
 	if err != nil {
 		return err
@@ -466,7 +485,8 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 	if providerErr != nil && len(reusable) == 0 {
 		return providerErr
 	}
-	plans, _ := campaign.BuildStrategyPlans(
+	reportPlanProgress := newPlanProgressPrinter(os.Stderr)
+	plans, _ := campaign.BuildProfilePlansWithProgress(
 		database,
 		clients,
 		groups,
@@ -474,10 +494,11 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 		&predCfg,
 		overheadModel,
 		survivalModel,
-		[]bidding.SelectionStrategy{strategy},
+		[]bidding.ScoreProfile{strategy.Profile()},
 		minSurvival,
+		reportPlanProgress,
 	)
-	plan, ok := plans[strategy]
+	plan, ok := plans[strategy.Profile().ID]
 	if !ok {
 		return fmt.Errorf("could not build dry-run plan for strategy %s", strategy)
 	}
@@ -548,6 +569,64 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 	fmt.Printf("\nEstimated total: ~$%.2f\n", total)
 	fmt.Println("To launch interactively: weft launch instances")
 	return nil
+}
+
+func newLaunchStartupReporter(w io.Writer) func(string) {
+	return func(message string) {
+		if w == nil || message == "" {
+			return
+		}
+		fmt.Fprintln(w, message)
+	}
+}
+
+func newLaunchProgressReporter(w io.Writer, label string, total int) func(int, int) {
+	if w == nil || total <= 0 {
+		return nil
+	}
+	lastPrinted := 0
+	lastAt := time.Time{}
+	return func(current, total int) {
+		if current <= 0 || current == lastPrinted {
+			return
+		}
+		now := time.Now()
+		if current != total && current != 1 && now.Sub(lastAt) < 1500*time.Millisecond {
+			return
+		}
+		lastPrinted = current
+		lastAt = now
+		fmt.Fprintf(w, "%s (%d/%d)\n", label, current, total)
+	}
+}
+
+func newPlanProgressPrinter(w io.Writer) campaign.PlanProgressFunc {
+	if w == nil {
+		return nil
+	}
+	last := ""
+	return func(progress campaign.PlanProgress) {
+		message := formatLaunchPlanProgress(progress)
+		if message == "" || message == last {
+			return
+		}
+		last = message
+		fmt.Fprintln(w, message)
+	}
+}
+
+func formatLaunchPlanProgress(progress campaign.PlanProgress) string {
+	if progress.Phase == "" {
+		return ""
+	}
+	message := "Building launch plan: " + progress.Phase
+	if progress.Current > 0 && progress.Total > 0 {
+		message += fmt.Sprintf(" (%d/%d)", progress.Current, progress.Total)
+	}
+	if progress.Detail != "" {
+		message += " — " + progress.Detail
+	}
+	return message
 }
 
 func resolveCampaignWatchID(database *sql.DB, args []string) (int64, error) {
