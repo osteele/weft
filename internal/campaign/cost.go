@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -231,15 +233,31 @@ func OfferSetupOverheadFactory(database *sql.DB, overheadModel *estimate.Overhea
 	if overheadModel == nil {
 		return nil
 	}
+	var downloadBytesCache sync.Map
 	return func(group InstanceGroup) bidding.OfferSetupFunc {
-		var downloadBytes int64
-		if totalBytes, err := dataloc.ResolveInputSizes(group.AllInputs(), nil); err != nil {
-			slog.Warn("could not resolve input sizes for setup estimate", "component", "cost", "error", err)
+		key := groupInputCacheKey(group.AllInputs())
+		downloadBytes := int64(0)
+		if cached, ok := downloadBytesCache.Load(key); ok {
+			downloadBytes = cached.(int64)
 		} else {
-			downloadBytes = totalBytes
+			if totalBytes, err := dataloc.ResolveInputSizes(group.AllInputs(), nil); err != nil {
+				slog.Warn("could not resolve input sizes for setup estimate", "component", "cost", "error", err)
+			} else {
+				downloadBytes = totalBytes
+			}
+			downloadBytesCache.Store(key, downloadBytes)
 		}
 		return offerSetupFunc(database, overheadModel, downloadBytes)
 	}
+}
+
+func groupInputCacheKey(inputs []string) string {
+	if len(inputs) == 0 {
+		return ""
+	}
+	sorted := append([]string(nil), inputs...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "\x1f")
 }
 
 // offerSetupFunc builds an OfferSetupFunc that estimates total setup overhead

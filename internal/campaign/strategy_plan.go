@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -266,29 +267,63 @@ func buildProfilePlansFromSplitRawWithSession(
 		return plans
 	}
 
-	totalProfiles := len(profiles)
-	for idx, profile := range profiles {
-		if !profile.Valid() {
-			continue
+	validProfiles := make([]bidding.ScoreProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.Valid() {
+			validProfiles = append(validProfiles, profile)
 		}
-		reportPlanProgress(onProgress, "Planning tradeoff profiles", profile.ID, idx+1, totalProfiles)
-		plans[profile.ID] = buildStrategyPlanForSplitRaw(
-			database,
-			splitGroups,
-			splitRaw,
-			reusable,
-			predCfg,
-			overheadModel,
-			survivalModel,
-			offerSession,
-			profile,
-			minSurvival,
-			onProgress,
-			profileProgressLabel(profile.ID, idx+1, totalProfiles),
-		)
+	}
+	if len(validProfiles) == 0 {
+		return plans
 	}
 
+	workerLimit := planProfileWorkerLimit(len(validProfiles))
+	sem := make(chan struct{}, workerLimit)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for idx, profile := range validProfiles {
+		wg.Add(1)
+		go func(idx int, profile bidding.ScoreProfile) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			reportPlanProgress(onProgress, "Planning tradeoff profiles", profile.ID, idx+1, len(validProfiles))
+			plan := buildStrategyPlanForSplitRaw(
+				database,
+				splitGroups,
+				splitRaw,
+				reusable,
+				predCfg,
+				overheadModel,
+				survivalModel,
+				offerSession,
+				profile,
+				minSurvival,
+				onProgress,
+				profileProgressLabel(profile.ID, idx+1, len(validProfiles)),
+			)
+
+			mu.Lock()
+			plans[profile.ID] = plan
+			mu.Unlock()
+		}(idx, profile)
+	}
+	wg.Wait()
+
 	return plans
+}
+
+func planProfileWorkerLimit(totalProfiles int) int {
+	switch {
+	case totalProfiles <= 1:
+		return 1
+	case totalProfiles == 2:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func buildStrategyPlanForSplitRaw(
