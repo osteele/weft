@@ -773,6 +773,21 @@ func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
 	return queryJobs(db, query, string(JobTargetUnplaced), StatusQueued)
 }
 
+// CountJobsWaitingOnInstances returns the number of queued jobs that are
+// assigned to non-terminal rental instances (i.e. the instance is still
+// setting up or running but the job hasn't started yet).
+func CountJobsWaitingOnInstances(database *sql.DB) (int, error) {
+	var count int
+	err := database.QueryRow(`
+		SELECT COUNT(*) FROM job_status
+		WHERE tombstoned = 0
+		  AND status = ?
+		  AND effective_target_kind = ?`,
+		StatusQueued, string(JobTargetRentalInstance),
+	).Scan(&count)
+	return count, err
+}
+
 // AssignJobHost atomically assigns a host to an unplaced queued job.
 // Returns true if the job was updated (false if it was already claimed or changed status).
 // Uses COALESCE(pending_status, status) so that a failed job with

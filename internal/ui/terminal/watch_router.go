@@ -184,7 +184,11 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 		jobs = filterRentalLaunchJobs(jobs)
 		jobs = filterLaunchJobsForScope(jobs, m.projectFilter)
 		if len(jobs) == 0 {
-			return launchPlanReadyMsg{flash: "No jobs need rental GPUs."}
+			msg := "No jobs need rental GPUs."
+			if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
+				msg += fmt.Sprintf(" (%d job(s) waiting on instances still setting up)", n)
+			}
+			return launchPlanReadyMsg{flash: msg}
 		}
 
 		if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {

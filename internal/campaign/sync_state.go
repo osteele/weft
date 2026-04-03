@@ -90,7 +90,7 @@ func SyncInstanceState(
 		// and re-associate orphaned jobs with this launch.
 		if verb, phaseJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && phaseJobID > 0 {
 			switch verb {
-			case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
+			case PhaseSetup, PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
 				if j := findJobInSlice(jobs, phaseJobID); j != nil {
 					if j.Status == db.StatusQueued {
 						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {

@@ -236,6 +236,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	if len(jobs) == 0 {
 		fmt.Println("No jobs need rental GPUs.")
+		if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
+			fmt.Printf("(%d job(s) waiting on instances still setting up)\n", n)
+		}
 		return nil
 	}
 
@@ -252,6 +255,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 			fmt.Printf("No unplaced jobs match GPU class %q.\n", campaignLaunchGPU)
 		} else {
 			fmt.Println("No jobs need rental GPUs.")
+			if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
+				fmt.Printf("(%d job(s) waiting on instances still setting up)\n", n)
+			}
 		}
 		return nil
 	}

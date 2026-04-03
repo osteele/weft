@@ -8,6 +8,7 @@ instead of maintaining its own provisioning infrastructure.
 
 | Gap | Priority | User Benefit | llm-perf-models ref |
 |-----|----------|--------------|---------------------|
+| Reuse Docker image packages | High | Skip re-downloading ~3 GB of torch/CUDA wheels during `uv sync` by reusing packages pre-installed in the PyTorch Docker image. Pre-create the venv with `--system-site-packages` and pin `UV_PYTHON` to the image's conda interpreter. Requires either projects pin torch to the image version (currently 2.6.0) or regenerate their lockfile at a compatible version. | — |
 | Persistent volumes | High | Reuse caches across instances to avoid repeated dependency/model downloads and shorten time-to-first-job. | `vastai_provision.sh`: volume create/find/attach |
 | Phone-tree copy | High | Fan out warm caches from one seeded machine to many targets so campaigns scale faster with less redundant network work. | `run_campaign.py`: copy loop with seeded/unprovisioned sets |
 | Copy failure fallback | High | Keep launch robust: if copy fails repeatedly, targets should still proceed via direct setup instead of stalling the campaign. | `run_campaign.py`: `--copy-retries` flag |
