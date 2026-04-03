@@ -242,7 +242,7 @@ type launchModel struct {
 	groupDone        map[int]bool        // groupIndex -> registered
 	estimateProgress estimateProgressMsg // latest estimation progress
 	progressCh       chan estimateProgressMsg
-	campaignCh       chan int64
+	campaignCh       chan campaignCreatedMsg
 	planCh           chan launchExecutionPlanMsg
 	phaseCh          chan launchPhaseMsg
 	instanceCh       chan launchInstanceRegisteredMsg
@@ -251,9 +251,11 @@ type launchModel struct {
 	instanceIDs             []int64
 	expectedInstanceCount   int
 	launchStartedAt         time.Time
+	launchCampaignCreatedAt time.Time
 	lastLaunchProgressAt    time.Time
 	launchStatusCounts      map[string]int
 	launchHeartbeatErr      error
+	firstRegSurvival        *db.FirstRegistrationSurvival
 	inlineWatchEnabled      bool
 	inlineWatchUsed         bool
 	registeredInstanceIDs   []int64
@@ -335,6 +337,7 @@ type launchHeartbeatMsg struct {
 
 type campaignCreatedMsg struct {
 	campaignID int64
+	createdAt  time.Time
 }
 
 type launchPhaseMsg struct {
@@ -344,6 +347,7 @@ type launchPhaseMsg struct {
 
 type launchExecutionPlanMsg struct {
 	expectedInstanceCount int
+	firstRegSurvival      *db.FirstRegistrationSurvival
 }
 
 type launchInstanceRegisteredMsg struct {
@@ -534,7 +538,7 @@ func (m *launchModel) resetLaunchChannels(groupCount int) {
 	if groupCount < 1 {
 		groupCount = 1
 	}
-	m.campaignCh = make(chan int64, 1)
+	m.campaignCh = make(chan campaignCreatedMsg, 1)
 	m.planCh = make(chan launchExecutionPlanMsg, 1)
 	m.phaseCh = make(chan launchPhaseMsg, max(16, groupCount*4))
 	m.instanceCh = make(chan launchInstanceRegisteredMsg, max(8, groupCount*2))
@@ -898,15 +902,15 @@ func (m launchModel) fetchEstimates() tea.Cmd {
 	return m.fetchEstimatesForOffers(m.groupOffers, offerIdentity(m.groupOffers), true)
 }
 
-// waitForCampaignCreated returns a Cmd that reads the campaign ID from the channel.
+// waitForCampaignCreated returns a Cmd that reads campaign creation metadata.
 func (m launchModel) waitForCampaignCreated() tea.Cmd {
 	ch := m.campaignCh
 	return func() tea.Msg {
-		id, ok := <-ch
+		msg, ok := <-ch
 		if !ok {
 			return nil
 		}
-		return campaignCreatedMsg{campaignID: id}
+		return msg
 	}
 }
 
@@ -1255,6 +1259,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case campaignCreatedMsg:
 		m.campaignID = msg.campaignID
+		if !msg.createdAt.IsZero() {
+			m.launchCampaignCreatedAt = msg.createdAt
+		}
 		m.lastLaunchProgressAt = time.Now()
 		m.launchCallbackEvents++
 		if m.inlineWatch != nil {
@@ -1307,6 +1314,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchExecutionPlanMsg:
 		m.expectedInstanceCount = msg.expectedInstanceCount
+		m.firstRegSurvival = msg.firstRegSurvival
 		return m, nil
 
 	case launchInstanceRegisteredMsg:
@@ -1492,8 +1500,10 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resetLaunchChannels(len(m.groups))
 		m.expectedInstanceCount = 0
 		m.launchStartedAt = time.Now()
+		m.launchCampaignCreatedAt = time.Time{}
 		m.lastLaunchProgressAt = m.launchStartedAt
 		m.launchStatusCounts = nil
+		m.firstRegSurvival = nil
 		m.lastHeartbeatStatusSig = ""
 		m.launchHeartbeatErr = nil
 		m.registeredInstanceIDs = nil
@@ -1949,11 +1959,14 @@ func (m launchModel) launchInstances() tea.Cmd {
 		defer close(phaseCh)
 		defer close(instanceCh)
 		var launchGroups []campaign.InstanceGroup
-		sendLaunchPlanReady := func(expectedInstanceCount int) {
+		sendLaunchPlanReady := func(expectedInstanceCount int, firstRegSurvival *db.FirstRegistrationSurvival) {
 			select {
 			case <-sendCtx.Done():
 				return
-			case planCh <- launchExecutionPlanMsg{expectedInstanceCount: expectedInstanceCount}:
+			case planCh <- launchExecutionPlanMsg{
+				expectedInstanceCount: expectedInstanceCount,
+				firstRegSurvival:      firstRegSurvival,
+			}:
 			}
 		}
 		sendCampaignPhase := func(phase string) {
@@ -2000,7 +2013,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			survivalModel,
 		)
 		if err != nil {
-			sendLaunchPlanReady(0)
+			sendLaunchPlanReady(0, nil)
 			return instancesLaunchedMsg{err: err}
 		}
 
@@ -2012,7 +2025,11 @@ func (m launchModel) launchInstances() tea.Cmd {
 		if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(selectedEstimates) > 0 {
 			opts.ApplyAutoBudget(selectedEstimates)
 		}
-		sendLaunchPlanReady(len(launchGroups))
+		firstRegSurvival, _ := db.ComputeFirstRegistrationSurvival(
+			database,
+			firstRegistrationScopeFromOffers(offers),
+		)
+		sendLaunchPlanReady(len(launchGroups), firstRegSurvival)
 
 		if len(selectedReuse) > 0 {
 			r2Client, err := newR2ClientFromConfig()
@@ -2055,7 +2072,17 @@ func (m launchModel) launchInstances() tea.Cmd {
 					sendCampaignPhase(fmt.Sprintf("%s: %s", group.GPUSpec(), phase))
 				}
 			},
-			func(id int64) { campaignCh <- id },
+			func(id int64) {
+				createdAt := time.Now()
+				if c, err := db.GetCampaign(database, id); err == nil && c != nil && c.CreatedAt > 0 {
+					createdAt = time.Unix(c.CreatedAt, 0)
+				}
+				select {
+				case <-sendCtx.Done():
+					return
+				case campaignCh <- campaignCreatedMsg{campaignID: id, createdAt: createdAt}:
+				}
+			},
 			func(group campaign.InstanceGroup, instanceID int64) {
 				sendInstanceRegistered(findGroupIndex(group), instanceID)
 			},
@@ -2278,6 +2305,108 @@ func (m launchModel) launchStallLine() string {
 	return fmt.Sprintf("No new-instance launch callbacks for %s; checking DB state...", stalledFor.Truncate(time.Second))
 }
 
+func firstRegistrationScopeFromOffers(offers []cloud.Offer) db.FirstRegistrationScope {
+	if len(offers) == 0 {
+		return db.FirstRegistrationScope{}
+	}
+	provider := string(offers[0].Provider)
+	if provider == "" {
+		return db.FirstRegistrationScope{}
+	}
+	allProvider := true
+	dataCenter := offers[0].DataCenter
+	allDataCenter := dataCenter != ""
+	for _, offer := range offers[1:] {
+		if string(offer.Provider) != provider {
+			allProvider = false
+		}
+		if offer.DataCenter != dataCenter {
+			allDataCenter = false
+		}
+	}
+	if !allProvider {
+		return db.FirstRegistrationScope{}
+	}
+	scope := db.FirstRegistrationScope{Provider: provider}
+	if allDataCenter {
+		scope.DataCenter = dataCenter
+	}
+	return scope
+}
+
+func formatDeadlineRemaining(d time.Duration) string {
+	if d > 0 {
+		return fmt.Sprintf("terminate in %s", d.Truncate(time.Second))
+	}
+	return fmt.Sprintf("termination overdue by %s", (-d).Truncate(time.Second))
+}
+
+func firstRegistrationSuspicionLabel(p float64) string {
+	switch {
+	case p < 0.10:
+		return "critical"
+	case p < 0.25:
+		return "high"
+	case p < 0.50:
+		return "elevated"
+	default:
+		return "low"
+	}
+}
+
+func (m launchModel) launchFirstRegistrationLine() (line string, critical bool) {
+	if !m.launching || m.firstRegSurvival == nil || len(m.registeredInstanceIDs) > 0 {
+		return "", false
+	}
+	start := m.launchCampaignCreatedAt
+	if start.IsZero() {
+		start = m.launchStartedAt
+	}
+	if start.IsZero() {
+		return "", false
+	}
+	elapsed := time.Since(start)
+	deadlineRemaining := m.firstRegSurvival.TerminateAfter - elapsed
+	deadlineText := formatDeadlineRemaining(deadlineRemaining)
+
+	p, ok := m.firstRegSurvival.ConditionalSuccess(elapsed)
+	if !ok {
+		return fmt.Sprintf(
+			"first registration: %s elapsed, %s (scope %s, n=%d)",
+			elapsed.Truncate(time.Second),
+			deadlineText,
+			m.firstRegSurvival.ScopeDescription(),
+			m.firstRegSurvival.SampleSize,
+		), deadlineRemaining <= 0
+	}
+	label := firstRegistrationSuspicionLabel(p)
+	remaining, remOK := m.firstRegSurvival.Durations.ConditionalMedian(elapsed)
+	if remOK {
+		if deadlineRemaining > 0 && remaining > deadlineRemaining {
+			remaining = deadlineRemaining
+		}
+		return fmt.Sprintf(
+			"first registration: %s elapsed, est ~%s remaining, p=%.0f%% (%s), %s (scope %s, n=%d)",
+			elapsed.Truncate(time.Second),
+			remaining.Truncate(time.Second),
+			p*100,
+			label,
+			deadlineText,
+			m.firstRegSurvival.ScopeDescription(),
+			m.firstRegSurvival.SampleSize,
+		), label == "critical" || deadlineRemaining <= 0
+	}
+	return fmt.Sprintf(
+		"first registration: %s elapsed, p=%.0f%% (%s), %s (scope %s, n=%d)",
+		elapsed.Truncate(time.Second),
+		p*100,
+		label,
+		deadlineText,
+		m.firstRegSurvival.ScopeDescription(),
+		m.firstRegSurvival.SampleSize,
+	), label == "critical" || deadlineRemaining <= 0
+}
+
 func (m launchModel) renderInlineLaunchOverview() string {
 	if m.inlineWatch == nil || !m.launching {
 		return ""
@@ -2304,6 +2433,14 @@ func (m launchModel) renderInlineLaunchOverview() string {
 	pendingLines++
 	if stateLine := formatLaunchStatusCounts(m.launchStatusCounts); stateLine != "" {
 		b.WriteString(fmt.Sprintf("  · %s\n", stateLine))
+		pendingLines++
+	}
+	if firstRegLine, critical := m.launchFirstRegistrationLine(); firstRegLine != "" {
+		if critical {
+			b.WriteString("  · " + launchErrStyle.Render(firstRegLine) + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("  · %s\n", firstRegLine))
+		}
 		pendingLines++
 	}
 	if stall := m.launchStallLine(); stall != "" {
@@ -2424,6 +2561,15 @@ func (m launchModel) View() string {
 		if stateLine := formatLaunchStatusCounts(m.launchStatusCounts); stateLine != "" {
 			b.WriteString("  · ")
 			b.WriteString(stateLine)
+			b.WriteString("\n")
+		}
+		if firstRegLine, critical := m.launchFirstRegistrationLine(); firstRegLine != "" {
+			b.WriteString("  · ")
+			if critical {
+				b.WriteString(launchErrStyle.Render(firstRegLine))
+			} else {
+				b.WriteString(firstRegLine)
+			}
 			b.WriteString("\n")
 		}
 		if stall := m.launchStallLine(); stall != "" {

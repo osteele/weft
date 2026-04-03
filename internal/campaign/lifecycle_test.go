@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -281,6 +283,98 @@ func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	}
 	if campaigns != 0 {
 		t.Fatalf("campaign count = %d, want 0", campaigns)
+	}
+}
+
+func TestLaunchCampaign_AutoFailsOnFirstRegistrationTimeout(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		101, "RTX_4090", 24, "python train.py",
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs: []*db.Job{
+			{
+				ID:         101,
+				Status:     db.StatusQueued,
+				Command:    "python train.py",
+				WorkingDir: "/tmp",
+			},
+		},
+	}
+	offer := cloud.Offer{
+		Provider:    cloud.ProviderVastai,
+		ProviderID:  "offer-1",
+		GPUName:     "RTX_4090",
+		NumGPUs:     1,
+		CostPerHour: 0.5,
+		DataCenter:  "us-east",
+	}
+
+	mockClient := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+	stager := &R2AssetStager{
+		Client:         &r2.Client{},
+		AgentVersion:   "test",
+		agentKey:       newStringPromise(),
+		sourcePromises: map[string]*stringPromise{},
+	}
+	var closeOnce sync.Once
+	stager.cancel = func() {
+		closeOnce.Do(func() {
+			stager.agentKey.resolve("", errors.New("stager canceled"))
+		})
+	}
+
+	var campaignID int64
+	result, err := LaunchCampaignWithAssetStager(
+		stager,
+		[]cloud.Client{mockClient},
+		database,
+		[]InstanceGroup{group},
+		[]cloud.Offer{offer},
+		nil,
+		nil,
+		LaunchOpts{},
+		cloud.R2Config{},
+		func(cloud.Provider) (cloud.CreateOpts, error) { return cloud.CreateOpts{}, nil },
+		func(InstanceGroup, string) {},
+		func(id int64) {
+			campaignID = id
+			// Force elapsed time past first-registration terminate threshold.
+			_, _ = database.Exec(`UPDATE campaigns SET created_at = ? WHERE id = ?`, time.Now().Add(-24*time.Hour).Unix(), id)
+		},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected first-registration timeout error")
+	}
+	if result != nil {
+		t.Fatalf("result = %#v, want nil on timeout", result)
+	}
+	if !strings.Contains(err.Error(), "first worker registration timed out") {
+		t.Fatalf("error = %v, want first-registration timeout", err)
+	}
+	if campaignID == 0 {
+		t.Fatal("expected campaign ID from callback")
+	}
+
+	c, getErr := db.GetCampaign(database, campaignID)
+	if getErr != nil {
+		t.Fatalf("get campaign: %v", getErr)
+	}
+	if c == nil {
+		t.Fatal("campaign not found")
+	}
+	if c.Status != db.CampaignStatusFailed {
+		t.Fatalf("campaign status = %q, want %q", c.Status, db.CampaignStatusFailed)
 	}
 }
 

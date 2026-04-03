@@ -654,6 +654,10 @@ func launchCampaignWithStager(
 	if onCampaignCreated != nil {
 		onCampaignCreated(campaignID)
 	}
+	campaignCreatedAt := time.Now()
+	if c, err := db.GetCampaign(database, campaignID); err == nil && c != nil && c.CreatedAt > 0 {
+		campaignCreatedAt = time.Unix(c.CreatedAt, 0)
+	}
 
 	// Donor strategy: find a cheap collocated instance for cache seeding
 	var donorCfg *DonorConfig
@@ -821,6 +825,38 @@ func launchCampaignWithStager(
 	var workerProviderIDs []workerInfo
 	var launchErrors []error
 	var wg sync.WaitGroup
+	var firstWorkerRegistered bool
+	var firstRegistrationTimedOut bool
+	firstRegSurvival, _ := db.ComputeFirstRegistrationSurvival(database, firstRegistrationScopeFromOffers(offers))
+	stopFirstRegistrationWatch := make(chan struct{})
+	if firstRegSurvival != nil {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopFirstRegistrationWatch:
+					return
+				case <-ticker.C:
+					mu.Lock()
+					if firstWorkerRegistered || firstRegistrationTimedOut {
+						mu.Unlock()
+						return
+					}
+					elapsed := time.Since(campaignCreatedAt)
+					shouldTimeout := elapsed >= firstRegSurvival.TerminateAfter
+					if shouldTimeout {
+						firstRegistrationTimedOut = true
+					}
+					mu.Unlock()
+					if shouldTimeout {
+						stager.Close()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	for i, g := range groups {
 		offer := offers[i]
@@ -846,13 +882,13 @@ func launchCampaignWithStager(
 					mu.Unlock()
 				}
 			}
-			var instanceRegistered func(int64)
-			if onInstanceRegistered != nil {
-				instanceRegistered = func(instanceID int64) {
-					mu.Lock()
+			instanceRegistered := func(instanceID int64) {
+				mu.Lock()
+				firstWorkerRegistered = true
+				if onInstanceRegistered != nil {
 					onInstanceRegistered(group, instanceID)
-					mu.Unlock()
 				}
+				mu.Unlock()
 			}
 
 			createOpts := cloud.CreateOpts{}
@@ -935,6 +971,19 @@ func launchCampaignWithStager(
 	}
 
 	wg.Wait()
+	close(stopFirstRegistrationWatch)
+	mu.Lock()
+	timedOut := firstRegistrationTimedOut
+	mu.Unlock()
+	if timedOut {
+		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
+		return nil, fmt.Errorf(
+			"first worker registration timed out after %s (scope=%s sample=%d)",
+			firstRegSurvival.TerminateAfter.Truncate(time.Second),
+			firstRegSurvival.ScopeDescription(),
+			firstRegSurvival.SampleSize,
+		)
+	}
 
 	// Donor fan-out: wait for readiness, copy caches, then destroy donor
 	if donorCfg != nil && donorProviderID != "" && len(workerProviderIDs) > 0 {
@@ -1020,6 +1069,35 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 
 func supportsDonorStrategy(client cloud.Client) bool {
 	return client != nil && client.Provider() == cloud.ProviderVastai
+}
+
+func firstRegistrationScopeFromOffers(offers []cloud.Offer) db.FirstRegistrationScope {
+	if len(offers) == 0 {
+		return db.FirstRegistrationScope{}
+	}
+	provider := string(offers[0].Provider)
+	if provider == "" {
+		return db.FirstRegistrationScope{}
+	}
+	allProvider := true
+	dataCenter := offers[0].DataCenter
+	allDataCenter := dataCenter != ""
+	for _, offer := range offers[1:] {
+		if string(offer.Provider) != provider {
+			allProvider = false
+		}
+		if offer.DataCenter != dataCenter {
+			allDataCenter = false
+		}
+	}
+	if !allProvider {
+		return db.FirstRegistrationScope{}
+	}
+	scope := db.FirstRegistrationScope{Provider: provider}
+	if allDataCenter {
+		scope.DataCenter = dataCenter
+	}
+	return scope
 }
 
 func configureBootstrapCreateOpts(client cloud.Client, createOpts *cloud.CreateOpts, bootstrapKey string) error {

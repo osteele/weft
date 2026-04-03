@@ -434,6 +434,46 @@ penalty when available). The model therefore prefers an offer that is slightly
 more expensive per hour when it is much more likely to finish without forcing a
 restart.
 
+## First Registration Hang Detection (Truncated Tail)
+
+Campaign launch also models **time to first worker registration** to detect
+"no callback" hangs early.
+
+Definition:
+
+```text
+T = first_worker_launch.created_at - campaign.created_at
+```
+
+Historical observations are built from campaigns:
+
+- success: campaign has at least one worker launch (event at first launch time)
+- failure: campaign reached a terminal status with no worker launch (event at campaign end)
+
+For a live campaign with elapsed time `e` and no registration yet, we condition
+on survival to `e` (tail truncation):
+
+```text
+P(success eventually | T > e) = successes_with(T > e) / total_with(T > e)
+```
+
+Remaining-time estimate is the conditional median from successful durations
+`T_success >= e`, minus `e`.
+
+Thresholds are learned by scope with fallback:
+
+1. provider + data center
+2. provider
+3. global
+
+If a narrower scope has too few samples, the next scope is used.
+
+This produces:
+
+- adaptive warn/terminate deadlines for first registration
+- conditional success probability (used for suspicion level)
+- truncated-tail remaining-time estimate for launch UI messaging
+
 ## Automatic Relaunch On Infrastructure Failure
 
 When `weft campaign watch` (TUI or plain mode) detects a retryable

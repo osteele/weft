@@ -199,6 +199,12 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 	}
 
 	for _, ddl := range []string{
+		`CREATE TABLE campaigns (
+			id INTEGER PRIMARY KEY,
+			status TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			ended_at INTEGER
+		)`,
 		`CREATE TABLE launches (
 			id INTEGER PRIMARY KEY,
 			campaign_id INTEGER,
@@ -226,6 +232,7 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			cuda_version REAL,
 			provider_instance_id TEXT,
 			provider_running_at INTEGER,
+			instance_role TEXT DEFAULT 'worker',
 			docker_image TEXT
 		)`,
 		createJobsTableSQL("jobs", false),

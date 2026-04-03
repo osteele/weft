@@ -182,6 +182,35 @@ rclone configuration problems.
 **Action:** Check if the agent binary was stale (`just build` rebuilds
 agents). Check R2 for bootstrap script artifacts.
 
+### First worker registration stalled
+
+The campaign was created, but no worker launch row was registered
+(`launches.created_at`) before the first-registration deadline.
+
+This uses a survival model over historical
+`time_to_first_registration = first_worker_launch.created_at - campaign.created_at`.
+When no registration has happened yet, we condition on elapsed time (tail
+truncation) to estimate:
+
+- conditional success probability `P(register eventually | not yet by elapsed)`
+- median remaining time from the truncated successful tail
+- adaptive warn/terminate thresholds
+
+Scope selection is:
+
+1. provider + data center
+2. provider
+3. global
+
+When a narrower scope has too little data, weft falls back automatically.
+
+By default, this detection is enforced during launch: if elapsed reaches the
+learned terminate threshold with zero worker registrations, the launch path
+auto-fails the campaign.
+
+**Action:** Inspect provider/API health and cloud offer availability; if this
+repeats in one region, force a different region/provider and re-launch.
+
 ### Setup phase stalled
 
 The agent started the setup phase (e.g., `uv sync`) for a job but

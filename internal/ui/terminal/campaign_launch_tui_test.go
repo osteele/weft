@@ -730,11 +730,11 @@ func TestLaunchModelUpdate_LaunchHeartbeatStatusChangeAdvancesLiveness(t *testin
 }
 
 func TestLaunchModelHandleKey_EnterResetsLaunchChannels(t *testing.T) {
-	oldCampaignCh := make(chan int64, 1)
+	oldCampaignCh := make(chan campaignCreatedMsg, 1)
 	oldPlanCh := make(chan launchExecutionPlanMsg, 1)
 	oldPhaseCh := make(chan launchPhaseMsg, 1)
 	oldInstanceCh := make(chan launchInstanceRegisteredMsg, 1)
-	oldCampaignCh <- 123
+	oldCampaignCh <- campaignCreatedMsg{campaignID: 123}
 	oldPlanCh <- launchExecutionPlanMsg{expectedInstanceCount: 99}
 	oldPhaseCh <- launchPhaseMsg{groupIndex: -1, phase: "stale"}
 	oldInstanceCh <- launchInstanceRegisteredMsg{instanceID: 999, groupIndex: 0}
