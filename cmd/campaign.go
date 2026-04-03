@@ -20,11 +20,16 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
+
+var loadInventoryHosts = inventory.LoadHosts
+var collectOnPremMetrics = placement.CollectMetrics
+var scoreOnPremHosts = placement.ScoreHostListWithPredictor
 
 var campaignCmd = &cobra.Command{
 	Use:     "campaign",
@@ -217,7 +222,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Pre-filter: try on-prem placement for unplaced jobs.
 	// Jobs that can now be placed on-prem are assigned and removed from the rental list.
 	if len(jobs) > 0 {
-		reportStartupPhase(fmt.Sprintf("Checking on-prem placement for %d job(s)...", len(jobs)))
+		reportStartupPhase(fmt.Sprintf("Probing on-prem hosts for %d job(s)...", len(jobs)))
 	}
 	jobs = prefilterOnPremWithProgress(database, jobs, cfg, newLaunchProgressReporter(cmd.ErrOrStderr(), "Checked on-prem placement", len(jobs)))
 
@@ -308,6 +313,40 @@ func prefilterOnPrem(database *sql.DB, jobs []*db.Job, cfg *config.Config) []*db
 }
 
 func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int)) []*db.Job {
+	hosts, err := loadInventoryHosts()
+	if err != nil || len(hosts) == 0 {
+		return prefilterOnPremIndividually(database, jobs, cfg, onProgress)
+	}
+
+	hostNames := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		hostNames = append(hostNames, host.Name)
+	}
+	liveMetrics := collectOnPremMetrics(database, hostNames, 5*time.Second)
+
+	var remaining []*db.Job
+	total := len(jobs)
+	for i, j := range jobs {
+		if onProgress != nil {
+			onProgress(i+1, total)
+		}
+		host, ok := selectOnPremHostFromSnapshot(database, hosts, liveMetrics, j, cfg)
+		if !ok {
+			remaining = append(remaining, j)
+			continue
+		}
+		assigned, err := db.AssignJobHost(database, j.ID, host)
+		if err != nil || !assigned {
+			remaining = append(remaining, j)
+			continue
+		}
+		slog.Info("placed job on-prem during launch pre-filter", "job_id", j.ID, "host", host)
+		fmt.Printf("Job #%d → %s (on-prem, skipping rental)\n", j.ID, host)
+	}
+	return remaining
+}
+
+func prefilterOnPremIndividually(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int)) []*db.Job {
 	var remaining []*db.Job
 	total := len(jobs)
 	for i, j := range jobs {
@@ -336,6 +375,49 @@ func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.C
 		fmt.Printf("Job #%d → %s (on-prem, skipping rental)\n", j.ID, host)
 	}
 	return remaining
+}
+
+func selectOnPremHostFromSnapshot(database *sql.DB, hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics, job *db.Job, cfg *config.Config) (string, bool) {
+	if job == nil {
+		return "", false
+	}
+	constraints := placement.ConstraintsFromJob(job)
+	if db.HasRentalTag(constraints.Tags) {
+		return "", false
+	}
+
+	predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
+	reachableHosts := filterReachableInventoryHosts(hosts, liveMetrics)
+	if host, ok := firstEligibleOnPremHost(database, reachableHosts, constraints, liveMetrics, predict); ok {
+		return host, true
+	}
+	return firstEligibleOnPremHost(database, hosts, constraints, nil, predict)
+}
+
+func filterReachableInventoryHosts(hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics) []inventory.HostSpec {
+	if len(liveMetrics) == 0 {
+		return nil
+	}
+	reachable := make([]inventory.HostSpec, 0, len(hosts))
+	for _, host := range hosts {
+		if liveMetrics[host.Name] != nil {
+			reachable = append(reachable, host)
+		}
+	}
+	return reachable
+}
+
+func firstEligibleOnPremHost(database *sql.DB, hosts []inventory.HostSpec, constraints placement.Constraints, metrics map[string]*placement.HostMetrics, predict placement.JobPredictor) (string, bool) {
+	if len(hosts) == 0 {
+		return "", false
+	}
+	scores := scoreOnPremHosts(database, hosts, constraints, metrics, predict)
+	for _, score := range scores {
+		if score.Eligible {
+			return score.Host, true
+		}
+	}
+	return "", false
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
