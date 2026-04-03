@@ -57,6 +57,76 @@ func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
 	}
 }
 
+func TestBuildProfilePlansFromSplitRaw_CachesSelectedOfferEstimatesAcrossProfiles(t *testing.T) {
+	originalResolve := resolvePredictBatch
+	originalCostPredict := estimateJobDurationsDetailedForCosts
+	t.Cleanup(func() {
+		resolvePredictBatch = originalResolve
+		estimateJobDurationsDetailedForCosts = originalCostPredict
+	})
+
+	resolveCalls := 0
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		resolveCalls++
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  1800,
+					Lower: 1500,
+					Upper: 2100,
+				},
+				DurationMetadata: &predictor.RuntimeMetadata{Source: "empirical", Confidence: 1.0},
+			}
+		}
+		return results, nil
+	}
+
+	costPredictCalls := 0
+	estimateJobDurationsDetailedForCosts = func(_ *predictor.Config, batchJobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
+		costPredictCalls++
+		results := make(map[int64]estimate.DurationPrediction, len(batchJobs))
+		for _, job := range batchJobs {
+			results[job.ID] = estimate.DurationPrediction{Estimate: estimate.FromSeconds(1800, 1500, 2100)}
+		}
+		return results
+	}
+
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs:     []*db.Job{{ID: 1, Project: "demo", Command: "python train.py --epochs 1"}},
+	}
+	splitRaw := []GroupRawOffers{{
+		Group: group,
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.40},
+		},
+	}}
+
+	plans := BuildProfilePlansFromSplitRaw(
+		nil,
+		nil,
+		[]InstanceGroup{group},
+		splitRaw,
+		nil,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		[]bidding.ScoreProfile{bidding.StrategyCheap.Profile(), bidding.StrategyFast.Profile()},
+		0,
+	)
+
+	if len(plans) != 2 {
+		t.Fatalf("expected 2 profile plans, got %d", len(plans))
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolvePredictBatch call count = %d, want 1", resolveCalls)
+	}
+	if costPredictCalls != 0 {
+		t.Fatalf("cost duration estimator call count = %d, want 0", costPredictCalls)
+	}
+}
+
 func TestRankGroupOffersWithPredictor_MultiJobGroupUsesTotalDuration(t *testing.T) {
 	original := resolvePredictBatch
 	t.Cleanup(func() { resolvePredictBatch = original })

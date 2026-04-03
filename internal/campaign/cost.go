@@ -18,6 +18,8 @@ import (
 	"github.com/osteele/weft/internal/transferbw"
 )
 
+var estimateJobDurationsDetailedForCosts = estimate.EstimateJobDurationsDetailed
+
 // CostEstimate holds the cost projection for one instance group.
 type CostEstimate struct {
 	Group              InstanceGroup
@@ -45,6 +47,14 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 // durations when available. Without predictions, feasible GPUs default to the
 // same runtime baseline instead of local DLPerf scaling.
 func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, onProgress EstimateProgressFunc) []CostEstimate {
+	return estimateCosts(database, groupOffers, nil, predCfg, overheadModel, r2Client, survivalModel, onProgress)
+}
+
+func EstimateCostsWithRuntimePredictions(database *sql.DB, groupOffers []GroupOffer, runtimePredictions []offerRuntimePrediction, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, onProgress EstimateProgressFunc) []CostEstimate {
+	return estimateCosts(database, groupOffers, runtimePredictions, predCfg, overheadModel, r2Client, survivalModel, onProgress)
+}
+
+func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePredictions []offerRuntimePrediction, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Collect inputs for all three estimation steps (fast, in-memory)
@@ -65,8 +75,11 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	}
 
 	var allBatchJobs []predictor.BatchJob
-	for _, go_ := range groupOffers {
+	for i, go_ := range groupOffers {
 		if go_.Offer == nil {
+			continue
+		}
+		if selectedRuntimePredictionComplete(runtimePredictions, i, len(go_.Group.Jobs)) {
 			continue
 		}
 		for _, job := range go_.Group.Jobs {
@@ -106,11 +119,13 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	}()
 
 	// Step 3: Job duration predictions (subprocess call to ML predictor)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		allPredictions = estimateJobDurationsDetailed(predCfg, allBatchJobs)
-	}()
+	if len(allBatchJobs) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			allPredictions = estimateJobDurationsDetailedForCosts(predCfg, allBatchJobs)
+		}()
+	}
 
 	wg.Wait()
 	jobsDone := 0
@@ -169,19 +184,36 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
 
 		var runEst estimate.Estimate
-		for _, job := range go_.Group.Jobs {
-			if pred, ok := allPredictions[job.ID]; ok {
-				est.JobDurations[job.ID] = pred.Estimate.Mean
-				runEst = runEst.Add(pred.Estimate)
-				if pred.Metadata != nil {
-					est.JobRuntimeMetadata[job.ID] = *pred.Metadata
+		if selectedRuntimePredictionComplete(runtimePredictions, i, len(go_.Group.Jobs)) {
+			pred := runtimePredictions[i]
+			for jobIdx, job := range go_.Group.Jobs {
+				jobEstimate := estimate.DefaultJobDuration
+				if jobIdx < len(pred.jobEstimates) && pred.jobEstimates[jobIdx].Mean > 0 {
+					jobEstimate = pred.jobEstimates[jobIdx]
+				} else if jobIdx < len(pred.jobDurations) && pred.jobDurations[jobIdx] > 0 {
+					jobEstimate = estimate.Constant(pred.jobDurations[jobIdx])
 				}
-			} else {
-				runEst = runEst.Add(estimate.DefaultJobDuration)
+				est.JobDurations[job.ID] = jobEstimate.Mean
+				runEst = runEst.Add(jobEstimate)
+				if jobIdx < len(pred.metadata) && pred.metadata[jobIdx] != nil {
+					est.JobRuntimeMetadata[job.ID] = *pred.metadata[jobIdx]
+				}
 			}
-			jobsDone++
-			if onProgress != nil {
-				onProgress("Estimating durations", jobsDone, len(allBatchJobs))
+		} else {
+			for _, job := range go_.Group.Jobs {
+				if pred, ok := allPredictions[job.ID]; ok {
+					est.JobDurations[job.ID] = pred.Estimate.Mean
+					runEst = runEst.Add(pred.Estimate)
+					if pred.Metadata != nil {
+						est.JobRuntimeMetadata[job.ID] = *pred.Metadata
+					}
+				} else {
+					runEst = runEst.Add(estimate.DefaultJobDuration)
+				}
+				jobsDone++
+				if onProgress != nil {
+					onProgress("Estimating durations", jobsDone, len(allBatchJobs))
+				}
 			}
 		}
 
@@ -223,6 +255,14 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	}
 
 	return estimates
+}
+
+func selectedRuntimePredictionComplete(runtimePredictions []offerRuntimePrediction, idx int, jobCount int) bool {
+	if idx < 0 || idx >= len(runtimePredictions) || jobCount < 0 {
+		return false
+	}
+	pred := runtimePredictions[idx]
+	return pred.complete && pred.feasible && len(pred.jobDurations) == jobCount
 }
 
 // OfferSetupOverheadFactory builds a SetupOverheadFactory that creates per-offer

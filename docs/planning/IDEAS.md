@@ -421,8 +421,11 @@ Future work:
   contention uncertainty. Instead of point estimates, simulate thousands of
   scenarios to find the option with best expected value under uncertainty.
 - **Multi-job scheduling**: Batch-optimize across multiple pending jobs
-  simultaneously. Today each job is placed independently; joint optimization
-  could avoid overloading a single host when 10 jobs arrive at once.
+  simultaneously. The launch planner already batch-optimizes the selected GPU
+  groups together, including reuse and merged/parallel candidate groupings.
+  The remaining gap is global optimization across all pending jobs and other
+  placement paths, so the scheduler can avoid overloading a single host when
+  10 jobs arrive at once.
 
 The `Candidate` struct's attributes (EstTime, EstCost, Survival) are the
 decision variables. Adding new attributes (e.g., data locality score, carbon

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type reuseGroupDecision struct {
 // PlanProgress reports coarse-grained progress while constructing launch plans.
 type PlanProgress struct {
 	Phase   string
+	Lane    string
 	Detail  string
 	Current int
 	Total   int
@@ -59,6 +61,51 @@ type PlanProgress struct {
 
 // PlanProgressFunc receives launch-plan progress updates.
 type PlanProgressFunc func(PlanProgress)
+
+type rawOfferEvaluation struct {
+	raw              []GroupRawOffers
+	offerPredictions map[int]map[string]offerRuntimePrediction
+}
+
+type groupingEvaluation struct {
+	label   string
+	groups  []InstanceGroup
+	rawEval rawOfferEvaluation
+}
+
+type planEvaluator struct {
+	database      *sql.DB
+	predCfg       *predictor.Config
+	overheadModel *estimate.OverheadModel
+	survivalModel *bidding.SurvivalModel
+	minSurvival   float64
+	setupFactory  SetupOverheadFactory
+
+	rawMu        sync.Mutex
+	rawEvalCache map[string]map[int]map[string]offerRuntimePrediction
+
+	estimateMu    sync.Mutex
+	estimateCache map[string][]CostEstimate
+}
+
+func newPlanEvaluator(
+	database *sql.DB,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	minSurvival float64,
+) *planEvaluator {
+	return &planEvaluator{
+		database:      database,
+		predCfg:       predCfg,
+		overheadModel: overheadModel,
+		survivalModel: survivalModel,
+		minSurvival:   minSurvival,
+		setupFactory:  OfferSetupOverheadFactory(database, overheadModel),
+		rawEvalCache:  make(map[string]map[int]map[string]offerRuntimePrediction),
+		estimateCache: make(map[string][]CostEstimate),
+	}
+}
 
 // BuildStrategyPlans builds a reusable/new-instance launch plan for each
 // strategy. The split groups are the original launch groups shown in the UI.
@@ -277,6 +324,9 @@ func buildProfilePlansFromSplitRawWithSession(
 		return plans
 	}
 
+	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival)
+	splitEval := evaluator.evaluateRawOffers(splitRaw)
+
 	workerLimit := planProfileWorkerLimit(len(validProfiles))
 	sem := make(chan struct{}, workerLimit)
 	var mu sync.Mutex
@@ -289,20 +339,17 @@ func buildProfilePlansFromSplitRawWithSession(
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			reportPlanProgress(onProgress, "Planning tradeoff profiles", profile.ID, idx+1, len(validProfiles))
+			progressLabel := profileProgressLabel(profile.ID, idx+1, len(validProfiles))
+			reportPlanProgressForLane(onProgress, "Planning tradeoff profiles", progressLabel, "", idx+1, len(validProfiles))
 			plan := buildStrategyPlanForSplitRaw(
-				database,
 				splitGroups,
-				splitRaw,
+				splitEval,
 				reusable,
-				predCfg,
-				overheadModel,
-				survivalModel,
+				evaluator,
 				offerSession,
 				profile,
-				minSurvival,
 				onProgress,
-				profileProgressLabel(profile.ID, idx+1, len(validProfiles)),
+				progressLabel,
 			)
 
 			mu.Lock()
@@ -327,16 +374,12 @@ func planProfileWorkerLimit(totalProfiles int) int {
 }
 
 func buildStrategyPlanForSplitRaw(
-	database *sql.DB,
 	splitGroups []InstanceGroup,
-	splitRaw []GroupRawOffers,
+	splitEval rawOfferEvaluation,
 	reusable []InstanceCapacity,
-	predCfg *predictor.Config,
-	overheadModel *estimate.OverheadModel,
-	survivalModel *bidding.SurvivalModel,
+	evaluator *planEvaluator,
 	offerSession *offerSearchSession,
 	profile bidding.ScoreProfile,
-	minSurvival float64,
 	onProgress PlanProgressFunc,
 	progressLabel string,
 ) StrategyPlan {
@@ -350,21 +393,19 @@ func buildStrategyPlanForSplitRaw(
 		plan.DisplayEstimates[i] = CostEstimate{Group: g, Offer: GroupOffer{Group: g}}
 	}
 
-	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
-	reportPlanProgress(onProgress, "Ranking direct-offer groups", progressLabel, 0, 0)
-	splitOffers, splitPredictions := rankGroupOffersForPlanningWithPredictions(splitRaw, predCfg, survivalModel, setupFactory, profile, minSurvival)
-	reportPlanProgress(onProgress, "Estimating direct-offer costs", progressLabel, 0, 0)
-	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, nil)
-	splitEstimates = applySelectedOfferRuntimePredictions(splitEstimates, splitPredictions)
+	reportPlanProgressForLane(onProgress, "Ranking direct-offer groups", progressLabel, "", 0, 0)
+	splitOffers, splitPredictions := evaluator.selectOffers(splitEval, profile)
+	reportPlanProgressForLane(onProgress, "Estimating direct-offer costs", progressLabel, "", 0, 0)
+	splitEstimates := evaluator.estimateSelectedOffers(splitOffers, splitPredictions)
 
-	reportPlanProgress(onProgress, "Checking reusable instances", progressLabel, 0, 0)
+	reportPlanProgressForLane(onProgress, "Checking reusable instances", progressLabel, "", 0, 0)
 	reuseDecisions := chooseReuseGroups(
-		database,
+		evaluator.database,
 		splitGroups,
 		splitEstimates,
 		reusable,
-		predCfg,
-		overheadModel,
+		evaluator.predCfg,
+		evaluator.overheadModel,
 		profile,
 	)
 
@@ -396,9 +437,15 @@ func buildStrategyPlanForSplitRaw(
 		return plan
 	}
 
-	reportPlanProgress(onProgress, "Fetching merged and parallel candidates", progressLabel, 0, 0)
+	reportPlanProgressForLane(onProgress, "Fetching merged and parallel candidates", progressLabel, "", 0, 0)
 	candidates := fetchCandidateGroupingsWithSession(offerSession, remainingGroups)
-	result := BestCandidateForProfileWithProgress(database, candidates, predCfg, overheadModel, survivalModel, profile, minSurvival, onProgress, progressLabel)
+	result := bestCandidateForProfileEvaluations(
+		evaluator,
+		evaluator.evaluateCandidateGroupings(candidates),
+		profile,
+		onProgress,
+		progressLabel,
+	)
 	if len(result.Groups) == 0 {
 		return plan
 	}
@@ -419,9 +466,139 @@ func buildStrategyPlanForSplitRaw(
 	return plan
 }
 
+func (e *planEvaluator) evaluateRawOffers(raw []GroupRawOffers) rawOfferEvaluation {
+	key := rawOfferEvaluationCacheKey(raw)
+
+	e.rawMu.Lock()
+	cached, ok := e.rawEvalCache[key]
+	e.rawMu.Unlock()
+	if ok {
+		return rawOfferEvaluation{raw: raw, offerPredictions: cached}
+	}
+
+	predictions := predictOfferRuntimes(raw, e.predCfg)
+
+	e.rawMu.Lock()
+	if cached, ok := e.rawEvalCache[key]; ok {
+		e.rawMu.Unlock()
+		return rawOfferEvaluation{raw: raw, offerPredictions: cached}
+	}
+	e.rawEvalCache[key] = predictions
+	e.rawMu.Unlock()
+
+	return rawOfferEvaluation{raw: raw, offerPredictions: predictions}
+}
+
+func (e *planEvaluator) selectOffers(eval rawOfferEvaluation, profile bidding.ScoreProfile) ([]GroupOffer, []offerRuntimePrediction) {
+	return rankGroupOffersFromPredictions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival)
+}
+
+func (e *planEvaluator) estimateSelectedOffers(groupOffers []GroupOffer, selected []offerRuntimePrediction) []CostEstimate {
+	key := selectedOfferSetCacheKey(groupOffers)
+	if key != "" {
+		e.estimateMu.Lock()
+		cached, ok := e.estimateCache[key]
+		e.estimateMu.Unlock()
+		if ok {
+			return append([]CostEstimate(nil), cached...)
+		}
+	}
+
+	estimates := EstimateCostsWithRuntimePredictions(
+		e.database,
+		groupOffers,
+		selected,
+		e.predCfg,
+		e.overheadModel,
+		nil,
+		e.survivalModel,
+		nil,
+	)
+	estimates = applySelectedOfferRuntimePredictions(estimates, selected)
+
+	if key != "" {
+		e.estimateMu.Lock()
+		if _, ok := e.estimateCache[key]; !ok {
+			e.estimateCache[key] = append([]CostEstimate(nil), estimates...)
+		}
+		e.estimateMu.Unlock()
+	}
+
+	return estimates
+}
+
+func (e *planEvaluator) evaluateCandidateGroupings(candidates []GroupingCandidate) []groupingEvaluation {
+	evaluations := make([]groupingEvaluation, len(candidates))
+	if len(candidates) == 0 {
+		return evaluations
+	}
+
+	workerLimit := planProfileWorkerLimit(len(candidates))
+	sem := make(chan struct{}, workerLimit)
+	var wg sync.WaitGroup
+
+	for idx, cand := range candidates {
+		wg.Add(1)
+		go func(idx int, cand GroupingCandidate) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			evaluations[idx] = groupingEvaluation{
+				label:   cand.Label,
+				groups:  cand.Groups,
+				rawEval: e.evaluateRawOffers(cand.Raw),
+			}
+		}(idx, cand)
+	}
+	wg.Wait()
+	return evaluations
+}
+
+func rawOfferEvaluationCacheKey(raw []GroupRawOffers) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	parts := make([]string, len(raw))
+	for i, groupRaw := range raw {
+		jobIDs := make([]string, 0, len(groupRaw.Group.Jobs))
+		for _, job := range groupRaw.Group.Jobs {
+			if job == nil {
+				jobIDs = append(jobIDs, "0")
+				continue
+			}
+			jobIDs = append(jobIDs, fmt.Sprintf("%d", job.ID))
+		}
+		offerKeys := make([]string, len(groupRaw.Offers))
+		for j, offer := range groupRaw.Offers {
+			offerKeys[j] = offerPredictionKey(offer)
+		}
+		parts[i] = strings.Join(jobIDs, ",") + "=>" + strings.Join(offerKeys, ",")
+	}
+
+	return strings.Join(parts, "||")
+}
+
+func selectedOfferSetCacheKey(groupOffers []GroupOffer) string {
+	if len(groupOffers) == 0 {
+		return ""
+	}
+
+	keys := make([]string, len(groupOffers))
+	for i, groupOffer := range groupOffers {
+		if groupOffer.Offer == nil {
+			continue
+		}
+		keys[i] = groupOffer.Offer.Key()
+	}
+	return strings.Join(keys, "|")
+}
+
 type offerRuntimePrediction struct {
 	totalRunHrs          float64
 	adjustedRunHrs       float64
+	jobEstimates         []estimate.Estimate
 	jobDurations         []time.Duration
 	adjustedJobDurations []time.Duration
 	metadata             []*predictor.RuntimeMetadata
@@ -450,6 +627,17 @@ func rankGroupOffersForPlanningWithPredictions(
 	minSurvival float64,
 ) ([]GroupOffer, []offerRuntimePrediction) {
 	predicted := predictOfferRuntimes(raw, predCfg)
+	return rankGroupOffersFromPredictions(raw, predicted, survivalModel, setupFactory, profile, minSurvival)
+}
+
+func rankGroupOffersFromPredictions(
+	raw []GroupRawOffers,
+	predicted map[int]map[string]offerRuntimePrediction,
+	survivalModel *bidding.SurvivalModel,
+	setupFactory SetupOverheadFactory,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+) ([]GroupOffer, []offerRuntimePrediction) {
 	results := make([]GroupOffer, len(raw))
 	selected := make([]offerRuntimePrediction, len(raw))
 	for i, r := range raw {
@@ -503,9 +691,11 @@ func neutralOfferRuntimePredictions(group InstanceGroup, offers []cloud.Offer) m
 	if jobCount < 1 {
 		jobCount = 1
 	}
+	jobEstimates := make([]estimate.Estimate, jobCount)
 	jobDurations := make([]time.Duration, jobCount)
 	totalRunHrs := 0.0
 	for i := range jobDurations {
+		jobEstimates[i] = estimate.DefaultJobDuration
 		jobDurations[i] = estimate.DefaultJobDuration.Mean
 		totalRunHrs += estimate.DefaultJobDuration.Mean.Hours()
 	}
@@ -514,6 +704,7 @@ func neutralOfferRuntimePredictions(group InstanceGroup, offers []cloud.Offer) m
 	for _, offer := range offers {
 		predicted[offerPredictionKey(offer)] = offerRuntimePrediction{
 			totalRunHrs:          totalRunHrs,
+			jobEstimates:         append([]estimate.Estimate(nil), jobEstimates...),
 			adjustedRunHrs:       totalRunHrs,
 			jobDurations:         append([]time.Duration(nil), jobDurations...),
 			adjustedJobDurations: append([]time.Duration(nil), jobDurations...),
@@ -538,6 +729,7 @@ func predictOfferRuntimes(
 		jobIdx   int
 	}
 	type runtimeAccum struct {
+		jobEstimates []estimate.Estimate
 		jobDurations []time.Duration
 		metadata     []*predictor.RuntimeMetadata
 		count        int
@@ -598,6 +790,7 @@ func predictOfferRuntimes(
 		accum := groupAccums[ref.offerKey]
 		if accum == nil {
 			accum = &runtimeAccum{
+				jobEstimates: make([]estimate.Estimate, expected[ref.groupIdx][ref.offerKey]),
 				jobDurations: make([]time.Duration, expected[ref.groupIdx][ref.offerKey]),
 				metadata:     make([]*predictor.RuntimeMetadata, expected[ref.groupIdx][ref.offerKey]),
 				feasible:     true,
@@ -605,6 +798,11 @@ func predictOfferRuntimes(
 			groupAccums[ref.offerKey] = accum
 		}
 
+		accum.jobEstimates[ref.jobIdx] = estimate.FromSeconds(
+			result.DurationS.Mean,
+			result.DurationS.Lower,
+			result.DurationS.Upper,
+		)
 		accum.jobDurations[ref.jobIdx] = time.Duration(result.DurationS.Mean * float64(time.Second))
 		accum.metadata[ref.jobIdx] = result.DurationMetadata
 		if result.DurationMetadata != nil && result.DurationMetadata.Feasible != nil && !*result.DurationMetadata.Feasible {
@@ -630,6 +828,7 @@ func predictOfferRuntimes(
 			}
 			predicted[groupIdx][key] = offerRuntimePrediction{
 				totalRunHrs:  totalRunHrs,
+				jobEstimates: append([]estimate.Estimate(nil), accum.jobEstimates...),
 				jobDurations: append([]time.Duration(nil), accum.jobDurations...),
 				metadata:     append([]*predictor.RuntimeMetadata(nil), accum.metadata...),
 				feasible:     accum.feasible,
@@ -1270,29 +1469,40 @@ func BestCandidateForProfileWithProgress(
 	onProgress PlanProgressFunc,
 	progressLabel string,
 ) CandidateResult {
+	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival)
+	return bestCandidateForProfileEvaluations(
+		evaluator,
+		evaluator.evaluateCandidateGroupings(candidates),
+		profile,
+		onProgress,
+		progressLabel,
+	)
+}
+
+func bestCandidateForProfileEvaluations(
+	evaluator *planEvaluator,
+	candidates []groupingEvaluation,
+	profile bidding.ScoreProfile,
+	onProgress PlanProgressFunc,
+	progressLabel string,
+) CandidateResult {
 	bestScore := math.Inf(1)
 	var best CandidateResult
 	if len(candidates) == 0 {
 		return best
 	}
 
-	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
 	for i, cand := range candidates {
-		detail := cand.Label
-		if progressLabel != "" {
-			detail = fmt.Sprintf("%s: %s", progressLabel, cand.Label)
-		}
-		reportPlanProgress(onProgress, "Scoring candidate groupings", detail, i+1, len(candidates))
-		offers, selectedPredictions := rankGroupOffersForPlanningWithPredictions(cand.Raw, predCfg, survivalModel, setupFactory, profile, minSurvival)
-		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, nil)
-		estimates = applySelectedOfferRuntimePredictions(estimates, selectedPredictions)
+		reportPlanProgressForLane(onProgress, "Scoring candidate groupings", progressLabel, cand.label, i+1, len(candidates))
+		offers, selectedPredictions := evaluator.selectOffers(cand.rawEval, profile)
+		estimates := evaluator.estimateSelectedOffers(offers, selectedPredictions)
 		score := ScoreEstimatesWithProfile(estimates, profile)
 		if i == 0 || score < bestScore {
 			bestScore = score
 			best = CandidateResult{
 				CandidateIdx: i,
-				Label:        cand.Label,
-				Groups:       cand.Groups,
+				Label:        cand.label,
+				Groups:       cand.groups,
 				Offers:       offers,
 				Estimates:    estimates,
 			}
@@ -1302,11 +1512,16 @@ func BestCandidateForProfileWithProgress(
 }
 
 func reportPlanProgress(onProgress PlanProgressFunc, phase, detail string, current, total int) {
+	reportPlanProgressForLane(onProgress, phase, "", detail, current, total)
+}
+
+func reportPlanProgressForLane(onProgress PlanProgressFunc, phase, lane, detail string, current, total int) {
 	if onProgress == nil {
 		return
 	}
 	onProgress(PlanProgress{
 		Phase:   phase,
+		Lane:    lane,
 		Detail:  detail,
 		Current: current,
 		Total:   total,

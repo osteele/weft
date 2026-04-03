@@ -290,6 +290,42 @@ func TestLaunchModelUpdate_RawOffersKickOffPlanBuild(t *testing.T) {
 	}
 }
 
+func TestFormatPlanProgressLines_ShowsConcurrentProfileLanes(t *testing.T) {
+	var state planProgressState
+	state.update(planProgressMsg{
+		lane:  "cheap (1/3)",
+		phase: "Estimating direct-offer costs",
+	})
+	state.update(planProgressMsg{
+		lane:    "fast (2/3)",
+		phase:   "Scoring candidate groupings",
+		detail:  "split",
+		current: 1,
+		total:   3,
+	})
+
+	lines := formatPlanProgressLines(state)
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3", len(lines))
+	}
+	for _, want := range []string{
+		"Building launch plan from raw offers...",
+		"cheap (1/3): Estimating direct-offer costs...",
+		"fast (2/3): Scoring candidate groupings (1/3): split...",
+	} {
+		found := false
+		for _, line := range lines {
+			if line == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing progress line %q in %#v", want, lines)
+		}
+	}
+}
+
 func TestTradeoffProfilesForLaunchBatch_UsesEndpointsFirst(t *testing.T) {
 	profiles, fullSet := tradeoffProfilesForLaunchBatch(false)
 	if fullSet {

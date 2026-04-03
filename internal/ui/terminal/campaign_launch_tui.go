@@ -242,7 +242,7 @@ type launchModel struct {
 	groupPhases       map[int]string      // groupIndex -> current phase
 	groupDone         map[int]bool        // groupIndex -> registered
 	estimateProgress  estimateProgressMsg // latest estimation progress
-	planProgress      planProgressMsg     // latest launch-plan build progress
+	planProgress      planProgressState   // launch-plan build progress by profile lane
 	planGeneration    int                 // increments when raw offers are refreshed
 	refiningTradeoffs bool                // true while richer frontier samples load in the background
 	progressCh        chan estimateProgressMsg
@@ -329,13 +329,37 @@ type estimateProgressMsg struct {
 	resolved, total int
 }
 
+type planProgressState struct {
+	order   []string
+	entries map[string]planProgressMsg
+}
+
 type planProgressMsg struct {
+	lane       string
 	phase      string
 	detail     string
 	current    int
 	total      int
 	background bool
 	generation int
+}
+
+func (s *planProgressState) reset() {
+	s.order = nil
+	s.entries = nil
+}
+
+func (s *planProgressState) update(msg planProgressMsg) {
+	if msg.lane == "" {
+		msg.lane = "planner"
+	}
+	if s.entries == nil {
+		s.entries = make(map[string]planProgressMsg)
+	}
+	if _, ok := s.entries[msg.lane]; !ok {
+		s.order = append(s.order, msg.lane)
+	}
+	s.entries[msg.lane] = msg
 }
 
 type instancesLaunchedMsg struct {
@@ -647,6 +671,7 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 			onProgress = func(progress campaign.PlanProgress) {
 				select {
 				case ch <- planProgressMsg{
+					lane:       progress.Lane,
 					phase:      progress.Phase,
 					detail:     progress.Detail,
 					current:    progress.Current,
@@ -1248,7 +1273,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
 			m.tradeoffRowsDirty = true
 			m.cachedTradeoffRows = nil
-			m.planProgress = planProgressMsg{}
+			m.planProgress.reset()
 			if m.assetStager != nil {
 				m.assetStager.Close()
 			}
@@ -1275,7 +1300,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refiningTradeoffs = false
 		if !msg.background {
 			m.loading = true
-			m.planProgress = planProgressMsg{}
+			m.planProgress.reset()
 		}
 		m.refreshTradeoffRowsIfNeeded()
 		return m, m.buildProfilePlans(msg.background)
@@ -1302,7 +1327,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.groupOffers = m.rankCachedOffers()
 		if !msg.background {
 			m.loading = false
-			m.planProgress = planProgressMsg{}
+			m.planProgress.reset()
 		}
 		if msg.fullSet {
 			m.refiningTradeoffs = false
@@ -1339,7 +1364,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if !msg.background {
-			m.planProgress = msg
+			m.planProgress.update(msg)
 		}
 		if m.buildingPlans() {
 			return m, waitForPlanProgress(m.planProgressCh)
@@ -1978,16 +2003,34 @@ func (m launchModel) buildingPlans() bool {
 	return m.loading && m.rawOffersLoaded() && m.tradeoffPlans == nil
 }
 
-func formatPlanProgress(msg planProgressMsg) string {
-	if msg.phase == "" {
-		return "Building launch plan from raw offers..."
+func formatPlanProgressLines(state planProgressState) []string {
+	lines := []string{"Building launch plan from raw offers..."}
+	if len(state.order) == 0 {
+		return lines
 	}
+	for _, lane := range state.order {
+		msg, ok := state.entries[lane]
+		if !ok {
+			continue
+		}
+		lines = append(lines, formatPlanProgressLine(msg))
+	}
+	return lines
+}
+
+func formatPlanProgressLine(msg planProgressMsg) string {
 	text := msg.phase
 	if msg.current > 0 && msg.total > 0 {
 		text = fmt.Sprintf("%s (%d/%d)", text, msg.current, msg.total)
 	}
 	if msg.detail != "" {
 		text += ": " + msg.detail
+	}
+	if msg.lane != "" {
+		text = msg.lane + ": " + text
+	}
+	if text == "" {
+		return "Planner progress..."
 	}
 	return text + "..."
 }
@@ -2974,9 +3017,16 @@ func (m launchModel) View() string {
 			b.WriteString(costEstimateHeader(false))
 			b.WriteString("\n")
 			renderRawOfferSummary(&b, m.cachedRawOffers)
-			b.WriteString(m.spinner.View())
-			b.WriteString(launchDimStyle.Render(" " + formatPlanProgress(m.planProgress)))
-			b.WriteString("\n")
+			progressLines := formatPlanProgressLines(m.planProgress)
+			if len(progressLines) > 0 {
+				b.WriteString(m.spinner.View())
+				b.WriteString(launchDimStyle.Render(" " + progressLines[0]))
+				b.WriteString("\n")
+				for _, line := range progressLines[1:] {
+					b.WriteString(launchDimStyle.Render("   " + line))
+					b.WriteString("\n")
+				}
+			}
 		} else if m.groupOffers != nil {
 			b.WriteString("\n")
 			b.WriteString(costEstimateHeader(true))
