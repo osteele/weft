@@ -516,6 +516,51 @@ func TestLaunchModelUpdate_PartialFailuresStayOpen(t *testing.T) {
 	}
 }
 
+func TestLaunchModelUpdate_SuccessFromWatchSwitchesBack(t *testing.T) {
+	model, cmd := launchModel{
+		launching:  true,
+		fromWatch:  true,
+		campaignID: 178,
+	}.Update(instancesLaunchedMsg{instanceIDs: []int64{42}})
+
+	got := model.(launchModel)
+	if !got.done {
+		t.Fatal("expected done state")
+	}
+	assertSwitchToWatchCmd(t, cmd, "Launched instances: 42")
+}
+
+func TestLaunchModelUpdate_IgnoresBackgroundPlanUpdatesAfterLaunchCompletion(t *testing.T) {
+	model, cmd := launchModel{
+		done:              true,
+		refiningTradeoffs: false,
+		planGeneration:    2,
+		tradeoffPlans: map[string]campaign.StrategyPlan{
+			"cheap": {},
+		},
+		activeTradeoff: "cheap",
+	}.Update(profilePlansLoadedMsg{
+		plans: map[string]campaign.StrategyPlan{
+			"fast": {},
+		},
+		options:    []campaign.TradeoffOption{{ID: "fast", Label: "fast"}},
+		fullSet:    true,
+		generation: 2,
+		background: true,
+	})
+
+	got := model.(launchModel)
+	if _, ok := got.tradeoffPlans["cheap"]; !ok {
+		t.Fatalf("expected completed launch to ignore background plan updates, got %#v", got.tradeoffPlans)
+	}
+	if _, ok := got.tradeoffPlans["fast"]; ok {
+		t.Fatalf("expected completed launch to ignore background plan updates, got %#v", got.tradeoffPlans)
+	}
+	if cmd != nil {
+		t.Fatalf("expected no follow-up command after launch completion, got %T", cmd)
+	}
+}
+
 func TestLaunchModelUpdate_OnPremDoneRefreshesGroups(t *testing.T) {
 	oldGroups := []campaign.InstanceGroup{
 		{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1, Description: "old-a"}}},
@@ -1057,6 +1102,38 @@ func TestLaunchModelHandleKey_CtrlCQuitsWhileLaunching(t *testing.T) {
 	assertQuitCmd(t, cmd)
 }
 
+func TestLaunchModelHandleKey_EnterClearsRefinementWhileLaunching(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1, Description: "train"}}},
+	}
+	items, selected, cursor := buildItemsFromGroups(groups)
+	model, cmd := launchModel{
+		groups:            groups,
+		items:             items,
+		selected:          selected,
+		cursor:            cursor,
+		refiningTradeoffs: true,
+		planProgress: planProgressState{
+			order:   []string{"fast"},
+			entries: map[string]planProgressMsg{"fast": {lane: "fast", phase: "Scoring candidate groupings"}},
+		},
+	}.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	got := model.(launchModel)
+	if !got.launching {
+		t.Fatal("expected launching state")
+	}
+	if got.refiningTradeoffs {
+		t.Fatal("expected refinement flag to clear once launch starts")
+	}
+	if got.planProgress.entries != nil || len(got.planProgress.order) != 0 {
+		t.Fatalf("expected plan progress to reset, got %#v", got.planProgress)
+	}
+	if cmd == nil {
+		t.Fatal("expected launch command batch")
+	}
+}
+
 func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
 	t.Helper()
 	if cmd == nil {
@@ -1065,5 +1142,20 @@ func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
 	msg := cmd()
 	if _, ok := msg.(tea.QuitMsg); !ok {
 		t.Fatalf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func assertSwitchToWatchCmd(t *testing.T, cmd tea.Cmd, wantFlash string) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected switch-to-watch command, got nil")
+	}
+	msg := cmd()
+	got, ok := msg.(switchToWatchMsg)
+	if !ok {
+		t.Fatalf("expected switchToWatchMsg, got %T", msg)
+	}
+	if got.flash != wantFlash {
+		t.Fatalf("flash = %q, want %q", got.flash, wantFlash)
 	}
 }

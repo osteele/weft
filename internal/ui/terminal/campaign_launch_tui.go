@@ -1428,6 +1428,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case profilePlansLoadedMsg:
+		if m.launching || m.done {
+			return m, nil
+		}
 		if msg.generation != m.planGeneration {
 			return m, nil
 		}
@@ -1475,6 +1478,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case estimateProgressMsg:
+		if m.launching || m.done {
+			return m, nil
+		}
 		m.estimateProgress = msg
 		if m.costEstimates == nil {
 			return m, waitForProgress(m.progressCh)
@@ -1482,6 +1488,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case planProgressMsg:
+		if m.launching || m.done {
+			return m, nil
+		}
 		if msg.generation != m.planGeneration {
 			return m, nil
 		}
@@ -1494,6 +1503,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case estimatesLoadedMsg:
+		if m.launching || m.done {
+			return m, nil
+		}
 		m.estimateCache[msg.cacheKey] = msg.estimates
 		m.tradeoffRowsDirty = true
 		// Only update display if this is for the current tradeoff's offers
@@ -1768,6 +1780,9 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.campaignPhase = ""
 		m.groupPhases = make(map[int]string)
 		m.groupDone = make(map[int]bool)
+		m.refiningTradeoffs = false
+		m.planProgress.reset()
+		m.estimateProgress = estimateProgressMsg{}
 		cmds := []tea.Cmd{
 			m.spinner.Tick,
 			m.waitForLaunchHeartbeat(),
