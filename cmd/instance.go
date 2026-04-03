@@ -242,10 +242,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		statusLabel := ci.Status
-		if label := ci.GraceStatusLabel(); label != "" {
-			statusLabel = label
-		}
+		statusLabel := campaign.DisplayInstanceStatus(ci)
 		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUSpec(), statusLabel)
 		if ci.TerminationReason != "" {
 			fmt.Printf("  Terminated: %s\n", ci.DisplayTerminationReason())

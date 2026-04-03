@@ -253,10 +253,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 	inst := report.Instance
 
 	// Section 1: Header
-	statusLabel := inst.Status
-	if inst.TerminationReason != "" && inst.TerminationReason != db.TerminationReasonCompleted {
-		statusLabel += " (" + inst.DisplayTerminationReason() + ")"
-	}
+	statusLabel := campaign.DisplayInstanceStatusWithReason(inst)
 	fmt.Fprintf(&b, "Instance %d — %s — %s\n", inst.ID, displayInstanceGPU(inst), statusLabel)
 	fmt.Fprintf(&b, "  Provider:  %s", inst.Provider)
 	if pid := inst.EffectiveProviderID(); pid != "" {

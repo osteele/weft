@@ -178,11 +178,11 @@ func watchActivePhaseStatus(phase string) (int64, string) {
 func formatWatchInstanceHeaderLine(update campaign.InstanceUpdate, opts watchInstanceBlockOptions) string {
 	ci := update.Launch
 	statusLabel := watchInstanceStatusLabel(update)
-	if label := ci.GraceStatusLabel(); label != "" {
-		statusLabel = label
+	if ci.Status == db.LaunchStatusGrace {
+		statusLabel = campaign.DisplayInstanceStatus(ci)
 	}
-	if ci.TerminationReason != "" && ci.TerminationReason != db.TerminationReasonCompleted {
-		statusLabel += " (" + ci.DisplayTerminationReason() + ")"
+	if reason := campaign.DisplayTerminationReason(ci); reason != "" {
+		statusLabel += " (" + reason + ")"
 	}
 
 	statusText := statusLabel
@@ -205,6 +205,9 @@ func watchInstanceStatusLabel(update campaign.InstanceUpdate) string {
 	inst := update.Instance
 	if ci == nil {
 		return ""
+	}
+	if ci.Status == db.LaunchStatusFailed || ci.Status == db.LaunchStatusCancelled {
+		return campaign.DisplayInstanceStatus(ci)
 	}
 	if inst == nil || inst.Status == "" || campaign.IsInstanceTerminal(ci.Status) {
 		return ci.Status

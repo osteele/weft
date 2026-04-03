@@ -368,7 +368,7 @@ func TestWatchInstanceStatusLabel(t *testing.T) {
 		{"launching+loading", db.LaunchStatusLaunching, cloud.ProviderStatusLoading, "", "", false, "loading"},
 		{"launching+running", db.LaunchStatusLaunching, cloud.ProviderStatusRunning, "", "", false, "running"},
 		{"completed+exited", db.LaunchStatusCompleted, cloud.ProviderStatusExited, "", "", false, "completed"},
-		{"failed+destroyed", db.LaunchStatusFailed, cloud.ProviderStatusDestroyed, "", "", false, "failed"},
+		{"failed+destroyed", db.LaunchStatusFailed, cloud.ProviderStatusDestroyed, "", "", false, "terminated"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

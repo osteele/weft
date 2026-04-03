@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
@@ -295,10 +296,7 @@ func formatCampaignDiagnosisReport(report *campaignDiagnosisReport) string {
 	fmt.Fprintf(&b, "%d instance(s)\n", len(report.Instances))
 
 	for _, inst := range report.Instances {
-		statusLabel := inst.Instance.Status
-		if inst.Instance.TerminationReason != "" && inst.Instance.TerminationReason != db.TerminationReasonCompleted {
-			statusLabel += " (" + inst.Instance.DisplayTerminationReason() + ")"
-		}
+		statusLabel := campaign.DisplayInstanceStatusWithReason(inst.Instance)
 
 		fmt.Fprintf(&b, "\nInstance %d — %s — %s\n", inst.Instance.ID, displayInstanceGPU(inst.Instance), statusLabel)
 		fmt.Fprintf(&b, "Cause: %s\n", inst.Summary)
