@@ -462,6 +462,22 @@ func TestComputeJobState_HistoricalOrphanedAttemptCountsAsStartedAndTerminal(t *
 	if state.LatestJobEnd != end {
 		t.Fatalf("LatestJobEnd = %d, want %d", state.LatestJobEnd, end)
 	}
+	if got, reason, ok := state.TerminalLaunchStatus(); !ok || got != db.LaunchStatusFailed || reason != db.TerminationReasonInfraFailure {
+		t.Fatalf("TerminalLaunchStatus() = (%q, %q, %v), want (%q, %q, true)", got, reason, ok, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+	}
+}
+
+func TestComputeJobState_MixedFailedAndOrphanedUsesJobFailure(t *testing.T) {
+	endA := time.Now().Add(-2 * time.Minute).Unix()
+	endB := time.Now().Add(-90 * time.Second).Unix()
+	jobs := []*db.Job{
+		{ID: 88, Status: db.StatusQueued, EndTime: &endA},
+		{ID: 89, Status: db.StatusQueued, EndTime: &endB},
+	}
+	state := ComputeJobState(jobs, map[int64]string{
+		88: db.AttemptOutcomeOrphaned,
+		89: db.AttemptOutcomeFailed,
+	})
 	if got, reason, ok := state.TerminalLaunchStatus(); !ok || got != db.LaunchStatusFailed || reason != db.TerminationReasonJobFailure {
 		t.Fatalf("TerminalLaunchStatus() = (%q, %q, %v), want (%q, %q, true)", got, reason, ok, db.LaunchStatusFailed, db.TerminationReasonJobFailure)
 	}

@@ -50,6 +50,8 @@ type JobState struct {
 	AllJobsTerminal  bool
 	AllJobsCompleted bool
 	AllJobsCanceled  bool
+	AnyFailed        bool
+	AnyOrphaned      bool
 	LatestJobEnd     int64 // unix timestamp of latest job end, 0 if none
 }
 
@@ -75,6 +77,12 @@ func ComputeJobState(jobs []*db.Job, outcomes map[int64]string) JobState {
 			}
 			if displayStatus != db.StatusCanceled {
 				s.AllJobsCanceled = false
+			}
+			switch displayStatus {
+			case db.StatusFailed, db.StatusDead, db.StatusKilled:
+				s.AnyFailed = true
+			case db.AttemptOutcomeOrphaned:
+				s.AnyOrphaned = true
 			}
 		}
 		if j.EndTime != nil && *j.EndTime > s.LatestJobEnd {
@@ -111,6 +119,10 @@ func (s JobState) TerminalLaunchStatus() (status string, reason string, ok bool)
 		return db.LaunchStatusCompleted, db.TerminationReasonCompleted, true
 	case s.AllJobsCanceled:
 		return db.LaunchStatusCancelled, db.TerminationReasonCancelled, true
+	case s.AnyFailed:
+		return db.LaunchStatusFailed, db.TerminationReasonJobFailure, true
+	case s.AnyOrphaned:
+		return db.LaunchStatusFailed, db.TerminationReasonInfraFailure, true
 	default:
 		return db.LaunchStatusFailed, db.TerminationReasonJobFailure, true
 	}

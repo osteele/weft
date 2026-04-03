@@ -284,6 +284,39 @@ func TestWatchModelTerminalUpdateKeepsJobsInlineInRunOrder(t *testing.T) {
 	}
 }
 
+func TestWatchModelView_OrphanedJobsUnderFailedInstanceShowInfraFailure(t *testing.T) {
+	instanceID := int64(455)
+	m := watchModel{
+		instanceIDs: []int64{instanceID},
+		updates: map[int64]campaign.InstanceUpdate{
+			instanceID: {
+				Launch: &db.Launch{
+					ID:                instanceID,
+					Status:            db.LaunchStatusFailed,
+					Provider:          "vastai",
+					GPUSpec:           "Tesla V100",
+					TerminationReason: db.TerminationReasonInfraFailure,
+				},
+				Jobs: []*db.Job{
+					{ID: 554, Status: db.StatusQueued, Description: "EXP-076"},
+				},
+				JobAttemptOutcomes: map[int64]string{
+					554: db.AttemptOutcomeOrphaned,
+				},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "failed (infrastructure failure)") {
+		t.Fatalf("expected infra failure instance reason, got:\n%s", out)
+	}
+	if !strings.Contains(out, "orphaned") {
+		t.Fatalf("expected orphaned job outcome in view, got:\n%s", out)
+	}
+}
+
 func TestWatchModelViewShowsCampaignSummaryRate(t *testing.T) {
 	launchUnix := time.Now().Add(-2 * time.Hour).Unix()
 	instanceA := int64(10)
