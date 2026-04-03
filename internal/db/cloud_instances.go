@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -159,6 +160,62 @@ func (c *Launch) DisplayGPUSpec() string {
 		return fmt.Sprintf("%s (%s)", c.ResolvedGPUName, spec)
 	}
 	return spec
+}
+
+// DisplayGPUBrief returns a compact, instance-hardware-focused GPU label for
+// headings and table columns (for example: "RTX 4090 24GB", "2x A100 80GB").
+func (c *Launch) DisplayGPUBrief() string {
+	model := c.displayGPUModelName()
+	if model == "" {
+		return ""
+	}
+	parts := []string{model}
+	if c.GPUMemGB > 0 {
+		parts = append(parts, fmt.Sprintf("%dGB", c.GPUMemGB))
+	}
+	label := strings.Join(parts, " ")
+	if c.NumGPUs > 1 {
+		return fmt.Sprintf("%dx %s", c.NumGPUs, label)
+	}
+	return label
+}
+
+// DisplayGPUDetails returns a detailed GPU line for instance status blocks
+// (for example: "RTX 4090, 24GB per GPU, CUDA 12.4").
+func (c *Launch) DisplayGPUDetails() string {
+	model := c.displayGPUModelName()
+	if model == "" {
+		return ""
+	}
+
+	details := []string{model}
+	if c.GPUMemGB > 0 {
+		details = append(details, fmt.Sprintf("%dGB per GPU", c.GPUMemGB))
+	}
+	if c.NumGPUs > 1 {
+		details = append(details, fmt.Sprintf("%dx GPUs", c.NumGPUs))
+	}
+	if c.CUDAVersion > 0 {
+		details = append(details, "CUDA "+strconv.FormatFloat(c.CUDAVersion, 'f', -1, 64))
+	}
+	return strings.Join(details, ", ")
+}
+
+func (c *Launch) displayGPUModelName() string {
+	if c == nil {
+		return ""
+	}
+	if c.ResolvedGPUName != "" {
+		return c.ResolvedGPUName
+	}
+	// Legacy rows may encode "Model (constraint text)" in GPUSpec.
+	if idx := strings.Index(c.GPUSpec, " ("); idx > 0 {
+		return strings.TrimSpace(c.GPUSpec[:idx])
+	}
+	if c.GPUSpec != "" {
+		return c.GPUSpec
+	}
+	return c.GPUClass
 }
 
 // GraceStatusLabel returns a human-readable label for the grace period status.

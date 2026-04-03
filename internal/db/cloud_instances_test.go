@@ -1146,3 +1146,41 @@ func TestSetJobLaunchID_RunningAttempt(t *testing.T) {
 		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
 	}
 }
+
+func TestDisplayGPUBrief_UsesResolvedNameAndActualMem(t *testing.T) {
+	ci := &Launch{
+		ResolvedGPUName: "RTX 4090",
+		GPUSpec:         "NVIDIA ≥20GB ≤20GB",
+		GPUMemGB:        24,
+		NumGPUs:         1,
+	}
+	if got := ci.DisplayGPUBrief(); got != "RTX 4090 24GB" {
+		t.Fatalf("DisplayGPUBrief() = %q, want %q", got, "RTX 4090 24GB")
+	}
+}
+
+func TestDisplayGPUBrief_MultiGPUShowsCount(t *testing.T) {
+	ci := &Launch{
+		ResolvedGPUName: "A100 SXM4",
+		GPUMemGB:        80,
+		NumGPUs:         4,
+	}
+	if got := ci.DisplayGPUBrief(); got != "4x A100 SXM4 80GB" {
+		t.Fatalf("DisplayGPUBrief() = %q, want %q", got, "4x A100 SXM4 80GB")
+	}
+}
+
+func TestDisplayGPUDetails_IncludesModelMemCUDA(t *testing.T) {
+	ci := &Launch{
+		ResolvedGPUName: "A100 NVL",
+		GPUMemGB:        80,
+		NumGPUs:         2,
+		CUDAVersion:     12.4,
+	}
+	got := ci.DisplayGPUDetails()
+	for _, want := range []string{"A100 NVL", "80GB per GPU", "2x GPUs", "CUDA 12.4"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("DisplayGPUDetails() = %q, missing %q", got, want)
+		}
+	}
+}

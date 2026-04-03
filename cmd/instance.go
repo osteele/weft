@@ -189,9 +189,9 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 			costStr = fmt.Sprintf("$%.2f", float64(inst.ActualSpendCents)/100)
 		}
 
-		gpuSpec := inst.GPUSpec
+		gpuSpec := inst.DisplayGPUBrief()
 		if gpuSpec == "" {
-			gpuSpec = inst.GPUClass
+			gpuSpec = "—"
 		}
 
 		providerInstID := inst.EffectiveProviderID()
@@ -243,7 +243,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		statusLabel := campaign.DisplayInstanceStatus(ci)
-		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUSpec(), statusLabel)
+		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUBrief(), statusLabel)
 		if ci.TerminationReason != "" {
 			fmt.Printf("  Terminated: %s\n", ci.DisplayTerminationReason())
 		}

@@ -316,7 +316,7 @@ func displayInstanceGPU(inst *db.Launch) string {
 	if inst == nil {
 		return "unknown GPU"
 	}
-	if spec := inst.DisplayGPUSpec(); spec != "" {
+	if spec := inst.DisplayGPUBrief(); spec != "" {
 		return spec
 	}
 	return "unknown GPU"

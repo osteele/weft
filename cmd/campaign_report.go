@@ -178,7 +178,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		fmt.Println()
 		if len(otherRunning) == 1 {
 			ci := otherRunning[0]
-			fmt.Printf("  1 other instance still running (ID %d, %s)\n", ci.ID, ci.DisplayGPUSpec())
+			fmt.Printf("  1 other instance still running (ID %d, %s)\n", ci.ID, ci.DisplayGPUBrief())
 		} else {
 			ids := make([]string, len(otherRunning))
 			for i, ci := range otherRunning {
@@ -253,7 +253,7 @@ func buildInstanceRow(ci *db.Launch, now time.Time) exitReportInstanceRow {
 
 	return exitReportInstanceRow{
 		id:   ci.ID,
-		line: fmt.Sprintf("  %d\t%s\t%s\t%s\t%s\t%s\n", ci.ID, ci.DisplayGPUSpec(), ci.Status, uptimeStr, costStr, reason),
+		line: fmt.Sprintf("  %d\t%s\t%s\t%s\t%s\t%s\n", ci.ID, ci.DisplayGPUBrief(), ci.Status, uptimeStr, costStr, reason),
 		cost: cost,
 	}
 }

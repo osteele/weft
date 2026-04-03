@@ -360,6 +360,39 @@ func TestWatchModelViewShowsCampaignSummaryRate(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlock_ShowsCPUAndGPULines(t *testing.T) {
+	now := time.Now()
+	update := campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:              487,
+			Status:          db.LaunchStatusRunning,
+			Provider:        "vastai",
+			ResolvedGPUName: "RTX 4090",
+			GPUMemGB:        24,
+			CUDAVersion:     12.4,
+		},
+		Instance: &cloud.Instance{
+			CPUName:  "AMD EPYC 7C13 64-Core Processor",
+			CPUCores: 25,
+			RAMGB:    1008,
+		},
+	}
+
+	out := formatWatchInstanceBlock(update, map[int64]int{}, watchInstanceBlockOptions{plain: true, now: now})
+	if !strings.Contains(out, "Instance 487 — RTX 4090 24GB — running") {
+		t.Fatalf("header missing GPU brief, got:\n%s", out)
+	}
+	if strings.Contains(out, "Specs:") {
+		t.Fatalf("expected Specs: label removed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CPU: AMD EPYC 7C13 64-Core Processor, 25 cores, 1008 GB RAM") {
+		t.Fatalf("expected CPU line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "GPU: RTX 4090, 24GB per GPU, CUDA 12.4") {
+		t.Fatalf("expected GPU detail line, got:\n%s", out)
+	}
+}
+
 func stripANSI(s string) string {
 	re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	return re.ReplaceAllString(s, "")

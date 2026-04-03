@@ -62,8 +62,11 @@ func formatWatchInstanceBlockStructured(update campaign.InstanceUpdate, jobProgr
 	}
 
 	addLine(formatWatchProviderLine(ci, update.Instance))
-	if specLine := formatWatchInstanceSpecLine(update.Instance); specLine != "" {
-		addLine(specLine)
+	if cpuLine := formatWatchInstanceCPULine(update.Instance); cpuLine != "" {
+		addLine(cpuLine)
+	}
+	if gpuLine := formatWatchInstanceGPULine(ci); gpuLine != "" {
+		addLine(gpuLine)
 	}
 
 	activity := formatObservedActivity(update, opts.now)
@@ -190,7 +193,7 @@ func formatWatchInstanceHeaderLine(update campaign.InstanceUpdate, opts watchIns
 		statusText = watchStatusBlockStyle(statusLabel, ci.Status).Render(statusLabel)
 	}
 
-	header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), statusText)
+	header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUBrief(), statusText)
 	if !opts.plain {
 		header = watchTitleStyle.Render(header)
 	}
@@ -329,7 +332,7 @@ func formatWatchProviderLine(ci *db.Launch, inst *cloud.Instance) string {
 	return line + " (provisioning...)"
 }
 
-func formatWatchInstanceSpecLine(inst *cloud.Instance) string {
+func formatWatchInstanceCPULine(inst *cloud.Instance) string {
 	if inst == nil {
 		return ""
 	}
@@ -346,7 +349,18 @@ func formatWatchInstanceSpecLine(inst *cloud.Instance) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("  Specs: %s", strings.Join(parts, ", "))
+	return fmt.Sprintf("  CPU: %s", strings.Join(parts, ", "))
+}
+
+func formatWatchInstanceGPULine(ci *db.Launch) string {
+	if ci == nil {
+		return ""
+	}
+	details := ci.DisplayGPUDetails()
+	if details == "" {
+		return ""
+	}
+	return "  GPU: " + details
 }
 
 func formatWatchInstanceCostLine(ci *db.Launch, inst *cloud.Instance, now time.Time) string {

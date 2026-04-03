@@ -369,9 +369,9 @@ func formatProjectLaunchRow(inst *db.Launch, now time.Time) string {
 	}
 	metrics := formatLaunchMetricsInline(observeLaunch(inst, nil, now))
 	if metrics == "" {
-		return fmt.Sprintf("instance %-5d %-24s %s", inst.ID, inst.DisplayGPUSpec(), status)
+		return fmt.Sprintf("instance %-5d %-24s %s", inst.ID, inst.DisplayGPUBrief(), status)
 	}
-	return fmt.Sprintf("instance %-5d %-24s %-18s %s", inst.ID, inst.DisplayGPUSpec(), status, metrics)
+	return fmt.Sprintf("instance %-5d %-24s %-18s %s", inst.ID, inst.DisplayGPUBrief(), status, metrics)
 }
 
 func formatProjectWatchTime(job *db.Job, bucket string, now time.Time) string {

@@ -85,6 +85,38 @@ Add per-job CPU/memory/thread stats for macOS hosts in the TUI.
 - Mirror the Linux fields we already show (CPU%, RSS, threads).
 - Keep the Linux path unchanged; add a macOS branch in `internal/ssh.GetProcessStats`.
 
+## Existing-Instance Donors (Same Data Center)
+
+When launching new instances, allow an already-running instance in the same
+provider/data center to act as a donor instead of always launching a dedicated
+ephemeral donor.
+
+### Motivation
+- Reduce time-to-first-job by reusing already-warm caches.
+- Avoid extra donor launch cost when a suitable warm instance already exists.
+
+### Nuances / Failure Cases
+- **Plan staleness**: a candidate donor may terminate after planning but before
+  fan-out begins.
+- **Mid-copy failure**: donor may terminate during `CopyBetweenInstances`, so
+  fan-out must detect partial copy and fall back to independent downloads.
+- **Compatibility checks**: donor should be considered only if provider and data
+  center match and required cache paths are present.
+- **Freshness checks**: stale or partial caches should not poison workers;
+  include validation or safe fallback.
+
+### Workload Interference Question
+- Copy traffic from a running donor could impact active jobs (especially
+  benchmarks) due to shared disk/network contention.
+- It may still be acceptable as an opt-in mode, or for non-benchmark workloads.
+
+### Potential Guardrails
+- Prefer idle/grace instances as donors; use running instances only when
+  explicitly allowed.
+- Add a donor health check immediately before each copy operation.
+- Add per-copy timeout + retry + fallback to direct download.
+- Add a policy flag (e.g. allow/deny donors with active jobs, benchmark mode).
+
 ## Notification Channels
 
 Beyond Slack, support other notification methods.
