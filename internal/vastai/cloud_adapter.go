@@ -73,6 +73,20 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 	return instanceToCloud(inst), nil
 }
 
+func (c *CloudClient) CreateInstanceWithProgress(offerID string, opts cloud.CreateOpts, progress cloud.ProgressFunc) (*cloud.Instance, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+	progress("vastai: submitting create request")
+	inst, err := c.CreateInstance(offerID, opts)
+	if err != nil {
+		progress("vastai: create request failed")
+		return nil, err
+	}
+	progress("vastai: create request accepted")
+	return inst, nil
+}
+
 func (c *CloudClient) ListAllInstances() ([]cloud.Instance, error) {
 	instances, err := c.inner.ListAllInstances()
 	if err != nil {

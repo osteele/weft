@@ -4,16 +4,17 @@ import "time"
 
 // MockClient is a test double for cloud.Client.
 type MockClient struct {
-	ProviderVal              Provider
-	AvailableFunc            func() error
-	SearchOffersFunc         func(OfferConstraints) ([]Offer, error)
-	CreateInstanceFunc       func(string, CreateOpts) (*Instance, error)
-	ShowInstanceFunc         func(string) (*Instance, error)
-	ListAllInstancesFunc     func() ([]Instance, error)
-	WaitReadyFunc            func(string, time.Duration) (*Instance, error)
-	DestroyInstanceFunc      func(string) error
-	CopyBetweenInstancesFunc func(string, string, string, string) error
-	SelfDestructCmdVal       string
+	ProviderVal                    Provider
+	AvailableFunc                  func() error
+	SearchOffersFunc               func(OfferConstraints) ([]Offer, error)
+	CreateInstanceFunc             func(string, CreateOpts) (*Instance, error)
+	CreateInstanceWithProgressFunc func(string, CreateOpts, ProgressFunc) (*Instance, error)
+	ShowInstanceFunc               func(string) (*Instance, error)
+	ListAllInstancesFunc           func() ([]Instance, error)
+	WaitReadyFunc                  func(string, time.Duration) (*Instance, error)
+	DestroyInstanceFunc            func(string) error
+	CopyBetweenInstancesFunc       func(string, string, string, string) error
+	SelfDestructCmdVal             string
 }
 
 var _ Client = (*MockClient)(nil)
@@ -44,6 +45,13 @@ func (m *MockClient) CreateInstance(offerID string, opts CreateOpts) (*Instance,
 		return m.CreateInstanceFunc(offerID, opts)
 	}
 	return nil, nil
+}
+
+func (m *MockClient) CreateInstanceWithProgress(offerID string, opts CreateOpts, progress ProgressFunc) (*Instance, error) {
+	if m.CreateInstanceWithProgressFunc != nil {
+		return m.CreateInstanceWithProgressFunc(offerID, opts, progress)
+	}
+	return m.CreateInstance(offerID, opts)
 }
 
 func (m *MockClient) ShowInstance(instanceID string) (*Instance, error) {

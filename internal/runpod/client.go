@@ -107,6 +107,20 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 	}, nil
 }
 
+func (c *CloudClient) CreateInstanceWithProgress(offerID string, opts cloud.CreateOpts, progress cloud.ProgressFunc) (*cloud.Instance, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+	progress("runpod: submitting pod create request")
+	inst, err := c.CreateInstance(offerID, opts)
+	if err != nil {
+		progress("runpod: pod create request failed")
+		return nil, err
+	}
+	progress("runpod: pod create request accepted")
+	return inst, nil
+}
+
 func podToInstance(pod Pod) cloud.Instance {
 	return cloud.Instance{
 		ProviderID:  pod.ID,

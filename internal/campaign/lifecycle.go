@@ -476,7 +476,15 @@ func createInstanceWithReplacement(
 			progress(fmt.Sprintf("retrying with replacement offer (attempt %d/%d)", attempt, maxCreateAttempts))
 		}
 
-		inst, err := client.CreateInstance(currentOffer.ProviderID, createOpts)
+		var (
+			inst *cloud.Instance
+			err  error
+		)
+		if progressClient, ok := client.(cloud.ProgressClient); ok {
+			inst, err = progressClient.CreateInstanceWithProgress(currentOffer.ProviderID, createOpts, progress)
+		} else {
+			inst, err = client.CreateInstance(currentOffer.ProviderID, createOpts)
+		}
 		if err == nil {
 			return inst, currentOffer, nil
 		}
@@ -1178,6 +1186,16 @@ func LaunchInstance(
 	if err != nil {
 		return 0, fmt.Errorf("create cloud instance: %w", err)
 	}
+	emitProgress := func(phase string) {
+		progress(phase)
+		oplog.Log(oplog.OpLaunchLaunchPhase, oplog.WithDetailf(
+			"launch_id=%d provider=%s offer_id=%s phase=%s",
+			instanceID,
+			client.Provider(),
+			offer.ProviderID,
+			phase,
+		))
+	}
 
 	// Transition to launching before assigning jobs so that the job_status
 	// view immediately considers assigned jobs as placed.
@@ -1336,7 +1354,7 @@ func LaunchInstance(
 		group,
 		offer,
 		createOpts,
-		progress,
+		emitProgress,
 		func(replacement cloud.Offer) error {
 			return db.UpdateLaunchOfferMetadata(database, instanceID, replacement)
 		},
@@ -1418,7 +1436,7 @@ func LaunchInstance(
 	// Generate and upload bootstrap script (must happen after CreateInstance
 	// so we have providerInstID for self-destruct, but before instance finishes
 	// booting and runs onstart-cmd — boot typically takes several minutes).
-	progress("uploading bootstrap")
+	emitProgress("uploading bootstrap")
 
 	// Build source mappings for the bootstrap script
 	var sources []SourceMapping

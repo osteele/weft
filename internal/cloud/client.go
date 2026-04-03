@@ -57,3 +57,9 @@ type Client interface {
 	// providerInstanceID is the provider-specific instance ID (e.g., Vast.ai instance number).
 	SelfDestructCmd(providerInstanceID string) string
 }
+
+// ProgressClient is an optional extension for providers that can surface
+// provider-side instance-creation milestones for logging/UI display.
+type ProgressClient interface {
+	CreateInstanceWithProgress(offerID string, opts CreateOpts, progress ProgressFunc) (*Instance, error)
+}

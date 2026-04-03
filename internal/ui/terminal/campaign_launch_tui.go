@@ -32,6 +32,7 @@ var (
 	launchSelectedStyle = lipgloss.NewStyle()
 	launchDimStyle      = tuiDimStyle
 	launchNoOfferStyle  = lipgloss.NewStyle().Foreground(tuiCompletedColor).Strikethrough(true)
+	launchWarnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	launchErrStyle      = tuiFailedStyle
 )
 
@@ -2363,15 +2364,67 @@ func formatLaunchStatusCounts(counts map[string]int) string {
 	return "instance states: " + strings.Join(parts, ", ")
 }
 
-func (m launchModel) launchStallLine() string {
+type launchWaitSeverity int
+
+const (
+	launchWaitSeverityNormal launchWaitSeverity = iota
+	launchWaitSeverityWarn
+	launchWaitSeverityCritical
+)
+
+func severityFromSuspicionLabel(label string) launchWaitSeverity {
+	switch label {
+	case "critical":
+		return launchWaitSeverityCritical
+	case "high", "elevated":
+		return launchWaitSeverityWarn
+	default:
+		return launchWaitSeverityNormal
+	}
+}
+
+func (m launchModel) launchWaitLine() (string, launchWaitSeverity) {
+	known := len(m.registeredInstanceIDs)
+	if known == 0 {
+		start := m.launchCampaignCreatedAt
+		if start.IsZero() {
+			start = m.launchStartedAt
+		}
+		if !start.IsZero() && m.firstRegSurvival != nil {
+			elapsed := time.Since(start)
+			severity := launchWaitSeverityNormal
+			if p, ok := m.firstRegSurvival.ConditionalSuccess(elapsed); ok {
+				severity = severityFromSuspicionLabel(firstRegistrationSuspicionLabel(p))
+			} else if elapsed >= m.firstRegSurvival.TerminateAfter && m.firstRegSurvival.TerminateAfter > 0 {
+				severity = launchWaitSeverityCritical
+			} else if elapsed >= m.firstRegSurvival.WarnAfter && m.firstRegSurvival.WarnAfter > 0 {
+				severity = launchWaitSeverityWarn
+			}
+			qualifier := "within typical range"
+			if severity == launchWaitSeverityWarn {
+				qualifier = "taking longer than typical"
+			} else if severity == launchWaitSeverityCritical {
+				qualifier = "much longer than typical"
+			}
+			return fmt.Sprintf(
+				"Still waiting for first instance registration (%s elapsed; %s)",
+				elapsed.Truncate(time.Second),
+				qualifier,
+			), severity
+		}
+	}
+
 	if m.lastLaunchProgressAt.IsZero() {
-		return ""
+		return "", launchWaitSeverityNormal
 	}
 	stalledFor := time.Since(m.lastLaunchProgressAt)
 	if stalledFor < launchStallThreshold {
-		return ""
+		return "", launchWaitSeverityNormal
 	}
-	return fmt.Sprintf("No new-instance launch callbacks for %s; checking DB state...", stalledFor.Truncate(time.Second))
+	if known == 0 {
+		return fmt.Sprintf("Still waiting for first instance registration (%s elapsed)", stalledFor.Truncate(time.Second)), launchWaitSeverityNormal
+	}
+	return fmt.Sprintf("Still waiting for additional instance registrations (%s since last update)", stalledFor.Truncate(time.Second)), launchWaitSeverityNormal
 }
 
 func firstRegistrationScopeFromOffers(offers []cloud.Offer) db.FirstRegistrationScope {
@@ -2512,8 +2565,17 @@ func (m launchModel) renderInlineLaunchOverview() string {
 		}
 		pendingLines++
 	}
-	if stall := m.launchStallLine(); stall != "" {
-		b.WriteString("  · " + launchErrStyle.Render(stall) + "\n")
+	if waitLine, severity := m.launchWaitLine(); waitLine != "" {
+		b.WriteString("  · ")
+		switch severity {
+		case launchWaitSeverityCritical:
+			b.WriteString(launchErrStyle.Render(waitLine))
+		case launchWaitSeverityWarn:
+			b.WriteString(launchWarnStyle.Render(waitLine))
+		default:
+			b.WriteString(launchDimStyle.Render(waitLine))
+		}
+		b.WriteString("\n")
 		pendingLines++
 	}
 	if m.launchHeartbeatErr != nil {
@@ -2641,9 +2703,16 @@ func (m launchModel) View() string {
 			}
 			b.WriteString("\n")
 		}
-		if stall := m.launchStallLine(); stall != "" {
+		if waitLine, severity := m.launchWaitLine(); waitLine != "" {
 			b.WriteString("  · ")
-			b.WriteString(launchErrStyle.Render(stall))
+			switch severity {
+			case launchWaitSeverityCritical:
+				b.WriteString(launchErrStyle.Render(waitLine))
+			case launchWaitSeverityWarn:
+				b.WriteString(launchWarnStyle.Render(waitLine))
+			default:
+				b.WriteString(launchDimStyle.Render(waitLine))
+			}
 			b.WriteString("\n")
 		}
 		if m.launchHeartbeatErr != nil {

@@ -651,11 +651,42 @@ func TestLaunchModelView_ShowsLaunchLivenessSummaryWhileLaunching(t *testing.T) 
 		"elapsed:",
 		"new instances discovered: 1/3",
 		"instance states: launching 1, running 1",
-		"No new-instance launch callbacks for",
+		"Still waiting for additional instance registrations",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in output, got:\n%s", want, out)
 		}
+	}
+}
+
+func TestLaunchModelView_FirstRegistrationWaitUsesSurvivalThresholds(t *testing.T) {
+	now := time.Now()
+	base := launchModel{
+		launching:               true,
+		launchCampaignCreatedAt: now.Add(-30 * time.Second),
+		firstRegSurvival: &db.FirstRegistrationSurvival{
+			WarnAfter:      2 * time.Minute,
+			TerminateAfter: 5 * time.Minute,
+		},
+	}
+
+	normalOut := stripANSI(base.View())
+	if !strings.Contains(normalOut, "Still waiting for first instance registration") || !strings.Contains(normalOut, "within typical range") {
+		t.Fatalf("expected normal first-registration wait message, got:\n%s", normalOut)
+	}
+
+	warnModel := base
+	warnModel.launchCampaignCreatedAt = now.Add(-3 * time.Minute)
+	warnOut := stripANSI(warnModel.View())
+	if !strings.Contains(warnOut, "taking longer than typical") {
+		t.Fatalf("expected warning first-registration wait message, got:\n%s", warnOut)
+	}
+
+	criticalModel := base
+	criticalModel.launchCampaignCreatedAt = now.Add(-6 * time.Minute)
+	criticalOut := stripANSI(criticalModel.View())
+	if !strings.Contains(criticalOut, "much longer than typical") {
+		t.Fatalf("expected critical first-registration wait message, got:\n%s", criticalOut)
 	}
 }
 

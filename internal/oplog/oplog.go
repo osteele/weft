@@ -71,6 +71,7 @@ const (
 	// Cloud launch telemetry
 	OpLaunchLaunchRequested = "cloud.instance.launch.requested"
 	OpLaunchLaunchCreated   = "cloud.instance.launch.created"
+	OpLaunchLaunchPhase     = "cloud.instance.launch.phase"
 	OpLaunchLaunchFailed    = "cloud.instance.launch.failed"
 	OpLaunchLaunchReadback  = "cloud.instance.launch.readback"
 	OpLaunchLaunchMismatch  = "cloud.instance.launch.mismatch"
