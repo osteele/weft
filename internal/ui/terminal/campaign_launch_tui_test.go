@@ -700,6 +700,68 @@ func TestLaunchModelUpdate_LaunchHeartbeatBackfillsInstancesAndStartsInlineWatch
 	}
 }
 
+func TestLaunchModelUpdate_LaunchHeartbeatStatusChangeAdvancesLiveness(t *testing.T) {
+	now := time.Now()
+	model, _ := launchModel{
+		launching:               true,
+		lastLaunchProgressAt:    now.Add(-2 * time.Minute),
+		registeredInstanceIDs:   []int64{11},
+		registeredInstanceIDSet: map[int64]struct{}{11: {}},
+		launchStatusCounts: map[string]int{
+			db.LaunchStatusLaunching: 1,
+		},
+		lastHeartbeatStatusSig: launchStatusSignature(map[string]int{
+			db.LaunchStatusLaunching: 1,
+		}),
+	}.Update(launchHeartbeatMsg{
+		instanceIDs: []int64{11},
+		statusCounts: map[string]int{
+			db.LaunchStatusRunning: 1,
+		},
+		polledAt: now,
+	})
+	got := model.(launchModel)
+	if !got.lastLaunchProgressAt.Equal(now) {
+		t.Fatalf("lastLaunchProgressAt = %v, want %v", got.lastLaunchProgressAt, now)
+	}
+	if got.heartbeatProgressEvents != 1 {
+		t.Fatalf("heartbeatProgressEvents = %d, want 1", got.heartbeatProgressEvents)
+	}
+}
+
+func TestLaunchModelHandleKey_EnterResetsLaunchChannels(t *testing.T) {
+	oldCampaignCh := make(chan int64, 1)
+	oldPlanCh := make(chan launchExecutionPlanMsg, 1)
+	oldPhaseCh := make(chan launchPhaseMsg, 1)
+	oldInstanceCh := make(chan launchInstanceRegisteredMsg, 1)
+	oldCampaignCh <- 123
+	oldPlanCh <- launchExecutionPlanMsg{expectedInstanceCount: 99}
+	oldPhaseCh <- launchPhaseMsg{groupIndex: -1, phase: "stale"}
+	oldInstanceCh <- launchInstanceRegisteredMsg{instanceID: 999, groupIndex: 0}
+
+	model, cmd := launchModel{
+		loading:                 false,
+		selected:                map[int64]bool{1: true},
+		groups:                  []campaign.InstanceGroup{{Jobs: []*db.Job{{ID: 1}}}},
+		campaignCh:              oldCampaignCh,
+		planCh:                  oldPlanCh,
+		phaseCh:                 oldPhaseCh,
+		instanceCh:              oldInstanceCh,
+		registeredInstanceIDSet: make(map[int64]struct{}),
+	}.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	got := model.(launchModel)
+
+	if !got.launching {
+		t.Fatal("expected launching state")
+	}
+	if cmd == nil {
+		t.Fatal("expected launch command batch")
+	}
+	if got.campaignCh == oldCampaignCh || got.planCh == oldPlanCh || got.phaseCh == oldPhaseCh || got.instanceCh == oldInstanceCh {
+		t.Fatal("expected launch channels to be replaced for a fresh launch")
+	}
+}
+
 func TestLaunchModelHandleKey_CtrlCQuitsWhileLaunching(t *testing.T) {
 	model, cmd := launchModel{launching: true}.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if model.(launchModel).launching != true {

@@ -1,8 +1,10 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -256,6 +258,10 @@ type launchModel struct {
 	inlineWatchUsed         bool
 	registeredInstanceIDs   []int64
 	registeredInstanceIDSet map[int64]struct{}
+	lastHeartbeatStatusSig  string
+	launchCallbackEvents    int
+	heartbeatProgressEvents int
+	heartbeatDiscoveries    int
 	inlineWatch             *watchModel
 	database                *sql.DB
 	clients                 []cloud.Client
@@ -494,7 +500,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
-	return launchModel{
+	m := launchModel{
 		groups:                  groups,
 		items:                   items,
 		cursor:                  cursor,
@@ -510,10 +516,6 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		overheadModel:           buildOverheadModel(database),
 		survivalModel:           buildSurvivalModel(database),
 		progressCh:              make(chan estimateProgressMsg, 1),
-		campaignCh:              make(chan int64, 1),
-		planCh:                  make(chan launchExecutionPlanMsg, 1),
-		phaseCh:                 make(chan launchPhaseMsg, 16),
-		instanceCh:              make(chan launchInstanceRegisteredMsg, len(groups)),
 		assetStageCh:            make(chan assetStageChangedMsg, 64),
 		gpuFilter:               gpuFilter,
 		projectFilter:           projectFilter,
@@ -524,6 +526,18 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		inlineWatchEnabled:      inlineWatchEnabled,
 		registeredInstanceIDSet: make(map[int64]struct{}),
 	}
+	m.resetLaunchChannels(len(groups))
+	return m
+}
+
+func (m *launchModel) resetLaunchChannels(groupCount int) {
+	if groupCount < 1 {
+		groupCount = 1
+	}
+	m.campaignCh = make(chan int64, 1)
+	m.planCh = make(chan launchExecutionPlanMsg, 1)
+	m.phaseCh = make(chan launchPhaseMsg, max(16, groupCount*4))
+	m.instanceCh = make(chan launchInstanceRegisteredMsg, max(8, groupCount*2))
 }
 
 func (m launchModel) Init() tea.Cmd {
@@ -978,6 +992,22 @@ func (m launchModel) waitForLaunchHeartbeat() tea.Cmd {
 	})
 }
 
+func launchStatusSignature(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(counts))
+	for status := range counts {
+		keys = append(keys, status)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, status := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", status, counts[status]))
+	}
+	return strings.Join(parts, ",")
+}
+
 func hasLaunchR2Config(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
@@ -1226,6 +1256,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case campaignCreatedMsg:
 		m.campaignID = msg.campaignID
 		m.lastLaunchProgressAt = time.Now()
+		m.launchCallbackEvents++
 		if m.inlineWatch != nil {
 			m.inlineWatch.campaignID = msg.campaignID
 			if m.inlineWatch.launchedAt.IsZero() {
@@ -1236,6 +1267,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchPhaseMsg:
 		m.lastLaunchProgressAt = time.Now()
+		m.launchCallbackEvents++
 		if msg.groupIndex < 0 {
 			m.campaignPhase = msg.phase
 		} else {
@@ -1279,9 +1311,11 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchInstanceRegisteredMsg:
 		m.lastLaunchProgressAt = time.Now()
+		m.launchCallbackEvents++
 		if _, ok := m.registeredInstanceIDSet[msg.instanceID]; !ok {
 			m.registeredInstanceIDSet[msg.instanceID] = struct{}{}
 			m.registeredInstanceIDs = append(m.registeredInstanceIDs, msg.instanceID)
+			slog.Debug("launch callback registered new instance", "component", "launch_tui", "instance_id", msg.instanceID, "callbacks", m.launchCallbackEvents)
 		}
 		if m.groupDone == nil {
 			m.groupDone = make(map[int]bool)
@@ -1312,7 +1346,13 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.launchHeartbeatErr = msg.err
 		} else {
 			m.launchHeartbeatErr = nil
+			progressed := false
 			if len(msg.statusCounts) > 0 {
+				statusSig := launchStatusSignature(msg.statusCounts)
+				if statusSig != m.lastHeartbeatStatusSig {
+					m.lastHeartbeatStatusSig = statusSig
+					progressed = true
+				}
 				m.launchStatusCounts = msg.statusCounts
 			}
 			for _, id := range msg.instanceIDs {
@@ -1321,6 +1361,17 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.registeredInstanceIDSet[id] = struct{}{}
 				m.registeredInstanceIDs = append(m.registeredInstanceIDs, id)
+				m.heartbeatDiscoveries++
+				progressed = true
+			}
+			if progressed {
+				m.lastLaunchProgressAt = msg.polledAt
+				m.heartbeatProgressEvents++
+				slog.Debug("launch heartbeat observed progress",
+					"component", "launch_tui",
+					"instances_known", len(m.registeredInstanceIDs),
+					"heartbeat_discoveries", m.heartbeatDiscoveries,
+					"heartbeat_progress_events", m.heartbeatProgressEvents)
 			}
 			next, watchCmd := m.maybeStartInlineWatch()
 			m = next
@@ -1438,13 +1489,18 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.quitOrSwitchToWatch("Launch canceled.")
 		}
 		m.launching = true
+		m.resetLaunchChannels(len(m.groups))
 		m.expectedInstanceCount = 0
 		m.launchStartedAt = time.Now()
 		m.lastLaunchProgressAt = m.launchStartedAt
 		m.launchStatusCounts = nil
+		m.lastHeartbeatStatusSig = ""
 		m.launchHeartbeatErr = nil
 		m.registeredInstanceIDs = nil
 		m.registeredInstanceIDSet = make(map[int64]struct{})
+		m.launchCallbackEvents = 0
+		m.heartbeatProgressEvents = 0
+		m.heartbeatDiscoveries = 0
 		m.inlineWatch = nil
 		m.inlineWatchUsed = false
 		m.partialErrors = nil
@@ -1880,12 +1936,14 @@ func (m launchModel) launchInstances() tea.Cmd {
 	planCh := m.planCh
 	phaseCh := m.phaseCh
 	instanceCh := m.instanceCh
+	sendCtx, cancelSends := context.WithCancel(context.Background())
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
 	assetStager := m.assetStager
 
 	return func() tea.Msg {
+		defer cancelSends()
 		defer close(planCh)
 		defer close(campaignCh)
 		defer close(phaseCh)
@@ -1893,26 +1951,30 @@ func (m launchModel) launchInstances() tea.Cmd {
 		var launchGroups []campaign.InstanceGroup
 		sendLaunchPlanReady := func(expectedInstanceCount int) {
 			select {
+			case <-sendCtx.Done():
+				return
 			case planCh <- launchExecutionPlanMsg{expectedInstanceCount: expectedInstanceCount}:
-			default:
 			}
 		}
 		sendCampaignPhase := func(phase string) {
 			select {
+			case <-sendCtx.Done():
+				return
 			case phaseCh <- launchPhaseMsg{groupIndex: -1, phase: phase}:
-			default:
 			}
 		}
 		sendGroupPhase := func(groupIdx int, phase string) {
 			select {
+			case <-sendCtx.Done():
+				return
 			case phaseCh <- launchPhaseMsg{groupIndex: groupIdx, phase: phase}:
-			default:
 			}
 		}
 		sendInstanceRegistered := func(groupIdx int, instanceID int64) {
 			select {
+			case <-sendCtx.Done():
+				return
 			case instanceCh <- launchInstanceRegisteredMsg{instanceID: instanceID, groupIndex: groupIdx}:
-			default:
 			}
 		}
 		findGroupIndex := func(group campaign.InstanceGroup) int {
