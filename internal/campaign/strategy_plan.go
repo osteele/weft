@@ -23,6 +23,10 @@ import (
 var resolvePredictBatch = predictor.ResolvePredictBatch
 var estimateJobDurationsDetailed = estimate.EstimateJobDurationsDetailed
 var estimateJobDurationsDetailedForReuse = estimate.EstimateJobDurationsDetailed
+var fetchCandidateGroupingsForPlanning = fetchCandidateGroupingsWithSession
+var fetchGroupRawOffersForPlanning = func(session *offerSearchSession, groups []InstanceGroup) []GroupRawOffers {
+	return session.fetchGroupRawOffers(groups)
+}
 
 // StrategyPlan combines reuse assignments with the best new-instance
 // candidate for a strategy. DisplayOffers/DisplayEstimates are aligned with the
@@ -63,6 +67,23 @@ type PlanProgress struct {
 
 // PlanProgressFunc receives launch-plan progress updates.
 type PlanProgressFunc func(PlanProgress)
+
+// CandidatePlanMode controls which candidate grouping families are explored
+// for one profile during plan construction.
+type CandidatePlanMode int
+
+const (
+	CandidatePlanModeFull CandidatePlanMode = iota
+	CandidatePlanModeSplitOnly
+	CandidatePlanModeMergedPreferred
+)
+
+// ProfilePlanSpec pairs a score profile with the candidate search mode to use
+// when constructing that profile's launch plan.
+type ProfilePlanSpec struct {
+	Profile       bidding.ScoreProfile
+	CandidateMode CandidatePlanMode
+}
 
 type rawOfferEvaluation struct {
 	raw              []GroupRawOffers
@@ -235,7 +256,7 @@ func BuildProfilePlansWithProgress(
 		overheadModel,
 		survivalModel,
 		offerSession,
-		profiles,
+		defaultProfilePlanSpecs(profiles),
 		minSurvival,
 		onProgress,
 	), splitRaw
@@ -284,6 +305,37 @@ func BuildProfilePlansFromSplitRawWithProgress(
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
+	return BuildProfilePlansFromSplitRawWithPlanSpecs(
+		database,
+		clients,
+		splitGroups,
+		splitRaw,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		defaultProfilePlanSpecs(profiles),
+		minSurvival,
+		onProgress,
+	)
+}
+
+// BuildProfilePlansFromSplitRawWithPlanSpecs builds reusable/new-instance
+// launch plans from pre-fetched split-group raw offers using explicit
+// per-profile candidate search modes.
+func BuildProfilePlansFromSplitRawWithPlanSpecs(
+	database *sql.DB,
+	clients []cloud.Client,
+	splitGroups []InstanceGroup,
+	splitRaw []GroupRawOffers,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	specs []ProfilePlanSpec,
+	minSurvival float64,
+	onProgress PlanProgressFunc,
+) map[string]StrategyPlan {
 	var offerSession *offerSearchSession
 	switch {
 	case len(clients) > 0:
@@ -309,7 +361,7 @@ func BuildProfilePlansFromSplitRawWithProgress(
 		overheadModel,
 		survivalModel,
 		offerSession,
-		profiles,
+		specs,
 		minSurvival,
 		onProgress,
 	)
@@ -324,22 +376,22 @@ func buildProfilePlansFromSplitRawWithSession(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	offerSession *offerSearchSession,
-	profiles []bidding.ScoreProfile,
+	specs []ProfilePlanSpec,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
-	plans := make(map[string]StrategyPlan, len(profiles))
+	plans := make(map[string]StrategyPlan, len(specs))
 	if len(splitGroups) == 0 {
 		return plans
 	}
 
-	validProfiles := make([]bidding.ScoreProfile, 0, len(profiles))
-	for _, profile := range profiles {
-		if profile.Valid() {
-			validProfiles = append(validProfiles, profile)
+	validSpecs := make([]ProfilePlanSpec, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Profile.Valid() {
+			validSpecs = append(validSpecs, spec)
 		}
 	}
-	if len(validProfiles) == 0 {
+	if len(validSpecs) == 0 {
 		return plans
 	}
 
@@ -347,39 +399,48 @@ func buildProfilePlansFromSplitRawWithSession(
 	reportPlanProgress(onProgress, "Estimating raw-offer runtimes", fmt.Sprintf("%d direct offer(s)", countRawOffers(splitRaw)), 0, 0)
 	splitEval := evaluator.evaluateRawOffers(splitRaw)
 
-	workerLimit := planProfileWorkerLimit(len(validProfiles))
+	workerLimit := planProfileWorkerLimit(len(validSpecs))
 	sem := make(chan struct{}, workerLimit)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	for idx, profile := range validProfiles {
+	for idx, spec := range validSpecs {
 		wg.Add(1)
-		go func(idx int, profile bidding.ScoreProfile) {
+		go func(idx int, spec ProfilePlanSpec) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			progressLabel := profileProgressLabel(profile.ID, idx+1, len(validProfiles))
-			reportPlanProgressForLane(onProgress, "Planning tradeoff profiles", progressLabel, "", idx+1, len(validProfiles))
+			progressLabel := profileProgressLabel(spec.Profile.ID, idx+1, len(validSpecs))
+			reportPlanProgressForLane(onProgress, "Planning tradeoff profiles", progressLabel, "", idx+1, len(validSpecs))
 			plan := buildStrategyPlanForSplitRaw(
 				splitGroups,
 				splitEval,
 				reusable,
 				evaluator,
 				offerSession,
-				profile,
+				spec.Profile,
+				spec.CandidateMode,
 				onProgress,
 				progressLabel,
 			)
 
 			mu.Lock()
-			plans[profile.ID] = plan
+			plans[spec.Profile.ID] = plan
 			mu.Unlock()
-		}(idx, profile)
+		}(idx, spec)
 	}
 	wg.Wait()
 
 	return plans
+}
+
+func defaultProfilePlanSpecs(profiles []bidding.ScoreProfile) []ProfilePlanSpec {
+	specs := make([]ProfilePlanSpec, 0, len(profiles))
+	for _, profile := range profiles {
+		specs = append(specs, ProfilePlanSpec{Profile: profile, CandidateMode: CandidatePlanModeFull})
+	}
+	return specs
 }
 
 func planProfileWorkerLimit(totalProfiles int) int {
@@ -400,6 +461,7 @@ func buildStrategyPlanForSplitRaw(
 	evaluator *planEvaluator,
 	offerSession *offerSearchSession,
 	profile bidding.ScoreProfile,
+	candidateMode CandidatePlanMode,
 	onProgress PlanProgressFunc,
 	progressLabel string,
 ) StrategyPlan {
@@ -453,19 +515,65 @@ func buildStrategyPlanForSplitRaw(
 		remainingIdx = append(remainingIdx, idx)
 	}
 
-	if len(remainingGroups) == 0 || offerSession == nil {
+	if len(remainingGroups) == 0 {
 		return plan
 	}
 
-	reportPlanProgressForLane(onProgress, "Fetching merged and parallel candidates", progressLabel, "", 0, 0)
-	candidates := fetchCandidateGroupingsWithSession(offerSession, remainingGroups)
-	result := bestCandidateForProfileEvaluations(
+	remainingSplitEval := subsetRawOfferEvaluation(splitEval, remainingIdx)
+	splitResult := evaluateSingleCandidateForProfile(
 		evaluator,
-		evaluator.evaluateCandidateGroupings(candidates),
+		groupingEvaluation{
+			label:   "split",
+			groups:  remainingGroups,
+			rawEval: remainingSplitEval,
+		},
 		profile,
 		onProgress,
 		progressLabel,
 	)
+
+	var result CandidateResult
+	switch candidateMode {
+	case CandidatePlanModeSplitOnly:
+		result = splitResult
+	case CandidatePlanModeMergedPreferred:
+		result = splitResult
+		if offerSession != nil {
+			mergedGroups := MergeCompatibleGroups(remainingGroups)
+			if len(mergedGroups) != len(remainingGroups) {
+				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
+				mergedEval := evaluator.evaluateRawOffers(fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedResult := evaluateSingleCandidateForProfile(
+					evaluator,
+					groupingEvaluation{
+						label:   "merged",
+						groups:  mergedGroups,
+						rawEval: mergedEval,
+					},
+					profile,
+					onProgress,
+					progressLabel,
+				)
+				if candidateResultHasOffers(mergedResult) {
+					result = mergedResult
+				}
+			}
+		}
+	default:
+		if offerSession == nil {
+			result = splitResult
+			break
+		}
+		reportPlanProgressForLane(onProgress, "Fetching merged and parallel candidates", progressLabel, "", 0, 0)
+		candidates := fetchCandidateGroupingsForPlanning(offerSession, remainingGroups)
+		result = bestCandidateForProfileEvaluations(
+			evaluator,
+			evaluator.evaluateCandidateGroupings(candidates),
+			profile,
+			onProgress,
+			progressLabel,
+		)
+	}
 	if len(result.Groups) == 0 {
 		return plan
 	}
@@ -484,6 +592,55 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	return plan
+}
+
+func subsetRawOfferEvaluation(eval rawOfferEvaluation, indexes []int) rawOfferEvaluation {
+	subsetRaw := make([]GroupRawOffers, 0, len(indexes))
+	subsetPredictions := make(map[int]map[string]offerRuntimePrediction, len(indexes))
+	for subsetIdx, originalIdx := range indexes {
+		if originalIdx < 0 || originalIdx >= len(eval.raw) {
+			continue
+		}
+		subsetRaw = append(subsetRaw, eval.raw[originalIdx])
+		if offerPredictions, ok := eval.offerPredictions[originalIdx]; ok {
+			subsetPredictions[subsetIdx] = offerPredictions
+		}
+	}
+	return rawOfferEvaluation{raw: subsetRaw, offerPredictions: subsetPredictions}
+}
+
+func evaluateSingleCandidateForProfile(
+	evaluator *planEvaluator,
+	candidate groupingEvaluation,
+	profile bidding.ScoreProfile,
+	onProgress PlanProgressFunc,
+	progressLabel string,
+) CandidateResult {
+	if len(candidate.groups) == 0 {
+		return CandidateResult{}
+	}
+	reportPlanProgressForLane(onProgress, "Scoring candidate groupings", progressLabel, candidate.label, 1, 1)
+	offers, selectedPredictions := evaluator.selectOffers(candidate.rawEval, profile)
+	estimates := evaluator.estimateSelectedOffers(offers, selectedPredictions)
+	return CandidateResult{
+		CandidateIdx: 0,
+		Label:        candidate.label,
+		Groups:       candidate.groups,
+		Offers:       offers,
+		Estimates:    estimates,
+	}
+}
+
+func candidateResultHasOffers(result CandidateResult) bool {
+	if len(result.Groups) == 0 || len(result.Offers) != len(result.Groups) {
+		return false
+	}
+	for _, offer := range result.Offers {
+		if offer.Offer == nil || offer.Err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *planEvaluator) evaluateRawOffers(raw []GroupRawOffers) rawOfferEvaluation {

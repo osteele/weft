@@ -58,6 +58,139 @@ func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
 	}
 }
 
+func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidates(t *testing.T) {
+	originalFetchCandidates := fetchCandidateGroupingsForPlanning
+	originalFetchRaw := fetchGroupRawOffersForPlanning
+	t.Cleanup(func() {
+		fetchCandidateGroupingsForPlanning = originalFetchCandidates
+		fetchGroupRawOffersForPlanning = originalFetchRaw
+	})
+
+	fetchCandidateGroupingsForPlanning = func(_ *offerSearchSession, _ []InstanceGroup) []GroupingCandidate {
+		t.Fatal("split-only pass should not fetch merged/parallel candidates")
+		return nil
+	}
+	fetchGroupRawOffersForPlanning = func(_ *offerSearchSession, _ []InstanceGroup) []GroupRawOffers {
+		t.Fatal("split-only pass should not fetch merged candidates")
+		return nil
+	}
+
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+	}
+	splitRaw := []GroupRawOffers{{
+		Group: group,
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.40},
+		},
+	}}
+
+	plans := buildProfilePlansFromSplitRawWithSession(
+		nil,
+		[]InstanceGroup{group},
+		splitRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		newOfferSearchSession(nil),
+		[]ProfilePlanSpec{{
+			Profile:       bidding.StrategyFast.Profile(),
+			CandidateMode: CandidatePlanModeSplitOnly,
+		}},
+		0,
+		nil,
+	)
+
+	plan, ok := plans[bidding.StrategyFast.Profile().ID]
+	if !ok {
+		t.Fatalf("expected fast plan, got %#v", plans)
+	}
+	if plan.NewCandidate == nil || plan.NewCandidate.Label != "split" {
+		t.Fatalf("expected split-only candidate, got %#v", plan.NewCandidate)
+	}
+	if len(plan.DisplayOffers) != 1 || plan.DisplayOffers[0].Offer == nil {
+		t.Fatalf("expected split offer to be displayed, got %#v", plan.DisplayOffers)
+	}
+}
+
+func TestBuildProfilePlansFromSplitRawWithSession_MergedPreferredUsesMergedCandidate(t *testing.T) {
+	originalFetchRaw := fetchGroupRawOffersForPlanning
+	t.Cleanup(func() {
+		fetchGroupRawOffersForPlanning = originalFetchRaw
+	})
+
+	fetchGroupRawOffersForPlanning = func(_ *offerSearchSession, groups []InstanceGroup) []GroupRawOffers {
+		if len(groups) != 1 {
+			t.Fatalf("merged fetch group count = %d, want 1", len(groups))
+		}
+		return []GroupRawOffers{{
+			Group: groups[0],
+			Offers: []cloud.Offer{
+				{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.60},
+			},
+		}}
+	}
+
+	groups := []InstanceGroup{
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+		},
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs:     []*db.Job{{ID: 2, Command: "python train.py --epochs 1"}},
+		},
+	}
+	splitRaw := []GroupRawOffers{
+		{
+			Group: groups[0],
+			Offers: []cloud.Offer{
+				{ProviderID: "split-a", GPUName: "RTX 4090", CostPerHour: 0.40},
+			},
+		},
+		{
+			Group: groups[1],
+			Offers: []cloud.Offer{
+				{ProviderID: "split-b", GPUName: "RTX 4090", CostPerHour: 0.40},
+			},
+		},
+	}
+
+	plans := buildProfilePlansFromSplitRawWithSession(
+		nil,
+		groups,
+		splitRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		newOfferSearchSession(nil),
+		[]ProfilePlanSpec{{
+			Profile:       bidding.StrategyCheap.Profile(),
+			CandidateMode: CandidatePlanModeMergedPreferred,
+		}},
+		0,
+		nil,
+	)
+
+	plan, ok := plans[bidding.StrategyCheap.Profile().ID]
+	if !ok {
+		t.Fatalf("expected cheap plan, got %#v", plans)
+	}
+	if plan.NewCandidate == nil || plan.NewCandidate.Label != "merged" {
+		t.Fatalf("expected merged candidate, got %#v", plan.NewCandidate)
+	}
+	for _, offer := range plan.DisplayOffers {
+		if offer.Offer == nil || offer.Offer.ProviderID != "merged" {
+			t.Fatalf("expected merged offer to be mapped back to split groups, got %#v", plan.DisplayOffers)
+		}
+	}
+}
+
 func TestPruneReuseCandidates_LimitsPoolAndKeepsStrongCandidates(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",

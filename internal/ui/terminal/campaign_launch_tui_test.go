@@ -142,7 +142,7 @@ func TestLaunchModelView_ShowsRawOfferSummaryWhilePlanning(t *testing.T) {
 		"Direct offers found for 1/2 GPU groups.",
 		"A100 ≥80GB: 1 direct offer",
 		"H100 ≥80GB: 0 direct offers",
-		"Building launch plan from raw offers...",
+		"Building initial launch options...",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
@@ -336,7 +336,7 @@ func TestFormatPlanProgressLines_ShowsConcurrentProfileLanes(t *testing.T) {
 		t.Fatalf("line count = %d, want 3", len(lines))
 	}
 	for _, want := range []string{
-		"Building launch plan from raw offers...",
+		"Building initial launch options...",
 		"cheap (1/3): Estimating direct-offer costs...",
 		"fast (2/3): Scoring candidate groupings (1/3): split...",
 	} {
@@ -353,29 +353,32 @@ func TestFormatPlanProgressLines_ShowsConcurrentProfileLanes(t *testing.T) {
 	}
 }
 
-func TestTradeoffProfilesForLaunchBatch_UsesEndpointsFirst(t *testing.T) {
-	profiles, fullSet := tradeoffProfilesForLaunchBatch(false)
+func TestTradeoffPlanSpecsForLaunchBatch_UsesFastFirstModes(t *testing.T) {
+	specs, fullSet := tradeoffPlanSpecsForLaunchBatch(false)
 	if fullSet {
 		t.Fatal("expected initial launch batch to be a partial profile set")
 	}
-	gotIDs := []string{profiles[0].ID, profiles[1].ID, profiles[2].ID}
-	wantIDs := []string{
-		bidding.StrategyCheap.Profile().ID,
-		bidding.StrategyFast.Profile().ID,
-		bidding.StrategyFastest.Profile().ID,
+	if len(specs) != 2 {
+		t.Fatalf("initial spec count = %d, want 2", len(specs))
 	}
-	for i := range wantIDs {
-		if gotIDs[i] != wantIDs[i] {
-			t.Fatalf("profile %d = %q, want %q", i, gotIDs[i], wantIDs[i])
-		}
+	if specs[0].Profile.ID != bidding.StrategyCheap.Profile().ID || specs[0].CandidateMode != campaign.CandidatePlanModeMergedPreferred {
+		t.Fatalf("initial cheap spec = %#v, want merged-preferred cheap", specs[0])
+	}
+	if specs[1].Profile.ID != bidding.StrategyFast.Profile().ID || specs[1].CandidateMode != campaign.CandidatePlanModeSplitOnly {
+		t.Fatalf("initial fast spec = %#v, want split-only fast", specs[1])
 	}
 
-	backgroundProfiles, backgroundFullSet := tradeoffProfilesForLaunchBatch(true)
+	backgroundSpecs, backgroundFullSet := tradeoffPlanSpecsForLaunchBatch(true)
 	if !backgroundFullSet {
 		t.Fatal("expected background launch batch to use the full profile set")
 	}
-	if len(backgroundProfiles) <= len(profiles) {
-		t.Fatalf("background profile count = %d, want > %d", len(backgroundProfiles), len(profiles))
+	if len(backgroundSpecs) <= len(specs) {
+		t.Fatalf("background profile count = %d, want > %d", len(backgroundSpecs), len(specs))
+	}
+	for _, spec := range backgroundSpecs {
+		if spec.CandidateMode != campaign.CandidatePlanModeFull {
+			t.Fatalf("background spec = %#v, want full candidate mode", spec)
+		}
 	}
 }
 
@@ -386,14 +389,12 @@ func TestLaunchModelUpdate_ProfilePlansLoaded_StartsBackgroundRefinement(t *test
 		estimateCache:  make(map[string][]campaign.CostEstimate),
 	}.Update(profilePlansLoadedMsg{
 		plans: map[string]campaign.StrategyPlan{
-			"cheap":   {},
-			"fast":    {},
-			"fastest": {},
+			"cheap": {},
+			"fast":  {},
 		},
 		options: []campaign.TradeoffOption{
 			{ID: "cheap", Label: "cheap"},
 			{ID: "fast", Label: "fast"},
-			{ID: "fastest", Label: "fastest"},
 		},
 		fullSet:    false,
 		generation: 1,

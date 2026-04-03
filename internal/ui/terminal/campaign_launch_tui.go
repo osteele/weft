@@ -711,7 +711,7 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 	minSurvival := m.launchOpts.MinSurvival
 	ch := m.planProgressCh
 	generation := m.planGeneration
-	profiles, fullSet := tradeoffProfilesForLaunchBatch(background)
+	specs, fullSet := tradeoffPlanSpecsForLaunchBatch(background)
 	build := func() tea.Msg {
 		var onProgress campaign.PlanProgressFunc
 		if !background {
@@ -730,7 +730,7 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 				}
 			}
 		}
-		plans := campaign.BuildProfilePlansFromSplitRawWithProgress(
+		plans := campaign.BuildProfilePlansFromSplitRawWithPlanSpecs(
 			database,
 			clients,
 			groups,
@@ -739,7 +739,7 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 			predCfg,
 			overheadModel,
 			survivalModel,
-			profiles,
+			specs,
 			minSurvival,
 			onProgress,
 		)
@@ -758,16 +758,28 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 	return tea.Batch(build, waitForPlanProgress(ch))
 }
 
-func tradeoffProfilesForLaunchBatch(background bool) ([]bidding.ScoreProfile, bool) {
+func tradeoffPlanSpecsForLaunchBatch(background bool) ([]campaign.ProfilePlanSpec, bool) {
 	if background {
-		return bidding.ParetoSamplingProfiles(), true
+		profiles := bidding.ParetoSamplingProfiles()
+		specs := make([]campaign.ProfilePlanSpec, 0, len(profiles))
+		for _, profile := range profiles {
+			specs = append(specs, campaign.ProfilePlanSpec{
+				Profile:       profile,
+				CandidateMode: campaign.CandidatePlanModeFull,
+			})
+		}
+		return specs, true
 	}
-	profiles := []bidding.ScoreProfile{
-		bidding.StrategyCheap.Profile(),
-		bidding.StrategyFast.Profile(),
-		bidding.StrategyFastest.Profile(),
-	}
-	return profiles, len(bidding.ParetoSamplingProfiles()) <= len(profiles)
+	return []campaign.ProfilePlanSpec{
+		{
+			Profile:       bidding.StrategyCheap.Profile(),
+			CandidateMode: campaign.CandidatePlanModeMergedPreferred,
+		},
+		{
+			Profile:       bidding.StrategyFast.Profile(),
+			CandidateMode: campaign.CandidatePlanModeSplitOnly,
+		},
+	}, false
 }
 
 // prefetchHFSizes warms the HF model size cache in parallel with offer fetching.
@@ -2143,7 +2155,7 @@ func (m launchModel) buildingPlans() bool {
 }
 
 func formatPlanProgressLines(state planProgressState) []string {
-	lines := []string{"Building launch plan from raw offers..."}
+	lines := []string{"Building initial launch options..."}
 	if len(state.order) == 0 {
 		return lines
 	}
