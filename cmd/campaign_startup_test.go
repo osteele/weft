@@ -5,9 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
@@ -69,7 +71,7 @@ func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
 		return []placement.Score{{Host: "host-a", Eligible: true}}
 	}
 
-	remaining := prefilterOnPremWithProgress(database, jobs, nil, nil)
+	remaining := prefilterOnPremWithProgress(database, jobs, nil, nil, nil)
 	if len(remaining) != 0 {
 		t.Fatalf("remaining jobs = %d, want 0", len(remaining))
 	}
@@ -91,5 +93,94 @@ func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
 		if job.Host != "host-a" {
 			t.Fatalf("job %d host = %q, want host-a", jobID, job.Host)
 		}
+	}
+}
+
+func TestPrefilterOnPremWithProgress_BatchesPredictorCallsAcrossHostsAndJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	job1, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py --epochs 1", "job 1", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(job1): %v", err)
+	}
+	job2, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py --epochs 2", "job 2", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(job2): %v", err)
+	}
+
+	jobs := []*db.Job{
+		{ID: job1, GPUClass: "nvidia", Command: "python train.py --epochs 1"},
+		{ID: job2, GPUClass: "nvidia", Command: "python train.py --epochs 2"},
+	}
+
+	originalLoad := loadInventoryHosts
+	originalCollect := collectOnPremMetrics
+	originalScore := scoreOnPremHosts
+	originalResolveBatch := resolvePredictBatchForOnPrem
+	originalBuildPredictor := buildJobPredictorFromConfig
+	t.Cleanup(func() {
+		loadInventoryHosts = originalLoad
+		collectOnPremMetrics = originalCollect
+		scoreOnPremHosts = originalScore
+		resolvePredictBatchForOnPrem = originalResolveBatch
+		buildJobPredictorFromConfig = originalBuildPredictor
+	})
+
+	hosts := []inventory.HostSpec{
+		{Name: "host-a"},
+		{Name: "host-b"},
+	}
+
+	loadInventoryHosts = func() ([]inventory.HostSpec, error) {
+		return hosts, nil
+	}
+	collectOnPremMetrics = func(_ *sql.DB, names []string, timeout time.Duration) map[string]*placement.HostMetrics {
+		return map[string]*placement.HostMetrics{
+			"host-a": {QueueDepth: 0},
+			"host-b": {QueueDepth: 0},
+		}
+	}
+
+	batchCalls := 0
+	resolvePredictBatchForOnPrem = func(_ predictor.Config, batchJobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		batchCalls++
+		if len(batchJobs) != len(jobs)*len(hosts) {
+			t.Fatalf("ResolvePredictBatch batch size = %d, want %d", len(batchJobs), len(jobs)*len(hosts))
+		}
+		results := make(map[int64]*predictor.Result, len(batchJobs))
+		for _, batchJob := range batchJobs {
+			results[batchJob.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{Mean: 60, Lower: 50, Upper: 70},
+			}
+		}
+		return results, nil
+	}
+	buildJobPredictorFromConfig = func(_ *config.Config, _ placement.Constraints) placement.JobPredictor {
+		t.Fatalf("unexpected fallback single-host predictor build")
+		return nil
+	}
+
+	scoreOnPremHosts = func(_ *sql.DB, scoredHosts []inventory.HostSpec, constraints placement.Constraints, metrics map[string]*placement.HostMetrics, predict placement.JobPredictor) []placement.Score {
+		if len(scoredHosts) != len(hosts) {
+			t.Fatalf("ScoreHostListWithPredictor hosts = %d, want %d", len(scoredHosts), len(hosts))
+		}
+		for _, host := range hosts {
+			prediction := predict(host.Name)
+			if prediction == nil || prediction.DurationS == nil || *prediction.DurationS != 60 {
+				t.Fatalf("missing cached prediction for host %s: %+v", host.Name, prediction)
+			}
+		}
+		return []placement.Score{{Host: "host-a", Eligible: true}}
+	}
+
+	remaining := prefilterOnPremWithProgress(database, jobs, &config.Config{Predictor: config.PredictorConfig{
+		ProjectPath: "/tmp/job-estimator",
+		ModelDir:    "/tmp/models",
+	}}, nil, nil)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining jobs = %d, want 0", len(remaining))
+	}
+	if batchCalls != 1 {
+		t.Fatalf("ResolvePredictBatch calls = %d, want 1", batchCalls)
 	}
 }

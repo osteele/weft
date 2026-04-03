@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
@@ -30,6 +31,8 @@ import (
 var loadInventoryHosts = inventory.LoadHosts
 var collectOnPremMetrics = placement.CollectMetrics
 var scoreOnPremHosts = placement.ScoreHostListWithPredictor
+var buildJobPredictorFromConfig = placement.BuildJobPredictorFromConfig
+var resolvePredictBatchForOnPrem = predictor.ResolvePredictBatch
 
 var campaignCmd = &cobra.Command{
 	Use:     "campaign",
@@ -224,7 +227,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if len(jobs) > 0 {
 		reportStartupPhase(fmt.Sprintf("Probing on-prem hosts for %d job(s)...", len(jobs)))
 	}
-	jobs = prefilterOnPremWithProgress(database, jobs, cfg, newLaunchProgressReporter(cmd.ErrOrStderr(), "Checked on-prem placement", len(jobs)))
+	jobs = prefilterOnPremWithProgress(database, jobs, cfg, newLaunchProgressReporter(cmd.ErrOrStderr(), "Checking on-prem placement", len(jobs)), reportStartupPhase)
 
 	if len(jobs) == 0 {
 		fmt.Println("No jobs need rental GPUs.")
@@ -309,10 +312,10 @@ func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 // prefilterOnPrem tries to place unplaced jobs on on-prem hosts before launching
 // rental instances. Returns the subset of jobs that still need rental.
 func prefilterOnPrem(database *sql.DB, jobs []*db.Job, cfg *config.Config) []*db.Job {
-	return prefilterOnPremWithProgress(database, jobs, cfg, nil)
+	return prefilterOnPremWithProgress(database, jobs, cfg, nil, nil)
 }
 
-func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int)) []*db.Job {
+func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int), onPhase func(string)) []*db.Job {
 	hosts, err := loadInventoryHosts()
 	if err != nil || len(hosts) == 0 {
 		return prefilterOnPremIndividually(database, jobs, cfg, onProgress)
@@ -322,7 +325,11 @@ func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.C
 	for _, host := range hosts {
 		hostNames = append(hostNames, host.Name)
 	}
+	if onPhase != nil {
+		onPhase(fmt.Sprintf("Collecting on-prem metrics for %d host(s)...", len(hosts)))
+	}
 	liveMetrics := collectOnPremMetrics(database, hostNames, 5*time.Second)
+	predictors := buildOnPremBatchPredictors(cfg, jobs, hosts, onPhase)
 
 	var remaining []*db.Job
 	total := len(jobs)
@@ -330,7 +337,7 @@ func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.C
 		if onProgress != nil {
 			onProgress(i+1, total)
 		}
-		host, ok := selectOnPremHostFromSnapshot(database, hosts, liveMetrics, j, cfg)
+		host, ok := selectOnPremHostFromSnapshot(database, hosts, liveMetrics, j, cfg, predictors[j.ID])
 		if !ok {
 			remaining = append(remaining, j)
 			continue
@@ -377,7 +384,7 @@ func prefilterOnPremIndividually(database *sql.DB, jobs []*db.Job, cfg *config.C
 	return remaining
 }
 
-func selectOnPremHostFromSnapshot(database *sql.DB, hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics, job *db.Job, cfg *config.Config) (string, bool) {
+func selectOnPremHostFromSnapshot(database *sql.DB, hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics, job *db.Job, cfg *config.Config, predict placement.JobPredictor) (string, bool) {
 	if job == nil {
 		return "", false
 	}
@@ -386,12 +393,124 @@ func selectOnPremHostFromSnapshot(database *sql.DB, hosts []inventory.HostSpec, 
 		return "", false
 	}
 
-	predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
+	if predict == nil {
+		predict = buildJobPredictorFromConfig(cfg, constraints)
+	}
 	reachableHosts := filterReachableInventoryHosts(hosts, liveMetrics)
 	if host, ok := firstEligibleOnPremHost(database, reachableHosts, constraints, liveMetrics, predict); ok {
 		return host, true
 	}
 	return firstEligibleOnPremHost(database, hosts, constraints, nil, predict)
+}
+
+func buildOnPremBatchPredictors(cfg *config.Config, jobs []*db.Job, hosts []inventory.HostSpec, onPhase func(string)) map[int64]placement.JobPredictor {
+	predCfg := placement.PredictorConfigFromApp(cfg)
+	if !predCfg.Configured() || len(jobs) == 0 || len(hosts) == 0 {
+		return nil
+	}
+
+	type batchRef struct {
+		jobID int64
+		host  string
+	}
+
+	refs := make(map[int64]batchRef)
+	batchJobs := make([]predictor.BatchJob, 0, len(jobs)*len(hosts))
+	var nextID int64 = 1
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		constraints := placement.ConstraintsFromJob(job)
+		if constraints.Command == "" || db.HasRentalTag(constraints.Tags) {
+			continue
+		}
+		for _, host := range hosts {
+			batchJobs = append(batchJobs, predictor.BatchJob{
+				ID:       nextID,
+				Command:  constraints.Command,
+				Host:     host.Name,
+				Project:  constraints.Project,
+				GPUClass: constraints.GPUClass,
+			})
+			refs[nextID] = batchRef{jobID: job.ID, host: host.Name}
+			nextID++
+		}
+	}
+	if len(batchJobs) == 0 {
+		return nil
+	}
+
+	if onPhase != nil {
+		onPhase(fmt.Sprintf("Estimating on-prem runtimes for %d host/job pair(s)...", len(batchJobs)))
+	}
+
+	results, err := resolvePredictBatchForOnPrem(predCfg, batchJobs)
+	if err != nil || results == nil {
+		return nil
+	}
+
+	predictionsByJob := make(map[int64]map[string]*placement.RawPrediction)
+	for id, ref := range refs {
+		result := results[id]
+		if result == nil {
+			continue
+		}
+		raw := rawPredictionFromResult(result)
+		if raw == nil {
+			continue
+		}
+		perHost := predictionsByJob[ref.jobID]
+		if perHost == nil {
+			perHost = make(map[string]*placement.RawPrediction)
+			predictionsByJob[ref.jobID] = perHost
+		}
+		perHost[ref.host] = raw
+	}
+	if len(predictionsByJob) == 0 {
+		return nil
+	}
+
+	predictors := make(map[int64]placement.JobPredictor, len(predictionsByJob))
+	for jobID, perHost := range predictionsByJob {
+		hostPredictions := perHost
+		predictors[jobID] = placement.NewJobPredictor(func(host string) *placement.RawPrediction {
+			return hostPredictions[host]
+		})
+	}
+	return predictors
+}
+
+func rawPredictionFromResult(result *predictor.Result) *placement.RawPrediction {
+	if result == nil {
+		return nil
+	}
+	raw := &placement.RawPrediction{}
+	if result.DurationS != nil {
+		raw.DurationS = &placement.RawPredictionField{
+			Mean:  result.DurationS.Mean,
+			Lower: result.DurationS.Lower,
+			Upper: result.DurationS.Upper,
+		}
+	}
+	if result.PeakRSSKB != nil {
+		raw.PeakRSSKB = &placement.RawPredictionField{
+			Mean:  result.PeakRSSKB.Mean,
+			Lower: result.PeakRSSKB.Lower,
+			Upper: result.PeakRSSKB.Upper,
+		}
+	}
+	if result.MaxGPUMemMiB != nil {
+		raw.MaxGPUMemMiB = &placement.RawPredictionField{
+			Mean:  result.MaxGPUMemMiB.Mean,
+			Lower: result.MaxGPUMemMiB.Lower,
+			Upper: result.MaxGPUMemMiB.Upper,
+		}
+	}
+	if raw.DurationS == nil && raw.PeakRSSKB == nil && raw.MaxGPUMemMiB == nil {
+		return nil
+	}
+	return raw
 }
 
 func filterReachableInventoryHosts(hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics) []inventory.HostSpec {

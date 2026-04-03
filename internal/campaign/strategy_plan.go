@@ -20,7 +20,7 @@ import (
 
 var resolvePredictBatch = predictor.ResolvePredictBatch
 var estimateJobDurationsDetailed = estimate.EstimateJobDurationsDetailed
-var estimateJobDurationDetailed = estimate.EstimateJobDurationDetailed
+var estimateJobDurationsDetailedForReuse = estimate.EstimateJobDurationsDetailed
 
 // StrategyPlan combines reuse assignments with the best new-instance
 // candidate for a strategy. DisplayOffers/DisplayEstimates are aligned with the
@@ -86,6 +86,14 @@ type planEvaluator struct {
 
 	estimateMu    sync.Mutex
 	estimateCache map[string][]CostEstimate
+
+	reuseMu        sync.Mutex
+	reuseEstimates map[string]reuseEstimateCacheEntry
+}
+
+type reuseEstimateCacheEntry struct {
+	estimate CostEstimate
+	ok       bool
 }
 
 func newPlanEvaluator(
@@ -96,14 +104,15 @@ func newPlanEvaluator(
 	minSurvival float64,
 ) *planEvaluator {
 	return &planEvaluator{
-		database:      database,
-		predCfg:       predCfg,
-		overheadModel: overheadModel,
-		survivalModel: survivalModel,
-		minSurvival:   minSurvival,
-		setupFactory:  OfferSetupOverheadFactory(database, overheadModel),
-		rawEvalCache:  make(map[string]map[int]map[string]offerRuntimePrediction),
-		estimateCache: make(map[string][]CostEstimate),
+		database:       database,
+		predCfg:        predCfg,
+		overheadModel:  overheadModel,
+		survivalModel:  survivalModel,
+		minSurvival:    minSurvival,
+		setupFactory:   OfferSetupOverheadFactory(database, overheadModel),
+		rawEvalCache:   make(map[string]map[int]map[string]offerRuntimePrediction),
+		estimateCache:  make(map[string][]CostEstimate),
+		reuseEstimates: make(map[string]reuseEstimateCacheEntry),
 	}
 }
 
@@ -400,12 +409,10 @@ func buildStrategyPlanForSplitRaw(
 
 	reportPlanProgressForLane(onProgress, "Checking reusable instances", progressLabel, "", 0, 0)
 	reuseDecisions := chooseReuseGroups(
-		evaluator.database,
 		splitGroups,
 		splitEstimates,
 		reusable,
-		evaluator.predCfg,
-		evaluator.overheadModel,
+		evaluator,
 		profile,
 	)
 
@@ -553,6 +560,41 @@ func (e *planEvaluator) evaluateCandidateGroupings(candidates []GroupingCandidat
 	}
 	wg.Wait()
 	return evaluations
+}
+
+func (e *planEvaluator) estimateReuseGroup(group InstanceGroup, cap InstanceCapacity) (CostEstimate, bool) {
+	key := reuseEstimateCacheKey(group, cap)
+
+	e.reuseMu.Lock()
+	if cached, ok := e.reuseEstimates[key]; ok {
+		e.reuseMu.Unlock()
+		return cached.estimate, cached.ok
+	}
+
+	est, ok := EstimateReuseGroup(e.database, group, cap, e.predCfg, e.overheadModel)
+	e.reuseEstimates[key] = reuseEstimateCacheEntry{estimate: est, ok: ok}
+	e.reuseMu.Unlock()
+	return est, ok
+}
+
+func reuseEstimateCacheKey(group InstanceGroup, cap InstanceCapacity) string {
+	jobIDs := make([]string, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		if job == nil {
+			jobIDs = append(jobIDs, "0")
+			continue
+		}
+		jobIDs = append(jobIDs, fmt.Sprintf("%d", job.ID))
+	}
+	inputs := append([]string(nil), cap.ProvisionedInputs...)
+	return strings.Join([]string{
+		strings.Join(jobIDs, ","),
+		fmt.Sprintf("%d", cap.Instance.ID),
+		fmt.Sprintf("%d", cap.DiskFreeGB),
+		fmt.Sprintf("%d", cap.RunningJobCount),
+		fmt.Sprintf("%d", int64(cap.GraceRemaining/time.Second)),
+		strings.Join(inputs, ","),
+	}, "|")
 }
 
 func rawOfferEvaluationCacheKey(raw []GroupRawOffers) string {
@@ -1124,12 +1166,10 @@ func offerPredictionKey(offer cloud.Offer) string {
 }
 
 func chooseReuseGroups(
-	database *sql.DB,
 	splitGroups []InstanceGroup,
 	splitEstimates []CostEstimate,
 	reusable []InstanceCapacity,
-	predCfg *predictor.Config,
-	overheadModel *estimate.OverheadModel,
+	evaluator *planEvaluator,
 	profile bidding.ScoreProfile,
 ) []reuseGroupDecision {
 	if len(reusable) == 0 || len(splitGroups) == 0 {
@@ -1148,7 +1188,7 @@ func chooseReuseGroups(
 		bestIdx := -1
 		var bestEstimate CostEstimate
 		for i, cap := range working {
-			est, ok := EstimateReuseGroup(database, group, cap, predCfg, overheadModel)
+			est, ok := evaluator.estimateReuseGroup(group, cap)
 			if !ok {
 				continue
 			}
@@ -1266,8 +1306,12 @@ func EstimateReuseGroup(
 	if gpuLabel == "" {
 		gpuLabel = inst.GPUClass
 	}
-	for _, job := range group.Jobs {
-		pred, _ := estimateJobDurationDetailed(predCfg, gpuLabel, job)
+	reusePredictions := estimateReuseDurationsDetailed(predCfg, gpuLabel, group.Jobs)
+	for idx, job := range group.Jobs {
+		pred := estimate.DurationPrediction{Estimate: estimate.DefaultJobDuration}
+		if got, ok := reusePredictions[int64(idx+1)]; ok {
+			pred = got
+		}
 		runEst = runEst.Add(pred.Estimate)
 		jobDurations[job.ID] = pred.Estimate.Mean
 		jobDurationList = append(jobDurationList, pred.Estimate.Mean)
@@ -1317,6 +1361,29 @@ func EstimateReuseGroup(
 	}
 	est = applySelectedOfferRuntimePrediction(est, runtimePred)
 	return est, true
+}
+
+func estimateReuseDurationsDetailed(predCfg *predictor.Config, gpuLabel string, jobs []*db.Job) map[int64]estimate.DurationPrediction {
+	if predCfg == nil || !predCfg.Configured() || len(jobs) == 0 {
+		return nil
+	}
+
+	batchJobs := make([]predictor.BatchJob, 0, len(jobs))
+	for idx, job := range jobs {
+		if job == nil || job.Command == "" {
+			continue
+		}
+		batchJobs = append(batchJobs, predictor.BatchJob{
+			ID:       int64(idx + 1),
+			Command:  job.Command,
+			Project:  job.Project,
+			GPUClass: gpuLabel,
+		})
+	}
+	if len(batchJobs) == 0 {
+		return nil
+	}
+	return estimateJobDurationsDetailedForReuse(predCfg, batchJobs)
 }
 
 func reuseSyntheticOffer(cap InstanceCapacity) cloud.Offer {

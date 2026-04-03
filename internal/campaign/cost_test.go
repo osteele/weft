@@ -58,7 +58,10 @@ func TestEstimateCosts_NilOffer(t *testing.T) {
 func TestEstimateReuseGroup_NoPredictionsDoesNotScaleByDLPerf(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",
-		Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+		Jobs: []*db.Job{
+			{ID: 1, Command: "python train.py --epochs 1"},
+			{ID: 2, Command: "python train.py --epochs 2"},
+		},
 	}
 	cap := InstanceCapacity{
 		Instance: &db.Launch{
@@ -90,21 +93,25 @@ func TestEstimateReuseGroup_NoPredictionsDoesNotScaleByDLPerf(t *testing.T) {
 }
 
 func TestEstimateReuseGroup_ShrinksLowConfidenceUnknownRuntime(t *testing.T) {
-	original := estimateJobDurationDetailed
-	t.Cleanup(func() { estimateJobDurationDetailed = original })
+	original := estimateJobDurationsDetailedForReuse
+	t.Cleanup(func() { estimateJobDurationsDetailedForReuse = original })
 
 	neutral := false
-	estimateJobDurationDetailed = func(_ *predictor.Config, _ string, job *db.Job) (estimate.DurationPrediction, bool) {
-		return estimate.DurationPrediction{
-			Estimate: estimate.Constant(30 * time.Minute),
-			Metadata: &predictor.RuntimeMetadata{
-				Source:                     "learned",
-				Confidence:                 0.7,
-				Bottleneck:                 "unknown",
-				MemoryHeadroomMiB:          128 * 1024,
-				BenefitsFromAdditionalVRAM: &neutral,
-			},
-		}, true
+	estimateJobDurationsDetailedForReuse = func(_ *predictor.Config, batchJobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
+		results := make(map[int64]estimate.DurationPrediction, len(batchJobs))
+		for _, batchJob := range batchJobs {
+			results[batchJob.ID] = estimate.DurationPrediction{
+				Estimate: estimate.Constant(30 * time.Minute),
+				Metadata: &predictor.RuntimeMetadata{
+					Source:                     "learned",
+					Confidence:                 0.7,
+					Bottleneck:                 "unknown",
+					MemoryHeadroomMiB:          128 * 1024,
+					BenefitsFromAdditionalVRAM: &neutral,
+				},
+			}
+		}
+		return results
 	}
 
 	group := InstanceGroup{
@@ -137,23 +144,27 @@ func TestEstimateReuseGroup_ShrinksLowConfidenceUnknownRuntime(t *testing.T) {
 }
 
 func TestEstimateReuseGroup_RejectsEstimatorInfeasibleReuse(t *testing.T) {
-	original := estimateJobDurationDetailed
-	t.Cleanup(func() { estimateJobDurationDetailed = original })
+	original := estimateJobDurationsDetailedForReuse
+	t.Cleanup(func() { estimateJobDurationsDetailedForReuse = original })
 
 	infeasible := false
-	estimateJobDurationDetailed = func(_ *predictor.Config, _ string, job *db.Job) (estimate.DurationPrediction, bool) {
-		return estimate.DurationPrediction{
-			Estimate: estimate.Constant(30 * time.Minute),
-			Metadata: &predictor.RuntimeMetadata{
-				Source:   "learned",
-				Feasible: &infeasible,
-			},
-		}, true
+	estimateJobDurationsDetailedForReuse = func(_ *predictor.Config, batchJobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
+		results := make(map[int64]estimate.DurationPrediction, len(batchJobs))
+		for _, batchJob := range batchJobs {
+			results[batchJob.ID] = estimate.DurationPrediction{
+				Estimate: estimate.Constant(30 * time.Minute),
+				Metadata: &predictor.RuntimeMetadata{
+					Source:   "learned",
+					Feasible: &infeasible,
+				},
+			}
+		}
+		return results
 	}
 
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",
-		Jobs:     []*db.Job{{ID: 1}},
+		Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
 	}
 	cap := InstanceCapacity{
 		Instance: &db.Launch{
