@@ -93,3 +93,22 @@ func TestIsTruthyEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestInCampaignAgentContextWithTerminal(t *testing.T) {
+	t.Setenv("CLAUDECODE", "")
+	t.Setenv("CODEX_CI", "")
+	t.Setenv("GEMINI_CLI", "")
+
+	t.Setenv("CODEX_CI", "1")
+	if got := inCampaignAgentContextWithTerminal(true); got {
+		t.Fatal("expected CODEX_CI in interactive terminal to not force agent context")
+	}
+	if got := inCampaignAgentContextWithTerminal(false); !got {
+		t.Fatal("expected CODEX_CI without terminal to force agent context")
+	}
+
+	t.Setenv("CLAUDECODE", "1")
+	if got := inCampaignAgentContextWithTerminal(true); !got {
+		t.Fatal("expected CLAUDECODE to force agent context even in terminal")
+	}
+}

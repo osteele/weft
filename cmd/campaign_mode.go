@@ -14,7 +14,8 @@ var campaignAgentEnvVars = []string{
 }
 
 func resolveCampaignTUI(forceTUI, forcePlain bool) (bool, error) {
-	return resolveCampaignTUIMode(forceTUI, forcePlain, hasCampaignTerminalIO(), inCampaignAgentContext())
+	hasTerminal := hasCampaignTerminalIO()
+	return resolveCampaignTUIMode(forceTUI, forcePlain, hasTerminal, inCampaignAgentContextWithTerminal(hasTerminal))
 }
 
 func resolveCampaignTUIMode(forceTUI, forcePlain, hasTerminal, codingAgent bool) (bool, error) {
@@ -38,10 +39,20 @@ func hasCampaignTerminalIO() bool {
 }
 
 func inCampaignAgentContext() bool {
+	return inCampaignAgentContextWithTerminal(hasCampaignTerminalIO())
+}
+
+func inCampaignAgentContextWithTerminal(hasTerminal bool) bool {
 	for _, envVar := range campaignAgentEnvVars {
-		if isTruthyEnv(os.Getenv(envVar)) {
-			return true
+		if !isTruthyEnv(os.Getenv(envVar)) {
+			continue
 		}
+		// CODEX_CI can be present in developer shells even for manual
+		// invocations; keep TUI defaults when we're in a real terminal.
+		if envVar == "CODEX_CI" && hasTerminal {
+			continue
+		}
+		return true
 	}
 	return false
 }
