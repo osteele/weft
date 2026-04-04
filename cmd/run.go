@@ -507,6 +507,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("dependency job %d runs on host %s; relay submission must target the same host %s", depID, depJob.Host, host)
 			}
 		}
+		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
+			return err
+		}
 
 		params := ops.QueueJobParams{
 			Host:        host,
@@ -601,6 +604,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       runNeeds,
+		}
+
+		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
+			return err
 		}
 
 		jobID, err := ops.RecordQueuedJob(database, params)
@@ -770,6 +777,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=queue cmd=%s", command))
+
+	if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
+		return err
+	}
 
 	if runDraft {
 		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, gpu)

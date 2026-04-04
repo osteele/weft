@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/spf13/cobra"
 )
 
@@ -122,6 +123,38 @@ func TestRestartQueuedJob_NoError(t *testing.T) {
 
 	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
 		t.Fatalf("restartJob queued failed: %v", err)
+	}
+}
+
+func TestRestartJobRejectsDeterministicPinnedHostGateMismatch(t *testing.T) {
+	restore := inventory.SetHosts([]inventory.HostSpec{
+		{
+			Name: "cool30",
+			GPUs: []inventory.GPUSpec{
+				{Name: "NVIDIA GeForce RTX 2080 Ti", Class: "rtx2080ti", Memory: "11GB", Indices: []int{0}},
+			},
+		},
+	})
+	t.Cleanup(restore)
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "python train.py", "retry mismatch")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "ampere+"); err != nil {
+		t.Fatalf("set gpu class: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	err = restartJob(database, jobID, restartOverrides{})
+	if err == nil {
+		t.Fatal("expected restart to be rejected")
+	}
+	if got, want := err.Error(), "gpu gate: no GPU matching class ampere+"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 

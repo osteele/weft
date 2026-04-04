@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/spf13/cobra"
 )
@@ -576,13 +577,19 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
 			continue
 		}
+		hydrateQueueBlockedReasons([]*db.Job{job})
+		display := queueblock.Display(job, nil)
 
 		// Show full job details
 		fmt.Printf("Job ID:      %d\n", job.ID)
 		fmt.Printf("Target:      %s\n", job.TargetDisplay())
 		// Show status with waiting info
-		statusStr := job.EffectiveStatus()
-		fmt.Printf("Status:      %s\n", statusStr)
+		if display.Blocked {
+			fmt.Printf("Status:      %s\n", display.Status)
+			fmt.Printf("Reason:      %s\n", display.Reason)
+		} else {
+			fmt.Printf("Status:      %s\n", job.EffectiveStatus())
+		}
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
 		fmt.Printf("Command:     %s\n", job.Command)

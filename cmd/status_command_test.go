@@ -3,10 +3,12 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -116,6 +118,64 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 	}
 	if gotCloudTimeout != NormalCloudSyncTimeout {
 		t.Fatalf("job info cloud timeout = %v, want %v", gotCloudTimeout, NormalCloudSyncTimeout)
+	}
+}
+
+func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	statusNoSync = true
+
+	reason := "gpu gate: no GPU matching class ampere+"
+	cleanupSSH := ssh.SetRunner(func(_ string, _ string) (string, string, error) {
+		return fmt.Sprintf("RUNNER:yes\nCURRENT:\nDEPTH:1\nBLOCKED:%d:%s\nSTOP:no\n", jobID, reason), "", nil
+	})
+	t.Cleanup(cleanupSSH)
+
+	out := captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Status:   blocked") {
+		t.Fatalf("missing blocked status, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Reason:   "+reason) {
+		t.Fatalf("missing blocked reason, got:\n%s", out)
+	}
+}
+
+func TestRunJobInfoShowsBlockedReasonFromQueueState(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked info", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	reason := "gpu gate: no GPU matching class ampere+"
+	cleanupSSH := ssh.SetRunner(func(_ string, _ string) (string, string, error) {
+		return fmt.Sprintf("RUNNER:yes\nCURRENT:\nDEPTH:1\nBLOCKED:%d:%s\nSTOP:no\n", jobID, reason), "", nil
+	})
+	t.Cleanup(cleanupSSH)
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Status:      blocked") {
+		t.Fatalf("missing blocked status, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Reason:      "+reason) {
+		t.Fatalf("missing blocked reason, got:\n%s", out)
 	}
 }
 

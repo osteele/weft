@@ -276,6 +276,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		fmt.Fprintf(os.Stderr, "Job %d: failed to reload: %v\n", jobID, err)
 		return
 	}
+	hydrateQueueBlockedReasons([]*db.Job{job})
 
 	printJobStatus(job, exitOnComplete)
 }
