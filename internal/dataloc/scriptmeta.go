@@ -13,12 +13,13 @@ import (
 // ScriptMeta holds weft resource requirements parsed from a PEP 723
 // inline metadata block ([tool.weft] table).
 type ScriptMeta struct {
-	GPU      string   // GPU constraint (e.g., "nvidia", "ampere+", "a100")
-	GPUClass string   // GPU class/generation
-	GPUMemGB int      // Minimum GPU memory in GB
-	Inputs   []string // Data asset refs (e.g., "hf:gpt2")
-	Outputs  []string // Data asset refs
-	Tags     []string // Job tags
+	GPU          string // GPU constraint (e.g., "nvidia", "ampere+", "a100")
+	GPUClass     string // GPU class/generation
+	GPUMemGB     int    // Requested GPU memory in GB (headroom may be applied by CLI)
+	GPUMemStrict *bool  // Exact gpu-mem matching (no headroom), when explicitly set
+	Inputs       []string
+	Outputs      []string
+	Tags         []string // Job tags
 }
 
 var (
@@ -58,11 +59,14 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 		meta.GPUClass = v
 	}
 	meta.GPUMemGB = parseGPUMem(wt.Get("gpu-mem"))
+	if v, ok := wt.Get("gpu-mem-strict").(bool); ok {
+		meta.GPUMemStrict = &v
+	}
 	meta.Inputs = tomlStringSlice(wt, "inputs")
 	meta.Outputs = tomlStringSlice(wt, "outputs")
 	meta.Tags = tomlStringSlice(wt, "tags")
 
-	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 &&
+	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
 		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 {
 		return nil, nil
 	}

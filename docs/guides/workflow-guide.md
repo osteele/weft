@@ -114,6 +114,7 @@ Supported keys (all optional):
 | `gpu`       | string           | `--gpu`             |
 | `gpu-class` | string           | `--gpu-class`       |
 | `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
+| `gpu-mem-strict` | bool       | `--gpu-mem-strict`  |
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |
 | `tags`      | list of strings  | `--tag`             |
@@ -125,14 +126,19 @@ block.
 
 `[tool.weft]` metadata is applied when submitting a new job (`weft run`). During
 `weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.
-Use `weft retry --gpu/--gpu-class/--gpu-mem` when you want explicit overrides.
+Use `weft retry --gpu/--gpu-class/--gpu-mem/--gpu-mem-strict` when you want explicit overrides.
 
 ### Avoiding GPU over-provisioning
 
-The `gpu-mem` value sets a **floor** — the minimum VRAM required. The default
-floor is 20GB when any GPU flag is used. For lightweight workloads, this default
-causes the bidding system to consider all GPU tiers including expensive H100 and
-H200 instances that provide no speedup.
+The `gpu-mem` value is a **requested floor**. By default, weft adds a `+2GB`
+safety margin for placement and queue admission checks. For example,
+`gpu-mem = 8` is treated as an effective `10GB` requirement. Use strict mode
+(`gpu-mem-strict = true` or `--gpu-mem-strict`) to keep exact matching.
+
+The default floor is 20GB when any GPU flag is used and no explicit `gpu-mem`
+is provided. For lightweight workloads, this default causes the bidding system
+to consider all GPU tiers including expensive H100 and H200 instances that
+provide no speedup.
 
 Set `gpu-mem` to actual peak VRAM usage (with headroom) to keep the floor low.
 A lower floor means the bidding system can select cheaper, smaller GPUs that are
@@ -148,8 +154,9 @@ just as fast for the workload:
 ```
 
 For example, GPT-2 small (124M params) training uses ~3GB of VRAM. Declaring
-`gpu-mem = 8` allows placement on any GPU with 8+ GB, while the default 20GB
-floor would exclude cheaper options like the T4 (16GB).
+`gpu-mem = 8` gives an effective `10GB` floor by default, which still allows
+placement on GPUs like the T4 (16GB), while avoiding exact-capacity 8GB cards.
+If you need exact 8GB matching, set `gpu-mem-strict = true`.
 
 **Predictor-derived ceilings**: After a job completes, weft records peak GPU
 memory usage via telemetry. On subsequent submissions of the same command, the

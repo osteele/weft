@@ -31,17 +31,20 @@ Examples:
 }
 
 var (
-	restartGPU      string
-	restartGPUClass string
-	restartGPUMem   int
+	restartGPU          string
+	restartGPUClass     string
+	restartGPUMem       int
+	restartGPUMemStrict bool
 )
 
 type restartOverrides struct {
-	GPU       string
-	GPUClass  string
-	GPUMemGB  *int
-	HasAny    bool
-	HasGPUMem bool
+	GPU             string
+	GPUClass        string
+	GPUMemGB        *int
+	GPUMemStrict    bool
+	HasAny          bool
+	HasGPUMem       bool
+	HasGPUMemStrict bool
 }
 
 func init() {
@@ -99,6 +102,7 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().StringVar(&restartGPU, "gpu", "", "GPU constraint override: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB)")
 	command.Flags().StringVar(&restartGPUClass, "gpu-class", "", "GPU class or generation override (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
+	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 }
 
 func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
@@ -106,7 +110,10 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	gpuValue := restartGPU
 	gpuClassValue := restartGPUClass
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
+	hasGPUMemStrict := cmd.Flags().Changed("gpu-mem-strict")
 	out.HasGPUMem = hasGPUMem
+	out.HasGPUMemStrict = hasGPUMemStrict
+	out.GPUMemStrict = restartGPUMemStrict
 
 	if gpuValue != "" && gpuClassValue != "" {
 		return out, fmt.Errorf("--gpu and --gpu-class cannot be used together")
@@ -131,19 +138,24 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	if hasGPUMem {
 		mem := restartGPUMem
 		if mem > 0 {
-			out.GPUMemGB = &mem
+			effective := applyGPUMemHeadroom(mem, true, out.GPUMemStrict)
+			out.GPUMemGB = &effective
 		} else {
 			out.GPUMemGB = nil
 		}
 	}
 	out.GPU = gpuValue
 	out.GPUClass = gpuClassValue
-	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem
+	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict
 	return out, nil
 }
 
 func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverrides) ([]string, error) {
-	updates, err := applyScriptGPUDefaults(database, job)
+	var strictOverride *bool
+	if overrides.HasGPUMemStrict {
+		strictOverride = &overrides.GPUMemStrict
+	}
+	updates, err := applyScriptGPUDefaults(database, job, strictOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +197,7 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 	return updates, nil
 }
 
-func applyScriptGPUDefaults(database *sql.DB, job *db.Job) ([]string, error) {
+func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool) ([]string, error) {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	meta, err := dataloc.ScanScriptMeta(localDir, job.Command)
 	if err != nil {
@@ -201,6 +213,13 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job) ([]string, error) {
 	metaGPU := meta.GPU
 	metaGPUClass := meta.GPUClass
 	metaGPUMem := meta.GPUMemGB
+	strict := false
+	if meta.GPUMemStrict != nil {
+		strict = *meta.GPUMemStrict
+	}
+	if strictOverride != nil {
+		strict = *strictOverride
+	}
 
 	if metaGPU != "" {
 		if !isNumericGPU(metaGPU) {
@@ -240,13 +259,18 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job) ([]string, error) {
 		}
 	}
 	if metaGPUMem > 0 {
-		if job.GPUMemGB == nil || *job.GPUMemGB != metaGPUMem {
-			mem := metaGPUMem
+		effectiveMem := applyGPUMemHeadroom(metaGPUMem, true, strict)
+		if job.GPUMemGB == nil || *job.GPUMemGB != effectiveMem {
+			mem := effectiveMem
 			if err := db.SetJobGPUMemGB(database, job.ID, &mem); err != nil {
 				return nil, fmt.Errorf("update gpu-mem from script metadata: %w", err)
 			}
 			job.GPUMemGB = &mem
-			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (from script metadata)", mem))
+			if strict {
+				updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (from script metadata, strict)", mem))
+			} else {
+				updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (from script metadata +%dGB headroom)", mem, defaultGPUMemHeadroomGB))
+			}
 		}
 	}
 	return updates, nil

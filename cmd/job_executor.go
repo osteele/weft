@@ -100,6 +100,7 @@ type queueJobOptions struct {
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
 	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
 	GPUMemGB     *int   // GPU memory reservation in GB per device
+	GPUMemStrict bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
 	GPUMemMaxGB  *int   // GPU memory ceiling in GB; soft cap for offer selection
 	Dependencies []queueDependency
 	AutoStart    bool
@@ -160,7 +161,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		gpu = extractGPUFromEnvVars(opts.EnvVars)
 	}
 	cfg, _ := loadPredictorConfig()
-	gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, opts.GPUMemGB, gpu, opts.GPUClass, opts.Host, opts.Project, opts.Command, 0)
+	gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, opts.GPUMemGB, gpu, opts.GPUClass, opts.GPUMemStrict, opts.Host, opts.Project, opts.Command, 0)
 	if opts.GPUMemMaxGB != nil {
 		gpuMemMaxGB = opts.GPUMemMaxGB
 	}

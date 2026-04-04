@@ -384,7 +384,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	if queueDraft {
 		gpu := extractGPUFromEnvVars(queueEnvVars)
-		gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, nil, gpu, "", host, projectName, command, 0)
+		gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, nil, gpu, "", false, host, projectName, command, 0)
 		depSpec := encodeQueueDependencies(deps)
 		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, gpu, depSpec)
 		if err != nil {

@@ -38,7 +38,8 @@ Use `start <job-id>` to start a queued job immediately.
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
 - `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `ampere+`)
-- `--gpu-mem GB`: Require minimum GPU memory in GB
+- `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default)
+- `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
 - `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`)
 - `--dry-run`: Show placement scores without submitting the job
@@ -52,9 +53,9 @@ These are applied as defaults — CLI flags take precedence. See
 
 **OOM history:** When a job fails with a GPU out-of-memory error, weft records
 the GPU capacity. On subsequent submissions of the same command, the minimum
-`--gpu-mem` is automatically raised above the capacity that caused the OOM,
-preventing the same failure from repeating. An explicit `--gpu-mem` flag
-overrides this floor.
+effective GPU memory requirement is automatically raised above the capacity that
+caused the OOM, preventing the same failure from repeating. An explicit
+`--gpu-mem` flag overrides this floor.
 
 If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
@@ -658,7 +659,8 @@ For terminal jobs (`killed`, `dead`, `failed`, `canceled`, `completed`), this
 archives the prior run attempt and sets the job back to `queued`.
 
 For jobs that are already `queued`, `restart`/`retry` is a no-op unless you pass
-override flags such as `--gpu`, `--gpu-class`, or `--gpu-mem`.
+override flags such as `--gpu`, `--gpu-class`, `--gpu-mem`, or
+`--gpu-mem-strict`.
 
 ### weft retry
 
@@ -674,11 +676,13 @@ GPU override flags are supported:
 ```bash
 weft retry 548 549 --gpu nvidia>=24GB
 weft retry 548 549 --gpu-class nvidia --gpu-mem 24
+weft retry 548 549 --gpu-class nvidia --gpu-mem 24 --gpu-mem-strict
 ```
 
 `retry` re-syncs project-derived inputs/outputs and re-reads `[tool.weft]`
 script metadata for GPU defaults. Explicit `retry` flags (`--gpu`,
-`--gpu-class`, `--gpu-mem`) take precedence over script metadata.
+`--gpu-class`, `--gpu-mem`, `--gpu-mem-strict`) take precedence over script
+metadata.
 
 ### weft job move
 

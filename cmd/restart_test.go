@@ -129,6 +129,7 @@ func TestParseRestartOverrides_ParsesGPUAndMem(t *testing.T) {
 	restartGPU = "nvidia>=24GB"
 	restartGPUClass = ""
 	restartGPUMem = 0
+	restartGPUMemStrict = false
 
 	cmd := &cobra.Command{Use: "retry"}
 	addRestartFlags(cmd)
@@ -142,6 +143,33 @@ func TestParseRestartOverrides_ParsesGPUAndMem(t *testing.T) {
 	}
 	if overrides.GPUClass != "nvidia" {
 		t.Fatalf("GPUClass = %q, want nvidia", overrides.GPUClass)
+	}
+	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 26 {
+		t.Fatalf("GPUMemGB = %v, want 26 (24 + headroom)", overrides.GPUMemGB)
+	}
+}
+
+func TestParseRestartOverrides_StrictKeepsExactMem(t *testing.T) {
+	restartGPU = "nvidia>=24GB"
+	restartGPUClass = ""
+	restartGPUMem = 0
+	restartGPUMemStrict = true
+
+	cmd := &cobra.Command{Use: "retry"}
+	addRestartFlags(cmd)
+	if err := cmd.Flags().Set("gpu", "nvidia>=24GB"); err != nil {
+		t.Fatalf("set gpu flag: %v", err)
+	}
+	if err := cmd.Flags().Set("gpu-mem-strict", "true"); err != nil {
+		t.Fatalf("set gpu-mem-strict flag: %v", err)
+	}
+
+	overrides, err := parseRestartOverrides(cmd)
+	if err != nil {
+		t.Fatalf("parseRestartOverrides: %v", err)
+	}
+	if !overrides.GPUMemStrict {
+		t.Fatalf("GPUMemStrict = false, want true")
 	}
 	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 24 {
 		t.Fatalf("GPUMemGB = %v, want 24", overrides.GPUMemGB)
@@ -204,8 +232,8 @@ print("train")
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
-		t.Fatalf("GPUMemGB = %v, want 24", job.GPUMemGB)
+	if job.GPUMemGB == nil || *job.GPUMemGB != 26 {
+		t.Fatalf("GPUMemGB = %v, want 26 (24 + headroom)", job.GPUMemGB)
 	}
 }
 
@@ -239,7 +267,37 @@ print("train")
 		t.Fatalf("get job: %v", err)
 	}
 	if job.GPUMemGB == nil || *job.GPUMemGB != 32 {
-		t.Fatalf("GPUMemGB = %v, want 32", job.GPUMemGB)
+		t.Fatalf("GPUMemGB = %v, want 34 (32 + headroom)", job.GPUMemGB)
+	}
+}
+
+func TestRestartQueuedJob_StrictKeepsExactGPUMem(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# gpu-mem = 24
+# gpu-mem-strict = true
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24", job.GPUMemGB)
 	}
 }
 

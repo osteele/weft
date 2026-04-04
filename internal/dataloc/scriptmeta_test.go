@@ -49,6 +49,16 @@ import torch
 			want: &ScriptMeta{GPUMemGB: 80},
 		},
 		{
+			name: "gpu-mem strict",
+			content: `# /// script
+# [tool.weft]
+# gpu-mem = 8
+# gpu-mem-strict = true
+# ///
+`,
+			want: &ScriptMeta{GPUMemGB: 8, GPUMemStrict: boolPtr(true)},
+		},
+		{
 			name:    "no metadata block",
 			content: `import torch\nprint("hello")\n`,
 			want:    nil,
@@ -139,6 +149,9 @@ import torch
 			if got.GPUMemGB != tt.want.GPUMemGB {
 				t.Errorf("GPUMemGB: got %d, want %d", got.GPUMemGB, tt.want.GPUMemGB)
 			}
+			if !equalBoolPtr(got.GPUMemStrict, tt.want.GPUMemStrict) {
+				t.Errorf("GPUMemStrict: got %v, want %v", got.GPUMemStrict, tt.want.GPUMemStrict)
+			}
 			assertStringSlice(t, "Inputs", got.Inputs, tt.want.Inputs)
 			assertStringSlice(t, "Outputs", got.Outputs, tt.want.Outputs)
 			assertStringSlice(t, "Tags", got.Tags, tt.want.Tags)
@@ -194,4 +207,15 @@ func assertStringSlice(t *testing.T, name string, got, want []string) {
 			t.Errorf("%s[%d]: got %q, want %q", name, i, got[i], want[i])
 		}
 	}
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func equalBoolPtr(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

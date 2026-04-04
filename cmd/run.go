@@ -70,29 +70,30 @@ Examples:
 }
 
 var (
-	runHost        string
-	runDir         string
-	runDescription string
-	runProject     string
-	runDraft       bool
-	runFollow      bool
-	runWait        bool
-	runNoWait      bool // explicit no-op flag for tooling compatibility
-	runKillJobID   int64
-	runFrom        int64
-	runEnvVars     []string
-	runTags        []string
-	runAfter       int64
-	runAfterAny    int64
-	runGPU         string
-	runGPUMem      int
-	runGPUClass    string
-	runInputs      []string
-	runOutputs     []string
-	runProduces    []string
-	runNeeds       []string
-	runDryRun      bool
-	runNoSync      bool
+	runHost         string
+	runDir          string
+	runDescription  string
+	runProject      string
+	runDraft        bool
+	runFollow       bool
+	runWait         bool
+	runNoWait       bool // explicit no-op flag for tooling compatibility
+	runKillJobID    int64
+	runFrom         int64
+	runEnvVars      []string
+	runTags         []string
+	runAfter        int64
+	runAfterAny     int64
+	runGPU          string
+	runGPUMem       int
+	runGPUMemStrict bool
+	runGPUClass     string
+	runInputs       []string
+	runOutputs      []string
+	runProduces     []string
+	runNeeds        []string
+	runDryRun       bool
+	runNoSync       bool
 
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
@@ -149,6 +150,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
 	runCmd.Flags().StringVar(&runGPU, "gpu", "", "GPU constraint: class, generation, or family (e.g., a100, ampere+, nvidia); append >=NGB for memory (e.g., nvidia>=24GB)")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
+	runCmd.Flags().BoolVar(&runGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
@@ -337,6 +339,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runGPUMem = meta.GPUMemGB
 			applied = append(applied, fmt.Sprintf("gpu-mem=%dGB", meta.GPUMemGB))
 		}
+		if !cmd.Flags().Changed("gpu-mem-strict") && meta.GPUMemStrict != nil {
+			runGPUMemStrict = *meta.GPUMemStrict
+			applied = append(applied, fmt.Sprintf("gpu-mem-strict=%t", runGPUMemStrict))
+		}
 		if len(meta.Inputs) > 0 {
 			runInputs = mergeDedup(runInputs, meta.Inputs)
 			applied = append(applied, fmt.Sprintf("inputs=%v", meta.Inputs))
@@ -427,7 +433,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if oomFloor > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "OOM history: requiring >=%dGB GPU memory (prior failure on %dGB GPU)\n", oomFloor, oomFloor-1)
 	}
-	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, host, projectName, command, oomFloor)
+	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict, host, projectName, command, oomFloor)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
@@ -846,6 +852,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:   outputDirs,
 			Produces:     runProduces,
 			Needs:        runNeeds,
+			GPUMemStrict: true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
