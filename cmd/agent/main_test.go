@@ -79,22 +79,22 @@ func TestAgentLogPathRespectsHome(t *testing.T) {
 
 func TestParseRunQueueArgs(t *testing.T) {
 	t.Run("accepts no queue name", func(t *testing.T) {
-		r2Bucket, err := parseRunQueueArgs(nil)
+		args, err := parseRunQueueArgs(nil)
 		if err != nil {
 			t.Fatalf("parseRunQueueArgs() error = %v", err)
 		}
-		if r2Bucket != "" {
-			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want empty", r2Bucket)
+		if args.R2Bucket != "" {
+			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want empty", args.R2Bucket)
 		}
 	})
 
 	t.Run("accepts explicit default queue for compatibility", func(t *testing.T) {
-		r2Bucket, err := parseRunQueueArgs([]string{"default", "--r2-bucket=test-bucket"})
+		args, err := parseRunQueueArgs([]string{"default", "--r2-bucket=test-bucket"})
 		if err != nil {
 			t.Fatalf("parseRunQueueArgs() error = %v", err)
 		}
-		if r2Bucket != "test-bucket" {
-			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want test-bucket", r2Bucket)
+		if args.R2Bucket != "test-bucket" {
+			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want test-bucket", args.R2Bucket)
 		}
 	})
 

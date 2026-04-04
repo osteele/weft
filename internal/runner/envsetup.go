@@ -7,6 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/osteele/weft/internal/inventory"
 )
 
 const direnvSetupCommand = `direnv allow && eval "$(direnv export bash)"`
@@ -48,9 +53,16 @@ func DetectSetupCommand(workingDir string) string {
 }
 
 // RunSetupCommand runs a detected environment setup command synchronously.
+// If timeout > 0, the process is killed after that duration (exit code 124,
+// matching the timeout(1) convention). A zero timeout uses DefaultSetupTimeout.
+// The process group ID is written to the job's PGID file so the kill poller
+// can reach the process during setup.
 // Returns ExitInfo and error. On success, ExitInfo.ExitCode is 0 and error is nil.
-func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []string, paths JobPaths) (ExitInfo, error) {
-	slog.Debug("running setup command", "component", "runner", "job_id", jobID, "cmd", setupCmd)
+func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []string, paths JobPaths, timeout time.Duration) (ExitInfo, error) {
+	if timeout == 0 {
+		timeout = inventory.DefaultSetupTimeout
+	}
+	slog.Debug("running setup command", "component", "runner", "job_id", jobID, "cmd", setupCmd, "timeout", timeout)
 	proc, err := StartProcess(setupCmd, workingDir, envVars, paths.Log)
 	if err != nil {
 		slog.Warn("setup start failed", "component", "runner", "job_id", jobID, "error", err)
@@ -58,7 +70,31 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 		WriteStatusFile(paths, ei)
 		return ei, fmt.Errorf("setup command: %w", err)
 	}
+
+	// Write PGID file so the kill poller can reach the setup process.
+	proc.WritePIDFiles(paths)
+
+	// Enforce setup timeout.
+	var timedOut atomic.Bool
+	if timeout > 0 {
+		timer := time.AfterFunc(timeout, func() {
+			timedOut.Store(true)
+			slog.Warn("setup timeout reached, sending SIGTERM", "component", "runner", "job_id", jobID, "timeout", timeout, "pgid", proc.PGID)
+			syscall.Kill(-proc.PGID, syscall.SIGTERM)
+			time.AfterFunc(10*time.Second, func() {
+				syscall.Kill(-proc.PGID, syscall.SIGKILL)
+			})
+		})
+		defer timer.Stop()
+	}
+
 	if waitErr := proc.Cmd.Wait(); waitErr != nil {
+		if timedOut.Load() {
+			ei := ExitInfo{ExitCode: 124}
+			slog.Warn("setup command timed out", "component", "runner", "job_id", jobID, "timeout", timeout, "cmd", setupCmd)
+			WriteStatusFile(paths, ei)
+			return ei, fmt.Errorf("setup command timed out after %s", timeout)
+		}
 		ei := ExtractExitInfo(waitErr)
 		slog.Warn("setup command failed", "component", "runner", "job_id", jobID, "exit_code", ei.ExitCode, "cmd", setupCmd)
 		WriteStatusFile(paths, ei)

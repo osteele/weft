@@ -3,6 +3,7 @@ package hostsync
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
@@ -19,15 +20,16 @@ var (
 	getSlackWebhookFunc      = slack.GetWebhook
 	deployNotifyScriptFunc   = slack.DeployNotifyScript
 	buildRunnerEnvPrefixFunc = slack.BuildRunnerEnvPrefix
-	ensureRunnerStartedFunc  = func(host, envPrefix, r2Bucket string) (bool, error) {
+	ensureRunnerStartedFunc  = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
 		runner := queuerunner.NewRunner(host)
-		return runner.EnsureStarted(envPrefix, r2Bucket)
+		return runner.EnsureStarted(envPrefix, r2Bucket, setupTimeout)
 	}
 )
 
 // EnsureQueueRunnerStarted ensures the queue runner is present and running.
 func EnsureQueueRunnerStarted(host string) (bool, error) {
-	if spec := findHostSpecFunc(host); spec != nil {
+	spec := findHostSpecFunc(host)
+	if spec != nil {
 		if _, err := ensureAgentUpToDateFunc(host, *spec); err != nil {
 			return false, fmt.Errorf("agent deploy failed: %w", err)
 		}
@@ -45,7 +47,12 @@ func EnsureQueueRunnerStarted(host string) (bool, error) {
 	deployNotifyScriptFunc(host, slackWebhook)
 	envVars := buildRunnerEnvPrefixFunc(slackWebhook)
 
-	started, err := ensureRunnerStartedFunc(host, envVars, r2Bucket)
+	var setupTimeout time.Duration
+	if spec != nil {
+		setupTimeout = spec.SetupTimeoutDuration()
+	}
+
+	started, err := ensureRunnerStartedFunc(host, envVars, r2Bucket, setupTimeout)
 	if err != nil {
 		return false, fmt.Errorf("queue runner start failed: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
@@ -94,15 +95,16 @@ func main() {
 }
 
 func runQueue(args []string) {
-	r2Bucket, err := parseRunQueueArgs(args)
+	parsed, err := parseRunQueueArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "run-queue: %v\n", err)
 		os.Exit(2)
 	}
 	cfg := runner.DefaultConfig()
+	cfg.SetupTimeout = parsed.SetupTimeout
 	r := runner.New(cfg)
-	if r2Bucket != "" {
-		setupInventoryR2(r, r2Bucket)
+	if parsed.R2Bucket != "" {
+		setupInventoryR2(r, parsed.R2Bucket)
 	}
 	if err := r.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)
@@ -110,17 +112,28 @@ func runQueue(args []string) {
 	}
 }
 
-func parseRunQueueArgs(args []string) (string, error) {
-	var r2Bucket string
+type runQueueArgs struct {
+	R2Bucket     string
+	SetupTimeout time.Duration
+}
+
+func parseRunQueueArgs(args []string) (runQueueArgs, error) {
+	var result runQueueArgs
 	for _, arg := range args {
 		switch {
 		case strings.HasPrefix(arg, "--r2-bucket="):
-			r2Bucket = arg[len("--r2-bucket="):]
+			result.R2Bucket = arg[len("--r2-bucket="):]
+		case strings.HasPrefix(arg, "--setup-timeout="):
+			d, err := time.ParseDuration(arg[len("--setup-timeout="):])
+			if err != nil {
+				return result, fmt.Errorf("invalid --setup-timeout: %w", err)
+			}
+			result.SetupTimeout = d
 		case arg == ops.DefaultQueueName:
 			// Accept the legacy positional default queue name for compatibility.
 		default:
-			return "", fmt.Errorf("unsupported queue %q; only %q is supported", arg, ops.DefaultQueueName)
+			return result, fmt.Errorf("unsupported queue %q; only %q is supported", arg, ops.DefaultQueueName)
 		}
 	}
-	return r2Bucket, nil
+	return result, nil
 }

@@ -24,6 +24,7 @@ type SingleJobConfig struct {
 	WorkingDir     string             // Override job.Dir if non-empty
 	SampleInterval time.Duration      // Default 1s
 	MaxTime        time.Duration      // If >0, kill the job after this duration
+	SetupTimeout   time.Duration      // If >0, kill the setup command after this duration (default 20m)
 	SkipProbes     bool               // Skip cache size probes (useful in tests)
 	OnPhase        func(phase string) // Called at phase transitions: "setup", "running"
 }
@@ -142,7 +143,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Run setup command as a separate phase
 	if setupCmd != "" {
-		ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths)
+		ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths, cfg.SetupTimeout)
 		if setupErr != nil {
 			now := time.Now().Unix()
 			phases.SetupEnd = now

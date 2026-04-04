@@ -139,7 +139,7 @@ func (m Model) fetchTopProcesses(host string, jobView bool) tea.Cmd {
 func (m Model) startQueue(host string) tea.Cmd {
 	return func() tea.Msg {
 		runner := queuerunner.NewRunner(host)
-		started, err := runner.EnsureStarted("", "")
+		started, err := runner.EnsureStarted("", "", 0)
 		if err != nil {
 			return queueStartedMsg{host: host, err: err}
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2keys"
@@ -188,10 +189,11 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 			Produces:   append([]string(nil), job.Produces...),
 			Needs:      append([]string(nil), job.Needs...),
 		},
-		LogDir:     cfg.LogDir,
-		WorkingDir: workDir,
-		MaxTime:    jobMaxTime,
-		OnPhase:    phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
+		LogDir:       cfg.LogDir,
+		WorkingDir:   workDir,
+		MaxTime:      jobMaxTime,
+		SetupTimeout: inventory.DefaultSetupTimeout,
+		OnPhase:      phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
 	}
 }
 

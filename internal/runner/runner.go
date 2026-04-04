@@ -20,9 +20,10 @@ import (
 
 // Runner is the main queue runner that manages job execution.
 type Runner struct {
-	queueName string
-	queueDir  string
-	logDir    string
+	queueName    string
+	queueDir     string
+	logDir       string
+	setupTimeout time.Duration
 
 	state           *State
 	cmdProc         *CommandProcessor
@@ -59,9 +60,10 @@ type Runner struct {
 
 // Config holds configuration for the runner.
 type Config struct {
-	QueueName string
-	QueueDir  string
-	LogDir    string
+	QueueName    string
+	QueueDir     string
+	LogDir       string
+	SetupTimeout time.Duration // If >0, kill setup commands after this duration
 }
 
 // DefaultConfig returns a configuration with standard paths.
@@ -84,6 +86,7 @@ func New(cfg Config) *Runner {
 		queueName:       queueName,
 		queueDir:        cfg.QueueDir,
 		logDir:          cfg.LogDir,
+		setupTimeout:    cfg.SetupTimeout,
 		commandsFile:    filepath.Join(cfg.QueueDir, queueName+".commands"),
 		stateFile:       filepath.Join(cfg.QueueDir, queueName+".state.json"),
 		currentFile:     filepath.Join(cfg.QueueDir, queueName+".current"),
@@ -480,7 +483,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 
 	// Run environment setup as a separate phase
 	if setupCmd != "" {
-		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths)
+		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths, r.setupTimeout)
 		if setupErr != nil {
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
 			return setupErr

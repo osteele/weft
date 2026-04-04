@@ -933,10 +933,19 @@ The queue runner:
 - Processes queued jobs in FIFO order with a CPU cap
 - Continues running even when you disconnect
 - Sends Slack notifications (if configured)
+- Enforces a setup-phase timeout (default: `20m`) before the main command starts
 
 **Examples:**
 ```bash
 weft queue start titan
+```
+
+Setup timeout can be overridden per host in the inventory file:
+
+```yaml
+# ~/.config/weft/hosts/titan.yaml
+name: titan
+setup_timeout: 90m
 ```
 
 #### weft queue stop

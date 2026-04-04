@@ -712,6 +712,18 @@ Hosts marked `shared = true` are treated as multi-tenant for placement.
 Auto-placed `benchmark` jobs skip them unless the job is explicitly
 inventory-tagged. Direct `--host` submissions still target the named host.
 
+Queue-runner setup commands (for example `uv sync` or `direnv allow`) are
+time-limited to prevent hung installs:
+- Default setup timeout: `20m`
+- Per-host override: set `setup_timeout` in
+  `~/.config/weft/hosts/<host>.yaml`
+
+```yaml
+# ~/.config/weft/hosts/cool100.yaml
+name: cool100
+setup_timeout: 90m
+```
+
 ### Vast.ai Cloud GPU
 
 Configure cloud GPU bursting with Vast.ai and optional R2 result upload:

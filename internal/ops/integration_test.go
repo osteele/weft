@@ -88,7 +88,7 @@ func stopQueueRunner(t *testing.T, host string, queueName string) bool {
 func ensureQueueRunnerStarted(t *testing.T, host string) (bool, error) {
 	t.Helper()
 	runner := queuerunner.NewRunner(host)
-	return runner.EnsureStarted("", "")
+	return runner.EnsureStarted("", "", 0)
 }
 
 func TestIntegration_QueueJobWithArtifactEnvVars(t *testing.T) {

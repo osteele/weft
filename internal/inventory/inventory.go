@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/osteele/weft/internal/config"
@@ -99,16 +100,34 @@ type GPUSpec struct {
 
 // HostSpec describes the static capabilities of a host.
 type HostSpec struct {
-	Name       string    `yaml:"name"`
-	OS         string    `yaml:"os"`
-	Arch       string    `yaml:"arch"`
-	CPUCores   int       `yaml:"cpu_cores"`
-	Memory     string    `yaml:"memory"`
-	NetworkBW  string    `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
-	GPUs       []GPUSpec `yaml:"gpus"`
-	CPUFactor  float64   `yaml:"cpu_factor"`             // relative CPU perf (1.0 = baseline)
-	GPUFactor  float64   `yaml:"gpu_factor"`             // relative GPU perf (1.0 = baseline)
-	HFCacheDir string    `yaml:"hf_cache_dir,omitempty"` // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
+	Name         string    `yaml:"name"`
+	OS           string    `yaml:"os"`
+	Arch         string    `yaml:"arch"`
+	CPUCores     int       `yaml:"cpu_cores"`
+	Memory       string    `yaml:"memory"`
+	NetworkBW    string    `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
+	GPUs         []GPUSpec `yaml:"gpus"`
+	CPUFactor    float64   `yaml:"cpu_factor"`              // relative CPU perf (1.0 = baseline)
+	GPUFactor    float64   `yaml:"gpu_factor"`              // relative GPU perf (1.0 = baseline)
+	HFCacheDir   string    `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
+	SetupTimeout string    `yaml:"setup_timeout,omitempty"` // max duration for setup commands (e.g. "90m"); default 20m
+}
+
+// DefaultSetupTimeout is the default maximum duration for setup commands
+// (e.g. uv sync) when no per-host override is configured.
+const DefaultSetupTimeout = 20 * time.Minute
+
+// SetupTimeoutDuration returns the configured setup timeout, or DefaultSetupTimeout
+// if not set or unparseable.
+func (h *HostSpec) SetupTimeoutDuration() time.Duration {
+	if h.SetupTimeout == "" {
+		return DefaultSetupTimeout
+	}
+	d, err := time.ParseDuration(h.SetupTimeout)
+	if err != nil {
+		return DefaultSetupTimeout
+	}
+	return d
 }
 
 // CPUPerformance returns the CPU performance factor, defaulting to 1.0 if unset.

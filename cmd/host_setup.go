@@ -141,7 +141,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		} else {
 			envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 			runner := queuerunner.NewRunner(host)
-			started, runnerErr := runner.EnsureStarted(envVars, r2Bucket)
+			started, runnerErr := runner.EnsureStarted(envVars, r2Bucket, spec.SetupTimeoutDuration())
 			if runnerErr != nil {
 				fmt.Fprintf(os.Stderr, " warning: %v\n", runnerErr)
 			} else if started {

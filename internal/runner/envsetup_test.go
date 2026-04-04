@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDetectSetupCommand(t *testing.T) {
@@ -104,5 +105,46 @@ func TestDetectSetupCommand(t *testing.T) {
 				t.Errorf("DetectSetupCommand() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunSetupCommand_Timeout(t *testing.T) {
+	dir := t.TempDir()
+	logDir := t.TempDir()
+	paths := NewJobPaths(logDir, 999)
+
+	start := time.Now()
+	ei, err := RunSetupCommand("sleep 300", 999, dir, nil, paths, 1*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from timed-out setup command")
+	}
+	if ei.ExitCode != 124 {
+		t.Fatalf("exit code = %d, want 124 (timeout convention)", ei.ExitCode)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("setup should have been killed quickly, took %s", elapsed)
+	}
+}
+
+func TestRunSetupCommand_WritesPGIDFile(t *testing.T) {
+	dir := t.TempDir()
+	logDir := t.TempDir()
+	paths := NewJobPaths(logDir, 888)
+
+	// Run a fast command that succeeds
+	ei, err := RunSetupCommand("true", 888, dir, nil, paths, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunSetupCommand() error = %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", ei.ExitCode)
+	}
+
+	// Verify PGID file was written
+	pgidPath := filepath.Join(logDir, "888.pgid")
+	if _, err := os.Stat(pgidPath); os.IsNotExist(err) {
+		t.Fatal("PGID file should exist after setup command runs")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -35,7 +36,7 @@ func TestEnsureQueueRunnerStartedSurfacesAgentDeployFailure(t *testing.T) {
 	getSlackWebhookFunc = func() string { return "" }
 	deployNotifyScriptFunc = func(host, webhook string) {}
 	buildRunnerEnvPrefixFunc = func(webhook string) string { return "" }
-	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string) (bool, error) {
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
 		t.Fatal("runner should not start when agent deploy fails")
 		return false, nil
 	}
@@ -106,7 +107,7 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 		return nil
 	}
 
-	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string) (bool, error) {
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
 		if host != "studio" {
 			t.Fatalf("host = %q, want studio", host)
 		}
