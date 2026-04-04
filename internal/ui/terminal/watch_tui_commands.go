@@ -37,8 +37,9 @@ func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 	database := m.database
 	cfg := m.appConfig
 	retryBudgetMultipliers := m.retryBudgetMultiplier
+	scopeJobIDs := rentalScopedUnplacedJobIDs(m.unplacedJobs)
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts, retryBudgetMultipliers)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts, retryBudgetMultipliers, scopeJobIDs, false)
 		if err != nil {
 			return retryResultMsg{err: err}
 		}
@@ -53,6 +54,17 @@ func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 			budgetBlockedByInst: result.BudgetBlocked,
 		}
 	}
+}
+
+func rentalScopedUnplacedJobIDs(jobs []*db.Job) []int64 {
+	scope := make([]int64, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasTag(db.TagInventory) {
+			continue
+		}
+		scope = append(scope, job.ID)
+	}
+	return scope
 }
 
 func (m watchModel) hasRetryableFailures() bool {
@@ -213,8 +225,9 @@ func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, stri
 
 	database := m.database
 	cfg := m.appConfig
+	scopeJobIDs := rentalScopedUnplacedJobIDs(m.unplacedJobs)
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, false)
 		if err != nil {
 			return autoLaunchDoneMsg{err: err}
 		}

@@ -32,7 +32,9 @@ type RelaunchConfig struct {
 	Strategy        bidding.SelectionStrategy
 	Database        *sql.DB
 	PredictorConfig *predictor.Config
-	ResetJobs       map[int64]int64      // jobID → failed instanceID; when non-nil, only relaunch these jobs
+	ResetJobs       map[int64]int64      // jobID → failed instanceID
+	RestrictToReset bool                 // when true and ResetJobs is non-empty, only relaunch reset jobs
+	ScopeJobIDs     []int64              // optional job scope (current watch/project queue)
 	SetupFactory    SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
 	RetryBudget     *RetryBudget         // optional hard stop limits for retry instances
 	// RetryBudgetMultiplierByFailedInstance scales the applicable retry-budget
@@ -79,9 +81,24 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		return nil, fmt.Errorf("list unplaced jobs: %w", err)
 	}
 
-	// If we know exactly which jobs were just orphaned, restrict to those.
-	// This prevents user-deselected jobs from being swept into the relaunch.
-	if len(cfg.ResetJobs) > 0 {
+	// Optionally scope relaunch to the current watch/project queue.
+	if len(cfg.ScopeJobIDs) > 0 {
+		inScope := make(map[int64]struct{}, len(cfg.ScopeJobIDs))
+		for _, id := range cfg.ScopeJobIDs {
+			inScope[id] = struct{}{}
+		}
+		filtered := make([]*db.Job, 0, len(unplaced))
+		for _, j := range unplaced {
+			if _, ok := inScope[j.ID]; ok {
+				filtered = append(filtered, j)
+			}
+		}
+		unplaced = filtered
+	}
+
+	// If we know exactly which jobs were just orphaned and this pass is in
+	// retry-only mode, restrict to those jobs.
+	if cfg.RestrictToReset && len(cfg.ResetJobs) > 0 {
 		filtered := make([]*db.Job, 0, len(cfg.ResetJobs))
 		for _, j := range unplaced {
 			if _, ok := cfg.ResetJobs[j.ID]; ok {
