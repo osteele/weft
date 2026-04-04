@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
@@ -19,6 +21,7 @@ import (
 
 const listDBChangeDebounce = 200 * time.Millisecond
 const listTUISyncInterval = 30 * time.Second
+const listAutoLeaseTTL = 30 * time.Second
 
 type listTUIModel struct {
 	database         *sql.DB
@@ -40,6 +43,10 @@ type listTUIModel struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	groupedByStatus  bool
+	autoMode         bool
+	autoInProgress   bool
+	autoLeaseOwner   string
+	autoLeaseScope   string
 }
 
 type listJobsLoadedMsg struct {
@@ -67,6 +74,12 @@ type listSyncTickMsg struct{}
 type listSyncWorkerResultMsg struct {
 	result hostsync.Result
 }
+type listAutoPilotDoneMsg struct {
+	placed         int
+	launched       int
+	anotherHolding bool
+	err            error
+}
 
 var (
 	listTUITitleStyle    = lipgloss.NewStyle().Bold(true)
@@ -76,7 +89,7 @@ var (
 	listTUIEmptyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
 )
 
-func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool) error {
+func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var sw *hostsync.Worker
@@ -97,6 +110,9 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		ctx:             ctx,
 		cancel:          cancel,
 		groupedByStatus: groupedByStatus,
+		autoMode:        groupedByStatus && autoMode,
+		autoLeaseOwner:  fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
+		autoLeaseScope:  buildListAutoLeaseScope(title),
 	}
 
 	restore := logging.Suppress()
@@ -123,6 +139,9 @@ func (m listTUIModel) Init() tea.Cmd {
 	} else if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
+	if cmd := m.runAutoPilot(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -139,6 +158,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
+			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 			if m.dbWatcher != nil {
 				_ = m.dbWatcher.Close()
 			}
@@ -170,6 +190,18 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < 0 {
 				m.cursor = 0
 			}
+		case "a":
+			if m.groupedByStatus {
+				m.autoMode = !m.autoMode
+				if m.autoMode {
+					m.statusMessage = "Auto-pilot ON"
+					return m, m.runAutoPilot()
+				}
+				m.autoInProgress = false
+				_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+				m.statusMessage = "Auto-pilot OFF"
+				return m, nil
+			}
 		}
 		m.clampCursor()
 		m.adjustOffset()
@@ -187,7 +219,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.jobs) > 0 && strings.HasPrefix(m.statusMessage, "No jobs") {
 			m.statusMessage = ""
 		}
-		return m, nil
+		return m, m.runAutoPilot()
 
 	case listSyncFinishedMsg:
 		if !msg.full {
@@ -261,7 +293,35 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "Refreshing..."
 			cmds = append(cmds, m.runBackgroundSync(true))
 		}
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return m, tea.Batch(cmds...)
+
+	case listAutoPilotDoneMsg:
+		m.autoInProgress = false
+		if !m.autoMode {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Auto-pilot failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.anotherHolding {
+			m.statusMessage = "Auto-pilot: another TUI is active for this scope"
+			return m, nil
+		}
+		switch {
+		case msg.placed > 0 && msg.launched > 0:
+			m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d, launched %d", msg.placed, msg.launched)
+		case msg.placed > 0:
+			m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d", msg.placed)
+		case msg.launched > 0:
+			m.statusMessage = fmt.Sprintf("Auto-pilot: launched %d", msg.launched)
+		default:
+			m.statusMessage = "Auto-pilot: monitoring"
+		}
+		return m, m.reloadJobs()
 	}
 
 	return m, nil
@@ -345,7 +405,11 @@ func (m listTUIModel) groupedFooterText() string {
 	if m.statusMessage != "" {
 		state += " " + m.statusMessage
 	}
-	return state + " q:quit"
+	autoHint := "auto:OFF"
+	if m.autoMode {
+		autoHint = "auto:ON"
+	}
+	return state + " a:toggle-auto " + autoHint + " q:quit"
 }
 
 func (m listTUIModel) footerText(rows int) string {
@@ -484,6 +548,135 @@ func scheduleListSyncTick() tea.Cmd {
 	return tea.Tick(listTUISyncInterval, func(time.Time) tea.Msg {
 		return listSyncTickMsg{}
 	})
+}
+
+func buildListAutoLeaseScope(title string) string {
+	scope := strings.TrimSpace(title)
+	if scope == "" {
+		scope = "jobs"
+	}
+	return "list_grouped_status:" + scope
+}
+
+func (m *listTUIModel) runAutoPilot() tea.Cmd {
+	if !m.groupedByStatus || !m.autoMode || m.autoInProgress || m.database == nil {
+		return nil
+	}
+	m.autoInProgress = true
+
+	database := m.database
+	ctx := m.ctx
+	owner := m.autoLeaseOwner
+	scope := m.autoLeaseScope
+	jobs := append([]*db.Job(nil), m.jobs...)
+
+	return func() tea.Msg {
+		acquired, err := db.AcquireAutoLease(database, scope, owner, listAutoLeaseTTL)
+		if err != nil {
+			return listAutoPilotDoneMsg{err: err}
+		}
+		if !acquired {
+			return listAutoPilotDoneMsg{anotherHolding: true}
+		}
+		defer db.ReleaseAutoLease(database, scope, owner)
+		placed, launched, runErr := runGroupedAutoPilotPass(ctx, database, jobs)
+		return listAutoPilotDoneMsg{placed: placed, launched: launched, err: runErr}
+	}
+}
+
+func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, error) {
+	if database == nil {
+		return 0, 0, nil
+	}
+	scoped := make(map[int64]struct{}, len(scopedJobs))
+	for _, job := range scopedJobs {
+		if job != nil {
+			scoped[job.ID] = struct{}{}
+		}
+	}
+
+	unplacedJobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		return 0, 0, err
+	}
+	unplaced := make([]*db.Job, 0, len(unplacedJobs))
+	for _, job := range unplacedJobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if len(scoped) > 0 {
+			if _, ok := scoped[job.ID]; !ok {
+				continue
+			}
+		}
+		unplaced = append(unplaced, job)
+	}
+	if len(unplaced) == 0 {
+		return 0, 0, nil
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return 0, 0, err
+	}
+	r2Client, _ := buildR2Client(cfg)
+
+	launches, err := db.ListRunningLaunches(database)
+	if err != nil {
+		return 0, 0, err
+	}
+	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
+	for _, ci := range launches {
+		jobs, jobsErr := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
+		if jobsErr != nil {
+			continue
+		}
+		if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(jobs)); ok {
+			capacities = append(capacities, cap)
+		}
+	}
+
+	placed := 0
+	for _, job := range unplaced {
+		ranked := campaign.RankForJob(job, capacities)
+		if len(ranked) == 0 {
+			continue
+		}
+		best := ranked[0]
+		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, best.Instance.ID, []*db.Job{job}); err != nil {
+			return placed, 0, err
+		}
+		placed++
+	}
+
+	remaining, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		return placed, 0, err
+	}
+	rentalScope := make([]int64, 0, len(remaining))
+	for _, job := range remaining {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasTag(db.TagInventory) {
+			continue
+		}
+		if len(scoped) > 0 {
+			if _, ok := scoped[job.ID]; !ok {
+				continue
+			}
+		}
+		rentalScope = append(rentalScope, job.ID)
+	}
+	if len(rentalScope) == 0 {
+		return placed, 0, nil
+	}
+
+	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false)
+	if err != nil {
+		return placed, 0, err
+	}
+	if result == nil {
+		return placed, 0, nil
+	}
+	return placed, len(result.InstanceIDs), nil
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {

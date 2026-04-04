@@ -16,6 +16,7 @@ type groupedStatusSection struct {
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 	running := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
+	unplaced := make([]*db.Job, 0)
 	completions := make([]*db.Job, 0)
 	failures := make([]*db.Job, 0)
 	killedCanceled := make([]*db.Job, 0)
@@ -29,6 +30,8 @@ func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 			running = append(running, job)
 		case "queued":
 			queued = append(queued, job)
+		case "unplaced":
+			unplaced = append(unplaced, job)
 		case "completions":
 			completions = append(completions, job)
 		case "failures":
@@ -41,6 +44,7 @@ func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 	sections := []groupedStatusSection{
 		{title: "Running", jobs: running},
 		{title: "Queued", jobs: queued},
+		{title: "Unplaced", jobs: unplaced},
 		{title: "Completions", jobs: completions},
 		{title: "Failures", jobs: failures},
 		{title: "Killed/Canceled", jobs: killedCanceled},
@@ -85,7 +89,10 @@ func groupedStatusBucket(job *db.Job) string {
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
 		return "running"
-	case db.StatusQueued:
+	case db.StatusQueued, db.StatusPendingPlacement:
+		if job.TargetKind() == db.JobTargetUnplaced {
+			return "unplaced"
+		}
 		return "queued"
 	case db.StatusKilled, db.StatusCanceled:
 		return "killed_canceled"

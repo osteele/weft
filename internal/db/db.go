@@ -1373,6 +1373,19 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create auto_leases table (short-lived scoped leases for cooperative TUIs).
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS auto_leases (
+			scope TEXT PRIMARY KEY,
+			owner TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_auto_leases_expires ON auto_leases(expires_at);
+	`); err != nil {
+		return err
+	}
+
 	// Create job_phase_timings table
 	jobPhaseTimingsSchema := `
 	CREATE TABLE IF NOT EXISTS job_phase_timings (
