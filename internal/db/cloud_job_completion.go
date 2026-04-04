@@ -69,6 +69,55 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	return 0, nil
 }
 
+// NeedsCloudCompletionBackfill reports whether the latest attempt for jobID is
+// terminal but still missing authoritative cloud completion fields.
+//
+// This is used to recover from reconcile races where attempts were force-closed
+// (for example at grace expiry) before R2 completion metadata was ingested.
+func NeedsCloudCompletionBackfill(database *sql.DB, jobID int64) (bool, error) {
+	var (
+		status           sql.NullString
+		exitCode         sql.NullInt64
+		startTime        sql.NullInt64
+		endTime          sql.NullInt64
+		lastSyncedStatus sql.NullString
+		launchID         sql.NullInt64
+	)
+	err := database.QueryRow(
+		`SELECT status, exit_code, start_time, end_time, last_synced_status, launch_id
+		 FROM job_attempts
+		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+		jobID,
+	).Scan(&status, &exitCode, &startTime, &endTime, &lastSyncedStatus, &launchID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !status.Valid || !IsTerminalStatus(status.String) {
+		return false, nil
+	}
+	// Non-cloud attempts are out of scope for cloud completion backfill.
+	if !launchID.Valid {
+		return false, nil
+	}
+
+	switch status.String {
+	case StatusCompleted, StatusFailed, StatusDead, StatusKilled:
+		if !endTime.Valid || !startTime.Valid || !exitCode.Valid {
+			return true, nil
+		}
+		// last_synced_status should reflect the terminal state once cloud
+		// completion data was applied.
+		if !lastSyncedStatus.Valid || lastSyncedStatus.String != status.String {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // StuckJob represents a job with non-terminal status on a completed launch.
 type StuckJob struct {
 	JobID     int64

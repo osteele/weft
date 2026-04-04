@@ -438,6 +438,46 @@ func TestAllowCompletedMarkerFallback_BlocksRelaunchedJob(t *testing.T) {
 	}
 }
 
+func TestShouldMarkCloudJobProcessed(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        string
+		needsBackfill bool
+		source        string
+		want          bool
+	}{
+		{
+			name:          "results source marks processed",
+			status:        db.StatusRunning,
+			needsBackfill: false,
+			source:        "results",
+			want:          true,
+		},
+		{
+			name:          "marker fallback defers processed marker",
+			status:        db.StatusRunning,
+			needsBackfill: false,
+			source:        "marker-fallback",
+			want:          false,
+		},
+		{
+			name:          "terminal incomplete defers processed marker",
+			status:        db.StatusFailed,
+			needsBackfill: true,
+			source:        "results",
+			want:          false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldMarkCloudJobProcessed(tc.status, tc.needsBackfill, tc.source); got != tc.want {
+				t.Fatalf("shouldMarkCloudJobProcessed(%q, %v, %q) = %v, want %v",
+					tc.status, tc.needsBackfill, tc.source, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestJobEligibleForStartedMarker_SkipsQueuedJobWithoutLaunch(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -473,7 +473,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		// Check current job status directly — skip if already terminal.
+		// Check current job status directly.
 		// If the exact latest-run marker is missing, only fall back to an
 		// older completion marker for the queued, unplaced placeholder state
 		// created by cleanup/reset. Never apply a stale completion marker to a
@@ -483,10 +483,29 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		if err := database.QueryRow(
 			"SELECT status, latest_run_id, launch_id FROM job_status WHERE id = ? AND tombstoned = 0",
 			jobID,
-		).Scan(&currentStatus, &latestRunID, &launchID); err != nil || db.IsTerminalStatus(currentStatus) {
+		).Scan(&currentStatus, &latestRunID, &launchID); err != nil {
 			// Keep live-log chunks: they are the primary log source for `weft log`.
 			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
 			continue
+		}
+
+		needsBackfill := false
+		if db.IsTerminalStatus(currentStatus) {
+			var backfillErr error
+			needsBackfill, backfillErr = db.NeedsCloudCompletionBackfill(database, jobID)
+			if backfillErr != nil {
+				slog.Warn("failed to evaluate cloud completion backfill need", "component", "sync", "job_id", jobID, "error", backfillErr)
+				continue
+			}
+			if !needsBackfill {
+				slog.Debug("skipping cloud completion sync for terminal job with complete metadata",
+					"component", "sync", "job_id", jobID, "reason", "terminal_complete_skip")
+				// Keep live-log chunks: they are the primary log source for `weft log`.
+				_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
+				continue
+			}
+			slog.Info("attempting cloud completion backfill for terminal job",
+				"component", "sync", "job_id", jobID, "reason", "terminal_incomplete_backfill")
 		}
 
 		runID := int64(0)
@@ -509,22 +528,45 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			}
 		}
 		resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
+		completeKey := r2keys.JobAttemptComplete(jobID, runID)
 
-		// Download results to temp dir
-		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
-		if err != nil {
+		// Download results when available. Fall back to the .complete marker's
+		// exit code when results are not yet uploaded.
+		var (
+			exitCode      *int
+			startTimeUnix int64
+			endTimeUnix   int64
+			failureReason string
+			source        = "results"
+			tmpDir        string
+			haveResults   bool
+		)
+
+		markerData, markerErr := r2Client.GetObject(ctx, completeKey)
+		if markerErr != nil {
 			continue
 		}
 
-		if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-			os.RemoveAll(tmpDir)
-			continue
+		tmpDir, err = os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
+		if err == nil {
+			if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err == nil {
+				exitCode, startTimeUnix, endTimeUnix, failureReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
+				if exitCode != nil {
+					haveResults = true
+				}
+			}
 		}
 
-		exitCode, startTimeUnix, endTimeUnix, failureReason := db.ParseCloudJobResult(tmpDir, jobIDStr)
 		if exitCode == nil {
-			os.RemoveAll(tmpDir)
-			continue
+			if code, parseErr := strconv.Atoi(strings.TrimSpace(string(markerData))); parseErr == nil {
+				exitCode = &code
+				source = "marker-fallback"
+				slog.Debug("using exit code from .complete marker (results not yet available)",
+					"component", "sync", "job_id", jobID, "run_id", runID, "reason", "marker_only_backfill")
+			} else {
+				os.RemoveAll(tmpDir)
+				continue
+			}
 		}
 
 		// If no start_time from completion record, try reading .started marker from R2
@@ -537,6 +579,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason)
 		if err != nil {
 			slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
+			os.RemoveAll(tmpDir)
 			continue
 		}
 		if updatedInstanceID > 0 {
@@ -551,30 +594,32 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			host = db.LaunchHost(updatedInstanceID)
 		}
 		if *exitCode == 0 {
-			oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0"))
+			oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
 		} else {
-			oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d", *exitCode))
+			oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
 		}
 
-		if err := importCloudTimeseriesFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)), "single"); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %d final timeseries import failed: %v\n", jobID, err)
-		}
-		if err := importCloudTelemetryFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID))); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %d final telemetry import failed: %v\n", jobID, err)
-		}
-
-		// Extract and store phase timing data
-		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
-			if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
-				slog.Warn("failed to store phase timings", "component", "sync", "job_id", jobID, "error", err)
+		if haveResults {
+			if err := importCloudTimeseriesFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)), "single"); err != nil && verbose {
+				fmt.Fprintf(os.Stderr, "Warning: cloud job %d final timeseries import failed: %v\n", jobID, err)
 			}
-			if launch, err := db.GetLaunch(database, updatedInstanceID); err == nil && launch != nil {
-				recordCloudDownloadObservation(database, launch.Provider, launch.DataCenter, timings)
+			if err := importCloudTelemetryFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID))); err != nil && verbose {
+				fmt.Fprintf(os.Stderr, "Warning: cloud job %d final telemetry import failed: %v\n", jobID, err)
 			}
-		}
 
-		// Cache logs locally before cleaning up
-		coordinator.WriteVastaiLogsToCache(jobID, tmpDir)
+			// Extract and store phase timing data
+			if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
+				if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
+					slog.Warn("failed to store phase timings", "component", "sync", "job_id", jobID, "error", err)
+				}
+				if launch, err := db.GetLaunch(database, updatedInstanceID); err == nil && launch != nil {
+					recordCloudDownloadObservation(database, launch.Provider, launch.DataCenter, timings)
+				}
+			}
+
+			// Cache logs locally before cleaning up
+			coordinator.WriteVastaiLogsToCache(jobID, tmpDir)
+		}
 
 		if verbose {
 			statusLabel := db.StatusCompleted
@@ -585,8 +630,15 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		// Keep live-log chunks: they are the primary log source for `weft log`.
-		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
-		_ = r2Client.DeletePrefix(ctx, resultPrefix)
+		// For marker-fallback completions, keep markers/results so we can
+		// backfill richer metadata once results upload arrives.
+		if source == "results" {
+			_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
+			_ = r2Client.DeletePrefix(ctx, resultPrefix)
+		}
+		if shouldMarkCloudJobProcessed(currentStatus, needsBackfill, source) {
+			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
+		}
 		os.RemoveAll(tmpDir)
 	}
 
@@ -670,6 +722,13 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 func allowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
 	return currentStatus == db.StatusQueued && !launchID.Valid
+}
+
+func shouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
+	if db.IsTerminalStatus(currentStatus) && needsBackfill {
+		return false
+	}
+	return source == "results"
 }
 
 // recordCloudDownloadObservation derives effective HF download bandwidth from

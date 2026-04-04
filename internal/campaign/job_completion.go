@@ -40,7 +40,19 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 		return false
 	}
 	if db.IsTerminalStatus(currentStatus) {
-		return false
+		needsBackfill, err := db.NeedsCloudCompletionBackfill(database, jobID)
+		if err != nil {
+			slog.Warn("failed to evaluate cloud completion backfill need",
+				"component", "reconcile", "job_id", jobID, "error", err)
+			return false
+		}
+		if !needsBackfill {
+			slog.Debug("skipping completion sync for terminal job with complete metadata",
+				"component", "reconcile", "job_id", jobID, "reason", "terminal_complete_skip")
+			return false
+		}
+		slog.Info("attempting completion backfill for terminal job",
+			"component", "reconcile", "job_id", jobID, "reason", "terminal_incomplete_backfill")
 	}
 
 	runID := int64(0)
