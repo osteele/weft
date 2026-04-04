@@ -71,6 +71,7 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 			Dir:        entry.WorkingDir,
 			Cmd:        entry.Command,
 			Desc:       entry.Description,
+			SourceSHA:  entry.SourceSHA256,
 			Env:        entry.EnvVars,
 			Deps:       entry.DepSpec,
 			CPU:        entry.CPUAllotment,
@@ -336,6 +337,7 @@ type commandJob struct {
 	Dir        string   `json:"dir,omitempty"`
 	Cmd        string   `json:"cmd"`
 	Desc       string   `json:"desc,omitempty"`
+	SourceSHA  string   `json:"source_sha256,omitempty"`
 	Env        []string `json:"env,omitempty"`
 	Deps       string   `json:"deps,omitempty"`
 	CPU        *int     `json:"cpu,omitempty"`

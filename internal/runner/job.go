@@ -152,7 +152,7 @@ func ArchiveExistingFiles(logDir string, jobID int64) {
 }
 
 // WriteMetaFile writes the job metadata file.
-func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description, queueName string, startTime int64) error {
+func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description, queueName string, startTime int64, sourceSHA string) error {
 	hostname, _ := os.Hostname()
 	var lines []string
 	lines = append(lines, fmt.Sprintf("job_id=%d", jobID))
@@ -164,13 +164,20 @@ func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description
 		lines = append(lines, fmt.Sprintf("description=%s", description))
 	}
 	lines = append(lines, fmt.Sprintf("queue=%s", queueName))
+	if sourceSHA != "" {
+		lines = append(lines, fmt.Sprintf("source_sha256=%s", sourceSHA))
+	}
 	return os.WriteFile(paths.Meta, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }
 
 // WriteLogHeader writes the initial header block to the log file.
-func WriteLogHeader(paths JobPaths, jobID int64, workingDir, command string) error {
-	header := fmt.Sprintf("=== START %s ===\njob_id: %d\ncd: %s\ncmd: %s\n===\n",
+func WriteLogHeader(paths JobPaths, jobID int64, workingDir, command, sourceSHA string) error {
+	header := fmt.Sprintf("=== START %s ===\njob_id: %d\ncd: %s\ncmd: %s\n",
 		time.Now().Format(time.UnixDate), jobID, workingDir, command)
+	if sourceSHA != "" {
+		header += fmt.Sprintf("source_sha256: %s\n", sourceSHA)
+	}
+	header += "===\n"
 	return os.WriteFile(paths.Log, []byte(header), 0644)
 }
 

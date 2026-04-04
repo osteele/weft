@@ -78,8 +78,8 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	expandedDir := ExpandTilde(workingDir)
 
 	// Write metadata
-	WriteMetaFile(paths, cfg.JobID, workingDir, command, job.Desc, "single", phases.WrapperStart)
-	WriteLogHeader(paths, cfg.JobID, workingDir, command)
+	WriteMetaFile(paths, cfg.JobID, workingDir, command, job.Desc, "single", phases.WrapperStart, "")
+	WriteLogHeader(paths, cfg.JobID, workingDir, command, "")
 
 	// Build environment
 	var envVars []string

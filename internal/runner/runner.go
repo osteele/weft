@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
+	srcsync "github.com/osteele/weft/internal/sync"
 )
 
 // Runner is the main queue runner that manages job execution.
@@ -421,11 +422,36 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	fmt.Printf("  Log: %s\n", paths.Log)
 	fmt.Printf("==========================================\n")
 
+	// Expand ~ in working directory
+	expandedDir := job.Dir
+	if len(expandedDir) > 1 && expandedDir[0] == '~' {
+		home, _ := os.UserHomeDir()
+		expandedDir = home + expandedDir[1:]
+	}
+
 	// Write metadata
-	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, r.queueName, startTime)
+	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, r.queueName, startTime, job.SourceSHA)
 
 	// Write log header
-	WriteLogHeader(paths, jobID, job.Dir, command)
+	WriteLogHeader(paths, jobID, job.Dir, command, job.SourceSHA)
+
+	if job.SourceSHA != "" {
+		markerSHA, err := srcsync.ReadSourceMarker(expandedDir)
+		if err != nil {
+			msg := fmt.Sprintf("source provenance check failed: expected %s, marker unreadable in %s (%v)", job.SourceSHA, expandedDir, err)
+			oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(msg))
+			_ = os.WriteFile(paths.Status, []byte("1\n"), 0644)
+			appendLine(paths.Log, msg)
+			return fmt.Errorf("%s", msg)
+		}
+		if markerSHA != job.SourceSHA {
+			msg := fmt.Sprintf("source provenance check failed: expected %s, marker has %s", job.SourceSHA, markerSHA)
+			oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(msg))
+			_ = os.WriteFile(paths.Status, []byte("1\n"), 0644)
+			appendLine(paths.Log, msg)
+			return fmt.Errorf("%s", msg)
+		}
+	}
 
 	// Call OnJobStart hook (best-effort)
 	if r.OnJobStart != nil {
@@ -446,13 +472,6 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 
 	// Build environment
 	var envVars []string
-
-	// Expand ~ in working directory
-	expandedDir := job.Dir
-	if len(expandedDir) > 1 && expandedDir[0] == '~' {
-		home, _ := os.UserHomeDir()
-		expandedDir = home + expandedDir[1:]
-	}
 
 	// Load dotenv files from working directory
 	if expandedDir != "" {
@@ -890,4 +909,13 @@ func (r *Runner) updateCurrentFile() {
 	} else {
 		os.WriteFile(r.currentFile, []byte(fmt.Sprintf("%d\n", current)), 0644)
 	}
+}
+
+func appendLine(path, line string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s\n", line)
 }

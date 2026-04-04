@@ -16,6 +16,7 @@ type QueueEntry struct {
 	WorkingDir   string
 	Command      string
 	Description  string
+	SourceSHA256 string
 	EnvVars      []string
 	DepSpec      string
 	CPUAllotment *int

@@ -3,7 +3,6 @@ package ops
 import (
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
@@ -12,9 +11,11 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
-// RequeueJob changes a job's status to queued and appends it to the remote queue.
-// If the host is unreachable, the job is queued locally and will be synced later.
+// RequeueJob changes a job's status to queued.
+// Queue-runner jobs are always deferred so host sync can refresh sources before
+// appending to the remote queue.
 func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	_ = opts
 	if err := RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
 		return Result{}, err
 	}
@@ -31,37 +32,11 @@ func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, err
 		return Result{}, fmt.Errorf("reload job: %w", err)
 	}
 
-	timeout := queueOpTimeout(opts)
-
-	// Remove old completion files so the runner doesn't skip the requeued job
-	if err := RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
-		slog.Warn("failed to remove remote completion files", "component", "ops", "job_id", job.ID, "error", err)
-	}
-
-	if err := AppendJobToQueue(job, timeout); err != nil {
-		if isQueueConnectionError(err) {
-			return Result{
-				Success:  true,
-				Deferred: true,
-				JobID:    job.ID,
-				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", job.ID),
-			}, nil
-		}
-		return Result{}, fmt.Errorf("append to remote queue: %w", err)
-	}
-
-	// Successfully appended — mark as synced
-	if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
-		return Result{}, fmt.Errorf("update synced status: %w", err)
-	}
-	if err := db.SetQueuedAtNow(database, job.ID); err != nil {
-		slog.Warn("failed to update queued_at", "component", "ops", "job_id", job.ID, "error", err)
-	}
-
 	return Result{
-		Success: true,
-		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d requeued on %s", job.ID, job.Host),
+		Success:  true,
+		Deferred: true,
+		JobID:    job.ID,
+		Message:  fmt.Sprintf("Job %d requeued locally; source sync + dispatch will run on next host sync", job.ID),
 	}, nil
 }
 

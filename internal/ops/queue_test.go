@@ -208,3 +208,45 @@ func TestRequeueJob_RefreshesProjectMetadata(t *testing.T) {
 		t.Fatalf("updated output dirs = %v, want [results/]", updated.OutputDirs)
 	}
 }
+
+func TestRequeueJob_AutoDefersWithoutImmediateQueueAppend(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+
+	jobID, err := db.RecordQueued(database, "test-host", workDir, "python train.py", "auto defer")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, time.Now().Unix(), jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	sshCalls := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		sshCalls++
+		return "", "", 0
+	})
+
+	result, err := RequeueJob(database, job, DefaultOptions())
+	if err != nil {
+		t.Fatalf("RequeueJob failed: %v", err)
+	}
+	if !result.Deferred {
+		t.Fatal("expected deferred requeue")
+	}
+	if sshCalls != 0 {
+		t.Fatalf("expected no immediate SSH queue append, got %d calls", sshCalls)
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.LastSyncedStatus != "" {
+		t.Fatalf("LastSyncedStatus = %q, want empty", updated.LastSyncedStatus)
+	}
+}

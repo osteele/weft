@@ -29,11 +29,18 @@ func AppendQueueEntry(host string, entry QueueEntry, opts AppendQueueEntryOption
 
 // AppendJobToQueue adds an existing job to the remote queue.
 func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
+	return AppendJobToQueueWithSource(job, timeout, "")
+}
+
+// AppendJobToQueueWithSource adds an existing job to the remote queue and
+// includes an optional source snapshot hash for provenance checks.
+func AppendJobToQueueWithSource(job *db.Job, timeout time.Duration, sourceSHA256 string) error {
 	entry := QueueEntry{
 		JobID:        job.ID,
 		WorkingDir:   job.WorkingDir,
 		Command:      job.Command,
 		Description:  job.Description,
+		SourceSHA256: sourceSHA256,
 		EnvVars:      job.EnvVars,
 		DepSpec:      job.DepSpec,
 		CPUAllotment: job.CPUAllotment,

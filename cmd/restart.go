@@ -292,6 +292,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err != nil {
 			return err
 		}
+		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass); err != nil {
+			return err
+		}
 		if len(updates) == 0 {
 			fmt.Printf("Job %d is already queued (no changes)\n", jobID)
 			return nil
@@ -312,6 +315,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 
 	updates, err := applyRestartOverrides(database, job, overrides)
 	if err != nil {
+		return err
+	}
+	if err := validatePinnedHostQueueGate(job.Host, job.GPUClass); err != nil {
 		return err
 	}
 
@@ -378,7 +384,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return err
 	}
 	if result.Deferred {
-		fmt.Printf("Job saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", job.Host)
+		if result.Message != "" {
+			fmt.Println(result.Message)
+		}
 	}
 
 	fmt.Printf("Restarted job %d on %s\n", jobID, job.Host)

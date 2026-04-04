@@ -436,6 +436,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 
 	ensured := 0
 	syncedDirs := make(map[string]bool)
+	sourceSHAByDir := make(map[string]string)
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
 		failures = append(failures, fmt.Sprintf("job %d %s: %v", jobID, stage, err))
@@ -455,6 +456,12 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
 			if !syncedDirs[remoteDir] {
+				sourceSHA256 := ""
+				if hash, hashErr := srcsync.ComputeSourceSHA256(localDir); hashErr != nil {
+					syncLog.Debug("source fingerprint unavailable", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", hashErr)
+				} else {
+					sourceSHA256 = hash
+				}
 				if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
 					if ssh.IsConnectionError(err.Error()) {
 						// Host is offline — bail out silently
@@ -469,7 +476,14 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 					recordFailure(job.ID, "source sync failed", err)
 					continue
 				}
+				if err := srcsync.WriteRemoteSourceMarker(job.Host, remoteDir, sourceSHA256, timeout); err != nil {
+					if ssh.IsConnectionError(err.Error()) {
+						return ensured, contacted, nil
+					}
+					syncLog.Debug("source marker write failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
+				}
 				syncedDirs[remoteDir] = true
+				sourceSHAByDir[remoteDir] = sourceSHA256
 			}
 		}
 
@@ -508,7 +522,11 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			continue
 		}
 
-		if err := AppendJobToQueue(job, timeout); err != nil {
+		sourceSHA256 := ""
+		if job.WorkingDir != "" {
+			sourceSHA256 = sourceSHAByDir[workdir.ToTildeRelative(job.WorkingDir)]
+		}
+		if err := AppendJobToQueueWithSource(job, timeout, sourceSHA256); err != nil {
 			if ssh.IsConnectionError(err.Error()) {
 				return ensured, contacted, nil
 			}

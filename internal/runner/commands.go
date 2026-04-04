@@ -158,6 +158,9 @@ func writeJobFile(queueDir string, job *opsqueue.CommandJob) error {
 // entry is missing them. This handles duplicate add commands where a second
 // entry may lack fields present in the first.
 func mergeResourceFields(job, existing *opsqueue.CommandJob) {
+	if job.SourceSHA == "" && existing.SourceSHA != "" {
+		job.SourceSHA = existing.SourceSHA
+	}
 	if job.CPU == nil && existing.CPU != nil {
 		job.CPU = existing.CPU
 	}

@@ -3,11 +3,13 @@ package runner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
+	srcsync "github.com/osteele/weft/internal/sync"
 )
 
 func gpuMemPtr(n int) *int { return &n }
@@ -184,6 +186,38 @@ func TestTryStartNextJob_RequeuesUnreadableJobFile(t *testing.T) {
 	}
 	if got := r.state.RunningCount(); got != 0 {
 		t.Fatalf("running count = %d, want 0", got)
+	}
+}
+
+func TestStartJob_SourceProvenanceMismatchFails(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, srcsync.SourceMarkerFile), []byte("different\n"), 0644); err != nil {
+		t.Fatalf("write source marker: %v", err)
+	}
+
+	jobID := int64(707)
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:        jobID,
+		Dir:       workDir,
+		Cmd:       "echo should-not-run",
+		SourceSHA: "expected-hash",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected provenance mismatch error")
+	}
+	if !strings.Contains(err.Error(), "source provenance check failed") {
+		t.Fatalf("error = %v, want provenance failure", err)
+	}
+
+	paths := NewJobPaths(r.logDir, jobID)
+	status, readErr := os.ReadFile(paths.Status)
+	if readErr != nil {
+		t.Fatalf("read status file: %v", readErr)
+	}
+	if strings.TrimSpace(string(status)) != "1" {
+		t.Fatalf("status = %q, want 1", strings.TrimSpace(string(status)))
 	}
 }
 
