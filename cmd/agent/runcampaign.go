@@ -191,8 +191,8 @@ func campaignDiskPath(jobs []cloud.AgentJob) string {
 // checkForNewJobs drains any queued grace-job requests and returns the jobs.
 // This enables running instances to pick up jobs submitted via campaign reuse
 // without losing requests that arrive before the next poll.
-func checkForNewJobs(r2Bucket string, instanceID int64) []cloud.AgentJob {
-	jobs, err := drainGraceJobRequests(r2Bucket, instanceID)
+func checkForNewJobs(r2Bucket string, instanceID int64, onPhase func(string)) []cloud.AgentJob {
+	jobs, err := drainGraceJobRequests(r2Bucket, instanceID, onPhase)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "check for new jobs: %v\n", err)
 		return nil

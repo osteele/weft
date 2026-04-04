@@ -2,7 +2,6 @@ package campaign
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -379,7 +378,7 @@ func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
 	uploadSourceToR2 = func(context.Context, *r2.Client, string) (string, error) {
 		return "sources/test.tar.gz", nil
 	}
-	sendGraceJobPayload = func(context.Context, controlplane.GraceStore, int64, []byte) (*controlplane.GraceCommandAck, error) {
+	sendGraceJobPayload = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (*controlplane.GraceCommandAck, error) {
 		return nil, errors.New("ack timeout")
 	}
 
@@ -438,11 +437,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 		return "sources/test.tar.gz", nil
 	}
 
-	var got GracePayload
-	sendGraceJobPayload = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload []byte) (*controlplane.GraceCommandAck, error) {
-		if err := json.Unmarshal(payload, &got); err != nil {
-			t.Fatalf("unmarshal payload: %v", err)
-		}
+	var got controlplane.GraceJobsRequest
+	sendGraceJobPayload = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (*controlplane.GraceCommandAck, error) {
+		got = payload
 		return &controlplane.GraceCommandAck{RequestID: "cmd-1", Accepted: true}, nil
 	}
 
@@ -460,5 +457,14 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Jobs[0].Needs, []string{"inputs/data.csv:41"}) {
 		t.Fatalf("needs = %v", got.Jobs[0].Needs)
+	}
+	if len(got.Sources) != 1 {
+		t.Fatalf("sources len = %d, want 1", len(got.Sources))
+	}
+	if got.Sources[0].R2Key != "sources/test.tar.gz" {
+		t.Fatalf("source r2 key = %q", got.Sources[0].R2Key)
+	}
+	if got.Sources[0].RemoteDir != "/workspace/project" {
+		t.Fatalf("source remote dir = %q", got.Sources[0].RemoteDir)
 	}
 }

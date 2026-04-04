@@ -167,7 +167,12 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
 
 		// Check for newly submitted jobs via R2 (between-job reuse)
-		if newJobs := checkForNewJobs(cfg.R2Bucket, cfg.InstanceID); len(newJobs) > 0 {
+		if newJobs := checkForNewJobs(cfg.R2Bucket, cfg.InstanceID, func(phase string) {
+			if cfg.OnPhase != nil {
+				cfg.OnPhase(phase)
+			}
+			writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
+		}); len(newJobs) > 0 {
 			fmt.Printf("Picked up %d new job(s) from R2\n", len(newJobs))
 			bgm.RegisterNewJobs(newJobs)
 			jobs = append(jobs, newJobs...)

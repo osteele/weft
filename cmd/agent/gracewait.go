@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
@@ -27,11 +26,6 @@ type graceStatus struct {
 	State      string  `json:"state"`    // "waiting", "running", "completed"
 	Deadline   string  `json:"deadline"` // RFC3339
 	FailedJobs []int64 `json:"failed_jobs"`
-}
-
-// graceJobsPayload is read from R2 as grace/<instanceID>/jobs.json.
-type graceJobsPayload struct {
-	Jobs []cloud.AgentJob `json:"jobs"`
 }
 
 // graceWaitConfig holds parameters for the grace-wait loop.
@@ -171,7 +165,9 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		}
 
 		// Check for resubmitted jobs.
-		jobs, err := drainGraceJobRequests(r2Bucket, instanceIDInt)
+		jobs, err := drainGraceJobRequests(r2Bucket, instanceIDInt, func(phase string) {
+			writePhase(r2Bucket, phaseKey, phase)
+		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "poll grace jobs: %v\n", err)
 			continue

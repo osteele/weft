@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -46,6 +47,20 @@ type GraceStore interface {
 	PutObject(ctx context.Context, key string, body io.Reader, contentType string) error
 	GetObject(ctx context.Context, key string) ([]byte, error)
 	DeleteObject(ctx context.Context, key string) error
+}
+
+// SourceUpdate describes one source snapshot update to apply before running
+// jobs received through the grace/reuse control plane.
+type SourceUpdate struct {
+	RemoteDir string `json:"remote_dir"`
+	R2Key     string `json:"r2_key"`
+}
+
+// GraceJobsRequest is the typed payload written under grace/<id>/jobs/.
+// Sources are applied before jobs are enqueued on the instance.
+type GraceJobsRequest struct {
+	Jobs    []cloud.AgentJob `json:"jobs"`
+	Sources []SourceUpdate   `json:"sources,omitempty"`
 }
 
 var ErrControlObjectNotFound = errors.New("control object not found")
@@ -86,9 +101,13 @@ func GraceCommandAckKey(instanceID int64, requestID string) string {
 	return fmt.Sprintf("%s%s.json", GraceCommandAcksPrefix(instanceID), requestID)
 }
 
-func SendGraceJobPayload(ctx context.Context, store GraceStore, instanceID int64, payload []byte) (*GraceCommandAck, error) {
+func SendGraceJobPayload(ctx context.Context, store GraceStore, instanceID int64, payload GraceJobsRequest) (*GraceCommandAck, error) {
 	requestID := NewGraceRequestID(instanceID)
-	if err := store.PutObject(ctx, GraceJobRequest(instanceID, requestID), bytes.NewReader(payload), "application/json"); err != nil {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode jobs request: %w", err)
+	}
+	if err := store.PutObject(ctx, GraceJobRequest(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
 		return nil, fmt.Errorf("write jobs request: %w", err)
 	}
 	return waitForAcceptedGraceAck(ctx, store, instanceID, requestID)

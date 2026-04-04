@@ -3,7 +3,6 @@ package campaign
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math"
 	"path"
@@ -344,8 +343,8 @@ func FormatReuseAssignments(assignments []ReuseAssignment) string {
 
 // GracePayload is the JSON structure written to R2 for job submission.
 type GracePayload struct {
-	Jobs    []cloud.AgentJob  `json:"jobs"`
-	Sources map[string]string `json:"sources"`
+	Jobs    []cloud.AgentJob            `json:"jobs"`
+	Sources []controlplane.SourceUpdate `json:"sources,omitempty"`
 }
 
 // SubmitJobsToInstance submits one or more jobs to an existing cloud instance
@@ -360,7 +359,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 	}
 
 	payload := GracePayload{
-		Sources: make(map[string]string),
+		Sources: []controlplane.SourceUpdate{},
 	}
 
 	// Sort jobs by ID so the agent executes them in submission order
@@ -382,13 +381,10 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		remoteDir := path.Join(cloud.ProjectRootDir, path.Base(sourceDir))
 
 		payload.Jobs = append(payload.Jobs, newAgentJob(job, remoteDir))
-		payload.Sources[sourceDir] = sourceR2Key
-	}
-
-	// Write jobs.json to R2
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
+		payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
+			RemoteDir: remoteDir,
+			R2Key:     sourceR2Key,
+		})
 	}
 
 	inst, err = db.GetLaunch(database, instanceID)
@@ -399,7 +395,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
 	}
 
-	if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, payloadJSON); err != nil {
+	if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
 		return fmt.Errorf("submit jobs to instance control plane: %w", err)
 	}
 
