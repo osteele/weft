@@ -517,20 +517,20 @@ func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
 // Tick scheduling
 // ---------------------------------------------------------------------------
 
-func scheduleSyncTick() tea.Cmd {
-	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+func (m watchModel) scheduleSyncTick() tea.Cmd {
+	return tea.Tick(throttledInterval(15*time.Second, m.focused), func(time.Time) tea.Msg {
 		return watchSyncTickMsg{}
 	})
 }
 
-func scheduleCheckDone() tea.Cmd {
-	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+func (m watchModel) scheduleCheckDone() tea.Cmd {
+	return tea.Tick(throttledInterval(5*time.Second, m.focused), func(time.Time) tea.Msg {
 		return watchCheckDoneMsg{}
 	})
 }
 
-func scheduleWatchAllTick() tea.Cmd {
-	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+func (m watchModel) scheduleWatchAllTick() tea.Cmd {
+	return tea.Tick(throttledInterval(15*time.Second, m.focused), func(time.Time) tea.Msg {
 		return watchAllTickMsg{}
 	})
 }
@@ -621,8 +621,8 @@ func (m watchModel) requestProjectActiveSyncs() {
 	}
 }
 
-func scheduleProjectSyncTick() tea.Cmd {
-	return tea.Tick(projectWatchSyncInterval, func(time.Time) tea.Msg {
+func (m watchModel) scheduleProjectSyncTick() tea.Cmd {
+	return tea.Tick(throttledInterval(projectWatchSyncInterval, m.focused), func(time.Time) tea.Msg {
 		return watchProjectSyncTickMsg{}
 	})
 }

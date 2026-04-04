@@ -47,6 +47,7 @@ type campaignListModel struct {
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
+	focused          bool
 }
 
 type campaignListLoadedMsg struct {
@@ -78,6 +79,7 @@ func newCampaignListModel(database *sql.DB, campaigns []*db.Campaign, syncEnable
 		database:       database,
 		syncEnabled:    syncEnabled,
 		syncInProgress: syncEnabled,
+		focused:        true,
 	}
 	model.applyItems(buildCampaignListItems(database, campaigns))
 	return model
@@ -140,7 +142,7 @@ func firstCampaignListSelectable(items []campaignListItem) int {
 }
 
 func (m campaignListModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.startDBWatcher(), scheduleCampaignListSyncTick()}
+	cmds := []tea.Cmd{m.startDBWatcher(), m.scheduleCampaignListSyncTick()}
 	if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
@@ -149,6 +151,14 @@ func (m campaignListModel) Init() tea.Cmd {
 
 func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.FocusMsg:
+		m.focused = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.focused = false
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
@@ -240,7 +250,7 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.reloadCampaigns()
 
 	case campaignListSyncTickMsg:
-		cmds := []tea.Cmd{scheduleCampaignListSyncTick()}
+		cmds := []tea.Cmd{m.scheduleCampaignListSyncTick()}
 		if !m.syncEnabled || m.syncInProgress {
 			return m, tea.Batch(cmds...)
 		}
@@ -418,8 +428,8 @@ func (m campaignListModel) waitForDBEvent() tea.Cmd {
 	}
 }
 
-func scheduleCampaignListSyncTick() tea.Cmd {
-	return tea.Tick(campaignListSyncInterval, func(time.Time) tea.Msg {
+func (m campaignListModel) scheduleCampaignListSyncTick() tea.Cmd {
+	return tea.Tick(throttledInterval(campaignListSyncInterval, m.focused), func(time.Time) tea.Msg {
 		return campaignListSyncTickMsg{}
 	})
 }
@@ -433,7 +443,7 @@ func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 	restore := logging.Suppress()
 	defer restore()
 
-	p := tea.NewProgram(router, tea.WithAltScreen())
+	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)

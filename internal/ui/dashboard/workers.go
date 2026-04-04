@@ -10,13 +10,13 @@ import (
 )
 
 func (m Model) startSyncTicker() tea.Cmd {
-	return tea.Tick(m.syncActiveInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(throttledInterval(m.syncActiveInterval, m.focused), func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
 func (m Model) startLogTicker() tea.Cmd {
-	return tea.Tick(m.logRefreshInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(throttledInterval(m.logRefreshInterval, m.focused), func(t time.Time) tea.Msg {
 		return logTickMsg(t)
 	})
 }
@@ -28,13 +28,13 @@ func (m Model) startCreateTicker() tea.Cmd {
 }
 
 func (m Model) startHostRefreshTicker() tea.Cmd {
-	return tea.Tick(m.hostRefreshInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(throttledInterval(m.hostRefreshInterval, m.focused), func(t time.Time) tea.Msg {
 		return hostRefreshTickMsg(t)
 	})
 }
 
 func (m Model) startHostSummaryTicker() tea.Cmd {
-	return tea.Tick(hostSummaryTickerInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(throttledInterval(hostSummaryTickerInterval, m.focused), func(t time.Time) tea.Msg {
 		return hostSummaryTickMsg(t)
 	})
 }

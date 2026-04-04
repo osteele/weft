@@ -83,22 +83,22 @@ func (m watchModel) handleCheckDone() (tea.Model, tea.Cmd) {
 
 func (m watchModel) handleCheckDoneResult(msg watchCheckDoneResultMsg) (tea.Model, tea.Cmd) {
 	if m.launchPending {
-		return m, scheduleCheckDone()
+		return m, m.scheduleCheckDone()
 	}
 	if !msg.allTerminal {
-		return m, scheduleCheckDone()
+		return m, m.scheduleCheckDone()
 	}
 
 	switch {
 	case m.mode.isInstanceBased():
 		if m.retrying {
-			return m, scheduleCheckDone()
+			return m, m.scheduleCheckDone()
 		}
 		return m, refreshWatchInstancesFromDB(m.database, m.instanceIDs, true)
 	case m.mode == watchModeSystem:
 		// System mode: also check on-prem and unplaced
 		if len(m.onPremHosts) > 0 || len(m.unplacedJobs) > 0 {
-			return m, scheduleCheckDone()
+			return m, m.scheduleCheckDone()
 		}
 		// All empty — trigger final refresh and quit
 		return m, refreshWatchInstancesFromDB(m.database, m.instanceIDs, true)
@@ -399,7 +399,7 @@ func (m watchModel) handleInstanceSyncTick() (tea.Model, tea.Cmd) {
 			return watchSyncDoneMsg{}
 		},
 		refreshWatchOnPrem(m.database),
-		scheduleSyncTick(),
+		m.scheduleSyncTick(),
 	)
 }
 
@@ -588,12 +588,12 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 
 func (m watchModel) handleSystemTick() (tea.Model, tea.Cmd) {
 	if m.refreshing {
-		return m, scheduleWatchAllTick()
+		return m, m.scheduleWatchAllTick()
 	}
 	m.refreshing = true
 	return m, tea.Batch(
 		refreshWatchSystem(m.database, m.appConfig, m.cloudInstances),
-		scheduleWatchAllTick(),
+		m.scheduleWatchAllTick(),
 	)
 }
 
@@ -726,7 +726,7 @@ func (m watchModel) handleDBWatchEvent(msg watchDBWatchEventMsg, triggerMsg tea.
 }
 
 func (m watchModel) handleProjectSyncTick() (tea.Model, tea.Cmd) {
-	cmds := []tea.Cmd{scheduleProjectSyncTick()}
+	cmds := []tea.Cmd{m.scheduleProjectSyncTick()}
 	if m.syncWorker != nil {
 		m.requestProjectActiveSyncs()
 		cmds = append(cmds, m.reloadProjectGroups())

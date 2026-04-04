@@ -136,6 +136,7 @@ type watchModel struct {
 	width        int
 	height       int
 	scrollOff    int // lines scrolled up from bottom (0 = pinned to bottom)
+	focused      bool
 
 	// Replacement chain cache (both modes, recomputed when instanceIDs change)
 	cachedHiddenIDs         map[int64]bool
@@ -228,6 +229,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		failedReplaceReason:    map[int64]string{},
 		budgetBlockedFailed:    map[int64]bool{},
 		autoNoopReasons:        map[int64]string{},
+		focused:                true,
 	}
 	m.rebuildReplacementCache()
 	return m
@@ -261,6 +263,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		preservedJobAttachment: map[int64]bool{},
 		flash:                  flash.State{Message: flashMessage},
 		autoNoopReasons:        map[int64]string{},
+		focused:                true,
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false, nil)
@@ -320,6 +323,7 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 		projectFilter:  projectFilter,
 		projectRecent:  recentWindow,
 		projectSyncing: syncEnabled,
+		focused:        true,
 	}
 }
 
@@ -339,7 +343,7 @@ func (m watchModel) Init() tea.Cmd {
 
 	switch {
 	case m.mode.isInstanceBased():
-		cmds = append(cmds, m.startDBWatcher(), scheduleSyncTick(), scheduleCheckDone())
+		cmds = append(cmds, m.startDBWatcher(), m.scheduleSyncTick(), m.scheduleCheckDone())
 		if m.syncWorker != nil {
 			m.requestOnPremSyncs()
 			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(hostsync.Result) tea.Msg {
@@ -348,14 +352,14 @@ func (m watchModel) Init() tea.Cmd {
 		}
 	case m.mode == watchModeSystem:
 		cmds = append(cmds,
-			scheduleWatchAllTick(),
-			scheduleCheckDone(),
+			m.scheduleWatchAllTick(),
+			m.scheduleCheckDone(),
 			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return watchSyncResultMsg{result: r}
 			}),
 		)
 	case m.mode == watchModeProject:
-		cmds = append(cmds, m.startDBWatcher(), m.reloadProjectGroups(), scheduleProjectSyncTick())
+		cmds = append(cmds, m.startDBWatcher(), m.reloadProjectGroups(), m.scheduleProjectSyncTick())
 		if m.syncWorker != nil {
 			m.requestProjectActiveSyncs()
 			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
@@ -440,6 +444,14 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.FocusMsg:
+		m.focused = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.focused = false
+		return m, nil
 
 	case tea.MouseMsg:
 		switch msg.Button {
@@ -669,7 +681,7 @@ func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estim
 	restore := logging.Suppress()
 	defer restore()
 
-	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	if err != nil {
 		return instanceIDs, err

@@ -47,6 +47,7 @@ type listTUIModel struct {
 	autoInProgress   bool
 	autoLeaseOwner   string
 	autoLeaseScope   string
+	focused          bool
 }
 
 type listJobsLoadedMsg struct {
@@ -113,12 +114,13 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		autoMode:        groupedByStatus && autoMode,
 		autoLeaseOwner:  fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		autoLeaseScope:  buildListAutoLeaseScope(title),
+		focused:         true,
 	}
 
 	restore := logging.Suppress()
 	defer restore()
 
-	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus()).Run()
 	cancel()
 	if sw != nil {
 		sw.Stop()
@@ -130,7 +132,7 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 }
 
 func (m listTUIModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), scheduleListSyncTick()}
+	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), m.scheduleListSyncTick()}
 	if m.syncWorker != nil {
 		m.requestActiveSyncs()
 		cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
@@ -205,6 +207,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clampCursor()
 		m.adjustOffset()
+		return m, nil
+
+	case tea.FocusMsg:
+		m.focused = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.focused = false
 		return m, nil
 
 	case listJobsLoadedMsg:
@@ -284,7 +294,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case listSyncTickMsg:
-		cmds := []tea.Cmd{scheduleListSyncTick()}
+		cmds := []tea.Cmd{m.scheduleListSyncTick()}
 		if m.syncWorker != nil {
 			m.requestActiveSyncs()
 			cmds = append(cmds, m.reloadJobs())
@@ -544,8 +554,8 @@ func (m listTUIModel) requestActiveSyncs() {
 	}
 }
 
-func scheduleListSyncTick() tea.Cmd {
-	return tea.Tick(listTUISyncInterval, func(time.Time) tea.Msg {
+func (m listTUIModel) scheduleListSyncTick() tea.Cmd {
+	return tea.Tick(throttledInterval(listTUISyncInterval, m.focused), func(time.Time) tea.Msg {
 		return listSyncTickMsg{}
 	})
 }

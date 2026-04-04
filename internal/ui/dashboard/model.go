@@ -158,6 +158,7 @@ type Model struct {
 
 	// Host offline hysteresis: only mark offline after consecutive failures
 	hostFailCount map[string]int
+	focused       bool
 
 	// Track hosts that have already shown low disk warning this session
 	lowDiskWarnedHosts map[string]bool
@@ -329,6 +330,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostFailCount:           make(map[string]int),
 		lowDiskWarnedHosts:      make(map[string]bool),
 		queueStoppedWarnedHosts: make(map[string]bool),
+		focused:                 true,
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
@@ -456,6 +458,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.jobList.SetHeight(contentHeight)
 		m.jobListContentHeight = contentHeight
+		return m, nil
+
+	case tea.FocusMsg:
+		m.focused = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.focused = false
 		return m, nil
 
 	case spinner.TickMsg:

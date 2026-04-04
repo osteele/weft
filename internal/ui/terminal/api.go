@@ -47,7 +47,7 @@ func RunWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
 	router := newWatchRouterModel(database, cfg, "", autoMode)
 
 	restore := logging.Suppress()
-	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	restore()
 
@@ -116,7 +116,7 @@ func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.
 	restore := logging.Suppress()
 	defer restore()
 
-	finalModel, err := tea.NewProgram(router, tea.WithAltScreen()).Run()
+	finalModel, err := tea.NewProgram(router, tea.WithAltScreen(), tea.WithReportFocus()).Run()
 	if r, ok := finalModel.(watchRouterModel); ok {
 		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
 			w.syncWorker.Stop()

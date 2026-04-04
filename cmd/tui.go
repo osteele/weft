@@ -100,7 +100,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		useMouse = tuiMouse
 	}
 
-	programOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	programOpts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithReportFocus()}
 	if useMouse {
 		programOpts = append(programOpts, tea.WithMouseCellMotion())
 	}
