@@ -644,6 +644,28 @@ func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
 	}
 }
 
+func TestRankOffer_EnforcesExactVRAMRequest(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:    "NVIDIA",
+		GPUMemGB:    20,
+		MaxGPUMemGB: 20, // exact request
+		Jobs:        []*db.Job{{ID: 1}},
+	}
+	offers := []cloud.Offer{
+		{ProviderID: "small", GPUName: "RTX 2080 Ti", GPUMemGB: 11, CostPerHour: 0.10},
+		{ProviderID: "exact", GPUName: "RTX 4000", GPUMemGB: 20, CostPerHour: 0.20},
+		{ProviderID: "large", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.05},
+	}
+
+	got := rankOfferWithProfile(group, offers, nil, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap.Profile(), 0)
+	if got.Offer == nil {
+		t.Fatal("expected an offer, got nil")
+	}
+	if got.Offer.ProviderID != "exact" {
+		t.Fatalf("picked offer %q, want %q", got.Offer.ProviderID, "exact")
+	}
+}
+
 // TestSplitToParallel_PreservesMaxGPUMemGB verifies that SplitToParallel
 // applies the VRAM tier ceiling to individual groups, matching the behavior
 // of affinityGroupUnconstrained.

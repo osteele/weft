@@ -90,6 +90,35 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 	return compatible, filtered
 }
 
+// filterOffersByVRAMReq applies a defensive local VRAM filter.
+// We still rely on provider-side filtering, but this guards against provider
+// inconsistencies and enforces exact-memory requests (min==max).
+func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
+	if len(offers) == 0 {
+		return offers, 0
+	}
+
+	const eps = 0.01
+	minMem := float64(group.GPUMemGB)
+	exactMem := group.MaxGPUMemGB > 0 && group.MaxGPUMemGB == group.GPUMemGB
+	maxMem := float64(group.MaxGPUMemGB)
+
+	filtered := make([]cloud.Offer, 0, len(offers))
+	removed := 0
+	for _, o := range offers {
+		if minMem > 0 && o.GPUMemGB+eps < minMem {
+			removed++
+			continue
+		}
+		if exactMem && o.GPUMemGB-eps > maxMem {
+			removed++
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered, removed
+}
+
 // rankOffer selects the best offer from a slice and returns a GroupOffer.
 func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) GroupOffer {
 	return rankOfferWithProfile(group, offers, survivalModel, jobDurationHrs, setupOverhead, strategy.Profile(), minSurvival)
@@ -97,6 +126,21 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 
 func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
+	if len(offers) == 0 {
+		return result
+	}
+	if vramFiltered, removed := filterOffersByVRAMReq(offers, group); removed > 0 {
+		slog.Debug("filtered offers by VRAM requirement",
+			"required_min_gb", group.GPUMemGB,
+			"required_exact_gb", func() int {
+				if group.MaxGPUMemGB == group.GPUMemGB {
+					return group.MaxGPUMemGB
+				}
+				return 0
+			}(),
+			"filtered", removed, "remaining", len(vramFiltered))
+		offers = vramFiltered
+	}
 	if len(offers) == 0 {
 		return result
 	}

@@ -128,7 +128,7 @@ func TestReconcileLaunches_GraceDetection(t *testing.T) {
 	}
 }
 
-func TestReconcileLaunches_GraceSyncsJobCompletions(t *testing.T) {
+func TestReconcileLaunches_GraceIgnoredWithActiveJobs(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
@@ -161,10 +161,13 @@ func TestReconcileLaunches_GraceSyncsJobCompletions(t *testing.T) {
 		},
 	}
 
-	// Override grace check to simulate R2 grace marker detection
+	// Override grace check to simulate R2 grace marker detection.
+	// This should not be invoked while the launch has an active job.
 	origGrace := reconcileCheckR2GraceStatus
 	t.Cleanup(func() { reconcileCheckR2GraceStatus = origGrace })
+	graceChecks := 0
 	reconcileCheckR2GraceStatus = func(_ *r2.Client, ci *db.Launch, dbConn *sql.DB) bool {
+		graceChecks++
 		_ = db.SetLaunchGraceStarted(dbConn, ci.ID, time.Now().Add(5*time.Minute).Unix())
 		return true
 	}
@@ -182,22 +185,72 @@ func TestReconcileLaunches_GraceSyncsJobCompletions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if result.Reconciled != 1 {
-		t.Errorf("reconciled = %d, want 1", result.Reconciled)
+	if result.Reconciled != 0 {
+		t.Errorf("reconciled = %d, want 0", result.Reconciled)
 	}
 
-	// Verify instance transitioned to grace
+	// Verify instance remains running
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+
+	// Grace marker should be skipped while the job is active.
+	if graceChecks != 0 {
+		t.Errorf("grace checks = %d, want 0", graceChecks)
+	}
+	if len(syncedJobIDs) != 0 {
+		t.Errorf("synced job IDs = %v, want []", syncedJobIDs)
+	}
+}
+
+func TestReconcileLaunches_GraceWhenNoActiveJobs(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
+		},
+	}
+
+	origGrace := reconcileCheckR2GraceStatus
+	t.Cleanup(func() { reconcileCheckR2GraceStatus = origGrace })
+	reconcileCheckR2GraceStatus = func(_ *r2.Client, ci *db.Launch, dbConn *sql.DB) bool {
+		_ = db.SetLaunchGraceStarted(dbConn, ci.ID, time.Now().Add(5*time.Minute).Unix())
+		return true
+	}
+
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1", result.Reconciled)
+	}
+
 	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
 	if ci.Status != db.LaunchStatusGrace {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusGrace)
-	}
-
-	// Verify job completion sync was called for the running job
-	if len(syncedJobIDs) != 1 || syncedJobIDs[0] != 1 {
-		t.Errorf("synced job IDs = %v, want [1]", syncedJobIDs)
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusGrace)
 	}
 }
 

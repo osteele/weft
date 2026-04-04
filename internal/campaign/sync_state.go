@@ -20,6 +20,7 @@ var (
 	syncFetchHeartbeat      = fetchHeartbeat
 	syncFetchJobProgress    = fetchJobProgress
 	syncFetchTermIntent     = fetchTerminationIntentFromR2
+	syncCheckR2GraceStatus  = checkR2GraceStatus
 )
 
 // SyncedState holds the observation state collected from R2 and the provider,
@@ -111,7 +112,9 @@ func SyncInstanceState(
 
 		// Detect grace transition
 		if s.InstancePhase == PhaseGrace && ci.Status == db.LaunchStatusRunning {
-			if checkR2GraceStatus(r2Client, ci, database) {
+			if hasActiveLaunchJobs(jobs, nil) {
+				slog.Warn("ignoring grace transition while launch has active jobs", "component", "sync", "instance", ci.ID)
+			} else if syncCheckR2GraceStatus(r2Client, ci, database) {
 				ci.Status = db.LaunchStatusGrace
 			}
 		}

@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -39,12 +40,14 @@ func TestSyncInstanceState_GraceToRunning(t *testing.T) {
 	origHB := syncFetchHeartbeat
 	origProgress := syncFetchJobProgress
 	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
 	t.Cleanup(func() {
 		syncFetchInstancePhase = origPhase
 		syncFetchBootstrapStage = origBootstrap
 		syncFetchHeartbeat = origHB
 		syncFetchJobProgress = origProgress
 		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
 	})
 
 	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
@@ -62,6 +65,7 @@ func TestSyncInstanceState_GraceToRunning(t *testing.T) {
 	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
 		return nil, nil
 	}
+	syncCheckR2GraceStatus = checkR2GraceStatus
 
 	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
@@ -106,12 +110,14 @@ func TestSyncInstanceState_GraceStaysWhenPhaseIsGrace(t *testing.T) {
 	origHB := syncFetchHeartbeat
 	origProgress := syncFetchJobProgress
 	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
 	t.Cleanup(func() {
 		syncFetchInstancePhase = origPhase
 		syncFetchBootstrapStage = origBootstrap
 		syncFetchHeartbeat = origHB
 		syncFetchJobProgress = origProgress
 		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
 	})
 
 	// Phase is still "grace" — agent is waiting, not running a job
@@ -130,11 +136,67 @@ func TestSyncInstanceState_GraceStaysWhenPhaseIsGrace(t *testing.T) {
 	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
 		return nil, nil
 	}
+	syncCheckR2GraceStatus = checkR2GraceStatus
 
 	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	// Should remain in grace
 	if ci.Status != db.LaunchStatusGrace {
 		t.Errorf("ci.Status = %q, want %q", ci.Status, db.LaunchStatusGrace)
+	}
+}
+
+func TestSyncInstanceState_DoesNotEnterGraceWithActiveJobs(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "grace" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	graceChecks := 0
+	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool {
+		graceChecks++
+		return true
+	}
+
+	jobs := []*db.Job{{ID: 1, Status: db.StatusRunning, StartTime: time.Now().Unix()}}
+	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, jobs, JobState{HasStartedJob: true}, SyncInstanceStateOpts{})
+
+	if ci.Status != db.LaunchStatusRunning {
+		t.Fatalf("ci.Status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+	if graceChecks != 0 {
+		t.Fatalf("grace status check calls = %d, want 0", graceChecks)
 	}
 }

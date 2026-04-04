@@ -256,10 +256,15 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 // terminated means the instance was moved to a terminal state (failed/completed).
 // providerInstances is the batch-fetched map from batchFetchProviderInstances.
 func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.Launch, providerInstances map[string]map[string]*cloud.Instance) (bool, bool) {
+	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
+	attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, ci.ID)
+
 	// Check for grace-wait state for running instances via R2.
 	// This is handled outside CheckInstance because it writes to the DB as a side effect.
 	if ci.Status == db.LaunchStatusRunning && r2Client != nil {
-		if graceDetected := reconcileCheckR2GraceStatus(r2Client, ci, database); graceDetected {
+		if hasActiveLaunchJobs(jobs, attemptOutcomes) {
+			slog.Warn("ignoring grace transition while launch has active jobs", "component", "reconcile", "instance", ci.ID)
+		} else if graceDetected := reconcileCheckR2GraceStatus(r2Client, ci, database); graceDetected {
 			syncJobCompletionsFromR2(database, r2Client, ci.ID)
 			return true, false // reconciled but not terminal (grace is not terminal)
 		}
@@ -294,8 +299,6 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		r.recordProviderStatusTransition(database, ci.ID, inst.Status)
 	}
 
-	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
-	attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, ci.ID)
 	jobState := ComputeJobState(jobs, attemptOutcomes)
 
 	// Sync external state (R2 markers, termination intent) to launch_live_state.
