@@ -18,6 +18,9 @@ const (
 	EventRelaunchDiskBump           = "relaunch.disk_bump"
 	EventRelaunchLaunchSuccess      = "relaunch.launch_success"
 	EventRelaunchLaunchFailed       = "relaunch.launch_failed"
+	EventRelaunchRunawayTripped     = "relaunch.runaway_tripped"
+	EventRelaunchRunawayBlocked     = "relaunch.runaway_blocked"
+	EventRelaunchRunawayResumed     = "relaunch.runaway_resumed"
 
 	// Reconciliation actions (from ExecuteAction / reconcileStaleHeartbeat)
 	EventReconcileBootstrapTimeout  = "reconcile.bootstrap_timeout"

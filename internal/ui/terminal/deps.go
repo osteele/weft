@@ -47,7 +47,7 @@ type Dependencies struct {
 	PerformFastSync                                   func(*sql.DB, bool) (bool, []string)
 	PerformSyncWithTimeoutForHostsDetailed            func(*sql.DB, []string, time.Duration, bool) (bool, []string, []string)
 	PerformSyncWithTimeoutForHostsDetailedWithOptions func(*sql.DB, []string, time.Duration, bool, bool) (bool, []string, []string)
-	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64, []int64, bool) (*campaign.RelaunchResult, error)
+	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64, []int64, string, bool) (*campaign.RelaunchResult, error)
 	BuildStaleDataNote                                func(*sql.DB, []string) string
 	PrintJobStatus                                    func(*db.Job, bool)
 	RefreshLaunchGroupsWithOnPrem                     func(*sql.DB, *config.Config, string, string, func(int, int), func(string)) ([]campaign.InstanceGroup, error)
@@ -190,6 +190,7 @@ func attemptRelaunchOrphanedJobs(
 	extraAttempts int,
 	retryBudgetMultiplierByFailedInstance map[int64]float64,
 	scopeJobIDs []int64,
+	scopeProject string,
 	restrictToReset bool,
 ) (*campaign.RelaunchResult, error) {
 	if deps.AttemptRelaunchOrphanedJobs == nil {
@@ -201,6 +202,7 @@ func attemptRelaunchOrphanedJobs(
 		extraAttempts,
 		retryBudgetMultiplierByFailedInstance,
 		scopeJobIDs,
+		scopeProject,
 		restrictToReset,
 	)
 }

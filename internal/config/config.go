@@ -140,6 +140,19 @@ type CampaignConfig struct {
 	RetryNextTimeLimit string `yaml:"retry_next_time_limit" toml:"retry_next_time_limit"`
 	// RetryNextCostLimit is the hard spend cap (USD) for second+ cloud retry attempts.
 	RetryNextCostLimit float64 `yaml:"retry_next_cost_limit" toml:"retry_next_cost_limit"`
+
+	// AutoRunawayEnabled enables the unattended relaunch runaway breaker.
+	// nil defaults to true.
+	AutoRunawayEnabled *bool `yaml:"auto_runaway_enabled" toml:"auto_runaway_enabled"`
+	// AutoRunawayWindow is the lookback horizon for runaway detection.
+	AutoRunawayWindow string `yaml:"auto_runaway_window" toml:"auto_runaway_window"`
+	// AutoRunawayChainNoProgressLimit is the max trailing orphaned-chain length
+	// before tripping the runaway breaker.
+	AutoRunawayChainNoProgressLimit int `yaml:"auto_runaway_chain_no_progress_limit" toml:"auto_runaway_chain_no_progress_limit"`
+	// AutoRunawayOrphanChurnLimit is the max orphaned attempts in window before trip.
+	AutoRunawayOrphanChurnLimit int `yaml:"auto_runaway_orphan_churn_limit" toml:"auto_runaway_orphan_churn_limit"`
+	// AutoRunawaySpendNoProgressLimit is the max spend (USD) in-window with no completions.
+	AutoRunawaySpendNoProgressLimit float64 `yaml:"auto_runaway_spend_no_progress_limit" toml:"auto_runaway_spend_no_progress_limit"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
@@ -459,6 +472,10 @@ const (
 	defaultRetryNextTimeLimit  = 45 * time.Minute
 	defaultRetryFirstCostUSD   = 1.00
 	defaultRetryNextCostUSD    = 0.25
+	defaultAutoRunawayWindow   = 24 * time.Hour
+	defaultAutoRunawayChain    = 3
+	defaultAutoRunawayOrphans  = 8
+	defaultAutoRunawaySpendUSD = 5.00
 )
 
 func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
@@ -517,6 +534,46 @@ func (c *Config) RetryNextCostLimitCents() int {
 		return costUSDToCents(defaultRetryNextCostUSD, defaultRetryNextCostUSD)
 	}
 	return costUSDToCents(c.Campaign.RetryNextCostLimit, defaultRetryNextCostUSD)
+}
+
+// AutoRunawayEnabled reports whether unattended runaway protection is enabled.
+func (c *Config) AutoRunawayEnabled() bool {
+	if c == nil || c.Campaign.AutoRunawayEnabled == nil {
+		return true
+	}
+	return *c.Campaign.AutoRunawayEnabled
+}
+
+// AutoRunawayWindow returns the lookback window for runaway detection.
+func (c *Config) AutoRunawayWindow() time.Duration {
+	if c == nil {
+		return defaultAutoRunawayWindow
+	}
+	return parseDurationOrDefault(c.Campaign.AutoRunawayWindow, defaultAutoRunawayWindow)
+}
+
+// AutoRunawayChainNoProgressLimit returns the no-progress chain threshold.
+func (c *Config) AutoRunawayChainNoProgressLimit() int {
+	if c == nil || c.Campaign.AutoRunawayChainNoProgressLimit <= 0 {
+		return defaultAutoRunawayChain
+	}
+	return c.Campaign.AutoRunawayChainNoProgressLimit
+}
+
+// AutoRunawayOrphanChurnLimit returns the orphan churn threshold.
+func (c *Config) AutoRunawayOrphanChurnLimit() int {
+	if c == nil || c.Campaign.AutoRunawayOrphanChurnLimit <= 0 {
+		return defaultAutoRunawayOrphans
+	}
+	return c.Campaign.AutoRunawayOrphanChurnLimit
+}
+
+// AutoRunawaySpendNoProgressLimitCents returns the spend threshold in cents.
+func (c *Config) AutoRunawaySpendNoProgressLimitCents() int {
+	if c == nil {
+		return costUSDToCents(defaultAutoRunawaySpendUSD, defaultAutoRunawaySpendUSD)
+	}
+	return costUSDToCents(c.Campaign.AutoRunawaySpendNoProgressLimit, defaultAutoRunawaySpendUSD)
 }
 
 // SourceExcludeDirs returns the effective global source exclude patterns.

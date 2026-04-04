@@ -271,7 +271,9 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 		return m, tea.Batch(cmds...)
 	}
 	reason := "no eligible relaunch candidates"
-	if msg.budgetSkip > 0 {
+	if msg.blockedReason != "" {
+		reason = msg.blockedReason
+	} else if msg.budgetSkip > 0 {
 		reason = fmt.Sprintf("%d job(s) exceeded retry budget", msg.budgetSkip)
 	} else if msg.skipped > 0 {
 		reason = fmt.Sprintf("%d job(s) exceeded max attempts", msg.skipped)
@@ -494,6 +496,10 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 		return m, m.checkAllDone()
 	}
 	if len(msg.instanceIDs) == 0 {
+		if msg.blockedReason != "" {
+			m.retryResult = "Retry blocked: " + msg.blockedReason
+			return m, m.checkAllDone()
+		}
 		if msg.budgetSkip > 0 {
 			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 				EventKind:  db.EventRetryMaxAttempts,

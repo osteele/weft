@@ -11,14 +11,15 @@ import (
 )
 
 // attemptRelaunchOrphanedJobs resets jobs on terminal cloud instances and
-// launches new instances for orphaned cloud jobs. extraAttempts raises the
-// max attempt threshold (used for manual retries to allow more tries).
+// launches replacement instances for scoped unplaced cloud jobs. extraAttempts
+// raises the max attempt threshold (used for manual retries to allow more tries).
 func attemptRelaunchOrphanedJobs(
 	database *sql.DB,
 	cfg *config.Config,
 	extraAttempts int,
 	retryBudgetMultiplierByFailedInstance map[int64]float64,
 	scopeJobIDs []int64,
+	scopeProject string,
 	restrictToReset bool,
 ) (*campaign.RelaunchResult, error) {
 	// Reset jobs on terminal instances so they become unplaced.
@@ -53,12 +54,20 @@ func attemptRelaunchOrphanedJobs(
 		ResetJobs:       resetJobs,
 		RestrictToReset: restrictToReset,
 		ScopeJobIDs:     scopeJobIDs,
+		ScopeProject:    scopeProject,
 		SetupFactory:    campaign.OfferSetupOverheadFactory(database, overheadModel),
 		RetryBudget: &campaign.RetryBudget{
 			FirstTimeLimit: cfg.RetryFirstTimeLimit(),
 			FirstCostCents: cfg.RetryFirstCostLimitCents(),
 			NextTimeLimit:  cfg.RetryNextTimeLimit(),
 			NextCostCents:  cfg.RetryNextCostLimitCents(),
+		},
+		RunawayPolicy: &campaign.RunawayPolicy{
+			Enabled:                  cfg.AutoRunawayEnabled(),
+			Window:                   cfg.AutoRunawayWindow(),
+			ChainNoProgressLimit:     cfg.AutoRunawayChainNoProgressLimit(),
+			OrphanChurnLimit:         cfg.AutoRunawayOrphanChurnLimit(),
+			SpendNoProgressLimitCent: cfg.AutoRunawaySpendNoProgressLimitCents(),
 		},
 		RetryBudgetMultiplierByFailedInstance: retryBudgetMultiplierByFailedInstance,
 	}

@@ -131,6 +131,39 @@ Watch mode shows per-instance details:
 
 Press `Ctrl-C` to exit watch mode. Instances continue running in the background.
 
+### Unattended runaway protection
+
+When `--auto` is enabled, Weft now includes a runaway breaker to prevent
+launch/die loops from running unattended for long periods.
+
+The breaker watches campaign/project-scoped relaunch behavior and trips when it
+detects no-progress churn (for example repeated orphaned retries with no
+completed jobs), even when failures happen after long runtimes.
+
+Default thresholds:
+
+- `auto_runaway_window = "24h"`
+- `auto_runaway_chain_no_progress_limit = 3`
+- `auto_runaway_orphan_churn_limit = 8`
+- `auto_runaway_spend_no_progress_limit = 5.0`
+
+Configuration (`~/.config/weft/config.toml`):
+
+```toml
+[campaign]
+auto_runaway_enabled = true
+auto_runaway_window = "24h"
+auto_runaway_chain_no_progress_limit = 3
+auto_runaway_orphan_churn_limit = 8
+auto_runaway_spend_no_progress_limit = 5.0
+```
+
+If the breaker trips, auto-relaunch is blocked until you manually resume:
+
+```bash
+weft campaign safety resume --campaign <campaign-id> [--project <project-name>]
+```
+
 ### Campaign overview
 
 ```bash

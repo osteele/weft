@@ -35,8 +35,10 @@ type RelaunchConfig struct {
 	ResetJobs       map[int64]int64      // jobID → failed instanceID
 	RestrictToReset bool                 // when true and ResetJobs is non-empty, only relaunch reset jobs
 	ScopeJobIDs     []int64              // optional job scope (current watch/project queue)
+	ScopeProject    string               // optional project scope label for safety events
 	SetupFactory    SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
 	RetryBudget     *RetryBudget         // optional hard stop limits for retry instances
+	RunawayPolicy   *RunawayPolicy       // optional unattended runaway breaker
 	// RetryBudgetMultiplierByFailedInstance scales the applicable retry-budget
 	// tier (first vs subsequent) for jobs that were orphaned from a specific
 	// failed instance. Used by watch-mode budget raise.
@@ -53,12 +55,22 @@ type RetryBudget struct {
 	NextCostCents  int
 }
 
+// RunawayPolicy defines guardrails for unattended relaunch loops.
+type RunawayPolicy struct {
+	Enabled                  bool
+	Window                   time.Duration
+	ChainNoProgressLimit     int
+	OrphanChurnLimit         int
+	SpendNoProgressLimitCent int
+}
+
 // RelaunchResult holds the outcome of a relaunch pass.
 type RelaunchResult struct {
-	InstanceIDs []int64 // newly launched instance DB IDs
-	Skipped     int     // jobs skipped (max attempts + budget limits + no offers)
-	BudgetSkip  int     // jobs skipped due to retry budget limits
-	Errors      []error
+	InstanceIDs   []int64 // newly launched instance DB IDs
+	Skipped       int     // jobs skipped (max attempts + budget limits + no offers)
+	BudgetSkip    int     // jobs skipped due to retry budget limits
+	BlockedReason string  // non-empty when relaunch is blocked by runaway breaker
+	Errors        []error
 	// NotReplacedReasons explains why orphaned jobs from a failed instance were
 	// not relaunched on this pass.
 	NotReplacedReasons map[int64]string // failed instance ID -> reason
@@ -114,6 +126,14 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	result := &RelaunchResult{
 		NotReplacedReasons: map[int64]string{},
 		BudgetBlocked:      map[int64]bool{},
+	}
+	if cfg.RunawayPolicy != nil && cfg.RunawayPolicy.Enabled {
+		if blocked, reason, err := evaluateRunawayBreaker(cfg.Database, cfg, unplaced, time.Now()); err != nil {
+			slog.Warn("runaway breaker evaluation failed", "component", "relaunch", "error", err)
+		} else if blocked {
+			result.BlockedReason = reason
+			return result, nil
+		}
 	}
 	var eligible []*db.Job
 	for _, j := range unplaced {
@@ -467,6 +487,218 @@ func summarizeBudgetDetail(detail string) string {
 		return detail
 	}
 	return "retry budget exceeded: " + detail
+}
+
+func runawayProjectLabel(project string) string {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return "<all>"
+	}
+	return strings.ReplaceAll(project, ";", "_")
+}
+
+func runawayScopeDetail(project string, detail string) string {
+	label := runawayProjectLabel(project)
+	if detail == "" {
+		return "project=" + label + ";"
+	}
+	return "project=" + label + "; " + detail
+}
+
+func eventMatchesRunawayProject(event db.LifecycleEvent, project string) bool {
+	want := "project=" + runawayProjectLabel(project) + ";"
+	return strings.Contains(event.Detail, want)
+}
+
+func latestRunawayEventAt(database *sql.DB, kind string, campaignID int64, project string) int64 {
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind:       kind,
+		CampaignID: campaignID,
+		Limit:      500,
+	})
+	if err != nil {
+		return 0
+	}
+	for _, e := range events {
+		if eventMatchesRunawayProject(e, project) {
+			return e.OccurredAt
+		}
+	}
+	return 0
+}
+
+func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db.Job, now time.Time) (bool, string, error) {
+	if cfg.RunawayPolicy == nil || !cfg.RunawayPolicy.Enabled || database == nil {
+		return false, "", nil
+	}
+	if len(unplaced) == 0 {
+		return false, "", nil
+	}
+	scopeJobIDs := make([]int64, 0, len(unplaced))
+	for _, j := range unplaced {
+		if j != nil && !j.HasTag(db.TagInventory) {
+			scopeJobIDs = append(scopeJobIDs, j.ID)
+		}
+	}
+	if len(scopeJobIDs) == 0 {
+		return false, "", nil
+	}
+	campaignID := inferScopeCampaignID(database, unplaced)
+	if campaignID == 0 {
+		return false, "", nil
+	}
+
+	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, cfg.ScopeProject)
+	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, cfg.ScopeProject)
+	if trippedAt > resumedAt {
+		reason := "runaway breaker tripped for scope; manual resume required"
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind:  db.EventRelaunchRunawayBlocked,
+			CampaignID: campaignID,
+			Detail:     runawayScopeDetail(cfg.ScopeProject, reason),
+		})
+		return true, reason, nil
+	}
+
+	since := now.Add(-cfg.RunawayPolicy.Window).Unix()
+	if resumedAt > since {
+		since = resumedAt
+	}
+	metrics, err := queryRunawayMetrics(database, campaignID, scopeJobIDs, since, now.Unix())
+	if err != nil {
+		return false, "", err
+	}
+	noProgress := metrics.CompletedCount == 0
+	limitHit := metrics.MaxTrailingOrphaned >= cfg.RunawayPolicy.ChainNoProgressLimit ||
+		metrics.OrphanedCount >= cfg.RunawayPolicy.OrphanChurnLimit ||
+		metrics.SpendCents >= cfg.RunawayPolicy.SpendNoProgressLimitCent
+	if !noProgress || !limitHit {
+		return false, "", nil
+	}
+	reason := fmt.Sprintf(
+		"no-progress runaway: chain=%d orphaned=%d spend=$%.2f window=%s",
+		metrics.MaxTrailingOrphaned,
+		metrics.OrphanedCount,
+		float64(metrics.SpendCents)/100.0,
+		cfg.RunawayPolicy.Window.String(),
+	)
+	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayTripped,
+		CampaignID: campaignID,
+		Detail:     runawayScopeDetail(cfg.ScopeProject, reason),
+	})
+	return true, reason, nil
+}
+
+type runawayMetrics struct {
+	CompletedCount      int
+	OrphanedCount       int
+	SpendCents          int
+	MaxTrailingOrphaned int
+}
+
+func inferScopeCampaignID(database *sql.DB, jobs []*db.Job) int64 {
+	for _, j := range jobs {
+		if j == nil {
+			continue
+		}
+		facts, err := attemptFactsForRelaunch(database, j.ID)
+		if err != nil || facts.LastLaunch == nil || facts.LastLaunch.CampaignID == nil {
+			continue
+		}
+		return *facts.LastLaunch.CampaignID
+	}
+	return 0
+}
+
+func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, since int64, nowUnix int64) (runawayMetrics, error) {
+	if len(jobIDs) == 0 {
+		return runawayMetrics{}, nil
+	}
+	var m runawayMetrics
+	args := make([]any, 0, len(jobIDs)+4)
+	holders := make([]string, 0, len(jobIDs))
+	for _, id := range jobIDs {
+		holders = append(holders, "?")
+		args = append(args, id)
+	}
+	inClause := strings.Join(holders, ",")
+
+	row := database.QueryRow(
+		fmt.Sprintf(`SELECT
+			COALESCE(SUM(CASE WHEN ja.cloud_outcome = ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN ja.cloud_outcome = ? THEN 1 ELSE 0 END), 0)
+		FROM job_attempts ja
+		JOIN launches l ON l.id = ja.launch_id
+		WHERE ja.launch_id IS NOT NULL
+		  AND ja.job_id IN (%s)
+		  AND l.campaign_id = ?
+		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, inClause),
+		append(append(append([]any{}, db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned), args...), campaignID, since)...,
+	)
+	if err := row.Scan(&m.CompletedCount, &m.OrphanedCount); err != nil {
+		return m, err
+	}
+
+	spendRow := database.QueryRow(
+		fmt.Sprintf(`SELECT COALESCE(SUM(
+			CASE
+				WHEN l.actual_spend_cents > 0 THEN l.actual_spend_cents
+				WHEN l.cost_per_hour_cents > 0 THEN CAST(ROUND(
+					(MAX(0, COALESCE(l.ended_at, ?) - COALESCE(l.launched_at, l.created_at))) / 3600.0
+					* l.cost_per_hour_cents
+				) AS INTEGER)
+				ELSE 0
+			END
+		), 0)
+		FROM launches l
+		JOIN (
+			SELECT DISTINCT ja.launch_id
+			FROM job_attempts ja
+			JOIN launches l2 ON l2.id = ja.launch_id
+			WHERE ja.launch_id IS NOT NULL
+			  AND ja.job_id IN (%s)
+			  AND l2.campaign_id = ?
+			  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?
+		) scoped ON scoped.launch_id = l.id
+		WHERE l.status IN (?, ?)`, inClause),
+		append(append(append([]any{nowUnix}, args...), campaignID, since), db.LaunchStatusFailed, db.LaunchStatusCancelled)...,
+	)
+	if err := spendRow.Scan(&m.SpendCents); err != nil {
+		return m, err
+	}
+
+	launchCache := map[int64]*db.Launch{}
+	for _, jobID := range jobIDs {
+		attempts, err := db.GetLaunchAttempts(database, jobID)
+		if err != nil || len(attempts) == 0 {
+			continue
+		}
+		trailing := 0
+		for i := len(attempts) - 1; i >= 0; i-- {
+			a := attempts[i]
+			if a.StartedAt < since {
+				break
+			}
+			ci, ok := launchCache[a.LaunchID]
+			if !ok {
+				ci, _ = db.GetLaunch(database, a.LaunchID)
+				launchCache[a.LaunchID] = ci
+			}
+			if ci == nil || ci.CampaignID == nil || *ci.CampaignID != campaignID {
+				continue
+			}
+			if a.Outcome == db.AttemptOutcomeOrphaned {
+				trailing++
+				continue
+			}
+			break
+		}
+		if trailing > m.MaxTrailingOrphaned {
+			m.MaxTrailingOrphaned = trailing
+		}
+	}
+	return m, nil
 }
 
 // mostRecentDiskFullGB returns the disk_gb of the most recent cloud instance

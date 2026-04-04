@@ -166,13 +166,17 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 								fmt.Printf("instance %d: retryable failure (%s), attempting relaunch (attempt %d/%d)...\n",
 									instanceID, ci.DisplayTerminationReason(), attempt+1, maxAttempts)
 								scopeJobIDs := rentalScopedUnplacedJobIDs(unplacedJobs)
-								outcome, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, false)
+								outcome, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, projectFilter, false)
 								if err != nil {
 									fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
 									return
 								}
 								if outcome != nil && outcome.BudgetSkip > 0 && len(outcome.InstanceIDs) == 0 {
 									fmt.Printf("instance %d: %d job(s) exceeded retry budget, giving up\n", instanceID, outcome.BudgetSkip)
+									return
+								}
+								if outcome != nil && outcome.BlockedReason != "" && len(outcome.InstanceIDs) == 0 {
+									fmt.Printf("instance %d: auto-relaunch blocked: %s\n", instanceID, outcome.BlockedReason)
 									return
 								}
 								if outcome != nil && outcome.Skipped > 0 && len(outcome.InstanceIDs) == 0 {

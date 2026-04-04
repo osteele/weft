@@ -47,6 +47,7 @@ type retryResultMsg struct {
 	instanceIDs         []int64
 	skipped             int
 	budgetSkip          int
+	blockedReason       string
 	notReplacedReasons  map[int64]string
 	budgetBlockedByInst map[int64]bool
 	err                 error
@@ -154,11 +155,12 @@ type autoPlaceDoneMsg struct {
 
 // autoLaunchDoneMsg carries the result of an auto-launch attempt.
 type autoLaunchDoneMsg struct {
-	instanceIDs []int64
-	skipped     int
-	budgetSkip  int
-	reasons     map[int64]string
-	err         error
+	instanceIDs   []int64
+	skipped       int
+	budgetSkip    int
+	blockedReason string
+	reasons       map[int64]string
+	err           error
 }
 
 // autoPilotBackoffReadyMsg fires when an auto-launch backoff delay elapses.

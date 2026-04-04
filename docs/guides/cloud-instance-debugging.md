@@ -165,6 +165,22 @@ subject to retry budget), re-launch with `weft instance launch`, or adjust
 `[campaign] retry_*_time_limit` / `retry_*_cost_limit` in
 `~/.config/weft/config.toml`.
 
+### Auto-relaunch blocked by runaway breaker
+
+In unattended `--auto` mode, Weft can halt relaunches when it detects repeated
+no-progress churn (for example, repeated orphaned retries and spend growth with
+no completions in the same campaign/project scope).
+
+You will see status text like `auto-relaunch blocked` or `runaway breaker`.
+
+**Action:** inspect recent lifecycle events, fix the underlying job/runtime
+issue, then resume relaunch:
+
+```bash
+weft log --events --kind relaunch.runaway
+weft campaign safety resume --campaign <campaign-id> [--project <project-name>]
+```
+
 ### Disk full during execution
 
 The instance ran out of disk. This usually means undeclared HF model
