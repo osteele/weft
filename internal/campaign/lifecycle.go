@@ -742,9 +742,22 @@ func launchCampaignWithStager(
 					}
 				}
 
+				donorCreateOpts := cloud.CreateOpts{}
+				if createOptsForProvider != nil {
+					donorCreateOpts, donorErr = createOptsForProvider(donorCfg.Offer.Provider)
+					if donorErr != nil {
+						slog.Warn("unsupported donor provider config", "component", "donor", "error", donorErr)
+						donorCfg = nil
+					}
+				}
+				if donorCfg == nil {
+					goto donorDisabled
+				}
+
 				donorBootstrap := GenerateBootstrapScript(BootstrapManifest{
 					AgentR2Key:   donorAssets.AgentR2Key,
 					Sources:      donorSources,
+					Image:        donorCreateOpts.Image,
 					DonorMode:    true,
 					HFModels:     donorCfg.HFModels,
 					DonorID:      fmt.Sprintf("%d", donorInstanceID),
@@ -762,14 +775,6 @@ func launchCampaignWithStager(
 					donorCfg = nil
 				} else {
 					// Build env vars and create opts for donor
-					donorCreateOpts := cloud.CreateOpts{}
-					if createOptsForProvider != nil {
-						donorCreateOpts, donorErr = createOptsForProvider(donorCfg.Offer.Provider)
-						if donorErr != nil {
-							slog.Warn("unsupported donor provider config", "component", "donor", "error", donorErr)
-							donorCfg = nil
-						}
-					}
 					if donorCfg != nil {
 						donorEnvVars := map[string]string{
 							"R2_ACCESS_KEY_ID":     r2Cfg.AccessKeyID,
@@ -1489,6 +1494,7 @@ func LaunchInstance(
 	bootstrapScript := GenerateBootstrapScript(BootstrapManifest{
 		AgentR2Key:         r2Assets.AgentR2Key,
 		Sources:            sources,
+		Image:              createOpts.Image,
 		HFModels:           collectHFModels([]InstanceGroup{group}),
 		DBInstanceID:       instanceID,
 		MaxTimeSeconds:     opts.MaxTimeSeconds,

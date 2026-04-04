@@ -2,7 +2,9 @@ package runner
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,5 +148,66 @@ func TestRunSetupCommand_WritesPGIDFile(t *testing.T) {
 	pgidPath := filepath.Join(logDir, "888.pgid")
 	if _, err := os.Stat(pgidPath); os.IsNotExist(err) {
 		t.Fatal("PGID file should exist after setup command runs")
+	}
+}
+
+func TestPyprojectDependsOnTorch(t *testing.T) {
+	dir := t.TempDir()
+	pyproject := filepath.Join(dir, "pyproject.toml")
+	if err := os.WriteFile(pyproject, []byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+
+	got, err := pyprojectDependsOnTorch(pyproject)
+	if err != nil {
+		t.Fatalf("pyprojectDependsOnTorch() error = %v", err)
+	}
+	if !got {
+		t.Fatal("pyprojectDependsOnTorch() = false, want true")
+	}
+}
+
+func TestPyprojectDependsOnTorch_FalseWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	pyproject := filepath.Join(dir, "pyproject.toml")
+	if err := os.WriteFile(pyproject, []byte("[project]\ndependencies = [\"numpy>=1.0\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+
+	got, err := pyprojectDependsOnTorch(pyproject)
+	if err != nil {
+		t.Fatalf("pyprojectDependsOnTorch() error = %v", err)
+	}
+	if got {
+		t.Fatal("pyprojectDependsOnTorch() = true, want false")
+	}
+}
+
+func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) {
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	prev := uvSystemPythonPath
+	uvSystemPythonPath = pythonPath
+	t.Cleanup(func() { uvSystemPythonPath = prev })
+
+	gotCmd, gotEnv, err := prepareUVSyncEnvironment(dir, "uv sync", []string{"A=1"})
+	if err != nil {
+		t.Fatalf("prepareUVSyncEnvironment() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".venv")); err != nil {
+		t.Fatalf("expected .venv to be created: %v", err)
+	}
+	joined := strings.Join(gotEnv, "\n")
+	if !strings.Contains(joined, "UV_PYTHON="+pythonPath) {
+		t.Fatalf("expected UV_PYTHON override in env, got: %v", gotEnv)
+	}
+	if !strings.Contains(gotCmd, "--no-install-package torch") {
+		t.Fatalf("expected torch skip flag in command, got: %q", gotCmd)
 	}
 }

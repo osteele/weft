@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -15,6 +16,10 @@ import (
 )
 
 const direnvSetupCommand = `direnv allow && eval "$(direnv export bash)"`
+
+var uvSystemPythonPath = "/opt/conda/bin/python"
+
+var uvSkipSystemPackages = []string{"torch", "torchaudio", "torchvision"}
 
 // DetectSetupCommand checks for environment manager marker files in the
 // working directory and returns the appropriate setup command to run before
@@ -62,8 +67,21 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 	if timeout == 0 {
 		timeout = inventory.DefaultSetupTimeout
 	}
-	slog.Debug("running setup command", "component", "runner", "job_id", jobID, "cmd", setupCmd, "timeout", timeout)
-	proc, err := StartProcess(setupCmd, workingDir, envVars, paths.Log)
+	preparedEnv := envVars
+	preparedCmd := setupCmd
+	if setupCmd == "uv sync" {
+		var prepErr error
+		preparedCmd, preparedEnv, prepErr = prepareUVSyncEnvironment(workingDir, setupCmd, envVars)
+		if prepErr != nil {
+			slog.Warn("uv sync preflight failed; continuing with normal uv sync",
+				"component", "runner", "job_id", jobID, "error", prepErr)
+			appendSetupLog(paths.Log, []byte("weft: uv sync preflight failed; continuing with normal uv sync: "+prepErr.Error()+"\n"))
+			preparedCmd = setupCmd
+			preparedEnv = envVars
+		}
+	}
+	slog.Debug("running setup command", "component", "runner", "job_id", jobID, "cmd", preparedCmd, "timeout", timeout)
+	proc, err := StartProcess(preparedCmd, workingDir, preparedEnv, paths.Log)
 	if err != nil {
 		slog.Warn("setup start failed", "component", "runner", "job_id", jobID, "error", err)
 		ei := ExitInfo{ExitCode: 1}
@@ -101,6 +119,71 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 		return ei, fmt.Errorf("setup command failed: %w", waitErr)
 	}
 	return ExitInfo{}, nil
+}
+
+func prepareUVSyncEnvironment(workingDir, setupCmd string, envVars []string) (string, []string, error) {
+	useSystem, err := shouldUseSystemTorchPackages(workingDir)
+	if err != nil {
+		return setupCmd, envVars, err
+	}
+	if !useSystem {
+		return setupCmd, envVars, nil
+	}
+	if err := ensureSystemSitePackagesVenv(workingDir); err != nil {
+		return setupCmd, envVars, err
+	}
+	return setupCmd + uvNoInstallPackagesArgs(), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), nil
+}
+
+func shouldUseSystemTorchPackages(workingDir string) (bool, error) {
+	if setupPythonPath := strings.TrimSpace(uvSystemPythonPath); setupPythonPath == "" {
+		return false, nil
+	}
+	if _, err := os.Stat(uvSystemPythonPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", uvSystemPythonPath, err)
+	}
+	torchProject, err := pyprojectDependsOnTorch(filepath.Join(workingDir, "pyproject.toml"))
+	if err != nil {
+		return false, err
+	}
+	return torchProject, nil
+}
+
+func pyprojectDependsOnTorch(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read pyproject: %w", err)
+	}
+	lower := strings.ToLower(string(data))
+	return strings.Contains(lower, "\"torch") || strings.Contains(lower, "'torch"), nil
+}
+
+func ensureSystemSitePackagesVenv(workingDir string) error {
+	venvDir := filepath.Join(workingDir, ".venv")
+	if dirExists(venvDir) {
+		return nil
+	}
+	cmd := exec.Command(uvSystemPythonPath, "-m", "venv", "--system-site-packages", ".venv")
+	cmd.Dir = workingDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("create .venv with system site packages: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func uvNoInstallPackagesArgs() string {
+	var b strings.Builder
+	for _, pkg := range uvSkipSystemPackages {
+		b.WriteString(" --no-install-package ")
+		b.WriteString(pkg)
+	}
+	return b.String()
 }
 
 // ResolveDirenvEnv evaluates .envrc and returns the exported environment.

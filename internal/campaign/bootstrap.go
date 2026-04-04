@@ -9,6 +9,7 @@ import (
 type BootstrapManifest struct {
 	AgentR2Key         string          // R2 key for the agent binary
 	Sources            []SourceMapping // source tarballs to extract
+	Image              string          // Docker image for deciding setup optimizations
 	DonorMode          bool            // download caches and write ready marker, no wrapper
 	HFModels           []string        // HF model IDs to pre-download before jobs run
 	DonorID            string          // provider instance ID (for R2 ready marker key)
@@ -108,9 +109,19 @@ func writeHFDownloads(b *strings.Builder, models []string, instanceID int64) {
 func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
 	// Run uv sync in each source directory
 	writeStageMarker(b, manifest.DBInstanceID, "deps_installing")
+	if isPyTorchImage(manifest.Image) {
+		b.WriteString("# Reuse torch packages from the PyTorch base image when possible\n")
+		b.WriteString("if [ -x /opt/conda/bin/python ]; then\n")
+		b.WriteString("  export UV_PYTHON=/opt/conda/bin/python\n")
+		b.WriteString("fi\n\n")
+	}
 	for _, src := range manifest.Sources {
 		b.WriteString(fmt.Sprintf("# Run uv sync in %s\n", src.RemoteDir))
-		b.WriteString(fmt.Sprintf("cd %q && uv sync 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
+		if isPyTorchImage(manifest.Image) {
+			b.WriteString(fmt.Sprintf("cd %q && ([ -d .venv ] || ([ -n \"${UV_PYTHON:-}\" ] && \"$UV_PYTHON\" -m venv --system-site-packages .venv)) && uv sync --no-install-package torch --no-install-package torchaudio --no-install-package torchvision 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
+		} else {
+			b.WriteString(fmt.Sprintf("cd %q && uv sync 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
+		}
 	}
 	writeStageMarker(b, manifest.DBInstanceID, "deps_installed")
 

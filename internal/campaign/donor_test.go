@@ -233,6 +233,28 @@ func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 	}
 }
 
+func TestGenerateBootstrapScript_DonorModeWithPyTorchImage(t *testing.T) {
+	manifest := BootstrapManifest{
+		AgentR2Key:   "agent/v1/linux-amd64",
+		Sources:      []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
+		Image:        "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime",
+		DonorMode:    true,
+		DonorID:      "9",
+		DBInstanceID: 9,
+	}
+
+	script := GenerateBootstrapScript(manifest)
+	if !strings.Contains(script, "export UV_PYTHON=/opt/conda/bin/python") {
+		t.Fatal("donor script should set UV_PYTHON for pytorch image")
+	}
+	if !strings.Contains(script, "--system-site-packages .venv") {
+		t.Fatal("donor script should create .venv with system site packages for pytorch image")
+	}
+	if !strings.Contains(script, "--no-install-package torch") {
+		t.Fatal("donor script should skip installing torch in pytorch image")
+	}
+}
+
 func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 	manifest := BootstrapManifest{
 		AgentR2Key:         "agent/v1/linux-amd64",
