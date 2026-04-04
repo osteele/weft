@@ -128,6 +128,35 @@ func TestEnvPatterns_GPUOOM(t *testing.T) {
 	}
 }
 
+func TestEnvPatterns_GPUOOMProcessAttribution(t *testing.T) {
+	log := `torch.cuda.OutOfMemoryError: CUDA out of memory.
+Process 1886134 has 9.18 GiB in use.
+Process 1887281 has 2.53 GiB in use.`
+
+	d := envPatterns[0].Match(log)
+	if d == nil {
+		t.Fatal("expected match for GPU OOM")
+	}
+	if len(d.GPUOOMProcesses) != 2 {
+		t.Fatalf("expected 2 gpu_oom_processes, got %d", len(d.GPUOOMProcesses))
+	}
+	if d.GPUOOMMainPID != 1886134 {
+		t.Errorf("GPUOOMMainPID = %d, want 1886134", d.GPUOOMMainPID)
+	}
+	if d.GPUOOMExtraPID != 1887281 {
+		t.Errorf("GPUOOMExtraPID = %d, want 1887281", d.GPUOOMExtraPID)
+	}
+	if d.GPUOOMExtraGiB != 2.53 {
+		t.Errorf("GPUOOMExtraGiB = %.2f, want 2.53", d.GPUOOMExtraGiB)
+	}
+	if d.GPUOOMHintDeltaGB != 4 {
+		t.Errorf("GPUOOMHintDeltaGB = %d, want 4", d.GPUOOMHintDeltaGB)
+	}
+	if d.GPUOOMNotes == "" {
+		t.Error("expected GPUOOMNotes to be populated")
+	}
+}
+
 func TestEnvPatterns_CUDAError(t *testing.T) {
 	log := `RuntimeError: CUDA error: device-side assert triggered`
 

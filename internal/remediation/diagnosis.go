@@ -5,6 +5,12 @@ package remediation
 
 import "encoding/json"
 
+// GPUOOMProcess holds per-process VRAM usage parsed from CUDA OOM logs.
+type GPUOOMProcess struct {
+	PID       int     `json:"pid"`
+	MemoryGiB float64 `json:"memory_gib"`
+}
+
 // ErrorDiagnosis describes a diagnosed error from a failed job's log output.
 type ErrorDiagnosis struct {
 	Pattern       string   `json:"pattern"`                   // e.g., "missing_hf_model", "missing_import"
@@ -14,6 +20,13 @@ type ErrorDiagnosis struct {
 	Remediable    bool     `json:"remediable"`                // can the coordinator auto-fix this?
 	Details       string   `json:"details"`                   // raw error text that matched
 	GPUCapacityGB int      `json:"gpu_capacity_gb,omitempty"` // for gpu_oom: total GPU memory (GB) of the device that OOM'd
+	// GPU OOM attribution parsed from framework error output.
+	GPUOOMProcesses   []GPUOOMProcess `json:"gpu_oom_processes,omitempty"`
+	GPUOOMMainPID     int             `json:"gpu_oom_main_pid,omitempty"`
+	GPUOOMExtraPID    int             `json:"gpu_oom_extra_pid,omitempty"`
+	GPUOOMExtraGiB    float64         `json:"gpu_oom_extra_memory_gib,omitempty"`
+	GPUOOMHintDeltaGB int             `json:"gpu_oom_hint_mem_delta_gb,omitempty"`
+	GPUOOMNotes       string          `json:"gpu_oom_notes,omitempty"`
 }
 
 // DiagnoseFromLog scans log content for known error patterns and returns

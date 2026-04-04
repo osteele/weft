@@ -376,7 +376,10 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 					}
 				}
 				if displayStatus == db.StatusFailed || displayStatus == db.AttemptOutcomeFailed || displayStatus == db.AttemptOutcomeOrphaned {
-					excerpt := terminal.ReadCachedJobFailureExcerpt(j.ID)
+					excerpt := diagnosisSummaryFromJSON(j.ErrorDiagnosis)
+					if excerpt == "" {
+						excerpt = terminal.ReadCachedJobFailureExcerpt(j.ID)
+					}
 					if excerpt == "" {
 						excerpt = truncate(strings.TrimSpace(strings.Join([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | ")), 180)
 					}

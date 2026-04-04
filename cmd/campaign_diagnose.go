@@ -260,13 +260,13 @@ func summarizeJobIssue(job *db.Job, outcome string) string {
 func diagnosisMessageForJob(job *db.Job) string {
 	if job.ErrorDiagnosis != "" {
 		d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
-		if err == nil && d != nil && d.Message != "" {
-			return d.Message
+		if err == nil && d != nil {
+			return formatDiagnosisSummary(d)
 		}
 	}
 	if cached, err := logcache.Read(job.ID); err == nil {
 		if d := remediation.DiagnoseFromLog(cached); d != nil {
-			return d.Message
+			return formatDiagnosisSummary(d)
 		}
 	}
 	return ""

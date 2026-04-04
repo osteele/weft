@@ -1,7 +1,10 @@
 package remediation
 
 import (
+	"math"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +19,8 @@ type pattern struct {
 	// extractAssets extracts data asset refs from regex match groups.
 	// Only used for data patterns.
 	extractAssets func(match []string) []string
+	// enrich can add structured fields to the diagnosis using full log content.
+	enrich func(logContent string, diagnosis *ErrorDiagnosis)
 }
 
 // Match tests log content against this pattern. Returns a diagnosis if matched.
@@ -33,6 +38,9 @@ func (p *pattern) Match(logContent string) *ErrorDiagnosis {
 	}
 	if p.extractAssets != nil {
 		d.MissingAssets = p.extractAssets(matches)
+	}
+	if p.enrich != nil {
+		p.enrich(logContent, d)
 	}
 	return d
 }
@@ -122,6 +130,7 @@ var envPatterns = []*pattern{
 		patternID: "gpu_oom",
 		category:  "environment",
 		message:   "GPU out of memory",
+		enrich:    enrichGPUOOMDiagnosis,
 	},
 	{
 		re:             regexp.MustCompile(`RuntimeError: CUDA error`),
@@ -143,6 +152,60 @@ var envPatterns = []*pattern{
 		category:  "environment",
 		message:   "Disk full — if HF models were downloaded at runtime, declare them with --input hf:<model-id> so the disk estimator accounts for their size",
 	},
+}
+
+var gpuOOMProcessPattern = regexp.MustCompile(`Process\s+(\d+)\s+has\s+([0-9]+(?:\.[0-9]+)?)\s+GiB in use`)
+
+func enrichGPUOOMDiagnosis(logContent string, diagnosis *ErrorDiagnosis) {
+	if diagnosis == nil {
+		return
+	}
+
+	matches := gpuOOMProcessPattern.FindAllStringSubmatch(logContent, -1)
+	if len(matches) == 0 {
+		return
+	}
+
+	processes := make([]GPUOOMProcess, 0, len(matches))
+	for _, m := range matches {
+		if len(m) != 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		memGiB, err := strconv.ParseFloat(m[2], 64)
+		if err != nil {
+			continue
+		}
+		processes = append(processes, GPUOOMProcess{
+			PID:       pid,
+			MemoryGiB: memGiB,
+		})
+	}
+	if len(processes) == 0 {
+		return
+	}
+
+	sort.Slice(processes, func(i, j int) bool {
+		if processes[i].MemoryGiB == processes[j].MemoryGiB {
+			return processes[i].PID < processes[j].PID
+		}
+		return processes[i].MemoryGiB > processes[j].MemoryGiB
+	})
+
+	diagnosis.GPUOOMProcesses = processes
+	diagnosis.GPUOOMMainPID = processes[0].PID
+
+	if len(processes) > 1 {
+		extra := processes[1]
+		diagnosis.GPUOOMExtraPID = extra.PID
+		diagnosis.GPUOOMExtraGiB = extra.MemoryGiB
+		// Suggest enough headroom for the additional process plus a small buffer.
+		diagnosis.GPUOOMHintDeltaGB = int(math.Ceil(extra.MemoryGiB)) + 1
+		diagnosis.GPUOOMNotes = "PIDs are container-local; identical PID values can appear across different containers."
+	}
 }
 
 // CheckFatalAtRuntime scans log content for patterns that indicate the job

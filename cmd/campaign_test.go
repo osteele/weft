@@ -235,6 +235,15 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 		Pattern:  "gpu_oom",
 		Category: "environment",
 		Message:  "GPU out of memory",
+		GPUOOMProcesses: []remediation.GPUOOMProcess{
+			{PID: 1886134, MemoryGiB: 9.18},
+			{PID: 1887281, MemoryGiB: 2.53},
+		},
+		GPUOOMMainPID:     1886134,
+		GPUOOMExtraPID:    1887281,
+		GPUOOMExtraGiB:    2.53,
+		GPUOOMHintDeltaGB: 4,
+		GPUOOMNotes:       "PIDs are container-local; identical PID values can appear across different containers.",
 	})
 	if err != nil {
 		t.Fatalf("MarshalDiagnosis: %v", err)
@@ -265,5 +274,14 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	}
 	if !strings.Contains(out, "GPU out of memory") {
 		t.Fatalf("diagnosis output missing GPU OOM detail:\n%s", out)
+	}
+	if !strings.Contains(out, "main GPU process pid=1886134 using 9.18 GiB") {
+		t.Fatalf("diagnosis output missing main process attribution:\n%s", out)
+	}
+	if !strings.Contains(out, "additional GPU process pid=1887281 using 2.53 GiB") {
+		t.Fatalf("diagnosis output missing additional process attribution:\n%s", out)
+	}
+	if !strings.Contains(out, "increase --gpu-mem by ~4GB on retry") {
+		t.Fatalf("diagnosis output missing gpu-mem hint:\n%s", out)
 	}
 }
