@@ -31,17 +31,11 @@ or lose network connectivity.`,
 
 // Execute runs the root command
 func Execute() error {
-	// If no args provided, check config for default command
-	if len(os.Args) == 1 {
-		cfg, err := config.Load()
-		if err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-		if cfg.DefaultCommand != "" && cfg.DefaultCommand != "help" {
-			// Insert the default command as the first argument
-			os.Args = append(os.Args, cfg.DefaultCommand)
-		}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
+	os.Args = rewriteRootArgs(os.Args, cfg)
 
 	logging.Setup(os.Stderr, "text")
 	if verbose {
@@ -72,6 +66,69 @@ func Execute() error {
 
 	printCommandError(executedCmd, err)
 	return err
+}
+
+func rewriteRootArgs(args []string, cfg *config.Config) []string {
+	if len(args) == 0 {
+		return args
+	}
+
+	rewritten := append([]string(nil), args...)
+	cmdArgs := rewritten[1:]
+
+	// Preserve existing behavior: when no command is provided, insert configured default command.
+	if len(cmdArgs) == 0 && cfg != nil && cfg.DefaultCommand != "" && cfg.DefaultCommand != "help" {
+		cmdArgs = append(cmdArgs, cfg.DefaultCommand)
+	}
+
+	cmdArgs = expandConfiguredAliases(cmdArgs, cfg)
+	return append([]string{rewritten[0]}, cmdArgs...)
+}
+
+func expandConfiguredAliases(args []string, cfg *config.Config) []string {
+	if len(args) == 0 || cfg == nil || len(cfg.Aliases) == 0 {
+		return args
+	}
+
+	expanded := append([]string(nil), args...)
+	seen := map[string]struct{}{}
+	const maxAliasExpansions = 16
+	for range maxAliasExpansions {
+		cmdIndex := firstCommandToken(expanded)
+		if cmdIndex < 0 {
+			break
+		}
+		key := expanded[cmdIndex]
+		replacement, ok := cfg.Aliases[key]
+		if !ok {
+			break
+		}
+		if _, cycle := seen[key]; cycle {
+			break
+		}
+		seen[key] = struct{}{}
+
+		parts := strings.Fields(replacement)
+		if len(parts) == 0 {
+			break
+		}
+
+		next := make([]string, 0, len(expanded)-1+len(parts))
+		next = append(next, expanded[:cmdIndex]...)
+		next = append(next, parts...)
+		next = append(next, expanded[cmdIndex+1:]...)
+		expanded = next
+	}
+	return expanded
+}
+
+func firstCommandToken(args []string) int {
+	for i, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			return i
+		}
+	}
+	return -1
 }
 
 // initOpLog initializes the operation logger based on config.

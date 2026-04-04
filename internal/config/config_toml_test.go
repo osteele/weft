@@ -181,6 +181,34 @@ retry_next_cost_limit = 0.40
 	}
 }
 
+func TestLoadTOMLDecodesAliases(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+
+	content := `
+[aliases]
+uj = "job list --group-by status --unprocessed --watch"
+li = "launch instances --yes"
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Aliases["uj"]; got != "job list --group-by status --unprocessed --watch" {
+		t.Fatalf("aliases.uj = %q", got)
+	}
+	if got := cfg.Aliases["li"]; got != "launch instances --yes" {
+		t.Fatalf("aliases.li = %q", got)
+	}
+}
+
 func TestCampaignRetryLimitsDefaultsAndFallbacks(t *testing.T) {
 	cfg := DefaultConfig()
 	if got := cfg.RetryFirstTimeLimit(); got != 45*time.Minute {

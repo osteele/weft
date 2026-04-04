@@ -18,6 +18,9 @@ type Config struct {
 	// DefaultCommand is the command to run when no arguments are provided
 	// Valid values: "help", "watch", "list", "tui", "web"
 	DefaultCommand string `yaml:"default_command" toml:"default_command"`
+	// Aliases maps shorthand command names to command fragments.
+	// Example: aliases.uj = "job list --unprocessed --watch"
+	Aliases map[string]string `yaml:"aliases" toml:"aliases"`
 
 	// TUI polling intervals (in seconds)
 	// SyncInterval is the legacy TUI sync interval (seconds).
