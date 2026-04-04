@@ -156,8 +156,13 @@ type autoPlaceDoneMsg struct {
 type autoLaunchDoneMsg struct {
 	instanceIDs []int64
 	skipped     int
+	budgetSkip  int
+	reasons     map[int64]string
 	err         error
 }
+
+// autoPilotBackoffReadyMsg fires when an auto-launch backoff delay elapses.
+type autoPilotBackoffReadyMsg struct{}
 
 // ---------------------------------------------------------------------------
 // Move picker messages

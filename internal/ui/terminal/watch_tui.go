@@ -117,6 +117,14 @@ type watchModel struct {
 	autoMode      bool // when true, auto-relaunch, auto-place, and auto-launch are active
 	autoLaunching bool // true while an auto-launch is in progress
 	autoPlacing   bool // true while an auto-place is in progress
+	// Auto-pilot diagnostics and relaunch backoff.
+	autoStatusLine          string
+	autoNoopReasons         map[int64]string
+	autoLastUnplacedSig     string
+	autoLaunchBackoffUntil  time.Time
+	autoLaunchBackoffStep   int
+	autoLaunchBackoffReason string
+	autoLaunchBackoffArmed  bool
 
 	// --- Move picker overlay ---
 	movePicker movePickerModel
@@ -219,6 +227,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		retryBudgetMultiplier:  map[int64]float64{},
 		failedReplaceReason:    map[int64]string{},
 		budgetBlockedFailed:    map[int64]bool{},
+		autoNoopReasons:        map[int64]string{},
 	}
 	m.rebuildReplacementCache()
 	return m
@@ -251,6 +260,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		syncWorker:             sw,
 		preservedJobAttachment: map[int64]bool{},
 		flash:                  flash.State{Message: flashMessage},
+		autoNoopReasons:        map[int64]string{},
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false, nil)
@@ -484,6 +494,12 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case autoLaunchDoneMsg:
 		return m.handleAutoLaunchDone(msg)
+	case autoPilotBackoffReadyMsg:
+		m.autoLaunchBackoffArmed = false
+		if m.autoMode && len(m.unplacedJobs) > 0 {
+			return m, m.runAutoPilot()
+		}
+		return m, nil
 
 	// --- Campaign/instance-only messages ---
 	case watchSyncTickMsg:

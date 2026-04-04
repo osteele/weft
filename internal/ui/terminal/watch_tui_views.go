@@ -198,6 +198,9 @@ func (m watchModel) renderInstanceView() (string, int) {
 	} else if m.retryResult != "" {
 		addLine(m.retryResult)
 	}
+	if status := m.autoStatusDetail(); status != "" {
+		addLine(watchDimStyle.Render(status))
+	}
 
 	if !m.done && !m.launchPending {
 		hint := "u unplace  x kill  t terminate  s submit  m move  ? help  q quit (instances run in background)"
@@ -340,6 +343,9 @@ func (m watchModel) renderSystemView() (string, int) {
 	}
 	if m.hasPreservedJobAttachment() {
 		footerParts = append(footerParts, watchDimStyle.Render(degraded.TerminalJobAttachmentDegradedFooter()))
+	}
+	if status := m.autoStatusDetail(); status != "" {
+		footerParts = append(footerParts, watchDimStyle.Render(status))
 	}
 
 	// Retry status in footer for system mode
@@ -579,7 +585,9 @@ func (m watchModel) formatUnplacedJobRows(jobs []*db.Job, availWidth int) []stri
 			descWidth, truncate(job.EffectiveDescription(), descWidth),
 			gpuWidth, formatWatchGPUConstraint(job),
 		)
-		if len(job.PlacementReasons) > 0 {
+		if reason := m.autoNoopReasons[job.ID]; reason != "" {
+			row += "  " + watchDimStyle.Render(reason)
+		} else if len(job.PlacementReasons) > 0 {
 			row += "  " + watchDimStyle.Render(job.PlacementReasons[0])
 		}
 		rows[i] = row
@@ -594,10 +602,15 @@ func (m watchModel) selectedStatusDetail() string {
 		}
 	}
 	job := m.selectedUnplacedJob()
-	if job == nil || len(job.PlacementReasons) == 0 {
-		return ""
+	if job != nil {
+		if reason := m.autoNoopReasons[job.ID]; reason != "" {
+			return fmt.Sprintf("#%d auto: %s", job.ID, reason)
+		}
+		if len(job.PlacementReasons) > 0 {
+			return fmt.Sprintf("#%d unplaced: %s", job.ID, strings.Join(job.PlacementReasons, " | "))
+		}
 	}
-	return fmt.Sprintf("#%d unplaced: %s", job.ID, strings.Join(job.PlacementReasons, " | "))
+	return ""
 }
 
 func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string {
@@ -625,6 +638,16 @@ func (m watchModel) autoModeHint() string {
 		return "[a] auto: ON"
 	}
 	return "[a] auto: OFF"
+}
+
+func (m watchModel) autoStatusDetail() string {
+	if !m.autoMode {
+		return ""
+	}
+	if m.autoStatusLine != "" {
+		return m.autoStatusLine
+	}
+	return "auto-pilot: monitoring"
 }
 
 // ---------------------------------------------------------------------------

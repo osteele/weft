@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,6 +21,13 @@ import (
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 )
+
+var autoLaunchBackoffDelays = []time.Duration{
+	15 * time.Second,
+	30 * time.Second,
+	60 * time.Second,
+	2 * time.Minute,
+}
 
 // ---------------------------------------------------------------------------
 // Retry helpers
@@ -78,19 +87,45 @@ func (m watchModel) countRetryableFailedInstances() int {
 // It sets autoPlacing/autoLaunching flags on m (caller must use the returned
 // model state, as in Bubble Tea's value-receiver pattern).
 func (m *watchModel) runAutoPilot() tea.Cmd {
+	if m.autoNoopReasons == nil {
+		m.autoNoopReasons = map[int64]string{}
+	}
+	// New unplaced set => clear stale diagnostics and launch backoff.
+	if sig := autoUnplacedSignature(m.unplacedJobs); sig != m.autoLastUnplacedSig {
+		m.autoLastUnplacedSig = sig
+		m.autoNoopReasons = map[int64]string{}
+		m.autoStatusLine = ""
+		m.resetAutoLaunchBackoff()
+	}
+
 	var cmds []tea.Cmd
+	globalReasons := make([]string, 0, 2)
+	reasonsByJob := map[int64]string{}
+	hasPlaceable := false
 	if len(m.unplacedJobs) > 0 && !m.autoPlacing {
-		if cmd := m.autoPlaceUnplacedJobs(); cmd != nil {
+		cmd, reason, byJob, placeable := m.autoPlaceUnplacedJobs()
+		hasPlaceable = placeable
+		for jobID, detail := range byJob {
+			reasonsByJob[jobID] = detail
+		}
+		if cmd != nil {
 			m.autoPlacing = true
 			cmds = append(cmds, cmd)
+		} else if reason != "" {
+			globalReasons = append(globalReasons, reason)
 		}
 	}
 	if len(m.unplacedJobs) > 0 && !m.autoLaunching {
-		if cmd := m.autoLaunchForUnplacedJobs(); cmd != nil {
+		cmd, reason := m.autoLaunchForUnplacedJobs(hasPlaceable)
+		if cmd != nil {
 			m.autoLaunching = true
 			cmds = append(cmds, cmd)
+		} else if reason != "" {
+			globalReasons = append(globalReasons, reason)
 		}
 	}
+	m.autoNoopReasons = reasonsByJob
+	m.autoStatusLine = strings.Join(globalReasons, " | ")
 	if len(cmds) == 0 {
 		return nil
 	}
@@ -98,11 +133,18 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 }
 
 // autoPlaceUnplacedJobs tries to submit unplaced jobs to compatible active instances.
-func (m watchModel) autoPlaceUnplacedJobs() tea.Cmd {
+func (m watchModel) autoPlaceUnplacedJobs() (tea.Cmd, string, map[int64]string, bool) {
+	reasonsByJob := map[int64]string{}
 	capacities := m.buildInstanceCapacities()
 	if len(capacities) == 0 {
-		return nil
+		for _, job := range m.unplacedJobs {
+			if job != nil && job.EffectiveStatus() == db.StatusQueued {
+				reasonsByJob[job.ID] = "auto-place: no active reusable instances"
+			}
+		}
+		return nil, "auto-place: no active reusable instances", reasonsByJob, false
 	}
+	hasPlaceable := false
 
 	// Find the first unplaced job that can be placed
 	for _, job := range m.unplacedJobs {
@@ -111,8 +153,10 @@ func (m watchModel) autoPlaceUnplacedJobs() tea.Cmd {
 		}
 		ranked := campaign.RankForJob(job, capacities)
 		if len(ranked) == 0 {
+			reasonsByJob[job.ID] = autoNoCompatibleReason(job, capacities)
 			continue
 		}
+		hasPlaceable = true
 		best := ranked[0]
 		jobID := job.ID
 		instanceID := best.Instance.ID
@@ -128,27 +172,16 @@ func (m watchModel) autoPlaceUnplacedJobs() tea.Cmd {
 				return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
 			}
 			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID}
-		}
+		}, "", reasonsByJob, true
 	}
-	return nil
+	return nil, "auto-place: no compatible active instances", reasonsByJob, hasPlaceable
 }
 
 // autoLaunchForUnplacedJobs launches new instances for unplaced rental jobs.
-func (m watchModel) autoLaunchForUnplacedJobs() tea.Cmd {
-	// Only launch if no placement was possible
-	capacities := m.buildInstanceCapacities()
-	hasPlaceable := false
-	for _, job := range m.unplacedJobs {
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
-			continue
-		}
-		if ranked := campaign.RankForJob(job, capacities); len(ranked) > 0 {
-			hasPlaceable = true
-			break
-		}
-	}
+func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, string) {
 	if hasPlaceable {
-		return nil // auto-place will handle these
+		m.resetAutoLaunchBackoff()
+		return nil, "auto-launch: waiting for auto-place to finish"
 	}
 
 	// Check if any unplaced jobs are rental-eligible
@@ -160,7 +193,22 @@ func (m watchModel) autoLaunchForUnplacedJobs() tea.Cmd {
 		}
 	}
 	if !hasRental {
-		return nil
+		m.resetAutoLaunchBackoff()
+		return nil, "auto-launch: no rental-eligible unplaced jobs"
+	}
+
+	// Back off repeated launch attempts when conditions are unchanged.
+	if !m.autoLaunchBackoffUntil.IsZero() && time.Now().Before(m.autoLaunchBackoffUntil) {
+		wait := time.Until(m.autoLaunchBackoffUntil).Round(time.Second)
+		if wait < time.Second {
+			wait = time.Second
+		}
+		if !m.autoLaunchBackoffArmed {
+			m.autoLaunchBackoffArmed = true
+			return tea.Tick(wait, func(time.Time) tea.Msg { return autoPilotBackoffReadyMsg{} }),
+				fmt.Sprintf("auto-launch: backing off for %s (%s)", wait, m.autoLaunchBackoffReason)
+		}
+		return nil, fmt.Sprintf("auto-launch: backing off for %s (%s)", wait, m.autoLaunchBackoffReason)
 	}
 
 	database := m.database
@@ -173,8 +221,56 @@ func (m watchModel) autoLaunchForUnplacedJobs() tea.Cmd {
 		if result == nil {
 			return autoLaunchDoneMsg{}
 		}
-		return autoLaunchDoneMsg{instanceIDs: result.InstanceIDs, skipped: result.Skipped}
+		return autoLaunchDoneMsg{
+			instanceIDs: result.InstanceIDs,
+			skipped:     result.Skipped,
+			budgetSkip:  result.BudgetSkip,
+			reasons:     result.NotReplacedReasons,
+		}
+	}, ""
+}
+
+func (m *watchModel) resetAutoLaunchBackoff() {
+	m.autoLaunchBackoffUntil = time.Time{}
+	m.autoLaunchBackoffReason = ""
+	m.autoLaunchBackoffArmed = false
+	m.autoLaunchBackoffStep = 0
+}
+
+func autoUnplacedSignature(jobs []*db.Job) string {
+	if len(jobs) == 0 {
+		return ""
 	}
+	ids := make([]int64, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued {
+			ids = append(ids, job.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var b strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(fmt.Sprintf("%d", id))
+	}
+	return b.String()
+}
+
+func autoNoCompatibleReason(job *db.Job, capacities []campaign.InstanceCapacity) string {
+	if job == nil {
+		return "auto-place: no compatible active instances"
+	}
+	for _, cap := range capacities {
+		if ok, reason := campaign.MatchJobToInstance(job, cap); !ok && reason != "" {
+			return "auto-place: " + reason
+		}
+	}
+	return "auto-place: no compatible active instances"
 }
 
 // ---------------------------------------------------------------------------

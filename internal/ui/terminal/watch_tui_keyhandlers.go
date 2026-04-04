@@ -15,6 +15,7 @@ import (
 func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 	m.autoMode = !m.autoMode
 	if m.autoMode {
+		m.autoStatusLine = "auto-pilot enabled"
 		cmds := []tea.Cmd{m.flash.Set("Auto-pilot ON", false)}
 		if cmd := m.runAutoPilot(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -27,6 +28,9 @@ func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	}
+	m.autoStatusLine = ""
+	m.autoNoopReasons = map[int64]string{}
+	m.resetAutoLaunchBackoff()
 	return m, m.flash.Set("Auto-pilot OFF", false)
 }
 

@@ -898,6 +898,88 @@ func TestWatchModelHandleKey_TogglesHelpOverlayInInstanceMode(t *testing.T) {
 	}
 }
 
+func TestSelectedStatusDetail_PrefersAutoNoopReasonForUnplacedJob(t *testing.T) {
+	job := &db.Job{
+		ID:               123,
+		Status:           db.StatusQueued,
+		PlacementReasons: []string{"cloud instance unavailable"},
+	}
+	m := watchModel{
+		mode:            watchModeInstances,
+		unplacedJobs:    []*db.Job{job},
+		autoNoopReasons: map[int64]string{123: "auto-launch skipped: retry budget exceeded"},
+	}
+
+	detail := m.selectedStatusDetail()
+	if !strings.Contains(detail, "#123 auto: auto-launch skipped: retry budget exceeded") {
+		t.Fatalf("unexpected detail: %q", detail)
+	}
+}
+
+func TestWatchModelRunAutoPilot_NoReusableInventoryJobsShowsNoopReason(t *testing.T) {
+	m := watchModel{
+		mode: watchModeInstances,
+		unplacedJobs: []*db.Job{
+			{ID: 91, Status: db.StatusQueued, Tags: []string{db.TagInventory}},
+		},
+		autoNoopReasons: map[int64]string{},
+	}
+
+	cmd := m.runAutoPilot()
+	if cmd != nil {
+		t.Fatal("expected no command when there are no reusable instances and no rental-eligible jobs")
+	}
+	if got := m.autoNoopReasons[91]; !strings.Contains(got, "no active reusable instances") {
+		t.Fatalf("autoNoopReasons[91] = %q, want reusable-instance reason", got)
+	}
+	if !strings.Contains(m.autoStatusLine, "no active reusable instances") {
+		t.Fatalf("autoStatusLine = %q, want no active reusable instances", m.autoStatusLine)
+	}
+	if !strings.Contains(m.autoStatusLine, "no rental-eligible unplaced jobs") {
+		t.Fatalf("autoStatusLine = %q, want no rental-eligible unplaced jobs", m.autoStatusLine)
+	}
+}
+
+func TestHandleAutoLaunchDone_SetsBackoffAndNoopReasonsOnSkip(t *testing.T) {
+	now := time.Now()
+	m := watchModel{
+		mode:     watchModeInstances,
+		autoMode: true,
+		width:    120,
+		height:   20,
+		unplacedJobs: []*db.Job{
+			{ID: 596, Status: db.StatusQueued},
+			{ID: 614, Status: db.StatusQueued},
+		},
+		autoNoopReasons: map[int64]string{},
+	}
+
+	updated, cmd := m.handleAutoLaunchDone(autoLaunchDoneMsg{
+		skipped:    2,
+		budgetSkip: 2,
+		reasons: map[int64]string{
+			497: "retry budget exceeded",
+		},
+	})
+	got := updated.(watchModel)
+
+	if cmd == nil {
+		t.Fatal("expected backoff tick command when auto-launch is skipped in auto mode")
+	}
+	if !got.autoLaunchBackoffUntil.After(now) {
+		t.Fatalf("expected backoff deadline after now, got %v", got.autoLaunchBackoffUntil)
+	}
+	if got.autoLaunchBackoffStep != 1 {
+		t.Fatalf("autoLaunchBackoffStep = %d, want 1", got.autoLaunchBackoffStep)
+	}
+	if !strings.Contains(got.autoStatusLine, "auto-launch skipped") {
+		t.Fatalf("autoStatusLine = %q, want skip message", got.autoStatusLine)
+	}
+	if reason := got.autoNoopReasons[596]; !strings.Contains(reason, "auto-launch skipped") {
+		t.Fatalf("autoNoopReasons[596] = %q, want auto-launch skipped reason", reason)
+	}
+}
+
 func watchTestInt64Ptr(v int64) *int64 { return &v }
 
 func watchTestIntPtr(v int) *int { return &v }

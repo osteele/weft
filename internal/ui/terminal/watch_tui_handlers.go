@@ -213,19 +213,23 @@ func (m watchModel) handleMoveExecuteDone(msg moveExecuteDoneMsg) (tea.Model, te
 func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cmd) {
 	m.autoPlacing = false
 	if msg.err != nil {
+		m.autoStatusLine = fmt.Sprintf("auto-place failed: %v", msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-place failed: %v", msg.err), true)
 	}
 	if msg.jobID > 0 {
 		flashCmd := m.flash.Set(fmt.Sprintf("Auto-placed job #%d → instance #%d", msg.jobID, msg.instanceID), false)
 		m.removeUnplacedJob(msg.jobID)
+		delete(m.autoNoopReasons, msg.jobID)
 		m.clampCursor()
+		m.autoStatusLine = fmt.Sprintf("auto-place: job #%d submitted to instance #%d", msg.jobID, msg.instanceID)
 
 		// Continue placing remaining jobs
 		var cmds []tea.Cmd
 		cmds = append(cmds, flashCmd)
 		if m.autoMode && len(m.unplacedJobs) > 0 {
-			m.autoPlacing = true
-			cmds = append(cmds, m.autoPlaceUnplacedJobs())
+			if cmd := m.runAutoPilot(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		if m.mode == watchModeSystem {
 			m.refreshing = true
@@ -239,9 +243,14 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.Cmd) {
 	m.autoLaunching = false
 	if msg.err != nil {
+		m.autoLaunchBackoffReason = "launch error"
+		m.autoLaunchBackoffUntil = time.Now().Add(nextAutoLaunchBackoff(m.autoLaunchBackoffStep))
+		m.autoLaunchBackoffStep++
+		m.autoStatusLine = fmt.Sprintf("auto-launch failed: %v", msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-launch failed: %v", msg.err), true)
 	}
 	if len(msg.instanceIDs) > 0 {
+		m.resetAutoLaunchBackoff()
 		// Add new instance IDs and start watching them
 		var cmds []tea.Cmd
 		for _, id := range msg.instanceIDs {
@@ -257,13 +266,78 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 		if msg.skipped > 0 {
 			flashMsg += fmt.Sprintf(" (%d skipped)", msg.skipped)
 		}
+		m.autoStatusLine = flashMsg
 		cmds = append(cmds, m.flash.Set(flashMsg, false))
 		return m, tea.Batch(cmds...)
+	}
+	reason := "no eligible relaunch candidates"
+	if msg.budgetSkip > 0 {
+		reason = fmt.Sprintf("%d job(s) exceeded retry budget", msg.budgetSkip)
+	} else if msg.skipped > 0 {
+		reason = fmt.Sprintf("%d job(s) exceeded max attempts", msg.skipped)
+	}
+	if len(msg.reasons) > 0 {
+		reason = summarizeAutoLaunchReasons(msg.reasons, reason)
+	}
+	delay := nextAutoLaunchBackoff(m.autoLaunchBackoffStep)
+	m.autoLaunchBackoffReason = reason
+	m.autoLaunchBackoffUntil = time.Now().Add(delay)
+	m.autoLaunchBackoffStep++
+	m.autoStatusLine = fmt.Sprintf("auto-launch skipped: %s", reason)
+	if m.autoNoopReasons == nil {
+		m.autoNoopReasons = map[int64]string{}
+	}
+	for _, job := range m.unplacedJobs {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued {
+			m.autoNoopReasons[job.ID] = "auto-launch skipped: " + reason
+		}
+	}
+	if !m.autoLaunchBackoffArmed && m.autoMode && len(m.unplacedJobs) > 0 {
+		m.autoLaunchBackoffArmed = true
+		return m, tea.Tick(delay, func(time.Time) tea.Msg { return autoPilotBackoffReadyMsg{} })
 	}
 	if msg.skipped > 0 {
 		return m, m.flash.Set(fmt.Sprintf("Auto-launch: %d job(s) exceeded max attempts", msg.skipped), true)
 	}
 	return m, nil
+}
+
+func summarizeAutoLaunchReasons(reasons map[int64]string, fallback string) string {
+	if len(reasons) == 0 {
+		return fallback
+	}
+	counts := map[string]int{}
+	for _, reason := range reasons {
+		if reason == "" {
+			continue
+		}
+		counts[reason]++
+	}
+	bestReason := ""
+	bestCount := 0
+	for reason, count := range counts {
+		if count > bestCount {
+			bestReason = reason
+			bestCount = count
+		}
+	}
+	if bestReason == "" {
+		return fallback
+	}
+	if len(reasons) == 1 || bestCount == len(reasons) {
+		return bestReason
+	}
+	return fmt.Sprintf("%s (+%d similar)", bestReason, len(reasons)-bestCount)
+}
+
+func nextAutoLaunchBackoff(step int) time.Duration {
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(autoLaunchBackoffDelays) {
+		return autoLaunchBackoffDelays[len(autoLaunchBackoffDelays)-1]
+	}
+	return autoLaunchBackoffDelays[step]
 }
 
 func countRunningJobs(jobs []*db.Job) int {
