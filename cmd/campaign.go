@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -284,7 +285,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Non-interactive mode (explicit via --yes/--plain or automatic).
 	if !launchInteractive {
-		return runNonInteractiveLaunch(database, cfg, groups, opts, useTUI)
+		return runNonInteractiveLaunch(cmd, database, cfg, groups, opts, useTUI)
 	}
 
 	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false, shouldWatch())
@@ -299,7 +300,11 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Segue into watch mode if instances were launched
 	if len(finalModel.InstanceIDs) > 0 && shouldWatch() && !finalModel.InlineWatchUsed {
 		fmt.Println()
-		return watchAndReport(database, useTUI, terminal.ModeInstances, finalModel.InstanceIDs, campaign.SummarizeEstimates(finalModel.CostEstimates), campaignLaunchAuto)
+		mode, watchIDs, projectFilter, err := resolveLaunchWatchTarget(database, cmd, finalModel.InstanceIDs)
+		if err != nil {
+			return err
+		}
+		return watchAndReport(database, useTUI, mode, watchIDs, campaign.SummarizeEstimates(finalModel.CostEstimates), campaignLaunchAuto, projectFilter)
 	}
 
 	// Inline watch already ran inside the TUI — print the exit report
@@ -574,7 +579,7 @@ func firstEligibleOnPremHost(database *sql.DB, hosts []inventory.HostSpec, const
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
-func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, watchTUI bool) error {
+func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, watchTUI bool) error {
 	clients, providerErr := buildCloudClients(cfg)
 	if providerErr != nil {
 		clients = nil
@@ -702,7 +707,11 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Segue into watch mode.
 	if shouldWatch() {
 		fmt.Println()
-		return watchAndReport(database, watchTUI, terminal.ModeInstances, result.InstanceIDs, campaign.SummarizeEstimates(estimates), campaignLaunchAuto)
+		mode, watchIDs, projectFilter, err := resolveLaunchWatchTarget(database, cmd, result.InstanceIDs)
+		if err != nil {
+			return err
+		}
+		return watchAndReport(database, watchTUI, mode, watchIDs, campaign.SummarizeEstimates(estimates), campaignLaunchAuto, projectFilter)
 	}
 
 	return nil
@@ -909,7 +918,209 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	return watchAndReport(database, useTUI, terminal.ModeCampaign, instanceIDs, nil, campaignWatchAuto)
+	return watchAndReport(database, useTUI, terminal.ModeCampaign, instanceIDs, nil, campaignWatchAuto, "")
+}
+
+type launchWatchScope string
+
+const (
+	launchWatchScopeAllInstances launchWatchScope = "all_instances"
+	launchWatchScopeCampaign     launchWatchScope = "campaign"
+	launchWatchScopeProject      launchWatchScope = "project"
+)
+
+func resolveLaunchWatchTarget(database *sql.DB, cmd *cobra.Command, launchedIDs []int64) (terminal.Mode, []int64, string, error) {
+	scope, projectFilter := inferLaunchWatchScope(cmd)
+	switch scope {
+	case launchWatchScopeProject:
+		ids, err := resolveProjectWatchInstanceIDs(database, projectFilter, launchedIDs)
+		return terminal.ModeInstances, ids, projectFilter, err
+	case launchWatchScopeCampaign:
+		ids, err := resolveCampaignWatchInstanceIDs(database, launchedIDs)
+		return terminal.ModeInstances, ids, "", err
+	default:
+		ids, err := resolveAllActiveWatchInstanceIDs(database, launchedIDs)
+		return terminal.ModeInstances, ids, "", err
+	}
+}
+
+func inferLaunchWatchScope(cmd *cobra.Command) (launchWatchScope, string) {
+	if project := strings.TrimSpace(campaignLaunchProject); project != "" {
+		return launchWatchScopeProject, project
+	}
+
+	if cmd == nil {
+		return launchWatchScopeAllInstances, ""
+	}
+
+	name := cmd.Name()
+	if name == "campaign" {
+		return launchWatchScopeCampaign, ""
+	}
+	if name == "project" {
+		return launchWatchScopeProject, ""
+	}
+	if name == "instance" || name == "instances" {
+		return launchWatchScopeAllInstances, ""
+	}
+
+	if parent := cmd.Parent(); parent != nil {
+		switch parent.Name() {
+		case "campaign":
+			return launchWatchScopeCampaign, ""
+		case "project":
+			return launchWatchScopeProject, ""
+		case "instance", "instances":
+			return launchWatchScopeAllInstances, ""
+		}
+	}
+
+	path := " " + strings.ToLower(cmd.CommandPath()) + " "
+	if strings.Contains(path, " campaign ") {
+		return launchWatchScopeCampaign, ""
+	}
+	if strings.Contains(path, " project ") {
+		return launchWatchScopeProject, ""
+	}
+	return launchWatchScopeAllInstances, ""
+}
+
+func resolveAllActiveWatchInstanceIDs(database *sql.DB, fallbackIDs []int64) ([]int64, error) {
+	instances, err := db.ListRunningLaunches(database)
+	if err != nil {
+		return nil, fmt.Errorf("list running instances: %w", err)
+	}
+	ids := make([]int64, 0, len(instances))
+	for _, inst := range instances {
+		ids = append(ids, inst.ID)
+	}
+	if len(ids) == 0 {
+		ids = append(ids, fallbackIDs...)
+	}
+	return uniqueSortedInstanceIDs(ids), nil
+}
+
+func resolveCampaignWatchInstanceIDs(database *sql.DB, launchedIDs []int64) ([]int64, error) {
+	campaignIDs := make(map[int64]struct{})
+	for _, instanceID := range launchedIDs {
+		inst, err := db.GetLaunch(database, instanceID)
+		if err != nil {
+			return nil, fmt.Errorf("get launch %d: %w", instanceID, err)
+		}
+		if inst == nil || inst.CampaignID == nil {
+			continue
+		}
+		campaignIDs[*inst.CampaignID] = struct{}{}
+	}
+
+	if len(campaignIDs) != 1 {
+		return expandInstanceReplacementChain(database, launchedIDs)
+	}
+
+	var campaignID int64
+	for id := range campaignIDs {
+		campaignID = id
+	}
+	instances, err := db.GetCampaignInstances(database, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("list campaign instances: %w", err)
+	}
+	ids := make([]int64, 0, len(instances))
+	for _, inst := range instances {
+		ids = append(ids, inst.ID)
+	}
+	return expandInstanceReplacementChain(database, ids)
+}
+
+func resolveProjectWatchInstanceIDs(database *sql.DB, project string, launchedIDs []int64) ([]int64, error) {
+	instances, err := db.ListRunningLaunches(database)
+	if err != nil {
+		return nil, fmt.Errorf("list running instances: %w", err)
+	}
+
+	var ids []int64
+	for _, inst := range instances {
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
+		if err != nil {
+			continue
+		}
+		for _, job := range jobs {
+			if job != nil && strings.TrimSpace(job.Project) == project {
+				ids = append(ids, inst.ID)
+				break
+			}
+		}
+	}
+
+	if len(ids) == 0 {
+		ids = append(ids, launchedIDs...)
+	}
+	return expandInstanceReplacementChain(database, ids)
+}
+
+func expandInstanceReplacementChain(database *sql.DB, seedIDs []int64) ([]int64, error) {
+	if len(seedIDs) == 0 {
+		return nil, nil
+	}
+	launches, err := db.ListLaunches(database)
+	if err != nil {
+		return nil, fmt.Errorf("list launches: %w", err)
+	}
+
+	byReplaced := make(map[int64][]int64)
+	for _, launch := range launches {
+		if launch == nil || launch.ReplacedInstanceID == nil {
+			continue
+		}
+		replacedID := *launch.ReplacedInstanceID
+		byReplaced[replacedID] = append(byReplaced[replacedID], launch.ID)
+	}
+
+	seen := make(map[int64]struct{})
+	queue := make([]int64, 0, len(seedIDs))
+	for _, id := range seedIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		queue = append(queue, id)
+	}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, child := range byReplaced[current] {
+			if _, ok := seen[child]; ok {
+				continue
+			}
+			seen[child] = struct{}{}
+			queue = append(queue, child)
+		}
+	}
+
+	ids := make([]int64, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+func uniqueSortedInstanceIDs(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	unique := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Slice(unique, func(i, j int) bool { return unique[i] < unique[j] })
+	return unique
 }
 
 func runCampaignTerminate(cmd *cobra.Command, args []string) error {

@@ -136,8 +136,16 @@ The system watch shows:
 - Unplaced jobs that are waiting for placement or cloud launch
 - Directory tails in job listings, consistent with `weft job list`
 
-Press `l` in the watch TUI to jump into the cloud launch planner, then return
-to the watch view when the planner exits.
+Press `l` in the watch TUI to jump into the cloud launch planner.
+
+Post-launch scope behavior:
+- `weft launch instances` (or `weft instance launch`) returns to an
+  all-instances view and shows all unplaced jobs.
+- `weft launch campaign` (or `weft campaign launch`) watches the campaign's
+  instances (including relaunch replacements) and shows all unplaced jobs.
+- `weft launch project` (or `weft project launch`) watches project-scoped
+  instances (including relaunch replacements) and filters unplaced jobs to
+  that project.
 
 #### Campaign Commands
 

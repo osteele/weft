@@ -1330,6 +1330,8 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 		r2Client, _ = buildR2Client(m.appConfig)
 	}
 	inlineWatch := newInstanceWatchModel(m.database, append([]int64(nil), m.registeredInstanceIDs...), r2Client, m.appConfig)
+	inlineWatch.projectFilter = m.projectFilter
+	inlineWatch.unplacedJobs = filterInstanceModeUnplacedJobs(inlineWatch.unplacedJobs, m.projectFilter)
 	inlineWatch.launchPending = m.launching
 	inlineWatch.campaignID = m.campaignID
 	if inlineWatch.launchedAt.IsZero() && m.campaignID != 0 {

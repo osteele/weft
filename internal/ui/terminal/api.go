@@ -90,12 +90,12 @@ func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 	}, nil
 }
 
-func WatchInstances(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool) ([]int64, error) {
-	return watchInstances(database, mode, instanceIDs, estimateSummary, autoMode)
+func WatchInstances(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool, projectFilter string) ([]int64, error) {
+	return watchInstances(database, mode, instanceIDs, estimateSummary, autoMode, projectFilter)
 }
 
-func WatchInstancesPlain(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) error {
-	return watchInstancesPlain(database, mode, instanceIDs, estimateSummary)
+func WatchInstancesPlain(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, projectFilter string) error {
+	return watchInstancesPlain(database, mode, instanceIDs, estimateSummary, projectFilter)
 }
 
 func WatchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {

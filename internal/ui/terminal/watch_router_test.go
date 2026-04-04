@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -148,5 +149,31 @@ func TestLaunchModelUpdate_SwitchToLaunchEscapesInlineWatch(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected reconciliation command")
+	}
+}
+
+func TestWatchRouterSwitchToLaunchPreservesCurrentInstanceIDs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	router := watchRouterModel{
+		active: watchModel{
+			mode:        watchModeInstances,
+			database:    database,
+			instanceIDs: []int64{7, 11},
+			ctx:         ctx,
+			cancel:      cancel,
+		},
+		database:    database,
+		config:      &config.Config{},
+		homeMode:    watchModeInstances,
+		instanceIDs: []int64{7},
+	}
+
+	next, _ := router.Update(switchToLaunchMsg{})
+	got := next.(watchRouterModel)
+	if len(got.instanceIDs) != 2 || got.instanceIDs[0] != 7 || got.instanceIDs[1] != 11 {
+		t.Fatalf("router instance IDs = %v, want [7 11]", got.instanceIDs)
 	}
 }

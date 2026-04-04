@@ -111,6 +111,29 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 	}
 }
 
+func TestWatchModelUpdate_OnPremRefreshFiltersUnplacedJobsByProjectInInstanceMode(t *testing.T) {
+	m := watchModel{
+		mode:          watchModeInstances,
+		projectFilter: "ALPHA",
+	}
+
+	next, _ := m.Update(watchOnPremRefreshedMsg{
+		updateUnplacedJobs: true,
+		unplacedJobs: []*db.Job{
+			{ID: 101, Status: db.StatusQueued, Project: "ALPHA"},
+			{ID: 102, Status: db.StatusQueued, Project: "BETA"},
+		},
+	})
+	got := next.(watchModel)
+
+	if len(got.unplacedJobs) != 1 {
+		t.Fatalf("filtered unplaced jobs = %d, want 1", len(got.unplacedJobs))
+	}
+	if got.unplacedJobs[0].ID != 101 {
+		t.Fatalf("filtered unplaced job ID = %d, want 101", got.unplacedJobs[0].ID)
+	}
+}
+
 func TestFormatWatchInstanceBlockUsesDBStatusWhenProviderLoading(t *testing.T) {
 	ci := &db.Launch{
 		ID:                 111,

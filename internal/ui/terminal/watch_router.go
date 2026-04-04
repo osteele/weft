@@ -61,17 +61,20 @@ func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, aut
 	}
 }
 
-func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client, autoMode bool) watchRouterModel {
+func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client, autoMode bool, projectFilter string) watchRouterModel {
 	watch := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
+	watch.projectFilter = projectFilter
+	watch.unplacedJobs = filterInstanceModeUnplacedJobs(watch.unplacedJobs, projectFilter)
 	watch.autoMode = autoMode
 	return watchRouterModel{
-		active:      watch,
-		database:    database,
-		config:      cfg,
-		homeMode:    mode,
-		instanceIDs: instanceIDs,
-		r2Client:    r2Client,
-		autoMode:    autoMode,
+		active:        watch,
+		database:      database,
+		config:        cfg,
+		homeMode:      mode,
+		instanceIDs:   instanceIDs,
+		r2Client:      r2Client,
+		projectFilter: projectFilter,
+		autoMode:      autoMode,
 	}
 }
 
@@ -118,6 +121,9 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Clean up watch model and sync auto-pilot state
 		if w, ok := m.active.(watchModel); ok {
 			m.autoMode = w.autoMode
+			if m.homeMode.isInstanceBased() {
+				m.instanceIDs = append([]int64(nil), w.instanceIDs...)
+			}
 			w.cancel()
 			if w.syncWorker != nil {
 				w.syncWorker.Stop()
@@ -156,6 +162,8 @@ func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
 	switch {
 	case m.homeMode.isInstanceBased():
 		w := newWatchModelWithMode(m.homeMode, m.database, m.instanceIDs, m.r2Client, m.config)
+		w.projectFilter = m.projectFilter
+		w.unplacedJobs = filterInstanceModeUnplacedJobs(w.unplacedJobs, m.projectFilter)
 		w.flash = flashmsg.State{Message: flash}
 		w.autoMode = m.autoMode
 		return w

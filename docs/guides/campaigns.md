@@ -82,6 +82,15 @@ weft campaign launch --yes --no-watch   # Launch and exit (print IDs)
 This fetches offers, prints a cost summary, creates a campaign, launches
 instances in parallel, and (unless `--no-watch`) transitions to watch mode.
 
+When launch transitions to watch mode, the scope depends on the launch command:
+- `weft launch instances` / `weft instance launch`: watch all active cloud
+  instances and show all unplaced jobs.
+- `weft launch campaign` / `weft campaign launch`: watch campaign instances
+  (including relaunch replacements) and show all unplaced jobs.
+- `weft launch project` / `weft project launch`: watch project-scoped
+  instances (including relaunch replacements) and filter unplaced jobs to that
+  project.
+
 To launch only jobs from a specific project:
 
 ```bash

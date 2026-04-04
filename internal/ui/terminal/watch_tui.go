@@ -568,7 +568,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.onPremHosts = msg.onPremHosts
 		}
 		if (m.mode == watchModeSystem || m.mode.isInstanceBased()) && msg.updateUnplacedJobs {
-			m.unplacedJobs = msg.unplacedJobs
+			m.unplacedJobs = filterInstanceModeUnplacedJobs(msg.unplacedJobs, m.projectFilter)
 			m.clampCursor()
 		}
 		if m.autoMode && m.mode.isInstanceBased() {
@@ -655,10 +655,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
 // Returns the final list of instance IDs (which may include auto-relaunched instances).
-func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool) ([]int64, error) {
+func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool, projectFilter string) ([]int64, error) {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
-	router := newInstanceWatchRouterModel(database, cfg, mode, instanceIDs, r2Client, autoMode)
+	router := newInstanceWatchRouterModel(database, cfg, mode, instanceIDs, r2Client, autoMode, projectFilter)
 	if estimateSummary != nil {
 		if w, ok := router.active.(watchModel); ok {
 			w.estimateSummaryLine = estimateSummary.FormatLine()
@@ -696,4 +696,11 @@ func renderWatchExitSnapshot(model tea.Model) string {
 		return ""
 	}
 	return m.View()
+}
+
+func filterInstanceModeUnplacedJobs(jobs []*db.Job, projectFilter string) []*db.Job {
+	if projectFilter == "" {
+		return jobs
+	}
+	return db.FilterJobsByProject(jobs, projectFilter)
 }

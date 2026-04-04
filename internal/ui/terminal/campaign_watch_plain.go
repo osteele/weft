@@ -28,7 +28,7 @@ func summaryInterval(elapsed time.Duration) time.Duration {
 
 // watchInstancesPlain prints line-oriented status updates for cloud instances.
 // Suitable for non-TTY output and parsing by coding agents.
-func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) error {
+func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, projectFilter string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -56,6 +56,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 
 	// Load initial unplaced jobs
 	unplacedJobs, _ := db.ListUnplacedJobs(database)
+	unplacedJobs = filterInstanceModeUnplacedJobs(unplacedJobs, projectFilter)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -102,7 +103,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 				syncCloudState(cfg, database, reconciler, false)
 				if refreshed, err := db.ListUnplacedJobs(database); err == nil {
 					mu.Lock()
-					unplacedJobs = refreshed
+					unplacedJobs = filterInstanceModeUnplacedJobs(refreshed, projectFilter)
 					mu.Unlock()
 				}
 			}
