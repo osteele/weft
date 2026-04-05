@@ -389,6 +389,8 @@ func (m watchModel) handleInstanceSyncTick() (tea.Model, tea.Cmd) {
 	m.requestOnPremSyncs()
 	return m, tea.Batch(
 		func() tea.Msg {
+			_ = syncCloudStateForTUI(m.database, false)
+			_ = syncCloudStateForTUI(m.database, true)
 			if _, err := db.ResetJobsOnTerminalLaunches(m.database); err != nil {
 				// log suppressed in TUI mode
 			}

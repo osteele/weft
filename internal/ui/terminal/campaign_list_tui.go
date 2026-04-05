@@ -11,13 +11,11 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/campaign"
-	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/logging"
 )
 
-const campaignListSyncInterval = 30 * time.Second
+const campaignListSyncInterval = TerminalSyncInterval
 
 // Aliases for shared TUI styles used in the campaign list TUI.
 var (
@@ -373,15 +371,7 @@ func (m campaignListModel) runBackgroundSync(full bool) tea.Cmd {
 }
 
 func syncCampaignListTUIData(database *sql.DB, full bool) []string {
-	timeout := FastCloudSyncTimeout
-	if full {
-		timeout = NormalCloudSyncTimeout
-	}
-	cfg, _ := config.Load()
-	if _, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false); !completed {
-		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
-	}
-	return nil
+	return syncCloudStateForTUI(database, full)
 }
 
 func (m campaignListModel) startDBWatcher() tea.Cmd {

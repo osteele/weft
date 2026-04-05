@@ -89,18 +89,17 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 		cancel()
 	}()
 
-	// Periodic cloud instance reconciliation and job result sync (every 15s)
-	reconciler := campaign.NewReconciler()
+	// Periodic cloud instance reconciliation and job result sync.
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(TerminalSyncInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				cfg, _ := config.Load()
-				syncCloudState(cfg, database, reconciler, false)
+				_ = syncCloudStateForTUI(database, false)
+				_ = syncCloudStateForTUI(database, true)
 				if refreshed, err := db.ListUnplacedJobs(database); err == nil {
 					mu.Lock()
 					unplacedJobs = filterInstanceModeUnplacedJobs(refreshed, projectFilter)

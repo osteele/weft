@@ -19,8 +19,9 @@ const (
 	FastSyncTimeout        = 2 * time.Second
 	DefaultSyncTimeout     = 5 * time.Second
 	NormalSyncTimeout      = 30 * time.Second
-	FastCloudSyncTimeout   = 5 * time.Second
-	NormalCloudSyncTimeout = 30 * time.Second
+	FastCloudSyncTimeout   = 10 * time.Second
+	NormalCloudSyncTimeout = 60 * time.Second
+	TerminalSyncInterval   = 60 * time.Second
 )
 
 type CloudSyncResult struct {

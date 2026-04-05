@@ -19,7 +19,6 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
@@ -630,13 +629,13 @@ func (m launchModel) runReconciliation() tea.Cmd {
 	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
 	projectFilter := m.projectFilter
-	reconciler := m.reconciler
 	return func() tea.Msg {
-		r2Client, _ := buildR2Client(cfg)
 		var warn string
-		if _, completed := syncCloudStateWithTimeout(cfg, database, reconciler, FastCloudSyncTimeout, false); !completed {
-			warn = degraded.CloudSyncTimedOutShowingLastKnownState(FastCloudSyncTimeout.String()) + "."
+		warnings := syncCloudStateTwoPhaseForTUI(database)
+		if len(warnings) > 0 {
+			warn = strings.Join(warnings, " | ")
 		}
+		r2Client, _ := buildR2Client(cfg)
 
 		// Re-query unplaced jobs since reconciliation may have freed some
 		jobs, err := db.ListUnplacedJobs(database)

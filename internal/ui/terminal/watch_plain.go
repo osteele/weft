@@ -56,7 +56,7 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(30 * time.Second):
+		case <-time.After(TerminalSyncInterval):
 		}
 	}
 }
@@ -65,7 +65,11 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	cloudDegraded := false
 	cloudReason := ""
 	if refresh {
-		syncCloudState(cfg, database, reconciler, false)
+		warnings := syncCloudStateTwoPhaseForTUI(database)
+		if len(warnings) > 0 {
+			cloudDegraded = true
+			cloudReason = strings.Join(warnings, " | ")
+		}
 	}
 
 	cloudInstances, err := db.ListRunningLaunches(database)
@@ -362,7 +366,7 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(30 * time.Second):
+		case <-time.After(TerminalSyncInterval):
 		}
 	}
 }

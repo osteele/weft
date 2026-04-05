@@ -10,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/queueblock"
 )
 
-const projectWatchSyncInterval = 30 * time.Second
+const projectWatchSyncInterval = TerminalSyncInterval
 
 func FilterProjectGroups(groups []ProjectGroup, project string) []ProjectGroup {
 	return filterProjectGroups(groups, project)
@@ -104,7 +104,8 @@ func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
 			warnings = append(warnings, note)
 		}
 	}
-	return warnings
+	warnings = append(warnings, syncCloudStateForTUI(database, full)...)
+	return compactWarnings(warnings)
 }
 
 func classifyUnplacedJobs(groups []projectGroup, unplacedSet map[int64]bool) {

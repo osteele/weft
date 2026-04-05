@@ -549,7 +549,7 @@ func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
 // ---------------------------------------------------------------------------
 
 func (m watchModel) scheduleSyncTick() tea.Cmd {
-	return tea.Tick(throttledInterval(15*time.Second, m.focused), func(time.Time) tea.Msg {
+	return tea.Tick(throttledInterval(TerminalSyncInterval, m.focused), func(time.Time) tea.Msg {
 		return watchSyncTickMsg{}
 	})
 }
@@ -561,7 +561,7 @@ func (m watchModel) scheduleCheckDone() tea.Cmd {
 }
 
 func (m watchModel) scheduleWatchAllTick() tea.Cmd {
-	return tea.Tick(throttledInterval(15*time.Second, m.focused), func(time.Time) tea.Msg {
+	return tea.Tick(throttledInterval(TerminalSyncInterval, m.focused), func(time.Time) tea.Msg {
 		return watchAllTickMsg{}
 	})
 }

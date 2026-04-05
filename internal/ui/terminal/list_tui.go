@@ -21,7 +21,7 @@ import (
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
-const listTUISyncInterval = 30 * time.Second
+const listTUISyncInterval = TerminalSyncInterval
 const listAutoLeaseTTL = 30 * time.Second
 
 type listTUIModel struct {
@@ -539,7 +539,8 @@ func syncListTUIData(database *sql.DB, full bool) []string {
 			warnings = append(warnings, note)
 		}
 	}
-	return warnings
+	warnings = append(warnings, syncCloudStateForTUI(database, full)...)
+	return compactWarnings(warnings)
 }
 
 func (m listTUIModel) requestActiveSyncs() {
