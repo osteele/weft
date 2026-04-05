@@ -285,6 +285,161 @@ func TestSweepOrphanedInstances_NoCampaignInDB(t *testing.T) {
 	}
 }
 
+func TestIsWeftInstance(t *testing.T) {
+	tests := []struct {
+		label string
+		want  bool
+	}{
+		{"weft/c42", true},
+		{"weft/i99", true},
+		{"weft/anything", true},
+		{"weft-c42", true},
+		{"weft-i99", true},
+		{"", false},
+		{"other-label", false},
+		{"my-weft/c1", false},
+	}
+	for _, tt := range tests {
+		if got := isWeftInstance(tt.label); got != tt.want {
+			t.Errorf("isWeftInstance(%q) = %v, want %v", tt.label, got, tt.want)
+		}
+	}
+}
+
+func TestSweepOrphanedInstances_DestroysNonCampaignWeftInstance(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a terminal launch with weft/i label (no campaign)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3060",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "adhoc-555"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	var destroyedID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "adhoc-555", Status: cloud.ProviderStatusExited, Label: "weft/i" + strconv.FormatInt(instanceID, 10)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 1 {
+		t.Errorf("destroyed = %d, want 1", destroyed)
+	}
+	if destroyedID != "adhoc-555" {
+		t.Errorf("destroyed ID = %q, want adhoc-555", destroyedID)
+	}
+}
+
+func TestSweepOrphanedInstances_SkipsNonCampaignWeftInstanceStillRunning(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a running launch with weft/i label
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3060",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "active-777"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	destroyCalled := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "active-777", Status: cloud.ProviderStatusRunning, Label: "weft/i" + strconv.FormatInt(instanceID, 10)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyCalled = true
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 0 {
+		t.Errorf("destroyed = %d, want 0", destroyed)
+	}
+	if destroyCalled {
+		t.Error("DestroyInstance should not be called for running non-campaign instances")
+	}
+}
+
+func TestSweepOrphanedInstances_DestroysTrackedTerminalInActiveCampaign(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create an active campaign with a tracked but terminal instance
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_3060",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "zombie-333"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	var destroyedID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "zombie-333", Status: cloud.ProviderStatusExited, Label: labelForCampaign(campaignID)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 1 {
+		t.Errorf("destroyed = %d, want 1", destroyed)
+	}
+	if destroyedID != "zombie-333" {
+		t.Errorf("destroyed ID = %q, want zombie-333", destroyedID)
+	}
+}
+
 func labelForCampaign(id int64) string {
 	return "weft/c" + strconv.FormatInt(id, 10)
 }

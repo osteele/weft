@@ -527,7 +527,8 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 
 	if action.DestroyProvider && providerID != "" && client != nil {
 		if err := client.DestroyInstance(providerID); err != nil {
-			slog.Warn("failed to destroy instance", "component", "reconcile", "instance", ci.ID, "provider", providerID, "error", err)
+			slog.Warn("failed to destroy instance, deferring terminal status to next reconcile pass", "component", "reconcile", "instance", ci.ID, "provider", providerID, "error", err)
+			return false, false
 		}
 	}
 

@@ -1324,9 +1324,12 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("configure bootstrap: %w", err)
 	}
 
-	// Set instance label for provider dashboard visibility
+	// Set instance label for provider dashboard visibility and orphan sweep.
+	// All weft instances must carry a weft/ prefix so the orphan sweep can identify them.
 	if campaignID != nil {
 		createOpts.Label = fmt.Sprintf("weft/c%d", *campaignID)
+	} else {
+		createOpts.Label = fmt.Sprintf("weft/i%d", instanceID)
 	}
 
 	campaignLogID := "nil"

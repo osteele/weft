@@ -351,6 +351,19 @@ func GetLaunch(db *sql.DB, id int64) (*Launch, error) {
 	return c, err
 }
 
+// GetLaunchByProviderID retrieves a launch by its provider instance ID.
+// Returns nil, nil if no matching launch is found.
+func GetLaunchByProviderID(database *sql.DB, providerID string) (*Launch, error) {
+	row := database.QueryRow(
+		`SELECT `+launchSelectColumns+` FROM launches WHERE provider_instance_id = ?`, providerID,
+	)
+	c, err := scanLaunchFrom(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return c, err
+}
+
 // ListLaunches returns all cloud instances ordered by creation time descending.
 func ListLaunches(db *sql.DB) ([]*Launch, error) {
 	rows, err := db.Query(

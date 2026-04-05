@@ -212,6 +212,13 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 				return // can't check — skip
 			}
 			if isProviderTerminal(inst) {
+				// Provider-terminal but still billable (e.g. "exited" on Vast.ai) — destroy it
+				if needsProviderDestroy(inst) {
+					slog.Info("safety-net destroying billable terminal instance", "component", "reconcile", "provider", providerID, "instance", ci.ID, "provider_status", inst.Status)
+					if err := client.DestroyInstance(providerID); err != nil {
+						slog.Warn("safety-net destroy of terminal instance failed", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", err)
+					}
+				}
 				if markTerminationIntentDestroyed(database, ci, time.Now()) {
 					mu.Lock()
 					result.Reconciled++

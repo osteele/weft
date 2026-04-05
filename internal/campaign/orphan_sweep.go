@@ -41,16 +41,14 @@ func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed
 		}
 
 		for _, inst := range instances {
-			campaignID, ok := extractCampaignID(inst.Label)
-			if !ok {
+			if !isWeftInstance(inst.Label) {
 				continue
 			}
-
 			if !needsProviderDestroy(&inst) {
 				continue
 			}
 
-			shouldDestroy, reason := shouldDestroyOrphan(database, campaignID, inst.ProviderID)
+			shouldDestroy, reason := shouldDestroyWeftInstance(database, inst.Label, inst.ProviderID)
 			if !shouldDestroy {
 				continue
 			}
@@ -66,10 +64,21 @@ func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed
 	return destroyed, nil
 }
 
-// shouldDestroyOrphan checks whether a weft-labeled instance should be destroyed.
-// Returns (true, reason) if the instance is orphaned.
-func shouldDestroyOrphan(database *sql.DB, campaignID int64, providerID string) (bool, string) {
-	// Check if the campaign exists
+// shouldDestroyWeftInstance checks whether a weft-labeled provider instance should
+// be destroyed. It handles both campaign-scoped labels (weft/c42) and standalone
+// instance labels (weft/i42).
+func shouldDestroyWeftInstance(database *sql.DB, label string, providerID string) (bool, string) {
+	// Campaign-scoped instance: check campaign + launch status
+	if campaignID, ok := extractCampaignID(label); ok {
+		return shouldDestroyCampaignInstance(database, campaignID, providerID)
+	}
+
+	// Non-campaign weft instance (weft/i{N}): check launch status in DB
+	return shouldDestroyByProviderID(database, providerID)
+}
+
+// shouldDestroyCampaignInstance checks a campaign-scoped instance.
+func shouldDestroyCampaignInstance(database *sql.DB, campaignID int64, providerID string) (bool, string) {
 	campaign, err := db.GetCampaign(database, campaignID)
 	if err != nil {
 		slog.Warn("failed to get campaign", "component", "orphan-sweep", "campaign", campaignID, "error", err)
@@ -79,10 +88,8 @@ func shouldDestroyOrphan(database *sql.DB, campaignID int64, providerID string) 
 		return true, "campaign not found in DB"
 	}
 
-	// Check if the campaign is active (non-terminal)
 	switch campaign.Status {
 	case db.CampaignStatusPlanned, db.CampaignStatusLaunching, db.CampaignStatusRunning:
-		// Campaign is active — check if this provider ID is tracked in the DB
 		instances, err := db.GetCampaignInstances(database, campaignID)
 		if err != nil {
 			slog.Warn("failed to get campaign instances", "component", "orphan-sweep", "campaign", campaignID, "error", err)
@@ -90,14 +97,40 @@ func shouldDestroyOrphan(database *sql.DB, campaignID int64, providerID string) 
 		}
 		for _, ci := range instances {
 			if ci.EffectiveProviderID() == providerID {
-				return false, "" // tracked instance, leave it alone
+				// Tracked in an active campaign, but check if the launch itself is terminal
+				if IsInstanceTerminal(ci.Status) {
+					return true, fmt.Sprintf("launch %d is %s in active campaign %d", ci.ID, ci.Status, campaignID)
+				}
+				return false, ""
 			}
 		}
 		return true, fmt.Sprintf("provider ID %s not tracked in active campaign %d", providerID, campaignID)
 	default:
-		// Campaign is terminal (completed/failed/canceled) — instance is orphaned
 		return true, fmt.Sprintf("campaign %d is %s", campaignID, campaign.Status)
 	}
+}
+
+// shouldDestroyByProviderID checks if a provider instance matches a terminal
+// launch in the DB.
+func shouldDestroyByProviderID(database *sql.DB, providerID string) (bool, string) {
+	launch, err := db.GetLaunchByProviderID(database, providerID)
+	if err != nil {
+		slog.Warn("failed to look up launch by provider ID", "component", "orphan-sweep", "provider_id", providerID, "error", err)
+		return false, ""
+	}
+	if launch == nil {
+		// Weft-labeled but not in our DB — destroy it
+		return true, "weft-labeled instance not found in DB"
+	}
+	if IsInstanceTerminal(launch.Status) {
+		return true, fmt.Sprintf("launch %d is %s", launch.ID, launch.Status)
+	}
+	return false, ""
+}
+
+// isWeftInstance returns true if the label indicates a weft-managed instance.
+func isWeftInstance(label string) bool {
+	return strings.HasPrefix(label, weftLabelPrefix) || strings.HasPrefix(label, weftNamePrefix)
 }
 
 // extractCampaignID parses a campaign ID from a weft label/name.
