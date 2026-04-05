@@ -878,22 +878,23 @@ func TestCountLaunchAttemptsInCampaign(t *testing.T) {
 		t.Fatalf("set job launch 2: %v", err)
 	}
 
-	// Global count should be 2 (both campaigns)
+	// Superseded attempts are excluded from retry-budget counting.
+	// The first campaign attempt is superseded by the second launch chain.
 	total, err := CountLaunchAttempts(database, jobID)
 	if err != nil {
 		t.Fatalf("count all attempts: %v", err)
 	}
-	if total != 2 {
-		t.Errorf("CountLaunchAttempts = %d, want 2", total)
+	if total != 1 {
+		t.Errorf("CountLaunchAttempts = %d, want 1", total)
 	}
 
-	// Campaign-scoped counts should be 1 each
+	// Campaign-scoped counts exclude superseded attempts as well.
 	count1, err := CountLaunchAttemptsInCampaign(database, jobID, campaign1ID)
 	if err != nil {
 		t.Fatalf("count campaign 1 attempts: %v", err)
 	}
-	if count1 != 1 {
-		t.Errorf("CountLaunchAttemptsInCampaign(campaign1) = %d, want 1", count1)
+	if count1 != 0 {
+		t.Errorf("CountLaunchAttemptsInCampaign(campaign1) = %d, want 0", count1)
 	}
 
 	count2, err := CountLaunchAttemptsInCampaign(database, jobID, campaign2ID)

@@ -295,10 +295,47 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass); err != nil {
 			return err
 		}
-		if len(updates) == 0 {
+		queuedEnded := job.EndTime != nil && *job.EndTime > 0
+		cloudAttemptCount, err := db.CountLaunchAttempts(database, jobID)
+		if err != nil {
+			return fmt.Errorf("count cloud attempts: %w", err)
+		}
+		hasCloudRetryHistory := cloudAttemptCount > 0
+		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory
+		if !shouldForceFreshAttempt && len(updates) == 0 {
 			fmt.Printf("Job %d is already queued (no changes)\n", jobID)
 			return nil
 		}
+
+		if shouldForceFreshAttempt {
+			if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+				return err
+			}
+
+			// Remove processed tag so the retried job appears in unprocessed listings.
+			if job.HasTag(db.ProcessedTag) {
+				if err := db.RemoveJobTag(database, jobID, db.ProcessedTag); err != nil {
+					return fmt.Errorf("remove processed tag: %w", err)
+				}
+			}
+
+			retryHost := ""
+			if job.HasInventoryHost() {
+				retryHost = job.Host
+			}
+			if err := db.RequeueFreshAttemptByID(database, jobID, retryHost); err != nil {
+				return fmt.Errorf("create fresh queued attempt: %w", err)
+			}
+
+			fmt.Printf("Restarted queued job %d (fresh retry attempt)\n", jobID)
+			fmt.Printf("  Retry budget reset\n")
+			fmt.Printf("  Source metadata refreshed; changed sources will be re-synced on dispatch\n")
+			for _, update := range updates {
+				fmt.Printf("  %s\n", update)
+			}
+			return nil
+		}
+
 		fmt.Printf("Updated queued job %d\n", jobID)
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)

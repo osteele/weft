@@ -134,7 +134,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 }
 
-func TestRenderJobListGroupedStatusPlainAt_ShowsRetriedTimingForUnplacedRetry(t *testing.T) {
+func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRetry(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	end := int64(4_940)
 	jobs := []*db.Job{
@@ -149,7 +149,29 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetriedTimingForUnplacedRetry(t 
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	want := "- 51 — proj retry me — retried 1m ago"
+	want := "- 51 — proj retry me — retry pending 1m ago"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	end := int64(4_940)
+	jobs := []*db.Job{
+		{
+			ID:                 52,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "retry blocked",
+			QueuedAt:           4_000,
+			EndTime:            &end,
+			QueueBlockedReason: "first retry budget exceeded: elapsed 1h2m >= limit 45m",
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	want := "- 52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}

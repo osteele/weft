@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 type groupedStatusSection struct {
@@ -136,7 +137,11 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 		return "running " + shortRelativeTime(now.Unix()-job.StartTime)
 	}
 	if sectionKey == "unplaced" && job.EndTime != nil && *job.EndTime > 0 {
-		return "retried " + shortRelativeTime(now.Unix()-*job.EndTime)
+		reason := strings.ToLower(strings.TrimSpace(queueblock.Display(job, nil).Reason))
+		if strings.Contains(reason, "retry budget exceeded") || strings.Contains(reason, "max attempts") {
+			return "retry rejected " + shortRelativeTime(now.Unix()-*job.EndTime)
+		}
+		return "retry pending " + shortRelativeTime(now.Unix()-*job.EndTime)
 	}
 	placedAt := job.QueuedAt
 	if placedAt == 0 {

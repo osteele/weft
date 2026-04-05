@@ -2489,6 +2489,55 @@ func RequeueByID(database *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
+// RequeueFreshAttemptByID creates a fresh queued attempt for manual retries.
+// Unlike RequeueByID's cloud path, this always creates a new attempt number so
+// retry budgeting and lifecycle accounting are reset from a clean attempt.
+// The caller controls host placement by passing host="" for unplaced/cloud jobs
+// or an inventory host name for pinned on-prem jobs.
+func RequeueFreshAttemptByID(database *sql.DB, id int64, host string) error {
+	warnOpenTransition(database, id, StatusQueued, false, status.SourceUserAction)
+
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	if err := closeOpenAttempts(tx, id, now); err != nil {
+		tx.Rollback()
+		return err
+	}
+	attemptID, err := createAttemptTx(tx, id, host, nil, StatusQueued)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE job_attempts SET pending_status = ?, pending_at = ?, last_synced_status = NULL WHERE id = ?`,
+		StatusQueued, now, attemptID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Manual retry starts a new launch chain for budgeting purposes.
+	// Mark prior cloud attempts as superseded so relaunch logic does not keep
+	// charging elapsed/spend from earlier failed chains.
+	if _, err := tx.Exec(
+		`UPDATE job_attempts
+		 SET cloud_outcome = ?
+		 WHERE job_id = ?
+		   AND launch_id IS NOT NULL
+		   AND end_time IS NOT NULL
+		   AND COALESCE(cloud_outcome, '') != ?`,
+		AttemptOutcomeSuperseded, id, AttemptOutcomeSuperseded,
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 // MoveQueuedJobToUnplaced clears a queued job's host assignment. Jobs that are
 // not inventory-only gain the rental placement tag so they remain eligible for
 // rental launch workflows. Unlike ResetJobToUnplaced, this does not archive a

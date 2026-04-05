@@ -1363,8 +1363,11 @@ func repairCompletedCloudAttemptsMissingExitCode(database *sql.DB) error {
 func CountLaunchAttempts(database *sql.DB, jobID int64) (int, error) {
 	var count int
 	err := database.QueryRow(
-		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND launch_id IS NOT NULL`,
-		jobID,
+		`SELECT COUNT(*) FROM job_attempts
+		 WHERE job_id = ?
+		   AND launch_id IS NOT NULL
+		   AND COALESCE(cloud_outcome, '') != ?`,
+		jobID, AttemptOutcomeSuperseded,
 	).Scan(&count)
 	return count, err
 }
@@ -1378,8 +1381,11 @@ func CountLaunchAttemptsInCampaign(database *sql.DB, jobID int64, campaignID int
 	err := database.QueryRow(
 		`SELECT COUNT(*) FROM job_attempts ja
 		 JOIN launches l ON l.id = ja.launch_id
-		 WHERE ja.job_id = ? AND ja.launch_id IS NOT NULL AND l.campaign_id = ?`,
-		jobID, campaignID,
+		 WHERE ja.job_id = ?
+		   AND ja.launch_id IS NOT NULL
+		   AND l.campaign_id = ?
+		   AND COALESCE(ja.cloud_outcome, '') != ?`,
+		jobID, campaignID, AttemptOutcomeSuperseded,
 	).Scan(&count)
 	return count, err
 }
@@ -1389,9 +1395,11 @@ func GetLaunchAttempts(database *sql.DB, jobID int64) ([]LaunchAttempt, error) {
 	rows, err := database.Query(
 		`SELECT id, job_id, launch_id, COALESCE(queued_at, start_time, 0), end_time, cloud_outcome
 		 FROM job_attempts
-		 WHERE job_id = ? AND launch_id IS NOT NULL
+		 WHERE job_id = ?
+		   AND launch_id IS NOT NULL
+		   AND COALESCE(cloud_outcome, '') != ?
 		 ORDER BY attempt_number ASC`,
-		jobID,
+		jobID, AttemptOutcomeSuperseded,
 	)
 	if err != nil {
 		return nil, err
