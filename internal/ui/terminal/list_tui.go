@@ -108,7 +108,9 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	var sw *hostsync.Worker
 	if syncEnabled {
 		cfg, _ := config.Load()
-		sw = hostsync.New(database, nil, nil, cfg)
+		cloudClients, _ := buildCloudClients(cfg)
+		r2Client, _ := buildR2Client(cfg)
+		sw = hostsync.New(database, cloudClients, r2Client, cfg)
 		sw.Start()
 	}
 

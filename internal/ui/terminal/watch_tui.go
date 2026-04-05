@@ -187,16 +187,14 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
 
+	allCloudClients, _ := buildCloudClients(cfg)
+
 	var sw *hostsync.Worker
 	if cfg != nil {
-		sw = hostsync.New(database, nil, nil, cfg)
+		workerR2, _ := buildR2Client(cfg)
+		sw = hostsync.New(database, allCloudClients, workerR2, cfg)
 		sw.Start()
 		go func() { <-ctx.Done(); sw.Stop() }()
-	}
-
-	allCloudClients, _ := buildCloudClients(cfg)
-	if sw != nil && len(allCloudClients) > 0 {
-		sw.SetCloudClients(allCloudClients)
 	}
 
 	unplaced, _ := db.ListUnplacedJobs(database)
@@ -240,11 +238,10 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
 	r2Client, _ := buildR2Client(cfg)
-
-	sw := hostsync.New(database, nil, r2Client, cfg)
-	sw.Start()
-
 	allCloudClients, _ := buildCloudClients(cfg)
+
+	sw := hostsync.New(database, allCloudClients, r2Client, cfg)
+	sw.Start()
 
 	model := watchModel{
 		mode:                   watchModeSystem,
@@ -303,7 +300,9 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 
 	var sw *hostsync.Worker
 	if syncEnabled && cfg != nil {
-		sw = hostsync.New(database, nil, nil, cfg)
+		cloudClients, _ := buildCloudClients(cfg)
+		r2Client, _ := buildR2Client(cfg)
+		sw = hostsync.New(database, cloudClients, r2Client, cfg)
 		sw.Start()
 		go func() { <-ctx.Done(); sw.Stop() }()
 	}
