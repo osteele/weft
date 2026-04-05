@@ -14,6 +14,7 @@ type MockClient struct {
 	WaitReadyFunc            func(int, time.Duration) (*Instance, error)
 	DestroyInstanceFunc      func(int) error
 	CopyBetweenInstancesFunc func(int, string, int, string) error
+	ShowUserFunc             func() (*User, error)
 }
 
 var _ VastaiClient = (*MockClient)(nil)
@@ -72,4 +73,11 @@ func (m *MockClient) CopyBetweenInstances(srcID int, srcPath string, dstID int, 
 		return m.CopyBetweenInstancesFunc(srcID, srcPath, dstID, dstPath)
 	}
 	return nil
+}
+
+func (m *MockClient) ShowUser() (*User, error) {
+	if m.ShowUserFunc != nil {
+		return m.ShowUserFunc()
+	}
+	return &User{}, nil
 }

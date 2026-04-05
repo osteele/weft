@@ -28,6 +28,7 @@ type VastaiClient interface {
 	WaitReady(instanceID int, timeout time.Duration) (*Instance, error)
 	DestroyInstance(instanceID int) error
 	CopyBetweenInstances(srcInstanceID int, srcPath string, dstInstanceID int, dstPath string) error
+	ShowUser() (*User, error)
 }
 
 var _ VastaiClient = (*Client)(nil)
@@ -53,6 +54,19 @@ func (c *Client) Available() error {
 		return fmt.Errorf("vastai CLI not authenticated: %v", err)
 	}
 	return nil
+}
+
+// ShowUser returns the authenticated user's account information.
+func (c *Client) ShowUser() (*User, error) {
+	out, err := c.run("show", "user", "--raw")
+	if err != nil {
+		return nil, fmt.Errorf("show user: %w", err)
+	}
+	var user User
+	if err := json.Unmarshal(out, &user); err != nil {
+		return nil, fmt.Errorf("parse user: %w", err)
+	}
+	return &user, nil
 }
 
 // SearchOffers queries available GPU offers matching constraints.

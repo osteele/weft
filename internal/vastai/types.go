@@ -38,6 +38,13 @@ type Instance struct {
 	IntendedStatus string  `json:"intended_status"`
 }
 
+// User represents Vast.ai account information.
+type User struct {
+	Credit float64 `json:"credit"`
+	Email  string  `json:"email"`
+	CanPay bool    `json:"can_pay"`
+}
+
 // OfferConstraints describes what GPU capabilities a job needs.
 type OfferConstraints struct {
 	GPUClass             string   // e.g., "RTX_4090", "A100" (mapped to Vast.ai gpu_name)

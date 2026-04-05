@@ -1054,3 +1054,23 @@ Both flags work entirely on the remote host (no laptop connection needed) and ca
 > **Note:** Dependencies must stay on the same host. If you try to start a job on
 > `titan` that waits on a job recorded on `studio`, the CLI errors immediately
 > instead of queuing work that can never start.
+
+### weft budget
+
+Show your Vast.ai account credit balance.
+
+```bash
+weft budget [flags]
+```
+
+**Flags:**
+- `--open`: Open the Vast.ai billing page in your browser
+
+**Examples:**
+```bash
+# Check remaining credit
+weft budget
+
+# Check balance and open billing page
+weft budget --open
+```
