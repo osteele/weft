@@ -480,7 +480,8 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
 
 	if listGroupBy == "status" {
-		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlain(jobs, terminal.ListOutputWidth()))
+		liveByLaunchID := loadLaunchLiveStateForJobs(database, jobs)
+		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithLiveState(jobs, terminal.ListOutputWidth(), liveByLaunchID))
 	}
 
 	switch listFormat {
@@ -514,6 +515,34 @@ func validateListGroupingOptions() error {
 		return usageErrorf("--group-by status supports table output only (remove --format or use --format table)")
 	}
 	return nil
+}
+
+func loadLaunchLiveStateForJobs(database *sql.DB, jobs []*db.Job) map[int64]*db.LaunchLiveState {
+	if database == nil || len(jobs) == 0 {
+		return nil
+	}
+	launchIDs := make(map[int64]struct{})
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		launchIDs[*job.LaunchID] = struct{}{}
+	}
+	if len(launchIDs) == 0 {
+		return nil
+	}
+	liveByLaunchID := make(map[int64]*db.LaunchLiveState, len(launchIDs))
+	for launchID := range launchIDs {
+		live, err := db.GetLaunchLiveState(database, launchID)
+		if err != nil || live == nil {
+			continue
+		}
+		liveByLaunchID[launchID] = live
+	}
+	if len(liveByLaunchID) == 0 {
+		return nil
+	}
+	return liveByLaunchID
 }
 
 // applyAttemptOutcomeOverrides overrides the display status for queued jobs

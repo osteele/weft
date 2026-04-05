@@ -156,6 +156,17 @@ type CampaignConfig struct {
 	AutoRunawayOrphanChurnLimit int `yaml:"auto_runaway_orphan_churn_limit" toml:"auto_runaway_orphan_churn_limit"`
 	// AutoRunawaySpendNoProgressLimit is the max spend (USD) in-window with no completions.
 	AutoRunawaySpendNoProgressLimit float64 `yaml:"auto_runaway_spend_no_progress_limit" toml:"auto_runaway_spend_no_progress_limit"`
+
+	// AutoObjective controls unattended auto-planner optimization profile.
+	// Valid values: "cost_first", "balanced", "time_first". Empty uses default.
+	AutoObjective string `yaml:"auto_objective" toml:"auto_objective"`
+	// ObjectiveCostWeight overrides the auto-planner cost weight when > 0.
+	ObjectiveCostWeight float64 `yaml:"objective_cost_weight" toml:"objective_cost_weight"`
+	// ObjectiveTimeWeight overrides the auto-planner time weight when > 0.
+	ObjectiveTimeWeight float64 `yaml:"objective_time_weight" toml:"objective_time_weight"`
+	// OpportunityCostWeight scales scarcity penalties for consuming reusable
+	// instance capacity in plan scoring. 0 defaults to the built-in value.
+	OpportunityCostWeight float64 `yaml:"opportunity_cost_weight" toml:"opportunity_cost_weight"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
@@ -471,14 +482,16 @@ func (c *Config) DefaultGracePeriod() string {
 }
 
 const (
-	defaultRetryFirstTimeLimit = 45 * time.Minute
-	defaultRetryNextTimeLimit  = 45 * time.Minute
-	defaultRetryFirstCostUSD   = 1.00
-	defaultRetryNextCostUSD    = 0.25
-	defaultAutoRunawayWindow   = 24 * time.Hour
-	defaultAutoRunawayChain    = 3
-	defaultAutoRunawayOrphans  = 8
-	defaultAutoRunawaySpendUSD = 5.00
+	defaultRetryFirstTimeLimit   = 45 * time.Minute
+	defaultRetryNextTimeLimit    = 45 * time.Minute
+	defaultRetryFirstCostUSD     = 1.00
+	defaultRetryNextCostUSD      = 0.25
+	defaultAutoRunawayWindow     = 24 * time.Hour
+	defaultAutoRunawayChain      = 3
+	defaultAutoRunawayOrphans    = 8
+	defaultAutoRunawaySpendUSD   = 5.00
+	defaultAutoObjective         = "cost_first"
+	defaultOpportunityCostWeight = 1.0
 )
 
 func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
@@ -577,6 +590,37 @@ func (c *Config) AutoRunawaySpendNoProgressLimitCents() int {
 		return costUSDToCents(defaultAutoRunawaySpendUSD, defaultAutoRunawaySpendUSD)
 	}
 	return costUSDToCents(c.Campaign.AutoRunawaySpendNoProgressLimit, defaultAutoRunawaySpendUSD)
+}
+
+// AutoObjective returns the unattended auto-planner objective profile id.
+func (c *Config) AutoObjective() string {
+	if c == nil {
+		return defaultAutoObjective
+	}
+	value := strings.ToLower(strings.TrimSpace(c.Campaign.AutoObjective))
+	switch value {
+	case "cost_first", "balanced", "time_first":
+		return value
+	default:
+		return defaultAutoObjective
+	}
+}
+
+// CampaignObjectiveWeights returns optional explicit objective weights.
+// Any non-positive value means "use profile defaults".
+func (c *Config) CampaignObjectiveWeights() (float64, float64) {
+	if c == nil {
+		return 0, 0
+	}
+	return c.Campaign.ObjectiveCostWeight, c.Campaign.ObjectiveTimeWeight
+}
+
+// CampaignOpportunityCostWeight returns the scarcity-penalty scaling factor.
+func (c *Config) CampaignOpportunityCostWeight() float64 {
+	if c == nil || c.Campaign.OpportunityCostWeight <= 0 {
+		return defaultOpportunityCostWeight
+	}
+	return c.Campaign.OpportunityCostWeight
 }
 
 // SourceExcludeDirs returns the effective global source exclude patterns.

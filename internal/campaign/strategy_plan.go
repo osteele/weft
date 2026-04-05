@@ -42,6 +42,15 @@ type StrategyPlan struct {
 	ReuseAssignments []ReuseAssignment
 }
 
+// PlanOptions configures scoring behavior for launch planning.
+type PlanOptions struct {
+	OpportunityCostWeight float64
+}
+
+func defaultPlanOptions() PlanOptions {
+	return PlanOptions{OpportunityCostWeight: 1.0}
+}
+
 func (p StrategyPlan) HasReuse() bool {
 	return len(p.ReuseAssignments) > 0
 }
@@ -118,6 +127,8 @@ type planEvaluator struct {
 
 	reuseInputMu    sync.Mutex
 	reuseInputBytes map[string]int64
+
+	opportunityCostWeight float64
 }
 
 type reuseEstimateCacheEntry struct {
@@ -131,19 +142,24 @@ func newPlanEvaluator(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	minSurvival float64,
+	options PlanOptions,
 ) *planEvaluator {
+	if options.OpportunityCostWeight <= 0 {
+		options = defaultPlanOptions()
+	}
 	return &planEvaluator{
-		database:         database,
-		predCfg:          predCfg,
-		overheadModel:    overheadModel,
-		survivalModel:    survivalModel,
-		minSurvival:      minSurvival,
-		setupFactory:     OfferSetupOverheadFactory(database, overheadModel),
-		rawEvalCache:     make(map[string]map[int]map[string]offerRuntimePrediction),
-		estimateCache:    make(map[string][]CostEstimate),
-		reuseEstimates:   make(map[string]reuseEstimateCacheEntry),
-		reusePredictions: make(map[string]map[int64]estimate.DurationPrediction),
-		reuseInputBytes:  make(map[string]int64),
+		database:              database,
+		predCfg:               predCfg,
+		overheadModel:         overheadModel,
+		survivalModel:         survivalModel,
+		minSurvival:           minSurvival,
+		setupFactory:          OfferSetupOverheadFactory(database, overheadModel),
+		rawEvalCache:          make(map[string]map[int]map[string]offerRuntimePrediction),
+		estimateCache:         make(map[string][]CostEstimate),
+		reuseEstimates:        make(map[string]reuseEstimateCacheEntry),
+		reusePredictions:      make(map[string]map[int64]estimate.DurationPrediction),
+		reuseInputBytes:       make(map[string]int64),
+		opportunityCostWeight: options.OpportunityCostWeight,
 	}
 }
 

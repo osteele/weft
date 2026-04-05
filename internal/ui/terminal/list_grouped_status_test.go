@@ -3,6 +3,7 @@ package terminal
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -59,5 +60,52 @@ func TestRenderJobListGroupedStatusPlainNone(t *testing.T) {
 	out := renderJobListGroupedStatusPlain(nil, 0)
 	if out != "None\n" {
 		t.Fatalf("output = %q, want %q", out, "None\n")
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(99)
+	jobs := []*db.Job{
+		{
+			ID:        42,
+			Status:    db.StatusRunning,
+			LaunchID:  &launchID,
+			Project:   "proj",
+			StartTime: 4_400,
+			CreatedAt: 4_300,
+			QueuedAt:  4_350,
+			Command:   "python train.py",
+		},
+		{
+			ID:          43,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "queued",
+			CreatedAt:   4_000,
+			QueuedAt:    4_200,
+		},
+		{
+			ID:          44,
+			Status:      db.StatusCompleted,
+			Project:     "proj",
+			Description: "done",
+			CreatedAt:   3_200,
+			ExitCode:    testIntPtr(0),
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, map[int64]*db.LaunchLiveState{
+		launchID: {LaunchID: launchID, JobProgressID: 42, JobProgressPct: 75},
+	}, now)
+
+	for _, want := range []string{
+		"- 42 — proj python train.py (rental) — running 75% — running 10m ago",
+		"- 43 — proj queued — queued 13m ago",
+		"- 44 — proj done — placed 30m ago — completed ok",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
 	}
 }

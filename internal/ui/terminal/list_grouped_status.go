@@ -3,17 +3,28 @@ package terminal
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/progress"
 )
 
 type groupedStatusSection struct {
 	title string
+	key   string
 	jobs  []*db.Job
 }
 
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
+	return renderJobListGroupedStatusPlainAt(jobs, width, nil, time.Now())
+}
+
+func renderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) string {
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, time.Now())
+}
+
+func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
 	running := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
 	unplaced := make([]*db.Job, 0)
@@ -42,12 +53,12 @@ func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 	}
 
 	sections := []groupedStatusSection{
-		{title: "Running", jobs: running},
-		{title: "Queued", jobs: queued},
-		{title: "Unplaced", jobs: unplaced},
-		{title: "Completions", jobs: completions},
-		{title: "Failures", jobs: failures},
-		{title: "Killed/Canceled", jobs: killedCanceled},
+		{title: "Running", key: "running", jobs: running},
+		{title: "Queued", key: "queued", jobs: queued},
+		{title: "Unplaced", key: "unplaced", jobs: unplaced},
+		{title: "Completions", key: "completions", jobs: completions},
+		{title: "Failures", key: "failures", jobs: failures},
+		{title: "Killed/Canceled", key: "killed_canceled", jobs: killedCanceled},
 	}
 
 	lines := make([]string, 0, len(jobs)+8)
@@ -57,10 +68,19 @@ func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 		}
 		lines = append(lines, fmt.Sprintf("%s (%d):", section.title, len(section.jobs)))
 		for _, job := range section.jobs {
-			line := fmt.Sprintf("- %d — %s", job.ID, groupedStatusJobLabel(job))
-			if suffix := groupedStatusOutcomeSuffix(job, section.title); suffix != "" {
-				line = line + " — " + suffix
+			parts := []string{
+				fmt.Sprintf("- %d — %s", job.ID, groupedStatusJobLabel(job)),
 			}
+			if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
+				parts = append(parts, progressText)
+			}
+			if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
+				parts = append(parts, timing)
+			}
+			if suffix := groupedStatusOutcomeSuffix(job, section.title); suffix != "" {
+				parts = append(parts, suffix)
+			}
+			line := strings.Join(parts, " — ")
 			lines = append(lines, line)
 		}
 		lines = append(lines, "")
@@ -82,6 +102,51 @@ func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 	}
 
 	return strings.Join(lines, "\n") + "\n"
+}
+
+func groupedStatusProgressSuffix(job *db.Job, sectionKey string, launchLiveByID map[int64]*db.LaunchLiveState) string {
+	if job == nil || sectionKey != "running" {
+		return ""
+	}
+	if job.LaunchID != nil && launchLiveByID != nil {
+		if live := launchLiveByID[*job.LaunchID]; live != nil && live.JobProgressID == job.ID {
+			if pctText := strings.TrimSpace(progress.FormatPhaseProgress(0, live.JobProgressPct)); pctText != "" {
+				return "running " + pctText
+			}
+		}
+	}
+	switch job.EffectiveStatus() {
+	case db.StatusStarting:
+		return "starting"
+	case db.StatusRunning:
+		return "running"
+	default:
+		return ""
+	}
+}
+
+func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) string {
+	if job == nil {
+		return ""
+	}
+	if sectionKey == "running" && job.StartTime > 0 {
+		return "running " + shortRelativeTime(now.Unix()-job.StartTime)
+	}
+	placedAt := job.QueuedAt
+	if placedAt == 0 {
+		placedAt = job.CreatedAt
+	}
+	if placedAt == 0 {
+		placedAt = job.StartTime
+	}
+	if placedAt <= 0 {
+		return ""
+	}
+	label := "placed"
+	if sectionKey == "unplaced" {
+		label = "queued"
+	}
+	return label + " " + shortRelativeTime(now.Unix()-placedAt)
 }
 
 func groupedStatusBucket(job *db.Job) string {
