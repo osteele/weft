@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,9 +13,14 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudreconcile"
+	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/monitor"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/web"
 	"github.com/spf13/cobra"
 )
@@ -63,6 +69,8 @@ func runWeb(cmd *cobra.Command, args []string) error {
 	mon.EnableRemediation(cfg)
 	mon.Start()
 	defer mon.Stop()
+	stopCloudReconcileLoop := startWebCloudReconcileLoop(database, cfg)
+	defer stopCloudReconcileLoop()
 
 	port := cfg.WebPort
 	if webPort != 0 {
@@ -98,6 +106,59 @@ func runWeb(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return server.Stop(ctx)
+}
+
+func startWebCloudReconcileLoop(database *sql.DB, cfg *config.Config) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	clients, _ := buildCloudClients(cfg)
+	r2Client, _ := buildR2Client(cfg)
+	reconciler := campaign.NewReconciler()
+	owner := cloudreconcile.OwnerID()
+
+	go func() {
+		defer close(done)
+		runPass := func() {
+			cloudreconcile.RunTwoPhasePass(ctx, database, cloudreconcile.Config{
+				Owner: owner,
+			}, func(_ context.Context, _ bool) (int, error) {
+				return runWebCloudReconcilePhase(database, clients, r2Client, reconciler)
+			})
+		}
+
+		runPass()
+		ticker := time.NewTicker(cloudreconcile.DefaultInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runPass()
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func runWebCloudReconcilePhase(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, reconciler *campaign.Reconciler) (int, error) {
+	if len(clients) == 0 {
+		resetMap, err := db.ResetJobsOnTerminalLaunches(database)
+		if err != nil {
+			return 0, err
+		}
+		return len(resetMap), nil
+	}
+	result := cloudsync.SyncState(database, reconciler, clients, r2Client, nil)
+	if result.ReconcileResult == nil {
+		return 0, nil
+	}
+	return result.ReconcileResult.Reconciled, nil
 }
 
 func openURL(url string) error {
