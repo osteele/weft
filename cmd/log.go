@@ -231,8 +231,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
-	// Cloud jobs: SSH for running, R2 for completed
-	if job.IsLaunchJob() {
+	// Cloud jobs (including unplaced jobs with prior cloud attempts): SSH for
+	// running, R2/cache for historical logs.
+	if shouldUseCloudLogs(database, job) {
 		return runLogForCloudJob(cmd, database, job)
 	}
 
@@ -373,12 +374,32 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	return nil
 }
 
+func shouldUseCloudLogs(database *sql.DB, job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	if job.IsLaunchJob() {
+		return true
+	}
+	if database == nil {
+		return false
+	}
+	attempts, err := db.GetLaunchAttempts(database, job.ID)
+	return err == nil && len(attempts) > 0
+}
+
 // runLogForCloudJob fetches log output for a cloud-based job.
 // Uses local cache → R2 → SSH (live follow only) in that order.
 func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
-	// Queued jobs haven't run yet — no log to show.
+	// Queued jobs without any cloud attempts haven't run yet — no log to show.
 	if job.Status == db.StatusQueued {
-		return fmt.Errorf("job %d is queued; no log available yet", job.ID)
+		attempts, err := db.GetLaunchAttempts(database, job.ID)
+		if err != nil {
+			return fmt.Errorf("lookup cloud attempts for job %d: %w", job.ID, err)
+		}
+		if len(attempts) == 0 {
+			return fmt.Errorf("job %d is queued; no log available yet", job.ID)
+		}
 	}
 
 	// Prefer local cache for terminal jobs.

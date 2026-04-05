@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
@@ -100,4 +101,78 @@ func resetLogModeState() {
 	logEventsKind = ""
 	logEventsLaunch = 0
 	logEventsStats = false
+}
+
+func TestShouldUseCloudLogsTrueForAssignedLaunchJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if !shouldUseCloudLogs(database, job) {
+		t.Fatal("shouldUseCloudLogs() = false, want true for launch-assigned job")
+	}
+}
+
+func TestShouldUseCloudLogsTrueForUnplacedJobWithCloudHistory(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:            db.LaunchStatusFailed,
+		TerminationReason: db.TerminationReasonJobFailure,
+		Provider:          "vastai",
+		GPUSpec:           "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	exitCode := 1
+	endTime := time.Now().Unix()
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exitCode, endTime); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	if err := db.CloseLaunchAttempt(database, jobID, db.AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseLaunchAttempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, db.StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status queued: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Host != "" {
+		t.Fatalf("job.Host = %q, want empty host for unplaced state", job.Host)
+	}
+	if !shouldUseCloudLogs(database, job) {
+		t.Fatal("shouldUseCloudLogs() = false, want true for unplaced job with cloud attempts")
+	}
 }
