@@ -498,6 +498,17 @@ func (w *Worker) doSync(host string, mode ops.SyncMode) {
 	}
 	defer func() { _ = db.ReleaseAutoLease(w.database, scope, w.owner) }()
 
+	if db.IsLaunchHost(host) {
+		hostStatus, err := ops.FetchLaunchHostStatusFromDB(w.database, host)
+		if err != nil {
+			result.Error = err
+			return
+		}
+		result.HostInfo = hostStatus.HostInfo
+		result.HostFull = hostStatus.Host
+		return
+	}
+
 	syncResult, err := ops.SyncHost(w.database, host, ops.HostSyncOptions{
 		Timeout:      ops.DefaultSyncOptions().Timeout,
 		UseBatchSync: true,

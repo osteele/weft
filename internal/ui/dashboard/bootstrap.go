@@ -39,7 +39,7 @@ func LoadInitialSnapshot(database *sql.DB, hostCacheDuration time.Duration) Init
 		snapshot.HostSyncTimes = times
 	}
 
-	jobHosts, err := db.ListUniqueHosts(database)
+	hostNames, err := db.ListHostsForTUI(database)
 	if err != nil {
 		return snapshot
 	}
@@ -50,26 +50,12 @@ func LoadInitialSnapshot(database *sql.DB, hostCacheDuration time.Duration) Init
 	}
 
 	cachedByName := make(map[string]*db.CachedHostInfo, len(cachedHosts))
-	hostSet := make(map[string]struct{}, len(jobHosts)+len(cachedHosts))
-	for _, host := range jobHosts {
-		if host == "" {
-			continue
-		}
-		hostSet[host] = struct{}{}
-	}
 	for _, cached := range cachedHosts {
 		if cached == nil || cached.Name == "" {
 			continue
 		}
-		hostSet[cached.Name] = struct{}{}
 		cachedByName[cached.Name] = cached
 	}
-
-	hostNames := make([]string, 0, len(hostSet))
-	for host := range hostSet {
-		hostNames = append(hostNames, host)
-	}
-	naturalSortStrings(hostNames)
 
 	hosts := make([]*Host, 0, len(hostNames))
 	for _, name := range hostNames {

@@ -20,35 +20,10 @@ import (
 func (m Model) loadHosts() tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
-		// Get hosts from jobs
-		jobHosts, err := db.ListUniqueHosts(database)
+		hosts, err := db.ListHostsForTUI(database)
 		if err != nil {
 			return hostsLoadedMsg{err: err}
 		}
-
-		// Get hosts from cache
-		cachedHosts, err := db.LoadAllCachedHosts(database)
-		if err != nil {
-			// If cache load fails, just use job hosts
-			return hostsLoadedMsg{hostNames: jobHosts, err: nil}
-		}
-
-		// Merge into unique set
-		hostSet := make(map[string]bool)
-		for _, h := range jobHosts {
-			hostSet[h] = true
-		}
-		for _, h := range cachedHosts {
-			hostSet[h.Name] = true
-		}
-
-		// Convert to sorted slice using natural ordering
-		var hosts []string
-		for h := range hostSet {
-			hosts = append(hosts, h)
-		}
-		naturalSortStrings(hosts)
-
 		return hostsLoadedMsg{hostNames: hosts, err: nil}
 	}
 }

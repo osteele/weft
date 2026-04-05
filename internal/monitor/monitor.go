@@ -596,31 +596,11 @@ func (m *Monitor) refreshJobs() {
 }
 
 func (m *Monitor) refreshHosts() {
-	jobHosts, err := db.ListUniqueHosts(m.db)
+	hosts, err := db.ListHostsForTUI(m.db)
 	if err != nil {
 		m.emit(Event{Type: EventHostsLoaded, Err: err})
 		return
 	}
-
-	cachedHosts, err := db.LoadAllCachedHosts(m.db)
-	if err != nil {
-		m.emit(Event{Type: EventHostsLoaded, HostNames: jobHosts})
-		return
-	}
-
-	hostSet := make(map[string]bool)
-	for _, h := range jobHosts {
-		hostSet[h] = true
-	}
-	for _, h := range cachedHosts {
-		hostSet[h.Name] = true
-	}
-
-	var hosts []string
-	for h := range hostSet {
-		hosts = append(hosts, h)
-	}
-	naturalSortStrings(hosts)
 
 	m.mu.Lock()
 	m.hosts = nil
@@ -667,6 +647,21 @@ func (m *Monitor) refreshHostInfo(hostName string) {
 		return // already refreshing this host
 	}
 	defer m.hostRefreshing.Delete(hostName)
+
+	if db.IsLaunchHost(hostName) {
+		hostStatus, err := ops.FetchLaunchHostStatusFromDB(m.db, hostName)
+		if err != nil {
+			offlineHost := &hostinfo.Host{
+				Name:   hostName,
+				Status: hostinfo.HostStatusOffline,
+				Error:  err.Error(),
+			}
+			m.updateHostInfo(offlineHost)
+			return
+		}
+		m.updateHostInfo(hostStatus.Host)
+		return
+	}
 
 	hostStatus, err := ops.TryFetchHostStatusCombined(m.db, hostName, queuerunner.StatusCommand(), 10*time.Second)
 	if err != nil && errors.Is(err, ssh.ErrPoolBusy) {
@@ -803,7 +798,7 @@ func (m *Monitor) requestSync(forceAll bool) {
 func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 	var result SyncResult
 
-	hosts, err := db.ListUniqueHosts(m.db)
+	hosts, err := db.ListHostsForTUI(m.db)
 	if err != nil {
 		m.emit(Event{Type: EventSyncCompleted, Err: err})
 		return result
@@ -813,6 +808,9 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 	activeJobsByHost := make(map[string][]*db.Job)
 	activeHost := make(map[string]bool)
 	for _, host := range hosts {
+		if db.IsLaunchHost(host) {
+			continue
+		}
 		jobs, err := db.ListActiveJobs(m.db, host)
 		if err != nil {
 			slog.Warn("failed to list active jobs", "component", "monitor", "host", host, "error", err)
@@ -849,6 +847,15 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 	}
 
 	for _, host := range hostsToSync {
+		if db.IsLaunchHost(host) {
+			now := time.Now()
+			m.mu.Lock()
+			m.lastHostSyncTimes[host] = now
+			m.hostSyncTimes[host] = now
+			m.mu.Unlock()
+			continue
+		}
+
 		hostSynced := false
 		syncOpts := ops.DefaultSyncOptions()
 		for _, job := range activeJobsByHost[host] {

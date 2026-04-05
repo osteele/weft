@@ -36,6 +36,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/util"
 	"github.com/osteele/weft/internal/workdir"
 	_ "modernc.org/sqlite"
 )
@@ -4062,6 +4063,71 @@ func ListUniqueHosts(db *sql.DB) ([]string, error) {
 		hosts = append(hosts, host)
 	}
 	return hosts, rows.Err()
+}
+
+// ListHostsForTUI returns host names for dashboard/monitor views.
+// It includes:
+// - inventory hosts from jobs and cached host info
+// - only active rental hosts (running/launching/grace launches)
+func ListHostsForTUI(database *sql.DB) ([]string, error) {
+	jobHosts, err := ListUniqueHosts(database)
+	if err != nil {
+		return nil, err
+	}
+
+	cachedHosts, err := LoadAllCachedHosts(database)
+	if err != nil {
+		cachedHosts = nil
+	}
+
+	runningLaunches, err := ListRunningLaunches(database)
+	if err != nil {
+		return nil, err
+	}
+	runningRentalHosts := make(map[string]struct{}, len(runningLaunches)*2)
+	for _, launch := range runningLaunches {
+		if launch == nil || launch.ID <= 0 {
+			continue
+		}
+		runningRentalHosts[LaunchHost(launch.ID)] = struct{}{}
+		if provider := strings.TrimSpace(strings.ToLower(launch.Provider)); provider != "" {
+			runningRentalHosts[provider+":"+strconv.FormatInt(launch.ID, 10)] = struct{}{}
+		}
+	}
+
+	hostSet := make(map[string]struct{}, len(jobHosts)+len(cachedHosts)+len(runningRentalHosts))
+	addHost := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if IsLaunchHost(name) {
+			if _, ok := runningRentalHosts[name]; !ok {
+				return
+			}
+		}
+		hostSet[name] = struct{}{}
+	}
+
+	for _, host := range jobHosts {
+		addHost(host)
+	}
+	for _, cached := range cachedHosts {
+		if cached == nil {
+			continue
+		}
+		addHost(cached.Name)
+	}
+	for host := range runningRentalHosts {
+		hostSet[host] = struct{}{}
+	}
+
+	hosts := make([]string, 0, len(hostSet))
+	for host := range hostSet {
+		hosts = append(hosts, host)
+	}
+	util.NaturalSortStrings(hosts)
+	return hosts, nil
 }
 
 // SearchJobs searches jobs by description or command
