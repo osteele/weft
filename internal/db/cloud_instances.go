@@ -1813,6 +1813,72 @@ func GetLaunchLiveState(database *sql.DB, launchID int64) (*LaunchLiveState, err
 	return &s, nil
 }
 
+// GetLaunchLiveStates returns cached ephemeral state for the specified launch IDs.
+func GetLaunchLiveStates(database *sql.DB, launchIDs []int64) (map[int64]*LaunchLiveState, error) {
+	result := make(map[int64]*LaunchLiveState, len(launchIDs))
+	if len(launchIDs) == 0 {
+		return result, nil
+	}
+
+	placeholders := make([]string, 0, len(launchIDs))
+	args := make([]any, 0, len(launchIDs))
+	for _, launchID := range launchIDs {
+		if launchID <= 0 {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, launchID)
+	}
+	if len(placeholders) == 0 {
+		return result, nil
+	}
+
+	query := `SELECT launch_id, instance_phase, bootstrap_stage,
+		heartbeat_json, heartbeat_ts, job_progress_pct, job_progress_id,
+		agent_version, phase_changed_at, updated_at
+		FROM launch_live_state
+		WHERE launch_id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var s LaunchLiveState
+		var phase, bootstrap, hbJSON, agentVer sql.NullString
+		var hbTS, progressID sql.NullInt64
+		var progressPct sql.NullInt64
+		var phaseChangedAt sql.NullInt64
+
+		if err := rows.Scan(&s.LaunchID, &phase, &bootstrap, &hbJSON, &hbTS,
+			&progressPct, &progressID, &agentVer, &phaseChangedAt, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+
+		s.InstancePhase = phase.String
+		s.BootstrapStage = bootstrap.String
+		s.HeartbeatJSON = hbJSON.String
+		s.HeartbeatTS = hbTS.Int64
+		if progressPct.Valid {
+			s.JobProgressPct = int(progressPct.Int64)
+		} else {
+			s.JobProgressPct = -1
+		}
+		s.JobProgressID = progressID.Int64
+		s.AgentVersion = agentVer.String
+		if phaseChangedAt.Valid {
+			s.PhaseChangedAt = &phaseChangedAt.Int64
+		}
+		copyState := s
+		result[s.LaunchID] = &copyState
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // DeleteLaunchLiveState removes the ephemeral state for a terminal instance.
 func DeleteLaunchLiveState(database *sql.DB, launchID int64) error {
 	_, err := database.Exec(`DELETE FROM launch_live_state WHERE launch_id = ?`, launchID)

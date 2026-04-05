@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -49,12 +50,16 @@ type listTUIModel struct {
 	autoLeaseOwner   string
 	autoLeaseScope   string
 	autoBlockReasons map[int64]string
+	launchLiveByID   map[int64]*db.LaunchLiveState
+	quickLaunching   bool
+	quickLaunchScope string
 	focused          bool
 }
 
 type listJobsLoadedMsg struct {
-	jobs []*db.Job
-	err  error
+	jobs           []*db.Job
+	launchLiveByID map[int64]*db.LaunchLiveState
+	err            error
 }
 
 type listSyncFinishedMsg struct {
@@ -84,6 +89,10 @@ type listAutoPilotDoneMsg struct {
 	anotherHolding bool
 	err            error
 }
+type listQuickLaunchDoneMsg struct {
+	instanceIDs []int64
+	err         error
+}
 
 var (
 	listTUITitleStyle    = lipgloss.NewStyle().Bold(true)
@@ -104,20 +113,21 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	}
 
 	model := listTUIModel{
-		database:        database,
-		args:            append([]string(nil), args...),
-		title:           title,
-		jobs:            jobs,
-		syncEnabled:     syncEnabled,
-		syncInProgress:  syncEnabled,
-		syncWorker:      sw,
-		ctx:             ctx,
-		cancel:          cancel,
-		groupedByStatus: groupedByStatus,
-		autoMode:        groupedByStatus && autoMode,
-		autoLeaseOwner:  fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
-		autoLeaseScope:  buildListAutoLeaseScope(title),
-		focused:         true,
+		database:         database,
+		args:             append([]string(nil), args...),
+		title:            title,
+		jobs:             jobs,
+		syncEnabled:      syncEnabled,
+		syncInProgress:   syncEnabled,
+		syncWorker:       sw,
+		ctx:              ctx,
+		cancel:           cancel,
+		groupedByStatus:  groupedByStatus,
+		autoMode:         groupedByStatus && autoMode,
+		autoLeaseOwner:   fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
+		autoLeaseScope:   buildListAutoLeaseScope(title),
+		quickLaunchScope: "list_quick_launch:" + buildListAutoLeaseScope(title),
+		focused:          true,
 	}
 
 	restore := logging.Suppress()
@@ -164,6 +174,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+			_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
 			if m.dbWatcher != nil {
 				_ = m.dbWatcher.Close()
 			}
@@ -208,6 +219,21 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMessage = "Auto-pilot OFF"
 				return m, nil
 			}
+		case "n":
+			if !m.groupedByStatus {
+				break
+			}
+			if m.quickLaunching {
+				m.statusMessage = "Launch already in progress..."
+				return m, nil
+			}
+			if !computeGroupedETA(m.groupedJobsWithAutoReasons(), m.launchLiveByID, time.Now()).HasQueued {
+				m.statusMessage = "No queued jobs to launch."
+				return m, nil
+			}
+			m.quickLaunching = true
+			m.statusMessage = "Launching new instance..."
+			return m, m.launchOneInstanceForQueue()
 		}
 		m.clampCursor()
 		m.adjustOffset()
@@ -227,6 +253,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.jobs = msg.jobs
+		m.launchLiveByID = msg.launchLiveByID
 		m.pruneAutoBlockReasons()
 		m.rebuildLayout()
 		m.clampCursor()
@@ -338,6 +365,19 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "Auto-pilot: monitoring"
 		}
 		return m, m.reloadJobs()
+
+	case listQuickLaunchDoneMsg:
+		m.quickLaunching = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Launch failed: %v", msg.err)
+			return m, nil
+		}
+		if len(msg.instanceIDs) == 0 {
+			m.statusMessage = "No new instance launched."
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Instance #%d launched", msg.instanceIDs[0])
+		return m, m.reloadJobs()
 	}
 
 	return m, nil
@@ -398,7 +438,8 @@ func (m listTUIModel) groupedView() string {
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
 	b.WriteString("\n")
 
-	body := renderJobListGroupedStatusPlain(m.groupedJobsWithAutoReasons(), m.width)
+	groupedJobs := m.groupedJobsWithAutoReasons()
+	body := renderJobListGroupedStatusPlainWithLiveState(groupedJobs, m.width, m.launchLiveByID)
 	body = strings.TrimSuffix(body, "\n")
 	if body == "" {
 		body = "None"
@@ -409,6 +450,10 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString("\n")
 	}
 
+	if etaLine := m.groupedETALine(groupedJobs); etaLine != "" {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
+		b.WriteString("\n")
+	}
 	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.groupedFooterText(), m.width)))
 	return b.String()
 }
@@ -426,6 +471,18 @@ func (m listTUIModel) groupedFooterText() string {
 		autoHint = "auto:ON"
 	}
 	return state + " a:toggle-auto " + autoHint + " q:quit"
+}
+
+func (m listTUIModel) groupedETALine(groupedJobs []*db.Job) string {
+	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
+	line := formatETALine(eta)
+	if line == "" {
+		return ""
+	}
+	if eta.HasQueued {
+		line += "  n:new instance"
+	}
+	return line
 }
 
 func (m listTUIModel) footerText(rows int) string {
@@ -507,7 +564,26 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 	args := append([]string(nil), m.args...)
 	return func() tea.Msg {
 		jobs, err := collectJobsForList(database, args)
-		return listJobsLoadedMsg{jobs: jobs, err: err}
+		if err != nil {
+			return listJobsLoadedMsg{jobs: jobs, err: err}
+		}
+		launchIDs := make([]int64, 0, len(jobs))
+		seen := make(map[int64]bool, len(jobs))
+		for _, job := range jobs {
+			if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+				continue
+			}
+			if seen[*job.LaunchID] {
+				continue
+			}
+			seen[*job.LaunchID] = true
+			launchIDs = append(launchIDs, *job.LaunchID)
+		}
+		launchLiveByID, liveErr := db.GetLaunchLiveStates(database, launchIDs)
+		if liveErr != nil {
+			launchLiveByID = map[int64]*db.LaunchLiveState{}
+		}
+		return listJobsLoadedMsg{jobs: jobs, launchLiveByID: launchLiveByID, err: nil}
 	}
 }
 
@@ -824,6 +900,97 @@ func summarizeRelaunchSkipEvent(kind, detail string, attemptNumber, maxAttempts 
 		return "max cloud attempts reached"
 	default:
 		return kind
+	}
+}
+
+func (m listTUIModel) launchOneInstanceForQueue() tea.Cmd {
+	database := m.database
+	scopeOwner := m.autoLeaseOwner
+	scope := m.quickLaunchScope
+	jobs := append([]*db.Job(nil), m.jobs...)
+
+	return func() tea.Msg {
+		acquired, err := db.AcquireAutoLease(database, scope, scopeOwner, listAutoLeaseTTL)
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
+		}
+		if !acquired {
+			return listQuickLaunchDoneMsg{err: fmt.Errorf("another TUI is launching for this scope")}
+		}
+		defer db.ReleaseAutoLease(database, scope, scopeOwner)
+
+		scoped := make(map[int64]struct{}, len(jobs))
+		for _, job := range jobs {
+			if job != nil {
+				scoped[job.ID] = struct{}{}
+			}
+		}
+		unplacedJobs, err := db.ListUnplacedJobs(database)
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
+		}
+		unplaced := make([]*db.Job, 0, len(unplacedJobs))
+		for _, job := range unplacedJobs {
+			if job == nil || (job.EffectiveStatus() != db.StatusQueued && job.EffectiveStatus() != db.StatusPendingPlacement) {
+				continue
+			}
+			if len(scoped) > 0 {
+				if _, ok := scoped[job.ID]; !ok {
+					continue
+				}
+			}
+			unplaced = append(unplaced, job)
+		}
+		if len(unplaced) == 0 {
+			return listQuickLaunchDoneMsg{err: fmt.Errorf("no queued jobs in this view")}
+		}
+
+		cfg, err := config.Load()
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
+		}
+		launches, err := db.ListRunningLaunches(database)
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
+		}
+		capacities := make([]campaign.InstanceCapacity, 0, len(launches))
+		for _, ci := range launches {
+			liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
+			if jobsErr != nil {
+				continue
+			}
+			if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(liveJobs)); ok {
+				capacities = append(capacities, cap)
+			}
+		}
+
+		plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
+		}
+		if len(plan.LaunchJobIDs) == 0 {
+			return listQuickLaunchDoneMsg{err: fmt.Errorf("queued jobs can be placed on existing instances")}
+		}
+		launchJobID := plan.LaunchJobIDs[0]
+		for _, jobID := range plan.LaunchJobIDs {
+			if jobID < launchJobID {
+				launchJobID = jobID
+			}
+		}
+
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, []int64{launchJobID}, "", false, true)
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
+		}
+		if result != nil && result.BlockedReason != "" {
+			return listQuickLaunchDoneMsg{err: errors.New(result.BlockedReason)}
+		}
+		if result == nil || len(result.InstanceIDs) == 0 {
+			return listQuickLaunchDoneMsg{err: fmt.Errorf("no compatible offer found")}
+		}
+
+		// Keep one-key behavior deterministic: launch only one additional instance.
+		return listQuickLaunchDoneMsg{instanceIDs: []int64{result.InstanceIDs[0]}}
 	}
 }
 
