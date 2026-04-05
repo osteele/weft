@@ -74,3 +74,25 @@ func TestFormatETAApprox(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatETALine_ShowsNewInstanceWithoutEstimateWhenNotBetter(t *testing.T) {
+	line := formatETALine(etaResult{
+		ETACurrent:     5 * time.Hour,
+		ETAWithNewInst: 5*time.Hour + 4*time.Minute,
+		HasQueued:      true,
+	})
+	if line != "ETA: ~5h  ·  with +1 instance" {
+		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h  ·  with +1 instance")
+	}
+}
+
+func TestFormatETALine_ShowsEstimateWhenBetter(t *testing.T) {
+	line := formatETALine(etaResult{
+		ETACurrent:     5 * time.Hour,
+		ETAWithNewInst: 4*time.Hour + 40*time.Minute,
+		HasQueued:      true,
+	})
+	if line != "ETA: ~5h  ·  with +1 instance: ~4h 40m" {
+		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h  ·  with +1 instance: ~4h 40m")
+	}
+}

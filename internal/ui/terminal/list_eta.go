@@ -118,8 +118,11 @@ func formatETALine(result etaResult) string {
 		return ""
 	}
 	line := "ETA: " + formatETAApprox(result.ETACurrent)
-	if result.ETAWithNewInst > 0 {
-		line += "  ·  with +1 instance: " + formatETAApprox(result.ETAWithNewInst)
+	if result.HasQueued {
+		line += "  ·  with +1 instance"
+		if result.ETAWithNewInst > 0 && result.ETAWithNewInst < result.ETACurrent {
+			line += ": " + formatETAApprox(result.ETAWithNewInst)
+		}
 	}
 	return line
 }

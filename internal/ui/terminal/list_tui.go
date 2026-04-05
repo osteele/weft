@@ -450,6 +450,9 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString("\n")
 	}
 
+	// Visually separate grouped job rows from ETA/actions footer lines.
+	b.WriteString("\n")
+
 	if etaLine := m.groupedETALine(groupedJobs); etaLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
 		b.WriteString("\n")
