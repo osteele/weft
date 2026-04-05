@@ -185,44 +185,50 @@ func initJobAttemptsSchema(db *sql.DB) error {
 func backfillJobAttempts(db *sql.DB) error {
 	// Step 1: Backfill historical attempts from job_runs (older archived attempts).
 	// Give each archived run an attempt_number based on archived_at ordering.
-	if _, err := db.Exec(`
-		INSERT INTO job_attempts (
-			job_id, attempt_number, host, launch_id, status, queued_at,
-			start_time, end_time, exit_code, error_message, failure_reason,
-			error_diagnosis, session_name, remote_id, remote_state, backend,
-			cost, placement_meta, job_metadata, observed_inputs
-		)
-		SELECT
-			jr.job_id,
-			jr.rn,
-			jr.host,
-			jr.cloud_instance_id,
-			jr.status,
-			NULL,
-			jr.start_time,
-			jr.end_time,
-			jr.exit_code,
-			jr.error_message,
-			jr.failure_reason,
-			jr.error_diagnosis,
-			jr.session_name,
-			jr.remote_id,
-			jr.remote_state,
-			jr.backend,
-			jr.cost,
-			jr.placement_meta,
-			jr.job_metadata,
-			NULL
-		FROM (
-			SELECT jr2.*,
-			       ROW_NUMBER() OVER (PARTITION BY jr2.job_id ORDER BY jr2.archived_at ASC) AS rn
-			FROM job_runs jr2
-		) jr
-		WHERE NOT EXISTS (
-			SELECT 1 FROM job_attempts ja WHERE ja.job_id = jr.job_id
-		)
-	`); err != nil {
-		return fmt.Errorf("backfill job_attempts from job_runs: %w", err)
+	hasJobRunsTable, err := tableSchemaContains(db, "job_runs", "create table")
+	if err != nil {
+		return fmt.Errorf("check job_runs schema: %w", err)
+	}
+	if hasJobRunsTable {
+		if _, err := db.Exec(`
+			INSERT INTO job_attempts (
+				job_id, attempt_number, host, launch_id, status, queued_at,
+				start_time, end_time, exit_code, error_message, failure_reason,
+				error_diagnosis, session_name, remote_id, remote_state, backend,
+				cost, placement_meta, job_metadata, observed_inputs
+			)
+			SELECT
+				jr.job_id,
+				jr.rn,
+				jr.host,
+				jr.cloud_instance_id,
+				jr.status,
+				NULL,
+				jr.start_time,
+				jr.end_time,
+				jr.exit_code,
+				jr.error_message,
+				jr.failure_reason,
+				jr.error_diagnosis,
+				jr.session_name,
+				jr.remote_id,
+				jr.remote_state,
+				jr.backend,
+				jr.cost,
+				jr.placement_meta,
+				jr.job_metadata,
+				NULL
+			FROM (
+				SELECT jr2.*,
+				       ROW_NUMBER() OVER (PARTITION BY jr2.job_id ORDER BY jr2.archived_at ASC) AS rn
+				FROM job_runs jr2
+			) jr
+			WHERE NOT EXISTS (
+				SELECT 1 FROM job_attempts ja WHERE ja.job_id = jr.job_id
+			)
+		`); err != nil {
+			return fmt.Errorf("backfill job_attempts from job_runs: %w", err)
+		}
 	}
 
 	// Step 2: Backfill the current attempt from the jobs table itself.
