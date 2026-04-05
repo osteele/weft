@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
@@ -18,7 +19,7 @@ func AcquireAutoLease(database *sql.DB, scope string, owner string, ttl time.Dur
 		expiresAt = now + 1
 	}
 
-	tx, err := database.BeginTx(nil, nil)
+	tx, err := database.BeginTx(context.Background(), nil)
 	if err != nil {
 		return false, err
 	}
