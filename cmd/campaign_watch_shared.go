@@ -21,6 +21,7 @@ func attemptRelaunchOrphanedJobs(
 	scopeJobIDs []int64,
 	scopeProject string,
 	restrictToReset bool,
+	includeFreshUnplaced bool,
 ) (*campaign.RelaunchResult, error) {
 	// Reset jobs on terminal instances so they become unplaced.
 	// The map tells RelaunchOrphanedJobs which jobs were just orphaned
@@ -43,19 +44,20 @@ func attemptRelaunchOrphanedJobs(
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
 	relaunchCfg := campaign.RelaunchConfig{
-		Clients:         clients,
-		R2Cfg:           r2Cfg,
-		LaunchOpts:      campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
-		MaxAttempts:     campaign.DefaultMaxCloudAttempts + extraAttempts,
-		SurvivalModel:   survivalModel,
-		MinSurvival:     campaignLaunchMinSurvival,
-		Database:        database,
-		PredictorConfig: &predCfg,
-		ResetJobs:       resetJobs,
-		RestrictToReset: restrictToReset,
-		ScopeJobIDs:     scopeJobIDs,
-		ScopeProject:    scopeProject,
-		SetupFactory:    campaign.OfferSetupOverheadFactory(database, overheadModel),
+		Clients:              clients,
+		R2Cfg:                r2Cfg,
+		LaunchOpts:           campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
+		MaxAttempts:          campaign.DefaultMaxCloudAttempts + extraAttempts,
+		SurvivalModel:        survivalModel,
+		MinSurvival:          campaignLaunchMinSurvival,
+		Database:             database,
+		PredictorConfig:      &predCfg,
+		ResetJobs:            resetJobs,
+		RestrictToReset:      restrictToReset,
+		IncludeFreshUnplaced: includeFreshUnplaced,
+		ScopeJobIDs:          scopeJobIDs,
+		ScopeProject:         scopeProject,
+		SetupFactory:         campaign.OfferSetupOverheadFactory(database, overheadModel),
 		RetryBudget: &campaign.RetryBudget{
 			FirstTimeLimit: cfg.RetryFirstTimeLimit(),
 			FirstCostCents: cfg.RetryFirstCostLimitCents(),

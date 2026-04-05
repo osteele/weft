@@ -691,7 +691,7 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
 	passStartedAt := time.Now().Unix()
-	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false)
+	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
 		return placed, 0, nil, err
 	}

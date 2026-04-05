@@ -453,11 +453,17 @@ func showJob(database *sql.DB, id int64) error {
 		fmt.Printf("Tags:         %s\n", strings.Join(tags, ", "))
 	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
-	fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
+	if job.StartTime > 0 {
+		fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
+	} else {
+		fmt.Printf("Start Time:   -\n")
+	}
 	if job.EndTime != nil {
 		fmt.Printf("End Time:     %s\n", time.Unix(*job.EndTime, 0).Format("2006-01-02 15:04:05"))
-		duration := *job.EndTime - job.StartTime
-		fmt.Printf("Duration:     %s\n", db.FormatDuration(duration))
+		if job.StartTime > 0 && *job.EndTime >= job.StartTime {
+			duration := *job.EndTime - job.StartTime
+			fmt.Printf("Duration:     %s\n", db.FormatDuration(duration))
+		}
 	}
 	if job.ExitCode != nil {
 		fmt.Printf("Exit Code:    %d\n", *job.ExitCode)

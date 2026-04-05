@@ -129,3 +129,24 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
 }
+
+func TestRenderJobListGroupedStatusPlainAt_ShowsRetriedTimingForUnplacedRetry(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	end := int64(4_940)
+	jobs := []*db.Job{
+		{
+			ID:          51,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "retry me",
+			QueuedAt:    4_000,
+			EndTime:     &end,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	want := "- 51 — proj retry me — retried 1m ago"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}

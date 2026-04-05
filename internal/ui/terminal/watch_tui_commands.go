@@ -39,7 +39,7 @@ func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 	retryBudgetMultipliers := m.retryBudgetMultiplier
 	scopeJobIDs := rentalScopedUnplacedJobIDs(m.unplacedJobs)
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts, retryBudgetMultipliers, scopeJobIDs, m.projectFilter, false)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts, retryBudgetMultipliers, scopeJobIDs, m.projectFilter, false, false)
 		if err != nil {
 			return retryResultMsg{err: err}
 		}
@@ -228,7 +228,7 @@ func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, stri
 	cfg := m.appConfig
 	scopeJobIDs := rentalScopedUnplacedJobIDs(m.unplacedJobs)
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, m.projectFilter, false)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, m.projectFilter, false, false)
 		if err != nil {
 			return autoLaunchDoneMsg{err: err}
 		}

@@ -135,6 +135,9 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 	if sectionKey == "running" && job.StartTime > 0 {
 		return "running " + shortRelativeTime(now.Unix()-job.StartTime)
 	}
+	if sectionKey == "unplaced" && job.EndTime != nil && *job.EndTime > 0 {
+		return "retried " + shortRelativeTime(now.Unix()-*job.EndTime)
+	}
 	placedAt := job.QueuedAt
 	if placedAt == 0 {
 		placedAt = job.CreatedAt

@@ -43,6 +43,9 @@ type RelaunchConfig struct {
 	// tier (first vs subsequent) for jobs that were orphaned from a specific
 	// failed instance. Used by watch-mode budget raise.
 	RetryBudgetMultiplierByFailedInstance map[int64]float64
+	// IncludeFreshUnplaced allows relaunching scoped unplaced jobs even when
+	// they have no prior cloud attempts and no rental tag.
+	IncludeFreshUnplaced bool
 }
 
 // RetryBudget defines hard retry-stop limits by retry tier.
@@ -145,7 +148,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			continue
 		}
 		count := facts.Count
-		if count == 0 && !j.HasTag(db.TagRental) {
+		if count == 0 && !j.HasTag(db.TagRental) && !cfg.IncludeFreshUnplaced {
 			continue
 		}
 		failedInstanceID := failedInstanceForJob(j.ID, facts.LastLaunch, cfg.ResetJobs)
