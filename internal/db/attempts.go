@@ -477,7 +477,9 @@ func createJobStatusView(db *sql.DB) error {
 				WHEN la.launch_id IS NOT NULL THEN
 					CASE
 						WHEN j.requested_status = 'queued'
-						     AND la.end_time IS NOT NULL THEN 'queued'
+						     AND la.end_time IS NOT NULL
+						     AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
+						     THEN 'queued'
 						WHEN la.end_time IS NOT NULL THEN
 							CASE
 								WHEN la.exit_code = 0 THEN 'completed'

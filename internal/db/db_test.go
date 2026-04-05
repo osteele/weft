@@ -1880,6 +1880,57 @@ func TestResetLaunchJobsClosesAttempts(t *testing.T) {
 	}
 }
 
+func TestJobStatusView_QueuedIntentKeepsFailedOutcomeForTerminalCloudAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+	if err != nil {
+		t.Fatalf("record unplaced: %v", err)
+	}
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:            LaunchStatusFailed,
+		TerminationReason: TerminationReasonJobFailure,
+		Provider:          "vastai",
+		GPUSpec:           "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+
+	if _, err := AssignJobHost(database, jobID, "cloud"); err != nil {
+		t.Fatalf("assign host: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set launch id: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("update queued->running: %v", err)
+	}
+
+	exitCode := 1
+	endTime := time.Now().Unix()
+	if err := CloseAttempt(database, jobID, StatusFailed, &exitCode, endTime); err != nil {
+		t.Fatalf("close attempt failed: %v", err)
+	}
+	if err := CloseLaunchAttempt(database, jobID, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("set cloud outcome failed: %v", err)
+	}
+
+	// Simulate queue intent after failure (e.g., reset/retry intent).
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusFailed)
+	}
+}
+
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
