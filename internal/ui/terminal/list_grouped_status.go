@@ -77,14 +77,14 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 			if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
 				parts = append(parts, timing)
 			}
-			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
-				parts = append(parts, blocked)
-			}
 			if suffix := groupedStatusOutcomeSuffix(job, section.title); suffix != "" {
 				parts = append(parts, suffix)
 			}
 			line := strings.Join(parts, " — ")
 			lines = append(lines, line)
+			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
+				lines = append(lines, "    "+blocked)
+			}
 		}
 		lines = append(lines, "")
 	}

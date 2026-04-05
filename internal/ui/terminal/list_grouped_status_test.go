@@ -124,9 +124,13 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	want := "- 50 — proj waiting — queued 5m ago — blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m"
-	if !strings.Contains(out, want) {
-		t.Fatalf("missing %q in output:\n%s", want, out)
+	lineWant := "- 50 — proj waiting — queued 5m ago"
+	if !strings.Contains(out, lineWant) {
+		t.Fatalf("missing %q in output:\n%s", lineWant, out)
+	}
+	blockedWant := "    blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m"
+	if !strings.Contains(out, blockedWant) {
+		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
 	}
 }
 
