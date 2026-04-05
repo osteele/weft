@@ -263,7 +263,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	// This is handled outside CheckInstance because it writes to the DB as a side effect.
 	if ci.Status == db.LaunchStatusRunning && r2Client != nil {
 		if hasActiveLaunchJobs(jobs, attemptOutcomes) {
-			slog.Warn("ignoring grace transition while launch has active jobs", "component", "reconcile", "instance", ci.ID)
+			slog.Debug("ignoring grace transition while launch has active jobs", "component", "reconcile", "instance", ci.ID)
 		} else if graceDetected := reconcileCheckR2GraceStatus(r2Client, ci, database); graceDetected {
 			syncJobCompletionsFromR2(database, r2Client, ci.ID)
 			return true, false // reconciled but not terminal (grace is not terminal)

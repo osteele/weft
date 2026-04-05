@@ -113,7 +113,7 @@ func SyncInstanceState(
 		// Detect grace transition
 		if s.InstancePhase == PhaseGrace && ci.Status == db.LaunchStatusRunning {
 			if hasActiveLaunchJobs(jobs, nil) {
-				slog.Warn("ignoring grace transition while launch has active jobs", "component", "sync", "instance", ci.ID)
+				slog.Debug("ignoring grace transition while launch has active jobs", "component", "sync", "instance", ci.ID)
 			} else if syncCheckR2GraceStatus(r2Client, ci, database) {
 				ci.Status = db.LaunchStatusGrace
 			}

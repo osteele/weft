@@ -3,11 +3,14 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
+	weftlogging "github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -150,6 +153,11 @@ func TestSyncInstanceState_DoesNotEnterGraceWithActiveJobs(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
+	prevLogger := slog.Default()
+	capture := weftlogging.NewCapturingHandler(slog.LevelWarn)
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
 		Status:  db.LaunchStatusRunning,
 		GPUSpec: "RTX_4090",
@@ -198,5 +206,10 @@ func TestSyncInstanceState_DoesNotEnterGraceWithActiveJobs(t *testing.T) {
 	}
 	if graceChecks != 0 {
 		t.Fatalf("grace status check calls = %d, want 0", graceChecks)
+	}
+	for _, message := range capture.Messages() {
+		if strings.Contains(message, "ignoring grace transition while launch has active jobs") {
+			t.Fatalf("unexpected warning-level grace-transition log: %q", message)
+		}
 	}
 }
