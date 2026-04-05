@@ -513,7 +513,7 @@ func dropLegacyRunsTable(db *sql.DB) error {
 
 func createIntegrityTriggers(db *sql.DB) error {
 	stmts := []string{
-		`CREATE TRIGGER artifacts_validate_job_run_ownership_on_insert
+		`CREATE TRIGGER IF NOT EXISTS artifacts_validate_job_run_ownership_on_insert
 		BEFORE INSERT ON artifacts
 		FOR EACH ROW
 		WHEN NEW.attempt_id IS NOT NULL
@@ -521,7 +521,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEGIN
 			SELECT RAISE(ABORT, 'artifacts.attempt_id must reference an attempt owned by artifacts.job_id');
 		END`,
-		`CREATE TRIGGER artifacts_validate_job_run_ownership_on_update
+		`CREATE TRIGGER IF NOT EXISTS artifacts_validate_job_run_ownership_on_update
 		BEFORE UPDATE OF job_id, attempt_id ON artifacts
 		FOR EACH ROW
 		WHEN NEW.attempt_id IS NOT NULL
@@ -529,7 +529,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEGIN
 			SELECT RAISE(ABORT, 'artifacts.attempt_id must reference an attempt owned by artifacts.job_id');
 		END`,
-		`CREATE TRIGGER job_timeseries_validate_job_run_ownership_on_insert
+		`CREATE TRIGGER IF NOT EXISTS job_timeseries_validate_job_run_ownership_on_insert
 		BEFORE INSERT ON job_timeseries
 		FOR EACH ROW
 		WHEN NEW.attempt_id IS NOT NULL
@@ -537,13 +537,71 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEGIN
 			SELECT RAISE(ABORT, 'job_timeseries.attempt_id must reference an attempt owned by job_timeseries.job_id');
 		END`,
-		`CREATE TRIGGER job_timeseries_validate_job_run_ownership_on_update
+		`CREATE TRIGGER IF NOT EXISTS job_timeseries_validate_job_run_ownership_on_update
 		BEFORE UPDATE OF job_id, attempt_id ON job_timeseries
 		FOR EACH ROW
 		WHEN NEW.attempt_id IS NOT NULL
 		     AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = NEW.attempt_id AND job_id = NEW.job_id)
 		BEGIN
 			SELECT RAISE(ABORT, 'job_timeseries.attempt_id must reference an attempt owned by job_timeseries.job_id');
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS launch_live_state_orphan_open_queued_attempts_on_insert
+		AFTER INSERT ON launch_live_state
+		FOR EACH ROW
+		WHEN lower(
+			CASE
+				WHEN instr(COALESCE(NEW.instance_phase, ''), ':') > 0
+					THEN substr(NEW.instance_phase, 1, instr(NEW.instance_phase, ':') - 1)
+				ELSE COALESCE(NEW.instance_phase, '')
+			END
+		) = 'destroying'
+		BEGIN
+			UPDATE jobs
+			   SET requested_status = 'queued'
+			 WHERE id IN (
+				SELECT job_id
+				  FROM job_attempts
+				 WHERE launch_id = NEW.launch_id
+				   AND end_time IS NULL
+				   AND status IN ('queued', 'pending_placement')
+			 );
+			UPDATE job_attempts
+			   SET status = 'canceled',
+			       end_time = strftime('%s','now'),
+			       cloud_outcome = 'orphaned',
+			       pending_status = NULL
+			 WHERE launch_id = NEW.launch_id
+			   AND end_time IS NULL
+			   AND status IN ('queued', 'pending_placement');
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS launch_live_state_orphan_open_queued_attempts_on_update
+		AFTER UPDATE OF instance_phase ON launch_live_state
+		FOR EACH ROW
+		WHEN lower(
+			CASE
+				WHEN instr(COALESCE(NEW.instance_phase, ''), ':') > 0
+					THEN substr(NEW.instance_phase, 1, instr(NEW.instance_phase, ':') - 1)
+				ELSE COALESCE(NEW.instance_phase, '')
+			END
+		) = 'destroying'
+		BEGIN
+			UPDATE jobs
+			   SET requested_status = 'queued'
+			 WHERE id IN (
+				SELECT job_id
+				  FROM job_attempts
+				 WHERE launch_id = NEW.launch_id
+				   AND end_time IS NULL
+				   AND status IN ('queued', 'pending_placement')
+			 );
+			UPDATE job_attempts
+			   SET status = 'canceled',
+			       end_time = strftime('%s','now'),
+			       cloud_outcome = 'orphaned',
+			       pending_status = NULL
+			 WHERE launch_id = NEW.launch_id
+			   AND end_time IS NULL
+			   AND status IN ('queued', 'pending_placement');
 		END`,
 	}
 	for _, stmt := range stmts {
@@ -576,6 +634,8 @@ func dropIntegrityViewsAndTriggers(db *sql.DB) error {
 		"artifacts_validate_job_run_ownership_on_update",
 		"job_timeseries_validate_job_run_ownership_on_insert",
 		"job_timeseries_validate_job_run_ownership_on_update",
+		"launch_live_state_orphan_open_queued_attempts_on_insert",
+		"launch_live_state_orphan_open_queued_attempts_on_update",
 	} {
 		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 			return err
@@ -1870,6 +1930,11 @@ func startupRepair(db *sql.DB) error {
 
 	// Recreate training_examples view (may have been dropped during table rebuild)
 	if err := createTrainingExamplesView(db); err != nil {
+		return err
+	}
+
+	// Ensure integrity triggers exist (including launch_live_state consistency guards).
+	if err := createIntegrityTriggers(db); err != nil {
 		return err
 	}
 

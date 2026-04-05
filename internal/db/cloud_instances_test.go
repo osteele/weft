@@ -1087,6 +1087,74 @@ func TestLaunchLiveState(t *testing.T) {
 	}
 }
 
+func TestLaunchLiveStateDestroyingOrphansQueuedAttempts(t *testing.T) {
+	database := setupTestDB(t)
+
+	ci := &Launch{Status: LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX3090"}
+	instanceID, err := CreateLaunch(database, ci)
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = 1`, StatusQueued); err != nil {
+		t.Fatalf("set requested status: %v", err)
+	}
+	if err := SetJobLaunchID(database, 1, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	var openBefore int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = 1 AND launch_id = ? AND end_time IS NULL`, instanceID).Scan(&openBefore); err != nil {
+		t.Fatalf("count open attempts before: %v", err)
+	}
+	if openBefore != 1 {
+		t.Fatalf("open attempts before = %d, want 1", openBefore)
+	}
+
+	if _, err := UpsertLaunchLiveState(database, LaunchLiveState{
+		LaunchID:      instanceID,
+		InstancePhase: "destroying",
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		var req sql.NullString
+		var latestOutcome sql.NullString
+		_ = database.QueryRow(`SELECT requested_status FROM jobs WHERE id = 1`).Scan(&req)
+		_ = database.QueryRow(`SELECT cloud_outcome FROM job_attempts WHERE job_id = 1 ORDER BY attempt_number DESC LIMIT 1`).Scan(&latestOutcome)
+		t.Fatalf("job status = %q, want %q (requested_status=%q latest_outcome=%q)", job.Status, StatusQueued, req.String, latestOutcome.String)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch_id = %v, want nil", *job.LaunchID)
+	}
+
+	var closedStatus, closedOutcome string
+	var closedEnd sql.NullInt64
+	if err := database.QueryRow(`
+		SELECT status, COALESCE(cloud_outcome, ''), end_time
+		FROM job_attempts
+		WHERE job_id = 1
+		ORDER BY attempt_number DESC
+		LIMIT 1`).Scan(&closedStatus, &closedOutcome, &closedEnd); err != nil {
+		t.Fatalf("read latest attempt: %v", err)
+	}
+	if closedStatus != StatusCanceled {
+		t.Fatalf("latest attempt status = %q, want %q", closedStatus, StatusCanceled)
+	}
+	if closedOutcome != AttemptOutcomeOrphaned {
+		t.Fatalf("latest attempt outcome = %q, want %q", closedOutcome, AttemptOutcomeOrphaned)
+	}
+	if !closedEnd.Valid || closedEnd.Int64 == 0 {
+		t.Fatal("latest attempt end_time should be set")
+	}
+}
+
 func TestSetJobLaunchID_NoOpenAttempt(t *testing.T) {
 	database := setupTestDB(t)
 
