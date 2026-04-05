@@ -101,6 +101,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 		}},
 		0,
 		nil,
+		defaultPlanOptions(),
 	)
 
 	plan, ok := plans[bidding.StrategyFast.Profile().ID]
@@ -175,6 +176,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_MergedPreferredUsesMergedCandi
 		}},
 		0,
 		nil,
+		defaultPlanOptions(),
 	)
 
 	plan, ok := plans[bidding.StrategyCheap.Profile().ID]

@@ -149,45 +149,65 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 func (m watchModel) autoPlaceUnplacedJobs() (tea.Cmd, string, map[int64]string, bool) {
 	reasonsByJob := map[int64]string{}
 	capacities := m.buildInstanceCapacities()
+	queued := make([]*db.Job, 0, len(m.unplacedJobs))
+	for _, job := range m.unplacedJobs {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued {
+			queued = append(queued, job)
+		}
+	}
+	if len(queued) == 0 {
+		return nil, "", reasonsByJob, false
+	}
 	if len(capacities) == 0 {
-		for _, job := range m.unplacedJobs {
-			if job != nil && job.EffectiveStatus() == db.StatusQueued {
-				reasonsByJob[job.ID] = "auto-place: no active reusable instances"
-			}
+		for _, job := range queued {
+			reasonsByJob[job.ID] = "auto-place: no active reusable instances"
 		}
 		return nil, "auto-place: no active reusable instances", reasonsByJob, false
 	}
-	hasPlaceable := false
 
-	// Find the first unplaced job that can be placed
-	for _, job := range m.unplacedJobs {
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
-			continue
+	plan, err := buildAutoPlacementPlan(m.database, m.appConfig, queued, capacities)
+	if err != nil {
+		for _, job := range queued {
+			reasonsByJob[job.ID] = "auto-place: planner error"
 		}
-		ranked := campaign.RankForJob(job, capacities)
-		if len(ranked) == 0 {
-			reasonsByJob[job.ID] = autoNoCompatibleReason(job, capacities)
-			continue
-		}
-		hasPlaceable = true
-		best := ranked[0]
-		jobID := job.ID
-		instanceID := best.Instance.ID
-		ctx := m.ctx
-		database := m.database
-		r2Client := m.r2Client
-		return func() tea.Msg {
-			job, err := db.GetJobByID(database, jobID)
-			if err != nil || job == nil {
-				return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %d: %w", jobID, err)}
-			}
-			if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
-				return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
-			}
-			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID}
-		}, "", reasonsByJob, true
+		return nil, fmt.Sprintf("auto-place: planner error: %v", err), reasonsByJob, false
 	}
-	return nil, "auto-place: no compatible active instances", reasonsByJob, hasPlaceable
+	for jobID, reason := range plan.BlockedReasons {
+		if reason != "" {
+			reasonsByJob[jobID] = "auto-place: " + reason
+		}
+	}
+	if len(plan.ReuseAssignments) == 0 {
+		if len(plan.LaunchJobIDs) > 0 {
+			return nil, "auto-place: no reusable match (launch candidates available)", reasonsByJob, false
+		}
+		for _, job := range queued {
+			if _, ok := reasonsByJob[job.ID]; !ok {
+				reasonsByJob[job.ID] = autoNoCompatibleReason(job, capacities)
+			}
+		}
+		return nil, "auto-place: no compatible active instances", reasonsByJob, false
+	}
+
+	assignment := plan.ReuseAssignments[0]
+	if assignment.Job == nil || assignment.Instance.Instance == nil {
+		return nil, "auto-place: planner produced invalid assignment", reasonsByJob, false
+	}
+	jobID := assignment.Job.ID
+	instanceID := assignment.Instance.Instance.ID
+	ctx := m.ctx
+	database := m.database
+	r2Client := m.r2Client
+	return func() tea.Msg {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil || job == nil {
+			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+		}
+		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
+			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
+		}
+		return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID}
+	}, "", reasonsByJob, true
 }
 
 // autoLaunchForUnplacedJobs launches new instances for unplaced rental jobs.
@@ -227,8 +247,19 @@ func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, stri
 	database := m.database
 	cfg := m.appConfig
 	scopeJobIDs := rentalScopedUnplacedJobIDs(m.unplacedJobs)
+	planScope := make([]*db.Job, 0, len(m.unplacedJobs))
+	for _, job := range m.unplacedJobs {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued && !job.HasTag(db.TagInventory) {
+			planScope = append(planScope, job)
+		}
+	}
+	capacities := m.buildInstanceCapacities()
+	plan, planErr := buildAutoPlacementPlan(database, cfg, planScope, capacities)
+	if planErr == nil && len(plan.LaunchJobIDs) > 0 {
+		scopeJobIDs = append([]int64(nil), plan.LaunchJobIDs...)
+	}
 	return func() tea.Msg {
-		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, m.projectFilter, false, false)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, m.projectFilter, false, true)
 		if err != nil {
 			return autoLaunchDoneMsg{err: err}
 		}

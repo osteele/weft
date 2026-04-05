@@ -275,6 +275,7 @@ func BuildProfilePlansWithProgress(
 		defaultProfilePlanSpecs(profiles),
 		minSurvival,
 		onProgress,
+		defaultPlanOptions(),
 	), splitRaw
 }
 
@@ -321,7 +322,7 @@ func BuildProfilePlansFromSplitRawWithProgress(
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
-	return BuildProfilePlansFromSplitRawWithPlanSpecs(
+	return BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 		database,
 		clients,
 		splitGroups,
@@ -333,6 +334,7 @@ func BuildProfilePlansFromSplitRawWithProgress(
 		defaultProfilePlanSpecs(profiles),
 		minSurvival,
 		onProgress,
+		defaultPlanOptions(),
 	)
 }
 
@@ -351,6 +353,39 @@ func BuildProfilePlansFromSplitRawWithPlanSpecs(
 	specs []ProfilePlanSpec,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
+) map[string]StrategyPlan {
+	return BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
+		database,
+		clients,
+		splitGroups,
+		splitRaw,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		specs,
+		minSurvival,
+		onProgress,
+		defaultPlanOptions(),
+	)
+}
+
+// BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions builds reusable/new-instance
+// launch plans from pre-fetched split-group raw offers using explicit
+// per-profile candidate search modes and score options.
+func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
+	database *sql.DB,
+	clients []cloud.Client,
+	splitGroups []InstanceGroup,
+	splitRaw []GroupRawOffers,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	specs []ProfilePlanSpec,
+	minSurvival float64,
+	onProgress PlanProgressFunc,
+	options PlanOptions,
 ) map[string]StrategyPlan {
 	var offerSession *offerSearchSession
 	switch {
@@ -380,6 +415,7 @@ func BuildProfilePlansFromSplitRawWithPlanSpecs(
 		specs,
 		minSurvival,
 		onProgress,
+		options,
 	)
 }
 
@@ -395,6 +431,7 @@ func buildProfilePlansFromSplitRawWithSession(
 	specs []ProfilePlanSpec,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
+	options PlanOptions,
 ) map[string]StrategyPlan {
 	plans := make(map[string]StrategyPlan, len(specs))
 	if len(splitGroups) == 0 {
@@ -411,7 +448,7 @@ func buildProfilePlansFromSplitRawWithSession(
 		return plans
 	}
 
-	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival)
+	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival, options)
 	reportPlanProgress(onProgress, "Estimating raw-offer runtimes", fmt.Sprintf("%d direct offer(s)", countRawOffers(splitRaw)), 0, 0)
 	splitEval := evaluator.evaluateRawOffers(splitRaw)
 
@@ -503,6 +540,7 @@ func buildStrategyPlanForSplitRaw(
 		reusable,
 		evaluator,
 		profile,
+		evaluator.opportunityCostWeight,
 		onProgress,
 		progressLabel,
 	)
@@ -1419,6 +1457,7 @@ func chooseReuseGroups(
 	reusable []InstanceCapacity,
 	evaluator *planEvaluator,
 	profile bidding.ScoreProfile,
+	opportunityWeight float64,
 	onProgress PlanProgressFunc,
 	progressLabel string,
 ) []reuseGroupDecision {
@@ -1481,6 +1520,22 @@ func chooseReuseGroups(
 		for result := range results {
 			if !result.ok {
 				continue
+			}
+			penalty := reuseOpportunityPenaltyUSD(
+				group,
+				working[result.idx],
+				splitGroups,
+				working,
+				opportunityWeight,
+			)
+			if penalty > 0 {
+				result.est.TotalCost += penalty
+				if result.est.RiskAdjustedCost > 0 {
+					result.est.RiskAdjustedCost += penalty
+				} else {
+					result.est.RiskAdjustedCost = result.est.TotalCost
+				}
+				result.score = ScoreEstimatesWithProfile([]CostEstimate{result.est}, profile)
 			}
 			if result.score < bestScore {
 				bestScore = result.score
@@ -1579,6 +1634,60 @@ func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap Instance
 		score += math.Min(float64(cap.DiskFreeGB), 200) * 0.05
 	}
 	return score
+}
+
+func reuseOpportunityPenaltyUSD(
+	group InstanceGroup,
+	cap InstanceCapacity,
+	allGroups []InstanceGroup,
+	working []InstanceCapacity,
+	weight float64,
+) float64 {
+	if weight <= 0 || cap.Instance == nil || len(allGroups) == 0 {
+		return 0
+	}
+
+	pressure := 0.0
+	for _, other := range allGroups {
+		if len(other.Jobs) == 0 {
+			continue
+		}
+		// Penalize taking capacity from jobs that are at least as demanding.
+		if other.GPUMemGB < group.GPUMemGB {
+			continue
+		}
+		if !quickReuseCompatible(other, cap) {
+			continue
+		}
+		compatibleSupply := 0
+		for _, candidate := range working {
+			if quickReuseCompatible(other, candidate) {
+				compatibleSupply++
+			}
+		}
+		if compatibleSupply == 0 {
+			continue
+		}
+		demand := float64(len(other.Jobs))
+		if demand < 1 {
+			demand = 1
+		}
+		pressure += demand / float64(compatibleSupply)
+	}
+	if pressure == 0 {
+		return 0
+	}
+
+	basePrice := float64(cap.Instance.CostPerHourCents) / 100.0
+	if basePrice <= 0 {
+		// Grace instances are "free" now but still consume scarce capacity.
+		basePrice = 0.02 * float64(max(1, cap.Instance.GPUMemGB))
+	}
+	groupMem := max(1, group.GPUMemGB)
+	headroom := float64(max(0, cap.Instance.GPUMemGB-groupMem)) / float64(groupMem)
+	memFactor := 1.0 + headroom
+
+	return weight * pressure * basePrice * memFactor
 }
 
 func reuseEstimateWorkerLimit(total int) int {
@@ -1953,7 +2062,7 @@ func BestCandidateForProfileWithProgress(
 	onProgress PlanProgressFunc,
 	progressLabel string,
 ) CandidateResult {
-	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival)
+	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival, defaultPlanOptions())
 	return bestCandidateForProfileEvaluations(
 		evaluator,
 		evaluator.evaluateCandidateGroupings(candidates),

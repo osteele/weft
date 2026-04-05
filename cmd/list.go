@@ -114,6 +114,7 @@ func addListFlags(cmd *cobra.Command) {
 	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	cmd.Flags().BoolVarP(&listWatch, "watch", "w", false, "Watch mode: show live-updating TUI or poll for changes (same as 'weft job watch')")
+	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start watch mode with auto-pilot enabled (grouped status views)")
 	cmd.Flags().StringVar(&listGroupBy, "group-by", "", `Group output: "status"`)
 }
 

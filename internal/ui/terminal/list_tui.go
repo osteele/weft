@@ -652,15 +652,24 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
+	plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	blockedReasons := map[int64]string{}
+	for jobID, reason := range plan.BlockedReasons {
+		if strings.TrimSpace(reason) != "" {
+			blockedReasons[jobID] = reason
+		}
+	}
+
 	placed := 0
-	for _, job := range unplaced {
-		ranked := campaign.RankForJob(job, capacities)
-		if len(ranked) == 0 {
+	for _, assignment := range plan.ReuseAssignments {
+		if assignment.Job == nil || assignment.Instance.Instance == nil {
 			continue
 		}
-		best := ranked[0]
-		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, best.Instance.ID, []*db.Job{job}); err != nil {
-			return placed, 0, nil, err
+		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
+			return placed, 0, blockedReasons, err
 		}
 		placed++
 	}
@@ -670,6 +679,10 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		return placed, 0, nil, err
 	}
 	rentalScope := make([]int64, 0, len(remaining))
+	launchScope := make(map[int64]struct{}, len(plan.LaunchJobIDs))
+	for _, jobID := range plan.LaunchJobIDs {
+		launchScope[jobID] = struct{}{}
+	}
 	remainingByID := make(map[int64]*db.Job, len(remaining))
 	for _, job := range remaining {
 		if job != nil {
@@ -683,10 +696,17 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 				continue
 			}
 		}
-		rentalScope = append(rentalScope, job.ID)
+		if len(launchScope) == 0 {
+			rentalScope = append(rentalScope, job.ID)
+			continue
+		}
+		// Restrict auto-launch to planner-approved launch candidates.
+		if _, ok := launchScope[job.ID]; ok {
+			rentalScope = append(rentalScope, job.ID)
+		}
 	}
 	if len(rentalScope) == 0 {
-		return placed, 0, nil, nil
+		return placed, 0, blockedReasons, nil
 	}
 
 	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
@@ -695,7 +715,6 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		return placed, 0, nil, err
 	}
-	blockedReasons := make(map[int64]string)
 	if result == nil {
 		return placed, 0, blockedReasons, nil
 	}

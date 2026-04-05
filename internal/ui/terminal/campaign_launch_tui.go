@@ -734,7 +734,8 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 				}
 			}
 		}
-		plans := campaign.BuildProfilePlansFromSplitRawWithPlanSpecs(
+		planOptions := campaign.AutoPlannerOptions(m.appConfig)
+		plans := campaign.BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 			database,
 			clients,
 			groups,
@@ -746,6 +747,7 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 			specs,
 			minSurvival,
 			onProgress,
+			planOptions,
 		)
 		options := campaign.BuildParetoTradeoffOptions(plans)
 		return profilePlansLoadedMsg{
