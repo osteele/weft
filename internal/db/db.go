@@ -901,7 +901,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 var dbPath string
 
@@ -1170,7 +1170,6 @@ func initSchema(db *sql.DB) error {
 		sha256 TEXT,
 		created_at INTEGER NOT NULL
 	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_job_name_path ON artifacts(job_id, name, path);
 	CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id);
 	`
 	if _, err := db.Exec(artifactsSchema); err != nil {
@@ -1189,6 +1188,9 @@ func initSchema(db *sql.DB) error {
 	db.Exec(`DROP INDEX IF EXISTS idx_artifacts_run_name_path`)
 	db.Exec(`DROP INDEX IF EXISTS idx_artifacts_job_name_path_legacy`)
 	db.Exec(`DROP INDEX IF EXISTS idx_artifacts_run`)
+	if err := dedupeArtifactsForUniqueIndexes(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_job_name_path_legacy ON artifacts(job_id, name, path) WHERE attempt_id IS NULL`); err != nil {
 		return err
 	}
@@ -1802,6 +1804,36 @@ func initSchema(db *sql.DB) error {
 	// Mark schema as current so subsequent opens skip migrations.
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
 		return fmt.Errorf("set schema version: %w", err)
+	}
+	return nil
+}
+
+// dedupeArtifactsForUniqueIndexes removes duplicate artifact rows that would
+// violate the partial unique indexes on legacy and attempt-scoped artifact keys.
+// Keep the newest row (highest id) for each duplicate key.
+func dedupeArtifactsForUniqueIndexes(db *sql.DB) error {
+	queries := []string{
+		`DELETE FROM artifacts
+		 WHERE attempt_id IS NULL
+		   AND id NOT IN (
+		     SELECT MAX(id)
+		     FROM artifacts
+		     WHERE attempt_id IS NULL
+		     GROUP BY job_id, name, path
+		   )`,
+		`DELETE FROM artifacts
+		 WHERE attempt_id IS NOT NULL
+		   AND id NOT IN (
+		     SELECT MAX(id)
+		     FROM artifacts
+		     WHERE attempt_id IS NOT NULL
+		     GROUP BY attempt_id, name, path
+		   )`,
+	}
+	for _, q := range queries {
+		if _, err := db.Exec(q); err != nil {
+			return err
+		}
 	}
 	return nil
 }

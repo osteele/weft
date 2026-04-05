@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -35,6 +36,15 @@ func AcquireAutoLease(database *sql.DB, scope string, owner string, ttl time.Dur
 		}
 	case errors.Is(err, sql.ErrNoRows):
 		// No current owner.
+	case isNoSuchTable(err):
+		// Mixed-version DB: best-effort schema repair, then fail open if unavailable.
+		if ensureErr := ensureAutoLeasesTable(database); ensureErr != nil {
+			if shouldFailOpenLease(ensureErr) {
+				return true, nil
+			}
+			return false, ensureErr
+		}
+		return AcquireAutoLease(database, scope, owner, ttl)
 	default:
 		return false, err
 	}
@@ -47,6 +57,15 @@ func AcquireAutoLease(database *sql.DB, scope string, owner string, ttl time.Dur
 			expires_at = excluded.expires_at,
 			updated_at = excluded.updated_at
 	`, scope, owner, expiresAt, now); err != nil {
+		if isNoSuchTable(err) {
+			if ensureErr := ensureAutoLeasesTable(database); ensureErr != nil {
+				if shouldFailOpenLease(ensureErr) {
+					return true, nil
+				}
+				return false, ensureErr
+			}
+			return AcquireAutoLease(database, scope, owner, ttl)
+		}
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -61,5 +80,29 @@ func ReleaseAutoLease(database *sql.DB, scope string, owner string) error {
 		return nil
 	}
 	_, err := database.Exec(`DELETE FROM auto_leases WHERE scope = ? AND owner = ?`, scope, owner)
+	if isNoSuchTable(err) {
+		return nil
+	}
 	return err
+}
+
+func ensureAutoLeasesTable(database *sql.DB) error {
+	_, err := database.Exec(`
+		CREATE TABLE IF NOT EXISTS auto_leases (
+			scope TEXT PRIMARY KEY,
+			owner TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_auto_leases_expires ON auto_leases(expires_at);
+	`)
+	return err
+}
+
+func shouldFailOpenLease(err error) bool {
+	if err == nil {
+		return false
+	}
+	e := strings.ToLower(err.Error())
+	return strings.Contains(e, "readonly") || strings.Contains(e, "read-only")
 }

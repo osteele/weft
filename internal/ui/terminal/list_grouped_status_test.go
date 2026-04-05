@@ -109,3 +109,23 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 		}
 	}
 }
+
+func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:                 50,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "waiting",
+			QueuedAt:           4_700,
+			QueueBlockedReason: "first retry budget exceeded: elapsed 1h2m >= limit 45m",
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	want := "- 50 — proj waiting — queued 5m ago — blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}

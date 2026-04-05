@@ -29,6 +29,8 @@ type HostSyncOptions struct {
 	Timeout      time.Duration
 	SkipSamples  bool
 	NoQueueStart bool
+	// Mode controls which sync work to perform. Zero value uses full behavior.
+	Mode SyncMode
 	// UseBatchSync uses batched SSH calls for queue-runner jobs (faster for many jobs).
 	UseBatchSync bool
 	// Logger for sync messages. If nil, uses slog.Default().
@@ -36,11 +38,27 @@ type HostSyncOptions struct {
 	Logger *slog.Logger
 }
 
+// SyncMode controls which portions of host sync execute.
+type SyncMode string
+
+const (
+	SyncModeFull   SyncMode = "full"
+	SyncModeStatus SyncMode = "status"
+	SyncModeRepair SyncMode = "repair"
+)
+
 func (o HostSyncOptions) logger() *slog.Logger {
 	if o.Logger != nil {
 		return o.Logger
 	}
 	return slog.Default()
+}
+
+func (o HostSyncOptions) mode() SyncMode {
+	if o.Mode == "" {
+		return SyncModeFull
+	}
+	return o.Mode
 }
 
 // HostSyncResult contains the outcome of syncing all jobs on a host.
@@ -63,6 +81,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	var result HostSyncResult
 	syncOpts := SyncOptions{Timeout: opts.Timeout, SkipSamples: opts.SkipSamples}
 	syncLog := opts.logger()
+	mode := opts.mode()
 	seenJobs := make(map[int64]bool)
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
@@ -74,134 +93,137 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		result.HostContacted = true
 	}
 
-	// Step 1: Sync active jobs
-	activeJobs, err := db.ListActiveJobs(database, host)
-	if err != nil {
-		return result, err
-	}
+	var activeJobs []*db.Job
+	if mode != SyncModeRepair {
+		// Step 1: Sync active jobs
+		activeJobs, err = db.ListActiveJobs(database, host)
+		if err != nil {
+			return result, err
+		}
 
-	if opts.UseBatchSync {
-		// Batch mode: separate queue-runner and tmux jobs.
-		// Jobs with PendingStatus need reconciliation, not batch sync,
-		// so they go through SyncAndReconcile to apply pending operations.
-		var queueRunnerJobs, tmuxJobs []*db.Job
-		for _, job := range activeJobs {
-			seenJobs[job.ID] = true
-			if job.PendingStatus != nil {
-				res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
-				if err != nil {
-					syncLog.Debug("failed to reconcile job", "job_id", job.ID, "host", host, "error", err)
-					continue
+		if opts.UseBatchSync {
+			// Batch mode: separate queue-runner and tmux jobs.
+			// Jobs with PendingStatus need reconciliation, not batch sync,
+			// so they go through SyncAndReconcile to apply pending operations.
+			var queueRunnerJobs, tmuxJobs []*db.Job
+			for _, job := range activeJobs {
+				seenJobs[job.ID] = true
+				if job.PendingStatus != nil {
+					res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
+					if err != nil {
+						syncLog.Debug("failed to reconcile job", "job_id", job.ID, "host", host, "error", err)
+						continue
+					}
+					if res != nil {
+						result.HostContacted = true
+						result.Updated++
+					}
+				} else if job.UsesQueueRunner() {
+					queueRunnerJobs = append(queueRunnerJobs, job)
+				} else {
+					tmuxJobs = append(tmuxJobs, job)
 				}
-				if res != nil {
+			}
+			if len(queueRunnerJobs) > 0 {
+				updatedCount, err := BatchSyncQueueRunnerJobs(database, host, queueRunnerJobs, timeout)
+				if err != nil {
+					syncLog.Debug("batch sync failed", "host", host, "error", err)
+				} else {
+					result.Updated += updatedCount
 					result.HostContacted = true
-					result.Updated++
 				}
-			} else if job.UsesQueueRunner() {
-				queueRunnerJobs = append(queueRunnerJobs, job)
-			} else {
-				tmuxJobs = append(tmuxJobs, job)
+				// Don't fail entire sync for batch error
 			}
-		}
-		if len(queueRunnerJobs) > 0 {
-			updatedCount, err := BatchSyncQueueRunnerJobs(database, host, queueRunnerJobs, timeout)
-			if err != nil {
-				syncLog.Debug("batch sync failed", "host", host, "error", err)
-			} else {
-				result.Updated += updatedCount
-				result.HostContacted = true
-			}
-			// Don't fail entire sync for batch error
-		}
-		for _, job := range tmuxJobs {
-			syncResult, err := SyncJob(database, job, syncOpts)
-			if err != nil {
-				syncLog.Debug("failed to sync job", "job_id", job.ID, "host", host, "error", err)
-				continue
-			}
-			if syncResult.HostContacted {
-				result.HostContacted = true
-			}
-			if syncResult.Updated {
-				result.Updated++
-			}
-		}
-	} else {
-		// Full mode: sync each job individually, using SyncAndReconcile for pending ops
-		consecutiveFailures := 0
-		for _, job := range activeJobs {
-			seenJobs[job.ID] = true
-			if job.PendingStatus != nil {
-				_, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
-				if err != nil {
-					syncLog.Debug("failed to reconcile job", "job_id", job.ID, "host", host, "error", err)
-					continue
-				}
-				result.HostContacted = true
-				result.Updated++
-				consecutiveFailures = 0
-			} else {
+			for _, job := range tmuxJobs {
 				syncResult, err := SyncJob(database, job, syncOpts)
 				if err != nil {
-					return result, err
+					syncLog.Debug("failed to sync job", "job_id", job.ID, "host", host, "error", err)
+					continue
 				}
 				if syncResult.HostContacted {
 					result.HostContacted = true
-					consecutiveFailures = 0
-				} else {
-					consecutiveFailures++
-					// If we've never contacted the host and have consecutive failures,
-					// the host is likely unreachable — bail out early
-					if !result.HostContacted && consecutiveFailures >= 2 {
-						return result, nil
-					}
 				}
 				if syncResult.Updated {
 					result.Updated++
 				}
 			}
-		}
-	}
-
-	// Ensure locally-queued jobs exist on the remote queue.
-	// This catches jobs that were recorded locally while the host was
-	// unreachable, or that the batch status path couldn't detect.
-	// Runs regardless of HostContacted so brand-new jobs with no other
-	// active jobs on the host can still be pushed.
-	{
-		ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout, syncLog)
-		result.Updated += ensured
-		if contacted {
-			result.HostContacted = true
-		}
-		if err != nil {
-			if !ssh.IsConnectionError(err.Error()) {
-				result.QueueDispatchError = err.Error()
-				syncLog.Debug("failed to dispatch queued jobs", "host", host, "error", err)
+		} else {
+			// Full mode: sync each job individually, using SyncAndReconcile for pending ops
+			consecutiveFailures := 0
+			for _, job := range activeJobs {
+				seenJobs[job.ID] = true
+				if job.PendingStatus != nil {
+					_, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
+					if err != nil {
+						syncLog.Debug("failed to reconcile job", "job_id", job.ID, "host", host, "error", err)
+						continue
+					}
+					result.HostContacted = true
+					result.Updated++
+					consecutiveFailures = 0
+				} else {
+					syncResult, err := SyncJob(database, job, syncOpts)
+					if err != nil {
+						return result, err
+					}
+					if syncResult.HostContacted {
+						result.HostContacted = true
+						consecutiveFailures = 0
+					} else {
+						consecutiveFailures++
+						// If we've never contacted the host and have consecutive failures,
+						// the host is likely unreachable — bail out early
+						if !result.HostContacted && consecutiveFailures >= 2 {
+							return result, nil
+						}
+					}
+					if syncResult.Updated {
+						result.Updated++
+					}
+				}
 			}
 		}
-	}
 
-	// Step 2: Reconcile jobs with pending operations (kill, cancel, draft→queued, etc.)
-	// This runs before the host-contacted guard so that draft→queued transitions
-	// (which have no active jobs) can contact the host and proceed.
-	pendingJobs, err := db.ListJobsPendingReconciliation(database, host)
-	if err != nil {
-		return result, err
-	}
-	for _, job := range pendingJobs {
-		if seenJobs[job.ID] {
-			continue
+		// Ensure locally-queued jobs exist on the remote queue.
+		// This catches jobs that were recorded locally while the host was
+		// unreachable, or that the batch status path couldn't detect.
+		// Runs regardless of HostContacted so brand-new jobs with no other
+		// active jobs on the host can still be pushed.
+		if mode == SyncModeFull {
+			ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout, syncLog)
+			result.Updated += ensured
+			if contacted {
+				result.HostContacted = true
+			}
+			if err != nil {
+				if !ssh.IsConnectionError(err.Error()) {
+					result.QueueDispatchError = err.Error()
+					syncLog.Debug("failed to dispatch queued jobs", "host", host, "error", err)
+				}
+			}
 		}
-		seenJobs[job.ID] = true
-		res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
+
+		// Step 2: Reconcile jobs with pending operations (kill, cancel, draft→queued, etc.)
+		// This runs before the host-contacted guard so that draft→queued transitions
+		// (which have no active jobs) can contact the host and proceed.
+		pendingJobs, err := db.ListJobsPendingReconciliation(database, host)
 		if err != nil {
-			syncLog.Debug("failed to reconcile pending job", "job_id", job.ID, "host", host, "error", err)
-			continue
+			return result, err
 		}
-		if res != nil {
-			result.HostContacted = true
-			result.Updated++
+		for _, job := range pendingJobs {
+			if seenJobs[job.ID] {
+				continue
+			}
+			seenJobs[job.ID] = true
+			res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
+			if err != nil {
+				syncLog.Debug("failed to reconcile pending job", "job_id", job.ID, "host", host, "error", err)
+				continue
+			}
+			if res != nil {
+				result.HostContacted = true
+				result.Updated++
+			}
 		}
 	}
 
@@ -211,120 +233,123 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		return result, nil
 	}
 
-	// Step 3: Check for restarted jobs (failed/dead queue-runner jobs that may be running again)
-	lastCheck := db.GetLastRestartCheck(database, host)
-	checkTime := time.Now()
+	if mode != SyncModeStatus {
+		// Step 3: Check for restarted jobs (failed/dead queue-runner jobs that may be running again)
+		lastCheck := db.GetLastRestartCheck(database, host)
+		checkTime := time.Now()
 
-	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
-	if err != nil {
-		return result, err
-	}
-
-	// Optimization: filter to jobs with recent activity if we have a last-check time
-	if !lastCheck.IsZero() && len(restartedJobs) > 0 {
-		sshHost := remote.NewSSHHost(host, timeout)
-		recentJobIDs, err := sshHost.GetRecentlyModifiedJobIDs(lastCheck)
-		if err == nil && recentJobIDs != nil {
-			recentSet := make(map[int64]bool)
-			for _, id := range recentJobIDs {
-				recentSet[id] = true
-			}
-			var filtered []*db.Job
-			for _, job := range restartedJobs {
-				if recentSet[job.ID] {
-					filtered = append(filtered, job)
-				}
-			}
-			restartedJobs = filtered
-		}
-	}
-
-	if opts.UseBatchSync {
-		// Batch mode for restarted jobs
-		var restartedQueueJobs []*db.Job
-		for _, job := range restartedJobs {
-			if seenJobs[job.ID] {
-				continue
-			}
-			seenJobs[job.ID] = true
-			restartedQueueJobs = append(restartedQueueJobs, job)
-		}
-		if len(restartedQueueJobs) > 0 {
-			updatedCount, err := BatchSyncQueueRunnerJobs(database, host, restartedQueueJobs, timeout)
-			if err != nil {
-				syncLog.Debug("batch sync of restarted jobs failed", "host", host, "error", err)
-			} else {
-				result.Updated += updatedCount
-				result.HostContacted = true
-			}
-		}
-	} else {
-		for _, job := range restartedJobs {
-			if seenJobs[job.ID] {
-				continue
-			}
-			seenJobs[job.ID] = true
-			syncResult, err := SyncJob(database, job, syncOpts)
-			if err != nil {
-				syncLog.Debug("failed to sync restarted job", "job_id", job.ID, "host", host, "error", err)
-				continue
-			}
-			if syncResult.HostContacted {
-				result.HostContacted = true
-			}
-			if syncResult.Updated {
-				result.Updated++
-			}
-		}
-	}
-
-	// Update last restart check time only if we contacted the host
-	if result.HostContacted {
-		if err := db.UpdateLastRestartCheck(database, host, checkTime); err != nil {
-			syncLog.Debug("failed to update restart check time", "host", host, "error", err)
-		}
-	}
-
-	// Step 4: Sync draft jobs
-	drafts, err := db.ListDraftJobsPendingSync(database, host)
-	if err != nil {
-		return result, err
-	}
-	for _, job := range drafts {
-		if seenJobs[job.ID] {
-			continue
-		}
-		syncResult, err := SyncDraftJob(database, job, syncOpts)
+		restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
 		if err != nil {
-			syncLog.Debug("failed to sync draft job", "job_id", job.ID, "host", host, "error", err)
-			continue
+			return result, err
 		}
-		if syncResult.HostContacted {
-			result.HostContacted = true
-		}
-		if syncResult.Updated {
-			result.Updated++
-		}
-	}
 
-	// Step 5: Ensure queue runner is started
-	if !opts.NoQueueStart && ensureQueueRunner != nil {
-		queueRunnerCount := 0
-		for _, job := range activeJobs {
-			if job.UsesQueueRunner() && (job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused) {
-				queueRunnerCount++
+		// Optimization: filter to jobs with recent activity if we have a last-check time
+		if !lastCheck.IsZero() && len(restartedJobs) > 0 {
+			sshHost := remote.NewSSHHost(host, timeout)
+			recentJobIDs, err := sshHost.GetRecentlyModifiedJobIDs(lastCheck)
+			if err == nil && recentJobIDs != nil {
+				recentSet := make(map[int64]bool)
+				for _, id := range recentJobIDs {
+					recentSet[id] = true
+				}
+				var filtered []*db.Job
+				for _, job := range restartedJobs {
+					if recentSet[job.ID] {
+						filtered = append(filtered, job)
+					}
+				}
+				restartedJobs = filtered
 			}
 		}
-		if queueRunnerCount > 0 {
-			started, err := ensureQueueRunner(host)
-			if err != nil {
-				if !ssh.IsConnectionError(err.Error()) {
-					result.QueueRunnerError = err.Error()
+
+		if opts.UseBatchSync {
+			// Batch mode for restarted jobs
+			var restartedQueueJobs []*db.Job
+			for _, job := range restartedJobs {
+				if seenJobs[job.ID] {
+					continue
 				}
-			} else {
-				result.HostContacted = true
-				if started {
-					result.QueueStarted = true
+				seenJobs[job.ID] = true
+				restartedQueueJobs = append(restartedQueueJobs, job)
+			}
+			if len(restartedQueueJobs) > 0 {
+				updatedCount, err := BatchSyncQueueRunnerJobs(database, host, restartedQueueJobs, timeout)
+				if err != nil {
+					syncLog.Debug("batch sync of restarted jobs failed", "host", host, "error", err)
+				} else {
+					result.Updated += updatedCount
+					result.HostContacted = true
+				}
+			}
+		} else {
+			for _, job := range restartedJobs {
+				if seenJobs[job.ID] {
+					continue
+				}
+				seenJobs[job.ID] = true
+				syncResult, err := SyncJob(database, job, syncOpts)
+				if err != nil {
+					syncLog.Debug("failed to sync restarted job", "job_id", job.ID, "host", host, "error", err)
+					continue
+				}
+				if syncResult.HostContacted {
+					result.HostContacted = true
+				}
+				if syncResult.Updated {
+					result.Updated++
+				}
+			}
+		}
+
+		// Update last restart check time only if we contacted the host
+		if result.HostContacted {
+			if err := db.UpdateLastRestartCheck(database, host, checkTime); err != nil {
+				syncLog.Debug("failed to update restart check time", "host", host, "error", err)
+			}
+		}
+
+		// Step 4: Sync draft jobs
+		if mode == SyncModeFull {
+			drafts, err := db.ListDraftJobsPendingSync(database, host)
+			if err != nil {
+				return result, err
+			}
+			for _, job := range drafts {
+				if seenJobs[job.ID] {
+					continue
+				}
+				syncResult, err := SyncDraftJob(database, job, syncOpts)
+				if err != nil {
+					syncLog.Debug("failed to sync draft job", "job_id", job.ID, "host", host, "error", err)
+					continue
+				}
+				if syncResult.HostContacted {
+					result.HostContacted = true
+				}
+				if syncResult.Updated {
+					result.Updated++
+				}
+			}
+		}
+		// Step 5: Ensure queue runner is started
+		if mode == SyncModeFull && !opts.NoQueueStart && ensureQueueRunner != nil {
+			queueRunnerCount := 0
+			for _, job := range activeJobs {
+				if job.UsesQueueRunner() && (job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused) {
+					queueRunnerCount++
+				}
+			}
+			if queueRunnerCount > 0 {
+				started, err := ensureQueueRunner(host)
+				if err != nil {
+					if !ssh.IsConnectionError(err.Error()) {
+						result.QueueRunnerError = err.Error()
+					}
+				} else {
+					result.HostContacted = true
+					if started {
+						result.QueueStarted = true
+					}
 				}
 			}
 		}
@@ -335,7 +360,9 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		if err := db.RecordHostSync(database, host, time.Now()); err != nil {
 			syncLog.Debug("failed to record host sync time", "host", host, "error", err)
 		}
-		scanHFCacheDuringSync(database, host)
+		if mode == SyncModeFull {
+			scanHFCacheDuringSync(database, host)
+		}
 	}
 
 	return result, nil

@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -66,10 +67,15 @@ func (m Model) loadHostSyncTimes() tea.Cmd {
 // requestHostInfoRefresh requests a host info refresh via the sync worker.
 func (m Model) requestHostInfoRefresh(hostName string, priority bool) {
 	if m.syncWorker != nil {
+		mode := ops.SyncModeStatus
+		if priority {
+			mode = ops.SyncModeFull
+		}
 		m.syncWorker.Request(SyncRequest{
 			Host:     hostName,
 			Rate:     RateRunning,
 			Priority: priority,
+			Mode:     mode,
 		})
 	}
 }
@@ -82,6 +88,7 @@ func (m Model) requestHostSyncPriority(hostName string) {
 		Host:     hostName,
 		Rate:     RateRunning,
 		Priority: true,
+		Mode:     ops.SyncModeFull,
 	})
 }
 

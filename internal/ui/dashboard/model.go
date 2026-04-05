@@ -418,6 +418,7 @@ func (m Model) Init() tea.Cmd {
 			m.startLogTicker(),
 			m.startHostRefreshTicker(),
 			m.startHostSummaryTicker(),
+			m.waitForSyncResult(),
 			m.spinner.Tick,
 		)
 	}
@@ -432,7 +433,7 @@ func (m Model) Init() tea.Cmd {
 		m.startHostRefreshTicker(),
 		m.startHostSummaryTicker(),
 		m.startDBWatcher(),
-		m.checkSyncResults(),
+		m.waitForSyncResult(),
 		m.spinner.Tick,
 	)
 }
@@ -844,8 +845,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshJobs())
 		// Request syncs for hosts based on their job activity
 		m.requestSyncsForActiveHosts()
-		// Check for sync results
-		cmds = append(cmds, m.checkSyncResults())
 		return m, tea.Batch(cmds...)
 
 	case logTickMsg:

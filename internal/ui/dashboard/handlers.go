@@ -52,7 +52,6 @@ func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
 	if m.initialSyncNeeded && m.syncWorker != nil {
 		m.initialSyncNeeded = false
 		m.requestSyncAllHosts(true)
-		cmds = append(cmds, m.checkSyncResults())
 	}
 
 	if cmd := m.fetchAllRunningJobsProgress(); cmd != nil {

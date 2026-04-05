@@ -3,7 +3,9 @@ package hostsync
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +65,7 @@ type Request struct {
 	Host     string
 	Rate     SyncRate
 	Priority bool
+	Mode     ops.SyncMode
 }
 
 // Result contains the outcome of a host sync or cloud reconciliation pass.
@@ -97,7 +100,9 @@ func BuildWarning(result ops.HostSyncResult) string {
 
 type hostSyncState struct {
 	lastSync      time.Time
+	lastRepair    time.Time
 	requestedRate SyncRate
+	requestedMode ops.SyncMode
 	inProgress    bool
 }
 
@@ -116,6 +121,7 @@ type Worker struct {
 
 	maxParallel int
 	inFlight    int
+	owner       string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -135,6 +141,7 @@ func New(database *sql.DB, cloudClients []cloud.Client, r2Client *r2.Client, app
 		hostState:    make(map[string]*hostSyncState),
 		reconciler:   campaign.NewReconciler(),
 		maxParallel:  3,
+		owner:        syncOwnerID(),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -206,10 +213,13 @@ func (w *Worker) run() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	benchTicker := time.NewTicker(60 * time.Second)
+	benchTicker := time.NewTicker(120 * time.Second)
 	defer benchTicker.Stop()
 
-	cloudReconcileTicker := time.NewTicker(10 * time.Second)
+	repairTicker := time.NewTicker(120 * time.Second)
+	defer repairTicker.Stop()
+
+	cloudReconcileTicker := time.NewTicker(120 * time.Second)
 	defer cloudReconcileTicker.Stop()
 
 	for {
@@ -220,6 +230,8 @@ func (w *Worker) run() {
 			w.handleRequest(req)
 		case <-ticker.C:
 			w.processQueue()
+		case <-repairTicker.C:
+			w.processRepairQueue()
 		case <-benchTicker.C:
 			w.checkUnplacedJobs()
 		case <-cloudReconcileTicker.C:
@@ -229,6 +241,12 @@ func (w *Worker) run() {
 }
 
 func (w *Worker) checkUnplacedJobs() {
+	ok, err := db.AcquireAutoLease(w.database, "sync:unplaced:auto", w.owner, 180*time.Second)
+	if err != nil || !ok {
+		return
+	}
+	defer func() { _ = db.ReleaseAutoLease(w.database, "sync:unplaced:auto", w.owner) }()
+
 	jobs, err := db.ListUnplacedJobs(w.database)
 	if err != nil {
 		slog.Warn("failed to list unplaced jobs", "component", "hostsync", "error", err)
@@ -327,6 +345,12 @@ func (w *Worker) checkUnplacedJobs() {
 }
 
 func (w *Worker) reconcileCloudJobs() {
+	ok, err := db.AcquireAutoLease(w.database, "sync:cloud:reconcile", w.owner, 180*time.Second)
+	if err != nil || !ok {
+		return
+	}
+	defer func() { _ = db.ReleaseAutoLease(w.database, "sync:cloud:reconcile", w.owner) }()
+
 	w.mu.Lock()
 	cloudClients := append([]cloud.Client(nil), w.cloudClients...)
 	r2Client := w.r2Client
@@ -371,6 +395,14 @@ func (w *Worker) handleRequest(req Request) {
 	if req.Rate < state.requestedRate || req.Priority {
 		state.requestedRate = req.Rate
 	}
+	if req.Mode == "" {
+		req.Mode = ops.SyncModeStatus
+	}
+	if req.Priority {
+		state.requestedMode = ops.SyncModeFull
+	} else if state.requestedMode == "" || req.Mode == ops.SyncModeFull {
+		state.requestedMode = req.Mode
+	}
 	if req.Priority && !state.inProgress {
 		w.maybeStartSync(req.Host, state)
 	}
@@ -381,6 +413,14 @@ func (w *Worker) processQueue() {
 	defer w.mu.Unlock()
 	for host, state := range w.hostState {
 		w.maybeStartSync(host, state)
+	}
+}
+
+func (w *Worker) processRepairQueue() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for host, state := range w.hostState {
+		w.maybeStartRepairSync(host, state)
 	}
 }
 
@@ -395,15 +435,41 @@ func (w *Worker) maybeStartSync(host string, state *hostSyncState) {
 	state.inProgress = true
 	state.lastSync = time.Now()
 	w.inFlight++
+	mode := state.requestedMode
+	if mode == "" {
+		mode = ops.SyncModeStatus
+	}
+	if mode == ops.SyncModeFull {
+		state.requestedMode = ops.SyncModeStatus
+	}
 
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
-		w.doSync(host)
+		w.doSync(host, mode)
 	}()
 }
 
-func (w *Worker) doSync(host string) {
+func (w *Worker) maybeStartRepairSync(host string, state *hostSyncState) {
+	if state.inProgress || w.inFlight >= w.maxParallel {
+		return
+	}
+	if time.Since(state.lastRepair) < 120*time.Second {
+		return
+	}
+
+	state.inProgress = true
+	state.lastRepair = time.Now()
+	w.inFlight++
+
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.doSync(host, ops.SyncModeRepair)
+	}()
+}
+
+func (w *Worker) doSync(host string, mode ops.SyncMode) {
 	result := Result{Host: host}
 
 	defer func() {
@@ -420,9 +486,22 @@ func (w *Worker) doSync(host string) {
 		}
 	}()
 
+	scope := hostLeaseScope(mode, host)
+	ttl := hostLeaseTTL(mode)
+	ok, err := db.AcquireAutoLease(w.database, scope, w.owner, ttl)
+	if err != nil {
+		result.Error = err
+		return
+	}
+	if !ok {
+		return
+	}
+	defer func() { _ = db.ReleaseAutoLease(w.database, scope, w.owner) }()
+
 	syncResult, err := ops.SyncHost(w.database, host, ops.HostSyncOptions{
 		Timeout:      ops.DefaultSyncOptions().Timeout,
 		UseBatchSync: true,
+		Mode:         mode,
 		Logger:       ops.NewSilentSyncLogger(),
 	}, EnsureQueueRunnerStarted)
 	if err != nil {
@@ -451,6 +530,36 @@ func (w *Worker) doSync(host string) {
 			}
 		}
 	}
+}
+
+func hostLeaseScope(mode ops.SyncMode, host string) string {
+	switch mode {
+	case ops.SyncModeRepair:
+		return fmt.Sprintf("sync:host:repair:%s", host)
+	case ops.SyncModeFull:
+		return fmt.Sprintf("sync:host:full:%s", host)
+	default:
+		return fmt.Sprintf("sync:host:fast:%s", host)
+	}
+}
+
+func hostLeaseTTL(mode ops.SyncMode) time.Duration {
+	switch mode {
+	case ops.SyncModeRepair:
+		return 3 * time.Minute
+	case ops.SyncModeFull:
+		return 15 * time.Minute
+	default:
+		return 30 * time.Second
+	}
+}
+
+func syncOwnerID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "unknown-host"
+	}
+	return fmt.Sprintf("%s:%d:%d", host, os.Getpid(), time.Now().UnixNano())
 }
 
 // GetHostSyncRate returns the sync cadence for a host based on active jobs.

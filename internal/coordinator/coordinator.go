@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator/services"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/slack"
@@ -161,6 +162,12 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 // reconcileAndNotifyCampaigns checks for newly-completed campaigns and sends Slack notifications.
 func (c *Coordinator) reconcileAndNotifyCampaigns(r2Client *r2.Client) {
+	ok, err := db.AcquireAutoLease(c.db, "sync:cloud:reconcile", "coordinator-cloud", 180*time.Second)
+	if err != nil || !ok {
+		return
+	}
+	defer func() { _ = db.ReleaseAutoLease(c.db, "sync:cloud:reconcile", "coordinator-cloud") }()
+
 	if c.reconciler == nil {
 		c.reconciler = campaign.NewReconciler()
 	}

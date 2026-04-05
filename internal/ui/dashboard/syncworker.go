@@ -63,6 +63,7 @@ func (m *Model) requestSyncsForActiveHosts() {
 		m.syncWorker.Request(SyncRequest{
 			Host: host,
 			Rate: rate,
+			Mode: ops.SyncModeStatus,
 		})
 	}
 
@@ -71,6 +72,7 @@ func (m *Model) requestSyncsForActiveHosts() {
 			m.syncWorker.Request(SyncRequest{
 				Host: host.Name,
 				Rate: RateIdle,
+				Mode: ops.SyncModeStatus,
 			})
 		}
 	}
@@ -93,10 +95,15 @@ func (m *Model) requestSyncAllHosts(priority bool) {
 	}
 
 	for host := range hosts {
+		mode := ops.SyncModeStatus
+		if priority {
+			mode = ops.SyncModeFull
+		}
 		m.syncWorker.Request(SyncRequest{
 			Host:     host,
 			Rate:     RateRunning,
 			Priority: priority,
+			Mode:     mode,
 		})
 	}
 }
@@ -116,6 +123,15 @@ func (m *Model) checkSyncResults() tea.Cmd {
 		}
 		return nil
 	}
+}
+
+func (m *Model) waitForSyncResult() tea.Cmd {
+	if m.syncWorker == nil {
+		return nil
+	}
+	return m.syncWorker.WaitForResult(m.ctx, func(result SyncResult) tea.Msg {
+		return syncResultMsg{result: result}
+	})
 }
 
 // handleSyncResult handles a sync result from the worker.
@@ -215,7 +231,7 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshJobs())
 	}
 
-	cmds = append(cmds, m.checkSyncResults())
+	cmds = append(cmds, m.waitForSyncResult())
 
 	if len(cmds) == 0 {
 		return m, nil

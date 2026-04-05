@@ -77,6 +77,9 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 			if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
 				parts = append(parts, timing)
 			}
+			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
+				parts = append(parts, blocked)
+			}
 			if suffix := groupedStatusOutcomeSuffix(job, section.title); suffix != "" {
 				parts = append(parts, suffix)
 			}
@@ -147,6 +150,16 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 		label = "queued"
 	}
 	return label + " " + shortRelativeTime(now.Unix()-placedAt)
+}
+
+func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
+	if job == nil || strings.TrimSpace(job.QueueBlockedReason) == "" {
+		return ""
+	}
+	if sectionKey != "queued" && sectionKey != "unplaced" {
+		return ""
+	}
+	return "blocked: " + strings.TrimSpace(job.QueueBlockedReason)
 }
 
 func groupedStatusBucket(job *db.Job) string {

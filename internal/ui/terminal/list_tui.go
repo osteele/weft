@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ type listTUIModel struct {
 	autoInProgress   bool
 	autoLeaseOwner   string
 	autoLeaseScope   string
+	autoBlockReasons map[int64]string
 	focused          bool
 }
 
@@ -78,6 +80,7 @@ type listSyncWorkerResultMsg struct {
 type listAutoPilotDoneMsg struct {
 	placed         int
 	launched       int
+	blockedReasons map[int64]string
 	anotherHolding bool
 	err            error
 }
@@ -200,6 +203,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.runAutoPilot()
 				}
 				m.autoInProgress = false
+				m.autoBlockReasons = nil
 				_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 				m.statusMessage = "Auto-pilot OFF"
 				return m, nil
@@ -223,6 +227,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.jobs = msg.jobs
+		m.pruneAutoBlockReasons()
 		m.rebuildLayout()
 		m.clampCursor()
 		m.adjustOffset()
@@ -313,6 +318,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.autoMode {
 			return m, nil
 		}
+		m.autoBlockReasons = msg.blockedReasons
 		if msg.err != nil {
 			m.statusMessage = fmt.Sprintf("Auto-pilot failed: %v", msg.err)
 			return m, nil
@@ -392,7 +398,7 @@ func (m listTUIModel) groupedView() string {
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
 	b.WriteString("\n")
 
-	body := renderJobListGroupedStatusPlain(m.jobs, m.width)
+	body := renderJobListGroupedStatusPlain(m.groupedJobsWithAutoReasons(), m.width)
 	body = strings.TrimSuffix(body, "\n")
 	if body == "" {
 		body = "None"
@@ -589,14 +595,14 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 			return listAutoPilotDoneMsg{anotherHolding: true}
 		}
 		defer db.ReleaseAutoLease(database, scope, owner)
-		placed, launched, runErr := runGroupedAutoPilotPass(ctx, database, jobs)
-		return listAutoPilotDoneMsg{placed: placed, launched: launched, err: runErr}
+		placed, launched, blockedReasons, runErr := runGroupedAutoPilotPass(ctx, database, jobs)
+		return listAutoPilotDoneMsg{placed: placed, launched: launched, blockedReasons: blockedReasons, err: runErr}
 	}
 }
 
-func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, error) {
+func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, map[int64]string, error) {
 	if database == nil {
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	}
 	scoped := make(map[int64]struct{}, len(scopedJobs))
 	for _, job := range scopedJobs {
@@ -607,7 +613,7 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	unplacedJobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	unplaced := make([]*db.Job, 0, len(unplacedJobs))
 	for _, job := range unplacedJobs {
@@ -622,18 +628,18 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		unplaced = append(unplaced, job)
 	}
 	if len(unplaced) == 0 {
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	r2Client, _ := buildR2Client(cfg)
 
 	launches, err := db.ListRunningLaunches(database)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
 	for _, ci := range launches {
@@ -654,17 +660,21 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 		best := ranked[0]
 		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, best.Instance.ID, []*db.Job{job}); err != nil {
-			return placed, 0, err
+			return placed, 0, nil, err
 		}
 		placed++
 	}
 
 	remaining, err := db.ListUnplacedJobs(database)
 	if err != nil {
-		return placed, 0, err
+		return placed, 0, nil, err
 	}
 	rentalScope := make([]int64, 0, len(remaining))
+	remainingByID := make(map[int64]*db.Job, len(remaining))
 	for _, job := range remaining {
+		if job != nil {
+			remainingByID[job.ID] = job
+		}
 		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasTag(db.TagInventory) {
 			continue
 		}
@@ -676,17 +686,164 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		rentalScope = append(rentalScope, job.ID)
 	}
 	if len(rentalScope) == 0 {
-		return placed, 0, nil
+		return placed, 0, nil, nil
 	}
 
+	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
+	passStartedAt := time.Now().Unix()
 	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false)
 	if err != nil {
-		return placed, 0, err
+		return placed, 0, nil, err
 	}
+	blockedReasons := make(map[int64]string)
 	if result == nil {
-		return placed, 0, nil
+		return placed, 0, blockedReasons, nil
 	}
-	return placed, len(result.InstanceIDs), nil
+	if result.BlockedReason != "" {
+		for _, jobID := range rentalScope {
+			blockedReasons[jobID] = result.BlockedReason
+		}
+	}
+	for jobID, failedID := range failedInstanceByJob {
+		if failedID == 0 {
+			continue
+		}
+		if reason, ok := result.NotReplacedReasons[failedID]; ok && strings.TrimSpace(reason) != "" {
+			blockedReasons[jobID] = reason
+		}
+	}
+	eventReasons := relaunchBlockedReasonsFromEvents(database, rentalScope, passStartedAt)
+	for jobID, reason := range eventReasons {
+		if strings.TrimSpace(reason) == "" {
+			continue
+		}
+		if _, exists := blockedReasons[jobID]; !exists {
+			blockedReasons[jobID] = reason
+		}
+	}
+	for jobID := range blockedReasons {
+		if _, exists := remainingByID[jobID]; !exists {
+			delete(blockedReasons, jobID)
+		}
+	}
+	return placed, len(result.InstanceIDs), blockedReasons, nil
+}
+
+func buildFailedInstanceByJob(database *sql.DB, jobIDs []int64) map[int64]int64 {
+	result := make(map[int64]int64, len(jobIDs))
+	for _, jobID := range jobIDs {
+		result[jobID] = latestAttemptLaunchID(database, jobID)
+	}
+	return result
+}
+
+func latestAttemptLaunchID(database *sql.DB, jobID int64) int64 {
+	attempts, err := db.GetLaunchAttempts(database, jobID)
+	if err != nil || len(attempts) == 0 {
+		return 0
+	}
+	return attempts[len(attempts)-1].LaunchID
+}
+
+func relaunchBlockedReasonsFromEvents(database *sql.DB, jobIDs []int64, sinceUnix int64) map[int64]string {
+	reasons := make(map[int64]string)
+	if database == nil || len(jobIDs) == 0 {
+		return reasons
+	}
+	placeholders := make([]string, 0, len(jobIDs))
+	args := make([]any, 0, len(jobIDs)+1)
+	args = append(args, sinceUnix)
+	for _, jobID := range jobIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, jobID)
+	}
+	query := fmt.Sprintf(`SELECT job_id, event_kind, detail, attempt_number, max_attempts
+		FROM lifecycle_events
+		WHERE occurred_at >= ?
+		  AND event_kind LIKE 'relaunch.skipped.%%'
+		  AND job_id IN (%s)
+		ORDER BY occurred_at DESC, id DESC`, strings.Join(placeholders, ","))
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return reasons
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			jobID         int64
+			eventKind     string
+			detail        sql.NullString
+			attemptNumber int
+			maxAttempts   int
+		)
+		if err := rows.Scan(&jobID, &eventKind, &detail, &attemptNumber, &maxAttempts); err != nil {
+			continue
+		}
+		if _, exists := reasons[jobID]; exists {
+			continue
+		}
+		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, attemptNumber, maxAttempts)
+	}
+	return reasons
+}
+
+func summarizeRelaunchSkipEvent(kind, detail string, attemptNumber, maxAttempts int) string {
+	detail = strings.TrimSpace(detail)
+	if detail != "" {
+		return detail
+	}
+	switch kind {
+	case db.EventRelaunchSkippedNoOffers:
+		return "no offers available"
+	case db.EventRelaunchSkippedOfferError:
+		return "offer query failed"
+	case db.EventRelaunchSkippedMaxAttempts:
+		if attemptNumber > 0 && maxAttempts > 0 {
+			return "attempt " + strconv.Itoa(attemptNumber) + "/" + strconv.Itoa(maxAttempts)
+		}
+		return "max cloud attempts reached"
+	default:
+		return kind
+	}
+}
+
+func (m *listTUIModel) pruneAutoBlockReasons() {
+	if len(m.autoBlockReasons) == 0 {
+		return
+	}
+	visible := make(map[int64]struct{}, len(m.jobs))
+	for _, job := range m.jobs {
+		if job != nil {
+			visible[job.ID] = struct{}{}
+		}
+	}
+	for jobID := range m.autoBlockReasons {
+		if _, ok := visible[jobID]; !ok {
+			delete(m.autoBlockReasons, jobID)
+		}
+	}
+}
+
+func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
+	if len(m.autoBlockReasons) == 0 {
+		return m.jobs
+	}
+	decorated := make([]*db.Job, 0, len(m.jobs))
+	for _, job := range m.jobs {
+		if job == nil {
+			decorated = append(decorated, nil)
+			continue
+		}
+		reason, ok := m.autoBlockReasons[job.ID]
+		if !ok || strings.TrimSpace(reason) == "" {
+			decorated = append(decorated, job)
+			continue
+		}
+		copyJob := *job
+		copyJob.QueueBlockedReason = reason
+		decorated = append(decorated, &copyJob)
+	}
+	return decorated
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {
