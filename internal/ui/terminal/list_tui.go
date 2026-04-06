@@ -844,6 +844,15 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			delete(blockedReasons, jobID)
 		}
 	}
+	// For rental-scope jobs with no specific reason when nothing launched,
+	// provide a fallback so they don't appear silently stuck.
+	if len(result.InstanceIDs) == 0 {
+		for _, jobID := range rentalScope {
+			if _, exists := blockedReasons[jobID]; !exists {
+				blockedReasons[jobID] = "no offers available"
+			}
+		}
+	}
 	return placed, len(result.InstanceIDs), blockedReasons, nil
 }
 
