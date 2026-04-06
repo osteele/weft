@@ -1603,6 +1603,9 @@ func initSchema(db *sql.DB) error {
 	// Migration: add phase_changed_at to launch_live_state
 	_ = addColumnIfMissing(db, `ALTER TABLE launch_live_state ADD COLUMN phase_changed_at INTEGER`)
 
+	// Migration: add job_progress_phase to launch_live_state
+	_ = addColumnIfMissing(db, `ALTER TABLE launch_live_state ADD COLUMN job_progress_phase INTEGER NOT NULL DEFAULT 0`)
+
 	// Backfill provider_instance_id from vastai_instance_id (legacy column)
 	db.Exec(`UPDATE launches SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`)
 

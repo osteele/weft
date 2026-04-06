@@ -1029,13 +1029,14 @@ func TestLaunchLiveState(t *testing.T) {
 
 	// Upsert and read back
 	state := LaunchLiveState{
-		LaunchID:       instanceID,
-		InstancePhase:  "running:42",
-		HeartbeatJSON:  `{"ts":1234}`,
-		HeartbeatTS:    1234,
-		JobProgressPct: 75,
-		JobProgressID:  42,
-		AgentVersion:   "abc123",
+		LaunchID:         instanceID,
+		InstancePhase:    "running:42",
+		HeartbeatJSON:    `{"ts":1234}`,
+		HeartbeatTS:      1234,
+		JobProgressPct:   75,
+		JobProgressID:    42,
+		JobProgressPhase: 3,
+		AgentVersion:     "abc123",
 	}
 	if _, err := UpsertLaunchLiveState(database, state); err != nil {
 		t.Fatalf("UpsertLaunchLiveState: %v", err)
@@ -1053,6 +1054,9 @@ func TestLaunchLiveState(t *testing.T) {
 	}
 	if got.JobProgressPct != 75 {
 		t.Errorf("progress = %d, want 75", got.JobProgressPct)
+	}
+	if got.JobProgressPhase != 3 {
+		t.Errorf("progress_phase = %d, want 3", got.JobProgressPhase)
 	}
 	if got.AgentVersion != "abc123" {
 		t.Errorf("agent_version = %q, want %q", got.AgentVersion, "abc123")

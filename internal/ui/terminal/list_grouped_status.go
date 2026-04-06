@@ -114,7 +114,7 @@ func groupedStatusProgressSuffix(job *db.Job, sectionKey string, launchLiveByID 
 	}
 	if job.LaunchID != nil && launchLiveByID != nil {
 		if live := launchLiveByID[*job.LaunchID]; live != nil && live.JobProgressID == job.ID {
-			if pctText := strings.TrimSpace(progress.FormatPhaseProgress(0, live.JobProgressPct)); pctText != "" {
+			if pctText := strings.TrimSpace(progress.FormatPhaseProgress(live.JobProgressPhase, live.JobProgressPct)); pctText != "" {
 				return "running " + pctText
 			}
 		}

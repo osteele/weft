@@ -161,14 +161,15 @@ func SyncInstanceState(
 		hbTS = s.Heartbeat.Ts
 	}
 	phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
-		LaunchID:       instanceID,
-		InstancePhase:  s.InstancePhase,
-		BootstrapStage: s.BootstrapStage,
-		HeartbeatJSON:  hbJSON,
-		HeartbeatTS:    hbTS,
-		JobProgressPct: s.JobProgress,
-		JobProgressID:  s.JobProgressID,
-		AgentVersion:   s.AgentVersion,
+		LaunchID:         instanceID,
+		InstancePhase:    s.InstancePhase,
+		BootstrapStage:   s.BootstrapStage,
+		HeartbeatJSON:    hbJSON,
+		HeartbeatTS:      hbTS,
+		JobProgressPct:   s.JobProgress,
+		JobProgressID:    s.JobProgressID,
+		JobProgressPhase: s.JobProgressPhase,
+		AgentVersion:     s.AgentVersion,
 	})
 	if phaseChangedAt != nil {
 		t := time.Unix(*phaseChangedAt, 0)
