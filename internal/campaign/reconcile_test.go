@@ -210,8 +210,11 @@ func TestReconcileLaunches_GraceIgnoredWithActiveJobs(t *testing.T) {
 	if graceChecks != 0 {
 		t.Errorf("grace checks = %d, want 0", graceChecks)
 	}
-	if len(syncedJobIDs) != 0 {
-		t.Errorf("synced job IDs = %v, want []", syncedJobIDs)
+	// The proactive completion sync checks R2 for .complete markers on every
+	// reconcile pass, even when jobs appear active. This breaks the circular
+	// dependency where jobs stay "running" because no one reads the marker.
+	if len(syncedJobIDs) != 1 || syncedJobIDs[0] != 1 {
+		t.Errorf("synced job IDs = %v, want [1]", syncedJobIDs)
 	}
 	for _, message := range capture.Messages() {
 		if strings.Contains(message, "ignoring grace transition while launch has active jobs") {

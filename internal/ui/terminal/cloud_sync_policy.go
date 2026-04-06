@@ -27,21 +27,24 @@ var (
 // syncCloudStateForTUI runs one cloud sync phase using the shared TUI timeout
 // policy and returns user-facing warnings when the sync times out.
 func syncCloudStateForTUI(database *sql.DB, full bool) []string {
+	timeout := FastCloudSyncTimeout
+	if full {
+		timeout = NormalCloudSyncTimeout
+	}
+
 	ok, err := db.AcquireAutoLease(database, cloudSyncLeaseScope, cloudSyncOwner(), cloudSyncLeaseTTL)
 	if err != nil {
-		return []string{fmt.Sprintf("cloud sync lease error: %v", err)}
+		warnings := []string{fmt.Sprintf("cloud sync lease error: %v", err)}
+		warnings = append(warnings, syncCloudDatabaseOnlyForTUI(database, timeout)...)
+		return compactWarnings(warnings)
 	}
 	if !ok {
-		return nil
+		return syncCloudDatabaseOnlyForTUI(database, timeout)
 	}
 	defer func() {
 		_ = db.ReleaseAutoLease(database, cloudSyncLeaseScope, cloudSyncOwner())
 	}()
 
-	timeout := FastCloudSyncTimeout
-	if full {
-		timeout = NormalCloudSyncTimeout
-	}
 	cfg, _ := config.Load()
 	if _, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false); !completed {
 		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
@@ -85,4 +88,27 @@ func cloudSyncOwner() string {
 		cloudSyncLeaseOwner = fmt.Sprintf("%s:%d:%d", host, os.Getpid(), time.Now().UnixNano())
 	})
 	return cloudSyncLeaseOwner
+}
+
+// syncCloudDatabaseOnlyForTUI applies DB-local reconciliation updates without
+// contacting cloud providers. This path is used when another process owns the
+// cloud reconcile lease.
+func syncCloudDatabaseOnlyForTUI(database *sql.DB, timeout time.Duration) []string {
+	done := make(chan struct{}, 1)
+	go func() {
+		_ = syncCloudStateWithClients(nil, database, campaign.NewReconciler(), nil, nil, false)
+		done <- struct{}{}
+	}()
+
+	if timeout <= 0 {
+		<-done
+		return nil
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
+	}
 }
