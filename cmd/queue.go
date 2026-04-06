@@ -704,23 +704,18 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only cancel queued jobs", jobID, effectiveStatus))
 			continue
 		}
+
+		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
 		if !job.HasInventoryHost() {
-			// Unplaced jobs have no remote queue entry — just update DB status
-			if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusCanceled); err != nil {
-				errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
-				continue
-			}
 			if job.IsRentalJob() {
 				fmt.Printf("Job %d cancelled (was assigned to %s)\n", jobID, job.TargetDisplay())
 			} else {
 				fmt.Printf("Job %d cancelled (was awaiting rental instance)\n", jobID)
 			}
-			continue
-		}
-
-		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
 		if result.Deferred {

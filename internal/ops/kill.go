@@ -82,6 +82,26 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 
 	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceling queued job"))
 
+	// Hostless jobs have no remote queue/process to reconcile against. Persist
+	// cancellation locally so status cannot bounce back to queued via probe/reconcile.
+	if !job.HasInventoryHost() {
+		if err := db.UpdateStatusAndLastSynced(database, job.ID, db.StatusCanceled); err != nil {
+			return Result{}, err
+		}
+		if err := db.SetRequestedStatus(database, job.ID, db.StatusCanceled); err != nil {
+			return Result{}, err
+		}
+		if err := db.ClearPendingStatus(database, job.ID); err != nil {
+			return Result{}, err
+		}
+		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceled (hostless local transition)"))
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d canceled", job.ID),
+		}, nil
+	}
+
 	outcome, err := requestJobStatus(database, job, db.StatusCanceled, opts)
 	if err != nil {
 		return Result{}, err

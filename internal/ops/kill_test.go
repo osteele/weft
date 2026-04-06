@@ -183,6 +183,46 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	}
 }
 
+func TestCancelQueuedJob_UnplacedNoAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.TargetKind() != db.JobTargetUnplaced {
+		t.Fatalf("expected unplaced job, got %s", job.TargetKind())
+	}
+
+	result, err := CancelQueuedJob(database, job, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CancelQueuedJob failed: %v", err)
+	}
+	if !result.Success {
+		t.Fatal("expected Success to be true")
+	}
+	if result.Deferred {
+		t.Fatal("expected Deferred to be false")
+	}
+	if result.Message != "Job 1 canceled" {
+		t.Fatalf("unexpected message: %q", result.Message)
+	}
+
+	updatedJob, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID(updated): %v", err)
+	}
+	if updatedJob.Status != db.StatusCanceled {
+		t.Fatalf("expected status canceled, got %s", updatedJob.Status)
+	}
+	if updatedJob.EffectiveStatus() != db.StatusCanceled {
+		t.Fatalf("expected effective status canceled, got %s", updatedJob.EffectiveStatus())
+	}
+}
+
 func TestUnplaceQueuedJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")

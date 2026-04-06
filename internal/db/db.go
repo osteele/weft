@@ -2414,6 +2414,14 @@ func SetPendingStatus(database *sql.DB, jobID int64, s string) error {
 	return SetAttemptPendingStatus(database, jobID, s)
 }
 
+// SetRequestedStatus sets jobs.requested_status directly.
+// This is used for hostless jobs where status should be derived locally
+// without remote reconciliation.
+func SetRequestedStatus(database *sql.DB, jobID int64, s string) error {
+	_, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, s, jobID)
+	return err
+}
+
 // ClearPendingStatus clears the pending status after reconciliation succeeds.
 func ClearPendingStatus(db *sql.DB, jobID int64) error {
 	return ClearAttemptPendingStatus(db, jobID)
