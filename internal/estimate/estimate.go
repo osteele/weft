@@ -4,6 +4,7 @@
 package estimate
 
 import (
+	"fmt"
 	"math"
 	"time"
 )
@@ -70,6 +71,37 @@ func (e Estimate) Scale(factor float64) Estimate {
 // Zero returns true if the estimate has zero mean duration.
 func (e Estimate) Zero() bool {
 	return e.Mean == 0
+}
+
+// FormatWithBounds formats a duration estimate as "~2h15 (1h–4h)".
+// Returns "—" for zero estimates, and omits bounds when they equal the mean.
+func (e Estimate) FormatWithBounds() string {
+	if e.Mean == 0 {
+		return "—"
+	}
+	mean := FormatDurationShort(e.Mean)
+	if e.Lower == e.Upper || e.Lower == e.Mean {
+		return "~" + mean
+	}
+	lower := FormatDurationShort(e.Lower)
+	upper := FormatDurationShort(e.Upper)
+	return fmt.Sprintf("~%s (%s–%s)", mean, lower, upper)
+}
+
+// FormatDurationShort formats a duration compactly (e.g., "2h15", "45m", "30s").
+func FormatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h == 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%02d", h, m)
 }
 
 // DurFromMinutes converts a floating-point minute value to a time.Duration.

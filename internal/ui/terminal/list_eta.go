@@ -13,20 +13,19 @@ import (
 
 const etaLaunchSetupOverhead = 4 * time.Minute
 const etaMaxRunningRemainder = 4 * time.Hour
-const etaUnknownDuration = -1 * time.Second
 const etaProgressFreshnessWindow = 3 * time.Minute
 const etaFallbackLowerScale = 0.5
 const etaFallbackUpperScale = 2.0
 const normalP90Z = 1.2815515655446004
 
 type etaResult struct {
-	ETACurrent     time.Duration // etaUnknownDuration when unavailable
-	ETAWithNewInst time.Duration // etaUnknownDuration when unavailable
+	ETACurrent     estimate.Estimate // zero value when unavailable
+	ETAWithNewInst estimate.Estimate // zero value when unavailable
 	HasQueued      bool
 }
 
 type etaBucket struct {
-	runningRemaining []time.Duration
+	runningRemaining []estimate.Estimate
 	runningSlots     int
 	queuedCount      int
 }
@@ -35,7 +34,6 @@ func computeGroupedETA(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveSt
 	buckets := make(map[string]*etaBucket)
 	hasQueued := false
 	totalQueued := 0
-	defaultDur := estimate.DefaultJobDuration.Mean
 
 	for _, job := range jobs {
 		if job == nil {
@@ -74,17 +72,17 @@ func computeGroupedETA(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveSt
 		buckets[key].runningSlots = bucketRunningSlots(key, jobs)
 	}
 
-	var current time.Duration = etaUnknownDuration
-	perBucketCurrent := make(map[string]time.Duration, len(buckets))
+	var current estimate.Estimate
+	perBucketCurrent := make(map[string]estimate.Estimate, len(buckets))
 	for key, bucket := range buckets {
-		eta := bucketETA(bucket, defaultDur, false)
+		eta := bucketETA(bucket, false)
 		perBucketCurrent[key] = eta
-		if eta > current {
+		if eta.Mean > current.Mean {
 			current = eta
 		}
 	}
 
-	withNew := etaUnknownDuration
+	var withNew estimate.Estimate
 	if totalQueued >= 2 {
 		keys := make([]string, 0, len(buckets))
 		for key, bucket := range buckets {
@@ -94,17 +92,17 @@ func computeGroupedETA(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveSt
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			candidate := etaUnknownDuration
+			var candidate estimate.Estimate
 			for k, eta := range perBucketCurrent {
 				compare := eta
 				if k == key {
-					compare = bucketETA(buckets[k], defaultDur, true)
+					compare = bucketETA(buckets[k], true)
 				}
-				if compare > candidate {
+				if compare.Mean > candidate.Mean {
 					candidate = compare
 				}
 			}
-			if candidate > 0 && (withNew == etaUnknownDuration || candidate < withNew) {
+			if candidate.Mean > 0 && (withNew.Mean <= 0 || candidate.Mean < withNew.Mean) {
 				withNew = candidate
 			}
 		}
@@ -118,14 +116,14 @@ func computeGroupedETA(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveSt
 }
 
 func formatETALine(result etaResult) string {
-	if result.ETACurrent <= 0 {
+	if result.ETACurrent.Mean <= 0 {
 		return ""
 	}
-	line := "ETA: " + formatETAApprox(result.ETACurrent)
+	line := "ETA: " + result.ETACurrent.FormatWithBounds()
 	if result.HasQueued {
 		line += "  ·  with +1 instance"
-		if result.ETAWithNewInst > 0 && result.ETAWithNewInst < result.ETACurrent {
-			line += ": " + formatETAApprox(result.ETAWithNewInst)
+		if result.ETAWithNewInst.Mean > 0 && result.ETAWithNewInst.Mean < result.ETACurrent.Mean {
+			line += ": " + result.ETAWithNewInst.FormatWithBounds()
 		}
 	}
 	return line
@@ -186,16 +184,16 @@ func bucketRunningSlots(bucketKey string, jobs []*db.Job) int {
 	return len(launchIDs) + slotsWithoutLaunch
 }
 
-func runningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) time.Duration {
+func runningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) estimate.Estimate {
 	remaining, ok := estimateRunningJobRemaining(job, launchLiveByID, now)
 	if ok {
 		return remaining
 	}
 	if job == nil {
-		return 0
+		return estimate.Estimate{}
 	}
 	if job.StartTime <= 0 {
-		return min(15*time.Minute, estimate.DefaultJobDuration.Mean)
+		return estimate.Constant(min(15*time.Minute, estimate.DefaultJobDuration.Mean))
 	}
 	elapsed := now.Unix() - job.StartTime
 	if elapsed < 0 {
@@ -210,28 +208,28 @@ func runningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveSta
 		if live := launchLiveByID[*job.LaunchID]; live != nil && live.JobProgressID == job.ID && live.JobProgressPct > 0 && live.JobProgressPct < 100 {
 			remaining := time.Duration(float64(elapsedDur) * float64(100-live.JobProgressPct) / float64(live.JobProgressPct))
 			if remaining < 0 {
-				return 0
+				return estimate.Estimate{}
 			}
 			if remaining > etaMaxRunningRemainder {
-				return etaMaxRunningRemainder
+				return estimate.Constant(etaMaxRunningRemainder)
 			}
-			return remaining
+			return estimate.Constant(remaining)
 		}
 	}
 
 	defaultDur := estimate.DefaultJobDuration.Mean
 	if elapsedDur >= defaultDur {
-		return 0
+		return estimate.Estimate{}
 	}
-	return defaultDur - elapsedDur
+	return estimate.Constant(defaultDur - elapsedDur)
 }
 
-func estimateRunningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) (time.Duration, bool) {
+func estimateRunningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) (estimate.Estimate, bool) {
 	if job == nil {
-		return 0, false
+		return estimate.Estimate{}, false
 	}
 	if status := job.EffectiveStatus(); status != db.StatusRunning && status != db.StatusStarting {
-		return 0, false
+		return estimate.Estimate{}, false
 	}
 
 	elapsed := runningJobElapsed(job, now)
@@ -245,7 +243,19 @@ func estimateRunningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.Launc
 	}
 
 	weight := progressBlendWeight(live, now)
-	blended := time.Duration((1.0-weight)*float64(priorRemaining) + weight*float64(progressRemaining))
+	blendedMean := time.Duration((1.0-weight)*float64(priorRemaining.Mean) + weight*float64(progressRemaining))
+	// Scale bounds proportionally: as progress increases, uncertainty shrinks.
+	var blended estimate.Estimate
+	if priorRemaining.Mean > 0 {
+		ratio := float64(blendedMean) / float64(priorRemaining.Mean)
+		blended = estimate.Estimate{
+			Mean:  blendedMean,
+			Lower: time.Duration(float64(priorRemaining.Lower) * ratio),
+			Upper: time.Duration(float64(priorRemaining.Upper) * ratio),
+		}
+	} else {
+		blended = estimate.Constant(blendedMean)
+	}
 	return capRunningRemaining(blended), true
 }
 
@@ -274,7 +284,7 @@ func runningJobPriorEstimate(job *db.Job) estimate.Estimate {
 	return estimate.FromSeconds(meanSec, lowerSec, upperSec)
 }
 
-func truncatedLogNormalRemaining(prior estimate.Estimate, elapsed time.Duration) time.Duration {
+func truncatedLogNormalRemaining(prior estimate.Estimate, elapsed time.Duration) estimate.Estimate {
 	mu, sigma, ok := fitLogNormalFromEstimate(prior)
 	if !ok {
 		mean := prior.Mean
@@ -283,9 +293,9 @@ func truncatedLogNormalRemaining(prior estimate.Estimate, elapsed time.Duration)
 		}
 		remaining := mean - elapsed
 		if remaining < 0 {
-			return 0
+			remaining = 0
 		}
-		return remaining
+		return estimate.Constant(remaining)
 	}
 
 	t := elapsed
@@ -294,18 +304,25 @@ func truncatedLogNormalRemaining(prior estimate.Estimate, elapsed time.Duration)
 	}
 	lnT := math.Log(float64(t) / float64(time.Second))
 
-	surv := normalCDF((mu - lnT) / sigma)
-	if surv <= 1e-9 {
-		return 0
+	calcRemaining := func(m float64) time.Duration {
+		surv := normalCDF((m - lnT) / sigma)
+		if surv <= 1e-9 {
+			return 0
+		}
+		tail := math.Exp(m+0.5*sigma*sigma) * normalCDF((m+sigma*sigma-lnT)/sigma)
+		condTotalSec := tail / surv
+		remainingSec := condTotalSec - float64(t)/float64(time.Second)
+		if remainingSec <= 0 {
+			return 0
+		}
+		return time.Duration(remainingSec * float64(time.Second))
 	}
 
-	tail := math.Exp(mu+0.5*sigma*sigma) * normalCDF((mu+sigma*sigma-lnT)/sigma)
-	condTotalSec := tail / surv
-	remainingSec := condTotalSec - float64(t)/float64(time.Second)
-	if remainingSec <= 0 {
-		return 0
+	return estimate.Estimate{
+		Mean:  calcRemaining(mu),
+		Lower: calcRemaining(mu - sigma),
+		Upper: calcRemaining(mu + sigma),
 	}
-	return time.Duration(remainingSec * float64(time.Second))
 }
 
 func fitLogNormalFromEstimate(prior estimate.Estimate) (mu, sigma float64, ok bool) {
@@ -385,50 +402,59 @@ func progressBlendWeight(live *db.LaunchLiveState, now time.Time) float64 {
 	return weight
 }
 
-func capRunningRemaining(remaining time.Duration) time.Duration {
-	if remaining <= 0 {
-		return 0
+func capRunningRemaining(e estimate.Estimate) estimate.Estimate {
+	cap := func(d time.Duration) time.Duration {
+		if d <= 0 {
+			return 0
+		}
+		if d > etaMaxRunningRemainder {
+			return etaMaxRunningRemainder
+		}
+		return d
 	}
-	if remaining > etaMaxRunningRemainder {
-		return etaMaxRunningRemainder
+	return estimate.Estimate{
+		Mean:  cap(e.Mean),
+		Lower: cap(e.Lower),
+		Upper: cap(e.Upper),
 	}
-	return remaining
 }
 
-func bucketETA(bucket *etaBucket, avgJobDuration time.Duration, addOneInstance bool) time.Duration {
+func bucketETA(bucket *etaBucket, addOneInstance bool) estimate.Estimate {
 	if bucket == nil {
-		return etaUnknownDuration
+		return estimate.Estimate{}
 	}
-	maxRemaining := time.Duration(0)
-	for _, d := range bucket.runningRemaining {
-		if d > maxRemaining {
-			maxRemaining = d
+	var maxRemaining estimate.Estimate
+	for _, e := range bucket.runningRemaining {
+		if e.Mean > maxRemaining.Mean {
+			maxRemaining = e
 		}
 	}
 
 	if bucket.queuedCount == 0 {
-		if maxRemaining > 0 {
+		if maxRemaining.Mean > 0 {
 			return maxRemaining
 		}
-		return etaUnknownDuration
+		return estimate.Estimate{}
 	}
 
 	slots := bucket.runningSlots
 	if addOneInstance {
 		slots++
 	}
+	defaultEst := estimate.DefaultJobDuration
 	if slots <= 0 {
-		eta := time.Duration(bucket.queuedCount) * avgJobDuration
+		eta := defaultEst.Scale(float64(bucket.queuedCount))
 		if addOneInstance {
-			eta += etaLaunchSetupOverhead
+			eta = eta.Add(estimate.Constant(etaLaunchSetupOverhead))
 		}
 		return eta
 	}
 
 	waves := int(math.Ceil(float64(bucket.queuedCount) / float64(slots)))
-	eta := maxRemaining + time.Duration(waves)*avgJobDuration
+	waveEst := defaultEst.Scale(float64(waves))
+	eta := maxRemaining.Add(waveEst)
 	if addOneInstance {
-		eta += etaLaunchSetupOverhead
+		eta = eta.Add(estimate.Constant(etaLaunchSetupOverhead))
 	}
 	return eta
 }

@@ -1169,7 +1169,7 @@ func minLaunchJobID(ids []int64) int64 {
 }
 
 type queueETAState struct {
-	AvailByInstance  map[int64][]time.Duration
+	AvailByInstance  map[int64][]estimate.Estimate
 	QueuedByInstance map[int64]int
 }
 
@@ -1293,7 +1293,7 @@ func rebalanceQueuedJobsToLaunchedInstance(
 
 func buildQueueETAState(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) queueETAState {
 	state := queueETAState{
-		AvailByInstance:  make(map[int64][]time.Duration),
+		AvailByInstance:  make(map[int64][]estimate.Estimate),
 		QueuedByInstance: make(map[int64]int),
 	}
 	for _, job := range jobs {
@@ -1316,11 +1316,11 @@ func buildQueueETAState(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveS
 
 func cloneQueueETAState(state queueETAState) queueETAState {
 	copyState := queueETAState{
-		AvailByInstance:  make(map[int64][]time.Duration, len(state.AvailByInstance)),
+		AvailByInstance:  make(map[int64][]estimate.Estimate, len(state.AvailByInstance)),
 		QueuedByInstance: make(map[int64]int, len(state.QueuedByInstance)),
 	}
 	for id, avail := range state.AvailByInstance {
-		copyState.AvailByInstance[id] = append([]time.Duration(nil), avail...)
+		copyState.AvailByInstance[id] = append([]estimate.Estimate(nil), avail...)
 	}
 	for id, queued := range state.QueuedByInstance {
 		copyState.QueuedByInstance[id] = queued
@@ -1336,7 +1336,12 @@ func meanQueuedCompletionETA(state queueETAState) time.Duration {
 			continue
 		}
 		totalQueued += queued
-		avail := append([]time.Duration(nil), state.AvailByInstance[instanceID]...)
+		// Extract mean durations for the scheduling simulation.
+		estimates := state.AvailByInstance[instanceID]
+		avail := make([]time.Duration, len(estimates))
+		for i, e := range estimates {
+			avail[i] = e.Mean
+		}
 		if len(avail) == 0 {
 			avail = []time.Duration{0}
 		}

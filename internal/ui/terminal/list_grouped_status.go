@@ -169,10 +169,10 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 		return ""
 	}
 	remaining, ok := estimateRunningJobRemaining(job, launchLiveByID, now)
-	if !ok || remaining <= 0 {
+	if !ok || remaining.Mean <= 0 {
 		return ""
 	}
-	return "ETA " + formatETAApprox(remaining)
+	return "ETA " + remaining.FormatWithBounds()
 }
 
 func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {

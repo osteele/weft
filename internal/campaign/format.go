@@ -166,27 +166,11 @@ func FormatCostTableWithEstimates(estimates []CostEstimate) string {
 
 // FormatEstDuration formats a duration with an indicator of whether it's predicted.
 func FormatEstDuration(d time.Duration, hasPrediction bool) string {
-	s := formatDurationShort(d)
+	s := estimate.FormatDurationShort(d)
 	if hasPrediction {
 		return "~" + s
 	}
 	return "~" + s + " (est)"
-}
-
-// formatDurationShort formats a duration as a compact string like "2h15".
-func formatDurationShort(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	if h == 0 {
-		return fmt.Sprintf("%dm", m)
-	}
-	if m == 0 {
-		return fmt.Sprintf("%dh", h)
-	}
-	return fmt.Sprintf("%dh%02d", h, m)
 }
 
 // FormatSSHCommand returns the SSH command string for a cloud instance.
@@ -385,16 +369,7 @@ func FormatCostBreakdown(estimates []CostEstimate, selectedPerGroup []int) strin
 
 // formatDurationWithBounds formats a duration estimate as "~2h15 (1h–4h)".
 func formatDurationWithBounds(e estimate.Estimate) string {
-	if e.Mean == 0 {
-		return "—"
-	}
-	mean := formatDurationShort(e.Mean)
-	if e.Lower == e.Upper || e.Lower == e.Mean {
-		return "~" + mean
-	}
-	lower := formatDurationShort(e.Lower)
-	upper := formatDurationShort(e.Upper)
-	return fmt.Sprintf("~%s (%s–%s)", mean, lower, upper)
+	return e.FormatWithBounds()
 }
 
 // formatCostWithBounds formats a cost as "~$3.38 ($1.00–$5.50)".
@@ -762,9 +737,9 @@ func FormatParetoSparkline(rows []StrategySummaryRow) *CostTable {
 	lines = append(lines, CostLine{Text: xAxis, Dimmed: true})
 
 	// X-axis labels
-	leftLabel := formatDurationShort(time.Duration(minT * float64(time.Hour)))
-	midLabel := formatDurationShort(time.Duration((minT + maxT) / 2 * float64(time.Hour)))
-	rightLabel := formatDurationShort(time.Duration(maxT * float64(time.Hour)))
+	leftLabel := estimate.FormatDurationShort(time.Duration(minT * float64(time.Hour)))
+	midLabel := estimate.FormatDurationShort(time.Duration((minT + maxT) / 2 * float64(time.Hour)))
+	rightLabel := estimate.FormatDurationShort(time.Duration(maxT * float64(time.Hour)))
 
 	xLine := make([]byte, yLabelW+1+chartCols)
 	for i := range xLine {

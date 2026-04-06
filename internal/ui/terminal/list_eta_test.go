@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 )
 
 func float64Ptr(v float64) *float64 { return &v }
@@ -35,11 +36,11 @@ func TestComputeGroupedETA_UsesLiveProgressAndQueue(t *testing.T) {
 	if !got.HasQueued {
 		t.Fatalf("HasQueued = false, want true")
 	}
-	if got.ETACurrent <= 0 {
-		t.Fatalf("ETACurrent = %v, want > 0", got.ETACurrent)
+	if got.ETACurrent.Mean <= 0 {
+		t.Fatalf("ETACurrent.Mean = %v, want > 0", got.ETACurrent.Mean)
 	}
-	if got.ETACurrent < 110*time.Minute || got.ETACurrent > 150*time.Minute {
-		t.Fatalf("ETACurrent = %v, want around 2h (running remainder + one queued job)", got.ETACurrent)
+	if got.ETACurrent.Mean < 110*time.Minute || got.ETACurrent.Mean > 150*time.Minute {
+		t.Fatalf("ETACurrent.Mean = %v, want around 2h (running remainder + one queued job)", got.ETACurrent.Mean)
 	}
 }
 
@@ -53,11 +54,11 @@ func TestComputeGroupedETA_WithNewInstanceShownWhenQueueLargeEnough(t *testing.T
 	}
 
 	got := computeGroupedETA(jobs, nil, now)
-	if got.ETAWithNewInst <= 0 {
-		t.Fatalf("ETAWithNewInst = %v, want > 0", got.ETAWithNewInst)
+	if got.ETAWithNewInst.Mean <= 0 {
+		t.Fatalf("ETAWithNewInst.Mean = %v, want > 0", got.ETAWithNewInst.Mean)
 	}
-	if got.ETAWithNewInst >= got.ETACurrent {
-		t.Fatalf("ETAWithNewInst = %v, ETACurrent = %v, want improved ETA", got.ETAWithNewInst, got.ETACurrent)
+	if got.ETAWithNewInst.Mean >= got.ETACurrent.Mean {
+		t.Fatalf("ETAWithNewInst.Mean = %v, ETACurrent.Mean = %v, want improved ETA", got.ETAWithNewInst.Mean, got.ETACurrent.Mean)
 	}
 }
 
@@ -80,8 +81,8 @@ func TestFormatETAApprox(t *testing.T) {
 
 func TestFormatETALine_ShowsNewInstanceWithoutEstimateWhenNotBetter(t *testing.T) {
 	line := formatETALine(etaResult{
-		ETACurrent:     5 * time.Hour,
-		ETAWithNewInst: 5*time.Hour + 4*time.Minute,
+		ETACurrent:     estimate.Constant(5 * time.Hour),
+		ETAWithNewInst: estimate.Constant(5*time.Hour + 4*time.Minute),
 		HasQueued:      true,
 	})
 	if line != "ETA: ~5h  ·  with +1 instance" {
@@ -91,12 +92,26 @@ func TestFormatETALine_ShowsNewInstanceWithoutEstimateWhenNotBetter(t *testing.T
 
 func TestFormatETALine_ShowsEstimateWhenBetter(t *testing.T) {
 	line := formatETALine(etaResult{
-		ETACurrent:     5 * time.Hour,
-		ETAWithNewInst: 4*time.Hour + 40*time.Minute,
+		ETACurrent:     estimate.Constant(5 * time.Hour),
+		ETAWithNewInst: estimate.Constant(4*time.Hour + 40*time.Minute),
 		HasQueued:      true,
 	})
-	if line != "ETA: ~5h  ·  with +1 instance: ~4h 40m" {
-		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h  ·  with +1 instance: ~4h 40m")
+	if line != "ETA: ~5h  ·  with +1 instance: ~4h40" {
+		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h  ·  with +1 instance: ~4h40")
+	}
+}
+
+func TestFormatETALine_ShowsBoundsWhenPresent(t *testing.T) {
+	line := formatETALine(etaResult{
+		ETACurrent: estimate.Estimate{
+			Mean:  2 * time.Hour,
+			Lower: 1 * time.Hour,
+			Upper: 4 * time.Hour,
+		},
+		HasQueued: false,
+	})
+	if line != "ETA: ~2h (1h–4h)" {
+		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~2h (1h–4h)")
 	}
 }
 
@@ -116,8 +131,11 @@ func TestEstimateRunningJobRemaining_UsesPlacementPriorWhenNoProgress(t *testing
 	if !ok {
 		t.Fatalf("estimateRunningJobRemaining() ok = false, want true")
 	}
-	if got < 45*time.Minute || got > etaMaxRunningRemainder {
-		t.Fatalf("estimateRunningJobRemaining() = %v, want plausible prior-based remainder", got)
+	if got.Mean < 45*time.Minute || got.Mean > etaMaxRunningRemainder {
+		t.Fatalf("estimateRunningJobRemaining() Mean = %v, want plausible prior-based remainder", got.Mean)
+	}
+	if got.Lower >= got.Mean || got.Upper <= got.Mean {
+		t.Fatalf("estimateRunningJobRemaining() bounds invalid: Lower=%v Mean=%v Upper=%v", got.Lower, got.Mean, got.Upper)
 	}
 }
 
@@ -147,7 +165,7 @@ func TestEstimateRunningJobRemaining_FreshProgressWeightedMoreThanStale(t *testi
 	if !okFresh || !okStale {
 		t.Fatalf("estimateRunningJobRemaining() expected both estimates, got fresh=%v stale=%v", okFresh, okStale)
 	}
-	if fresh >= stale {
-		t.Fatalf("fresh ETA = %v, stale ETA = %v, want fresh < stale", fresh, stale)
+	if fresh.Mean >= stale.Mean {
+		t.Fatalf("fresh ETA Mean = %v, stale ETA Mean = %v, want fresh < stale", fresh.Mean, stale.Mean)
 	}
 }
