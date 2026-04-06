@@ -369,7 +369,11 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.launched > 0:
 			m.statusMessage = fmt.Sprintf("Auto-pilot: launched %d", msg.launched)
 		default:
-			m.statusMessage = "Auto-pilot: monitoring"
+			if summary := autoPilotBlockSummary(msg.blockedReasons); summary != "" {
+				m.statusMessage = "Auto-pilot: " + summary
+			} else {
+				m.statusMessage = "Auto-pilot: monitoring"
+			}
 		}
 		return m, m.reloadJobs()
 
@@ -1400,6 +1404,35 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 		decorated = append(decorated, &copyJob)
 	}
 	return decorated
+}
+
+func autoPilotBlockSummary(reasons map[int64]string) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	unique := map[string]int{}
+	for _, reason := range reasons {
+		r := strings.TrimSpace(reason)
+		if r != "" {
+			unique[r]++
+		}
+	}
+	if len(unique) == 0 {
+		return ""
+	}
+	if len(unique) == 1 {
+		for reason, count := range unique {
+			if count == 1 {
+				return reason
+			}
+			return fmt.Sprintf("%s (%d jobs)", reason, count)
+		}
+	}
+	total := 0
+	for _, c := range unique {
+		total += c
+	}
+	return fmt.Sprintf("%d jobs blocked", total)
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {
