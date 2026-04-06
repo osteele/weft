@@ -103,34 +103,38 @@ func BuildAutoPlacementPlan(
 		if len(group.Jobs) == 0 {
 			continue
 		}
-		if _, ok := reused[group.Jobs[0].ID]; ok {
-			continue
-		}
 		offer := GroupOffer{}
 		if i < len(strategyPlan.DisplayOffers) {
 			offer = strategyPlan.DisplayOffers[i]
 		}
-		launchable := offer.Offer != nil && offer.Err == nil
-		reason := ""
-		if !launchable {
-			if offer.Err != nil {
-				reason = offer.Err.Error()
-			} else {
-				reason = "no compatible offers"
-			}
-		}
-		for _, job := range group.Jobs {
-			if job == nil {
-				continue
-			}
-			if launchable {
-				plan.LaunchJobIDs = append(plan.LaunchJobIDs, job.ID)
-				continue
-			}
-			plan.BlockedReasons[job.ID] = "planner: " + strings.TrimSpace(reason)
-		}
+		applyGroupOffer(&plan, group, offer, reused)
 	}
 
 	sort.Slice(plan.LaunchJobIDs, func(i, j int) bool { return plan.LaunchJobIDs[i] < plan.LaunchJobIDs[j] })
 	return plan, nil
+}
+
+func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}) {
+	launchable := offer.Offer != nil && offer.Err == nil
+	reason := ""
+	if !launchable {
+		if offer.Err != nil {
+			reason = offer.Err.Error()
+		} else {
+			reason = "no compatible offers"
+		}
+	}
+	for _, job := range group.Jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := reused[job.ID]; ok {
+			continue
+		}
+		if launchable {
+			plan.LaunchJobIDs = append(plan.LaunchJobIDs, job.ID)
+			continue
+		}
+		plan.BlockedReasons[job.ID] = "planner: " + strings.TrimSpace(reason)
+	}
 }
