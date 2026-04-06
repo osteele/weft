@@ -522,6 +522,7 @@ func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}
 		}
+		hydrateRelaunchBlockedReasons(database, unplacedJobs)
 		return watchOnPremRefreshedMsg{
 			updateOnPremHosts:  true,
 			onPremHosts:        groupOnPremHosts(onPremJobs),
@@ -537,6 +538,7 @@ func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}
 		}
+		hydrateRelaunchBlockedReasons(database, unplacedJobs)
 		return watchOnPremRefreshedMsg{
 			updateUnplacedJobs: true,
 			unplacedJobs:       unplacedJobs,

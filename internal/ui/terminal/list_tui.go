@@ -584,6 +584,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if err != nil {
 			return listJobsLoadedMsg{jobs: jobs, err: err}
 		}
+		hydrateRelaunchBlockedReasons(database, jobs)
 		launchIDs := make([]int64, 0, len(jobs))
 		seen := make(map[int64]bool, len(jobs))
 		for _, job := range jobs {
@@ -864,18 +865,24 @@ func relaunchBlockedReasonsFromEvents(database *sql.DB, jobIDs []int64, sinceUni
 		return reasons
 	}
 	placeholders := make([]string, 0, len(jobIDs))
-	args := make([]any, 0, len(jobIDs)+1)
-	args = append(args, sinceUnix)
-	for _, jobID := range jobIDs {
+	for range jobIDs {
 		placeholders = append(placeholders, "?")
-		args = append(args, jobID)
 	}
 	query := fmt.Sprintf(`SELECT job_id, event_kind, detail, attempt_number, max_attempts
 		FROM lifecycle_events
-		WHERE occurred_at >= ?
-		  AND event_kind LIKE 'relaunch.skipped.%%'
-		  AND job_id IN (%s)
-		ORDER BY occurred_at DESC, id DESC`, strings.Join(placeholders, ","))
+		WHERE event_kind LIKE 'relaunch.skipped.%%'
+		  AND job_id IN (%s)`, strings.Join(placeholders, ","))
+	if sinceUnix > 0 {
+		query += "\n\t\t  AND occurred_at >= ?"
+	}
+	query += "\n\t\tORDER BY occurred_at DESC, id DESC"
+	args := make([]any, 0, len(jobIDs)+1)
+	for _, jobID := range jobIDs {
+		args = append(args, jobID)
+	}
+	if sinceUnix > 0 {
+		args = append(args, sinceUnix)
+	}
 	rows, err := database.Query(query, args...)
 	if err != nil {
 		return reasons
@@ -918,6 +925,94 @@ func summarizeRelaunchSkipEvent(kind, detail string, attemptNumber, maxAttempts 
 	default:
 		return kind
 	}
+}
+
+func hydrateRelaunchBlockedReasons(database *sql.DB, jobs []*db.Job) {
+	if database == nil || len(jobs) == 0 {
+		return
+	}
+	jobIDs := make([]int64, 0, len(jobs))
+	queueFloorByJob := make(map[int64]int64, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if strings.TrimSpace(job.QueueBlockedReason) != "" {
+			continue
+		}
+		if job.TargetKind() != db.JobTargetUnplaced {
+			continue
+		}
+		jobIDs = append(jobIDs, job.ID)
+		floor := job.QueuedAt
+		if floor <= 0 {
+			floor = job.CreatedAt
+		}
+		queueFloorByJob[job.ID] = floor
+	}
+	if len(jobIDs) == 0 {
+		return
+	}
+	reasons := relaunchBlockedReasonsFromEventsWithFloor(database, queueFloorByJob)
+	if len(reasons) == 0 {
+		return
+	}
+	for _, job := range jobs {
+		if job == nil || strings.TrimSpace(job.QueueBlockedReason) != "" {
+			continue
+		}
+		if reason := strings.TrimSpace(reasons[job.ID]); reason != "" {
+			job.QueueBlockedReason = reason
+		}
+	}
+}
+
+func relaunchBlockedReasonsFromEventsWithFloor(database *sql.DB, floorByJob map[int64]int64) map[int64]string {
+	reasons := make(map[int64]string)
+	if database == nil || len(floorByJob) == 0 {
+		return reasons
+	}
+	jobIDs := make([]int64, 0, len(floorByJob))
+	for jobID := range floorByJob {
+		jobIDs = append(jobIDs, jobID)
+	}
+	placeholders := make([]string, 0, len(jobIDs))
+	args := make([]any, 0, len(jobIDs))
+	for _, jobID := range jobIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, jobID)
+	}
+	query := fmt.Sprintf(`SELECT job_id, occurred_at, event_kind, detail, attempt_number, max_attempts
+		FROM lifecycle_events
+		WHERE event_kind LIKE 'relaunch.skipped.%%'
+		  AND job_id IN (%s)
+		ORDER BY occurred_at DESC, id DESC`, strings.Join(placeholders, ","))
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return reasons
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			jobID         int64
+			occurredAt    int64
+			eventKind     string
+			detail        sql.NullString
+			attemptNumber int
+			maxAttempts   int
+		)
+		if err := rows.Scan(&jobID, &occurredAt, &eventKind, &detail, &attemptNumber, &maxAttempts); err != nil {
+			continue
+		}
+		if _, exists := reasons[jobID]; exists {
+			continue
+		}
+		if floor, ok := floorByJob[jobID]; ok && floor > 0 && occurredAt < floor {
+			continue
+		}
+		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, attemptNumber, maxAttempts)
+	}
+	return reasons
 }
 
 func (m listTUIModel) launchOneInstanceForQueue() tea.Cmd {

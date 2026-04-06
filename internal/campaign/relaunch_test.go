@@ -108,3 +108,51 @@ func TestApplyRetryBudgetMultiplier_SubsequentRetry(t *testing.T) {
 		t.Fatal("first-tier limits should remain unchanged for subsequent retry scaling")
 	}
 }
+
+func TestRetryBudgetUsage_NoStartConsumesNoBudget(t *testing.T) {
+	now := time.Unix(2_000, 0)
+	launchedAt := int64(1_000)
+	endedAt := int64(1_900)
+	facts := relaunchAttemptFacts{
+		LastLaunch: &db.Launch{
+			LaunchedAt:       &launchedAt,
+			EndedAt:          &endedAt,
+			CostPerHourCents: 200,
+		},
+		LastAttemptStartTime: 0,
+		LastAttemptEndTime:   &endedAt,
+	}
+
+	elapsed, spend := retryBudgetUsage(facts, now)
+	if elapsed != 0 {
+		t.Fatalf("elapsed = %v, want 0", elapsed)
+	}
+	if spend != 0 {
+		t.Fatalf("spend = %d, want 0", spend)
+	}
+}
+
+func TestRetryBudgetUsage_ProratesActualSpendByAttemptElapsed(t *testing.T) {
+	now := time.Unix(4_000, 0)
+	launchedAt := int64(1_000)
+	endedAt := int64(3_000) // 2000s launch elapsed
+	attemptStart := int64(2_000)
+	attemptEnd := int64(3_000) // 1000s attempt elapsed (50%)
+	facts := relaunchAttemptFacts{
+		LastLaunch: &db.Launch{
+			LaunchedAt:       &launchedAt,
+			EndedAt:          &endedAt,
+			ActualSpendCents: 300,
+		},
+		LastAttemptStartTime: attemptStart,
+		LastAttemptEndTime:   &attemptEnd,
+	}
+
+	elapsed, spend := retryBudgetUsage(facts, now)
+	if elapsed != time.Duration(attemptEnd-attemptStart)*time.Second {
+		t.Fatalf("elapsed = %v, want %v", elapsed, time.Duration(attemptEnd-attemptStart)*time.Second)
+	}
+	if spend != 150 {
+		t.Fatalf("spend = %d, want 150", spend)
+	}
+}

@@ -114,6 +114,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	if err != nil {
 		return watchSystemSnapshot{}, fmt.Errorf("list unplaced jobs: %w", err)
 	}
+	hydrateRelaunchBlockedReasons(database, unplacedJobs)
 
 	return watchSystemSnapshot{
 		Launches:        cloudInstances,

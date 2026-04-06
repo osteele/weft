@@ -198,6 +198,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	}
 
 	unplaced, _ := db.ListUnplacedJobs(database)
+	hydrateRelaunchBlockedReasons(database, unplaced)
 	onPremJobs, _ := db.ListActiveOnPremJobs(database)
 	queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 
