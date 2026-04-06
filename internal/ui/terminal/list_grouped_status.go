@@ -136,6 +136,9 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 	if sectionKey == "running" && job.StartTime > 0 {
 		return "running " + shortRelativeTime(now.Unix()-job.StartTime)
 	}
+	if sectionKey == "completions" && job.EndTime != nil && *job.EndTime > 0 {
+		return "completed " + shortRelativeTime(now.Unix()-*job.EndTime)
+	}
 	if sectionKey == "unplaced" && job.EndTime != nil && *job.EndTime > 0 {
 		reason := strings.ToLower(strings.TrimSpace(queueblock.Display(job, nil).Reason))
 		if strings.Contains(reason, "retry budget exceeded") || strings.Contains(reason, "max attempts") {

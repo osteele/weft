@@ -91,6 +91,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 			Project:     "proj",
 			Description: "done",
 			CreatedAt:   3_200,
+			EndTime:     testInt64Ptr(4_940),
 			ExitCode:    testIntPtr(0),
 		},
 	}
@@ -102,11 +103,31 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 	for _, want := range []string{
 		"- 42 — proj python train.py (rental) — running 75% — running 10m ago",
 		"- 43 — proj queued — queued 13m ago",
-		"- 44 — proj done — placed 30m ago — completed ok",
+		"- 44 — proj done — completed 1m ago — completed ok",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMissing(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          53,
+			Status:      db.StatusCompleted,
+			Project:     "proj",
+			Description: "legacy completion",
+			QueuedAt:    4_700,
+			ExitCode:    testIntPtr(0),
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	want := "- 53 — proj legacy completion — placed 5m ago — completed ok"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
 }
 
