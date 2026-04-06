@@ -11,7 +11,9 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
-func TestCheckInstance_GraceExpired(t *testing.T) {
+func TestCheckInstance_GraceExpired_ForceDestroyAfterTimeout(t *testing.T) {
+	// Grace expired well past the shutdown timeout — no termination intent from agent.
+	// Coordinator should force-destroy.
 	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
@@ -36,6 +38,55 @@ func TestCheckInstance_GraceExpired(t *testing.T) {
 	}
 	if action.AttemptOutcome != db.AttemptOutcomeFailed {
 		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeFailed)
+	}
+}
+
+func TestCheckInstance_GraceExpired_WaitForAgentShutdown(t *testing.T) {
+	// Grace expired recently (within shutdown timeout) and no termination intent.
+	// Coordinator should wait, not destroy.
+	recentDeadline := time.Now().Add(-30 * time.Second).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:            1,
+			Status:        db.LaunchStatusGrace,
+			GraceDeadline: &recentDeadline,
+		},
+		Now: time.Now(),
+	})
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
+	}
+	if action.DestroyProvider {
+		t.Error("DestroyProvider should be false while waiting for agent shutdown")
+	}
+	if action.StallMessage == "" {
+		t.Error("expected a stall message")
+	}
+}
+
+func TestCheckInstance_GraceExpired_AgentIntentPresent(t *testing.T) {
+	// Grace expired and agent has written a termination intent.
+	// Step 1 should fall through to step 3 (termination intent handler).
+	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:            1,
+			Status:        db.LaunchStatusGrace,
+			GraceDeadline: &pastDeadline,
+		},
+		TerminationIntent: &instanceintent.Marker{
+			TerminalStatus:    db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonJobFailure,
+		},
+		Now: time.Now(),
+	})
+	if action.Kind != ActionTerminationIntent {
+		t.Fatalf("action.Kind = %d, want ActionTerminationIntent (%d); grace expiry should defer to termination intent", action.Kind, ActionTerminationIntent)
+	}
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
 	}
 }
 

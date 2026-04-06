@@ -642,7 +642,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 		}, nil
 	}
 
-	return nil, fmt.Errorf("log not available in R2 for job %d (may have been purged)", jobID)
+	return nil, fmt.Errorf("log not found in R2 for job %d (the job may not have produced output, or the instance was terminated before log upload)", jobID)
 }
 
 func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {

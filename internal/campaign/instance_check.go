@@ -33,6 +33,12 @@ const (
 	ActionRunningStalled                        // running phase + stale heartbeat too long -> fail
 )
 
+// graceShutdownTimeout is how long after the grace deadline the coordinator
+// waits for the agent to write a termination intent before force-destroying.
+// The agent normally self-destructs within seconds of its deadline; this
+// timeout is a safety net for unresponsive agents.
+const graceShutdownTimeout = 2 * time.Minute
+
 // InstanceAction describes what reconciliation action to take for a cloud instance.
 type InstanceAction struct {
 	Kind              InstanceActionKind
@@ -174,14 +180,30 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	// queued (ResetJobs: false) — the job already ran and errored, so
 	// re-queuing would cause an infinite retry loop. Close the attempts as
 	// "failed" instead.
+	//
+	// Instead of immediately destroying, we give the agent time to shut down
+	// gracefully (upload logs, write termination intent). The coordinator
+	// only force-destroys after graceShutdownTimeout with no agent response.
 	if ci.Status == db.LaunchStatusGrace && ci.GraceDeadline != nil && p.Now.Unix() > *ci.GraceDeadline {
-		return InstanceAction{
-			Kind:              ActionGraceExpired,
-			TerminalStatus:    db.LaunchStatusFailed,
-			TerminationReason: db.TerminationReasonJobFailure,
-			StallMessage:      "grace period expired — terminating instance",
-			DestroyProvider:   true,
-			AttemptOutcome:    db.AttemptOutcomeFailed,
+		if p.TerminationIntent != nil {
+			// Agent already signaled intent to shut down — fall through
+			// to step 3 which handles termination intent properly.
+		} else {
+			graceOverdueBy := p.Now.Sub(time.Unix(*ci.GraceDeadline, 0))
+			if graceOverdueBy > graceShutdownTimeout {
+				return InstanceAction{
+					Kind:              ActionGraceExpired,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonJobFailure,
+					StallMessage:      fmt.Sprintf("grace period expired %s ago with no agent shutdown — force terminating", graceOverdueBy.Truncate(time.Second)),
+					DestroyProvider:   true,
+					AttemptOutcome:    db.AttemptOutcomeFailed,
+				}
+			}
+			return InstanceAction{
+				Kind:         ActionDisplayOnly,
+				StallMessage: "grace period expired — waiting for agent shutdown",
+			}
 		}
 	}
 
