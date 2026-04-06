@@ -300,18 +300,20 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var sw *hostsync.Worker
+	var r2Client *r2.Client
 	if syncEnabled && cfg != nil {
 		cloudClients, _ := buildCloudClients(cfg)
-		r2Client, _ := buildR2Client(cfg)
+		r2Client, _ = buildR2Client(cfg)
 		sw = hostsync.New(database, cloudClients, r2Client, cfg)
 		sw.Start()
 		go func() { <-ctx.Done(); sw.Stop() }()
 	}
 
-	return watchModel{
+	model := watchModel{
 		mode:           watchModeProject,
 		database:       database,
 		appConfig:      cfg,
+		r2Client:       r2Client,
 		ctx:            ctx,
 		cancel:         cancel,
 		spinner:        s,
@@ -325,6 +327,14 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 		projectSyncing: syncEnabled,
 		focused:        true,
 	}
+
+	// Load unplaced jobs so Init auto-pilot can act on them immediately.
+	if unplaced, err := db.ListUnplacedJobs(database); err == nil {
+		hydrateRelaunchBlockedReasons(database, unplaced)
+		model.unplacedJobs = filterInstanceModeUnplacedJobs(unplaced, projectFilter)
+	}
+
+	return model
 }
 
 // ---------------------------------------------------------------------------
@@ -579,11 +589,11 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if (m.mode == watchModeSystem || m.mode.isInstanceBased()) && msg.updateOnPremHosts {
 			m.onPremHosts = msg.onPremHosts
 		}
-		if (m.mode == watchModeSystem || m.mode.isInstanceBased()) && msg.updateUnplacedJobs {
+		if msg.updateUnplacedJobs {
 			m.unplacedJobs = filterInstanceModeUnplacedJobs(msg.unplacedJobs, m.projectFilter)
 			m.clampCursor()
 		}
-		if m.autoMode && m.mode.isInstanceBased() {
+		if m.autoMode && (m.mode.isInstanceBased() || m.mode == watchModeProject) {
 			return m, m.runAutoPilot()
 		}
 		return m, nil
@@ -627,7 +637,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.debounceActive = false
-		return m, m.reloadProjectGroups()
+		return m, tea.Batch(m.reloadProjectGroups(), refreshWatchUnplacedJobs(m.database))
 
 	case watchInstanceDBRefreshTriggeredMsg:
 		if !m.mode.isInstanceBased() {

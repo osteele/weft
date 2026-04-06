@@ -655,6 +655,13 @@ func (m watchModel) handleProjectLoaded(msg watchProjectLoadedMsg) (tea.Model, t
 	}
 	m.clampCursor()
 	m.adjustProjectOffset()
+
+	// Trigger auto-pilot if enabled
+	if m.autoMode {
+		if cmd := m.runAutoPilot(); cmd != nil {
+			return m, cmd
+		}
+	}
 	return m, nil
 }
 
