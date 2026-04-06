@@ -14,6 +14,10 @@ import (
 const etaLaunchSetupOverhead = 4 * time.Minute
 const etaMaxRunningRemainder = 4 * time.Hour
 const etaUnknownDuration = -1 * time.Second
+const etaProgressFreshnessWindow = 3 * time.Minute
+const etaFallbackLowerScale = 0.5
+const etaFallbackUpperScale = 2.0
+const normalP90Z = 1.2815515655446004
 
 type etaResult struct {
 	ETACurrent     time.Duration // etaUnknownDuration when unavailable
@@ -183,6 +187,10 @@ func bucketRunningSlots(bucketKey string, jobs []*db.Job) int {
 }
 
 func runningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) time.Duration {
+	remaining, ok := estimateRunningJobRemaining(job, launchLiveByID, now)
+	if ok {
+		return remaining
+	}
 	if job == nil {
 		return 0
 	}
@@ -216,6 +224,175 @@ func runningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveSta
 		return 0
 	}
 	return defaultDur - elapsedDur
+}
+
+func estimateRunningJobRemaining(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) (time.Duration, bool) {
+	if job == nil {
+		return 0, false
+	}
+	if status := job.EffectiveStatus(); status != db.StatusRunning && status != db.StatusStarting {
+		return 0, false
+	}
+
+	elapsed := runningJobElapsed(job, now)
+	prior := runningJobPriorEstimate(job)
+	priorRemaining := truncatedLogNormalRemaining(prior, elapsed)
+
+	live := launchLiveStateForJob(job, launchLiveByID)
+	progressRemaining, hasProgress := progressBasedRemaining(elapsed, live)
+	if !hasProgress {
+		return capRunningRemaining(priorRemaining), true
+	}
+
+	weight := progressBlendWeight(live, now)
+	blended := time.Duration((1.0-weight)*float64(priorRemaining) + weight*float64(progressRemaining))
+	return capRunningRemaining(blended), true
+}
+
+func runningJobElapsed(job *db.Job, now time.Time) time.Duration {
+	if job == nil || job.StartTime <= 0 {
+		return 0
+	}
+	elapsed := now.Unix() - job.StartTime
+	if elapsed <= 0 {
+		return 0
+	}
+	return time.Duration(elapsed) * time.Second
+}
+
+func runningJobPriorEstimate(job *db.Job) estimate.Estimate {
+	fallback := estimate.DefaultJobDuration
+	if job == nil || job.PlacementMeta == nil || job.PlacementMeta.PredictedDurationS == nil {
+		return fallback
+	}
+	meanSec := *job.PlacementMeta.PredictedDurationS
+	if !(meanSec > 0) {
+		return fallback
+	}
+	lowerSec := meanSec * etaFallbackLowerScale
+	upperSec := meanSec * etaFallbackUpperScale
+	return estimate.FromSeconds(meanSec, lowerSec, upperSec)
+}
+
+func truncatedLogNormalRemaining(prior estimate.Estimate, elapsed time.Duration) time.Duration {
+	mu, sigma, ok := fitLogNormalFromEstimate(prior)
+	if !ok {
+		mean := prior.Mean
+		if mean <= 0 {
+			mean = estimate.DefaultJobDuration.Mean
+		}
+		remaining := mean - elapsed
+		if remaining < 0 {
+			return 0
+		}
+		return remaining
+	}
+
+	t := elapsed
+	if t < time.Second {
+		t = time.Second
+	}
+	lnT := math.Log(float64(t) / float64(time.Second))
+
+	surv := normalCDF((mu - lnT) / sigma)
+	if surv <= 1e-9 {
+		return 0
+	}
+
+	tail := math.Exp(mu+0.5*sigma*sigma) * normalCDF((mu+sigma*sigma-lnT)/sigma)
+	condTotalSec := tail / surv
+	remainingSec := condTotalSec - float64(t)/float64(time.Second)
+	if remainingSec <= 0 {
+		return 0
+	}
+	return time.Duration(remainingSec * float64(time.Second))
+}
+
+func fitLogNormalFromEstimate(prior estimate.Estimate) (mu, sigma float64, ok bool) {
+	lowerSec := prior.Lower.Seconds()
+	upperSec := prior.Upper.Seconds()
+	meanSec := prior.Mean.Seconds()
+
+	switch {
+	case lowerSec > 0 && upperSec > lowerSec:
+		sigma = (math.Log(upperSec) - math.Log(lowerSec)) / (2 * normalP90Z)
+		if !(sigma > 0) {
+			return 0, 0, false
+		}
+		mu = math.Log(lowerSec) + normalP90Z*sigma
+		return mu, sigma, true
+	case meanSec > 0:
+		sigma = 0.6
+		mu = math.Log(meanSec) - 0.5*sigma*sigma
+		return mu, sigma, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func normalCDF(z float64) float64 {
+	return 0.5 * (1.0 + math.Erf(z/math.Sqrt2))
+}
+
+func launchLiveStateForJob(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState) *db.LaunchLiveState {
+	if job == nil || job.LaunchID == nil || launchLiveByID == nil {
+		return nil
+	}
+	live := launchLiveByID[*job.LaunchID]
+	if live == nil || live.JobProgressID != job.ID {
+		return nil
+	}
+	return live
+}
+
+func progressBasedRemaining(elapsed time.Duration, live *db.LaunchLiveState) (time.Duration, bool) {
+	if live == nil || elapsed <= 0 {
+		return 0, false
+	}
+	pct := live.JobProgressPct
+	if pct <= 0 || pct >= 100 {
+		return 0, false
+	}
+	remaining := time.Duration(float64(elapsed) * float64(100-pct) / float64(pct))
+	if remaining < 0 {
+		return 0, false
+	}
+	return remaining, true
+}
+
+func progressBlendWeight(live *db.LaunchLiveState, now time.Time) float64 {
+	if live == nil {
+		return 0.0
+	}
+	pct := float64(live.JobProgressPct)
+	weight := 0.2
+	if pct > 10 {
+		weight += 0.6 * math.Min(1.0, (pct-10.0)/70.0)
+	}
+
+	// Older progress updates are still useful but less trustworthy.
+	if live.UpdatedAt <= 0 {
+		return weight * 0.6
+	}
+	age := now.Unix() - live.UpdatedAt
+	if age <= 0 {
+		return weight
+	}
+	ageDur := time.Duration(age) * time.Second
+	if ageDur > etaProgressFreshnessWindow {
+		return weight * 0.4
+	}
+	return weight
+}
+
+func capRunningRemaining(remaining time.Duration) time.Duration {
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining > etaMaxRunningRemainder {
+		return etaMaxRunningRemainder
+	}
+	return remaining
 }
 
 func bucketETA(bucket *etaBucket, avgJobDuration time.Duration, addOneInstance bool) time.Duration {

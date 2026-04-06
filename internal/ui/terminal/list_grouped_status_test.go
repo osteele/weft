@@ -101,7 +101,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 	}, now)
 
 	for _, want := range []string{
-		"- 42 — proj python train.py (rental) — running 75% — running 10m ago",
+		"- 42 — proj python train.py (rental) — running 75% — ETA ~58m — running 10m ago",
 		"- 43 — proj queued — queued 13m ago",
 		"- 44 — proj done — completed 1m ago — completed ok",
 	} {

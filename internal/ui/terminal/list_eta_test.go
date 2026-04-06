@@ -7,6 +7,8 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+func float64Ptr(v float64) *float64 { return &v }
+
 func TestComputeGroupedETA_UsesLiveProgressAndQueue(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	launchID := int64(7)
@@ -15,6 +17,7 @@ func TestComputeGroupedETA_UsesLiveProgressAndQueue(t *testing.T) {
 			ID:        1,
 			Status:    db.StatusRunning,
 			GPUClass:  "A100",
+			Host:      db.LaunchHost(launchID),
 			LaunchID:  &launchID,
 			StartTime: 9_400,
 		},
@@ -35,8 +38,8 @@ func TestComputeGroupedETA_UsesLiveProgressAndQueue(t *testing.T) {
 	if got.ETACurrent <= 0 {
 		t.Fatalf("ETACurrent = %v, want > 0", got.ETACurrent)
 	}
-	if got.ETACurrent < 60*time.Minute || got.ETACurrent > 90*time.Minute {
-		t.Fatalf("ETACurrent = %v, want near 70m", got.ETACurrent)
+	if got.ETACurrent < 110*time.Minute || got.ETACurrent > 150*time.Minute {
+		t.Fatalf("ETACurrent = %v, want around 2h (running remainder + one queued job)", got.ETACurrent)
 	}
 }
 
@@ -44,7 +47,7 @@ func TestComputeGroupedETA_WithNewInstanceShownWhenQueueLargeEnough(t *testing.T
 	now := time.Unix(10_000, 0)
 	launchID := int64(9)
 	jobs := []*db.Job{
-		{ID: 10, Status: db.StatusRunning, GPUClass: "A100", LaunchID: &launchID, StartTime: 9_900},
+		{ID: 10, Status: db.StatusRunning, GPUClass: "A100", Host: db.LaunchHost(launchID), LaunchID: &launchID, StartTime: 9_900},
 		{ID: 1, Status: db.StatusQueued, GPUClass: "A100"},
 		{ID: 2, Status: db.StatusQueued, GPUClass: "A100"},
 	}
@@ -94,5 +97,57 @@ func TestFormatETALine_ShowsEstimateWhenBetter(t *testing.T) {
 	})
 	if line != "ETA: ~5h  ·  with +1 instance: ~4h 40m" {
 		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h  ·  with +1 instance: ~4h 40m")
+	}
+}
+
+func TestEstimateRunningJobRemaining_UsesPlacementPriorWhenNoProgress(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	job := &db.Job{
+		ID:        1,
+		Status:    db.StatusRunning,
+		Host:      "cool30",
+		StartTime: 9_100, // 15 minutes elapsed
+		PlacementMeta: &db.PlacementMeta{
+			PredictedDurationS: float64Ptr(2 * 60 * 60),
+		},
+	}
+
+	got, ok := estimateRunningJobRemaining(job, nil, now)
+	if !ok {
+		t.Fatalf("estimateRunningJobRemaining() ok = false, want true")
+	}
+	if got < 45*time.Minute || got > etaMaxRunningRemainder {
+		t.Fatalf("estimateRunningJobRemaining() = %v, want plausible prior-based remainder", got)
+	}
+}
+
+func TestEstimateRunningJobRemaining_FreshProgressWeightedMoreThanStale(t *testing.T) {
+	now := time.Unix(20_000, 0)
+	launchID := int64(7)
+	job := &db.Job{
+		ID:        1,
+		Status:    db.StatusRunning,
+		Host:      db.LaunchHost(launchID),
+		StartTime: 19_400, // 10 minutes elapsed
+		LaunchID:  &launchID,
+		PlacementMeta: &db.PlacementMeta{
+			PredictedDurationS: float64Ptr(3 * 60 * 60),
+		},
+	}
+
+	freshMap := map[int64]*db.LaunchLiveState{
+		launchID: {LaunchID: launchID, JobProgressID: 1, JobProgressPct: 50, UpdatedAt: now.Unix()},
+	}
+	staleMap := map[int64]*db.LaunchLiveState{
+		launchID: {LaunchID: launchID, JobProgressID: 1, JobProgressPct: 50, UpdatedAt: now.Add(-10 * time.Minute).Unix()},
+	}
+
+	fresh, okFresh := estimateRunningJobRemaining(job, freshMap, now)
+	stale, okStale := estimateRunningJobRemaining(job, staleMap, now)
+	if !okFresh || !okStale {
+		t.Fatalf("estimateRunningJobRemaining() expected both estimates, got fresh=%v stale=%v", okFresh, okStale)
+	}
+	if fresh >= stale {
+		t.Fatalf("fresh ETA = %v, stale ETA = %v, want fresh < stale", fresh, stale)
 	}
 }

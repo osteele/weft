@@ -75,6 +75,9 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 			if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
 				parts = append(parts, progressText)
 			}
+			if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
+				parts = append(parts, etaText)
+			}
 			if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
 				parts = append(parts, timing)
 			}
@@ -161,6 +164,17 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 		label = "queued"
 	}
 	return label + " " + shortRelativeTime(now.Unix()-placedAt)
+}
+
+func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
+	if job == nil || sectionKey != "running" {
+		return ""
+	}
+	remaining, ok := estimateRunningJobRemaining(job, launchLiveByID, now)
+	if !ok || remaining <= 0 {
+		return ""
+	}
+	return "ETA " + formatETAApprox(remaining)
 }
 
 func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
