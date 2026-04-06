@@ -404,6 +404,15 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 		_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
 		return err
 	case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
+		// Don't overwrite an already-terminal instance that has a termination
+		// reason set (e.g., bootstrap_timeout → job_failure on next pass).
+		var currentStatus, currentReason string
+		if err := db.QueryRow(`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`, id).Scan(&currentStatus, &currentReason); err == nil {
+			isTerminal := currentStatus == LaunchStatusCompleted || currentStatus == LaunchStatusFailed || currentStatus == LaunchStatusCancelled
+			if isTerminal && currentReason != "" {
+				return nil
+			}
+		}
 		if reason != "" && detail != "" {
 			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, now, reason, detail, id)
 			return err
@@ -897,6 +906,16 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			outcome, jobID, now); err != nil {
 			tx.Rollback()
 			return 0, fmt.Errorf("set cloud_outcome for job %d: %w", jobID, err)
+		}
+		// Clear start_time on orphaned attempts so the retry budget doesn't
+		// charge infrastructure overhead (bootstrap/setup) against the job.
+		if outcome == AttemptOutcomeOrphaned {
+			if _, err := tx.Exec(
+				`UPDATE job_attempts SET start_time = NULL WHERE job_id = ? AND end_time = ? AND cloud_outcome = ?`,
+				jobID, now, AttemptOutcomeOrphaned); err != nil {
+				tx.Rollback()
+				return 0, fmt.Errorf("clear start_time for orphaned job %d: %w", jobID, err)
+			}
 		}
 	}
 
