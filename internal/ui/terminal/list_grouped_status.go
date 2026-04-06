@@ -125,8 +125,6 @@ func groupedStatusProgressSuffix(job *db.Job, sectionKey string, launchLiveByID 
 	switch job.EffectiveStatus() {
 	case db.StatusStarting:
 		return "starting"
-	case db.StatusRunning:
-		return "running"
 	default:
 		return ""
 	}
@@ -137,7 +135,7 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 		return ""
 	}
 	if sectionKey == "running" && job.StartTime > 0 {
-		return "running " + shortRelativeTime(now.Unix()-job.StartTime)
+		return "started " + shortRelativeTime(now.Unix()-job.StartTime)
 	}
 	if sectionKey == "completions" && job.EndTime != nil && *job.EndTime > 0 {
 		return "completed " + shortRelativeTime(now.Unix()-*job.EndTime)

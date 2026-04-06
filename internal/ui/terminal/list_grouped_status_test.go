@@ -101,13 +101,40 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 	}, now)
 
 	for _, want := range []string{
-		"- 42 — proj python train.py (rental) — running 75% — ETA ~58m — running 10m ago",
+		"- 42 — proj python train.py (rental) — running 75% — ETA ~58m — started 10m ago",
 		"- 43 — proj queued — queued 13m ago",
 		"- 44 — proj done — completed 1m ago — completed ok",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicateRunningLabel(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(77)
+	jobs := []*db.Job{
+		{
+			ID:        99,
+			Status:    db.StatusRunning,
+			LaunchID:  &launchID,
+			Project:   "proj",
+			StartTime: 4_400,
+			Command:   "python worker.py",
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	want := "- 99 — proj python worker.py (rental)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+	if !strings.Contains(out, "— started 10m ago") {
+		t.Fatalf("missing started timing in output:\n%s", out)
+	}
+	if strings.Contains(out, " — running — ") {
+		t.Fatalf("unexpected duplicate running label in output:\n%s", out)
 	}
 }
 
