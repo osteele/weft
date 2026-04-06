@@ -341,6 +341,13 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
+		// Backfill adaptive bootstrap timeout for accurate display.
+		if liveUpdate.BootstrapTerminateAfter == 0 && ci.Provider != "" {
+			if survival, err := db.ComputeBootstrapSurvival(database, ci.Provider); err == nil && survival != nil {
+				liveUpdate.BootstrapTerminateAfter = survival.TerminateAfter
+				liveUpdate.BootstrapDurations = survival.Durations
+			}
+		}
 		activity := terminal.FormatObservedActivity(*liveUpdate, time.Now())
 		if activity.Bootstrap != "" {
 			fmt.Printf("  Bootstrap: %s\n", activity.Bootstrap)
