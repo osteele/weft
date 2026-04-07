@@ -28,10 +28,11 @@ func formatObservedPhase(update campaign.InstanceUpdate, now time.Time) string {
 
 func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) observedActivity {
 	activity := observedActivity{}
+	ci := update.Launch
 	if update.BootstrapStage != "" {
 		activity.Bootstrap = campaign.BootstrapStageLabel(update.BootstrapStage)
 	}
-	if update.InstancePhase != "" {
+	if update.InstancePhase != "" && (ci == nil || !campaign.IsInstanceTerminal(ci.Status)) {
 		activity.Phase = formatObservedPhase(update, now)
 		return activity
 	}
@@ -44,7 +45,6 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 		return activity
 	}
 
-	ci := update.Launch
 	if ci == nil || campaign.IsInstanceTerminal(ci.Status) {
 		return activity
 	}

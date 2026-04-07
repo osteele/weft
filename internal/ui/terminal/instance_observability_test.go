@@ -259,3 +259,21 @@ func TestFormatObservedActivity_ProviderExited_StopsTimer(t *testing.T) {
 		t.Errorf("expected provider status in message, got: %s", activity.Bootstrap)
 	}
 }
+
+func TestFormatObservedActivity_HidesPhaseForTerminalLaunch(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	phaseChangedAt := now.Add(-2 * time.Minute)
+	update := campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:     220,
+			Status: db.LaunchStatusFailed,
+		},
+		InstancePhase:  "setup:733",
+		PhaseChangedAt: &phaseChangedAt,
+	}
+
+	activity := formatObservedActivity(update, now)
+	if activity.Phase != "" {
+		t.Fatalf("phase = %q, want empty for terminal launch", activity.Phase)
+	}
+}

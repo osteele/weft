@@ -218,6 +218,28 @@ func TestFormatWatchInstanceBlockUsesLivePhaseForActiveJobStatus(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlock_HidesPhaseLineForTerminalLaunch(t *testing.T) {
+	phaseChangedAt := time.Now().Add(-2 * time.Minute)
+	update := campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:       708,
+			Status:   db.LaunchStatusFailed,
+			Provider: "vastai",
+			GPUSpec:  "RTX 4090",
+		},
+		InstancePhase:  "setup:733",
+		PhaseChangedAt: &phaseChangedAt,
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
+	if strings.Contains(out, "Phase:") {
+		t.Fatalf("did not expect phase line for terminal launch, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Instance 708 — RTX 4090 — terminated") {
+		t.Fatalf("expected terminal header, got:\n%s", out)
+	}
+}
+
 func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
 	now := time.Unix(3600, 0)
 	launchedAt := int64(0)
