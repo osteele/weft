@@ -502,6 +502,7 @@ func (m listTUIModel) View() string {
 
 	layout := m.layout
 	var b strings.Builder
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
 
 	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
@@ -510,6 +511,9 @@ func (m listTUIModel) View() string {
 	b.WriteString("\n")
 
 	rows := m.pageSize()
+	if len(sharedStatusLines) > 0 && rows > len(sharedStatusLines) {
+		rows -= len(sharedStatusLines)
+	}
 	if len(m.jobs) == 0 {
 		b.WriteString(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateText(), m.width)))
 		b.WriteString("\n")
@@ -532,6 +536,10 @@ func (m listTUIModel) View() string {
 		}
 	}
 
+	for _, line := range sharedStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(rows), m.width)))
 	return b.String()
 }
@@ -552,11 +560,13 @@ func (m listTUIModel) groupedView() string {
 	etaLine := m.groupedETALine(groupedJobs)
 	statusLine := m.groupedStatusText()
 	controlsLine := m.groupedControlsText()
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
 	// Reserve: 1 title + 1 blank separator + 2 footer lines + optional ETA line.
 	footerLines := 3 // blank separator + status + controls
 	if etaLine != "" {
 		footerLines++
 	}
+	footerLines += len(sharedStatusLines)
 	maxBodyLines := m.height - 1 - footerLines // 1 for title
 
 	body := renderJobListGroupedStatusPlainWithLiveState(groupedJobs, m.width, m.launchLiveByID)
@@ -577,6 +587,10 @@ func (m listTUIModel) groupedView() string {
 	// Visually separate grouped job rows from ETA/actions footer lines.
 	b.WriteString("\n")
 
+	for _, line := range sharedStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	if etaLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
 		b.WriteString("\n")

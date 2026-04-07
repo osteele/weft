@@ -3032,10 +3032,15 @@ func (m launchModel) renderInlineWatchView() string {
 
 func (m launchModel) View() string {
 	var b strings.Builder
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
 
 	if m.err != nil && m.inlineWatch == nil {
 		b.WriteString(launchErrStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n")
+		for _, line := range sharedStatusLines {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
 		return b.String()
 	}
 	if m.statusHint != "" && m.inlineWatch == nil {
@@ -3074,6 +3079,10 @@ func (m launchModel) View() string {
 			b.WriteString("\n")
 			b.WriteString(formatPartialErrors(m.partialErrors, m.width))
 			b.WriteString("\nPress Enter, Esc, or q to continue.\n")
+		}
+		for _, line := range sharedStatusLines {
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
 		return b.String()
 	}
@@ -3141,6 +3150,10 @@ func (m launchModel) View() string {
 				phase := m.launchPhaseLabel(idx, m.groupPhases[idx])
 				b.WriteString(fmt.Sprintf("  · %s: %s\n", spec, phase))
 			}
+		}
+		for _, line := range sharedStatusLines {
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
 		return b.String()
 	}
@@ -3375,6 +3388,10 @@ func (m launchModel) View() string {
 			b.WriteString(launchErrStyle.Render(fmt.Sprintf("  %d selected job(s) will be skipped (no offers)", skippedCount)))
 			b.WriteString("\n")
 		}
+	}
+	for _, line := range sharedStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
 	}
 
 	// Help line

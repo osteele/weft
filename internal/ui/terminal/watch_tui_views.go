@@ -201,6 +201,9 @@ func (m watchModel) renderInstanceView() (string, int) {
 	if status := m.autoStatusDetail(); status != "" {
 		addLine(watchDimStyle.Render(status))
 	}
+	for _, line := range renderSharedTUIStatusLines(m.database, width) {
+		addLine(line)
+	}
 
 	if !m.done && !m.launchPending {
 		hint := "u unplace  x kill  t terminate  s submit  m move  ? help  q quit (instances run in background)"
@@ -224,6 +227,7 @@ func (m watchModel) renderSystemView() (string, int) {
 	if width <= 0 {
 		width = 100
 	}
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, width)
 
 	rows := make([]watchRenderRow, 0, 8+len(m.cloudInstances)+len(m.unplacedJobs))
 	selectedVisualIndex := -1
@@ -363,7 +367,8 @@ func (m watchModel) renderSystemView() (string, int) {
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 
 	// Render rows into content string
-	contentHeight := m.height - 1
+	reservedFooterLines := 1 + len(sharedStatusLines)
+	contentHeight := m.height - reservedFooterLines
 	if contentHeight < 1 {
 		contentHeight = len(rows)
 	}
@@ -388,6 +393,10 @@ func (m watchModel) renderSystemView() (string, int) {
 		}
 	}
 	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	for _, line := range sharedStatusLines {
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	footer := strings.Join(footerParts, "  ")
@@ -690,7 +699,11 @@ func (m watchModel) renderProjectView() string {
 	}
 
 	lines := m.projectLines
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
 	rows := m.projectPageSize()
+	if len(sharedStatusLines) > 0 && rows > len(sharedStatusLines) {
+		rows -= len(sharedStatusLines)
+	}
 	var b strings.Builder
 	title := fmt.Sprintf("Project Watch (%d projects)", len(m.projectGroups))
 	b.WriteString(watchTitleStyle.Render(truncateDisplayWidth(title, m.width)))
@@ -719,6 +732,10 @@ func (m watchModel) renderProjectView() string {
 		}
 	}
 
+	for _, line := range sharedStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	b.WriteString(watchDimStyle.Render(truncateDisplayWidth(m.projectFooterText(), m.width)))
 	return b.String()
 }

@@ -280,6 +280,7 @@ func (m campaignListModel) nextSelectable(from int) int {
 
 func (m campaignListModel) View() string {
 	var b strings.Builder
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, 0)
 
 	b.WriteString(listTitleStyle.Render("Campaigns"))
 	if m.syncInProgress {
@@ -331,6 +332,10 @@ func (m campaignListModel) View() string {
 		b.WriteString("\n")
 	}
 
+	for _, line := range sharedStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	footer := []string{}
 	if m.statusMessage != "" {
 		footer = append(footer, m.statusMessage)
