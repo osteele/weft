@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,6 +113,7 @@ var (
 	listTUISelectedStyle = lipgloss.NewStyle().Reverse(true)
 	listTUIFooterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	listTUIEmptyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
+	graceAckKeyPattern   = regexp.MustCompile(`grace/(\d+)/acks/`)
 )
 
 func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
@@ -386,7 +388,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autoBlockReasons = msg.blockedReasons
 		if msg.err != nil {
 			if !m.quickLaunchStatusProtected() {
-				m.statusMessage = fmt.Sprintf("Auto-pilot failed: %v", msg.err)
+				m.statusMessage = "Auto-pilot failed: " + summarizeAutoPilotError(msg.err)
 			}
 			return m, nil
 		}
@@ -1659,6 +1661,23 @@ func autoPilotBlockSummary(reasons map[int64]string) string {
 		total += c
 	}
 	return fmt.Sprintf("%d jobs blocked", total)
+}
+
+func summarizeAutoPilotError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "unknown error"
+	}
+	if strings.Contains(msg, "submit jobs to instance control plane:") {
+		if matches := graceAckKeyPattern.FindStringSubmatch(msg); len(matches) == 2 {
+			return fmt.Sprintf("instance #%s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", matches[1])
+		}
+		return "instance control plane did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)"
+	}
+	return msg
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {

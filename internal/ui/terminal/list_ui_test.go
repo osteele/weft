@@ -249,3 +249,23 @@ func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
 		t.Fatal("expected next sync tick to schedule another autopilot pass")
 	}
 }
+
+func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		autoInProgress:  true,
+		database:        &sql.DB{},
+	}
+
+	err := errors.New("submit jobs to instance control plane: get object grace/728/acks/1775574400000-728-123456.json: operation error S3: GetObject, https response error StatusCode: 404")
+	next, _ := m.Update(listAutoPilotDoneMsg{err: err})
+	got := next.(listTUIModel)
+
+	if !strings.Contains(got.statusMessage, "instance #728 did not acknowledge queued jobs") {
+		t.Fatalf("statusMessage = %q, want instance-specific summary", got.statusMessage)
+	}
+	if !strings.Contains(got.statusMessage, "run `weft sync`") {
+		t.Fatalf("statusMessage = %q, want actionable guidance", got.statusMessage)
+	}
+}
