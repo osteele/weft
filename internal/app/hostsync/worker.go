@@ -13,7 +13,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/cloudreconcile"
 	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
@@ -220,7 +219,7 @@ func (w *Worker) run() {
 	repairTicker := time.NewTicker(120 * time.Second)
 	defer repairTicker.Stop()
 
-	cloudReconcileTicker := time.NewTicker(cloudreconcile.DefaultInterval)
+	cloudReconcileTicker := time.NewTicker(60 * time.Second)
 	defer cloudReconcileTicker.Stop()
 
 	for {
@@ -346,12 +345,6 @@ func (w *Worker) checkUnplacedJobs() {
 }
 
 func (w *Worker) reconcileCloudJobs() {
-	cloudreconcile.RunTwoPhasePass(w.ctx, w.database, cloudreconcile.Config{
-		Owner: w.owner,
-	}, w.reconcileCloudPhase)
-}
-
-func (w *Worker) reconcileCloudPhase(_ context.Context, _ bool) (int, error) {
 	w.mu.Lock()
 	cloudClients := append([]cloud.Client(nil), w.cloudClients...)
 	r2Client := w.r2Client
@@ -361,7 +354,11 @@ func (w *Worker) reconcileCloudPhase(_ context.Context, _ bool) (int, error) {
 		resetMap, err := db.ResetJobsOnTerminalLaunches(w.database)
 		if err != nil {
 			slog.Warn("cloud reconcile failed", "component", "hostsync", "error", err)
-			return 0, err
+			select {
+			case w.results <- Result{Error: err}:
+			default:
+			}
+			return
 		}
 		if len(resetMap) > 0 {
 			slog.Info("cloud reconcile reset jobs on terminal instances", "component", "hostsync", "count", len(resetMap))
@@ -370,7 +367,7 @@ func (w *Worker) reconcileCloudPhase(_ context.Context, _ bool) (int, error) {
 			default:
 			}
 		}
-		return len(resetMap), nil
+		return
 	}
 
 	result := cloudsync.SyncState(w.database, w.reconciler, cloudClients, r2Client, nil)
@@ -380,9 +377,8 @@ func (w *Worker) reconcileCloudPhase(_ context.Context, _ bool) (int, error) {
 		case w.results <- Result{Updated: result.ReconcileResult.Reconciled}:
 		default:
 		}
-		return result.ReconcileResult.Reconciled, nil
+		return
 	}
-	return 0, nil
 }
 
 func (w *Worker) handleRequest(req Request) {
