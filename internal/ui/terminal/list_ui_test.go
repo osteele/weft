@@ -3,6 +3,7 @@ package terminal
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
@@ -129,5 +130,55 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 	if got.jobs[0].ID != 2 {
 		t.Fatalf("first job ID = %d, want 2", got.jobs[0].ID)
+	}
+}
+
+func TestListTUIQuickLaunchProgressUpdatesStatus(t *testing.T) {
+	progressCh := make(chan listQuickLaunchProgressMsg)
+	m := listTUIModel{
+		quickLaunchProgress: progressCh,
+		statusMessage:       "Launching new instance...",
+	}
+
+	next, _ := m.Update(listQuickLaunchProgressMsg{message: "Planning placement..."})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Planning placement..." {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Planning placement...")
+	}
+}
+
+func TestListTUIQuickLaunchDonePinsStatusAgainstAutoPilotNoise(t *testing.T) {
+	m := listTUIModel{
+		autoMode: true,
+	}
+	next, _ := m.Update(listQuickLaunchDoneMsg{
+		instanceIDs:  []int64{675},
+		runningJobID: 702,
+	})
+	got := next.(listTUIModel)
+	if !strings.Contains(got.statusMessage, "job #702 running") {
+		t.Fatalf("statusMessage = %q, want running job summary", got.statusMessage)
+	}
+
+	next2, _ := got.Update(listAutoPilotDoneMsg{})
+	got2 := next2.(listTUIModel)
+	if got2.statusMessage != got.statusMessage {
+		t.Fatalf("statusMessage overwritten during hold: got %q, want %q", got2.statusMessage, got.statusMessage)
+	}
+	if time.Now().After(got2.quickLaunchStatusHoldUntil) {
+		t.Fatalf("quick launch status hold should be set in the future")
+	}
+}
+
+func TestListTUIQuickLaunchInFlightProtectsStatusFromAutoPilotNoise(t *testing.T) {
+	m := listTUIModel{
+		autoMode:       true,
+		quickLaunching: true,
+		statusMessage:  "Launching new instance...",
+	}
+	next, _ := m.Update(listAutoPilotDoneMsg{})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Launching new instance..." {
+		t.Fatalf("statusMessage overwritten while quick launch in-flight: got %q", got.statusMessage)
 	}
 }
