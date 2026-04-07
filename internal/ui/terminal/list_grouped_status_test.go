@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -222,5 +223,52 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate
 	want := "- 52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_AlignsTimingSuffixToRightEdge(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	width := 100
+	jobs := []*db.Job{
+		{
+			ID:          61,
+			Status:      db.StatusRunning,
+			Host:        "cool30",
+			Project:     "short-proj",
+			Description: "short desc",
+			StartTime:   4_200,
+		},
+		{
+			ID:          62,
+			Status:      db.StatusRunning,
+			Host:        "cool30",
+			Project:     "very-long-project-name",
+			Description: "this is a much longer description that would otherwise force ragged started timing text",
+			StartTime:   4_200,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, now)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected section header + 2 rows, got:\n%s", out)
+	}
+
+	row1 := lines[1]
+	row2 := lines[2]
+	token := "— ETA "
+	idx1 := strings.Index(row1, token)
+	idx2 := strings.Index(row2, token)
+	if idx1 < 0 || idx2 < 0 {
+		t.Fatalf("expected both rows to contain ETA suffix:\n%s", out)
+	}
+	col1 := lipgloss.Width(row1[:idx1])
+	col2 := lipgloss.Width(row2[:idx2])
+	if col1 != col2 {
+		t.Fatalf("suffix columns do not align: col1=%d col2=%d\n%s", col1, col2, out)
+	}
+	if lipgloss.Width(row1) != width || lipgloss.Width(row2) != width {
+		t.Fatalf("row widths should fill terminal width=%d; got row1=%d row2=%d\n%s",
+			width, lipgloss.Width(row1), lipgloss.Width(row2), out)
 	}
 }

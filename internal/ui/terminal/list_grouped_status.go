@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/progress"
@@ -95,14 +96,25 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 				suffix = " — " + strings.Join(suffixParts, " — ")
 			}
 
-			// Truncate description to fit remaining width.
 			prefix := fmt.Sprintf("- %d — %s ", job.ID, projectCol)
-			descWidth := width - len(prefix) - len(suffix)
-			if width > 0 && descWidth > 0 && len(desc) > descWidth {
-				desc = truncateDisplayWidth(desc, descWidth)
-			}
-
 			line := prefix + desc + suffix
+			if width > 0 {
+				prefixWidth := lipgloss.Width(prefix)
+				suffixWidth := lipgloss.Width(suffix)
+				descWidth := width - prefixWidth - suffixWidth
+				if descWidth < 0 {
+					descWidth = 0
+				}
+				desc = truncateDisplayWidth(desc, descWidth)
+				line = prefix + desc
+				if suffix != "" {
+					padding := descWidth - lipgloss.Width(desc)
+					if padding < 0 {
+						padding = 0
+					}
+					line += strings.Repeat(" ", padding) + suffix
+				}
+			}
 			lines = append(lines, line)
 			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
 				lines = append(lines, "    "+blocked)
