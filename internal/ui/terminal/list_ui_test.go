@@ -199,10 +199,10 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "[1 jobs] Auto-pilot failed:") {
+	if !strings.Contains(out, "Auto-pilot failed:") {
 		t.Fatalf("expected status line in grouped footer, got:\n%s", out)
 	}
-	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
+	if !strings.Contains(out, "[1 jobs] a:toggle-auto auto:ON q:quit") {
 		t.Fatalf("expected controls line with auto state, got:\n%s", out)
 	}
 }
@@ -221,7 +221,7 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
+	if !strings.Contains(out, "[1 jobs] a:toggle-auto auto:ON q:quit") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
 	}
 }

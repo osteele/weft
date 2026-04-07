@@ -585,12 +585,15 @@ func (m listTUIModel) groupedView() string {
 }
 
 func (m listTUIModel) groupedStatusText() string {
-	state := fmt.Sprintf("[%d jobs]", len(m.jobs))
+	state := ""
 	if m.syncInProgress {
-		state += " syncing..."
+		state = "syncing..."
 	}
 	if m.statusMessage != "" {
-		state += " " + m.statusMessage
+		if state != "" {
+			state += " "
+		}
+		state += m.statusMessage
 	}
 	return state
 }
@@ -600,7 +603,7 @@ func (m listTUIModel) groupedControlsText() string {
 	if m.autoMode {
 		autoHint = "auto:ON"
 	}
-	return "a:toggle-auto " + autoHint + " q:quit"
+	return fmt.Sprintf("[%d jobs] a:toggle-auto %s q:quit", len(m.jobs), autoHint)
 }
 
 func (m listTUIModel) groupedETALine(groupedJobs []*db.Job) string {
