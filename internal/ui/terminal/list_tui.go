@@ -544,12 +544,27 @@ func (m listTUIModel) groupedView() string {
 	b.WriteString("\n")
 
 	groupedJobs := m.groupedJobsWithAutoReasons()
+
+	// Build footer lines first so we can reserve space for them.
+	etaLine := m.groupedETALine(groupedJobs)
+	footerLine := m.groupedFooterText()
+	// Reserve: 1 title + 1 blank separator + 1 footer + optional ETA line.
+	footerLines := 2 // blank separator + footer
+	if etaLine != "" {
+		footerLines++
+	}
+	maxBodyLines := m.height - 1 - footerLines // 1 for title
+
 	body := renderJobListGroupedStatusPlainWithLiveState(groupedJobs, m.width, m.launchLiveByID)
 	body = strings.TrimSuffix(body, "\n")
 	if body == "" {
 		body = "None"
 	}
 	bodyLines := strings.Split(body, "\n")
+
+	if maxBodyLines > 0 && len(bodyLines) > maxBodyLines {
+		bodyLines = bodyLines[:maxBodyLines]
+	}
 	for _, line := range bodyLines {
 		b.WriteString(truncateDisplayWidth(line, m.width))
 		b.WriteString("\n")
@@ -558,11 +573,11 @@ func (m listTUIModel) groupedView() string {
 	// Visually separate grouped job rows from ETA/actions footer lines.
 	b.WriteString("\n")
 
-	if etaLine := m.groupedETALine(groupedJobs); etaLine != "" {
+	if etaLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
 		b.WriteString("\n")
 	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.groupedFooterText(), m.width)))
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(footerLine, m.width)))
 	return b.String()
 }
 

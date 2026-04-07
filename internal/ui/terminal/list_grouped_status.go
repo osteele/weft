@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/queueblock"
+	"github.com/osteele/weft/internal/ui/dashboard"
 )
 
 type groupedStatusSection struct {
@@ -62,6 +63,9 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 		{title: "Killed/Canceled", key: "killed_canceled", jobs: killedCanceled},
 	}
 
+	// Compute uniform project column width across all jobs.
+	projectWidth := computeProjectColumnWidth(jobs, width)
+
 	lines := make([]string, 0, len(jobs)+8)
 	for _, section := range sections {
 		if len(section.jobs) == 0 {
@@ -69,22 +73,36 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 		}
 		lines = append(lines, fmt.Sprintf("%s (%d):", section.title, len(section.jobs)))
 		for _, job := range section.jobs {
-			parts := []string{
-				fmt.Sprintf("- %d — %s", job.ID, groupedStatusJobLabel(job)),
-			}
+			project, desc := groupedStatusJobParts(job)
+			projectCol := formatProjectColumn(project, projectWidth)
+
+			// Build suffix parts (progress, ETA, timing, outcome).
+			var suffixParts []string
 			if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
-				parts = append(parts, progressText)
+				suffixParts = append(suffixParts, progressText)
 			}
 			if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
-				parts = append(parts, etaText)
+				suffixParts = append(suffixParts, etaText)
 			}
 			if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
-				parts = append(parts, timing)
+				suffixParts = append(suffixParts, timing)
 			}
 			if suffix := groupedStatusOutcomeSuffix(job, section.title); suffix != "" {
-				parts = append(parts, suffix)
+				suffixParts = append(suffixParts, suffix)
 			}
-			line := strings.Join(parts, " — ")
+			suffix := ""
+			if len(suffixParts) > 0 {
+				suffix = " — " + strings.Join(suffixParts, " — ")
+			}
+
+			// Truncate description to fit remaining width.
+			prefix := fmt.Sprintf("- %d — %s ", job.ID, projectCol)
+			descWidth := width - len(prefix) - len(suffix)
+			if width > 0 && descWidth > 0 && len(desc) > descWidth {
+				desc = truncateDisplayWidth(desc, descWidth)
+			}
+
+			line := prefix + desc + suffix
 			lines = append(lines, line)
 			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
 				lines = append(lines, "    "+blocked)
@@ -109,6 +127,51 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 	}
 
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// computeProjectColumnWidth determines a uniform project column width
+// based on the longest project name, capped to a fraction of terminal width.
+func computeProjectColumnWidth(jobs []*db.Job, termWidth int) int {
+	maxLen := 0
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		name := strings.TrimSpace(campaign.JobProjectLabel(job))
+		if len(name) > maxLen {
+			maxLen = len(name)
+		}
+	}
+	if maxLen == 0 {
+		return 0
+	}
+	// Cap at 30% of terminal width, min 8, max 30.
+	cap := 30
+	if termWidth > 0 {
+		cap = termWidth * 30 / 100
+	}
+	if cap < 8 {
+		cap = 8
+	}
+	if cap > 30 {
+		cap = 30
+	}
+	if maxLen < cap {
+		return maxLen
+	}
+	return cap
+}
+
+// formatProjectColumn abbreviates and pads a project name to exactly width chars.
+func formatProjectColumn(project string, width int) string {
+	if width <= 0 || project == "" {
+		return project
+	}
+	abbreviated := dashboard.AbbreviateProject(project, width)
+	if len(abbreviated) < width {
+		abbreviated += strings.Repeat(" ", width-len(abbreviated))
+	}
+	return abbreviated
 }
 
 func groupedStatusProgressSuffix(job *db.Job, sectionKey string, launchLiveByID map[int64]*db.LaunchLiveState) string {
@@ -209,24 +272,29 @@ func groupedStatusBucket(job *db.Job) string {
 	}
 }
 
-func groupedStatusJobLabel(job *db.Job) string {
-	project := campaign.JobProjectLabel(job)
-	desc := strings.TrimSpace(job.EffectiveDescription())
-	label := strings.TrimSpace(project)
-	if desc != "" {
-		if label != "" {
-			label += " "
-		}
-		label += desc
-	}
-	if label == "" {
-		label = job.EffectiveCommand()
+// groupedStatusJobParts returns the project name and description separately.
+func groupedStatusJobParts(job *db.Job) (project, desc string) {
+	project = strings.TrimSpace(campaign.JobProjectLabel(job))
+	desc = strings.TrimSpace(job.EffectiveDescription())
+	if desc == "" && project == "" {
+		desc = job.EffectiveCommand()
 	}
 	scope := groupedStatusScopeLabel(job)
 	if scope != "" {
-		label += fmt.Sprintf(" (%s)", scope)
+		desc += fmt.Sprintf(" (%s)", scope)
 	}
-	return label
+	return project, desc
+}
+
+func groupedStatusJobLabel(job *db.Job) string {
+	project, desc := groupedStatusJobParts(job)
+	if project != "" && desc != "" {
+		return project + " " + desc
+	}
+	if project != "" {
+		return project
+	}
+	return desc
 }
 
 func groupedStatusScopeLabel(job *db.Job) string {
