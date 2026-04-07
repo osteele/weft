@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -167,11 +166,11 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: get job: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: get job: %v", FormatJobID(jobID), err))
 			continue
 		}
 		if job == nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			errorsList = append(errorsList, fmt.Sprintf("job %s not found", FormatJobID(jobID)))
 			continue
 		}
 		if job.IsLaunchJob() {
@@ -180,16 +179,16 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 				if errors.Is(syncErr, artifacts.ErrManifestMissing) {
 					// No manifest in R2; try convention-based output sync
 					if outErr := syncJobOutputs(job); outErr == nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced convention-based outputs\n", jobID)
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced convention-based outputs\n", FormatJobID(jobID))
 						continue
 					}
-					errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %d", jobID))
+					errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", FormatJobID(jobID)))
 					continue
 				}
-				errorsList = append(errorsList, fmt.Sprintf("job %d: sync cloud artifacts: %v", jobID, syncErr))
+				errorsList = append(errorsList, fmt.Sprintf("job %s: sync cloud artifacts: %v", FormatJobID(jobID), syncErr))
 				continue
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced %d artifacts from R2 (skipped %d)\n", jobID, result.Added, result.Skipped)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts from R2 (skipped %d)\n", FormatJobID(jobID), result.Added, result.Skipped)
 			continue
 		}
 		result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
@@ -197,21 +196,21 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				// Try convention-based output sync instead
 				if syncErr := syncJobOutputs(job); syncErr == nil {
-					fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced convention-based outputs\n", jobID)
+					fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced convention-based outputs\n", FormatJobID(jobID))
 					continue
 				}
-				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %d", jobID))
+				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", FormatJobID(jobID)))
 				continue
 			}
 			if ssh.IsConnectionError(err.Error()) {
-				errorsList = append(errorsList, fmt.Sprintf("host %s unreachable while syncing artifacts for job %d", job.Host, jobID))
+				errorsList = append(errorsList, fmt.Sprintf("host %s unreachable while syncing artifacts for job %s", job.Host, FormatJobID(jobID)))
 				continue
 			}
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			continue
 		}
 		if len(jobIDs) > 1 {
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced %d artifacts (skipped %d)\n", jobID, result.Added, result.Skipped)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts (skipped %d)\n", FormatJobID(jobID), result.Added, result.Skipped)
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d artifacts (skipped %d)\n", result.Added, result.Skipped)
 		}
@@ -243,7 +242,7 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 		if job.IsLaunchJob() {
 			cloudResult, syncErr := syncCloudJobArtifacts(database, r2Client, job)
 			if syncErr != nil && !errors.Is(syncErr, artifacts.ErrManifestMissing) {
-				fmt.Fprintf(os.Stderr, "Warning: failed to sync cloud artifacts for job %d: %v\n", job.ID, syncErr)
+				fmt.Fprintf(os.Stderr, "Warning: failed to sync cloud artifacts for job %s: %v\n", FormatJobID(job.ID), syncErr)
 			}
 			if cloudResult.Added > 0 {
 				syncedJobs++
@@ -258,10 +257,10 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 				continue
 			}
 			if ssh.IsConnectionError(err.Error()) {
-				fmt.Fprintf(os.Stderr, "Warning: host %s unreachable while syncing artifacts for job %d\n", job.Host, job.ID)
+				fmt.Fprintf(os.Stderr, "Warning: host %s unreachable while syncing artifacts for job %s\n", job.Host, FormatJobID(job.ID))
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "Warning: failed to sync artifacts for job %d: %v\n", job.ID, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync artifacts for job %s: %v\n", FormatJobID(job.ID), err)
 			continue
 		}
 		if result.Added == 0 && result.Skipped == 0 {
@@ -304,29 +303,29 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 			if i > 0 {
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %d:\n", jobID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s:\n", FormatJobID(jobID))
 		}
 
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: get job: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: get job: %v", FormatJobID(jobID), err))
 			continue
 		}
 		if job == nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			errorsList = append(errorsList, fmt.Sprintf("job %s not found", FormatJobID(jobID)))
 			continue
 		}
 
 		if artifactListSync {
 			if err := syncArtifactsForJob(database, job, r2Client, NormalSyncTimeout); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 				continue
 			}
 		}
 
 		entries, err := db.ListArtifactsByJob(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			continue
 		}
 
@@ -452,16 +451,16 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 						continue
 					}
 				}
-				errorsList = append(errorsList, fmt.Sprintf("artifact %q not found for job %d", token, jobID))
+				errorsList = append(errorsList, fmt.Sprintf("artifact %q not found for job %s", token, FormatJobID(jobID)))
 				continue
 			}
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			continue
 		}
 
 		localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			continue
 		}
 		dest, err := resolveArtifactOutputPathForJob(localPath, artifactOutput, jobID, multiple)
@@ -470,12 +469,12 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 		}
 		if dest == "-" {
 			if err := copyToWriter(localPath, cmd.OutOrStdout()); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			}
 			continue
 		}
 		if err := copyFile(localPath, dest); err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			continue
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
@@ -570,7 +569,7 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 	for _, jobID := range jobIDs {
 		entries, err := db.ListArtifactsByJob(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
 			continue
 		}
 
@@ -582,22 +581,22 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 				if len(cloudFiles) > 0 {
 					downloaded, dlErr := downloadCloudOutputFiles(cmd, r2Client, job, cloudFiles)
 					if dlErr != nil {
-						errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, dlErr))
+						errorsList = append(errorsList, fmt.Sprintf("job %s: %v", FormatJobID(jobID), dlErr))
 					}
 					if downloaded == 0 && dlErr == nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "Job %d: no artifacts found\n", jobID)
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: no artifacts found\n", FormatJobID(jobID))
 					}
 					continue
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: no artifacts found\n", jobID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: no artifacts found\n", FormatJobID(jobID))
 			continue
 		}
 
 		for _, entry := range entries {
 			localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
 			if err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %d artifact %q: %v", jobID, entry.Path, err))
+				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", FormatJobID(jobID), entry.Path, err))
 				continue
 			}
 			dest, err := resolveArtifactOutputPathForJob(localPath, artifactOutput, jobID, len(jobIDs) > 1)
@@ -605,7 +604,7 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 				return err
 			}
 			if err := copyFile(localPath, dest); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %d artifact %q: %v", jobID, entry.Path, err))
+				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", FormatJobID(jobID), entry.Path, err))
 				continue
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
@@ -639,7 +638,7 @@ func runArtifactCat(cmd *cobra.Command, args []string) error {
 	entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("artifact %q not found for job %d", token, jobID)
+			return fmt.Errorf("artifact %q not found for job %s", token, FormatJobID(jobID))
 		}
 		return err
 	}
@@ -672,7 +671,7 @@ func runArtifactAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %s not found", FormatJobID(jobID))
 	}
 
 	if err := ensureRemoteArtifactDir(job.Host); err != nil {
@@ -697,7 +696,7 @@ func runArtifactAdd(cmd *cobra.Command, args []string) error {
 }
 
 func parseJobID(raw string) (int64, error) {
-	id, err := strconv.ParseInt(raw, 10, 64)
+	id, err := ParseJobID(raw)
 	if err != nil || id <= 0 {
 		return 0, usageErrorf("invalid job id %q", raw)
 	}
@@ -925,7 +924,7 @@ func syncJobOutputs(job *db.Job) error {
 func syncCloudJobOutputs(job *db.Job) error {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	if localDir == "" {
-		return fmt.Errorf("cannot resolve local working directory for job %d", job.ID)
+		return fmt.Errorf("cannot resolve local working directory for job %s", FormatJobID(job.ID))
 	}
 
 	cfg, err := config.Load()

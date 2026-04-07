@@ -336,9 +336,9 @@ weft job status --wait 42 43 44   # wait for all (exits 0 only if all succeed)
 ```
 
 **Job ID syntax:**
-- Single IDs: `42`, `43`, `44`
-- Ranges: `42:45` (expands to 42, 43, 44, 45)
-- Mixed: `42 50:53 60` (expands to 42, 50, 51, 52, 53, 60)
+- Single IDs: `wj42` (also accepts `42`)
+- Ranges: `wj42:wj45`, `wj42:45`, `42:wj45` (inclusive)
+- Mixed: `wj42 wj50:53 60` (expands to 42, 50, 51, 52, 53, 60)
 
 Duplicate IDs are automatically removed with a warning.
 
@@ -350,11 +350,11 @@ Duplicate IDs are automatically removed with a warning.
 
 **Examples:**
 ```bash
-weft job status 42           # Check status of job #42
-weft job status 42 43 44     # Check multiple jobs
-weft job status 100:105      # Check jobs 100 through 105
-weft job status 100...105    # Alternative range syntax
-weft job status 42,43,44     # Comma-separated IDs
+weft job status wj42               # Check status of job wj42
+weft job status wj42 wj43 wj44     # Check multiple jobs
+weft job status wj100:wj105        # Check jobs wj100 through wj105
+weft job status wj100...wj105      # Alternative range syntax
+weft job status wj42,wj43,wj44     # Comma-separated IDs
 ```
 
 This command:

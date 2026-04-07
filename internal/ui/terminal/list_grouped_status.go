@@ -96,7 +96,7 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 				suffix = " — " + strings.Join(suffixParts, " — ")
 			}
 
-			prefix := fmt.Sprintf("- %d — %s ", job.ID, projectCol)
+			prefix := fmt.Sprintf("- wj%d — %s ", job.ID, projectCol)
 			line := prefix + desc + suffix
 			if width > 0 {
 				prefixWidth := lipgloss.Width(prefix)

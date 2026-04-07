@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -394,7 +393,7 @@ func init() {
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	jobID, err := ParseJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -412,13 +411,13 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %s not found", FormatJobID(jobID))
 	}
 
 	// Check status
 	effectiveStatus := job.EffectiveStatus()
 	if effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("can only move queued jobs (job %d has status: %s)", jobID, effectiveStatus)
+		return fmt.Errorf("can only move queued jobs (job %s has status: %s)", FormatJobID(jobID), effectiveStatus)
 	}
 
 	oldHost := job.Host
@@ -437,7 +436,7 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 		reportQueueChangeSyncFailure(newHost, syncErr)
 	}
 
-	fmt.Printf("Moved job %d: %s → %s\n", jobID, oldHost, newHost)
+	fmt.Printf("Moved job %s: %s → %s\n", FormatJobID(jobID), oldHost, newHost)
 	fmt.Printf("Command: %s\n", job.Command)
 	if job.Description != "" {
 		fmt.Printf("Description: %s\n", job.Description)

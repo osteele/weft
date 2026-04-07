@@ -98,10 +98,10 @@ func TestFormatJobIDList(t *testing.T) {
 		ids  []int64
 		want string
 	}{
-		{"sorts descending to ascending", []int64{3, 1, 2}, "1, 2, 3"},
+		{"sorts descending to ascending", []int64{3, 1, 2}, "wj1:wj3"},
 		{"empty slice", []int64{}, ""},
-		{"single element", []int64{42}, "42"},
-		{"already sorted", []int64{10, 20, 30}, "10, 20, 30"},
+		{"single element", []int64{42}, "wj42"},
+		{"already sorted", []int64{10, 20, 30}, "wj10,wj20,wj30"},
 	}
 
 	for _, tt := range tests {

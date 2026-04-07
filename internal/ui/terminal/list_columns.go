@@ -42,8 +42,13 @@ func allColumnDefs() []columnDef {
 		},
 		{
 			key: "id", title: "ID", width: 6, alignRight: true,
-			value:     func(job *db.Job) string { return fmt.Sprintf("%d", job.ID) },
+			value:     func(job *db.Job) string { return fmt.Sprintf("wj%d", job.ID) },
 			jsonValue: func(job *db.Job) any { return job.ID },
+		},
+		{
+			key: "job_id", title: "JOB_ID", width: 8,
+			value:     func(job *db.Job) string { return fmt.Sprintf("wj%d", job.ID) },
+			jsonValue: func(job *db.Job) any { return fmt.Sprintf("wj%d", job.ID) },
 		},
 		{
 			key: "host", title: "HOST", width: 12,
@@ -135,7 +140,7 @@ func columnDefMap() map[string]columnDef {
 var defaultTableColumnKeys = []string{"check", "id", "host", "status", "started", "project", "dir", "description"}
 
 // defaultJSONColumnKeys returns the column keys used in JSON output by default.
-var defaultJSONColumnKeys = []string{"id", "host", "status", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu"}
+var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu"}
 
 // defaultTSVColumnKeys returns the column keys used in TSV output by default
 // (same as the wide table but without the checkmark column).

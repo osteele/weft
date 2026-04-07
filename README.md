@@ -255,11 +255,13 @@ Most workflows start with:
 weft run --gpu-class a100 -m "Train" 'uv run python train.py'
 weft data where hf:meta-llama/Llama-3-8B
 weft data fetch hf:meta-llama/Llama-3-8B --host cool100
-weft log 42 -f
+weft log wj42 -f
 weft job list --running
 weft jobs list --group-by status --unprocessed
 weft plan submit plan.yaml
 ```
+
+Job IDs are shown as `wj<id>` in CLI output. Commands accept both `wj42` and `42`, including mixed ranges like `wj42:47` or `wj42:wj47`.
 
 For shell syntax, queue operations, job control, artifact commands, and advanced flags, use the dedicated reference above.
 
@@ -297,13 +299,13 @@ usage.
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
-│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
-│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
-│ 50   skynet       ✓ done       yesterday    make build                       │
+│ wj52 deepthought  ● running    2h ago       python train.py --lr 0.001       │
+│ wj51 deepthought  ✗ exit 1     3h ago       python test.py                   │
+│ wj50 skynet       ✓ done       yesterday    make build                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ Details                                                                      │
-│ Job 52 on deepthought                                                        │
+│ Job wj52 on deepthought                                                      │
 │ Cmd:     python train.py --lr 0.001                                          │
 │ Dir:     ~/code/ml-project                                                   │
 │ Started: 2025-12-13 10:15:32 (2h ago)                                        │

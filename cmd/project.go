@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
@@ -150,7 +149,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 func runProjectJobs(cmd *cobra.Command, args []string) error {
 	// If --project not set, check if first arg is a project name (non-numeric)
 	if listProject == "" && len(args) > 0 {
-		if _, err := strconv.ParseInt(args[0], 10, 64); err != nil {
+		if _, err := ParseJobID(args[0]); err != nil {
 			listProject = args[0]
 			args = args[1:]
 		}

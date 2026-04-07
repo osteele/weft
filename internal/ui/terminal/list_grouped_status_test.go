@@ -46,13 +46,13 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 		last = idx
 	}
 
-	if !strings.Contains(out, "- 4 — proj ok (inventory) — completed ok") {
+	if !strings.Contains(out, "- wj4 — proj ok (inventory) — completed ok") {
 		t.Fatalf("missing completion line in output:\n%s", out)
 	}
-	if !strings.Contains(out, "- 7 — proj bad exit (inventory) — completed (exit 2)") {
+	if !strings.Contains(out, "- wj7 — proj bad exit (inventory) — completed (exit 2)") {
 		t.Fatalf("missing failed-completed line in output:\n%s", out)
 	}
-	if !strings.Contains(out, "- 9 — proj canceled (rental) — canceled") {
+	if !strings.Contains(out, "- wj9 — proj canceled (rental) — canceled") {
 		t.Fatalf("missing rental canceled line in output:\n%s", out)
 	}
 }
@@ -102,9 +102,9 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 	}, now)
 
 	for _, want := range []string{
-		"- 42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
-		"- 43 — proj queued — queued 13m ago",
-		"- 44 — proj done — completed 1m ago — completed ok",
+		"- wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
+		"- wj43 — proj queued — queued 13m ago",
+		"- wj44 — proj done — completed 1m ago — completed ok",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
@@ -127,7 +127,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	want := "- 99 — proj python worker.py (rental)"
+	want := "- wj99 — proj python worker.py (rental)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -153,7 +153,7 @@ func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMis
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	want := "- 53 — proj legacy completion — placed 5m ago — completed ok"
+	want := "- wj53 — proj legacy completion — placed 5m ago — completed ok"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -173,7 +173,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	lineWant := "- 50 — proj waiting — queued 5m ago"
+	lineWant := "- wj50 — proj waiting — queued 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
 	}
@@ -198,7 +198,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRet
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	want := "- 51 — proj retry me — retry pending 1m ago"
+	want := "- wj51 — proj retry me — retry pending 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -220,7 +220,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
-	want := "- 52 — proj retry blocked — retry rejected 1m ago"
+	want := "- wj52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}

@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
@@ -33,15 +32,15 @@ For queued jobs, you can also update the working directory, command, GPU, and re
 allotments (GPU memory, CPU). The remote queue file will be updated automatically.
 
 Examples:
-  weft describe 42 -m "Training GPT-2 with lr=0.001"
-  weft describe 42 -m ""  # Clear description
-  weft describe 42 --directory /new/path
-  weft describe 42 --command "python train.py --epochs 100"
-  weft describe 42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
-  weft describe 42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
-  weft describe 42 --gpu-mem 12          # Reserve 12 GB GPU memory per device
-  weft describe 42 --cpu 50              # Set CPU allotment to 50%
-  weft describe 42 -m "New desc" --command "python new.py"`,
+  weft describe wj42 -m "Training GPT-2 with lr=0.001"
+  weft describe wj42 -m ""  # Clear description
+  weft describe wj42 --directory /new/path
+  weft describe wj42 --command "python train.py --epochs 100"
+  weft describe wj42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
+  weft describe wj42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
+  weft describe wj42 --gpu-mem 12          # Reserve 12 GB GPU memory per device
+  weft describe wj42 --cpu 50              # Set CPU allotment to 50%
+  weft describe wj42 -m "New desc" --command "python new.py"`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runDescribe,
 }
@@ -61,7 +60,7 @@ func init() {
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	jobID, err := ParseJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -82,7 +81,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %s not found", FormatJobID(jobID))
 	}
 
 	// Normalize GPU flags (--gpu and --gpus are aliases)

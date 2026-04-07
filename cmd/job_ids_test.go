@@ -18,6 +18,11 @@ func TestParseJobIDs(t *testing.T) {
 			want: []int64{123},
 		},
 		{
+			name: "single prefixed ID",
+			args: []string{"wj123"},
+			want: []int64{123},
+		},
+		{
 			name: "multiple IDs",
 			args: []string{"123", "456", "789"},
 			want: []int64{123, 456, 789},
@@ -73,6 +78,11 @@ func TestParseJobIDs(t *testing.T) {
 			want: []int64{10, 11, 12, 13, 14, 15, 16},
 		},
 		{
+			name: "mixed prefixed and unprefixed ranges",
+			args: []string{"wj750:wj752", "wj754:756"},
+			want: []int64{750, 751, 752, 754, 755, 756},
+		},
+		{
 			name:    "invalid ID",
 			args:    []string{"abc"},
 			wantErr: true,
@@ -121,9 +131,24 @@ func TestParseJobIDArg(t *testing.T) {
 			want: []int64{42},
 		},
 		{
+			name: "single prefixed ID",
+			arg:  "wj42",
+			want: []int64{42},
+		},
+		{
 			name: "range",
 			arg:  "10:15",
 			want: []int64{10, 11, 12, 13, 14, 15},
+		},
+		{
+			name: "prefixed range",
+			arg:  "wj10:wj12",
+			want: []int64{10, 11, 12},
+		},
+		{
+			name: "mixed prefixed range",
+			arg:  "wj10:12",
+			want: []int64{10, 11, 12},
 		},
 		{
 			name: "double colon range",
@@ -183,5 +208,11 @@ func TestParseJobIDArg(t *testing.T) {
 				t.Errorf("parseJobIDArg() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFormatJobID(t *testing.T) {
+	if got := FormatJobID(750); got != "wj750" {
+		t.Fatalf("FormatJobID(750) = %q, want %q", got, "wj750")
 	}
 }

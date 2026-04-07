@@ -50,7 +50,7 @@ func TestPrintJobsJSON(t *testing.T) {
 
 	// Check first record has expected keys
 	rec := records[0]
-	for _, key := range []string{"id", "host", "status", "started", "project", "description"} {
+	for _, key := range []string{"id", "job_id", "host", "status", "started", "project", "description"} {
 		if _, ok := rec[key]; !ok {
 			t.Errorf("missing key %q in JSON record", key)
 		}
@@ -59,6 +59,9 @@ func TestPrintJobsJSON(t *testing.T) {
 	// Check id is a number
 	if id, ok := rec["id"].(float64); !ok || id != 42 {
 		t.Errorf("id = %v, want 42", rec["id"])
+	}
+	if id, ok := rec["job_id"].(string); !ok || id != "wj42" {
+		t.Errorf("job_id = %v, want wj42", rec["job_id"])
 	}
 
 	// Check exit_code is a number
@@ -111,6 +114,9 @@ func TestPrintJobsTSV(t *testing.T) {
 	rowFields := strings.Split(lines[1], "\t")
 	if len(rowFields) != len(headerFields) {
 		t.Errorf("row has %d fields, header has %d", len(rowFields), len(headerFields))
+	}
+	if rowFields[0] != "wj42" {
+		t.Errorf("first row field = %q, want wj42", rowFields[0])
 	}
 }
 

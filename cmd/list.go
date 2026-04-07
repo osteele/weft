@@ -435,10 +435,10 @@ func showJob(database *sql.DB, id int64) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", id)
+		return fmt.Errorf("job %s not found", FormatJobID(id))
 	}
 
-	fmt.Printf("Job ID:       %d\n", job.ID)
+	fmt.Printf("Job ID:       %s\n", FormatJobID(job.ID))
 	fmt.Printf("Target:       %s\n", job.TargetDisplay())
 	fmt.Printf("Working Dir:  %s\n", job.EffectiveWorkingDir())
 	if job.Project != "" {

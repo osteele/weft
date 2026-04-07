@@ -591,7 +591,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
-	jobID, err := strconv.ParseInt(args[1], 10, 64)
+	jobID, err := ParseJobID(args[1])
 	if err != nil {
 		return fmt.Errorf("invalid job ID %q: %w", args[1], err)
 	}
@@ -611,7 +611,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %s not found", FormatJobID(jobID))
 	}
 
 	// Override command if specified via CLI flag
@@ -625,7 +625,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	fmt.Printf("Re-syncing sources and submitting job %d to instance %d...\n", jobID, instanceID)
+	fmt.Printf("Re-syncing sources and submitting job %s to instance %d...\n", FormatJobID(jobID), instanceID)
 
 	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
 		return err
@@ -638,7 +638,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Job %d resubmitted to instance %d.\n", jobID, instanceID)
+	fmt.Printf("Job %s resubmitted to instance %d.\n", FormatJobID(jobID), instanceID)
 	fmt.Println("Use 'weft campaign watch' or 'weft instance status' to monitor progress.")
 	return nil
 }
