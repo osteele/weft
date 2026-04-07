@@ -358,6 +358,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if meta.Image != "" {
 			applied = append(applied, fmt.Sprintf("image=%s", meta.Image))
 		}
+		if len(meta.UvArgs) > 0 {
+			command = dataloc.InjectUvArgs(command, meta.UvArgs)
+			applied = append(applied, fmt.Sprintf("uv-args=%v", meta.UvArgs))
+		}
 		if len(applied) > 0 {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Script metadata: %s\n", strings.Join(applied, ", "))
 		}

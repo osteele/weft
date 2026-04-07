@@ -132,6 +132,25 @@ import torch
 			},
 		},
 		{
+			name: "uv-args",
+			content: `# /// script
+# [tool.weft]
+# uv-args = ["--system"]
+# ///
+`,
+			want: &ScriptMeta{UvArgs: []string{"--system"}},
+		},
+		{
+			name: "uv-args with gpu",
+			content: `# /// script
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# uv-args = ["--system", "--no-cache"]
+# ///
+`,
+			want: &ScriptMeta{GPU: "nvidia>=20GB", UvArgs: []string{"--system", "--no-cache"}},
+		},
+		{
 			name: "mixed with uv dependencies",
 			content: `# /// script
 # requires-python = ">=3.10"
@@ -182,6 +201,7 @@ import torch
 			if got.Image != tt.want.Image {
 				t.Errorf("Image: got %q, want %q", got.Image, tt.want.Image)
 			}
+			assertStringSlice(t, "UvArgs", got.UvArgs, tt.want.UvArgs)
 		})
 	}
 }
@@ -245,6 +265,60 @@ func TestScanScriptMetaNoScript(t *testing.T) {
 	}
 	if meta != nil {
 		t.Fatalf("expected nil, got %+v", meta)
+	}
+}
+
+func TestInjectUvArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		uvArgs  []string
+		want    string
+	}{
+		{
+			name:    "basic injection",
+			command: "uv run script.py",
+			uvArgs:  []string{"--system"},
+			want:    "uv run --system script.py",
+		},
+		{
+			name:    "multiple args",
+			command: "uv run script.py",
+			uvArgs:  []string{"--system", "--no-cache"},
+			want:    "uv run --system --no-cache script.py",
+		},
+		{
+			name:    "no uv run",
+			command: "python script.py",
+			uvArgs:  []string{"--system"},
+			want:    "python script.py",
+		},
+		{
+			name:    "compound command",
+			command: "pip install foo && uv run script.py",
+			uvArgs:  []string{"--system"},
+			want:    "pip install foo && uv run --system script.py",
+		},
+		{
+			name:    "empty args",
+			command: "uv run script.py",
+			uvArgs:  nil,
+			want:    "uv run script.py",
+		},
+		{
+			name:    "uv run with existing flags",
+			command: "uv run --python 3.11 script.py",
+			uvArgs:  []string{"--system"},
+			want:    "uv run --system --python 3.11 script.py",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := InjectUvArgs(tt.command, tt.uvArgs)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

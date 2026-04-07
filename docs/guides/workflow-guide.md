@@ -119,11 +119,16 @@ Supported keys (all optional):
 | `outputs`   | list of strings  | `--output`          |
 | `tags`      | list of strings  | `--tag`             |
 | `image`     | string           | `.weft.toml [cloud] image` |
+| `uv-args`   | list of strings  | *(injected into `uv run`)* |
 
 CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
+
+The `uv-args` key injects extra arguments into `uv run` commands. For example,
+`uv-args = ["--system"]` rewrites `uv run script.py` to
+`uv run --system script.py`. The command is unchanged if it doesn't use `uv run`.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
 (highest to lowest): `.weft.toml [cloud] image` > script `image` > auto-selected

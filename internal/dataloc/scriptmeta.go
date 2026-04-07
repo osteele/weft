@@ -21,6 +21,7 @@ type ScriptMeta struct {
 	Outputs      []string
 	Tags         []string // Job tags
 	Image        string   // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
+	UvArgs       []string // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
 }
 
 var (
@@ -69,9 +70,10 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 	if v, ok := wt.Get("image").(string); ok {
 		meta.Image = v
 	}
+	meta.UvArgs = tomlStringSlice(wt, "uv-args")
 
 	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
-		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" {
+		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" && len(meta.UvArgs) == 0 {
 		return nil, nil
 	}
 
@@ -150,6 +152,20 @@ func parseGPUMem(v interface{}) int {
 		}
 	}
 	return 0
+}
+
+// InjectUvArgs inserts extra arguments into a "uv run" command.
+// For example, InjectUvArgs("uv run script.py", {"--system"}) returns
+// "uv run --system script.py".
+func InjectUvArgs(command string, uvArgs []string) string {
+	if len(uvArgs) == 0 {
+		return command
+	}
+	before, after, ok := strings.Cut(command, "uv run")
+	if !ok {
+		return command
+	}
+	return before + "uv run " + strings.Join(uvArgs, " ") + after
 }
 
 func tomlStringSlice(tree *toml.Tree, key string) []string {
