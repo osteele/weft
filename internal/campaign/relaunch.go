@@ -259,14 +259,16 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	var launchOffers []cloud.Offer
 	for _, gOffer := range groupOffers {
 		if gOffer.Offer == nil {
-			slog.Warn("no offers for group, skipping", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "job_count", len(gOffer.Group.Jobs))
+			detail := gOffer.FilterStats.NoOffersDetail()
+			slog.Warn("no offers for group, skipping", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "job_count", len(gOffer.Group.Jobs), "detail", detail)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchSkippedNoOffers,
 				GPUSpec:   gOffer.Group.GPUSpec(),
 				JobCount:  len(gOffer.Group.Jobs),
+				Detail:    detail,
 			})
 			result.Skipped += len(gOffer.Group.Jobs)
-			recordGroupNotReplacedReasons(result, cfg.ResetJobs, gOffer.Group, "no offers available")
+			recordGroupNotReplacedReasons(result, cfg.ResetJobs, gOffer.Group, detail)
 			continue
 		}
 		if gOffer.Err != nil {

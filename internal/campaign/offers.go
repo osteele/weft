@@ -24,12 +24,43 @@ func parseCUDAVersionFloat(s string) float64 {
 	return v
 }
 
+// OfferFilterStats tracks how many offers survived each filtering stage.
+// Fields are evaluated in order: VRAM → CUDA → Survival. A zero value means
+// either "all filtered out at this stage" or "stage not reached" (because
+// an earlier stage already eliminated everything).
+type OfferFilterStats struct {
+	RawCount      int // offers returned by provider search
+	AfterVRAM     int // remaining after VRAM requirement filter
+	AfterCUDA     int // remaining after CUDA compatibility filter
+	AfterSurvival int // remaining after survival probability filter
+}
+
+// NoOffersDetail returns a human-readable explanation of why no offers survived
+// filtering.
+func (s OfferFilterStats) NoOffersDetail() string {
+	if s.RawCount == 0 {
+		return "no offers from providers"
+	}
+	switch {
+	case s.AfterVRAM == 0:
+		return fmt.Sprintf("%d offers found, all filtered by VRAM requirement", s.RawCount)
+	case s.AfterCUDA == 0:
+		return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility", s.RawCount, s.AfterVRAM)
+	case s.AfterSurvival == 0:
+		return fmt.Sprintf("%d offers found, %d passed filters but none met survival threshold", s.RawCount, s.AfterCUDA)
+	default:
+		// Defensive: all stages passed but no offer was selected.
+		return fmt.Sprintf("%d offers found, none met all criteria", s.RawCount)
+	}
+}
+
 // GroupOffer pairs an instance group with its best cloud offer.
 type GroupOffer struct {
 	Group          InstanceGroup
 	Offer          *cloud.Offer // nil if no offers found
 	SurvivalProb   float64      // 0 if no survival model available
 	RejectedGroups []bidding.RejectedGroup
+	FilterStats    OfferFilterStats
 	Err            error
 }
 
@@ -121,6 +152,8 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 
 func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
+	stats := OfferFilterStats{RawCount: len(offers)}
+	defer func() { result.FilterStats = stats }()
 	if len(offers) == 0 {
 		return result
 	}
@@ -130,15 +163,18 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 			"filtered", removed, "remaining", len(vramFiltered))
 		offers = vramFiltered
 	}
+	stats.AfterVRAM = len(offers)
 	if len(offers) == 0 {
 		return result
 	}
 	offers, _ = filterOffersByCUDACompat(offers, group.Image)
+	stats.AfterCUDA = len(offers)
 	if len(offers) == 0 {
 		return result
 	}
 	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
 	result.RejectedGroups = rejected
+	stats.AfterSurvival = len(filtered)
 	if len(filtered) == 0 {
 		return result
 	}
