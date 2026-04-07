@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -17,6 +18,12 @@ import (
 
 // cliTimeout is the maximum time to wait for a vastai CLI command to complete.
 const cliTimeout = 30 * time.Second
+const availabilityGracePeriod = 2 * time.Minute
+
+var availabilityState struct {
+	mu          sync.Mutex
+	lastSuccess time.Time
+}
 
 // VastaiClient is the interface for interacting with the Vast.ai API.
 type VastaiClient interface {
@@ -49,11 +56,64 @@ func (c *Client) Available() error {
 	if _, err := exec.LookPath(c.CLIPath); err != nil {
 		return fmt.Errorf("vastai CLI not found in PATH (install: pip install vastai)")
 	}
-	// Quick auth check: "vastai show user" fails if not authenticated
+	// Quick account check. This can fail for auth, network, or transient CLI errors.
 	if _, err := c.run("show", "user", "--raw"); err != nil {
-		return fmt.Errorf("vastai CLI not authenticated: %v", err)
+		if isVastAuthError(err) {
+			return fmt.Errorf("vastai CLI authentication failed: %v", err)
+		}
+		if isVastTransientAvailabilityError(err) && recentlyAvailable(availabilityGracePeriod) {
+			return nil
+		}
+		return fmt.Errorf("vastai CLI availability check failed: %v", err)
 	}
+	markAvailabilitySuccess(time.Now())
 	return nil
+}
+
+func markAvailabilitySuccess(now time.Time) {
+	availabilityState.mu.Lock()
+	defer availabilityState.mu.Unlock()
+	availabilityState.lastSuccess = now
+}
+
+func recentlyAvailable(window time.Duration) bool {
+	if window <= 0 {
+		return false
+	}
+	availabilityState.mu.Lock()
+	defer availabilityState.mu.Unlock()
+	return !availabilityState.lastSuccess.IsZero() && time.Since(availabilityState.lastSuccess) <= window
+}
+
+func isVastAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unauthorized") ||
+		strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "authentication failed") ||
+		strings.Contains(msg, "invalid api key") ||
+		strings.Contains(msg, "api key") ||
+		strings.Contains(msg, "please login") ||
+		strings.Contains(msg, "not authenticated")
+}
+
+func isVastTransientAvailabilityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "temporary failure") ||
+		strings.Contains(msg, "failed to resolve") ||
+		strings.Contains(msg, "name resolution") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "eof")
 }
 
 // ShowUser returns the authenticated user's account information.

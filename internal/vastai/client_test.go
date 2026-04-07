@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
@@ -271,5 +272,55 @@ func TestExtractCLIError(t *testing.T) {
 				t.Errorf("extractCLIError(%q) = %q, want %q", tt.out, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsVastAuthError(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{err: errors.New("show user --raw: unauthorized"), want: true},
+		{err: errors.New("invalid API key"), want: true},
+		{err: errors.New("connection refused"), want: false},
+	}
+	for _, tt := range tests {
+		if got := isVastAuthError(tt.err); got != tt.want {
+			t.Fatalf("isVastAuthError(%q)=%v want %v", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestIsVastTransientAvailabilityError(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{err: errors.New("failed to resolve host"), want: true},
+		{err: errors.New("context deadline exceeded"), want: true},
+		{err: errors.New("network is unreachable"), want: true},
+		{err: errors.New("invalid API key"), want: false},
+	}
+	for _, tt := range tests {
+		if got := isVastTransientAvailabilityError(tt.err); got != tt.want {
+			t.Fatalf("isVastTransientAvailabilityError(%q)=%v want %v", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestRecentlyAvailable(t *testing.T) {
+	availabilityState.mu.Lock()
+	availabilityState.lastSuccess = time.Time{}
+	availabilityState.mu.Unlock()
+
+	if recentlyAvailable(2 * time.Minute) {
+		t.Fatalf("recentlyAvailable should be false with zero lastSuccess")
+	}
+	markAvailabilitySuccess(time.Now().Add(-30 * time.Second))
+	if !recentlyAvailable(2 * time.Minute) {
+		t.Fatalf("recentlyAvailable should be true within grace window")
+	}
+	if recentlyAvailable(10 * time.Second) {
+		t.Fatalf("recentlyAvailable should be false outside grace window")
 	}
 }

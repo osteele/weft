@@ -35,8 +35,11 @@ func attemptRelaunchOrphanedJobs(
 		cfg, _ = config.Load()
 	}
 	clients, err := buildCloudClients(cfg)
-	if err != nil || len(clients) == 0 {
-		return nil, fmt.Errorf("no cloud providers available: %v", err)
+	if err != nil {
+		return nil, err
+	}
+	if len(clients) == 0 {
+		return nil, fmt.Errorf("no cloud providers available")
 	}
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
