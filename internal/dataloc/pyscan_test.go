@@ -223,6 +223,8 @@ func TestExtractPythonScripts(t *testing.T) {
 	}{
 		{"simple", "python train.py", []string{"train.py"}},
 		{"uv run", "uv run python foo.py", []string{"foo.py"}},
+		{"uv run without python", "uv run train.py", []string{"train.py"}},
+		{"uv run with flags", "uv run --with numpy train.py", []string{"train.py"}},
 		{"with flags", "python -u train.py --epochs 10", []string{"train.py"}},
 		{"subdirectory", "python experiments/train.py", []string{"experiments/train.py"}},
 		{"no py", "bash run.sh", nil},

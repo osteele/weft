@@ -355,6 +355,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runTags = mergeDedup(runTags, meta.Tags)
 			applied = append(applied, fmt.Sprintf("tags=%v", meta.Tags))
 		}
+		if meta.Image != "" {
+			applied = append(applied, fmt.Sprintf("image=%s", meta.Image))
+		}
 		if len(applied) > 0 {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Script metadata: %s\n", strings.Join(applied, ", "))
 		}

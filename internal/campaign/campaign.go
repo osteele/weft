@@ -447,7 +447,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			img := config.ProjectCloudImage(localDir)
+			img := ResolveJobImage(localDir, job.Command)
 
 			hasTorch := localDir != "" && hasCUDAPackages([]string{localDir})
 
@@ -491,6 +491,22 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 		}
 	}
 	return result
+}
+
+// ResolveJobImage returns the Docker image for a job by checking the project
+// config (.weft.toml [cloud] image) first, then falling back to PEP 723
+// [tool.weft] script metadata. Returns empty string if neither source specifies
+// an image.
+func ResolveJobImage(localDir, command string) string {
+	img := config.ProjectCloudImage(localDir)
+	if img == "" {
+		if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
+			slog.Warn("script metadata error in image resolution", "component", "campaign", "error", err)
+		} else if meta != nil && meta.Image != "" {
+			img = meta.Image
+		}
+	}
+	return img
 }
 
 // SourceDirs returns the unique local absolute paths for all jobs in the group.

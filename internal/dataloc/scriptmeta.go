@@ -20,6 +20,7 @@ type ScriptMeta struct {
 	Inputs       []string
 	Outputs      []string
 	Tags         []string // Job tags
+	Image        string   // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
 }
 
 var (
@@ -65,9 +66,12 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 	meta.Inputs = tomlStringSlice(wt, "inputs")
 	meta.Outputs = tomlStringSlice(wt, "outputs")
 	meta.Tags = tomlStringSlice(wt, "tags")
+	if v, ok := wt.Get("image").(string); ok {
+		meta.Image = v
+	}
 
 	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
-		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 {
+		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" {
 		return nil, nil
 	}
 

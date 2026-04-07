@@ -118,11 +118,18 @@ Supported keys (all optional):
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |
 | `tags`      | list of strings  | `--tag`             |
+| `image`     | string           | `.weft.toml [cloud] image` |
 
 CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
+
+The `image` key specifies a Docker image for cloud execution. Image precedence
+(highest to lowest): `.weft.toml [cloud] image` > script `image` > auto-selected
+PyTorch image > global default. Script metadata works with any command that
+references a `.py` file, including `uv run script.py`, `python script.py`, and
+compound commands like `pip install foo && python script.py`.
 
 `[tool.weft]` metadata is applied when submitting a new job (`weft run`). During
 `weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.

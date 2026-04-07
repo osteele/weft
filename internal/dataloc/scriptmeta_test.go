@@ -108,6 +108,30 @@ import torch
 			},
 		},
 		{
+			name: "image field",
+			content: `# /// script
+# [tool.weft]
+# image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+# ///
+`,
+			want: &ScriptMeta{Image: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"},
+		},
+		{
+			name: "image with gpu-mem",
+			content: `# /// script
+# [tool.weft]
+# gpu-mem = 40
+# image = "nvcr.io/nvidia/pytorch:23.10-py3"
+# inputs = ["hf:gpt2"]
+# ///
+`,
+			want: &ScriptMeta{
+				GPUMemGB: 40,
+				Image:    "nvcr.io/nvidia/pytorch:23.10-py3",
+				Inputs:   []string{"hf:gpt2"},
+			},
+		},
+		{
 			name: "mixed with uv dependencies",
 			content: `# /// script
 # requires-python = ">=3.10"
@@ -155,6 +179,9 @@ import torch
 			assertStringSlice(t, "Inputs", got.Inputs, tt.want.Inputs)
 			assertStringSlice(t, "Outputs", got.Outputs, tt.want.Outputs)
 			assertStringSlice(t, "Tags", got.Tags, tt.want.Tags)
+			if got.Image != tt.want.Image {
+				t.Errorf("Image: got %q, want %q", got.Image, tt.want.Image)
+			}
 		})
 	}
 }
@@ -183,6 +210,31 @@ import torch
 	}
 	if len(meta.Inputs) != 1 || meta.Inputs[0] != "hf:gpt2" {
 		t.Errorf("Inputs: got %v, want [hf:gpt2]", meta.Inputs)
+	}
+}
+
+func TestScanScriptMetaWithImage(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "train.py")
+	os.WriteFile(script, []byte(`# /// script
+# [tool.weft]
+# gpu-mem = 40
+# image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+# ///
+`), 0o644)
+
+	meta, err := ScanScriptMeta(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected metadata, got nil")
+	}
+	if meta.Image != "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime" {
+		t.Errorf("Image: got %q, want %q", meta.Image, "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
+	}
+	if meta.GPUMemGB != 40 {
+		t.Errorf("GPUMemGB: got %d, want 40", meta.GPUMemGB)
 	}
 }
 
