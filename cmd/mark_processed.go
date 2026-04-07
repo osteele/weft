@@ -16,12 +16,30 @@ var markProcessedCmd = &cobra.Command{
 	RunE:  runMarkProcessed,
 }
 
+var markUnprocessedCmd = &cobra.Command{
+	Use:   "mark-unprocessed <job-id>...",
+	Short: "Mark a job as unprocessed",
+	Long:  "Mark a job as unprocessed by removing the reserved processed tag.",
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
+	RunE:  runMarkUnprocessed,
+}
+
 func init() {
 	markProcessedCmd.Deprecated = "use 'weft job mark-processed' instead"
 	rootCmd.AddCommand(markProcessedCmd)
+	markUnprocessedCmd.Deprecated = "use 'weft job mark-unprocessed' instead"
+	rootCmd.AddCommand(markUnprocessedCmd)
 }
 
-func runMarkProcessed(cmd *cobra.Command, args []string) error {
+func runMarkProcessed(_ *cobra.Command, args []string) error {
+	return setProcessedTag(args, true)
+}
+
+func runMarkUnprocessed(_ *cobra.Command, args []string) error {
+	return setProcessedTag(args, false)
+}
+
+func setProcessedTag(args []string, processed bool) error {
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
 		return err
@@ -33,13 +51,20 @@ func runMarkProcessed(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	tagFn := db.AddJobTag
+	verb := "processed"
+	if !processed {
+		tagFn = db.RemoveJobTag
+		verb = "unprocessed"
+	}
+
 	var errorsList []string
 	for _, jobID := range jobIDs {
-		if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
+		if err := tagFn(database, jobID, db.ProcessedTag); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-		fmt.Printf("Job %d marked as processed\n", jobID)
+		fmt.Printf("Job %d marked as %s\n", jobID, verb)
 	}
 
 	if len(errorsList) > 0 {

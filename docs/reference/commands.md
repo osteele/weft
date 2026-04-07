@@ -464,37 +464,46 @@ weft project watch --plain
 weft project watch --recent 48h
 ```
 
-### weft tag
+### weft job tag
 
 Attach or remove tags on jobs stored in the local database.
 
 ```bash
-weft tag add <job-id> <tag>
-weft tag rm <job-id> <tag>
+weft job tag add <job-id>... <tag>
+weft job tag rm <job-id>... <tag>
 ```
+
+**Aliases:** `weft tag add`, `weft tag rm` (deprecated top-level forms)
 
 **Examples:**
 ```bash
-weft tag add 42 exp-012
-weft tag rm 42 exp-012
+weft job tag add 42 exp-012
+weft job tag rm 42 exp-012
+weft job tag add 42 43 44 rental    # tag multiple jobs at once
 ```
 
 Reserved placement tags use the preferred names `rental` and `inventory`.
 Legacy aliases `cloud` and `on-prem` are accepted on input and mapped to the
 preferred names in CLI/TUI output.
 
-### weft mark-processed
+### weft job mark-processed / mark-unprocessed
 
-Mark a job as processed by adding the reserved `processed` tag.
+Mark jobs as processed or unprocessed by adding or removing the reserved
+`processed` tag.
 
 ```bash
-weft mark-processed <job-id>
+weft job mark-processed <job-id>...
+weft job mark-unprocessed <job-id>...
 ```
+
+**Aliases:** `weft mark-processed`, `weft mark-unprocessed` (deprecated
+top-level forms)
 
 **Examples:**
 ```bash
-weft mark-processed 42
-weft job list --status unprocessed
+weft job mark-processed 42
+weft job mark-unprocessed 42 43
+weft job list --unprocessed
 ```
 
 ### weft sync

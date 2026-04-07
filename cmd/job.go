@@ -239,6 +239,14 @@ var jobMarkProcessedCmd = &cobra.Command{
 	RunE:  runMarkProcessed,
 }
 
+var jobMarkUnprocessedCmd = &cobra.Command{
+	Use:   "mark-unprocessed <job-id>...",
+	Short: markUnprocessedCmd.Short,
+	Long:  markUnprocessedCmd.Long,
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
+	RunE:  runMarkUnprocessed,
+}
+
 var jobPruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: pruneCmd.Short,
@@ -323,6 +331,7 @@ func init() {
 	jobCmd.AddCommand(jobResumeCmd)
 	jobCmd.AddCommand(jobCleanupCmd)
 	jobCmd.AddCommand(jobMarkProcessedCmd)
+	jobCmd.AddCommand(jobMarkUnprocessedCmd)
 	jobCmd.AddCommand(jobPruneCmd)
 	jobCmd.AddCommand(jobPredictCmd)
 	jobCmd.AddCommand(jobUnplaceCmd)
