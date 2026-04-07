@@ -64,11 +64,7 @@ func IsRetryableTermination(ci *Launch) bool {
 	switch ci.TerminationReason {
 	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonUnknown, "":
 		return true
-	case cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead, cloud.ProviderStatusStopped:
-		// Provider-level terminal statuses — worth retrying on a different instance.
-		return true
 	default:
-		// "exited" (process exited), job_failure, disk_full, completed, canceled, etc.
 		return false
 	}
 }
