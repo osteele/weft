@@ -22,6 +22,8 @@ const (
 var (
 	cloudSyncLeaseOwnerOnce sync.Once
 	cloudSyncLeaseOwner     string
+	cloudSyncReconcilerOnce sync.Once
+	cloudSyncReconciler     *campaign.Reconciler
 )
 
 // syncCloudStateForTUI runs one cloud sync phase using the shared TUI timeout
@@ -46,7 +48,7 @@ func syncCloudStateForTUI(database *sql.DB, full bool) []string {
 	}()
 
 	cfg, _ := config.Load()
-	if _, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false); !completed {
+	if _, completed := syncCloudStateWithTimeout(cfg, database, tuiCloudReconciler(), timeout, false); !completed {
 		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
 	}
 	return nil
@@ -90,13 +92,20 @@ func cloudSyncOwner() string {
 	return cloudSyncLeaseOwner
 }
 
+func tuiCloudReconciler() *campaign.Reconciler {
+	cloudSyncReconcilerOnce.Do(func() {
+		cloudSyncReconciler = campaign.NewReconciler()
+	})
+	return cloudSyncReconciler
+}
+
 // syncCloudDatabaseOnlyForTUI applies DB-local reconciliation updates without
 // contacting cloud providers. This path is used when another process owns the
 // cloud reconcile lease.
 func syncCloudDatabaseOnlyForTUI(database *sql.DB, timeout time.Duration) []string {
 	done := make(chan struct{}, 1)
 	go func() {
-		_ = syncCloudStateWithClients(nil, database, campaign.NewReconciler(), nil, nil, false)
+		_ = syncCloudStateWithClients(nil, database, tuiCloudReconciler(), nil, nil, false)
 		done <- struct{}{}
 	}()
 
