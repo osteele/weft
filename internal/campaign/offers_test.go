@@ -644,25 +644,29 @@ func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
 	}
 }
 
-func TestRankOffer_EnforcesExactVRAMRequest(t *testing.T) {
+func TestRankOffer_NoHardVRAMCeiling(t *testing.T) {
+	// MaxGPUMemGB is a soft signal for the bidding system, not a hard filter.
+	// All offers meeting the minimum should be eligible; cheapest wins.
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",
-		GPUMemGB:    20,
-		MaxGPUMemGB: 20, // exact request
+		GPUMemGB:    18,
+		MaxGPUMemGB: 18,
 		Jobs:        []*db.Job{{ID: 1}},
 	}
 	offers := []cloud.Offer{
 		{ProviderID: "small", GPUName: "RTX 2080 Ti", GPUMemGB: 11, CostPerHour: 0.10},
-		{ProviderID: "exact", GPUName: "RTX 4000", GPUMemGB: 20, CostPerHour: 0.20},
-		{ProviderID: "large", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.05},
+		{ProviderID: "24gb", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.05},
+		{ProviderID: "48gb", GPUName: "A100 PCIE", GPUMemGB: 48, CostPerHour: 0.50},
 	}
 
 	got := rankOfferWithProfile(group, offers, nil, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap.Profile(), 0)
 	if got.Offer == nil {
 		t.Fatal("expected an offer, got nil")
 	}
-	if got.Offer.ProviderID != "exact" {
-		t.Fatalf("picked offer %q, want %q", got.Offer.ProviderID, "exact")
+	// 11GB is below minimum (18), so excluded. Both 24GB and 48GB pass the
+	// minimum filter; cheapest (24gb at $0.05) wins.
+	if got.Offer.ProviderID != "24gb" {
+		t.Fatalf("picked offer %q, want %q (cheapest above minimum)", got.Offer.ProviderID, "24gb")
 	}
 }
 

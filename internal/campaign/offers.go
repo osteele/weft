@@ -90,9 +90,10 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 	return compatible, filtered
 }
 
-// filterOffersByVRAMReq applies a defensive local VRAM filter.
+// filterOffersByVRAMReq applies a defensive local VRAM minimum filter.
 // We still rely on provider-side filtering, but this guards against provider
-// inconsistencies and enforces exact-memory requests (min==max).
+// inconsistencies. MaxGPUMemGB is not enforced here — it is a soft signal
+// used by the bidding system to avoid overpaying for oversized GPUs.
 func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
 	if len(offers) == 0 {
 		return offers, 0
@@ -100,17 +101,11 @@ func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 
 	const eps = 0.01
 	minMem := float64(group.GPUMemGB)
-	exactMem := group.MaxGPUMemGB > 0 && group.MaxGPUMemGB == group.GPUMemGB
-	maxMem := float64(group.MaxGPUMemGB)
 
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
 		if minMem > 0 && o.GPUMemGB+eps < minMem {
-			removed++
-			continue
-		}
-		if exactMem && o.GPUMemGB-eps > maxMem {
 			removed++
 			continue
 		}
@@ -132,12 +127,6 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	if vramFiltered, removed := filterOffersByVRAMReq(offers, group); removed > 0 {
 		slog.Debug("filtered offers by VRAM requirement",
 			"required_min_gb", group.GPUMemGB,
-			"required_exact_gb", func() int {
-				if group.MaxGPUMemGB == group.GPUMemGB {
-					return group.MaxGPUMemGB
-				}
-				return 0
-			}(),
 			"filtered", removed, "remaining", len(vramFiltered))
 		offers = vramFiltered
 	}
