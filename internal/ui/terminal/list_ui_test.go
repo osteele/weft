@@ -199,10 +199,10 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "Auto-pilot failed:") {
+	if !strings.Contains(out, "[1 jobs] Auto-pilot failed:") {
 		t.Fatalf("expected status line in grouped footer, got:\n%s", out)
 	}
-	if !strings.Contains(out, "[1 jobs] a:toggle-auto auto:ON q:quit") {
+	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
 		t.Fatalf("expected controls line with auto state, got:\n%s", out)
 	}
 }
@@ -221,7 +221,7 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "[1 jobs] a:toggle-auto auto:ON q:quit") {
+	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
 	}
 }
@@ -267,5 +267,34 @@ func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
 	}
 	if !strings.Contains(got.statusMessage, "run `weft sync`") {
 		t.Fatalf("statusMessage = %q, want actionable guidance", got.statusMessage)
+	}
+}
+
+func TestListTUIAutoPilotStatusUsesSingularInstanceWordingAndClass(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+	}
+
+	next, _ := m.Update(listAutoPilotDoneMsg{
+		launched:      1,
+		launchedClass: "A100 80GB",
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Auto-pilot: launched 1 A100 80GB instance" {
+		t.Fatalf("statusMessage = %q", got.statusMessage)
+	}
+}
+
+func TestListTUIAutoPilotStatusUsesPluralInstancesWording(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+	}
+
+	next, _ := m.Update(listAutoPilotDoneMsg{launched: 2})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Auto-pilot: launched 2 instances" {
+		t.Fatalf("statusMessage = %q", got.statusMessage)
 	}
 }
