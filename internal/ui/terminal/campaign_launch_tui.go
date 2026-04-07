@@ -862,9 +862,13 @@ func tradeoffPlanSpecsForLaunchBatch(background bool) ([]campaign.ProfilePlanSpe
 		profiles := bidding.ParetoSamplingProfiles()
 		specs := make([]campaign.ProfilePlanSpec, 0, len(profiles))
 		for _, profile := range profiles {
+			mode := campaign.CandidatePlanModeFull
+			if profile.ID == bidding.StrategyFastest.Profile().ID {
+				mode = campaign.CandidatePlanModeParallelPreferred
+			}
 			specs = append(specs, campaign.ProfilePlanSpec{
 				Profile:       profile,
-				CandidateMode: campaign.CandidatePlanModeFull,
+				CandidateMode: mode,
 			})
 		}
 		return specs, true
@@ -2731,50 +2735,6 @@ func severityFromSuspicionLabel(label string) launchWaitSeverity {
 	}
 }
 
-func (m launchModel) launchWaitLine() (string, launchWaitSeverity) {
-	known := len(m.registeredInstanceIDs)
-	if known == 0 {
-		start := m.launchCampaignCreatedAt
-		if start.IsZero() {
-			start = m.launchStartedAt
-		}
-		if !start.IsZero() && m.firstRegSurvival != nil {
-			elapsed := time.Since(start)
-			severity := launchWaitSeverityNormal
-			if p, ok := m.firstRegSurvival.ConditionalSuccess(elapsed); ok {
-				severity = severityFromSuspicionLabel(firstRegistrationSuspicionLabel(p))
-			} else if elapsed >= m.firstRegSurvival.TerminateAfter && m.firstRegSurvival.TerminateAfter > 0 {
-				severity = launchWaitSeverityCritical
-			} else if elapsed >= m.firstRegSurvival.WarnAfter && m.firstRegSurvival.WarnAfter > 0 {
-				severity = launchWaitSeverityWarn
-			}
-			qualifier := "within typical range"
-			if severity == launchWaitSeverityWarn {
-				qualifier = "taking longer than typical"
-			} else if severity == launchWaitSeverityCritical {
-				qualifier = "much longer than typical"
-			}
-			return fmt.Sprintf(
-				"Still waiting for first instance registration (%s elapsed; %s)",
-				elapsed.Truncate(time.Second),
-				qualifier,
-			), severity
-		}
-	}
-
-	if m.lastLaunchProgressAt.IsZero() {
-		return "", launchWaitSeverityNormal
-	}
-	stalledFor := time.Since(m.lastLaunchProgressAt)
-	if stalledFor < launchStallThreshold {
-		return "", launchWaitSeverityNormal
-	}
-	if known == 0 {
-		return fmt.Sprintf("Still waiting for first instance registration (%s elapsed)", stalledFor.Truncate(time.Second)), launchWaitSeverityNormal
-	}
-	return fmt.Sprintf("Still waiting for additional instance registrations (%s since last update)", stalledFor.Truncate(time.Second)), launchWaitSeverityNormal
-}
-
 func firstRegistrationScopeFromOffers(offers []cloud.Offer) db.FirstRegistrationScope {
 	if len(offers) == 0 {
 		return db.FirstRegistrationScope{}
@@ -2824,57 +2784,150 @@ func firstRegistrationSuspicionLabel(p float64) string {
 	}
 }
 
-func (m launchModel) launchFirstRegistrationLine() (line string, critical bool) {
+func firstRegistrationQualifier(severity launchWaitSeverity) string {
+	switch severity {
+	case launchWaitSeverityWarn:
+		return "taking longer than typical"
+	case launchWaitSeverityCritical:
+		return "much longer than typical"
+	default:
+		return "within typical range"
+	}
+}
+
+type firstRegistrationStatus struct {
+	elapsed           time.Duration
+	severity          launchWaitSeverity
+	qualifier         string
+	suspicionLabel    string
+	successProb       float64
+	successProbKnown  bool
+	remainingEstimate time.Duration
+	remainingKnown    bool
+	deadlineRemaining time.Duration
+	scope             string
+	sampleSize        int
+}
+
+func (m launchModel) firstRegistrationStatus() *firstRegistrationStatus {
 	if !m.launching || m.firstRegSurvival == nil || len(m.registeredInstanceIDs) > 0 {
-		return "", false
+		return nil
 	}
 	start := m.launchCampaignCreatedAt
 	if start.IsZero() {
 		start = m.launchStartedAt
 	}
 	if start.IsZero() {
+		return nil
+	}
+
+	elapsed := time.Since(start)
+	status := &firstRegistrationStatus{
+		elapsed:           elapsed,
+		severity:          launchWaitSeverityNormal,
+		qualifier:         firstRegistrationQualifier(launchWaitSeverityNormal),
+		deadlineRemaining: m.firstRegSurvival.TerminateAfter - elapsed,
+		scope:             m.firstRegSurvival.ScopeDescription(),
+		sampleSize:        m.firstRegSurvival.SampleSize,
+	}
+
+	if p, ok := m.firstRegSurvival.ConditionalSuccess(status.elapsed); ok {
+		status.successProb = p
+		status.successProbKnown = true
+		status.suspicionLabel = firstRegistrationSuspicionLabel(p)
+		status.severity = severityFromSuspicionLabel(status.suspicionLabel)
+	} else if status.elapsed >= m.firstRegSurvival.TerminateAfter && m.firstRegSurvival.TerminateAfter > 0 {
+		status.severity = launchWaitSeverityCritical
+	} else if status.elapsed >= m.firstRegSurvival.WarnAfter && m.firstRegSurvival.WarnAfter > 0 {
+		status.severity = launchWaitSeverityWarn
+	}
+
+	status.qualifier = firstRegistrationQualifier(status.severity)
+	if remaining, remOK := m.firstRegSurvival.Durations.ConditionalMedian(status.elapsed); remOK {
+		if status.deadlineRemaining > 0 && remaining > status.deadlineRemaining {
+			remaining = status.deadlineRemaining
+		}
+		status.remainingEstimate = remaining
+		status.remainingKnown = true
+	}
+	return status
+}
+
+func (m launchModel) launchWaitLine() (string, launchWaitSeverity) {
+	known := len(m.registeredInstanceIDs)
+	if known == 0 {
+		if status := m.firstRegistrationStatus(); status != nil {
+			return fmt.Sprintf(
+				"Still waiting for first instance registration (%s elapsed; %s)",
+				status.elapsed.Truncate(time.Second),
+				status.qualifier,
+			), status.severity
+		}
+	}
+
+	if m.lastLaunchProgressAt.IsZero() {
+		return "", launchWaitSeverityNormal
+	}
+	stalledFor := time.Since(m.lastLaunchProgressAt)
+	if stalledFor < launchStallThreshold {
+		return "", launchWaitSeverityNormal
+	}
+	if known == 0 {
+		return fmt.Sprintf("Still waiting for first instance registration (%s elapsed)", stalledFor.Truncate(time.Second)), launchWaitSeverityNormal
+	}
+	return fmt.Sprintf("Still waiting for additional instance registrations (%s since last update)", stalledFor.Truncate(time.Second)), launchWaitSeverityNormal
+}
+
+func (m launchModel) launchFirstRegistrationLine() (line string, critical bool) {
+	status := m.firstRegistrationStatus()
+	if status == nil {
 		return "", false
 	}
-	elapsed := time.Since(start)
-	deadlineRemaining := m.firstRegSurvival.TerminateAfter - elapsed
-	deadlineText := formatDeadlineRemaining(deadlineRemaining)
+	return formatFirstRegistrationLine(status)
+}
 
-	p, ok := m.firstRegSurvival.ConditionalSuccess(elapsed)
-	if !ok {
-		return fmt.Sprintf(
-			"first registration: %s elapsed, %s (scope %s, n=%d)",
-			elapsed.Truncate(time.Second),
-			deadlineText,
-			m.firstRegSurvival.ScopeDescription(),
-			m.firstRegSurvival.SampleSize,
-		), deadlineRemaining <= 0
+func formatFirstRegistrationLine(status *firstRegistrationStatus) (line string, critical bool) {
+	if status == nil {
+		return "", false
 	}
-	label := firstRegistrationSuspicionLabel(p)
-	remaining, remOK := m.firstRegSurvival.Durations.ConditionalMedian(elapsed)
-	if remOK {
-		if deadlineRemaining > 0 && remaining > deadlineRemaining {
-			remaining = deadlineRemaining
+	critical = status.severity == launchWaitSeverityCritical
+	deadlineText := ""
+	if critical {
+		deadlineText = ", " + formatDeadlineRemaining(status.deadlineRemaining)
+	}
+	if status.successProbKnown {
+		if status.remainingKnown {
+			return fmt.Sprintf(
+				"first registration: %s elapsed, est ~%s remaining, p=%.0f%% (%s), %s%s (scope %s, n=%d)",
+				status.elapsed.Truncate(time.Second),
+				status.remainingEstimate.Truncate(time.Second),
+				status.successProb*100,
+				status.suspicionLabel,
+				status.qualifier,
+				deadlineText,
+				status.scope,
+				status.sampleSize,
+			), critical
 		}
 		return fmt.Sprintf(
-			"first registration: %s elapsed, est ~%s remaining, p=%.0f%% (%s), %s (scope %s, n=%d)",
-			elapsed.Truncate(time.Second),
-			remaining.Truncate(time.Second),
-			p*100,
-			label,
+			"first registration: %s elapsed, p=%.0f%% (%s), %s%s (scope %s, n=%d)",
+			status.elapsed.Truncate(time.Second),
+			status.successProb*100,
+			status.suspicionLabel,
+			status.qualifier,
 			deadlineText,
-			m.firstRegSurvival.ScopeDescription(),
-			m.firstRegSurvival.SampleSize,
-		), label == "critical" || deadlineRemaining <= 0
+			status.scope,
+			status.sampleSize,
+		), critical
 	}
 	return fmt.Sprintf(
-		"first registration: %s elapsed, p=%.0f%% (%s), %s (scope %s, n=%d)",
-		elapsed.Truncate(time.Second),
-		p*100,
-		label,
+		"first registration: %s elapsed, %s%s (scope %s, n=%d)",
+		status.elapsed.Truncate(time.Second),
+		status.qualifier,
 		deadlineText,
-		m.firstRegSurvival.ScopeDescription(),
-		m.firstRegSurvival.SampleSize,
-	), label == "critical" || deadlineRemaining <= 0
+		status.scope,
+		status.sampleSize,
+	), critical
 }
 
 func (m launchModel) renderInlineLaunchOverview() string {

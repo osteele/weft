@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/estimate"
 )
@@ -59,6 +60,32 @@ func TestBuildParetoTradeoffOptions_DedupesEquivalentPoints(t *testing.T) {
 	}
 	if options[0].Label != "cheap/fast/fastest" {
 		t.Fatalf("label = %q, want cheap/fast/fastest", options[0].Label)
+	}
+}
+
+func TestBuildParetoTradeoffOptions_PreservesCanonicalStrategyAnchors(t *testing.T) {
+	plans := map[string]StrategyPlan{
+		bidding.StrategyCheap.Profile().ID:   tradeoffTestPlan(8*time.Hour, 1.0),
+		bidding.StrategyFast.Profile().ID:    tradeoffTestPlan(9*time.Hour, 1.1), // dominated by cheap
+		bidding.StrategyFastest.Profile().ID: tradeoffTestPlan(2*time.Hour, 4.0),
+	}
+
+	options := BuildParetoTradeoffOptions(plans)
+	if len(options) != 3 {
+		t.Fatalf("expected 3 options (including fast anchor), got %d: %#v", len(options), options)
+	}
+	labelsByID := map[string]string{}
+	for _, option := range options {
+		labelsByID[option.ID] = option.Label
+	}
+	if labelsByID[bidding.StrategyCheap.Profile().ID] != "cheap" {
+		t.Fatalf("cheap label = %q, want cheap", labelsByID[bidding.StrategyCheap.Profile().ID])
+	}
+	if labelsByID[bidding.StrategyFast.Profile().ID] != "fast" {
+		t.Fatalf("fast label = %q, want fast", labelsByID[bidding.StrategyFast.Profile().ID])
+	}
+	if labelsByID[bidding.StrategyFastest.Profile().ID] != "fastest" {
+		t.Fatalf("fastest label = %q, want fastest", labelsByID[bidding.StrategyFastest.Profile().ID])
 	}
 }
 

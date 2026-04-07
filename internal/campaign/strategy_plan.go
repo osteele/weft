@@ -85,6 +85,7 @@ const (
 	CandidatePlanModeFull CandidatePlanMode = iota
 	CandidatePlanModeSplitOnly
 	CandidatePlanModeMergedPreferred
+	CandidatePlanModeParallelPreferred
 )
 
 // ProfilePlanSpec pairs a score profile with the candidate search mode to use
@@ -491,7 +492,11 @@ func buildProfilePlansFromSplitRawWithSession(
 func defaultProfilePlanSpecs(profiles []bidding.ScoreProfile) []ProfilePlanSpec {
 	specs := make([]ProfilePlanSpec, 0, len(profiles))
 	for _, profile := range profiles {
-		specs = append(specs, ProfilePlanSpec{Profile: profile, CandidateMode: CandidatePlanModeFull})
+		mode := CandidatePlanModeFull
+		if profile.ID == bidding.StrategyFastest.Profile().ID {
+			mode = CandidatePlanModeParallelPreferred
+		}
+		specs = append(specs, ProfilePlanSpec{Profile: profile, CandidateMode: mode})
 	}
 	return specs
 }
@@ -610,6 +615,54 @@ func buildStrategyPlanForSplitRaw(
 				)
 				if candidateResultHasOffers(mergedResult) {
 					result = mergedResult
+				}
+			}
+		}
+	case CandidatePlanModeParallelPreferred:
+		nonParallelCandidates := []groupingEvaluation{
+			{
+				label:   "split",
+				groups:  remainingGroups,
+				rawEval: remainingSplitEval,
+			},
+		}
+		if offerSession != nil {
+			mergedGroups := MergeCompatibleGroups(remainingGroups)
+			if len(mergedGroups) != len(remainingGroups) {
+				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
+				mergedEval := evaluator.evaluateRawOffers(fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				nonParallelCandidates = append(nonParallelCandidates, groupingEvaluation{
+					label:   "merged",
+					groups:  mergedGroups,
+					rawEval: mergedEval,
+				})
+			}
+		}
+		result = bestCandidateForProfileEvaluations(
+			evaluator,
+			nonParallelCandidates,
+			profile,
+			onProgress,
+			progressLabel,
+		)
+		if offerSession != nil {
+			parallelGroups := SplitToParallel(remainingGroups)
+			if len(parallelGroups) > 0 {
+				reportPlanProgressForLane(onProgress, "Fetching parallel candidate", progressLabel, "", 0, 0)
+				parallelEval := evaluator.evaluateRawOffers(fetchGroupRawOffersForPlanning(offerSession, parallelGroups))
+				parallelResult := evaluateSingleCandidateForProfile(
+					evaluator,
+					groupingEvaluation{
+						label:   "parallel",
+						groups:  parallelGroups,
+						rawEval: parallelEval,
+					},
+					profile,
+					onProgress,
+					progressLabel,
+				)
+				if candidateResultHasOffers(parallelResult) {
+					result = parallelResult
 				}
 			}
 		}

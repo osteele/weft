@@ -376,8 +376,12 @@ func TestTradeoffPlanSpecsForLaunchBatch_UsesFastFirstModes(t *testing.T) {
 		t.Fatalf("background profile count = %d, want > %d", len(backgroundSpecs), len(specs))
 	}
 	for _, spec := range backgroundSpecs {
-		if spec.CandidateMode != campaign.CandidatePlanModeFull {
-			t.Fatalf("background spec = %#v, want full candidate mode", spec)
+		wantMode := campaign.CandidatePlanModeFull
+		if spec.Profile.ID == bidding.StrategyFastest.Profile().ID {
+			wantMode = campaign.CandidatePlanModeParallelPreferred
+		}
+		if spec.CandidateMode != wantMode {
+			t.Fatalf("background spec = %#v, want mode %v", spec, wantMode)
 		}
 	}
 }
@@ -1037,6 +1041,49 @@ func TestLaunchModelView_FirstRegistrationWaitUsesSurvivalThresholds(t *testing.
 	criticalOut := stripANSI(criticalModel.View())
 	if !strings.Contains(criticalOut, "much longer than typical") {
 		t.Fatalf("expected critical first-registration wait message, got:\n%s", criticalOut)
+	}
+}
+
+func TestFormatFirstRegistrationLine_NormalOmitsOverdueDeadline(t *testing.T) {
+	line, critical := formatFirstRegistrationLine(&firstRegistrationStatus{
+		elapsed:           12*time.Minute + 20*time.Second,
+		severity:          launchWaitSeverityNormal,
+		qualifier:         "within typical range",
+		suspicionLabel:    "low",
+		successProb:       1.0,
+		successProbKnown:  true,
+		scope:             "global",
+		sampleSize:        42,
+		deadlineRemaining: -20 * time.Second,
+	})
+	if critical {
+		t.Fatal("expected non-critical line")
+	}
+	if strings.Contains(line, "termination overdue") {
+		t.Fatalf("did not expect overdue deadline in normal status line, got %q", line)
+	}
+	if !strings.Contains(line, "within typical range") {
+		t.Fatalf("expected qualifier in normal status line, got %q", line)
+	}
+}
+
+func TestFormatFirstRegistrationLine_CriticalIncludesOverdueDeadline(t *testing.T) {
+	line, critical := formatFirstRegistrationLine(&firstRegistrationStatus{
+		elapsed:           12*time.Minute + 20*time.Second,
+		severity:          launchWaitSeverityCritical,
+		qualifier:         "much longer than typical",
+		suspicionLabel:    "critical",
+		successProb:       0.08,
+		successProbKnown:  true,
+		scope:             "global",
+		sampleSize:        42,
+		deadlineRemaining: -20 * time.Second,
+	})
+	if !critical {
+		t.Fatal("expected critical line")
+	}
+	if !strings.Contains(line, "termination overdue by 20s") {
+		t.Fatalf("expected overdue deadline in critical status line, got %q", line)
 	}
 }
 

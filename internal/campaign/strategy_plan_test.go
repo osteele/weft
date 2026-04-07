@@ -58,6 +58,26 @@ func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
 	}
 }
 
+func TestDefaultProfilePlanSpecs_FastestUsesParallelPreferred(t *testing.T) {
+	specs := defaultProfilePlanSpecs([]bidding.ScoreProfile{
+		bidding.StrategyCheap.Profile(),
+		bidding.StrategyFast.Profile(),
+		bidding.StrategyFastest.Profile(),
+	})
+	if len(specs) != 3 {
+		t.Fatalf("spec count = %d, want 3", len(specs))
+	}
+	if specs[0].CandidateMode != CandidatePlanModeFull {
+		t.Fatalf("cheap mode = %v, want full", specs[0].CandidateMode)
+	}
+	if specs[1].CandidateMode != CandidatePlanModeFull {
+		t.Fatalf("fast mode = %v, want full", specs[1].CandidateMode)
+	}
+	if specs[2].CandidateMode != CandidatePlanModeParallelPreferred {
+		t.Fatalf("fastest mode = %v, want parallel-preferred", specs[2].CandidateMode)
+	}
+}
+
 func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidates(t *testing.T) {
 	originalFetchCandidates := fetchCandidateGroupingsForPlanning
 	originalFetchRaw := fetchGroupRawOffersForPlanning
@@ -113,6 +133,170 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 	}
 	if len(plan.DisplayOffers) != 1 || plan.DisplayOffers[0].Offer == nil {
 		t.Fatalf("expected split offer to be displayed, got %#v", plan.DisplayOffers)
+	}
+}
+
+func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredChoosesParallelWhenLaunchable(t *testing.T) {
+	originalFetchRaw := fetchGroupRawOffersForPlanning
+	t.Cleanup(func() {
+		fetchGroupRawOffersForPlanning = originalFetchRaw
+	})
+
+	fetchGroupRawOffersForPlanning = func(_ *offerSearchSession, groups []InstanceGroup) []GroupRawOffers {
+		raw := make([]GroupRawOffers, len(groups))
+		for i, group := range groups {
+			raw[i] = GroupRawOffers{Group: group}
+		}
+		switch len(groups) {
+		case 1:
+			// merged candidate
+			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.30}}
+		case 4:
+			// parallel candidate (fully launchable)
+			for i := range raw {
+				raw[i].Offers = []cloud.Offer{{ProviderID: "parallel", GPUName: "RTX 4090", CostPerHour: 0.60}}
+			}
+		default:
+			t.Fatalf("unexpected candidate size %d", len(groups))
+		}
+		return raw
+	}
+
+	groups := []InstanceGroup{
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs:     []*db.Job{{ID: 1, Command: "python a.py"}, {ID: 2, Command: "python b.py"}},
+		},
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs:     []*db.Job{{ID: 3, Command: "python c.py"}, {ID: 4, Command: "python d.py"}},
+		},
+	}
+	splitRaw := []GroupRawOffers{
+		{
+			Group: groups[0],
+			Offers: []cloud.Offer{
+				{ProviderID: "split-a", GPUName: "RTX 4090", CostPerHour: 0.20},
+			},
+		},
+		{
+			Group: groups[1],
+			Offers: []cloud.Offer{
+				{ProviderID: "split-b", GPUName: "RTX 4090", CostPerHour: 0.20},
+			},
+		},
+	}
+
+	plans := buildProfilePlansFromSplitRawWithSession(
+		nil,
+		groups,
+		splitRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		newOfferSearchSession(nil),
+		[]ProfilePlanSpec{{
+			Profile:       bidding.StrategyFastest.Profile(),
+			CandidateMode: CandidatePlanModeParallelPreferred,
+		}},
+		0,
+		nil,
+		defaultPlanOptions(),
+	)
+
+	plan, ok := plans[bidding.StrategyFastest.Profile().ID]
+	if !ok {
+		t.Fatalf("expected fastest plan, got %#v", plans)
+	}
+	if plan.NewCandidate == nil || plan.NewCandidate.Label != "parallel" {
+		t.Fatalf("expected parallel candidate, got %#v", plan.NewCandidate)
+	}
+}
+
+func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredFallsBackWhenParallelIncomplete(t *testing.T) {
+	originalFetchRaw := fetchGroupRawOffersForPlanning
+	t.Cleanup(func() {
+		fetchGroupRawOffersForPlanning = originalFetchRaw
+	})
+
+	fetchGroupRawOffersForPlanning = func(_ *offerSearchSession, groups []InstanceGroup) []GroupRawOffers {
+		raw := make([]GroupRawOffers, len(groups))
+		for i, group := range groups {
+			raw[i] = GroupRawOffers{Group: group}
+		}
+		switch len(groups) {
+		case 1:
+			// merged candidate: valid and cheaper than split, so it should win non-parallel fallback.
+			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.10}}
+		case 4:
+			// parallel candidate: one missing offer => incomplete => must not be selected.
+			for i := range raw {
+				raw[i].Offers = []cloud.Offer{{ProviderID: "parallel", GPUName: "RTX 4090", CostPerHour: 0.60}}
+			}
+			raw[0].Offers = nil
+		default:
+			t.Fatalf("unexpected candidate size %d", len(groups))
+		}
+		return raw
+	}
+
+	groups := []InstanceGroup{
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs:     []*db.Job{{ID: 1, Command: "python a.py"}, {ID: 2, Command: "python b.py"}},
+		},
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 12,
+			Jobs:     []*db.Job{{ID: 3, Command: "python c.py"}, {ID: 4, Command: "python d.py"}},
+		},
+	}
+	splitRaw := []GroupRawOffers{
+		{
+			Group: groups[0],
+			Offers: []cloud.Offer{
+				{ProviderID: "split-a", GPUName: "RTX 4090", CostPerHour: 0.25},
+			},
+		},
+		{
+			Group: groups[1],
+			Offers: []cloud.Offer{
+				{ProviderID: "split-b", GPUName: "RTX 4090", CostPerHour: 0.25},
+			},
+		},
+	}
+
+	plans := buildProfilePlansFromSplitRawWithSession(
+		nil,
+		groups,
+		splitRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		newOfferSearchSession(nil),
+		[]ProfilePlanSpec{{
+			Profile:       bidding.StrategyFastest.Profile(),
+			CandidateMode: CandidatePlanModeParallelPreferred,
+		}},
+		0,
+		nil,
+		defaultPlanOptions(),
+	)
+
+	plan, ok := plans[bidding.StrategyFastest.Profile().ID]
+	if !ok {
+		t.Fatalf("expected fastest plan, got %#v", plans)
+	}
+	if plan.NewCandidate == nil {
+		t.Fatalf("expected fallback non-parallel candidate, got %#v", plan.NewCandidate)
+	}
+	if plan.NewCandidate.Label == "parallel" {
+		t.Fatalf("expected non-parallel fallback candidate, got %#v", plan.NewCandidate)
 	}
 }
 

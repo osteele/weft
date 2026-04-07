@@ -3,6 +3,8 @@ package campaign
 import (
 	"math"
 	"sort"
+
+	"github.com/osteele/weft/internal/bidding"
 )
 
 // TradeoffOption is a selectable Pareto-frontier plan in the launch TUI.
@@ -26,21 +28,78 @@ func BuildParetoTradeoffOptions(plans map[string]StrategyPlan) []TradeoffOption 
 		return nil
 	}
 
-	points = dedupeTradeoffPoints(points)
-	points = paretoFrontier(points)
-	sort.Slice(points, func(i, j int) bool {
-		if !almostEqual(points[i].cost, points[j].cost) {
-			return points[i].cost < points[j].cost
+	pointsByID := make(map[string]tradeoffPoint, len(points))
+	for _, point := range points {
+		pointsByID[point.id] = point
+	}
+
+	frontier := dedupeTradeoffPoints(points)
+	frontier = paretoFrontier(frontier)
+
+	selectedIDs := make([]string, 0, len(frontier)+3)
+	seen := make(map[string]struct{}, len(frontier)+3)
+	for _, point := range frontier {
+		if _, ok := seen[point.id]; ok {
+			continue
 		}
-		if !almostEqual(points[i].time, points[j].time) {
-			return points[i].time > points[j].time
+		seen[point.id] = struct{}{}
+		selectedIDs = append(selectedIDs, point.id)
+	}
+
+	anchorIDs := []string{
+		bidding.StrategyCheap.Profile().ID,
+		bidding.StrategyFast.Profile().ID,
+		bidding.StrategyFastest.Profile().ID,
+	}
+	for _, id := range anchorIDs {
+		if _, ok := pointsByID[id]; !ok {
+			continue
 		}
-		return points[i].id < points[j].id
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		selectedIDs = append(selectedIDs, id)
+	}
+
+	selected := make([]tradeoffPoint, 0, len(selectedIDs))
+	for _, id := range selectedIDs {
+		selected = append(selected, pointsByID[id])
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if !almostEqual(selected[i].cost, selected[j].cost) {
+			return selected[i].cost < selected[j].cost
+		}
+		if !almostEqual(selected[i].time, selected[j].time) {
+			return selected[i].time > selected[j].time
+		}
+		return selected[i].id < selected[j].id
 	})
 
-	options := make([]TradeoffOption, len(points))
-	for i, point := range points {
+	options := make([]TradeoffOption, len(selected))
+	for i, point := range selected {
 		options[i] = TradeoffOption{ID: point.id}
+	}
+
+	hasAnchors := false
+	for _, id := range anchorIDs {
+		if _, ok := pointsByID[id]; ok {
+			hasAnchors = true
+			break
+		}
+	}
+	if hasAnchors {
+		for i := range options {
+			switch options[i].ID {
+			case bidding.StrategyCheap.Profile().ID:
+				options[i].Label = "cheap"
+			case bidding.StrategyFast.Profile().ID:
+				options[i].Label = "fast"
+			case bidding.StrategyFastest.Profile().ID:
+				options[i].Label = "fastest"
+			}
+		}
+		return options
 	}
 
 	switch len(options) {
@@ -52,7 +111,9 @@ func BuildParetoTradeoffOptions(plans map[string]StrategyPlan) []TradeoffOption 
 	default:
 		options[0].Label = "cheap"
 		options[len(options)-1].Label = "fastest"
-		options[len(options)/2].Label = "fast"
+		if idx := len(options) / 2; idx >= 0 && idx < len(options) {
+			options[idx].Label = "fast"
+		}
 	}
 
 	return options
