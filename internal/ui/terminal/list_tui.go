@@ -547,9 +547,10 @@ func (m listTUIModel) groupedView() string {
 
 	// Build footer lines first so we can reserve space for them.
 	etaLine := m.groupedETALine(groupedJobs)
-	footerLine := m.groupedFooterText()
-	// Reserve: 1 title + 1 blank separator + 1 footer + optional ETA line.
-	footerLines := 2 // blank separator + footer
+	statusLine := m.groupedStatusText()
+	controlsLine := m.groupedControlsText()
+	// Reserve: 1 title + 1 blank separator + 2 footer lines + optional ETA line.
+	footerLines := 3 // blank separator + status + controls
 	if etaLine != "" {
 		footerLines++
 	}
@@ -577,11 +578,13 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
 		b.WriteString("\n")
 	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(footerLine, m.width)))
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
+	b.WriteString("\n")
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(controlsLine, m.width)))
 	return b.String()
 }
 
-func (m listTUIModel) groupedFooterText() string {
+func (m listTUIModel) groupedStatusText() string {
 	state := fmt.Sprintf("[%d jobs]", len(m.jobs))
 	if m.syncInProgress {
 		state += " syncing..."
@@ -589,11 +592,15 @@ func (m listTUIModel) groupedFooterText() string {
 	if m.statusMessage != "" {
 		state += " " + m.statusMessage
 	}
+	return state
+}
+
+func (m listTUIModel) groupedControlsText() string {
 	autoHint := "auto:OFF"
 	if m.autoMode {
 		autoHint = "auto:ON"
 	}
-	return state + " a:toggle-auto " + autoHint + " q:quit"
+	return "a:toggle-auto " + autoHint + " q:quit"
 }
 
 func (m listTUIModel) groupedETALine(groupedJobs []*db.Job) string {

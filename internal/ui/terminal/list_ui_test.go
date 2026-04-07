@@ -1,6 +1,8 @@
 package terminal
 
 import (
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -180,5 +182,70 @@ func TestListTUIQuickLaunchInFlightProtectsStatusFromAutoPilotNoise(t *testing.T
 	got := next.(listTUIModel)
 	if got.statusMessage != "Launching new instance..." {
 		t.Fatalf("statusMessage overwritten while quick launch in-flight: got %q", got.statusMessage)
+	}
+}
+
+func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		width:           90,
+		height:          12,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 733, Status: db.StatusQueued, Description: "retry pending", Project: "proj"},
+		},
+		statusMessage: "Auto-pilot failed: submit jobs to instance control plane: get object grace/686/acks/17755648...",
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "[1 jobs] Auto-pilot failed:") {
+		t.Fatalf("expected status line in grouped footer, got:\n%s", out)
+	}
+	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
+		t.Fatalf("expected controls line with auto state, got:\n%s", out)
+	}
+}
+
+func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		width:           64,
+		height:          12,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 733, Status: db.StatusQueued, Description: "retry pending", Project: "proj"},
+		},
+		statusMessage: "Auto-pilot failed: no cloud providers available: vastai: vastai CLI availability check failed: timeout",
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
+		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
+	}
+}
+
+func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		autoInProgress:  true,
+		database:        &sql.DB{},
+	}
+
+	next, _ := m.Update(listAutoPilotDoneMsg{err: errors.New("boom")})
+	got := next.(listTUIModel)
+	if got.autoInProgress {
+		t.Fatal("autoInProgress should be cleared after autopilot failure")
+	}
+	if !strings.Contains(got.statusMessage, "Auto-pilot failed: boom") {
+		t.Fatalf("statusMessage = %q, want failure text", got.statusMessage)
+	}
+
+	next2, _ := got.Update(listSyncTickMsg{})
+	got2 := next2.(listTUIModel)
+	if !got2.autoInProgress {
+		t.Fatal("expected next sync tick to schedule another autopilot pass")
 	}
 }
