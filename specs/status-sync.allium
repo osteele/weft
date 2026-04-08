@@ -1,0 +1,757 @@
+-- allium: 3
+-- status-sync.allium
+--
+-- Scope: Synchronization of job and instance status between the local database,
+--        remote hosts (via SSH), and cloud instances (via R2 object storage)
+-- Includes: On-prem SSH sync, cloud R2 sync, three-way merge reconciliation,
+--           agent-side status reporting, provider polling, orphan cleanup
+-- Excludes:
+--   - Job submission and placement (see job-lifecycle.allium)
+--   - Campaign/instance launch and termination (see campaign-lifecycle.allium)
+--   - Output artifact collection and log caching
+--   - TUI rendering and display
+
+use "./job-lifecycle.allium" as jobs
+use "./campaign-lifecycle.allium" as cloud
+
+-- ==========================================================================
+-- Value types
+-- ==========================================================================
+
+-- Source identifies what signal triggered a status transition.
+-- Determines whether the transition is authoritative (can override terminal).
+value SyncSource = ssh_sync | slurm_sync | r2_completion | r2_phase
+                 | reconcile | user_action | cleanup | queue_runner | placement
+
+-- Agent execution phase reported via R2. Format: "verb:jobID" or bare verb.
+value AgentPhase = setup | running | finalizing | uploading
+                 | uploading_results | disk_full | grace | destroying
+
+-- Bootstrap progress stage reported during instance startup.
+value BootstrapStage = agent_installed | sources_extracted | ready
+
+-- Sync mode controls which portions of host sync execute.
+value SyncMode = full | status_only | repair
+
+-- The three states used in three-way merge reconciliation.
+value ThreeWayState {
+    base: String?       -- last_synced_status: remote state at last successful sync
+    local: String?      -- pending_status: what user wants (nil = no pending change)
+    remote: String      -- probed remote state
+}
+
+-- Remote file markers read from on-prem hosts via SSH.
+value RemoteJobFiles {
+    status_file: String?        -- {jobID}.status: exit code (plain text)
+    pid_file: String?           -- {jobID}.pid: process ID
+    pgid_file: String?          -- {jobID}.pgid: process group ID
+    meta_file: String?          -- {jobID}.meta: key=value metadata
+    heartbeat_file: String?     -- {jobID}.heartbeat: epoch timestamp
+}
+
+-- R2 markers read for cloud instance sync.
+value R2InstanceState {
+    phase: AgentPhase?              -- instance/<id>/phase
+    bootstrap_stage: BootstrapStage?    -- bootstrap/<id>/stage
+    heartbeat: HeartbeatSample?     -- instance/<id>/heartbeat
+    heartbeat_age: Duration?
+    termination_intent: String?     -- instance/<id>/termination-intent.json
+    agent_version: String?          -- instance/<id>/agent-version
+    job_progress: Integer?          -- 0-100 or -1
+}
+
+-- Heartbeat sample written by agent to R2.
+value HeartbeatSample {
+    timestamp: Timestamp
+    phase: AgentPhase
+    gpu_util_pct: Integer?
+    gpu_mem_used_mib: Integer?
+    gpu_mem_total_mib: Integer?
+    gpu_temp_c: Integer?
+    host_rss_kb: Integer?
+    host_mem_total_kb: Integer?
+    disk_free_bytes: Integer?
+    disk_total_bytes: Integer?
+}
+
+-- Result of probing a queue-runner job's remote state via SSH.
+value QuickStatus {
+    state: queue_unknown | queue_running | queue_paused | queue_queued | queue_dead
+    exit_code: Integer?
+    mtime: Timestamp?       -- file modification time when completed
+    uncertain: Boolean      -- true if host unreachable
+}
+
+-- Outcome of a sync or reconciliation operation.
+value SyncResult {
+    updated: Boolean        -- job status was changed in database
+    host_contacted: Boolean -- remote host was successfully reached
+}
+
+-- Outcome of three-way merge reconciliation.
+value ReconcileResult {
+    action: none | update_db | update_remote | conflict_resolved
+    old_status: String?
+    new_status: String?
+    conflict: Boolean
+    resolution: String?
+}
+
+-- ==========================================================================
+-- Entities
+-- ==========================================================================
+
+-- Tracks the live observation state for a cloud instance, persisted
+-- between reconciliation passes.
+entity InstanceLiveState {
+    instance: cloud/Instance
+    phase: AgentPhase?
+    bootstrap_stage: BootstrapStage?
+    heartbeat_age: Duration?
+    phase_changed_at: Timestamp?
+    job_progress: Integer?
+    termination_intent: String?
+}
+
+-- ==========================================================================
+-- Configuration
+-- ==========================================================================
+
+config {
+    -- SSH sync timeouts
+    default_ssh_timeout: Duration = 5.seconds
+    fast_ssh_timeout: Duration = 2.seconds
+    fast_host_timeout: Duration = 30.seconds
+    normal_sync_timeout: Duration = 30.seconds
+
+    -- R2 fetch timeout
+    r2_marker_timeout: Duration = 3.seconds
+
+    -- Heartbeat and stall thresholds
+    heartbeat_stale_threshold: Duration = 3.minutes
+    running_stall_timeout: Duration = 30.minutes
+
+    -- Reconcile safety-net window
+    recently_terminal_window: Duration = 30.minutes
+
+    -- Provider polling dead-confirmation
+    dead_confirm_time: Duration = 30.seconds
+
+    -- Survival cache TTL (bootstrap/setup thresholds)
+    survival_cache_ttl: Duration = 5.minutes
+
+    -- TUI sync intervals
+    tui_sync_interval: Duration = 60.seconds
+    tui_cloud_reconcile_interval: Duration = 60.seconds
+    tui_fast_cloud_sync_timeout: Duration = 10.seconds
+    tui_normal_cloud_sync_timeout: Duration = 60.seconds
+}
+
+-- ==========================================================================
+-- On-prem SSH sync
+-- ==========================================================================
+
+-- Host-level sync: iterate all active jobs on a host and sync each one.
+rule SyncHost {
+    when: SyncHostRequested(host, mode)
+
+    -- Step 1: Process deferred queue operations (pending kills, cancels, etc.)
+    ensures: DeferredQueueOpsProcessed(host)
+
+    -- Step 2: Sync each active job
+    for job in jobs/Jobs where job.host.name = host and not job.is_terminal:
+        ensures: SyncJobTriggered(job, mode)
+
+    -- Step 3: Ensure locally-queued jobs exist on remote queue
+    if mode = full:
+        ensures: QueuedJobsPushedToRemote(host)
+}
+
+-- Sync a single on-prem job by probing its remote state via SSH.
+rule SyncOnPremJob {
+    when: SyncJobTriggered(job, mode)
+    requires: job.backend in {queue_runner, slurm}
+    requires: job.host != null
+
+    -- Different probe strategies per backend
+    if job.backend = slurm:
+        ensures: SlurmJobProbed(job)
+    else if job.backend = queue_runner:
+        ensures: QueueRunnerJobProbed(job)
+
+    @guidance
+        -- Queue-runner probe sequence:
+        -- 1. Read status file ({jobID}.status) for exit code
+        -- 2. Check if process is running via PID/PGID files
+        -- 3. Check process pause state (ps -o stat= shows "T")
+        -- 4. Read metadata, samples, resource usage files
+        -- Falls back to R2 if SSH fails for inventory hosts.
+}
+
+-- Tmux-session job sync (legacy path for non-queue-runner jobs).
+rule SyncTmuxJob {
+    when: SyncJobTriggered(job, mode)
+    requires: job.backend != slurm
+    requires: not job.uses_queue_runner
+
+    -- Probe: does the tmux session still exist?
+    -- If session exists and process is paused (pgid state "T") → mark paused
+    -- If session exists and job was paused → mark running (resumed)
+    -- If session gone → check status file for exit code → completed/failed
+    -- If session gone and no status file → mark dead
+
+    @guidance
+        -- SSH probes:
+        -- 1. `tmux list-sessions` to check session existence
+        -- 2. Read .pgid/.pid, then `ps -o stat=` for pause detection
+        -- 3. Read {jobID}.status file for exit code
+        -- 4. If running/paused and session gone with no status → dead
+}
+
+-- Status file detection: job completed on remote host.
+rule RemoteJobCompleted {
+    when: StatusFileFound(job, exit_code, mtime)
+
+    if exit_code = 0:
+        ensures: job.status = completed
+    else:
+        ensures: job.status = failed
+    ensures: job.exit_code = exit_code
+    ensures: job.latest_attempt.end_time = mtime
+    ensures: job.latest_attempt.last_synced_status = job.status
+}
+
+-- Process vanished without status file.
+rule RemoteJobVanished {
+    when: SessionGoneNoStatusFile(job)
+    requires: job.status in {running, paused}
+
+    ensures: job.status = dead
+}
+
+-- Process detected as paused (SIGSTOP / "T" state).
+rule RemoteJobPaused {
+    when: ProcessPauseDetected(job)
+    requires: job.status in {queued, starting, running}
+
+    ensures: job.status = paused
+}
+
+-- Paused process resumed (session exists, no longer in "T" state).
+rule RemoteJobResumed {
+    when: ProcessResumeDetected(job)
+    requires: job.status = paused
+
+    ensures: job.status = running
+}
+
+-- ==========================================================================
+-- Three-way merge reconciliation (on-prem)
+-- ==========================================================================
+
+-- The three-way merge resolves conflicts between what the user wants
+-- (pending_status), what the remote host reports, and what we last knew.
+rule ThreeWayMerge {
+    when: ReconcileRequested(job, remote_status)
+
+    let base = job.latest_attempt.last_synced_status ?? job.status
+    let local = job.latest_attempt.pending_status
+
+    -- Case 1: No local intent and remote unchanged → no-op
+    if local = null and base = remote_status:
+        ensures: ReconcileResult(action: none)
+
+    -- Case 2: Remote changed, no local intent → accept remote (pure sync)
+    else if local = null and base != remote_status:
+        ensures: job.status = remote_status
+        ensures: job.latest_attempt.last_synced_status = remote_status
+
+    -- Case 3: Local intent, remote unchanged → apply intent to remote
+    else if local != null and base = remote_status:
+        ensures: PendingAppliedToRemote(job, local)
+
+    -- Case 4: Both changed to same state → convergence
+    else if local != null and local = remote_status:
+        ensures: job.status = remote_status
+        ensures: job.latest_attempt.pending_status = null
+        ensures: job.latest_attempt.last_synced_status = remote_status
+
+    -- Case 5: Job queued locally but not on remote → push to remote queue
+    else if job.status = queued and remote_status = null:
+        ensures: JobPushedToRemoteQueue(job)
+
+    -- Case 6: Conflict — both diverged from base
+    else:
+        ensures: ConflictResolved(job, base, local, remote_status)
+}
+
+-- Conflict resolution: local intent vs remote state.
+rule ResolveConflict {
+    when: ConflictResolved(job, base, local, remote)
+
+    -- If remote is terminal, accept it (unless local wants requeue)
+    if remote in {completed, failed, dead, killed, canceled}:
+        if local = queued:
+            -- Requeue intent overrides stale terminal state
+            ensures: PendingAppliedToRemote(job, queued)
+        else:
+            -- Accept terminal remote state, discard local intent
+            ensures: job.status = remote
+            ensures: job.latest_attempt.pending_status = null
+    else:
+        -- Remote not terminal — keep trying local intent
+        ensures: PendingAppliedToRemote(job, local)
+
+    @guidance
+        -- Connection errors during pending application leave pending_status
+        -- in place for retry on the next sync pass, rather than dropping
+        -- the user's intent.
+}
+
+-- Apply a pending status change to the remote host.
+rule ApplyPendingToRemote {
+    when: PendingAppliedToRemote(job, target_status)
+
+    if target_status = killed:
+        ensures: RemoteKillRequested(job)
+    else if target_status = canceled:
+        ensures: RemoteCancelRequested(job)
+    else if target_status = paused:
+        ensures: RemotePauseRequested(job)
+    else if target_status = running:
+        ensures: RemoteResumeRequested(job)
+    else if target_status = draft:
+        ensures: RemoteDraftRequested(job)
+    else if target_status = queued:
+        ensures: RemoteRequeueRequested(job)
+
+    ensures: job.latest_attempt.pending_status = null
+    ensures: job.status = target_status
+    ensures: job.latest_attempt.last_synced_status = target_status
+}
+
+-- ==========================================================================
+-- Cloud R2 sync
+-- ==========================================================================
+
+-- Sync a cloud instance's state from R2 markers and provider API.
+rule SyncCloudInstanceState {
+    when: CloudSyncRequested(instance)
+    requires: instance.status in {running, grace}
+
+    -- Read R2 markers
+    let r2_state = FetchR2InstanceState(instance)
+
+    -- Persist to live state table
+    ensures: InstanceLiveState updated for instance
+
+    -- Side effect: mark queued jobs as running if R2 phase says they are
+    if r2_state.phase != null:
+        let phase_job = job referenced by r2_state.phase
+        if phase_job != null and phase_job.status = queued:
+            ensures: phase_job.status = running
+
+    -- Side effect: detect grace transition
+    if r2_state.phase = grace and instance.status = running:
+        if no active jobs on instance:
+            ensures: instance.status = grace
+
+    -- Side effect: detect grace→running (agent resumed)
+    if instance.status = grace and r2_state.phase != grace:
+        ensures: instance.status = running
+        ensures: instance.grace_started_at = null
+        ensures: instance.grace_deadline = null
+
+    @guidance
+        -- R2 keys read per instance:
+        -- instance/<id>/phase — current execution phase ("verb:jobID")
+        -- instance/<id>/heartbeat — JSON with GPU, memory, disk metrics
+        -- bootstrap/<id>/stage — bootstrap progress during startup
+        -- instance/<id>/termination-intent.json — cleanup control
+        -- instance/<id>/agent-version — agent binary version
+        -- jobs/<jobID>/runs/<runID>/.complete — per-job exit code
+}
+
+-- Sync individual job completions from R2 .complete markers.
+rule SyncJobCompletionsFromR2 {
+    when: JobCompletionSyncRequested(instance)
+
+    for job in instance.jobs where not job.is_terminal:
+        let r2_complete = R2JobCompleteMarker(job)
+        if r2_complete != null:
+            if r2_complete.exit_code = 0:
+                ensures: job.status = completed
+                ensures: job.exit_code = 0
+            else:
+                ensures: job.status = failed
+                ensures: job.exit_code = r2_complete.exit_code
+
+    @guidance
+        -- R2 key: jobs/<jobID>/runs/<runID>/.complete
+        -- Contains exit code. Written by agent synchronously before
+        -- moving to next job. Read by reconciler each pass to keep
+        -- DB in sync without waiting for terminal instance action.
+}
+
+-- ==========================================================================
+-- Agent-side status reporting
+-- ==========================================================================
+
+-- Agent writes phase transitions to R2 as it progresses through a job.
+rule AgentReportsPhase {
+    when: AgentPhaseChange(instance, phase, job)
+
+    ensures: R2PhaseWritten(instance, phase, job)
+
+    @guidance
+        -- Written to: instance/<instanceID>/phase
+        -- Format: "verb:jobID" (e.g., "setup:123", "running:123")
+        -- Or bare verb for non-job phases: "grace", "destroying"
+        -- Phase sequence per job: setup → running → finalizing → uploading
+}
+
+-- Agent writes heartbeat samples continuously in the background.
+rule AgentReportsHeartbeat {
+    when: AgentHeartbeatTick(instance)
+
+    ensures: R2HeartbeatWritten(instance)
+
+    @guidance
+        -- Written to: instance/<instanceID>/heartbeat
+        -- JSON with: timestamp, phase, GPU utilization, GPU memory,
+        -- GPU temperature, host RSS, host total memory, disk free/total.
+        -- Read by coordinator to detect stale/dead agents and disk full.
+}
+
+-- Agent writes per-job completion marker.
+rule AgentReportsJobComplete {
+    when: AgentJobFinished(instance, job, exit_code)
+
+    ensures: R2JobCompleteWritten(job, exit_code)
+
+    @guidance
+        -- Written to: jobs/<jobID>/runs/<runID>/.complete
+        -- Contains exit code as plain text.
+        -- Written synchronously before agent moves to next job.
+}
+
+-- Agent writes completion manifest when all jobs finish.
+rule AgentReportsInstanceComplete {
+    when: AgentAllJobsFinished(instance)
+
+    ensures: R2CompletionManifestWritten(instance)
+
+    @guidance
+        -- Written to: campaigns/<instanceID>/.complete
+        -- JSON: {CompletedAtUnix, Jobs: [{JobID, ExitCode, UploadStatus, OutputBytes}]}
+        -- Written just before agent self-destructs.
+}
+
+-- ==========================================================================
+-- Provider polling
+-- ==========================================================================
+
+-- Batch-fetch provider instance states once per reconciliation pass.
+rule BatchFetchProviderState {
+    when: ReconcilePassStarted()
+
+    ensures: ProviderInstancesBatchFetched()
+
+    @guidance
+        -- Calls ListAllInstances() once per provider instead of N
+        -- individual ShowInstance() calls. Reduces transient errors.
+        -- Falls back to individual ShowInstance() if batch fails.
+}
+
+-- Record provider status transitions for historical tracking.
+rule RecordProviderTransition {
+    when: ProviderStatusChanged(instance, new_provider_status)
+
+    ensures: ProviderTransitionRecorded(instance, new_provider_status)
+
+    @guidance
+        -- Persisted to provider_status_history table.
+        -- Used for bootstrap survival analysis and reliability tracking.
+}
+
+-- ==========================================================================
+-- Cloud reconciliation pass
+-- ==========================================================================
+
+-- The reconciler runs periodically and checks all running/launching instances.
+rule ReconcilePass {
+    when: ReconcilePassTriggered()
+
+    -- For each running/launching instance:
+    for instance in cloud/Instances where not instance.is_terminal:
+        ensures: CloudSyncRequested(instance)
+        ensures: InstanceReconciled(instance)
+
+    -- Reset jobs stranded on dead cloud instances
+    ensures: OrphanedCloudJobsReset()
+
+    -- Safety net: verify recently-terminal instances are actually destroyed
+    for instance in cloud/Instances
+        where instance.is_terminal
+        and instance.ended_at > now - config.recently_terminal_window:
+            ensures: TerminalInstanceVerified(instance)
+
+    -- Orphan sweep: destroy weft-labeled provider instances from non-active campaigns
+    ensures: OrphanSweepCompleted()
+}
+
+-- R2 completion can authoritatively override terminal job states.
+-- This corrects race conditions where SSH sync marked a job dead/failed
+-- but the agent actually completed it successfully.
+rule AuthoritativeR2Completion {
+    when: R2CompletionFound(job, exit_code)
+    requires: job.status in {failed, dead, killed, canceled, queued}
+
+    if exit_code = 0:
+        ensures: job.status = completed
+        ensures: job.exit_code = 0
+        ensures: job.latest_attempt.last_synced_status = completed
+
+    @guidance
+        -- R2 completion is the only non-user source that can override
+        -- terminal states. The agent on the remote host has direct
+        -- knowledge of actual job outcome, making it authoritative.
+        -- This uses the Authoritative flag in the transition table.
+}
+
+-- ==========================================================================
+-- Sync triggers
+-- ==========================================================================
+
+-- Automatic sync before display commands (list, status, job show).
+rule AutoSyncBeforeDisplay {
+    when: DisplayCommandRequested(hosts)
+
+    for host in hosts:
+        ensures: SyncHostRequested(host, status_only)
+
+    ensures: CloudSyncRequested()
+
+    @guidance
+        -- Uses fast timeouts (2s SSH, 30s per host) to avoid blocking
+        -- the display. Falls back gracefully if hosts are unreachable.
+}
+
+-- Explicit sync command.
+rule ExplicitSync {
+    when: UserSync(hosts)
+
+    for host in hosts:
+        ensures: SyncHostRequested(host, full)
+
+    ensures: ReconcilePassTriggered()
+
+    @guidance
+        -- Default mode: SSH host sync + cloud reconcile.
+        -- Uses normal timeouts (30s per host).
+        -- Agent deployment and queue runner startup require --full flag
+        -- to avoid slow SSH operations on unreachable hosts blocking
+        -- the fast path.
+}
+
+-- TUI periodic sync via the hostsync.Worker background goroutine.
+rule TUIPeriodicSync {
+    when: TUISyncTickFired()
+
+    -- On-prem: request syncs for hosts with visible jobs
+    for host in visible_job_hosts:
+        ensures: SyncHostRequested(host, status_only)
+
+    -- Cloud: reconcile runs on its own 60s ticker inside the worker
+    ensures: CloudReconcileTriggered()
+
+    -- Always reload jobs from DB to pick up changes from any source
+    ensures: TUIJobsReloaded()
+
+    @guidance
+        -- The hostsync.Worker runs a select loop with multiple tickers:
+        --   500ms: process host sync queue
+        --   60s:   cloud reconcile (reconcileCloudJobs)
+        --   120s:  repair syncs, unplaced job checks
+        --
+        -- Cloud reconcile calls cloudsync.SyncState → ReconcileLaunches
+        -- which reads R2 markers and provider API. Side effects include
+        -- marking queued jobs as running (MarkQueuedJobRunning).
+        --
+        -- The worker sends a result to the TUI when Updated > 0
+        -- (including both instance-level reconciliation AND job status
+        -- transitions like queued→running). The TUI reloads jobs from DB
+        -- upon receiving any result.
+        --
+        -- The TUI also reloads jobs every sync tick (60s) regardless
+        -- of worker results, to catch DB changes from other sources.
+}
+
+-- ==========================================================================
+-- Multi-process sync coordination
+-- ==========================================================================
+
+-- Cloud sync lease: prevents redundant provider API calls when multiple
+-- TUIs or a coordinator are running simultaneously.
+rule CloudSyncLease {
+    when: CloudSyncRequested()
+
+    let lease = AcquireAutoLease("sync:cloud:reconcile", process_owner, 180.seconds)
+
+    if lease.acquired:
+        -- This process owns the cloud reconcile for the next 180s.
+        ensures: ReconcilePassTriggered()
+        ensures: LeaseReleased("sync:cloud:reconcile") after reconcile completes
+    else:
+        -- Another process owns the reconcile. Fall back to DB-only
+        -- reconciliation (apply local state changes without contacting
+        -- cloud providers or R2).
+        ensures: DBOnlyReconcileTriggered()
+
+    @guidance
+        -- Lease table: auto_leases(scope, owner, expires_at, updated_at)
+        -- Scope: "sync:cloud:reconcile"
+        -- TTL: 180 seconds
+        -- Owner: "{hostname}:{pid}:{nanotime}" for TUI, "coordinator-cloud"
+        --   for the coordinator daemon.
+        -- DB-only fallback runs syncCloudStateWithClients with nil clients,
+        --   applying only local DB repairs (orphaned job resets, campaign
+        --   status reconciliation) without R2 or provider API calls.
+}
+
+-- Per-host sync leases: prevent redundant SSH probes across processes.
+rule HostSyncLease {
+    when: SyncHostRequested(host, mode)
+
+    let scope = "sync:host:" ++ mode ++ ":" ++ host
+    let ttl = HostLeaseTTL(mode)
+    let lease = AcquireAutoLease(scope, process_owner, ttl)
+
+    if lease.acquired:
+        ensures: HostSyncExecuted(host, mode)
+        ensures: LeaseReleased(scope) after sync completes
+    else:
+        -- Another process is syncing this host. Skip.
+        ensures: HostSyncSkipped(host)
+
+    @guidance
+        -- Lease TTLs by mode:
+        --   fast (status_only): 30 seconds
+        --   full: 15 minutes
+        --   repair: 3 minutes
+        -- The hostsync.Worker enforces maxParallel=3 concurrent host syncs
+        -- within a single process, and uses per-host leases to coordinate
+        -- across processes.
+}
+
+-- DB as shared notification bus: all processes read/write the same SQLite DB.
+-- Any process that updates job or instance state makes changes visible to all
+-- other processes on their next DB read. TUIs reload from DB every sync tick
+-- (60s) regardless of which process performed the sync.
+rule DBAsSharedBus {
+    when: AnyProcessUpdatesDB()
+
+    -- No explicit notification mechanism. Processes discover changes by
+    -- re-reading from DB on their next poll cycle.
+    ensures: AllProcessesEventuallyReadUpdatedState()
+
+    @guidance
+        -- The DB is the source of truth for all job and instance state.
+        -- Multiple processes may read and write concurrently. SQLite's
+        -- WAL mode allows concurrent reads with a single writer.
+        --
+        -- TUI reload sources:
+        --   1. Periodic tick (60s) → reloadJobs() from DB
+        --   2. Worker result notification → reloadJobs() from DB
+        --   3. DB file watcher (inotify/kqueue) → debounced reload
+        --
+        -- This means a TUI that loses the cloud sync lease still gets
+        -- updated data within 60s of the winning process writing to DB.
+}
+
+-- ==========================================================================
+-- Opslog sync
+-- ==========================================================================
+
+-- Opslog sync fetches instance operation logs from R2 for local caching.
+-- Uses negative caching to avoid re-fetching oplogs that don't exist.
+rule OpslogSync {
+    when: OpslogSyncRequested(instances)
+
+    -- Filter out instances with cached not-found status
+    let candidates = instances.filter(i =>
+        not (i.oplog_not_found = true
+             and i.oplog_synced_at >= i.ended_at + config.oplog_not_found_buffer))
+
+    -- Fetch in parallel with bounded concurrency
+    for instance in candidates (parallel, max: config.oplog_max_parallel):
+        let result = FetchR2Opslog(instance)
+        if result = synced:
+            ensures: OpslogCached(instance)
+            ensures: instance.oplog_synced_at = now
+        else if result in {not_found, error}:
+            ensures: instance.oplog_not_found = true
+            ensures: instance.oplog_synced_at = now
+
+    @guidance
+        -- DB columns on launches: oplog_synced_at, oplog_not_found
+        -- Safety buffer: 10 minutes after ended_at before trusting not-found
+        -- Running/grace instances are always re-checked regardless of flags
+        -- Bounded parallelism: 10 concurrent R2 reads (semaphore channel)
+}
+
+config {
+    -- Opslog sync
+    oplog_lookback: Duration = 7.days
+    oplog_not_found_buffer: Duration = 10.minutes
+    oplog_max_parallel: Integer = 10
+}
+
+-- ==========================================================================
+-- Invariants
+-- ==========================================================================
+
+invariant SyncedStatusMatchesAfterSync {
+    -- After a successful sync with no pending operations, the DB status
+    -- should reflect the remote state.
+    for job in jobs/Jobs:
+        if job.latest_attempt.pending_status = null
+        and job.latest_attempt.last_synced_status != null:
+            job.status = job.latest_attempt.last_synced_status
+}
+
+invariant AuthoritativeOverridesAreR2Only {
+    -- Only R2 completion (authoritative source) can transition
+    -- from terminal states to completed.
+    for job in jobs/Jobs:
+        if job.status = completed and job.latest_attempt.last_synced_status in {failed, dead, killed, canceled}:
+            -- This transition was made by an authoritative source
+            job.latest_attempt.last_synced_status = completed
+}
+
+invariant PendingStatusClearedAfterApply {
+    -- After a pending operation is successfully applied to the remote,
+    -- pending_status must be cleared.
+    for attempt in JobAttempts:
+        if attempt.pending_status != null:
+            attempt.pending_at != null
+}
+
+invariant GraceDetectionRequiresNoActiveJobs {
+    -- Grace transition is only detected when no active jobs remain
+    -- on the instance. This prevents premature grace entry while
+    -- a job is still running.
+    for instance in cloud/Instances:
+        if instance.status = grace:
+            instance.jobs.all(j => j.is_terminal)
+}
+
+invariant ReconcileResultCountsAllChanges {
+    -- ReconcileResult.JobsUpdated must count all job status transitions
+    -- made as side effects during cloud reconciliation (e.g. queued→running
+    -- from R2 phase detection). This ensures the TUI is notified of
+    -- changes that don't correspond to instance-level reconciliation.
+    for reconcile_pass in ReconcilePasses:
+        reconcile_pass.result.jobs_updated >= count of jobs whose status
+            changed during the pass
+}

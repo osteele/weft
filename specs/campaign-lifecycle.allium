@@ -1,0 +1,636 @@
+-- allium: 3
+-- campaign-lifecycle.allium
+--
+-- Scope: Cloud instance lifecycle from launch through execution to termination
+-- Includes: Campaign, Instance (Launch), grace period, R2 control plane,
+--           provider abstraction, reconciliation, termination
+-- Excludes:
+--   - Job lifecycle (separate spec: job-lifecycle.allium)
+--   - Placement scoring algorithm internals
+--   - TUI/dashboard rendering
+--   - Source syncing and output artifact collection
+--   - Offer search and selection UI
+
+use "./job-lifecycle.allium" as jobs
+
+-- ==========================================================================
+-- External entities
+-- ==========================================================================
+
+-- Cloud GPU provider (Vast.ai, RunPod, etc.)
+external entity Provider {
+    name: String        -- "vastai", "runpod"
+}
+
+-- A provider-level instance — weft creates and destroys these but does not
+-- control the provider's internal state machine.
+external entity ProviderInstance {
+    provider_id: String
+    status: created | creating | loading | running | exited | stopped | error | destroyed | dead
+}
+
+-- ==========================================================================
+-- Value types
+-- ==========================================================================
+
+value OfferSnapshot {
+    gpu_name: String
+    num_gpus: Integer
+    gpu_mem_gb: Decimal
+    cost_per_hour_cents: Integer
+    reliability: Decimal            -- 0.0–1.0
+    dl_perf: Decimal
+    data_center: String
+    cuda_version: Decimal
+    disk_gb: Integer
+    download_mbps: Decimal
+    upload_mbps: Decimal
+    machine_id: String
+}
+
+value TerminationReason = completed | provider_failure | job_failure
+                        | disk_full | infra_failure | bootstrap_timeout
+                        | canceled | phase_stall | unknown
+
+value InstanceRole = worker | donor
+
+-- ==========================================================================
+-- Entities
+-- ==========================================================================
+
+-- A Campaign is a batch of cloud instances launched together.
+entity Campaign {
+    status: planned | launching | running | completed | failed | canceled
+    created_at: Timestamp
+    ended_at: Timestamp?
+    estimated_cost_cents: Integer
+
+    -- Relationships
+    instances: Instance with campaign = this
+
+    -- Derived
+    active_instances: instances where status not in {completed, failed, canceled}
+    is_terminal: status in {completed, failed, canceled}
+
+    transitions status {
+        planned -> launching
+        launching -> running
+        launching -> failed
+        launching -> canceled
+        running -> completed
+        running -> failed
+        running -> canceled
+        terminal: completed, failed, canceled
+    }
+}
+
+-- An Instance (internally "Launch") is a single cloud GPU deployment.
+entity Instance {
+    -- Association
+    campaign: Campaign?
+
+    -- Provider
+    provider: Provider
+    provider_instance: ProviderInstance?
+
+    -- GPU specification
+    gpu_spec: String                -- user-specified GPU request
+    gpu_class: String               -- resolved GPU class
+    gpu_mem_gb: Integer
+    num_gpus: Integer
+    resolved_gpu_name: String?      -- actual GPU name from offer
+    docker_image: String
+
+    -- Offer metadata (captured at launch, immutable)
+    offer: OfferSnapshot
+
+    -- Budgets
+    max_spend_cents: Integer
+    max_time_seconds: Integer
+    actual_spend_cents: Integer
+
+    -- Timestamps
+    created_at: Timestamp
+    ready_at: Timestamp?                -- provider instance ready
+    launched_at: Timestamp?             -- weft marked it running
+    ended_at: Timestamp?
+    provider_running_at: Timestamp?     -- provider first reported running
+
+    -- Data locality
+    instance_role: InstanceRole
+    donor_instance: Instance?           -- donor that seeded this worker
+    seed_download_secs: Integer?        -- download time on donor
+    seed_copy_secs: Integer?            -- copy-from-donor time on worker
+    replaced_instance: Instance?        -- failed instance this one replaces
+
+    -- Capacity
+    disk_gb: Integer
+    provisioned_inputs: List<String>    -- e.g. "hf:meta-llama/Llama-3-8B"
+
+    -- Grace period
+    grace_period_seconds: Integer       -- configured duration (0 = disabled)
+    grace_started_at: Timestamp?
+    grace_deadline: Timestamp?
+
+    -- Termination
+    termination_reason: TerminationReason?
+    termination_detail: String?
+    termination_requested_at: Timestamp?
+
+    -- Result verification
+    results_verified: Boolean?          -- nil=legacy, true=ok, false=partial
+
+    -- Relationships
+    jobs: jobs/Job with cloud_instance = this
+
+    -- Derived
+    is_terminal: status in {completed, failed, canceled}
+    has_grace: grace_period_seconds > 0
+    grace_remaining: if grace_deadline != null then grace_deadline - now else null
+    bootstrap_origin: provider_running_at ?? launched_at
+    is_retryable: termination_reason in {provider_failure, infra_failure,
+                                          bootstrap_timeout, phase_stall, unknown}
+
+    -- Status
+    status: planned | launching | running | grace | completed | failed | canceled
+
+    transitions status {
+        planned -> launching
+        planned -> canceled
+        launching -> running
+        launching -> failed
+        launching -> canceled
+        running -> grace
+        running -> completed
+        running -> failed
+        running -> canceled
+        grace -> running              -- jobs resubmitted during grace
+        grace -> completed            -- resubmitted jobs all succeed
+        grace -> failed               -- grace expired or released
+        grace -> canceled
+        terminal: completed, failed, canceled
+    }
+}
+
+-- ==========================================================================
+-- R2 control plane messages
+-- ==========================================================================
+
+-- Grace period control messages exchanged via R2 object storage
+-- between the coordinator (laptop) and the agent (cloud instance).
+
+value GraceJobsRequest {
+    jobs: List<jobs/Job>
+    sources: List<String>
+}
+
+value GraceCommandAck {
+    request_id: String
+    accepted: Boolean
+}
+
+-- ==========================================================================
+-- Configuration
+-- ==========================================================================
+
+config {
+    default_grace_period: Duration = 5.minutes
+    grace_poll_interval: Duration = 10.seconds
+    bootstrap_warn_threshold: Duration = 15.minutes
+    bootstrap_timeout: Duration = 20.minutes
+    setup_stall_warn: Duration = 15.minutes
+    setup_stall_timeout: Duration = 25.minutes
+    heartbeat_stale_threshold: Duration = 3.minutes
+    running_stall_timeout: Duration = 30.minutes
+    self_destruct_retries: Integer = 3
+    self_destruct_backoff: Duration = 5.seconds
+    reconcile_cleanup_window: Duration = 30.minutes
+}
+
+-- ==========================================================================
+-- Launch rules
+-- ==========================================================================
+
+rule LaunchInstance {
+    when: LaunchInstance(campaign, jobs, gpu_spec, options)
+
+    ensures: Instance.created(
+        campaign: campaign,
+        provider: options.provider,
+        gpu_spec: gpu_spec,
+        gpu_class: options.gpu_class,
+        gpu_mem_gb: options.gpu_mem_gb,
+        num_gpus: options.num_gpus,
+        docker_image: options.docker_image,
+        offer: options.offer,
+        max_spend_cents: options.max_spend_cents,
+        max_time_seconds: options.max_time_seconds,
+        actual_spend_cents: 0,
+        instance_role: options.role,
+        donor_instance: options.donor,
+        disk_gb: options.offer.disk_gb,
+        provisioned_inputs: options.inputs,
+        grace_period_seconds: options.grace_period_seconds,
+        status: planned,
+        created_at: now
+    )
+    ensures:
+        for job in jobs:
+            job.cloud_instance = instance
+            job.target_kind = rental_instance
+}
+
+rule BeginLaunching {
+    when: instance: Instance.status becomes planned
+
+    -- Create provider instance, upload bootstrap script and job manifest
+    ensures: instance.status = launching
+
+    @guidance
+        -- The launch sequence:
+        -- 1. Create provider instance via API
+        -- 2. Record provider instance ID
+        -- 3. Upload bootstrap shell script to R2
+        -- 4. Write agent startup manifest to R2 with job list and environment
+        -- The provider's onstart handler fetches and executes the bootstrap script.
+}
+
+rule InstanceBecomesReady {
+    when: instance: Instance.provider_instance.status becomes running
+    requires: instance.status = launching
+
+    ensures: instance.provider_running_at = now
+}
+
+rule InstanceStartsRunning {
+    when: AgentRegistered(instance)
+    requires: instance.status = launching
+
+    ensures: instance.status = running
+    ensures: instance.launched_at = now
+}
+
+-- ==========================================================================
+-- Completion rules
+-- ==========================================================================
+
+rule AllJobsCompleted {
+    when: instance: Instance.jobs.all(j => j.status = completed)
+    requires: instance.status in {running, grace}
+
+    ensures: instance.status = completed
+    ensures: instance.termination_reason = completed
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Agent self-destructs after writing completion manifest to R2.
+}
+
+-- ==========================================================================
+-- Donor lifecycle (data locality)
+-- ==========================================================================
+
+-- A donor instance downloads data (HF models, datasets) and signals readiness
+-- via an R2 marker. The worker instance then copies from the donor.
+rule DonorCompletes {
+    when: DonorReadyMarkerFound(instance)
+    requires: instance.instance_role = donor
+    requires: instance.status = running
+
+    ensures: instance.status = completed
+    ensures: instance.termination_reason = completed
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Detected by reconciler checking R2 for donor-ready marker.
+        -- Provider instance is destroyed after marker is found.
+        -- Worker instances reference donor_instance for data seeding.
+}
+
+-- ==========================================================================
+-- Reconciler recovery actions
+-- ==========================================================================
+
+-- Bootstrap stalled but R2 shows the instance actually completed — accept it.
+rule BootstrapCompleteOverride {
+    when: BootstrapStalledButCompleted(instance)
+    requires: instance.status = launching
+
+    ensures: instance.status = completed
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Checked when bootstrap stall is detected past the warn threshold.
+        -- If R2 has a completion manifest, the agent finished despite the
+        -- stall appearance. Accept completion rather than terminating.
+}
+
+-- All jobs reached terminal state but the agent failed to self-destruct.
+rule SelfDestructFailed {
+    when: AllJobsTerminalButInstanceLingering(instance)
+    requires: instance.status = running
+    requires: instance.jobs.all(j => j.is_terminal)
+
+    let terminal_status = if instance.jobs.all(j => j.status = completed) then completed else failed
+    let reason = if terminal_status = completed then completed else job_failure
+
+    ensures: instance.status = terminal_status
+    ensures: instance.termination_reason = reason
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Triggered when all jobs reached terminal state 2+ minutes ago
+        -- but the instance is still running. Forces cleanup and destroys
+        -- the provider instance.
+}
+
+-- ==========================================================================
+-- Grace period rules
+-- ==========================================================================
+
+rule EnterGracePeriod {
+    when: job: jobs/Job.status transitions_to failed
+    requires: job.cloud_instance != null
+    requires: job.cloud_instance.has_grace
+    requires: job.cloud_instance.status = running
+
+    let instance = job.cloud_instance
+
+    ensures: instance.status = grace
+    ensures: instance.grace_started_at = now
+    ensures: instance.grace_deadline = now + instance.grace_period_seconds.seconds
+
+    @guidance
+        -- Agent transitions to grace-wait mode, polling R2 every
+        -- config.grace_poll_interval for control messages:
+        -- jobs (resubmit), extend (add time), release (terminate).
+}
+
+rule SubmitJobDuringGrace {
+    when: SubmitGraceJob(instance, job)
+    requires: instance.status = grace
+    requires: instance.grace_deadline > now
+
+    ensures: job.cloud_instance = instance
+    ensures: instance.status = running
+
+    @guidance
+        -- Coordinator writes GraceJobsRequest to R2 at
+        -- grace/<instanceID>/jobs/<requestID>.json.
+        -- Agent reads, processes, writes ack to grace/<instanceID>/acks/.
+        -- Grace state cleared: instance resumes running.
+}
+
+rule ExtendGracePeriod {
+    when: ExtendGrace(instance, additional_duration)
+    requires: instance.status = grace
+
+    ensures: instance.grace_deadline = instance.grace_deadline + additional_duration
+
+    @guidance
+        -- Coordinator writes duration string to R2 at
+        -- grace/<instanceID>/extend/<requestID>.txt.
+        -- Agent reads and updates its local deadline.
+        -- Default extension: 15 minutes.
+}
+
+rule ReleaseGraceInstance {
+    when: ReleaseGrace(instance)
+    requires: instance.status = grace
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = job_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Coordinator writes to grace/<instanceID>/release/<requestID>.txt.
+        -- Agent self-destructs cleanly.
+}
+
+rule GracePeriodExpires {
+    when: instance: Instance.grace_deadline <= now
+    requires: instance.status = grace
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = job_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Agent detects expired deadline during poll loop,
+        -- self-destructs with status=failed.
+}
+
+-- ==========================================================================
+-- Failure and termination rules
+-- ==========================================================================
+
+rule BootstrapTimeout {
+    when: instance: Instance.bootstrap_origin + config.bootstrap_timeout <= now
+    requires: instance.status = launching
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = bootstrap_timeout
+    ensures: instance.ended_at = now
+}
+
+rule SetupStall {
+    when: SetupPhaseStalled(instance)
+    requires: instance.status = running
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = phase_stall
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Triggered when setup phase exceeds config.setup_stall_timeout
+        -- with no progress (adaptive threshold per command).
+}
+
+rule HeartbeatStale {
+    when: HeartbeatStale(instance)
+    requires: instance.status = running
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Triggered when heartbeat age exceeds config.heartbeat_stale_threshold
+        -- and agent is unreachable. Combined with running_stall_timeout for
+        -- phase-unchanged detection.
+}
+
+rule ProviderInstanceDied {
+    when: instance: Instance.provider_instance.status becomes exited
+    requires: instance.status in {launching, running, grace}
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = provider_failure
+    ensures: instance.ended_at = now
+}
+
+rule DiskFullDetected {
+    when: DiskFull(instance)
+    requires: instance.status in {running, grace}
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = disk_full
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Detected via heartbeat reporting < 5% disk free.
+}
+
+-- ==========================================================================
+-- User-initiated termination
+-- ==========================================================================
+
+rule UserTerminatesInstance {
+    when: UserTerminate(instance)
+    requires: instance.status in {launching, running, grace}
+
+    ensures: instance.status = canceled
+    ensures: instance.termination_reason = canceled
+    ensures: instance.termination_requested_at = now
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Writes termination intent JSON to R2 at
+        -- instance/<id>/termination-intent.json.
+        -- Agent detects and self-destructs. Provider instance destroyed.
+}
+
+rule UserTerminatesCampaign {
+    when: UserTerminateCampaign(campaign)
+    requires: campaign.status in {launching, running}
+
+    ensures:
+        for instance in campaign.active_instances:
+            UserTerminate(instance)
+    ensures: campaign.status = canceled
+    ensures: campaign.ended_at = now
+}
+
+-- ==========================================================================
+-- Relaunch (retry on infrastructure failure)
+-- ==========================================================================
+
+rule RelaunchAfterInfraFailure {
+    when: instance: Instance.status transitions_to failed
+    requires: instance.is_retryable
+
+    ensures: Instance.created(
+        campaign: instance.campaign,
+        replaced_instance: instance,
+        gpu_spec: instance.gpu_spec,
+        gpu_class: instance.gpu_class,
+        gpu_mem_gb: instance.gpu_mem_gb,
+        num_gpus: instance.num_gpus,
+        docker_image: instance.docker_image,
+        offer: instance.offer,
+        provisioned_inputs: instance.provisioned_inputs,
+        grace_period_seconds: instance.grace_period_seconds,
+        status: planned,
+        created_at: now
+    )
+    ensures:
+        for job in instance.jobs where job.status != completed:
+            job.cloud_instance = new_instance
+
+    @guidance
+        -- Infrastructure failures (provider_failure, infra_failure,
+        -- bootstrap_timeout, phase_stall) are automatically relaunched
+        -- on a different provider instance. Job-level failures (job_failure,
+        -- disk_full) are not retried automatically.
+}
+
+-- ==========================================================================
+-- Campaign status derivation
+-- ==========================================================================
+
+rule CampaignLaunching {
+    when: instance: Instance.status transitions_to launching
+    requires: instance.campaign != null
+    requires: instance.campaign.status = planned
+
+    ensures: instance.campaign.status = launching
+}
+
+rule CampaignRunning {
+    when: instance: Instance.status transitions_to running
+    requires: instance.campaign != null
+    requires: instance.campaign.status in {planned, launching}
+
+    ensures: instance.campaign.status = running
+}
+
+rule CampaignCompleted {
+    when: campaign: Campaign.instances.all(i => i.is_terminal)
+    requires: campaign.status in {launching, running}
+    requires: campaign.instances.all(i => i.status = completed)
+
+    ensures: campaign.status = completed
+    ensures: campaign.ended_at = now
+}
+
+rule CampaignFailed {
+    when: campaign: Campaign.instances.all(i => i.is_terminal)
+    requires: campaign.status in {launching, running}
+    requires: campaign.instances.any(i => i.status != completed)
+
+    ensures: campaign.status = failed
+    ensures: campaign.ended_at = now
+}
+
+-- ==========================================================================
+-- Reconciliation (safety-net cleanup)
+-- ==========================================================================
+
+rule ReconcileOrphanedProviderInstance {
+    when: ReconcilePass(instance)
+    requires: instance.is_terminal
+    requires: instance.ended_at > now - config.reconcile_cleanup_window
+    requires: instance.provider_instance.status = running
+
+    ensures: ProviderDestroyRequested(instance)
+
+    @guidance
+        -- Safety-net: if a provider instance is still running after the
+        -- weft instance reached terminal state, destroy it again.
+        -- Checked during periodic reconciliation passes.
+}
+
+-- ==========================================================================
+-- Invariants
+-- ==========================================================================
+
+invariant TerminalInstancesHaveEndTime {
+    for instance in Instances:
+        if instance.is_terminal:
+            instance.ended_at != null
+}
+
+invariant TerminalInstancesHaveReason {
+    for instance in Instances:
+        if instance.status in {failed, canceled}:
+            instance.termination_reason != null
+}
+
+invariant GraceRequiresDeadline {
+    for instance in Instances:
+        if instance.status = grace:
+            instance.grace_deadline != null
+            instance.grace_started_at != null
+}
+
+invariant TerminalCampaignsHaveEndTime {
+    for campaign in Campaigns:
+        if campaign.is_terminal:
+            campaign.ended_at != null
+}
+
+invariant CompletedCampaignsHaveAllCompleted {
+    for campaign in Campaigns:
+        if campaign.status = completed:
+            campaign.instances.all(i => i.status = completed)
+}

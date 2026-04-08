@@ -1,0 +1,475 @@
+-- allium: 3
+-- job-lifecycle.allium
+--
+-- Scope: Job lifecycle from submission through execution to completion
+-- Includes: Job, JobAttempt, placement, execution, failure detection, retry
+-- Excludes:
+--   - Cloud instance management (separate spec: campaign lifecycle)
+--   - Source/data syncing implementation
+--   - TUI/dashboard rendering
+--   - Telemetry sampling and timeseries collection
+--   - Output artifact sync
+--
+-- Naming convention: Allium enum literals use underscores (e.g. queue_runner).
+-- The implementation uses hyphens in serialized string values (e.g. "queue-runner").
+-- Spec underscores map to implementation hyphens.
+
+-- A Host is an external entity — weft discovers capabilities but does not
+-- manage the host itself.
+external entity Host {
+    name: String
+    gpu_specs: List<GPUSpec>
+}
+
+value GPUSpec {
+    class: String           -- e.g. "A100", "RTX 3090"
+    memory_gb: Integer
+    count: Integer
+}
+
+-- A CloudInstance is managed by the campaign lifecycle spec.
+-- Jobs reference it for placement but don't control its lifecycle.
+external entity CloudInstance {
+    host: Host
+    gpu_spec: GPUSpec
+    status: String
+}
+
+entity Job {
+    -- Immutable spec (set at submission)
+    command: String
+    working_dir: String
+    project: String
+    description: String?
+    inputs: List<String>        -- data dependencies (e.g. "hf:meta-llama/Llama-3-8B")
+    outputs: List<String>       -- declared output assets
+    output_dirs: List<String>   -- convention-based output directories
+    produces: List<String>      -- artifact specs this job produces
+    needs: List<String>         -- artifact specs this job requires
+    tags: Set<Tag>
+    env_vars: List<String>
+    dep_spec: String?           -- dependency on another job (e.g. "42" or "42:any")
+
+    -- GPU requirements
+    gpu_class: String?          -- required GPU class (e.g. "A100", "nvidia>=24GB")
+    gpu_mem_gb: Integer?        -- minimum GPU memory per device
+    gpu_mem_max_gb: Integer?    -- maximum GPU memory per device
+    gpu_devices: String?        -- CUDA_VISIBLE_DEVICES allocation
+
+    -- Placement
+    host: Host?
+    target_kind: TargetKind
+    placement_reasons: List<String>     -- why job is unplaced
+    cloud_instance: CloudInstance?
+
+    -- Execution backend
+    backend: Backend
+
+    -- Mutable state
+    status: Status
+    created_at: Timestamp
+    retry_count: Integer
+
+    -- Post-execution
+    exit_code: Integer?
+    failure_reason: FailureReason?
+    error_message: String?
+    observed_inputs: List<String>   -- data inputs discovered post-mortem
+    cost: Decimal?                  -- actual cost for cloud jobs
+
+    -- Relationships
+    attempts: JobAttempt with job = this
+
+    -- Derived
+    latest_attempt: attempts.max_by(a => a.attempt_number)
+    is_placed: host != null
+    is_terminal: status in {completed, failed, dead, killed, canceled, draft}
+    needs_placement: status = pending_placement
+    is_blocked: dep_spec != null and dependency_job.is_terminal = false
+
+    -- Status
+    status: draft | pending_placement | queued | starting | running
+          | paused | completed | failed | dead | killed | canceled
+
+    transitions status {
+        -- Normal forward flow
+        draft -> queued
+        pending_placement -> queued
+        pending_placement -> canceled
+        queued -> starting
+        queued -> running
+        queued -> paused
+        queued -> canceled
+        queued -> killed
+        queued -> dead
+        queued -> failed
+        queued -> draft
+        starting -> running
+        starting -> completed
+        starting -> dead
+        starting -> failed
+        starting -> queued
+        starting -> draft
+        running -> completed
+        running -> failed
+        running -> dead
+        running -> killed
+        running -> canceled
+        running -> paused
+        running -> queued
+        running -> draft
+        paused -> running
+        paused -> killed
+        paused -> failed
+        paused -> queued
+
+        -- Restart/requeue paths (from terminal states)
+        failed -> running
+        failed -> paused
+        failed -> queued
+        dead -> running
+        dead -> paused
+        dead -> queued
+        killed -> paused
+        killed -> queued
+        canceled -> paused
+        canceled -> queued
+        canceled -> failed
+
+        -- Authoritative overrides (R2 completion corrects race conditions)
+        queued -> completed
+        failed -> completed
+        dead -> completed
+        killed -> completed
+        canceled -> completed
+
+        terminal: completed, dead, failed, killed, canceled, draft
+    }
+}
+
+-- Each execution attempt for a job. A job may have multiple attempts
+-- due to retry, requeue, or auto-remediation.
+entity JobAttempt {
+    job: Job
+    attempt_number: Integer
+    status: Status              -- same status enum as Job
+    host: Host?
+    cloud_instance: CloudInstance?
+    backend: Backend
+    start_time: Timestamp?
+    end_time: Timestamp?
+    exit_code: Integer?
+    failure_reason: FailureReason?
+
+    -- Three-way merge fields (for on-prem sync reconciliation)
+    last_synced_status: String?     -- remote state at last successful sync
+    pending_status: String?         -- what user wants (nil = no pending change)
+    pending_at: Timestamp?          -- when user requested change
+}
+
+value Tag = exclusive | benchmark | rental | inventory | compute_intensive
+
+value TargetKind = unplaced | inventory_host | rental_instance
+
+value Backend = queue_runner | slurm | vastai
+
+-- Failure reasons detected by the runner from exit info and system probes.
+-- Dynamic values: "signal_<name>" for other signals, "exit_<N>" for
+-- unrecognized non-zero exit codes.
+value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
+                    | killed_sigkill | killed_sigterm
+
+value Status = draft | pending_placement | queued | starting | running
+             | paused | completed | failed | dead | killed | canceled
+
+-- Placement scoring result
+value PlacementResult {
+    host: Host
+    score: Decimal
+    estimated_queue_drain: Duration?
+    estimated_transfer_time: Duration?
+    data_locality_score: Decimal?
+}
+
+config {
+    setup_timeout: Duration = 20.minutes
+    kill_grace_period: Duration = 10.seconds    -- SIGTERM → SIGKILL delay
+}
+
+-- ==========================================================================
+-- Submission rules
+-- ==========================================================================
+
+rule SubmitJob {
+    when: SubmitJob(command, working_dir, options)
+
+    ensures: Job.created(
+        command: command,
+        working_dir: working_dir,
+        project: options.project,
+        description: options.description,
+        gpu_class: options.gpu_class,
+        gpu_mem_gb: options.gpu_mem_gb,
+        inputs: options.inputs,
+        outputs: options.outputs,
+        tags: options.tags,
+        env_vars: options.env_vars,
+        dep_spec: options.dep_spec,
+        backend: options.backend,
+        status: if options.draft then draft
+                else if options.host != null then queued
+                else pending_placement,
+        host: options.host,
+        created_at: now,
+        retry_count: 0
+    )
+}
+
+rule SubmitDraft {
+    when: SubmitDraft(job)
+    requires: job.status = draft
+
+    ensures: job.status = queued
+    ensures: JobAttempt.created(
+        job: job,
+        attempt_number: 1,
+        status: queued,
+        backend: job.backend
+    )
+}
+
+-- ==========================================================================
+-- Placement rules
+-- ==========================================================================
+
+rule PlaceJob {
+    when: job: Job.status becomes pending_placement
+    requires: job.dep_spec = null or job.is_blocked = false
+
+    let candidates = evaluate_placement(job)
+    let best = candidates.max_by(c => c.score)
+
+    if best != null:
+        ensures: job.host = best.host
+        ensures: job.target_kind = inventory_host
+        ensures: job.status = queued
+        ensures: JobAttempt.created(
+            job: job,
+            attempt_number: 1,
+            status: queued,
+            host: best.host,
+            backend: job.backend
+        )
+    else:
+        ensures: job.target_kind = unplaced
+        ensures: job.placement_reasons = candidates.reasons
+
+    @guidance
+        -- Placement scoring considers GPU availability, memory requirements,
+        -- data locality (input assets already cached on host), queue depth,
+        -- and estimated transfer time. Jobs with `rental` tag prefer cloud
+        -- instances; jobs with `inventory` tag prefer on-prem hosts.
+}
+
+rule ReleaseDependency {
+    when: dep: Job.is_terminal becomes true
+    for job in Jobs where job.dep_spec references dep:
+        if job.status = queued and job.is_blocked = false:
+            ensures: JobReadyToRun(job)
+}
+
+-- ==========================================================================
+-- Execution rules
+-- ==========================================================================
+
+rule JobStarts {
+    when: job: Job.status transitions_to running
+
+    ensures: job.latest_attempt.start_time = now
+}
+
+rule JobCompletes {
+    when: JobFinished(job, exit_code)
+    requires: job.status in {running, starting, queued}
+
+    if exit_code = 0:
+        ensures: job.status = completed
+        ensures: job.exit_code = 0
+    else:
+        let reason = detect_failure_reason(exit_code)
+        ensures: job.status = failed
+        ensures: job.exit_code = exit_code
+        ensures: job.failure_reason = reason
+}
+
+rule JobDied {
+    when: JobUnexpectedlyGone(job)
+    requires: job.status in {running, starting, queued}
+
+    ensures: job.status = dead
+}
+
+-- ==========================================================================
+-- Failure detection
+-- ==========================================================================
+
+rule DetectFailureReason {
+    when: job: Job.status transitions_to failed
+    requires: job.exit_code != null
+
+    -- Exit code 137 (SIGKILL) → OOM
+    -- Exit code 139 (SIGSEGV) → segfault
+    -- Exit code 124 → timeout
+    -- Disk exhaustion detected via system probes → disk_full
+    -- GPU OOM detected via nvidia-smi → gpu_oom
+    -- Otherwise → error or exit_N
+
+    @guidance
+        -- Failure reason detection examines dmesg for OOM killer messages,
+        -- nvidia-smi for GPU memory exhaustion, and df for disk full
+        -- conditions. These system probes run on the remote host.
+}
+
+-- ==========================================================================
+-- User actions
+-- ==========================================================================
+
+rule UserKillsJob {
+    when: UserKill(job)
+    requires: job.status in {running, starting, queued, paused}
+
+    ensures: job.status = killed
+    @guidance
+        -- Sends SIGTERM, waits config.kill_grace_period, then SIGKILL.
+}
+
+rule UserPausesJob {
+    when: UserPause(job)
+    requires: job.status in {running, queued}
+
+    ensures: job.status = paused
+}
+
+rule UserResumesJob {
+    when: UserResume(job)
+    requires: job.status = paused
+
+    ensures: job.status = running
+}
+
+rule UserCancelsJob {
+    when: UserCancel(job)
+    requires: job.status in {queued, running, pending_placement}
+
+    ensures: job.status = canceled
+}
+
+-- ==========================================================================
+-- Retry and requeue
+-- ==========================================================================
+
+rule UserRequeuesJob {
+    when: UserRequeue(job)
+    requires: job.status in {failed, dead, killed, canceled}
+
+    let new_attempt_number = job.latest_attempt.attempt_number + 1
+
+    ensures: job.status = queued
+    ensures: JobAttempt.created(
+        job: job,
+        attempt_number: new_attempt_number,
+        status: queued,
+        backend: job.backend
+    )
+}
+
+rule ResetJobToUnplaced {
+    when: ResetToUnplaced(job)
+    requires: job.is_terminal
+
+    ensures: job.host = null
+    ensures: job.cloud_instance = null
+    ensures: job.target_kind = unplaced
+    ensures: job.status = queued
+    ensures: JobAttempt.created(
+        job: job,
+        attempt_number: job.latest_attempt.attempt_number + 1,
+        status: queued,
+        backend: job.backend
+    )
+
+    @guidance
+        -- Used when the original cloud instance is no longer available
+        -- and the job needs re-placement on a different host.
+}
+
+-- ==========================================================================
+-- Authoritative overrides
+-- ==========================================================================
+
+rule AuthoritativeCompletion {
+    when: R2CompletionReceived(job, exit_code)
+    requires: job.status in {failed, dead, killed, canceled, queued}
+
+    if exit_code = 0:
+        ensures: job.status = completed
+        ensures: job.exit_code = 0
+
+    @guidance
+        -- R2 completion signals can arrive after the local sync has already
+        -- marked a job as failed/dead due to a race condition. The R2 signal
+        -- is authoritative because the agent on the remote host has direct
+        -- knowledge of the actual outcome.
+}
+
+-- ==========================================================================
+-- Three-way merge reconciliation (on-prem sync)
+-- ==========================================================================
+
+rule SyncReconcile {
+    when: SyncCompleted(attempt, remote_status)
+
+    if attempt.pending_status != null:
+        -- User intent takes priority
+        ensures: attempt.status = attempt.pending_status
+        ensures: attempt.pending_status = null
+        ensures: attempt.pending_at = null
+    else:
+        -- Remote state is authoritative
+        ensures: attempt.status = remote_status
+    ensures: attempt.last_synced_status = remote_status
+
+    @guidance
+        -- Three-way merge handles network partitions for on-prem jobs.
+        -- If the user requested a state change (e.g. pause) while the host
+        -- was unreachable, user intent is honored on reconnection.
+        -- Otherwise, the remote host's observed state is authoritative.
+}
+
+-- ==========================================================================
+-- Invariants
+-- ==========================================================================
+
+invariant TerminalJobsHaveEndTime {
+    for job in Jobs:
+        if job.status in {completed, failed, dead, killed}:
+            job.latest_attempt.end_time != null
+}
+
+invariant AttemptNumbersAreSequential {
+    for job in Jobs:
+        for i in 1..job.attempts.count:
+            job.attempts.any(a => a.attempt_number = i)
+}
+
+invariant PlacedJobsHaveHost {
+    for job in Jobs:
+        if job.target_kind != unplaced:
+            job.host != null
+}
+
+invariant RunningJobsAreNotTerminal {
+    for job in Jobs:
+        if job.status = running:
+            job.is_terminal = false
+}
