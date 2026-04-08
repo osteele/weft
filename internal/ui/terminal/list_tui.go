@@ -1246,12 +1246,12 @@ func runQuickLaunchWithProgress(
 	}
 
 	emit("Planning placement...")
-	scopedQueuedRental, err := listScopedQueuedRentalJobs(database, scoped)
+	scopedLaunchable, err := listScopedLaunchableJobs(database, scoped)
 	if err != nil {
 		return listQuickLaunchDoneMsg{err: err}
 	}
-	if len(scopedQueuedRental) == 0 {
-		return listQuickLaunchDoneMsg{err: fmt.Errorf("no queued rental jobs in this view")}
+	if len(scopedLaunchable) == 0 {
+		return listQuickLaunchDoneMsg{err: fmt.Errorf("no launchable queued jobs in this view")}
 	}
 
 	cfg, err := config.Load()
@@ -1273,7 +1273,7 @@ func runQuickLaunchWithProgress(
 		}
 	}
 
-	plan, err := buildAutoPlacementPlan(database, cfg, scopedQueuedRental, capacities)
+	plan, err := buildAutoPlacementPlan(database, cfg, scopedLaunchable, capacities)
 	if err != nil {
 		return listQuickLaunchDoneMsg{err: err}
 	}
@@ -1281,8 +1281,8 @@ func runQuickLaunchWithProgress(
 		return listQuickLaunchDoneMsg{err: fmt.Errorf("queued jobs can be placed on existing instances")}
 	}
 
-	byID := make(map[int64]*db.Job, len(scopedQueuedRental))
-	for _, job := range scopedQueuedRental {
+	byID := make(map[int64]*db.Job, len(scopedLaunchable))
+	for _, job := range scopedLaunchable {
 		if job != nil {
 			byID[job.ID] = job
 		}
@@ -1294,9 +1294,10 @@ func runQuickLaunchWithProgress(
 	}
 
 	emit(fmt.Sprintf("Preparing job #%d for new instance...", launchJobID))
-	// Relaunch helper only operates on unplaced jobs, so for a placed rental
-	// queue item we first reset it back to the unplaced queue.
-	if launchJob.LaunchID != nil && *launchJob.LaunchID > 0 {
+	// Relaunch helper only operates on unplaced jobs, so for a placed job
+	// (rental queue item or inventory host) we first reset it back to the
+	// unplaced pool.
+	if launchJob.TargetKind() != db.JobTargetUnplaced {
 		if _, err := ops.UnplaceQueuedJob(database, launchJob, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
 			return listQuickLaunchDoneMsg{err: fmt.Errorf("prepare launch anchor job %d: %w", launchJob.ID, err)}
 		}
@@ -1411,7 +1412,10 @@ func waitForQuickLaunchRunningState(
 	}
 }
 
-func listScopedQueuedRentalJobs(database *sql.DB, scoped map[int64]struct{}) ([]*db.Job, error) {
+// listScopedLaunchableJobs returns queued jobs in the scoped set that are
+// eligible for cloud launch: rental, unplaced, or inventory-host jobs (unless
+// explicitly tagged inventory-only).
+func listScopedLaunchableJobs(database *sql.DB, scoped map[int64]struct{}) ([]*db.Job, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -1430,7 +1434,7 @@ func listScopedQueuedRentalJobs(database *sql.DB, scoped map[int64]struct{}) ([]
 		if status != db.StatusQueued && status != db.StatusPendingPlacement {
 			continue
 		}
-		if !job.IsRentalJob() || job.HasTag(db.TagInventory) {
+		if job.HasTag(db.TagInventory) {
 			continue
 		}
 		out = append(out, job)
@@ -1468,7 +1472,7 @@ func rebalanceQueuedJobsToLaunchedInstance(
 		return 0, "", nil
 	}
 	r2Client, _ := buildR2Client(cfg)
-	scopedQueued, err := listScopedQueuedRentalJobs(database, scoped)
+	scopedQueued, err := listScopedLaunchableJobs(database, scoped)
 	if err != nil {
 		return 0, "", err
 	}
