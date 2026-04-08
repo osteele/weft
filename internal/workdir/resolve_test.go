@@ -85,3 +85,34 @@ func TestResolveWorkingDir_DefaultEmpty(t *testing.T) {
 		t.Errorf("expected empty string for non-automap dir, got %q", dir)
 	}
 }
+
+func TestNormalize_RejectsContainerPath(t *testing.T) {
+	_, err := Normalize("/workspace/llm-performance-models")
+	if err == nil {
+		t.Fatal("expected error for container path, got nil")
+	}
+	if !strings.Contains(err.Error(), "container path") {
+		t.Errorf("expected 'container path' in error, got %q", err.Error())
+	}
+}
+
+func TestNormalize_AcceptsExistingAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	got, err := Normalize(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != dir {
+		t.Errorf("got %q, want %q", got, dir)
+	}
+}
+
+func TestNormalize_AcceptsTildePath(t *testing.T) {
+	got, err := Normalize("~/code/myproject")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "~/code/myproject" {
+		t.Errorf("got %q, want ~/code/myproject", got)
+	}
+}

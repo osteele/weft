@@ -42,20 +42,56 @@ func ResolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 	return "", nil
 }
 
+// containerPrefixes are path prefixes that indicate a container environment,
+// not a local filesystem path. Jobs submitted with these paths will fail
+// source tarball creation.
+var containerPrefixes = []string{
+	"/workspace/",
+	"/app/",
+	"/opt/ml/",
+	"/home/user/",
+}
+
 // Normalize converts a submission directory into the canonical stored form.
 // Relative local paths are resolved against the current working directory.
 // Tilde-prefixed and absolute paths are preserved.
+//
+// Paths matching known container prefixes (e.g. /workspace/...) are rejected
+// to catch jobs submitted from inside a cloud instance.
 func Normalize(dir string) (string, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return "", nil
 	}
 	if strings.HasPrefix(dir, "~") || filepath.IsAbs(dir) {
-		return filepath.Clean(dir), nil
+		cleaned := filepath.Clean(dir)
+		if err := rejectContainerPath(cleaned); err != nil {
+			return "", err
+		}
+		return cleaned, nil
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path for %q: %w", dir, err)
 	}
 	return abs, nil
+}
+
+// rejectContainerPath returns an error if the path looks like a container
+// mount point rather than a local filesystem path.
+func rejectContainerPath(path string) error {
+	if IsContainerPath(path) {
+		return fmt.Errorf("working directory %q looks like a container path, not a local path; use a ~ or local absolute path instead", path)
+	}
+	return nil
+}
+
+// IsContainerPath returns true if the path matches known container mount prefixes.
+func IsContainerPath(path string) bool {
+	for _, prefix := range containerPrefixes {
+		if strings.HasPrefix(path, prefix) || path == strings.TrimSuffix(prefix, "/") {
+			return true
+		}
+	}
+	return false
 }

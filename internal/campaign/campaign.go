@@ -517,10 +517,16 @@ func (g InstanceGroup) SourceDirs() []string {
 	var dirs []string
 	for _, job := range g.Jobs {
 		d := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		if d != "" && !seen[d] {
-			seen[d] = true
-			dirs = append(dirs, d)
+		if d == "" || seen[d] {
+			continue
 		}
+		if workdir.IsContainerPath(d) {
+			slog.Warn("skipping container path in source dirs",
+				"job_id", job.ID, "path", d)
+			continue
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
 	}
 	return dirs
 }
