@@ -177,7 +177,7 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	if orphaned, err := db.ResetOrphanedCloudJobs(database); err != nil {
 		slog.Warn("failed to reset orphaned cloud jobs", "component", "reconcile", "error", err)
 	} else if orphaned > 0 {
-		slog.Info("reset orphaned jobs from dead cloud instances", "component", "reconcile", "count", orphaned)
+		slog.Debug("reset orphaned jobs from dead cloud instances", "component", "reconcile", "count", orphaned)
 		mu.Lock()
 		result.Reconciled += int(orphaned)
 		mu.Unlock()
@@ -216,7 +216,7 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 			if isProviderTerminal(inst) {
 				// Provider-terminal but still billable (e.g. "exited" on Vast.ai) — destroy it
 				if needsProviderDestroy(inst) {
-					slog.Info("safety-net destroying billable terminal instance", "component", "reconcile", "provider", providerID, "instance", ci.ID, "provider_status", inst.Status)
+					slog.Debug("safety-net destroying billable terminal instance", "component", "reconcile", "provider", providerID, "instance", ci.ID, "provider_status", inst.Status)
 					if err := client.DestroyInstance(providerID); err != nil {
 						slog.Warn("safety-net destroy of terminal instance failed", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", err)
 					}
@@ -249,7 +249,7 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	if swept, sweepErr := MaybeSweepOrphanedInstances(database, clients); sweepErr != nil {
 		slog.Warn("orphan sweep error", "component", "reconcile", "error", sweepErr)
 	} else if swept > 0 {
-		slog.Info("orphan sweep destroyed instances", "component", "reconcile", "count", swept)
+		slog.Debug("orphan sweep destroyed instances", "component", "reconcile", "count", swept)
 		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 			EventKind: db.EventReconcileOrphanSweep,
 			JobCount:  swept,
@@ -350,7 +350,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
-		slog.Info("reconcile action triggered", "component", "reconcile", "instance", ci.ID, "action", action.Kind, "message", action.StallMessage)
+		slog.Debug("reconcile action triggered", "component", "reconcile", "instance", ci.ID, "action", action.Kind, "message", action.StallMessage)
 
 		// Before executing a terminal action, sync per-job completions from R2.
 		// The agent writes .complete markers for each job; without this sync,
@@ -401,7 +401,7 @@ func syncJobCompletionsFromR2(database *sql.DB, r2Client *r2.Client, instanceID 
 		}
 	}
 	if synced > 0 || remaining > 0 {
-		slog.Info("synced job completions from R2",
+		slog.Debug("synced job completions from R2",
 			"component", "reconcile", "instance", instanceID,
 			"synced", synced, "remaining_non_terminal", remaining)
 	}
@@ -561,7 +561,7 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 	if resetCount, err := db.ResetLaunchJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
 		slog.Warn("failed to reset jobs for stale-heartbeat instance", "component", "reconcile", "instance", ci.ID, "error", err)
 	} else if resetCount > 0 {
-		slog.Info("reset jobs from stale-heartbeat instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
+		slog.Debug("reset jobs from stale-heartbeat instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
 	}
 	r.clearProbeFailure(ci.ID)
 	return true, true
@@ -588,7 +588,7 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 				if err := db.UpdateCampaignStatus(database, c.ID, db.CampaignStatusFailed); err != nil {
 					slog.Warn("failed to update campaign status", "component", "reconcile", "campaign", c.ID, "status", db.CampaignStatusFailed, "error", err)
 				} else {
-					slog.Info("campaign had no instances, marking failed", "component", "reconcile", "campaign", c.ID, "status", db.CampaignStatusFailed)
+					slog.Debug("campaign had no instances, marking failed", "component", "reconcile", "campaign", c.ID, "status", db.CampaignStatusFailed)
 					c.Status = db.CampaignStatusFailed
 					completed = append(completed, c)
 				}
@@ -624,7 +624,7 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 		if err := db.UpdateCampaignStatus(database, c.ID, status); err != nil {
 			slog.Warn("failed to update campaign status", "component", "reconcile", "campaign", c.ID, "status", status, "error", err)
 		} else {
-			slog.Info("campaign transitioned to terminal state", "component", "reconcile", "campaign", c.ID, "status", status)
+			slog.Debug("campaign transitioned to terminal state", "component", "reconcile", "campaign", c.ID, "status", status)
 			c.Status = status
 			completed = append(completed, c)
 		}
@@ -686,7 +686,7 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.Launch, database *sql.DB) bo
 		return false
 	}
 
-	slog.Info("instance entered grace-wait", "component", "reconcile", "instance", ci.ID, "deadline", payload.Deadline.Unix)
+	slog.Debug("instance entered grace-wait", "component", "reconcile", "instance", ci.ID, "deadline", payload.Deadline.Unix)
 	if err := db.SetLaunchGraceStarted(database, ci.ID, payload.Deadline.Unix); err != nil {
 		slog.Warn("failed to set grace for instance", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false

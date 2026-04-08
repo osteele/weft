@@ -51,7 +51,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 				"component", "reconcile", "job_id", jobID, "reason", "terminal_complete_skip")
 			return false
 		}
-		slog.Info("attempting completion backfill for terminal job",
+		slog.Debug("attempting completion backfill for terminal job",
 			"component", "reconcile", "job_id", jobID, "reason", "terminal_incomplete_backfill")
 	}
 
@@ -128,7 +128,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	// Don't clean up R2 markers here — leave them for the full sync pass
 	// which also imports phase timings and caches logs.
 
-	slog.Info("synced job completion", "component", "reconcile", "job_id", jobID,
+	slog.Debug("synced job completion", "component", "reconcile", "job_id", jobID,
 		"exit_code", *exitCode, "source", source)
 	return true
 }
@@ -149,7 +149,7 @@ func FinalizeStuckJobsWithR2Check(database *sql.DB, r2Client *r2.Client) ([]int6
 		// Try R2 sync first — the .complete marker may have arrived since
 		// the reconciler last checked.
 		if r2Client != nil && reconcileCheckAndSyncJobComplete(ctx, r2Client, database, s.JobID) {
-			slog.Info("recovered stuck job from R2 (would have been marked dead)",
+			slog.Debug("recovered stuck job from R2 (would have been marked dead)",
 				"component", "sync", "job_id", s.JobID)
 			finalized = append(finalized, s.JobID)
 			continue
