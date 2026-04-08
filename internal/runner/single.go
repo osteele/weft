@@ -89,6 +89,11 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 
 	setupCmd := DetectSetupCommand(expandedDir)
+	if ShouldSkipSetup(setupCmd, expandedDir, command) {
+		slog.Info("skipping uv sync: command targets PEP 723 script with inline dependencies",
+			"component", "runner", "job_id", cfg.JobID)
+		setupCmd = ""
+	}
 	if setupCmd == direnvSetupCommand {
 		resolvedEnv, ei, resolveErr := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
 		if resolveErr != nil {

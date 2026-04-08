@@ -183,6 +183,43 @@ func TestPyprojectDependsOnTorch_FalseWhenMissing(t *testing.T) {
 	}
 }
 
+func TestShouldSkipSetup(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a PEP 723 script with dependencies
+	pep723Script := filepath.Join(dir, "standalone.py")
+	os.WriteFile(pep723Script, []byte(`# /// script
+# dependencies = ["vllm>=0.17"]
+# ///
+import vllm
+`), 0o644)
+
+	// Create a plain script without PEP 723
+	plainScript := filepath.Join(dir, "plain.py")
+	os.WriteFile(plainScript, []byte("import torch\n"), 0o644)
+
+	tests := []struct {
+		name     string
+		setupCmd string
+		command  string
+		want     bool
+	}{
+		{"uv sync + PEP 723 script", "uv sync", "uv run python standalone.py", true},
+		{"uv sync + plain script", "uv sync", "uv run python plain.py", false},
+		{"pixi install + PEP 723 script", "pixi install", "uv run python standalone.py", false},
+		{"empty setup + PEP 723 script", "", "uv run python standalone.py", false},
+		{"uv sync + no script", "uv sync", "echo hello", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShouldSkipSetup(tt.setupCmd, dir, tt.command)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) {
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {

@@ -480,6 +480,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	setupCmd := DetectSetupCommand(expandedDir)
+	if ShouldSkipSetup(setupCmd, expandedDir, command) {
+		slog.Info("skipping uv sync: command targets PEP 723 script with inline dependencies",
+			"component", "runner", "job_id", jobID)
+		setupCmd = ""
+	}
 	if setupCmd == direnvSetupCommand {
 		resolvedEnv, ei, err := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
 		if err != nil {

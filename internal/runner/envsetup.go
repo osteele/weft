@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -55,6 +56,17 @@ func DetectSetupCommand(workingDir string) string {
 	}
 
 	return ""
+}
+
+// ShouldSkipSetup reports whether the detected setup command should be skipped
+// because the job command targets a self-contained PEP 723 script. When a
+// script declares its own inline dependencies, `uv run` creates an isolated
+// environment from them, making a project-level `uv sync` redundant.
+func ShouldSkipSetup(setupCmd, workingDir, command string) bool {
+	if setupCmd != "uv sync" {
+		return false
+	}
+	return dataloc.CommandTargetsPEP723Script(workingDir, command)
 }
 
 // RunSetupCommand runs a detected environment setup command synchronously.

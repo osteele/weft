@@ -377,6 +377,113 @@ func TestApplyUvArgs(t *testing.T) {
 	}
 }
 
+func TestHasPEP723Dependencies(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name: "with dependencies",
+			content: `# /// script
+# dependencies = ["vllm>=0.17", "pynvml>=12.0"]
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# ///
+`,
+			want: true,
+		},
+		{
+			name: "no dependencies key",
+			content: `# /// script
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# ///
+`,
+			want: false,
+		},
+		{
+			name:    "no PEP 723 block",
+			content: `import torch`,
+			want:    false,
+		},
+		{
+			name: "empty dependencies",
+			content: `# /// script
+# dependencies = []
+# ///
+`,
+			want: true,
+		},
+		{
+			name: "dependencies with requires-python",
+			content: `# /// script
+# requires-python = ">=3.10"
+# dependencies = ["torch"]
+# ///
+`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := HasPEP723Dependencies(tt.content)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommandTargetsPEP723Script(t *testing.T) {
+	dir := t.TempDir()
+
+	// Script with PEP 723 dependencies
+	pep723Script := filepath.Join(dir, "standalone.py")
+	os.WriteFile(pep723Script, []byte(`# /// script
+# dependencies = ["vllm>=0.17"]
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# ///
+import vllm
+`), 0o644)
+
+	// Script without PEP 723
+	plainScript := filepath.Join(dir, "plain.py")
+	os.WriteFile(plainScript, []byte(`import torch
+`), 0o644)
+
+	// Script with [tool.weft] but no dependencies
+	weftOnlyScript := filepath.Join(dir, "weft_only.py")
+	os.WriteFile(weftOnlyScript, []byte(`# /// script
+# [tool.weft]
+# gpu-mem = 40
+# ///
+import torch
+`), 0o644)
+
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"uv run PEP 723 script", "uv run python standalone.py", true},
+		{"uv run plain script", "uv run python plain.py", false},
+		{"uv run weft-only script", "uv run python weft_only.py", false},
+		{"no script in command", "echo hello", false},
+		{"nonexistent script", "uv run python missing.py", false},
+		{"direct python PEP 723", "python standalone.py", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CommandTargetsPEP723Script(dir, tt.command)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func assertStringSlice(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

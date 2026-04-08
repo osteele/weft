@@ -142,6 +142,13 @@ compound commands like `pip install foo && python script.py`.
 `weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.
 Use `weft retry --gpu/--gpu-class/--gpu-mem/--gpu-mem-strict` when you want explicit overrides.
 
+**Setup phase skipping:** When a job command targets a PEP 723 script that
+declares its own `dependencies`, weft automatically skips the `uv sync` setup
+phase. The script's inline dependencies are self-contained — `uv run` creates
+an isolated environment from them, making the project-level `uv sync`
+unnecessary. This avoids installing hundreds of unneeded packages on
+disk-constrained cloud instances.
+
 ### Avoiding GPU over-provisioning
 
 The `gpu-mem` value is a **requested floor**. By default, weft adds a `+2GB`
