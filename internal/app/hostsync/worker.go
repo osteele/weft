@@ -371,13 +371,12 @@ func (w *Worker) reconcileCloudJobs() {
 	}
 
 	result := cloudsync.SyncState(w.database, w.reconciler, cloudClients, r2Client, nil)
-	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
-		slog.Info("cloud reconcile completed", "component", "hostsync", "reconciled", result.ReconcileResult.Reconciled)
+	if result.Updated > 0 {
+		slog.Info("cloud reconcile completed", "component", "hostsync", "updated", result.Updated)
 		select {
-		case w.results <- Result{Updated: result.ReconcileResult.Reconciled}:
+		case w.results <- Result{Updated: result.Updated}:
 		default:
 		}
-		return
 	}
 }
 

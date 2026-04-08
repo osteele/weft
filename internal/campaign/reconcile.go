@@ -23,6 +23,7 @@ import (
 type ReconcileResult struct {
 	Reconciled          int     // total number of instances whose state changed
 	TerminatedInstances []int64 // DB IDs of instances that were moved to a terminal state
+	JobsUpdated         int     // count of job status transitions (e.g. queued→running)
 }
 
 // minDeadConfirmTime is how long an instance must continuously appear dead
@@ -158,15 +159,16 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 		wg.Add(1)
 		go func(ci *db.Launch) {
 			defer wg.Done()
-			reconciled, terminated := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
+			reconciled, terminated, jobsUpdated := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
+			mu.Lock()
 			if reconciled {
-				mu.Lock()
 				result.Reconciled++
 				if terminated {
 					result.TerminatedInstances = append(result.TerminatedInstances, ci.ID)
 				}
-				mu.Unlock()
 			}
+			result.JobsUpdated += jobsUpdated
+			mu.Unlock()
 		}(ci)
 	}
 	wg.Wait()
@@ -259,10 +261,11 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 }
 
 // reconcileOneInstance processes a single cloud instance for reconciliation.
-// Returns (reconciled, terminated) where reconciled means state changed and
-// terminated means the instance was moved to a terminal state (failed/completed).
+// Returns (reconciled, terminated, jobsUpdated) where reconciled means instance
+// state changed, terminated means moved to a terminal state (failed/completed),
+// and jobsUpdated counts job status transitions (e.g. queued→running).
 // providerInstances is the batch-fetched map from batchFetchProviderInstances.
-func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.Launch, providerInstances map[string]map[string]*cloud.Instance) (bool, bool) {
+func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.Launch, providerInstances map[string]map[string]*cloud.Instance) (bool, bool, int) {
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 	attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, ci.ID)
 
@@ -273,7 +276,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 			slog.Debug("ignoring grace transition while launch has active jobs", "component", "reconcile", "instance", ci.ID)
 		} else if graceDetected := reconcileCheckR2GraceStatus(r2Client, ci, database); graceDetected {
 			syncJobCompletionsFromR2(database, r2Client, ci.ID)
-			return true, false // reconciled but not terminal (grace is not terminal)
+			return true, false, 0 // reconciled but not terminal (grace is not terminal)
 		}
 	}
 
@@ -367,17 +370,17 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				ProcessDiskFailureReport(r2Client, ci.ID, database)
 			}
 		}
-		return reconciled, terminated
+		return reconciled, terminated, synced.JobsUpdated
 	}
 
 	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
 	if client != nil && !isProviderTerminal(inst) && ci.Status == db.LaunchStatusRunning && r2Client != nil {
 		if reconciled, terminated := r.reconcileStaleHeartbeat(database, client, r2Client, ci, inst); reconciled {
-			return true, terminated
+			return true, terminated, synced.JobsUpdated
 		}
 	}
 
-	return false, false
+	return false, false, synced.JobsUpdated
 }
 
 // syncJobCompletionsFromR2 checks R2 for per-job .complete markers and records

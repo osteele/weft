@@ -36,6 +36,7 @@ type SyncedState struct {
 	TerminationIntent *instanceintent.Marker
 	AgentVersion      string
 	PhaseChangedAt    *time.Time
+	JobsUpdated       int // count of job status transitions (e.g. queued→running)
 }
 
 // SyncInstanceStateOpts configures optional behaviors for SyncInstanceState.
@@ -96,6 +97,8 @@ func SyncInstanceState(
 					if j.Status == db.StatusQueued {
 						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
 							slog.Warn("failed to mark job running from R2 phase", "component", "sync", "job_id", phaseJobID, "error", err)
+						} else {
+							s.JobsUpdated++
 						}
 					}
 					// Re-link orphaned job to this launch if its attempt

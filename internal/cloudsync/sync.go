@@ -27,7 +27,7 @@ func SyncState(database *sql.DB, reconciler *campaign.Reconciler, clients []clou
 		} else {
 			result.ReconcileResult = reconcileResult
 			if reconcileResult != nil {
-				result.Updated += reconcileResult.Reconciled
+				result.Updated += reconcileResult.Reconciled + reconcileResult.JobsUpdated
 			}
 		}
 	}

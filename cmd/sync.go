@@ -34,24 +34,25 @@ import (
 var syncCmd = &cobra.Command{
 	Use:   "sync [host...]",
 	Short: "Sync job statuses from remote hosts",
-	Long: `Sync job statuses by checking remote hosts.
+	Long: `Sync job statuses by checking remote hosts and cloud instances.
 
 If hosts are specified, only those hosts are synced. Otherwise, all hosts
-with running or queued jobs are synced. Also starts queue runners on hosts
-with queued jobs. Connection failures are silently ignored.
+with running or queued jobs are synced. Connection failures are silently ignored.
+
+Use --full to also deploy agent binaries and start queue runners.
 
 Examples:
-  weft sync                    # Sync all hosts with active jobs
+  weft sync                    # Sync all hosts + cloud instances
   weft sync studio             # Sync only studio
-  weft sync cool30 cool100     # Sync specific hosts
+  weft sync --full             # Also deploy agents and start queue runners
   weft sync --verbose          # Show progress
-  weft sync --no-queue-start   # Don't start queue runners
   weft sync --timeout 10s      # Use 10 second timeout per host`,
 	RunE: runSync,
 }
 
 var (
 	syncVerbose      bool
+	syncFull         bool
 	syncNoQueueStart bool
 	syncTimeout      time.Duration
 	syncHosts        []string
@@ -78,7 +79,9 @@ const (
 func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVarP(&syncVerbose, "verbose", "v", false, "Show detailed progress")
-	syncCmd.Flags().BoolVar(&syncNoQueueStart, "no-queue-start", false, "Don't auto-start queue runners")
+	syncCmd.Flags().BoolVar(&syncFull, "full", false, "Run full sync including agent deployment and queue runner startup")
+	syncCmd.Flags().BoolVar(&syncNoQueueStart, "no-queue-start", false, "Don't auto-start queue runners (requires --full)")
+	_ = syncCmd.Flags().MarkHidden("no-queue-start")
 	syncCmd.Flags().DurationVarP(&syncTimeout, "timeout", "t", NormalSyncTimeout, "Timeout per host (e.g., 10s, 1m)")
 	syncCmd.Flags().StringArrayVar(&syncHosts, "host", nil, "Host(s) to sync (repeatable; also accepted as positional args)")
 }
@@ -144,12 +147,12 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Deploy agent binary to reachable hosts that need updates (before starting runners)
-	deployAgentsToHosts(hosts)
-
-	// Start queue runners on hosts with queued jobs (unless --no-queue-start)
-	if !syncNoQueueStart {
-		startQueueRunnersForQueuedHosts(database)
+	// Deploy agent binary and start queue runners only in full mode
+	if syncFull {
+		deployAgentsToHosts(hosts)
+		if !syncNoQueueStart {
+			startQueueRunnersForQueuedHosts(database)
+		}
 	}
 
 	// Prune old cached log files
