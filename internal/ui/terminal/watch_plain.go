@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/queueblock"
 )
@@ -91,11 +92,11 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	for _, ci := range cloudInstances {
 		jobs, err := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 		if err != nil {
-			return watchSystemSnapshot{}, fmt.Errorf("list jobs for cloud instance %d: %w", ci.ID, err)
+			return watchSystemSnapshot{}, fmt.Errorf("list jobs for cloud instance %s: %w", ids.FormatInstanceID(ci.ID), err)
 		}
 		outcomes, err := db.GetAttemptOutcomesByLaunch(database, ci.ID)
 		if err != nil {
-			return watchSystemSnapshot{}, fmt.Errorf("list attempt outcomes for cloud instance %d: %w", ci.ID, err)
+			return watchSystemSnapshot{}, fmt.Errorf("list attempt outcomes for cloud instance %s: %w", ids.FormatInstanceID(ci.ID), err)
 		}
 		instanceUpdates[ci.ID] = campaign.InstanceUpdate{
 			Launch:             ci,
@@ -142,7 +143,7 @@ func reloadActiveLaunches(database *sql.DB, launchIDs []int64) ([]*db.Launch, er
 	for _, launchID := range launchIDs {
 		launch, err := db.GetLaunch(database, launchID)
 		if err != nil {
-			return nil, fmt.Errorf("reload cloud instance %d: %w", launchID, err)
+			return nil, fmt.Errorf("reload cloud instance %s: %w", ids.FormatInstanceID(launchID), err)
 		}
 		if launch == nil {
 			continue

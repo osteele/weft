@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -141,7 +142,7 @@ func attachProjectLaunches(database *sql.DB, groups []projectGroup) error {
 				var err error
 				inst, err = db.GetLaunch(database, instanceID)
 				if err != nil {
-					return fmt.Errorf("get cloud instance %d: %w", instanceID, err)
+					return fmt.Errorf("get cloud instance %s: %w", ids.FormatInstanceID(instanceID), err)
 				}
 				cache[instanceID] = inst
 			}

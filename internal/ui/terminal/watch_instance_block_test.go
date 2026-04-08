@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func TestFormatWatchInstanceBlockKeepsAttemptsInlineInRunOrder(t *testing.T) {
@@ -235,7 +236,7 @@ func TestFormatWatchInstanceBlock_HidesPhaseLineForTerminalLaunch(t *testing.T) 
 	if strings.Contains(out, "Phase:") {
 		t.Fatalf("did not expect phase line for terminal launch, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Instance 708 — RTX 4090 — terminated") {
+	if !strings.Contains(out, "Instance "+ids.FormatInstanceID(708)+" — RTX 4090 — terminated") {
 		t.Fatalf("expected terminal header, got:\n%s", out)
 	}
 }
@@ -254,8 +255,8 @@ func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
 	}
 
 	line := formatPreviousInstanceLine(donors, now)
-	if !strings.Contains(line, "Instance 226") {
-		t.Fatalf("expected Instance 226, got: %s", line)
+	if !strings.Contains(line, "Instance "+ids.FormatInstanceID(226)) {
+		t.Fatalf("expected Instance %s, got: %s", ids.FormatInstanceID(226), line)
 	}
 	if !strings.Contains(line, "infrastructure failure") {
 		t.Fatalf("expected 'infrastructure failure', got: %s", line)
@@ -296,11 +297,11 @@ func TestFormatPreviousInstanceLineChain(t *testing.T) {
 	}
 
 	line := formatPreviousInstanceLine(donors, now)
-	if !strings.Contains(line, "Instance 228 (infrastructure failure)") {
-		t.Fatalf("expected Instance 228 (infrastructure failure), got: %s", line)
+	if !strings.Contains(line, "Instance "+ids.FormatInstanceID(228)+" (infrastructure failure)") {
+		t.Fatalf("expected Instance %s (infrastructure failure), got: %s", ids.FormatInstanceID(228), line)
 	}
-	if !strings.Contains(line, "Instance 226 (bootstrap timeout)") {
-		t.Fatalf("expected Instance 226 (bootstrap timeout), got: %s", line)
+	if !strings.Contains(line, "Instance "+ids.FormatInstanceID(226)+" (bootstrap timeout)") {
+		t.Fatalf("expected Instance %s (bootstrap timeout), got: %s", ids.FormatInstanceID(226), line)
 	}
 	if !strings.Contains(line, " → ") {
 		t.Fatalf("expected arrow separator, got: %s", line)
@@ -335,7 +336,7 @@ func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
 			{ID: 226, Status: db.LaunchStatusFailed, TerminationReason: "infra_failure"},
 		},
 	})
-	if !strings.Contains(out, "Previous: Instance 226") {
+	if !strings.Contains(out, "Previous: Instance "+ids.FormatInstanceID(226)) {
 		t.Fatalf("expected Previous line in block output, got:\n%s", out)
 	}
 }

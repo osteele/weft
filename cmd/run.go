@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -649,16 +650,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 								oplog.WithJobID(jobID),
 								oplog.WithDetailf("instance=%d ack=received", instanceID),
 								oplog.WithDuration(dur))
-							fmt.Printf("Job #%d submitted to rental instance #%d (%s)\n",
-								jobID, instanceID, placementPlan.Fast.Reuse.DisplayName)
+							fmt.Printf("Job #%d submitted to rental instance %s (%s)\n",
+								jobID, ids.FormatInstanceID(instanceID), placementPlan.Fast.Reuse.DisplayName)
 							return nil
 						case cloudReuseAckNotObserved:
 							oplog.Log(oplog.OpCloudSetJobInstance,
 								oplog.WithJobID(jobID),
 								oplog.WithDetailf("instance=%d ack=not_observed timeout_ms=%d", instanceID, runCloudReuseAckWaitTimeout.Milliseconds()),
 								oplog.WithDuration(dur))
-							fmt.Printf("Job #%d sent to rental instance #%d (%s); acknowledgment not yet received. Check status later.\n",
-								jobID, instanceID, placementPlan.Fast.Reuse.DisplayName)
+							fmt.Printf("Job #%d sent to rental instance %s (%s); acknowledgment not yet received. Check status later.\n",
+								jobID, ids.FormatInstanceID(instanceID), placementPlan.Fast.Reuse.DisplayName)
 							return nil
 						default:
 							oplog.Log(oplog.OpCloudSetJobInstance,

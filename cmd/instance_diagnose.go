@@ -3,12 +3,12 @@ package cmd
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -46,7 +46,7 @@ type timelineEntry struct {
 }
 
 func runInstanceDiagnose(_ *cobra.Command, args []string) error {
-	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	instanceID, err := ids.ParseInstanceID(args[0])
 	if err != nil {
 		return usageErrorf("invalid instance ID %q", args[0])
 	}
@@ -62,7 +62,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("get instance: %w", err)
 	}
 	if inst == nil {
-		return fmt.Errorf("instance %d not found", instanceID)
+		return fmt.Errorf("instance %s not found", ids.FormatInstanceID(instanceID))
 	}
 
 	// Refine termination reason if it's a generic job_failure.
@@ -254,7 +254,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 
 	// Section 1: Header
 	statusLabel := campaign.DisplayInstanceStatusWithReason(inst)
-	fmt.Fprintf(&b, "Instance %d — %s — %s\n", inst.ID, displayInstanceGPU(inst), statusLabel)
+	fmt.Fprintf(&b, "Instance %s — %s — %s\n", ids.FormatInstanceID(inst.ID), displayInstanceGPU(inst), statusLabel)
 	fmt.Fprintf(&b, "  Provider:  %s", inst.Provider)
 	if pid := inst.EffectiveProviderID(); pid != "" {
 		fmt.Fprintf(&b, " (%s)", pid)

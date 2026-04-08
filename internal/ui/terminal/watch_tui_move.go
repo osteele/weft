@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/ids"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 )
 
@@ -142,6 +143,6 @@ func formatMoveOptionLine(o moveOption) string {
 		return fmt.Sprintf("  %-10s %-14s ~%s setup  $%.2f/hr",
 			string(o.strategy)+":", o.gpuName, dashboard.FormatCompactDuration(o.waitTime), o.costPerHour)
 	}
-	return fmt.Sprintf("  Instance #%-4d %-14s ~%s wait  $%.2f/hr",
-		o.instanceID, o.gpuName, dashboard.FormatCompactDuration(o.waitTime), o.costPerHour)
+	return fmt.Sprintf("  %-12s %-14s ~%s wait  $%.2f/hr",
+		ids.FormatInstanceID(o.instanceID), o.gpuName, dashboard.FormatCompactDuration(o.waitTime), o.costPerHour)
 }

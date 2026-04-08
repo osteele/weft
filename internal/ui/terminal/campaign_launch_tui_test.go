@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/predictor"
 )
 
@@ -26,7 +27,7 @@ func TestLaunchModelView_ShowsPartialFailures(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"Campaign 49: launched instances: 108",
+		"Campaign 49: launched instances: " + ids.FormatInstanceID(108),
 		"2 planned launch(es) failed:",
 		"RTX3090",
 		"A100",
@@ -580,7 +581,7 @@ func TestLaunchModelUpdate_SuccessFromWatchSwitchesBack(t *testing.T) {
 	if !got.done {
 		t.Fatal("expected done state")
 	}
-	assertSwitchToWatchCmd(t, cmd, "Launched instances: 42")
+	assertSwitchToWatchCmd(t, cmd, "Launched instances: wi42")
 }
 
 func TestLaunchModelUpdate_IgnoresBackgroundPlanUpdatesAfterLaunchCompletion(t *testing.T) {
@@ -747,8 +748,8 @@ func TestLaunchModelUpdate_StartsInlineWatchOnFirstRegistration(t *testing.T) {
 
 	out := stripANSI(got.View())
 	for _, want := range []string{
-		fmt.Sprintf("Instance %d — RTX 3090 — launching", firstID),
-		fmt.Sprintf("Instance %d — A40 — launching", secondID),
+		fmt.Sprintf("Instance %s — RTX 3090 — launching", ids.FormatInstanceID(firstID)),
+		fmt.Sprintf("Instance %s — A40 — launching", ids.FormatInstanceID(secondID)),
 		"Bootstrap: provisioning instance",
 	} {
 		if !strings.Contains(out, want) {
@@ -795,7 +796,7 @@ func TestLaunchModelUpdate_InlineWatchKeepsRunningWithPartialFailures(t *testing
 	if !strings.Contains(out, "1 planned launch(es) failed:") {
 		t.Fatalf("expected partial failure banner, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Instance 42 — A40 — launching") {
+	if !strings.Contains(out, "Instance wi42 — A40 — launching") {
 		t.Fatalf("expected watch view to remain visible, got:\n%s", out)
 	}
 }

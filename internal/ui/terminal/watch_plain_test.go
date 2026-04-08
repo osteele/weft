@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
@@ -46,7 +47,7 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 		"Summary:  cost: $0.00  current rate: $2.00/hr",
 		"INVENTORY HOSTS (1 active)",
 		"UNPLACED JOBS (1)",
-		"Instance 5 — A100 — running",
+		"Instance " + ids.FormatInstanceID(5) + " — A100 — running",
 		"Cost: $0.00 (uptime: 0s, rate: $2.00/hr)",
 		"  vastai: 32734388",
 		"  Jobs: 0/1 resolved",

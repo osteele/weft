@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
@@ -507,7 +508,7 @@ func requestWatchInstanceTerminate(database *sql.DB, instanceID int64) tea.Cmd {
 		if len(errs) > 0 {
 			return watchTerminateDoneMsg{instanceID: instanceID, err: errs[0]}
 		}
-		return watchTerminateDoneMsg{instanceID: instanceID, message: fmt.Sprintf("Instance %d terminated", instanceID)}
+		return watchTerminateDoneMsg{instanceID: instanceID, message: fmt.Sprintf("Instance %s terminated", ids.FormatInstanceID(instanceID))}
 	}
 }
 
@@ -801,11 +802,11 @@ func requestMoveExecute(
 		if !opt.isNew {
 			// Step 2a: submit to existing instance
 			if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, opt.instanceID, []*db.Job{job}); err != nil {
-				return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("submit to instance %d: %w", opt.instanceID, err)}
+				return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(opt.instanceID), err)}
 			}
 			return moveExecuteDoneMsg{
 				jobID:      jobID,
-				targetDesc: fmt.Sprintf("instance #%d", opt.instanceID),
+				targetDesc: fmt.Sprintf("instance %s", ids.FormatInstanceID(opt.instanceID)),
 			}
 		}
 
@@ -874,7 +875,7 @@ func requestMoveExecute(
 
 		desc := fmt.Sprintf("new %s instance", opt.gpuName)
 		if len(result.InstanceIDs) > 0 {
-			desc = fmt.Sprintf("new %s instance #%d", opt.gpuName, result.InstanceIDs[0])
+			desc = fmt.Sprintf("new %s instance %s", opt.gpuName, ids.FormatInstanceID(result.InstanceIDs[0]))
 		}
 		return moveExecuteDoneMsg{jobID: jobID, targetDesc: desc}
 	}

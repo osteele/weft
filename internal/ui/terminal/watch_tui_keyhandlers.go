@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.retryBudgetMultiplier[instID] = scale
 		m.retryAttempt = 0
 		m.retrying = true
-		m.retryResult = fmt.Sprintf("Retry: doubled budget for failed instance %d (x%.1f)", instID, scale)
+		m.retryResult = fmt.Sprintf("Retry: doubled budget for failed instance %s (x%.1f)", ids.FormatInstanceID(instID), scale)
 		return m, m.retryFailedInstances(0)
 	case "u":
 		// Try cloud job row first
@@ -147,7 +148,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		// Terminate a cloud instance
 		if instID := m.selectedCloudInstanceID(); instID != 0 {
-			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Terminating instance #%d...", instID), false)
+			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Terminating instance %s...", ids.FormatInstanceID(instID)), false)
 			return m, tea.Batch(flashCmd, requestWatchInstanceTerminate(m.database, instID))
 		}
 	case "s":
@@ -165,7 +166,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.flash.Set(fmt.Sprintf("No compatible instance for job #%d (%s)", job.ID, reason), true)
 		}
 		best := ranked[0]
-		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Submitting job #%d to instance #%d...", job.ID, best.Instance.ID), false)
+		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Submitting job #%d to instance %s...", job.ID, ids.FormatInstanceID(best.Instance.ID)), false)
 		return m, tea.Batch(flashCmd, requestWatchJobSubmit(m.ctx, m.database, m.r2Client, job.ID, best.Instance.ID))
 	case "l":
 		if len(m.unplacedJobs) == 0 {
@@ -226,7 +227,7 @@ func (m watchModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		jobID := m.movePicker.jobID
 		selected := *opt
 		m.movePicker.reset()
-		targetDesc := fmt.Sprintf("instance #%d", selected.instanceID)
+		targetDesc := fmt.Sprintf("instance %s", ids.FormatInstanceID(selected.instanceID))
 		if selected.isNew {
 			targetDesc = fmt.Sprintf("new %s instance", selected.gpuName)
 		}

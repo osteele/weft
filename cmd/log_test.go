@@ -99,7 +99,7 @@ func resetLogModeState() {
 	logOpsErrors = false
 	logEvents = false
 	logEventsKind = ""
-	logEventsLaunch = 0
+	logEventsLaunch = ""
 	logEventsStats = false
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -622,22 +623,23 @@ func BootstrapStageLabel(stage string) string {
 func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	var lines []string
 	id := curr.Launch.ID
+	instanceRef := ids.FormatInstanceID(id)
 
 	// Report bootstrap stall warnings
 	if curr.StallMessage != "" && curr.StallMessage != prev.StallMessage {
-		lines = append(lines, fmt.Sprintf("instance %d: WARNING %s", id, curr.StallMessage))
+		lines = append(lines, fmt.Sprintf("instance %s: WARNING %s", instanceRef, curr.StallMessage))
 	}
 
 	// Report bootstrap stage changes
 	if curr.BootstrapStage != "" && curr.BootstrapStage != prev.BootstrapStage {
 		label := BootstrapStageLabel(curr.BootstrapStage)
-		lines = append(lines, fmt.Sprintf("instance %d: bootstrap: %s", id, label))
+		lines = append(lines, fmt.Sprintf("instance %s: bootstrap: %s", instanceRef, label))
 	}
 
 	// Report instance phase changes
 	if curr.InstancePhase != "" && curr.InstancePhase != prev.InstancePhase {
 		label := InstancePhaseLabel(curr.InstancePhase)
-		line := fmt.Sprintf("instance %d: phase: %s", id, label)
+		line := fmt.Sprintf("instance %s: phase: %s", instanceRef, label)
 		if curr.PhaseChangedAt != nil {
 			line += fmt.Sprintf(" (for %s)", time.Since(*curr.PhaseChangedAt).Truncate(time.Second))
 		}
@@ -653,9 +655,9 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 		prevLabel := TerminationIntentLabel(prev.TerminationIntent)
 		currLabel := TerminationIntentLabel(curr.TerminationIntent)
 		if currLabel != "" && currLabel != prevLabel {
-			lines = append(lines, fmt.Sprintf("instance %d: %s", id, currLabel))
+			lines = append(lines, fmt.Sprintf("instance %s: %s", instanceRef, currLabel))
 			if detail := TerminationIntentDetail(curr.TerminationIntent); detail != "" {
-				lines = append(lines, fmt.Sprintf("instance %d: cleanup detail: %s", id, detail))
+				lines = append(lines, fmt.Sprintf("instance %s: cleanup detail: %s", instanceRef, detail))
 			}
 		}
 	}
@@ -663,14 +665,14 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	// Report job progress changes
 	if curr.JobProgress >= 0 && (curr.JobProgress != prev.JobProgress || curr.JobProgressID != prev.JobProgressID || curr.JobProgressPhase != prev.JobProgressPhase) {
 		if curr.JobProgressPhase > 1 {
-			lines = append(lines, fmt.Sprintf("instance %d: job %d progress: phase %d %d%%", id, curr.JobProgressID, curr.JobProgressPhase, curr.JobProgress))
+			lines = append(lines, fmt.Sprintf("instance %s: job %d progress: phase %d %d%%", instanceRef, curr.JobProgressID, curr.JobProgressPhase, curr.JobProgress))
 		} else {
-			lines = append(lines, fmt.Sprintf("instance %d: job %d progress: %d%%", id, curr.JobProgressID, curr.JobProgress))
+			lines = append(lines, fmt.Sprintf("instance %s: job %d progress: %d%%", instanceRef, curr.JobProgressID, curr.JobProgress))
 		}
 	}
 
 	if prev.Launch == nil || prev.Launch.Status != curr.Launch.Status {
-		line := fmt.Sprintf("instance %d: status=%s", id, curr.Launch.Status)
+		line := fmt.Sprintf("instance %s: status=%s", instanceRef, curr.Launch.Status)
 		if reason := curr.Launch.TerminationReason; reason != "" && reason != db.TerminationReasonCompleted {
 			line += fmt.Sprintf(" (%s)", reason)
 		}
@@ -686,22 +688,22 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 		// Show grace period help when entering grace status
 		if curr.Launch.Status == db.LaunchStatusGrace {
 			if label := curr.Launch.GraceStatusLabel(); label != "" {
-				lines = append(lines, fmt.Sprintf("instance %d: %s", id, label))
+				lines = append(lines, fmt.Sprintf("instance %s: %s", instanceRef, label))
 			}
 			// Show actionable commands for failed jobs
 			for _, j := range curr.Jobs {
 				if j.Status == db.StatusFailed {
 					lines = append(lines, "")
 					lines = append(lines, fmt.Sprintf("  To resubmit job %d with updated sources:", j.ID))
-					lines = append(lines, fmt.Sprintf("    weft instance submit %d %d", id, j.ID))
+					lines = append(lines, fmt.Sprintf("    weft instance submit %s %d", instanceRef, j.ID))
 					lines = append(lines, "  To resubmit with a modified command:")
-					lines = append(lines, fmt.Sprintf("    weft instance submit %d %d --command '...'", id, j.ID))
+					lines = append(lines, fmt.Sprintf("    weft instance submit %s %d --command '...'", instanceRef, j.ID))
 				}
 			}
 			lines = append(lines, "  To extend the grace period:")
-			lines = append(lines, fmt.Sprintf("    weft instance extend %d 15m", id))
+			lines = append(lines, fmt.Sprintf("    weft instance extend %s 15m", instanceRef))
 			lines = append(lines, "  To release the instance:")
-			lines = append(lines, fmt.Sprintf("    weft instance release %d", id))
+			lines = append(lines, fmt.Sprintf("    weft instance release %s", instanceRef))
 		}
 	}
 
@@ -713,7 +715,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	for _, j := range curr.Jobs {
 		displayStatus := AttemptDisplayStatus(j, curr.JobAttemptOutcomes)
 		if prevJobStatus[j.ID] != displayStatus {
-			line := fmt.Sprintf("instance %d: job %d status=%s dir=%s", id, j.ID, displayStatus, j.DirectoryTailDisplay())
+			line := fmt.Sprintf("instance %s: job %d status=%s dir=%s", instanceRef, j.ID, displayStatus, j.DirectoryTailDisplay())
 			if j.ExitCode != nil {
 				line += fmt.Sprintf(" exit=%d", *j.ExitCode)
 			}

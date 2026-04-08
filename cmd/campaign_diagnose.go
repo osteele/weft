@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/spf13/cobra"
@@ -112,12 +113,12 @@ func buildCampaignDiagnosisReport(database *sql.DB, campaignID int64) (*campaign
 
 		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
 		if err != nil {
-			return nil, fmt.Errorf("get jobs for instance %d: %w", inst.ID, err)
+			return nil, fmt.Errorf("get jobs for instance %s: %w", ids.FormatInstanceID(inst.ID), err)
 		}
 
 		outcomes, err := db.GetAttemptOutcomesByLaunch(database, inst.ID)
 		if err != nil {
-			return nil, fmt.Errorf("get attempt outcomes for instance %d: %w", inst.ID, err)
+			return nil, fmt.Errorf("get attempt outcomes for instance %s: %w", ids.FormatInstanceID(inst.ID), err)
 		}
 
 		finding := buildInstanceDiagnosis(inst, jobs, outcomes)
@@ -298,7 +299,7 @@ func formatCampaignDiagnosisReport(report *campaignDiagnosisReport) string {
 	for _, inst := range report.Instances {
 		statusLabel := campaign.DisplayInstanceStatusWithReason(inst.Instance)
 
-		fmt.Fprintf(&b, "\nInstance %d — %s — %s\n", inst.Instance.ID, displayInstanceGPU(inst.Instance), statusLabel)
+		fmt.Fprintf(&b, "\nInstance %s — %s — %s\n", ids.FormatInstanceID(inst.Instance.ID), displayInstanceGPU(inst.Instance), statusLabel)
 		fmt.Fprintf(&b, "Cause: %s\n", inst.Summary)
 
 		if len(inst.JobFindings) == 0 {

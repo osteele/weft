@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -3072,7 +3073,7 @@ func (m launchModel) View() string {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(fmt.Sprintf("%d", id))
+			b.WriteString(ids.FormatInstanceID(id))
 		}
 		b.WriteString("\n")
 		if len(m.partialErrors) > 0 {

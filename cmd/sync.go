@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
@@ -944,24 +945,24 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 		return nil
 	}
 
-	var ids []int64
+	var instanceIDList []int64
 	if instanceIDs != nil {
-		ids = make([]int64, 0, len(instanceIDs))
+		instanceIDList = make([]int64, 0, len(instanceIDs))
 		for id := range instanceIDs {
 			if id > 0 {
-				ids = append(ids, id)
+				instanceIDList = append(instanceIDList, id)
 			}
 		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		sort.Slice(instanceIDList, func(i, j int) bool { return instanceIDList[i] < instanceIDList[j] })
 	} else {
 		var err error
-		ids, err = db.ListLaunchIDsNeedingOpslogSync(database, cloudInstanceOpslogLookback)
+		instanceIDList, err = db.ListLaunchIDsNeedingOpslogSync(database, cloudInstanceOpslogLookback)
 		if err != nil {
 			return fmt.Errorf("list launches needing opslog sync: %w", err)
 		}
 	}
 
-	if len(ids) == 0 {
+	if len(instanceIDList) == 0 {
 		return nil
 	}
 
@@ -970,7 +971,7 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 
-	for _, instanceID := range ids {
+	for _, instanceID := range instanceIDList {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(id int64) {
@@ -984,7 +985,7 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 				_ = db.MarkOpslogNotFound(database, id)
 			case opslogError:
 				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: instance %d ops log sync failed: %v\n", id, err)
+					fmt.Fprintf(os.Stderr, "Warning: instance %s ops log sync failed: %v\n", ids.FormatInstanceID(id), err)
 				}
 			}
 		}(instanceID)

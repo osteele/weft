@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // ---------------------------------------------------------------------------
@@ -167,7 +168,7 @@ func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd
 	if msg.err != nil {
 		return m, m.flash.Set(fmt.Sprintf("Submit failed: %v", msg.err), true)
 	}
-	flashCmd := m.flash.Set(fmt.Sprintf("Submitted job #%d to instance #%d", msg.jobID, msg.instanceID), false)
+	flashCmd := m.flash.Set(fmt.Sprintf("Submitted job #%d to instance %s", msg.jobID, ids.FormatInstanceID(msg.instanceID)), false)
 	m.removeUnplacedJob(msg.jobID)
 	m.clampCursor()
 	if m.mode == watchModeSystem {
@@ -217,11 +218,11 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 		return m, m.flash.Set(fmt.Sprintf("Auto-place failed: %v", msg.err), true)
 	}
 	if msg.jobID > 0 {
-		flashCmd := m.flash.Set(fmt.Sprintf("Auto-placed job #%d → instance #%d", msg.jobID, msg.instanceID), false)
+		flashCmd := m.flash.Set(fmt.Sprintf("Auto-placed job #%d → instance %s", msg.jobID, ids.FormatInstanceID(msg.instanceID)), false)
 		m.removeUnplacedJob(msg.jobID)
 		delete(m.autoNoopReasons, msg.jobID)
 		m.clampCursor()
-		m.autoStatusLine = fmt.Sprintf("auto-place: job #%d submitted to instance #%d", msg.jobID, msg.instanceID)
+		m.autoStatusLine = fmt.Sprintf("auto-place: job #%d submitted to instance %s", msg.jobID, ids.FormatInstanceID(msg.instanceID))
 
 		// Continue placing remaining jobs
 		var cmds []tea.Cmd
@@ -548,11 +549,12 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Success
+	instanceRefs := strings.Join(ids.FormatInstanceIDList(msg.instanceIDs), ", ")
 	_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 		EventKind:  db.EventRetrySuccess,
 		CampaignID: m.campaignID,
 		JobCount:   len(msg.instanceIDs),
-		Detail:     fmt.Sprintf("launched instances %v", msg.instanceIDs),
+		Detail:     fmt.Sprintf("launched instances %s", instanceRefs),
 	})
 	m.retryAttempt = 0
 	m.retryExtraAttempts = 0

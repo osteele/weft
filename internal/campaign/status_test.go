@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -25,7 +26,7 @@ func TestFormatPlainUpdate_Initial(t *testing.T) {
 	}
 
 	output := FormatPlainUpdate(prev, curr)
-	if !strings.Contains(output, "instance 5") {
+	if !strings.Contains(output, "instance "+ids.FormatInstanceID(5)) {
 		t.Errorf("should contain instance ID, got %q", output)
 	}
 	if !strings.Contains(output, "status=launching") {

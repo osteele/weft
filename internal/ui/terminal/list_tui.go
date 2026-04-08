@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/ops"
 )
@@ -437,9 +438,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quickLaunchStatusHoldUntil = time.Now().Add(10 * time.Second)
 			return m, nil
 		}
-		status := fmt.Sprintf("Instance #%d launched", msg.instanceIDs[0])
+		status := fmt.Sprintf("Instance %s launched", ids.FormatInstanceID(msg.instanceIDs[0]))
 		if msg.runningJobID > 0 {
-			status = fmt.Sprintf("Instance #%d: job #%d running", msg.instanceIDs[0], msg.runningJobID)
+			status = fmt.Sprintf("Instance %s: job #%d running", ids.FormatInstanceID(msg.instanceIDs[0]), msg.runningJobID)
 		}
 		if msg.movedJobs > 0 {
 			status = fmt.Sprintf("%s; moved %d queued job(s)", status, msg.movedJobs)
@@ -1316,7 +1317,7 @@ func runQuickLaunchWithProgress(
 	}
 
 	newInstanceID := result.InstanceIDs[0]
-	emit(fmt.Sprintf("Instance #%d created; rebalancing queued jobs...", newInstanceID))
+	emit(fmt.Sprintf("Instance %s created; rebalancing queued jobs...", ids.FormatInstanceID(newInstanceID)))
 	movedJobs, warning, err := rebalanceQueuedJobsToLaunchedInstance(
 		ctx,
 		database,
@@ -1376,7 +1377,7 @@ func waitForQuickLaunchRunningState(
 		}
 	}
 
-	emit(fmt.Sprintf("Waiting for first running job on instance #%d...", instanceID))
+	emit(fmt.Sprintf("Waiting for first running job on instance %s...", ids.FormatInstanceID(instanceID)))
 	deadline := time.Now().Add(maxWait)
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -1395,13 +1396,13 @@ func waitForQuickLaunchRunningState(
 			}
 		}
 		if launch, err := db.GetLaunch(database, instanceID); err == nil && launch != nil && campaign.IsInstanceTerminal(launch.Status) {
-			return 0, "", fmt.Errorf("instance #%d ended before any job started (%s)", instanceID, launch.Status)
+			return 0, "", fmt.Errorf("instance %s ended before any job started (%s)", ids.FormatInstanceID(instanceID), launch.Status)
 		}
 		if time.Now().After(deadline) {
 			return 0, "waiting for scheduler to start first job", nil
 		}
 		if time.Since(lastProgress) >= 5*time.Second {
-			emit(fmt.Sprintf("Waiting for first running job on instance #%d... (%ds)", instanceID, int(time.Since(deadline.Add(-maxWait)).Seconds())))
+			emit(fmt.Sprintf("Waiting for first running job on instance %s... (%ds)", ids.FormatInstanceID(instanceID), int(time.Since(deadline.Add(-maxWait)).Seconds())))
 			lastProgress = time.Now()
 		}
 		select {
@@ -1491,12 +1492,12 @@ func rebalanceQueuedJobsToLaunchedInstance(
 
 	targetLaunch, err := db.GetLaunch(database, targetInstanceID)
 	if err != nil || targetLaunch == nil {
-		return 0, "", fmt.Errorf("load launched instance %d: %w", targetInstanceID, err)
+		return 0, "", fmt.Errorf("load launched instance %s: %w", ids.FormatInstanceID(targetInstanceID), err)
 	}
 	targetLaunchJobs, _ := db.GetLaunchJobsIncludingAttempts(database, targetInstanceID)
 	targetCap, ok := campaign.NewInstanceCapacity(targetLaunch, countRunningJobs(targetLaunchJobs))
 	if !ok {
-		return 0, "", fmt.Errorf("launched instance %d is not reusable", targetInstanceID)
+		return 0, "", fmt.Errorf("launched instance %s is not reusable", ids.FormatInstanceID(targetInstanceID))
 	}
 
 	candidates := make([]*db.Job, 0)
@@ -1565,7 +1566,7 @@ func rebalanceQueuedJobsToLaunchedInstance(
 			return moved, warning, fmt.Errorf("reload moved job %d: %w", job.ID, getErr)
 		}
 		if submitErr := campaign.SubmitJobsToInstance(ctx, database, r2Client, targetInstanceID, []*db.Job{refreshed}); submitErr != nil {
-			return moved, warning, fmt.Errorf("submit moved job %d to instance %d: %w", job.ID, targetInstanceID, submitErr)
+			return moved, warning, fmt.Errorf("submit moved job %d to instance %s: %w", job.ID, ids.FormatInstanceID(targetInstanceID), submitErr)
 		}
 		moved++
 		state.QueuedByInstance[src]--
@@ -1725,7 +1726,10 @@ func summarizeAutoPilotError(err error) string {
 	}
 	if strings.Contains(msg, "submit jobs to instance control plane:") {
 		if matches := graceAckKeyPattern.FindStringSubmatch(msg); len(matches) == 2 {
-			return fmt.Sprintf("instance #%s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", matches[1])
+			if instanceID, err := strconv.ParseInt(matches[1], 10, 64); err == nil {
+				return fmt.Sprintf("instance %s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", ids.FormatInstanceID(instanceID))
+			}
+			return fmt.Sprintf("instance %s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", matches[1])
 		}
 		return "instance control plane did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)"
 	}

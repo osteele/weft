@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
@@ -697,7 +698,7 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	}
 	fmt.Printf("Campaign %d: launched %d instance(s)\n", result.CampaignID, len(result.InstanceIDs))
 	for _, id := range result.InstanceIDs {
-		fmt.Printf("  instance %d\n", id)
+		fmt.Printf("  instance %s\n", ids.FormatInstanceID(id))
 	}
 
 	// Print next steps
@@ -1005,7 +1006,7 @@ func resolveCampaignWatchInstanceIDs(database *sql.DB, launchedIDs []int64) ([]i
 	for _, instanceID := range launchedIDs {
 		inst, err := db.GetLaunch(database, instanceID)
 		if err != nil {
-			return nil, fmt.Errorf("get launch %d: %w", instanceID, err)
+			return nil, fmt.Errorf("get launch %s: %w", ids.FormatInstanceID(instanceID), err)
 		}
 		if inst == nil || inst.CampaignID == nil {
 			continue
@@ -1348,10 +1349,10 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 		for i, j := range jobs {
 			jobIDs[i] = fmt.Sprintf("#%d", j.ID)
 		}
-		fmt.Printf("Submitting %s to instance %d...\n", strings.Join(jobIDs, ", "), instanceID)
+		fmt.Printf("Submitting %s to instance %s...\n", strings.Join(jobIDs, ", "), ids.FormatInstanceID(instanceID))
 
 		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, jobs); err != nil {
-			return fmt.Errorf("submit to instance %d: %w", instanceID, err)
+			return fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(instanceID), err)
 		}
 
 		// Auto-extend grace if deadline is close
@@ -1367,7 +1368,7 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 			}
 		}
 
-		fmt.Printf("  Submitted %d job(s) to instance %d\n", len(jobs), instanceID)
+		fmt.Printf("  Submitted %d job(s) to instance %s\n", len(jobs), ids.FormatInstanceID(instanceID))
 	}
 	return nil
 }

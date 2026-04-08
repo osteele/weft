@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testing.T) {
@@ -52,7 +53,7 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	if !strings.Contains(cleanOut, "terminated (infrastructure failure)") {
 		t.Fatalf("output missing failed status label, got:\n%s", out)
 	}
-	if !strings.Contains(cleanOut, fmt.Sprintf("Instance %d — A100 — launching", launchingID)) {
+	if !strings.Contains(cleanOut, fmt.Sprintf("Instance %s — A100 — launching", ids.FormatInstanceID(launchingID))) {
 		t.Fatalf("output missing launching status label, got:\n%s", out)
 	}
 	if !strings.Contains(cleanOut, "  vastai:") {
@@ -61,11 +62,11 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	if !strings.Contains(cleanOut, "  vastai:") {
 		t.Fatalf("output missing launching instance identity line, got:\n%s", out)
 	}
-	if strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", failedID)) || strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", launchingID)) {
+	if strings.Contains(cleanOut, fmt.Sprintf("ID %s  vastai:", ids.FormatInstanceID(failedID))) || strings.Contains(cleanOut, fmt.Sprintf("ID %s  vastai:", ids.FormatInstanceID(launchingID))) {
 		t.Fatalf("output should omit redundant provider line IDs, got:\n%s", out)
 	}
 
-	parts := strings.Split(cleanOut, fmt.Sprintf("Instance %d —", failedID))
+	parts := strings.Split(cleanOut, fmt.Sprintf("Instance %s —", ids.FormatInstanceID(failedID)))
 	if len(parts) < 2 {
 		t.Fatalf("could not isolate failed instance section, got:\n%s", out)
 	}
@@ -74,7 +75,7 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 		t.Fatalf("failed instance section should not include spinner %q, section:\n%s", cleanSpinner, failedSection)
 	}
 
-	launchParts := strings.Split(cleanOut, fmt.Sprintf("Instance %d —", launchingID))
+	launchParts := strings.Split(cleanOut, fmt.Sprintf("Instance %s —", ids.FormatInstanceID(launchingID)))
 	if len(launchParts) < 2 {
 		t.Fatalf("could not isolate launching instance section, got:\n%s", out)
 	}
@@ -379,7 +380,7 @@ func TestFormatWatchInstanceBlock_ShowsCPUAndGPULines(t *testing.T) {
 	}
 
 	out := formatWatchInstanceBlock(update, map[int64]int{}, watchInstanceBlockOptions{plain: true, now: now})
-	if !strings.Contains(out, "Instance 487 — RTX 4090 24GB — running") {
+	if !strings.Contains(out, "Instance wi487 — RTX 4090 24GB — running") {
 		t.Fatalf("header missing GPU brief, got:\n%s", out)
 	}
 	if strings.Contains(out, "Specs:") {

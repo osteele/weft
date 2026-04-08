@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
@@ -60,7 +61,7 @@ func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		"Inventory Hosts (1 active)",
 		"Unplaced Jobs (1)",
 		"[u] unplace",
-		"Instance 5 — A100 — running",
+		"Instance " + ids.FormatInstanceID(5) + " — A100 — running",
 		"  vastai:",
 		"  Jobs: 0/2 resolved",
 		"EXP-ALPHA",
@@ -96,7 +97,7 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
 	for _, expected := range []string{
-		"Instance 5 — A100 — running",
+		"Instance " + ids.FormatInstanceID(5) + " — A100 — running",
 		"  vastai: 32734388",
 		"  Jobs: 0/2 resolved",
 		"EXP-ALPHA",
@@ -148,7 +149,7 @@ func TestFormatWatchInstanceBlockUsesDBStatusWhenProviderLoading(t *testing.T) {
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
-	if !strings.Contains(out, "Instance 111 — A100 — bootstrapping") {
+	if !strings.Contains(out, "Instance "+ids.FormatInstanceID(111)+" — A100 — bootstrapping") {
 		t.Fatalf("expected conservative bootstrap status in header, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Bootstrap: waiting for bootstrap activity") {
@@ -651,7 +652,7 @@ func TestInstanceWatchModelViewShowsInventoryHosts(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"Instance 5 — A100 — running",
+		"Instance " + ids.FormatInstanceID(5) + " — A100 — running",
 		"Inventory Hosts (1 active)",
 		"cool30",
 		"BETA",

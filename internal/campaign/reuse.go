@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
@@ -49,10 +50,10 @@ func instanceAcceptsReuse(inst *db.Launch) (bool, string) {
 		return false, "instance not found"
 	}
 	if inst.Status != db.LaunchStatusGrace && inst.Status != db.LaunchStatusRunning {
-		return false, fmt.Sprintf("instance %d is not reusable (status=%s)", inst.ID, inst.Status)
+		return false, fmt.Sprintf("instance %s is not reusable (status=%s)", ids.FormatInstanceID(inst.ID), inst.Status)
 	}
 	if inst.HasActiveTerminationIntent() {
-		return false, fmt.Sprintf("instance %d is self-destructing", inst.ID)
+		return false, fmt.Sprintf("instance %s is self-destructing", ids.FormatInstanceID(inst.ID))
 	}
 	return true, ""
 }
@@ -335,8 +336,8 @@ func FormatReuseAssignments(assignments []ReuseAssignment) string {
 		if inst.Status == db.LaunchStatusRunning {
 			cost = "$0.00 (shared)"
 		}
-		b.WriteString(fmt.Sprintf("  Job #%d  →  Instance #%d (%s, %s)  %s\n",
-			a.Job.ID, inst.ID, inst.DisplayGPUSpec(), detail, cost))
+		b.WriteString(fmt.Sprintf("  Job #%d  →  Instance %s (%s, %s)  %s\n",
+			a.Job.ID, ids.FormatInstanceID(inst.ID), inst.DisplayGPUSpec(), detail, cost))
 	}
 	return b.String()
 }
@@ -352,10 +353,10 @@ type GracePayload struct {
 func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
 	inst, err := db.GetLaunch(database, instanceID)
 	if err != nil {
-		return fmt.Errorf("get instance %d: %w", instanceID, err)
+		return fmt.Errorf("get instance %s: %w", ids.FormatInstanceID(instanceID), err)
 	}
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
-		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
+		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
 	payload := GracePayload{
@@ -389,10 +390,10 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 
 	inst, err = db.GetLaunch(database, instanceID)
 	if err != nil {
-		return fmt.Errorf("re-check instance %d: %w", instanceID, err)
+		return fmt.Errorf("re-check instance %s: %w", ids.FormatInstanceID(instanceID), err)
 	}
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
-		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
+		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
 	if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
@@ -401,15 +402,15 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 
 	inst, err = db.GetLaunch(database, instanceID)
 	if err != nil {
-		return fmt.Errorf("final re-check instance %d: %w", instanceID, err)
+		return fmt.Errorf("final re-check instance %s: %w", ids.FormatInstanceID(instanceID), err)
 	}
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
-		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
+		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
 	for _, job := range jobs {
 		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
-			return fmt.Errorf("associate job %d with instance %d: %w", job.ID, instanceID, err)
+			return fmt.Errorf("associate job %d with instance %s: %w", job.ID, ids.FormatInstanceID(instanceID), err)
 		}
 	}
 

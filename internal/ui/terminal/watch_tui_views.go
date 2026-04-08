@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -141,7 +142,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 				})
 				renderStructuredBlock(structured, addSelectable, addLine)
 			} else {
-				addLine(m.spinner.View() + fmt.Sprintf(" Instance %d — waiting for data...", id))
+				addLine(m.spinner.View() + fmt.Sprintf(" Instance %s — waiting for data...", ids.FormatInstanceID(id)))
 			}
 			addLine("")
 			continue
@@ -607,7 +608,7 @@ func (m watchModel) formatUnplacedJobRows(jobs []*db.Job, availWidth int) []stri
 func (m watchModel) selectedStatusDetail() string {
 	if instID := m.selectedCloudInstanceID(); instID != 0 {
 		if reason := m.failedReplaceReason[instID]; reason != "" {
-			return fmt.Sprintf("instance #%d not replaced: %s", instID, reason)
+			return fmt.Sprintf("instance %s not replaced: %s", ids.FormatInstanceID(instID), reason)
 		}
 	}
 	job := m.selectedUnplacedJob()

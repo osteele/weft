@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 	"github.com/osteele/weft/internal/ui/terminal"
 )
@@ -178,13 +179,13 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		fmt.Println()
 		if len(otherRunning) == 1 {
 			ci := otherRunning[0]
-			fmt.Printf("  1 other instance still running (ID %d, %s)\n", ci.ID, ci.DisplayGPUBrief())
+			fmt.Printf("  1 other instance still running (ID %s, %s)\n", ids.FormatInstanceID(ci.ID), ci.DisplayGPUBrief())
 		} else {
-			ids := make([]string, len(otherRunning))
+			runningIDs := make([]string, len(otherRunning))
 			for i, ci := range otherRunning {
-				ids[i] = fmt.Sprintf("%d", ci.ID)
+				runningIDs[i] = ids.FormatInstanceID(ci.ID)
 			}
-			fmt.Printf("  %d other instances still running (IDs %s)\n", len(otherRunning), strings.Join(ids, ", "))
+			fmt.Printf("  %d other instances still running (IDs %s)\n", len(otherRunning), strings.Join(runningIDs, ", "))
 		}
 	}
 
@@ -215,8 +216,8 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		w = tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintf(w, "  JOB\tSTATUS\tINSTANCE\tPROJECT\tDESCRIPTION\n")
 		for _, j := range jobs {
-			fmt.Fprintf(w, "  %d\t%s\t%d\t%s\t%s\n",
-				j.id, j.status, j.instanceID, truncate(j.project, projectWidth), truncate(j.fullDescription, descWidth))
+			fmt.Fprintf(w, "  %d\t%s\t%s\t%s\t%s\n",
+				j.id, j.status, ids.FormatInstanceID(j.instanceID), truncate(j.project, projectWidth), truncate(j.fullDescription, descWidth))
 		}
 		w.Flush()
 	}
@@ -253,7 +254,7 @@ func buildInstanceRow(ci *db.Launch, now time.Time) exitReportInstanceRow {
 
 	return exitReportInstanceRow{
 		id:   ci.ID,
-		line: fmt.Sprintf("  %d\t%s\t%s\t%s\t%s\t%s\n", ci.ID, ci.DisplayGPUBrief(), ci.Status, uptimeStr, costStr, reason),
+		line: fmt.Sprintf("  %s\t%s\t%s\t%s\t%s\t%s\n", ids.FormatInstanceID(ci.ID), ci.DisplayGPUBrief(), ci.Status, uptimeStr, costStr, reason),
 		cost: cost,
 	}
 }

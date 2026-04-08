@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
@@ -151,10 +151,10 @@ func getGraceInstance(database *sql.DB, instanceID int64) (*db.Launch, error) {
 		return nil, fmt.Errorf("get instance: %w", err)
 	}
 	if ci == nil {
-		return nil, fmt.Errorf("instance %d not found", instanceID)
+		return nil, fmt.Errorf("instance %s not found", ids.FormatInstanceID(instanceID))
 	}
 	if ci.Status != db.LaunchStatusGrace {
-		return nil, fmt.Errorf("instance %d is not in grace period (status: %s)", instanceID, ci.Status)
+		return nil, fmt.Errorf("instance %s is not in grace period (status: %s)", ids.FormatInstanceID(instanceID), ci.Status)
 	}
 	return ci, nil
 }
@@ -209,8 +209,8 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 			campaignStr = fmt.Sprintf("%d", *inst.CampaignID)
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			inst.ID, campaignStr, inst.Status, inst.Provider, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			ids.FormatInstanceID(inst.ID), campaignStr, inst.Status, inst.Provider, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
 	}
 	w.Flush()
 	return nil
@@ -228,22 +228,22 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Println()
 		}
 
-		id, err := strconv.ParseInt(arg, 10, 64)
+		id, err := ids.ParseInstanceID(arg)
 		if err != nil {
 			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
 		}
 
 		ci, err := db.GetLaunch(database, id)
 		if err != nil {
-			return fmt.Errorf("get instance %d: %w", id, err)
+			return fmt.Errorf("get instance %s: %w", ids.FormatInstanceID(id), err)
 		}
 		if ci == nil {
-			fmt.Fprintf(os.Stderr, "Instance %d not found\n", id)
+			fmt.Fprintf(os.Stderr, "Instance %s not found\n", ids.FormatInstanceID(id))
 			continue
 		}
 
 		statusLabel := campaign.DisplayInstanceStatus(ci)
-		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUBrief(), statusLabel)
+		fmt.Printf("Instance %s — %s — %s\n", ids.FormatInstanceID(ci.ID), ci.DisplayGPUBrief(), statusLabel)
 		if ci.TerminationReason != "" {
 			fmt.Printf("  Terminated: %s\n", ci.DisplayTerminationReason())
 		}
@@ -308,7 +308,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		// Jobs
 		jobs, err := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 		if err != nil {
-			return fmt.Errorf("get instance %d jobs: %w", ci.ID, err)
+			return fmt.Errorf("get instance %s jobs: %w", ids.FormatInstanceID(ci.ID), err)
 		}
 		if liveUpdate == nil {
 			liveUpdate = &campaign.InstanceUpdate{
@@ -426,16 +426,16 @@ func runInstanceTerminate(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	var ids []int64
+	var instanceIDs []int64
 	for _, arg := range args {
-		id, err := strconv.ParseInt(arg, 10, 64)
+		id, err := ids.ParseInstanceID(arg)
 		if err != nil {
 			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
 		}
-		ids = append(ids, id)
+		instanceIDs = append(instanceIDs, id)
 	}
 
-	terminated, errors := terminateInstancesParallel(database, ids)
+	terminated, errors := terminateInstancesParallel(database, instanceIDs)
 	for _, e := range errors {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", e)
 	}
@@ -449,13 +449,13 @@ func runInstanceTerminate(cmd *cobra.Command, args []string) error {
 }
 
 // terminateInstancesParallel terminates multiple cloud instances in parallel.
-func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
+func terminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []error) {
 	var mu sync.Mutex
 	var terminated int
 	var errors []error
 	var wg sync.WaitGroup
 
-	for _, id := range ids {
+	for _, id := range instanceIDs {
 		wg.Add(1)
 		go func(instanceID int64) {
 			defer wg.Done()
@@ -463,20 +463,20 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 			ci, err := db.GetLaunch(database, instanceID)
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("get instance %d: %w", instanceID, err))
+				errors = append(errors, fmt.Errorf("get instance %s: %w", ids.FormatInstanceID(instanceID), err))
 				mu.Unlock()
 				return
 			}
 			if ci == nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("instance %d not found", instanceID))
+				errors = append(errors, fmt.Errorf("instance %s not found", ids.FormatInstanceID(instanceID)))
 				mu.Unlock()
 				return
 			}
 
 			if campaign.IsInstanceTerminal(ci.Status) {
 				mu.Lock()
-				fmt.Printf("Instance %d already %s\n", instanceID, ci.Status)
+				fmt.Printf("Instance %s already %s\n", ids.FormatInstanceID(instanceID), ci.Status)
 				mu.Unlock()
 				return
 			}
@@ -496,7 +496,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 
 			if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("update instance %d status: %w", instanceID, err))
+				errors = append(errors, fmt.Errorf("update instance %s status: %w", ids.FormatInstanceID(instanceID), err))
 				mu.Unlock()
 				return
 			}
@@ -504,7 +504,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 			resetCount, err := db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeCancelled)
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("reset jobs for instance %d: %w", instanceID, err))
+				errors = append(errors, fmt.Errorf("reset jobs for instance %s: %w", ids.FormatInstanceID(instanceID), err))
 				mu.Unlock()
 				return
 			}
@@ -515,7 +515,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 			if providerInstID != "" {
 				instanceInfo = fmt.Sprintf(", destroyed %s %s", ci.Provider, providerInstID)
 			}
-			fmt.Printf("Cancelled instance %d%s, %d jobs reset to unplaced\n", instanceID, instanceInfo, resetCount)
+			fmt.Printf("Cancelled instance %s%s, %d jobs reset to unplaced\n", ids.FormatInstanceID(instanceID), instanceInfo, resetCount)
 			mu.Unlock()
 		}(id)
 	}
@@ -525,7 +525,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 }
 
 func runInstanceSSH(cmd *cobra.Command, args []string) error {
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := ids.ParseInstanceID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
@@ -541,7 +541,7 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get instance: %w", err)
 	}
 	if ci == nil {
-		return fmt.Errorf("instance %d not found", id)
+		return fmt.Errorf("instance %s not found", ids.FormatInstanceID(id))
 	}
 
 	providerInstID := ci.EffectiveProviderID()
@@ -587,7 +587,7 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 }
 
 func runInstanceSubmit(cmd *cobra.Command, args []string) error {
-	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	instanceID, err := ids.ParseInstanceID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
@@ -625,7 +625,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	fmt.Printf("Re-syncing sources and submitting job %s to instance %d...\n", FormatJobID(jobID), instanceID)
+	fmt.Printf("Re-syncing sources and submitting job %s to instance %s...\n", FormatJobID(jobID), ids.FormatInstanceID(instanceID))
 
 	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
 		return err
@@ -638,13 +638,13 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Job %s resubmitted to instance %d.\n", FormatJobID(jobID), instanceID)
+	fmt.Printf("Job %s resubmitted to instance %s.\n", FormatJobID(jobID), ids.FormatInstanceID(instanceID))
 	fmt.Println("Use 'weft campaign watch' or 'weft instance status' to monitor progress.")
 	return nil
 }
 
 func runInstanceExtend(cmd *cobra.Command, args []string) error {
-	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	instanceID, err := ids.ParseInstanceID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
@@ -683,12 +683,12 @@ func runInstanceExtend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("update DB: %w", err)
 	}
 
-	fmt.Printf("Grace period for instance %d extended by %s.\n", instanceID, duration)
+	fmt.Printf("Grace period for instance %s extended by %s.\n", ids.FormatInstanceID(instanceID), duration)
 	return nil
 }
 
 func runInstanceRelease(cmd *cobra.Command, args []string) error {
-	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	instanceID, err := ids.ParseInstanceID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
@@ -717,7 +717,7 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("Instance %d released. It will self-destruct shortly.\n", instanceID)
+	fmt.Printf("Instance %s released. It will self-destruct shortly.\n", ids.FormatInstanceID(instanceID))
 	return nil
 }
 

@@ -262,7 +262,7 @@ func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
 	next, _ := m.Update(listAutoPilotDoneMsg{err: err})
 	got := next.(listTUIModel)
 
-	if !strings.Contains(got.statusMessage, "instance #728 did not acknowledge queued jobs") {
+	if !strings.Contains(got.statusMessage, "instance wi728 did not acknowledge queued jobs") {
 		t.Fatalf("statusMessage = %q, want instance-specific summary", got.statusMessage)
 	}
 	if !strings.Contains(got.statusMessage, "run `weft sync`") {

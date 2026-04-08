@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/progress"
 )
 
@@ -193,7 +194,7 @@ func formatWatchInstanceHeaderLine(update campaign.InstanceUpdate, opts watchIns
 		statusText = watchStatusBlockStyle(statusLabel, ci.Status).Render(statusLabel)
 	}
 
-	header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUBrief(), statusText)
+	header := fmt.Sprintf("Instance %s — %s — %s", ids.FormatInstanceID(ci.ID), ci.DisplayGPUBrief(), statusText)
 	if !opts.plain {
 		header = watchTitleStyle.Render(header)
 	}
@@ -451,11 +452,11 @@ func formatPreviousInstanceLine(donors []*db.Launch, now time.Time) string {
 		if obs.Uptime != nil {
 			parts = append(parts, obs.Uptime.Truncate(time.Second).String())
 		}
-		return fmt.Sprintf("  Previous: Instance %d — %s", di.ID, strings.Join(parts, ", "))
+		return fmt.Sprintf("  Previous: Instance %s — %s", ids.FormatInstanceID(di.ID), strings.Join(parts, ", "))
 	}
 	summaries := make([]string, len(donors))
 	for i, di := range donors {
-		summaries[i] = fmt.Sprintf("Instance %d (%s)", di.ID, di.DisplayTerminationReason())
+		summaries[i] = fmt.Sprintf("Instance %s (%s)", ids.FormatInstanceID(di.ID), di.DisplayTerminationReason())
 	}
 	return "  Previous: " + strings.Join(summaries, " → ")
 }

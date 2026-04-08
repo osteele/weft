@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func summaryInterval(elapsed time.Duration) time.Duration {
@@ -162,29 +164,30 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 							}()
 							maxAttempts := len(retryBackoffDelays) + 1
 							for attempt := range maxAttempts {
-								fmt.Printf("instance %d: retryable failure (%s), attempting relaunch (attempt %d/%d)...\n",
-									instanceID, ci.DisplayTerminationReason(), attempt+1, maxAttempts)
+								fmt.Printf("instance %s: retryable failure (%s), attempting relaunch (attempt %d/%d)...\n",
+									ids.FormatInstanceID(instanceID), ci.DisplayTerminationReason(), attempt+1, maxAttempts)
 								scopeJobIDs := rentalScopedUnplacedJobIDs(unplacedJobs)
 								outcome, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, projectFilter, false, false)
 								if err != nil {
-									fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
+									fmt.Printf("instance %s: relaunch failed: %v\n", ids.FormatInstanceID(instanceID), err)
 									return
 								}
 								if outcome != nil && outcome.BudgetSkip > 0 && len(outcome.InstanceIDs) == 0 {
-									fmt.Printf("instance %d: %d job(s) exceeded retry budget, giving up\n", instanceID, outcome.BudgetSkip)
+									fmt.Printf("instance %s: %d job(s) exceeded retry budget, giving up\n", ids.FormatInstanceID(instanceID), outcome.BudgetSkip)
 									return
 								}
 								if outcome != nil && outcome.BlockedReason != "" && len(outcome.InstanceIDs) == 0 {
-									fmt.Printf("instance %d: auto-relaunch blocked: %s\n", instanceID, outcome.BlockedReason)
+									fmt.Printf("instance %s: auto-relaunch blocked: %s\n", ids.FormatInstanceID(instanceID), outcome.BlockedReason)
 									return
 								}
 								if outcome != nil && outcome.Skipped > 0 && len(outcome.InstanceIDs) == 0 {
-									fmt.Printf("instance %d: %d job(s) exceeded max cloud attempts, giving up\n", instanceID, outcome.Skipped)
+									fmt.Printf("instance %s: %d job(s) exceeded max cloud attempts, giving up\n", ids.FormatInstanceID(instanceID), outcome.Skipped)
 									return
 								}
 								newIDs := outcome.InstanceIDs
 								if len(newIDs) > 0 {
-									fmt.Printf("instance %d: relaunched as instance(s) %v\n", instanceID, newIDs)
+									fmt.Printf("instance %s: relaunched as instance(s) %s\n",
+										ids.FormatInstanceID(instanceID), strings.Join(ids.FormatInstanceIDList(newIDs), ", "))
 									for _, newID := range newIDs {
 										startWatching(newID)
 									}
@@ -192,7 +195,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 								}
 								if attempt < len(retryBackoffDelays) {
 									delay := retryBackoffDelays[attempt]
-									fmt.Printf("instance %d: no offers available, retrying in %s...\n", instanceID, delay)
+									fmt.Printf("instance %s: no offers available, retrying in %s...\n", ids.FormatInstanceID(instanceID), delay)
 									select {
 									case <-time.After(delay):
 									case <-ctx.Done():
@@ -200,7 +203,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 									}
 								}
 							}
-							fmt.Printf("instance %d: no offers available after %d attempts\n", instanceID, maxAttempts)
+							fmt.Printf("instance %s: no offers available after %d attempts\n", ids.FormatInstanceID(instanceID), maxAttempts)
 						}()
 					}
 				}

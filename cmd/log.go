@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/cloudlog"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/oplog"
@@ -57,7 +58,7 @@ Lifecycle Events (structured relaunch/reconcile/retry decisions):
   weft log --events                              # Recent lifecycle events
   weft log --events --kind relaunch              # All relaunch decisions
   weft log --events --kind reconcile             # Reconciliation actions
-  weft log --events --launch 239                 # Events for instance 239
+  weft log --events --launch wi239               # Events for instance wi239
   weft log --events --since 6h                    # Events in last 6 hours
   weft log --events --stats                      # Aggregate statistics`,
 	Args: validateLogArgs,
@@ -88,7 +89,7 @@ var (
 	// Lifecycle events flags
 	logEvents       bool
 	logEventsKind   string
-	logEventsLaunch int64
+	logEventsLaunch string
 	logEventsStats  bool
 )
 
@@ -121,7 +122,7 @@ func addLogFlags(cmd *cobra.Command) {
 	// Lifecycle events flags
 	cmd.Flags().BoolVar(&logEvents, "events", false, "Show lifecycle events (relaunch/reconcile/retry decisions)")
 	cmd.Flags().StringVar(&logEventsKind, "kind", "", "Filter events by kind or prefix (e.g., relaunch, reconcile.bootstrap_timeout)")
-	cmd.Flags().Int64Var(&logEventsLaunch, "launch", 0, "Filter events by launch/instance ID")
+	cmd.Flags().StringVar(&logEventsLaunch, "launch", "", "Filter events by launch/instance ID (e.g., 239 or wi239)")
 	cmd.Flags().BoolVar(&logEventsStats, "stats", false, "Show aggregate event statistics (requires --events)")
 }
 
@@ -442,7 +443,7 @@ func resolveLaunchSSH(database *sql.DB, job *db.Job) (*cloud.Instance, error) {
 		return nil, fmt.Errorf("get cloud instance: %w", err)
 	}
 	if ci == nil {
-		return nil, fmt.Errorf("cloud instance %d not found", *job.LaunchID)
+		return nil, fmt.Errorf("cloud instance %s not found", ids.FormatInstanceID(*job.LaunchID))
 	}
 
 	providerID := ci.EffectiveProviderID()
@@ -1105,9 +1106,17 @@ func runEventsLog(cmd *cobra.Command) error {
 	}
 	defer database.Close()
 
+	var launchID int64
+	if strings.TrimSpace(logEventsLaunch) != "" {
+		launchID, err = ids.ParseInstanceID(logEventsLaunch)
+		if err != nil {
+			return fmt.Errorf("invalid launch/instance ID %q: %w", logEventsLaunch, err)
+		}
+	}
+
 	filter := db.LifecycleEventFilter{
 		Kind:     logEventsKind,
-		LaunchID: logEventsLaunch,
+		LaunchID: launchID,
 	}
 
 	// Use kind as prefix if it doesn't contain a dot (e.g. "relaunch" matches "relaunch.*")
@@ -1152,7 +1161,7 @@ func formatLifecycleEvent(e db.LifecycleEvent) {
 	parts = append(parts, ts, e.EventKind)
 
 	if e.LaunchID != 0 {
-		parts = append(parts, fmt.Sprintf("instance:%d", e.LaunchID))
+		parts = append(parts, fmt.Sprintf("instance:%s", ids.FormatInstanceID(e.LaunchID)))
 	}
 	if e.JobID != 0 {
 		parts = append(parts, fmt.Sprintf("job:%d", e.JobID))

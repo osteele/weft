@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -230,7 +231,7 @@ func formatLaunchResultFlash(instanceIDs []int64, partialErrors []string) string
 	}
 	instanceText := make([]string, 0, len(instanceIDs))
 	for _, id := range instanceIDs {
-		instanceText = append(instanceText, fmt.Sprintf("%d", id))
+		instanceText = append(instanceText, ids.FormatInstanceID(id))
 	}
 	message := "Launched instances: " + strings.Join(instanceText, ", ")
 	if len(partialErrors) > 0 {
