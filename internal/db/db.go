@@ -962,7 +962,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 var dbPath string
 
@@ -1862,6 +1862,14 @@ func initSchema(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_host_contention_host ON host_contention_obs(host, observed_at);
 	`); err != nil {
+		return err
+	}
+
+	// Migration: track opslog sync state for negative caching.
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN oplog_synced_at INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN oplog_not_found INTEGER DEFAULT 0`); err != nil {
 		return err
 	}
 

@@ -1919,3 +1919,62 @@ func DeleteLaunchLiveState(database *sql.DB, launchID int64) error {
 	_, err := database.Exec(`DELETE FROM launch_live_state WHERE launch_id = ?`, launchID)
 	return err
 }
+
+// MarkOpslogSynced records a successful opslog fetch for a launch.
+func MarkOpslogSynced(database *sql.DB, launchID int64) error {
+	_, err := database.Exec(
+		`UPDATE launches SET oplog_synced_at = ?, oplog_not_found = 0 WHERE id = ?`,
+		time.Now().Unix(), launchID)
+	return err
+}
+
+// MarkOpslogNotFound records that an opslog was not found for a terminal launch.
+func MarkOpslogNotFound(database *sql.DB, launchID int64) error {
+	_, err := database.Exec(
+		`UPDATE launches SET oplog_synced_at = ?, oplog_not_found = 1 WHERE id = ?`,
+		time.Now().Unix(), launchID)
+	return err
+}
+
+// ListLaunchIDsNeedingOpslogSync returns IDs of launches that need opslog sync.
+// Includes running/grace launches and recently-terminal launches, excluding those
+// where oplog_not_found=1 and the check was performed at least 10 minutes after
+// the instance terminated.
+func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]int64, error) {
+	cutoff := time.Now().Add(-since).Unix()
+	const safetyBuffer = 600 // 10 minutes
+	rows, err := database.Query(`
+		SELECT id FROM launches
+		WHERE provider_instance_id != ''
+		AND (
+			-- Running/grace instances always need sync
+			status IN (?, ?)
+			OR (
+				-- Recently terminal instances, excluding known-not-found
+				status IN (?, ?, ?)
+				AND ended_at >= ?
+				AND NOT (
+					oplog_not_found = 1
+					AND oplog_synced_at >= IFNULL(ended_at, 0) + ?
+				)
+			)
+		)
+		ORDER BY id`,
+		LaunchStatusRunning, LaunchStatusGrace,
+		LaunchStatusFailed, LaunchStatusCompleted, LaunchStatusCancelled,
+		cutoff, safetyBuffer)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}

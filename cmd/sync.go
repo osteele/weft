@@ -112,53 +112,65 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if len(hosts) == 0 {
-		fmt.Println("No active jobs to sync")
-		return nil
-	}
+	cfg, _ := config.Load()
 
+	// Run SSH host syncs and cloud sync all in parallel.
+	// SSH pool semaphores throttle actual connections.
+	var mu sync.Mutex
 	var totalUpdated, hostsReached, hostsUnreachable int
+	var wg sync.WaitGroup
 
+	// Launch per-host SSH syncs
 	for _, host := range hosts {
-		if syncVerbose {
-			fmt.Printf("Checking %s...\n", host)
-		}
-
-		result, err := syncHost(database, host)
-		if err != nil {
-			// Check if it's a connection error
-			if ssh.IsConnectionError(err.Error()) {
-				hostsUnreachable++
-				if syncVerbose {
-					fmt.Printf("  %s: offline\n", host)
-				}
-				continue
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+			if syncVerbose {
+				fmt.Printf("Checking %s...\n", h)
 			}
-			// Non-connection error - log warning but continue
-			fmt.Fprintf(os.Stderr, "Warning: error syncing %s: %v\n", host, err)
-			continue
-		}
 
-		totalUpdated += result.Updated
-		reportHostSyncWarnings(host, result)
-		hostsReached++
-		if syncVerbose && result.Updated > 0 {
-			fmt.Printf("  %s: %d job(s) updated\n", host, result.Updated)
-		}
+			result, err := syncHost(database, h)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					hostsUnreachable++
+					if syncVerbose {
+						fmt.Printf("  %s: offline\n", h)
+					}
+					return
+				}
+				fmt.Fprintf(os.Stderr, "Warning: error syncing %s: %v\n", h, err)
+				return
+			}
+
+			totalUpdated += result.Updated
+			reportHostSyncWarnings(h, result)
+			hostsReached++
+			if syncVerbose && result.Updated > 0 {
+				fmt.Printf("  %s: %d job(s) updated\n", h, result.Updated)
+			}
+		}(host)
 	}
 
-	// Deploy agent binary and start queue runners only in full mode
+	// Launch cloud sync in parallel with SSH
+	var cloudUpdated int
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cloudUpdated = syncCloudState(cfg, database, campaign.NewReconciler(), syncVerbose).Updated
+	}()
+
+	wg.Wait()
+	totalUpdated += cloudUpdated
+
+	// Deploy agent binary and start queue runners only in full mode (after sync completes)
 	if syncFull {
 		deployAgentsToHosts(hosts)
 		if !syncNoQueueStart {
 			startQueueRunnersForQueuedHosts(database)
 		}
 	}
-
-	// Prune old cached log files
-	cfg, _ := config.Load()
-
-	totalUpdated += syncCloudState(cfg, database, campaign.NewReconciler(), syncVerbose).Updated
 
 	if cfg.LogCacheMaxAge > 0 {
 		maxAge := time.Duration(cfg.LogCacheMaxAge) * 24 * time.Hour
@@ -957,61 +969,83 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 	if r2Client == nil || database == nil {
 		return nil
 	}
-	if instanceIDs == nil {
-		instanceIDs = make(map[int64]struct{})
-		running, err := db.ListRunningLaunches(database)
-		if err != nil {
-			return fmt.Errorf("list running launches: %w", err)
-		}
-		for _, launch := range running {
-			instanceIDs[launch.ID] = struct{}{}
-		}
 
-		recent, err := db.ListRecentlyTerminalLaunches(database, cloudInstanceOpslogLookback)
-		if err != nil {
-			return fmt.Errorf("list recent terminal launches: %w", err)
-		}
-		for _, launch := range recent {
-			instanceIDs[launch.ID] = struct{}{}
-		}
-	}
-
-	ids := make([]int64, 0, len(instanceIDs))
-	for instanceID := range instanceIDs {
-		if instanceID > 0 {
-			ids = append(ids, instanceID)
-		}
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-
-	for _, instanceID := range ids {
-		if err := syncCloudInstanceOpslog(ctx, r2Client, instanceID); err != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: instance %d ops log sync failed: %v\n", instanceID, err)
+	var ids []int64
+	if instanceIDs != nil {
+		ids = make([]int64, 0, len(instanceIDs))
+		for id := range instanceIDs {
+			if id > 0 {
+				ids = append(ids, id)
 			}
 		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	} else {
+		var err error
+		ids, err = db.ListLaunchIDsNeedingOpslogSync(database, cloudInstanceOpslogLookback)
+		if err != nil {
+			return fmt.Errorf("list launches needing opslog sync: %w", err)
+		}
 	}
+
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Bounded parallelism for R2 reads
+	const maxParallel = 10
+	sem := make(chan struct{}, maxParallel)
+	var wg sync.WaitGroup
+
+	for _, instanceID := range ids {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(id int64) {
+			defer func() { <-sem; wg.Done() }()
+
+			result, err := syncCloudInstanceOpslog(ctx, r2Client, id)
+			switch result {
+			case opslogSynced:
+				_ = db.MarkOpslogSynced(database, id)
+			case opslogNotFound:
+				_ = db.MarkOpslogNotFound(database, id)
+			case opslogError:
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: instance %d ops log sync failed: %v\n", id, err)
+				}
+			}
+		}(instanceID)
+	}
+	wg.Wait()
 	return nil
 }
 
-func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceID int64) error {
+// opslogResult describes the outcome of a single opslog sync attempt.
+type opslogResult int
+
+const (
+	opslogSynced   opslogResult = iota // successfully fetched and cached
+	opslogNotFound                     // R2 key does not exist
+	opslogError                        // transient error (timeout, network)
+)
+
+func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceID int64) (opslogResult, error) {
 	if r2Client == nil || instanceID <= 0 {
-		return nil
+		return opslogNotFound, nil
 	}
 	data, err := r2Client.GetObject(ctx, r2keys.InstanceOpslog(instanceID))
 	if err != nil {
 		if r2.IsNotFound(err) {
-			return nil
+			return opslogNotFound, nil
 		}
-		return fmt.Errorf("get instance ops log: %w", err)
+		return opslogError, fmt.Errorf("get instance ops log: %w", err)
 	}
 	if len(data) == 0 {
-		return nil
+		return opslogNotFound, nil
 	}
 	if err := oplog.WriteSyncedInstanceLog(instanceID, data); err != nil {
-		return fmt.Errorf("cache instance ops log: %w", err)
+		return opslogError, fmt.Errorf("cache instance ops log: %w", err)
 	}
-	return nil
+	return opslogSynced, nil
 }
 
 func importCloudTimeseriesFile(database *sql.DB, jobID int64, path, tenant string) error {
