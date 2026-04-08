@@ -380,7 +380,7 @@ func (w *Worker) reconcileCloudJobs() {
 	for _, client := range cloudClients {
 		clientAny = append(clientAny, client)
 	}
-	result := syncorch.SyncCloud(nil, w.database, syncorch.CloudSyncOptions{
+	result := syncorch.SyncCloud(w.appConfig, w.database, syncorch.CloudSyncOptions{
 		Timeout:     0,
 		Reconciler:  w.reconciler,
 		Clients:     clientAny,
