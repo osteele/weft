@@ -132,6 +132,7 @@ func TestRestartQueuedEndedLaunchJob_CreatesFreshAttemptAndRefreshesMetadata(t *
 	script := `# /// script
 # [tool.weft]
 # gpu-mem = 24
+# uv-args = ["--system"]
 # ///
 print("train")
 `
@@ -174,6 +175,9 @@ print("train")
 	}
 	if job.GPUMemGB == nil || *job.GPUMemGB != 26 {
 		t.Fatalf("GPUMemGB = %v, want 26 (24 + headroom)", job.GPUMemGB)
+	}
+	if job.Command != "uv run --system train.py" {
+		t.Fatalf("Command = %q, want %q", job.Command, "uv run --system train.py")
 	}
 
 	var latestAttemptNumber int

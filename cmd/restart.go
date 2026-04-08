@@ -273,6 +273,16 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 			}
 		}
 	}
+	if len(meta.UvArgs) > 0 {
+		rewritten := dataloc.ApplyUvArgs(job.Command, meta.UvArgs)
+		if rewritten != job.Command {
+			if err := db.SetJobCommand(database, job.ID, rewritten); err != nil {
+				return nil, fmt.Errorf("update command from script metadata uv-args: %w", err)
+			}
+			job.Command = rewritten
+			updates = append(updates, fmt.Sprintf("command: %s (from script metadata uv-args)", rewritten))
+		}
+	}
 	return updates, nil
 }
 

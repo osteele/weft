@@ -128,7 +128,9 @@ block.
 
 The `uv-args` key injects extra arguments into `uv run` commands. For example,
 `uv-args = ["--system"]` rewrites `uv run script.py` to
-`uv run --system script.py`. The command is unchanged if it doesn't use `uv run`.
+`uv run --system script.py`. For common direct Python invocations like
+`python script.py` and `python3 script.py`, weft also rewrites to `uv run`
+before applying `uv-args`.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
 (highest to lowest): `.weft.toml [cloud] image` > script `image` > auto-selected

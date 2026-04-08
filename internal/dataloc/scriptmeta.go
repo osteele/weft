@@ -27,6 +27,7 @@ type ScriptMeta struct {
 var (
 	pep723StartRe = regexp.MustCompile(`^# /// script\s*$`)
 	pep723EndRe   = regexp.MustCompile(`^# ///\s*$`)
+	pythonExecRe  = regexp.MustCompile(`^python([0-9]+(\.[0-9]+)?)?$`)
 )
 
 // ParseScriptMeta extracts [tool.weft] from a PEP 723 inline metadata block.
@@ -166,6 +167,94 @@ func InjectUvArgs(command string, uvArgs []string) string {
 		return command
 	}
 	return before + "uv run " + strings.Join(uvArgs, " ") + after
+}
+
+// ApplyUvArgs applies uv-args to a command.
+// Behavior:
+//   - If command already contains "uv run", inject uvArgs into that invocation.
+//   - Otherwise, rewrite common direct Python forms (python/python3[.N] script.py)
+//     to an equivalent "uv run <uvArgs> ..." command.
+//   - Compound shell commands are left unchanged.
+func ApplyUvArgs(command string, uvArgs []string) string {
+	if len(uvArgs) == 0 {
+		return command
+	}
+
+	injected := InjectUvArgs(command, uvArgs)
+	if injected != command {
+		return injected
+	}
+
+	if hasShellOperators(command) {
+		return command
+	}
+
+	return rewritePythonCommandWithUv(command, uvArgs)
+}
+
+func hasShellOperators(command string) bool {
+	for _, op := range []string{"&&", "||", "|", ";"} {
+		if strings.Contains(command, op) {
+			return true
+		}
+	}
+	return false
+}
+
+func rewritePythonCommandWithUv(command string, uvArgs []string) string {
+	tokens := strings.Fields(command)
+	if len(tokens) == 0 {
+		return command
+	}
+
+	pythonIdx := -1
+	for i, tok := range tokens {
+		if isPythonExecToken(tok) {
+			pythonIdx = i
+			break
+		}
+		// Allow leading env var assignments.
+		if strings.Contains(tok, "=") && !strings.HasPrefix(tok, "-") {
+			continue
+		}
+		return command
+	}
+	if pythonIdx == -1 {
+		return command
+	}
+
+	scriptIdx := -1
+	for i := pythonIdx + 1; i < len(tokens); i++ {
+		tok := tokens[i]
+		if strings.HasSuffix(tok, ".py") && !strings.Contains(tok, "=") {
+			scriptIdx = i
+			break
+		}
+	}
+	if scriptIdx == -1 {
+		return command
+	}
+
+	uvPrefix := "uv run " + strings.Join(uvArgs, " ")
+	pythonFlags := tokens[pythonIdx+1 : scriptIdx]
+	scriptAndArgs := strings.Join(tokens[scriptIdx:], " ")
+
+	var rewritten string
+	if len(pythonFlags) == 0 {
+		rewritten = uvPrefix + " " + scriptAndArgs
+	} else {
+		rewritten = uvPrefix + " python " + strings.Join(pythonFlags, " ") + " " + scriptAndArgs
+	}
+
+	if pythonIdx > 0 {
+		return strings.Join(tokens[:pythonIdx], " ") + " " + rewritten
+	}
+	return rewritten
+}
+
+func isPythonExecToken(token string) bool {
+	base := filepath.Base(token)
+	return pythonExecRe.MatchString(base)
 }
 
 func tomlStringSlice(tree *toml.Tree, key string) []string {

@@ -322,6 +322,61 @@ func TestInjectUvArgs(t *testing.T) {
 	}
 }
 
+func TestApplyUvArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		uvArgs  []string
+		want    string
+	}{
+		{
+			name:    "existing uv run",
+			command: "uv run script.py",
+			uvArgs:  []string{"--system"},
+			want:    "uv run --system script.py",
+		},
+		{
+			name:    "python script rewritten",
+			command: "python script.py",
+			uvArgs:  []string{"--system"},
+			want:    "uv run --system script.py",
+		},
+		{
+			name:    "python with flags preserved",
+			command: "python -u script.py --epochs 10",
+			uvArgs:  []string{"--system"},
+			want:    "uv run --system python -u script.py --epochs 10",
+		},
+		{
+			name:    "python3 script rewritten",
+			command: "python3 script.py",
+			uvArgs:  []string{"--system"},
+			want:    "uv run --system script.py",
+		},
+		{
+			name:    "compound command unchanged",
+			command: "pip install foo && python script.py",
+			uvArgs:  []string{"--system"},
+			want:    "pip install foo && python script.py",
+		},
+		{
+			name:    "empty args unchanged",
+			command: "python script.py",
+			uvArgs:  nil,
+			want:    "python script.py",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ApplyUvArgs(tt.command, tt.uvArgs)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func assertStringSlice(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

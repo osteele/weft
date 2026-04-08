@@ -2202,6 +2202,12 @@ func UpdateJobCommand(db *sql.DB, id int64, command string) error {
 	return err
 }
 
+// SetJobCommand updates the command for a job regardless of status.
+func SetJobCommand(db *sql.DB, id int64, command string) error {
+	_, err := db.Exec(`UPDATE jobs SET command = ? WHERE id = ?`, command, id)
+	return err
+}
+
 // UpdateJobHost updates the host for a job (only for queued jobs)
 func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 	_, err := db.Exec(`UPDATE job_attempts SET host = ? WHERE job_id = ? AND end_time IS NULL`, newHost, id)
