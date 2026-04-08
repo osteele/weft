@@ -199,11 +199,14 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "[1 jobs] Auto-pilot failed:") {
+	if !strings.Contains(out, "Auto-pilot failed:") {
 		t.Fatalf("expected status line in grouped footer, got:\n%s", out)
 	}
-	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
+	if !strings.Contains(out, "a:auto (ON)") {
 		t.Fatalf("expected controls line with auto state, got:\n%s", out)
+	}
+	if !strings.Contains(out, "q:quit") {
+		t.Fatalf("expected quit hint in controls line, got:\n%s", out)
 	}
 }
 
@@ -221,7 +224,7 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "a:toggle-auto auto:ON q:quit") {
+	if !strings.Contains(out, "a:auto (ON)") || !strings.Contains(out, "q:quit") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
 	}
 }
@@ -242,17 +245,14 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	groupedIdx := strings.Index(out, "[1 jobs] Auto-pilot: monitoring")
-	sharedIdx := strings.Index(out, "status: running jobs")
-	controlsIdx := strings.Index(out, "a:toggle-auto auto:ON q:quit")
-	if groupedIdx < 0 || sharedIdx < 0 || controlsIdx < 0 {
+	sharedIdx := strings.Index(out, "0 jobs running")
+	statusIdx := strings.Index(out, "Auto-pilot: monitoring")
+	controlsIdx := strings.Index(out, "a:auto (ON)")
+	if sharedIdx < 0 || statusIdx < 0 || controlsIdx < 0 {
 		t.Fatalf("missing grouped footer parts, got:\n%s", out)
 	}
-	if !(groupedIdx < sharedIdx && sharedIdx < controlsIdx) {
-		t.Fatalf("expected grouped status -> shared status -> controls order, got:\n%s", out)
-	}
-	if etaIdx := strings.Index(out, "ETA: "); etaIdx >= 0 && !(groupedIdx < etaIdx && etaIdx < sharedIdx) {
-		t.Fatalf("expected ETA line between grouped status and shared status, got:\n%s", out)
+	if !(sharedIdx < statusIdx && statusIdx < controlsIdx) {
+		t.Fatalf("expected shared status -> status -> controls order, got:\n%s", out)
 	}
 }
 

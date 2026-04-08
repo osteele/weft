@@ -79,11 +79,11 @@ func TestFetchSharedTUIStatusSplitsRunningAndStartingInstances(t *testing.T) {
 	}
 
 	status := fetchSharedTUIStatus(database)
-	if !strings.Contains(status, "instances 4 (running 2, starting 2)") {
+	if !strings.Contains(status, "4 instances (2 up, 2 starting)") {
 		t.Fatalf("status = %q, want split instance counts", status)
 	}
-	if !strings.Contains(status, "burn $1.00/hr") {
-		t.Fatalf("status = %q, want burn suffix", status)
+	if !strings.Contains(status, "$1.00/hr") {
+		t.Fatalf("status = %q, want cost suffix", status)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestFetchSharedTUIStatusOmitsStartingWhenZero(t *testing.T) {
 	}
 
 	status := fetchSharedTUIStatus(database)
-	if !strings.Contains(status, "instances 3") {
+	if !strings.Contains(status, "3 instances") {
 		t.Fatalf("status = %q, want compact instance count", status)
 	}
 	if strings.Contains(status, "starting") {

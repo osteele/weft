@@ -558,13 +558,17 @@ func (m listTUIModel) groupedView() string {
 	groupedJobs := m.groupedJobsWithAutoReasons()
 
 	// Build footer lines first so we can reserve space for them.
-	etaLine := m.groupedETALine(groupedJobs)
+	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
+	etaLine := formatETALine(eta)
 	statusLine := m.groupedStatusText()
-	controlsLine := m.groupedControlsText()
+	controlsLine := m.groupedControlsText(eta.HasQueued)
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
-	// Reserve: 1 title + 1 blank separator + 2 footer lines + optional ETA line.
-	footerLines := 3 // blank separator + status + controls
+	// Reserve: 1 title + 1 blank separator + footer lines.
+	footerLines := 2 // blank separator + controls
 	if etaLine != "" {
+		footerLines++
+	}
+	if statusLine != "" {
 		footerLines++
 	}
 	footerLines += len(sharedStatusLines)
@@ -585,9 +589,7 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString("\n")
 	}
 
-	// Visually separate grouped job rows from ETA/actions footer lines.
-	b.WriteString("\n")
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
+	// Visually separate grouped job rows from footer lines.
 	b.WriteString("\n")
 	if etaLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
@@ -597,38 +599,38 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
+	if statusLine != "" {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
+		b.WriteString("\n")
+	}
 	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(controlsLine, m.width)))
 	return b.String()
 }
 
 func (m listTUIModel) groupedStatusText() string {
-	state := fmt.Sprintf("[%d jobs]", len(m.jobs))
+	var parts []string
 	if m.syncInProgress {
-		state += " syncing..."
+		parts = append(parts, "syncing...")
 	}
 	if m.statusMessage != "" {
-		state += " " + m.statusMessage
+		parts = append(parts, m.statusMessage)
 	}
-	return state
-}
-
-func (m listTUIModel) groupedControlsText() string {
-	autoHint := "auto:OFF"
-	if m.autoMode {
-		autoHint = "auto:ON"
-	}
-	return "a:toggle-auto " + autoHint + " q:quit"
-}
-
-func (m listTUIModel) groupedETALine(groupedJobs []*db.Job) string {
-	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
-	line := formatETALine(eta)
-	if line == "" {
+	if len(parts) == 0 {
 		return ""
 	}
-	if eta.HasQueued {
+	return strings.Join(parts, " ")
+}
+
+func (m listTUIModel) groupedControlsText(hasQueued bool) string {
+	autoState := "OFF"
+	if m.autoMode {
+		autoState = "ON"
+	}
+	line := fmt.Sprintf("a:auto (%s)", autoState)
+	if hasQueued {
 		line += "  n:new instance"
 	}
+	line += "  q:quit"
 	return line
 }
 
