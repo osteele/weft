@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
@@ -1295,7 +1296,11 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			continue
 		}
 		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
-			return placed, 0, "", blockedReasons, err
+			slog.Debug("auto-pilot reuse assignment failed, skipping",
+				"job_id", assignment.Job.ID,
+				"instance_id", assignment.Instance.Instance.ID,
+				"error", err)
+			continue
 		}
 		placed++
 	}
