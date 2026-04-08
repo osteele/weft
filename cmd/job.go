@@ -1,16 +1,22 @@
 package cmd
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/bidding"
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
-	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -113,22 +119,58 @@ var jobListCmd = &cobra.Command{
 }
 
 // Job move subcommand
-var jobMoveCmd = &cobra.Command{
-	Use:   "move <job-id> <new-host|new|create>",
-	Short: "Move a queued job to a different host or a new instance",
-	Long: `Move a queued job to a different host or a newly launched instance.
+var (
+	jobMoveEach    bool
+	jobMoveProject string
+)
 
-This command only works for jobs with status=queued that haven't started yet.
-For host targets, it updates the host in the database and triggers queue reconciliation.
-For 'new'/'create', it launches a compatible new rental instance and moves the job there.
+var jobMoveCmd = &cobra.Command{
+	Use:   "move <job-id>... <destination>",
+	Short: "Move queued jobs to a host, instance, or new instance(s)",
+	Long: `Move one or more queued jobs to a different destination.
+
+The last argument is the destination; all preceding arguments are job IDs.
+Job IDs support ranges (123:127), comma lists (123,124), and wj prefix.
+Jobs that are not queued are skipped with a warning.
+
+Destinations:
+  <hostname>     Move to an on-prem inventory host (e.g., cool100, studio)
+  wi<N>          Submit to an existing cloud instance (e.g., wi872)
+  new            Launch new instance(s) sized for the jobs (grouped by GPU affinity)
+  create         Alias for 'new'
+
+Flags:
+  --each              With 'new'/'create': launch a separate instance per job
+  --project <name>    Select all eligible queued jobs in the named project
 
 Examples:
-  weft job move 42 cool100   # Move job 42 to cool100
-  weft job move 43 studio    # Move job 43 to studio
-  weft job move 44 new       # Launch a new instance and move job 44
-  weft job move 45 create    # Alias for 'new'`,
-	Args: usageArgs(cobra.ExactArgs(2)),
+  weft job move 42 cool100              # Place job 42 on cool100
+  weft job move 43 wi872                # Submit job 43 to instance wi872
+  weft job move 44 new                  # Launch one new instance for job 44
+  weft job move 44 45 46 new            # Launch instance(s) for jobs 44-46
+  weft job move 44:46 --each new        # Separate new instance per job
+  weft job move --project myproj new    # All queued myproj jobs → new instance`,
+	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runJobMove,
+}
+
+var (
+	jobPlaceEach    bool
+	jobPlaceProject string
+)
+
+var jobPlaceCmd = &cobra.Command{
+	Use:   "place <job-id>... <destination>",
+	Short: "Place unplaced queued jobs on a host, instance, or new instance(s)",
+	Long: `Place one or more unplaced queued jobs on a destination.
+
+Like 'move', but only acts on jobs that are currently unplaced.
+Already-placed jobs are skipped with a warning. If all jobs are
+already placed, it's an error.
+
+Accepts the same destinations, --each, and --project flags as 'move'.`,
+	Args: usageArgs(cobra.MinimumNArgs(1)),
+	RunE: runJobPlace,
 }
 
 var jobStartCmd = &cobra.Command{
@@ -326,7 +368,12 @@ func init() {
 	jobCmd.AddCommand(jobRestartCmd)
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobWatchCmd)
+	jobMoveCmd.Flags().BoolVar(&jobMoveEach, "each", false, "With 'new'/'create': launch a separate instance per job")
+	jobMoveCmd.Flags().StringVar(&jobMoveProject, "project", "", "Select all eligible queued jobs in the named project")
 	jobCmd.AddCommand(jobMoveCmd)
+	jobPlaceCmd.Flags().BoolVar(&jobPlaceEach, "each", false, "With 'new'/'create': launch a separate instance per job")
+	jobPlaceCmd.Flags().StringVar(&jobPlaceProject, "project", "", "Select all eligible unplaced queued jobs in the named project")
+	jobCmd.AddCommand(jobPlaceCmd)
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
 	jobCmd.AddCommand(jobInfoCmd)
@@ -398,11 +445,16 @@ func init() {
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
-	jobID, err := ParseJobID(args[0])
-	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
-	}
-	newHost := args[1]
+	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false)
+}
+
+func runJobPlace(cmd *cobra.Command, args []string) error {
+	return runJobMoveOrPlace(args, jobPlaceProject, jobPlaceEach, true)
+}
+
+func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool) error {
+	dest := args[len(args)-1]
+	jobArgs := args[:len(args)-1]
 
 	database, err := db.Open()
 	if err != nil {
@@ -410,60 +462,250 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Get the job
-	job, err := db.GetJobByID(database, jobID)
+	eligible, err := resolveEligibleJobs(database, jobArgs, project, unplacedOnly)
 	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %s not found", FormatJobID(jobID))
+		return err
 	}
 
-	// Check status
-	effectiveStatus := job.EffectiveStatus()
-	if effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("can only move queued jobs (job %s has status: %s)", FormatJobID(jobID), effectiveStatus)
+	switch {
+	case strings.EqualFold(dest, "new") || strings.EqualFold(dest, "create"):
+		return moveJobsToNewInstances(database, eligible, each)
+	default:
+		if each {
+			return usageErrorf("--each is only valid with 'new' or 'create' destination")
+		}
+		if instanceID, parseErr := ids.ParseInstanceID(dest); parseErr == nil {
+			return moveJobsToInstance(database, eligible, instanceID)
+		}
+		return moveJobsToHost(database, eligible, dest)
+	}
+}
+
+// resolveEligibleJobs fetches jobs by ID list and/or --project, filtering to
+// queued jobs. When unplacedOnly is true (place command), already-placed jobs
+// are also skipped.
+func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, unplacedOnly bool) ([]*db.Job, error) {
+	var jobs []*db.Job
+	if project != "" {
+		all, err := db.ListJobs(database, db.StatusQueued, "", 0, nil, "")
+		if err != nil {
+			return nil, fmt.Errorf("list queued jobs: %w", err)
+		}
+		for _, job := range all {
+			if job.Project == project {
+				jobs = append(jobs, job)
+			}
+		}
+	}
+	if len(jobArgs) > 0 {
+		jobIDs, err := ParseJobIDs(jobArgs)
+		if err != nil {
+			return nil, fmt.Errorf("parse job IDs: %w", err)
+		}
+		for _, jobID := range jobIDs {
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				return nil, fmt.Errorf("get job %s: %w", FormatJobID(jobID), err)
+			}
+			if job != nil {
+				jobs = append(jobs, job)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: job %s not found, skipping\n", FormatJobID(jobID))
+			}
+		}
+	}
+	if len(jobs) == 0 && project == "" {
+		return nil, usageErrorf("provide job IDs or --project")
 	}
 
-	oldHost := job.Host
+	var eligible []*db.Job
+	for _, job := range jobs {
+		if job.EffectiveStatus() != db.StatusQueued {
+			fmt.Fprintf(os.Stderr, "Warning: job %s has status %s, skipping\n", FormatJobID(job.ID), job.EffectiveStatus())
+			continue
+		}
+		if unplacedOnly && job.TargetKind() != db.JobTargetUnplaced {
+			fmt.Fprintf(os.Stderr, "Warning: job %s is already placed, skipping\n", FormatJobID(job.ID))
+			continue
+		}
+		eligible = append(eligible, job)
+	}
+	if len(eligible) == 0 {
+		if unplacedOnly {
+			return nil, fmt.Errorf("no eligible unplaced queued jobs")
+		}
+		return nil, fmt.Errorf("no eligible queued jobs to move")
+	}
+	return eligible, nil
+}
 
-	if strings.EqualFold(newHost, "new") || strings.EqualFold(newHost, "create") {
-		result, moveErr := terminal.MoveQueuedJobToNewInstance(database, jobID)
-		if moveErr != nil {
-			return fmt.Errorf("move to new instance: %w", moveErr)
+func moveJobsToHost(database *sql.DB, jobs []*db.Job, host string) error {
+	moved := 0
+	for _, job := range jobs {
+		if err := unplaceIfNeeded(database, job); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: unplace job %s failed: %v\n", FormatJobID(job.ID), err)
+			continue
 		}
-		fmt.Printf("Moved job %s: %s → %s\n", FormatJobID(jobID), oldHost, result.TargetDesc)
-		if result.InstanceID > 0 {
-			fmt.Printf("Instance: %s\n", ids.FormatInstanceID(result.InstanceID))
+		if err := db.UpdateJobHost(database, job.ID, host); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: move job %s failed: %v\n", FormatJobID(job.ID), err)
+			continue
 		}
-		fmt.Printf("Command: %s\n", job.Command)
-		if job.Description != "" {
-			fmt.Printf("Description: %s\n", job.Description)
+		if err := db.SetPendingStatus(database, job.ID, db.StatusQueued); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: set pending status for job %s: %v\n", FormatJobID(job.ID), err)
 		}
+		moved++
+		fmt.Printf("Moved job %s → %s\n", FormatJobID(job.ID), host)
+	}
+	if moved == 0 {
+		return fmt.Errorf("all %d job(s) failed to move to %s", len(jobs), host)
+	}
+	if syncErr := syncHostAfterQueueChange(database, host); syncErr != nil {
+		reportQueueChangeSyncFailure(host, syncErr)
+	}
+	return nil
+}
+
+func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) error {
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		return fmt.Errorf("R2 client: %w", err)
+	}
+
+	var ready []*db.Job
+	for _, job := range jobs {
+		if err := unplaceIfNeeded(database, job); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: unplace job %s failed: %v\n", FormatJobID(job.ID), err)
+			continue
+		}
+		ready = append(ready, job)
+	}
+	if len(ready) == 0 {
+		return fmt.Errorf("all jobs failed to unplace")
+	}
+
+	if err := campaign.SubmitJobsToInstance(context.Background(), database, r2Client, instanceID, ready); err != nil {
+		return fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(instanceID), err)
+	}
+	for _, job := range ready {
+		fmt.Printf("Moved job %s → instance %s\n", FormatJobID(job.ID), ids.FormatInstanceID(instanceID))
+	}
+	return nil
+}
+
+func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	clients, err := buildCloudClients(cfg)
+	if err != nil || len(clients) == 0 {
+		return fmt.Errorf("no cloud providers available")
+	}
+	r2Client, r2Err := buildR2Client(cfg)
+	if r2Err != nil {
+		return fmt.Errorf("R2 client: %w", r2Err)
+	}
+
+	// Unplace all jobs first.
+	for _, job := range jobs {
+		if err := unplaceIfNeeded(database, job); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: unplace job %s failed: %v\n", FormatJobID(job.ID), err)
+		}
+	}
+
+	// Group jobs.
+	var groups []campaign.InstanceGroup
+	if separateEach {
+		for _, job := range jobs {
+			groups = append(groups, campaign.PrepareGroups([]*db.Job{job}, database, "", r2Client)...)
+		}
+	} else {
+		groups = campaign.PrepareGroups(jobs, database, "", r2Client)
+	}
+	if len(groups) == 0 {
+		return fmt.Errorf("no launchable groups from provided jobs")
+	}
+
+	// Fetch offers.
+	survivalModel := buildSurvivalModel(database)
+	predCfg := buildPredictorConfig(cfg)
+	overheadModel := buildOverheadModel(database)
+	setupFactory := campaign.OfferSetupOverheadFactory(database, overheadModel)
+	groupOffers := campaign.FetchGroupOffersWithPredictor(
+		clients, groups, &predCfg, survivalModel, setupFactory,
+		bidding.StrategyCheap, 0.4,
+	)
+
+	var launchGroups []campaign.InstanceGroup
+	var launchOffers []cloud.Offer
+	for _, gOffer := range groupOffers {
+		if gOffer.Offer == nil || gOffer.Err != nil {
+			detail := "no offers"
+			if gOffer.Err != nil {
+				detail = gOffer.Err.Error()
+			}
+			fmt.Fprintf(os.Stderr, "Warning: %s for %s (%d jobs) — skipping\n", detail, gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs))
+			continue
+		}
+		launchGroups = append(launchGroups, gOffer.Group)
+		launchOffers = append(launchOffers, *gOffer.Offer)
+	}
+	if len(launchGroups) == 0 {
+		return fmt.Errorf("no cloud offers found for any GPU group")
+	}
+
+	fmt.Printf("Launching %d instance(s) for %d job(s)...\n", len(launchGroups), countGroupJobs(launchGroups))
+
+	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+	opts := campaign.LaunchOpts{
+		GracePeriodSeconds: 15 * 60,
+		Strategy:           bidding.StrategyCheap,
+		MinSurvival:        0.4,
+	}
+
+	result, err := campaign.LaunchCampaign(
+		clients, database, launchGroups, launchOffers, nil, survivalModel, opts, r2Cfg,
+		func(provider cloud.Provider) (cloud.CreateOpts, error) {
+			return createOptsForProvider(cfg, provider)
+		},
+		func(group campaign.InstanceGroup, phase string) {
+			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
+		},
+		func(id int64) {
+			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(launchGroups))
+		},
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, e := range result.Errors {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", e)
+	}
+	if len(result.InstanceIDs) == 0 && len(result.Errors) > 0 {
+		return result.Errors[0]
+	}
+	for _, id := range result.InstanceIDs {
+		fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
+	}
+	return nil
+}
+
+func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
+	if job.TargetKind() == db.JobTargetUnplaced {
 		return nil
 	}
+	_, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
+	return err
+}
 
-	// Update host in database first
-	if err := db.UpdateJobHost(database, jobID, newHost); err != nil {
-		return fmt.Errorf("update database: %w", err)
+func countGroupJobs(groups []campaign.InstanceGroup) int {
+	n := 0
+	for _, g := range groups {
+		n += len(g.Jobs)
 	}
-
-	// Set pending status to queued to trigger reconciliation
-	if err := db.SetPendingStatus(database, jobID, db.StatusQueued); err != nil {
-		return fmt.Errorf("set pending status: %w", err)
-	}
-
-	if syncErr := syncHostAfterQueueChange(database, newHost); syncErr != nil {
-		reportQueueChangeSyncFailure(newHost, syncErr)
-	}
-
-	fmt.Printf("Moved job %s: %s → %s\n", FormatJobID(jobID), oldHost, newHost)
-	fmt.Printf("Command: %s\n", job.Command)
-	if job.Description != "" {
-		fmt.Printf("Description: %s\n", job.Description)
-	}
-
-	return nil
+	return n
 }
 
 func runJobUnplace(cmd *cobra.Command, args []string) error {

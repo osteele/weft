@@ -695,19 +695,45 @@ metadata.
 
 ### weft job move
 
-Move a queued job to a different host.
+Move one or more queued jobs to a different destination. Jobs that are not
+queued are skipped with a warning. Unplaced jobs can be moved (placed)
+directly.
 
 ```bash
-weft job move <job-id> <new-host>
+weft job move <job-id>... <destination>
 ```
 
-This command updates the host for a job that hasn't started yet (status=queued). Useful when you've queued work but want to run it on a different machine.
+**Destinations:**
+- `<hostname>` — on-prem inventory host (e.g., `cool100`, `studio`)
+- `wi<N>` — existing cloud instance (e.g., `wi872`)
+- `new` / `create` — launch new instance(s) grouped by GPU affinity
+- `new` with `--each` — launch a separate instance per job
+
+**Flags:**
+- `--each` — with `new`/`create`: launch a separate instance per job
+- `--project <name>` — select all eligible queued jobs in the named project (can combine with explicit job IDs)
 
 **Examples:**
 ```bash
-weft job move 42 atlas   # Move job 42 to atlas
-weft job move 43 studio    # Move job 43 to studio
+weft job move 42 cool100              # Place/move job 42 to cool100
+weft job move 43 wi872                # Submit job 43 to instance wi872
+weft job move 44 new                  # Launch one new instance for job 44
+weft job move 44 45 46 new            # Launch instance(s) for jobs 44-46
+weft job move 44:46 --each new        # Separate new instance per job
+weft job move --project myproj new    # All queued myproj jobs → new instance(s)
 ```
+
+### weft job place
+
+Place one or more unplaced queued jobs. Like `move`, but only acts on
+jobs that are currently unplaced — already-placed jobs are skipped with
+a warning, and if all jobs are already placed it's an error.
+
+```bash
+weft job place <job-id>... <destination>
+```
+
+Accepts the same destinations, `--each`, and `--project` flags as `move`.
 
 ### weft job start
 
