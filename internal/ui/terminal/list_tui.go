@@ -64,6 +64,10 @@ type listTUIModel struct {
 	quickLaunchDone            <-chan listQuickLaunchDoneMsg
 	quickLaunchStatusHoldUntil time.Time
 	movePicker                 movePickerModel
+	moveLookupPending          bool
+	moveLookupRequestID        int64
+	moveLookupJobID            int64
+	moveLookupSeq              int64
 	focused                    bool
 }
 
@@ -110,6 +114,13 @@ type listQuickLaunchDoneMsg struct {
 }
 type listQuickLaunchProgressMsg struct {
 	message string
+}
+
+type listMoveOptionsReadyMsg struct {
+	requestID int64
+	jobID     int64
+	options   []moveOption
+	err       error
 }
 
 var (
@@ -455,6 +466,31 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.reloadJobs()
 
 	case moveOptionsReadyMsg:
+		// Legacy path; grouped list uses listMoveOptionsReadyMsg with request IDs.
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Move: %v", msg.err)
+			return m, nil
+		}
+		m.movePicker = movePickerModel{
+			active:  true,
+			jobID:   msg.jobID,
+			options: msg.options,
+			cursor:  0,
+		}
+		return m, nil
+
+	case listMoveOptionsReadyMsg:
+		if !m.moveLookupPending || msg.requestID != m.moveLookupRequestID {
+			return m, nil
+		}
+		m.moveLookupPending = false
+		m.moveLookupRequestID = 0
+
+		selected := m.selectedGroupedJob()
+		if selected == nil || selected.ID != msg.jobID {
+			m.statusMessage = "Move lookup discarded (selection changed)"
+			return m, nil
+		}
 		if msg.err != nil {
 			m.statusMessage = fmt.Sprintf("Move: %v", msg.err)
 			return m, nil
@@ -771,7 +807,23 @@ func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "q", "esc":
+	case "esc":
+		if m.moveLookupPending {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+			m.statusMessage = "Move lookup canceled"
+			return m, nil
+		}
+		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+		_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
+		if m.dbWatcher != nil {
+			_ = m.dbWatcher.Close()
+		}
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return m, tea.Quit
+	case "ctrl+c", "q":
 		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 		_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
 		if m.dbWatcher != nil {
@@ -869,25 +921,45 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "Move is only available for queued jobs"
 			return m, nil
 		}
+		m.moveLookupSeq++
+		reqID := m.moveLookupSeq
+		m.moveLookupPending = true
+		m.moveLookupRequestID = reqID
+		m.moveLookupJobID = job.ID
+		m.statusMessage = fmt.Sprintf("Searching move destinations for job #%d... (Esc to cancel)", job.ID)
+		return m, m.requestGroupedMoveOptions(reqID, job.ID)
+	}
+	return m, nil
+}
+
+func (m listTUIModel) requestGroupedMoveOptions(requestID int64, jobID int64) tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+		}
+		if job == nil {
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+		}
+
 		cfg, cfgErr := config.Load()
 		if cfgErr != nil {
-			m.statusMessage = fmt.Sprintf("Move setup failed: %v", cfgErr)
-			return m, nil
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("load config: %w", cfgErr)}
 		}
 		cloudClients, clientsErr := buildCloudClients(cfg)
 		if clientsErr != nil {
-			m.statusMessage = fmt.Sprintf("Move setup failed: %v", clientsErr)
-			return m, nil
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("build cloud clients: %w", clientsErr)}
 		}
-		launches, err := db.ListRunningLaunches(m.database)
+
+		launches, err := db.ListRunningLaunches(database)
 		if err != nil {
-			m.statusMessage = fmt.Sprintf("Move setup failed: %v", err)
-			return m, nil
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("list running launches: %w", err)}
 		}
 		capacities := make([]campaign.InstanceCapacity, 0, len(launches))
 		queuedCounts := make(map[int64]int, len(launches))
 		for _, ci := range launches {
-			liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(m.database, ci.ID)
+			liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 			if jobsErr != nil {
 				continue
 			}
@@ -904,10 +976,18 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job.LaunchID != nil {
 			sourceInstanceID = *job.LaunchID
 		}
-		m.statusMessage = "Searching for move destinations..."
-		return m, requestMoveOptions(m.database, cfg, cloudClients, job, capacities, queuedCounts, sourceInstanceID)
+		msg := requestMoveOptions(database, cfg, cloudClients, job, capacities, queuedCounts, sourceInstanceID)()
+		ready, ok := msg.(moveOptionsReadyMsg)
+		if !ok {
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("unexpected move-options response")}
+		}
+		return listMoveOptionsReadyMsg{
+			requestID: requestID,
+			jobID:     ready.jobID,
+			options:   ready.options,
+			err:       ready.err,
+		}
 	}
-	return m, nil
 }
 
 func (m listTUIModel) footerText(rows int) string {

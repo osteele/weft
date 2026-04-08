@@ -376,3 +376,50 @@ func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 		t.Fatalf("controls line missing queued-job actions: %q", line)
 	}
 }
+
+func TestListTUIGroupedEscCancelsPendingMoveLookup(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:     true,
+		width:               100,
+		height:              20,
+		moveLookupPending:   true,
+		moveLookupRequestID: 7,
+		statusMessage:       "Searching move destinations...",
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := next.(listTUIModel)
+	if got.moveLookupPending {
+		t.Fatalf("moveLookupPending = true, want false")
+	}
+	if got.moveLookupRequestID != 0 {
+		t.Fatalf("moveLookupRequestID = %d, want 0", got.moveLookupRequestID)
+	}
+	if got.statusMessage != "Move lookup canceled" {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Move lookup canceled")
+	}
+}
+
+func TestListTUIGroupedIgnoresStaleMoveOptionsResult(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:     true,
+		width:               100,
+		height:              20,
+		moveLookupPending:   true,
+		moveLookupRequestID: 9,
+		statusMessage:       "Searching...",
+	}
+
+	next, _ := m.Update(listMoveOptionsReadyMsg{
+		requestID: 8,
+		jobID:     12,
+		options:   []moveOption{{isNew: true, gpuName: "A100"}},
+	})
+	got := next.(listTUIModel)
+	if !got.moveLookupPending {
+		t.Fatalf("stale response should not clear pending state")
+	}
+	if got.movePicker.active {
+		t.Fatalf("stale response should not open move picker")
+	}
+}
