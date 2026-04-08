@@ -212,6 +212,32 @@ func applyEnvMap(env map[string]string) []string {
 	return vars
 }
 
+// mergeEnvVarsByKey merges two "KEY=value" slices with key-based dedup.
+// Values from overlay replace values from base when the key matches.
+// New keys from overlay are appended.
+func mergeEnvVarsByKey(base, overlay []string) []string {
+	if len(overlay) == 0 {
+		return base
+	}
+	if len(base) == 0 {
+		return overlay
+	}
+	result := make([]string, 0, len(base)+len(overlay))
+	replaced := make(map[string]bool)
+	for _, ov := range overlay {
+		k, _, _ := strings.Cut(ov, "=")
+		replaced[k] = true
+	}
+	for _, bv := range base {
+		k, _, _ := strings.Cut(bv, "=")
+		if !replaced[k] {
+			result = append(result, bv)
+		}
+	}
+	result = append(result, overlay...)
+	return result
+}
+
 func encodeQueueDependencies(deps []queueDependency) string {
 	if len(deps) == 0 {
 		return ""

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -281,6 +282,16 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 			}
 			job.Command = rewritten
 			updates = append(updates, fmt.Sprintf("command: %s (from script metadata uv-args)", rewritten))
+		}
+	}
+	if len(meta.Env) > 0 {
+		merged := mergeEnvVarsByKey(job.EnvVars, applyEnvMap(meta.Env))
+		if !slices.Equal(merged, job.EnvVars) {
+			if err := db.SetJobEnvVars(database, job.ID, merged); err != nil {
+				return nil, fmt.Errorf("update env vars from script metadata: %w", err)
+			}
+			job.EnvVars = merged
+			updates = append(updates, fmt.Sprintf("env: %v (from script metadata)", meta.Env))
 		}
 	}
 	return updates, nil

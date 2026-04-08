@@ -151,6 +151,33 @@ import torch
 			want: &ScriptMeta{GPU: "nvidia>=20GB", UvArgs: []string{"--system", "--no-cache"}},
 		},
 		{
+			name: "env vars",
+			content: `# /// script
+# [tool.weft]
+# [tool.weft.env]
+# UV_SYSTEM_PYTHON = "1"
+# ///
+`,
+			want: &ScriptMeta{Env: map[string]string{"UV_SYSTEM_PYTHON": "1"}},
+		},
+		{
+			name: "env vars with other fields",
+			content: `# /// script
+# [tool.weft]
+# gpu-mem = 40
+# image = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+# [tool.weft.env]
+# UV_SYSTEM_PYTHON = "1"
+# CUDA_HOME = "/usr/local/cuda"
+# ///
+`,
+			want: &ScriptMeta{
+				GPUMemGB: 40,
+				Image:    "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10",
+				Env:      map[string]string{"UV_SYSTEM_PYTHON": "1", "CUDA_HOME": "/usr/local/cuda"},
+			},
+		},
+		{
 			name: "mixed with uv dependencies",
 			content: `# /// script
 # requires-python = ">=3.10"
@@ -202,6 +229,7 @@ import torch
 				t.Errorf("Image: got %q, want %q", got.Image, tt.want.Image)
 			}
 			assertStringSlice(t, "UvArgs", got.UvArgs, tt.want.UvArgs)
+			assertStringMap(t, "Env", got.Env, tt.want.Env)
 		})
 	}
 }
@@ -506,4 +534,17 @@ func equalBoolPtr(a, b *bool) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+func assertStringMap(t *testing.T, name string, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s: got %v, want %v", name, got, want)
+		return
+	}
+	for k, wv := range want {
+		if gv, ok := got[k]; !ok || gv != wv {
+			t.Errorf("%s[%q]: got %q, want %q", name, k, gv, wv)
+		}
+	}
 }

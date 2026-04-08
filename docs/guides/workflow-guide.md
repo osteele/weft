@@ -120,6 +120,7 @@ Supported keys (all optional):
 | `tags`      | list of strings  | `--tag`             |
 | `image`     | string           | `.weft.toml [cloud] image` |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
+| `env`        | table of strings | `--env` (merged)           |
 
 CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
@@ -131,6 +132,22 @@ The `uv-args` key injects extra arguments into `uv run` commands. For example,
 `uv run --system script.py`. For common direct Python invocations like
 `python script.py` and `python3 script.py`, weft also rewrites to `uv run`
 before applying `uv-args`.
+
+The `env` key sets environment variables for the job. Declare it as a TOML
+sub-table:
+
+```toml
+[tool.weft.env]
+UV_SYSTEM_PYTHON = "1"
+CUDA_HOME = "/usr/local/cuda"
+```
+
+This is equivalent to passing `--env UV_SYSTEM_PYTHON=1 --env CUDA_HOME=/usr/local/cuda`.
+Env vars from script metadata are merged with `--env` flags (both sources are
+kept; `--env` flags take precedence for duplicate keys at the runner level).
+This is useful for container-based jobs that need specific environment
+configuration, such as `UV_SYSTEM_PYTHON=1` for scripts that import packages
+from the container's system Python.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
 (highest to lowest): `.weft.toml [cloud] image` > script `image` > auto-selected

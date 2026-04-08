@@ -19,9 +19,10 @@ type ScriptMeta struct {
 	GPUMemStrict *bool  // Exact gpu-mem matching (no headroom), when explicitly set
 	Inputs       []string
 	Outputs      []string
-	Tags         []string // Job tags
-	Image        string   // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
-	UvArgs       []string // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
+	Tags         []string          // Job tags
+	Image        string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
+	UvArgs       []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
+	Env          map[string]string // Environment variables to set when running the job
 }
 
 var (
@@ -72,9 +73,10 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 		meta.Image = v
 	}
 	meta.UvArgs = tomlStringSlice(wt, "uv-args")
+	meta.Env = tomlStringMap(wt, "env")
 
 	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
-		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" && len(meta.UvArgs) == 0 {
+		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" && len(meta.UvArgs) == 0 && len(meta.Env) == 0 {
 		return nil, nil
 	}
 
@@ -297,6 +299,27 @@ func tomlStringSlice(tree *toml.Tree, key string) []string {
 		if s, ok := item.(string); ok {
 			result = append(result, s)
 		}
+	}
+	return result
+}
+
+func tomlStringMap(tree *toml.Tree, key string) map[string]string {
+	v := tree.Get(key)
+	if v == nil {
+		return nil
+	}
+	sub, ok := v.(*toml.Tree)
+	if !ok {
+		return nil
+	}
+	result := make(map[string]string, len(sub.Keys()))
+	for _, k := range sub.Keys() {
+		if s, ok := sub.Get(k).(string); ok {
+			result[k] = s
+		}
+	}
+	if len(result) == 0 {
+		return nil
 	}
 	return result
 }
