@@ -253,7 +253,13 @@ func (w *Worker) checkUnplacedJobs() {
 		return
 	}
 
-	sources := []placement.CandidateSource{&placement.OnPremSource{}}
+	// Collect live host metrics once for the entire cycle so that
+	// individual job placements reuse the same SSH probe results.
+	allHosts, _ := placement.LoadHostNames()
+	sharedMetrics := placement.CollectMetrics(w.database, allHosts, 5*time.Second)
+
+	onpremSource := &placement.OnPremSource{Metrics: sharedMetrics}
+	sources := []placement.CandidateSource{onpremSource}
 	w.mu.Lock()
 	r2Client := w.r2Client
 	w.mu.Unlock()
@@ -269,7 +275,7 @@ func (w *Worker) checkUnplacedJobs() {
 
 		jobSources := sources
 		if j.HasTag(db.TagInventory) {
-			jobSources = []placement.CandidateSource{&placement.OnPremSource{}}
+			jobSources = []placement.CandidateSource{onpremSource}
 		}
 
 		constraints := placement.ConstraintsFromJob(j)

@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strings"
 
@@ -40,6 +43,10 @@ func Execute() error {
 	logging.Setup(os.Stderr, "text")
 	if verbose {
 		logging.SetLevel(slog.LevelDebug)
+	}
+
+	if pprofEnv := os.Getenv("WEFT_PPROF"); pprofEnv != "" && pprofEnv != "0" {
+		startPprof()
 	}
 
 	// Initialize operation logger
@@ -146,6 +153,16 @@ var versionCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("weft %s\n", Version)
 	},
+}
+
+func startPprof() {
+	ln, err := net.Listen("tcp", "localhost:6060")
+	if err != nil {
+		slog.Warn("pprof listener failed", "error", err)
+		return
+	}
+	slog.Info("pprof enabled", "addr", "http://"+ln.Addr().String()+"/debug/pprof/")
+	go func() { _ = http.Serve(ln, nil) }()
 }
 
 func init() {

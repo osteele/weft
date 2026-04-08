@@ -33,6 +33,19 @@ var ErrNoEligibleHost = errors.New("no eligible host found")
 var loadHosts = inventory.LoadHosts
 var collectMetrics = CollectMetrics
 
+// LoadHostNames returns the names of all inventory hosts.
+func LoadHostNames() ([]string, error) {
+	hosts, err := loadHosts()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(hosts))
+	for i, h := range hosts {
+		names[i] = h.Name
+	}
+	return names, nil
+}
+
 // Constraints describes hard requirements for a job placement.
 type Constraints struct {
 	GPUClass string   // Required GPU class (e.g., "a100"); empty = no preference
@@ -332,6 +345,13 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 // BestReachableHostWithPredictor returns the best eligible reachable host using
 // live metrics and optional predictor-based resource scoring.
 func BestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTimeout time.Duration, predict JobPredictor) (*PlacementResult, error) {
+	return bestReachableHostWithPredictor(db, constraints, probeTimeout, predict, nil)
+}
+
+// bestReachableHostWithPredictor is the internal implementation that accepts
+// optional pre-collected metrics to avoid redundant SSH probes when placing
+// multiple jobs in a single cycle.
+func bestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTimeout time.Duration, predict JobPredictor, preMetrics map[string]*HostMetrics) (*PlacementResult, error) {
 	// First pass: static scoring to determine eligible hosts
 	hosts, err := loadHosts()
 	if err != nil {
@@ -348,8 +368,18 @@ func BestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTi
 		return nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
 	}
 
-	// Collect live metrics (also proves reachability)
-	metrics := collectMetrics(db, eligible, probeTimeout)
+	// Use pre-collected metrics if available, otherwise probe via SSH.
+	var metrics map[string]*HostMetrics
+	if preMetrics != nil {
+		metrics = make(map[string]*HostMetrics, len(eligible))
+		for _, h := range eligible {
+			if m, ok := preMetrics[h]; ok {
+				metrics[h] = m
+			}
+		}
+	} else {
+		metrics = collectMetrics(db, eligible, probeTimeout)
+	}
 	if len(metrics) == 0 {
 		return nil, ErrNoReachableHost
 	}
@@ -394,11 +424,17 @@ func BestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTi
 // Returns ErrNoEligibleHost if no inventory host matches.
 // Does not compare against rental — use Evaluate for cross-strategy comparison.
 func PlaceOnPrem(database *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
+	return placeOnPremWithMetrics(database, constraints, predict, nil)
+}
+
+// placeOnPremWithMetrics is like PlaceOnPrem but accepts optional pre-collected
+// metrics to avoid redundant SSH probes.
+func placeOnPremWithMetrics(database *sql.DB, constraints Constraints, predict JobPredictor, preMetrics map[string]*HostMetrics) (*PlacementResult, error) {
 	if db.HasRentalTag(constraints.Tags) {
 		return nil, ErrNoEligibleHost
 	}
 
-	result, err := BestReachableHostWithPredictor(database, constraints, 5*time.Second, predict)
+	result, err := bestReachableHostWithPredictor(database, constraints, 5*time.Second, predict, preMetrics)
 	if err == nil {
 		return result, nil
 	}
