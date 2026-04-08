@@ -1349,18 +1349,32 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 	if outcome == AttemptOutcomeCompleted {
 		_, err := database.Exec(
 			`UPDATE job_attempts
-			 SET status = ?, cloud_outcome = ?, end_time = COALESCE(end_time, ?),
+			 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?),
 			     exit_code = COALESCE(exit_code, 0), last_synced_status = ?, pending_status = NULL
-			 WHERE launch_id = ? AND end_time IS NULL`,
+			 WHERE launch_id = ? AND (end_time IS NULL OR end_time = 0)`,
 			attemptStatus, outcome, now, StatusCompleted, instanceID,
 		)
 		return err
 	}
 	_, err := database.Exec(
 		`UPDATE job_attempts
-		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(end_time, ?), pending_status = NULL
-		 WHERE launch_id = ? AND end_time IS NULL`,
+		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?), pending_status = NULL
+		 WHERE launch_id = ? AND (end_time IS NULL OR end_time = 0)`,
 		attemptStatus, outcome, now, instanceID,
+	)
+	return err
+}
+
+// repairAttemptEndTimeZero fixes attempts where end_time was written as 0
+// (meaning "unknown") instead of NULL. This caused CloseLaunchAttempts and
+// ComputeJobState to treat the attempt as having a known end time of epoch 0,
+// preventing instance cleanup.
+func repairAttemptEndTimeZero(database *sql.DB) error {
+	_, err := database.Exec(
+		`UPDATE job_attempts
+		 SET end_time = COALESCE(NULLIF(start_time, 0), queued_at, strftime('%s','now'))
+		 WHERE end_time = 0 AND status IN (?, ?, ?)`,
+		StatusCompleted, StatusFailed, StatusCanceled,
 	)
 	return err
 }
@@ -1912,12 +1926,6 @@ func GetLaunchLiveStates(database *sql.DB, launchIDs []int64) (map[int64]*Launch
 		return nil, err
 	}
 	return result, nil
-}
-
-// DeleteLaunchLiveState removes the ephemeral state for a terminal instance.
-func DeleteLaunchLiveState(database *sql.DB, launchID int64) error {
-	_, err := database.Exec(`DELETE FROM launch_live_state WHERE launch_id = ?`, launchID)
-	return err
 }
 
 // MarkOpslogSynced records a successful opslog fetch for a launch.

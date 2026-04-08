@@ -58,7 +58,7 @@ type dbExecer interface {
 // cleanupStaleAttempts.
 func closeAttemptsAndRequeue(db dbExecer, jobID int64, now int64) error {
 	if _, err := db.Exec(
-		`UPDATE job_attempts SET status = ?, end_time = COALESCE(end_time, ?) WHERE job_id = ? AND end_time IS NULL`,
+		`UPDATE job_attempts SET status = ?, end_time = COALESCE(NULLIF(end_time, 0), ?) WHERE job_id = ? AND (end_time IS NULL OR end_time = 0)`,
 		StatusCanceled, now, jobID); err != nil {
 		return err
 	}

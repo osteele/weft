@@ -202,6 +202,8 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
+    self_destruct_linger_threshold: Duration = 2.minutes
+    self_destruct_unknown_end_fallback: Duration = 3.minutes
     self_destruct_retries: Integer = 3
     self_destruct_backoff: Duration = 5.seconds
     reconcile_cleanup_window: Duration = 30.minutes
@@ -339,9 +341,13 @@ rule SelfDestructFailed {
     ensures: instance.ended_at = now
 
     @guidance
-        -- Triggered when all jobs reached terminal state 2+ minutes ago
-        -- but the instance is still running. Forces cleanup and destroys
-        -- the provider instance.
+        -- Triggered when all jobs reached terminal state but the instance
+        -- is still running. Waits self_destruct_linger_threshold (2 min)
+        -- after the latest job end_time before forcing cleanup. If no job
+        -- end_time is known (end_time was 0/unset), uses
+        -- self_destruct_unknown_end_fallback (3 min) as a conservative
+        -- synthetic duration that exceeds the threshold, triggering
+        -- immediate cleanup.
 }
 
 -- ==========================================================================

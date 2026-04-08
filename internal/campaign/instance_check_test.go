@@ -303,6 +303,25 @@ func TestCheckInstance_SelfDestructFailed_BeatsStaleHeartbeatWarning(t *testing.
 	}
 }
 
+func TestCheckInstance_SelfDestructFailed_ZeroLatestJobEnd(t *testing.T) {
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:     1,
+			Status: db.LaunchStatusRunning,
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, AllJobsCompleted: true, LatestJobEnd: 0},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionSelfDestructFailed {
+		t.Fatalf("action.Kind = %d, want ActionSelfDestructFailed (%d); LatestJobEnd=0 should still trigger cleanup", action.Kind, ActionSelfDestructFailed)
+	}
+	if action.TerminalStatus != db.LaunchStatusCompleted {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusCompleted)
+	}
+}
+
 func TestCheckInstance_EmptyStatusTimeout(t *testing.T) {
 	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
 	r := NewReconciler()
@@ -723,6 +742,9 @@ func TestCheckInstance_IntendedStatusStoppedButRunning(t *testing.T) {
 
 func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 	r := NewReconciler()
+	// LatestJobEnd is recent (< 2 min ago), so step 6 (self-destruct) defers;
+	// instead the stale heartbeat warning fires.
+	recentEnd := time.Now().Add(-30 * time.Second).Unix()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
 			ID:                 1,
@@ -731,7 +753,7 @@ func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 		},
 		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		HeartbeatAge: 5 * time.Minute,
-		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true},
+		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, LatestJobEnd: recentEnd},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionDisplayOnly {

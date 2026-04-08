@@ -22,6 +22,12 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		return 0, err
 	}
 
+	// Treat 0 as "unknown" — fall back to current time so downstream code
+	// (CloseLaunchAttempts, ComputeJobState) doesn't confuse 0 with NULL.
+	if endTimeUnix == 0 {
+		endTimeUnix = time.Now().Unix()
+	}
+
 	var cloudInstanceID sql.NullInt64
 	if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
 		return 0, err

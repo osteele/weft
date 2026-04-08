@@ -1924,6 +1924,11 @@ func startupRepair(db *sql.DB) error {
 		return err
 	}
 
+	// Repair attempts where end_time was written as 0 instead of NULL.
+	if err := repairAttemptEndTimeZero(db); err != nil {
+		return err
+	}
+
 	// Repair synthetic completed cloud attempts that were closed without an exit code.
 	if err := repairCompletedCloudAttemptsMissingExitCode(db); err != nil {
 		return err

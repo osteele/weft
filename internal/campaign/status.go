@@ -265,7 +265,6 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				case ch <- update:
 				case <-ctx.Done():
 				}
-				_ = db.DeleteLaunchLiveState(database, cloudInstanceID)
 				return
 			}
 
@@ -377,7 +376,6 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			// Check for terminal state
 			if IsInstanceTerminal(ci.Status) {
-				_ = db.DeleteLaunchLiveState(database, cloudInstanceID)
 				return
 			}
 

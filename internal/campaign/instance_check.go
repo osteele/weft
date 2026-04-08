@@ -394,15 +394,23 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 6. Failed self-destruct: jobs reached a terminal state but the instance is lingering.
-	if ci.Status == db.LaunchStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal && p.JobState.LatestJobEnd > 0 {
-		if terminalStatus, reason, ok := p.JobState.TerminalLaunchStatus(); ok &&
-			p.Now.Sub(time.Unix(p.JobState.LatestJobEnd, 0)) > 2*time.Minute {
-			return InstanceAction{
-				Kind:              ActionSelfDestructFailed,
-				TerminalStatus:    terminalStatus,
-				TerminationReason: reason,
-				StallMessage:      "jobs reached terminal state but self-destruct failed — cleaning up",
-				DestroyProvider:   true,
+	if ci.Status == db.LaunchStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal {
+		if terminalStatus, reason, ok := p.JobState.TerminalLaunchStatus(); ok {
+			var sinceEnd time.Duration
+			if p.JobState.LatestJobEnd > 0 {
+				sinceEnd = p.Now.Sub(time.Unix(p.JobState.LatestJobEnd, 0))
+			} else {
+				// end_time unknown (was 0) — use a conservative fallback
+				sinceEnd = 3 * time.Minute
+			}
+			if sinceEnd > 2*time.Minute {
+				return InstanceAction{
+					Kind:              ActionSelfDestructFailed,
+					TerminalStatus:    terminalStatus,
+					TerminationReason: reason,
+					StallMessage:      "jobs reached terminal state but self-destruct failed — cleaning up",
+					DestroyProvider:   true,
+				}
 			}
 		}
 	}

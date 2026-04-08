@@ -483,6 +483,49 @@ func TestCloseLaunchAttempts_CompletedSetsExitCode(t *testing.T) {
 	}
 }
 
+func TestCloseLaunchAttempts_EndTimeZero(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	insertTestJob(t, database, 1, "echo done", "/tmp", StatusRunning, withLaunch(instanceID))
+
+	// Simulate the bug: set end_time=0 (not NULL) as RecordCloudJobCompletion used to do
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET end_time = 0 WHERE job_id = 1`,
+	); err != nil {
+		t.Fatalf("set end_time=0: %v", err)
+	}
+
+	if err := CloseLaunchAttempts(database, instanceID, AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("CloseLaunchAttempts: %v", err)
+	}
+
+	var endTime int64
+	if err := database.QueryRow(
+		`SELECT end_time FROM job_attempts WHERE job_id = 1 ORDER BY attempt_number DESC LIMIT 1`,
+	).Scan(&endTime); err != nil {
+		t.Fatalf("query end_time: %v", err)
+	}
+	if endTime == 0 {
+		t.Fatal("end_time still 0 after CloseLaunchAttempts — WHERE clause missed end_time=0")
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	}
+}
+
 func TestResetLaunchJobs_PreservesCanceledJobs(t *testing.T) {
 	database := setupTestDB(t)
 
@@ -1079,17 +1122,6 @@ func TestLaunchLiveState(t *testing.T) {
 		t.Errorf("progress = %d, want -1", got.JobProgressPct)
 	}
 
-	// Delete
-	if err := DeleteLaunchLiveState(database, instanceID); err != nil {
-		t.Fatalf("DeleteLaunchLiveState: %v", err)
-	}
-	got, err = GetLaunchLiveState(database, instanceID)
-	if err != nil {
-		t.Fatalf("GetLaunchLiveState: %v", err)
-	}
-	if got != nil {
-		t.Fatalf("expected nil after delete, got %+v", got)
-	}
 }
 
 func TestLaunchLiveStateDestroyingOrphansQueuedAttempts(t *testing.T) {

@@ -278,7 +278,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Location: %s\n", ci.DataCenter)
 		}
 
-		// Agent version and live status (skip for terminal instances)
+		// Agent version and live status
 		var liveUpdate *campaign.InstanceUpdate
 		if !campaign.IsInstanceTerminal(ci.Status) {
 			if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
@@ -289,10 +289,10 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				}
 				watchCancel()
 			}
-			// Read agent version from DB (populated by WatchInstance)
-			if liveState, err := db.GetLaunchLiveState(database, ci.ID); err == nil && liveState != nil && liveState.AgentVersion != "" {
-				fmt.Printf("  Agent:    %s\n", liveState.AgentVersion)
-			}
+		}
+		// Read agent version from DB-cached live state (persists after terminal)
+		if liveState, err := db.GetLaunchLiveState(database, ci.ID); err == nil && liveState != nil && liveState.AgentVersion != "" {
+			fmt.Printf("  Agent:    %s\n", liveState.AgentVersion)
 		}
 
 		obs := terminal.ObserveLaunch(ci, inst, time.Now())

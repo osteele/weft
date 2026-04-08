@@ -454,6 +454,13 @@ invariant TerminalJobsHaveEndTime {
     for job in Jobs:
         if job.status in {completed, failed, dead, killed}:
             job.latest_attempt.end_time != null
+            job.latest_attempt.end_time > 0
+
+    @guidance
+        -- end_time = 0 is treated as "unknown" (equivalent to NULL) by
+        -- CloseLaunchAttempts and ComputeJobState. RecordCloudJobCompletion
+        -- normalizes 0 to time.Now(); the startup repair
+        -- repairAttemptEndTimeZero fixes historical rows.
 }
 
 invariant AttemptNumbersAreSequential {
