@@ -226,6 +226,36 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
+	database := db.SetupTestDB(t)
+	m := listTUIModel{
+		database:        database,
+		groupedByStatus: true,
+		autoMode:        true,
+		width:           90,
+		height:          12,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 733, Status: db.StatusQueued, Description: "retry pending", Project: "proj"},
+		},
+		statusMessage: "Auto-pilot: monitoring",
+	}
+
+	out := stripANSI(m.View())
+	groupedIdx := strings.Index(out, "[1 jobs] Auto-pilot: monitoring")
+	sharedIdx := strings.Index(out, "status: running jobs")
+	controlsIdx := strings.Index(out, "a:toggle-auto auto:ON q:quit")
+	if groupedIdx < 0 || sharedIdx < 0 || controlsIdx < 0 {
+		t.Fatalf("missing grouped footer parts, got:\n%s", out)
+	}
+	if !(groupedIdx < sharedIdx && sharedIdx < controlsIdx) {
+		t.Fatalf("expected grouped status -> shared status -> controls order, got:\n%s", out)
+	}
+	if etaIdx := strings.Index(out, "ETA: "); etaIdx >= 0 && !(groupedIdx < etaIdx && etaIdx < sharedIdx) {
+		t.Fatalf("expected ETA line between grouped status and shared status, got:\n%s", out)
+	}
+}
+
 func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,

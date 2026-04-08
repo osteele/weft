@@ -151,6 +151,22 @@ func fetchSharedTUIStatus(database *sql.DB) string {
 		return ""
 	}
 	totalInstances := len(launches)
+	runningInstances := totalInstances
+	startingInstances := 0
+
+	launchJobCounts, err := dbpkg.GetLaunchJobCounts(database)
+	if err != nil {
+		return ""
+	}
+	for _, l := range launches {
+		if l == nil {
+			continue
+		}
+		if launchJobCounts[l.ID] == 0 {
+			startingInstances++
+		}
+	}
+	runningInstances = max(0, totalInstances-startingInstances)
 
 	var burnCentsPerHour int
 	for _, l := range launches {
@@ -158,6 +174,9 @@ func fetchSharedTUIStatus(database *sql.DB) string {
 	}
 
 	status := fmt.Sprintf("status: running jobs %d  instances %d", runningJobs, totalInstances)
+	if startingInstances > 0 {
+		status += fmt.Sprintf(" (running %d, starting %d)", runningInstances, startingInstances)
+	}
 	if burnCentsPerHour > 0 {
 		status += fmt.Sprintf("  burn $%.2f/hr", float64(burnCentsPerHour)/100)
 	}
