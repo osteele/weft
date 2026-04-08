@@ -75,6 +75,32 @@ func BinariesVersion() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+// CheckAgentBinariesCurrent verifies that the local agent binary for
+// linux/amd64 is available and matches the current version. Returns nil if
+// ready, or a user-facing error explaining what to run.
+func CheckAgentBinariesCurrent() error {
+	version, err := LocalAgentVersion()
+	if err != nil {
+		return fmt.Errorf("determine agent version: %w", err)
+	}
+
+	// Already in the build cache — good to go.
+	if _, err := os.Stat(CachePath(version, "linux", "amd64")); err == nil {
+		return nil
+	}
+
+	// Check embedded binaries directory.
+	builtVersion, err := BinariesVersion()
+	if err != nil {
+		return fmt.Errorf("agent binaries not built; run 'just build-agents'")
+	}
+	if builtVersion != version {
+		return fmt.Errorf("agent binaries are stale (built for %s, need %s); run 'just build-agents'", builtVersion, version)
+	}
+
+	return nil
+}
+
 func defaultExtractFunc(version, goos, goarch, outputPath string) error {
 	root, err := RepoRoot()
 	if err != nil {

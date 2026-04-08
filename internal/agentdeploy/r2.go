@@ -2,10 +2,8 @@ package agentdeploy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 
 	"github.com/osteele/weft/internal/dataplane"
@@ -19,7 +17,6 @@ type EnsureAgentProgressFunc func(phase string)
 
 // EnsureAgentInR2 uploads the agent binary for the given version to R2.
 // If the object is already present, it skips build and upload.
-// If the binary is not in the local cache, it attempts to build via the Fly builder.
 func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string, output io.Writer) (string, error) {
 	return EnsureAgentInR2WithProgress(ctx, r2Client, version, goos, goarch, output, nil)
 }
@@ -43,14 +40,7 @@ func EnsureAgentInR2WithProgress(ctx context.Context, r2Client *r2.Client, versi
 	}
 
 	localPath, err := EnsureBuilt(version, goos, goarch)
-	if errors.Is(err, ErrAgentNotAvailable) {
-		onProgress("building agent")
-		slog.Info("agent binary not in cache, building via Fly builder", "component", "agentdeploy")
-		localPath, err = BuildViaFly(version, goos, goarch, output)
-		if err != nil {
-			return "", fmt.Errorf("build agent: %w", err)
-		}
-	} else if err != nil {
+	if err != nil {
 		return "", fmt.Errorf("build agent: %w", err)
 	}
 

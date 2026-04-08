@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
@@ -183,6 +184,13 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+
+	// Preflight: verify agent binaries are current before doing any slow work
+	// (job loading, offer searching, cost estimation).
+	if err := agentdeploy.CheckAgentBinariesCurrent(); err != nil {
+		return err
+	}
+
 	if !launchInteractive {
 		reportStartupPhase("Checking predictor status...")
 		if err := ensurePredictorUsableFunc(cmd, cfg, "campaign planning"); err != nil {
