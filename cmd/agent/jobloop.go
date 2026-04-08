@@ -193,6 +193,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 			OutputDirs: append([]string(nil), job.OutputDirs...),
 			Produces:   append([]string(nil), job.Produces...),
 			Needs:      append([]string(nil), job.Needs...),
+			Env:        append([]string(nil), job.Env...),
 		},
 		LogDir:       cfg.LogDir,
 		WorkingDir:   workDir,

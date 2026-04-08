@@ -23,6 +23,7 @@ type ScriptMeta struct {
 	Image        string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
 	UvArgs       []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
 	Env          map[string]string // Environment variables to set when running the job
+	PreInstall   string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
 }
 
 var (
@@ -44,39 +45,58 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 		return nil, fmt.Errorf("parse script metadata TOML: %w", err)
 	}
 
-	weftTree := tree.Get("tool.weft")
-	if weftTree == nil {
-		return nil, nil
-	}
-
-	wt, ok := weftTree.(*toml.Tree)
-	if !ok {
-		return nil, nil
-	}
-
 	meta := &ScriptMeta{}
 
-	if v, ok := wt.Get("gpu").(string); ok {
-		meta.GPU = v
+	// Parse [tool.weft] settings.
+	if weftTree := tree.Get("tool.weft"); weftTree != nil {
+		if wt, ok := weftTree.(*toml.Tree); ok {
+			if v, ok := wt.Get("gpu").(string); ok {
+				meta.GPU = v
+			}
+			if v, ok := wt.Get("gpu-class").(string); ok {
+				meta.GPUClass = v
+			}
+			meta.GPUMemGB = parseGPUMem(wt.Get("gpu-mem"))
+			if v, ok := wt.Get("gpu-mem-strict").(bool); ok {
+				meta.GPUMemStrict = &v
+			}
+			meta.Inputs = tomlStringSlice(wt, "inputs")
+			meta.Outputs = tomlStringSlice(wt, "outputs")
+			meta.Tags = tomlStringSlice(wt, "tags")
+			if v, ok := wt.Get("image").(string); ok {
+				meta.Image = v
+			}
+			meta.UvArgs = tomlStringSlice(wt, "uv-args")
+			meta.Env = tomlStringMap(wt, "env")
+			if v, ok := wt.Get("pre-install").(string); ok {
+				meta.PreInstall = v
+			}
+		}
 	}
-	if v, ok := wt.Get("gpu-class").(string); ok {
-		meta.GPUClass = v
+
+	// Parse [tool.uv] settings and convert to environment variables.
+	// These have lower priority than explicit [tool.weft.env] entries.
+	if uvTree := tree.Get("tool.uv"); uvTree != nil {
+		if ut, ok := uvTree.(*toml.Tree); ok {
+			uvEnv := extractUvEnvVars(ut)
+			if len(uvEnv) > 0 {
+				if meta.Env == nil {
+					meta.Env = uvEnv
+				} else {
+					// [tool.weft.env] takes precedence over [tool.uv]
+					for k, v := range uvEnv {
+						if _, exists := meta.Env[k]; !exists {
+							meta.Env[k] = v
+						}
+					}
+				}
+			}
+		}
 	}
-	meta.GPUMemGB = parseGPUMem(wt.Get("gpu-mem"))
-	if v, ok := wt.Get("gpu-mem-strict").(bool); ok {
-		meta.GPUMemStrict = &v
-	}
-	meta.Inputs = tomlStringSlice(wt, "inputs")
-	meta.Outputs = tomlStringSlice(wt, "outputs")
-	meta.Tags = tomlStringSlice(wt, "tags")
-	if v, ok := wt.Get("image").(string); ok {
-		meta.Image = v
-	}
-	meta.UvArgs = tomlStringSlice(wt, "uv-args")
-	meta.Env = tomlStringMap(wt, "env")
 
 	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
-		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" && len(meta.UvArgs) == 0 && len(meta.Env) == 0 {
+		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" &&
+		len(meta.UvArgs) == 0 && len(meta.Env) == 0 && meta.PreInstall == "" {
 		return nil, nil
 	}
 
@@ -283,6 +303,51 @@ func rewritePythonCommandWithUv(command string, uvArgs []string) string {
 func isPythonExecToken(token string) bool {
 	base := filepath.Base(token)
 	return pythonExecRe.MatchString(base)
+}
+
+// extractUvEnvVars converts [tool.uv] settings to environment variables.
+// Supported keys: index-url → UV_INDEX_URL, extra-index-url → UV_EXTRA_INDEX_URL.
+func extractUvEnvVars(ut *toml.Tree) map[string]string {
+	var env map[string]string
+	setEnv := func(k, v string) {
+		if env == nil {
+			env = make(map[string]string)
+		}
+		env[k] = v
+	}
+	if v, ok := ut.Get("index-url").(string); ok && v != "" {
+		setEnv("UV_INDEX_URL", v)
+	}
+	if urls := tomlStringOrSlice(ut, "extra-index-url"); len(urls) > 0 {
+		setEnv("UV_EXTRA_INDEX_URL", strings.Join(urls, " "))
+	}
+	return env
+}
+
+// tomlStringOrSlice extracts a TOML value that can be either a single string
+// or an array of strings.
+func tomlStringOrSlice(tree *toml.Tree, key string) []string {
+	v := tree.Get(key)
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok {
+		if s == "" {
+			return nil
+		}
+		return []string{s}
+	}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	var result []string
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 func tomlStringSlice(tree *toml.Tree, key string) []string {

@@ -193,6 +193,114 @@ import torch
 				Inputs:   []string{"hf:gpt2"},
 			},
 		},
+		{
+			name: "pre-install",
+			content: `# /// script
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# pre-install = "apt-get update && apt-get install -y libnuma-dev"
+# ///
+`,
+			want: &ScriptMeta{
+				GPU:        "nvidia>=20GB",
+				PreInstall: "apt-get update && apt-get install -y libnuma-dev",
+			},
+		},
+		{
+			name: "tool.uv index-url",
+			content: `# /// script
+# dependencies = ["sglang"]
+# [tool.uv]
+# index-url = "https://docs.sglang.ai/whl/cu124"
+# ///
+`,
+			want: &ScriptMeta{
+				Env: map[string]string{"UV_INDEX_URL": "https://docs.sglang.ai/whl/cu124"},
+			},
+		},
+		{
+			name: "tool.uv extra-index-url array",
+			content: `# /// script
+# dependencies = ["sglang"]
+# [tool.uv]
+# index-url = "https://docs.sglang.ai/whl/cu124"
+# extra-index-url = ["https://pypi.org/simple", "https://flashinfer.ai/whl/cu124"]
+# ///
+`,
+			want: &ScriptMeta{
+				Env: map[string]string{
+					"UV_INDEX_URL":       "https://docs.sglang.ai/whl/cu124",
+					"UV_EXTRA_INDEX_URL": "https://pypi.org/simple https://flashinfer.ai/whl/cu124",
+				},
+			},
+		},
+		{
+			name: "tool.uv extra-index-url string",
+			content: `# /// script
+# dependencies = ["sglang"]
+# [tool.uv]
+# extra-index-url = "https://pypi.org/simple"
+# ///
+`,
+			want: &ScriptMeta{
+				Env: map[string]string{"UV_EXTRA_INDEX_URL": "https://pypi.org/simple"},
+			},
+		},
+		{
+			name: "tool.weft.env overrides tool.uv",
+			content: `# /// script
+# dependencies = ["sglang"]
+# [tool.uv]
+# index-url = "https://docs.sglang.ai/whl/cu124"
+# [tool.weft]
+# gpu = "nvidia"
+# [tool.weft.env]
+# UV_INDEX_URL = "https://custom.example.com/simple"
+# ///
+`,
+			want: &ScriptMeta{
+				GPU: "nvidia",
+				Env: map[string]string{"UV_INDEX_URL": "https://custom.example.com/simple"},
+			},
+		},
+		{
+			name: "tool.uv only (no tool.weft)",
+			content: `# /// script
+# dependencies = ["sglang"]
+# [tool.uv]
+# index-url = "https://docs.sglang.ai/whl/cu124"
+# ///
+`,
+			want: &ScriptMeta{
+				Env: map[string]string{"UV_INDEX_URL": "https://docs.sglang.ai/whl/cu124"},
+			},
+		},
+		{
+			name: "full sglang-style script",
+			content: `# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = ["sglang[srt]>=0.4", "pynvml>=12.0"]
+# [tool.uv]
+# index-url = "https://docs.sglang.ai/whl/cu124"
+# extra-index-url = ["https://pypi.org/simple", "https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python"]
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+# inputs = ["hf:gpt2"]
+# pre-install = "apt-get update && apt-get install -y libnuma-dev"
+# ///
+`,
+			want: &ScriptMeta{
+				GPU:        "nvidia>=20GB",
+				Image:      "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+				Inputs:     []string{"hf:gpt2"},
+				PreInstall: "apt-get update && apt-get install -y libnuma-dev",
+				Env: map[string]string{
+					"UV_INDEX_URL":       "https://docs.sglang.ai/whl/cu124",
+					"UV_EXTRA_INDEX_URL": "https://pypi.org/simple https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -230,6 +338,9 @@ import torch
 			}
 			assertStringSlice(t, "UvArgs", got.UvArgs, tt.want.UvArgs)
 			assertStringMap(t, "Env", got.Env, tt.want.Env)
+			if got.PreInstall != tt.want.PreInstall {
+				t.Errorf("PreInstall: got %q, want %q", got.PreInstall, tt.want.PreInstall)
+			}
 		})
 	}
 }

@@ -121,6 +121,7 @@ Supported keys (all optional):
 | `image`     | string           | `.weft.toml [cloud] image` |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
 | `env`        | table of strings | `--env` (merged)           |
+| `pre-install` | string          | *(prepended to command)*   |
 
 CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
@@ -148,6 +149,39 @@ kept; `--env` flags take precedence for duplicate keys at the runner level).
 This is useful for container-based jobs that need specific environment
 configuration, such as `UV_SYSTEM_PYTHON=1` for scripts that import packages
 from the container's system Python.
+
+The `pre-install` key specifies a shell command to run before the job command.
+It is prepended to the command with `&&`. This is useful for installing system
+packages on cloud instances:
+
+```toml
+[tool.weft]
+pre-install = "apt-get update && apt-get install -y libnuma-dev"
+```
+
+#### `[tool.uv]` index settings
+
+Weft also reads `[tool.uv]` settings from the PEP 723 metadata block. Since
+`uv run` does not natively read `[tool.uv]` from inline script metadata, weft
+extracts `index-url` and `extra-index-url` and converts them to `UV_INDEX_URL`
+and `UV_EXTRA_INDEX_URL` environment variables. This is useful for scripts that
+need packages from custom PyPI indexes (e.g., CUDA-specific wheels):
+
+```python
+# /// script
+# dependencies = ["sglang[srt]>=0.4", "pynvml>=12.0"]
+# [tool.uv]
+# index-url = "https://docs.sglang.ai/whl/cu124"
+# extra-index-url = ["https://pypi.org/simple", "https://flashinfer.ai/whl/cu124/torch2.5"]
+# [tool.weft]
+# gpu = "nvidia>=20GB"
+# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+# pre-install = "apt-get update && apt-get install -y libnuma-dev"
+# ///
+```
+
+Explicit `[tool.weft.env]` entries for `UV_INDEX_URL` or `UV_EXTRA_INDEX_URL`
+take precedence over `[tool.uv]` values.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
 (highest to lowest): `.weft.toml [cloud] image` > script `image` > auto-selected

@@ -18,6 +18,7 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 		OutputDirs:  []string{"results/"},
 		Produces:    []string{"results/model.pt"},
 		Needs:       []string{"inputs/data.csv:41"},
+		EnvVars:     []string{"UV_INDEX_URL=https://example.com/simple", "CUDA_HOME=/usr/local/cuda"},
 		LatestRunID: &runID,
 	}
 
@@ -40,5 +41,19 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Needs, job.Needs) {
 		t.Fatalf("needs = %v, want %v", got.Needs, job.Needs)
+	}
+	if !reflect.DeepEqual(got.Env, job.EnvVars) {
+		t.Fatalf("env = %v, want %v", got.Env, job.EnvVars)
+	}
+}
+
+func TestNewAgentJobNilEnvVars(t *testing.T) {
+	job := &db.Job{
+		ID:      1,
+		Command: "echo hello",
+	}
+	got := newAgentJob(job, "/workspace/repo")
+	if got.Env != nil {
+		t.Fatalf("env = %v, want nil", got.Env)
 	}
 }

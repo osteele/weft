@@ -363,6 +363,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			command = dataloc.ApplyUvArgs(command, meta.UvArgs)
 			applied = append(applied, fmt.Sprintf("uv-args=%v", meta.UvArgs))
 		}
+		if meta.PreInstall != "" {
+			command = meta.PreInstall + " && " + command
+			applied = append(applied, fmt.Sprintf("pre-install=%s", meta.PreInstall))
+		}
 		if len(meta.Env) > 0 {
 			runEnvVars = append(runEnvVars, applyEnvMap(meta.Env)...)
 			applied = append(applied, fmt.Sprintf("env=%v", meta.Env))

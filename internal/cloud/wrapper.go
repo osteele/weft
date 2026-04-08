@@ -11,6 +11,7 @@ type AgentJob struct {
 	OutputDirs []string `json:"output_dirs,omitempty"`
 	Produces   []string `json:"produces,omitempty"`
 	Needs      []string `json:"needs,omitempty"`
+	Env        []string `json:"env,omitempty"`
 }
 
 // CampaignManifest is uploaded to R2 by the coordinator and read by weft-agent run-campaign.

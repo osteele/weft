@@ -23,6 +23,7 @@ func newAgentJob(job *db.Job, remoteDir string) cloud.AgentJob {
 		OutputDirs: append([]string(nil), job.OutputDirs...),
 		Produces:   append([]string(nil), job.Produces...),
 		Needs:      append([]string(nil), job.Needs...),
+		Env:        append([]string(nil), job.EnvVars...),
 	}
 }
 

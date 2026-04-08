@@ -284,6 +284,14 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 			updates = append(updates, fmt.Sprintf("command: %s (from script metadata uv-args)", rewritten))
 		}
 	}
+	if meta.PreInstall != "" && !strings.HasPrefix(job.Command, meta.PreInstall) {
+		rewritten := meta.PreInstall + " && " + job.Command
+		if err := db.SetJobCommand(database, job.ID, rewritten); err != nil {
+			return nil, fmt.Errorf("update command from script metadata pre-install: %w", err)
+		}
+		job.Command = rewritten
+		updates = append(updates, fmt.Sprintf("command: %s (from script metadata pre-install)", rewritten))
+	}
 	if len(meta.Env) > 0 {
 		merged := mergeEnvVarsByKey(job.EnvVars, applyEnvMap(meta.Env))
 		if !slices.Equal(merged, job.EnvVars) {
