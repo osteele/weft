@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
 )
@@ -326,5 +327,52 @@ func TestListTUIAutoPilotStatusUsesPluralInstancesWording(t *testing.T) {
 	got := next.(listTUIModel)
 	if got.statusMessage != "Auto-pilot: launched 2 instances" {
 		t.Fatalf("statusMessage = %q", got.statusMessage)
+	}
+}
+
+func TestListTUIGroupedSelectionSkipsHeaders(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusRunning, Description: "running"},
+			{ID: 102, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	if len(m.groupedSelectableRows) != 2 {
+		t.Fatalf("selectable rows = %d, want 2", len(m.groupedSelectableRows))
+	}
+	if row := m.selectedGroupedRow(); row < 0 || row >= len(m.groupedRows) || m.groupedRows[row].isHeader {
+		t.Fatalf("initial selected row should be a job row, got row=%d", row)
+	}
+	if job := m.selectedGroupedJob(); job == nil || job.ID != 101 {
+		t.Fatalf("initial selected job = %+v, want ID 101", job)
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	got := next.(listTUIModel)
+	if job := got.selectedGroupedJob(); job == nil || job.ID != 102 {
+		t.Fatalf("after down selected job = %+v, want ID 102", job)
+	}
+}
+
+func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 202, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	line := m.groupedControlsText(true)
+	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "m:move") {
+		t.Fatalf("controls line missing queued-job actions: %q", line)
 	}
 }

@@ -50,6 +50,8 @@ type listTUIModel struct {
 	ctx                        context.Context
 	cancel                     context.CancelFunc
 	groupedByStatus            bool
+	groupedRows                []groupedStatusRow
+	groupedSelectableRows      []int
 	autoMode                   bool
 	autoInProgress             bool
 	autoLeaseOwner             string
@@ -61,6 +63,7 @@ type listTUIModel struct {
 	quickLaunchProgress        <-chan listQuickLaunchProgressMsg
 	quickLaunchDone            <-chan listQuickLaunchDoneMsg
 	quickLaunchStatusHoldUntil time.Time
+	movePicker                 movePickerModel
 	focused                    bool
 }
 
@@ -147,6 +150,7 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		quickLaunchScope: "list_quick_launch:" + buildListAutoLeaseScope(title),
 		focused:          true,
 	}
+	model.rebuildGroupedRows()
 
 	restore := logging.Suppress()
 	defer restore()
@@ -184,11 +188,18 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.rebuildLayout()
+		m.rebuildGroupedRows()
 		m.clampCursor()
 		m.adjustOffset()
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.movePicker.active {
+			return m.handleMovePickerKey(msg)
+		}
+		if m.groupedByStatus {
+			return m.handleGroupedKey(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
@@ -282,6 +293,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchLiveByID = msg.launchLiveByID
 		m.pruneAutoBlockReasons()
 		m.rebuildLayout()
+		m.rebuildGroupedRows()
 		m.clampCursor()
 		m.adjustOffset()
 		if len(m.jobs) > 0 && strings.HasPrefix(m.statusMessage, "No jobs") {
@@ -418,6 +430,51 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.reloadJobs()
 
+	case watchKillDoneMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Kill failed: %v", msg.err)
+			return m, nil
+		}
+		if strings.TrimSpace(msg.message) != "" {
+			m.statusMessage = msg.message
+		} else {
+			m.statusMessage = fmt.Sprintf("Job #%d killed", msg.jobID)
+		}
+		return m, m.reloadJobs()
+
+	case watchUnplaceDoneMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Unplace failed: %v", msg.err)
+			return m, nil
+		}
+		if strings.TrimSpace(msg.message) != "" {
+			m.statusMessage = msg.message
+		} else if msg.job != nil {
+			m.statusMessage = fmt.Sprintf("Job #%d unplaced", msg.job.ID)
+		}
+		return m, m.reloadJobs()
+
+	case moveOptionsReadyMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Move: %v", msg.err)
+			return m, nil
+		}
+		m.movePicker = movePickerModel{
+			active:  true,
+			jobID:   msg.jobID,
+			options: msg.options,
+			cursor:  0,
+		}
+		return m, nil
+
+	case moveExecuteDoneMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Move failed: %v", msg.err)
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc)
+		return m, m.reloadJobs()
+
 	case listQuickLaunchProgressMsg:
 		if strings.TrimSpace(msg.message) != "" {
 			m.statusMessage = msg.message
@@ -493,6 +550,9 @@ func (m listTUIModel) waitForQuickLaunchDone() tea.Cmd {
 }
 
 func (m listTUIModel) View() string {
+	if m.movePicker.active {
+		return m.movePicker.View(m.width, m.height)
+	}
 	if m.groupedByStatus {
 		return m.groupedView()
 	}
@@ -574,15 +634,28 @@ func (m listTUIModel) groupedView() string {
 	footerLines += len(sharedStatusLines)
 	maxBodyLines := m.height - 1 - footerLines // 1 for title
 
-	body := renderJobListGroupedStatusPlainWithLiveState(groupedJobs, m.width, m.launchLiveByID)
-	body = strings.TrimSuffix(body, "\n")
-	if body == "" {
-		body = "None"
+	rows := m.groupedRows
+	if len(rows) == 0 {
+		rows = []groupedStatusRow{{text: "None"}}
 	}
-	bodyLines := strings.Split(body, "\n")
-
+	bodyLines := make([]string, 0, len(rows))
+	selectedVisualLine := -1
+	selectedRow := m.selectedGroupedRow()
+	for idx, row := range rows {
+		line := row.text
+		if selectedRow >= 0 && idx == selectedRow {
+			line = listTUISelectedStyle.Render(line)
+			selectedVisualLine = idx
+		}
+		bodyLines = append(bodyLines, line)
+	}
 	if maxBodyLines > 0 && len(bodyLines) > maxBodyLines {
-		bodyLines = bodyLines[:maxBodyLines]
+		start := 0
+		if selectedVisualLine >= 0 {
+			start = watchScrollStart(len(bodyLines), selectedVisualLine, maxBodyLines)
+		}
+		end := min(len(bodyLines), start+maxBodyLines)
+		bodyLines = bodyLines[start:end]
 	}
 	for _, line := range bodyLines {
 		b.WriteString(truncateDisplayWidth(line, m.width))
@@ -627,11 +700,214 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		autoState = "ON"
 	}
 	line := fmt.Sprintf("a:auto (%s)", autoState)
+	if m.selectedGroupedJob() != nil {
+		line += "  k:kill  u:unplace"
+		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
+			line += "  m:move"
+		}
+	}
 	if hasQueued {
 		line += "  n:new instance"
 	}
 	line += "  q:quit"
 	return line
+}
+
+func (m listTUIModel) selectedGroupedRow() int {
+	if len(m.groupedSelectableRows) == 0 || m.cursor < 0 || m.cursor >= len(m.groupedSelectableRows) {
+		return -1
+	}
+	return m.groupedSelectableRows[m.cursor]
+}
+
+func (m listTUIModel) selectedGroupedJob() *db.Job {
+	row := m.selectedGroupedRow()
+	if row < 0 || row >= len(m.groupedRows) {
+		return nil
+	}
+	return m.groupedRows[row].job
+}
+
+func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.movePicker.reset()
+		return m, nil
+	case "up", "k":
+		m.movePicker.moveCursor(-1)
+		return m, nil
+	case "down", "j":
+		m.movePicker.moveCursor(1)
+		return m, nil
+	case "enter":
+		opt := m.movePicker.selectedOption()
+		if opt == nil {
+			return m, nil
+		}
+		jobID := m.movePicker.jobID
+		selected := *opt
+		m.movePicker.reset()
+		targetDesc := fmt.Sprintf("instance %s", ids.FormatInstanceID(selected.instanceID))
+		if selected.isNew {
+			targetDesc = fmt.Sprintf("new %s instance", selected.gpuName)
+		}
+		m.statusMessage = fmt.Sprintf("Moving job #%d to %s...", jobID, targetDesc)
+		cfg, cfgErr := config.Load()
+		if cfgErr != nil {
+			return m, func() tea.Msg { return moveExecuteDoneMsg{jobID: jobID, err: cfgErr} }
+		}
+		cloudClients, clientsErr := buildCloudClients(cfg)
+		if clientsErr != nil {
+			return m, func() tea.Msg { return moveExecuteDoneMsg{jobID: jobID, err: clientsErr} }
+		}
+		r2Client, r2Err := buildR2Client(cfg)
+		if r2Err != nil {
+			return m, func() tea.Msg { return moveExecuteDoneMsg{jobID: jobID, err: r2Err} }
+		}
+		return m, requestMoveExecute(m.ctx, m.database, r2Client, cfg, cloudClients, jobID, selected)
+	}
+	return m, nil
+}
+
+func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q", "esc":
+		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+		_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
+		if m.dbWatcher != nil {
+			_ = m.dbWatcher.Close()
+		}
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return m, tea.Quit
+	case "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.cursor < len(m.groupedSelectableRows)-1 {
+			m.cursor++
+		}
+		return m, nil
+	case "g", "home":
+		m.cursor = 0
+		return m, nil
+	case "G", "end":
+		if len(m.groupedSelectableRows) > 0 {
+			m.cursor = len(m.groupedSelectableRows) - 1
+		}
+		return m, nil
+	case "pgdown", "space":
+		m.cursor += m.pageSize()
+		if m.cursor >= len(m.groupedSelectableRows) {
+			m.cursor = max(0, len(m.groupedSelectableRows)-1)
+		}
+		return m, nil
+	case "pgup", "b":
+		m.cursor -= m.pageSize()
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		return m, nil
+	case "a":
+		m.autoMode = !m.autoMode
+		if m.autoMode {
+			m.statusMessage = "Auto-pilot ON"
+			return m, m.runAutoPilot()
+		}
+		m.autoInProgress = false
+		m.autoBlockReasons = nil
+		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+		m.statusMessage = "Auto-pilot OFF"
+		return m, nil
+	case "n":
+		if m.quickLaunching {
+			m.statusMessage = "Launch already in progress..."
+			return m, nil
+		}
+		if !computeGroupedETA(m.groupedJobsWithAutoReasons(), m.launchLiveByID, time.Now()).HasQueued {
+			m.statusMessage = "No queued jobs to launch."
+			return m, nil
+		}
+		m.quickLaunching = true
+		m.statusMessage = "Launching new instance..."
+		progressCh := make(chan listQuickLaunchProgressMsg, 16)
+		doneCh := make(chan listQuickLaunchDoneMsg, 1)
+		m.quickLaunchProgress = progressCh
+		m.quickLaunchDone = doneCh
+		return m, tea.Batch(
+			m.startQuickLaunch(progressCh, doneCh),
+			m.waitForQuickLaunchProgress(),
+			m.waitForQuickLaunchDone(),
+		)
+	case "k":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
+		return m, requestWatchJobKill(m.database, job.ID)
+	case "u":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			return m, nil
+		}
+		if job.EffectiveStatus() != db.StatusQueued {
+			m.statusMessage = fmt.Sprintf("Job #%d is %s; only queued jobs can be unplaced", job.ID, job.EffectiveStatus())
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Unplacing job #%d...", job.ID)
+		return m, requestWatchJobUnplace(m.database, job.ID)
+	case "m":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			return m, nil
+		}
+		if job.EffectiveStatus() != db.StatusQueued {
+			m.statusMessage = "Move is only available for queued jobs"
+			return m, nil
+		}
+		cfg, cfgErr := config.Load()
+		if cfgErr != nil {
+			m.statusMessage = fmt.Sprintf("Move setup failed: %v", cfgErr)
+			return m, nil
+		}
+		cloudClients, clientsErr := buildCloudClients(cfg)
+		if clientsErr != nil {
+			m.statusMessage = fmt.Sprintf("Move setup failed: %v", clientsErr)
+			return m, nil
+		}
+		launches, err := db.ListRunningLaunches(m.database)
+		if err != nil {
+			m.statusMessage = fmt.Sprintf("Move setup failed: %v", err)
+			return m, nil
+		}
+		capacities := make([]campaign.InstanceCapacity, 0, len(launches))
+		queuedCounts := make(map[int64]int, len(launches))
+		for _, ci := range launches {
+			liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(m.database, ci.ID)
+			if jobsErr != nil {
+				continue
+			}
+			if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(liveJobs)); ok {
+				capacities = append(capacities, cap)
+			}
+			for _, j := range liveJobs {
+				if j != nil && j.EffectiveStatus() == db.StatusQueued {
+					queuedCounts[ci.ID]++
+				}
+			}
+		}
+		sourceInstanceID := int64(0)
+		if job.LaunchID != nil {
+			sourceInstanceID = *job.LaunchID
+		}
+		m.statusMessage = "Searching for move destinations..."
+		return m, requestMoveOptions(m.database, cfg, cloudClients, job, capacities, queuedCounts, sourceInstanceID)
+	}
+	return m, nil
 }
 
 func (m listTUIModel) footerText(rows int) string {
@@ -667,7 +943,28 @@ func (m *listTUIModel) rebuildLayout() {
 	m.layout = newJobListLayout(max(20, m.width-2), m.jobs, nil, false)
 }
 
+func (m *listTUIModel) rebuildGroupedRows() {
+	if !m.groupedByStatus {
+		m.groupedRows = nil
+		m.groupedSelectableRows = nil
+		return
+	}
+	groupedJobs := m.groupedJobsWithAutoReasons()
+	m.groupedRows = buildGroupedStatusRows(groupedJobs, m.width, m.launchLiveByID)
+	m.groupedSelectableRows = m.groupedSelectableRows[:0]
+	for i, row := range m.groupedRows {
+		if row.job != nil && !row.isHeader && !row.isBlocked {
+			m.groupedSelectableRows = append(m.groupedSelectableRows, i)
+		}
+	}
+	m.clampGroupedCursor()
+}
+
 func (m *listTUIModel) clampCursor() {
+	if m.groupedByStatus {
+		m.clampGroupedCursor()
+		return
+	}
 	if len(m.jobs) == 0 {
 		m.cursor = 0
 		return
@@ -680,7 +977,23 @@ func (m *listTUIModel) clampCursor() {
 	}
 }
 
+func (m *listTUIModel) clampGroupedCursor() {
+	if len(m.groupedSelectableRows) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.groupedSelectableRows) {
+		m.cursor = len(m.groupedSelectableRows) - 1
+	}
+}
+
 func (m *listTUIModel) adjustOffset() {
+	if m.groupedByStatus {
+		return
+	}
 	pageSize := m.pageSize()
 	if pageSize <= 0 {
 		m.offset = 0

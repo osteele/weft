@@ -19,6 +19,14 @@ type groupedStatusSection struct {
 	jobs  []*db.Job
 }
 
+type groupedStatusRow struct {
+	text      string
+	isHeader  bool
+	isBlocked bool
+	job       *db.Job
+	section   string
+}
+
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 	return renderJobListGroupedStatusPlainAt(jobs, width, nil, time.Now())
 }
@@ -28,6 +36,22 @@ func renderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, lau
 }
 
 func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
+	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, now)
+	if len(rows) == 0 {
+		return "None\n"
+	}
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, row.text)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) []groupedStatusRow {
+	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, time.Now())
+}
+
+func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
 	unplaced := make([]*db.Job, 0)
@@ -67,12 +91,16 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 	// Compute uniform project column width across all jobs.
 	projectWidth := computeProjectColumnWidth(jobs, width)
 
-	lines := make([]string, 0, len(jobs)+8)
+	rows := make([]groupedStatusRow, 0, len(jobs)+8)
 	for _, section := range sections {
 		if len(section.jobs) == 0 {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s (%d):", section.title, len(section.jobs)))
+		rows = append(rows, groupedStatusRow{
+			text:     fmt.Sprintf("%s (%d):", section.title, len(section.jobs)),
+			isHeader: true,
+			section:  section.key,
+		})
 		for _, job := range section.jobs {
 			project, desc := groupedStatusJobParts(job)
 			projectCol := formatProjectColumn(project, projectWidth)
@@ -115,30 +143,39 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 					line += strings.Repeat(" ", padding) + suffix
 				}
 			}
-			lines = append(lines, line)
+			rows = append(rows, groupedStatusRow{
+				text:    line,
+				job:     job,
+				section: section.key,
+			})
 			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
-				lines = append(lines, "    "+blocked)
+				rows = append(rows, groupedStatusRow{
+					text:      "    " + blocked,
+					isBlocked: true,
+					job:       job,
+					section:   section.key,
+				})
 			}
 		}
-		lines = append(lines, "")
+		rows = append(rows, groupedStatusRow{text: ""})
 	}
 
-	if len(lines) == 0 {
-		return "None\n"
+	if len(rows) == 0 {
+		return nil
 	}
 
 	// Remove trailing blank line.
-	if lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+	if rows[len(rows)-1].text == "" {
+		rows = rows[:len(rows)-1]
 	}
 
 	if width > 0 {
-		for i := range lines {
-			lines[i] = truncateDisplayWidth(lines[i], width)
+		for i := range rows {
+			rows[i].text = truncateDisplayWidth(rows[i].text, width)
 		}
 	}
 
-	return strings.Join(lines, "\n") + "\n"
+	return rows
 }
 
 // computeProjectColumnWidth determines a uniform project column width

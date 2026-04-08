@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -112,16 +114,19 @@ var jobListCmd = &cobra.Command{
 
 // Job move subcommand
 var jobMoveCmd = &cobra.Command{
-	Use:   "move <job-id> <new-host>",
-	Short: "Move a queued job to a different host",
-	Long: `Move a queued job to a different host.
+	Use:   "move <job-id> <new-host|new|create>",
+	Short: "Move a queued job to a different host or a new instance",
+	Long: `Move a queued job to a different host or a newly launched instance.
 
 This command only works for jobs with status=queued that haven't started yet.
-It updates the host in the database and removes/adds the job from/to queue files.
+For host targets, it updates the host in the database and triggers queue reconciliation.
+For 'new'/'create', it launches a compatible new rental instance and moves the job there.
 
 Examples:
   weft job move 42 cool100   # Move job 42 to cool100
-  weft job move 43 studio    # Move job 43 to studio`,
+  weft job move 43 studio    # Move job 43 to studio
+  weft job move 44 new       # Launch a new instance and move job 44
+  weft job move 45 create    # Alias for 'new'`,
 	Args: usageArgs(cobra.ExactArgs(2)),
 	RunE: runJobMove,
 }
@@ -421,6 +426,22 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 	}
 
 	oldHost := job.Host
+
+	if strings.EqualFold(newHost, "new") || strings.EqualFold(newHost, "create") {
+		result, moveErr := terminal.MoveQueuedJobToNewInstance(database, jobID)
+		if moveErr != nil {
+			return fmt.Errorf("move to new instance: %w", moveErr)
+		}
+		fmt.Printf("Moved job %s: %s → %s\n", FormatJobID(jobID), oldHost, result.TargetDesc)
+		if result.InstanceID > 0 {
+			fmt.Printf("Instance: %s\n", ids.FormatInstanceID(result.InstanceID))
+		}
+		fmt.Printf("Command: %s\n", job.Command)
+		if job.Description != "" {
+			fmt.Printf("Description: %s\n", job.Description)
+		}
+		return nil
+	}
 
 	// Update host in database first
 	if err := db.UpdateJobHost(database, jobID, newHost); err != nil {
