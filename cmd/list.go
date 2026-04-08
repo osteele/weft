@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/syncorch"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -184,17 +185,20 @@ func syncListData(database *sql.DB) []string {
 		return warnings
 	}
 
-	var completed bool
-	var unreachable []string
-	var syncWarnings []string
+	var hostFilter []string
 	if listHost != "" {
-		completed, unreachable, syncWarnings = performSyncWithTimeoutForHostsDetailed(database, []string{listHost}, FastSyncTimeout, false)
-	} else {
-		completed, unreachable, syncWarnings = performSyncWithTimeoutForHostsDetailed(database, nil, FastSyncTimeout, false)
+		hostFilter = []string{listHost}
 	}
-	warnings = append(warnings, syncWarnings...)
-	if !completed {
-		if note := buildStaleDataNote(database, unreachable); note != "" {
+	result := syncorch.SyncAll(database, nil, syncorch.SyncOptions{
+		Hosts:        hostFilter,
+		SSHTimeout:   FastSyncTimeout,
+		HostTimeout:  FastSyncHostTimeout,
+		CloudMode:    syncorch.CloudBounded,
+		CloudTimeout: FastCloudSyncTimeout,
+	})
+	warnings = append(warnings, result.Warnings...)
+	if !result.AllCompleted {
+		if note := buildStaleDataNote(database, result.HostsUnreachable); note != "" {
 			warnings = append(warnings, note)
 		}
 	}

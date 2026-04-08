@@ -13,7 +13,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
@@ -22,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/syncorch"
 )
 
 // SyncRate describes how aggressively a host should be refreshed.
@@ -370,7 +370,17 @@ func (w *Worker) reconcileCloudJobs() {
 		return
 	}
 
-	result := cloudsync.SyncState(w.database, w.reconciler, cloudClients, r2Client, nil)
+	clientAny := make([]any, 0, len(cloudClients))
+	for _, client := range cloudClients {
+		clientAny = append(clientAny, client)
+	}
+	result := syncorch.SyncCloud(nil, w.database, syncorch.CloudSyncOptions{
+		Timeout:     0,
+		Reconciler:  w.reconciler,
+		Clients:     clientAny,
+		R2Client:    r2Client,
+		SyncResults: true,
+	})
 	if result.Updated > 0 {
 		slog.Info("cloud reconcile completed", "component", "hostsync", "updated", result.Updated)
 		select {

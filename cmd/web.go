@@ -16,11 +16,11 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudreconcile"
-	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/syncorch"
 	"github.com/osteele/weft/internal/web"
 	"github.com/spf13/cobra"
 )
@@ -147,14 +147,17 @@ func startWebCloudReconcileLoop(database *sql.DB, cfg *config.Config) func() {
 }
 
 func runWebCloudReconcilePhase(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, reconciler *campaign.Reconciler) (int, error) {
-	if len(clients) == 0 {
-		resetMap, err := db.ResetJobsOnTerminalLaunches(database)
-		if err != nil {
-			return 0, err
-		}
-		return len(resetMap), nil
+	clientAny := make([]any, 0, len(clients))
+	for _, client := range clients {
+		clientAny = append(clientAny, client)
 	}
-	result := cloudsync.SyncState(database, reconciler, clients, r2Client, nil)
+	result := syncorch.SyncCloud(nil, database, syncorch.CloudSyncOptions{
+		Timeout:     0,
+		Reconciler:  reconciler,
+		Clients:     clientAny,
+		R2Client:    r2Client,
+		SyncResults: false,
+	})
 	if result.ReconcileResult == nil {
 		return 0, nil
 	}
