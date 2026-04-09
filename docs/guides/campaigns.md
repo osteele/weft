@@ -75,7 +75,7 @@ For scripted or agent-driven workflows, use `--yes` to skip the TUI:
 
 ```bash
 weft campaign launch --yes --watch      # Launch all unplaced jobs, then watch
-weft campaign launch --yes --jobs 42,43 # Launch specific jobs only
+weft campaign launch --yes --jobs wj42,wj43 # Launch specific jobs only
 weft campaign launch --yes --no-watch   # Launch and exit (print IDs)
 ```
 
@@ -108,7 +108,7 @@ weft campaign launch --project myproj   # Filter to a specific project's jobs
 weft campaign launch --max-spend '$10'  # Budget limit per instance
 weft campaign launch --max-time 2h      # Time limit per instance
 weft campaign launch --yes              # Skip TUI, launch all groups
-weft campaign launch --jobs 42,43       # Filter to specific job IDs
+weft campaign launch --jobs wj42,wj43       # Filter to specific job IDs
 weft campaign launch --min-survival 0   # Disable survival floor (allow all offers)
 weft campaign launch --min-survival 0.6 # Stricter survival floor
 ```

@@ -191,7 +191,7 @@ func FormatJobIDs(jobs []*db.Job, maxShow int) string {
 			parts = append(parts, fmt.Sprintf("…+%d", len(jobs)-maxShow))
 			break
 		}
-		parts = append(parts, fmt.Sprintf("%d", j.ID))
+		parts = append(parts, fmt.Sprintf("wj%d", j.ID))
 	}
 	return strings.Join(parts, ",")
 }

@@ -382,7 +382,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				if desc == "" {
 					desc = campaign.TruncateCommand(j.EffectiveCommand(), 50)
 				}
-				fmt.Printf("    %-6d %-12s %s\n", j.ID, displayStatus, desc)
+				fmt.Printf("    %-6s %-12s %s\n", FormatJobID(j.ID), displayStatus, desc)
 				if campaign.IsJobTerminal(displayStatus) {
 					if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil {
 						if summary := terminal.FormatUploadSummary(timings); summary != "" {

@@ -57,7 +57,7 @@ func TestFormatJobIDs(t *testing.T) {
 	}
 
 	result := FormatJobIDs(jobs, 5)
-	if !strings.Contains(result, "88") {
+	if !strings.Contains(result, "wj88") {
 		t.Errorf("should contain first job ID, got %q", result)
 	}
 	if !strings.Contains(result, "…+2") {

@@ -75,7 +75,7 @@ to toggle the status (or do it from the TUI, described below).
 weft run deepthought 'python train.py'
 
 # Start a queued job immediately
-weft start 123
+weft start wj123
 
 # Start immediately instead of queuing
 weft run -i deepthought 'python train.py'
@@ -233,21 +233,21 @@ remote cleanup.
 **Examples:**
 ```bash
 # Sync artifacts for job 2073 into the local store
-weft artifact sync 2073
+weft artifact sync wj2073
 
 # Sync all outstanding artifacts across jobs
 weft artifact sync
 
 # List cached artifacts
-weft artifact list 2073
+weft artifact list wj2073
 
 # Retrieve by name or path
-weft artifact get 2073 selectivity_results -o ./results.json
-weft artifact get 2073 output/selectivity_results.json -o ./results.json
+weft artifact get wj2073 selectivity_results -o ./results.json
+weft artifact get wj2073 output/selectivity_results.json -o ./results.json
 
 # Write artifact to stdout
-weft artifact get 2073 selectivity_results -o -
-weft artifact cat 2073 selectivity_results | jq '.metric'
+weft artifact get wj2073 selectivity_results -o -
+weft artifact cat wj2073 selectivity_results | jq '.metric'
 
 # Resolve latest job by tag
 weft artifact get --tag exp-012 --latest selectivity_results -o ./results.json
@@ -332,9 +332,9 @@ Check the status of one or more jobs by ID.
 
 ```bash
 weft job status <job-id>...
-weft job status --wait 42         # block until the job finishes
-weft job status --wait --wait-timeout 30m 42
-weft job status --wait 42 43 44   # wait for all (exits 0 only if all succeed)
+weft job status --wait wj42         # block until the job finishes
+weft job status --wait --wait-timeout 30m wj42
+weft job status --wait wj42 wj43 wj44   # wait for all (exits 0 only if all succeed)
 ```
 
 **Job ID syntax:**
@@ -414,9 +414,9 @@ weft job list --status unprocessed     # Jobs missing the processed tag
 weft job list --search training        # Search jobs
 weft job list --group-by status        # Grouped status view
 weft job list --group-by status --watch # Grouped live view (TUI on interactive terminals)
-weft job list 12::14                   # List jobs 12 through 14
-weft job list 12...13                  # Alternative range syntax
-weft job list 12,13,14                 # Comma-separated IDs
+weft job list wj12::wj14                   # List jobs 12 through 14
+weft job list wj12...wj13                  # Alternative range syntax
+weft job list wj12,wj13,wj14                 # Comma-separated IDs
 weft job list --show 42                # Job details
 weft job list --cleanup 30             # Remove old jobs
 ```
@@ -479,9 +479,9 @@ weft job tag rm <job-id>... <tag>
 
 **Examples:**
 ```bash
-weft job tag add 42 exp-012
-weft job tag rm 42 exp-012
-weft job tag add 42 43 44 rental    # tag multiple jobs at once
+weft job tag add wj42 exp-012
+weft job tag rm wj42 exp-012
+weft job tag add wj42 wj43 wj44 rental    # tag multiple jobs at once
 ```
 
 Reserved placement tags use the preferred names `rental` and `inventory`.
@@ -503,8 +503,8 @@ top-level forms)
 
 **Examples:**
 ```bash
-weft job mark-processed 42
-weft job mark-unprocessed 42 43
+weft job mark-processed wj42
+weft job mark-unprocessed wj42 wj43
 weft job list --unprocessed
 ```
 
@@ -613,16 +613,16 @@ weft log --events [flags]
 
 **Examples:**
 ```bash
-weft log 42           # Last 50 lines
-weft log 42 -f        # Follow (like tail -f)
-weft log 42 -n 100    # Last 100 lines
-weft log 42 --tail 30 # Alias for --lines
-weft log 42 --from 100 --to 200  # Lines 100-200
-weft log 42 --from 500           # From line 500 onwards
-weft log 42 --to 100             # First 100 lines
-weft log 42 --grep error         # Lines containing "error"
-weft log 42 -f --grep epoch      # Follow, filter for "epoch"
-weft log 42 --full               # Entire log
+weft log wj42           # Last 50 lines
+weft log wj42 -f        # Follow (like tail -f)
+weft log wj42 -n 100    # Last 100 lines
+weft log wj42 --tail 30 # Alias for --lines
+weft log wj42 --from 100 --to 200  # Lines 100-200
+weft log wj42 --from 500           # From line 500 onwards
+weft log wj42 --to 100             # First 100 lines
+weft log wj42 --grep error         # Lines containing "error"
+weft log wj42 -f --grep epoch      # Follow, filter for "epoch"
+weft log wj42 --full               # Entire log
 weft log --ops --job 42          # Operations for a job
 weft log --ops --host vastai:17  # Operations for a rental instance
 weft log --events --kind relaunch
@@ -653,9 +653,9 @@ stream.
 
 **Examples:**
 ```bash
-weft telemetry 42
-weft telemetry 42 43
-weft telemetry 42 --json
+weft telemetry wj42
+weft telemetry wj42 wj43
+weft telemetry wj42 --json
 ```
 
 ### weft job restart
@@ -685,9 +685,9 @@ weft job retry <job-id>   # Alias
 GPU override flags are supported:
 
 ```bash
-weft retry 548 549 --gpu nvidia>=24GB
-weft retry 548 549 --gpu-class nvidia --gpu-mem 24
-weft retry 548 549 --gpu-class nvidia --gpu-mem 24 --gpu-mem-strict
+weft retry wj548 wj549 --gpu nvidia>=24GB
+weft retry wj548 wj549 --gpu-class nvidia --gpu-mem 24
+weft retry wj548 wj549 --gpu-class nvidia --gpu-mem 24 --gpu-mem-strict
 ```
 
 `retry` re-syncs project-derived inputs/outputs and re-reads `[tool.weft]`
@@ -717,11 +717,11 @@ weft job move <job-id>... <destination>
 
 **Examples:**
 ```bash
-weft job move 42 cool100              # Place/move job 42 to cool100
-weft job move 43 wi872                # Submit job 43 to instance wi872
-weft job move 44 new                  # Launch one new instance for job 44
-weft job move 44 45 46 new            # Launch instance(s) for jobs 44-46
-weft job move 44:46 --each new        # Separate new instance per job
+weft job move wj42 cool100              # Place/move job 42 to cool100
+weft job move wj43 wi872                # Submit job 43 to instance wi872
+weft job move wj44 new                  # Launch one new instance for job 44
+weft job move wj44 wj45 wj46 new            # Launch instance(s) for jobs 44-46
+weft job move wj44:wj46 --each new        # Separate new instance per job
 weft job move --project myproj new    # All queued myproj jobs → new instance(s)
 ```
 
@@ -749,9 +749,9 @@ weft run <job-id>           # Shorthand (same effect)
 
 Examples:
 ```bash
-weft run 512                # Start queued job 512 immediately
-weft job start 512          # Same as above
-weft job start 9001         # Bypass queue order and run now
+weft run wj512                # Start queued job 512 immediately
+weft job start wj512          # Same as above
+weft job start wj9001         # Bypass queue order and run now
 ```
 
 Only jobs with status `queued` can be started this way. The command preserves
@@ -844,7 +844,7 @@ weft kill <job-id>
 
 **Example:**
 ```bash
-weft kill 42    # Kill job #42
+weft kill wj42    # Kill job #42
 ```
 
 ### weft pause
@@ -857,7 +857,7 @@ weft pause <job-id>
 
 **Example:**
 ```bash
-weft pause 42   # Pause job #42
+weft pause wj42   # Pause job #42
 ```
 
 ### weft resume
@@ -870,7 +870,7 @@ weft resume <job-id>
 
 **Example:**
 ```bash
-weft resume 42  # Resume job #42
+weft resume wj42  # Resume job #42
 ```
 
 ### weft job draft
@@ -952,11 +952,11 @@ IDs can also be suffixed with `+` or `:any` to mark them as completion-based dep
 
 **Examples:**
 ```bash
-weft edit 1595 --depends-on 1599
-weft edit 1600 --depends-on 1400 --depends-on-any 1401
-weft edit 1700 --clear-depends
-weft edit 1750 --tag benchmark --tag exp-012
-weft edit 1800 --command "python eval.py" -C ~/project -e FOO=bar
+weft edit wj1595 --depends-on wj1599
+weft edit wj1600 --depends-on wj1400 --depends-on-any wj1401
+weft edit wj1700 --clear-depends
+weft edit wj1750 --tag benchmark --tag exp-012
+weft edit wj1800 --command "python eval.py" -C ~/project -e FOO=bar
 ```
 
 Changes are validated so you can only depend on jobs that run on the same host. If the host is offline, the update is deferred like other queue operations and reapplied once it reconnects.

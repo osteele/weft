@@ -218,8 +218,8 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 			display = display[:47] + "..."
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n",
-			job.ID, job.Status, started, display)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			FormatJobID(job.ID), job.Status, started, display)
 	}
 
 	w.Flush()
