@@ -61,3 +61,18 @@ func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
 		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeFailed)
 	}
 }
+
+func TestInstanceInfoCommandAliasExists(t *testing.T) {
+	var found bool
+	for _, sub := range instanceCmd.Commands() {
+		if sub.Name() == "info" {
+			found = true
+			if sub.RunE == nil {
+				t.Fatal("instance info command should have a handler")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("instance info command not found")
+	}
+}

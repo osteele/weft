@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
@@ -853,7 +855,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 
 		// Show full job details
 		fmt.Printf("Job ID:      %d\n", job.ID)
-		fmt.Printf("Target:      %s\n", job.TargetDisplay())
+		fmt.Printf("Host:        %s\n", job.TargetDisplay())
 		// Show status with waiting info
 		if display.Blocked {
 			fmt.Printf("Status:      %s\n", display.Status)
@@ -866,6 +868,19 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Command:     %s\n", job.Command)
 		if tags := job.DisplayTags(); len(tags) > 0 {
 			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
+		}
+		now := time.Now()
+		elapsed := jobElapsedDuration(job, now)
+		if elapsed > 0 {
+			fmt.Printf("Elapsed:     %s\n", db.FormatDuration(int64(elapsed.Seconds())))
+		}
+		estimateTotal, hasEstimate := jobTimeEstimate(job, database)
+		if hasEstimate {
+			fmt.Printf("Est. Time:   %s\n", estimateTotal.FormatWithBounds())
+			if elapsed > 0 {
+				eta := estimateRemaining(estimateTotal, elapsed)
+				fmt.Printf("ETA:         %s\n", eta.FormatWithBounds())
+			}
 		}
 
 		// Show effective command/directory if different
@@ -913,6 +928,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		if job.ErrorMessage != "" {
 			fmt.Printf("Error:       %s\n", job.ErrorMessage)
+		}
+		if rentalSummary, ok := rentalCostSummary(database, job, now); ok {
+			fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
 		}
 
 		// Resource usage
@@ -965,6 +983,205 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
+}
+
+type rentalCostInfo struct {
+	Cost  float64
+	Basis string
+}
+
+func jobElapsedDuration(job *db.Job, now time.Time) time.Duration {
+	if job == nil {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if job.StartTime <= 0 {
+		return 0
+	}
+	start := time.Unix(job.StartTime, 0)
+	end := now
+	if job.EndTime != nil && *job.EndTime > 0 {
+		end = time.Unix(*job.EndTime, 0)
+	}
+	if end.Before(start) {
+		return 0
+	}
+	return end.Sub(start)
+}
+
+func jobSetupDuration(job *db.Job, timings *db.JobPhaseTimings, now time.Time) time.Duration {
+	if job == nil || timings == nil || timings.SetupStart == nil || *timings.SetupStart <= 0 {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	start := time.Unix(*timings.SetupStart, 0)
+	switch {
+	case timings.SetupEnd != nil && *timings.SetupEnd > 0:
+		end := time.Unix(*timings.SetupEnd, 0)
+		if end.After(start) {
+			return end.Sub(start)
+		}
+	case timings.RunStart != nil && *timings.RunStart > 0:
+		end := time.Unix(*timings.RunStart, 0)
+		if end.After(start) {
+			return end.Sub(start)
+		}
+	}
+	if job.EndTime != nil && *job.EndTime > 0 {
+		end := time.Unix(*job.EndTime, 0)
+		if end.After(start) {
+			return end.Sub(start)
+		}
+	}
+	if now.After(start) {
+		return now.Sub(start)
+	}
+	return 0
+}
+
+func jobRunElapsedDuration(job *db.Job, timings *db.JobPhaseTimings, now time.Time) time.Duration {
+	if job == nil {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if timings != nil && timings.RunStart != nil && *timings.RunStart > 0 {
+		start := time.Unix(*timings.RunStart, 0)
+		end := now
+		if timings.RunEnd != nil && *timings.RunEnd > 0 {
+			end = time.Unix(*timings.RunEnd, 0)
+		} else if job.EndTime != nil && *job.EndTime > 0 {
+			end = time.Unix(*job.EndTime, 0)
+		}
+		if end.After(start) {
+			return end.Sub(start)
+		}
+		return 0
+	}
+	return jobElapsedDuration(job, now)
+}
+
+func predictionToEstimate(predictedSeconds *float64) (estimate.Estimate, bool) {
+	if predictedSeconds == nil || *predictedSeconds <= 0 {
+		return estimate.Estimate{}, false
+	}
+	meanSeconds := *predictedSeconds
+	return estimate.FromSeconds(meanSeconds, meanSeconds*0.5, meanSeconds*2.0), true
+}
+
+func jobTimeEstimate(job *db.Job, database *sql.DB) (estimate.Estimate, bool) {
+	if job == nil {
+		return estimate.Estimate{}, false
+	}
+	timeEstimate, ok := predictionToEstimate(nil)
+	if job.PlacementMeta != nil {
+		timeEstimate, ok = predictionToEstimate(job.PlacementMeta.PredictedDurationS)
+	}
+	if !ok {
+		timeEstimate = estimate.DefaultJobDuration
+		ok = true
+	}
+	// For rentals, include observed setup overhead when available.
+	if job.LaunchID != nil && *job.LaunchID > 0 {
+		if timings, err := db.GetJobPhaseTimings(database, job.ID); err == nil && timings != nil {
+			setup := jobSetupDuration(job, timings, time.Now())
+			if setup > 0 {
+				timeEstimate = estimate.Estimate{
+					Mean:  timeEstimate.Mean + setup,
+					Lower: timeEstimate.Lower + setup,
+					Upper: timeEstimate.Upper + setup,
+				}
+			}
+		}
+	}
+	return timeEstimate, ok
+}
+
+func estimateRemaining(total estimate.Estimate, elapsed time.Duration) estimate.Estimate {
+	remaining := estimate.Estimate{
+		Mean:  max(0, total.Mean-elapsed),
+		Lower: max(0, total.Lower-elapsed),
+		Upper: max(0, total.Upper-elapsed),
+	}
+	if remaining.Upper < remaining.Lower {
+		remaining.Upper = remaining.Lower
+	}
+	if remaining.Mean < remaining.Lower {
+		remaining.Mean = remaining.Lower
+	}
+	if remaining.Mean > remaining.Upper {
+		remaining.Mean = remaining.Upper
+	}
+	return remaining
+}
+
+func launchCostSoFar(launch *db.Launch, now time.Time) float64 {
+	if launch == nil {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if launch.LaunchedAt != nil && launch.CostPerHourCents > 0 {
+		start := time.Unix(*launch.LaunchedAt, 0)
+		end := now
+		if launch.EndedAt != nil && *launch.EndedAt > 0 {
+			end = time.Unix(*launch.EndedAt, 0)
+		}
+		if end.Before(start) {
+			end = start
+		}
+		return end.Sub(start).Hours() * (float64(launch.CostPerHourCents) / 100.0)
+	}
+	if launch.ActualSpendCents > 0 {
+		return float64(launch.ActualSpendCents) / 100.0
+	}
+	return 0
+}
+
+func rentalCostSummary(database *sql.DB, job *db.Job, now time.Time) (rentalCostInfo, bool) {
+	if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+		return rentalCostInfo{}, false
+	}
+	launch, err := db.GetLaunch(database, *job.LaunchID)
+	if err != nil || launch == nil {
+		return rentalCostInfo{}, false
+	}
+
+	currentJobs, err := db.GetLaunchJobs(database, *job.LaunchID)
+	if err != nil {
+		return rentalCostInfo{}, false
+	}
+	isOnlyJob := len(currentJobs) == 1 && currentJobs[0] != nil && currentJobs[0].ID == job.ID
+
+	if isOnlyJob {
+		return rentalCostInfo{
+			Cost:  launchCostSoFar(launch, now),
+			Basis: "instance total",
+		}, true
+	}
+
+	ratePerHour := float64(launch.CostPerHourCents) / 100.0
+	if ratePerHour <= 0 {
+		return rentalCostInfo{}, false
+	}
+	timings, _ := db.GetJobPhaseTimings(database, job.ID)
+	setup := jobSetupDuration(job, timings, now)
+	run := jobRunElapsedDuration(job, timings, now)
+	billable := setup + run
+	if billable <= 0 {
+		return rentalCostInfo{}, false
+	}
+	cost := math.Max(0, billable.Hours()*ratePerHour)
+	return rentalCostInfo{
+		Cost:  cost,
+		Basis: "shared instance: setup + run",
+	}, true
 }
 
 func formatUnixTime(t int64) string {

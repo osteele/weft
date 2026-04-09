@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/util"
@@ -178,11 +179,14 @@ func (j *Job) TargetDisplay() string {
 	switch j.TargetKind() {
 	case JobTargetRentalInstance:
 		if j != nil && j.LaunchID != nil && *j.LaunchID > 0 {
-			return fmt.Sprintf("rental:%d", *j.LaunchID)
+			return ids.FormatInstanceID(*j.LaunchID)
 		}
 		if j != nil {
 			host := strings.TrimSpace(j.Host)
 			if host != "" {
+				if instanceID, ok := parseLegacyLaunchHostInstanceID(host); ok {
+					return ids.FormatInstanceID(instanceID)
+				}
 				return host
 			}
 		}

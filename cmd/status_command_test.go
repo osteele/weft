@@ -179,6 +179,131 @@ func TestRunJobInfoShowsBlockedReasonFromQueueState(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoRentalDisplaysHostElapsedEstimateETAAndCost(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	launchedAt := now - 3600
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUSpec:          "RTX_4090",
+		CostPerHourCents: 100,
+		LaunchedAt:       &launchedAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo hi", "info output", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, now-900, jobID); err != nil {
+		t.Fatalf("set running attempt: %v", err)
+	}
+	if err := db.SetJobPlacementMeta(database, jobID, &db.PlacementMeta{PredictedDurationS: float64PtrSC(1800)}); err != nil {
+		t.Fatalf("SetJobPlacementMeta: %v", err)
+	}
+	if err := db.UpsertJobPhaseTimings(database, &db.JobPhaseTimings{
+		JobID:      jobID,
+		SetupStart: int64PtrSC(now - 930),
+		SetupEnd:   int64PtrSC(now - 900),
+		RunStart:   int64PtrSC(now - 900),
+	}); err != nil {
+		t.Fatalf("UpsertJobPhaseTimings: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Host:        wi") {
+		t.Fatalf("missing wi host label, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Elapsed:") {
+		t.Fatalf("missing elapsed line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Est. Time:") {
+		t.Fatalf("missing estimate line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ETA:") {
+		t.Fatalf("missing ETA line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "instance total") {
+		t.Fatalf("missing instance-total cost line, got:\n%s", out)
+	}
+}
+
+func TestRunJobInfoRentalSharedInstanceUsesSetupAndRunCostBasis(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	launchedAt := now - 1800
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUSpec:          "RTX_4090",
+		CostPerHourCents: 240,
+		LaunchedAt:       &launchedAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo hi", "shared billing", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, now-600, jobID); err != nil {
+		t.Fatalf("set running attempt: %v", err)
+	}
+	if err := db.UpsertJobPhaseTimings(database, &db.JobPhaseTimings{
+		JobID:      jobID,
+		SetupStart: int64PtrSC(now - 660),
+		SetupEnd:   int64PtrSC(now - 600),
+		RunStart:   int64PtrSC(now - 600),
+	}); err != nil {
+		t.Fatalf("UpsertJobPhaseTimings: %v", err)
+	}
+
+	otherID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo other", "other job", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(other): %v", err)
+	}
+	if err := db.SetJobLaunchID(database, otherID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID(other): %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "shared instance: setup + run") {
+		t.Fatalf("missing shared-cost basis line, got:\n%s", out)
+	}
+}
+
+func int64PtrSC(v int64) *int64 {
+	return &v
+}
+
+func float64PtrSC(v float64) *float64 {
+	return &v
+}
+
 func createRentalQueuedJob(t *testing.T, database *sql.DB) int64 {
 	t.Helper()
 

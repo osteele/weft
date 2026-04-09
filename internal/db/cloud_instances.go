@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
@@ -606,7 +607,23 @@ func LaunchHost(instanceID int64) string {
 // IsLaunchHost reports whether a host string refers to a legacy synthetic
 // rental host name (e.g. "vastai:123" or "runpod:456").
 func IsLaunchHost(host string) bool {
-	return strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:")
+	_, ok := parseLegacyLaunchHostInstanceID(host)
+	return ok
+}
+
+func parseLegacyLaunchHostInstanceID(host string) (int64, bool) {
+	trimmed := strings.TrimSpace(host)
+	for _, prefix := range []string{"vastai:", "runpod:", "rental:"} {
+		suffix, ok := strings.CutPrefix(trimmed, prefix)
+		if !ok {
+			continue
+		}
+		id, err := ids.ParseInstanceID(suffix)
+		if err == nil && id > 0 {
+			return id, true
+		}
+	}
+	return 0, false
 }
 
 // SetJobLaunchID associates a job with a cloud instance by creating a new

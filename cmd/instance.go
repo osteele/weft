@@ -42,6 +42,13 @@ var instanceStatusCmd = &cobra.Command{
 	RunE:  runInstanceStatus,
 }
 
+var instanceInfoCmd = &cobra.Command{
+	Use:   "info <id> [id...]",
+	Short: "Show cloud instance status with uptime and cost",
+	Args:  cobra.MinimumNArgs(1),
+	RunE:  runInstanceStatus,
+}
+
 var instanceTerminateCmd = &cobra.Command{
 	Use:     "terminate <id> [id...]",
 	Aliases: []string{"cancel"},
@@ -111,6 +118,7 @@ func init() {
 	rootCmd.AddCommand(instanceCmd)
 	instanceCmd.AddCommand(instanceListCmd)
 	instanceCmd.AddCommand(instanceStatusCmd)
+	instanceCmd.AddCommand(instanceInfoCmd)
 	instanceCmd.AddCommand(instanceTerminateCmd)
 	instanceCmd.AddCommand(instanceSSHCmd)
 	instanceCmd.AddCommand(instanceSubmitCmd)
