@@ -1286,7 +1286,24 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
-	plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
+	// Run planner with a timeout — the offer search can hang if the provider API
+	// is unresponsive, which would leave autoInProgress stuck true forever.
+	type planResult struct {
+		plan campaign.AutoPlacementPlan
+		err  error
+	}
+	planCh := make(chan planResult, 1)
+	go func() {
+		p, e := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
+		planCh <- planResult{p, e}
+	}()
+	var plan campaign.AutoPlacementPlan
+	select {
+	case pr := <-planCh:
+		plan, err = pr.plan, pr.err
+	case <-time.After(30 * time.Second):
+		err = fmt.Errorf("planner timed out (offer search may be hung)")
+	}
 	if err != nil {
 		oplog.Log("auto_pilot.planner_error",
 			oplog.WithError(err),
