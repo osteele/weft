@@ -281,6 +281,48 @@ func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
 	}
 }
 
+func TestListTUIAutoPilotFailureRebuildsGroupedRowsWithBlockReasons(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 10, Description: "test job", Tags: []string{"rental"}, Status: db.StatusQueued},
+	}
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		autoInProgress:  true,
+		database:        &sql.DB{},
+		jobs:            jobs,
+		width:           120,
+		height:          40,
+	}
+	m.rebuildGroupedRows()
+
+	// Simulate auto-pilot error with partial block reasons.
+	reasons := map[int64]string{10: "no cloud providers available"}
+	next, _ := m.Update(listAutoPilotDoneMsg{
+		err:            errors.New("no cloud providers available"),
+		blockedReasons: reasons,
+	})
+	got := next.(listTUIModel)
+
+	if got.autoBlockReasons == nil {
+		t.Fatal("autoBlockReasons should be set even on error")
+	}
+	if got.autoBlockReasons[10] != "no cloud providers available" {
+		t.Fatalf("autoBlockReasons[10] = %q, want block reason", got.autoBlockReasons[10])
+	}
+	// Grouped rows should have been rebuilt to include the block reason.
+	found := false
+	for _, row := range got.groupedRows {
+		if strings.Contains(row.text, "blocked:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected grouped rows to contain a blocked reason row after auto-pilot error")
+	}
+}
+
 func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,

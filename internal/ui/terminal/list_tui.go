@@ -416,6 +416,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot failed: " + summarizeAutoPilotError(msg.err)
 			}
+			m.rebuildGroupedRows()
 			return m, nil
 		}
 		if msg.anotherHolding {
@@ -1344,7 +1345,13 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	passStartedAt := time.Now().Unix()
 	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
-		return placed, 0, "", nil, err
+		// Preserve planner-level blocked reasons collected before the launch error.
+		for _, jobID := range rentalScope {
+			if _, exists := blockedReasons[jobID]; !exists {
+				blockedReasons[jobID] = "launch failed"
+			}
+		}
+		return placed, 0, "", blockedReasons, err
 	}
 	if result == nil {
 		return placed, 0, "", blockedReasons, nil

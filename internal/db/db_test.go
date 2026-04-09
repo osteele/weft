@@ -1638,6 +1638,76 @@ func TestLaunchAttempts(t *testing.T) {
 	}
 }
 
+func TestCountLaunchAttempts_ExcludesOrphanedBeforeStart(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test job", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	// Create instance that will fail before job starts.
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set launch: %v", err)
+	}
+
+	// Mark the attempt as orphaned (instance failed before job started).
+	// The attempt has no start_time.
+	if err := CloseLaunchAttempt(database, jobID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+
+	count, err := CountLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("CountLaunchAttempts: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("CountLaunchAttempts = %d, want 0 (orphaned before start should not count)", count)
+	}
+
+	// Create a second instance where the job actually starts.
+	instanceID2, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance 2: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", nil, StatusQueued); err != nil {
+		t.Fatalf("create attempt 2: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID2); err != nil {
+		t.Fatalf("set launch 2: %v", err)
+	}
+	// Simulate job starting then being orphaned (instance dies mid-run).
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ? WHERE job_id = ? AND launch_id = ?`,
+		time.Now().Unix(), jobID, instanceID2,
+	); err != nil {
+		t.Fatalf("set start_time: %v", err)
+	}
+	if err := CloseLaunchAttempt(database, jobID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("close attempt 2: %v", err)
+	}
+
+	count, err = CountLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("CountLaunchAttempts: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CountLaunchAttempts = %d, want 1 (orphaned after start should count)", count)
+	}
+}
+
 func TestLaunchAttemptTriggersSyncJobAssignment(t *testing.T) {
 	database := SetupTestDB(t)
 

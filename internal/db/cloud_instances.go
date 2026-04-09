@@ -1402,14 +1402,19 @@ func repairCompletedCloudAttemptsMissingExitCode(database *sql.DB) error {
 }
 
 // CountLaunchAttempts returns the number of cloud-associated attempts for a job.
+// Attempts where the job was orphaned before it started (instance failed during
+// provisioning) are excluded — infrastructure failures should not count against
+// the job's retry budget.
 func CountLaunchAttempts(database *sql.DB, jobID int64) (int, error) {
 	var count int
 	err := database.QueryRow(
 		`SELECT COUNT(*) FROM job_attempts
 		 WHERE job_id = ?
 		   AND launch_id IS NOT NULL
-		   AND COALESCE(cloud_outcome, '') != ?`,
+		   AND COALESCE(cloud_outcome, '') != ?
+		   AND NOT (COALESCE(cloud_outcome, '') = ? AND start_time IS NULL)`,
 		jobID, AttemptOutcomeSuperseded,
+		AttemptOutcomeOrphaned,
 	).Scan(&count)
 	return count, err
 }
@@ -1418,6 +1423,7 @@ func CountLaunchAttempts(database *sql.DB, jobID int64) (int, error) {
 // for a job within a specific campaign. This prevents attempts from earlier
 // campaigns (e.g. a previous `launch` command) from counting against the retry
 // budget of the current campaign.
+// Attempts where the job was orphaned before it started are excluded.
 func CountLaunchAttemptsInCampaign(database *sql.DB, jobID int64, campaignID int64) (int, error) {
 	var count int
 	err := database.QueryRow(
@@ -1426,8 +1432,10 @@ func CountLaunchAttemptsInCampaign(database *sql.DB, jobID int64, campaignID int
 		 WHERE ja.job_id = ?
 		   AND ja.launch_id IS NOT NULL
 		   AND l.campaign_id = ?
-		   AND COALESCE(ja.cloud_outcome, '') != ?`,
+		   AND COALESCE(ja.cloud_outcome, '') != ?
+		   AND NOT (COALESCE(ja.cloud_outcome, '') = ? AND ja.start_time IS NULL)`,
 		jobID, campaignID, AttemptOutcomeSuperseded,
+		AttemptOutcomeOrphaned,
 	).Scan(&count)
 	return count, err
 }
