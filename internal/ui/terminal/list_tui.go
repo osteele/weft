@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"regexp"
 	"sort"
@@ -24,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 )
 
@@ -1211,7 +1211,7 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("auto-pilot goroutine panicked", "component", "auto-pilot", "panic", fmt.Sprintf("%v", r))
+				oplog.Log("auto_pilot.panic", oplog.WithErrorStr(fmt.Sprintf("%v", r)))
 				msg = listAutoPilotDoneMsg{err: fmt.Errorf("auto-pilot panic: %v", r)}
 			}
 		}()
@@ -1288,11 +1288,9 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
 	if err != nil {
-		slog.Warn("auto-pilot planner failed",
-			"component", "auto-pilot",
-			"error", err,
-			"unplaced", len(unplaced),
-			"capacities", len(capacities))
+		oplog.Log("auto_pilot.planner_error",
+			oplog.WithError(err),
+			oplog.WithDetailf("unplaced=%d capacities=%d", len(unplaced), len(capacities)))
 		return 0, 0, "", nil, err
 	}
 	blockedReasons := map[int64]string{}
@@ -1301,13 +1299,9 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
-	slog.Info("auto-pilot pass",
-		"component", "auto-pilot",
-		"unplaced", len(unplaced),
-		"capacities", len(capacities),
-		"reuse", len(plan.ReuseAssignments),
-		"launch_candidates", len(plan.LaunchJobIDs),
-		"blocked", len(blockedReasons))
+	oplog.Log("auto_pilot.plan",
+		oplog.WithDetailf("unplaced=%d capacities=%d reuse=%d launch=%d blocked=%d",
+			len(unplaced), len(capacities), len(plan.ReuseAssignments), len(plan.LaunchJobIDs), len(blockedReasons)))
 
 	placed := 0
 	for _, assignment := range plan.ReuseAssignments {
@@ -1315,10 +1309,9 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			continue
 		}
 		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
-			slog.Debug("auto-pilot reuse assignment failed, skipping",
-				"job_id", assignment.Job.ID,
-				"instance_id", assignment.Instance.Instance.ID,
-				"error", err)
+			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
+				oplog.WithError(err),
+				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
 			continue
 		}
 		placed++
@@ -1356,24 +1349,20 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 	if len(rentalScope) == 0 {
-		slog.Debug("auto-pilot: no rental-scope jobs to launch",
-			"component", "auto-pilot",
-			"launch_scope", len(launchScope),
-			"blocked", len(blockedReasons))
+		oplog.Log("auto_pilot.no_rental_scope",
+			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
 		return placed, 0, "", blockedReasons, nil
 	}
-	slog.Info("auto-pilot launching",
-		"component", "auto-pilot",
-		"rental_scope", len(rentalScope))
+	oplog.Log("auto_pilot.launching",
+		oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
 
 	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
 	passStartedAt := time.Now().Unix()
 	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
-		slog.Warn("auto-pilot launch failed",
-			"component", "auto-pilot",
-			"error", err,
-			"rental_scope", len(rentalScope))
+		oplog.Log("auto_pilot.launch_error",
+			oplog.WithError(err),
+			oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
 		// Preserve planner-level blocked reasons collected before the launch error.
 		for _, jobID := range rentalScope {
 			if _, exists := blockedReasons[jobID]; !exists {
