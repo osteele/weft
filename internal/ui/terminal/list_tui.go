@@ -1208,7 +1208,13 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	scope := m.autoLeaseScope
 	jobs := append([]*db.Job(nil), m.jobs...)
 
-	return func() tea.Msg {
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("auto-pilot goroutine panicked", "component", "auto-pilot", "panic", fmt.Sprintf("%v", r))
+				msg = listAutoPilotDoneMsg{err: fmt.Errorf("auto-pilot panic: %v", r)}
+			}
+		}()
 		acquired, err := db.AcquireAutoLease(database, scope, owner, listAutoLeaseTTL)
 		if err != nil {
 			return listAutoPilotDoneMsg{err: err}
@@ -1282,6 +1288,11 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
 	if err != nil {
+		slog.Warn("auto-pilot planner failed",
+			"component", "auto-pilot",
+			"error", err,
+			"unplaced", len(unplaced),
+			"capacities", len(capacities))
 		return 0, 0, "", nil, err
 	}
 	blockedReasons := map[int64]string{}
@@ -1290,6 +1301,13 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
+	slog.Info("auto-pilot pass",
+		"component", "auto-pilot",
+		"unplaced", len(unplaced),
+		"capacities", len(capacities),
+		"reuse", len(plan.ReuseAssignments),
+		"launch_candidates", len(plan.LaunchJobIDs),
+		"blocked", len(blockedReasons))
 
 	placed := 0
 	for _, assignment := range plan.ReuseAssignments {
@@ -1338,13 +1356,24 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 	if len(rentalScope) == 0 {
+		slog.Debug("auto-pilot: no rental-scope jobs to launch",
+			"component", "auto-pilot",
+			"launch_scope", len(launchScope),
+			"blocked", len(blockedReasons))
 		return placed, 0, "", blockedReasons, nil
 	}
+	slog.Info("auto-pilot launching",
+		"component", "auto-pilot",
+		"rental_scope", len(rentalScope))
 
 	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
 	passStartedAt := time.Now().Unix()
 	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
+		slog.Warn("auto-pilot launch failed",
+			"component", "auto-pilot",
+			"error", err,
+			"rental_scope", len(rentalScope))
 		// Preserve planner-level blocked reasons collected before the launch error.
 		for _, jobID := range rentalScope {
 			if _, exists := blockedReasons[jobID]; !exists {
