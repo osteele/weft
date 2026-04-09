@@ -133,7 +133,15 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	} else {
 		gpuDevices = GetJobGPUDevices(job)
 	}
-	if len(gpuDevices) > 0 && job.GPUClass != "" {
+	// Auto-assign GPU on GPU hosts when no explicit constraint was given.
+	if len(gpuDevices) == 0 && len(gpuInv.Devices) > 0 {
+		gpuInv.RefreshDeviceMemSnapshot()
+		emptyState := NewState()
+		if device := gpuInv.PickLeastLoadedGPU(emptyState); device != "" {
+			gpuDevices = []string{device}
+		}
+	}
+	if len(gpuDevices) > 0 {
 		cudaEnv := FormatGPUDeviceEnv(gpuDevices)
 		envVars = append(envVars, cudaEnv)
 	}

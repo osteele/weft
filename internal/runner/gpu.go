@@ -3,11 +3,13 @@ package runner
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
 )
@@ -139,6 +141,9 @@ func execNvidiaSmiRaw() (string, error) {
 // Populates both Devices and an initial DeviceMemSnapshot in a single query.
 // Falls back to parsing the default table format when the CSV query flags
 // are silently ignored (observed on driver 525.x).
+//
+// After discovery, enriches truncated GPU names from the host YAML inventory
+// (driver 525.x truncates names to "NVIDIA GeForce ...", breaking class matching).
 func DiscoverGPUs() *GPUInventory {
 	inv := &GPUInventory{}
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
@@ -147,7 +152,7 @@ func DiscoverGPUs() *GPUInventory {
 	inv.hasNvidiaSmi = true
 
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,name,memory.used,memory.total", 4)
-	if rows != nil {
+	if len(rows) > 0 {
 		slog.Debug("nvidia-smi CSV query returned devices", "component", "gpu", "count", len(rows))
 		inv.DeviceMemSnapshot = make(map[string]DeviceMemInfo, len(rows))
 		for _, parts := range rows {
@@ -164,6 +169,7 @@ func DiscoverGPUs() *GPUInventory {
 			})
 			inv.DeviceMemSnapshot[idx] = DeviceMemInfo{UsedMiB: usedMiB, TotalMiB: totalMiB}
 		}
+		inv.enrichFromHostYAML()
 		inv.LogInventory()
 		return inv
 	}
@@ -186,8 +192,21 @@ func DiscoverGPUs() *GPUInventory {
 	slog.Debug("table format fallback found devices", "component", "gpu", "count", len(devices))
 	inv.Devices = devices
 	inv.DeviceMemSnapshot = memSnapshot
+	inv.enrichFromHostYAML()
 	inv.LogInventory()
 	return inv
+}
+
+// enrichFromHostYAML replaces truncated GPU names with correct names from the
+// host YAML inventory, if available for the current hostname.
+func (inv *GPUInventory) enrichFromHostYAML() {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return
+	}
+	if spec := inventory.FindHost(hostname); spec != nil {
+		inv.EnrichNamesFromHostSpec(spec)
+	}
 }
 
 // RefreshDeviceMemSnapshot queries nvidia-smi for actual per-device memory usage
@@ -196,7 +215,7 @@ func DiscoverGPUs() *GPUInventory {
 func (inv *GPUInventory) RefreshDeviceMemSnapshot() {
 	result := make(map[string]DeviceMemInfo)
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,memory.used,memory.total", 3)
-	if rows != nil {
+	if len(rows) > 0 {
 		for _, parts := range rows {
 			idx := parts[0]
 			used, _ := strconv.Atoi(parts[1])
@@ -239,6 +258,35 @@ func (inv *GPUInventory) LogInventory() {
 	slog.Debug("GPU inventory discovered", "component", "gpu", "count", len(inv.Devices))
 	for _, d := range inv.Devices {
 		slog.Debug("GPU device", "component", "gpu", "index", d.Index, "name", d.Name, "mem_gb", d.TotalMemGB)
+	}
+}
+
+// EnrichNamesFromHostSpec replaces truncated GPU names (containing "...")
+// with correct names from the host YAML inventory. On old nvidia drivers
+// (e.g. 525.x), nvidia-smi truncates names like "NVIDIA GeForce RTX 3090"
+// to "NVIDIA GeForce ...", breaking class-based GPU matching.
+func (inv *GPUInventory) EnrichNamesFromHostSpec(spec *inventory.HostSpec) {
+	if spec == nil || len(spec.GPUs) == 0 {
+		return
+	}
+	// Build index → name map from host spec
+	nameByIndex := make(map[string]string)
+	for _, g := range spec.GPUs {
+		for _, idx := range g.Indices {
+			nameByIndex[fmt.Sprintf("%d", idx)] = g.Name
+		}
+	}
+	for i := range inv.Devices {
+		if strings.Contains(inv.Devices[i].Name, "...") {
+			if name, ok := nameByIndex[inv.Devices[i].Index]; ok {
+				slog.Debug("GPU name enriched from host spec",
+					"component", "gpu",
+					"device", inv.Devices[i].Index,
+					"truncated", inv.Devices[i].Name,
+					"resolved", name)
+				inv.Devices[i].Name = name
+			}
+		}
 	}
 }
 
@@ -334,28 +382,7 @@ func (inv *GPUInventory) PickBestGPUForClassWithReason(state *State, className s
 		return "", fmt.Sprintf("no GPU matching class %s", className), false
 	}
 
-	bestDevice := ""
-	bestFreeMiB := -1
-	busyCount := 0
-	memBlockedCount := 0
-
-	for _, device := range candidates {
-		if DeviceHasRunningJob(state, device) {
-			slog.Debug("GPU device busy", "component", "gpu", "class", className, "device", device)
-			busyCount++
-			continue
-		}
-		freeMiB, ok := inv.deviceMemCheck(state, device, memRequired)
-		if !ok {
-			slog.Debug("GPU device rejected for insufficient memory", "component", "gpu", "class", className, "device", device, "need_gb", memRequired, "free_mib", freeMiB)
-			memBlockedCount++
-			continue
-		}
-		if freeMiB > bestFreeMiB {
-			bestFreeMiB = freeMiB
-			bestDevice = device
-		}
-	}
+	bestDevice, bestFreeMiB, busyCount, memBlockedCount := inv.pickBestDevice(state, candidates, memRequired)
 
 	if bestDevice == "" {
 		switch {
@@ -369,6 +396,44 @@ func (inv *GPUInventory) PickBestGPUForClassWithReason(state *State, className s
 	}
 	slog.Debug("GPU device selected", "component", "gpu", "class", className, "device", bestDevice, "free_mib", bestFreeMiB)
 	return bestDevice, "", true
+}
+
+// pickBestDevice selects the candidate device with the most free memory,
+// skipping busy devices and those that fail the memory check.
+func (inv *GPUInventory) pickBestDevice(state *State, candidates []string, memRequired int) (bestDevice string, bestFreeMiB int, busyCount int, memBlockedCount int) {
+	bestFreeMiB = -1
+	for _, device := range candidates {
+		if DeviceHasRunningJob(state, device) {
+			busyCount++
+			continue
+		}
+		freeMiB, ok := inv.deviceMemCheck(state, device, memRequired)
+		if !ok {
+			memBlockedCount++
+			continue
+		}
+		if freeMiB > bestFreeMiB {
+			bestFreeMiB = freeMiB
+			bestDevice = device
+		}
+	}
+	return
+}
+
+// PickLeastLoadedGPU selects the GPU device with the most free memory,
+// skipping devices that have running jobs. No class constraint or memory
+// requirement is applied. Returns the device index, or "" if no device
+// is available.
+func (inv *GPUInventory) PickLeastLoadedGPU(state *State) string {
+	candidates := make([]string, len(inv.Devices))
+	for i, d := range inv.Devices {
+		candidates[i] = d.Index
+	}
+	bestDevice, bestFreeMiB, _, _ := inv.pickBestDevice(state, candidates, 0)
+	if bestDevice != "" {
+		slog.Debug("GPU auto-assigned (no class constraint)", "component", "gpu", "device", bestDevice, "free_mib", bestFreeMiB)
+	}
+	return bestDevice
 }
 
 // CanStartGPUJob checks if a job can start based on GPU constraints.

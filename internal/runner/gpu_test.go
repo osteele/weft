@@ -648,3 +648,182 @@ func TestPickBestGPUForClass_EmptyInventory(t *testing.T) {
 		t.Error("expected no device from empty inventory")
 	}
 }
+
+func TestPickLeastLoadedGPU_SelectsMostFreeMemory(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+			{Index: "1", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+			{Index: "2", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+		},
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 23 * 1024, TotalMiB: 24 * 1024}, // ~96% used
+			"1": {UsedMiB: 10 * 1024, TotalMiB: 24 * 1024}, // ~42% used
+			"2": {UsedMiB: 100, TotalMiB: 24 * 1024},       // nearly idle
+		},
+	}
+	state := NewState()
+
+	device := inv.PickLeastLoadedGPU(state)
+	if device != "2" {
+		t.Errorf("expected device 2 (most free memory), got %s", device)
+	}
+}
+
+func TestPickLeastLoadedGPU_SkipsBusyDevices(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+			{Index: "1", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+		},
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 100, TotalMiB: 24 * 1024},
+			"1": {UsedMiB: 100, TotalMiB: 24 * 1024},
+		},
+	}
+	state := NewState()
+	state.AddRunning("99", RunningJobState{GPUDevices: []string{"0"}, GPUMemGB: 20})
+
+	device := inv.PickLeastLoadedGPU(state)
+	if device != "1" {
+		t.Errorf("expected device 1 (device 0 has running job), got %s", device)
+	}
+}
+
+func TestPickLeastLoadedGPU_EmptyInventory(t *testing.T) {
+	inv := &GPUInventory{}
+	state := NewState()
+
+	device := inv.PickLeastLoadedGPU(state)
+	if device != "" {
+		t.Errorf("expected empty string from empty inventory, got %s", device)
+	}
+}
+
+func TestPickLeastLoadedGPU_NoSnapshot(t *testing.T) {
+	// Without a snapshot, falls back to full static capacity and picks
+	// the first device (all tied). This is the best we can do.
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+			{Index: "1", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+		},
+	}
+	state := NewState()
+
+	device := inv.PickLeastLoadedGPU(state)
+	if device == "" {
+		t.Error("expected a device even without snapshot")
+	}
+}
+
+func TestEnrichNamesFromHostSpec(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA GeForce ...", TotalMemGB: 24},
+			{Index: "1", Name: "NVIDIA GeForce ...", TotalMemGB: 24},
+			{Index: "2", Name: "NVIDIA GeForce ...", TotalMemGB: 24},
+		},
+	}
+	spec := &inventory.HostSpec{
+		Name: "cool30",
+		GPUs: []inventory.GPUSpec{
+			{Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24576MiB", Indices: []int{0, 1, 2}},
+		},
+	}
+
+	inv.EnrichNamesFromHostSpec(spec)
+
+	for i, d := range inv.Devices {
+		if d.Name != "NVIDIA GeForce RTX 3090" {
+			t.Errorf("Devices[%d].Name = %q, want %q", i, d.Name, "NVIDIA GeForce RTX 3090")
+		}
+	}
+
+	// After enrichment, class matching should work
+	devices := inv.DevicesByClass("3090")
+	if len(devices) != 3 {
+		t.Errorf("DevicesByClass(\"3090\") after enrichment = %v, want 3 devices", devices)
+	}
+}
+
+func TestEnrichNamesFromHostSpec_NonTruncatedUnchanged(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+		},
+	}
+	spec := &inventory.HostSpec{
+		Name: "cool100",
+		GPUs: []inventory.GPUSpec{
+			{Name: "NVIDIA A100-PCIE-80GB", Class: "a100", Memory: "80GB", Indices: []int{0}},
+		},
+	}
+
+	inv.EnrichNamesFromHostSpec(spec)
+
+	if inv.Devices[0].Name != "NVIDIA A100-PCIE-80GB" {
+		t.Errorf("non-truncated name changed: got %q", inv.Devices[0].Name)
+	}
+}
+
+func TestEnrichNamesFromHostSpec_MixedGPUs(t *testing.T) {
+	// cool100-like: A100s at 0,1 and 2080 Tis at 2-9, all truncated
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100-PCI...", TotalMemGB: 80},
+			{Index: "1", Name: "NVIDIA A100-PCI...", TotalMemGB: 80},
+			{Index: "2", Name: "NVIDIA GeForce ...", TotalMemGB: 11},
+		},
+	}
+	spec := &inventory.HostSpec{
+		Name: "cool100",
+		GPUs: []inventory.GPUSpec{
+			{Name: "NVIDIA A100-PCIE-80GB", Class: "a100", Memory: "80GB", Indices: []int{0, 1}},
+			{Name: "NVIDIA GeForce RTX 2080 Ti", Class: "rtx2080ti", Memory: "11GB", Indices: []int{2}},
+		},
+	}
+
+	inv.EnrichNamesFromHostSpec(spec)
+
+	if inv.Devices[0].Name != "NVIDIA A100-PCIE-80GB" {
+		t.Errorf("Devices[0].Name = %q, want NVIDIA A100-PCIE-80GB", inv.Devices[0].Name)
+	}
+	if inv.Devices[2].Name != "NVIDIA GeForce RTX 2080 Ti" {
+		t.Errorf("Devices[2].Name = %q, want NVIDIA GeForce RTX 2080 Ti", inv.Devices[2].Name)
+	}
+
+	// Class matching should now work for both types
+	a100s := inv.DevicesByClass("a100")
+	if len(a100s) != 2 {
+		t.Errorf("DevicesByClass(\"a100\") = %v, want 2", a100s)
+	}
+	ti2080s := inv.DevicesByClass("2080")
+	if len(ti2080s) != 1 {
+		t.Errorf("DevicesByClass(\"2080\") = %v, want 1", ti2080s)
+	}
+}
+
+func TestDevicesByClass_TruncatedNames(t *testing.T) {
+	// On driver 525.x, nvidia-smi truncates GPU names to "NVIDIA GeForce ..."
+	// in table format. Class matching for specific models fails.
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA GeForce ...", TotalMemGB: 24},
+			{Index: "1", Name: "NVIDIA GeForce ...", TotalMemGB: 24},
+		},
+	}
+
+	// Specific model matching fails with truncated names
+	if got := inv.DevicesByClass("3090"); len(got) != 0 {
+		t.Errorf("DevicesByClass(\"3090\") on truncated names = %v, want empty", got)
+	}
+	if got := inv.DevicesByClass("rtx3090"); len(got) != 0 {
+		t.Errorf("DevicesByClass(\"rtx3090\") on truncated names = %v, want empty", got)
+	}
+
+	// Family matching still works
+	if got := inv.DevicesByClass("nvidia"); len(got) != 2 {
+		t.Errorf("DevicesByClass(\"nvidia\") on truncated names = %v, want 2 devices", got)
+	}
+}

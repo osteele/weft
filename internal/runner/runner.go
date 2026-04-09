@@ -343,6 +343,15 @@ func (r *Runner) tryStartNextJob() {
 		}
 	}
 
+	// Auto-assign GPU on hosts with GPUs when the job has no GPU constraints.
+	// Without this, CUDA defaults to GPU 0, causing OOM when GPU 0 is loaded.
+	if !jobHasGPU && len(r.gpuInv.Devices) > 0 {
+		r.gpuInv.RefreshDeviceMemSnapshot()
+		if device := r.gpuInv.PickLeastLoadedGPU(r.state); device != "" {
+			resolvedGPUDevices = []string{device}
+		}
+	}
+
 	// Start the job
 	slog.Info("job starting", "component", "runner", "job_id", jobID, "running_count", runningCount, "gpu_class", job.GPUClass, "resolved_gpu", resolvedGPUDevices)
 	err = r.startJob(jobID, job, resolvedGPUDevices)
