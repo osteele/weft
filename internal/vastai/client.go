@@ -182,6 +182,13 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 	if opts.Label != "" {
 		args = append(args, "--label", opts.Label)
 	}
+	for _, capVal := range opts.CapAdd {
+		capVal = strings.TrimSpace(capVal)
+		if capVal == "" {
+			continue
+		}
+		args = append(args, "--cap-add", capVal)
+	}
 	if len(opts.EnvVars) > 0 {
 		var parts []string
 		for _, k := range slices.Sorted(maps.Keys(opts.EnvVars)) {

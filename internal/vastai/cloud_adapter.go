@@ -64,6 +64,7 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		SSHEnabled: opts.SSHEnabled,
 		OnStartCmd: opts.OnStartCmd,
 		EnvVars:    opts.EnvVars,
+		CapAdd:     opts.CapAdd,
 		Label:      opts.Label,
 	}
 	inst, err := c.inner.CreateInstance(id, vopts)

@@ -21,6 +21,7 @@ type ScriptMeta struct {
 	Outputs      []string
 	Tags         []string          // Job tags
 	Image        string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
+	VastCapAdd   []string          // Vast.ai-only --cap-add values (e.g., ["SYS_ADMIN"])
 	UvArgs       []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
 	Env          map[string]string // Environment variables to set when running the job
 	PreInstall   string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
@@ -66,6 +67,7 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			if v, ok := wt.Get("image").(string); ok {
 				meta.Image = v
 			}
+			meta.VastCapAdd = normalizeCaps(tomlStringSlice(wt, "vast-cap-add"))
 			meta.UvArgs = tomlStringSlice(wt, "uv-args")
 			meta.Env = tomlStringMap(wt, "env")
 			if v, ok := wt.Get("pre-install").(string); ok {
@@ -96,6 +98,7 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 
 	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
 		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" &&
+		len(meta.VastCapAdd) == 0 &&
 		len(meta.UvArgs) == 0 && len(meta.Env) == 0 && meta.PreInstall == "" {
 		return nil, nil
 	}
@@ -387,4 +390,27 @@ func tomlStringMap(tree *toml.Tree, key string) map[string]string {
 		return nil
 	}
 	return result
+}
+
+func normalizeCaps(caps []string) []string {
+	if len(caps) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(caps))
+	out := make([]string, 0, len(caps))
+	for _, capVal := range caps {
+		capVal = strings.ToUpper(strings.TrimSpace(capVal))
+		if capVal == "" {
+			continue
+		}
+		if _, ok := seen[capVal]; ok {
+			continue
+		}
+		seen[capVal] = struct{}{}
+		out = append(out, capVal)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

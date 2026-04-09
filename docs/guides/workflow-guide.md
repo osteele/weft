@@ -119,6 +119,7 @@ Supported keys (all optional):
 | `outputs`   | list of strings  | `--output`          |
 | `tags`      | list of strings  | `--tag`             |
 | `image`     | string           | `.weft.toml [cloud] image` |
+| `vast-cap-add` | list of strings | Vast.ai `--cap-add` (campaign launch) |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
 | `env`        | table of strings | `--env` (merged)           |
 | `pre-install` | string          | *(prepended to command)*   |
@@ -188,6 +189,23 @@ The `image` key specifies a Docker image for cloud execution. Image precedence
 PyTorch image > global default. Script metadata works with any command that
 references a `.py` file, including `uv run script.py`, `python script.py`, and
 compound commands like `pip install foo && python script.py`.
+
+The `vast-cap-add` key requests extra Linux capabilities on Vast.ai campaign
+instances. Example:
+
+```python
+# /// script
+# [tool.weft]
+# gpu = "nvidia>=24GB"
+# vast-cap-add = ["SYS_ADMIN"]
+# ///
+```
+
+This maps to `vastai create instance ... --cap-add SYS_ADMIN` for any launch
+group containing that job. If a grouped launch contains mixed jobs and any job
+sets `vast-cap-add`, the new instance is launched with the union of requested
+capabilities. For safety, groups that request `vast-cap-add` are not placed on
+existing reusable instances with unknown launch capabilities.
 
 `[tool.weft]` metadata is applied when submitting a new job (`weft run`). During
 `weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.

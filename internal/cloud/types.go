@@ -96,6 +96,7 @@ type CreateOpts struct {
 	SSHEnabled bool              // enable SSH access
 	OnStartCmd string            // command to run on instance start
 	EnvVars    map[string]string // environment variables passed via provider's env mechanism
+	CapAdd     []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)
 	TemplateID string            // provider template ID for startup-managed images
 	Label      string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
 }

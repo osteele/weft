@@ -132,6 +132,15 @@ import torch
 			},
 		},
 		{
+			name: "vast cap-add",
+			content: `# /// script
+# [tool.weft]
+# vast-cap-add = ["sys_admin", "NET_ADMIN", "SYS_ADMIN", ""]
+# ///
+`,
+			want: &ScriptMeta{VastCapAdd: []string{"SYS_ADMIN", "NET_ADMIN"}},
+		},
+		{
 			name: "uv-args",
 			content: `# /// script
 # [tool.weft]
@@ -336,6 +345,7 @@ import torch
 			if got.Image != tt.want.Image {
 				t.Errorf("Image: got %q, want %q", got.Image, tt.want.Image)
 			}
+			assertStringSlice(t, "VastCapAdd", got.VastCapAdd, tt.want.VastCapAdd)
 			assertStringSlice(t, "UvArgs", got.UvArgs, tt.want.UvArgs)
 			assertStringMap(t, "Env", got.Env, tt.want.Env)
 			if got.PreInstall != tt.want.PreInstall {

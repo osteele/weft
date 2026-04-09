@@ -1278,6 +1278,9 @@ func LaunchInstance(
 	if group.Image != "" {
 		createOpts.Image = group.Image
 	}
+	if client.Provider() == cloud.ProviderVastai && len(group.VastCapAdd) > 0 {
+		createOpts.CapAdd = append([]string(nil), group.VastCapAdd...)
+	}
 
 	// Persist the final Docker image for analytics (correlate loading duration vs image type)
 	if createOpts.Image != "" {

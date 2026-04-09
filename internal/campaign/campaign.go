@@ -3,6 +3,7 @@ package campaign
 
 import (
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,11 +34,12 @@ func vramTierOf(memGB int) int {
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
-	GPUClass    string // Normalized GPU class (uppercase), e.g. "H100"
-	GPUMemGB    int    // Supremum of GPU memory across all jobs in the group
-	MaxGPUMemGB int    // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
-	DiskGB      int    // Estimated disk space needed (0 = use default)
-	Image       string // Per-project Docker image override ("" = use global default)
+	GPUClass    string   // Normalized GPU class (uppercase), e.g. "H100"
+	GPUMemGB    int      // Supremum of GPU memory across all jobs in the group
+	MaxGPUMemGB int      // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
+	DiskGB      int      // Estimated disk space needed (0 = use default)
+	Image       string   // Per-project Docker image override ("" = use global default)
+	VastCapAdd  []string // Vast.ai-only --cap-add values (nil = none)
 	Jobs        []*db.Job
 }
 
@@ -433,8 +435,9 @@ func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
 // using the most capable variant.
 func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 	type imageGroup struct {
-		image string
-		jobs  []*db.Job
+		image      string
+		vastCapAdd []string
+		jobs       []*db.Job
 	}
 
 	// Pre-compute the auto-selected PyTorch image (constant across all jobs).
@@ -448,6 +451,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 			img := ResolveJobImage(localDir, job.Command)
+			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
 
 			hasTorch := localDir != "" && hasCUDAPackages([]string{localDir})
 
@@ -469,13 +473,14 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 				supremum, ok := imageSupremum(subs[i].image, img)
 				if ok {
 					subs[i].image = supremum
+					subs[i].vastCapAdd = mergeVastCapAdd(subs[i].vastCapAdd, vastCapAdd)
 					subs[i].jobs = append(subs[i].jobs, job)
 					merged = true
 					break
 				}
 			}
 			if !merged {
-				subs = append(subs, imageGroup{image: img, jobs: []*db.Job{job}})
+				subs = append(subs, imageGroup{image: img, vastCapAdd: vastCapAdd, jobs: []*db.Job{job}})
 			}
 		}
 
@@ -486,6 +491,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 				MaxGPUMemGB: g.MaxGPUMemGB,
 				DiskGB:      g.DiskGB,
 				Image:       sub.image,
+				VastCapAdd:  sub.vastCapAdd,
 				Jobs:        sub.jobs,
 			})
 		}
@@ -507,6 +513,33 @@ func ResolveJobImage(localDir, command string) string {
 		}
 	}
 	return img
+}
+
+// ResolveJobVastCapAdd returns the Vast.ai-only capabilities to request for a
+// job from PEP 723 [tool.weft] metadata. Returns nil if unspecified.
+func ResolveJobVastCapAdd(localDir, command string) []string {
+	meta, err := dataloc.ScanScriptMeta(localDir, command)
+	if err != nil {
+		slog.Warn("script metadata error in vast cap-add resolution", "component", "campaign", "error", err)
+		return nil
+	}
+	if meta == nil || len(meta.VastCapAdd) == 0 {
+		return nil
+	}
+	return append([]string(nil), meta.VastCapAdd...)
+}
+
+func mergeVastCapAdd(a, b []string) []string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := append([]string(nil), a...)
+	for _, capVal := range b {
+		if !slices.Contains(out, capVal) {
+			out = append(out, capVal)
+		}
+	}
+	return out
 }
 
 // SourceDirs returns the unique local absolute paths for all jobs in the group.

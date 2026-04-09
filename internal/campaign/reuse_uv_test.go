@@ -49,3 +49,21 @@ func TestMatchGroupToInstance_AccountsForCachedUVSyncDisk(t *testing.T) {
 		t.Fatalf("reason = %q, want disk insufficiency from uv sync", reason)
 	}
 }
+
+func TestMatchGroupToInstance_RejectsGroupRequiringVastCapAdd(t *testing.T) {
+	group := InstanceGroup{
+		VastCapAdd: []string{"SYS_ADMIN"},
+		Jobs:       []*db.Job{{ID: 1}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{DiskGB: 100, GPUMemGB: 24},
+	}
+
+	ok, reason := MatchGroupToInstance(group, cap)
+	if ok {
+		t.Fatal("MatchGroupToInstance unexpectedly accepted group requiring vast-cap-add")
+	}
+	if reason != "requires fresh launch with vast-cap-add" {
+		t.Fatalf("reason = %q, want capability guard", reason)
+	}
+}

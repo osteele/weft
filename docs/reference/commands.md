@@ -50,6 +50,8 @@ Use `start <job-id>` to start a queued job immediately.
 using a [PEP 723](https://peps.python.org/pep-0723/) `[tool.weft]` table.
 These are applied as defaults — CLI flags take precedence. See
 [Workflow Guide § Script metadata](../guides/workflow-guide.md#script-metadata).
+For Vast.ai campaign launches, metadata also supports `vast-cap-add` to request
+extra container capabilities (for example, `["SYS_ADMIN"]`).
 
 **OOM history:** When a job fails with a GPU out-of-memory error, weft records
 the GPU capacity. On subsequent submissions of the same command, the minimum

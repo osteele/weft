@@ -67,5 +67,6 @@ type CreateOpts struct {
 	SSHEnabled bool              // enable SSH access
 	OnStartCmd string            // command to run on instance start
 	EnvVars    map[string]string // environment variables passed via --env flag
+	CapAdd     []string          // extra Linux capabilities passed via --cap-add
 	Label      string            // instance label visible in Vast.ai dashboard
 }

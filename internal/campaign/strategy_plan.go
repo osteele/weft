@@ -1782,6 +1782,11 @@ func consumeReuseGroup(cap *InstanceCapacity, group InstanceGroup) {
 // group sequentially, updating a temporary copy of the instance capacity while
 // checking disk and cached inputs.
 func MatchGroupToInstance(group InstanceGroup, cap InstanceCapacity) (bool, string) {
+	if len(group.VastCapAdd) > 0 {
+		// Reuse candidates do not currently persist cap-add metadata. Avoid routing
+		// capability-constrained groups to instances with unknown launch flags.
+		return false, "requires fresh launch with vast-cap-add"
+	}
 	temp := cap
 	temp.ProvisionedInputs = append([]string(nil), cap.ProvisionedInputs...)
 	for _, job := range group.Jobs {

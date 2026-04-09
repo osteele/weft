@@ -1,6 +1,8 @@
 package campaign
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -621,6 +623,66 @@ func TestVramTierOf(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("vramTierOf(%d) = %d, want %d", tt.memGB, got, tt.want)
 		}
+	}
+}
+
+func TestResolveJobVastCapAdd(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "train.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# [tool.weft]
+# vast-cap-add = ["sys_admin", "NET_ADMIN"]
+# ///
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	got := ResolveJobVastCapAdd(dir, "uv run python train.py")
+	want := []string{"SYS_ADMIN", "NET_ADMIN"}
+	if len(got) != len(want) {
+		t.Fatalf("ResolveJobVastCapAdd() len=%d want=%d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ResolveJobVastCapAdd()[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
+	dir := t.TempDir()
+	withCap := filepath.Join(dir, "with_cap.py")
+	withoutCap := filepath.Join(dir, "without_cap.py")
+	if err := os.WriteFile(withCap, []byte(`# /// script
+# [tool.weft]
+# vast-cap-add = ["SYS_ADMIN"]
+# ///
+`), 0o644); err != nil {
+		t.Fatalf("write with_cap.py: %v", err)
+	}
+	if err := os.WriteFile(withoutCap, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write without_cap.py: %v", err)
+	}
+
+	groups := SplitGroupsByImage([]InstanceGroup{
+		{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 24,
+			Jobs: []*db.Job{
+				{ID: 1, Command: "python with_cap.py", WorkingDir: dir},
+				{ID: 2, Command: "python without_cap.py", WorkingDir: dir},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if len(groups[0].VastCapAdd) != 1 || groups[0].VastCapAdd[0] != "SYS_ADMIN" {
+		t.Fatalf("group.VastCapAdd=%v want [SYS_ADMIN]", groups[0].VastCapAdd)
+	}
+	if len(groups[0].Jobs) != 2 {
+		t.Fatalf("expected both jobs in same group, got %d jobs", len(groups[0].Jobs))
 	}
 }
 
