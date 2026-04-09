@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/syncorch"
 )
 
 // Default intervals for background operations.
@@ -145,6 +146,7 @@ type Monitor struct {
 	hostRefreshing sync.Map // host name → struct{}, guards concurrent refreshHostInfo
 
 	// Optional embedded coordinator services
+	appConfig  *config.Config
 	remediator *services.Remediator
 	svcCancel  context.CancelFunc
 }
@@ -175,6 +177,7 @@ func (m *Monitor) EnableRemediationWithLogger(appConfig *config.Config, logger *
 	if logger == nil {
 		logger = slog.Default().With("component", "remediator")
 	}
+	m.appConfig = appConfig
 	m.remediator = services.NewRemediator(m.db, logger, appConfig, 30*time.Second)
 }
 
@@ -938,6 +941,14 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 			Type:          EventHostSyncTimesLoaded,
 			HostSyncTimes: m.HostSyncTimes(),
 		})
+	}
+
+	if m.appConfig != nil {
+		cloudResult := syncorch.SyncCloud(m.appConfig, m.db, syncorch.CloudSyncOptions{
+			Timeout:     30 * time.Second,
+			SyncResults: true,
+		})
+		result.Updated += cloudResult.Updated
 	}
 
 	return result
