@@ -76,6 +76,30 @@ func TestMergeEnvVars_EmptyOverlay(t *testing.T) {
 	}
 }
 
+func TestWrapCommandWithExitCapture(t *testing.T) {
+	wrapped := WrapCommandWithExitCapture("python train.py", "/tmp/test.status")
+	// Must start with the original command
+	if !strings.HasPrefix(wrapped, "python train.py; ") {
+		t.Errorf("wrapped command should start with original command, got: %s", wrapped)
+	}
+	// Must capture exit code
+	if !strings.Contains(wrapped, "EXIT_CODE=$?") {
+		t.Errorf("wrapped command should capture EXIT_CODE, got: %s", wrapped)
+	}
+	// Must write footer to stdout (which Go redirects to log file)
+	if !strings.Contains(wrapped, `echo "=== END exit=$EXIT_CODE`) {
+		t.Errorf("wrapped command should write log footer, got: %s", wrapped)
+	}
+	// Must write status file
+	if !strings.Contains(wrapped, "echo $EXIT_CODE > /tmp/test.status") {
+		t.Errorf("wrapped command should write status file, got: %s", wrapped)
+	}
+	// Must propagate exit code
+	if !strings.HasSuffix(wrapped, "exit $EXIT_CODE") {
+		t.Errorf("wrapped command should end with exit $EXIT_CODE, got: %s", wrapped)
+	}
+}
+
 func TestMergeEnvVars_ExpandsLeadingTildeValues(t *testing.T) {
 	base := []string{"HOME=/home/tester"}
 	overlay := []string{

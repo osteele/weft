@@ -526,9 +526,13 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 
+	// Wrap the command so bash writes the exit code and log footer even if
+	// the Go runner crashes mid-job (e.g., during a runner restart).
+	wrappedCommand := WrapCommandWithExitCapture(command, paths.Status)
+
 	// Start the process
 	slog.Debug("launching process", "component", "runner", "job_id", jobID)
-	proc, err := StartProcess(command, job.Dir, envVars, paths.Log)
+	proc, err := StartProcess(wrappedCommand, job.Dir, envVars, paths.Log)
 	if err != nil {
 		oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithError(err))
 		slog.Warn("job start failed", "component", "runner", "job_id", jobID, "error", err)
@@ -581,9 +585,12 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	endTime := time.Now().Unix()
 	duration := endTime - startTime
 
-	// Write status and log footer
-	WriteStatusFile(paths, ei)
-	WriteLogFooter(paths, ei)
+	// Write status and log footer. The wrapper shell may have already
+	// written these (see WrapCommandWithExitCapture), so skip if present.
+	if _, statErr := os.Stat(paths.Status); statErr != nil {
+		WriteStatusFile(paths, ei)
+		WriteLogFooter(paths, ei)
+	}
 
 	// Write artifact satisfied files for producer jobs
 	for _, spec := range rj.Data.Produces {
@@ -674,22 +681,33 @@ func (r *Runner) refreshRunningJobs() {
 		jobID := mustParseInt64(jobIDStr)
 		paths := NewJobPaths(r.logDir, jobID)
 
-		// Check if status file appeared (job completed outside our wait goroutine)
+		// Check if status file appeared (job completed outside our wait goroutine).
+		// This covers two cases: (1) the bash wrapper captured the exit code
+		// after the runner restarted, (2) normal completion race with refresh.
 		if _, err := os.Stat(paths.Status); err == nil {
-			// Job completed — the wait goroutine should handle this,
-			// but check if it hasn't yet (e.g., bash runner state recovery)
 			r.processesMu.Lock()
 			_, hasProc := r.processes[jobIDStr]
 			r.processesMu.Unlock()
 
 			if !hasProc {
-				// No active wait goroutine — handle completion here
 				exitCode, _ := ReadStatusFile(paths.Status)
+				ei := ExitInfo{ExitCode: exitCode}
+				endTime := time.Now().Unix()
 				rs, _ := r.state.GetRunning(jobIDStr)
+				if exitCode == 0 {
+					oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetail("exit=0 (recovered)"))
+					slog.Info("job completed (recovered)", "component", "runner", "job_id", jobID)
+				} else {
+					failureReason := DetectFailureReasonFromExitInfo(ei)
+					WriteFailureReasonFile(paths, failureReason)
+					oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("exit=%d (recovered)", exitCode))
+					slog.Warn("job failed (recovered)", "component", "runner", "job_id", jobID, "exit_code", exitCode)
+				}
+				WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, nil)
 				WriteRusageFile(paths, rs)
-				finishedAt := time.Now().Unix()
-				r.state.RecordFinished(jobIDStr, exitCode, finishedAt)
+				r.state.RecordFinished(jobIDStr, exitCode, endTime)
 				r.state.RemoveRunning(jobIDStr)
+				CleanupPIDFiles(paths)
 				changed = true
 			}
 			continue
@@ -760,18 +778,15 @@ func (r *Runner) refreshRunningJobs() {
 			oplog.LogJob("job.orphan_killed", jobID, "", oplog.WithDetailf("pgid=%d", pgid))
 		}
 
-		// Mark as failed
-		if _, err := os.Stat(paths.Status); err != nil {
-			orphanEI := ExitInfo{ExitCode: 1}
-			WriteStatusFile(paths, orphanEI)
-			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
-			endTime := time.Now().Unix()
-			rs, _ := r.state.GetRunning(jobIDStr)
-			WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, KillReasonOrphan, rs.StartedAt, endTime, nil)
-			r.state.RecordFinished(jobIDStr, 1, endTime)
-		}
+		// No status file — truly orphaned, exit code unknown
+		orphanEI := ExitInfo{ExitCode: 1}
+		WriteStatusFile(paths, orphanEI)
+		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
+		endTime := time.Now().Unix()
 		rs, _ := r.state.GetRunning(jobIDStr)
+		WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, KillReasonOrphan, rs.StartedAt, endTime, nil)
 		WriteRusageFile(paths, rs)
+		r.state.RecordFinished(jobIDStr, 1, endTime)
 		r.state.RemoveRunning(jobIDStr)
 		CleanupPIDFiles(paths)
 		changed = true

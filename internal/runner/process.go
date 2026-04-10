@@ -204,6 +204,20 @@ func CleanupPIDFiles(paths JobPaths) {
 	os.Remove(paths.Heartbeat)
 }
 
+// WrapCommandWithExitCapture wraps a command string so that bash writes the
+// exit code to a status file and appends a log footer after the command finishes.
+// This ensures exit information is recorded even if the Go runner process dies
+// mid-job (e.g., during a runner restart). StartProcess runs the result as
+// bash -c '<wrapped>', so stdout/stderr go to the log file via Go's fd redirection.
+func WrapCommandWithExitCapture(command, statusFile string) string {
+	return fmt.Sprintf(
+		"%s; EXIT_CODE=$?; "+
+			`echo "=== END exit=$EXIT_CODE $(date) ==="; `+
+			"echo $EXIT_CODE > %s; "+
+			"exit $EXIT_CODE",
+		command, statusFile)
+}
+
 // GetProcessTree returns all PIDs in the process tree rooted at the given PID.
 func GetProcessTree(rootPID int) []int {
 	pids := []int{rootPID}
