@@ -232,6 +232,14 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
+	// For terminal jobs, default to showing the full log unless the user
+	// explicitly requested a specific range or line count.
+	if isTerminalStatus(job.Status) && !logFull && logFrom == 0 && logTo == 0 &&
+		!cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail") {
+		logFrom = 1
+		logFull = true
+	}
+
 	// Cloud jobs (including unplaced jobs with prior cloud attempts): SSH for
 	// running, R2/cache for historical logs.
 	if shouldUseCloudLogs(database, job) {

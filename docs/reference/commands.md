@@ -257,8 +257,12 @@ weft artifact get --tag exp-012 --latest selectivity_results -o ./results.json
 
 Jobs automatically track files written to `output/` or `outputs/` in the
 working directory. On successful completion, the runner records discovered files
-in the completion record and auto-syncs small outputs (< 100 MB) back to the
-coordinator.
+in the completion record and syncs them back:
+
+- **On-prem jobs**: Auto-syncs outputs via rsync if total size is under the
+  configured limit (default: 100 MB). Larger outputs must be retrieved manually
+  with `weft artifact sync`.
+- **Cloud jobs**: All outputs are uploaded to R2 regardless of size.
 
 Customize output directories, auto-sync behavior, cloud image, and
 project-specific source excludes in `.weft.toml`:
