@@ -49,6 +49,13 @@ var terminateCmd = &cobra.Command{
 	Short: "Terminate campaigns or instances",
 }
 
+// --- move ---
+
+var moveCmd = &cobra.Command{
+	Use:   "move <jobs>",
+	Short: "Move queued jobs between hosts/instances or launch new instances",
+}
+
 func init() {
 	// launch
 	launchCampaignCmd := withPluralAlias(verbAlias("campaign", campaignLaunchCmd))
@@ -122,6 +129,12 @@ func init() {
 	configureWatchFlags(systemWatchCmd)
 	systemCmd.AddCommand(systemWatchCmd)
 	rootCmd.AddCommand(systemCmd)
+
+	// move
+	moveJobsCmd := withPluralAlias(verbAlias("jobs <job-id>... <destination>", jobMoveCmd))
+	moveCmd.AddCommand(moveJobsCmd)
+	rootCmd.AddCommand(moveCmd)
+	addJobMoveFlags(moveJobsCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
 
 	// terminate
 	terminateCampaignCmd := withPluralAlias(verbAlias("campaign <campaign-id>", campaignTerminateCmd))

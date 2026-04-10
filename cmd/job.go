@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
@@ -122,6 +123,8 @@ var jobListCmd = &cobra.Command{
 var (
 	jobMoveEach    bool
 	jobMoveProject string
+	jobMoveTo      string
+	jobMoveFrom    string
 )
 
 var jobMoveCmd = &cobra.Command{
@@ -141,6 +144,8 @@ Destinations:
 
 Flags:
   --each              With 'new'/'create': launch a separate instance per job
+  --to, -t <dest>     Destination (alternative to positional final argument)
+  --from, -f <inst>   Select queued jobs from source cloud instance (e.g., wi872)
   --project <name>    Select all eligible queued jobs in the named project
 
 Examples:
@@ -148,9 +153,11 @@ Examples:
   weft job move 43 wi872                # Submit job 43 to instance wi872
   weft job move 44 new                  # Launch one new instance for job 44
   weft job move 44 45 46 new            # Launch instance(s) for jobs 44-46
+  weft job move 44 45 --to new          # Destination via --to/-t
   weft job move 44:46 --each new        # Separate new instance per job
+  weft job move --from wi872 --to wi900 # Move queued jobs from wi872 to wi900
   weft job move --project myproj new    # All queued myproj jobs → new instance`,
-	Args: usageArgs(cobra.MinimumNArgs(1)),
+	Args: usageArgs(cobra.ArbitraryArgs),
 	RunE: runJobMove,
 }
 
@@ -368,8 +375,7 @@ func init() {
 	jobCmd.AddCommand(jobRestartCmd)
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobWatchCmd)
-	jobMoveCmd.Flags().BoolVar(&jobMoveEach, "each", false, "With 'new'/'create': launch a separate instance per job")
-	jobMoveCmd.Flags().StringVar(&jobMoveProject, "project", "", "Select all eligible queued jobs in the named project")
+	addJobMoveFlags(jobMoveCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
 	jobCmd.AddCommand(jobMoveCmd)
 	jobPlaceCmd.Flags().BoolVar(&jobPlaceEach, "each", false, "With 'new'/'create': launch a separate instance per job")
 	jobPlaceCmd.Flags().StringVar(&jobPlaceProject, "project", "", "Select all eligible unplaced queued jobs in the named project")
@@ -445,16 +451,33 @@ func init() {
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false)
+	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom)
 }
 
 func runJobPlace(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobPlaceProject, jobPlaceEach, true)
+	return runJobMoveOrPlace(args, jobPlaceProject, jobPlaceEach, true, "", "")
 }
 
-func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool) error {
-	dest := args[len(args)-1]
-	jobArgs := args[:len(args)-1]
+func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {
+	cmd.Flags().BoolVar(each, "each", false, "With 'new'/'create': launch a separate instance per job")
+	cmd.Flags().StringVar(project, "project", "", "Select all eligible queued jobs in the named project")
+	if destination != nil {
+		cmd.Flags().StringVarP(destination, "to", "t", "", "Destination host, instance (wi<N>), or 'new'/'create'")
+	}
+	if from != nil {
+		cmd.Flags().StringVarP(from, "from", "f", "", "Select queued jobs from source cloud instance (wi<N>)")
+	}
+}
+
+func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string) error {
+	dest, jobArgs, err := resolveMoveDestination(args, destinationFlag)
+	if err != nil {
+		return err
+	}
+
+	if err := validateMoveSelectors(jobArgs, project, from); err != nil {
+		return err
+	}
 
 	database, err := db.Open()
 	if err != nil {
@@ -462,7 +485,7 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 	}
 	defer database.Close()
 
-	eligible, err := resolveEligibleJobs(database, jobArgs, project, unplacedOnly)
+	eligible, err := resolveEligibleJobs(database, jobArgs, project, from, unplacedOnly)
 	if err != nil {
 		return err
 	}
@@ -481,12 +504,63 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 	}
 }
 
+func resolveMoveDestination(args []string, destinationFlag string) (string, []string, error) {
+	destinationFlag = strings.TrimSpace(destinationFlag)
+	if destinationFlag != "" {
+		if len(args) == 0 {
+			return destinationFlag, nil, nil
+		}
+		return destinationFlag, args, nil
+	}
+
+	if len(args) == 0 {
+		return "", nil, usageErrorf("provide destination as final argument or --to")
+	}
+	return strings.TrimSpace(args[len(args)-1]), args[:len(args)-1], nil
+}
+
+func validateMoveSelectors(jobArgs []string, project string, from string) error {
+	selectors := 0
+	if len(jobArgs) > 0 {
+		selectors++
+	}
+	if strings.TrimSpace(project) != "" {
+		selectors++
+	}
+	if strings.TrimSpace(from) != "" {
+		selectors++
+	}
+	if selectors == 0 {
+		return usageErrorf("provide job IDs, --project, or --from")
+	}
+	if selectors > 1 {
+		return usageErrorf("choose exactly one selector mode: job IDs, --project, or --from")
+	}
+	return nil
+}
+
 // resolveEligibleJobs fetches jobs by ID list and/or --project, filtering to
 // queued jobs. When unplacedOnly is true (place command), already-placed jobs
 // are also skipped.
-func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, unplacedOnly bool) ([]*db.Job, error) {
+func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, from string, unplacedOnly bool) ([]*db.Job, error) {
 	var jobs []*db.Job
-	if project != "" {
+	var sourceInstanceID int64
+	if from != "" {
+		parsedID, err := ids.ParseInstanceID(from)
+		if err != nil {
+			return nil, usageErrorf("invalid --from instance %q: %v", from, err)
+		}
+		sourceInstanceID = parsedID
+		selected, err := db.GetLaunchJobsIncludingAttempts(database, sourceInstanceID)
+		if err != nil {
+			return nil, fmt.Errorf("list jobs on instance %s: %w", ids.FormatInstanceID(sourceInstanceID), err)
+		}
+		for _, job := range selected {
+			if job != nil && job.LaunchID != nil && *job.LaunchID == sourceInstanceID {
+				jobs = append(jobs, job)
+			}
+		}
+	} else if project != "" {
 		all, err := db.ListJobs(database, db.StatusQueued, "", 0, nil, "")
 		if err != nil {
 			return nil, fmt.Errorf("list queued jobs: %w", err)
@@ -514,13 +588,14 @@ func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, unp
 			}
 		}
 	}
-	if len(jobs) == 0 && project == "" {
-		return nil, usageErrorf("provide job IDs or --project")
+	if len(jobs) == 0 && project == "" && from == "" {
+		return nil, usageErrorf("provide job IDs, --project, or --from")
 	}
 
 	var eligible []*db.Job
 	for _, job := range jobs {
-		if job.EffectiveStatus() != db.StatusQueued {
+		status := job.EffectiveStatus()
+		if status != db.StatusQueued && status != db.StatusPendingPlacement {
 			fmt.Fprintf(os.Stderr, "Warning: job %s has status %s, skipping\n", FormatJobID(job.ID), job.EffectiveStatus())
 			continue
 		}
@@ -531,6 +606,9 @@ func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, unp
 		eligible = append(eligible, job)
 	}
 	if len(eligible) == 0 {
+		if sourceInstanceID > 0 {
+			return nil, fmt.Errorf("no eligible queued jobs found on %s", ids.FormatInstanceID(sourceInstanceID))
+		}
 		if unplacedOnly {
 			return nil, fmt.Errorf("no eligible unplaced queued jobs")
 		}
@@ -593,6 +671,11 @@ func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) erro
 }
 
 func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool) error {
+	if !verbose {
+		restore := logging.Suppress()
+		defer restore()
+	}
+
 	// Keep single-job move-to-new on the same implementation path as TUI move,
 	// so behavior and instrumentation stay consistent across interfaces.
 	if len(jobs) == 1 && !separateEach {
