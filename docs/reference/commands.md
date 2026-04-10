@@ -591,7 +591,7 @@ weft log --events [flags]
 
 **Flags:**
 - `-f, --follow`: Follow log in real-time (like `tail -f`)
-- `-n, --lines N`: Number of lines to show (default: 50)
+- `-n, --lines N`: Number of lines to show (default: 50 for running jobs)
 - `--tail N`: Alias for `--lines`
 - `--from N`: Show lines starting from line N
 - `--to N`: Show lines up to line N
@@ -613,7 +613,7 @@ weft log --events [flags]
 
 **Examples:**
 ```bash
-weft log wj42           # Last 50 lines
+weft log wj42           # Full log (completed jobs) or last 50 lines (running)
 weft log wj42 -f        # Follow (like tail -f)
 weft log wj42 -n 100    # Last 100 lines
 weft log wj42 --tail 30 # Alias for --lines
@@ -622,13 +622,15 @@ weft log wj42 --from 500           # From line 500 onwards
 weft log wj42 --to 100             # First 100 lines
 weft log wj42 --grep error         # Lines containing "error"
 weft log wj42 -f --grep epoch      # Follow, filter for "epoch"
-weft log wj42 --full               # Entire log
+weft log wj42 --full               # Entire log (explicit)
 weft log --ops --job 42          # Operations for a job
 weft log --ops --host vastai:17  # Operations for a rental instance
 weft log --events --kind relaunch
 ```
 
 **Notes:**
+- Completed jobs show the full log by default; running jobs show the last 50 lines
+- Use `-n` to override the default for either case
 - `--from`/`--to` cannot be used with `-n`/`--lines`
 - `--follow` cannot be used with `--to`
 - `--grep` can be combined with any other option

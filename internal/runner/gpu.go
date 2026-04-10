@@ -31,6 +31,9 @@ type DeviceMemInfo struct {
 type GPUInventory struct {
 	Devices           []GPUInfo
 	DeviceMemSnapshot map[string]DeviceMemInfo // actual per-device memory, refreshed each tick
+	DeviceUtilPct     map[string]int           // per-device GPU utilization %
+	DeviceHasCompute  map[string]bool          // true when a compute process is active on device
+	isInventoryHost   bool                     // true for on-prem inventory hosts only
 	hasNvidiaSmi      bool                     // cached LookPath result from DiscoverGPUs
 }
 
@@ -93,6 +96,14 @@ var nvidiaSmiTableGPULine = regexp.MustCompile(`\|\s+(\d+)\s+(NVIDIA\s+\S+(?:\s+
 //	| 51%   45C    P8    22W / 350W |      6MiB / 24576MiB |      0%      Default |
 var nvidiaSmiTableMemLine = regexp.MustCompile(`\|\s+\d+%\s+\d+C\s+\w+\s+\d+W\s*/\s*\d+W\s*\|\s+(\d+)MiB\s*/\s*(\d+)MiB\s*\|`)
 
+// nvidiaSmiTableUtilLine matches the utilization value in the stats line.
+var nvidiaSmiTableUtilLine = regexp.MustCompile(`\|\s+\d+%\s+\d+C\s+\w+\s+\d+W\s*/\s*\d+W\s*\|\s+\d+MiB\s*/\s*\d+MiB\s*\|\s+(\d+)%`)
+
+// nvidiaSmiTableProcessLine matches process rows in the Processes section.
+// Example:
+// |    0   N/A  N/A      3156      G   /usr/lib/xorg/Xorg                  4MiB |
+var nvidiaSmiTableProcessLine = regexp.MustCompile(`^\|\s*(\d+)\s+\S+\s+\S+\s+\d+\s+([CG](?:\+G)?)\s+.+\|$`)
+
 // parseNvidiaSmiTable parses the default nvidia-smi table format that some old
 // drivers (e.g. 525.x) return when they silently ignore --query-gpu and --format
 // flags. Returns both device info and per-device memory usage in a single pass.
@@ -127,6 +138,46 @@ func parseNvidiaSmiTable(out string) ([]GPUInfo, map[string]DeviceMemInfo) {
 	return devices, memSnapshot
 }
 
+// parseNvidiaSmiTableUtil parses per-device utilization from table output.
+func parseNvidiaSmiTableUtil(out string) map[string]int {
+	utilByDevice := make(map[string]int)
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		m := nvidiaSmiTableGPULine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		idx := m[1]
+		if i+1 >= len(lines) {
+			continue
+		}
+		if mm := nvidiaSmiTableUtilLine.FindStringSubmatch(lines[i+1]); mm != nil {
+			util, _ := strconv.Atoi(mm[1])
+			utilByDevice[idx] = util
+		}
+	}
+	return utilByDevice
+}
+
+// parseNvidiaSmiTableComputeProcessFlags parses process rows in table output and
+// returns a per-device flag for active compute workloads.
+func parseNvidiaSmiTableComputeProcessFlags(out string) map[string]bool {
+	hasCompute := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		m := nvidiaSmiTableProcessLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		device := m[1]
+		procType := m[2]
+		// Treat compute-capable process types as active workloads.
+		if strings.Contains(procType, "C") {
+			hasCompute[device] = true
+		}
+	}
+	return hasCompute
+}
+
 // execNvidiaSmiRaw runs nvidia-smi with no extra flags and returns stdout.
 func execNvidiaSmiRaw() (string, error) {
 	out, err := exec.Command("nvidia-smi").Output()
@@ -150,6 +201,7 @@ func DiscoverGPUs() *GPUInventory {
 		return inv
 	}
 	inv.hasNvidiaSmi = true
+	inv.detectInventoryHost()
 
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,name,memory.used,memory.total", 4)
 	if len(rows) > 0 {
@@ -209,11 +261,21 @@ func (inv *GPUInventory) enrichFromHostYAML() {
 	}
 }
 
+func (inv *GPUInventory) detectInventoryHost() {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return
+	}
+	inv.isInventoryHost = inventory.FindHost(hostname) != nil
+}
+
 // RefreshDeviceMemSnapshot queries nvidia-smi for actual per-device memory usage
 // and stores the result in DeviceMemSnapshot. Safe to call on non-GPU hosts
 // (sets an empty map). Falls back to table format parsing on old drivers.
 func (inv *GPUInventory) RefreshDeviceMemSnapshot() {
 	result := make(map[string]DeviceMemInfo)
+	utilByDevice := make(map[string]int)
+	hasCompute := make(map[string]bool)
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,memory.used,memory.total", 3)
 	if len(rows) > 0 {
 		for _, parts := range rows {
@@ -222,17 +284,45 @@ func (inv *GPUInventory) RefreshDeviceMemSnapshot() {
 			total, _ := strconv.Atoi(parts[2])
 			result[idx] = DeviceMemInfo{UsedMiB: used, TotalMiB: total}
 		}
-		inv.DeviceMemSnapshot = result
-		return
+	}
+	utilRows := inv.queryNvidiaSmiCached("--query-gpu=index,utilization.gpu", 2)
+	for _, parts := range utilRows {
+		idx := parts[0]
+		util, _ := strconv.Atoi(parts[1])
+		utilByDevice[idx] = util
 	}
 
-	// Fallback to table format for old drivers
+	// Compute process detection on modern drivers: gpu_uuid -> index.
+	computeRows := inv.queryNvidiaSmiCached("--query-compute-apps=gpu_uuid,pid,used_memory", 3)
+	if len(computeRows) > 0 {
+		uuidRows := inv.queryNvidiaSmiCached("--query-gpu=index,uuid", 2)
+		uuidToIndex := make(map[string]string, len(uuidRows))
+		for _, parts := range uuidRows {
+			uuidToIndex[parts[1]] = parts[0]
+		}
+		for _, parts := range computeRows {
+			uuid := parts[0]
+			if idx, ok := uuidToIndex[uuid]; ok {
+				hasCompute[idx] = true
+			}
+		}
+	}
+
+	// Fallback to table format for old drivers (or query-output incompatibility).
 	if tableOut, err := execNvidiaSmiRaw(); err == nil {
 		if _, memInfo := parseNvidiaSmiTable(tableOut); len(memInfo) > 0 {
 			result = memInfo
 		}
+		if len(utilByDevice) == 0 {
+			utilByDevice = parseNvidiaSmiTableUtil(tableOut)
+		}
+		if len(hasCompute) == 0 {
+			hasCompute = parseNvidiaSmiTableComputeProcessFlags(tableOut)
+		}
 	}
 	inv.DeviceMemSnapshot = result
+	inv.DeviceUtilPct = utilByDevice
+	inv.DeviceHasCompute = hasCompute
 }
 
 // PerDeviceGPUMemUsedMiB queries nvidia-smi for actual per-device memory usage.
@@ -403,7 +493,7 @@ func (inv *GPUInventory) PickBestGPUForClassWithReason(state *State, className s
 func (inv *GPUInventory) pickBestDevice(state *State, candidates []string, memRequired int) (bestDevice string, bestFreeMiB int, busyCount int, memBlockedCount int) {
 	bestFreeMiB = -1
 	for _, device := range candidates {
-		if DeviceHasRunningJob(state, device) {
+		if inv.deviceBusy(state, device, false) {
 			busyCount++
 			continue
 		}
@@ -447,10 +537,12 @@ func (inv *GPUInventory) CanStartGPUJob(state *State, job *RunnerJob) (bool, []s
 // CanStartGPUJobWithReason checks if a job can start based on GPU constraints.
 // Returns a user-facing reason when the GPU gate blocks the job.
 func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) (bool, []string, string) {
+	strictIsolation := HasTag(job.Data, "benchmark")
+
 	// GPU class-based job
 	if job.Data.GPUClass != "" {
 		memPerDevice := GetJobGPUMem(job.Data, DefaultGPUMemGB)
-		device, reason, ok := inv.PickBestGPUForClassWithReason(state, job.Data.GPUClass, memPerDevice)
+		device, reason, ok := inv.pickBestGPUForClassWithMode(state, job.Data.GPUClass, memPerDevice, strictIsolation)
 		if !ok {
 			return false, nil, reason
 		}
@@ -465,7 +557,7 @@ func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) 
 
 	memPerDevice := GetJobGPUMem(job.Data, DefaultGPUMemGB)
 	for _, device := range devices {
-		if DeviceHasRunningJob(state, device) {
+		if inv.deviceBusy(state, device, strictIsolation) {
 			return false, nil, fmt.Sprintf("GPU %s is already in use", device)
 		}
 		if _, ok := inv.deviceMemCheck(state, device, memPerDevice); !ok {
@@ -473,6 +565,66 @@ func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) 
 		}
 	}
 	return true, devices, ""
+}
+
+const defaultNonBenchmarkGPUBusyUtilThreshold = 50
+
+func (inv *GPUInventory) deviceBusy(state *State, device string, strictIsolation bool) bool {
+	if DeviceHasRunningJob(state, device) {
+		return true
+	}
+	// Apply compute-process occupancy gating only on inventory (on-prem) hosts.
+	if !inv.isInventoryHost {
+		return false
+	}
+	if !inv.DeviceHasCompute[device] {
+		return false
+	}
+	if strictIsolation {
+		return true
+	}
+	util := inv.DeviceUtilPct[device]
+	return util >= defaultNonBenchmarkGPUBusyUtilThreshold
+}
+
+func (inv *GPUInventory) pickBestGPUForClassWithMode(state *State, className string, memRequired int, strictIsolation bool) (string, string, bool) {
+	candidates := inv.DevicesByClass(className)
+	if len(candidates) == 0 {
+		slog.Debug("no matching GPU devices for class", "component", "gpu", "class", className, "total_devices", len(inv.Devices))
+		return "", fmt.Sprintf("no GPU matching class %s", className), false
+	}
+
+	bestDevice := ""
+	bestFreeMiB := -1
+	busyCount := 0
+	memBlockedCount := 0
+	for _, device := range candidates {
+		if inv.deviceBusy(state, device, strictIsolation) {
+			busyCount++
+			continue
+		}
+		freeMiB, ok := inv.deviceMemCheck(state, device, memRequired)
+		if !ok {
+			memBlockedCount++
+			continue
+		}
+		if freeMiB > bestFreeMiB {
+			bestFreeMiB = freeMiB
+			bestDevice = device
+		}
+	}
+	if bestDevice == "" {
+		switch {
+		case busyCount == len(candidates):
+			return "", fmt.Sprintf("all %s GPUs are in use", className), false
+		case memBlockedCount > 0:
+			return "", fmt.Sprintf("no %s GPU currently has %dGB free", className, memRequired), false
+		default:
+			return "", fmt.Sprintf("no %s GPU is currently available", className), false
+		}
+	}
+	slog.Debug("GPU device selected", "component", "gpu", "class", className, "device", bestDevice, "free_mib", bestFreeMiB)
+	return bestDevice, "", true
 }
 
 // DefaultGPUMemGB is the default GPU memory reservation when a job uses a GPU.

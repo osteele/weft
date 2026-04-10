@@ -827,3 +827,102 @@ func TestDevicesByClass_TruncatedNames(t *testing.T) {
 		t.Errorf("DevicesByClass(\"nvidia\") on truncated names = %v, want 2 devices", got)
 	}
 }
+
+func TestCanStartGPUJob_InventoryNonBenchmark_AllowsMinorComputeProcess(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100", TotalMemGB: 80},
+		},
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 10 * 1024, TotalMiB: 80 * 1024},
+		},
+		DeviceHasCompute: map[string]bool{"0": true},
+		DeviceUtilPct:    map[string]int{"0": defaultNonBenchmarkGPUBusyUtilThreshold - 1},
+		isInventoryHost:  true,
+	}
+	state := NewState()
+	job := &RunnerJob{
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPUClass: "a100"},
+		ID:   1,
+	}
+
+	canStart, devices, reason := inv.CanStartGPUJobWithReason(state, job)
+	if !canStart {
+		t.Fatalf("expected non-benchmark job to start despite minor compute load, reason=%q", reason)
+	}
+	if len(devices) != 1 || devices[0] != "0" {
+		t.Fatalf("expected device [0], got %v", devices)
+	}
+}
+
+func TestCanStartGPUJob_InventoryNonBenchmark_BlocksHighComputeUtil(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100", TotalMemGB: 80},
+		},
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 10 * 1024, TotalMiB: 80 * 1024},
+		},
+		DeviceHasCompute: map[string]bool{"0": true},
+		DeviceUtilPct:    map[string]int{"0": defaultNonBenchmarkGPUBusyUtilThreshold},
+		isInventoryHost:  true,
+	}
+	state := NewState()
+	job := &RunnerJob{
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPUClass: "a100"},
+		ID:   1,
+	}
+
+	canStart, _, _ := inv.CanStartGPUJobWithReason(state, job)
+	if canStart {
+		t.Fatal("expected non-benchmark job to be blocked by high compute utilization")
+	}
+}
+
+func TestCanStartGPUJob_InventoryBenchmark_BlocksAnyComputeProcess(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100", TotalMemGB: 80},
+		},
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 10 * 1024, TotalMiB: 80 * 1024},
+		},
+		DeviceHasCompute: map[string]bool{"0": true},
+		DeviceUtilPct:    map[string]int{"0": 1},
+		isInventoryHost:  true,
+	}
+	state := NewState()
+	job := &RunnerJob{
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPUClass: "a100", Tags: []string{"benchmark"}},
+		ID:   1,
+	}
+
+	canStart, _, _ := inv.CanStartGPUJobWithReason(state, job)
+	if canStart {
+		t.Fatal("expected benchmark job to be blocked by any active compute process")
+	}
+}
+
+func TestParseNvidiaSmiTableComputeProcessFlags(t *testing.T) {
+	out := `Fri Apr 10 13:13:10 2026
++-----------------------------------------------------------------------------+
+| Processes:                                                                  |
+|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
+|        ID   ID                                                   Usage      |
+|=============================================================================|
+|    0   N/A  N/A      1234      C   python train.py                   20MiB |
+|    1   N/A  N/A      3156      G   /usr/lib/xorg/Xorg                 4MiB |
+|    2   N/A  N/A      5555    C+G   /usr/bin/obs                      32MiB |
++-----------------------------------------------------------------------------+`
+
+	flags := parseNvidiaSmiTableComputeProcessFlags(out)
+	if !flags["0"] {
+		t.Fatal("expected GPU 0 to be marked compute-busy")
+	}
+	if flags["1"] {
+		t.Fatal("expected GPU 1 (display-only G) to be ignored")
+	}
+	if !flags["2"] {
+		t.Fatal("expected GPU 2 (C+G) to be marked compute-busy")
+	}
+}
