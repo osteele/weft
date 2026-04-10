@@ -244,8 +244,8 @@ func TestRestartQueuedWithCloudHistory_CreatesFreshAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create cloud attempt: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE job_attempts SET end_time = ?, status = ?, cloud_outcome = ? WHERE id = ?`,
-		1_700_000_000, db.StatusCanceled, db.AttemptOutcomeOrphaned, attempt1); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ?, end_time = ?, status = ?, cloud_outcome = ? WHERE id = ?`,
+		1_699_999_000, 1_700_000_000, db.StatusCanceled, db.AttemptOutcomeOrphaned, attempt1); err != nil {
 		t.Fatalf("close cloud attempt: %v", err)
 	}
 
