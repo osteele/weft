@@ -58,6 +58,8 @@ type listTUIModel struct {
 	autoLeaseOwner             string
 	autoLeaseScope             string
 	autoBlockReasons           map[int64]string
+	lastAutoPilotErrorRaw      string
+	showAutoPilotErrorDetails  bool
 	launchLiveByID             map[int64]*db.LaunchLiveState
 	quickLaunching             bool
 	quickLaunchScope           string
@@ -413,12 +415,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.autoBlockReasons = msg.blockedReasons
 		if msg.err != nil {
+			m.lastAutoPilotErrorRaw = msg.err.Error()
+			m.showAutoPilotErrorDetails = false
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot failed: " + summarizeAutoPilotError(msg.err)
 			}
 			m.rebuildGroupedRows()
 			return m, nil
 		}
+		m.lastAutoPilotErrorRaw = ""
+		m.showAutoPilotErrorDetails = false
 		if msg.anotherHolding {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot: another TUI is active for this scope"
@@ -654,29 +660,41 @@ func (m listTUIModel) groupedView() string {
 	b.WriteString("\n")
 
 	groupedJobs := m.groupedJobsWithAutoReasons()
+	rows := m.groupedRows
+	if len(rows) == 0 {
+		rows = []groupedStatusRow{{text: "None"}}
+	}
 
 	// Build footer lines first so we can reserve space for them.
 	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
 	etaLine := formatETALine(eta)
 	statusLine := m.groupedStatusText()
-	controlsLine := m.groupedControlsText(eta.HasQueued)
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
 	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning)
-	// Reserve: 1 title + 1 blank separator + footer lines.
-	footerLines := 2 // blank separator + controls
+	errorDetailsLines := m.groupedErrorDetailsLines()
+	baseFooterLines := 2 // blank separator + controls
 	if etaLine != "" {
-		footerLines++
+		baseFooterLines++
 	}
 	if statusLine != "" {
-		footerLines++
+		baseFooterLines++
 	}
-	footerLines += len(sharedStatusLines)
+	baseFooterLines += len(sharedStatusLines)
+	availableForBodyAndDetails := max(0, m.height-1-baseFooterLines)
+	if len(errorDetailsLines) > 0 {
+		maxDetailLines := availableForBodyAndDetails
+		if len(rows) > 0 && maxDetailLines > 0 {
+			maxDetailLines--
+		}
+		if len(errorDetailsLines) > maxDetailLines {
+			errorDetailsLines = truncateErrorDetailsLines(errorDetailsLines, maxDetailLines)
+		}
+	}
+	controlsLine := m.groupedControlsText(eta.HasQueued)
+	// Reserve: 1 title + 1 blank separator + footer lines.
+	footerLines := baseFooterLines
+	footerLines += len(errorDetailsLines)
 	maxBodyLines := m.height - 1 - footerLines // 1 for title
-
-	rows := m.groupedRows
-	if len(rows) == 0 {
-		rows = []groupedStatusRow{{text: "None"}}
-	}
 	bodyLines := make([]string, 0, len(rows))
 	selectedVisualLine := -1
 	selectedRow := m.selectedGroupedRow()
@@ -703,6 +721,10 @@ func (m listTUIModel) groupedView() string {
 
 	// Visually separate grouped job rows from footer lines.
 	b.WriteString("\n")
+	for _, line := range errorDetailsLines {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
+		b.WriteString("\n")
+	}
 	if etaLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
 		b.WriteString("\n")
@@ -747,6 +769,13 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	}
 	if hasQueued {
 		line += "  n:new instance"
+	}
+	if strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
+		if m.showAutoPilotErrorDetails {
+			line += "  e:hide error"
+		} else {
+			line += "  e:error details"
+		}
 	}
 	line += "  q:quit"
 	return line
@@ -876,6 +905,13 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.autoBlockReasons = nil
 		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 		m.statusMessage = "Auto-pilot OFF"
+		return m, nil
+	case "e":
+		if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
+			m.statusMessage = "No auto-pilot error details."
+			return m, nil
+		}
+		m.showAutoPilotErrorDetails = !m.showAutoPilotErrorDetails
 		return m, nil
 	case "n":
 		if m.quickLaunching {
@@ -2160,13 +2196,60 @@ func summarizeAutoPilotError(err error) string {
 	if strings.Contains(msg, "submit jobs to instance control plane:") {
 		if matches := graceAckKeyPattern.FindStringSubmatch(msg); len(matches) == 2 {
 			if instanceID, err := strconv.ParseInt(matches[1], 10, 64); err == nil {
-				return fmt.Sprintf("instance %s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", ids.FormatInstanceID(instanceID))
+				return normalizeStatusLineText(fmt.Sprintf("instance %s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", ids.FormatInstanceID(instanceID)))
 			}
-			return fmt.Sprintf("instance %s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", matches[1])
+			return normalizeStatusLineText(fmt.Sprintf("instance %s did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)", matches[1]))
 		}
-		return "instance control plane did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)"
+		return normalizeStatusLineText("instance control plane did not acknowledge queued jobs; auto-pilot will retry (run `weft sync` to force reconcile)")
 	}
-	return msg
+	return normalizeStatusLineText(msg)
+}
+
+func normalizeStatusLineText(msg string) string {
+	msg = strings.ReplaceAll(msg, "\r\n", "\n")
+	msg = strings.ReplaceAll(msg, "\r", "\n")
+	parts := strings.Split(msg, "\n")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		collapsed := strings.Join(strings.Fields(part), " ")
+		if collapsed != "" {
+			clean = append(clean, collapsed)
+		}
+	}
+	if len(clean) == 0 {
+		return ""
+	}
+	return strings.Join(clean, " | ")
+}
+
+func (m listTUIModel) groupedErrorDetailsLines() []string {
+	if !m.groupedByStatus || !m.showAutoPilotErrorDetails {
+		return nil
+	}
+	raw := strings.TrimSpace(m.lastAutoPilotErrorRaw)
+	if raw == "" {
+		return nil
+	}
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
+	lines := []string{"Auto-pilot error details:"}
+	lines = append(lines, strings.Split(raw, "\n")...)
+	return lines
+}
+
+func truncateErrorDetailsLines(lines []string, maxLines int) []string {
+	if maxLines <= 0 {
+		return nil
+	}
+	if len(lines) <= maxLines {
+		return lines
+	}
+	if maxLines == 1 {
+		return []string{"…"}
+	}
+	truncated := append([]string(nil), lines[:maxLines-1]...)
+	truncated = append(truncated, "…")
+	return truncated
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {

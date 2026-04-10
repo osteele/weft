@@ -343,6 +343,68 @@ func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
 	}
 }
 
+func TestNormalizeStatusLineTextCollapsesMultilineIndentedText(t *testing.T) {
+	raw := "Error: app osteele-weft-builder has no started VMs.\n       It may be unhealthy or not have been deployed yet."
+	got := normalizeStatusLineText(raw)
+	want := "Error: app osteele-weft-builder has no started VMs. | It may be unhealthy or not have been deployed yet."
+	if got != want {
+		t.Fatalf("normalizeStatusLineText() = %q, want %q", got, want)
+	}
+}
+
+func TestListTUIAutoPilotFailureStoresRawErrorAndShowsNormalizedStatus(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		autoInProgress:  true,
+		database:        &sql.DB{},
+	}
+	err := errors.New("line one\n    line two")
+	next, _ := m.Update(listAutoPilotDoneMsg{err: err})
+	got := next.(listTUIModel)
+
+	if got.lastAutoPilotErrorRaw != "line one\n    line two" {
+		t.Fatalf("lastAutoPilotErrorRaw = %q", got.lastAutoPilotErrorRaw)
+	}
+	if strings.Contains(got.statusMessage, "\n") {
+		t.Fatalf("statusMessage should be single-line, got %q", got.statusMessage)
+	}
+	if !strings.Contains(got.statusMessage, "line one | line two") {
+		t.Fatalf("statusMessage = %q, want normalized summary", got.statusMessage)
+	}
+}
+
+func TestListTUIGroupedKeyETogglesErrorDetailsPanel(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:       true,
+		width:                 100,
+		height:                20,
+		lastAutoPilotErrorRaw: "line one\n  line two",
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	got := next.(listTUIModel)
+	if !got.showAutoPilotErrorDetails {
+		t.Fatal("expected error details panel to be enabled")
+	}
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "Auto-pilot error details:") {
+		t.Fatalf("expected details header in view, got:\n%s", out)
+	}
+	if !strings.Contains(out, "line one") || !strings.Contains(out, "  line two") {
+		t.Fatalf("expected raw multiline error text in details panel, got:\n%s", out)
+	}
+	if !strings.Contains(out, "e:hide error") {
+		t.Fatalf("expected controls hint to hide details, got:\n%s", out)
+	}
+
+	next2, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	got2 := next2.(listTUIModel)
+	if got2.showAutoPilotErrorDetails {
+		t.Fatal("expected error details panel to be disabled")
+	}
+}
+
 func TestListTUIAutoPilotStatusUsesSingularInstanceWordingAndClass(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
