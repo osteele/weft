@@ -82,6 +82,85 @@ func TestLocalInputOverlays_ValidatePaths(t *testing.T) {
 	})
 }
 
+func TestOverlayTarball_EndToEnd(t *testing.T) {
+	// Set up a project directory mimicking the real scenario:
+	// .gitignore excludes data/, but local:data/conllu/ should be included.
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "main.py"), []byte("print('hello')\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, "data", "conllu"), 0o755); err != nil {
+		t.Fatalf("mkdir data/conllu: %v", err)
+	}
+	// Create multiple files to match the real scenario
+	files := map[string]string{
+		"data/conllu/train.conllu": "1\ttrain\tdata\n",
+		"data/conllu/dev.conllu":   "1\tdev\tdata\n",
+		"data/conllu/test.conllu":  "1\ttest\tdata\n",
+	}
+	for rel, content := range files {
+		if err := os.WriteFile(filepath.Join(localDir, rel), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	// Stage with local: input overlay
+	inputs := []string{"hf:bert-base-cased", "local:data/conllu/"}
+	stagedDir, cleanup, err := stageSourceDirWithLocalInputs(localDir, inputs)
+	if err != nil {
+		t.Fatalf("stageSourceDirWithLocalInputs: %v", err)
+	}
+	defer cleanup()
+
+	if stagedDir == "" {
+		t.Fatal("expected a staged directory, got empty string")
+	}
+
+	// Create tarball from staged dir (no excludes)
+	tmpPath, hashWithOverlay, err := createSourceTarball(stagedDir, nil)
+	if err != nil {
+		t.Fatalf("createSourceTarball(staged): %v", err)
+	}
+	defer os.Remove(tmpPath)
+
+	// Create base tarball (with excludes) for hash comparison
+	baseTmpPath, hashWithout, err := CreateSourceTarball(localDir)
+	if err != nil {
+		t.Fatalf("CreateSourceTarball(base): %v", err)
+	}
+	defer os.Remove(baseTmpPath)
+
+	if hashWithOverlay == hashWithout {
+		t.Fatal("overlay tarball hash should differ from base tarball hash")
+	}
+
+	// Extract the overlay tarball and verify contents
+	extractDir := t.TempDir()
+	if err := ExtractTarball(tmpPath, extractDir); err != nil {
+		t.Fatalf("ExtractTarball: %v", err)
+	}
+
+	// Verify main.py exists
+	if _, err := os.Stat(filepath.Join(extractDir, "main.py")); err != nil {
+		t.Errorf("expected main.py in extracted tarball: %v", err)
+	}
+
+	// Verify all overlay files exist with correct content
+	for rel, wantContent := range files {
+		got, err := os.ReadFile(filepath.Join(extractDir, rel))
+		if err != nil {
+			t.Errorf("expected %s in extracted tarball: %v", rel, err)
+			continue
+		}
+		if string(got) != wantContent {
+			t.Errorf("content mismatch for %s: got %q, want %q", rel, got, wantContent)
+		}
+	}
+}
+
 func TestBuildSourceSnapshot_UsesDefaultExcludesAndLocalInputOverlays(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
@@ -98,24 +177,24 @@ func TestBuildSourceSnapshot_UsesDefaultExcludesAndLocalInputOverlays(t *testing
 		t.Fatalf("write overlay file: %v", err)
 	}
 
-	noOverlaySnapshot, cleanupNoOverlay, err := BuildSourceSnapshot(localDir, nil)
+	noOverlay, err := BuildSourceSnapshot(localDir, nil)
 	if err != nil {
 		t.Fatalf("BuildSourceSnapshot(no overlays): %v", err)
 	}
-	defer cleanupNoOverlay()
-	if _, err := os.Stat(filepath.Join(noOverlaySnapshot, "main.py")); err != nil {
+	defer noOverlay.Cleanup()
+	if _, err := os.Stat(filepath.Join(noOverlay.Dir, "main.py")); err != nil {
 		t.Fatalf("expected main.py in snapshot: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(noOverlaySnapshot, "data", "conllu", "train.conllu")); err == nil {
+	if _, err := os.Stat(filepath.Join(noOverlay.Dir, "data", "conllu", "train.conllu")); err == nil {
 		t.Fatalf("expected gitignored file to be absent without explicit local input")
 	}
 
-	withOverlaySnapshot, cleanupWithOverlay, err := BuildSourceSnapshot(localDir, []string{"local:data/conllu/"})
+	withOverlay, err := BuildSourceSnapshot(localDir, []string{"local:data/conllu/"})
 	if err != nil {
 		t.Fatalf("BuildSourceSnapshot(with overlays): %v", err)
 	}
-	defer cleanupWithOverlay()
-	if _, err := os.Stat(filepath.Join(withOverlaySnapshot, "data", "conllu", "train.conllu")); err != nil {
+	defer withOverlay.Cleanup()
+	if _, err := os.Stat(filepath.Join(withOverlay.Dir, "data", "conllu", "train.conllu")); err != nil {
 		t.Fatalf("expected explicit local input to be present: %v", err)
 	}
 }

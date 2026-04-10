@@ -119,16 +119,16 @@ func buildStageRoot(localDir, workingDir string, inputs []string) (string, []Sou
 	}
 
 	var entries []SourceBundleEntry
-	snapshotDir, snapshotCleanup, err := weftsync.BuildSourceSnapshot(localDir, inputs)
+	snap, err := weftsync.BuildSourceSnapshot(localDir, inputs)
 	if err != nil {
 		_ = os.RemoveAll(root)
 		return "", nil, err
 	}
-	defer snapshotCleanup()
+	defer snap.Cleanup()
 
 	mainRel := filepath.Join("entries", "0")
 	mainAbs := filepath.Join(root, mainRel)
-	if err := weftsync.CopyPath(snapshotDir, mainAbs); err != nil {
+	if err := weftsync.CopyPath(snap.Dir, mainAbs); err != nil {
 		_ = os.RemoveAll(root)
 		return "", nil, err
 	}

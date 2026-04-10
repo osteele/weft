@@ -154,6 +154,15 @@ func TestProjectWatchModelViewShowsGroupedContent(t *testing.T) {
 	}
 }
 
+func TestShortRelativeTime_IncludesHoursForDayScaleDurations(t *testing.T) {
+	if got := shortRelativeTime(42 * 3600); got != "1d18h ago" {
+		t.Fatalf("shortRelativeTime(42h) = %q, want %q", got, "1d18h ago")
+	}
+	if got := shortRelativeTime(11 * 24 * 3600); got != "11d ago" {
+		t.Fatalf("shortRelativeTime(11d) = %q, want %q", got, "11d ago")
+	}
+}
+
 func TestProjectWatchFooterShowsSelectedBlockedReason(t *testing.T) {
 	blocked := &db.Job{
 		ID:                 41,

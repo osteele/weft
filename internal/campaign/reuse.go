@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"math"
 	"path"
 	"slices"
@@ -374,6 +375,8 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 
 		// Upload fresh sources (content-addressed, so deduped)
+		slog.Info("source upload: reuse path", "component", "reuse",
+			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
 		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir, job.Inputs)
 		if err != nil {
 			return fmt.Errorf("upload source for job %d: %w", job.ID, err)

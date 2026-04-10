@@ -31,6 +31,7 @@ type SnapshotInspection struct {
 	LargestFiles    []SnapshotItem `json:"largest_files"`
 	LargestTopLevel []SnapshotItem `json:"largest_top_level_dirs"`
 	TarballHash     string         `json:"tarball_hash,omitempty"`
+	Overlays        []string       `json:"overlays,omitempty"`
 }
 
 // InspectSnapshot measures the local source snapshot using the same exclude
@@ -259,4 +260,79 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	n, err := w.w.Write(p)
 	w.n += int64(n)
 	return n, err
+}
+
+// InspectSnapshotWithInputs measures the snapshot as it would actually be
+// uploaded to R2 — with declared local: inputs overlaid on top of the base
+// snapshot. This shows the user what the rental instance will receive.
+func InspectSnapshotWithInputs(localDir string, inputs []string, topFiles, topDirs int) (*SnapshotInspection, error) {
+	resolvedDir, err := filepath.Abs(localDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", localDir, err)
+	}
+
+	snap, err := BuildSourceSnapshot(resolvedDir, inputs)
+	if err != nil {
+		return nil, fmt.Errorf("build source snapshot: %w", err)
+	}
+	defer snap.Cleanup()
+
+	fileItems := []SnapshotItem{}
+	topLevelBytes := map[string]int64{}
+	result := &SnapshotInspection{
+		LocalDir:   resolvedDir,
+		LimitBytes: MaxSourceTarballBytes,
+		Overlays:   snap.Overlays,
+	}
+
+	err = filepath.Walk(snap.Dir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relPath, err := filepath.Rel(snap.Dir, path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return nil
+		}
+		if info.IsDir() {
+			if relPath != "." {
+				result.DirectoryCount++
+			}
+			return nil
+		}
+		size := info.Size()
+		result.FileCount++
+		result.TotalBytes += size
+		fileItems = append(fileItems, SnapshotItem{Path: relPath, Bytes: size})
+		if top := topLevelDir(relPath); top != "" {
+			topLevelBytes[top] += size
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk snapshot: %w", err)
+	}
+
+	result.OverLimit = result.TotalBytes > result.LimitBytes
+	result.LargestFiles = topSnapshotItems(fileItems, topFiles)
+	result.LargestTopLevel = topSnapshotItems(mapToSnapshotItems(topLevelBytes, nil), topDirs)
+
+	if !result.OverLimit {
+		tmpPath, hash, err := createSourceTarball(snap.Dir, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create source tarball: %w", err)
+		}
+		defer os.Remove(tmpPath)
+		info, err := os.Stat(tmpPath)
+		if err != nil {
+			return nil, fmt.Errorf("stat tarball: %w", err)
+		}
+		size := info.Size()
+		result.CompressedBytes = &size
+		result.TarballHash = hash
+	}
+
+	return result, nil
 }

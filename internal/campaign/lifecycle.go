@@ -311,6 +311,8 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		localDir := localDir
 		promise := promise
 		inputs := sourceInputsByDir[localDir]
+		slog.Info("source upload: queuing", "component", "launch",
+			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs)
 		uploadWg.Add(1)
 		go func() {
 			defer uploadWg.Done()

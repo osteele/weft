@@ -139,6 +139,26 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_RunningDayScaleTimingShowsDayAndHour(t *testing.T) {
+	now := time.Unix(200_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          199,
+			Status:      db.StatusRunning,
+			Host:        "cool30",
+			Project:     "proj",
+			Description: "long runner",
+			StartTime:   now.Unix() - (42 * 3600), // 1d18h
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	want := "— started 1d18h ago"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMissing(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{

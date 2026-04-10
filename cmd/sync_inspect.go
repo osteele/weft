@@ -33,6 +33,7 @@ var (
 	syncInspectTopDirs      int
 	syncInspectJSON         bool
 	syncInspectShowExcludes bool
+	syncInspectInputs       []string
 )
 
 func init() {
@@ -41,6 +42,7 @@ func init() {
 	syncInspectCmd.Flags().IntVar(&syncInspectTopDirs, "top-dirs", 10, "Show the N largest included top-level directories")
 	syncInspectCmd.Flags().BoolVar(&syncInspectJSON, "json", false, "Emit machine-readable JSON")
 	syncInspectCmd.Flags().BoolVar(&syncInspectShowExcludes, "show-excludes", false, "Print the effective exclude patterns")
+	syncInspectCmd.Flags().StringSliceVar(&syncInspectInputs, "input", nil, "Declared inputs to include as overlays (e.g., local:data/conllu/)")
 }
 
 func runSyncInspect(cmd *cobra.Command, args []string) error {
@@ -49,7 +51,15 @@ func runSyncInspect(cmd *cobra.Command, args []string) error {
 		localDir = args[0]
 	}
 
-	inspection, err := srcsync.InspectSnapshot(localDir, syncInspectTopFiles, syncInspectTopDirs)
+	var (
+		inspection *srcsync.SnapshotInspection
+		err        error
+	)
+	if len(syncInspectInputs) > 0 {
+		inspection, err = srcsync.InspectSnapshotWithInputs(localDir, syncInspectInputs, syncInspectTopFiles, syncInspectTopDirs)
+	} else {
+		inspection, err = srcsync.InspectSnapshot(localDir, syncInspectTopFiles, syncInspectTopDirs)
+	}
 	if err != nil {
 		return err
 	}
@@ -102,6 +112,14 @@ func runSyncInspect(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "Snapshot limit: exceeded by %s\n", terminal.FormatBytesIEC(report.TotalBytes-report.LimitBytes))
 	} else {
 		fmt.Fprintf(out, "Snapshot limit: within %s\n", terminal.FormatBytesIEC(report.LimitBytes))
+	}
+
+	if len(report.Overlays) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Declared local inputs (overlaid on snapshot):")
+		for _, overlay := range report.Overlays {
+			fmt.Fprintf(out, "  %s\n", overlay)
+		}
 	}
 
 	printSnapshotItems(out, "Largest included files", report.LargestFiles)

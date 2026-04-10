@@ -407,7 +407,12 @@ func shortRelativeTime(deltaSeconds int64) string {
 	case deltaSeconds < 86400:
 		return fmt.Sprintf("%dh ago", deltaSeconds/3600)
 	default:
-		return fmt.Sprintf("%dd ago", deltaSeconds/86400)
+		days := deltaSeconds / 86400
+		hours := (deltaSeconds % 86400) / 3600
+		if hours > 0 && days < 10 {
+			return fmt.Sprintf("%dd%dh ago", days, hours)
+		}
+		return fmt.Sprintf("%dd ago", days)
 	}
 }
 

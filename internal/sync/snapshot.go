@@ -6,20 +6,37 @@ import (
 	"path/filepath"
 )
 
+// SnapshotResult holds the output of BuildSourceSnapshot.
+type SnapshotResult struct {
+	Dir      string   // staged snapshot directory
+	Cleanup  func()   // must be called to remove the staging directory
+	Overlays []string // declared local: inputs that were overlaid (e.g. "local:data/conllu/")
+}
+
 // BuildSourceSnapshot materializes a source snapshot for localDir using the
 // default source excludes, then overlays declared local: inputs into that
 // snapshot. The returned directory must be cleaned up by the caller.
-func BuildSourceSnapshot(localDir string, inputs []string) (string, func(), error) {
+func BuildSourceSnapshot(localDir string, inputs []string) (SnapshotResult, error) {
 	localDir, err := filepath.Abs(localDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve source directory: %w", err)
+		return SnapshotResult{}, fmt.Errorf("resolve source directory: %w", err)
 	}
 
 	overlays, err := localInputOverlays(localDir, inputs)
 	if err != nil {
-		return "", nil, err
+		return SnapshotResult{}, err
 	}
-	return buildSourceSnapshotWithOverlays(localDir, overlays)
+
+	var overlayNames []string
+	for _, o := range overlays {
+		overlayNames = append(overlayNames, o.input)
+	}
+
+	dir, cleanup, err := buildSourceSnapshotWithOverlays(localDir, overlays)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	return SnapshotResult{Dir: dir, Cleanup: cleanup, Overlays: overlayNames}, nil
 }
 
 func buildSourceSnapshotWithOverlays(localDir string, overlays []localOverlay) (string, func(), error) {

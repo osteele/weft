@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,6 +50,8 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 	cleanup := func() {}
 	if len(inputs) > 0 {
 		onProgress("staging explicit inputs")
+		slog.Info("source overlay: staging inputs", "component", "sync",
+			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs)
 		stagedDir, cleanupFn, err := stageSourceDirWithLocalInputs(localDir, inputs)
 		if err != nil {
 			return "", err
@@ -57,6 +60,11 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 			sourceDir = stagedDir
 			applyExcludes = false
 			cleanup = cleanupFn
+			slog.Info("source overlay: staged directory created", "component", "sync",
+				"stagedDir", stagedDir)
+		} else {
+			slog.Info("source overlay: no local overlays needed", "component", "sync",
+				"localDir", localDir)
 		}
 	}
 	defer cleanup()
@@ -76,6 +84,9 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 		return "", fmt.Errorf("create source tarball: %w", err)
 	}
 	defer os.Remove(tmpPath)
+
+	slog.Info("source overlay: tarball created", "component", "sync",
+		"hash", hash, "applyExcludes", applyExcludes, "sourceDir", sourceDir)
 
 	key := dataplane.SourceTarball(hash)
 
@@ -156,6 +167,8 @@ func localInputOverlays(localDir string, inputs []string) ([]localOverlay, error
 			continue
 		}
 		seen[rel] = struct{}{}
+		slog.Debug("source overlay: resolved local input", "component", "sync",
+			"input", ref, "abs", candidate, "rel", rel)
 		overlays = append(overlays, localOverlay{
 			input: ref,
 			abs:   candidate,
