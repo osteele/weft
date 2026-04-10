@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -524,27 +525,26 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 			m.retryResult = fmt.Sprintf("Retry: %d job(s) exceeded max cloud attempts, giving up", msg.skipped)
 			return m, m.checkAllDone()
 		}
-		if m.retryAttempt < len(retryBackoffDelays) {
-			delay := retryBackoffDelays[m.retryAttempt]
+		if delay, ok := orchestration.RetryBackoffDelay(m.retryAttempt); ok {
 			m.retryAttempt++
 			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 				EventKind:     db.EventRetryNoOffers,
 				CampaignID:    m.campaignID,
 				AttemptNumber: m.retryAttempt,
-				MaxAttempts:   len(retryBackoffDelays) + 1,
+				MaxAttempts:   orchestration.RetryBackoffMaxAttempts(),
 				Detail:        fmt.Sprintf("backoff %s", delay),
 			})
 			m.retryResult = fmt.Sprintf("Retry: no offers available, retrying in %s (attempt %d/%d)",
-				delay, m.retryAttempt+1, len(retryBackoffDelays)+1)
+				delay, m.retryAttempt+1, orchestration.RetryBackoffMaxAttempts())
 			return m, tea.Tick(delay, func(time.Time) tea.Msg { return retryBackoffMsg{} })
 		}
 		_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 			EventKind:     db.EventRetryExhausted,
 			CampaignID:    m.campaignID,
-			AttemptNumber: len(retryBackoffDelays) + 1,
+			AttemptNumber: orchestration.RetryBackoffMaxAttempts(),
 		})
 		m.retryExtraAttempts = 0
-		m.retryResult = fmt.Sprintf("Retry: no instances launched after %d attempts (no offers available)", len(retryBackoffDelays)+1)
+		m.retryResult = fmt.Sprintf("Retry: no instances launched after %d attempts (no offers available)", orchestration.RetryBackoffMaxAttempts())
 		return m, m.checkAllDone()
 	}
 

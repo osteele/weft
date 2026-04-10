@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
@@ -458,78 +458,7 @@ func runInstanceTerminate(cmd *cobra.Command, args []string) error {
 
 // terminateInstancesParallel terminates multiple cloud instances in parallel.
 func terminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []error) {
-	var mu sync.Mutex
-	var terminated int
-	var errors []error
-	var wg sync.WaitGroup
-
-	for _, id := range instanceIDs {
-		wg.Add(1)
-		go func(instanceID int64) {
-			defer wg.Done()
-
-			ci, err := db.GetLaunch(database, instanceID)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("get instance %s: %w", ids.FormatInstanceID(instanceID), err))
-				mu.Unlock()
-				return
-			}
-			if ci == nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("instance %s not found", ids.FormatInstanceID(instanceID)))
-				mu.Unlock()
-				return
-			}
-
-			if campaign.IsInstanceTerminal(ci.Status) {
-				mu.Lock()
-				fmt.Printf("Instance %s already %s\n", ids.FormatInstanceID(instanceID), ci.Status)
-				mu.Unlock()
-				return
-			}
-
-			// Destroy cloud instance
-			providerInstID := ci.EffectiveProviderID()
-			if providerInstID != "" {
-				client := cloudClientForDBInstance(ci.Provider)
-				if err := client.DestroyInstance(providerInstID); err != nil {
-					mu.Lock()
-					errors = append(errors, fmt.Errorf("destroy %s instance %s: %w", ci.Provider, providerInstID, err))
-					mu.Unlock()
-					// Continue with DB status update — mark as cancelled even if
-					// provider destroy failed, so the orphan sweep can retry.
-				}
-			}
-
-			if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("update instance %s status: %w", ids.FormatInstanceID(instanceID), err))
-				mu.Unlock()
-				return
-			}
-
-			resetCount, err := db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeCancelled)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("reset jobs for instance %s: %w", ids.FormatInstanceID(instanceID), err))
-				mu.Unlock()
-				return
-			}
-
-			mu.Lock()
-			terminated++
-			instanceInfo := ""
-			if providerInstID != "" {
-				instanceInfo = fmt.Sprintf(", destroyed %s %s", ci.Provider, providerInstID)
-			}
-			fmt.Printf("Cancelled instance %s%s, %d jobs reset to unplaced\n", ids.FormatInstanceID(instanceID), instanceInfo, resetCount)
-			mu.Unlock()
-		}(id)
-	}
-
-	wg.Wait()
-	return terminated, errors
+	return orchestration.TerminateInstancesParallel(database, instanceIDs)
 }
 
 func runInstanceSSH(cmd *cobra.Command, args []string) error {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,13 +17,13 @@ import (
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
@@ -72,6 +71,8 @@ type listTUIModel struct {
 	moveLookupJobID            int64
 	moveLookupSeq              int64
 	focused                    bool
+	appConfig                  *config.Config
+	cloudClients               []cloud.Client
 }
 
 type listJobsLoadedMsg struct {
@@ -137,11 +138,11 @@ var (
 
 func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
+	cfg, _ := config.Load()
+	cloudClients, _ := buildCloudClients(cfg)
 
 	var sw *hostsync.Worker
 	if syncEnabled {
-		cfg, _ := config.Load()
-		cloudClients, _ := buildCloudClients(cfg)
 		r2Client, _ := buildR2Client(cfg)
 		sw = hostsync.New(database, cloudClients, r2Client, cfg)
 		sw.Start()
@@ -163,6 +164,8 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		autoLeaseScope:   buildListAutoLeaseScope(title),
 		quickLaunchScope: "list_quick_launch:" + buildListAutoLeaseScope(title),
 		focused:          true,
+		appConfig:        cfg,
+		cloudClients:     cloudClients,
 	}
 	model.rebuildGroupedRows()
 
@@ -973,6 +976,8 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m listTUIModel) requestGroupedMoveOptions(requestID int64, jobID int64) tea.Cmd {
 	database := m.database
+	appCfg := m.appConfig
+	cachedCloudClients := append([]cloud.Client(nil), m.cloudClients...)
 	return func() tea.Msg {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
@@ -982,13 +987,21 @@ func (m listTUIModel) requestGroupedMoveOptions(requestID int64, jobID int64) te
 			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
 		}
 
-		cfg, cfgErr := config.Load()
-		if cfgErr != nil {
-			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("load config: %w", cfgErr)}
+		cfg := appCfg
+		if cfg == nil {
+			var cfgErr error
+			cfg, cfgErr = config.Load()
+			if cfgErr != nil {
+				return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("load config: %w", cfgErr)}
+			}
 		}
-		cloudClients, clientsErr := buildCloudClients(cfg)
-		if clientsErr != nil {
-			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("build cloud clients: %w", clientsErr)}
+		cloudClients := cachedCloudClients
+		if len(cloudClients) == 0 {
+			var clientsErr error
+			cloudClients, clientsErr = buildCloudClients(cfg)
+			if clientsErr != nil {
+				return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("build cloud clients: %w", clientsErr)}
+			}
 		}
 
 		launches, err := db.ListRunningLaunches(database)
@@ -1272,183 +1285,14 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 }
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, string, map[int64]string, error) {
-	if database == nil {
-		return 0, 0, "", nil, nil
-	}
-	scoped := make(map[int64]struct{}, len(scopedJobs))
-	for _, job := range scopedJobs {
-		if job != nil {
-			scoped[job.ID] = struct{}{}
-		}
-	}
-
-	unplacedJobs, err := db.ListUnplacedJobs(database)
+	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)
 	if err != nil {
 		return 0, 0, "", nil, err
-	}
-	unplaced := make([]*db.Job, 0, len(unplacedJobs))
-	for _, job := range unplacedJobs {
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
-			continue
-		}
-		if len(scoped) > 0 {
-			if _, ok := scoped[job.ID]; !ok {
-				continue
-			}
-		}
-		unplaced = append(unplaced, job)
-	}
-	if len(unplaced) == 0 {
-		return 0, 0, "", nil, nil
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return 0, 0, "", nil, err
-	}
-	r2Client, _ := buildR2Client(cfg)
-
-	launches, err := db.ListRunningLaunches(database)
-	if err != nil {
-		return 0, 0, "", nil, err
-	}
-	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
-	for _, ci := range launches {
-		jobs, jobsErr := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
-		if jobsErr != nil {
-			continue
-		}
-		if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(jobs)); ok {
-			capacities = append(capacities, cap)
-		}
-	}
-
-	plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
-	if err != nil {
-		oplog.Log("auto_pilot.planner_error",
-			oplog.WithError(err),
-			oplog.WithDetailf("unplaced=%d capacities=%d", len(unplaced), len(capacities)))
-		return 0, 0, "", nil, err
-	}
-	blockedReasons := map[int64]string{}
-	for jobID, reason := range plan.BlockedReasons {
-		if strings.TrimSpace(reason) != "" {
-			blockedReasons[jobID] = reason
-		}
-	}
-	oplog.Log("auto_pilot.plan",
-		oplog.WithDetailf("unplaced=%d capacities=%d reuse=%d launch=%d blocked=%d",
-			len(unplaced), len(capacities), len(plan.ReuseAssignments), len(plan.LaunchJobIDs), len(blockedReasons)))
-
-	placed := 0
-	for _, assignment := range plan.ReuseAssignments {
-		if assignment.Job == nil || assignment.Instance.Instance == nil {
-			continue
-		}
-		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
-			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
-				oplog.WithError(err),
-				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
-			blockedReasons[assignment.Job.ID] = fmt.Sprintf("reuse instance %d failed: %s", assignment.Instance.Instance.ID, summarizeAutoPilotError(err))
-			continue
-		}
-		placed++
-	}
-
-	remaining, err := db.ListUnplacedJobs(database)
-	if err != nil {
-		return placed, 0, "", nil, err
-	}
-	rentalScope := make([]int64, 0, len(remaining))
-	launchScope := make(map[int64]struct{}, len(plan.LaunchJobIDs))
-	for _, jobID := range plan.LaunchJobIDs {
-		launchScope[jobID] = struct{}{}
-	}
-	remainingByID := make(map[int64]*db.Job, len(remaining))
-	for _, job := range remaining {
-		if job != nil {
-			remainingByID[job.ID] = job
-		}
-		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasTag(db.TagInventory) {
-			continue
-		}
-		if len(scoped) > 0 {
-			if _, ok := scoped[job.ID]; !ok {
-				continue
-			}
-		}
-		if len(launchScope) == 0 {
-			rentalScope = append(rentalScope, job.ID)
-			continue
-		}
-		// Restrict auto-launch to planner-approved launch candidates.
-		if _, ok := launchScope[job.ID]; ok {
-			rentalScope = append(rentalScope, job.ID)
-		}
-	}
-	if len(rentalScope) == 0 {
-		oplog.Log("auto_pilot.no_rental_scope",
-			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
-		return placed, 0, "", blockedReasons, nil
-	}
-	oplog.Log("auto_pilot.launching",
-		oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
-
-	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
-	passStartedAt := time.Now().Unix()
-	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
-	if err != nil {
-		oplog.Log("auto_pilot.launch_error",
-			oplog.WithError(err),
-			oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
-		// Preserve planner-level blocked reasons collected before the launch error.
-		for _, jobID := range rentalScope {
-			if _, exists := blockedReasons[jobID]; !exists {
-				blockedReasons[jobID] = "launch failed"
-			}
-		}
-		return placed, 0, "", blockedReasons, err
 	}
 	if result == nil {
-		return placed, 0, "", blockedReasons, nil
+		return 0, 0, "", nil, nil
 	}
-	if result.BlockedReason != "" {
-		for _, jobID := range rentalScope {
-			blockedReasons[jobID] = result.BlockedReason
-		}
-	}
-	for jobID, failedID := range failedInstanceByJob {
-		if failedID == 0 {
-			continue
-		}
-		if reason, ok := result.NotReplacedReasons[failedID]; ok && strings.TrimSpace(reason) != "" {
-			blockedReasons[jobID] = reason
-		}
-	}
-	eventReasons := relaunchBlockedReasonsFromEvents(database, rentalScope, passStartedAt)
-	for jobID, reason := range eventReasons {
-		if strings.TrimSpace(reason) == "" {
-			continue
-		}
-		if _, exists := blockedReasons[jobID]; !exists {
-			blockedReasons[jobID] = reason
-		}
-	}
-	for jobID := range blockedReasons {
-		if _, exists := remainingByID[jobID]; !exists {
-			delete(blockedReasons, jobID)
-		}
-	}
-	// For rental-scope jobs with no specific reason when nothing launched,
-	// provide a fallback so they don't appear silently stuck.
-	if len(result.InstanceIDs) == 0 {
-		for _, jobID := range rentalScope {
-			if _, exists := blockedReasons[jobID]; !exists {
-				blockedReasons[jobID] = "no offers available"
-			}
-		}
-	}
-	return placed, len(result.InstanceIDs), launchedClassFromResult(database, result.InstanceIDs), blockedReasons, nil
+	return result.Placed, result.Launched, result.LaunchedClass, result.BlockedReasons, nil
 }
 
 func launchedClassFromResult(database *sql.DB, instanceIDs []int64) string {
@@ -1679,436 +1523,21 @@ func runQuickLaunchWithProgress(
 	jobs []*db.Job,
 	progress chan<- listQuickLaunchProgressMsg,
 ) listQuickLaunchDoneMsg {
-	emit := func(message string) {
-		if strings.TrimSpace(message) == "" {
-			return
-		}
+	res, err := orchestration.RunQuickLaunch(ctx, database, scopeOwner, scope, jobs, func(message string) {
 		select {
 		case progress <- listQuickLaunchProgressMsg{message: message}:
 		default:
 		}
-	}
-
-	emit("Acquiring launch lease...")
-	acquired, err := db.AcquireAutoLease(database, scope, scopeOwner, listAutoLeaseTTL)
+	})
 	if err != nil {
 		return listQuickLaunchDoneMsg{err: err}
 	}
-	if !acquired {
-		return listQuickLaunchDoneMsg{err: fmt.Errorf("another TUI is launching for this scope")}
-	}
-	defer db.ReleaseAutoLease(database, scope, scopeOwner)
-
-	scoped := make(map[int64]struct{}, len(jobs))
-	for _, job := range jobs {
-		if job != nil {
-			scoped[job.ID] = struct{}{}
-		}
-	}
-
-	emit("Planning placement...")
-	scopedLaunchable, err := listScopedLaunchableJobs(database, scoped)
-	if err != nil {
-		return listQuickLaunchDoneMsg{err: err}
-	}
-	if len(scopedLaunchable) == 0 {
-		return listQuickLaunchDoneMsg{err: fmt.Errorf("no launchable queued jobs in this view")}
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return listQuickLaunchDoneMsg{err: err}
-	}
-	launches, err := db.ListRunningLaunches(database)
-	if err != nil {
-		return listQuickLaunchDoneMsg{err: err}
-	}
-	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
-	for _, ci := range launches {
-		liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
-		if jobsErr != nil {
-			continue
-		}
-		if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(liveJobs)); ok {
-			capacities = append(capacities, cap)
-		}
-	}
-
-	plan, err := buildAutoPlacementPlan(database, cfg, scopedLaunchable, capacities)
-	if err != nil {
-		return listQuickLaunchDoneMsg{err: err}
-	}
-	if len(plan.LaunchJobIDs) == 0 {
-		return listQuickLaunchDoneMsg{err: fmt.Errorf("queued jobs can be placed on existing instances")}
-	}
-
-	byID := make(map[int64]*db.Job, len(scopedLaunchable))
-	for _, job := range scopedLaunchable {
-		if job != nil {
-			byID[job.ID] = job
-		}
-	}
-	launchJobID := minLaunchJobID(plan.LaunchJobIDs)
-	launchJob := byID[launchJobID]
-	if launchJob == nil {
-		return listQuickLaunchDoneMsg{err: fmt.Errorf("launch job %d not found in current scope", launchJobID)}
-	}
-
-	emit(fmt.Sprintf("Preparing job #%d for new instance...", launchJobID))
-	// Relaunch helper only operates on unplaced jobs, so for a placed job
-	// (rental queue item or inventory host) we first reset it back to the
-	// unplaced pool.
-	if launchJob.TargetKind() != db.JobTargetUnplaced {
-		if _, err := ops.UnplaceQueuedJob(database, launchJob, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
-			return listQuickLaunchDoneMsg{err: fmt.Errorf("prepare launch anchor job %d: %w", launchJob.ID, err)}
-		}
-	}
-
-	emit(fmt.Sprintf("Launching new instance for job #%d...", launchJobID))
-	result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, []int64{launchJobID}, "", false, true)
-	if err != nil {
-		return listQuickLaunchDoneMsg{err: err}
-	}
-	if result != nil && result.BlockedReason != "" {
-		return listQuickLaunchDoneMsg{err: errors.New(result.BlockedReason)}
-	}
-	if result == nil || len(result.InstanceIDs) == 0 {
-		return listQuickLaunchDoneMsg{err: fmt.Errorf("no compatible offer found")}
-	}
-
-	newInstanceID := result.InstanceIDs[0]
-	emit(fmt.Sprintf("Instance %s created; rebalancing queued jobs...", ids.FormatInstanceID(newInstanceID)))
-	movedJobs, warning, err := rebalanceQueuedJobsToLaunchedInstance(
-		ctx,
-		database,
-		cfg,
-		newInstanceID,
-		launchJobID,
-		scoped,
-	)
-	if err != nil {
-		return listQuickLaunchDoneMsg{
-			instanceIDs: []int64{newInstanceID},
-			movedJobs:   movedJobs,
-			err:         err,
-		}
-	}
-
-	runningJobID, waitWarning, err := waitForQuickLaunchRunningState(ctx, database, newInstanceID, 90*time.Second, progress)
-	if err != nil {
-		return listQuickLaunchDoneMsg{
-			instanceIDs: []int64{newInstanceID},
-			movedJobs:   movedJobs,
-			warning:     warning,
-			err:         err,
-		}
-	}
-	if strings.TrimSpace(waitWarning) != "" {
-		if strings.TrimSpace(warning) != "" {
-			warning = warning + "; " + waitWarning
-		} else {
-			warning = waitWarning
-		}
-	}
-
-	// Keep one-key behavior deterministic: launch only one additional instance.
 	return listQuickLaunchDoneMsg{
-		instanceIDs:  []int64{newInstanceID},
-		movedJobs:    movedJobs,
-		warning:      warning,
-		runningJobID: runningJobID,
+		instanceIDs:  res.InstanceIDs,
+		movedJobs:    res.MovedJobs,
+		warning:      res.Warning,
+		runningJobID: res.RunningJobID,
 	}
-}
-
-func waitForQuickLaunchRunningState(
-	ctx context.Context,
-	database *sql.DB,
-	instanceID int64,
-	maxWait time.Duration,
-	progress chan<- listQuickLaunchProgressMsg,
-) (int64, string, error) {
-	if instanceID <= 0 || database == nil {
-		return 0, "", nil
-	}
-	emit := func(message string) {
-		select {
-		case progress <- listQuickLaunchProgressMsg{message: message}:
-		default:
-		}
-	}
-
-	emit(fmt.Sprintf("Waiting for first running job on instance %s...", ids.FormatInstanceID(instanceID)))
-	deadline := time.Now().Add(maxWait)
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	lastProgress := time.Time{}
-	for {
-		if launchJobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID); err == nil {
-			for _, job := range launchJobs {
-				if job == nil {
-					continue
-				}
-				status := job.EffectiveStatus()
-				if status == db.StatusRunning || status == db.StatusStarting {
-					return job.ID, "", nil
-				}
-			}
-		}
-		if launch, err := db.GetLaunch(database, instanceID); err == nil && launch != nil && campaign.IsInstanceTerminal(launch.Status) {
-			return 0, "", fmt.Errorf("instance %s ended before any job started (%s)", ids.FormatInstanceID(instanceID), launch.Status)
-		}
-		if time.Now().After(deadline) {
-			return 0, "waiting for scheduler to start first job", nil
-		}
-		if time.Since(lastProgress) >= 5*time.Second {
-			emit(fmt.Sprintf("Waiting for first running job on instance %s... (%ds)", ids.FormatInstanceID(instanceID), int(time.Since(deadline.Add(-maxWait)).Seconds())))
-			lastProgress = time.Now()
-		}
-		select {
-		case <-ctx.Done():
-			return 0, "", ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-// listScopedLaunchableJobs returns queued jobs in the scoped set that are
-// eligible for cloud launch: rental, unplaced, or inventory-host jobs (unless
-// explicitly tagged inventory-only).
-func listScopedLaunchableJobs(database *sql.DB, scoped map[int64]struct{}) ([]*db.Job, error) {
-	if database == nil {
-		return nil, nil
-	}
-	ids := make([]int64, 0, len(scoped))
-	for id := range scoped {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	out := make([]*db.Job, 0, len(ids))
-	for _, id := range ids {
-		job, err := db.GetJobByID(database, id)
-		if err != nil || job == nil {
-			continue
-		}
-		status := job.EffectiveStatus()
-		if status != db.StatusQueued && status != db.StatusPendingPlacement {
-			continue
-		}
-		if job.HasTag(db.TagInventory) {
-			continue
-		}
-		out = append(out, job)
-	}
-	return out, nil
-}
-
-func minLaunchJobID(ids []int64) int64 {
-	if len(ids) == 0 {
-		return 0
-	}
-	minID := ids[0]
-	for _, id := range ids[1:] {
-		if id < minID {
-			minID = id
-		}
-	}
-	return minID
-}
-
-type queueETAState struct {
-	AvailByInstance  map[int64][]estimate.Estimate
-	QueuedByInstance map[int64]int
-}
-
-func rebalanceQueuedJobsToLaunchedInstance(
-	ctx context.Context,
-	database *sql.DB,
-	cfg *config.Config,
-	targetInstanceID int64,
-	anchorJobID int64,
-	scoped map[int64]struct{},
-) (moved int, warning string, err error) {
-	if database == nil || targetInstanceID == 0 {
-		return 0, "", nil
-	}
-	r2Client, _ := buildR2Client(cfg)
-	scopedQueued, err := listScopedLaunchableJobs(database, scoped)
-	if err != nil {
-		return 0, "", err
-	}
-
-	// Refresh live state for scoped launch IDs before evaluating queue ETA.
-	launchIDs := make([]int64, 0, len(scopedQueued))
-	seenLaunch := make(map[int64]struct{})
-	for _, job := range scopedQueued {
-		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-			continue
-		}
-		if _, ok := seenLaunch[*job.LaunchID]; ok {
-			continue
-		}
-		seenLaunch[*job.LaunchID] = struct{}{}
-		launchIDs = append(launchIDs, *job.LaunchID)
-	}
-	launchLiveByID, _ := db.GetLaunchLiveStates(database, launchIDs)
-
-	targetLaunch, err := db.GetLaunch(database, targetInstanceID)
-	if err != nil || targetLaunch == nil {
-		return 0, "", fmt.Errorf("load launched instance %s: %w", ids.FormatInstanceID(targetInstanceID), err)
-	}
-	targetLaunchJobs, _ := db.GetLaunchJobsIncludingAttempts(database, targetInstanceID)
-	targetCap, ok := campaign.NewInstanceCapacity(targetLaunch, countRunningJobs(targetLaunchJobs))
-	if !ok {
-		return 0, "", fmt.Errorf("launched instance %s is not reusable", ids.FormatInstanceID(targetInstanceID))
-	}
-
-	candidates := make([]*db.Job, 0)
-	for _, job := range scopedQueued {
-		if job == nil || job.ID == anchorJobID {
-			continue
-		}
-		if job.LaunchID == nil || *job.LaunchID <= 0 || *job.LaunchID == targetInstanceID {
-			continue
-		}
-		if ok, _ := campaign.MatchJobToInstance(job, targetCap); !ok {
-			continue
-		}
-		candidates = append(candidates, job)
-	}
-	if len(candidates) == 0 {
-		return 0, "", nil
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
-
-	state := buildQueueETAState(scopedQueued, launchLiveByID, time.Now())
-	currentMean := meanQueuedCompletionETA(state)
-	if currentMean <= 0 {
-		return 0, "", nil
-	}
-
-	for {
-		bestGain := time.Duration(0)
-		bestIdx := -1
-		for i, job := range candidates {
-			if job == nil || job.LaunchID == nil {
-				continue
-			}
-			src := *job.LaunchID
-			if src == 0 || src == targetInstanceID {
-				continue
-			}
-			if state.QueuedByInstance[src] <= 0 {
-				continue
-			}
-			next := cloneQueueETAState(state)
-			next.QueuedByInstance[src]--
-			next.QueuedByInstance[targetInstanceID]++
-			nextMean := meanQueuedCompletionETA(next)
-			gain := currentMean - nextMean
-			if gain > bestGain {
-				bestGain = gain
-				bestIdx = i
-			}
-		}
-		if bestIdx < 0 || bestGain <= 0 {
-			break
-		}
-		job := candidates[bestIdx]
-		candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
-		if job == nil || job.LaunchID == nil {
-			continue
-		}
-		src := *job.LaunchID
-		if _, unplaceErr := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast)); unplaceErr != nil {
-			warning = "some queued jobs could not be moved"
-			continue
-		}
-		refreshed, getErr := db.GetJobByID(database, job.ID)
-		if getErr != nil || refreshed == nil {
-			return moved, warning, fmt.Errorf("reload moved job %d: %w", job.ID, getErr)
-		}
-		if submitErr := campaign.SubmitJobsToInstance(ctx, database, r2Client, targetInstanceID, []*db.Job{refreshed}); submitErr != nil {
-			return moved, warning, fmt.Errorf("submit moved job %d to instance %s: %w", job.ID, ids.FormatInstanceID(targetInstanceID), submitErr)
-		}
-		moved++
-		state.QueuedByInstance[src]--
-		state.QueuedByInstance[targetInstanceID]++
-		currentMean -= bestGain
-	}
-	return moved, warning, nil
-}
-
-func buildQueueETAState(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) queueETAState {
-	state := queueETAState{
-		AvailByInstance:  make(map[int64][]estimate.Estimate),
-		QueuedByInstance: make(map[int64]int),
-	}
-	for _, job := range jobs {
-		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-			continue
-		}
-		instanceID := *job.LaunchID
-		switch job.EffectiveStatus() {
-		case db.StatusRunning, db.StatusStarting:
-			state.AvailByInstance[instanceID] = append(
-				state.AvailByInstance[instanceID],
-				runningJobRemaining(job, launchLiveByID, now),
-			)
-		case db.StatusQueued, db.StatusPendingPlacement:
-			state.QueuedByInstance[instanceID]++
-		}
-	}
-	return state
-}
-
-func cloneQueueETAState(state queueETAState) queueETAState {
-	copyState := queueETAState{
-		AvailByInstance:  make(map[int64][]estimate.Estimate, len(state.AvailByInstance)),
-		QueuedByInstance: make(map[int64]int, len(state.QueuedByInstance)),
-	}
-	for id, avail := range state.AvailByInstance {
-		copyState.AvailByInstance[id] = append([]estimate.Estimate(nil), avail...)
-	}
-	for id, queued := range state.QueuedByInstance {
-		copyState.QueuedByInstance[id] = queued
-	}
-	return copyState
-}
-
-func meanQueuedCompletionETA(state queueETAState) time.Duration {
-	totalQueued := 0
-	var total time.Duration
-	for instanceID, queued := range state.QueuedByInstance {
-		if queued <= 0 {
-			continue
-		}
-		totalQueued += queued
-		// Extract mean durations for the scheduling simulation.
-		estimates := state.AvailByInstance[instanceID]
-		avail := make([]time.Duration, len(estimates))
-		for i, e := range estimates {
-			avail[i] = e.Mean
-		}
-		if len(avail) == 0 {
-			avail = []time.Duration{0}
-		}
-		for i := 0; i < queued; i++ {
-			slot := 0
-			for idx := 1; idx < len(avail); idx++ {
-				if avail[idx] < avail[slot] {
-					slot = idx
-				}
-			}
-			completion := avail[slot] + estimate.DefaultJobDuration.Mean
-			avail[slot] = completion
-			total += completion
-		}
-	}
-	if totalQueued == 0 {
-		return 0
-	}
-	return total / time.Duration(totalQueued)
 }
 
 func (m *listTUIModel) pruneAutoBlockReasons() {

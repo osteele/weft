@@ -9,14 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
-	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/spf13/cobra"
@@ -595,137 +593,32 @@ func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) erro
 }
 
 func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	clients, err := buildCloudClients(cfg)
-	if err != nil || len(clients) == 0 {
-		return fmt.Errorf("no cloud providers available")
-	}
-	r2Client, r2Err := buildR2Client(cfg)
-	if r2Err != nil {
-		return fmt.Errorf("R2 client: %w", r2Err)
-	}
-
-	// Unplace all jobs first.
-	for _, job := range jobs {
-		if err := unplaceIfNeeded(database, job); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: unplace job %s failed: %v\n", FormatJobID(job.ID), err)
-		}
-	}
-
-	launchable, warnings := refreshLaunchableJobs(database, jobs)
-	for _, warning := range warnings {
-		fmt.Fprintln(os.Stderr, warning)
-	}
-
-	// Group jobs.
-	var groups []campaign.InstanceGroup
-	if separateEach {
-		for _, job := range launchable {
-			groups = append(groups, campaign.PrepareGroups([]*db.Job{job}, database, "", r2Client)...)
-		}
-	} else {
-		groups = campaign.PrepareGroups(launchable, database, "", r2Client)
-	}
-	if len(groups) == 0 {
-		return fmt.Errorf("no launchable groups from provided jobs")
-	}
-
-	// Fetch offers.
-	survivalModel := buildSurvivalModel(database)
-	predCfg := buildPredictorConfig(cfg)
-	overheadModel := buildOverheadModel(database)
-	setupFactory := campaign.OfferSetupOverheadFactory(database, overheadModel)
-	groupOffers := campaign.FetchGroupOffersWithPredictor(
-		clients, groups, &predCfg, survivalModel, setupFactory,
-		bidding.StrategyCheap, 0.4,
-	)
-
-	var launchGroups []campaign.InstanceGroup
-	var launchOffers []cloud.Offer
-	for _, gOffer := range groupOffers {
-		if gOffer.Offer == nil || gOffer.Err != nil {
-			detail := "no offers"
-			if gOffer.Err != nil {
-				detail = gOffer.Err.Error()
-			}
-			fmt.Fprintf(os.Stderr, "Warning: %s for %s (%d jobs) — skipping\n", detail, gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs))
-			continue
-		}
-		launchGroups = append(launchGroups, gOffer.Group)
-		launchOffers = append(launchOffers, *gOffer.Offer)
-	}
-	if len(launchGroups) == 0 {
-		return fmt.Errorf("no cloud offers found for any GPU group")
-	}
-
-	fmt.Printf("Launching %d instance(s) for %d job(s)...\n", len(launchGroups), countGroupJobs(launchGroups))
-
-	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-	opts := campaign.LaunchOpts{
-		GracePeriodSeconds: 15 * 60,
-		Strategy:           bidding.StrategyCheap,
-		MinSurvival:        0.4,
-	}
-
-	result, err := campaign.LaunchCampaign(
-		clients, database, launchGroups, launchOffers, nil, survivalModel, opts, r2Cfg,
-		func(provider cloud.Provider) (cloud.CreateOpts, error) {
-			return createOptsForProvider(cfg, provider)
-		},
-		func(group campaign.InstanceGroup, phase string) {
-			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
-		},
-		func(id int64) {
-			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(launchGroups))
-		},
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-
-	for _, e := range result.Errors {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", e)
-	}
-	if len(result.InstanceIDs) == 0 && len(result.Errors) > 0 {
-		return result.Errors[0]
-	}
-	for _, id := range result.InstanceIDs {
-		fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
-	}
-	return nil
-}
-
-func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
-	launchable := make([]*db.Job, 0, len(jobs))
-	var warnings []string
-	for _, job := range jobs {
-		if job == nil {
-			continue
-		}
-		latest, err := db.GetJobByID(database, job.ID)
+	// Keep single-job move-to-new on the same implementation path as TUI move,
+	// so behavior and instrumentation stay consistent across interfaces.
+	if len(jobs) == 1 && !separateEach {
+		res, err := orchestration.MoveQueuedJobToNewInstance(database, jobs[0].ID)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("Warning: reload job %s failed: %v", FormatJobID(job.ID), err))
-			continue
+			return err
 		}
-		if latest == nil {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %s no longer exists, skipping", FormatJobID(job.ID)))
-			continue
+		target := res.TargetDesc
+		if strings.TrimSpace(target) == "" && res.InstanceID > 0 {
+			target = fmt.Sprintf("instance %s", ids.FormatInstanceID(res.InstanceID))
 		}
-		if latest.EffectiveStatus() != db.StatusQueued {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %s has status %s after unplace, skipping", FormatJobID(job.ID), latest.EffectiveStatus()))
-			continue
+		if strings.TrimSpace(target) == "" {
+			target = "new instance"
 		}
-		if latest.HasAssignedHost() {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %s is still placed after unplace, skipping", FormatJobID(job.ID)))
-			continue
-		}
-		launchable = append(launchable, latest)
+		fmt.Printf("Moved job %s → %s\n", FormatJobID(jobs[0].ID), target)
+		return nil
 	}
-	return launchable, warnings
+	_, err := orchestration.MoveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
+		OnStatus: func(message string) {
+			fmt.Println(message)
+		},
+		OnWarning: func(message string) {
+			fmt.Fprintln(os.Stderr, message)
+		},
+	})
+	return err
 }
 
 func unplaceIfNeeded(database *sql.DB, job *db.Job) error {

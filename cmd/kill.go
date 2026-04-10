@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/spf13/cobra"
 )
 
@@ -29,11 +29,11 @@ func init() {
 }
 
 func runKill(cmd *cobra.Command, args []string) error {
-	service, err := core.NewService()
+	database, err := db.Open()
 	if err != nil {
-		return fmt.Errorf("initialize core service: %w", err)
+		return fmt.Errorf("open database: %w", err)
 	}
-	defer service.Close()
+	defer database.Close()
 
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
@@ -44,21 +44,13 @@ func runKill(cmd *cobra.Command, args []string) error {
 	for _, jobID := range jobIDs {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("kill"), oplog.WithJobID(jobID))
 
-		if msg, err := killOrCancelCloudJob(service.Database(), jobID, db.StatusKilled); err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
-			continue
-		} else if msg != "" {
-			fmt.Println(msg)
-			continue
-		}
-
-		result, err := service.KillJob(jobID, ops.TimeoutNormal)
+		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutNormal)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
 
-		message := result.Outcome.Message
+		message := result.Message
 		if message == "" {
 			message = fmt.Sprintf("Job %d updated", jobID)
 		}

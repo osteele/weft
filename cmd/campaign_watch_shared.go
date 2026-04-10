@@ -2,12 +2,10 @@ package cmd
 
 import (
 	"database/sql"
-	"fmt"
-	"log/slog"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 // attemptRelaunchOrphanedJobs resets jobs on terminal cloud instances and
@@ -23,66 +21,14 @@ func attemptRelaunchOrphanedJobs(
 	restrictToReset bool,
 	includeFreshUnplaced bool,
 ) (*campaign.RelaunchResult, error) {
-	// Reset jobs on terminal instances so they become unplaced.
-	// The map tells RelaunchOrphanedJobs which jobs were just orphaned
-	// (and from which instance), so it doesn't sweep in unrelated unplaced jobs.
-	resetJobs, err := db.ResetJobsOnTerminalLaunches(database)
-	if err != nil {
-		slog.Warn("failed to reset jobs on terminal launches", "component", "auto-relaunch", "error", err)
-	}
-
-	if cfg == nil {
-		cfg, _ = config.Load()
-	}
-	clients, err := buildCloudClients(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if len(clients) == 0 {
-		return nil, fmt.Errorf("no cloud providers available")
-	}
-
-	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-	survivalModel := buildSurvivalModel(database)
-	overheadModel := buildOverheadModel(database)
-	predCfg := buildPredictorConfig(cfg)
-	relaunchCfg := campaign.RelaunchConfig{
-		Clients:              clients,
-		R2Cfg:                r2Cfg,
-		LaunchOpts:           campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
-		MaxAttempts:          campaign.DefaultMaxCloudAttempts + extraAttempts,
-		SurvivalModel:        survivalModel,
-		MinSurvival:          campaignLaunchMinSurvival,
-		Database:             database,
-		PredictorConfig:      &predCfg,
-		ResetJobs:            resetJobs,
-		RestrictToReset:      restrictToReset,
-		IncludeFreshUnplaced: includeFreshUnplaced,
-		ScopeJobIDs:          scopeJobIDs,
-		ScopeProject:         scopeProject,
-		SetupFactory:         campaign.OfferSetupOverheadFactory(database, overheadModel),
-		RetryBudget: &campaign.RetryBudget{
-			FirstTimeLimit: cfg.RetryFirstTimeLimit(),
-			FirstCostCents: cfg.RetryFirstCostLimitCents(),
-			NextTimeLimit:  cfg.RetryNextTimeLimit(),
-			NextCostCents:  cfg.RetryNextCostLimitCents(),
-		},
-		RunawayPolicy: &campaign.RunawayPolicy{
-			Enabled:                  cfg.AutoRunawayEnabled(),
-			Window:                   cfg.AutoRunawayWindow(),
-			ChainNoProgressLimit:     cfg.AutoRunawayChainNoProgressLimit(),
-			OrphanChurnLimit:         cfg.AutoRunawayOrphanChurnLimit(),
-			SpendNoProgressLimitCent: cfg.AutoRunawaySpendNoProgressLimitCents(),
-		},
-		RetryBudgetMultiplierByFailedInstance: retryBudgetMultiplierByFailedInstance,
-	}
-
-	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
-	if err != nil {
-		return nil, err
-	}
-	if result == nil {
-		return &campaign.RelaunchResult{}, nil
-	}
-	return result, nil
+	return orchestration.RelaunchOrphanedJobs(
+		database,
+		cfg,
+		extraAttempts,
+		retryBudgetMultiplierByFailedInstance,
+		scopeJobIDs,
+		scopeProject,
+		restrictToReset,
+		includeFreshUnplaced,
+	)
 }

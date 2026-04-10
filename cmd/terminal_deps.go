@@ -7,6 +7,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 )
@@ -29,7 +30,7 @@ func init() {
 		PerformFastSync:                                   performFastSync,
 		PerformSyncWithTimeoutForHostsDetailed:            performSyncWithTimeoutForHostsDetailed,
 		PerformSyncWithTimeoutForHostsDetailedWithOptions: performSyncWithTimeoutForHostsDetailedWithOptions,
-		AttemptRelaunchOrphanedJobs:                       attemptRelaunchOrphanedJobs,
+		AttemptRelaunchOrphanedJobs:                       orchestration.RelaunchOrphanedJobs,
 		BuildStaleDataNote:                                buildStaleDataNote,
 		PrintJobStatus:                                    printJobStatus,
 		RefreshLaunchGroupsWithOnPrem:                     refreshLaunchGroupsWithOnPrem,
@@ -37,7 +38,7 @@ func init() {
 		SyncCloudState:                                    terminalSyncCloudState,
 		SyncCloudStateWithTimeout:                         terminalSyncCloudStateWithTimeout,
 		SyncCloudStateWithClients:                         terminalSyncCloudStateWithClients,
-		TerminateInstancesParallel:                        terminateInstancesParallel,
+		TerminateInstancesParallel:                        orchestration.TerminateInstancesParallel,
 		PrintWatchExitReport:                              printWatchExitReport,
 	})
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 func TestRefreshLaunchableJobs_ReloadsAfterUnplace(t *testing.T) {
@@ -36,7 +37,7 @@ func TestRefreshLaunchableJobs_ReloadsAfterUnplace(t *testing.T) {
 		t.Fatalf("stale groups = %d, want 0", len(staleGroups))
 	}
 
-	launchable, warnings := refreshLaunchableJobs(database, []*db.Job{staleJob})
+	launchable, warnings := orchestration.RefreshLaunchableJobs(database, []*db.Job{staleJob})
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", warnings)
 	}

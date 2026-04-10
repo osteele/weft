@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -12,13 +13,14 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
-	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -479,22 +481,7 @@ func requestWatchJobSubmit(ctx context.Context, database *sql.DB, r2Client *r2.C
 
 func requestWatchJobKill(database *sql.DB, jobID int64) tea.Cmd {
 	return func() tea.Msg {
-		msg, err := killOrCancelCloudJob(database, jobID, db.StatusKilled)
-		if err != nil {
-			return watchKillDoneMsg{jobID: jobID, err: err}
-		}
-		if msg != "" {
-			return watchKillDoneMsg{jobID: jobID, message: msg}
-		}
-		// Non-cloud job: use ops.KillJob
-		job, err := db.GetJobByID(database, jobID)
-		if err != nil {
-			return watchKillDoneMsg{jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
-		}
-		if job == nil {
-			return watchKillDoneMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
-		}
-		result, err := ops.KillJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
+		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast)
 		if err != nil {
 			return watchKillDoneMsg{jobID: jobID, err: err}
 		}
@@ -679,97 +666,66 @@ func requestMoveOptions(
 	sourceInstanceID int64,
 ) tea.Cmd {
 	jobID := job.ID
+	jobHost := job.Host
+	_ = cfg
 	return func() tea.Msg {
-		var options []moveOption
-
-		// --- Existing instances ---
-		var filtered []campaign.InstanceCapacity
-		for _, cap := range capacities {
-			if cap.Instance.ID == sourceInstanceID {
-				continue
+		lookupStarted := time.Now()
+		logPhase := func(phase string, started time.Time, detail string, err error) {
+			msg := "phase=" + phase
+			if detail != "" {
+				msg += " " + detail
 			}
-			filtered = append(filtered, cap)
+			opts := []oplog.Option{
+				oplog.WithDetail(msg),
+				oplog.WithDuration(time.Since(started)),
+			}
+			if err != nil {
+				opts = append(opts, oplog.WithError(err))
+			}
+			oplog.LogJob(oplog.OpTUIAction, jobID, jobHost, opts...)
 		}
-		ranked := campaign.RankForJob(job, filtered)
-		for _, cap := range ranked {
-			inst := cap.Instance
-			gpuName := inst.ResolvedGPUName
-			if gpuName == "" {
-				gpuName = inst.GPUClass
+		oplog.LogJob(oplog.OpTUIAction, jobID, jobHost, oplog.WithDetail("key=m action=move_lookup_start"))
+
+		// --- Existing instances + new options ---
+		existingStarted := time.Now()
+		jmOptions, buildErr := orchestration.BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID)
+		if buildErr != nil {
+			logPhase("raw_offers", existingStarted, "", buildErr)
+			return moveOptionsReadyMsg{jobID: jobID, err: buildErr}
+		}
+		options := make([]moveOption, 0, len(jmOptions))
+		existingCount := 0
+		newCount := 0
+		for _, o := range jmOptions {
+			if o.IsNew {
+				newCount++
+			} else {
+				existingCount++
 			}
-
-			waitTime := time.Duration(queuedCounts[inst.ID]) * 30 * time.Minute
-			costPerHour := float64(inst.CostPerHourCents) / 100.0
-
 			options = append(options, moveOption{
-				isNew:       false,
-				instanceID:  inst.ID,
-				gpuName:     gpuName,
-				waitTime:    waitTime,
-				costPerHour: costPerHour,
+				isNew:       o.IsNew,
+				instanceID:  o.InstanceID,
+				offer:       o.Offer,
+				strategy:    o.Strategy,
+				gpuName:     o.GPUName,
+				waitTime:    o.WaitTime,
+				costPerHour: o.CostPerHour,
 			})
 		}
-
-		// --- New instance offers (one per strategy) ---
-		if len(cloudClients) > 0 {
-			group := campaign.InstanceGroup{
-				GPUClass: job.GPUClass,
-				Jobs:     []*db.Job{job},
-			}
-			if job.GPUMemGB != nil {
-				group.GPUMemGB = *job.GPUMemGB
-			}
-
-			rawOffers := campaign.FetchGroupRawOffers(cloudClients, []campaign.InstanceGroup{group})
-
-			strategies := []bidding.SelectionStrategy{
-				bidding.StrategyCheap,
-				bidding.StrategyFast,
-				bidding.StrategyFastest,
-			}
-
-			survivalModel := buildSurvivalModel(database)
-			overheadModel := buildOverheadModel(database)
-			predCfg := buildPredictorConfig(cfg)
-			setupFactory := campaign.OfferSetupOverheadFactory(database, overheadModel)
-
-			seen := make(map[string]bool) // deduplicate by offer key
-			for _, strategy := range strategies {
-				ranked := campaign.RankGroupOffersWithPredictor(rawOffers, &predCfg, survivalModel, setupFactory, strategy, 0)
-				if len(ranked) == 0 || ranked[0].Offer == nil {
-					continue
-				}
-				offer := ranked[0].Offer
-				key := offer.Key()
-				if seen[key] {
-					// Different strategy picked same offer — show it once with first strategy
-					continue
-				}
-				seen[key] = true
-
-				// Estimate setup time: ~8 min as rough default
-				setupTime := 8 * time.Minute
-
-				options = append(options, moveOption{
-					isNew:       true,
-					offer:       offer,
-					strategy:    strategy,
-					gpuName:     offer.GPUName,
-					waitTime:    setupTime,
-					costPerHour: offer.CostPerHour,
-				})
-			}
-		}
+		logPhase("existing_instances", existingStarted, fmt.Sprintf("count=%d", existingCount), nil)
+		logPhase("rank_offers", existingStarted, fmt.Sprintf("new_options=%d", newCount), nil)
 
 		if len(options) == 0 {
+			logPhase("complete", lookupStarted, "options=0", fmt.Errorf("no compatible destinations found"))
 			return moveOptionsReadyMsg{jobID: jobID, err: fmt.Errorf("no compatible destinations found")}
 		}
+		logPhase("complete", lookupStarted, fmt.Sprintf("options=%d", len(options)), nil)
+		slog.Debug("move lookup complete", "component", "tui", "job_id", jobID, "options", len(options), "elapsed", time.Since(lookupStarted).Truncate(time.Millisecond))
 		return moveOptionsReadyMsg{jobID: jobID, options: options}
 	}
 }
 
-// requestMoveExecute performs the actual move: unplace from source, then
-// either submit to existing instance or launch a new one.
+// requestMoveExecute performs the selected move option via shared move service.
 func requestMoveExecute(
 	ctx context.Context,
 	database *sql.DB,
@@ -780,103 +736,18 @@ func requestMoveExecute(
 	opt moveOption,
 ) tea.Cmd {
 	return func() tea.Msg {
-		job, err := db.GetJobByID(database, jobID)
-		if err != nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+		targetDesc, execErr := orchestration.ExecuteOption(ctx, database, r2Client, cfg, cloudClients, jobID, orchestration.Option{
+			IsNew:       opt.isNew,
+			InstanceID:  opt.instanceID,
+			Offer:       opt.offer,
+			Strategy:    opt.strategy,
+			WaitTime:    opt.waitTime,
+			CostPerHour: opt.costPerHour,
+			GPUName:     opt.gpuName,
+		})
+		if execErr != nil {
+			return moveExecuteDoneMsg{jobID: jobID, err: execErr}
 		}
-		if job == nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
-		}
-
-		// Step 1: unplace from current instance
-		if _, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("unplace: %w", err)}
-		}
-
-		// Re-fetch after unplace
-		job, err = db.GetJobByID(database, jobID)
-		if err != nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("reload job %d: %w", jobID, err)}
-		}
-
-		if !opt.isNew {
-			// Step 2a: submit to existing instance
-			if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, opt.instanceID, []*db.Job{job}); err != nil {
-				return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(opt.instanceID), err)}
-			}
-			return moveExecuteDoneMsg{
-				jobID:      jobID,
-				targetDesc: fmt.Sprintf("instance %s", ids.FormatInstanceID(opt.instanceID)),
-			}
-		}
-
-		// Step 2b: launch new instance with this job
-		offer := *opt.offer
-		group := campaign.InstanceGroup{
-			GPUClass: job.GPUClass,
-			Jobs:     []*db.Job{job},
-		}
-		if job.GPUMemGB != nil {
-			group.GPUMemGB = *job.GPUMemGB
-		}
-
-		// Resolve grace period
-		gracePeriod := 5 * time.Minute
-		if cfg != nil {
-			if gp := cfg.DefaultGracePeriod(); gp != "" && gp != "0" {
-				if d, parseErr := time.ParseDuration(gp); parseErr == nil {
-					gracePeriod = d
-				}
-			}
-		}
-
-		launchOpts := campaign.LaunchOpts{
-			GracePeriodSeconds: int(gracePeriod.Seconds()),
-			Strategy:           opt.strategy,
-		}
-
-		// Compute estimates for auto-budget
-		predCfg := buildPredictorConfig(cfg)
-		survivalModel := buildSurvivalModel(database)
-		groupOffer := campaign.GroupOffer{Group: group, Offer: &offer}
-		estimates := campaign.EstimateCosts(database, []campaign.GroupOffer{groupOffer}, &predCfg, nil, nil, survivalModel, nil)
-		if len(estimates) > 0 {
-			launchOpts.ApplyAutoBudget(estimates)
-		}
-
-		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-		client := cloudClientForProvider(cloudClients, offer.Provider)
-		if client == nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("no client for provider %s", offer.Provider)}
-		}
-
-		createOpts, err := createOptsForProvider(cfg, offer.Provider)
-		if err != nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("create opts: %w", err)}
-		}
-
-		result, err := campaign.LaunchCampaign(
-			[]cloud.Client{client},
-			database,
-			[]campaign.InstanceGroup{group},
-			[]cloud.Offer{offer},
-			estimates,
-			survivalModel,
-			launchOpts,
-			r2Cfg,
-			func(p cloud.Provider) (cloud.CreateOpts, error) { return createOpts, nil },
-			func(campaign.InstanceGroup, string) {},
-			nil,
-			func(campaign.InstanceGroup, int64) {},
-		)
-		if err != nil {
-			return moveExecuteDoneMsg{jobID: jobID, err: fmt.Errorf("launch: %w", err)}
-		}
-
-		desc := fmt.Sprintf("new %s instance", opt.gpuName)
-		if len(result.InstanceIDs) > 0 {
-			desc = fmt.Sprintf("new %s instance %s", opt.gpuName, ids.FormatInstanceID(result.InstanceIDs[0]))
-		}
-		return moveExecuteDoneMsg{jobID: jobID, targetDesc: desc}
+		return moveExecuteDoneMsg{jobID: jobID, targetDesc: targetDesc}
 	}
 }

@@ -3,9 +3,12 @@ package cloudproviders
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/vastai"
 )
@@ -77,21 +80,59 @@ func Discover(cfg *config.Config) Discovery {
 
 func discover(checks []providerCheck) Discovery {
 	result := Discovery{}
-	for _, check := range checks {
+	type checkResult struct {
+		provider cloud.Provider
+		client   cloud.Client
+		err      error
+		elapsed  time.Duration
+	}
+
+	results := make([]checkResult, len(checks))
+	var wg sync.WaitGroup
+	for i, check := range checks {
 		if !check.Attempt {
 			continue
 		}
+		wg.Add(1)
+		go func(idx int, p providerCheck) {
+			defer wg.Done()
+			start := time.Now()
+			client, err := p.Load()
+			results[idx] = checkResult{
+				provider: p.Provider,
+				client:   client,
+				err:      err,
+				elapsed:  time.Since(start),
+			}
+			if err != nil {
+				oplog.Log("cloud.provider_discovery",
+					oplog.WithDetailf("provider=%s status=unavailable", p.Provider),
+					oplog.WithDuration(results[idx].elapsed),
+					oplog.WithError(err))
+				return
+			}
+			oplog.Log("cloud.provider_discovery",
+				oplog.WithDetailf("provider=%s status=available", p.Provider),
+				oplog.WithDuration(results[idx].elapsed))
+		}(i, check)
+	}
+	wg.Wait()
 
-		client, err := check.Load()
-		if err != nil {
+	for i, check := range checks {
+		if !check.Attempt {
+			continue
+		}
+		r := results[i]
+		if r.err != nil {
 			result.Unavailable = append(result.Unavailable, UnavailableProvider{
-				Provider: check.Provider,
-				Err:      err,
+				Provider: r.provider,
+				Err:      r.err,
 			})
 			continue
 		}
-
-		result.Clients = append(result.Clients, client)
+		if r.client != nil {
+			result.Clients = append(result.Clients, r.client)
+		}
 	}
 
 	return result
