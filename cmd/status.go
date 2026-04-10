@@ -40,14 +40,21 @@ var (
 var syncRentalJobsStatusFunc = syncRentalJobsStatusWithTimeout
 
 var statusCmd = &cobra.Command{
-	Use:   "status [job-id]...",
-	Short: "Check the status of jobs",
+	Use:   "status [id]...",
+	Short: "Check the status of jobs or instances",
 	Long: `Check the status of one or more jobs.
 
 Without arguments, shows all active jobs (running, starting, queued)
 and recent failures from the last 24 hours.
 
-Job IDs can be specified individually or as ranges:
+Job/instance IDs can be specified with prefixes:
+  - Job ID: wj42
+  - Instance ID: wi42
+  - Mixed with inferred type: wj42 43 or wi42 43
+
+Bare numeric IDs are ambiguous at the top level and return an error.
+
+When targeting jobs, IDs can be specified individually or as ranges:
   - Single ID: 42
   - Single ID (prefixed): wj42
   - Range: 42:47, 42::47, or 42...47 (expands to 42, 43, 44, 45, 46, 47)
@@ -77,6 +84,8 @@ Examples:
 	RunE: runStatus,
 }
 
+var runInstanceStatusFromStatusFunc = runInstanceStatus
+
 func init() {
 	rootCmd.AddCommand(statusCmd)
 	addStatusFlags(statusCmd)
@@ -94,6 +103,24 @@ func addStatusFlags(cmd *cobra.Command) {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 && isTopLevelStatusCommand(cmd) {
+		kind, err := resolveIDTargetKind(args)
+		if err != nil {
+			return err
+		}
+		if kind == idTargetInstance {
+			return runInstanceStatusFromStatusFunc(cmd, args)
+		}
+	}
+
+	return runJobStatus(cmd, args)
+}
+
+func isTopLevelStatusCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Name() == "status" && cmd.Parent() == rootCmd
+}
+
+func runJobStatus(cmd *cobra.Command, args []string) error {
 	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

@@ -206,32 +206,33 @@ Examples:
 
 // Top-level info command (alias for job info)
 var infoCmd = &cobra.Command{
-	Use:   "info <job-id>...",
-	Short: "Show detailed job information",
-	Long: `Show full details for a job including command, working directory,
-environment variables, and timing information.
+	Use:   "info <id>...",
+	Short: "Show detailed job or instance information",
+	Long: `Show full details for jobs or cloud instances.
 
-This is an alias for 'job info'.
+Prefix with wj... for jobs or wi... for instances.
+Unprefixed IDs inherit type only when mixed with a prefixed ID.
 
 Examples:
-  weft info 42`,
+  weft info wj42
+  weft info wi42
+  weft info wj42 43
+  weft info wi42 43`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
-	RunE: runJobInfo,
+	RunE: runInfo,
 }
 
 // Top-level show command (alias for job info)
 var showCmd = &cobra.Command{
-	Use:   "show <job-id>...",
-	Short: "Show detailed job information",
-	Long: `Show full details for a job including command, working directory,
-environment variables, and timing information.
-
-This is an alias for 'job info'.
+	Use:   "show <id>...",
+	Short: "Show detailed job or instance information",
+	Long: `Alias for "weft info". Supports wj... (job) and wi... (instance) IDs.
 
 Examples:
-  weft show 42`,
+  weft show wj42
+  weft show wi42`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
-	RunE: runJobInfo,
+	RunE: runInfo,
 }
 
 // Top-level start command (alias for job start)
@@ -812,6 +813,19 @@ var (
 )
 
 var quickSyncJobsFunc = quickSyncJobs
+var runJobInfoFromInfoFunc = runJobInfo
+var runInstanceStatusFromInfoFunc = runInstanceStatus
+
+func runInfo(cmd *cobra.Command, args []string) error {
+	kind, err := resolveIDTargetKind(args)
+	if err != nil {
+		return err
+	}
+	if kind == idTargetInstance {
+		return runInstanceStatusFromInfoFunc(cmd, args)
+	}
+	return runJobInfoFromInfoFunc(cmd, args)
+}
 
 func runJobInfo(cmd *cobra.Command, args []string) error {
 	jobIDs, err := ParseJobIDs(args)

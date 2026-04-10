@@ -45,8 +45,17 @@ var launchCmd = &cobra.Command{
 // --- terminate ---
 
 var terminateCmd = &cobra.Command{
-	Use:   "terminate <campaign|instance> <id>",
-	Short: "Terminate campaigns or instances",
+	Use:   "terminate <id...> | terminate <campaign|instance> <id>",
+	Short: "Terminate jobs, campaigns, or instances",
+	Long: `Terminate by explicit ID prefix:
+  - wj... for jobs
+  - wi... for cloud instances
+
+You can also use subcommands:
+  weft terminate campaign <campaign-id>
+  weft terminate instance <id> [id...]`,
+	Args: usageArgs(cobra.MinimumNArgs(1)),
+	RunE: runTerminate,
 }
 
 // --- move ---
