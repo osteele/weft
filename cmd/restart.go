@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
@@ -362,6 +363,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			for _, update := range updates {
 				fmt.Printf("  %s\n", update)
 			}
+			tryResumeRunawayBreaker(database, job)
 			return nil
 		}
 
@@ -407,6 +409,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}
+		tryResumeRunawayBreaker(database, job)
 		return nil
 	}
 
@@ -467,4 +470,12 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		fmt.Printf("  Env vars: %s\n", strings.Join(job.EnvVars, ", "))
 	}
 	return nil
+}
+
+func tryResumeRunawayBreaker(database *sql.DB, job *db.Job) {
+	if resumed, err := campaign.ResumeRunawayBreakerForJob(database, job); err != nil {
+		slog.Warn("failed to resume runaway breaker", "error", err)
+	} else if resumed {
+		fmt.Printf("  Auto-launch resumed (was paused due to repeated failures)\n")
+	}
 }

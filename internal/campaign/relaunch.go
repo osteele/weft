@@ -494,6 +494,8 @@ func summarizeBudgetDetail(detail string) string {
 	return "retry budget exceeded: " + detail
 }
 
+const runawayPausedReason = "paused: repeated launch failures without progress"
+
 func runawayProjectLabel(project string) string {
 	project = strings.TrimSpace(project)
 	if project == "" {
@@ -556,7 +558,7 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, cfg.ScopeProject)
 	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, cfg.ScopeProject)
 	if trippedAt > resumedAt {
-		reason := "runaway breaker tripped for scope; manual resume required"
+		reason := runawayPausedReason
 		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 			EventKind:  db.EventRelaunchRunawayBlocked,
 			CampaignID: campaignID,
@@ -580,7 +582,7 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	if !noProgress || !limitHit {
 		return false, "", nil
 	}
-	reason := fmt.Sprintf(
+	detail := fmt.Sprintf(
 		"no-progress runaway: chain=%d orphaned=%d spend=$%.2f window=%s",
 		metrics.MaxTrailingOrphaned,
 		metrics.OrphanedCount,
@@ -590,9 +592,38 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 		EventKind:  db.EventRelaunchRunawayTripped,
 		CampaignID: campaignID,
-		Detail:     runawayScopeDetail(cfg.ScopeProject, reason),
+		Detail:     runawayScopeDetail(cfg.ScopeProject, detail),
 	})
+	reason := "paused: repeated launch failures without progress"
 	return true, reason, nil
+}
+
+// ResumeRunawayBreakerForJob clears the runaway breaker for the scope
+// associated with the given job (campaign + project). Returns true if a
+// breaker was active and has been resumed, false if no breaker was tripped.
+func ResumeRunawayBreakerForJob(database *sql.DB, job *db.Job) (bool, error) {
+	if database == nil || job == nil {
+		return false, nil
+	}
+	campaignID := inferScopeCampaignID(database, []*db.Job{job})
+	if campaignID == 0 {
+		return false, nil
+	}
+	project := job.Project
+	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, project)
+	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, project)
+	if trippedAt <= resumedAt {
+		return false, nil
+	}
+	detail := runawayScopeDetail(project, "auto-resumed via retry")
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayResumed,
+		CampaignID: campaignID,
+		Detail:     detail,
+	}); err != nil {
+		return false, fmt.Errorf("record resume event: %w", err)
+	}
+	return true, nil
 }
 
 type runawayMetrics struct {
