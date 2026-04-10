@@ -61,8 +61,23 @@ You can also use subcommands:
 // --- move ---
 
 var moveCmd = &cobra.Command{
-	Use:   "move <jobs>",
+	Use:   "move [job-id]... <destination>",
 	Short: "Move queued jobs between hosts/instances or launch new instances",
+	Long: `Move queued jobs to a host, instance, or new instance(s).
+
+Use either:
+  weft move <job-id>... <destination>
+or:
+  weft move jobs <job-id>... <destination>`,
+	Args: usageArgs(cobra.ArbitraryArgs),
+	RunE: runMove,
+}
+
+func runMove(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return runJobMove(cmd, args)
 }
 
 func init() {
@@ -143,6 +158,7 @@ func init() {
 	moveJobsCmd := withPluralAlias(verbAlias("jobs <job-id>... <destination>", jobMoveCmd))
 	moveCmd.AddCommand(moveJobsCmd)
 	rootCmd.AddCommand(moveCmd)
+	addJobMoveFlags(moveCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
 	addJobMoveFlags(moveJobsCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
 
 	// terminate

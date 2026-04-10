@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -113,5 +114,37 @@ func TestMoveJobsVerbAlias_ExposesMoveFlags(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("each") == nil {
 		t.Fatal("--each flag not found on move jobs alias")
+	}
+}
+
+func TestMoveRootAlias_ExposesMoveFlags(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"move"})
+	if err != nil {
+		t.Fatalf("find move command: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("move command not found")
+	}
+	if cmd.Flags().Lookup("to") == nil {
+		t.Fatal("--to flag not found on move command")
+	}
+	if cmd.Flags().Lookup("from") == nil {
+		t.Fatal("--from flag not found on move command")
+	}
+	if cmd.Flags().Lookup("project") == nil {
+		t.Fatal("--project flag not found on move command")
+	}
+	if cmd.Flags().Lookup("each") == nil {
+		t.Fatal("--each flag not found on move command")
+	}
+}
+
+func TestMoveRootAlias_RequiresSelectorLikeJobMove(t *testing.T) {
+	err := runMove(moveCmd, []string{"new"})
+	if err == nil {
+		t.Fatal("expected selector validation error")
+	}
+	if !strings.Contains(err.Error(), "provide job IDs, --project, or --from") {
+		t.Fatalf("error = %q, want selector guidance", err)
 	}
 }
