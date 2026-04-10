@@ -119,20 +119,16 @@ func buildStageRoot(localDir, workingDir string, inputs []string) (string, []Sou
 	}
 
 	var entries []SourceBundleEntry
-	mainTarball, _, err := weftsync.CreateSourceTarball(localDir)
+	snapshotDir, snapshotCleanup, err := weftsync.BuildSourceSnapshot(localDir, inputs)
 	if err != nil {
 		_ = os.RemoveAll(root)
 		return "", nil, err
 	}
-	defer os.Remove(mainTarball)
+	defer snapshotCleanup()
 
 	mainRel := filepath.Join("entries", "0")
 	mainAbs := filepath.Join(root, mainRel)
-	if err := os.MkdirAll(mainAbs, 0755); err != nil {
-		_ = os.RemoveAll(root)
-		return "", nil, err
-	}
-	if err := weftsync.ExtractTarball(mainTarball, mainAbs); err != nil {
+	if err := weftsync.CopyPath(snapshotDir, mainAbs); err != nil {
 		_ = os.RemoveAll(root)
 		return "", nil, err
 	}

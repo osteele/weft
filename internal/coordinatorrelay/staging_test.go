@@ -82,3 +82,36 @@ func TestBuildStageRootIncludesMainAndExtraPaths(t *testing.T) {
 		t.Fatalf("extra dir entry not found")
 	}
 }
+
+func TestBuildStageRootIncludesDeclaredLocalInputsInMainSnapshot(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "main.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, "data", "conllu"), 0o755); err != nil {
+		t.Fatalf("mkdir data/conllu: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "data", "conllu", "train.conllu"), []byte("1\ttest\n"), 0o644); err != nil {
+		t.Fatalf("write train.conllu: %v", err)
+	}
+
+	root, entries, err := buildStageRoot(projectDir, "/remote/project", []string{"local:data/conllu/"})
+	if err != nil {
+		t.Fatalf("buildStageRoot: %v", err)
+	}
+	defer os.RemoveAll(root)
+
+	if len(entries) == 0 {
+		t.Fatalf("expected at least main source entry")
+	}
+	mainEntry := entries[0]
+	if mainEntry.Kind != SourceEntryDir {
+		t.Fatalf("main entry kind = %q, want %q", mainEntry.Kind, SourceEntryDir)
+	}
+	if _, err := os.Stat(filepath.Join(root, mainEntry.RelPath, "data", "conllu", "train.conllu")); err != nil {
+		t.Fatalf("main snapshot missing declared local input: %v", err)
+	}
+}

@@ -27,7 +27,6 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
-	"github.com/osteele/weft/internal/workdir"
 )
 
 // Cloud rental instances are currently always linux/amd64 (Vast.ai, RunPod).
@@ -255,12 +254,8 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		for _, d := range g.SourceDirs() {
 			allSourceDirs[d] = true
 		}
-		for _, job := range g.Jobs {
-			d := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			if d == "" || workdir.IsContainerPath(d) {
-				continue
-			}
-			sourceInputsByDir[d] = mergeStringSlices(sourceInputsByDir[d], job.Inputs)
+		for d, inputs := range SourceInputsByDir(g.Jobs) {
+			sourceInputsByDir[d] = mergeStringSlices(sourceInputsByDir[d], inputs)
 		}
 	}
 	for localDir := range allSourceDirs {

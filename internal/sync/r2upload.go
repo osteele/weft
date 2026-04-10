@@ -116,32 +116,7 @@ func stageSourceDirWithLocalInputs(localDir string, inputs []string) (string, fu
 	if len(overlays) == 0 {
 		return "", func() {}, nil
 	}
-
-	stageDir, err := os.MkdirTemp("", "weft-source-stage-*")
-	if err != nil {
-		return "", nil, fmt.Errorf("create staged source dir: %w", err)
-	}
-	cleanup := func() { _ = os.RemoveAll(stageDir) }
-
-	mainTarball, _, err := CreateSourceTarball(localDir)
-	if err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("stage source snapshot: %w", err)
-	}
-	defer os.Remove(mainTarball)
-	if err := ExtractTarball(mainTarball, stageDir); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("extract staged source snapshot: %w", err)
-	}
-
-	for _, overlay := range overlays {
-		target := filepath.Join(stageDir, overlay.rel)
-		if err := CopyPath(overlay.abs, target); err != nil {
-			cleanup()
-			return "", nil, fmt.Errorf("stage declared local input %q: %w", overlay.input, err)
-		}
-	}
-	return stageDir, cleanup, nil
+	return buildSourceSnapshotWithOverlays(localDir, overlays)
 }
 
 type localOverlay struct {

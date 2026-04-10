@@ -293,8 +293,9 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		}
 
 		sourceR2Keys := make(map[string]string)
+		inputsByDir := campaign.SourceInputsByDir(group.Jobs)
 		for _, d := range group.SourceDirs() {
-			key, err := weftsync.UploadSourceToR2(ctx, r2Client, d)
+			key, err := weftsync.UploadSourceToR2ForInputs(ctx, r2Client, d, inputsByDir[d])
 			if err != nil {
 				return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("upload source: %w", err)}
 			}

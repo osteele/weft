@@ -81,3 +81,41 @@ func TestLocalInputOverlays_ValidatePaths(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildSourceSnapshot_UsesDefaultExcludesAndLocalInputOverlays(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "main.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, "data", "conllu"), 0o755); err != nil {
+		t.Fatalf("mkdir data/conllu: %v", err)
+	}
+	overlayFile := filepath.Join(localDir, "data", "conllu", "train.conllu")
+	if err := os.WriteFile(overlayFile, []byte("1\ttest\n"), 0o644); err != nil {
+		t.Fatalf("write overlay file: %v", err)
+	}
+
+	noOverlaySnapshot, cleanupNoOverlay, err := BuildSourceSnapshot(localDir, nil)
+	if err != nil {
+		t.Fatalf("BuildSourceSnapshot(no overlays): %v", err)
+	}
+	defer cleanupNoOverlay()
+	if _, err := os.Stat(filepath.Join(noOverlaySnapshot, "main.py")); err != nil {
+		t.Fatalf("expected main.py in snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(noOverlaySnapshot, "data", "conllu", "train.conllu")); err == nil {
+		t.Fatalf("expected gitignored file to be absent without explicit local input")
+	}
+
+	withOverlaySnapshot, cleanupWithOverlay, err := BuildSourceSnapshot(localDir, []string{"local:data/conllu/"})
+	if err != nil {
+		t.Fatalf("BuildSourceSnapshot(with overlays): %v", err)
+	}
+	defer cleanupWithOverlay()
+	if _, err := os.Stat(filepath.Join(withOverlaySnapshot, "data", "conllu", "train.conllu")); err != nil {
+		t.Fatalf("expected explicit local input to be present: %v", err)
+	}
+}
