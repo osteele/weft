@@ -334,6 +334,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory
 		if !shouldForceFreshAttempt && len(updates) == 0 {
 			fmt.Printf("Job %d is already queued (no changes)\n", jobID)
+			tryResumeRunawayBreaker(database, job)
 			return nil
 		}
 
@@ -371,6 +372,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}
+		tryResumeRunawayBreaker(database, job)
 		return nil
 	}
 	if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusStarting {

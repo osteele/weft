@@ -126,6 +126,89 @@ func TestRestartQueuedJob_NoError(t *testing.T) {
 	}
 }
 
+func TestRestartQueuedJob_NoChanges_ResumesRunawayBreakerFromProjectScope(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	project := "retry-scope"
+	if err := db.SetJobProject(database, jobID, project); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayTripped,
+		CampaignID: 77,
+		Detail:     "project=retry-scope; no-progress runaway: chain=3 orphaned=8 spend=$5.00 window=24h",
+	}); err != nil {
+		t.Fatalf("insert runaway tripped event: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind:       db.EventRelaunchRunawayResumed,
+		CampaignID: 77,
+	})
+	if err != nil {
+		t.Fatalf("list lifecycle events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if strings.Contains(event.Detail, "project=retry-scope;") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected relaunch runaway resumed event for campaign 77 project %q", project)
+	}
+}
+
+func TestRestartQueuedJob_NoChanges_ResumesRunawayBreakerFromAllScopeBlocked(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobProject(database, jobID, "role-encoding-injection"); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayBlocked,
+		CampaignID: 225,
+		Detail:     "project=<all>; runaway breaker tripped for scope; manual resume required",
+	}); err != nil {
+		t.Fatalf("insert runaway blocked event: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind:       db.EventRelaunchRunawayResumed,
+		CampaignID: 225,
+	})
+	if err != nil {
+		t.Fatalf("list lifecycle events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if strings.Contains(event.Detail, "project=<all>;") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected relaunch runaway resumed event for <all> project scope")
+	}
+}
+
 func TestRestartQueuedEndedLaunchJob_CreatesFreshAttemptAndRefreshesMetadata(t *testing.T) {
 	database := db.SetupTestDB(t)
 	workDir := t.TempDir()

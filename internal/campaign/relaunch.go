@@ -513,8 +513,33 @@ func runawayScopeDetail(project string, detail string) string {
 }
 
 func eventMatchesRunawayProject(event db.LifecycleEvent, project string) bool {
-	want := "project=" + runawayProjectLabel(project) + ";"
-	return strings.Contains(event.Detail, want)
+	want := runawayProjectLabel(project)
+	got := runawayProjectLabel(runawayProjectFromDetail(event.Detail))
+	if want == "<all>" {
+		return got == "<all>"
+	}
+	return got == want || got == "<all>"
+}
+
+func runawayProjectFromDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return "<all>"
+	}
+	const key = "project="
+	start := strings.Index(detail, key)
+	if start < 0 {
+		return "<all>"
+	}
+	value := detail[start+len(key):]
+	if end := strings.Index(value, ";"); end >= 0 {
+		value = value[:end]
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "<all>"
+	}
+	return value
 }
 
 func latestRunawayEventAt(database *sql.DB, kind string, campaignID int64, project string) int64 {
@@ -605,17 +630,24 @@ func ResumeRunawayBreakerForJob(database *sql.DB, job *db.Job) (bool, error) {
 	if database == nil || job == nil {
 		return false, nil
 	}
+	project := job.Project
 	campaignID := inferScopeCampaignID(database, []*db.Job{job})
+	if campaignID == 0 {
+		campaignID = inferActiveRunawayCampaignID(database, project)
+	}
 	if campaignID == 0 {
 		return false, nil
 	}
-	project := job.Project
 	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, project)
-	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, project)
-	if trippedAt <= resumedAt {
+	pausedAt, pausedScope := latestRunawayPausedAt(database, campaignID, project)
+	if pausedAt <= resumedAt {
 		return false, nil
 	}
-	detail := runawayScopeDetail(project, "auto-resumed via retry")
+	resumeProject := project
+	if pausedScope == "<all>" {
+		resumeProject = ""
+	}
+	detail := runawayScopeDetail(resumeProject, "auto-resumed via retry")
 	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 		EventKind:  db.EventRelaunchRunawayResumed,
 		CampaignID: campaignID,
@@ -624,6 +656,61 @@ func ResumeRunawayBreakerForJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, fmt.Errorf("record resume event: %w", err)
 	}
 	return true, nil
+}
+
+func inferActiveRunawayCampaignID(database *sql.DB, project string) int64 {
+	if database == nil {
+		return 0
+	}
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		KindPrefix: "relaunch.runaway_",
+		Limit:      200,
+	})
+	if err != nil {
+		return 0
+	}
+	var fallback int64
+	for _, event := range events {
+		if event.CampaignID == 0 {
+			continue
+		}
+		if event.EventKind != db.EventRelaunchRunawayBlocked && event.EventKind != db.EventRelaunchRunawayTripped {
+			continue
+		}
+		if !eventMatchesRunawayProject(event, project) {
+			continue
+		}
+		resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, event.CampaignID, project)
+		pausedAt, _ := latestRunawayPausedAt(database, event.CampaignID, project)
+		if pausedAt > resumedAt {
+			return event.CampaignID
+		}
+		if fallback == 0 {
+			fallback = event.CampaignID
+		}
+	}
+	return fallback
+}
+
+func latestRunawayPausedAt(database *sql.DB, campaignID int64, project string) (int64, string) {
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		CampaignID: campaignID,
+		KindPrefix: "relaunch.runaway_",
+		Limit:      200,
+	})
+	if err != nil {
+		return 0, ""
+	}
+	for _, event := range events {
+		if event.EventKind != db.EventRelaunchRunawayBlocked && event.EventKind != db.EventRelaunchRunawayTripped {
+			continue
+		}
+		if !eventMatchesRunawayProject(event, project) {
+			continue
+		}
+		return event.OccurredAt, runawayProjectLabel(runawayProjectFromDetail(event.Detail))
+	}
+	return 0, ""
 }
 
 type runawayMetrics struct {
