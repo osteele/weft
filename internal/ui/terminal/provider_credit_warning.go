@@ -173,9 +173,9 @@ func fetchSharedTUIStatus(database *sql.DB) string {
 		burnCentsPerHour += l.CostPerHourCents
 	}
 
-	status := fmt.Sprintf("%d jobs running  ·  %d instances", runningJobs, totalInstances)
+	status := fmt.Sprintf("%d jobs running (all)  ·  %d instances", runningJobs, totalInstances)
 	if startingInstances > 0 {
-		status = fmt.Sprintf("%d jobs running  ·  %d instances (%d up, %d starting)", runningJobs, totalInstances, runningInstances, startingInstances)
+		status = fmt.Sprintf("%d jobs running (all)  ·  %d instances (%d up, %d starting)", runningJobs, totalInstances, runningInstances, startingInstances)
 	}
 	if burnCentsPerHour > 0 {
 		status += fmt.Sprintf("  ·  $%.2f/hr", float64(burnCentsPerHour)/100)
