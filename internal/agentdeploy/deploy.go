@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -80,9 +81,21 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, fmt.Errorf("deployed agent version mismatch on %s: want %s, got %q (binary may be incompatible)", host, localVer, deployedVer)
 	}
 
-	// Kill the runner tmux session so EnsureRunnerStarted recreates it with the new binary.
-	if err := ssh.TmuxKillSession(host, queuerunner.RunnerSessionName()); err != nil {
-		slog.Warn("failed to kill runner session", "component", "agentdeploy", "host", host, "error", err)
+	// Send a restart command so the runner re-execs with the new binary,
+	// preserving the tmux session and any running jobs.
+	runner := queuerunner.NewRunner(host)
+	if err := runner.SendRestartSignal(); err != nil {
+		var qaErr *opsqueue.QueueAppendError
+		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
+			slog.Warn("host unreachable, cannot restart runner",
+				"component", "agentdeploy", "host", host, "error", err)
+		} else {
+			slog.Warn("failed to send restart command, falling back to session kill",
+				"component", "agentdeploy", "host", host, "error", err)
+			if err := ssh.TmuxKillSession(host, runner.SessionName()); err != nil {
+				slog.Warn("failed to kill runner session", "component", "agentdeploy", "host", host, "error", err)
+			}
+		}
 	}
 
 	return true, nil

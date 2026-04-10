@@ -103,6 +103,12 @@ func (r *Runner) SendStopSignal() error {
 	return opsqueue.AppendCommand(r.host, cmd, opsqueue.AppendCommandOptions{})
 }
 
+// SendRestartSignal signals the runner to re-exec with the current binary.
+func (r *Runner) SendRestartSignal() error {
+	cmd := opsqueue.NewRestartCommand()
+	return opsqueue.AppendCommand(r.host, cmd, opsqueue.AppendCommandOptions{})
+}
+
 // WaitForStop waits until the runner's tmux session exits or timeout elapses.
 func (r *Runner) WaitForStop(timeout time.Duration) error {
 	session := r.SessionName()
