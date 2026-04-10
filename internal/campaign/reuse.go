@@ -24,7 +24,7 @@ import (
 var (
 	sendGraceJobPayload      = controlplane.SendGraceJobPayload
 	sendGraceJobPayloadNoAck = controlplane.SendGraceJobPayloadNoAck
-	uploadSourceToR2         = weftsync.UploadSourceToR2
+	uploadSourceToR2         = weftsync.UploadSourceToR2ForInputs
 )
 
 // MinGraceRemaining is the minimum grace period remaining to consider an
@@ -374,7 +374,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 
 		// Upload fresh sources (content-addressed, so deduped)
-		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir)
+		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir, job.Inputs)
 		if err != nil {
 			return fmt.Errorf("upload source for job %d: %w", job.ID, err)
 		}

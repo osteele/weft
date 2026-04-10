@@ -27,6 +27,7 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // Cloud rental instances are currently always linux/amd64 (Vast.ai, RunPod).
@@ -249,9 +250,17 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 	})
 
 	allSourceDirs := make(map[string]bool)
+	sourceInputsByDir := make(map[string][]string)
 	for _, g := range groups {
 		for _, d := range g.SourceDirs() {
 			allSourceDirs[d] = true
+		}
+		for _, job := range g.Jobs {
+			d := workdir.ResolveLocal(job.EffectiveWorkingDir())
+			if d == "" || workdir.IsContainerPath(d) {
+				continue
+			}
+			sourceInputsByDir[d] = mergeStringSlices(sourceInputsByDir[d], job.Inputs)
 		}
 	}
 	for localDir := range allSourceDirs {
@@ -306,10 +315,11 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 	for localDir, promise := range stager.sourcePromises {
 		localDir := localDir
 		promise := promise
+		inputs := sourceInputsByDir[localDir]
 		uploadWg.Add(1)
 		go func() {
 			defer uploadWg.Done()
-			key, err := weftsync.UploadSourceToR2WithProgress(uploadCtx, r2Client, localDir, func(phase string) {
+			key, err := weftsync.UploadSourceToR2WithProgressForInputs(uploadCtx, r2Client, localDir, inputs, func(phase string) {
 				stager.setStatus(AssetStageStatus{
 					Key:   localDir,
 					Kind:  AssetStageKindSource,

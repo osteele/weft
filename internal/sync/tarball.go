@@ -26,7 +26,10 @@ const MaxSourceTarballBytes = 500 * 1024 * 1024 // 500 MB
 // Returns an error if the uncompressed source exceeds MaxSourceTarballBytes.
 func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err error) {
 	excludes := sourceExcludes(localDir)
+	return createSourceTarball(localDir, excludes)
+}
 
+func createSourceTarball(localDir string, excludes []string) (tmpPath string, sha256hex string, err error) {
 	tmpFile, err := os.CreateTemp("", "weft-source-*.tar.gz")
 	if err != nil {
 		return "", "", fmt.Errorf("create temp file: %w", err)

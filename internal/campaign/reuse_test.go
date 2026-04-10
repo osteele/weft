@@ -377,7 +377,7 @@ func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
 		sendGraceJobPayload = prevSend
 	})
 
-	uploadSourceToR2 = func(context.Context, *r2.Client, string) (string, error) {
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
 		return "sources/test.tar.gz", nil
 	}
 	sendGraceJobPayload = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (*controlplane.GraceCommandAck, error) {
@@ -423,6 +423,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if err := db.SetJobNeeds(database, jobID, []string{"inputs/data.csv:41"}); err != nil {
 		t.Fatalf("SetJobNeeds: %v", err)
 	}
+	if err := db.SetJobInputs(database, jobID, []string{"local:data/conllu/"}); err != nil {
+		t.Fatalf("SetJobInputs: %v", err)
+	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
@@ -435,7 +438,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
 
-	uploadSourceToR2 = func(context.Context, *r2.Client, string) (string, error) {
+	var uploadedInputs []string
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, _ string, inputs []string) (string, error) {
+		uploadedInputs = append([]string(nil), inputs...)
 		return "sources/test.tar.gz", nil
 	}
 
@@ -468,5 +473,8 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 	if got.Sources[0].RemoteDir != "/workspace/project" {
 		t.Fatalf("source remote dir = %q", got.Sources[0].RemoteDir)
+	}
+	if !reflect.DeepEqual(uploadedInputs, []string{"local:data/conllu/"}) {
+		t.Fatalf("uploaded inputs = %v", uploadedInputs)
 	}
 }
