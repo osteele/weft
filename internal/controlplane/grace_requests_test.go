@@ -3,7 +3,6 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -145,8 +144,12 @@ func TestWaitForGraceCommandAckUsesDefaultPollInterval(t *testing.T) {
 	store := &fakeGraceStore{objects: make(map[string][]byte)}
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
+	ctx = WithGraceAckTimeout(ctx, 250*time.Millisecond)
 	_, err := WaitForGraceCommandAck(ctx, store, 1, "req-default")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want deadline exceeded", err)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "grace ack timeout") {
+		t.Fatalf("err = %v, want grace ack timeout message", err)
 	}
 }

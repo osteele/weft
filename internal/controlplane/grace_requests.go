@@ -31,6 +31,17 @@ type GraceCommandAck struct {
 }
 
 const defaultGraceAckPollInterval = 500 * time.Millisecond
+const defaultGraceAckTimeout = 30 * time.Second
+
+type graceAckTimeoutKey struct{}
+
+// WithGraceAckTimeout overrides the default ack wait timeout.
+func WithGraceAckTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	if timeout <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, graceAckTimeoutKey{}, timeout)
+}
 
 type graceAckPollIntervalKey struct{}
 
@@ -113,6 +124,21 @@ func SendGraceJobPayload(ctx context.Context, store GraceStore, instanceID int64
 	return waitForAcceptedGraceAck(ctx, store, instanceID, requestID)
 }
 
+// SendGraceJobPayloadNoAck writes the job request to R2 without waiting for
+// an acknowledgment. Use this for running instances where the agent won't
+// ack until the current job finishes.
+func SendGraceJobPayloadNoAck(ctx context.Context, store GraceStore, instanceID int64, payload GraceJobsRequest) error {
+	requestID := NewGraceRequestID(instanceID)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode jobs request: %w", err)
+	}
+	if err := store.PutObject(ctx, GraceJobRequest(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
+		return fmt.Errorf("write jobs request: %w", err)
+	}
+	return nil
+}
+
 func SendGraceExtend(ctx context.Context, store GraceStore, instanceID int64, duration time.Duration) (*GraceCommandAck, error) {
 	requestID := NewGraceRequestID(instanceID)
 	if err := store.PutObject(ctx, GraceExtendRequest(instanceID, requestID), bytes.NewReader([]byte(duration.String())), "text/plain"); err != nil {
@@ -137,6 +163,13 @@ func WaitForGraceCommandAck(ctx context.Context, store GraceStore, instanceID in
 	if interval, ok := ctx.Value(graceAckPollIntervalKey{}).(time.Duration); ok && interval > 0 {
 		pollInterval = interval
 	}
+	timeout := defaultGraceAckTimeout
+	if t, ok := ctx.Value(graceAckTimeoutKey{}).(time.Duration); ok && t > 0 {
+		timeout = t
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -158,7 +191,7 @@ func WaitForGraceCommandAck(ctx context.Context, store GraceStore, instanceID in
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("grace ack timeout after %s (instance may be unresponsive)", timeout)
 		case <-ticker.C:
 		}
 	}

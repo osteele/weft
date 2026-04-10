@@ -22,8 +22,9 @@ import (
 )
 
 var (
-	sendGraceJobPayload = controlplane.SendGraceJobPayload
-	uploadSourceToR2    = weftsync.UploadSourceToR2
+	sendGraceJobPayload      = controlplane.SendGraceJobPayload
+	sendGraceJobPayloadNoAck = controlplane.SendGraceJobPayloadNoAck
+	uploadSourceToR2         = weftsync.UploadSourceToR2
 )
 
 // MinGraceRemaining is the minimum grace period remaining to consider an
@@ -396,8 +397,18 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
-	if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
-		return fmt.Errorf("submit jobs to instance control plane: %w", err)
+	// Running instances pick up queued jobs between job executions but don't
+	// ack immediately — the agent only drains grace requests after the current
+	// job finishes. Write the request to R2 but skip waiting for the ack;
+	// the agent will find it. Grace instances poll continuously, so we wait.
+	if inst.Status == db.LaunchStatusRunning {
+		if err := sendGraceJobPayloadNoAck(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
+			return fmt.Errorf("submit jobs to instance control plane: %w", err)
+		}
+	} else {
+		if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
+			return fmt.Errorf("submit jobs to instance control plane: %w", err)
+		}
 	}
 
 	inst, err = db.GetLaunch(database, instanceID)

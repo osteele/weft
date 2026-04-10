@@ -660,7 +660,8 @@ func (m listTUIModel) groupedView() string {
 	etaLine := formatETALine(eta)
 	statusLine := m.groupedStatusText()
 	controlsLine := m.groupedControlsText(eta.HasQueued)
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
+	visibleRunning := countVisibleRunningJobs(groupedJobs)
+	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning)
 	// Reserve: 1 title + 1 blank separator + footer lines.
 	footerLines := 2 // blank separator + controls
 	if etaLine != "" {
@@ -1312,6 +1313,7 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
 				oplog.WithError(err),
 				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
+			blockedReasons[assignment.Job.ID] = fmt.Sprintf("reuse instance %d failed: %s", assignment.Instance.Instance.ID, summarizeAutoPilotError(err))
 			continue
 		}
 		placed++
@@ -2144,6 +2146,12 @@ func autoPilotBlockSummary(reasons map[int64]string) string {
 func summarizeAutoPilotError(err error) string {
 	if err == nil {
 		return "unknown error"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled (will retry)"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timed out (will retry)"
 	}
 	msg := strings.TrimSpace(err.Error())
 	if msg == "" {

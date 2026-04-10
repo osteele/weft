@@ -350,10 +350,12 @@ func TestSubmitJobsToInstanceRejectsActiveTerminationIntent(t *testing.T) {
 func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
 	database := db.SetupTestDB(t)
 
+	graceDeadline := time.Now().Add(5 * time.Minute).Unix()
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
-		Status:   db.LaunchStatusRunning,
-		Provider: "vastai",
-		GPUSpec:  "RTX_3090",
+		Status:        db.LaunchStatusGrace,
+		Provider:      "vastai",
+		GPUSpec:       "RTX_3090",
+		GraceDeadline: &graceDeadline,
 	})
 	if err != nil {
 		t.Fatalf("CreateLaunch: %v", err)
@@ -427,10 +429,10 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 
 	prevUpload := uploadSourceToR2
-	prevSend := sendGraceJobPayload
+	prevSendNoAck := sendGraceJobPayloadNoAck
 	t.Cleanup(func() {
 		uploadSourceToR2 = prevUpload
-		sendGraceJobPayload = prevSend
+		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
 
 	uploadSourceToR2 = func(context.Context, *r2.Client, string) (string, error) {
@@ -438,9 +440,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 
 	var got controlplane.GraceJobsRequest
-	sendGraceJobPayload = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (*controlplane.GraceCommandAck, error) {
+	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) error {
 		got = payload
-		return &controlplane.GraceCommandAck{RequestID: "cmd-1", Accepted: true}, nil
+		return nil
 	}
 
 	if err := SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job}); err != nil {

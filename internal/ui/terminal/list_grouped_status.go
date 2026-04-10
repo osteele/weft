@@ -359,6 +359,17 @@ func groupedStatusScopeLabel(job *db.Job) string {
 	}
 }
 
+// countVisibleRunningJobs counts jobs that would appear in the "Running" section.
+func countVisibleRunningJobs(jobs []*db.Job) int {
+	n := 0
+	for _, job := range jobs {
+		if job != nil && groupedStatusBucket(job) == "running" {
+			n++
+		}
+	}
+	return n
+}
+
 func groupedStatusOutcomeSuffix(job *db.Job, sectionTitle string) string {
 	switch sectionTitle {
 	case "Completions":

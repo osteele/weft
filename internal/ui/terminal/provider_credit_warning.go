@@ -30,13 +30,14 @@ var (
 		warning string
 	}
 
-	sharedTUIStatusFetch = fetchSharedTUIStatus
+	sharedTUIStatusFetch = fetchSharedTUIStatusWithCount
 
 	sharedTUIStatusCache struct {
-		mu       sync.Mutex
-		expires  time.Time
-		database *sql.DB
-		status   string
+		mu          sync.Mutex
+		expires     time.Time
+		database    *sql.DB
+		status      string
+		runningJobs int
 	}
 )
 
@@ -76,6 +77,27 @@ func renderSharedTUIStatusLines(database *sql.DB, width int) []string {
 	return lines
 }
 
+// renderSharedTUIStatusLinesWithVisibleRunning returns status lines, prefixing
+// "global: " when the global running count differs from visibleRunning.
+// Pass visibleRunning < 0 to skip the comparison (same as renderSharedTUIStatusLines).
+func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, visibleRunning int) []string {
+	lines := make([]string, 0, 2)
+	status, globalRunning := sharedTUIStatusTextWithCount(database)
+	if status != "" {
+		if visibleRunning >= 0 && globalRunning != visibleRunning {
+			status = "global status: " + status
+		}
+		if width > 0 {
+			status = truncateDisplayWidth(status, width)
+		}
+		lines = append(lines, tuiDimStyle.Render(status))
+	}
+	if warning := renderProviderCreditWarningLine(width); warning != "" {
+		lines = append(lines, warning)
+	}
+	return lines
+}
+
 func providerCreditWarningText() string {
 	now := providerCreditWarningNow()
 
@@ -97,27 +119,35 @@ func providerCreditWarningText() string {
 }
 
 func sharedTUIStatusText(database *sql.DB) string {
+	s, _ := sharedTUIStatusTextWithCount(database)
+	return s
+}
+
+func sharedTUIStatusTextWithCount(database *sql.DB) (string, int) {
 	if database == nil {
-		return ""
+		return "", 0
 	}
 
 	now := providerCreditWarningNow()
 	sharedTUIStatusCache.mu.Lock()
 	if database == sharedTUIStatusCache.database && now.Before(sharedTUIStatusCache.expires) {
 		status := sharedTUIStatusCache.status
+		count := sharedTUIStatusCache.runningJobs
 		sharedTUIStatusCache.mu.Unlock()
-		return status
+		return status, count
 	}
 	sharedTUIStatusCache.mu.Unlock()
 
-	status := strings.TrimSpace(sharedTUIStatusFetch(database))
+	status, count := sharedTUIStatusFetch(database)
+	status = strings.TrimSpace(status)
 
 	sharedTUIStatusCache.mu.Lock()
 	sharedTUIStatusCache.database = database
 	sharedTUIStatusCache.status = status
+	sharedTUIStatusCache.runningJobs = count
 	sharedTUIStatusCache.expires = now.Add(sharedTUIStatusTTL)
 	sharedTUIStatusCache.mu.Unlock()
-	return status
+	return status, count
 }
 
 func fetchProviderCreditWarning() string {
@@ -141,14 +171,14 @@ func fetchProviderCreditWarning() string {
 	return strings.Join(warnings, " | ")
 }
 
-func fetchSharedTUIStatus(database *sql.DB) string {
+func fetchSharedTUIStatusWithCount(database *sql.DB) (string, int) {
 	runningJobs, err := countRunningJobsInDB(database)
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	launches, err := dbpkg.ListRunningLaunches(database)
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	totalInstances := len(launches)
 	runningInstances := totalInstances
@@ -156,7 +186,7 @@ func fetchSharedTUIStatus(database *sql.DB) string {
 
 	launchJobCounts, err := dbpkg.GetLaunchJobCounts(database)
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	for _, l := range launches {
 		if l == nil {
@@ -173,14 +203,14 @@ func fetchSharedTUIStatus(database *sql.DB) string {
 		burnCentsPerHour += l.CostPerHourCents
 	}
 
-	status := fmt.Sprintf("%d jobs running (all)  ·  %d instances", runningJobs, totalInstances)
+	status := fmt.Sprintf("%d jobs running  ·  %d instances", runningJobs, totalInstances)
 	if startingInstances > 0 {
-		status = fmt.Sprintf("%d jobs running (all)  ·  %d instances (%d up, %d starting)", runningJobs, totalInstances, runningInstances, startingInstances)
+		status = fmt.Sprintf("%d jobs running  ·  %d instances (%d up, %d starting)", runningJobs, totalInstances, runningInstances, startingInstances)
 	}
 	if burnCentsPerHour > 0 {
 		status += fmt.Sprintf("  ·  $%.2f/hr", float64(burnCentsPerHour)/100)
 	}
-	return status
+	return status, runningJobs
 }
 
 func countRunningJobsInDB(database *sql.DB) (int, error) {

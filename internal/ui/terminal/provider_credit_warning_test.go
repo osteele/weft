@@ -78,7 +78,7 @@ func TestFetchSharedTUIStatusSplitsRunningAndStartingInstances(t *testing.T) {
 		t.Fatalf("MarkQueuedJobRunning(job2): %v", err)
 	}
 
-	status := fetchSharedTUIStatus(database)
+	status, _ := fetchSharedTUIStatusWithCount(database)
 	if !strings.Contains(status, "4 instances (2 up, 2 starting)") {
 		t.Fatalf("status = %q, want split instance counts", status)
 	}
@@ -125,7 +125,7 @@ func TestFetchSharedTUIStatusOmitsStartingWhenZero(t *testing.T) {
 		t.Fatalf("SetJobLaunchID(job3): %v", err)
 	}
 
-	status := fetchSharedTUIStatus(database)
+	status, _ := fetchSharedTUIStatusWithCount(database)
 	if !strings.Contains(status, "3 instances") {
 		t.Fatalf("status = %q, want compact instance count", status)
 	}
