@@ -449,7 +449,10 @@ func createJobStatusView(db *sql.DB) error {
 		)
 		SELECT
 			j.id,
-			CASE WHEN j.requested_status = 'queued' AND la.end_time IS NOT NULL
+			CASE WHEN j.requested_status = 'queued'
+			          AND la.end_time IS NOT NULL
+			          AND COALESCE(la.status, '') != 'completed'
+			          AND COALESCE(la.exit_code, 1) != 0
 			     THEN '' ELSE COALESCE(la.host, '') END AS host,
 			la.session_name,
 			j.working_dir,
@@ -538,7 +541,10 @@ func createJobStatusView(db *sql.DB) error {
 			COALESCE(la.attempt_number - 1, 0) AS retry_count,
 			la.placement_meta,
 			j.placement_reasons,
-			CASE WHEN j.requested_status = 'queued' AND la.end_time IS NOT NULL
+			CASE WHEN j.requested_status = 'queued'
+			          AND la.end_time IS NOT NULL
+			          AND COALESCE(la.status, '') != 'completed'
+			          AND COALESCE(la.exit_code, 1) != 0
 			     THEN NULL ELSE la.launch_id END AS launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
@@ -546,7 +552,10 @@ func createJobStatusView(db *sql.DB) error {
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
-				WHEN j.requested_status = 'queued' AND la.end_time IS NOT NULL
+				WHEN j.requested_status = 'queued'
+				     AND la.end_time IS NOT NULL
+				     AND COALESCE(la.status, '') != 'completed'
+				     AND COALESCE(la.exit_code, 1) != 0
 				THEN 'unplaced'
 				WHEN la.launch_id IS NOT NULL
 				     AND l.status IN ('launching', 'running', 'grace', 'completed')

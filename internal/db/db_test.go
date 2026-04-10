@@ -2009,6 +2009,57 @@ func TestJobStatusView_QueuedIntentKeepsFailedOutcomeForTerminalCloudAttempt(t *
 	}
 }
 
+func TestJobStatusView_QueuedIntentCompletedCloudKeepsTarget(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+	if err != nil {
+		t.Fatalf("record unplaced: %v", err)
+	}
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+
+	if _, err := AssignJobHost(database, jobID, "cloud"); err != nil {
+		t.Fatalf("assign host: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set launch id: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("update queued->running: %v", err)
+	}
+
+	exitCode := 0
+	endTime := time.Now().Unix()
+	if err := CloseAttempt(database, jobID, StatusCompleted, &exitCode, endTime); err != nil {
+		t.Fatalf("close attempt completed: %v", err)
+	}
+	if err := CloseLaunchAttempt(database, jobID, AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("set cloud outcome completed: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	}
+	if got, want := job.TargetDisplay(), fmt.Sprintf("wi%d", instanceID); got != want {
+		t.Fatalf("target display = %q, want %q", got, want)
+	}
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("launch_id = %v, want %d", job.LaunchID, instanceID)
+	}
+}
+
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

@@ -599,10 +599,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	display := queueblock.Display(job, nil)
 
 	fmt.Printf("Job ID:   %s\n", FormatJobID(job.ID))
-	fmt.Printf("Target:   %s\n", job.TargetDisplay())
-	if gpuDev := job.GPUDevice(); gpuDev != "" {
-		fmt.Printf("GPU:      %s\n", gpuDev)
-	}
+	fmt.Printf("Host:     %s\n", job.TargetDisplay())
 	if display.Blocked {
 		fmt.Printf("Status:   %s\n", display.Status)
 		fmt.Printf("Reason:   %s\n", display.Reason)
@@ -610,18 +607,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Status:   %s\n", effectiveStatus)
 	}
 
-	if job.Description != "" {
-		fmt.Printf("Desc:     %s\n", job.Description)
-	}
-
-	if job.StartTime > 0 {
-		startTime := time.Unix(job.StartTime, 0)
-		fmt.Printf("Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
-	}
-
 	if job.EndTime != nil {
-		endTime := time.Unix(*job.EndTime, 0)
-		fmt.Printf("Ended:    %s\n", endTime.Format("2006-01-02 15:04:05"))
 		if job.StartTime > 0 {
 			duration := *job.EndTime - job.StartTime
 			fmt.Printf("Duration: %s\n", db.FormatDuration(duration))

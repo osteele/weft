@@ -317,6 +317,56 @@ func TestRunJobInfoRentalSharedInstanceUsesSetupAndRunCostBasis(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoCompletedQueuedIntentShowsCompletedAttemptTarget(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "completed target", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	if _, err := db.AssignJobHost(database, jobID, "cloud"); err != nil {
+		t.Fatalf("AssignJobHost: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	exitCode := 0
+	endTime := time.Now().Unix()
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, endTime); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	if err := db.CloseLaunchAttempt(database, jobID, db.AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("CloseLaunchAttempt: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Status:      completed") {
+		t.Fatalf("missing completed status, got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Host:        wi%d", instanceID)) {
+		t.Fatalf("missing completed attempt target, got:\n%s", out)
+	}
+}
+
 func int64PtrSC(v int64) *int64 {
 	return &v
 }
