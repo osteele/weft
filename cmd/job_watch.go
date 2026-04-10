@@ -51,7 +51,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	database, err := db.OpenForReading()
+	database, err := openJobWatchDatabase(useTUI)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -69,6 +69,17 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 		return terminal.RunListTUI(database, nil, jobs, buildListTitle(nil), !listNoSync, listGroupBy == "status", autoMode)
 	}
 	return watchJobsPlainAll(database, watchFollow)
+}
+
+func openJobWatchDatabase(useTUI bool) (*sql.DB, error) {
+	if jobWatchNeedsWritableDB(useTUI) {
+		return db.Open()
+	}
+	return db.OpenForReading()
+}
+
+func jobWatchNeedsWritableDB(useTUI bool) bool {
+	return useTUI && listGroupBy == "status"
 }
 
 // watchJobsPlainAll polls all jobs matching the current list filters,

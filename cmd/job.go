@@ -615,14 +615,19 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool)
 		}
 	}
 
+	launchable, warnings := refreshLaunchableJobs(database, jobs)
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+
 	// Group jobs.
 	var groups []campaign.InstanceGroup
 	if separateEach {
-		for _, job := range jobs {
+		for _, job := range launchable {
 			groups = append(groups, campaign.PrepareGroups([]*db.Job{job}, database, "", r2Client)...)
 		}
 	} else {
-		groups = campaign.PrepareGroups(jobs, database, "", r2Client)
+		groups = campaign.PrepareGroups(launchable, database, "", r2Client)
 	}
 	if len(groups) == 0 {
 		return fmt.Errorf("no launchable groups from provided jobs")
@@ -692,6 +697,35 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool)
 		fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
 	}
 	return nil
+}
+
+func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
+	launchable := make([]*db.Job, 0, len(jobs))
+	var warnings []string
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		latest, err := db.GetJobByID(database, job.ID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("Warning: reload job %s failed: %v", FormatJobID(job.ID), err))
+			continue
+		}
+		if latest == nil {
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s no longer exists, skipping", FormatJobID(job.ID)))
+			continue
+		}
+		if latest.EffectiveStatus() != db.StatusQueued {
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s has status %s after unplace, skipping", FormatJobID(job.ID), latest.EffectiveStatus()))
+			continue
+		}
+		if latest.HasAssignedHost() {
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s is still placed after unplace, skipping", FormatJobID(job.ID)))
+			continue
+		}
+		launchable = append(launchable, latest)
+	}
+	return launchable, warnings
 }
 
 func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
