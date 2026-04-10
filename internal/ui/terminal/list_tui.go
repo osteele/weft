@@ -46,6 +46,7 @@ type listTUIModel struct {
 	dbWatcher                  *fsnotify.Watcher
 	dbWatcherTargets           map[string]struct{}
 	debounceActive             bool
+	debouncePending            bool
 	syncWorker                 *hostsync.Worker
 	ctx                        context.Context
 	cancel                     context.CancelFunc
@@ -361,11 +362,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{}
 		if msg.err != nil {
 			m.statusMessage = fmt.Sprintf("DB watch error: %v", msg.err)
-		} else if !m.debounceActive {
-			m.debounceActive = true
-			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
-				return listDBRefreshTriggeredMsg{}
-			}))
+		} else {
+			if !m.debounceActive {
+				m.debounceActive = true
+				cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+					return listDBRefreshTriggeredMsg{}
+				}))
+			} else {
+				// Queue one trailing refresh so bursty DB writes don't leave stale rows.
+				m.debouncePending = true
+			}
 		}
 		if cmd := m.waitForDBEvent(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -373,8 +379,17 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case listDBRefreshTriggeredMsg:
-		m.debounceActive = false
-		return m, m.reloadJobs()
+		cmds := []tea.Cmd{m.reloadJobs()}
+		if m.debouncePending {
+			m.debouncePending = false
+			m.debounceActive = true
+			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+				return listDBRefreshTriggeredMsg{}
+			}))
+		} else {
+			m.debounceActive = false
+		}
+		return m, tea.Batch(cmds...)
 
 	case listSyncWorkerResultMsg:
 		m.syncInProgress = false

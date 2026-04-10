@@ -101,6 +101,7 @@ type watchModel struct {
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
+	debouncePending  bool
 
 	// --- Project-mode fields ---
 	projectGroups  []projectGroup
@@ -636,14 +637,25 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode != watchModeProject {
 			return m, nil
 		}
-		m.debounceActive = false
-		return m, tea.Batch(m.reloadProjectGroups(), refreshWatchUnplacedJobs(m.database))
+		cmds := []tea.Cmd{
+			m.reloadProjectGroups(),
+			refreshWatchUnplacedJobs(m.database),
+		}
+		if m.debouncePending {
+			m.debouncePending = false
+			m.debounceActive = true
+			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+				return watchProjectDBRefreshTriggeredMsg{}
+			}))
+		} else {
+			m.debounceActive = false
+		}
+		return m, tea.Batch(cmds...)
 
 	case watchInstanceDBRefreshTriggeredMsg:
 		if !m.mode.isInstanceBased() {
 			return m, nil
 		}
-		m.debounceActive = false
 		// Lightweight refresh: sync on-prem hosts and refresh unplaced jobs,
 		// but do NOT call handleInstanceSyncTick() which schedules another
 		// scheduleSyncTick(). Doing so from the DB watcher (which fires every
@@ -651,7 +663,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The full sweep (reconcile campaigns, orphan sweep) already runs on
 		// independent schedules via SyncWorker (10s) and the periodic tick (15s).
 		m.requestOnPremSyncs()
-		return m, tea.Batch(
+		cmds := []tea.Cmd{
 			refreshWatchUnplacedJobs(m.database),
 			func() tea.Msg {
 				if _, err := db.ResetJobsOnTerminalLaunches(m.database); err != nil {
@@ -659,7 +671,17 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return watchSyncDoneMsg{}
 			},
-		)
+		}
+		if m.debouncePending {
+			m.debouncePending = false
+			m.debounceActive = true
+			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+				return watchInstanceDBRefreshTriggeredMsg{}
+			}))
+		} else {
+			m.debounceActive = false
+		}
+		return m, tea.Batch(cmds...)
 
 	case watchProjectSyncTickMsg:
 		if m.mode != watchModeProject {

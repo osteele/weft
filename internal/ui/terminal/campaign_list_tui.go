@@ -45,6 +45,7 @@ type campaignListModel struct {
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
+	debouncePending  bool
 	focused          bool
 }
 
@@ -232,11 +233,16 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{}
 		if msg.err != nil {
 			m.statusMessage = fmt.Sprintf("DB watch error: %v", msg.err)
-		} else if !m.debounceActive {
-			m.debounceActive = true
-			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
-				return campaignListDBRefreshTriggeredMsg{}
-			}))
+		} else {
+			if !m.debounceActive {
+				m.debounceActive = true
+				cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+					return campaignListDBRefreshTriggeredMsg{}
+				}))
+			} else {
+				// Queue one trailing refresh so bursty DB writes don't leave stale rows.
+				m.debouncePending = true
+			}
 		}
 		if cmd := m.waitForDBEvent(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -244,8 +250,17 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case campaignListDBRefreshTriggeredMsg:
-		m.debounceActive = false
-		return m, m.reloadCampaigns()
+		cmds := []tea.Cmd{m.reloadCampaigns()}
+		if m.debouncePending {
+			m.debouncePending = false
+			m.debounceActive = true
+			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+				return campaignListDBRefreshTriggeredMsg{}
+			}))
+		} else {
+			m.debounceActive = false
+		}
+		return m, tea.Batch(cmds...)
 
 	case campaignListSyncTickMsg:
 		cmds := []tea.Cmd{m.scheduleCampaignListSyncTick()}

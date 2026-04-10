@@ -136,6 +136,36 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 }
 
+func TestListTUIDBDebounceQueuesTrailingRefresh(t *testing.T) {
+	m := listTUIModel{
+		debounceActive: true,
+	}
+
+	next, _ := m.Update(listDBWatchEventMsg{})
+	got := next.(listTUIModel)
+	if !got.debounceActive {
+		t.Fatal("debounceActive should remain true while debounce window is open")
+	}
+	if !got.debouncePending {
+		t.Fatal("expected debouncePending to be set for trailing refresh")
+	}
+
+	next, _ = got.Update(listDBRefreshTriggeredMsg{})
+	got = next.(listTUIModel)
+	if !got.debounceActive {
+		t.Fatal("debounceActive should stay true while trailing refresh is scheduled")
+	}
+	if got.debouncePending {
+		t.Fatal("debouncePending should clear after scheduling trailing refresh")
+	}
+
+	next, _ = got.Update(listDBRefreshTriggeredMsg{})
+	got = next.(listTUIModel)
+	if got.debounceActive {
+		t.Fatal("debounceActive should clear when no trailing refresh is pending")
+	}
+}
+
 func TestListTUIQuickLaunchProgressUpdatesStatus(t *testing.T) {
 	progressCh := make(chan listQuickLaunchProgressMsg)
 	m := listTUIModel{

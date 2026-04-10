@@ -729,6 +729,9 @@ func (m watchModel) handleDBWatchEvent(msg watchDBWatchEventMsg, triggerMsg tea.
 		cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
 			return triggerMsg
 		}))
+	} else {
+		// Queue one trailing refresh for bursty DB writes.
+		m.debouncePending = true
 	}
 	if cmd := m.waitForDBEvent(); cmd != nil {
 		cmds = append(cmds, cmd)
