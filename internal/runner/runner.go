@@ -14,6 +14,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -489,10 +490,13 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	setupCmd := DetectSetupCommand(expandedDir)
-	if ShouldSkipSetup(setupCmd, expandedDir, command) {
-		slog.Info("skipping uv sync: command targets PEP 723 script with inline dependencies",
-			"component", "runner", "job_id", jobID)
-		setupCmd = ""
+	if setupCmd == "uv sync" {
+		scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
+		if ShouldSkipSetup(setupCmd, scriptMeta) {
+			slog.Info("skipping uv sync: script metadata declares isolated = true",
+				"component", "runner", "job_id", jobID)
+			setupCmd = ""
+		}
 	}
 	if setupCmd == direnvSetupCommand {
 		resolvedEnv, ei, err := ResolveDirenvEnv(expandedDir, envVars, paths.Log)

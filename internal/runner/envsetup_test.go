@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/dataloc"
 )
 
 func TestDetectSetupCommand(t *testing.T) {
@@ -184,35 +186,24 @@ func TestPyprojectDependsOnTorch_FalseWhenMissing(t *testing.T) {
 }
 
 func TestShouldSkipSetup(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create a PEP 723 script with dependencies
-	pep723Script := filepath.Join(dir, "standalone.py")
-	os.WriteFile(pep723Script, []byte(`# /// script
-# dependencies = ["vllm>=0.17"]
-# ///
-import vllm
-`), 0o644)
-
-	// Create a plain script without PEP 723
-	plainScript := filepath.Join(dir, "plain.py")
-	os.WriteFile(plainScript, []byte("import torch\n"), 0o644)
+	isolated := &dataloc.ScriptMeta{Isolated: true}
+	notIsolated := &dataloc.ScriptMeta{GPU: "nvidia"}
 
 	tests := []struct {
 		name     string
 		setupCmd string
-		command  string
+		meta     *dataloc.ScriptMeta
 		want     bool
 	}{
-		{"uv sync + PEP 723 script", "uv sync", "uv run python standalone.py", true},
-		{"uv sync + plain script", "uv sync", "uv run python plain.py", false},
-		{"pixi install + PEP 723 script", "pixi install", "uv run python standalone.py", false},
-		{"empty setup + PEP 723 script", "", "uv run python standalone.py", false},
-		{"uv sync + no script", "uv sync", "echo hello", false},
+		{"uv sync + isolated", "uv sync", isolated, true},
+		{"uv sync + not isolated", "uv sync", notIsolated, false},
+		{"uv sync + nil meta", "uv sync", nil, false},
+		{"pixi install + isolated", "pixi install", isolated, false},
+		{"empty setup + isolated", "", isolated, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ShouldSkipSetup(tt.setupCmd, dir, tt.command)
+			got := ShouldSkipSetup(tt.setupCmd, tt.meta)
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}

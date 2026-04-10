@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/remediation"
 )
@@ -89,10 +90,13 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 
 	setupCmd := DetectSetupCommand(expandedDir)
-	if ShouldSkipSetup(setupCmd, expandedDir, command) {
-		slog.Info("skipping uv sync: command targets PEP 723 script with inline dependencies",
-			"component", "runner", "job_id", cfg.JobID)
-		setupCmd = ""
+	if setupCmd == "uv sync" {
+		scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
+		if ShouldSkipSetup(setupCmd, scriptMeta) {
+			slog.Info("skipping uv sync: script metadata declares isolated = true",
+				"component", "runner", "job_id", cfg.JobID)
+			setupCmd = ""
+		}
 	}
 	if setupCmd == direnvSetupCommand {
 		resolvedEnv, ei, resolveErr := ResolveDirenvEnv(expandedDir, envVars, paths.Log)

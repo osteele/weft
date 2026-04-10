@@ -25,6 +25,14 @@ type ScriptMeta struct {
 	UvArgs       []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
 	Env          map[string]string // Environment variables to set when running the job
 	PreInstall   string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
+	Isolated     bool              // Skip project-level uv sync; script runs in an isolated PEP 723 environment
+}
+
+func (m *ScriptMeta) isEmpty() bool {
+	return m.GPU == "" && m.GPUClass == "" && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
+		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
+		len(m.VastCapAdd) == 0 && len(m.UvArgs) == 0 && len(m.Env) == 0 &&
+		m.PreInstall == "" && !m.Isolated
 }
 
 var (
@@ -73,6 +81,9 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			if v, ok := wt.Get("pre-install").(string); ok {
 				meta.PreInstall = v
 			}
+			if v, ok := wt.Get("isolated").(bool); ok {
+				meta.Isolated = v
+			}
 		}
 	}
 
@@ -96,10 +107,7 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 		}
 	}
 
-	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 && meta.GPUMemStrict == nil &&
-		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 && meta.Image == "" &&
-		len(meta.VastCapAdd) == 0 &&
-		len(meta.UvArgs) == 0 && len(meta.Env) == 0 && meta.PreInstall == "" {
+	if meta.isEmpty() {
 		return nil, nil
 	}
 
@@ -132,29 +140,6 @@ func readFirstPythonScript(dir, command string) string {
 		return string(content)
 	}
 	return ""
-}
-
-// HasPEP723Dependencies reports whether content contains a PEP 723 inline
-// metadata block with a `dependencies` key. This indicates the script is
-// self-contained and does not need a project-level `uv sync`.
-func HasPEP723Dependencies(content string) bool {
-	block := extractPEP723Block(content)
-	if block == "" {
-		return false
-	}
-	tree, err := toml.Load(block)
-	if err != nil {
-		return false
-	}
-	return tree.Get("dependencies") != nil
-}
-
-// CommandTargetsPEP723Script reports whether a shell command's first .py script
-// has PEP 723 inline dependencies. When true, the script is self-contained and
-// a project-level `uv sync` setup phase should be skipped.
-func CommandTargetsPEP723Script(workingDir, command string) bool {
-	content := readFirstPythonScript(workingDir, command)
-	return content != "" && HasPEP723Dependencies(content)
 }
 
 // extractPEP723Block returns the TOML content from a PEP 723 inline metadata

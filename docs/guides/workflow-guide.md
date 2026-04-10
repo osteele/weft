@@ -211,12 +211,12 @@ existing reusable instances with unknown launch capabilities.
 `weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.
 Use `weft retry --gpu/--gpu-class/--gpu-mem/--gpu-mem-strict` when you want explicit overrides.
 
-**Setup phase skipping:** When a job command targets a PEP 723 script that
-declares its own `dependencies`, weft automatically skips the `uv sync` setup
-phase. The script's inline dependencies are self-contained — `uv run` creates
-an isolated environment from them, making the project-level `uv sync`
-unnecessary. This avoids installing hundreds of unneeded packages on
-disk-constrained cloud instances.
+**Setup phase skipping:** Add `isolated = true` to the `[tool.weft]` table
+to skip the `uv sync` setup phase. Use this only for truly self-contained
+scripts whose PEP 723 `dependencies` list everything they need — `uv run`
+creates an isolated environment that does **not** include the project's
+packages. Scripts that import from the project package must not set
+`isolated = true`.
 
 ### Avoiding GPU over-provisioning
 
