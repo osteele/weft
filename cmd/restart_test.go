@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,6 +124,62 @@ func TestRestartQueuedJob_NoError(t *testing.T) {
 
 	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
 		t.Fatalf("restartJob queued failed: %v", err)
+	}
+}
+
+func TestResolveRestartTargetJobIDs_RequiresSelector(t *testing.T) {
+	database := db.SetupTestDB(t)
+	prev := restartUnplaced
+	restartUnplaced = false
+	t.Cleanup(func() { restartUnplaced = prev })
+
+	_, err := resolveRestartTargetJobIDs(database, nil)
+	if err == nil {
+		t.Fatal("expected selector error")
+	}
+	if !strings.Contains(err.Error(), "use --unplaced") {
+		t.Fatalf("error = %q, want mention of --unplaced", err.Error())
+	}
+}
+
+func TestResolveRestartTargetJobIDs_UnplacedSelectsQueuedUnplacedJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	queuedID, err := db.RecordQueued(database, "", t.TempDir(), "python queued.py", "queued")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	placedID, err := db.RecordQueued(database, "cool30", t.TempDir(), "python placed.py", "placed")
+	if err != nil {
+		t.Fatalf("record placed: %v", err)
+	}
+
+	prev := restartUnplaced
+	restartUnplaced = true
+	t.Cleanup(func() { restartUnplaced = prev })
+
+	jobIDs, err := resolveRestartTargetJobIDs(database, nil)
+	if err != nil {
+		t.Fatalf("resolveRestartTargetJobIDs: %v", err)
+	}
+	slices.Sort(jobIDs)
+	want := []int64{queuedID}
+	if !slices.Equal(jobIDs, want) {
+		t.Fatalf("jobIDs = %v, want %v (placed=%d excluded)", jobIDs, want, placedID)
+	}
+}
+
+func TestResolveRestartTargetJobIDs_UnplacedRejectsExplicitIDs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	prev := restartUnplaced
+	restartUnplaced = true
+	t.Cleanup(func() { restartUnplaced = prev })
+
+	_, err := resolveRestartTargetJobIDs(database, []string{"wj1"})
+	if err == nil {
+		t.Fatal("expected argument conflict error")
+	}
+	if !strings.Contains(err.Error(), "cannot combine job IDs with --unplaced") {
+		t.Fatalf("error = %q", err.Error())
 	}
 }
 

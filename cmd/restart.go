@@ -17,7 +17,7 @@ import (
 )
 
 var restartCmd = &cobra.Command{
-	Use:     "restart <job-id>...",
+	Use:     "restart [job-id]...",
 	Aliases: []string{"retry"},
 	Short:   "Restart a killed, dead, failed, canceled, or completed job",
 	Long: `Restart a job by requeuing it with the same ID.
@@ -27,8 +27,9 @@ The previous run is archived and the job is reset to queued status.
 Examples:
   weft restart 42
   weft retry 42
-  weft restart 42 43 44`,
-	Args: usageArgs(cobra.MinimumNArgs(1)),
+  weft restart 42 43 44
+  weft retry --unplaced`,
+	Args: usageArgs(cobra.ArbitraryArgs),
 	RunE: runRestart,
 }
 
@@ -37,6 +38,7 @@ var (
 	restartGPUClass     string
 	restartGPUMem       int
 	restartGPUMemStrict bool
+	restartUnplaced     bool
 )
 
 type restartOverrides struct {
@@ -66,7 +68,7 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	jobIDs, err := ParseJobIDs(args)
+	jobIDs, err := resolveRestartTargetJobIDs(database, args)
 	if err != nil {
 		return err
 	}
@@ -105,6 +107,34 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().StringVar(&restartGPUClass, "gpu-class", "", "GPU class or generation override (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
+	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
+}
+
+func resolveRestartTargetJobIDs(database *sql.DB, args []string) ([]int64, error) {
+	if restartUnplaced {
+		if len(args) > 0 {
+			return nil, usageErrorf("cannot combine job IDs with --unplaced")
+		}
+		jobs, err := db.ListUnplacedJobs(database)
+		if err != nil {
+			return nil, fmt.Errorf("list unplaced jobs: %w", err)
+		}
+		jobIDs := make([]int64, 0, len(jobs))
+		for _, job := range jobs {
+			if job != nil && job.EffectiveStatus() == db.StatusQueued {
+				jobIDs = append(jobIDs, job.ID)
+			}
+		}
+		if len(jobIDs) == 0 {
+			return nil, fmt.Errorf("no unplaced queued jobs to retry")
+		}
+		slices.Sort(jobIDs)
+		return jobIDs, nil
+	}
+	if len(args) == 0 {
+		return nil, usageErrorf("requires at least one job ID, or use --unplaced")
+	}
+	return ParseJobIDs(args)
 }
 
 func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {

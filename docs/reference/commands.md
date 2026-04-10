@@ -669,7 +669,7 @@ weft telemetry wj42 --json
 Requeue one or more jobs using the same job ID.
 
 ```bash
-weft job restart <job-id>...
+weft job restart [job-id]...
 ```
 
 For terminal jobs (`killed`, `dead`, `failed`, `canceled`, `completed`), this
@@ -679,13 +679,19 @@ For jobs that are already `queued`, `restart`/`retry` is a no-op unless you pass
 override flags such as `--gpu`, `--gpu-class`, `--gpu-mem`, or
 `--gpu-mem-strict`.
 
+Use `--unplaced` to retry all currently queued unplaced jobs:
+
+```bash
+weft retry --unplaced
+```
+
 ### weft retry
 
 Alias for `weft job restart`.
 
 ```bash
-weft retry <job-id>...
-weft job retry <job-id>   # Alias
+weft retry [job-id]...
+weft job retry [job-id]   # Alias
 ```
 
 GPU override flags are supported:

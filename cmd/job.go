@@ -103,11 +103,11 @@ var jobDescribeCmd = &cobra.Command{
 
 // Job restart subcommand
 var jobRestartCmd = &cobra.Command{
-	Use:     "restart <job-id>...",
+	Use:     "restart [job-id]...",
 	Aliases: []string{"retry"},
 	Short:   "Requeue a killed, dead, failed, canceled, or completed job",
 	Long:    restartCmd.Long,
-	Args:    usageArgs(cobra.MinimumNArgs(1)),
+	Args:    usageArgs(cobra.ArbitraryArgs),
 	RunE:    runRestart,
 }
 
