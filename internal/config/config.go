@@ -101,9 +101,40 @@ type Config struct {
 	// Remediation holds auto-remediation configuration for failed jobs
 	Remediation RemediationConfig `yaml:"remediation" toml:"remediation"`
 
+	// AgentBuild holds on-demand remote builder configuration for agent binaries.
+	AgentBuild AgentBuildConfig `yaml:"agent_build" toml:"agent_build"`
+
 	// AutomapDirs lists local prefixes that should reuse the same relative path
 	// on remote hosts; defaults to ["~"].
 	AutomapDirs []string `yaml:"automap_dirs" toml:"automap_dirs"`
+}
+
+// AgentBuildConfig configures remote builders used to compile agent binaries.
+type AgentBuildConfig struct {
+	// LinuxAMD64Builders is an ordered list of builders tried for linux/amd64.
+	// Valid builder types are "ssh" and "fly".
+	LinuxAMD64Builders []AgentBuilder `yaml:"linux_amd64_builders" toml:"linux_amd64_builders"`
+}
+
+// AgentBuilder defines one remote builder candidate.
+type AgentBuilder struct {
+	// Type selects the builder implementation ("ssh" or "fly").
+	Type string `yaml:"type" toml:"type"`
+
+	// Name is an optional label for logs and diagnostics.
+	Name string `yaml:"name" toml:"name"`
+
+	// SSH builder settings.
+	Host      string `yaml:"host" toml:"host"`
+	RemoteDir string `yaml:"remote_dir" toml:"remote_dir"`
+	GoBin     string `yaml:"go_bin" toml:"go_bin"`
+
+	// Fly builder settings.
+	App        string `yaml:"app" toml:"app"`
+	Machine    string `yaml:"machine" toml:"machine"`
+	BaseDir    string `yaml:"base_dir" toml:"base_dir"`
+	ZigTarget  string `yaml:"zig_target" toml:"zig_target"`
+	ZigVersion string `yaml:"zig_version" toml:"zig_version"`
 }
 
 // SyncConfig holds source sync and packaging defaults.

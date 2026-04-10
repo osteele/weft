@@ -8,28 +8,32 @@ default:
 build:
     #!/usr/bin/env bash
     set -euo pipefail
-    go run . retrain --if-schema-changed
-    echo "Building weft binary and agent binaries in parallel..."
-    pids=()
-    just build-agents &
-    pids+=($!)
-    go build -o weft . &
-    pids+=($!)
-    for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+    echo "Scheduling predictor schema check (non-blocking)..."
+    (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
+    echo "Building weft binary..."
+    if command -v weft >/dev/null 2>&1; then
+        echo "Starting non-blocking background agent prewarm via installed weft..."
+        (weft build-agents --targets linux-amd64 >/dev/null 2>&1 || true) &
+    else
+        echo "info: installed weft not found; skipping agent prewarm"
+    fi
+    go build -o weft .
     echo "Build complete."
 
 # Install to $GOPATH/bin (also builds agents so they are ready to deploy)
 install:
     #!/usr/bin/env bash
     set -euo pipefail
-    go run . retrain --if-schema-changed
-    echo "Building and installing in parallel..."
-    pids=()
-    just build-agents &
-    pids+=($!)
-    go install . &
-    pids+=($!)
-    for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+    echo "Scheduling predictor schema check (non-blocking)..."
+    (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
+    echo "Installing weft..."
+    if command -v weft >/dev/null 2>&1; then
+        echo "Starting non-blocking background agent prewarm via installed weft..."
+        (weft build-agents --targets linux-amd64 >/dev/null 2>&1 || true) &
+    else
+        echo "info: installed weft not found; skipping agent prewarm"
+    fi
+    go install .
     echo "Install complete."
 
 # Run tests (skips slow build tests; use test-all for full suite)
@@ -89,104 +93,12 @@ check: format lint test
 build-agents:
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p internal/agentdeploy/binaries
-    VERSION=$(jj log --no-graph -r 'ancestors(@-, 200)' -T 'commit_id.short(12)' --limit 1 cmd/agent/ internal/ 2>/dev/null || echo "dev")
-    EXISTING=$(cat internal/agentdeploy/binaries/VERSION 2>/dev/null || echo "")
-    if [ "$VERSION" = "$EXISTING" ]; then
-        echo "Agent binaries already up to date (version: ${VERSION})"
-        exit 0
-    fi
-    LDFLAGS="-X main.version=${VERSION}"
-    echo "Building agent binaries in parallel (version: ${VERSION})..."
-    pids=()
-
-    # linux/amd64: try WEFT_LINUX_BUILDER_HOST (SSH, needs Tailscale), fall back to Fly.
-    # SSH builder runs first; if it fails quickly (<3s, e.g. connection refused),
-    # we fall back to Fly transparently. If it's still running after 3s we assume
-    # connectivity is fine and wait for it to finish.
-    HAS_SSH_BUILDER=""
-    HAS_FLY_BUILDER=""
-    [ -n "${WEFT_LINUX_BUILDER_HOST:-}" ] && HAS_SSH_BUILDER=1
-    [ -n "${WEFT_FLY_BUILDER_APP:-}" ] && [ -n "${WEFT_FLY_BUILDER_MACHINE:-}" ] && HAS_FLY_BUILDER=1
-
-    if [ -n "$HAS_SSH_BUILDER" ]; then
-        (
-            REMOTE_DIR="${WEFT_LINUX_BUILDER_DIR:-~/.cache/weft/agent-build}"
-            REMOTE_GO="${WEFT_LINUX_BUILDER_GO:-/usr/local/go/bin/go}"
-            rsync -az --delete \
-                --exclude='.git/' --exclude='.jj/' --exclude='.claude/' \
-                --exclude='.cache/' --exclude='.gocache/' --exclude='.gomodcache/' \
-                --exclude='.bench-*-gocache/' --exclude='.bench-*-gomodcache/' \
-                --exclude='testdata/' --exclude='dist/' \
-                '--exclude=internal/agentdeploy/binaries/weft-agent-*' \
-                '--exclude=internal/agentdeploy/binaries/VERSION' \
-                '--exclude=weft' '--exclude=placement.test' \
-                ./ "${WEFT_LINUX_BUILDER_HOST}:${REMOTE_DIR}/"
-            ssh "${WEFT_LINUX_BUILDER_HOST}" \
-                "cd ${REMOTE_DIR} && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 ${REMOTE_GO} build -buildvcs=false -ldflags '${LDFLAGS}' -o weft-agent-linux-amd64 ./cmd/agent"
-            rsync -az \
-                "${WEFT_LINUX_BUILDER_HOST}:${REMOTE_DIR}/weft-agent-linux-amd64" \
-                internal/agentdeploy/binaries/weft-agent-linux-amd64
-        ) &
-        SSH_PID=$!
-        if [ -n "$HAS_FLY_BUILDER" ]; then
-            # Poll briefly — if SSH builder dies fast (DNS, refused), fall back immediately
-            for _i in $(seq 15); do
-                kill -0 "$SSH_PID" 2>/dev/null || break
-                sleep 0.2
-            done
-            if ! kill -0 "$SSH_PID" 2>/dev/null; then
-                if wait "$SSH_PID" 2>/dev/null; then
-                    : # succeeded already
-                else
-                    echo "SSH builder failed, falling back to Fly..."
-                    ./scripts/build-agent-on-fly.sh "${VERSION}" internal/agentdeploy/binaries/weft-agent-linux-amd64
-                fi
-            else
-                # Still running (connected) — wait for it, fall back on failure
-                if ! wait "$SSH_PID" 2>/dev/null; then
-                    echo "SSH builder failed, falling back to Fly..."
-                    ./scripts/build-agent-on-fly.sh "${VERSION}" internal/agentdeploy/binaries/weft-agent-linux-amd64
-                fi
-            fi
-        else
-            pids+=($SSH_PID)
+    if command -v weft >/dev/null 2>&1; then
+        if weft build-agents --targets linux-amd64; then
+            exit 0
         fi
-    elif [ -n "$HAS_FLY_BUILDER" ]; then
-        ./scripts/build-agent-on-fly.sh "${VERSION}" internal/agentdeploy/binaries/weft-agent-linux-amd64 &
-        pids+=($!)
-    else
-        echo "info: no linux/amd64 builder available; skipping"
-        echo "      set WEFT_LINUX_BUILDER_HOST (SSH) or WEFT_FLY_BUILDER_APP/MACHINE (Fly)"
     fi
-
-    # darwin/arm64: build on WEFT_MACOS_BUILDER_HOST via SSH if set, otherwise skip
-    if [ -n "${WEFT_MACOS_BUILDER_HOST:-}" ]; then
-        (
-            REMOTE_DIR="${WEFT_MACOS_BUILDER_DIR:-~/.cache/weft/agent-build}"
-            rsync -az --delete \
-                --exclude='.git/' --exclude='.jj/' --exclude='.claude/' \
-                --exclude='.cache/' --exclude='.gocache/' --exclude='.gomodcache/' \
-                --exclude='.bench-*-gocache/' --exclude='.bench-*-gomodcache/' \
-                --exclude='testdata/' --exclude='dist/' \
-                '--exclude=internal/agentdeploy/binaries/weft-agent-*' \
-                '--exclude=internal/agentdeploy/binaries/VERSION' \
-                '--exclude=weft' '--exclude=placement.test' \
-                ./ "${WEFT_MACOS_BUILDER_HOST}:${REMOTE_DIR}/"
-            ssh "${WEFT_MACOS_BUILDER_HOST}" \
-                "cd ${REMOTE_DIR} && mkdir -p internal/agentdeploy/binaries && GOOS=darwin GOARCH=arm64 go build -buildvcs=false -ldflags '${LDFLAGS}' -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent"
-            rsync -az \
-                "${WEFT_MACOS_BUILDER_HOST}:${REMOTE_DIR}/internal/agentdeploy/binaries/weft-agent-darwin-arm64" \
-                internal/agentdeploy/binaries/weft-agent-darwin-arm64
-        ) &
-        pids+=($!)
-    else
-        echo "info: WEFT_MACOS_BUILDER_HOST not set; skipping darwin/arm64 agent build"
-        echo "      set this env var to enable macOS cross-compilation"
-    fi
-
-    for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
-    echo "${VERSION}" > internal/agentdeploy/binaries/VERSION
+    go run . build-agents --targets linux-amd64
 
 # Build agent binary for a target (default: current platform)
 build-agent target="local":

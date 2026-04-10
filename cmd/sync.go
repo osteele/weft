@@ -1078,7 +1078,7 @@ func deployAgentsToHosts(hosts []string) {
 		deployed, err := agentdeploy.EnsureAgentUpToDate(host, *spec)
 		if err != nil {
 			if errors.Is(err, agentdeploy.ErrAgentNotAvailable) {
-				fmt.Fprintf(os.Stderr, "Warning: agent binary for %s/%s not built; run 'just build-agents'\n", spec.OS, spec.Arch)
+				fmt.Fprintf(os.Stderr, "Warning: agent binary for %s/%s is unavailable and no builder succeeded\n", spec.OS, spec.Arch)
 			} else if !ssh.IsConnectionError(err.Error()) {
 				fmt.Fprintf(os.Stderr, "Warning: agent deploy to %s failed: %v\n", host, err)
 			}

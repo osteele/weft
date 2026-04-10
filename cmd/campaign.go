@@ -184,12 +184,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-
-	// Preflight: verify agent binaries are current before doing any slow work
-	// (job loading, offer searching, cost estimation).
-	if err := agentdeploy.CheckAgentBinariesCurrent(); err != nil {
-		return err
-	}
+	agentdeploy.StartBackgroundPrewarm("linux", "amd64")
 
 	if !launchInteractive {
 		reportStartupPhase("Checking predictor status...")

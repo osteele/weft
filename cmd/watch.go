@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -75,6 +76,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	agentdeploy.StartBackgroundPrewarm("linux", "amd64")
 
 	database, err := db.OpenForReading()
 	if err != nil {

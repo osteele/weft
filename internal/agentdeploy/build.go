@@ -54,7 +54,12 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 	}
 
 	if err := extractFunc(version, goos, goarch, path); err != nil {
-		return "", err
+		if errBuild := buildOnDemand(version, goos, goarch, path); errBuild != nil {
+			if errors.Is(err, ErrAgentNotAvailable) {
+				return "", errBuild
+			}
+			return "", fmt.Errorf("extract bundled agent binary: %w; on-demand build failed: %v", err, errBuild)
+		}
 	}
 
 	return path, nil
@@ -76,8 +81,7 @@ func BinariesVersion() (string, error) {
 }
 
 // CheckAgentBinariesCurrent verifies that the local agent binary for
-// linux/amd64 is available and matches the current version. Returns nil if
-// ready, or a user-facing error explaining what to run.
+// linux/amd64 is available and matches the current version.
 func CheckAgentBinariesCurrent() error {
 	version, err := LocalAgentVersion()
 	if err != nil {
@@ -91,20 +95,16 @@ func CheckAgentBinariesCurrent() error {
 
 	// Check embedded binaries directory.
 	builtVersion, err := BinariesVersion()
-	if err != nil {
-		return fmt.Errorf("agent binaries not built; run 'just build-agents'")
+	if err == nil && builtVersion == version {
+		return nil
 	}
-	if builtVersion != version {
-		return fmt.Errorf("agent binaries are stale (built for %s, need %s); run 'just build-agents'", builtVersion, version)
-	}
-
-	return nil
+	return fmt.Errorf("%w for linux/amd64", ErrAgentNotAvailable)
 }
 
 func defaultExtractFunc(version, goos, goarch, outputPath string) error {
 	root, err := RepoRoot()
 	if err != nil {
-		return fmt.Errorf("%w: run 'just build-agents' first: %w", ErrAgentNotAvailable, err)
+		return fmt.Errorf("%w: source tree unavailable: %w", ErrAgentNotAvailable, err)
 	}
 
 	binDir := filepath.Join(root, "internal", "agentdeploy", "binaries")
@@ -115,7 +115,7 @@ func defaultExtractFunc(version, goos, goarch, outputPath string) error {
 	versionFile := filepath.Join(binDir, "VERSION")
 	if versionData, err := os.ReadFile(versionFile); err == nil {
 		if builtVersion := strings.TrimSpace(string(versionData)); builtVersion != version {
-			return fmt.Errorf("%w for %s/%s: binary in binaries/ is version %s, need %s; run 'just build-agents'",
+			return fmt.Errorf("%w for %s/%s: binary in binaries/ is version %s, need %s",
 				ErrAgentNotAvailable, goos, goarch, builtVersion, version)
 		}
 	}
@@ -123,7 +123,7 @@ func defaultExtractFunc(version, goos, goarch, outputPath string) error {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("%w for %s/%s: run 'just build-agents' first", ErrAgentNotAvailable, goos, goarch)
+			return fmt.Errorf("%w for %s/%s: binary not found in internal/agentdeploy/binaries", ErrAgentNotAvailable, goos, goarch)
 		}
 		return fmt.Errorf("%w for %s/%s: %w", ErrAgentNotAvailable, goos, goarch, err)
 	}

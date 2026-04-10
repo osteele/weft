@@ -93,7 +93,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	agentReady := agentErr == nil
 	if agentErr != nil {
 		if errors.Is(agentErr, agentdeploy.ErrAgentNotAvailable) {
-			fmt.Fprintf(os.Stderr, " skipped (binary not built; run 'just build-agents')\n")
+			fmt.Fprintf(os.Stderr, " skipped (no agent builder succeeded)\n")
 		} else {
 			fmt.Fprintf(os.Stderr, " warning: %v\n", agentErr)
 		}
