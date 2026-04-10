@@ -501,25 +501,35 @@ func fetchCloudArtifactByToken(cmd *cobra.Command, r2Client *r2.Client, job *db.
 
 // downloadSingleCloudFile downloads one cloud output file to the output destination.
 func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, f runner.OutputFile, multiple bool) error {
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
-	}
+	var (
+		data    []byte
+		lastErr error
+	)
+	for _, runID := range jobAttemptRunIDs(job) {
+		// Determine the R2 key based on whether this is an artifact or convention output
+		var r2Key string
+		if strings.HasPrefix(f.RelPath, "artifacts/") {
+			trimmed := strings.TrimPrefix(f.RelPath, "artifacts/")
+			r2Key = r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID) + trimmed
+		} else {
+			r2Key = r2keys.JobAttemptOutputsPrefix(job.ID, runID) + f.RelPath
+		}
 
-	// Determine the R2 key based on whether this is an artifact or convention output
-	var r2Key string
-	if strings.HasPrefix(f.RelPath, "artifacts/") {
-		trimmed := strings.TrimPrefix(f.RelPath, "artifacts/")
-		r2Key = r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID) + trimmed
-	} else {
-		r2Key = r2keys.JobAttemptOutputsPrefix(job.ID, runID) + f.RelPath
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		var err error
+		data, err = r2Client.GetObject(ctx, r2Key)
+		cancel()
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		if !r2.IsNotFound(err) {
+			break
+		}
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	data, err := r2Client.GetObject(ctx, r2Key)
-	if err != nil {
-		return fmt.Errorf("download from R2: %w", err)
+	if lastErr != nil {
+		return fmt.Errorf("download from R2: %w", lastErr)
 	}
 
 	dest, err := resolveArtifactOutputPathForJob(f.RelPath, artifactOutput, job.ID, multiple)
@@ -939,24 +949,29 @@ func syncCloudJobOutputs(job *db.Job) error {
 		return fmt.Errorf("R2 not configured; cannot fetch cloud job outputs")
 	}
 
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
-	}
+	var lastErr error
+	for _, runID := range jobAttemptRunIDs(job) {
+		// Download convention-based outputs
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
+		err := r2Client.DownloadResults(ctx, outputsPrefix, localDir)
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
 
-	// Download convention-based outputs
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-	if err := r2Client.DownloadResults(ctx, outputsPrefix, localDir); err != nil {
-		return err
+		// Download artifact manifest entries (files declared via WEFT_ARTIFACT_MANIFEST)
+		artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
+		err = r2Client.DownloadResults(ctx2, artifactsPrefix, localDir)
+		cancel2()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
 	}
-
-	// Download artifact manifest entries (files declared via WEFT_ARTIFACT_MANIFEST)
-	artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel2()
-	return r2Client.DownloadResults(ctx2, artifactsPrefix, localDir)
+	return lastErr
 }
 
 var (
@@ -995,20 +1010,29 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 		return artifacts.SyncResult{}, fmt.Errorf("R2 not configured; cannot fetch cloud job artifacts")
 	}
 
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
-	}
-
-	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, runID)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	manifestData, err := store.GetObject(ctx, manifestKey)
-	if err != nil {
-		if r2.IsNotFound(err) {
-			return artifacts.SyncResult{}, artifacts.ErrManifestMissing
+	var (
+		manifestData []byte
+		runID        int64
+		err          error
+	)
+	foundManifest := false
+	for _, candidateRunID := range jobAttemptRunIDs(job) {
+		manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, candidateRunID)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		manifestData, err = store.GetObject(ctx, manifestKey)
+		cancel()
+		if err != nil {
+			if r2.IsNotFound(err) {
+				continue
+			}
+			return artifacts.SyncResult{}, fmt.Errorf("fetch manifest from R2: %w", err)
 		}
-		return artifacts.SyncResult{}, fmt.Errorf("fetch manifest from R2: %w", err)
+		runID = candidateRunID
+		foundManifest = true
+		break
+	}
+	if !foundManifest {
+		return artifacts.SyncResult{}, artifacts.ErrManifestMissing
 	}
 
 	manifest, err := artifacts.ParseManifest(string(manifestData), job.ID)
@@ -1051,6 +1075,13 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 		result.Added++
 	}
 	return result, nil
+}
+
+func jobAttemptRunIDs(job *db.Job) []int64 {
+	if job != nil && job.LatestRunID != nil && *job.LatestRunID != 0 {
+		return []int64{*job.LatestRunID, 0}
+	}
+	return []int64{0}
 }
 
 func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath, localPath string) (int64, string, error) {
@@ -1127,46 +1158,43 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 // listCloudJobOutputFiles lists output files for a cloud job by checking R2 for
 // both the outputs/ and artifacts/files/ prefixes.
 func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFile {
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
-	}
-
-	var result []runner.OutputFile
-
-	// Convention-based outputs
-	outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	files, err := r2Client.ListObjects(ctx, outputsPrefix)
-	cancel()
-	if err == nil {
-		for _, f := range files {
-			relPath := strings.TrimPrefix(f.Key, outputsPrefix)
-			if relPath == "" {
-				continue
-			}
-			result = append(result, runner.OutputFile{
-				RelPath:   relPath,
-				SizeBytes: f.SizeBytes,
-			})
+	result := make([]runner.OutputFile, 0)
+	seen := make(map[string]struct{})
+	appendFile := func(relPath string, sizeBytes int64) {
+		if relPath == "" {
+			return
 		}
+		if _, ok := seen[relPath]; ok {
+			return
+		}
+		seen[relPath] = struct{}{}
+		result = append(result, runner.OutputFile{
+			RelPath:   relPath,
+			SizeBytes: sizeBytes,
+		})
 	}
 
-	// Artifact manifest entries
-	artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-	aFiles, err := r2Client.ListObjects(ctx2, artifactsPrefix)
-	cancel2()
-	if err == nil {
-		for _, f := range aFiles {
-			relPath := strings.TrimPrefix(f.Key, artifactsPrefix)
-			if relPath == "" {
-				continue
+	for _, runID := range jobAttemptRunIDs(job) {
+		// Convention-based outputs
+		outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		files, err := r2Client.ListObjects(ctx, outputsPrefix)
+		cancel()
+		if err == nil {
+			for _, f := range files {
+				appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes)
 			}
-			result = append(result, runner.OutputFile{
-				RelPath:   "artifacts/" + relPath,
-				SizeBytes: f.SizeBytes,
-			})
+		}
+
+		// Artifact manifest entries
+		artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+		aFiles, err := r2Client.ListObjects(ctx2, artifactsPrefix)
+		cancel2()
+		if err == nil {
+			for _, f := range aFiles {
+				appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes)
+			}
 		}
 	}
 

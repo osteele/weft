@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
@@ -80,7 +81,7 @@ type fakeCloudArtifactStore struct {
 func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byte, error) {
 	data, ok := s.objects[key]
 	if !ok {
-		return nil, os.ErrNotExist
+		return nil, &types.NoSuchKey{}
 	}
 	return append([]byte(nil), data...), nil
 }
@@ -207,5 +208,60 @@ func TestSyncArtifactsForJob_UsesCloudSyncForLaunchJobs(t *testing.T) {
 	}
 	if localCalled {
 		t.Fatal("did not expect local sync path")
+	}
+}
+
+func TestSyncCloudJobArtifactsWithStore_FallsBackToRunZeroManifest(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID == 0 {
+		t.Fatalf("latest_run_id = %v, want non-zero", job.LatestRunID)
+	}
+
+	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, 0)
+	filesPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, 0)
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			manifestKey:                          []byte(`{"artifacts":[{"path":"results/metrics.json"}]}`),
+			filesPrefix + "results/metrics.json": []byte(`{"acc":0.9}`),
+		},
+	}
+
+	result, err := syncCloudJobArtifactsWithStore(database, store, job)
+	if err != nil {
+		t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("added = %d, want 1", result.Added)
+	}
+
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, "results/metrics.json")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	if entry.Path != "results/metrics.json" {
+		t.Fatalf("path = %q, want results/metrics.json", entry.Path)
 	}
 }

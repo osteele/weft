@@ -133,3 +133,30 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 		t.Fatalf("needs = %v, want %v", got.Job.Needs, job.Needs)
 	}
 }
+
+func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(42)
+
+	logFile := filepath.Join(logDir, "wj42.log")
+	jsonFile := filepath.Join(logDir, "wj42.completion.json")
+	if err := os.WriteFile(logFile, []byte("line 1\n"), 0o644); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+	if err := os.WriteFile(jsonFile, []byte(`{"ok":true}`), 0o644); err != nil {
+		t.Fatalf("write completion file: %v", err)
+	}
+
+	snapshot, err := snapshotLogDir(logDir, jobID)
+	if err != nil {
+		t.Fatalf("snapshotLogDir: %v", err)
+	}
+	defer os.RemoveAll(snapshot)
+
+	if _, err := os.Stat(filepath.Join(snapshot, "wj42.log")); err != nil {
+		t.Fatalf("expected .log file in snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapshot, "wj42.completion.json")); err != nil {
+		t.Fatalf("expected completion file in snapshot: %v", err)
+	}
+}

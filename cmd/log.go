@@ -570,7 +570,7 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 	}
 
 	// Cache for terminal jobs
-	if shouldPreferCachedLog(job.Status) && fetched.Final {
+	if shouldPreferCachedLog(job.Status) && fetched.Final && fetched.Content != "" {
 		_ = logcache.Write(job.ID, fetched.Content)
 	}
 
@@ -592,14 +592,23 @@ type fetchedCloudLog struct {
 }
 
 func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID int64, from, to, lines int) (*fetchedCloudLog, error) {
-	keys := []struct {
+	candidateRunIDs := []int64{runID}
+	if runID != 0 {
+		candidateRunIDs = append(candidateRunIDs, 0)
+	}
+	type candidate struct {
 		finalKey    string
 		manifestKey string
-	}{
-		{finalKey: r2keys.JobAttemptResultLog(jobID, runID), manifestKey: cloudlog.ManifestKeyForRun(jobID, runID)},
+	}
+	candidates := make([]candidate, len(candidateRunIDs))
+	for i, id := range candidateRunIDs {
+		candidates[i] = candidate{
+			finalKey:    r2keys.JobAttemptResultLog(jobID, id),
+			manifestKey: cloudlog.ManifestKeyForRun(jobID, id),
+		}
 	}
 
-	for _, keys := range keys {
+	for _, keys := range candidates {
 		exists, err := r2Client.ObjectExists(ctx, keys.finalKey)
 		if err != nil {
 			return nil, fmt.Errorf("check log in R2 (key %s): %w", keys.finalKey, err)
