@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -12,10 +14,13 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
+
+const hostInfoLiveProbeTimeout = 2 * time.Second
 
 var hostCmd = &cobra.Command{
 	Use:     "host",
@@ -138,9 +143,19 @@ func runHostInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load cached info: %w", err)
 	}
 
+	// Best-effort live probe for dynamic utilization data.
+	// Fail fast and quietly when the host is unavailable.
+	var liveHost *hostinfo.Host
+	if _, probedHost, probeErr := ops.TryFetchAndCacheHostInfo(database, host, hostInfoLiveProbeTimeout); probeErr == nil && probedHost != nil {
+		liveHost = probedHost
+		if cachedInfo == nil {
+			cachedInfo = hostinfo.CachedInfoFromHost(probedHost)
+		}
+	}
+
 	// Display cached info if available
 	if cachedInfo != nil {
-		displayHostInfo(host, cachedInfo)
+		displayHostInfo(host, cachedInfo, liveHost)
 		cacheAge := time.Now().Unix() - cachedInfo.LastUpdated
 		fmt.Printf("\n(cached %s ago)\n", db.FormatDuration(cacheAge))
 	} else {
@@ -151,35 +166,145 @@ func runHostInfo(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func displayHostInfo(host string, info *db.CachedHostInfo) {
+func displayHostInfo(host string, info *db.CachedHostInfo, liveHost *hostinfo.Host) {
+	cachedHost := hostinfo.HostFromCachedInfo(info)
+	if cachedHost == nil {
+		cachedHost = &hostinfo.Host{}
+	}
+
 	fmt.Printf("Host: %s\n", host)
-	if info.Arch != "" {
-		fmt.Printf("Architecture: %s\n", info.Arch)
+	if cachedHost.Arch != "" {
+		fmt.Printf("Architecture: %s\n", cachedHost.Arch)
 	}
-	if info.Model != "" {
-		fmt.Printf("Model: %s\n", info.Model)
+	if cachedHost.Model != "" {
+		fmt.Printf("Model: %s\n", cachedHost.Model)
 	}
-	if info.OSVersion != "" {
-		fmt.Printf("OS: %s\n", info.OSVersion)
+	if cachedHost.OS != "" {
+		fmt.Printf("OS: %s\n", cachedHost.OS)
 	}
-	if info.CPUCount > 0 {
-		fmt.Printf("CPUs: %d", info.CPUCount)
-		if info.CPUModel != "" {
-			fmt.Printf(" (%s", info.CPUModel)
-			if info.CPUFreq != "" {
-				fmt.Printf(" @ %s", info.CPUFreq)
+	if cachedHost.CPUs > 0 {
+		fmt.Printf("CPUs: %d", cachedHost.CPUs)
+		if cachedHost.CPUModel != "" {
+			fmt.Printf(" (%s", cachedHost.CPUModel)
+			if cachedHost.CPUFreq != "" {
+				fmt.Printf(" @ %s", cachedHost.CPUFreq)
 			}
 			fmt.Printf(")")
 		}
 		fmt.Println()
 	}
-	if info.MemTotal != "" {
-		fmt.Printf("Memory: %s\n", info.MemTotal)
+	if cachedHost.MemTotal != "" {
+		fmt.Printf("Memory: %s\n", cachedHost.MemTotal)
+	}
+	if liveHost != nil {
+		if pct := liveHost.CPUUtilizationPct(); pct >= 0 {
+			load := strings.TrimSpace(liveHost.LoadAvgShort())
+			if load != "" && load != "-" && liveHost.CPUs > 0 {
+				fmt.Printf("CPU Utilization: %d%% (load1 %s on %d cores)\n", pct, load, liveHost.CPUs)
+			} else {
+				fmt.Printf("CPU Utilization: %d%%\n", pct)
+			}
+		}
 	}
 
-	// Parse and display GPUs from JSON
-	if info.GPUsJSON != "" {
-		fmt.Printf("\nGPUs: %s\n", info.GPUsJSON)
+	if len(cachedHost.GPUs) > 0 {
+		displayHostGPUStats(cachedHost.GPUs)
+		return
+	}
+
+	gpusJSON := strings.TrimSpace(info.GPUsJSON)
+	if gpusJSON != "" && gpusJSON != "[]" {
+		fmt.Printf("\nGPUs: %s\n", gpusJSON)
+	}
+}
+
+func displayHostGPUStats(gpus []hostinfo.GPUInfo) {
+	sorted := append([]hostinfo.GPUInfo(nil), gpus...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Index < sorted[j].Index
+	})
+
+	fmt.Printf("\nGPUs:\n")
+	const rowFmt = "  %-3s %-6s %-6s %-22s %s\n"
+	fmt.Printf(rowFmt, "GPU", "Temp", "Util", "Memory", "Name")
+	fmt.Printf(rowFmt, "───", "────", "────", "──────────────────────", "────")
+	for _, gpu := range sorted {
+		temp := "-"
+		if gpu.Temperature > 0 {
+			temp = fmt.Sprintf("%d°C", gpu.Temperature)
+		}
+		util := "-"
+		if gpu.Utilization > 0 || gpu.MemUsed != "" || gpu.MemTotal != "" {
+			util = fmt.Sprintf("%d%%", gpu.Utilization)
+		}
+		mem := formatGPUMemoryUsage(gpu.MemUsed, gpu.MemTotal)
+		name := strings.TrimSpace(gpu.Name)
+		if name == "" {
+			name = "(unknown)"
+		}
+		fmt.Printf(rowFmt, strconv.Itoa(gpu.Index), temp, util, mem, name)
+	}
+}
+
+func formatGPUMemoryUsage(used, total string) string {
+	used = strings.TrimSpace(used)
+	total = strings.TrimSpace(total)
+	if used == "" && total == "" {
+		return "-"
+	}
+	if used == "" {
+		return formatGPUMemory(total)
+	}
+	if total == "" {
+		return formatGPUMemory(used)
+	}
+	usedFmt := formatGPUMemory(used)
+	totalFmt := formatGPUMemory(total)
+	usedMiB, usedOK := parseMemMiB(used)
+	totalMiB, totalOK := parseMemMiB(total)
+	if usedOK && totalOK && totalMiB > 0 {
+		pct := (usedMiB * 100) / totalMiB
+		return fmt.Sprintf("%s/%s(%d%%)", usedFmt, totalFmt, pct)
+	}
+	return fmt.Sprintf("%s/%s", usedFmt, totalFmt)
+}
+
+func formatGPUMemory(mem string) string {
+	mem = strings.TrimSpace(mem)
+	mib, ok := parseMemMiB(mem)
+	if !ok {
+		return mem
+	}
+	if mib >= 1024 {
+		return fmt.Sprintf("%.1fGiB", float64(mib)/1024.0)
+	}
+	return fmt.Sprintf("%dMiB", mib)
+}
+
+func parseMemMiB(mem string) (int, bool) {
+	mem = strings.ReplaceAll(strings.TrimSpace(mem), " ", "")
+	if mem == "" {
+		return 0, false
+	}
+	i := 0
+	for i < len(mem) && (mem[i] == '.' || (mem[i] >= '0' && mem[i] <= '9')) {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(mem[:i], 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := strings.ToLower(mem[i:])
+	switch unit {
+	case "", "m", "mb", "mib":
+		return int(n + 0.5), true
+	case "g", "gb", "gib":
+		return int(n*1024.0 + 0.5), true
+	default:
+		return 0, false
 	}
 }
 

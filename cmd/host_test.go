@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -263,4 +264,57 @@ func hostListHasHost(output, host string) bool {
 
 func countHostListRows(output, host string) int {
 	return len(scanHostLines(output, host))
+}
+
+func TestDisplayHostInfoFormatsGPUStatsTable(t *testing.T) {
+	info := &db.CachedHostInfo{
+		Arch:      "Linux x86_64",
+		OSVersion: "5.8.0-49-generic",
+		CPUCount:  96,
+		CPUModel:  "AMD EPYC 7402 24-Core Processor",
+		MemTotal:  "503Gi",
+		GPUsJSON: `[{"Index":1,"Name":"NVIDIA GeForce","Temperature":45,"Utilization":0,"MemUsed":"6MiB","MemTotal":"24576MiB"},` +
+			`{"Index":0,"Name":"NVIDIA GeForce","Temperature":41,"Utilization":7,"MemUsed":"1024MiB","MemTotal":"24576MiB"}]`,
+	}
+
+	out := captureStdout(t, func() {
+		displayHostInfo("cool30", info, nil)
+	})
+
+	if !strings.Contains(out, "Host: cool30") {
+		t.Fatalf("missing host line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CPUs: 96 (AMD EPYC 7402 24-Core Processor)") {
+		t.Fatalf("missing CPU line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "GPUs:") || !strings.Contains(out, "GPU") || !strings.Contains(out, "Memory") {
+		t.Fatalf("missing GPU table header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "0   41°C") || !strings.Contains(out, "1.0GiB/24.0GiB(4%)") {
+		t.Fatalf("missing formatted first GPU stats, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1   45°C") || !strings.Contains(out, "6MiB/24.0GiB(0%)") {
+		t.Fatalf("missing formatted second GPU stats, got:\n%s", out)
+	}
+}
+
+func TestDisplayHostInfoShowsLiveCPUUtilization(t *testing.T) {
+	info := &db.CachedHostInfo{
+		CPUCount: 16,
+		MemTotal: "64Gi",
+	}
+	live := &hostinfo.Host{
+		CPUs:    16,
+		LoadAvg: "8.0, 4.0, 2.0",
+	}
+
+	out := captureStdout(t, func() {
+		displayHostInfo("cool30", info, live)
+	})
+	if !strings.Contains(out, "CPU Utilization: 50%") {
+		t.Fatalf("missing CPU utilization line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "load1 8.0 on 16 cores") {
+		t.Fatalf("missing CPU load details, got:\n%s", out)
+	}
 }

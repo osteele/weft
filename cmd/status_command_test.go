@@ -121,6 +121,27 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoFormatsJobIDWithPrefix(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "id format", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	want := fmt.Sprintf("Job ID:      %s", FormatJobID(jobID))
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing formatted job ID %q, got:\n%s", want, out)
+	}
+}
+
 func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")

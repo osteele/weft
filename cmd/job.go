@@ -864,7 +864,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		display := queueblock.Display(job, nil)
 
 		// Show full job details
-		fmt.Printf("Job ID:      %d\n", job.ID)
+		fmt.Printf("Job ID:      %s\n", FormatJobID(job.ID))
 		fmt.Printf("Host:        %s\n", job.TargetDisplay())
 		// Show status with waiting info
 		if display.Blocked {
