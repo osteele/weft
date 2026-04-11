@@ -45,10 +45,12 @@ entity Job {
     outputs: List<String>       -- declared output assets
     output_dirs: List<String>   -- convention-based output directories
     produces: List<String>      -- artifact specs this job produces
-    needs: List<String>         -- artifact specs this job requires
+    needs: List<String>         -- host-local artifact specs this job requires
     tags: Set<Tag>
     env_vars: List<String>
-    dep_spec: String?           -- dependency on another job (e.g. "42" or "42:any")
+    dep_spec: String?           -- host-local dependency on another job (e.g. "42" or "42:any")
+    -- Cloud-backed dependencies (e.g. rental upstream jobs) are stored in job metadata:
+    --   metadata.dependencies.cloud_after / metadata.dependencies.cloud_needs
 
     -- GPU requirements
     gpu_class: String?          -- required GPU class (e.g. "A100", "nvidia>=24GB")
@@ -295,6 +297,11 @@ rule ReleaseDependency {
     for job in Jobs where job.dep_spec references dep:
         if job.status = queued and job.is_blocked = false:
             ensures: JobReadyToRun(job)
+
+    @guidance
+        -- For cloud-backed dependencies (stored in job metadata), readiness is
+        -- evaluated from synced DB status (terminal/completed) rather than
+        -- remote host status files.
 }
 
 -- ==========================================================================

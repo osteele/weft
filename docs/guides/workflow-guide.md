@@ -707,6 +707,32 @@ laptop$ weft run \
   'uv run python train.py'
 ```
 
+### Chaining jobs after rental runs
+
+You can chain downstream jobs to rental/ephemeral producers with `--after`,
+`--after-any`, and `--needs`, the same as inventory jobs.
+
+```bash
+# Producer on a rental instance
+laptop$ weft run \
+  --tag rental --gpu nvidia \
+  --produces output/model.pt \
+  -m "Train on rental GPU" \
+  'uv run python train.py'
+# Job 1046 queued
+
+# Downstream consumer
+laptop$ weft run \
+  --after 1046 \
+  --needs output/model.pt:1046 \
+  --gpu nvidia \
+  -m "Evaluate checkpoint" \
+  'uv run python eval.py'
+```
+
+For rental producers, weft waits for completion and artifact upload, then
+stages needed files from cloud artifact storage before the consumer starts.
+
 ## Auto-placement across hosts
 
 When you don't specify a host, weft picks the best one. The scoring considers:

@@ -54,7 +54,7 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 	}
 
 	t.Run("infer host from producers", func(t *testing.T) {
-		host, err := resolveArtifactNeedsHost(database, []string{
+		host, localNeeds, cloudNeeds, err := resolveArtifactNeedsHost(database, []string{
 			fmt.Sprintf("results/model.pt:%d", hostJobID),
 			fmt.Sprintf("results/metrics.json:%d", hostJobID2),
 		}, "")
@@ -64,10 +64,13 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 		if host != "host-a" {
 			t.Fatalf("host = %q, want host-a", host)
 		}
+		if len(localNeeds) != 2 || len(cloudNeeds) != 0 {
+			t.Fatalf("unexpected needs split local=%v cloud=%v", localNeeds, cloudNeeds)
+		}
 	})
 
 	t.Run("reject mismatched explicit host", func(t *testing.T) {
-		_, err := resolveArtifactNeedsHost(database, []string{
+		_, _, _, err := resolveArtifactNeedsHost(database, []string{
 			fmt.Sprintf("results/model.pt:%d", hostJobID),
 		}, "host-b")
 		if err == nil {
@@ -76,7 +79,7 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 	})
 
 	t.Run("reject multiple producer hosts", func(t *testing.T) {
-		_, err := resolveArtifactNeedsHost(database, []string{
+		_, _, _, err := resolveArtifactNeedsHost(database, []string{
 			fmt.Sprintf("results/model.pt:%d", hostJobID),
 			fmt.Sprintf("results/metrics.json:%d", otherHostJobID),
 		}, "")
@@ -85,12 +88,57 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 		}
 	})
 
-	t.Run("reject producer without host", func(t *testing.T) {
-		_, err := resolveArtifactNeedsHost(database, []string{
+	t.Run("allow producer without host as cloud need", func(t *testing.T) {
+		host, localNeeds, cloudNeeds, err := resolveArtifactNeedsHost(database, []string{
 			fmt.Sprintf("results/model.pt:%d", cloudJobID),
 		}, "")
-		if err == nil {
-			t.Fatal("expected unresolved producer host error")
+		if err != nil {
+			t.Fatalf("resolveArtifactNeedsHost: %v", err)
+		}
+		if host != "" {
+			t.Fatalf("host = %q, want empty", host)
+		}
+		if len(localNeeds) != 0 || len(cloudNeeds) != 1 {
+			t.Fatalf("unexpected needs split local=%v cloud=%v", localNeeds, cloudNeeds)
+		}
+	})
+}
+
+func TestResolveDependencyForTarget(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	localDepID, err := db.RecordQueued(database, "host-a", "/tmp/project", "echo local", "local")
+	if err != nil {
+		t.Fatalf("RecordQueued local: %v", err)
+	}
+	cloudDepID, err := db.RecordQueued(database, "", "/tmp/project", "echo cloud", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued cloud: %v", err)
+	}
+
+	t.Run("local dependency stays local", func(t *testing.T) {
+		localDep, cloudDep, err := resolveDependencyForTarget(database, localDepID, "host-a", false)
+		if err != nil {
+			t.Fatalf("resolveDependencyForTarget: %v", err)
+		}
+		if localDep == nil || localDep.JobID != localDepID || localDep.AllowFailure {
+			t.Fatalf("unexpected local dep: %+v", localDep)
+		}
+		if cloudDep != nil {
+			t.Fatalf("expected no cloud dep, got %+v", cloudDep)
+		}
+	})
+
+	t.Run("hostless dependency becomes cloud", func(t *testing.T) {
+		localDep, cloudDep, err := resolveDependencyForTarget(database, cloudDepID, "host-a", true)
+		if err != nil {
+			t.Fatalf("resolveDependencyForTarget: %v", err)
+		}
+		if localDep != nil {
+			t.Fatalf("expected no local dep, got %+v", localDep)
+		}
+		if cloudDep == nil || cloudDep.JobID != cloudDepID || !cloudDep.AllowFailure {
+			t.Fatalf("unexpected cloud dep: %+v", cloudDep)
 		}
 	})
 }

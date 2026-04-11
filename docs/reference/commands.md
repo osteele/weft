@@ -31,8 +31,8 @@ Use `start <job-id>` to start a queued job immediately.
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
-- `--after, --depends-on ID`: Start job after another job succeeds
-- `--after-any ID`: Start job after another job completes, success or failure
+- `--after, --depends-on ID`: Start job after another job succeeds (works for inventory and rental/ephemeral upstream jobs)
+- `--after-any ID`: Start job after another job completes, success or failure (works for inventory and rental/ephemeral upstream jobs)
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
@@ -41,7 +41,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
-- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`)
+- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; rental/ephemeral producers are staged from cloud artifact storage)
 - `--dry-run`: Show placement scores without submitting the job
 - `--no-sync`: Skip source sync before submission
 - `--wait`: Wait for the job to complete before returning
@@ -129,6 +129,19 @@ weft run --needs output/model.pt:100 -m "Eval on MMLU" 'python eval.py'
 weft run --produces output/model.pt:100 -m "Fine-tune (retry)" 'python train.py --resume'
 # Job 101 automatically picks up job 102's output — no re-editing needed
 
+# Rental producer + downstream dependency (cross-host)
+weft run --tag rental --gpu nvidia \
+  --produces output/model.pt \
+  -m "Train on rental GPU" 'python train.py'
+# Job 1046 queued on a rental instance
+
+weft run --gpu nvidia \
+  --needs output/model.pt:1046 \
+  --after 1046 \
+  -m "Eval" 'python eval.py'
+# Downstream job waits until 1046 completes and artifact upload is available,
+# then stages output/model.pt from cloud artifact storage before execution.
+
 # Kill a job
 weft run deepthought --kill 42
 ```
@@ -137,6 +150,12 @@ The `--produces`/`--needs` flags let you build multi-step pipelines without
 hard-coding job IDs into downstream commands. When a producer fails and you
 retry it with a version suffix (`:100`), all consumers keyed to that version
 pick up the replacement automatically.
+
+Dependency behavior differs by artifact location:
+- Inventory-host artifacts are staged from the producing host when needed.
+- Rental/ephemeral producer artifacts are staged from cloud artifact storage.
+- If a dependency target is not ready yet (producer still running or artifact
+  not uploaded), the downstream queued job stays deferred until it is available.
 
 ### weft estimation
 
@@ -954,7 +973,10 @@ weft edit wj1750 --tag benchmark --tag exp-012
 weft edit wj1800 --command "python eval.py" -C ~/project -e FOO=bar
 ```
 
-Changes are validated so you can only depend on jobs that run on the same host. If the host is offline, the update is deferred like other queue operations and reapplied once it reconnects.
+Dependencies can target local-host jobs or rental/ephemeral jobs. For rental
+dependencies, the queue entry is held until dependency completion/artifact sync
+is visible in local state. If the host is offline, dependency updates are
+deferred like other queue operations and reapplied once it reconnects.
 
 #### weft queue start
 

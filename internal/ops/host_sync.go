@@ -6,16 +6,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/prestage"
+	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -464,11 +471,46 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	ensured := 0
 	syncedDirs := make(map[string]bool)
 	sourceSHAByDir := make(map[string]string)
+	var r2Client *r2.Client
+	var r2ClientErr error
+	r2ClientLoaded := false
+	getR2Client := func() (*r2.Client, error) {
+		if r2ClientLoaded {
+			return r2Client, r2ClientErr
+		}
+		r2ClientLoaded = true
+		cfg, err := config.Load()
+		if err != nil {
+			r2ClientErr = fmt.Errorf("load config for cloud dependencies: %w", err)
+			return nil, r2ClientErr
+		}
+		r2Client, r2ClientErr = r2.New(r2.Config{
+			AccountID:       cfg.Vastai.R2.AccountID,
+			AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
+			SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
+			Bucket:          cfg.Vastai.R2.Bucket,
+		})
+		if r2ClientErr != nil {
+			r2ClientErr = fmt.Errorf("create R2 client for cloud dependencies: %w", r2ClientErr)
+			return nil, r2ClientErr
+		}
+		return r2Client, nil
+	}
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
 		failures = append(failures, fmt.Sprintf("job %d %s: %v", jobID, stage, err))
 	}
 	for _, job := range jobs {
+		ready, reason, err := cloudDepsReady(database, job)
+		if err != nil {
+			recordFailure(job.ID, "dependency check failed", err)
+			continue
+		}
+		if !ready {
+			syncLog.Debug("cloud dependency not ready; deferring dispatch", "job_id", job.ID, "host", host, "reason", reason)
+			continue
+		}
+
 		// Set backend if not yet stored
 		if job.Backend == "" {
 			if err := db.SetJobBackend(database, job.ID, backend); err != nil {
@@ -528,6 +570,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 				continue
 			}
 		}
+		if err := materializeCloudNeeds(database, job, timeout, getR2Client); err != nil {
+			recordFailure(job.ID, "cloud artifact staging failed", err)
+			continue
+		}
 
 		// Route Slurm jobs to sbatch
 		if job.Backend == db.BackendSlurm {
@@ -570,6 +616,148 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		return ensured, contacted, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 	return ensured, contacted, nil
+}
+
+func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {
+	if job == nil || job.Metadata == nil || job.Metadata.Dependencies == nil {
+		return true, "", nil
+	}
+	for _, dep := range job.Metadata.Dependencies.CloudAfter {
+		if dep.JobID <= 0 {
+			continue
+		}
+		upstream, err := db.GetJobByID(database, dep.JobID)
+		if err != nil {
+			return false, "", fmt.Errorf("lookup cloud dependency job %d: %w", dep.JobID, err)
+		}
+		if upstream == nil {
+			return false, fmt.Sprintf("dependency job %d not found", dep.JobID), nil
+		}
+		if !db.IsTerminalStatus(upstream.Status) {
+			return false, fmt.Sprintf("dependency job %d not complete (%s)", dep.JobID, upstream.Status), nil
+		}
+		if !dep.AllowFailure && upstream.Status != db.StatusCompleted {
+			return false, fmt.Sprintf("dependency job %d did not succeed (%s)", dep.JobID, upstream.Status), nil
+		}
+	}
+	return true, "", nil
+}
+
+func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
+	if job == nil || job.Metadata == nil || job.Metadata.Dependencies == nil || len(job.Metadata.Dependencies.CloudNeeds) == 0 {
+		return nil
+	}
+	r2Client, err := getR2Client()
+	if err != nil {
+		return err
+	}
+	if r2Client == nil || !r2Client.IsConfigured() {
+		return fmt.Errorf("R2 is not configured")
+	}
+	remoteBase := workdir.ToTildeRelative(job.WorkingDir)
+	if remoteBase == "" {
+		remoteBase = job.WorkingDir
+	}
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-needs-%d-*", job.ID))
+	if err != nil {
+		return fmt.Errorf("create temp dir for cloud needs: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	for _, spec := range job.Metadata.Dependencies.CloudNeeds {
+		parsed, err := parseCloudNeedSpec(spec)
+		if err != nil {
+			return fmt.Errorf("parse cloud need %q: %w", spec, err)
+		}
+		producer, err := db.GetJobByID(database, parsed.Version)
+		if err != nil {
+			return fmt.Errorf("lookup producer job %d for %q: %w", parsed.Version, spec, err)
+		}
+		if producer == nil {
+			return fmt.Errorf("producer job %d for %q not found", parsed.Version, spec)
+		}
+		data, err := fetchCloudNeedObject(r2Client, producer.ID, producer.LatestRunID, parsed.Path)
+		if err != nil {
+			return fmt.Errorf("%q: %w", spec, err)
+		}
+		localPath := filepath.Join(tmpDir, filepath.FromSlash(parsed.Path))
+		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+			return fmt.Errorf("prepare local staging path for %q: %w", spec, err)
+		}
+		if err := os.WriteFile(localPath, data, 0644); err != nil {
+			return fmt.Errorf("write local staging file for %q: %w", spec, err)
+		}
+		remotePath := strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(parsed.Path, "/")
+		if err := ensureRemoteParentDir(job.Host, remotePath, timeout); err != nil {
+			return fmt.Errorf("create remote directory for %q: %w", spec, err)
+		}
+		if err := ssh.CopyTo(localPath, job.Host, remotePath); err != nil {
+			return fmt.Errorf("copy %q to %s:%s: %w", spec, job.Host, remotePath, err)
+		}
+	}
+	return nil
+}
+
+type cloudNeedSpec struct {
+	Path    string
+	Version int64
+}
+
+func parseCloudNeedSpec(spec string) (cloudNeedSpec, error) {
+	idx := strings.LastIndex(spec, ":")
+	if idx < 0 {
+		return cloudNeedSpec{}, fmt.Errorf("needs spec %q must include :version suffix", spec)
+	}
+	version, err := strconv.ParseInt(spec[idx+1:], 10, 64)
+	if err != nil || version <= 0 {
+		return cloudNeedSpec{}, fmt.Errorf("needs spec %q has invalid version", spec)
+	}
+	return cloudNeedSpec{Path: spec[:idx], Version: version}, nil
+}
+
+func fetchCloudNeedObject(client *r2.Client, jobID int64, latestRunID *int64, relPath string) ([]byte, error) {
+	runIDs := []int64{0}
+	if latestRunID != nil && *latestRunID > 0 {
+		runIDs = append([]int64{*latestRunID}, runIDs...)
+	}
+	artifactRel := artifacts.LocalRelativePath(relPath)
+	outputRel := strings.TrimPrefix(relPath, "/")
+	for _, runID := range runIDs {
+		keys := []string{
+			r2keys.JobAttemptArtifactFilesPrefix(jobID, runID) + artifactRel,
+			r2keys.JobAttemptOutputsPrefix(jobID, runID) + outputRel,
+		}
+		for _, key := range keys {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			data, err := client.GetObject(ctx, key)
+			cancel()
+			if err == nil {
+				return data, nil
+			}
+			if r2.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("fetch %s: %w", key, err)
+		}
+	}
+	return nil, fmt.Errorf("artifact %q not found in cloud outputs", relPath)
+}
+
+func ensureRemoteParentDir(host, remotePath string, timeout time.Duration) error {
+	remoteDir := path.Dir(remotePath)
+	if remoteDir == "." || remoteDir == "/" || remoteDir == "" {
+		return nil
+	}
+	// Keep "~" expansion by running mkdir relative to $HOME for tilde paths.
+	if strings.HasPrefix(remoteDir, "~/") {
+		remoteDir = strings.TrimPrefix(remoteDir, "~/")
+	}
+	cmd := fmt.Sprintf("mkdir -p %s", shellQuote(remoteDir))
+	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return fmt.Errorf("mkdir remote path: %s: %w", stderr, err)
+	}
+	return nil
 }
 
 func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, timeout time.Duration) error {

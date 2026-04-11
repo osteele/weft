@@ -29,7 +29,7 @@ func TestBuildQueueEditDependencies(t *testing.T) {
 		t.Fatalf("record completion job: %v", err)
 	}
 
-	deps, err := buildQueueEditDependencies(database, "hostA", targetID,
+	deps, cloudAfter, err := buildQueueEditDependencies(database, "hostA", targetID,
 		[]string{fmt.Sprintf("%d", successID)},
 		[]string{fmt.Sprintf("%d", anyID)},
 	)
@@ -45,9 +45,12 @@ func TestBuildQueueEditDependencies(t *testing.T) {
 	if deps[1].JobID != anyID || !deps[1].AllowFailure {
 		t.Fatalf("expected completion dep to allow failure, got %+v", deps[1])
 	}
+	if len(cloudAfter) != 0 {
+		t.Fatalf("expected no cloud deps, got %+v", cloudAfter)
+	}
 
 	// Self-dependency should fail
-	if _, err := buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d", targetID)}, nil); err == nil {
+	if _, _, err := buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d", targetID)}, nil); err == nil {
 		t.Fatal("expected self-dependency to error")
 	}
 
@@ -56,9 +59,25 @@ func TestBuildQueueEditDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record other host job: %v", err)
 	}
-	_, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d", otherHostID)}, nil)
+	_, _, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d", otherHostID)}, nil)
 	if err == nil || !errors.Is(err, errCrossHostDep) {
 		t.Fatalf("expected errCrossHostDep, got %v", err)
+	}
+
+	// Hostless/rental dependency should become cloud dependency metadata
+	hostlessID, err := db.RecordQueued(database, "", "/tmp", "echo cloud", "cloud")
+	if err != nil {
+		t.Fatalf("record hostless job: %v", err)
+	}
+	deps, cloudAfter, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d", hostlessID)}, nil)
+	if err != nil {
+		t.Fatalf("hostless dependency: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("expected no local deps for hostless job, got %+v", deps)
+	}
+	if len(cloudAfter) != 1 || cloudAfter[0].JobID != hostlessID {
+		t.Fatalf("expected cloud dep for hostless job, got %+v", cloudAfter)
 	}
 }
 
@@ -77,7 +96,7 @@ func TestBuildQueueEditDependenciesModes(t *testing.T) {
 		t.Fatalf("record job B: %v", err)
 	}
 
-	deps, err := buildQueueEditDependencies(database, "hostA", targetID,
+	deps, _, err := buildQueueEditDependencies(database, "hostA", targetID,
 		[]string{fmt.Sprintf("%d:any,%d:success", jobA, jobB)},
 		nil,
 	)
@@ -107,7 +126,7 @@ func TestBuildQueueEditDependenciesValidation(t *testing.T) {
 	}
 
 	// '+' suffix on first entry should set allow-failure
-	deps, err := buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d+", jobA)}, nil)
+	deps, _, err := buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d+", jobA)}, nil)
 	if err != nil {
 		t.Fatalf("plus suffix: %v", err)
 	}
@@ -116,7 +135,7 @@ func TestBuildQueueEditDependenciesValidation(t *testing.T) {
 	}
 
 	// Duplicated entries keep the first interpretation
-	deps, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d,%d+", jobA, jobA)}, nil)
+	deps, _, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d,%d+", jobA, jobA)}, nil)
 	if err != nil {
 		t.Fatalf("dedupe deps: %v", err)
 	}
@@ -128,13 +147,13 @@ func TestBuildQueueEditDependenciesValidation(t *testing.T) {
 	}
 
 	// Unknown mode
-	_, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d:bogus", jobA)}, nil)
+	_, _, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d:bogus", jobA)}, nil)
 	if err == nil || !errors.Is(err, errUnknownDepMode) {
 		t.Fatalf("expected errUnknownDepMode, got %v", err)
 	}
 
 	// Non-numeric ID
-	_, err = buildQueueEditDependencies(database, "hostA", targetID, []string{"abc"}, nil)
+	_, _, err = buildQueueEditDependencies(database, "hostA", targetID, []string{"abc"}, nil)
 	if err == nil || !errors.Is(err, errInvalidDepJobID) {
 		t.Fatalf("expected errInvalidDepJobID, got %v", err)
 	}

@@ -369,17 +369,30 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	var deps []queueDependency
+	var cloudAfter []db.JobDependencyRef
 	if queueAfter > 0 {
-		if err := ensureSameHostDependency(database, queueAfter, host); err != nil {
+		localDep, cloudDep, err := resolveDependencyForTarget(database, queueAfter, host, false)
+		if err != nil {
 			return err
 		}
-		deps = append(deps, queueDependency{JobID: queueAfter, AllowFailure: false})
+		if localDep != nil {
+			deps = append(deps, *localDep)
+		}
+		if cloudDep != nil {
+			cloudAfter = append(cloudAfter, *cloudDep)
+		}
 	}
 	if queueAfterAny > 0 {
-		if err := ensureSameHostDependency(database, queueAfterAny, host); err != nil {
+		localDep, cloudDep, err := resolveDependencyForTarget(database, queueAfterAny, host, true)
+		if err != nil {
 			return err
 		}
-		deps = append(deps, queueDependency{JobID: queueAfterAny, AllowFailure: true})
+		if localDep != nil {
+			deps = append(deps, *localDep)
+		}
+		if cloudDep != nil {
+			cloudAfter = append(cloudAfter, *cloudDep)
+		}
 	}
 
 	if queueDraft {
@@ -437,6 +450,17 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record draft output dirs: %w", err)
 			}
 		}
+		if len(cloudAfter) > 0 {
+			meta := &db.JobMetadata{
+				Dependencies: &db.JobDependencyMetadata{
+					CloudAfter: append([]db.JobDependencyRef(nil), cloudAfter...),
+				},
+			}
+			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft cloud dependencies: %w", err)
+			}
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -470,6 +494,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		AutoStart:    !queueNoStart,
 		Inputs:       queueInputs,
 		OutputDirs:   outputDirs,
+		CloudAfter:   cloudAfter,
 	})
 	if err != nil {
 		return err
@@ -1041,6 +1066,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 	var depSpec string
 	var deps []queueDependency
+	var cloudAfter []db.JobDependencyRef
 	switch {
 	case queueEditClearDeps:
 		depSpec = ""
@@ -1053,7 +1079,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("depends-on-any") {
 			anyValues = nil
 		}
-		deps, err = buildQueueEditDependencies(database, job.Host, job.ID, depValues, anyValues)
+		deps, cloudAfter, err = buildQueueEditDependencies(database, job.Host, job.ID, depValues, anyValues)
 		if err != nil {
 			return err
 		}
@@ -1073,6 +1099,35 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		} else {
 			updates = append(updates, "dependencies: "+formatQueueDependencies(deps))
 		}
+	}
+	if dependsChanged || queueEditClearDeps {
+		var meta *db.JobMetadata
+		if job.Metadata != nil {
+			clone := *job.Metadata
+			meta = &clone
+		} else {
+			meta = &db.JobMetadata{}
+		}
+		if queueEditClearDeps {
+			if meta.Dependencies != nil {
+				meta.Dependencies.CloudAfter = nil
+			}
+		} else {
+			if meta.Dependencies == nil {
+				meta.Dependencies = &db.JobDependencyMetadata{}
+			}
+			meta.Dependencies.CloudAfter = append([]db.JobDependencyRef(nil), cloudAfter...)
+		}
+		if meta.Dependencies != nil && len(meta.Dependencies.CloudAfter) == 0 && len(meta.Dependencies.CloudNeeds) == 0 {
+			meta.Dependencies = nil
+		}
+		if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil {
+			meta = nil
+		}
+		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+			return fmt.Errorf("update cloud dependency metadata: %w", err)
+		}
+		job.Metadata = meta
 	}
 
 	// Push to remote queue
@@ -1195,8 +1250,9 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, error) {
+func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, []db.JobDependencyRef, error) {
 	var deps []queueDependency
+	var cloudAfter []db.JobDependencyRef
 	seen := map[int64]bool{}
 
 	add := func(values []string, defaultAllowFailure bool) error {
@@ -1234,23 +1290,29 @@ func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64
 				if seen[depID] {
 					continue
 				}
-				if err := ensureSameHostDependency(database, depID, host); err != nil {
+				localDep, cloudDep, err := resolveDependencyForTarget(database, depID, host, allowFailure)
+				if err != nil {
 					return err
 				}
 				seen[depID] = true
-				deps = append(deps, queueDependency{JobID: depID, AllowFailure: allowFailure})
+				if localDep != nil {
+					deps = append(deps, *localDep)
+				}
+				if cloudDep != nil {
+					cloudAfter = append(cloudAfter, *cloudDep)
+				}
 			}
 		}
 		return nil
 	}
 
 	if err := add(successVals, false); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := add(anyVals, true); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return deps, nil
+	return deps, cloudAfter, nil
 }
 
 func splitDependencyValues(raw string) []string {

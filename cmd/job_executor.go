@@ -109,6 +109,8 @@ type queueJobOptions struct {
 	OutputDirs   []string // Convention-based output directories from .weft.toml
 	Produces     []string // Artifact specs this job produces
 	Needs        []string // Artifact specs this job needs
+	CloudAfter   []db.JobDependencyRef
+	CloudNeeds   []string
 }
 
 type queueDependency struct {
@@ -190,6 +192,17 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(opts.CloudAfter) > 0 || len(opts.CloudNeeds) > 0 {
+		meta := &db.JobMetadata{
+			Dependencies: &db.JobDependencyMetadata{
+				CloudAfter: append([]db.JobDependencyRef(nil), opts.CloudAfter...),
+				CloudNeeds: append([]string(nil), opts.CloudNeeds...),
+			},
+		}
+		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+			return nil, fmt.Errorf("record cloud dependency metadata: %w", err)
+		}
+	}
 
 	return &queueJobResult{
 		JobID: jobID,
@@ -267,46 +280,71 @@ func ensureSameHostDependency(database *sql.DB, depID int64, host string) error 
 	if job == nil {
 		return fmt.Errorf("dependency job %d not found", depID)
 	}
+	if job.IsRentalJob() || strings.TrimSpace(job.Host) == "" {
+		return nil
+	}
 	if job.Host != host {
 		return fmt.Errorf("dependency job %d runs on host %s, target on %s: %w", depID, job.Host, host, errCrossHostDep)
 	}
 	return nil
 }
 
-func resolveArtifactNeedsHost(database *sql.DB, needs []string, host string) (string, error) {
+func resolveDependencyForTarget(database *sql.DB, depID int64, host string, allowFailure bool) (*queueDependency, *db.JobDependencyRef, error) {
+	if depID <= 0 {
+		return nil, nil, fmt.Errorf("invalid dependency job ID %d", depID)
+	}
+	job, err := db.GetJobByID(database, depID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lookup dependency job %d: %w", depID, err)
+	}
+	if job == nil {
+		return nil, nil, fmt.Errorf("dependency job %d not found", depID)
+	}
+	if job.IsRentalJob() || strings.TrimSpace(job.Host) == "" {
+		ref := &db.JobDependencyRef{JobID: depID, AllowFailure: allowFailure}
+		return nil, ref, nil
+	}
+	if strings.TrimSpace(host) != "" && job.Host != host {
+		return nil, nil, fmt.Errorf("dependency job %d runs on host %s, target on %s: %w", depID, job.Host, host, errCrossHostDep)
+	}
+	return &queueDependency{JobID: depID, AllowFailure: allowFailure}, nil, nil
+}
+
+func resolveArtifactNeedsHost(database *sql.DB, needs []string, host string) (string, []string, []string, error) {
 	resolvedHost := strings.TrimSpace(host)
 	seenJobs := make(map[int64]bool)
+	localNeeds := make([]string, 0, len(needs))
+	cloudNeeds := make([]string, 0, len(needs))
 
 	for _, spec := range needs {
 		parsed, err := runner.ParseNeedsSpec(spec)
 		if err != nil {
-			return "", err
+			return "", nil, nil, err
 		}
-		if seenJobs[parsed.Version] {
-			continue
-		}
-		seenJobs[parsed.Version] = true
 
 		job, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return "", fmt.Errorf("lookup artifact producer job %d: %w", parsed.Version, err)
+			return "", nil, nil, fmt.Errorf("lookup artifact producer job %d: %w", parsed.Version, err)
 		}
 		if job == nil {
-			return "", fmt.Errorf("artifact producer job %d not found", parsed.Version)
+			return "", nil, nil, fmt.Errorf("artifact producer job %d not found", parsed.Version)
+		}
+		if job.IsRentalJob() || strings.TrimSpace(job.Host) == "" {
+			cloudNeeds = append(cloudNeeds, spec)
+			continue
 		}
 
 		producerHost := strings.TrimSpace(job.Host)
-		if producerHost == "" {
-			return "", fmt.Errorf("artifact dependency %q points to job %d, which is not assigned to a concrete host", spec, parsed.Version)
+		if !seenJobs[parsed.Version] {
+			if resolvedHost == "" {
+				resolvedHost = producerHost
+			} else if producerHost != resolvedHost {
+				return "", nil, nil, fmt.Errorf("artifact dependency %q is on host %s, but target host is %s", spec, producerHost, resolvedHost)
+			}
+			seenJobs[parsed.Version] = true
 		}
-		if resolvedHost == "" {
-			resolvedHost = producerHost
-			continue
-		}
-		if producerHost != resolvedHost {
-			return "", fmt.Errorf("artifact dependency %q is on host %s, but target host is %s", spec, producerHost, resolvedHost)
-		}
+		localNeeds = append(localNeeds, spec)
 	}
 
-	return resolvedHost, nil
+	return resolvedHost, localNeeds, cloudNeeds, nil
 }

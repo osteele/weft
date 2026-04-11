@@ -10,6 +10,7 @@
 --   - Campaign/instance launch and termination (see campaign-lifecycle.allium)
 --   - Output artifact collection and log caching
 --   - TUI rendering and display
+--   - Queue dispatch policy details (except cloud dependency readiness signals)
 
 use "./job-lifecycle.allium" as jobs
 use "./campaign-lifecycle.allium" as cloud
@@ -87,6 +88,12 @@ value SyncResult {
     updated: Boolean        -- job status was changed in database
     host_contacted: Boolean -- remote host was successfully reached
 }
+
+-- Cloud dependency readiness for queued jobs is derived from synced DB state:
+--   - cloud_after(success): upstream status must be completed
+--   - cloud_after(any): upstream status must be terminal
+-- These dependencies are evaluated during queue dispatch, not by remote
+-- queue-runner status files.
 
 -- Outcome of three-way merge reconciliation.
 value ReconcileResult {

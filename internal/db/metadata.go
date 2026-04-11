@@ -9,9 +9,23 @@ import (
 
 // JobMetadata stores optional derived or cached metadata for a job.
 type JobMetadata struct {
-	CPU       *JobCPUStats         `json:"cpu,omitempty"`
-	Resource  *ResourceUsage       `json:"resource,omitempty"`
-	Telemetry *JobTelemetrySummary `json:"telemetry,omitempty"`
+	CPU          *JobCPUStats           `json:"cpu,omitempty"`
+	Resource     *ResourceUsage         `json:"resource,omitempty"`
+	Telemetry    *JobTelemetrySummary   `json:"telemetry,omitempty"`
+	Dependencies *JobDependencyMetadata `json:"dependencies,omitempty"`
+}
+
+// JobDependencyMetadata stores dependency semantics that cannot be encoded as
+// host-local queue-runner deps (e.g., rental/cloud upstream dependencies).
+type JobDependencyMetadata struct {
+	CloudAfter []JobDependencyRef `json:"cloud_after,omitempty"`
+	CloudNeeds []string           `json:"cloud_needs,omitempty"`
+}
+
+// JobDependencyRef identifies a dependency on another logical job.
+type JobDependencyRef struct {
+	JobID        int64 `json:"job_id"`
+	AllowFailure bool  `json:"allow_failure,omitempty"`
 }
 
 // ResourceUsage stores resource consumption captured when a job completes.

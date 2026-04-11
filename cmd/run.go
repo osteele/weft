@@ -185,6 +185,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	var host, command string
+	localNeeds := append([]string(nil), runNeeds...)
+	cloudNeeds := []string{}
 
 	// --host flag takes priority
 	host = runHost
@@ -413,11 +415,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if len(runNeeds) > 0 {
-		resolvedHost, err := resolveArtifactNeedsHost(database, runNeeds, host)
+		resolvedHost, resolvedLocalNeeds, resolvedCloudNeeds, err := resolveArtifactNeedsHost(database, runNeeds, host)
 		if err != nil {
 			return fmt.Errorf("--needs: %w", err)
 		}
 		host = resolvedHost
+		localNeeds = resolvedLocalNeeds
+		cloudNeeds = resolvedCloudNeeds
 	}
 
 	gpu := extractGPUFromEnvVars(runEnvVars)
@@ -526,11 +530,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
-			Needs:       runNeeds,
+			Needs:       localNeeds,
 		}
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
 		if err != nil {
 			return err
+		}
+		if len(cloudNeeds) > 0 {
+			meta := &db.JobMetadata{
+				Dependencies: &db.JobDependencyMetadata{
+					CloudNeeds: append([]string(nil), cloudNeeds...),
+				},
+			}
+			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+				return fmt.Errorf("record cloud dependency metadata: %w", err)
+			}
 		}
 		w := cmd.OutOrStdout()
 		if ack != nil && ack.Host != "" {
@@ -602,7 +616,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
-			Needs:       runNeeds,
+			Needs:       localNeeds,
 		}
 
 		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
@@ -612,6 +626,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		jobID, err := ops.RecordQueuedJob(database, params)
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
+		}
+		if len(cloudNeeds) > 0 {
+			meta := &db.JobMetadata{
+				Dependencies: &db.JobDependencyMetadata{
+					CloudNeeds: append([]string(nil), cloudNeeds...),
+				},
+			}
+			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+				return fmt.Errorf("record cloud dependency metadata: %w", err)
+			}
 		}
 
 		// Store placement telemetry if auto-placement was used
@@ -759,10 +783,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
-			Needs:       runNeeds,
+			Needs:       localNeeds,
 		})
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
+		}
+		if len(cloudNeeds) > 0 {
+			meta := &db.JobMetadata{
+				Dependencies: &db.JobDependencyMetadata{
+					CloudNeeds: append([]string(nil), cloudNeeds...),
+				},
+			}
+			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+				return fmt.Errorf("record cloud dependency metadata: %w", err)
+			}
 		}
 		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
 			slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
@@ -828,20 +862,33 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Handle --after/--depends-on and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {
 		deps := []queueDependency{}
+		cloudAfter := []db.JobDependencyRef{}
 		waitType := "succeeds"
 		afterID := runAfter
 		if runAfterAny > 0 {
 			afterID = runAfterAny
 			waitType = "completes"
-			if err := ensureSameHostDependency(database, afterID, host); err != nil {
+			localDep, cloudDep, err := resolveDependencyForTarget(database, afterID, host, true)
+			if err != nil {
 				return err
 			}
-			deps = append(deps, queueDependency{JobID: afterID, AllowFailure: true})
+			if localDep != nil {
+				deps = append(deps, *localDep)
+			}
+			if cloudDep != nil {
+				cloudAfter = append(cloudAfter, *cloudDep)
+			}
 		} else if runAfter > 0 {
-			if err := ensureSameHostDependency(database, afterID, host); err != nil {
+			localDep, cloudDep, err := resolveDependencyForTarget(database, afterID, host, false)
+			if err != nil {
 				return err
 			}
-			deps = append(deps, queueDependency{JobID: afterID, AllowFailure: false})
+			if localDep != nil {
+				deps = append(deps, *localDep)
+			}
+			if cloudDep != nil {
+				cloudAfter = append(cloudAfter, *cloudDep)
+			}
 		}
 		res, err := queueJob(database, queueJobOptions{
 			Host:         host,
@@ -861,7 +908,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:      runOutputs,
 			OutputDirs:   outputDirs,
 			Produces:     runProduces,
-			Needs:        runNeeds,
+			Needs:        localNeeds,
+			CloudAfter:   cloudAfter,
+			CloudNeeds:   cloudNeeds,
 			GPUMemStrict: true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 		})
 		if err != nil {
