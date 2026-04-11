@@ -33,14 +33,13 @@ var tagRemoveCmd = &cobra.Command{
 }
 
 func init() {
-	tagCmd.Deprecated = "use 'weft job tag' instead"
 	rootCmd.AddCommand(tagCmd)
 	tagCmd.AddCommand(tagAddCmd)
 	tagCmd.AddCommand(tagRemoveCmd)
 }
 
 func runTagAdd(cmd *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDs(args[:len(args)-1])
+	jobIDs, err := ParseJobIDsWithExplicitPrefix(args[:len(args)-1])
 	if err != nil {
 		return err
 	}
@@ -82,7 +81,7 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runTagRemove(cmd *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDs(args[:len(args)-1])
+	jobIDs, err := ParseJobIDsWithExplicitPrefix(args[:len(args)-1])
 	if err != nil {
 		return err
 	}

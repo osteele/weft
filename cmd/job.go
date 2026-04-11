@@ -48,10 +48,10 @@ Available subcommands:
 
 // Job run subcommand - delegates to main run command
 var jobRunCmd = &cobra.Command{
-	Use:   "run <host> <command>",
+	Use:   "run <command>",
 	Short: "Start a new job on a remote host",
 	Long:  runCmd.Long,
-	Args:  usageArgs(cobra.MinimumNArgs(2)),
+	Args:  usageArgs(cobra.ExactArgs(1)),
 	RunE:  runRun,
 }
 
@@ -342,7 +342,7 @@ var jobTagCmd = &cobra.Command{
 var jobTagAddCmd = &cobra.Command{
 	Use:   "add <job-id>... <tag>",
 	Short: tagAddCmd.Short,
-	Args:  usageArgs(cobra.MinimumNArgs(2)),
+	Args:  usageArgs(cobra.ExactArgs(1)),
 	RunE:  runTagAdd,
 }
 
@@ -350,7 +350,7 @@ var jobTagRemoveCmd = &cobra.Command{
 	Use:     "rm <job-id>... <tag>",
 	Aliases: []string{"remove", "delete"},
 	Short:   tagRemoveCmd.Short,
-	Args:    usageArgs(cobra.MinimumNArgs(2)),
+	Args:    usageArgs(cobra.ExactArgs(1)),
 	RunE:    runTagRemove,
 }
 
@@ -360,7 +360,6 @@ func init() {
 
 	// Register top-level aliases
 	rootCmd.AddCommand(infoCmd)
-	showCmd.Deprecated = "use 'weft job info' instead"
 	startCmd.Deprecated = "use 'weft job start' instead"
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(startCmd)

@@ -198,3 +198,16 @@ func formatJobIDRange(start, end int64) string {
 	}
 	return fmt.Sprintf("%s:%s", FormatJobID(start), FormatJobID(end))
 }
+
+// ParseJobIDsWithExplicitPrefix parses job IDs and requires at least one explicit
+// "wj" prefix across the provided args. Instance-prefixed IDs ("wi") are rejected.
+func ParseJobIDsWithExplicitPrefix(args []string) ([]int64, error) {
+	kind, err := resolveIDTargetKind(args)
+	if err != nil {
+		return nil, err
+	}
+	if kind != idTargetJob {
+		return nil, usageErrorf("ambiguous ID(s): use wj... for jobs")
+	}
+	return ParseJobIDs(args)
+}

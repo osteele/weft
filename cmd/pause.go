@@ -23,7 +23,6 @@ Examples:
 }
 
 func init() {
-	pauseCmd.Deprecated = "use 'weft job pause' instead"
 	rootCmd.AddCommand(pauseCmd)
 }
 
@@ -34,7 +33,7 @@ func runPause(cmd *cobra.Command, args []string) error {
 	}
 	defer service.Close()
 
-	jobIDs, err := ParseJobIDs(args)
+	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
 	if err != nil {
 		return err
 	}

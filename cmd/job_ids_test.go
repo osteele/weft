@@ -216,3 +216,29 @@ func TestFormatJobID(t *testing.T) {
 		t.Fatalf("FormatJobID(750) = %q, want %q", got, "wj750")
 	}
 }
+
+func TestParseJobIDsWithExplicitPrefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    []int64
+		wantErr bool
+	}{
+		{name: "accepts prefixed", args: []string{"wj10", "11"}, want: []int64{10, 11}},
+		{name: "rejects no prefix", args: []string{"10", "11"}, wantErr: true},
+		{name: "rejects instance prefix", args: []string{"wi10"}, wantErr: true},
+		{name: "rejects mixed job and instance prefixes", args: []string{"wj10", "wi11"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseJobIDsWithExplicitPrefix(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseJobIDsWithExplicitPrefix() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ParseJobIDsWithExplicitPrefix() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -25,9 +25,7 @@ var markUnprocessedCmd = &cobra.Command{
 }
 
 func init() {
-	markProcessedCmd.Deprecated = "use 'weft job mark-processed' instead"
 	rootCmd.AddCommand(markProcessedCmd)
-	markUnprocessedCmd.Deprecated = "use 'weft job mark-unprocessed' instead"
 	rootCmd.AddCommand(markUnprocessedCmd)
 }
 
@@ -40,7 +38,7 @@ func runMarkUnprocessed(_ *cobra.Command, args []string) error {
 }
 
 func setProcessedTag(args []string, processed bool) error {
-	jobIDs, err := ParseJobIDs(args)
+	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
 	if err != nil {
 		return err
 	}

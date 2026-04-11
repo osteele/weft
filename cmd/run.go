@@ -19,7 +19,6 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
-	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
@@ -61,8 +60,8 @@ Examples:
 			}
 			return nil
 		}
-		// Normal mode: 1 arg (command), or 2 args (deprecated positional host + command)
-		if len(args) < 1 || len(args) > 2 {
+		// Normal mode: exactly 1 arg (command)
+		if len(args) != 1 {
 			return fmt.Errorf("requires <command> argument")
 		}
 		return nil
@@ -245,24 +244,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		// Parse positional args
-		if len(args) == 2 {
-			// Backward compat: 2 args where first looks like a known host
-			if inventory.FindHost(args[0]) != nil {
-				if host == "" {
-					host = args[0]
-					fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: positional host is deprecated. Use: weft run --host %s '%s'\n", args[0], args[1])
-				}
-				command = args[1]
-			} else {
-				return usageErrorf("unexpected argument %q (use --host to specify a host)", args[0])
-			}
-		} else if len(args) == 1 {
-			// Single arg: is it a known host name, or a command?
-			if inventory.FindHost(args[0]) != nil {
-				return usageErrorf("'%s' looks like a host name. Usage: weft run --host %s <command>", args[0], args[0])
-			}
+		if len(args) == 1 {
 			command = args[0]
-			// host will be resolved via placement below
 		}
 	}
 

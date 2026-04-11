@@ -23,7 +23,6 @@ Examples:
 }
 
 func init() {
-	resumeCmd.Deprecated = "use 'weft job resume' instead"
 	rootCmd.AddCommand(resumeCmd)
 }
 
@@ -34,7 +33,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	}
 	defer service.Close()
 
-	jobIDs, err := ParseJobIDs(args)
+	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
 	if err != nil {
 		return err
 	}
