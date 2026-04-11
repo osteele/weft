@@ -229,14 +229,8 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	return updated
 }
 
-// AllowCompletedMarkerFallback permits matching a legacy .complete marker
-// (without run ID) for queued pre-launch jobs and running cloud jobs whose
-// agent may predate run-ID markers.
 func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
-	if currentStatus == db.StatusQueued && !launchID.Valid {
-		return true
-	}
-	return currentStatus == db.StatusRunning && launchID.Valid
+	return currentStatus == db.StatusQueued && !launchID.Valid
 }
 
 func ShouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
