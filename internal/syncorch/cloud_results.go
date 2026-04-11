@@ -29,9 +29,9 @@ const cloudInstanceOpslogLookback = 7 * 24 * time.Hour
 
 const (
 	// opslogSyncTimeout is the overall budget for the opslog sync phase.
-	opslogSyncTimeout = 30 * time.Second
+	opslogSyncTimeout = 60 * time.Second
 	// opslogRequestTimeout caps each individual R2 opslog fetch.
-	opslogRequestTimeout = 5 * time.Second
+	opslogRequestTimeout = 10 * time.Second
 )
 
 // syncCloudJobResults checks for completed cloud job results in R2.
