@@ -687,26 +687,37 @@ directly.
 
 ```bash
 weft job move <job-id>... <destination>
+weft job move [<job-id>...] --to <destination>
+weft job move --from <instance> --to <destination>
 ```
 
 **Destinations:**
 - `<hostname>` — on-prem inventory host (e.g., `cool100`, `studio`)
 - `wi<N>` — existing cloud instance (e.g., `wi872`)
 - `new` / `create` — launch new instance(s) grouped by GPU affinity
-- `new` with `--each` — launch a separate instance per job
+- `distinct` — synonym for `--each --to new` (separate new instance per job)
 
 **Flags:**
-- `--each` — with `new`/`create`: launch a separate instance per job
-- `--project <name>` — select all eligible queued jobs in the named project (can combine with explicit job IDs)
+- `--each` — with `new`/`create`/`distinct`: launch a separate instance per job
+- `--to <destination>` — destination as a flag instead of final positional argument
+- `--from <instance>` — select queued jobs from a source cloud instance (e.g., `wi872`)
+- `--project <name>` — select all eligible queued jobs in the named project
+
+Exactly one selector mode is required:
+- Job IDs (`<job-id>...`)
+- `--project <name>`
+- `--from <instance>`
 
 **Examples:**
 ```bash
 weft job move wj42 cool100              # Place/move job 42 to cool100
 weft job move wj43 wi872                # Submit job 43 to instance wi872
 weft job move wj44 new                  # Launch one new instance for job 44
-weft job move wj44 wj45 wj46 new            # Launch instance(s) for jobs 44-46
-weft job move wj44:wj46 --each new        # Separate new instance per job
-weft job move --project myproj new    # All queued myproj jobs → new instance(s)
+weft job move wj44 wj45 wj46 new       # Launch instance(s) for jobs 44-46
+weft job move wj44:wj46 --each new     # Separate new instance per job
+weft job move wj44:wj46 --to distinct  # Synonym for --each --to new
+weft job move --project myproj --to new
+weft job move --from wi872 --to wi900
 ```
 
 ### weft job place

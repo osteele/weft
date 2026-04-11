@@ -141,6 +141,7 @@ Destinations:
   wi<N>          Submit to an existing cloud instance (e.g., wi872)
   new            Launch new instance(s) sized for the jobs (grouped by GPU affinity)
   create         Alias for 'new'
+  distinct       Alias for '--each --to new' (separate new instance per job)
 
 Flags:
   --each              With 'new'/'create': launch a separate instance per job
@@ -155,6 +156,7 @@ Examples:
   weft job move 44 45 46 new            # Launch instance(s) for jobs 44-46
   weft job move 44 45 --to new          # Destination via --to/-t
   weft job move 44:46 --each new        # Separate new instance per job
+  weft job move 44:46 --to distinct     # Alias for --each --to new
   weft job move --from wi872 --to wi900 # Move queued jobs from wi872 to wi900
   weft job move --project myproj new    # All queued myproj jobs → new instance`,
 	Args: usageArgs(cobra.ArbitraryArgs),
@@ -370,7 +372,7 @@ func init() {
 	jobCmd.AddCommand(jobWatchCmd)
 	addJobMoveFlags(jobMoveCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
 	jobCmd.AddCommand(jobMoveCmd)
-	jobPlaceCmd.Flags().BoolVar(&jobPlaceEach, "each", false, "With 'new'/'create': launch a separate instance per job")
+	jobPlaceCmd.Flags().BoolVar(&jobPlaceEach, "each", false, "With 'new'/'create'/'distinct': launch a separate instance per job")
 	jobPlaceCmd.Flags().StringVar(&jobPlaceProject, "project", "", "Select all eligible unplaced queued jobs in the named project")
 	jobCmd.AddCommand(jobPlaceCmd)
 	jobCmd.AddCommand(jobDraftCmd)
@@ -445,10 +447,10 @@ func runJobPlace(cmd *cobra.Command, args []string) error {
 }
 
 func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {
-	cmd.Flags().BoolVar(each, "each", false, "With 'new'/'create': launch a separate instance per job")
+	cmd.Flags().BoolVar(each, "each", false, "With 'new'/'create'/'distinct': launch a separate instance per job")
 	cmd.Flags().StringVar(project, "project", "", "Select all eligible queued jobs in the named project")
 	if destination != nil {
-		cmd.Flags().StringVarP(destination, "to", "t", "", "Destination host, instance (wi<N>), or 'new'/'create'")
+		cmd.Flags().StringVarP(destination, "to", "t", "", "Destination host, instance (wi<N>), or 'new'/'create'/'distinct'")
 	}
 	if from != nil {
 		cmd.Flags().StringVarP(from, "from", "f", "", "Select queued jobs from source cloud instance (wi<N>)")
@@ -460,6 +462,7 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 	if err != nil {
 		return err
 	}
+	dest, each = normalizeMoveDestination(dest, each)
 
 	if err := validateMoveSelectors(jobArgs, project, from); err != nil {
 		return err
@@ -481,13 +484,20 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 		return moveJobsToNewInstances(database, eligible, each)
 	default:
 		if each {
-			return usageErrorf("--each is only valid with 'new' or 'create' destination")
+			return usageErrorf("--each is only valid with 'new', 'create', or 'distinct' destination")
 		}
 		if instanceID, parseErr := ids.ParseInstanceID(dest); parseErr == nil {
 			return moveJobsToInstance(database, eligible, instanceID)
 		}
 		return moveJobsToHost(database, eligible, dest)
 	}
+}
+
+func normalizeMoveDestination(dest string, each bool) (string, bool) {
+	if strings.EqualFold(strings.TrimSpace(dest), "distinct") {
+		return "new", true
+	}
+	return dest, each
 }
 
 func resolveMoveDestination(args []string, destinationFlag string) (string, []string, error) {

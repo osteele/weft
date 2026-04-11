@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/spf13/cobra"
 )
 
 func TestResolveMoveDestination_WithToFlag(t *testing.T) {
@@ -32,6 +34,26 @@ func TestResolveMoveDestination_UsesFinalPositionalDestination(t *testing.T) {
 	}
 	if len(jobArgs) != 2 || jobArgs[0] != "wj946" || jobArgs[1] != "wj943" {
 		t.Fatalf("job args = %v, want [wj946 wj943]", jobArgs)
+	}
+}
+
+func TestNormalizeMoveDestination_DistinctEnablesEach(t *testing.T) {
+	dest, each := normalizeMoveDestination("distinct", false)
+	if dest != "new" {
+		t.Fatalf("destination = %q, want %q", dest, "new")
+	}
+	if !each {
+		t.Fatal("expected distinct destination to enable --each semantics")
+	}
+}
+
+func TestNormalizeMoveDestination_OtherDestinationsUnchanged(t *testing.T) {
+	dest, each := normalizeMoveDestination("wi872", false)
+	if dest != "wi872" {
+		t.Fatalf("destination = %q, want %q", dest, "wi872")
+	}
+	if each {
+		t.Fatal("unexpected each=true for non-distinct destination")
 	}
 }
 
@@ -146,5 +168,27 @@ func TestMoveRootAlias_RequiresSelectorLikeJobMove(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "provide job IDs, --project, or --from") {
 		t.Fatalf("error = %q, want selector guidance", err)
+	}
+}
+
+func TestRunMove_AllowsFlagOnlySelectorForms(t *testing.T) {
+	origFrom, origProject, origTo := jobMoveFrom, jobMoveProject, jobMoveTo
+	origDelegate := runMoveDelegate
+	t.Cleanup(func() {
+		jobMoveFrom, jobMoveProject, jobMoveTo = origFrom, origProject, origTo
+		runMoveDelegate = origDelegate
+	})
+
+	jobMoveFrom = "wi872"
+	jobMoveTo = "new"
+
+	sentinel := errors.New("delegate called")
+	runMoveDelegate = func(cmd *cobra.Command, args []string) error {
+		return sentinel
+	}
+
+	err := runMove(moveCmd, nil)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected delegated execution, got %v", err)
 	}
 }

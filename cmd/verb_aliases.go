@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"github.com/spf13/cobra"
 )
 
@@ -73,11 +75,15 @@ or:
 	RunE: runMove,
 }
 
+var runMoveDelegate = runJobMove
+
 func runMove(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
+	// Keep bare `weft move` as help, but allow flag-only selector forms like:
+	//   weft move --from wi872 --to wi900
+	if len(args) == 0 && strings.TrimSpace(jobMoveFrom) == "" && strings.TrimSpace(jobMoveProject) == "" && strings.TrimSpace(jobMoveTo) == "" {
 		return cmd.Help()
 	}
-	return runJobMove(cmd, args)
+	return runMoveDelegate(cmd, args)
 }
 
 func init() {
