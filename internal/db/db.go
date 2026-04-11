@@ -966,7 +966,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 var dbPath string
 
@@ -1874,6 +1874,9 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN oplog_not_found INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN oplog_timeout INTEGER DEFAULT 0`); err != nil {
 		return err
 	}
 

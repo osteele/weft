@@ -1956,7 +1956,7 @@ func GetLaunchLiveStates(database *sql.DB, launchIDs []int64) (map[int64]*Launch
 // MarkOpslogSynced records a successful opslog fetch for a launch.
 func MarkOpslogSynced(database *sql.DB, launchID int64) error {
 	_, err := database.Exec(
-		`UPDATE launches SET oplog_synced_at = ?, oplog_not_found = 0 WHERE id = ?`,
+		`UPDATE launches SET oplog_synced_at = ?, oplog_not_found = 0, oplog_timeout = 0 WHERE id = ?`,
 		time.Now().Unix(), launchID)
 	return err
 }
@@ -1969,10 +1969,17 @@ func MarkOpslogNotFound(database *sql.DB, launchID int64) error {
 	return err
 }
 
+// MarkOpslogTimeout records that an opslog fetch timed out for a launch.
+func MarkOpslogTimeout(database *sql.DB, launchID int64) error {
+	_, err := database.Exec(
+		`UPDATE launches SET oplog_synced_at = ?, oplog_timeout = 1 WHERE id = ?`,
+		time.Now().Unix(), launchID)
+	return err
+}
+
 // ListLaunchIDsNeedingOpslogSync returns IDs of launches that need opslog sync.
 // Includes running/grace launches and recently-terminal launches, excluding those
-// where oplog_not_found=1 and the check was performed at least 10 minutes after
-// the instance terminated.
+// confirmed not-found or timed-out (checked at least 10 minutes after termination).
 func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]int64, error) {
 	cutoff := time.Now().Add(-since).Unix()
 	const safetyBuffer = 600 // 10 minutes
@@ -1983,11 +1990,11 @@ func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]in
 			-- Running/grace instances always need sync
 			status IN (?, ?)
 			OR (
-				-- Recently terminal instances, excluding known-not-found
+				-- Recently terminal instances, excluding known-not-found or timed-out
 				status IN (?, ?, ?)
 				AND ended_at >= ?
 				AND NOT (
-					oplog_not_found = 1
+					(oplog_not_found = 1 OR oplog_timeout = 1)
 					AND oplog_synced_at >= IFNULL(ended_at, 0) + ?
 				)
 			)

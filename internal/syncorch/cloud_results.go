@@ -266,7 +266,7 @@ func syncOneCompletedJobMarker(
 			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
 			return completedMarkerResult{}
 		}
-		slog.Info("attempting cloud completion backfill for terminal job",
+		slog.Debug("attempting cloud completion backfill for terminal job",
 			"component", "sync", "job_id", jobID, "reason", "terminal_incomplete_backfill")
 	}
 

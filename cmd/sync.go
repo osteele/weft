@@ -20,7 +20,6 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
@@ -76,6 +75,10 @@ const (
 	// cloudInstanceOpslogLookback controls how far back full sync caches
 	// instance-level ops logs for later `weft log --ops` inspection.
 	cloudInstanceOpslogLookback = 7 * 24 * time.Hour
+	// opslogSyncTimeout is the overall budget for the opslog sync phase.
+	opslogSyncTimeout = 30 * time.Second
+	// opslogRequestTimeout caps each individual R2 opslog fetch.
+	opslogRequestTimeout = 5 * time.Second
 )
 
 func init() {
@@ -398,7 +401,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	updatedInstanceIDs := make(map[int64]struct{})
 	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
-		if verbose {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "Warning: cloud sync skipped (R2 storage unreachable)\n")
+		} else if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: R2 list: %v\n", err)
 		}
 		return 0
@@ -521,7 +526,11 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 		wg.Wait()
 	}
-	if err := syncCloudInstanceOpslogs(ctx, r2Client, database, nil, verbose); err != nil && verbose {
+	// Use a fresh context for opslog sync — the shared ctx may be nearly
+	// expired after job-marker and timeseries syncing consumed most of its budget.
+	opslogCtx, opslogCancel := context.WithTimeout(context.Background(), opslogSyncTimeout)
+	defer opslogCancel()
+	if err := syncCloudInstanceOpslogs(opslogCtx, r2Client, database, nil, verbose); err != nil && verbose {
 		fmt.Fprintf(os.Stderr, "Warning: instance ops log sync failed: %v\n", err)
 	}
 
@@ -600,7 +609,7 @@ func syncOneCompletedJobMarker(
 			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
 			return completedMarkerResult{}
 		}
-		slog.Info("attempting cloud completion backfill for terminal job",
+		slog.Debug("attempting cloud completion backfill for terminal job",
 			"component", "sync", "job_id", jobID, "reason", "terminal_incomplete_backfill")
 	}
 
@@ -966,10 +975,16 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 		return nil
 	}
 
+	if verbose {
+		fmt.Printf("Syncing ops logs for %d instance(s)...\n", len(instanceIDList))
+	}
+
 	// Bounded parallelism for R2 reads
 	const maxParallel = 10
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var timeoutCount, errorCount int
 
 	for _, instanceID := range instanceIDList {
 		sem <- struct{}{}
@@ -984,13 +999,25 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 			case opslogNotFound:
 				_ = db.MarkOpslogNotFound(database, id)
 			case opslogError:
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: instance %s ops log sync failed: %v\n", ids.FormatInstanceID(id), err)
+				mu.Lock()
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					_ = db.MarkOpslogTimeout(database, id)
+					timeoutCount++
+				} else {
+					errorCount++
 				}
+				mu.Unlock()
 			}
 		}(instanceID)
 	}
 	wg.Wait()
+
+	if timeoutCount > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: %d instance ops log(s) skipped (R2 storage unreachable)\n", timeoutCount)
+	}
+	if errorCount > 0 && verbose {
+		fmt.Fprintf(os.Stderr, "Warning: %d instance ops log(s) failed to sync\n", errorCount)
+	}
 	return nil
 }
 
@@ -1007,7 +1034,9 @@ func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceI
 	if r2Client == nil || instanceID <= 0 {
 		return opslogNotFound, nil
 	}
-	data, err := r2Client.GetObject(ctx, r2keys.InstanceOpslog(instanceID))
+	reqCtx, cancel := context.WithTimeout(ctx, opslogRequestTimeout)
+	defer cancel()
+	data, err := r2Client.GetObject(reqCtx, r2keys.InstanceOpslog(instanceID))
 	if err != nil {
 		if r2.IsNotFound(err) {
 			return opslogNotFound, nil

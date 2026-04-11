@@ -688,30 +688,35 @@ rule DBAsSharedBus {
 -- ==========================================================================
 
 -- Opslog sync fetches instance operation logs from R2 for local caching.
--- Uses negative caching to avoid re-fetching oplogs that don't exist.
+-- Uses negative caching to avoid re-fetching oplogs that don't exist or time out.
+-- Gets its own context timeout, independent of the job-marker sync budget.
 rule OpslogSync {
     when: OpslogSyncRequested(instances)
 
-    -- Filter out instances with cached not-found status
+    -- Filter out instances with cached not-found or timed-out status
     let candidates = instances.filter(i =>
-        not (i.oplog_not_found = true
+        not ((i.oplog_not_found = true or i.oplog_timeout = true)
              and i.oplog_synced_at >= i.ended_at + config.oplog_not_found_buffer))
 
-    -- Fetch in parallel with bounded concurrency
+    -- Fetch in parallel with bounded concurrency; each request has its own timeout
     for instance in candidates (parallel, max: config.oplog_max_parallel):
-        let result = FetchR2Opslog(instance)
+        let result = FetchR2Opslog(instance, timeout: config.oplog_request_timeout)
         if result = synced:
             ensures: OpslogCached(instance)
             ensures: instance.oplog_synced_at = now
-        else if result in {not_found, error}:
+        else if result = not_found:
             ensures: instance.oplog_not_found = true
+            ensures: instance.oplog_synced_at = now
+        else if result = timeout:
+            ensures: instance.oplog_timeout = true
             ensures: instance.oplog_synced_at = now
 
     @guidance
-        -- DB columns on launches: oplog_synced_at, oplog_not_found
-        -- Safety buffer: 10 minutes after ended_at before trusting not-found
+        -- DB columns on launches: oplog_synced_at, oplog_not_found, oplog_timeout
+        -- Safety buffer: 10 minutes after ended_at before trusting not-found/timeout
         -- Running/grace instances are always re-checked regardless of flags
         -- Bounded parallelism: 10 concurrent R2 reads (semaphore channel)
+        -- Per-request timeout: 5s; overall sync timeout: 30s (fresh context)
 }
 
 config {
@@ -719,6 +724,8 @@ config {
     oplog_lookback: Duration = 7.days
     oplog_not_found_buffer: Duration = 10.minutes
     oplog_max_parallel: Integer = 10
+    oplog_sync_timeout: Duration = 30.seconds
+    oplog_request_timeout: Duration = 5.seconds
 }
 
 -- ==========================================================================
