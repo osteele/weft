@@ -554,34 +554,6 @@ weft sync inspect --show-excludes
 weft sync inspect --json
 ```
 
-### weft prune
-
-Tombstone completed/dead jobs so they disappear from listings, and optionally delete their log files on remote hosts.
-
-```bash
-weft prune [flags]
-```
-
-**Flags:**
-- `--older-than DURATION`: Only remove jobs older than this (e.g., `7d`, `24h`, `30m`)
-- `--dead-only`: Only remove dead jobs (not completed)
-- `--dry-run`: Preview what would be deleted without actually deleting
-- `--keep-files`: Don't delete remote log files (only remove from database)
-
-**Examples:**
-```bash
-weft prune                    # Tombstone all completed/dead jobs
-weft prune --older-than 7d    # Only tombstone jobs older than 7 days
-weft prune --older-than 24h   # Only tombstone jobs older than 24 hours
-weft prune --dry-run          # Preview which jobs would be tombstoned
-weft prune --dead-only        # Only tombstone dead jobs
-weft prune --keep-files       # Tombstone locally but keep remote files
-
-Tombstoned jobs remain in the database for auditing and can still be viewed with
-`weft job status <id>` or `weft log <id>`, but they disappear from
-`weft list` and the TUI.
-```
-
 ### weft log
 
 View the full log file for a job.

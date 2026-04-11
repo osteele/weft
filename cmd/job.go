@@ -301,13 +301,6 @@ var jobMarkUnprocessedCmd = &cobra.Command{
 	RunE:  runMarkUnprocessed,
 }
 
-var jobPruneCmd = &cobra.Command{
-	Use:   "prune",
-	Short: pruneCmd.Short,
-	Long:  pruneCmd.Long,
-	RunE:  runPrune,
-}
-
 var jobPredictCmd = &cobra.Command{
 	Use:   "predict <command>",
 	Short: "Predict job duration and resource usage",
@@ -389,7 +382,6 @@ func init() {
 	jobCmd.AddCommand(jobCleanupCmd)
 	jobCmd.AddCommand(jobMarkProcessedCmd)
 	jobCmd.AddCommand(jobMarkUnprocessedCmd)
-	jobCmd.AddCommand(jobPruneCmd)
 	jobCmd.AddCommand(jobPredictCmd)
 	jobCmd.AddCommand(jobUnplaceCmd)
 	jobCmd.AddCommand(jobTagCmd)
@@ -437,12 +429,6 @@ func init() {
 	jobCleanupCmd.Flags().BoolVar(&cleanupLogs, "logs", false, "Clean log files only")
 	jobCleanupCmd.Flags().IntVar(&cleanupOlderThan, "older-than", 7, "Only clean items older than N days")
 	jobCleanupCmd.Flags().BoolVar(&cleanupDryRun, "dry-run", false, "Preview without actually deleting")
-
-	// Flags for job prune
-	jobPruneCmd.Flags().StringVar(&pruneOlderThan, "older-than", "", "Only remove jobs older than this duration (e.g., 7d, 24h, 30m)")
-	jobPruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Preview without actually deleting")
-	jobPruneCmd.Flags().BoolVar(&pruneDeadOnly, "dead-only", false, "Only remove dead jobs (not completed)")
-	jobPruneCmd.Flags().BoolVar(&pruneKeepFiles, "keep-files", false, "Don't delete remote log files")
 
 	// Flags for job predict
 	jobPredictCmd.Flags().StringVar(&predictHost, "host", "", "Target host")

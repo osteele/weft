@@ -106,7 +106,7 @@ weft/
 │   ├── sync.go            # Sync job statuses + deploy agent binary
 │   ├── queue.go           # Queue commands (add, start, stop, list)
 │   ├── tui.go             # Launch interactive TUI
-│   └── ...                # job, kill, log, restart, cleanup, prune, etc.
+│   └── ...                # job, kill, log, restart, cleanup,  etc.
 ├── cmd/agent/              # Go agent binary (deployed to remote hosts)
 │   └── main.go            # Entry point for weft-agent run-queue
 ├── internal/

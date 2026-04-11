@@ -317,7 +317,7 @@ usage.
 │   Threads: 24                                                                │
 │   GPU 0:   85% util, 12.5GiB                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav l:logs s:sync n:new r:restart k:kill d:draft p:prune h:hosts q:quit
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill d:draft h:hosts q:quit
 ```
 
 Press `l` to view logs:
@@ -337,7 +337,7 @@ Press `l` to view logs:
 │ Epoch 48/100: loss=0.0218, acc=0.9831                                        │
 │ ...                                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill h:hosts q:quit
 ```
 
 Press `?` for the full keyboard shortcut help overlay.
