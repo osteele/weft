@@ -446,6 +446,18 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	}
 
 	if !job.HasInventoryHost() {
+		// Unplaced rental jobs (instance was terminated) — reset to queued
+		if job.HasTag(db.TagRental) {
+			if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+				return err
+			}
+			if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+				return err
+			}
+			fmt.Printf("Reset job %d to queued (unplaced rental job)\n", jobID)
+			tryResumeRunawayBreaker(database, job)
+			return nil
+		}
 		return fmt.Errorf("job missing host")
 	}
 

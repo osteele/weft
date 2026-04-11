@@ -638,6 +638,58 @@ print("train")
 	}
 }
 
+func TestRestartUnplacedRentalJob_ResetsToQueued(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Create a rental job, assign it to an instance, then clear the instance
+	// (simulating instance termination). Retry should reset to unplaced.
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "orphan-retry", "nvidia")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.AddJobTag(database, jobID, db.TagRental); err != nil {
+		t.Fatalf("add rental tag: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set launch: %v", err)
+	}
+	// Mark the attempt as failed
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusFailed, 1000, jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	// Clear the launch (simulates instance termination cleanup)
+	if _, err := database.Exec(`UPDATE job_attempts SET launch_id = NULL WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("clear launch: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("status = %q, want %q", job.EffectiveStatus(), db.StatusQueued)
+	}
+	if job.Host != "" {
+		t.Fatalf("host = %q, want empty", job.Host)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("launch_id = %v, want nil", job.LaunchID)
+	}
+}
+
 func intPtrRestart(v int) *int {
 	return &v
 }
