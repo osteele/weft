@@ -57,3 +57,13 @@ func TestNewAgentJobNilEnvVars(t *testing.T) {
 		t.Fatalf("env = %v, want nil", got.Env)
 	}
 }
+
+func TestNewCloudAgentJobRejectsMissingRunID(t *testing.T) {
+	job := &db.Job{
+		ID:      7,
+		Command: "echo hi",
+	}
+	if _, err := newCloudAgentJob(job, "/workspace/repo"); err == nil {
+		t.Fatal("expected error for missing latest_run_id")
+	}
+}

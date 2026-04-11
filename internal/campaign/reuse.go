@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -370,8 +371,23 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return jobs[i].ID < jobs[j].ID
 	})
 
-	// Upload sources and build payload
+	claimedJobs := make([]*db.Job, 0, len(jobs))
+	claimedJobIDs := make([]int64, 0, len(jobs))
 	for _, job := range jobs {
+		claimedJob, err := claimJobForLaunch(database, job.ID, instanceID)
+		if err != nil {
+			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			if rollbackErr != nil {
+				return fmt.Errorf("claim job %d for instance %s: %w (rollback: %v)", job.ID, ids.FormatInstanceID(instanceID), err, rollbackErr)
+			}
+			return fmt.Errorf("claim job %d for instance %s: %w", job.ID, ids.FormatInstanceID(instanceID), err)
+		}
+		claimedJobs = append(claimedJobs, claimedJob)
+		claimedJobIDs = append(claimedJobIDs, claimedJob.ID)
+	}
+
+	// Upload sources and build payload
+	for _, job := range claimedJobs {
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 
 		// Upload fresh sources (content-addressed, so deduped)
@@ -379,13 +395,25 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
 		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir, job.Inputs)
 		if err != nil {
+			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			if rollbackErr != nil {
+				return fmt.Errorf("upload source for job %d: %w (rollback: %v)", job.ID, err, rollbackErr)
+			}
 			return fmt.Errorf("upload source for job %d: %w", job.ID, err)
 		}
 
 		// Compute remote working directory under the synced project root.
 		remoteDir := path.Join(cloud.ProjectRootDir, path.Base(sourceDir))
 
-		payload.Jobs = append(payload.Jobs, newAgentJob(job, remoteDir))
+		agentJob, err := newCloudAgentJob(job, remoteDir)
+		if err != nil {
+			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			if rollbackErr != nil {
+				return fmt.Errorf("build agent job payload for job %d: %w (rollback: %v)", job.ID, err, rollbackErr)
+			}
+			return fmt.Errorf("build agent job payload for job %d: %w", job.ID, err)
+		}
+		payload.Jobs = append(payload.Jobs, agentJob)
 		payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
 			RemoteDir: remoteDir,
 			R2Key:     sourceR2Key,
@@ -406,10 +434,18 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 	// the agent will find it. Grace instances poll continuously, so we wait.
 	if inst.Status == db.LaunchStatusRunning {
 		if err := sendGraceJobPayloadNoAck(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
+			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			if rollbackErr != nil {
+				return fmt.Errorf("submit jobs to instance control plane: %w (rollback: %v)", err, rollbackErr)
+			}
 			return fmt.Errorf("submit jobs to instance control plane: %w", err)
 		}
 	} else {
 		if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
+			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			if rollbackErr != nil {
+				return fmt.Errorf("submit jobs to instance control plane: %w (rollback: %v)", err, rollbackErr)
+			}
 			return fmt.Errorf("submit jobs to instance control plane: %w", err)
 		}
 	}
@@ -422,11 +458,15 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
-	for _, job := range jobs {
-		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
-			return fmt.Errorf("associate job %d with instance %s: %w", job.ID, ids.FormatInstanceID(instanceID), err)
+	return nil
+}
+
+func resetClaimedJobsToUnplaced(database *sql.DB, jobIDs []int64) error {
+	var rollbackErr error
+	for _, jobID := range jobIDs {
+		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("reset job %d to unplaced: %w", jobID, err))
 		}
 	}
-
-	return nil
+	return rollbackErr
 }

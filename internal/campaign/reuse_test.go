@@ -456,6 +456,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if len(got.Jobs) != 1 {
 		t.Fatalf("jobs len = %d, want 1", len(got.Jobs))
 	}
+	if got.Jobs[0].RunID <= 0 {
+		t.Fatalf("run_id = %d, want non-zero", got.Jobs[0].RunID)
+	}
 	if !reflect.DeepEqual(got.Jobs[0].OutputDirs, []string{"results/"}) {
 		t.Fatalf("output dirs = %v", got.Jobs[0].OutputDirs)
 	}
@@ -476,5 +479,69 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(uploadedInputs, []string{"local:data/conllu/"}) {
 		t.Fatalf("uploaded inputs = %v", uploadedInputs)
+	}
+}
+
+func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobAID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project-a", "python a.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU A: %v", err)
+	}
+	jobBID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project-b", "python b.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU B: %v", err)
+	}
+	jobA, err := db.GetJobByID(database, jobAID)
+	if err != nil {
+		t.Fatalf("GetJobByID A: %v", err)
+	}
+	jobB, err := db.GetJobByID(database, jobBID)
+	if err != nil {
+		t.Fatalf("GetJobByID B: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+	})
+
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
+		return sourceDir + ".tar.gz", nil
+	}
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) error {
+		return errors.New("write failed")
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{jobA, jobB})
+	if err == nil {
+		t.Fatal("expected submit error")
+	}
+
+	reloadedA, err := db.GetJobByID(database, jobAID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload A: %v", err)
+	}
+	reloadedB, err := db.GetJobByID(database, jobBID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload B: %v", err)
+	}
+	if reloadedA.LaunchID != nil {
+		t.Fatalf("job A LaunchID = %v, want nil", *reloadedA.LaunchID)
+	}
+	if reloadedB.LaunchID != nil {
+		t.Fatalf("job B LaunchID = %v, want nil", *reloadedB.LaunchID)
 	}
 }

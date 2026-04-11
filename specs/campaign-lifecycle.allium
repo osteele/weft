@@ -381,10 +381,21 @@ rule SubmitJobDuringGrace {
     ensures: instance.status = running
 
     @guidance
-        -- Coordinator writes GraceJobsRequest to R2 at
-        -- grace/<instanceID>/jobs/<requestID>.json.
-        -- Agent reads, processes, writes ack to grace/<instanceID>/acks/.
-        -- Grace state cleared: instance resumes running.
+        -- Submission sequence (DB first, then R2):
+        -- 1. claimJobForLaunch: creates job_attempts row, associates
+        --    job with instance, assigns run_id (the attempt ID)
+        -- 2. Upload sources to R2 (content-addressed, deduped)
+        -- 3. Build agent payload using claimed job's LatestRunID
+        -- 4. Write GraceJobsRequest to R2 at
+        --    grace/<instanceID>/jobs/<requestID>.json
+        -- 5. Agent reads, processes, writes ack to
+        --    grace/<instanceID>/acks/
+        --
+        -- If any step after claim fails, claimed jobs are rolled back
+        -- to unplaced via resetClaimedJobsToUnplaced.
+        --
+        -- This ordering guarantees the run_id in the agent payload
+        -- matches the DB. See R2RunIDFromDB invariant in status-sync.
 }
 
 rule ExtendGracePeriod {

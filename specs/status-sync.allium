@@ -370,6 +370,11 @@ rule SyncCloudInstanceState {
         -- instance/<id>/termination-intent.json — cleanup control
         -- instance/<id>/agent-version — agent binary version
         -- jobs/<jobID>/runs/<runID>/.complete — per-job exit code
+        --
+        -- The runID in R2 key paths is the job_attempts.id from the DB.
+        -- Both agent (writer) and sync (reader) derive it from the same
+        -- DB row, established by claimJobForLaunch before the agent
+        -- payload is built. See R2RunIDFromDB invariant.
 }
 
 -- Sync individual job completions from R2 .complete markers.
@@ -377,7 +382,8 @@ rule SyncJobCompletionsFromR2 {
     when: JobCompletionSyncRequested(instance)
 
     for job in instance.jobs where not job.is_terminal:
-        let r2_complete = R2JobCompleteMarker(job)
+        let run_id = job.latest_attempt.id
+        let r2_complete = R2JobCompleteMarker(job, run_id)
         if r2_complete != null:
             if r2_complete.exit_code = 0:
                 ensures: job.status = completed
@@ -391,6 +397,12 @@ rule SyncJobCompletionsFromR2 {
         -- Contains exit code. Written by agent synchronously before
         -- moving to next job. Read by reconciler each pass to keep
         -- DB in sync without waiting for terminal instance action.
+        --
+        -- The run_id used to construct the R2 key comes from
+        -- job.latest_attempt.id (the job_attempts row). Both the
+        -- agent and sync must use the same run_id. This is guaranteed
+        -- by claimJobForLaunch creating the attempt before building
+        -- the agent payload. See R2RunIDFromDB invariant.
 }
 
 -- ==========================================================================
@@ -433,6 +445,8 @@ rule AgentReportsJobComplete {
         -- Written to: jobs/<jobID>/runs/<runID>/.complete
         -- Contains exit code as plain text.
         -- Written synchronously before agent moves to next job.
+        -- The runID is the job_attempts.id assigned by claimJobForLaunch
+        -- before the agent payload is built. See R2RunIDFromDB invariant.
 }
 
 -- Agent writes completion manifest when all jobs finish.
@@ -735,6 +749,35 @@ invariant PendingStatusClearedAfterApply {
     for attempt in JobAttempts:
         if attempt.pending_status != null:
             attempt.pending_at != null
+}
+
+invariant R2RunIDFromDB {
+    -- The run_id used in R2 key paths (jobs/<jobID>/runs/<runID>/...)
+    -- must be the job_attempts.id established in the DB before the
+    -- agent payload is constructed. Both the agent (R2 writer) and
+    -- sync (R2 reader) derive the run_id from the same DB row.
+    --
+    -- This prevents a class of bugs where the agent writes R2 markers
+    -- at one path and sync looks for them at another.
+    --
+    -- Enforcement: claimJobForLaunch creates the job_attempts row
+    -- (via SetJobLaunchID) and re-reads the job to get the fresh
+    -- LatestRunID before the agent payload is built.
+    -- newCloudAgentJob validates that LatestRunID is non-zero.
+    for job in jobs/Jobs:
+        if job.cloud_instance != null and not job.is_terminal:
+            job.latest_attempt != null
+            job.latest_attempt.id > 0
+
+    @guidance
+        -- Implementation: internal/campaign/launch_claim.go
+        -- claimJobForLaunch(database, jobID, instanceID) performs:
+        --   1. SetJobLaunchID → creates job_attempts row (the run_id)
+        --   2. GetJobByID → re-reads to get fresh LatestRunID
+        --   3. Validates LatestRunID > 0 and LaunchID matches
+        -- This must complete before newCloudAgentJob builds the payload.
+        -- If claim fails, all previously claimed jobs are rolled back
+        -- to unplaced via resetClaimedJobsToUnplaced.
 }
 
 invariant GraceDetectionRequiresNoActiveJobs {

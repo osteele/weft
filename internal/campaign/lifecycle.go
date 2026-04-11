@@ -1220,7 +1220,8 @@ func LaunchInstance(
 	// now are skipped rather than causing a hard failure.
 	var claimedJobs []*db.Job
 	for i, job := range group.Jobs {
-		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
+		updatedJob, err := claimJobForLaunch(database, job.ID, instanceID)
+		if err != nil {
 			if errors.Is(err, db.ErrJobAlreadyClaimed) {
 				slog.Info("job claimed by another launch, skipping",
 					"component", "launch", "job_id", job.ID, "launch_id", instanceID)
@@ -1231,16 +1232,9 @@ func LaunchInstance(
 				oplog.WithError(err),
 			)
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, fmt.Errorf("set launch_id for job %d: %w", job.ID, err)
+			return instanceID, err
 		}
-		updatedJob, err := db.GetJobByID(database, job.ID)
-		if err != nil {
-			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, fmt.Errorf("refresh job %d after cloud assignment: %w", job.ID, err)
-		}
-		if updatedJob != nil {
-			group.Jobs[i] = updatedJob
-		}
+		group.Jobs[i] = updatedJob
 		if err := db.SetJobCampaignIndex(database, job.ID, i); err != nil {
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 			return instanceID, fmt.Errorf("set campaign_job_index for job %d: %w", job.ID, err)
@@ -1268,7 +1262,12 @@ func LaunchInstance(
 
 	var agentJobs []cloud.AgentJob
 	for _, job := range group.Jobs {
-		agentJobs = append(agentJobs, newAgentJob(job, remoteDirForAgentJob(job, localToRemote)))
+		agentJob, err := newCloudAgentJob(job, remoteDirForAgentJob(job, localToRemote))
+		if err != nil {
+			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+			return instanceID, fmt.Errorf("build agent job payload for job %d: %w", job.ID, err)
+		}
+		agentJobs = append(agentJobs, agentJob)
 	}
 
 	// Sort jobs by ID so the agent executes them in submission order
