@@ -85,7 +85,7 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
 	cmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
 	cmd.Flags().BoolVar(&listFailed, "failed", false, "Show only failed jobs (failed, dead, or completed with non-zero exit code)")
-	cmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, paused, starting, completed, queued, dead, failed, processed, unprocessed)")
+	cmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, paused, starting, pending_placement, completed, queued, dead, failed, processed, unprocessed)")
 	cmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	cmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
 	cmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")

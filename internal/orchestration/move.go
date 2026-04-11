@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -151,6 +152,16 @@ func ExecuteOption(
 	if opt.Offer == nil {
 		return "", fmt.Errorf("new-instance option missing offer")
 	}
+	markedJobIDs, err := markJobsPendingPlacement(database, []int64{job.ID})
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if restoreErr := restorePendingPlacementToQueued(database, markedJobIDs); restoreErr != nil {
+			slog.Warn("failed to normalize pending_placement jobs", "component", "move", "error", restoreErr)
+		}
+	}()
+
 	offer := *opt.Offer
 	group := campaign.InstanceGroup{GPUClass: job.GPUClass, Jobs: []*db.Job{job}}
 	if job.GPUMemGB != nil {
@@ -399,6 +410,22 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		}
 	}
 	logPhase("refresh_launchable", refreshStarted, fmt.Sprintf("launchable=%d warnings=%d", len(launchable), len(warnings)), nil)
+
+	launchableIDs := make([]int64, 0, len(launchable))
+	for _, job := range launchable {
+		if job != nil {
+			launchableIDs = append(launchableIDs, job.ID)
+		}
+	}
+	markedJobIDs, err := markJobsPendingPlacement(database, launchableIDs)
+	if err != nil {
+		return BulkResult{}, err
+	}
+	defer func() {
+		if restoreErr := restorePendingPlacementToQueued(database, markedJobIDs); restoreErr != nil {
+			slog.Warn("failed to normalize pending_placement jobs", "component", "move", "error", restoreErr)
+		}
+	}()
 
 	groupStarted := time.Now()
 	var groups []campaign.InstanceGroup

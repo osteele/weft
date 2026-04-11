@@ -256,6 +256,9 @@ func formatJobListStatus(job *db.Job) string {
 	}
 
 	status := job.EffectiveStatus()
+	if status == db.StatusPendingPlacement {
+		status = "launching"
+	}
 	if display := queueblock.Display(job, nil); display.Blocked {
 		status = "blocked"
 	}

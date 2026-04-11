@@ -16,6 +16,7 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 		{ID: 2, Status: db.StatusStarting, Host: "cool30", Project: "proj", Description: "run b"},
 		{ID: 3, Status: db.StatusQueued, Host: "cool30", Project: "proj", Description: "queue"},
 		{ID: 10, Status: db.StatusPendingPlacement, Host: "", Project: "proj", Description: "needs placement"},
+		{ID: 11, Status: db.StatusQueued, Host: "", Project: "proj", Description: "still unplaced"},
 		{ID: 4, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Host: "cool30", Project: "proj", Description: "ok"},
 		{ID: 5, Status: db.StatusFailed, Host: "cool30", Project: "proj", Description: "failed"},
 		{ID: 6, Status: db.StatusDead, Host: "cool30", Project: "proj", Description: "dead"},
@@ -28,6 +29,7 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 
 	wantOrder := []string{
 		"Running (2):",
+		"Launching (1):",
 		"Queued (1):",
 		"Unplaced (1):",
 		"Completions (1):",
@@ -54,6 +56,9 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 	}
 	if !strings.Contains(out, "- wj9 — proj canceled (rental) — canceled") {
 		t.Fatalf("missing rental canceled line in output:\n%s", out)
+	}
+	if !strings.Contains(out, "- wj10 — proj needs placement — instance starting") {
+		t.Fatalf("missing launching suffix in output:\n%s", out)
 	}
 }
 

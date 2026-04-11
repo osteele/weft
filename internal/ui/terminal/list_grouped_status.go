@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/dashboard"
@@ -53,6 +54,7 @@ func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]
 
 func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
+	launching := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
 	unplaced := make([]*db.Job, 0)
 	completions := make([]*db.Job, 0)
@@ -66,6 +68,8 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		switch groupedStatusBucket(job) {
 		case "running":
 			running = append(running, job)
+		case "launching":
+			launching = append(launching, job)
 		case "queued":
 			queued = append(queued, job)
 		case "unplaced":
@@ -81,6 +85,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 
 	sections := []groupedStatusSection{
 		{title: "Running", key: "running", jobs: running},
+		{title: "Launching", key: "launching", jobs: launching},
 		{title: "Queued", key: "queued", jobs: queued},
 		{title: "Unplaced", key: "unplaced", jobs: unplaced},
 		{title: "Completions", key: "completions", jobs: completions},
@@ -249,6 +254,12 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 	if sectionKey == "running" && job.StartTime > 0 {
 		return "started " + shortRelativeTime(now.Unix()-job.StartTime)
 	}
+	if sectionKey == "launching" {
+		if job.LaunchID != nil && *job.LaunchID > 0 {
+			return fmt.Sprintf("instance %s starting", ids.FormatInstanceID(*job.LaunchID))
+		}
+		return "instance starting"
+	}
 	if sectionKey == "completions" && job.EndTime != nil && *job.EndTime > 0 {
 		return "completed " + shortRelativeTime(now.Unix()-*job.EndTime)
 	}
@@ -302,7 +313,9 @@ func groupedStatusBucket(job *db.Job) string {
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
 		return "running"
-	case db.StatusQueued, db.StatusPendingPlacement:
+	case db.StatusPendingPlacement:
+		return "launching"
+	case db.StatusQueued:
 		if job.TargetKind() == db.JobTargetUnplaced {
 			return "unplaced"
 		}

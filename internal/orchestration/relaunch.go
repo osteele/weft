@@ -25,6 +25,16 @@ func RelaunchOrphanedJobs(
 	restrictToReset bool,
 	includeFreshUnplaced bool,
 ) (*campaign.RelaunchResult, error) {
+	markedJobIDs, err := markJobsPendingPlacement(database, scopeJobIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if restoreErr := restorePendingPlacementToQueued(database, markedJobIDs); restoreErr != nil {
+			slog.Warn("failed to normalize pending_placement jobs", "component", "auto-relaunch", "error", restoreErr)
+		}
+	}()
+
 	resetJobs, err := db.ResetJobsOnTerminalLaunches(database)
 	if err != nil {
 		slog.Warn("failed to reset jobs on terminal launches", "component", "auto-relaunch", "error", err)

@@ -85,6 +85,10 @@ entity Job {
     is_placed: host != null
     is_terminal: status in {completed, failed, dead, killed, canceled, draft}
     needs_placement: status = pending_placement
+    -- queued+unplaced means no prospective assignment yet.
+    is_unplaced_queue: status = queued and target_kind = unplaced
+    -- pending_placement means launch/placement is actively in progress.
+    is_launching: status = pending_placement
     is_blocked: dep_spec != null and dependency_job.is_terminal = false
 
     -- Status
@@ -269,6 +273,21 @@ rule PlaceJob {
         -- data locality (input assets already cached on host), queue depth,
         -- and estimated transfer time. Jobs with `rental` tag prefer cloud
         -- instances; jobs with `inventory` tag prefer on-prem hosts.
+}
+
+rule LaunchPlacementWindow {
+    when: LaunchWorkflowBegins(jobs)
+    requires: for job in jobs: job.status in {queued, pending_placement}
+
+    ensures: for job in jobs: job.status = pending_placement
+
+    @guidance
+        -- Distinguish "unplaced and waiting for a decision" from
+        -- "placement already in progress while launching infrastructure":
+        --   - queued + target_kind=unplaced => not assigned yet
+        --   - pending_placement => selected for launch/placement work
+        -- Jobs return to queued if launch/placement fails; claimed jobs become
+        -- queued once assigned to a host/instance.
 }
 
 rule ReleaseDependency {
