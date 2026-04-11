@@ -73,9 +73,9 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			fmt.Fprintf(os.Stderr, "Warning: cloud sync skipped (R2 storage unreachable)\n")
+			slog.Warn("cloud sync skipped", "component", "sync", "reason", "R2 storage unreachable")
 		} else if verbose {
-			fmt.Fprintf(os.Stderr, "Warning: R2 list: %v\n", err)
+			slog.Warn("R2 list failed", "component", "sync", "error", err)
 		}
 		return 0
 	}
@@ -683,10 +683,10 @@ func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 	}
 	wg.Wait()
 	if timeoutCount > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: %d instance ops log(s) skipped (R2 storage unreachable)\n", timeoutCount)
+		slog.Warn("opslog sync timed out", "component", "sync", "count", timeoutCount)
 	}
-	if errorCount > 0 && verbose {
-		fmt.Fprintf(os.Stderr, "Warning: %d instance ops log(s) failed to sync\n", errorCount)
+	if errorCount > 0 {
+		slog.Warn("opslog sync errors", "component", "sync", "count", errorCount)
 	}
 	return nil
 }

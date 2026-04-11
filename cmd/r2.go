@@ -15,6 +15,7 @@ const r2CmdTimeout = 15 * time.Second
 
 func init() {
 	rootCmd.AddCommand(r2Cmd)
+	r2Cmd.AddCommand(r2StatusCmd)
 	r2Cmd.AddCommand(r2LsCmd)
 	r2Cmd.AddCommand(r2CatCmd)
 }
@@ -30,6 +31,29 @@ func newR2Client() (*r2.Client, error) {
 		return nil, err
 	}
 	return r2.New(r2Config(cfg))
+}
+
+var r2StatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Check whether R2 storage is reachable",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newR2Client()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		start := time.Now()
+		_, err = client.ListObjects(ctx, "instance/0/") // lightweight probe
+		elapsed := time.Since(start)
+		if err != nil {
+			fmt.Printf("unreachable (%s): %v\n", elapsed.Round(time.Millisecond), err)
+			os.Exit(1)
+		}
+		fmt.Printf("ok (%s)\n", elapsed.Round(time.Millisecond))
+		return nil
+	},
 }
 
 var r2LsCmd = &cobra.Command{
