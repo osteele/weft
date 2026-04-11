@@ -430,9 +430,10 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 		parts = append(parts, fmt.Sprintf("geolocation notin [%s]", strings.Join(quoted, ",")))
 	}
 
-	// Always require SSH and verified machines
+	// Always require SSH, verified machines, and full GPU allocation
 	parts = append(parts, "direct_port_count>=1")
 	parts = append(parts, "verified=true")
+	parts = append(parts, "gpu_frac=1")
 
 	return strings.Join(parts, " "), postFilter
 }

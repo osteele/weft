@@ -162,7 +162,7 @@ func TestBuildSearchFilter(t *testing.T) {
 		{
 			name:        "defaults only",
 			constraints: OfferConstraints{},
-			wantParts:   []string{"num_gpus=1", "direct_port_count>=1", "verified=true"},
+			wantParts:   []string{"num_gpus=1", "direct_port_count>=1", "verified=true", "gpu_frac=1"},
 		},
 		{
 			name: "with GPU class and memory",
