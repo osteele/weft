@@ -18,13 +18,12 @@ import (
 )
 
 type CloudSyncOptions struct {
-	Timeout           time.Duration
-	Verbose           bool
-	Reconciler        any
-	Clients           []any
-	R2Client          any
-	SyncResults       bool
-	CloudJobResultsFn func(*config.Config, *sql.DB, bool) int
+	Timeout     time.Duration
+	Verbose     bool
+	Reconciler  any
+	Clients     []any
+	R2Client    any
+	SyncResults bool
 
 	LeaseScope string
 	LeaseOwner string
@@ -125,11 +124,7 @@ func syncCloud(cfg *config.Config, database *sql.DB, opts CloudSyncOptions) Clou
 func syncCloudWithClients(database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, opts CloudSyncOptions, cfg *config.Config) CloudSyncResult {
 	syncResults := func() int { return 0 }
 	if opts.SyncResults {
-		if opts.CloudJobResultsFn != nil {
-			syncResults = func() int { return opts.CloudJobResultsFn(cfg, database, opts.Verbose) }
-		} else {
-			syncResults = func() int { return SyncCloudJobResults(cfg, database, opts.Verbose) }
-		}
+		syncResults = func() int { return SyncCloudJobResults(cfg, database, opts.Verbose) }
 	}
 	result := cloudsync.SyncState(database, reconciler, clients, r2Client, syncResults)
 	if opts.Verbose && result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {

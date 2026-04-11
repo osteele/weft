@@ -29,9 +29,6 @@ func syncCloudState(cfg *config.Config, database *sql.DB, reconciler *campaign.R
 		Reconciler:  reconciler,
 		SyncResults: true,
 		Timeout:     0,
-		CloudJobResultsFn: func(cfg *config.Config, database *sql.DB, verbose bool) int {
-			return syncCloudJobResults(cfg, database, verbose)
-		},
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}
 }
@@ -45,9 +42,6 @@ func syncCloudStateWithTimeout(cfg *config.Config, database *sql.DB, reconciler 
 		Reconciler:  reconciler,
 		SyncResults: true,
 		Timeout:     timeout,
-		CloudJobResultsFn: func(cfg *config.Config, database *sql.DB, verbose bool) int {
-			return syncCloudJobResults(cfg, database, verbose)
-		},
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}, res.Completed
 }
@@ -64,9 +58,6 @@ func syncCloudStateWithClients(cfg *config.Config, database *sql.DB, reconciler 
 		R2Client:    r2Client,
 		SyncResults: true,
 		Timeout:     0,
-		CloudJobResultsFn: func(cfg *config.Config, database *sql.DB, verbose bool) int {
-			return syncCloudJobResults(cfg, database, verbose)
-		},
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}
 }
@@ -86,9 +77,6 @@ func syncCloudStateWithClientsTimeout(cfg *config.Config, database *sql.DB, reco
 		R2Client:    r2Client,
 		SyncResults: true,
 		Timeout:     timeout,
-		CloudJobResultsFn: func(cfg *config.Config, database *sql.DB, verbose bool) int {
-			return syncCloudJobResults(cfg, database, verbose)
-		},
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}, res.Completed
 }

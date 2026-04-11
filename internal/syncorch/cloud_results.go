@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +27,13 @@ import (
 
 const cloudInstanceOpslogLookback = 7 * 24 * time.Hour
 
+const (
+	// opslogSyncTimeout is the overall budget for the opslog sync phase.
+	opslogSyncTimeout = 30 * time.Second
+	// opslogRequestTimeout caps each individual R2 opslog fetch.
+	opslogRequestTimeout = 5 * time.Second
+)
+
 // syncCloudJobResults checks for completed cloud job results in R2.
 // This covers both legacy Vast.ai-backend jobs and campaign-launched queue-runner jobs.
 // Uses per-job DB lookups rather than pre-filtering by cloud_instance_id, so results
@@ -47,7 +55,7 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		return updated
 	}
 
-	r2Cfg := r2Config(cfg)
+	r2Cfg := R2Config(cfg)
 	r2Client, err := r2.New(r2Cfg)
 	if err != nil {
 		if verbose {
@@ -64,7 +72,9 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	updatedInstanceIDs := make(map[int64]struct{})
 	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
-		if verbose {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "Warning: cloud sync skipped (R2 storage unreachable)\n")
+		} else if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: R2 list: %v\n", err)
 		}
 		return 0
@@ -127,7 +137,7 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			go func(jobID int64) {
 				defer func() { <-sem; wg.Done() }()
 
-				runID, ok, err := jobEligibleForStartedMarker(database, jobID)
+				runID, ok, err := JobEligibleForStartedMarker(database, jobID)
 				if err != nil {
 					slog.Warn("failed to check started-marker eligibility", "component", "sync", "job_id", jobID, "error", err)
 					return
@@ -187,7 +197,11 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 		wg.Wait()
 	}
-	if err := syncCloudInstanceOpslogs(ctx, r2Client, database, nil, verbose); err != nil && verbose {
+	// Use a fresh context for opslog sync — the shared ctx may be nearly
+	// expired after job-marker and timeseries syncing consumed most of its budget.
+	opslogCtx, opslogCancel := context.WithTimeout(context.Background(), opslogSyncTimeout)
+	defer opslogCancel()
+	if err := SyncCloudInstanceOpslogs(opslogCtx, r2Client, database, nil, verbose); err != nil && verbose {
 		fmt.Fprintf(os.Stderr, "Warning: instance ops log sync failed: %v\n", err)
 	}
 
@@ -210,16 +224,16 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 	// Backfill HF download bandwidth observations from historical phase timings.
 	// Idempotent — skips datacenters that already have observations.
-	backfillHFDownloadObservations(database)
+	BackfillHFDownloadObservations(database)
 
 	return updated
 }
 
-func allowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
+func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
 	return currentStatus == db.StatusQueued && !launchID.Valid
 }
 
-func shouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
+func ShouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
 	if db.IsTerminalStatus(currentStatus) && needsBackfill {
 		return false
 	}
@@ -275,7 +289,7 @@ func syncOneCompletedJobMarker(
 		runID = latestRunID.Int64
 	}
 	if !markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, runID)) {
-		if !allowCompletedMarkerFallback(currentStatus, launchID) {
+		if !AllowCompletedMarkerFallback(currentStatus, launchID) {
 			return completedMarkerResult{}
 		}
 		if altKey, ok := markers.AnyCompletedKey(jobID); ok {
@@ -380,7 +394,7 @@ func syncOneCompletedJobMarker(
 		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
 		_ = r2Client.DeletePrefix(ctx, resultPrefix)
 	}
-	if shouldMarkCloudJobProcessed(currentStatus, needsBackfill, source) {
+	if ShouldMarkCloudJobProcessed(currentStatus, needsBackfill, source) {
 		_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
 	}
 	os.RemoveAll(tmpDir)
@@ -413,7 +427,7 @@ var backfillOnce sync.Once
 
 // backfillHFDownloadObservations populates transfer_observations from historical
 // job_phase_timings for cold-start jobs. Runs at most once per process.
-func backfillHFDownloadObservations(database *sql.DB) {
+func BackfillHFDownloadObservations(database *sql.DB) {
 	backfillOnce.Do(func() {
 		rows, err := database.Query(`
 			SELECT l.provider, l.data_center,
@@ -457,7 +471,7 @@ func backfillHFDownloadObservations(database *sql.DB) {
 // jobEligibleForStartedMarker returns the current run ID for a queued job that
 // is still attached to a live cloud instance. This prevents stale R2 .started
 // markers from resurrecting jobs that were already reset from failed instances.
-func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, error) {
+func JobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, error) {
 	var (
 		currentStatus   string
 		latestRunID     sql.NullInt64
@@ -504,7 +518,7 @@ func updateInstanceTerminationReason(database *sql.DB, instanceID int64) {
 	}
 }
 
-func r2Config(cfg *config.Config) r2.Config {
+func R2Config(cfg *config.Config) r2.Config {
 	return r2.Config{
 		AccountID:       cfg.Vastai.R2.AccountID,
 		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
@@ -606,7 +620,7 @@ func syncCloudLiveTelemetry(ctx context.Context, r2Client *r2.Client, database *
 	return nil
 }
 
-func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database *sql.DB, instanceIDs map[int64]struct{}, verbose bool) error {
+func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database *sql.DB, instanceIDs map[int64]struct{}, verbose bool) error {
 	if r2Client == nil || database == nil {
 		return nil
 	}
@@ -632,10 +646,16 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 		return nil
 	}
 
+	if verbose {
+		fmt.Printf("Syncing ops logs for %d instance(s)...\n", len(ids))
+	}
+
 	// Bounded parallelism for R2 reads
 	const maxParallel = 10
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var timeoutCount, errorCount int
 
 	for _, instanceID := range ids {
 		sem <- struct{}{}
@@ -650,13 +670,24 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 			case opslogNotFound:
 				_ = db.MarkOpslogNotFound(database, id)
 			case opslogError:
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: instance %d ops log sync failed: %v\n", id, err)
+				mu.Lock()
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					_ = db.MarkOpslogTimeout(database, id)
+					timeoutCount++
+				} else {
+					errorCount++
 				}
+				mu.Unlock()
 			}
 		}(instanceID)
 	}
 	wg.Wait()
+	if timeoutCount > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: %d instance ops log(s) skipped (R2 storage unreachable)\n", timeoutCount)
+	}
+	if errorCount > 0 && verbose {
+		fmt.Fprintf(os.Stderr, "Warning: %d instance ops log(s) failed to sync\n", errorCount)
+	}
 	return nil
 }
 
@@ -673,7 +704,9 @@ func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceI
 	if r2Client == nil || instanceID <= 0 {
 		return opslogNotFound, nil
 	}
-	data, err := r2Client.GetObject(ctx, r2keys.InstanceOpslog(instanceID))
+	reqCtx, cancel := context.WithTimeout(ctx, opslogRequestTimeout)
+	defer cancel()
+	data, err := r2Client.GetObject(reqCtx, r2keys.InstanceOpslog(instanceID))
 	if err != nil {
 		if r2.IsNotFound(err) {
 			return opslogNotFound, nil

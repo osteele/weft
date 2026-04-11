@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/syncorch"
 )
 
 func TestSyncHostWaitTimeout(t *testing.T) {
@@ -316,7 +317,7 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 		t.Fatalf("set job running: %v", err)
 	}
 
-	updated := syncCloudJobResults(&config.Config{}, database, false)
+	updated := syncorch.SyncCloudJobResults(&config.Config{}, database, false)
 	if updated != 1 {
 		t.Fatalf("syncCloudJobResults updated %d rows, want 1", updated)
 	}
