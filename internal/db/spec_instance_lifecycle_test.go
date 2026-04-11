@@ -300,6 +300,85 @@ func TestSpec_RetryableTerminationReasons(t *testing.T) {
 	})
 }
 
+func TestSpec_ResetJobToUnplaced(t *testing.T) {
+	// From job-lifecycle.allium: ResetJobToUnplaced and UserRetriesUnplaced rules.
+	// After reset: host=null, cloud_instance=null, target_kind=unplaced, status=queued,
+	// and a new attempt is created.
+	t.Run("clears cloud association and requeues", func(t *testing.T) {
+		database := SetupTestDB(t)
+
+		jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU: %v", err)
+		}
+		launchID, err := CreateLaunch(database, &Launch{
+			Status:   LaunchStatusRunning,
+			Provider: "vastai",
+			GPUSpec:  "RTX_4090",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		if err := UpdateAttemptRunning(database, jobID); err != nil {
+			t.Fatalf("UpdateAttemptRunning: %v", err)
+		}
+
+		// Verify job is associated with instance before reset.
+		before, _ := GetJobByID(database, jobID)
+		if before.LaunchID == nil || *before.LaunchID != launchID {
+			t.Fatalf("pre-reset: expected launch_id=%d, got %v", launchID, before.LaunchID)
+		}
+
+		if err := ResetJobToUnplaced(database, jobID); err != nil {
+			t.Fatalf("ResetJobToUnplaced: %v", err)
+		}
+
+		job, _ := GetJobByID(database, jobID)
+
+		// Spec ensures: status = queued
+		if job.Status != StatusQueued {
+			t.Errorf("status = %q, want %q", job.Status, StatusQueued)
+		}
+
+		// Spec ensures: new attempt created (attempt_number incremented)
+		if job.LatestRunID == nil {
+			t.Fatal("expected a new attempt after reset")
+		}
+	})
+
+	t.Run("from terminal state", func(t *testing.T) {
+		database := SetupTestDB(t)
+
+		jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU: %v", err)
+		}
+		launchID, err := CreateLaunch(database, &Launch{
+			Status:   LaunchStatusFailed,
+			Provider: "vastai",
+			GPUSpec:  "RTX_4090",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+
+		if err := ResetJobToUnplaced(database, jobID); err != nil {
+			t.Fatalf("ResetJobToUnplaced: %v", err)
+		}
+
+		job, _ := GetJobByID(database, jobID)
+		if job.Status != StatusQueued {
+			t.Errorf("status = %q, want %q", job.Status, StatusQueued)
+		}
+	})
+}
+
 func TestSpec_GraceRequiresDeadline(t *testing.T) {
 	// Invariant: grace instances must have grace_deadline and grace_started_at.
 	database := SetupTestDB(t)

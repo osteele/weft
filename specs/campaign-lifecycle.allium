@@ -196,6 +196,7 @@ value GraceCommandAck {
 config {
     default_grace_period: Duration = 5.minutes
     grace_poll_interval: Duration = 10.seconds
+    grace_shutdown_timeout: Duration = 2.minutes
     bootstrap_warn_threshold: Duration = 15.minutes
     bootstrap_timeout: Duration = 20.minutes
     setup_stall_warn: Duration = 15.minutes
@@ -207,6 +208,13 @@ config {
     self_destruct_retries: Integer = 3
     self_destruct_backoff: Duration = 5.seconds
     reconcile_cleanup_window: Duration = 30.minutes
+
+    -- Runaway breaker thresholds
+    runaway_enabled: Boolean = true
+    runaway_lookback_window: Duration = 24.hours
+    runaway_chain_no_progress_limit: Integer = 3
+    runaway_orphan_churn_limit: Integer = 8
+    runaway_spend_no_progress_limit_cents: Integer = 500
 }
 
 -- ==========================================================================
@@ -428,13 +436,24 @@ rule GracePeriodExpires {
     when: instance: Instance.grace_deadline <= now
     requires: instance.status = grace
 
-    ensures: instance.status = failed
-    ensures: instance.termination_reason = job_failure
-    ensures: instance.ended_at = now
+    -- Wait for agent graceful shutdown before force-destroying.
+    -- The agent may still be uploading logs or writing termination intent.
+    if instance.grace_deadline + config.grace_shutdown_timeout > now:
+        -- Within shutdown window: display-only, do not destroy yet
+        ensures: WaitingForAgentShutdown(instance)
+    else:
+        -- Shutdown window exceeded: force-destroy
+        ensures: instance.status = failed
+        ensures: instance.termination_reason = job_failure
+        ensures: instance.ended_at = now
 
     @guidance
-        -- Agent detects expired deadline during poll loop,
-        -- self-destructs with status=failed.
+        -- After grace deadline passes, the coordinator waits up to
+        -- grace_shutdown_timeout (2 min) for the agent to write its
+        -- termination intent and upload final logs. Only force-destroys
+        -- the provider instance if no agent response after the window.
+        -- If the agent's termination intent is already present, the
+        -- reconciler handles it via the normal termination path instead.
 }
 
 -- ==========================================================================
@@ -597,6 +616,59 @@ rule CampaignFailed {
 
     ensures: campaign.status = failed
     ensures: campaign.ended_at = now
+}
+
+-- ==========================================================================
+-- Runaway breaker (launch safety)
+-- ==========================================================================
+
+-- The runaway breaker pauses automatic relaunches when repeated failures
+-- indicate a systemic problem (bad GPU class, broken setup, etc.).
+-- Tracked via lifecycle_events: relaunch.runaway_tripped / _resumed.
+
+rule RunawayBreakerTrips {
+    when: RelaunchEvaluated(instance)
+    requires: config.runaway_enabled
+
+    -- Trips when BOTH conditions hold within the lookback window:
+    -- 1. Zero job completions (no progress)
+    -- 2. At least one of:
+    --    - Max trailing orphaned chain >= chain_no_progress_limit
+    --    - Total orphaned attempts >= orphan_churn_limit
+    --    - Total spend >= spend_no_progress_limit_cents
+
+    let scope = instance.campaign.id ++ ":" ++ instance.project
+    let window = config.runaway_lookback_window
+    let completions = count completed jobs in scope within window
+    let chain = max trailing orphaned attempt chain in scope within window
+    let orphans = count orphaned attempts in scope within window
+    let spend = sum actual_spend_cents in scope within window
+
+    if completions = 0
+       and (chain >= config.runaway_chain_no_progress_limit
+            or orphans >= config.runaway_orphan_churn_limit
+            or spend >= config.runaway_spend_no_progress_limit_cents):
+        ensures: RunawayBreakerTripped(scope)
+        ensures: RelaunchBlocked(instance)
+
+    @guidance
+        -- Scoped per campaign+project. The breaker prevents new instance
+        -- launches but does not terminate running instances.
+        -- Recorded as lifecycle_event kind=relaunch.runaway_tripped.
+        -- Implementation: internal/campaign/relaunch.go evaluateRunawayBreaker()
+}
+
+rule RunawayBreakerClears {
+    when: UserRetry(job)
+    requires: RunawayBreakerIsTripped(job.scope)
+
+    ensures: RunawayBreakerResumed(job.scope)
+
+    @guidance
+        -- Auto-clears when user retries a job in the affected scope.
+        -- Also clearable manually via `weft campaign safety resume`.
+        -- Recorded as lifecycle_event kind=relaunch.runaway_resumed.
+        -- Implementation: internal/campaign/relaunch.go ResumeRunawayBreakerForJob()
 }
 
 -- ==========================================================================

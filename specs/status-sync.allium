@@ -246,6 +246,46 @@ rule RemoteJobResumed {
 }
 
 -- ==========================================================================
+-- Runner restart and exit code preservation (on-prem)
+-- ==========================================================================
+
+-- When deploying a new agent binary, the queue runner is restarted
+-- gracefully rather than killed, preserving running jobs' exit codes.
+
+rule AgentDeployRestart {
+    when: AgentBinaryDeployed(host)
+
+    -- Send restart command via queue command log, not kill signal.
+    -- The runner picks up the restart on its next tick and re-execs.
+    ensures: RunnerRestartRequested(host)
+
+    @guidance
+        -- The runner re-execs via syscall.Exec, preserving the tmux session.
+        -- Running jobs continue in their subprocesses. Exit codes survive
+        -- because commands are wrapped with exit-capture shell code:
+        --   cmd; EXIT_CODE=$?; echo $EXIT_CODE > {jobID}.status; exit $EXIT_CODE
+        -- When the restarted runner finds a dead PID with a wrapper-written
+        -- status file, it reads the real exit code instead of defaulting to 1.
+        --
+        -- Falls back to session kill if restart command fails.
+        -- Implementation:
+        --   internal/runner/process.go WrapCommandWithExitCapture()
+        --   internal/runner/runner.go tick() restart handling
+        --   internal/agentdeploy/deploy.go SendRestartSignal()
+}
+
+invariant ExitCodesPreservedAcrossRestart {
+    -- Jobs that completed during a runner restart must have their actual
+    -- exit code recorded, not a default value.
+    for job in jobs/Jobs:
+        if job.status in {completed, failed}:
+            if job.exit_code != null:
+                -- Exit code came from the wrapper-written status file
+                -- or the runner's direct observation, not a default.
+                job.exit_code = job.latest_attempt.exit_code
+}
+
+-- ==========================================================================
 -- Three-way merge reconciliation (on-prem)
 -- ==========================================================================
 

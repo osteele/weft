@@ -403,6 +403,21 @@ rule ResetJobToUnplaced {
         -- and the job needs re-placement on a different host.
 }
 
+rule UserRetriesUnplaced {
+    when: UserRetryUnplaced(job)
+    requires: job.is_terminal
+    requires: job.target_kind != unplaced or job.cloud_instance != null
+
+    ensures: ResetToUnplaced(job)
+
+    @guidance
+        -- `weft retry --unplaced` resets terminal jobs to unplaced+queued
+        -- so the scheduler can re-place them on a different host or instance.
+        -- Also clears the runaway breaker if tripped for the job's scope
+        -- (see RunawayBreakerClears in campaign-lifecycle.allium).
+        -- Implementation: cmd/restart.go
+}
+
 -- ==========================================================================
 -- Authoritative overrides
 -- ==========================================================================
@@ -457,10 +472,15 @@ invariant TerminalJobsHaveEndTime {
             job.latest_attempt.end_time > 0
 
     @guidance
-        -- end_time = 0 is treated as "unknown" (equivalent to NULL) by
-        -- CloseLaunchAttempts and ComputeJobState. RecordCloudJobCompletion
-        -- normalizes 0 to time.Now(); the startup repair
-        -- repairAttemptEndTimeZero fixes historical rows.
+        -- end_time = 0 is INVALID and must not be written. It breaks:
+        --   - CloseLaunchAttempts (WHERE end_time IS NULL misses 0)
+        --   - ComputeJobState (LatestJobEnd > 0 treats 0 as "no end")
+        --   - Self-destruct detection (requires LatestJobEnd > 0)
+        -- RecordCloudJobCompletion normalizes 0 → time.Now() as a
+        -- safety net. The startup repair repairAttemptEndTimeZero
+        -- fixes historical rows. Any code path that writes end_time
+        -- must ensure it is either NULL (not yet ended) or a positive
+        -- unix timestamp.
 }
 
 invariant AttemptNumbersAreSequential {
