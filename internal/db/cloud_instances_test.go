@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
@@ -1288,4 +1289,109 @@ func TestDisplayGPUDetails_IncludesModelMemCUDA(t *testing.T) {
 			t.Fatalf("DisplayGPUDetails() = %q, missing %q", got, want)
 		}
 	}
+}
+
+// --- Opslog sync tests ---
+
+func createTerminalLaunch(t *testing.T, database *sql.DB, endedSecondsAgo int64) int64 {
+	t.Helper()
+	id, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	endedAt := nowUnix() - endedSecondsAgo
+	if _, err := database.Exec(`UPDATE launches SET provider_instance_id = '12345', ended_at = ? WHERE id = ?`, endedAt, id); err != nil {
+		t.Fatalf("set provider_instance_id/ended_at: %v", err)
+	}
+	return id
+}
+
+func TestListLaunchIDsNeedingOpslogSync_ExcludesTimedOut(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Create a terminal launch that ended 1 hour ago
+	id := createTerminalLaunch(t, database, 3600)
+
+	// Initially it should need sync
+	ids, err := ListLaunchIDsNeedingOpslogSync(database, 7*24*time.Hour) // 7 days as Duration
+	if err != nil {
+		t.Fatalf("ListLaunchIDsNeedingOpslogSync: %v", err)
+	}
+	if !containsID(ids, id) {
+		t.Fatal("expected launch to need opslog sync before marking timeout")
+	}
+
+	// Mark as timed out
+	if err := MarkOpslogTimeout(database, id); err != nil {
+		t.Fatalf("MarkOpslogTimeout: %v", err)
+	}
+
+	// Should now be excluded
+	ids, err = ListLaunchIDsNeedingOpslogSync(database, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("ListLaunchIDsNeedingOpslogSync: %v", err)
+	}
+	if containsID(ids, id) {
+		t.Fatal("timed-out launch should be excluded from opslog sync")
+	}
+}
+
+func TestListLaunchIDsNeedingOpslogSync_TimedOutRecentStillIncluded(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Create a launch that ended just 1 second ago
+	id := createTerminalLaunch(t, database, 1)
+
+	// Mark timed out immediately (within the 10-minute safety buffer)
+	if err := MarkOpslogTimeout(database, id); err != nil {
+		t.Fatalf("MarkOpslogTimeout: %v", err)
+	}
+
+	// Should still be included because the timeout was set <10min after termination
+	ids, err := ListLaunchIDsNeedingOpslogSync(database, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("ListLaunchIDsNeedingOpslogSync: %v", err)
+	}
+	if !containsID(ids, id) {
+		t.Fatal("recently-timed-out launch should still be included (within safety buffer)")
+	}
+}
+
+func TestMarkOpslogSynced_ClearsTimeoutFlag(t *testing.T) {
+	database := setupTestDB(t)
+	id := createTerminalLaunch(t, database, 3600)
+
+	// Mark timed out then synced
+	if err := MarkOpslogTimeout(database, id); err != nil {
+		t.Fatalf("MarkOpslogTimeout: %v", err)
+	}
+	if err := MarkOpslogSynced(database, id); err != nil {
+		t.Fatalf("MarkOpslogSynced: %v", err)
+	}
+
+	// Verify timeout flag is cleared
+	var timeout int
+	if err := database.QueryRow(`SELECT oplog_timeout FROM launches WHERE id = ?`, id).Scan(&timeout); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if timeout != 0 {
+		t.Fatalf("oplog_timeout = %d after MarkOpslogSynced, want 0", timeout)
+	}
+}
+
+func containsID(ids []int64, target int64) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
+}
+
+func nowUnix() int64 {
+	return time.Now().Unix()
 }
