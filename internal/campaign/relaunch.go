@@ -168,7 +168,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				MaxAttempts:   maxAttempts,
 			})
 			result.Skipped++
-			recordNotReplacedReason(result, failedInstanceID, "max cloud attempts reached")
+			recordJobSkipReason(result, j.ID, failedInstanceID, "max cloud attempts reached")
 			continue
 		}
 		if cfg.RetryBudget != nil && count > 0 {
@@ -192,7 +192,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				})
 				result.Skipped++
 				result.BudgetSkip++
-				recordNotReplacedReason(result, failedInstanceID, summarizeBudgetDetail(detail))
+				recordJobSkipReason(result, j.ID, failedInstanceID, summarizeBudgetDetail(detail))
 				if failedInstanceID != 0 {
 					result.BudgetBlocked[failedInstanceID] = true
 				}
@@ -411,6 +411,24 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+// recordJobSkipReason records a per-job skip reason into both NotReplacedReasons
+// (keyed by the failed predecessor instance, when known) and JobReasons (keyed
+// by job id). Keying in JobReasons ensures the reason survives even when the
+// job's last attempt had its launch_id cleared (e.g. after ResetJobToUnplaced),
+// where the failedInstanceID lookup in autopilot would otherwise return 0.
+func recordJobSkipReason(result *RelaunchResult, jobID, failedInstanceID int64, reason string) {
+	if result == nil || reason == "" {
+		return
+	}
+	if result.JobReasons == nil {
+		result.JobReasons = map[int64]string{}
+	}
+	if jobID != 0 {
+		result.JobReasons[jobID] = reason
+	}
+	recordNotReplacedReason(result, failedInstanceID, reason)
 }
 
 func recordNotReplacedReason(result *RelaunchResult, failedInstanceID int64, reason string) {

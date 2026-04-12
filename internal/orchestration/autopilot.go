@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
@@ -118,7 +117,14 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if job != nil {
 			remainingByID[job.ID] = job
 		}
-		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasTag(db.TagInventory) {
+		if job == nil || job.HasTag(db.TagInventory) {
+			continue
+		}
+		// Accept both queued and pending_placement unplaced rentals; the
+		// latter can get stuck when a prior reset leaves the attempt in
+		// pending_placement and the autopilot would otherwise never touch
+		// it — producing unplaced jobs with no blocked reason.
+		if es := job.EffectiveStatus(); es != db.StatusQueued && es != db.StatusPendingPlacement {
 			continue
 		}
 		if len(scoped) > 0 {
@@ -148,7 +154,6 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
 
 	failedInstanceByJob := BuildFailedInstanceByJob(database, rentalScope)
-	passStartedAt := time.Now().Unix()
 	result, err := RelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
 		oplog.Log("auto_pilot.launch_error",
@@ -190,7 +195,23 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
-	eventReasons := RelaunchBlockedReasonsFromEvents(database, rentalScope, passStartedAt)
+	// Use per-job queue-floor (QueuedAt/CreatedAt) rather than a single
+	// passStartedAt floor: skip events are often logged on a prior pass
+	// (e.g. retry-budget cooldown), but remain the authoritative reason
+	// while the job is still queued. Filtering by passStartedAt dropped
+	// those recent-but-not-current-pass reasons, leaving the generic
+	// "no offers available" fallback as the only surfaced reason.
+	floorByJob := make(map[int64]int64, len(rentalScope))
+	for _, jobID := range rentalScope {
+		if j, ok := remainingByID[jobID]; ok && j != nil {
+			floor := j.QueuedAt
+			if floor <= 0 {
+				floor = j.CreatedAt
+			}
+			floorByJob[jobID] = floor
+		}
+	}
+	eventReasons := RelaunchBlockedReasonsFromEventsWithFloor(database, floorByJob)
 	for jobID, reason := range eventReasons {
 		if strings.TrimSpace(reason) == "" {
 			continue
