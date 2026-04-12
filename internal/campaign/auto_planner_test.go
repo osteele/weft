@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -50,5 +51,27 @@ func TestApplyGroupOffer_BlocksOnlyUnreusedJobsWhenNoOffer(t *testing.T) {
 	}
 	if _, exists := plan.BlockedReasons[706]; exists {
 		t.Fatalf("unexpected blocked reason for reused job 706: %q", plan.BlockedReasons[706])
+	}
+}
+
+func TestApplyGroupOffer_NoOfferEmitsConstraintAwareReason(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{
+		GPUClass: "ampere+",
+		GPUMemGB: 40,
+		Jobs:     []*db.Job{{ID: 910}},
+	}
+	offer := GroupOffer{
+		FilterStats: OfferFilterStats{RawCount: 12, AfterVRAM: 0},
+	}
+
+	applyGroupOffer(&plan, group, offer, nil)
+
+	got := plan.BlockedReasons[910]
+	if got == "planner: no compatible offers" {
+		t.Fatalf("blocked reason regressed to generic message: %q", got)
+	}
+	if !strings.Contains(got, "12 offers found") || !strings.Contains(got, "VRAM") {
+		t.Fatalf("blocked reason = %q, want a constraint-aware message mentioning offer count and VRAM", got)
 	}
 }

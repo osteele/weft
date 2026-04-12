@@ -121,7 +121,8 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 		if offer.Err != nil {
 			reason = offer.Err.Error()
 		} else {
-			reason = "no compatible offers"
+			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(group))
+			reason = offer.FilterStats.NoOffersDetail(constraintStr)
 		}
 	}
 	for _, job := range group.Jobs {
