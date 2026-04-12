@@ -81,6 +81,10 @@ type RelaunchResult struct {
 	// BudgetBlocked marks failed instances whose orphaned jobs were skipped due
 	// to retry budget limits.
 	BudgetBlocked map[int64]bool // failed instance ID -> true
+	// JobReasons explains why specific jobs were skipped this pass, keyed by
+	// job ID. Unlike NotReplacedReasons (keyed by failed instance ID), this
+	// covers fresh unplaced jobs with no prior launch.
+	JobReasons map[int64]string // job ID -> reason
 }
 
 // RelaunchOrphanedJobs finds unplaced cloud jobs, filters by attempt count,
@@ -130,6 +134,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	result := &RelaunchResult{
 		NotReplacedReasons: map[int64]string{},
 		BudgetBlocked:      map[int64]bool{},
+		JobReasons:         map[int64]string{},
 	}
 	if cfg.RunawayPolicy != nil && cfg.RunawayPolicy.Enabled {
 		if blocked, reason, err := evaluateRunawayBreaker(cfg.Database, cfg, unplaced, time.Now()); err != nil {
@@ -260,7 +265,8 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	var launchOffers []cloud.Offer
 	for _, gOffer := range groupOffers {
 		if gOffer.Offer == nil {
-			detail := gOffer.FilterStats.NoOffersDetail()
+			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(gOffer.Group))
+			detail := gOffer.FilterStats.NoOffersDetail(constraintStr)
 			slog.Warn("no offers for group, skipping", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "job_count", len(gOffer.Group.Jobs), "detail", detail)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchSkippedNoOffers,
@@ -269,7 +275,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				Detail:    detail,
 			})
 			result.Skipped += len(gOffer.Group.Jobs)
-			recordGroupNotReplacedReasons(result, cfg.ResetJobs, gOffer.Group, detail)
+			recordGroupReasons(result, cfg.ResetJobs, gOffer.Group, detail)
 			continue
 		}
 		if gOffer.Err != nil {
@@ -280,7 +286,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				ErrorText: gOffer.Err.Error(),
 			})
 			result.Errors = append(result.Errors, gOffer.Err)
-			recordGroupNotReplacedReasons(result, cfg.ResetJobs, gOffer.Group, "offer query failed")
+			recordGroupReasons(result, cfg.ResetJobs, gOffer.Group, "offer query failed: "+gOffer.Err.Error())
 			continue
 		}
 		launchGroups = append(launchGroups, gOffer.Group)
@@ -382,7 +388,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 					ErrorText: err.Error(),
 				})
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
-				recordGroupNotReplacedReasons(result, cfg.ResetJobs, group, "launch failed")
+				recordGroupReasons(result, cfg.ResetJobs, group, "launch failed: "+err.Error())
 				return
 			}
 			if hasPredecessor {
@@ -421,18 +427,27 @@ func recordNotReplacedReason(result *RelaunchResult, failedInstanceID int64, rea
 	result.NotReplacedReasons[failedInstanceID] = reason
 }
 
-func recordGroupNotReplacedReasons(result *RelaunchResult, resetJobs map[int64]int64, group InstanceGroup, reason string) {
-	if len(resetJobs) == 0 {
+// recordGroupReasons records reason for every job in the group: both in
+// JobReasons (keyed by job ID, covers fresh unplaced jobs) and in
+// NotReplacedReasons (keyed by the failed predecessor's instance ID, when
+// resetJobs maps the job back to one).
+func recordGroupReasons(result *RelaunchResult, resetJobs map[int64]int64, group InstanceGroup, reason string) {
+	if result == nil || reason == "" {
 		return
 	}
-	seen := map[int64]bool{}
+	if result.JobReasons == nil {
+		result.JobReasons = map[int64]string{}
+	}
+	seenInstance := map[int64]bool{}
 	for _, j := range group.Jobs {
-		failedID := resetJobs[j.ID]
-		if failedID == 0 || seen[failedID] {
+		if j == nil {
 			continue
 		}
-		seen[failedID] = true
-		recordNotReplacedReason(result, failedID, reason)
+		result.JobReasons[j.ID] = reason
+		if failedID := resetJobs[j.ID]; failedID != 0 && !seenInstance[failedID] {
+			seenInstance[failedID] = true
+			recordNotReplacedReason(result, failedID, reason)
+		}
 	}
 }
 

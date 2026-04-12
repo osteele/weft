@@ -61,6 +61,7 @@ type listTUIModel struct {
 	groupedSelectableRows      []int
 	autoMode                   bool
 	autoInProgress             bool
+	autoPassStartedAt          time.Time
 	autoPersistentError        string
 	autoPersistentBlocked      string
 	autoPersistentBlockedN     int
@@ -119,6 +120,9 @@ type listAutoPilotDoneMsg struct {
 	blockedReasons map[int64]string
 	anotherHolding bool
 	err            error
+	// deferred marks a redelivery after the minimum-display hold so the handler
+	// knows to apply the result rather than schedule another tick.
+	deferred bool
 }
 type listQuickLaunchDoneMsg struct {
 	instanceIDs  []int64
@@ -455,6 +459,13 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case listAutoPilotDoneMsg:
+		if !msg.deferred {
+			if remaining := listAutoPilotMinDisplayDuration - time.Since(m.autoPassStartedAt); remaining > 0 {
+				held := msg
+				held.deferred = true
+				return m, tea.Tick(remaining, func(time.Time) tea.Msg { return held })
+			}
+		}
 		m.autoInProgress = false
 		if !m.autoMode {
 			return m, nil
@@ -1379,7 +1390,12 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	if !m.groupedByStatus || !m.autoMode || m.autoInProgress || m.database == nil {
 		return nil
 	}
+	if m.countUnplacedQueuedJobs() == 0 {
+		// Nothing to evaluate; skip the pass so the status line doesn't flicker.
+		return nil
+	}
 	m.autoInProgress = true
+	m.autoPassStartedAt = time.Now()
 
 	database := m.database
 	ctx := m.ctx
@@ -1412,6 +1428,11 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 		}
 	}
 }
+
+// listAutoPilotMinDisplayDuration is the minimum time the "evaluating..."
+// auto-pilot status line stays visible, even when the pass completes sooner.
+// Prevents rapid flicker between "evaluating" and idle text on every sync tick.
+const listAutoPilotMinDisplayDuration = 1200 * time.Millisecond
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, string, map[int64]string, error) {
 	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)

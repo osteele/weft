@@ -769,3 +769,45 @@ func TestApproximateEstimates_UsesNeutralRuntimeAcrossOffers(t *testing.T) {
 		t.Fatalf("TotalTime differs across offers: %v vs %v", estimates[0].TotalTime, estimates[1].TotalTime)
 	}
 }
+
+func TestNoOffersDetail_IncludesConstraints(t *testing.T) {
+	stats := OfferFilterStats{RawCount: 0}
+	got := stats.NoOffersDetail("gpu=ampere+ vram>=40GB")
+	want := "no offers from providers for gpu=ampere+ vram>=40GB"
+	if got != want {
+		t.Fatalf("NoOffersDetail = %q, want %q", got, want)
+	}
+}
+
+func TestNoOffersDetail_FilterStages(t *testing.T) {
+	cases := []struct {
+		name string
+		s    OfferFilterStats
+		want string
+	}{
+		{"vram", OfferFilterStats{RawCount: 12}, "12 offers found, all filtered by VRAM requirement"},
+		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 passed VRAM but all filtered by CUDA compatibility"},
+		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 passed filters but none met survival threshold"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.s.NoOffersDetail(""); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatOfferConstraints(t *testing.T) {
+	c := cloud.OfferConstraints{
+		GPUClass:       "ampere+",
+		MinGPUMemGB:    40,
+		MinDiskGB:      60,
+		MinReliability: 0.95,
+	}
+	got := FormatOfferConstraints(c)
+	want := "gpu=ampere+ vram>=40GB disk>=60GB reliability>=0.95"
+	if got != want {
+		t.Fatalf("FormatOfferConstraints = %q, want %q", got, want)
+	}
+}

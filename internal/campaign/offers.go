@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -36,9 +37,13 @@ type OfferFilterStats struct {
 }
 
 // NoOffersDetail returns a human-readable explanation of why no offers survived
-// filtering.
-func (s OfferFilterStats) NoOffersDetail() string {
+// filtering. When constraints is non-empty it is appended to the zero-offers
+// branch so the caller can see which search predicates yielded nothing.
+func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 	if s.RawCount == 0 {
+		if constraints != "" {
+			return fmt.Sprintf("no offers from providers for %s", constraints)
+		}
 		return "no offers from providers"
 	}
 	switch {
@@ -52,6 +57,32 @@ func (s OfferFilterStats) NoOffersDetail() string {
 		// Defensive: all stages passed but no offer was selected.
 		return fmt.Sprintf("%d offers found, none met all criteria", s.RawCount)
 	}
+}
+
+// FormatOfferConstraints renders an OfferConstraints as a compact human string
+// like "gpu=ampere+ vram>=40GB disk>=60GB reliability>=0.95". Empty fields are
+// omitted.
+func FormatOfferConstraints(c cloud.OfferConstraints) string {
+	var parts []string
+	if c.GPUClass != "" {
+		parts = append(parts, "gpu="+c.GPUClass)
+	}
+	if c.MinGPUMemGB > 0 {
+		parts = append(parts, fmt.Sprintf("vram>=%dGB", c.MinGPUMemGB))
+	}
+	if c.MaxGPUMemGB > 0 {
+		parts = append(parts, fmt.Sprintf("vram<=%dGB", c.MaxGPUMemGB))
+	}
+	if c.MinDiskGB > 0 {
+		parts = append(parts, fmt.Sprintf("disk>=%dGB", c.MinDiskGB))
+	}
+	if c.MinReliability > 0 {
+		parts = append(parts, fmt.Sprintf("reliability>=%.2f", c.MinReliability))
+	}
+	if c.MinCPUCoresEffective > 0 {
+		parts = append(parts, fmt.Sprintf("cpu>=%d", c.MinCPUCoresEffective))
+	}
+	return strings.Join(parts, " ")
 }
 
 // GroupOffer pairs an instance group with its best cloud offer.

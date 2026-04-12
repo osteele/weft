@@ -182,6 +182,14 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
+	for jobID, reason := range result.JobReasons {
+		if strings.TrimSpace(reason) == "" {
+			continue
+		}
+		if _, exists := blockedReasons[jobID]; !exists {
+			blockedReasons[jobID] = reason
+		}
+	}
 	eventReasons := RelaunchBlockedReasonsFromEvents(database, rentalScope, passStartedAt)
 	for jobID, reason := range eventReasons {
 		if strings.TrimSpace(reason) == "" {

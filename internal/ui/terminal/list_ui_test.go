@@ -293,6 +293,9 @@ func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
 		autoMode:        true,
 		autoInProgress:  true,
 		database:        &sql.DB{},
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, Tags: []string{"rental"}},
+		},
 	}
 
 	next, _ := m.Update(listAutoPilotDoneMsg{err: errors.New("boom")})
