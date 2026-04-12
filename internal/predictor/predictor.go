@@ -162,6 +162,7 @@ var runStatusCLI = runStatusCLIImpl
 var countTrainingRows = countTrainingRowsImpl
 var backgroundRetrainCheckInterval = time.Minute
 var predictorStatusCacheTTL = 5 * time.Second
+var predictorStatusFileCacheTTL = 5 * time.Minute
 var nowFunc = time.Now
 var predictionCache = struct {
 	mu      sync.RWMutex
@@ -254,6 +255,50 @@ func (c *Config) metaPath() string {
 	return filepath.Join(c.modelDir(), "meta.json")
 }
 
+func (c *Config) statusCachePath() string {
+	return filepath.Join(c.modelDir(), "status-cache.json")
+}
+
+type persistedStatus struct {
+	At     time.Time `json:"at"`
+	Status Status    `json:"status"`
+}
+
+func readStatusFileCache(cfg Config) (Status, bool) {
+	path := cfg.statusCachePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Status{}, false
+	}
+	var p persistedStatus
+	if err := json.Unmarshal(data, &p); err != nil {
+		return Status{}, false
+	}
+	if nowFunc().Sub(p.At) >= predictorStatusFileCacheTTL {
+		return Status{}, false
+	}
+	return p.Status, true
+}
+
+func writeStatusFileCache(cfg Config, status Status) {
+	modelDir := cfg.modelDir()
+	if modelDir == "" {
+		return
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		return
+	}
+	data, err := json.Marshal(persistedStatus{At: nowFunc(), Status: status})
+	if err != nil {
+		return
+	}
+	tmp := cfg.statusCachePath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, cfg.statusCachePath())
+}
+
 // ReadMeta reads the model metadata sidecar file.
 func ReadMeta(cfg Config) (*Meta, error) {
 	data, err := os.ReadFile(cfg.metaPath())
@@ -298,6 +343,14 @@ func baseStatus(cfg Config) Status {
 	}
 	state.statusMu.Unlock()
 
+	if cached, ok := readStatusFileCache(cfg); ok {
+		state.statusMu.Lock()
+		state.cachedStatus = cached
+		state.cachedAt = nowFunc()
+		state.statusMu.Unlock()
+		return cached
+	}
+
 	if estimatorStatus, err := loadEstimatorStatus(cfg); err == nil {
 		status.ModelAvailable = estimatorStatus.ModelPresent
 		status.TrainedAt = estimatorStatus.TrainedAt
@@ -339,6 +392,7 @@ func baseStatus(cfg Config) Status {
 	state.cachedStatus = status
 	state.cachedAt = nowFunc()
 	state.statusMu.Unlock()
+	writeStatusFileCache(cfg, status)
 	return status
 }
 
@@ -446,6 +500,7 @@ func invalidateStatusCache(cfg Config) {
 	state.cachedStatus = Status{}
 	state.cachedAt = time.Time{}
 	state.statusMu.Unlock()
+	_ = os.Remove(cfg.statusCachePath())
 }
 
 func predictionKey(cfg Config, host, project, gpuClass, command string) predictionCacheKey {
@@ -735,7 +790,20 @@ func maybeScheduleBackgroundRetrain(cfg Config) {
 	state.nextStaleCheck = now.Add(backgroundRetrainCheckInterval)
 	state.statusMu.Unlock()
 
-	status := GetStatus(cfg)
+	// If the persistent status cache is fresh, use it synchronously; otherwise
+	// fetch status in the background so the caller (often a short-lived CLI)
+	// isn't blocked by the subprocess cold-start. In the async case, the next
+	// invocation will pick up any retrain decision.
+	if cached, ok := readStatusFileCache(cfg); ok {
+		evaluateRetrainDecision(cfg, cached)
+		return
+	}
+	go func() {
+		evaluateRetrainDecision(cfg, GetStatus(cfg))
+	}()
+}
+
+func evaluateRetrainDecision(cfg Config, status Status) {
 	if status.SchemaIncompatible {
 		return
 	}

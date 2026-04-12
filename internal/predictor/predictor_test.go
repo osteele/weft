@@ -662,14 +662,18 @@ func TestGetStatusCachesEstimatorStatusWithinTTL(t *testing.T) {
 	originalRunStatusCLI := runStatusCLI
 	originalNowFunc := nowFunc
 	originalTTL := predictorStatusCacheTTL
+	originalFileTTL := predictorStatusFileCacheTTL
 	t.Cleanup(func() {
 		runStatusCLI = originalRunStatusCLI
 		nowFunc = originalNowFunc
 		predictorStatusCacheTTL = originalTTL
+		predictorStatusFileCacheTTL = originalFileTTL
 		backgroundRetrains.mu.Lock()
 		backgroundRetrains.states = make(map[string]*backgroundRetrainState)
 		backgroundRetrains.mu.Unlock()
 	})
+	// Disable file cache so this test can isolate the in-memory TTL behavior.
+	predictorStatusFileCacheTTL = 0
 
 	var calls atomic.Int32
 	runStatusCLI = func(Config) ([]byte, error) {

@@ -257,8 +257,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err := cfg.ValidateCommand(command); err != nil {
 		return err
 	}
-	if err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction"); err != nil {
-		return err
+	// Skip predictor entirely when placement won't use it: explicit --host,
+	// rental-tagged jobs (skip on-prem placement), or draft submissions. This
+	// avoids both the readiness check and the later gpu-mem prediction path
+	// (which both cold-start `uv run` and dominate submission latency).
+	predictorNeeded := host == "" && !db.HasRentalTag(runTags) && !runDraft
+	if predictorNeeded {
+		if err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction"); err != nil {
+			return err
+		}
 	}
 
 	// Parse "cd /path && command" pattern to extract working directory
@@ -457,7 +464,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if oomFloor > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "OOM history: requiring >=%dGB GPU memory (prior failure on %dGB GPU)\n", oomFloor, oomFloor-1)
 	}
-	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict, host, projectName, command, oomFloor)
+	gpuMemCfg := cfg
+	if !predictorNeeded {
+		gpuMemCfg = nil // Skip predictor shell-out; use explicit value or fallback.
+	}
+	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(gpuMemCfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict, host, projectName, command, oomFloor)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{

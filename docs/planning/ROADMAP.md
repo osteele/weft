@@ -62,6 +62,25 @@ keeping its existing calibration logic:
 The major blockers for deeper integration remain persistent volumes and
 phone-tree copy.
 
+## Predictor Daemon
+
+`weft run` currently shells out to `uv run --project <predictor-path> job-estimator
+status` to check predictor model readiness on every submission. The `uv` cold-start
+plus Python import graph (sklearn, pandas, etc.) takes ~30s, dominating submission
+latency. A persistent file cache (`status-cache.json`, 5-minute TTL) and async
+stale-check mask the cost for most submissions, but the first submission after the
+cache expires still pays the full cost.
+
+A long-lived predictor daemon would eliminate the cold-start entirely:
+
+- Start once (on demand or via launchd alongside the coordinator).
+- Expose status + prediction RPCs over a Unix socket.
+- Keep the job-estimator Python process warm with loaded models.
+- `weft run` queries the daemon instead of shelling out.
+
+This would take submission latency from seconds to milliseconds on the predictor
+path, at the cost of managing another long-lived process.
+
 ## On-Prem Derived Status Model
 
 Extend the derived-status approach used by cloud jobs to on-prem jobs so status
