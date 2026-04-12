@@ -344,6 +344,10 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchLiveByID = msg.launchLiveByID
 		m.launchStatusByID = msg.launchStatusByID
 		m.pruneAutoBlockReasons()
+		if m.countUnplacedQueuedJobs() == 0 {
+			m.autoPersistentBlocked = ""
+			m.autoPersistentBlockedN = 0
+		}
 		m.rebuildLayout()
 		m.rebuildGroupedRows()
 		m.clampCursor()
@@ -1543,14 +1547,14 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	if len(m.autoBlockReasons) == 0 {
 		return
 	}
-	visible := make(map[int64]struct{}, len(m.jobs))
+	visibleUnplaced := make(map[int64]struct{}, len(m.jobs))
 	for _, job := range m.jobs {
-		if job != nil {
-			visible[job.ID] = struct{}{}
+		if job != nil && job.IsUnplacedQueued() {
+			visibleUnplaced[job.ID] = struct{}{}
 		}
 	}
 	for jobID := range m.autoBlockReasons {
-		if _, ok := visible[jobID]; !ok {
+		if _, ok := visibleUnplaced[jobID]; !ok {
 			delete(m.autoBlockReasons, jobID)
 		}
 	}
@@ -1567,7 +1571,7 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 			continue
 		}
 		reason, ok := m.autoBlockReasons[job.ID]
-		if !ok || strings.TrimSpace(reason) == "" {
+		if !ok || strings.TrimSpace(reason) == "" || !job.IsUnplacedQueued() {
 			decorated = append(decorated, job)
 			continue
 		}

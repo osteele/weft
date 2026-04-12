@@ -136,6 +136,81 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 }
 
+func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T) {
+	m := listTUIModel{
+		autoBlockReasons: map[int64]string{
+			1: "no offers available",
+			2: "no offers available",
+			3: "no offers available",
+		},
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued},
+			{ID: 2, Status: db.StatusQueued, Host: "cool30"},
+		},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	if got := m.autoBlockReasons[1]; got == "" {
+		t.Fatal("expected unplaced queued job to keep block reason")
+	}
+	if _, ok := m.autoBlockReasons[2]; ok {
+		t.Fatal("expected placed queued job block reason to be pruned")
+	}
+	if _, ok := m.autoBlockReasons[3]; ok {
+		t.Fatal("expected non-visible job block reason to be pruned")
+	}
+}
+
+func TestGroupedJobsWithAutoReasonsOnlyAppliesToUnplacedQueuedJobs(t *testing.T) {
+	unplaced := &db.Job{ID: 10, Status: db.StatusQueued}
+	placed := &db.Job{ID: 11, Status: db.StatusQueued, Host: "cool30"}
+	m := listTUIModel{
+		jobs: []*db.Job{unplaced, placed},
+		autoBlockReasons: map[int64]string{
+			10: "no offers available",
+			11: "no offers available",
+		},
+	}
+
+	decorated := m.groupedJobsWithAutoReasons()
+	if len(decorated) != 2 {
+		t.Fatalf("decorated len = %d, want 2", len(decorated))
+	}
+
+	if decorated[0] == unplaced {
+		t.Fatal("expected unplaced job to be copied with injected block reason")
+	}
+	if got := decorated[0].QueueBlockedReason; got != "no offers available" {
+		t.Fatalf("unplaced QueueBlockedReason = %q, want injected reason", got)
+	}
+	if decorated[1] != placed {
+		t.Fatal("expected placed queued job to be returned unchanged")
+	}
+}
+
+func TestListTUIJobsLoadedClearsStalePersistentBlockedSummaryWhenNoUnplacedJobs(t *testing.T) {
+	m := listTUIModel{
+		autoMode:               true,
+		autoPersistentBlocked:  "no offers available",
+		autoPersistentBlockedN: 2,
+	}
+
+	next, _ := m.Update(listJobsLoadedMsg{
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, Host: "cool30"},
+		},
+	})
+	got := next.(listTUIModel)
+
+	if got.autoPersistentBlocked != "" {
+		t.Fatalf("autoPersistentBlocked = %q, want empty", got.autoPersistentBlocked)
+	}
+	if got.autoPersistentBlockedN != 0 {
+		t.Fatalf("autoPersistentBlockedN = %d, want 0", got.autoPersistentBlockedN)
+	}
+}
+
 func TestListTUIDBDebounceQueuesTrailingRefresh(t *testing.T) {
 	m := listTUIModel{
 		debounceActive: true,
