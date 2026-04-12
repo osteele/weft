@@ -364,7 +364,8 @@ func (m watchModel) renderSystemView() (string, int) {
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 
 	// Render rows into content string
-	reservedFooterLines := 1 + len(sharedStatusLines)
+	// Reserve: one blank separator + footer controls line + status/footer lines.
+	reservedFooterLines := 2 + len(sharedStatusLines)
 	if m.autoPilotStatusLine() != "" {
 		reservedFooterLines++
 	}
@@ -785,6 +786,9 @@ func (m watchModel) renderProjectView() string {
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
 	autoLine := m.autoPilotStatusLine()
 	rows := m.projectPageSize()
+	if rows > 1 {
+		rows-- // blank separator before footer/status block
+	}
 	if len(sharedStatusLines) > 0 && rows > len(sharedStatusLines) {
 		rows -= len(sharedStatusLines)
 	}
@@ -819,6 +823,7 @@ func (m watchModel) renderProjectView() string {
 		}
 	}
 
+	b.WriteString("\n")
 	for _, line := range sharedStatusLines {
 		b.WriteString(line)
 		b.WriteString("\n")

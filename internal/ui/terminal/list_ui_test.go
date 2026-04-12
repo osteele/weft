@@ -389,14 +389,89 @@ func TestListTUIGroupedViewShortViewportPreservesAllSectionHeaders(t *testing.T)
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"Running (1):",
-		"Queued (1):",
-		"Completed (1):",
-		"Failed (1):",
+		"Running (1)",
+		"Queued (1)",
+		"Completed (1)",
+		"Failed (1)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in grouped short viewport output, got:\n%s", want, out)
 		}
+	}
+}
+
+func TestSelectGroupedRowsForViewport_EllidesSectionTailWithDots(t *testing.T) {
+	rows := buildGroupedStatusRows([]*db.Job{
+		{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "run 1", Project: "proj"},
+		{ID: 2, Status: db.StatusRunning, Host: "cool30", Description: "run 2", Project: "proj"},
+		{ID: 3, Status: db.StatusRunning, Host: "cool30", Description: "run 3", Project: "proj"},
+		{ID: 4, Status: db.StatusRunning, Host: "cool30", Description: "run 4", Project: "proj"},
+	}, 120, nil, nil)
+
+	lines := selectGroupedRowsForViewport(rows, 4)
+	if len(lines) != 4 {
+		t.Fatalf("line count = %d, want 4", len(lines))
+	}
+	if lines[0].text != "Running (4):" {
+		t.Fatalf("first line = %q, want Running header", lines[0].text)
+	}
+	if lines[3].text != "..." {
+		t.Fatalf("last line = %q, want %q", lines[3].text, "...")
+	}
+}
+
+func TestSelectGroupedRowsForViewport_FullyElidedGroupShowsHeaderWithoutColon(t *testing.T) {
+	rows := buildGroupedStatusRows([]*db.Job{
+		{ID: 10, Status: db.StatusQueued, Host: "", Description: "u1", Project: "proj"},
+		{ID: 11, Status: db.StatusQueued, Host: "", Description: "u2", Project: "proj"},
+	}, 120, nil, nil)
+
+	lines := selectGroupedRowsForViewport(rows, 1)
+	if len(lines) != 1 {
+		t.Fatalf("line count = %d, want 1", len(lines))
+	}
+	if got := lines[0].text; got != "Unplaced (2)" {
+		t.Fatalf("line = %q, want %q", got, "Unplaced (2)")
+	}
+}
+
+func TestSelectGroupedRowsForViewport_RemovesBlankLinesBetweenAbbreviatedGroups(t *testing.T) {
+	rows := buildGroupedStatusRows([]*db.Job{
+		{ID: 20, Status: db.StatusRunning, Host: "cool30", Description: "r1", Project: "proj"},
+		{ID: 21, Status: db.StatusRunning, Host: "cool30", Description: "r2", Project: "proj"},
+		{ID: 30, Status: db.StatusQueued, Host: "", Description: "u1", Project: "proj"},
+		{ID: 31, Status: db.StatusQueued, Host: "", Description: "u2", Project: "proj"},
+	}, 120, nil, nil)
+
+	lines := selectGroupedRowsForViewport(rows, 3)
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2", len(lines))
+	}
+	if strings.TrimSpace(lines[0].text) == "" || strings.TrimSpace(lines[1].text) == "" {
+		t.Fatalf("expected no blank separator between abbreviated groups, got: %+v", lines)
+	}
+}
+
+func TestListTUIGroupedViewPinsFooterAtBottomWithSeparator(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           80,
+		height:          12,
+		title:           "Jobs",
+		jobs:            nil,
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	lines := strings.Split(out, "\n")
+	if len(lines) != m.height {
+		t.Fatalf("rendered line count = %d, want %d\n%s", len(lines), m.height, out)
+	}
+	if !strings.Contains(lines[len(lines)-1], "q:quit") {
+		t.Fatalf("last line = %q, want controls footer", lines[len(lines)-1])
+	}
+	if strings.TrimSpace(lines[len(lines)-2]) != "" {
+		t.Fatalf("expected blank separator above footer, got %q", lines[len(lines)-2])
 	}
 }
 

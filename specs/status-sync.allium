@@ -662,6 +662,15 @@ rule TUIPeriodicSync {
         --
         -- The TUI also reloads jobs every sync tick (60s) regardless
         -- of worker results, to catch DB changes from other sources.
+        --
+        -- TUI rendering contract for grouped status list:
+        --   - Status/footer block is bottom-anchored.
+        --   - Keep at least one blank separator line above the footer block.
+        --   - If the viewport is too short, abbreviate grouped job rows by
+        --     replacing the tail of a section with "..." (only when 2+ lines
+        --     are elided). If all jobs in a section are elided, render
+        --     "Section (N)" (without a colon), preserving section order and
+        --     omitting blank separator lines between abbreviated sections.
 }
 
 -- ==========================================================================

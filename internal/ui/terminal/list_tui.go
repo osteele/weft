@@ -688,21 +688,23 @@ func (m listTUIModel) View() string {
 	b.WriteString(listTUIHeaderStyle.Render(truncateDisplayWidth(formatJobListHeader(layout), m.width)))
 	b.WriteString("\n")
 
-	rows := m.pageSize()
-	if len(sharedStatusLines) > 0 && rows > len(sharedStatusLines) {
-		rows -= len(sharedStatusLines)
-	}
+	footerBlockLines := len(sharedStatusLines) + 1 // shared status + controls/footer text
+	bodyRows := max(0, m.height-2-1-footerBlockLines)
+	bodyLinesWritten := 0
 	if len(m.jobs) == 0 {
 		b.WriteString(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateText(), m.width)))
 		b.WriteString("\n")
-		for i := 1; i < rows; i++ {
+		bodyLinesWritten = 1
+		for i := 1; i < bodyRows; i++ {
 			b.WriteString("\n")
+			bodyLinesWritten++
 		}
 	} else {
-		for i := 0; i < rows; i++ {
+		for i := 0; i < bodyRows; i++ {
 			idx := m.offset + i
 			if idx >= len(m.jobs) {
 				b.WriteString("\n")
+				bodyLinesWritten++
 				continue
 			}
 			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), m.width)
@@ -711,14 +713,21 @@ func (m listTUIModel) View() string {
 			}
 			b.WriteString(row)
 			b.WriteString("\n")
+			bodyLinesWritten++
 		}
 	}
+	for bodyLinesWritten < bodyRows {
+		b.WriteString("\n")
+		bodyLinesWritten++
+	}
 
+	// Always keep a visible separator above the status/footer block.
+	b.WriteString("\n")
 	for _, line := range sharedStatusLines {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(rows), m.width)))
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(bodyRows), m.width)))
 	return b.String()
 }
 
@@ -771,19 +780,22 @@ func (m listTUIModel) groupedView() string {
 	// Reserve: 1 title + 1 blank separator + footer lines.
 	footerLines := baseFooterLines
 	footerLines += len(errorDetailsLines)
-	maxBodyLines := m.height - 1 - footerLines // 1 for title
+	maxBodyLines := max(0, m.height-1-footerLines) // 1 for title
 	selectedRow := m.selectedGroupedRow()
 	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines)
-	for _, idx := range visibleRows {
-		line := "…"
-		if idx >= 0 {
-			line = rows[idx].text
-			if selectedRow >= 0 && idx == selectedRow {
-				line = listTUISelectedStyle.Render(line)
-			}
+	bodyLinesWritten := 0
+	for _, row := range visibleRows {
+		line := row.text
+		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
+			line = listTUISelectedStyle.Render(line)
 		}
 		b.WriteString(truncateDisplayWidth(line, m.width))
 		b.WriteString("\n")
+		bodyLinesWritten++
+	}
+	for bodyLinesWritten < maxBodyLines {
+		b.WriteString("\n")
+		bodyLinesWritten++
 	}
 
 	// Visually separate grouped job rows from footer lines.
@@ -1685,93 +1697,163 @@ func truncateErrorDetailsLines(lines []string, maxLines int) []string {
 	return truncated
 }
 
-// selectGroupedRowsForViewport chooses grouped status rows for a short viewport,
-// preserving section headers and ellipsizing hidden lines above.
-// Returned indices refer to rows; -1 denotes an ellipsis marker line.
-func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []int {
+type groupedViewportLine struct {
+	text   string
+	rowIdx int // -1 means synthesized (ellipsis)
+}
+
+type groupedViewportSection struct {
+	title          string
+	headerRowIndex int
+	jobCount       int
+	rows           []groupedStatusRow
+	shownRows      int
+	ellipsis       bool
+	summaryOnly    bool
+}
+
+func (s groupedViewportSection) abbreviated() bool {
+	return s.ellipsis || s.summaryOnly
+}
+
+func parseGroupedViewportSections(rows []groupedStatusRow) []groupedViewportSection {
+	sections := make([]groupedViewportSection, 0, 8)
+	current := groupedViewportSection{}
+	active := false
+	for i, row := range rows {
+		if row.isHeader {
+			if active {
+				current.shownRows = len(current.rows)
+				sections = append(sections, current)
+			}
+			title := strings.TrimSpace(strings.TrimSuffix(row.text, ":"))
+			if idx := strings.Index(title, " ("); idx > 0 {
+				title = strings.TrimSpace(title[:idx])
+			}
+			current = groupedViewportSection{
+				title:          title,
+				headerRowIndex: i,
+				rows:           make([]groupedStatusRow, 0, 8),
+			}
+			active = true
+			continue
+		}
+		if !active || strings.TrimSpace(row.text) == "" {
+			continue
+		}
+		current.rows = append(current.rows, row)
+		if row.job != nil && !row.isBlocked {
+			current.jobCount++
+		}
+	}
+	if active {
+		current.shownRows = len(current.rows)
+		sections = append(sections, current)
+	}
+	return sections
+}
+
+// selectGroupedRowsForViewport keeps grouped sections in order and, when needed,
+// abbreviates section tails with "..." or collapses a fully elided section to
+// "Section (N)" (without a trailing colon).
+func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []groupedViewportLine {
 	if maxLines <= 0 || len(rows) == 0 {
 		return nil
 	}
-	if len(rows) <= maxLines {
-		indices := make([]int, len(rows))
+	type sectionState struct {
+		groupedViewportSection
+		rowIdxs []int
+	}
+	parsed := parseGroupedViewportSections(rows)
+	sections := make([]sectionState, 0, len(parsed))
+	for _, section := range parsed {
+		rowIdxs := make([]int, 0, len(rows))
 		for i := range rows {
-			indices[i] = i
-		}
-		return indices
-	}
-
-	headerIdxs := make([]int, 0, 8)
-	for i, row := range rows {
-		if row.isHeader {
-			headerIdxs = append(headerIdxs, i)
-		}
-	}
-
-	needEllipsis := len(rows) > maxLines
-	capacity := maxLines
-	if needEllipsis && len(headerIdxs) < maxLines {
-		capacity = maxLines - 1
-	}
-	if capacity <= 0 {
-		capacity = maxLines
-		needEllipsis = false
-	}
-
-	selected := map[int]struct{}{}
-	if len(headerIdxs) <= capacity {
-		for _, idx := range headerIdxs {
-			selected[idx] = struct{}{}
-		}
-	} else {
-		// If the viewport is too short to hold every header, keep the tail
-		// sections visible so final outcomes stay on screen.
-		for _, idx := range headerIdxs[len(headerIdxs)-capacity:] {
-			selected[idx] = struct{}{}
-		}
-	}
-
-	remaining := capacity - len(selected)
-	if remaining > 0 {
-		for i := len(rows) - 1; i >= 0 && remaining > 0; i-- {
-			if _, ok := selected[i]; ok {
+			if i <= section.headerRowIndex {
 				continue
 			}
 			if rows[i].isHeader {
-				continue
+				break
 			}
 			if strings.TrimSpace(rows[i].text) == "" {
 				continue
 			}
-			selected[i] = struct{}{}
-			remaining--
+			rowIdxs = append(rowIdxs, i)
 		}
+		sections = append(sections, sectionState{
+			groupedViewportSection: section,
+			rowIdxs:                rowIdxs,
+		})
 	}
-	if remaining > 0 {
-		for i := len(rows) - 1; i >= 0 && remaining > 0; i-- {
-			if _, ok := selected[i]; ok {
+	render := func() []groupedViewportLine {
+		out := make([]groupedViewportLine, 0, maxLines)
+		prevAbbreviated := false
+		for idx, section := range sections {
+			currAbbreviated := section.abbreviated()
+			if idx > 0 && !(prevAbbreviated && currAbbreviated) {
+				out = append(out, groupedViewportLine{text: "", rowIdx: -1})
+			}
+			if section.summaryOnly {
+				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d)", section.title, section.jobCount), rowIdx: -1})
+			} else {
+				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d):", section.title, section.jobCount), rowIdx: section.headerRowIndex})
+				for i := 0; i < section.shownRows && i < len(section.rows) && i < len(section.rowIdxs); i++ {
+					out = append(out, groupedViewportLine{text: section.rows[i].text, rowIdx: section.rowIdxs[i]})
+				}
+				if section.ellipsis {
+					out = append(out, groupedViewportLine{text: "...", rowIdx: -1})
+				}
+			}
+			prevAbbreviated = currAbbreviated
+		}
+		for len(out) > 0 && strings.TrimSpace(out[len(out)-1].text) == "" {
+			out = out[:len(out)-1]
+		}
+		return out
+	}
+
+	lines := render()
+	for len(lines) > maxLines {
+		changed := false
+		for i := len(sections) - 1; i >= 0; i-- {
+			s := &sections[i]
+			total := len(s.rows)
+			if s.summaryOnly {
 				continue
 			}
-			selected[i] = struct{}{}
-			remaining--
+			switch {
+			case s.ellipsis:
+				if s.shownRows > 1 {
+					s.shownRows--
+					changed = true
+				} else {
+					s.summaryOnly = true
+					s.ellipsis = false
+					s.shownRows = 0
+					changed = true
+				}
+			case total >= 3:
+				s.ellipsis = true
+				s.shownRows = total - 2
+				changed = true
+			default:
+				s.summaryOnly = true
+				s.shownRows = 0
+				changed = true
+			}
+			if changed {
+				break
+			}
 		}
+		if !changed {
+			break
+		}
+		lines = render()
 	}
-
-	indices := make([]int, 0, len(selected))
-	for idx := range selected {
-		indices = append(indices, idx)
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
 	}
-	sort.Ints(indices)
-
-	if !needEllipsis || len(indices) == 0 || indices[0] == 0 {
-		return indices
-	}
-	if len(indices) >= maxLines {
-		indices = indices[1:]
-	}
-	out := make([]int, 0, len(indices)+1)
-	out = append(out, -1)
-	out = append(out, indices...)
-	return out
+	return lines
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {
