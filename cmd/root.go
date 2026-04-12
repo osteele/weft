@@ -8,6 +8,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/osteele/weft/internal/config"
@@ -41,6 +42,23 @@ func Execute() error {
 	os.Args = rewriteRootArgs(os.Args, cfg)
 
 	logging.Setup(os.Stderr, "text")
+	// Pre-scan os.Args for --verbose, because cobra hasn't parsed flags yet
+	// and PersistentPreRun wouldn't run for commands that error before RunE.
+	for _, a := range os.Args[1:] {
+		if a == "--" {
+			break
+		}
+		if a == "--verbose" {
+			verbose = true
+			break
+		}
+		if rest, ok := strings.CutPrefix(a, "--verbose="); ok {
+			if v, err := strconv.ParseBool(rest); err == nil {
+				verbose = v
+			}
+			break
+		}
+	}
 	if verbose {
 		logging.SetLevel(slog.LevelDebug)
 	}
