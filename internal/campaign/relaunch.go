@@ -65,6 +65,7 @@ type RunawayPolicy struct {
 	ChainNoProgressLimit     int
 	OrphanChurnLimit         int
 	SpendNoProgressLimitCent int
+	ResumeGracePeriod        time.Duration // skip breaker check for this long after a resume
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
@@ -590,6 +591,16 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 			Detail:     runawayScopeDetail(cfg.ScopeProject, reason),
 		})
 		return true, reason, nil
+	}
+
+	// After a manual resume, give new instances time to complete a job
+	// before re-evaluating the breaker.
+	gracePeriod := cfg.RunawayPolicy.ResumeGracePeriod
+	if gracePeriod <= 0 {
+		gracePeriod = 15 * time.Minute
+	}
+	if resumedAt > 0 && now.Unix()-resumedAt < int64(gracePeriod.Seconds()) {
+		return false, "", nil
 	}
 
 	since := now.Add(-cfg.RunawayPolicy.Window).Unix()

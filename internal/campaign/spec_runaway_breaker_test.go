@@ -287,6 +287,83 @@ func TestSpec_RunawayBreakerClears_OnResume(t *testing.T) {
 	}
 }
 
+func TestSpec_RunawayBreakerGracePeriod_SkipsCheckAfterResume(t *testing.T) {
+	// After a resume, the breaker should not re-trip during the grace period,
+	// even if metrics would otherwise trigger it. This prevents false positives
+	// when new instances haven't completed any jobs yet.
+	database := db.SetupTestDB(t)
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	// Trip the breaker
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayTripped,
+		CampaignID: campaignID,
+		Detail:     "project=<all>; test trip",
+	}); err != nil {
+		t.Fatalf("insert tripped: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	// Resume it
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayResumed,
+		CampaignID: campaignID,
+		Detail:     "project=<all>; auto-resumed via retry",
+	}); err != nil {
+		t.Fatalf("insert resumed: %v", err)
+	}
+
+	// Create orphaned instances that would normally re-trip the breaker
+	for i := 0; i < 5; i++ {
+		launchID, err := db.CreateLaunch(database, &db.Launch{
+			CampaignID: &campaignID,
+			Status:     db.LaunchStatusFailed,
+			Provider:   "vastai",
+			GPUSpec:    "RTX_4090",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if i == 0 {
+			if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+				t.Fatalf("SetJobLaunchID: %v", err)
+			}
+		}
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         3, // low threshold — would trip without grace
+			SpendNoProgressLimitCent: 500,
+			ResumeGracePeriod:        15 * time.Minute,
+		},
+	}
+
+	// Evaluate immediately after resume — should NOT trip due to grace period
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if tripped {
+		t.Fatal("breaker should NOT re-trip during grace period after resume")
+	}
+}
+
 func TestSpec_RunawayBreakerDisabled(t *testing.T) {
 	// Spec: RunawayBreakerTrips requires config.runaway_enabled.
 	database := db.SetupTestDB(t)
