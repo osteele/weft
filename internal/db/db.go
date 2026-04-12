@@ -82,15 +82,16 @@ type Job struct {
 	ExitCode             *int
 	Status               string
 	Tombstoned           bool
-	Cost                 *float64       // Actual cost in dollars (for cloud-run jobs)
-	ErrorDiagnosis       string         // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
-	RetryCount           int            // Number of auto-remediation retries attempted
-	PlacementMeta        *PlacementMeta // Placement telemetry (predictions, scores)
-	PlacementReasons     []string       // Why the job is currently unplaced
-	LaunchID             *int64         // Cloud instance ID if this job is part of a cloud instance
-	CampaignJobIndex     *int           // Position within a cloud campaign sequence, if assigned
-	LatestRunID          *int64         // Latest execution attempt row for this logical job
-	QueueBlockedReason   string         // Transient UI-only queue gate reason; not persisted
+	Cost                 *float64              // Actual cost in dollars (for cloud-run jobs)
+	ErrorDiagnosis       string                // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
+	RetryCount           int                   // Number of auto-remediation retries attempted
+	PlacementMeta        *PlacementMeta        // Placement telemetry (predictions, scores)
+	CLIResourceOverrides *CLIResourceOverrides // Original CLI flag intent from submission, replayed on retry
+	PlacementReasons     []string              // Why the job is currently unplaced
+	LaunchID             *int64                // Cloud instance ID if this job is part of a cloud instance
+	CampaignJobIndex     *int                  // Position within a cloud campaign sequence, if assigned
+	LatestRunID          *int64                // Latest execution attempt row for this logical job
+	QueueBlockedReason   string                // Transient UI-only queue gate reason; not persisted
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -228,6 +229,21 @@ func (j *Job) UsesInventoryPlacement() bool {
 	return j.HasInventoryHost()
 }
 
+// CLIResourceOverrides records the resource-related CLI flags the user passed
+// at job submission (original intent). Only fields the user explicitly set
+// are populated. On retry, these are re-applied on top of the current script
+// metadata to produce effective values — matching the merge `weft run`
+// performs for a fresh submission.
+//
+// Values are stored *pre-headroom* (raw CLI intent); headroom is applied
+// when the merge is evaluated.
+type CLIResourceOverrides struct {
+	GPU          string `json:"gpu,omitempty"`
+	GPUClass     string `json:"gpu_class,omitempty"`
+	GPUMemGB     *int   `json:"gpu_mem_gb,omitempty"`
+	GPUMemStrict *bool  `json:"gpu_mem_strict,omitempty"`
+}
+
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
 type PlacementMeta struct {
 	PredictedDurationS *float64 `json:"pred_dur_s,omitempty"`
@@ -238,7 +254,7 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
 
 const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
@@ -362,6 +378,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		tombstoned INTEGER NOT NULL DEFAULT 0,
 		placement_host TEXT,
 		placement_reasons TEXT,
+		cli_overrides TEXT,
 		campaign_job_index INTEGER,
 		requested_status TEXT
 	)`, ifClause, table)
@@ -1154,6 +1171,14 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN needs TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add cli_overrides column storing the resource-related CLI
+	// flags the user passed at submission. Replayed on retry to reproduce
+	// the original submission intent against the current script metadata.
+	// See cmd/restart.go applyScriptGPUDefaults.
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN cli_overrides TEXT`); err != nil {
 		return err
 	}
 
@@ -2320,6 +2345,37 @@ func decodePlacementMeta(value sql.NullString) *PlacementMeta {
 	return &meta
 }
 
+func decodeCLIResourceOverrides(value sql.NullString) *CLIResourceOverrides {
+	if !value.Valid || value.String == "" {
+		return nil
+	}
+	var snap CLIResourceOverrides
+	if err := json.Unmarshal([]byte(value.String), &snap); err != nil {
+		return nil
+	}
+	return &snap
+}
+
+// SetJobCLIResourceOverrides updates the stored CLI-submission overrides.
+// nil or a struct with no fields set clears the column.
+func SetJobCLIResourceOverrides(db *sql.DB, jobID int64, snap *CLIResourceOverrides) error {
+	var value interface{}
+	if snap != nil && !snap.IsEmpty() {
+		data, err := json.Marshal(snap)
+		if err != nil {
+			return fmt.Errorf("encode cli overrides: %w", err)
+		}
+		value = string(data)
+	}
+	_, err := db.Exec(`UPDATE jobs SET cli_overrides = ? WHERE id = ?`, value, jobID)
+	return err
+}
+
+// IsEmpty reports whether no fields are populated.
+func (o *CLIResourceOverrides) IsEmpty() bool {
+	return o.GPU == "" && o.GPUClass == "" && o.GPUMemGB == nil && o.GPUMemStrict == nil
+}
+
 // ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID
 // and are in a non-terminal status.
 func ListActiveVastaiJobs(db *sql.DB) ([]*Job, error) {
@@ -3440,6 +3496,7 @@ type jobScanFields struct {
 	retryCount       sql.NullInt64
 	placementMeta    sql.NullString
 	placementReasons sql.NullString
+	cliOverrides     sql.NullString
 	cloudInstanceID  sql.NullInt64
 	campaignJobIndex sql.NullInt64
 	latestRunID      sql.NullInt64
@@ -3461,7 +3518,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 		&f.produces, &f.needs, &f.project, &f.tombstoned,
 		&f.lastSyncedStatus, &f.pendingStatus, &f.pendingAt,
 		&f.jobMetadata, &f.cost, &f.errorDiagnosis, &f.retryCount,
-		&f.placementMeta, &f.placementReasons,
+		&f.placementMeta, &f.placementReasons, &f.cliOverrides,
 		&f.cloudInstanceID, &f.campaignJobIndex, &f.latestRunID,
 	}
 }
@@ -3570,6 +3627,7 @@ func (f *jobScanFields) populateJob(j *Job) {
 	}
 	j.PlacementMeta = decodePlacementMeta(f.placementMeta)
 	j.PlacementReasons = decodeStringSlice(f.placementReasons)
+	j.CLIResourceOverrides = decodeCLIResourceOverrides(f.cliOverrides)
 	if f.cloudInstanceID.Valid {
 		j.LaunchID = &f.cloudInstanceID.Int64
 	}

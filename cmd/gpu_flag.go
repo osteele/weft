@@ -38,3 +38,25 @@ func parseGPUFlag(value string) (gpuClass string, gpuMemGB int, err error) {
 
 	return gpuClass, mem, nil
 }
+
+// expandGPUFlag normalizes a (gpu, gpuClass, gpuMem) triple so a non-numeric
+// gpu like "nvidia>=24GB" is split into class + mem. Callers pass the raw
+// inputs; receivers consume the expanded triple. Leaves numeric gpu (CUDA
+// device index) and empty gpu untouched. Existing non-empty class or mem are
+// not overwritten by the expansion.
+func expandGPUFlag(gpu, gpuClass string, gpuMemGB int) (string, string, int, error) {
+	if gpu == "" || isNumericGPU(gpu) {
+		return gpu, gpuClass, gpuMemGB, nil
+	}
+	parsedClass, parsedMem, err := parseGPUFlag(gpu)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if gpuClass == "" {
+		gpuClass = parsedClass
+	}
+	if gpuMemGB == 0 && parsedMem > 0 {
+		gpuMemGB = parsedMem
+	}
+	return "", gpuClass, gpuMemGB, nil
+}

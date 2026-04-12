@@ -693,3 +693,153 @@ func TestRestartUnplacedRentalJob_ResetsToQueued(t *testing.T) {
 func intPtrRestart(v int) *int {
 	return &v
 }
+
+// TestRestartQueuedJob_ClearsGPUMemWhenScriptDropsIt regression-tests the bug
+// where a job with gpu_mem inherited from the script's PEP 723 block would
+// keep its stale value on retry after the script author removed the gpu-mem
+// line. No CLI override was stored, so on retry the merge produces no
+// gpu-mem and the DB field is cleared.
+func TestRestartQueuedJob_ClearsGPUMemWhenScriptDropsIt(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	// Script still has a [tool.weft] block (tags) so meta != nil, but no
+	// longer declares gpu-mem.
+	script := `# /// script
+# [tool.weft]
+# tags = ["benchmark"]
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	stale := 82
+	if err := db.SetJobGPUMemGB(database, jobID, &stale); err != nil {
+		t.Fatalf("set stale gpu mem: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB != nil {
+		t.Fatalf("GPUMemGB = %v, want nil (script no longer declares gpu-mem)", *job.GPUMemGB)
+	}
+}
+
+// TestRestartQueuedJob_PreservesStoredCLIOverride verifies that when the user
+// submitted a job with an explicit --gpu-mem CLI flag, that intent is
+// replayed on retry even if the script's gpu-mem has changed or been removed.
+func TestRestartQueuedJob_PreservesStoredCLIOverride(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	// Script no longer declares gpu-mem.
+	script := `# /// script
+# [tool.weft]
+# tags = ["benchmark"]
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	// The user originally passed --gpu-mem=40 on the CLI; post-headroom the
+	// effective value was 42. Record both.
+	eff := 42
+	if err := db.SetJobGPUMemGB(database, jobID, &eff); err != nil {
+		t.Fatalf("set gpu mem: %v", err)
+	}
+	raw := 40
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{
+		GPUMemGB: &raw,
+	}); err != nil {
+		t.Fatalf("set cli overrides: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 42 {
+		t.Fatalf("GPUMemGB = %v, want 42 (CLI override replayed)", job.GPUMemGB)
+	}
+}
+
+// TestRestartQueuedJob_ReplaysCLIOverrideWithChangedScript verifies the
+// merge: when script gpu-mem changes and the user had a CLI override, the
+// CLI override still wins.
+func TestRestartQueuedJob_ReplaysCLIOverrideWithChangedScript(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# gpu-mem = 16
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	// Stored CLI override: user passed --gpu-mem=40 at submission.
+	raw := 40
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{
+		GPUMemGB: &raw,
+	}); err != nil {
+		t.Fatalf("set cli overrides: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 42 {
+		t.Fatalf("GPUMemGB = %v, want 42 (CLI 40 + headroom)", job.GPUMemGB)
+	}
+}
+
+// TestRestartQueuedJob_NoScriptMetaLeavesFieldsAlone verifies that when the
+// script has no PEP 723 block, retry does not clear existing resource fields.
+// Protects against regressions where legacy jobs with pinned host/class get
+// silently cleared.
+func TestRestartQueuedJob_NoScriptMetaLeavesFieldsAlone(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "ampere+"); err != nil {
+		t.Fatalf("set gpu class: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("GPUClass = %q, want ampere+ (preserved when no script meta)", job.GPUClass)
+	}
+}

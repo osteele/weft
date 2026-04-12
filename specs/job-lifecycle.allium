@@ -72,6 +72,12 @@ entity Job {
     created_at: Timestamp
     retry_count: Integer
 
+    -- Original submission intent: the resource-related CLI flags the user
+    -- passed at `weft run` time. Replayed on retry so that edits to the
+    -- script's PEP 723 [tool.weft] block are reflected without losing
+    -- explicit user overrides. Fields absent here were not set on the CLI.
+    cli_overrides: CLIResourceOverrides?
+
     -- Post-execution
     exit_code: Integer?
     failure_reason: FailureReason?
@@ -445,6 +451,27 @@ rule UserRetriesUnplaced {
         -- Also clears the runaway breaker if tripped for the job's scope
         -- (see RunawayBreakerClears in campaign-lifecycle.allium).
         -- Implementation: cmd/restart.go
+}
+
+rule RetryReplaysSubmissionIntent {
+    when: UserRequeue(job) or UserRetryUnplaced(job)
+    requires: job.has_script_pep723_block
+
+    -- On retry, resource fields (gpu, gpu_class, gpu_mem) are recomputed
+    -- by re-reading the current PEP 723 [tool.weft] block and replaying
+    -- job.cli_overrides on top, using the same CLI > script > unset
+    -- precedence as the initial `weft run` submission. Fields the script
+    -- no longer declares AND the user did not pin via CLI are cleared.
+    -- CLI overrides explicitly re-passed to `weft retry` take precedence
+    -- over both stored overrides and script metadata.
+
+    @guidance
+        -- Implementation: cmd/restart.go applyScriptGPUDefaults.
+        -- Covers the case where a user edits a script to add, change, or
+        -- remove a resource constraint and re-runs `weft retry <id>`.
+        -- Legacy jobs with no stored cli_overrides are treated as having
+        -- no CLI intent; the retry-time merge then reflects the current
+        -- script verbatim.
 }
 
 -- ==========================================================================

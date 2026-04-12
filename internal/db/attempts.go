@@ -544,6 +544,7 @@ func createJobStatusView(db *sql.DB) error {
 			COALESCE(la.attempt_number - 1, 0) AS retry_count,
 			la.placement_meta,
 			j.placement_reasons,
+			j.cli_overrides,
 			CASE WHEN j.requested_status = 'queued'
 			          AND la.end_time IS NOT NULL
 			          AND COALESCE(la.status, '') != 'completed'

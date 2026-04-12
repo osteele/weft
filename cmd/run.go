@@ -308,10 +308,31 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
 	}
 
+	// Capture CLI intent for resource flags BEFORE script defaults are merged in.
+	// These overrides are persisted on the job so retries can replay the user's
+	// original submission intent against updated script metadata.
+	cliOverrides := &db.CLIResourceOverrides{}
+	if runGPU != "" {
+		cliOverrides.GPU = runGPU
+	}
+	if runGPUClass != "" {
+		cliOverrides.GPUClass = runGPUClass
+	}
+	if runGPUMem != 0 {
+		mem := runGPUMem
+		cliOverrides.GPUMemGB = &mem
+	}
+	if cmd.Flags().Changed("gpu-mem-strict") {
+		s := runGPUMemStrict
+		cliOverrides.GPUMemStrict = &s
+	}
+
 	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
-	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
-		slog.Warn("script metadata error", "error", err)
-	} else if meta != nil {
+	scriptMeta, scriptMetaErr := dataloc.ScanScriptMeta(localDir, command)
+	if scriptMetaErr != nil {
+		slog.Warn("script metadata error", "error", scriptMetaErr)
+	}
+	if meta := scriptMeta; meta != nil {
 		var applied []string
 		if runGPU == "" && runGPUClass == "" && meta.GPU != "" {
 			runGPU = meta.GPU
@@ -536,6 +557,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
+			slog.Warn("failed to save cli overrides", "error", err)
+		}
 		if len(cloudNeeds) > 0 {
 			meta := &db.JobMetadata{
 				Dependencies: &db.JobDependencyMetadata{
@@ -626,6 +650,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		jobID, err := ops.RecordQueuedJob(database, params)
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
+		}
+		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
+			slog.Warn("failed to save cli overrides", "error", err)
 		}
 		if len(cloudNeeds) > 0 {
 			meta := &db.JobMetadata{
@@ -788,6 +815,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
 		}
+		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
+			slog.Warn("failed to save cli overrides", "error", err)
+		}
 		if len(cloudNeeds) > 0 {
 			meta := &db.JobMetadata{
 				Dependencies: &db.JobDependencyMetadata{
@@ -819,6 +849,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, gpu)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
+		}
+		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
+			slog.Warn("failed to save cli overrides", "error", err)
 		}
 		backend, err := ops.ResolveBackend(host, 5*time.Second)
 		if err != nil {

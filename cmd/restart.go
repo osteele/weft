@@ -236,75 +236,120 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 		slog.Warn("script metadata error", "error", err)
 		return nil, nil
 	}
+	// When there's no script PEP 723 block at all, leave the job's resource
+	// fields alone. The script provides no new information to merge, and the
+	// existing values may have come from CLI or from a path we can't infer.
 	if meta == nil {
 		return nil, nil
 	}
 
-	var updates []string
-	// Match run semantics: gpu takes precedence over gpu-class when both are present.
-	metaGPU := meta.GPU
-	metaGPUClass := meta.GPUClass
-	metaGPUMem := meta.GPUMemGB
-	strict := false
-	if meta.GPUMemStrict != nil {
-		strict = *meta.GPUMemStrict
+	metaGPU, metaGPUClass, metaGPUMem, err := expandGPUFlag(meta.GPU, meta.GPUClass, meta.GPUMemGB)
+	if err != nil {
+		return nil, fmt.Errorf("parse script metadata gpu: %w", err)
 	}
-	if strictOverride != nil {
-		strict = *strictOverride
+	metaStrict := false
+	metaStrictSet := false
+	if meta.GPUMemStrict != nil {
+		metaStrict = *meta.GPUMemStrict
+		metaStrictSet = true
 	}
 
-	if metaGPU != "" {
-		if !isNumericGPU(metaGPU) {
-			parsedClass, parsedMem, err := parseGPUFlag(metaGPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse script metadata gpu: %w", err)
-			}
-			metaGPU = ""
-			metaGPUClass = parsedClass
-			if parsedMem > 0 {
-				metaGPUMem = parsedMem
-			}
+	cliGPU, cliGPUClass, cliGPUMem := "", "", 0
+	cliGPUMemSet, cliStrict, cliStrictSet := false, false, false
+	if o := job.CLIResourceOverrides; o != nil {
+		cliGPU, cliGPUClass = o.GPU, o.GPUClass
+		if o.GPUMemGB != nil {
+			cliGPUMem = *o.GPUMemGB
+			cliGPUMemSet = true
+		}
+		if o.GPUMemStrict != nil {
+			cliStrict = *o.GPUMemStrict
+			cliStrictSet = true
+		}
+		var err error
+		cliGPU, cliGPUClass, cliGPUMem, err = expandGPUFlag(cliGPU, cliGPUClass, cliGPUMem)
+		if err != nil {
+			return nil, fmt.Errorf("parse cli gpu override: %w", err)
+		}
+		if cliGPUMem > 0 {
+			cliGPUMemSet = true
 		}
 	}
-	if metaGPU != "" {
-		if job.GPU != metaGPU {
-			if err := db.SetJobGPU(database, job.ID, metaGPU); err != nil {
-				return nil, fmt.Errorf("update gpu from script metadata: %w", err)
-			}
-			job.GPU = metaGPU
-			updates = append(updates, fmt.Sprintf("gpu: %s (from script metadata)", metaGPU))
+
+	// Precedence: strictOverride (retry-time flag) > CLI intent > script meta.
+	effGPU := cliGPU
+	if effGPU == "" {
+		effGPU = metaGPU
+	}
+	effGPUClass := cliGPUClass
+	// Only fall back to script gpu-class when no CLI intent exists for gpu
+	// OR gpu-class — matches cmd/run.go:316-323 submission precedence.
+	if effGPUClass == "" && effGPU == "" {
+		effGPUClass = metaGPUClass
+	}
+	effStrict := false
+	switch {
+	case strictOverride != nil:
+		effStrict = *strictOverride
+	case cliStrictSet:
+		effStrict = cliStrict
+	case metaStrictSet:
+		effStrict = metaStrict
+	}
+	effGPUMemRaw := 0
+	if cliGPUMemSet {
+		effGPUMemRaw = cliGPUMem
+	} else if metaGPUMem > 0 {
+		effGPUMemRaw = metaGPUMem
+	}
+
+	var updates []string
+
+	if job.GPU != effGPU {
+		if err := db.SetJobGPU(database, job.ID, effGPU); err != nil {
+			return nil, fmt.Errorf("update gpu: %w", err)
+		}
+		job.GPU = effGPU
+		if effGPU == "" {
+			updates = append(updates, "gpu: cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("gpu: %s", effGPU))
 		}
 	}
-	if metaGPU == "" && metaGPUClass != "" {
-		if !strings.EqualFold(job.GPUClass, metaGPUClass) {
-			if err := db.SetJobGPUClass(database, job.ID, metaGPUClass); err != nil {
-				return nil, fmt.Errorf("update gpu-class from script metadata: %w", err)
-			}
-			job.GPUClass = metaGPUClass
-			updates = append(updates, fmt.Sprintf("gpu-class: %s (from script metadata)", metaGPUClass))
+	if !strings.EqualFold(job.GPUClass, effGPUClass) {
+		if err := db.SetJobGPUClass(database, job.ID, effGPUClass); err != nil {
+			return nil, fmt.Errorf("update gpu-class: %w", err)
 		}
-		if job.GPU != "" {
-			if err := db.SetJobGPU(database, job.ID, ""); err != nil {
-				return nil, fmt.Errorf("clear gpu from script metadata: %w", err)
-			}
-			job.GPU = ""
+		job.GPUClass = effGPUClass
+		if effGPUClass == "" {
+			updates = append(updates, "gpu-class: cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("gpu-class: %s", effGPUClass))
 		}
 	}
-	if metaGPUMem > 0 {
-		effectiveMem := applyGPUMemHeadroom(metaGPUMem, true, strict)
-		if job.GPUMemGB == nil || *job.GPUMemGB != effectiveMem {
-			mem := effectiveMem
-			if err := db.SetJobGPUMemGB(database, job.ID, &mem); err != nil {
-				return nil, fmt.Errorf("update gpu-mem from script metadata: %w", err)
-			}
-			job.GPUMemGB = &mem
-			if strict {
-				updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (from script metadata, strict)", mem))
-			} else {
-				updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (from script metadata +%dGB headroom)", mem, defaultGPUMemHeadroomGB))
-			}
+
+	var effMem *int
+	if effGPUMemRaw > 0 {
+		m := applyGPUMemHeadroom(effGPUMemRaw, true, effStrict)
+		effMem = &m
+	}
+	memChanged := (effMem == nil) != (job.GPUMemGB == nil) ||
+		(effMem != nil && job.GPUMemGB != nil && *effMem != *job.GPUMemGB)
+	if memChanged {
+		if err := db.SetJobGPUMemGB(database, job.ID, effMem); err != nil {
+			return nil, fmt.Errorf("update gpu-mem: %w", err)
+		}
+		job.GPUMemGB = effMem
+		switch {
+		case effMem == nil:
+			updates = append(updates, "gpu-mem: cleared")
+		case effStrict:
+			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (strict)", *effMem))
+		default:
+			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (+%dGB headroom)", *effMem, defaultGPUMemHeadroomGB))
 		}
 	}
+
 	if len(meta.UvArgs) > 0 {
 		rewritten := dataloc.ApplyUvArgs(job.Command, meta.UvArgs)
 		if rewritten != job.Command {
