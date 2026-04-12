@@ -173,6 +173,9 @@ func init() {
 func printCommandError(cmd *cobra.Command, err error) {
 	stream := cmd.ErrOrStderr()
 	fmt.Fprintf(stream, "Error: %v\n", err)
+	if db.IsDatabaseLocked(err) {
+		fmt.Fprintln(stream, "Hint: database lock contention is usually transient; retry shortly. Cloud instances are reconciled by sync/watch and orphan sweep (`weft sync` can force a pass).")
+	}
 	if isUsageError(err) {
 		fmt.Fprintln(stream)
 		fmt.Fprint(stream, cmd.UsageString())

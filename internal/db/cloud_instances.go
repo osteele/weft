@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -317,23 +318,25 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 		provisionedInputsJSON = &s
 	}
 
-	result, err := db.Exec(
-		`INSERT INTO launches (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
-		 max_spend_cents, max_time_seconds, created_at,
-		 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
-		 inet_down_mbps, inet_up_mbps, cuda_version,
-		 disk_gb, provisioned_inputs, machine_id, docker_image)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
-		c.MaxSpendCents, c.MaxTimeSeconds, now,
-		c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
-		c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
-		c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
+	return RetryOnDatabaseLockedValue(context.Background(), "create launch row", func() (int64, error) {
+		result, err := db.Exec(
+			`INSERT INTO launches (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
+			 max_spend_cents, max_time_seconds, created_at,
+			 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
+			 inet_down_mbps, inet_up_mbps, cuda_version,
+			 disk_gb, provisioned_inputs, machine_id, docker_image)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
+			c.MaxSpendCents, c.MaxTimeSeconds, now,
+			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
+			c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
+			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return result.LastInsertId()
+	})
 }
 
 // GetLaunch retrieves a cloud instance by ID.
@@ -396,34 +399,36 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 	if len(terminationInfo) > 1 {
 		detail = terminationInfo[1]
 	}
-	switch status {
-	case LaunchStatusRunning:
-		_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
-		return err
-	case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
-		// Don't overwrite an already-terminal instance that has a termination
-		// reason set (e.g., bootstrap_timeout → job_failure on next pass).
-		var currentStatus, currentReason string
-		if err := db.QueryRow(`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`, id).Scan(&currentStatus, &currentReason); err == nil {
-			isTerminal := currentStatus == LaunchStatusCompleted || currentStatus == LaunchStatusFailed || currentStatus == LaunchStatusCancelled
-			if isTerminal && currentReason != "" {
-				return nil
+	return RetryOnDatabaseLocked(context.Background(), "update launch status", func() error {
+		switch status {
+		case LaunchStatusRunning:
+			_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
+			return err
+		case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
+			// Don't overwrite an already-terminal instance that has a termination
+			// reason set (e.g., bootstrap_timeout → job_failure on next pass).
+			var currentStatus, currentReason string
+			if err := db.QueryRow(`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`, id).Scan(&currentStatus, &currentReason); err == nil {
+				isTerminal := currentStatus == LaunchStatusCompleted || currentStatus == LaunchStatusFailed || currentStatus == LaunchStatusCancelled
+				if isTerminal && currentReason != "" {
+					return nil
+				}
 			}
-		}
-		if reason != "" && detail != "" {
-			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, now, reason, detail, id)
+			if reason != "" && detail != "" {
+				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, now, reason, detail, id)
+				return err
+			}
+			if reason != "" {
+				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
+				return err
+			}
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ? WHERE id = ?`, status, now, id)
+			return err
+		default:
+			_, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ?`, status, id)
 			return err
 		}
-		if reason != "" {
-			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
-			return err
-		}
-		_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ? WHERE id = ?`, status, now, id)
-		return err
-	default:
-		_, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ?`, status, id)
-		return err
-	}
+	})
 }
 
 // UpdateLaunchDockerImage sets the Docker image used for a launch.
@@ -631,6 +636,12 @@ func parseLegacyLaunchHostInstanceID(host string) (int64, bool) {
 // (integrity violation otherwise). The open attempt is closed and a fresh
 // attempt is created with the instance assignment.
 func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
+	return RetryOnDatabaseLocked(context.Background(), "set job launch id", func() error {
+		return setJobLaunchIDOnce(database, jobID, instanceID)
+	})
+}
+
+func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64) error {
 	tx, err := database.Begin()
 	if err != nil {
 		return err
@@ -686,8 +697,10 @@ func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 
 // SetJobCampaignIndex sets the 0-based position of a job within its campaign sequence.
 func SetJobCampaignIndex(db *sql.DB, jobID int64, index int) error {
-	_, err := db.Exec(`UPDATE jobs SET campaign_job_index = ? WHERE id = ?`, index, jobID)
-	return err
+	return RetryOnDatabaseLocked(context.Background(), "set job campaign index", func() error {
+		_, err := db.Exec(`UPDATE jobs SET campaign_job_index = ? WHERE id = ?`, index, jobID)
+		return err
+	})
 }
 
 // GetLaunchJobs returns all jobs associated with a cloud instance.

@@ -23,6 +23,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -976,6 +977,7 @@ const statusNeedsRental = "needs_rental"
 const currentSchemaVersion = 5
 
 var dbPath string
+var startupRepairFn = startupRepair
 
 func init() {
 	home, err := os.UserHomeDir()
@@ -1009,9 +1011,13 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	if err := startupRepair(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("startup repair: %w", err)
+	if err := startupRepairFn(db); err != nil {
+		if IsDatabaseLocked(err) {
+			slog.Warn("startup repair deferred due database lock; continuing with existing schema/state", "error", err)
+		} else {
+			db.Close()
+			return nil, fmt.Errorf("startup repair: %w", err)
+		}
 	}
 
 	return db, nil
@@ -2435,16 +2441,18 @@ func ClearQueueAssignment(db *sql.DB, id int64) error {
 // For jobs without an attempt (unplaced), it sets requested_status directly
 // on the jobs table since there's no attempt row to hold pending_status.
 func SetPendingStatus(database *sql.DB, jobID int64, s string) error {
-	attemptID, err := GetLatestAttemptID(database, jobID)
-	if err != nil {
-		return err
-	}
-	if attemptID == 0 {
-		// No attempt exists: set requested_status directly on the job.
-		_, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, s, jobID)
-		return err
-	}
-	return SetAttemptPendingStatus(database, jobID, s)
+	return RetryOnDatabaseLocked(context.Background(), "set pending status", func() error {
+		attemptID, err := GetLatestAttemptID(database, jobID)
+		if err != nil {
+			return err
+		}
+		if attemptID == 0 {
+			// No attempt exists: set requested_status directly on the job.
+			_, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, s, jobID)
+			return err
+		}
+		return SetAttemptPendingStatus(database, jobID, s)
+	})
 }
 
 // SetRequestedStatus sets jobs.requested_status directly.

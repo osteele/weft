@@ -305,8 +305,8 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "Auto-pilot failed:") {
-		t.Fatalf("expected status line in grouped footer, got:\n%s", out)
+	if strings.Contains(out, "Auto-pilot failed:") {
+		t.Fatalf("expected auto-pilot message to be rendered only in the dedicated auto line, got:\n%s", out)
 	}
 	if !strings.Contains(out, "a:auto (ON)") {
 		t.Fatalf("expected controls line with auto state, got:\n%s", out)
@@ -335,6 +335,19 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	out := stripANSI(m.View())
 	if !strings.Contains(out, "a:auto (ON)") || !strings.Contains(out, "q:quit") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
+	}
+}
+
+func TestListTUIGroupedStatusTextNormalizesControlCharacters(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		statusMessage:   "peak_rss_kb: n=2373, cv_r2=0.7294\r\new instance\tq:quit",
+	}
+
+	got := m.groupedStatusText()
+	want := "peak_rss_kb: n=2373, cv_r2=0.7294 | ew instance q:quit"
+	if got != want {
+		t.Fatalf("groupedStatusText() = %q, want %q", got, want)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -474,6 +475,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	if cb.OnStatus != nil {
 		cb.OnStatus(fmt.Sprintf("Launching %d instance(s) for %d job(s)...", len(launchGroups), countGroupJobs(launchGroups)))
 	}
+	groupLabels := buildMoveGroupProgressLabels(launchGroups)
 	opts := campaign.LaunchOpts{
 		GracePeriodSeconds: 15 * 60,
 		Strategy:           bidding.StrategyCheap,
@@ -494,6 +496,10 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		},
 		func(group campaign.InstanceGroup, phase string) {
 			if cb.OnStatus != nil {
+				if label := moveGroupProgressLabel(group, groupLabels); label != "" {
+					cb.OnStatus(fmt.Sprintf("  %s %s: %s", label, group.GPUSpec(), phase))
+					return
+				}
 				cb.OnStatus(fmt.Sprintf("  %s: %s", group.GPUSpec(), phase))
 			}
 		},
@@ -627,4 +633,56 @@ func countGroupJobs(groups []campaign.InstanceGroup) int {
 		n += len(g.Jobs)
 	}
 	return n
+}
+
+func buildMoveGroupProgressLabels(groups []campaign.InstanceGroup) map[string]string {
+	if len(groups) == 0 {
+		return nil
+	}
+	labels := make(map[string]string, len(groups))
+	for i, group := range groups {
+		anchor := int64(0)
+		for _, job := range group.Jobs {
+			if job == nil {
+				continue
+			}
+			if anchor == 0 || job.ID < anchor {
+				anchor = job.ID
+			}
+		}
+		label := fmt.Sprintf("[%d/%d]", i+1, len(groups))
+		if anchor > 0 {
+			label = fmt.Sprintf("[%d/%d wj%d]", i+1, len(groups), anchor)
+		}
+		labels[moveGroupSignature(group)] = label
+	}
+	return labels
+}
+
+func moveGroupProgressLabel(group campaign.InstanceGroup, labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	return labels[moveGroupSignature(group)]
+}
+
+func moveGroupSignature(group campaign.InstanceGroup) string {
+	ids := make([]int64, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		if job == nil || job.ID <= 0 {
+			continue
+		}
+		ids = append(ids, job.ID)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(group.GPUSpec()))
+	b.WriteString("|")
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(fmt.Sprintf("%d", id))
+	}
+	return b.String()
 }

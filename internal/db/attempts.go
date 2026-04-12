@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -960,13 +961,15 @@ func UpdateAttemptDead(execer dbExecer, jobID int64) error {
 // SetAttemptPendingStatus sets pending_status on the latest attempt (open or closed).
 // Pending status can be set on a terminal attempt (e.g., retry intent on a failed job).
 func SetAttemptPendingStatus(db *sql.DB, jobID int64, status string) error {
-	now := time.Now().Unix()
-	_, err := db.Exec(`
-		UPDATE job_attempts SET pending_status = ?, pending_at = ?
-		WHERE id = `+latestAttemptSubquery,
-		status, now, jobID,
-	)
-	return err
+	return RetryOnDatabaseLocked(context.Background(), "set attempt pending status", func() error {
+		now := time.Now().Unix()
+		_, err := db.Exec(`
+			UPDATE job_attempts SET pending_status = ?, pending_at = ?
+			WHERE id = `+latestAttemptSubquery,
+			status, now, jobID,
+		)
+		return err
+	})
 }
 
 // ClearAttemptPendingStatus clears pending_status on the latest attempt (open or closed).

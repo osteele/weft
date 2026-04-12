@@ -829,11 +829,12 @@ func (m listTUIModel) pendingHostList() []string {
 
 func (m listTUIModel) groupedStatusText() string {
 	var parts []string
-	if m.statusMessage != "" &&
-		!strings.HasPrefix(m.statusMessage, "Auto-pilot:") &&
-		m.statusMessage != "Auto-pilot ON" &&
-		m.statusMessage != "Auto-pilot OFF" {
-		parts = append(parts, m.statusMessage)
+	status := normalizeStatusLineText(m.statusMessage)
+	if status != "" &&
+		!strings.HasPrefix(status, "Auto-pilot") &&
+		status != "Auto-pilot ON" &&
+		status != "Auto-pilot OFF" {
+		parts = append(parts, status)
 	}
 	if len(parts) == 0 {
 		return ""

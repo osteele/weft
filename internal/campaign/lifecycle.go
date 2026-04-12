@@ -1196,7 +1196,7 @@ func LaunchInstance(
 	}
 	instanceID, err := db.CreateLaunch(database, instance)
 	if err != nil {
-		return 0, fmt.Errorf("create cloud instance: %w", err)
+		return 0, fmt.Errorf("create cloud instance: failed to register local launch record before provider create: %w", err)
 	}
 	emitProgress := func(phase string) {
 		progress(phase)
