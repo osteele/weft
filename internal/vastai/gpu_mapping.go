@@ -17,33 +17,49 @@ var gpuClassToVastaiNames = map[string][]string{
 	"t4":        {"Tesla T4"},
 
 	// Ampere
-	"rtx3090": {"RTX 3090"},
-	"rtx3080": {"RTX 3080"},
-	"rtx3070": {"RTX 3070"},
-	"rtx3060": {"RTX 3060"},
-	"a100":    {"A100 PCIE", "A100 SXM4", "A100X"},
-	"a10":     {"A10"},
-	"a40":     {"A40"},
-	"a10g":    {"A10G"},
+	"rtx3090":   {"RTX 3090"},
+	"rtx3090ti": {"RTX 3090 Ti"},
+	"rtx3080":   {"RTX 3080"},
+	"rtx3080ti": {"RTX 3080 Ti"},
+	"rtx3070":   {"RTX 3070"},
+	"rtx3070ti": {"RTX 3070 Ti"},
+	"rtx3060":   {"RTX 3060"},
+	"rtx3060ti": {"RTX 3060 Ti"},
+	"a100":      {"A100 PCIE", "A100 SXM4", "A100X"},
+	"a10":       {"A10"},
+	"a40":       {"A40"},
+	"a10g":      {"A10G"},
 
 	// Ada Lovelace
-	"rtx4090": {"RTX 4090"},
-	"rtx4080": {"RTX 4080"},
-	"rtx4070": {"RTX 4070"},
-	"rtx4060": {"RTX 4060"},
-	"l40":     {"L40"},
-	"l40s":    {"L40S"},
-	"l20":     {"L20"},
-	"l4":      {"L4"},
+	"rtx4090":      {"RTX 4090"},
+	"rtx4080":      {"RTX 4080"},
+	"rtx4080s":     {"RTX 4080S"},
+	"rtx4070ti":    {"RTX 4070 Ti"},
+	"rtx4070":      {"RTX 4070"},
+	"rtx4070sti":   {"RTX 4070S Ti"},
+	"rtx4060ti":    {"RTX 4060 Ti"},
+	"rtx4060":      {"RTX 4060"},
+	"rtx6000ada":   {"RTX 6000Ada"},
+	"rtxpro6000ws": {"RTX PRO 6000 WS"},
+	"l40":          {"L40"},
+	"l40s":         {"L40S"},
+	"l20":          {"L20"},
+	"l4":           {"L4"},
 
 	// Hopper
 	"h100": {"H100 SXM", "H100 NVL", "H100 PCIE"},
 	"h200": {"H200", "H200 NVL"},
 
 	// Blackwell
-	"b100":  {"B100"},
-	"b200":  {"B200", "B200 NVL"},
-	"gb200": {"GB200"},
+	"rtx5090":    {"RTX 5090"},
+	"rtx5080":    {"RTX 5080"},
+	"rtx5070ti":  {"RTX 5070 Ti"},
+	"rtx5070":    {"RTX 5070"},
+	"rtx5060ti":  {"RTX 5060 Ti"},
+	"rtxpro5000": {"RTX PRO 5000"},
+	"b100":       {"B100"},
+	"b200":       {"B200", "B200 NVL"},
+	"gb200":      {"GB200"},
 }
 
 // gpuGeneration represents an ordered GPU generation for Vast.ai filtering.
@@ -60,11 +76,25 @@ const (
 
 // generationGPUNames maps each generation to all Vast.ai gpu_name values in that generation.
 var generationGPUNames = map[gpuGeneration][]string{
-	genTuring:      {"RTX 2080 Ti", "RTX 2080", "RTX 2070", "RTX 2060", "Tesla T4"},
-	genAmpere:      {"RTX 3090", "RTX 3080", "RTX 3070", "RTX 3060", "A100 PCIE", "A100 SXM4", "A100X", "A10", "A40", "A10G"},
-	genAdaLovelace: {"RTX 4090", "RTX 4080", "RTX 4070", "RTX 4060", "L40", "L40S", "L20", "L4"},
-	genHopper:      {"H100 SXM", "H100 NVL", "H100 PCIE", "H200", "H200 NVL"},
-	genBlackwell:   {"B100", "B200", "B200 NVL", "GB200"},
+	genTuring: {"RTX 2080 Ti", "RTX 2080", "RTX 2070", "RTX 2060", "Tesla T4"},
+	genAmpere: {
+		"RTX 3090", "RTX 3090 Ti", "RTX 3080", "RTX 3080 Ti",
+		"RTX 3070", "RTX 3070 Ti", "RTX 3060", "RTX 3060 Ti",
+		"A100 PCIE", "A100 SXM4", "A100X", "A10", "A40", "A10G",
+	},
+	genAdaLovelace: {
+		"RTX 4090", "RTX 4080", "RTX 4080S",
+		"RTX 4070 Ti", "RTX 4070", "RTX 4070S Ti",
+		"RTX 4060 Ti", "RTX 4060",
+		"RTX 6000Ada", "RTX PRO 6000 WS",
+		"L40", "L40S", "L20", "L4",
+	},
+	genHopper: {"H100 SXM", "H100 NVL", "H100 PCIE", "H200", "H200 NVL"},
+	genBlackwell: {
+		"RTX 5090", "RTX 5080", "RTX 5070 Ti", "RTX 5070", "RTX 5060 Ti",
+		"RTX PRO 5000",
+		"B100", "B200", "B200 NVL", "GB200",
+	},
 }
 
 // genNames maps user-facing generation names to their generation.
@@ -80,12 +110,21 @@ var genNames = map[string]gpuGeneration{
 // gpuClassToGen maps normalized GPU class names to their generation.
 var gpuClassToGen = map[string]gpuGeneration{
 	"rtx2080ti": genTuring, "rtx2080": genTuring, "rtx2070": genTuring, "rtx2060": genTuring, "t4": genTuring,
-	"rtx3090": genAmpere, "rtx3080": genAmpere, "rtx3070": genAmpere, "rtx3060": genAmpere,
+
+	"rtx3090": genAmpere, "rtx3090ti": genAmpere, "rtx3080": genAmpere, "rtx3080ti": genAmpere,
+	"rtx3070": genAmpere, "rtx3070ti": genAmpere, "rtx3060": genAmpere, "rtx3060ti": genAmpere,
 	"a100": genAmpere, "a10": genAmpere, "a40": genAmpere, "a10g": genAmpere,
-	"rtx4090": genAdaLovelace, "rtx4080": genAdaLovelace,
-	"rtx4070": genAdaLovelace, "rtx4060": genAdaLovelace,
+
+	"rtx4090": genAdaLovelace, "rtx4080": genAdaLovelace, "rtx4080s": genAdaLovelace,
+	"rtx4070ti": genAdaLovelace, "rtx4070": genAdaLovelace, "rtx4070sti": genAdaLovelace,
+	"rtx4060ti": genAdaLovelace, "rtx4060": genAdaLovelace,
+	"rtx6000ada": genAdaLovelace, "rtxpro6000ws": genAdaLovelace,
 	"l40": genAdaLovelace, "l40s": genAdaLovelace, "l20": genAdaLovelace, "l4": genAdaLovelace,
+
 	"h100": genHopper, "h200": genHopper,
+
+	"rtx5090": genBlackwell, "rtx5080": genBlackwell, "rtx5070ti": genBlackwell,
+	"rtx5070": genBlackwell, "rtx5060ti": genBlackwell, "rtxpro5000": genBlackwell,
 	"b100": genBlackwell, "b200": genBlackwell, "gb200": genBlackwell,
 }
 
