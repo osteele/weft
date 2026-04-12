@@ -86,6 +86,12 @@ type QueueJobParams struct {
 	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
 	Produces     []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
 	Needs        []string // Artifact specs this job needs (e.g., "output/model.pt:100")
+	// Metadata is persisted to job_attempts.job_metadata as part of the same
+	// RecordQueuedJob call. Writing metadata inside RecordQueuedJob (rather
+	// than the caller doing a follow-up SetJobMetadata) avoids a race where a
+	// concurrent sync worker picks up the newly-visible job before CloudNeeds
+	// / CloudAfter have been written, silently skipping artifact staging.
+	Metadata *db.JobMetadata
 }
 
 // RecordQueuedJob records a job in the local database with "queued" status.
@@ -230,6 +236,14 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 				db.DeleteJob(database, jobID)
 			}
 			return 0, fmt.Errorf("record needs: %w", err)
+		}
+	}
+	if params.Metadata != nil {
+		if err := db.SetJobMetadata(database, jobID, params.Metadata); err != nil {
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
+			return 0, fmt.Errorf("record job metadata: %w", err)
 		}
 	}
 

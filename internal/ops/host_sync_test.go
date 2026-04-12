@@ -9,8 +9,63 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 	srcsync "github.com/osteele/weft/internal/sync"
 )
+
+// TestMaterializeCloudNeeds_RefreshesStaleMetadata verifies that
+// materializeCloudNeeds re-reads the job's metadata from the DB before
+// deciding whether to skip staging. ListUnsyncedQueuedJobs can read a job row
+// before the submitter has written job_attempts.job_metadata (the two writes
+// are not atomic), leaving CloudNeeds empty on the in-memory struct. Without
+// the fresh re-read the job would be dispatched with missing inputs — the
+// wj1088 incident.
+func TestMaterializeCloudNeeds_RefreshesStaleMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Producer job for the artifact.
+	producerID, err := db.RecordQueued(database, "test-host", "/tmp", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+
+	// Consumer job. Simulate the race: metadata is persisted in the DB, but
+	// the in-memory Job struct we pass in (as ListUnsyncedQueuedJobs would
+	// have produced moments earlier) has Metadata=nil.
+	consumerID, err := db.RecordQueued(database, "test-host", "/tmp", "consume", "consumer")
+	if err != nil {
+		t.Fatalf("record consumer: %v", err)
+	}
+	meta := &db.JobMetadata{
+		Dependencies: &db.JobDependencyMetadata{
+			CloudNeeds: []string{fmt.Sprintf("output/artifact.bin:%d", producerID)},
+		},
+	}
+	if err := db.SetJobMetadata(database, consumerID, meta); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+
+	stale, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	// Forcibly clear the metadata to mimic the stale read.
+	stale.Metadata = nil
+
+	// getR2Client returns an unconfigured client, which causes
+	// materializeCloudNeeds to return an R2-not-configured error *only if*
+	// it gets past the metadata check. If the fresh re-read fails to populate
+	// metadata, the function returns nil silently — exactly the bug we're
+	// guarding against.
+	getR2 := func() (*r2.Client, error) { return &r2.Client{}, nil }
+	err = materializeCloudNeeds(database, stale, 5*time.Second, getR2)
+	if err == nil {
+		t.Fatal("expected materializeCloudNeeds to progress past the metadata check (stale metadata should have been refreshed)")
+	}
+	if !strings.Contains(err.Error(), "R2 is not configured") {
+		t.Fatalf("expected 'R2 is not configured' error after refresh, got: %v", err)
+	}
+}
 
 func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	database := db.SetupTestDB(t)

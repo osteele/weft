@@ -991,7 +991,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 var dbPath string
 var startupRepairFn = startupRepair

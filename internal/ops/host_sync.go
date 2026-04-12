@@ -619,7 +619,15 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 }
 
 func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {
-	if job == nil || job.Metadata == nil || job.Metadata.Dependencies == nil {
+	if job == nil {
+		return true, "", nil
+	}
+	// See note in materializeCloudNeeds: refresh metadata to avoid acting on
+	// a stale read that predates the submitter's metadata write.
+	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
+		job.Metadata = fresh.Metadata
+	}
+	if job.Metadata == nil || job.Metadata.Dependencies == nil {
 		return true, "", nil
 	}
 	for _, dep := range job.Metadata.Dependencies.CloudAfter {
@@ -644,7 +652,20 @@ func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {
 }
 
 func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
-	if job == nil || job.Metadata == nil || job.Metadata.Dependencies == nil || len(job.Metadata.Dependencies.CloudNeeds) == 0 {
+	if job == nil {
+		return nil
+	}
+	// Refresh metadata from the database. ListUnsyncedQueuedJobs may have read
+	// the job row before the submitter finished writing job_attempts.job_metadata
+	// (the two writes are not atomic), which would leave CloudNeeds empty on
+	// the in-memory job struct even though it has since been persisted. A
+	// stale read here would silently skip staging and dispatch the job with
+	// missing inputs — see the wj1088 incident. Re-reading immediately before
+	// the dispatch decision closes that window.
+	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
+		job.Metadata = fresh.Metadata
+	}
+	if job.Metadata == nil || job.Metadata.Dependencies == nil || len(job.Metadata.Dependencies.CloudNeeds) == 0 {
 		return nil
 	}
 	r2Client, err := getR2Client()

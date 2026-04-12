@@ -552,6 +552,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       localNeeds,
+			Metadata:    buildCloudDependencyMetadata(nil, cloudNeeds),
 		}
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
 		if err != nil {
@@ -559,16 +560,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
 			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		if len(cloudNeeds) > 0 {
-			meta := &db.JobMetadata{
-				Dependencies: &db.JobDependencyMetadata{
-					CloudNeeds: append([]string(nil), cloudNeeds...),
-				},
-			}
-			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
-				return fmt.Errorf("record cloud dependency metadata: %w", err)
-			}
 		}
 		w := cmd.OutOrStdout()
 		if ack != nil && ack.Host != "" {
@@ -641,6 +632,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       localNeeds,
+			Metadata:    buildCloudDependencyMetadata(nil, cloudNeeds),
 		}
 
 		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
@@ -653,16 +645,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
 			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		if len(cloudNeeds) > 0 {
-			meta := &db.JobMetadata{
-				Dependencies: &db.JobDependencyMetadata{
-					CloudNeeds: append([]string(nil), cloudNeeds...),
-				},
-			}
-			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
-				return fmt.Errorf("record cloud dependency metadata: %w", err)
-			}
 		}
 
 		// Store placement telemetry if auto-placement was used
@@ -811,22 +793,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       localNeeds,
+			Metadata:    buildCloudDependencyMetadata(nil, cloudNeeds),
 		})
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
 		}
 		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
 			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		if len(cloudNeeds) > 0 {
-			meta := &db.JobMetadata{
-				Dependencies: &db.JobDependencyMetadata{
-					CloudNeeds: append([]string(nil), cloudNeeds...),
-				},
-			}
-			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
-				return fmt.Errorf("record cloud dependency metadata: %w", err)
-			}
 		}
 		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
 			slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)

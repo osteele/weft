@@ -145,6 +145,28 @@ func isNumericGPU(s string) bool {
 	return true
 }
 
+// buildCloudDependencyMetadata returns a JobMetadata carrying CloudAfter /
+// CloudNeeds, or nil if both are empty. This helper is used by all submission
+// paths so the metadata is persisted atomically as part of RecordQueuedJob —
+// a separate SetJobMetadata call after RecordQueuedJob leaves a window in
+// which the sync worker can dispatch the job before the metadata is written,
+// silently skipping cloud artifact staging.
+func buildCloudDependencyMetadata(cloudAfter []db.JobDependencyRef, cloudNeeds []string) *db.JobMetadata {
+	if len(cloudAfter) == 0 && len(cloudNeeds) == 0 {
+		return nil
+	}
+	meta := &db.JobMetadata{
+		Dependencies: &db.JobDependencyMetadata{},
+	}
+	if len(cloudAfter) > 0 {
+		meta.Dependencies.CloudAfter = append([]db.JobDependencyRef(nil), cloudAfter...)
+	}
+	if len(cloudNeeds) > 0 {
+		meta.Dependencies.CloudNeeds = append([]string(nil), cloudNeeds...)
+	}
+	return meta
+}
+
 // extractGPUFromEnvVars finds and returns the CUDA_VISIBLE_DEVICES value from env vars
 func extractGPUFromEnvVars(envVars []string) string {
 	for _, ev := range envVars {
@@ -186,22 +208,12 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		OutputDirs:  opts.OutputDirs,
 		Produces:    opts.Produces,
 		Needs:       opts.Needs,
+		Metadata:    buildCloudDependencyMetadata(opts.CloudAfter, opts.CloudNeeds),
 	}
 
 	jobID, err := ops.RecordQueuedJob(database, params)
 	if err != nil {
 		return nil, err
-	}
-	if len(opts.CloudAfter) > 0 || len(opts.CloudNeeds) > 0 {
-		meta := &db.JobMetadata{
-			Dependencies: &db.JobDependencyMetadata{
-				CloudAfter: append([]db.JobDependencyRef(nil), opts.CloudAfter...),
-				CloudNeeds: append([]string(nil), opts.CloudNeeds...),
-			},
-		}
-		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
-			return nil, fmt.Errorf("record cloud dependency metadata: %w", err)
-		}
 	}
 
 	return &queueJobResult{
