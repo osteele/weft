@@ -656,7 +656,7 @@ func (m watchModel) autoModeHint() string {
 func (m watchModel) autoPilotUnplacedCount() int {
 	n := 0
 	for _, job := range m.unplacedJobs {
-		if job != nil && job.EffectiveStatus() == db.StatusQueued {
+		if job.IsUnplacedQueued() {
 			n++
 		}
 	}

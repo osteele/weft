@@ -156,6 +156,13 @@ func (j *Job) IsRentalJob() bool {
 	return j != nil && j.TargetKind() == JobTargetRentalInstance
 }
 
+// IsUnplacedQueued reports whether the job is queued and not yet assigned to
+// any host or rental instance. This is the canonical predicate for "work the
+// auto-pilot still needs to act on".
+func (j *Job) IsUnplacedQueued() bool {
+	return j != nil && j.EffectiveStatus() == StatusQueued && j.TargetKind() == JobTargetUnplaced
+}
+
 // HasInventoryHost reports whether the job is currently assigned to an
 // inventory host.
 func (j *Job) HasInventoryHost() bool {

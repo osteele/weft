@@ -851,10 +851,7 @@ func (m *listTUIModel) clearAutoPilotPersistentState() {
 func (m listTUIModel) countUnplacedQueuedJobs() int {
 	n := 0
 	for _, job := range m.jobs {
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
-			continue
-		}
-		if job.Host == "" && job.LaunchID == nil {
+		if job.IsUnplacedQueued() {
 			n++
 		}
 	}
