@@ -877,8 +877,18 @@ func runTrainCLIImpl(cfg Config, modelDir string) error {
 	args = append(args, "--model-dir", modelDir)
 
 	cmd := exec.Command("uv", args...)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if summary := summarizeSubprocessStderr(stderr.Bytes(), 280); summary != "" {
+			return fmt.Errorf("predictor train: %w: %s", err, summary)
+		}
+		return err
+	}
+	if summary := summarizeSubprocessStderr(stderr.Bytes(), 280); summary != "" {
+		slog.Debug("predictor train stderr", "stderr", summary)
+	}
+	return nil
 }
 
 func runStatusCLIImpl(cfg Config) ([]byte, error) {
@@ -909,6 +919,21 @@ func runStatusCLIImpl(cfg Config) ([]byte, error) {
 		slog.Debug("predictor status stderr", "stderr", stderr.String())
 	}
 	return stdout.Bytes(), nil
+}
+
+func summarizeSubprocessStderr(stderr []byte, maxLen int) string {
+	clean := bytes.TrimSpace(stderr)
+	if len(clean) == 0 {
+		return ""
+	}
+	collapsed := string(bytes.Join(bytes.Fields(clean), []byte(" ")))
+	if maxLen <= 0 || len(collapsed) <= maxLen {
+		return collapsed
+	}
+	if maxLen == 1 {
+		return "…"
+	}
+	return collapsed[:maxLen-1] + "…"
 }
 
 func swapModelDir(srcDir, dstDir string) error {

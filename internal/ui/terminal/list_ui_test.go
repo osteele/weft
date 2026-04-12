@@ -239,6 +239,9 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	if !strings.Contains(out, "q:quit") {
 		t.Fatalf("expected quit hint in controls line, got:\n%s", out)
 	}
+	if !strings.Contains(out, "r:refresh") {
+		t.Fatalf("expected refresh hint in controls line, got:\n%s", out)
+	}
 }
 
 func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
@@ -257,6 +260,55 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	out := stripANSI(m.View())
 	if !strings.Contains(out, "a:auto (ON)") || !strings.Contains(out, "q:quit") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
+	}
+}
+
+func TestListTUIRefreshKeySetsRefreshingStatusAndReturnsCommand(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           90,
+		height:          12,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 733, Status: db.StatusQueued, Description: "retry pending", Project: "proj"},
+		},
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Refreshing..." {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Refreshing...")
+	}
+	if cmd == nil {
+		t.Fatal("expected refresh key to return a refresh command")
+	}
+}
+
+func TestListTUIGroupedViewShortViewportPreservesAllSectionHeaders(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          8,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "run", Project: "proj"},
+			{ID: 2, Status: db.StatusQueued, Host: "cool30", Description: "queue", Project: "proj"},
+			{ID: 3, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Description: "done", Project: "proj"},
+			{ID: 4, Status: db.StatusFailed, Description: "fail", Project: "proj"},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"Running (1):",
+		"Queued (1):",
+		"Completed (1):",
+		"Failed (1):",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in grouped short viewport output, got:\n%s", want, out)
+		}
 	}
 }
 

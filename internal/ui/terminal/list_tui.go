@@ -281,6 +281,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < 0 {
 				m.cursor = 0
 			}
+		case "r":
+			return m.triggerManualRefresh()
 		case "a":
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
@@ -766,26 +768,16 @@ func (m listTUIModel) groupedView() string {
 	footerLines := baseFooterLines
 	footerLines += len(errorDetailsLines)
 	maxBodyLines := m.height - 1 - footerLines // 1 for title
-	bodyLines := make([]string, 0, len(rows))
-	selectedVisualLine := -1
 	selectedRow := m.selectedGroupedRow()
-	for idx, row := range rows {
-		line := row.text
-		if selectedRow >= 0 && idx == selectedRow {
-			line = listTUISelectedStyle.Render(line)
-			selectedVisualLine = idx
+	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines)
+	for _, idx := range visibleRows {
+		line := "…"
+		if idx >= 0 {
+			line = rows[idx].text
+			if selectedRow >= 0 && idx == selectedRow {
+				line = listTUISelectedStyle.Render(line)
+			}
 		}
-		bodyLines = append(bodyLines, line)
-	}
-	if maxBodyLines > 0 && len(bodyLines) > maxBodyLines {
-		start := 0
-		if selectedVisualLine >= 0 {
-			start = watchScrollStart(len(bodyLines), selectedVisualLine, maxBodyLines)
-		}
-		end := min(len(bodyLines), start+maxBodyLines)
-		bodyLines = bodyLines[start:end]
-	}
-	for _, line := range bodyLines {
 		b.WriteString(truncateDisplayWidth(line, m.width))
 		b.WriteString("\n")
 	}
@@ -897,6 +889,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		autoState = "ON"
 	}
 	line := fmt.Sprintf("a:auto (%s)", autoState)
+	line += "  r:refresh"
 	if m.selectedGroupedJob() != nil {
 		line += "  k:kill  u:unplace"
 		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
@@ -1031,6 +1024,8 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 		}
 		return m, nil
+	case "r":
+		return m.triggerManualRefresh()
 	case "a":
 		m.autoMode = !m.autoMode
 		if m.autoMode {
@@ -1198,6 +1193,23 @@ func (m listTUIModel) footerText(rows int) string {
 	}
 	state += "  up/down move  space/b page  g/G top/bottom  q quit"
 	return state
+}
+
+func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {
+	cmds := []tea.Cmd{m.reloadJobs()}
+	if !m.quickLaunchStatusProtected() {
+		m.statusMessage = "Refreshing..."
+	}
+	if m.syncWorker != nil {
+		m.requestActiveSyncs()
+	} else if m.syncEnabled && !m.syncInProgress() {
+		m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
+		cmds = append(cmds, m.runBackgroundSync(true))
+	}
+	if cmd := m.runAutoPilot(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m listTUIModel) emptyStateText() string {
@@ -1666,6 +1678,95 @@ func truncateErrorDetailsLines(lines []string, maxLines int) []string {
 	truncated := append([]string(nil), lines[:maxLines-1]...)
 	truncated = append(truncated, "…")
 	return truncated
+}
+
+// selectGroupedRowsForViewport chooses grouped status rows for a short viewport,
+// preserving section headers and ellipsizing hidden lines above.
+// Returned indices refer to rows; -1 denotes an ellipsis marker line.
+func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []int {
+	if maxLines <= 0 || len(rows) == 0 {
+		return nil
+	}
+	if len(rows) <= maxLines {
+		indices := make([]int, len(rows))
+		for i := range rows {
+			indices[i] = i
+		}
+		return indices
+	}
+
+	headerIdxs := make([]int, 0, 8)
+	for i, row := range rows {
+		if row.isHeader {
+			headerIdxs = append(headerIdxs, i)
+		}
+	}
+
+	needEllipsis := len(rows) > maxLines
+	capacity := maxLines
+	if needEllipsis && len(headerIdxs) < maxLines {
+		capacity = maxLines - 1
+	}
+	if capacity <= 0 {
+		capacity = maxLines
+		needEllipsis = false
+	}
+
+	selected := map[int]struct{}{}
+	if len(headerIdxs) <= capacity {
+		for _, idx := range headerIdxs {
+			selected[idx] = struct{}{}
+		}
+	} else {
+		// If the viewport is too short to hold every header, keep the tail
+		// sections visible so final outcomes stay on screen.
+		for _, idx := range headerIdxs[len(headerIdxs)-capacity:] {
+			selected[idx] = struct{}{}
+		}
+	}
+
+	remaining := capacity - len(selected)
+	if remaining > 0 {
+		for i := len(rows) - 1; i >= 0 && remaining > 0; i-- {
+			if _, ok := selected[i]; ok {
+				continue
+			}
+			if rows[i].isHeader {
+				continue
+			}
+			if strings.TrimSpace(rows[i].text) == "" {
+				continue
+			}
+			selected[i] = struct{}{}
+			remaining--
+		}
+	}
+	if remaining > 0 {
+		for i := len(rows) - 1; i >= 0 && remaining > 0; i-- {
+			if _, ok := selected[i]; ok {
+				continue
+			}
+			selected[i] = struct{}{}
+			remaining--
+		}
+	}
+
+	indices := make([]int, 0, len(selected))
+	for idx := range selected {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+
+	if !needEllipsis || len(indices) == 0 || indices[0] == 0 {
+		return indices
+	}
+	if len(indices) >= maxLines {
+		indices = indices[1:]
+	}
+	out := make([]int, 0, len(indices)+1)
+	out = append(out, -1)
+	out = append(out, indices...)
+	return out
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {
