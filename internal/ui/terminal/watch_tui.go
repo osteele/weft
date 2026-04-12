@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -203,7 +204,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	}
 
 	unplaced, _ := db.ListUnplacedJobs(database)
-	hydrateRelaunchBlockedReasons(database, unplaced)
+	orchestration.HydrateRelaunchBlockedReasons(database, unplaced)
 	onPremJobs, _ := db.ListActiveOnPremJobs(database)
 	queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 
@@ -335,7 +336,7 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 
 	// Load unplaced jobs so Init auto-pilot can act on them immediately.
 	if unplaced, err := db.ListUnplacedJobs(database); err == nil {
-		hydrateRelaunchBlockedReasons(database, unplaced)
+		orchestration.HydrateRelaunchBlockedReasons(database, unplaced)
 		model.unplacedJobs = filterInstanceModeUnplacedJobs(unplaced, projectFilter)
 	}
 

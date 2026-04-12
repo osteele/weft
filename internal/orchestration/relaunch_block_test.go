@@ -1,4 +1,4 @@
-package terminal
+package orchestration
 
 import (
 	"testing"
@@ -27,7 +27,7 @@ func TestHydrateRelaunchBlockedReasons_AppliesToQueuedUnplacedJobs(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListUnplacedJobs: %v", err)
 	}
-	hydrateRelaunchBlockedReasons(database, jobs)
+	HydrateRelaunchBlockedReasons(database, jobs)
 
 	if len(jobs) != 1 {
 		t.Fatalf("ListUnplacedJobs returned %d jobs, want 1", len(jobs))
@@ -56,7 +56,7 @@ func TestHydrateRelaunchBlockedReasons_DoesNotApplyToInventoryQueuedJobs(t *test
 	if err != nil {
 		t.Fatalf("ListQueued: %v", err)
 	}
-	hydrateRelaunchBlockedReasons(database, jobs)
+	HydrateRelaunchBlockedReasons(database, jobs)
 
 	if len(jobs) != 1 {
 		t.Fatalf("ListQueued returned %d jobs, want 1", len(jobs))
@@ -73,7 +73,6 @@ func TestHydrateRelaunchBlockedReasons_IgnoresStalePriorQueueEpoch(t *testing.T)
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
 
-	// Old relaunch skip from a prior queue epoch.
 	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = 1000 WHERE job_id = ?`, jobID); err != nil {
 		t.Fatalf("set initial queued_at: %v", err)
 	}
@@ -88,7 +87,6 @@ func TestHydrateRelaunchBlockedReasons_IgnoresStalePriorQueueEpoch(t *testing.T)
 		t.Fatalf("InsertLifecycleEvent old: %v", err)
 	}
 
-	// New queue epoch (e.g. retry/unplace happened later).
 	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = 2000 WHERE job_id = ? AND end_time IS NULL`, jobID); err != nil {
 		t.Fatalf("set new queued_at: %v", err)
 	}
@@ -97,7 +95,7 @@ func TestHydrateRelaunchBlockedReasons_IgnoresStalePriorQueueEpoch(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListUnplacedJobs: %v", err)
 	}
-	hydrateRelaunchBlockedReasons(database, jobs)
+	HydrateRelaunchBlockedReasons(database, jobs)
 
 	if len(jobs) != 1 {
 		t.Fatalf("ListUnplacedJobs returned %d jobs, want 1", len(jobs))

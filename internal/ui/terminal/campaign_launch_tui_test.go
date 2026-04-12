@@ -427,7 +427,7 @@ func TestShortlistRawOffersForInteractive_KeepsCheapAndFastExtremes(t *testing.T
 		},
 	}}
 
-	got := shortlistRawOffersForInteractive(raw)
+	got := campaign.ShortlistRawOffers(raw)
 	if len(got) != 1 {
 		t.Fatalf("group count = %d, want 1", len(got))
 	}
@@ -446,8 +446,8 @@ func TestShortlistRawOffersForInteractive_KeepsCheapAndFastExtremes(t *testing.T
 }
 
 func TestShortlistRawOffersForInteractive_LimitsLargeOfferSets(t *testing.T) {
-	offers := make([]cloud.Offer, 0, initialOfferShortlistPerGroup+8)
-	for i := 0; i < initialOfferShortlistPerGroup+8; i++ {
+	offers := make([]cloud.Offer, 0, campaign.DefaultShortlistPerGroup+8)
+	for i := 0; i < campaign.DefaultShortlistPerGroup+8; i++ {
 		offers = append(offers, cloud.Offer{
 			ProviderID:  fmt.Sprintf("offer-%d", i),
 			GPUName:     fmt.Sprintf("GPU-%d", i),
@@ -456,12 +456,12 @@ func TestShortlistRawOffersForInteractive_LimitsLargeOfferSets(t *testing.T) {
 		})
 	}
 
-	got := shortlistRawOffersForInteractive([]campaign.GroupRawOffers{{
+	got := campaign.ShortlistRawOffers([]campaign.GroupRawOffers{{
 		Group:  campaign.InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 24},
 		Offers: offers,
 	}})
-	if len(got[0].Offers) != initialOfferShortlistPerGroup {
-		t.Fatalf("offer count = %d, want %d", len(got[0].Offers), initialOfferShortlistPerGroup)
+	if len(got[0].Offers) != campaign.DefaultShortlistPerGroup {
+		t.Fatalf("offer count = %d, want %d", len(got[0].Offers), campaign.DefaultShortlistPerGroup)
 	}
 }
 

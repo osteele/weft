@@ -259,7 +259,7 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 	}
 	if msg.err != nil {
 		m.autoLaunchBackoffReason = "launch error"
-		m.autoLaunchBackoffUntil = time.Now().Add(nextAutoLaunchBackoff(m.autoLaunchBackoffStep))
+		m.autoLaunchBackoffUntil = time.Now().Add(orchestration.RetryBackoffDelayClamped(m.autoLaunchBackoffStep))
 		m.autoLaunchBackoffStep++
 		m.autoPersistentError = summarizeAutoPilotError(msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-launch failed: %v", msg.err), true)
@@ -294,9 +294,9 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 		reason = fmt.Sprintf("%d job(s) exceeded max attempts", msg.skipped)
 	}
 	if len(msg.reasons) > 0 {
-		reason = summarizeAutoLaunchReasons(msg.reasons, reason)
+		reason = orchestration.SummarizeAutoLaunchReasons(msg.reasons, reason)
 	}
-	delay := nextAutoLaunchBackoff(m.autoLaunchBackoffStep)
+	delay := orchestration.RetryBackoffDelayClamped(m.autoLaunchBackoffStep)
 	m.autoLaunchBackoffReason = reason
 	m.autoLaunchBackoffUntil = time.Now().Add(delay)
 	m.autoLaunchBackoffStep++
@@ -319,44 +319,6 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 		return m, m.flash.Set(fmt.Sprintf("Auto-launch: %d job(s) exceeded max attempts", msg.skipped), true)
 	}
 	return m, nil
-}
-
-func summarizeAutoLaunchReasons(reasons map[int64]string, fallback string) string {
-	if len(reasons) == 0 {
-		return fallback
-	}
-	counts := map[string]int{}
-	for _, reason := range reasons {
-		if reason == "" {
-			continue
-		}
-		counts[reason]++
-	}
-	bestReason := ""
-	bestCount := 0
-	for reason, count := range counts {
-		if count > bestCount {
-			bestReason = reason
-			bestCount = count
-		}
-	}
-	if bestReason == "" {
-		return fallback
-	}
-	if len(reasons) == 1 || bestCount == len(reasons) {
-		return bestReason
-	}
-	return fmt.Sprintf("%s (+%d similar)", bestReason, len(reasons)-bestCount)
-}
-
-func nextAutoLaunchBackoff(step int) time.Duration {
-	if step < 0 {
-		step = 0
-	}
-	if step >= len(autoLaunchBackoffDelays) {
-		return autoLaunchBackoffDelays[len(autoLaunchBackoffDelays)-1]
-	}
-	return autoLaunchBackoffDelays[step]
 }
 
 func countRunningJobs(jobs []*db.Job) int {

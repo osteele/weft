@@ -25,13 +25,6 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
-var autoLaunchBackoffDelays = []time.Duration{
-	15 * time.Second,
-	30 * time.Second,
-	60 * time.Second,
-	2 * time.Minute,
-}
-
 // ---------------------------------------------------------------------------
 // Retry helpers
 // ---------------------------------------------------------------------------
@@ -148,7 +141,7 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 		if m.autoPilotUnplacedCount() > 0 {
 			reason := strings.TrimSpace(strings.Join(globalReasons, " | "))
 			if reason == "" {
-				reason = summarizeAutoLaunchReasons(reasonsByJob, "")
+				reason = orchestration.SummarizeAutoLaunchReasons(reasonsByJob, "")
 			}
 			reason = strings.TrimSpace(reason)
 			if reason != "" {
@@ -534,7 +527,7 @@ func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}
 		}
-		hydrateRelaunchBlockedReasons(database, unplacedJobs)
+		orchestration.HydrateRelaunchBlockedReasons(database, unplacedJobs)
 		return watchOnPremRefreshedMsg{
 			updateOnPremHosts:  true,
 			onPremHosts:        groupOnPremHosts(onPremJobs),
@@ -550,7 +543,7 @@ func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
 		if err != nil {
 			return watchOnPremRefreshedMsg{err: err}
 		}
-		hydrateRelaunchBlockedReasons(database, unplacedJobs)
+		orchestration.HydrateRelaunchBlockedReasons(database, unplacedJobs)
 		return watchOnPremRefreshedMsg{
 			updateUnplacedJobs: true,
 			unplacedJobs:       unplacedJobs,

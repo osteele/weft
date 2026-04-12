@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -148,7 +147,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	oplog.Log("auto_pilot.launching",
 		oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
 
-	failedInstanceByJob := buildFailedInstanceByJob(database, rentalScope)
+	failedInstanceByJob := BuildFailedInstanceByJob(database, rentalScope)
 	passStartedAt := time.Now().Unix()
 	result, err := RelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
@@ -183,7 +182,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
-	eventReasons := relaunchBlockedReasonsFromEvents(database, rentalScope, passStartedAt)
+	eventReasons := RelaunchBlockedReasonsFromEvents(database, rentalScope, passStartedAt)
 	for jobID, reason := range eventReasons {
 		if strings.TrimSpace(reason) == "" {
 			continue
@@ -238,90 +237,6 @@ func launchedClassFromResult(database *sql.DB, instanceIDs []int64) string {
 		return label
 	}
 	return ""
-}
-
-func buildFailedInstanceByJob(database *sql.DB, jobIDs []int64) map[int64]int64 {
-	result := make(map[int64]int64, len(jobIDs))
-	for _, jobID := range jobIDs {
-		result[jobID] = latestAttemptLaunchID(database, jobID)
-	}
-	return result
-}
-
-func latestAttemptLaunchID(database *sql.DB, jobID int64) int64 {
-	attempts, err := db.GetLaunchAttempts(database, jobID)
-	if err != nil || len(attempts) == 0 {
-		return 0
-	}
-	return attempts[len(attempts)-1].LaunchID
-}
-
-func relaunchBlockedReasonsFromEvents(database *sql.DB, jobIDs []int64, sinceUnix int64) map[int64]string {
-	reasons := make(map[int64]string)
-	if database == nil || len(jobIDs) == 0 {
-		return reasons
-	}
-	placeholders := make([]string, 0, len(jobIDs))
-	for range jobIDs {
-		placeholders = append(placeholders, "?")
-	}
-	query := fmt.Sprintf(`SELECT job_id, event_kind, detail, attempt_number, max_attempts
-		FROM lifecycle_events
-		WHERE event_kind LIKE 'relaunch.skipped.%%'
-		  AND job_id IN (%s)`, strings.Join(placeholders, ","))
-	if sinceUnix > 0 {
-		query += "\n\t\t  AND occurred_at >= ?"
-	}
-	query += "\n\t\tORDER BY occurred_at DESC, id DESC"
-	args := make([]any, 0, len(jobIDs)+1)
-	for _, jobID := range jobIDs {
-		args = append(args, jobID)
-	}
-	if sinceUnix > 0 {
-		args = append(args, sinceUnix)
-	}
-	rows, err := database.Query(query, args...)
-	if err != nil {
-		return reasons
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			jobID         int64
-			eventKind     string
-			detail        sql.NullString
-			attemptNumber int
-			maxAttempts   int
-		)
-		if err := rows.Scan(&jobID, &eventKind, &detail, &attemptNumber, &maxAttempts); err != nil {
-			continue
-		}
-		if _, exists := reasons[jobID]; exists {
-			continue
-		}
-		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, attemptNumber, maxAttempts)
-	}
-	return reasons
-}
-
-func summarizeRelaunchSkipEvent(kind, detail string, attemptNumber, maxAttempts int) string {
-	detail = strings.TrimSpace(detail)
-	if detail != "" {
-		return detail
-	}
-	switch kind {
-	case db.EventRelaunchSkippedNoOffers:
-		return "no offers available"
-	case db.EventRelaunchSkippedOfferError:
-		return "offer query failed"
-	case db.EventRelaunchSkippedMaxAttempts:
-		if attemptNumber > 0 && maxAttempts > 0 {
-			return "attempt " + strconv.Itoa(attemptNumber) + "/" + strconv.Itoa(maxAttempts)
-		}
-		return "max cloud attempts reached"
-	default:
-		return kind
-	}
 }
 
 func summarizeAutoPilotError(err error) string {

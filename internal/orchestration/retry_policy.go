@@ -16,6 +16,19 @@ func RetryBackoffDelay(attempt int) (time.Duration, bool) {
 	return retryBackoffDelays[attempt], true
 }
 
+func RetryBackoffDelayClamped(attempt int) time.Duration {
+	switch {
+	case len(retryBackoffDelays) == 0:
+		return 0
+	case attempt < 0:
+		return retryBackoffDelays[0]
+	case attempt >= len(retryBackoffDelays):
+		return retryBackoffDelays[len(retryBackoffDelays)-1]
+	default:
+		return retryBackoffDelays[attempt]
+	}
+}
+
 func RetryBackoffMaxAttempts() int {
 	return len(retryBackoffDelays) + 1
 }

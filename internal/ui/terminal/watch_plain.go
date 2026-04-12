@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -115,7 +116,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	if err != nil {
 		return watchSystemSnapshot{}, fmt.Errorf("list unplaced jobs: %w", err)
 	}
-	hydrateRelaunchBlockedReasons(database, unplacedJobs)
+	orchestration.HydrateRelaunchBlockedReasons(database, unplacedJobs)
 
 	return watchSystemSnapshot{
 		Launches:        cloudInstances,

@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
-	"math"
 	"os"
 	"strings"
 	"time"
@@ -539,99 +537,28 @@ func validateMoveSelectors(jobArgs []string, project string, from string) error 
 // queued jobs. When unplacedOnly is true (place command), already-placed jobs
 // are also skipped.
 func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, from string, unplacedOnly bool) ([]*db.Job, error) {
-	var jobs []*db.Job
-	var sourceInstanceID int64
-	if from != "" {
-		parsedID, err := ids.ParseInstanceID(from)
-		if err != nil {
-			return nil, usageErrorf("invalid --from instance %q: %v", from, err)
-		}
-		sourceInstanceID = parsedID
-		selected, err := db.GetLaunchJobsIncludingAttempts(database, sourceInstanceID)
-		if err != nil {
-			return nil, fmt.Errorf("list jobs on instance %s: %w", ids.FormatInstanceID(sourceInstanceID), err)
-		}
-		for _, job := range selected {
-			if job != nil && job.LaunchID != nil && *job.LaunchID == sourceInstanceID {
-				jobs = append(jobs, job)
-			}
-		}
-	} else if project != "" {
-		all, err := db.ListJobs(database, db.StatusQueued, "", 0, nil, "")
-		if err != nil {
-			return nil, fmt.Errorf("list queued jobs: %w", err)
-		}
-		for _, job := range all {
-			if job.Project == project {
-				jobs = append(jobs, job)
-			}
-		}
+	jobIDs, err := ParseJobIDs(jobArgs)
+	if err != nil {
+		return nil, fmt.Errorf("parse job IDs: %w", err)
 	}
-	if len(jobArgs) > 0 {
-		jobIDs, err := ParseJobIDs(jobArgs)
-		if err != nil {
-			return nil, fmt.Errorf("parse job IDs: %w", err)
-		}
-		for _, jobID := range jobIDs {
-			job, err := db.GetJobByID(database, jobID)
-			if err != nil {
-				return nil, fmt.Errorf("get job %s: %w", FormatJobID(jobID), err)
-			}
-			if job != nil {
-				jobs = append(jobs, job)
-			} else {
-				fmt.Fprintf(os.Stderr, "Warning: job %s not found, skipping\n", FormatJobID(jobID))
-			}
-		}
-	}
-	if len(jobs) == 0 && project == "" && from == "" {
-		return nil, usageErrorf("provide job IDs, --project, or --from")
-	}
-
-	var eligible []*db.Job
-	for _, job := range jobs {
-		status := job.EffectiveStatus()
-		if status != db.StatusQueued && status != db.StatusPendingPlacement {
-			fmt.Fprintf(os.Stderr, "Warning: job %s has status %s, skipping\n", FormatJobID(job.ID), job.EffectiveStatus())
-			continue
-		}
-		if unplacedOnly && job.TargetKind() != db.JobTargetUnplaced {
-			fmt.Fprintf(os.Stderr, "Warning: job %s is already placed, skipping\n", FormatJobID(job.ID))
-			continue
-		}
-		eligible = append(eligible, job)
-	}
-	if len(eligible) == 0 {
-		if sourceInstanceID > 0 {
-			return nil, fmt.Errorf("no eligible queued jobs found on %s", ids.FormatInstanceID(sourceInstanceID))
-		}
-		if unplacedOnly {
-			return nil, fmt.Errorf("no eligible unplaced queued jobs")
-		}
-		return nil, fmt.Errorf("no eligible queued jobs to move")
-	}
-	return eligible, nil
+	return orchestration.ResolveEligibleJobs(database, jobIDs, project, from, unplacedOnly, orchestration.JobMoveCallbacks{
+		OnWarning: func(message string) {
+			fmt.Fprintln(os.Stderr, message)
+		},
+	})
 }
 
 func moveJobsToHost(database *sql.DB, jobs []*db.Job, host string) error {
-	moved := 0
-	for _, job := range jobs {
-		if err := unplaceIfNeeded(database, job); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: unplace job %s failed: %v\n", FormatJobID(job.ID), err)
-			continue
-		}
-		if err := db.UpdateJobHost(database, job.ID, host); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: move job %s failed: %v\n", FormatJobID(job.ID), err)
-			continue
-		}
-		if err := db.SetPendingStatus(database, job.ID, db.StatusQueued); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: set pending status for job %s: %v\n", FormatJobID(job.ID), err)
-		}
-		moved++
-		fmt.Printf("Moved job %s → %s\n", FormatJobID(job.ID), host)
-	}
-	if moved == 0 {
-		return fmt.Errorf("all %d job(s) failed to move to %s", len(jobs), host)
+	_, err := orchestration.MoveJobsToHost(database, jobs, host, orchestration.JobMoveCallbacks{
+		OnWarning: func(message string) {
+			fmt.Fprintln(os.Stderr, message)
+		},
+		OnMoved: func(jobID int64, _ string) {
+			fmt.Printf("Moved job %s → %s\n", FormatJobID(jobID), host)
+		},
+	})
+	if err != nil {
+		return err
 	}
 	if syncErr := syncHostAfterQueueChange(database, host); syncErr != nil {
 		reportQueueChangeSyncFailure(host, syncErr)
@@ -640,30 +567,15 @@ func moveJobsToHost(database *sql.DB, jobs []*db.Job, host string) error {
 }
 
 func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) error {
-	r2Client, err := newR2ClientFromConfig()
-	if err != nil {
-		return fmt.Errorf("R2 client: %w", err)
-	}
-
-	var ready []*db.Job
-	for _, job := range jobs {
-		if err := unplaceIfNeeded(database, job); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: unplace job %s failed: %v\n", FormatJobID(job.ID), err)
-			continue
-		}
-		ready = append(ready, job)
-	}
-	if len(ready) == 0 {
-		return fmt.Errorf("all jobs failed to unplace")
-	}
-
-	if err := campaign.SubmitJobsToInstance(context.Background(), database, r2Client, instanceID, ready); err != nil {
-		return fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(instanceID), err)
-	}
-	for _, job := range ready {
-		fmt.Printf("Moved job %s → instance %s\n", FormatJobID(job.ID), ids.FormatInstanceID(instanceID))
-	}
-	return nil
+	_, err := orchestration.MoveJobsToInstance(database, jobs, instanceID, orchestration.JobMoveCallbacks{
+		OnWarning: func(message string) {
+			fmt.Fprintln(os.Stderr, message)
+		},
+		OnMoved: func(jobID int64, target string) {
+			fmt.Printf("Moved job %s → %s\n", FormatJobID(jobID), target)
+		},
+	})
+	return err
 }
 
 func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool) error {
@@ -697,14 +609,6 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool)
 			fmt.Fprintln(os.Stderr, message)
 		},
 	})
-	return err
-}
-
-func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
-	if job.TargetKind() == db.JobTargetUnplaced {
-		return nil
-	}
-	_, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
 	return err
 }
 
@@ -889,15 +793,15 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
 		}
 		now := time.Now()
-		elapsed := jobElapsedDuration(job, now)
+		elapsed := estimate.JobElapsedDuration(job, now)
 		if elapsed > 0 {
 			fmt.Printf("Elapsed:     %s\n", db.FormatDuration(int64(elapsed.Seconds())))
 		}
-		estimateTotal, hasEstimate := jobTimeEstimate(job, database)
+		estimateTotal, hasEstimate := estimate.JobTimeEstimate(job, database, now)
 		if hasEstimate {
 			fmt.Printf("Est. Time:   %s\n", estimateTotal.FormatWithBounds())
 			if elapsed > 0 {
-				eta := estimateRemaining(estimateTotal, elapsed)
+				eta := estimate.Remaining(estimateTotal, elapsed)
 				fmt.Printf("ETA:         %s\n", eta.FormatWithBounds())
 			}
 		}
@@ -948,7 +852,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if job.ErrorMessage != "" {
 			fmt.Printf("Error:       %s\n", job.ErrorMessage)
 		}
-		if rentalSummary, ok := rentalCostSummary(database, job, now); ok {
+		if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
 			fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
 		}
 
@@ -1002,205 +906,6 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
-}
-
-type rentalCostInfo struct {
-	Cost  float64
-	Basis string
-}
-
-func jobElapsedDuration(job *db.Job, now time.Time) time.Duration {
-	if job == nil {
-		return 0
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if job.StartTime <= 0 {
-		return 0
-	}
-	start := time.Unix(job.StartTime, 0)
-	end := now
-	if job.EndTime != nil && *job.EndTime > 0 {
-		end = time.Unix(*job.EndTime, 0)
-	}
-	if end.Before(start) {
-		return 0
-	}
-	return end.Sub(start)
-}
-
-func jobSetupDuration(job *db.Job, timings *db.JobPhaseTimings, now time.Time) time.Duration {
-	if job == nil || timings == nil || timings.SetupStart == nil || *timings.SetupStart <= 0 {
-		return 0
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	start := time.Unix(*timings.SetupStart, 0)
-	switch {
-	case timings.SetupEnd != nil && *timings.SetupEnd > 0:
-		end := time.Unix(*timings.SetupEnd, 0)
-		if end.After(start) {
-			return end.Sub(start)
-		}
-	case timings.RunStart != nil && *timings.RunStart > 0:
-		end := time.Unix(*timings.RunStart, 0)
-		if end.After(start) {
-			return end.Sub(start)
-		}
-	}
-	if job.EndTime != nil && *job.EndTime > 0 {
-		end := time.Unix(*job.EndTime, 0)
-		if end.After(start) {
-			return end.Sub(start)
-		}
-	}
-	if now.After(start) {
-		return now.Sub(start)
-	}
-	return 0
-}
-
-func jobRunElapsedDuration(job *db.Job, timings *db.JobPhaseTimings, now time.Time) time.Duration {
-	if job == nil {
-		return 0
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if timings != nil && timings.RunStart != nil && *timings.RunStart > 0 {
-		start := time.Unix(*timings.RunStart, 0)
-		end := now
-		if timings.RunEnd != nil && *timings.RunEnd > 0 {
-			end = time.Unix(*timings.RunEnd, 0)
-		} else if job.EndTime != nil && *job.EndTime > 0 {
-			end = time.Unix(*job.EndTime, 0)
-		}
-		if end.After(start) {
-			return end.Sub(start)
-		}
-		return 0
-	}
-	return jobElapsedDuration(job, now)
-}
-
-func predictionToEstimate(predictedSeconds *float64) (estimate.Estimate, bool) {
-	if predictedSeconds == nil || *predictedSeconds <= 0 {
-		return estimate.Estimate{}, false
-	}
-	meanSeconds := *predictedSeconds
-	return estimate.FromSeconds(meanSeconds, meanSeconds*0.5, meanSeconds*2.0), true
-}
-
-func jobTimeEstimate(job *db.Job, database *sql.DB) (estimate.Estimate, bool) {
-	if job == nil {
-		return estimate.Estimate{}, false
-	}
-	timeEstimate, ok := predictionToEstimate(nil)
-	if job.PlacementMeta != nil {
-		timeEstimate, ok = predictionToEstimate(job.PlacementMeta.PredictedDurationS)
-	}
-	if !ok {
-		timeEstimate = estimate.DefaultJobDuration
-		ok = true
-	}
-	// For rentals, include observed setup overhead when available.
-	if job.LaunchID != nil && *job.LaunchID > 0 {
-		if timings, err := db.GetJobPhaseTimings(database, job.ID); err == nil && timings != nil {
-			setup := jobSetupDuration(job, timings, time.Now())
-			if setup > 0 {
-				timeEstimate = estimate.Estimate{
-					Mean:  timeEstimate.Mean + setup,
-					Lower: timeEstimate.Lower + setup,
-					Upper: timeEstimate.Upper + setup,
-				}
-			}
-		}
-	}
-	return timeEstimate, ok
-}
-
-func estimateRemaining(total estimate.Estimate, elapsed time.Duration) estimate.Estimate {
-	remaining := estimate.Estimate{
-		Mean:  max(0, total.Mean-elapsed),
-		Lower: max(0, total.Lower-elapsed),
-		Upper: max(0, total.Upper-elapsed),
-	}
-	if remaining.Upper < remaining.Lower {
-		remaining.Upper = remaining.Lower
-	}
-	if remaining.Mean < remaining.Lower {
-		remaining.Mean = remaining.Lower
-	}
-	if remaining.Mean > remaining.Upper {
-		remaining.Mean = remaining.Upper
-	}
-	return remaining
-}
-
-func launchCostSoFar(launch *db.Launch, now time.Time) float64 {
-	if launch == nil {
-		return 0
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if launch.LaunchedAt != nil && launch.CostPerHourCents > 0 {
-		start := time.Unix(*launch.LaunchedAt, 0)
-		end := now
-		if launch.EndedAt != nil && *launch.EndedAt > 0 {
-			end = time.Unix(*launch.EndedAt, 0)
-		}
-		if end.Before(start) {
-			end = start
-		}
-		return end.Sub(start).Hours() * (float64(launch.CostPerHourCents) / 100.0)
-	}
-	if launch.ActualSpendCents > 0 {
-		return float64(launch.ActualSpendCents) / 100.0
-	}
-	return 0
-}
-
-func rentalCostSummary(database *sql.DB, job *db.Job, now time.Time) (rentalCostInfo, bool) {
-	if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-		return rentalCostInfo{}, false
-	}
-	launch, err := db.GetLaunch(database, *job.LaunchID)
-	if err != nil || launch == nil {
-		return rentalCostInfo{}, false
-	}
-
-	currentJobs, err := db.GetLaunchJobs(database, *job.LaunchID)
-	if err != nil {
-		return rentalCostInfo{}, false
-	}
-	isOnlyJob := len(currentJobs) == 1 && currentJobs[0] != nil && currentJobs[0].ID == job.ID
-
-	if isOnlyJob {
-		return rentalCostInfo{
-			Cost:  launchCostSoFar(launch, now),
-			Basis: "instance total",
-		}, true
-	}
-
-	ratePerHour := float64(launch.CostPerHourCents) / 100.0
-	if ratePerHour <= 0 {
-		return rentalCostInfo{}, false
-	}
-	timings, _ := db.GetJobPhaseTimings(database, job.ID)
-	setup := jobSetupDuration(job, timings, now)
-	run := jobRunElapsedDuration(job, timings, now)
-	billable := setup + run
-	if billable <= 0 {
-		return rentalCostInfo{}, false
-	}
-	cost := math.Max(0, billable.Hours()*ratePerHour)
-	return rentalCostInfo{
-		Cost:  cost,
-		Basis: "shared instance: setup + run",
-	}, true
 }
 
 func formatUnixTime(t int64) string {

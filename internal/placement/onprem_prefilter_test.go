@@ -1,4 +1,4 @@
-package cmd
+package placement
 
 import (
 	"database/sql"
@@ -8,11 +8,10 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
-	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 )
 
-func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
+func TestPrefilterOnPrem_ReusesSingleMetricsSnapshot(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	job1, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py --epochs 1", "job 1", "nvidia")
@@ -51,16 +50,16 @@ func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
 		loadCalls++
 		return hosts, nil
 	}
-	collectOnPremMetrics = func(_ *sql.DB, names []string, timeout time.Duration) map[string]*placement.HostMetrics {
+	collectOnPremMetrics = func(_ *sql.DB, names []string, timeout time.Duration) map[string]*HostMetrics {
 		collectCalls++
 		if len(names) != 2 {
 			t.Fatalf("CollectMetrics got %d hosts, want 2", len(names))
 		}
-		return map[string]*placement.HostMetrics{
+		return map[string]*HostMetrics{
 			"host-a": {QueueDepth: 0},
 		}
 	}
-	scoreOnPremHosts = func(_ *sql.DB, scoredHosts []inventory.HostSpec, constraints placement.Constraints, metrics map[string]*placement.HostMetrics, predict placement.JobPredictor) []placement.Score {
+	scoreOnPremHosts = func(_ *sql.DB, scoredHosts []inventory.HostSpec, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) []Score {
 		scoreCalls++
 		if len(scoredHosts) != 1 || scoredHosts[0].Name != "host-a" {
 			t.Fatalf("ScoreHostListWithPredictor hosts = %#v, want reachable host-a only", scoredHosts)
@@ -68,10 +67,10 @@ func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
 		if metrics["host-a"] == nil {
 			t.Fatalf("expected live metrics for host-a")
 		}
-		return []placement.Score{{Host: "host-a", Eligible: true}}
+		return []Score{{Host: "host-a", Eligible: true}}
 	}
 
-	remaining := prefilterOnPremWithProgress(database, jobs, nil, nil, nil)
+	remaining := PrefilterOnPrem(database, jobs, nil, PrefilterCallbacks{})
 	if len(remaining) != 0 {
 		t.Fatalf("remaining jobs = %d, want 0", len(remaining))
 	}
@@ -96,7 +95,7 @@ func TestPrefilterOnPremWithProgress_ReusesSingleMetricsSnapshot(t *testing.T) {
 	}
 }
 
-func TestPrefilterOnPremWithProgress_BatchesPredictorCallsAcrossHostsAndJobs(t *testing.T) {
+func TestPrefilterOnPrem_BatchesPredictorCallsAcrossHostsAndJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	job1, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py --epochs 1", "job 1", "nvidia")
@@ -134,8 +133,8 @@ func TestPrefilterOnPremWithProgress_BatchesPredictorCallsAcrossHostsAndJobs(t *
 	loadInventoryHosts = func() ([]inventory.HostSpec, error) {
 		return hosts, nil
 	}
-	collectOnPremMetrics = func(_ *sql.DB, names []string, timeout time.Duration) map[string]*placement.HostMetrics {
-		return map[string]*placement.HostMetrics{
+	collectOnPremMetrics = func(_ *sql.DB, names []string, timeout time.Duration) map[string]*HostMetrics {
+		return map[string]*HostMetrics{
 			"host-a": {QueueDepth: 0},
 			"host-b": {QueueDepth: 0},
 		}
@@ -155,12 +154,12 @@ func TestPrefilterOnPremWithProgress_BatchesPredictorCallsAcrossHostsAndJobs(t *
 		}
 		return results, nil
 	}
-	buildJobPredictorFromConfig = func(_ *config.Config, _ placement.Constraints) placement.JobPredictor {
+	buildJobPredictorFromConfig = func(_ *config.Config, _ Constraints) JobPredictor {
 		t.Fatalf("unexpected fallback single-host predictor build")
 		return nil
 	}
 
-	scoreOnPremHosts = func(_ *sql.DB, scoredHosts []inventory.HostSpec, constraints placement.Constraints, metrics map[string]*placement.HostMetrics, predict placement.JobPredictor) []placement.Score {
+	scoreOnPremHosts = func(_ *sql.DB, scoredHosts []inventory.HostSpec, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) []Score {
 		if len(scoredHosts) != len(hosts) {
 			t.Fatalf("ScoreHostListWithPredictor hosts = %d, want %d", len(scoredHosts), len(hosts))
 		}
@@ -170,13 +169,13 @@ func TestPrefilterOnPremWithProgress_BatchesPredictorCallsAcrossHostsAndJobs(t *
 				t.Fatalf("missing cached prediction for host %s: %+v", host.Name, prediction)
 			}
 		}
-		return []placement.Score{{Host: "host-a", Eligible: true}}
+		return []Score{{Host: "host-a", Eligible: true}}
 	}
 
-	remaining := prefilterOnPremWithProgress(database, jobs, &config.Config{Predictor: config.PredictorConfig{
+	remaining := PrefilterOnPrem(database, jobs, &config.Config{Predictor: config.PredictorConfig{
 		ProjectPath: "/tmp/job-estimator",
 		ModelDir:    "/tmp/models",
-	}}, nil, nil)
+	}}, PrefilterCallbacks{})
 	if len(remaining) != 0 {
 		t.Fatalf("remaining jobs = %d, want 0", len(remaining))
 	}

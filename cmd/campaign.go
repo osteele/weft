@@ -23,19 +23,11 @@ import (
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
-	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
-	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
-
-var loadInventoryHosts = inventory.LoadHosts
-var collectOnPremMetrics = placement.CollectMetrics
-var scoreOnPremHosts = placement.ScoreHostListWithPredictor
-var buildJobPredictorFromConfig = placement.BuildJobPredictorFromConfig
-var resolvePredictBatchForOnPrem = predictor.ResolvePredictBatch
 
 var campaignCmd = &cobra.Command{
 	Use:     "campaign",
@@ -359,227 +351,13 @@ func prefilterOnPrem(database *sql.DB, jobs []*db.Job, cfg *config.Config) []*db
 }
 
 func prefilterOnPremWithProgress(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int), onPhase func(string)) []*db.Job {
-	hosts, err := loadInventoryHosts()
-	if err != nil || len(hosts) == 0 {
-		return prefilterOnPremIndividually(database, jobs, cfg, onProgress)
-	}
-
-	hostNames := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		hostNames = append(hostNames, host.Name)
-	}
-	if onPhase != nil {
-		onPhase(fmt.Sprintf("Collecting on-prem metrics for %d host(s)...", len(hosts)))
-	}
-	liveMetrics := collectOnPremMetrics(database, hostNames, 5*time.Second)
-	predictors := buildOnPremBatchPredictors(cfg, jobs, hosts, onPhase)
-
-	var remaining []*db.Job
-	total := len(jobs)
-	for i, j := range jobs {
-		if onProgress != nil {
-			onProgress(i+1, total)
-		}
-		host, ok := selectOnPremHostFromSnapshot(database, hosts, liveMetrics, j, cfg, predictors[j.ID])
-		if !ok {
-			remaining = append(remaining, j)
-			continue
-		}
-		assigned, err := db.AssignJobHost(database, j.ID, host)
-		if err != nil || !assigned {
-			remaining = append(remaining, j)
-			continue
-		}
-		slog.Info("placed job on-prem during launch pre-filter", "job_id", j.ID, "host", host)
-		fmt.Printf("Job #%d → %s (on-prem, skipping rental)\n", j.ID, host)
-	}
-	return remaining
-}
-
-func prefilterOnPremIndividually(database *sql.DB, jobs []*db.Job, cfg *config.Config, onProgress func(int, int)) []*db.Job {
-	var remaining []*db.Job
-	total := len(jobs)
-	for i, j := range jobs {
-		if onProgress != nil {
-			onProgress(i+1, total)
-		}
-		constraints := placement.ConstraintsFromJob(j)
-		predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
-		plan, err := placement.Evaluate(placement.EvaluateRequest{
-			Constraints: constraints,
-			Predictor:   predict,
-			Sources:     []placement.CandidateSource{&placement.OnPremSource{}},
-			Database:    database,
-		})
-		if err != nil || plan.Unplaced || plan.Cheap == nil || plan.Cheap.OnPrem == nil {
-			remaining = append(remaining, j)
-			continue
-		}
-		host := plan.Cheap.OnPrem.Host
-		assigned, err := db.AssignJobHost(database, j.ID, host)
-		if err != nil || !assigned {
-			remaining = append(remaining, j)
-			continue
-		}
-		slog.Info("placed job on-prem during launch pre-filter", "job_id", j.ID, "host", host)
-		fmt.Printf("Job #%d → %s (on-prem, skipping rental)\n", j.ID, host)
-	}
-	return remaining
-}
-
-func selectOnPremHostFromSnapshot(database *sql.DB, hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics, job *db.Job, cfg *config.Config, predict placement.JobPredictor) (string, bool) {
-	if job == nil {
-		return "", false
-	}
-	constraints := placement.ConstraintsFromJob(job)
-	if db.HasRentalTag(constraints.Tags) {
-		return "", false
-	}
-
-	if predict == nil {
-		predict = buildJobPredictorFromConfig(cfg, constraints)
-	}
-	reachableHosts := filterReachableInventoryHosts(hosts, liveMetrics)
-	if host, ok := firstEligibleOnPremHost(database, reachableHosts, constraints, liveMetrics, predict); ok {
-		return host, true
-	}
-	return firstEligibleOnPremHost(database, hosts, constraints, nil, predict)
-}
-
-func buildOnPremBatchPredictors(cfg *config.Config, jobs []*db.Job, hosts []inventory.HostSpec, onPhase func(string)) map[int64]placement.JobPredictor {
-	predCfg := placement.PredictorConfigFromApp(cfg)
-	if !predCfg.Configured() || len(jobs) == 0 || len(hosts) == 0 {
-		return nil
-	}
-
-	type batchRef struct {
-		jobID int64
-		host  string
-	}
-
-	refs := make(map[int64]batchRef)
-	batchJobs := make([]predictor.BatchJob, 0, len(jobs)*len(hosts))
-	var nextID int64 = 1
-	for _, job := range jobs {
-		if job == nil {
-			continue
-		}
-		constraints := placement.ConstraintsFromJob(job)
-		if constraints.Command == "" || db.HasRentalTag(constraints.Tags) {
-			continue
-		}
-		for _, host := range hosts {
-			batchJobs = append(batchJobs, predictor.BatchJob{
-				ID:       nextID,
-				Command:  constraints.Command,
-				Host:     host.Name,
-				Project:  constraints.Project,
-				GPUClass: constraints.GPUClass,
-			})
-			refs[nextID] = batchRef{jobID: job.ID, host: host.Name}
-			nextID++
-		}
-	}
-	if len(batchJobs) == 0 {
-		return nil
-	}
-
-	if onPhase != nil {
-		onPhase(fmt.Sprintf("Estimating on-prem runtimes for %d host/job pair(s)...", len(batchJobs)))
-	}
-
-	results, err := resolvePredictBatchForOnPrem(predCfg, batchJobs)
-	if err != nil || results == nil {
-		return nil
-	}
-
-	predictionsByJob := make(map[int64]map[string]*placement.RawPrediction)
-	for id, ref := range refs {
-		result := results[id]
-		if result == nil {
-			continue
-		}
-		raw := rawPredictionFromResult(result)
-		if raw == nil {
-			continue
-		}
-		perHost := predictionsByJob[ref.jobID]
-		if perHost == nil {
-			perHost = make(map[string]*placement.RawPrediction)
-			predictionsByJob[ref.jobID] = perHost
-		}
-		perHost[ref.host] = raw
-	}
-	if len(predictionsByJob) == 0 {
-		return nil
-	}
-
-	predictors := make(map[int64]placement.JobPredictor, len(predictionsByJob))
-	for jobID, perHost := range predictionsByJob {
-		hostPredictions := perHost
-		predictors[jobID] = placement.NewJobPredictor(func(host string) *placement.RawPrediction {
-			return hostPredictions[host]
-		})
-	}
-	return predictors
-}
-
-func rawPredictionFromResult(result *predictor.Result) *placement.RawPrediction {
-	if result == nil {
-		return nil
-	}
-	raw := &placement.RawPrediction{}
-	if result.DurationS != nil {
-		raw.DurationS = &placement.RawPredictionField{
-			Mean:  result.DurationS.Mean,
-			Lower: result.DurationS.Lower,
-			Upper: result.DurationS.Upper,
-		}
-	}
-	if result.PeakRSSKB != nil {
-		raw.PeakRSSKB = &placement.RawPredictionField{
-			Mean:  result.PeakRSSKB.Mean,
-			Lower: result.PeakRSSKB.Lower,
-			Upper: result.PeakRSSKB.Upper,
-		}
-	}
-	if result.MaxGPUMemMiB != nil {
-		raw.MaxGPUMemMiB = &placement.RawPredictionField{
-			Mean:  result.MaxGPUMemMiB.Mean,
-			Lower: result.MaxGPUMemMiB.Lower,
-			Upper: result.MaxGPUMemMiB.Upper,
-		}
-	}
-	if raw.DurationS == nil && raw.PeakRSSKB == nil && raw.MaxGPUMemMiB == nil {
-		return nil
-	}
-	return raw
-}
-
-func filterReachableInventoryHosts(hosts []inventory.HostSpec, liveMetrics map[string]*placement.HostMetrics) []inventory.HostSpec {
-	if len(liveMetrics) == 0 {
-		return nil
-	}
-	reachable := make([]inventory.HostSpec, 0, len(hosts))
-	for _, host := range hosts {
-		if liveMetrics[host.Name] != nil {
-			reachable = append(reachable, host)
-		}
-	}
-	return reachable
-}
-
-func firstEligibleOnPremHost(database *sql.DB, hosts []inventory.HostSpec, constraints placement.Constraints, metrics map[string]*placement.HostMetrics, predict placement.JobPredictor) (string, bool) {
-	if len(hosts) == 0 {
-		return "", false
-	}
-	scores := scoreOnPremHosts(database, hosts, constraints, metrics, predict)
-	for _, score := range scores {
-		if score.Eligible {
-			return score.Host, true
-		}
-	}
-	return "", false
+	return placement.PrefilterOnPrem(database, jobs, cfg, placement.PrefilterCallbacks{
+		OnProgress: onProgress,
+		OnPhase:    onPhase,
+		OnPlaced: func(jobID int64, host string) {
+			fmt.Printf("Job #%d → %s (on-prem, skipping rental)\n", jobID, host)
+		},
+	})
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
