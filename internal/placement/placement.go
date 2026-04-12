@@ -474,6 +474,14 @@ func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPre
 func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics, cfg *config.Config) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
+	// Hard constraint: opt-in-only hosts are skipped by auto-placement.
+	// They remain usable via an explicit --host, which bypasses the scorer.
+	if cfg != nil && cfg.HostOptInOnly(host.Name) {
+		s.Eligible = false
+		s.Reasons = append(s.Reasons, "host is opt-in only (specify with --host)")
+		return s
+	}
+
 	// Hard constraint: GPU class (supports exact model, generation, or minimum generation)
 	var gc GPUConstraint
 	if c.GPUClass != "" {

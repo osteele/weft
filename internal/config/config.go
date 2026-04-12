@@ -304,6 +304,9 @@ type HostConfig struct {
 	// Shared marks an inventory host as multi-tenant, so benchmark auto-placement
 	// avoids it unless the job is explicitly inventory-tagged.
 	Shared bool `yaml:"shared" toml:"shared"`
+	// OptInOnly excludes the host from auto-placement; it is only used when
+	// explicitly selected via --host.
+	OptInOnly bool `yaml:"opt_in_only" toml:"opt_in_only"`
 }
 
 // HostGPUConfig describes a homogeneous GPU group for a host.
@@ -429,6 +432,16 @@ func (c *Config) HostShared(host string) bool {
 	}
 	cfg, ok := c.Hosts[host]
 	return ok && cfg.Shared
+}
+
+// HostOptInOnly reports whether the host is excluded from auto-placement and
+// must be selected explicitly via --host.
+func (c *Config) HostOptInOnly(host string) bool {
+	if c == nil || host == "" {
+		return false
+	}
+	cfg, ok := c.Hosts[host]
+	return ok && cfg.OptInOnly
 }
 
 var (
