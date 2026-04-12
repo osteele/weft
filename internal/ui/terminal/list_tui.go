@@ -72,6 +72,7 @@ type listTUIModel struct {
 	lastAutoPilotErrorRaw      string
 	showAutoPilotErrorDetails  bool
 	launchLiveByID             map[int64]*db.LaunchLiveState
+	launchStatusByID           map[int64]string
 	quickLaunching             bool
 	quickLaunchScope           string
 	quickLaunchProgress        <-chan listQuickLaunchProgressMsg
@@ -88,9 +89,10 @@ type listTUIModel struct {
 }
 
 type listJobsLoadedMsg struct {
-	jobs           []*db.Job
-	launchLiveByID map[int64]*db.LaunchLiveState
-	err            error
+	jobs             []*db.Job
+	launchLiveByID   map[int64]*db.LaunchLiveState
+	launchStatusByID map[int64]string
+	err              error
 }
 
 type listSyncFinishedMsg struct {
@@ -338,6 +340,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.jobs = msg.jobs
 		m.launchLiveByID = msg.launchLiveByID
+		m.launchStatusByID = msg.launchStatusByID
 		m.pruneAutoBlockReasons()
 		m.rebuildLayout()
 		m.rebuildGroupedRows()
@@ -1218,7 +1221,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		return
 	}
 	groupedJobs := m.groupedJobsWithAutoReasons()
-	m.groupedRows = buildGroupedStatusRows(groupedJobs, m.width, m.launchLiveByID)
+	m.groupedRows = buildGroupedStatusRows(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID)
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
 		if row.job != nil && !row.isHeader && !row.isBlocked {
@@ -1314,7 +1317,16 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if liveErr != nil {
 			launchLiveByID = map[int64]*db.LaunchLiveState{}
 		}
-		return listJobsLoadedMsg{jobs: jobs, launchLiveByID: launchLiveByID, err: nil}
+		launchStatusByID, statusErr := db.GetLaunchStatuses(database, launchIDs)
+		if statusErr != nil {
+			launchStatusByID = map[int64]string{}
+		}
+		return listJobsLoadedMsg{
+			jobs:             jobs,
+			launchLiveByID:   launchLiveByID,
+			launchStatusByID: launchStatusByID,
+			err:              nil,
+		}
 	}
 }
 

@@ -29,11 +29,11 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 
 	wantOrder := []string{
 		"Running (2):",
-		"Launching (1):",
 		"Queued (1):",
+		"Launching (1):",
 		"Unplaced (1):",
-		"Completions (1):",
-		"Failures (3):",
+		"Completed (1):",
+		"Failed (3):",
 		"Killed/Canceled (2):",
 	}
 	last := -1
@@ -104,7 +104,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, map[int64]*db.LaunchLiveState{
 		launchID: {LaunchID: launchID, JobProgressID: 42, JobProgressPct: 75},
-	}, now)
+	}, nil, now)
 
 	for _, want := range []string{
 		"- wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
@@ -131,7 +131,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
 	want := "- wj99 — proj python worker.py (rental)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -157,7 +157,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningDayScaleTimingShowsDayAndHour(
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
 	want := "— started 1d18h ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -177,7 +177,7 @@ func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMis
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
 	want := "- wj53 — proj legacy completion — placed 5m ago — completed ok"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -197,7 +197,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
 	lineWant := "- wj50 — proj waiting — queued 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
@@ -222,7 +222,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRet
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
 	want := "- wj51 — proj retry me — retry pending 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -244,10 +244,42 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
 	want := "- wj52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_ReclassifiesPendingPlacementWhenLaunchRunning(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2468)
+	jobs := []*db.Job{
+		{
+			ID:          70,
+			Status:      db.StatusPendingPlacement,
+			LaunchID:    &launchID,
+			Project:     "proj",
+			Description: "stale launch pending",
+			QueuedAt:    4_700,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(
+		jobs,
+		0,
+		nil,
+		map[int64]string{launchID: db.LaunchStatusRunning},
+		now,
+	)
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("expected queued section, got:\n%s", out)
+	}
+	if strings.Contains(out, "Launching (1):") {
+		t.Fatalf("did not expect launching section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "wj70") || !strings.Contains(out, "— placed 5m ago") {
+		t.Fatalf("missing queued timing row in output:\n%s", out)
 	}
 }
 
@@ -273,7 +305,7 @@ func TestRenderJobListGroupedStatusPlainAt_AlignsTimingSuffixToRightEdge(t *test
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, now)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected section header + 2 rows, got:\n%s", out)

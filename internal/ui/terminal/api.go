@@ -156,6 +156,10 @@ func RenderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, lau
 	return renderJobListGroupedStatusPlainWithLiveState(jobs, width, launchLiveByID)
 }
 
+func RenderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) string {
+	return renderJobListGroupedStatusPlainWithLaunchState(jobs, width, launchLiveByID, launchStatusByID)
+}
+
 func ResolveColumns(keys []string, defaultKeys []string) ([]ColumnDef, error) {
 	return resolveColumns(keys, defaultKeys)
 }

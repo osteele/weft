@@ -148,6 +148,14 @@ func SyncInstanceState(
 		}
 	}
 
+	// Instance-scoped convergence: once a launch is active, stale
+	// pending_placement intents should be normalized back to queued.
+	if updated, err := db.NormalizePendingPlacementForLaunch(database, instanceID); err != nil {
+		slog.Warn("failed to normalize pending placement jobs", "component", "sync", "instance", instanceID, "error", err)
+	} else if updated > 0 {
+		s.JobsUpdated += int(updated)
+	}
+
 	if opts.AgentVersionFetched {
 		s.AgentVersion = opts.AgentVersion
 	} else {

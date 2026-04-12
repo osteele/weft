@@ -561,6 +561,22 @@ rule ReconcilePass {
     ensures: OrphanSweepCompleted()
 }
 
+-- Heal stale pending_placement intents once a launch is past bootstrap.
+rule NormalizePendingPlacementAfterLaunchProgress {
+    when: InstanceReconciled(instance)
+    requires: instance.status in {running, grace, completed}
+
+    ensures: StalePendingPlacementNormalized(instance)
+
+    @guidance
+        -- Scope: latest attempts for jobs on this instance where
+        -- pending_status = pending_placement.
+        -- Normalize pending_status to queued unless the latest attempt is a
+        -- completed non-orphaned/non-canceled cloud outcome.
+        -- This prevents jobs from being shown as "launching" forever when
+        -- launch status has already advanced and coordinator updates lag.
+}
+
 -- R2 completion can authoritatively override terminal job states.
 -- This corrects race conditions where SSH sync marked a job dead/failed
 -- but the agent actually completed it successfully.

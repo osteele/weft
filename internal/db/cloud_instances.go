@@ -1953,6 +1953,55 @@ func GetLaunchLiveStates(database *sql.DB, launchIDs []int64) (map[int64]*Launch
 	return result, nil
 }
 
+// GetLaunchStatuses returns launch statuses keyed by launch ID for the supplied
+// launch IDs. Missing IDs are omitted from the result map.
+func GetLaunchStatuses(database *sql.DB, launchIDs []int64) (map[int64]string, error) {
+	result := make(map[int64]string, len(launchIDs))
+	if len(launchIDs) == 0 {
+		return result, nil
+	}
+
+	seen := make(map[int64]struct{}, len(launchIDs))
+	placeholders := make([]string, 0, len(launchIDs))
+	args := make([]any, 0, len(launchIDs))
+	for _, launchID := range launchIDs {
+		if launchID <= 0 {
+			continue
+		}
+		if _, ok := seen[launchID]; ok {
+			continue
+		}
+		seen[launchID] = struct{}{}
+		placeholders = append(placeholders, "?")
+		args = append(args, launchID)
+	}
+	if len(placeholders) == 0 {
+		return result, nil
+	}
+
+	rows, err := database.Query(
+		`SELECT id, status FROM launches WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var launchID int64
+		var status string
+		if err := rows.Scan(&launchID, &status); err != nil {
+			return nil, err
+		}
+		result[launchID] = strings.TrimSpace(status)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // MarkOpslogSynced records a successful opslog fetch for a launch.
 func MarkOpslogSynced(database *sql.DB, launchID int64) error {
 	_, err := database.Exec(

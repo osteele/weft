@@ -290,6 +290,9 @@ rule LaunchPlacementWindow {
         --   - pending_placement => selected for launch/placement work
         -- Jobs return to queued if launch/placement fails; claimed jobs become
         -- queued once assigned to a host/instance.
+        -- pending_placement is an intent marker, not durable truth:
+        -- reconciliation may normalize stale pending_placement back to queued
+        -- after launch progress is observed.
 }
 
 rule ReleaseDependency {

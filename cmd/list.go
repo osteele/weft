@@ -492,7 +492,8 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 
 	if listGroupBy == "status" {
 		liveByLaunchID := loadLaunchLiveStateForJobs(database, jobs)
-		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithLiveState(jobs, terminal.ListOutputWidth(), liveByLaunchID))
+		launchStatusByID := loadLaunchStatusForJobs(database, jobs)
+		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithLaunchState(jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID))
 	}
 
 	switch listFormat {
@@ -554,6 +555,32 @@ func loadLaunchLiveStateForJobs(database *sql.DB, jobs []*db.Job) map[int64]*db.
 		return nil
 	}
 	return liveByLaunchID
+}
+
+func loadLaunchStatusForJobs(database *sql.DB, jobs []*db.Job) map[int64]string {
+	if database == nil || len(jobs) == 0 {
+		return nil
+	}
+	launchIDs := make([]int64, 0, len(jobs))
+	seen := make(map[int64]struct{}, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		if _, ok := seen[*job.LaunchID]; ok {
+			continue
+		}
+		seen[*job.LaunchID] = struct{}{}
+		launchIDs = append(launchIDs, *job.LaunchID)
+	}
+	if len(launchIDs) == 0 {
+		return nil
+	}
+	statusByID, err := db.GetLaunchStatuses(database, launchIDs)
+	if err != nil || len(statusByID) == 0 {
+		return nil
+	}
+	return statusByID
 }
 
 // applyAttemptOutcomeOverrides overrides the display status for queued jobs

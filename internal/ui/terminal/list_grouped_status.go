@@ -29,15 +29,19 @@ type groupedStatusRow struct {
 }
 
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, time.Now())
 }
 
-func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
-	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, now)
+func renderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) string {
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, time.Now())
+}
+
+func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, now time.Time) string {
+	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, now)
 	if len(rows) == 0 {
 		return "None\n"
 	}
@@ -48,11 +52,11 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) []groupedStatusRow {
-	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, time.Now())
+func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) []groupedStatusRow {
+	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, time.Now())
 }
 
-func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) []groupedStatusRow {
+func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
 	launching := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
@@ -65,7 +69,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job) {
+		switch groupedStatusBucket(job, launchStatusByID) {
 		case "running":
 			running = append(running, job)
 		case "launching":
@@ -85,11 +89,11 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 
 	sections := []groupedStatusSection{
 		{title: "Running", key: "running", jobs: running},
-		{title: "Launching", key: "launching", jobs: launching},
 		{title: "Queued", key: "queued", jobs: queued},
+		{title: "Launching", key: "launching", jobs: launching},
 		{title: "Unplaced", key: "unplaced", jobs: unplaced},
-		{title: "Completions", key: "completions", jobs: completions},
-		{title: "Failures", key: "failures", jobs: failures},
+		{title: "Completed", key: "completions", jobs: completions},
+		{title: "Failed", key: "failures", jobs: failures},
 		{title: "Killed/Canceled", key: "killed_canceled", jobs: killedCanceled},
 	}
 
@@ -308,12 +312,18 @@ func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
 	return "blocked: " + strings.TrimSpace(job.QueueBlockedReason)
 }
 
-func groupedStatusBucket(job *db.Job) string {
+func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string) string {
 	status := job.EffectiveStatus()
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
 		return "running"
 	case db.StatusPendingPlacement:
+		switch launchStatusForJob(job, launchStatusByID) {
+		case db.LaunchStatusRunning, db.LaunchStatusGrace, db.LaunchStatusCompleted:
+			return "queued"
+		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
+			return "unplaced"
+		}
 		return "launching"
 	case db.StatusQueued:
 		if job.TargetKind() == db.JobTargetUnplaced {
@@ -376,7 +386,7 @@ func groupedStatusScopeLabel(job *db.Job) string {
 func countVisibleRunningJobs(jobs []*db.Job) int {
 	n := 0
 	for _, job := range jobs {
-		if job != nil && groupedStatusBucket(job) == "running" {
+		if job != nil && groupedStatusBucket(job, nil) == "running" {
 			n++
 		}
 	}
@@ -385,9 +395,9 @@ func countVisibleRunningJobs(jobs []*db.Job) int {
 
 func groupedStatusOutcomeSuffix(job *db.Job, sectionTitle string) string {
 	switch sectionTitle {
-	case "Completions":
+	case "Completed":
 		return "completed ok"
-	case "Failures":
+	case "Failed":
 		status := job.EffectiveStatus()
 		if status == db.StatusCompleted && job.ExitCode != nil {
 			return fmt.Sprintf("completed (exit %d)", *job.ExitCode)
@@ -398,4 +408,11 @@ func groupedStatusOutcomeSuffix(job *db.Job, sectionTitle string) string {
 	default:
 		return ""
 	}
+}
+
+func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
+	if job == nil || job.LaunchID == nil || launchStatusByID == nil {
+		return ""
+	}
+	return strings.TrimSpace(launchStatusByID[*job.LaunchID])
 }
