@@ -285,7 +285,11 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	database, err := db.Open()
+	openDB := db.OpenForReading
+	if artifactListSync {
+		openDB = db.Open
+	}
+	database, err := openDB()
 	if err != nil {
 		return err
 	}
@@ -427,7 +431,7 @@ func runArtifactGet(cmd *cobra.Command, args []string) error {
 }
 
 func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return err
 	}
@@ -564,7 +568,7 @@ func downloadCloudOutputFiles(cmd *cobra.Command, r2Client *r2.Client, job *db.J
 }
 
 func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return err
 	}
@@ -639,7 +643,7 @@ func runArtifactCat(cmd *cobra.Command, args []string) error {
 		token = args[1]
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return err
 	}
@@ -718,7 +722,7 @@ func resolveArtifactJobID(args []string) (int64, error) {
 		return parseJobID(args[0])
 	}
 
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return 0, err
 	}
