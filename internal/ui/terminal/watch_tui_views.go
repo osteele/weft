@@ -199,11 +199,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 	} else if m.retryResult != "" {
 		addLine(m.retryResult)
 	}
-	if status := m.autoStatusDetail(); status != "" {
-		addLine(watchDimStyle.Render(status))
-	}
 	for _, line := range renderSharedTUIStatusLines(m.database, width) {
 		addLine(line)
+	}
+	if line := m.autoPilotStatusLine(); line != "" {
+		addLine(watchDimStyle.Render(line))
 	}
 
 	if !m.done && !m.launchPending {
@@ -349,10 +349,6 @@ func (m watchModel) renderSystemView() (string, int) {
 	if m.hasPreservedJobAttachment() {
 		footerParts = append(footerParts, watchDimStyle.Render(degraded.TerminalJobAttachmentDegradedFooter()))
 	}
-	if status := m.autoStatusDetail(); status != "" {
-		footerParts = append(footerParts, watchDimStyle.Render(status))
-	}
-
 	// Retry status in footer for system mode
 	if m.retrying {
 		footerParts = append(footerParts, m.spinner.View()+fmt.Sprintf(" Retrying %d retryable failed instance(s)...", m.countRetryableFailedInstances()))
@@ -369,6 +365,9 @@ func (m watchModel) renderSystemView() (string, int) {
 
 	// Render rows into content string
 	reservedFooterLines := 1 + len(sharedStatusLines)
+	if m.autoPilotStatusLine() != "" {
+		reservedFooterLines++
+	}
 	contentHeight := m.height - reservedFooterLines
 	if contentHeight < 1 {
 		contentHeight = len(rows)
@@ -398,6 +397,10 @@ func (m watchModel) renderSystemView() (string, int) {
 	}
 	for _, line := range sharedStatusLines {
 		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if line := m.autoPilotStatusLine(); line != "" {
+		b.WriteString(watchDimStyle.Render(line))
 		b.WriteString("\n")
 	}
 	footer := strings.Join(footerParts, "  ")
@@ -650,14 +653,97 @@ func (m watchModel) autoModeHint() string {
 	return "[a] auto: OFF"
 }
 
-func (m watchModel) autoStatusDetail() string {
+func (m watchModel) autoPilotUnplacedCount() int {
+	n := 0
+	for _, job := range m.unplacedJobs {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued {
+			n++
+		}
+	}
+	return n
+}
+
+func (m watchModel) autoPilotRunningCount() int {
+	n := 0
+	switch {
+	case m.mode == watchModeSystem:
+		for _, host := range m.onPremHosts {
+			for _, job := range host.Jobs {
+				if job != nil && job.EffectiveStatus() == db.StatusRunning {
+					n++
+				}
+			}
+		}
+		for _, u := range m.updates {
+			for _, job := range u.Jobs {
+				if job != nil && job.EffectiveStatus() == db.StatusRunning {
+					n++
+				}
+			}
+		}
+	case m.mode.isInstanceBased():
+		for _, id := range m.instanceIDs {
+			u, ok := m.updates[id]
+			if !ok {
+				continue
+			}
+			for _, job := range u.Jobs {
+				if job != nil && job.EffectiveStatus() == db.StatusRunning {
+					n++
+				}
+			}
+		}
+	case m.mode == watchModeProject:
+		for _, g := range m.projectGroups {
+			for _, job := range g.Running {
+				if job != nil && job.EffectiveStatus() == db.StatusRunning {
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+func (m watchModel) autoPilotSyncInProgress() bool {
+	switch {
+	case m.mode == watchModeSystem:
+		return m.refreshing
+	case m.mode == watchModeProject:
+		return m.projectSyncing
+	default:
+		return false
+	}
+}
+
+func (m watchModel) autoPilotStatusLine() string {
 	if !m.autoMode {
 		return ""
 	}
-	if m.autoStatusLine != "" {
-		return m.autoStatusLine
+	unplaced := m.autoPilotUnplacedCount()
+	if m.autoPilotSyncInProgress() {
+		return "Auto-pilot: syncing cloud state..."
 	}
-	return "auto-pilot: monitoring"
+	if m.autoPassInFlight || m.autoPlacing {
+		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs...", unplaced)
+	}
+	if m.autoLaunching {
+		return "Auto-pilot: launching instance..."
+	}
+	if strings.TrimSpace(m.autoPersistentError) != "" {
+		return "Auto-pilot: failed — " + m.autoPersistentError
+	}
+	if strings.TrimSpace(m.autoPersistentBlocked) != "" {
+		return fmt.Sprintf("Auto-pilot: paused — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
+	}
+	if !m.autoLaunchBackoffUntil.IsZero() && time.Now().Before(m.autoLaunchBackoffUntil) {
+		wait := time.Until(m.autoLaunchBackoffUntil).Round(time.Second)
+		if wait < time.Second {
+			wait = time.Second
+		}
+		return fmt.Sprintf("Auto-pilot: next pass in %s (%d unplaced)", wait, unplaced)
+	}
+	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running)", unplaced, m.autoPilotRunningCount())
 }
 
 // ---------------------------------------------------------------------------
@@ -701,9 +787,13 @@ func (m watchModel) renderProjectView() string {
 
 	lines := m.projectLines
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
+	autoLine := m.autoPilotStatusLine()
 	rows := m.projectPageSize()
 	if len(sharedStatusLines) > 0 && rows > len(sharedStatusLines) {
 		rows -= len(sharedStatusLines)
+	}
+	if autoLine != "" && rows > 1 {
+		rows--
 	}
 	var b strings.Builder
 	title := fmt.Sprintf("Project Watch (%d projects)", len(m.projectGroups))
@@ -735,6 +825,10 @@ func (m watchModel) renderProjectView() string {
 
 	for _, line := range sharedStatusLines {
 		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if autoLine != "" {
+		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(autoLine, m.width)))
 		b.WriteString("\n")
 	}
 	b.WriteString(watchDimStyle.Render(truncateDisplayWidth(m.projectFooterText(), m.width)))

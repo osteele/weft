@@ -115,9 +115,10 @@ type watchModel struct {
 	projectOffset  int // top visible line (offset-based scroll)
 
 	// --- Auto-pilot mode ---
-	autoMode      bool // when true, auto-relaunch, auto-place, and auto-launch are active
-	autoLaunching bool // true while an auto-launch is in progress
-	autoPlacing   bool // true while an auto-place is in progress
+	autoMode         bool // when true, auto-relaunch, auto-place, and auto-launch are active
+	autoLaunching    bool // true while an auto-launch is in progress
+	autoPlacing      bool // true while an auto-place is in progress
+	autoPassInFlight bool
 	// Auto-pilot diagnostics and relaunch backoff.
 	autoStatusLine          string
 	autoNoopReasons         map[int64]string
@@ -126,6 +127,9 @@ type watchModel struct {
 	autoLaunchBackoffStep   int
 	autoLaunchBackoffReason string
 	autoLaunchBackoffArmed  bool
+	autoPersistentError     string
+	autoPersistentBlocked   string
+	autoPersistentBlockedN  int
 
 	// --- Move picker overlay ---
 	movePicker movePickerModel

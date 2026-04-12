@@ -14,6 +14,12 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 )
 
+func (m *watchModel) clearAutoPilotPersistentState() {
+	m.autoPersistentError = ""
+	m.autoPersistentBlocked = ""
+	m.autoPersistentBlockedN = 0
+}
+
 // ---------------------------------------------------------------------------
 // Update handlers: watch updates
 // ---------------------------------------------------------------------------
@@ -214,11 +220,15 @@ func (m watchModel) handleMoveExecuteDone(msg moveExecuteDoneMsg) (tea.Model, te
 
 func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cmd) {
 	m.autoPlacing = false
+	if !m.autoLaunching {
+		m.autoPassInFlight = false
+	}
 	if msg.err != nil {
-		m.autoStatusLine = fmt.Sprintf("auto-place failed: %v", msg.err)
+		m.autoPersistentError = summarizeAutoPilotError(msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-place failed: %v", msg.err), true)
 	}
 	if msg.jobID > 0 {
+		m.clearAutoPilotPersistentState()
 		flashCmd := m.flash.Set(fmt.Sprintf("Auto-placed job #%d → instance %s", msg.jobID, ids.FormatInstanceID(msg.instanceID)), false)
 		m.removeUnplacedJob(msg.jobID)
 		delete(m.autoNoopReasons, msg.jobID)
@@ -244,14 +254,18 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 
 func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.Cmd) {
 	m.autoLaunching = false
+	if !m.autoPlacing {
+		m.autoPassInFlight = false
+	}
 	if msg.err != nil {
 		m.autoLaunchBackoffReason = "launch error"
 		m.autoLaunchBackoffUntil = time.Now().Add(nextAutoLaunchBackoff(m.autoLaunchBackoffStep))
 		m.autoLaunchBackoffStep++
-		m.autoStatusLine = fmt.Sprintf("auto-launch failed: %v", msg.err)
+		m.autoPersistentError = summarizeAutoPilotError(msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-launch failed: %v", msg.err), true)
 	}
 	if len(msg.instanceIDs) > 0 {
+		m.clearAutoPilotPersistentState()
 		m.resetAutoLaunchBackoff()
 		// Add new instance IDs and start watching them
 		var cmds []tea.Cmd
@@ -268,7 +282,6 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 		if msg.skipped > 0 {
 			flashMsg += fmt.Sprintf(" (%d skipped)", msg.skipped)
 		}
-		m.autoStatusLine = flashMsg
 		cmds = append(cmds, m.flash.Set(flashMsg, false))
 		return m, tea.Batch(cmds...)
 	}
@@ -288,6 +301,8 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 	m.autoLaunchBackoffUntil = time.Now().Add(delay)
 	m.autoLaunchBackoffStep++
 	m.autoStatusLine = fmt.Sprintf("auto-launch skipped: %s", reason)
+	m.autoPersistentBlocked = reason
+	m.autoPersistentBlockedN = m.autoPilotUnplacedCount()
 	if m.autoNoopReasons == nil {
 		m.autoNoopReasons = map[int64]string{}
 	}

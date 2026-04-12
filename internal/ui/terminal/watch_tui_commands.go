@@ -112,6 +112,7 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 		m.autoNoopReasons = map[int64]string{}
 		m.autoStatusLine = ""
 		m.resetAutoLaunchBackoff()
+		m.clearAutoPilotPersistentState()
 	}
 
 	var cmds []tea.Cmd
@@ -143,8 +144,31 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 	m.autoNoopReasons = reasonsByJob
 	m.autoStatusLine = strings.Join(globalReasons, " | ")
 	if len(cmds) == 0 {
+		m.autoPassInFlight = false
+		if m.autoPilotUnplacedCount() > 0 {
+			reason := strings.TrimSpace(strings.Join(globalReasons, " | "))
+			if reason == "" {
+				reason = summarizeAutoLaunchReasons(reasonsByJob, "")
+			}
+			reason = strings.TrimSpace(reason)
+			if reason != "" {
+				m.autoPersistentBlocked = reason
+				n := 0
+				for _, r := range reasonsByJob {
+					if strings.TrimSpace(r) != "" {
+						n++
+					}
+				}
+				if n <= 0 {
+					n = m.autoPilotUnplacedCount()
+				}
+				m.autoPersistentBlockedN = n
+			}
+		}
 		return nil
 	}
+	m.autoPassInFlight = true
+	m.autoPersistentError = ""
 	return tea.Batch(cmds...)
 }
 

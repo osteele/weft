@@ -16,6 +16,7 @@ import (
 func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 	m.autoMode = !m.autoMode
 	if m.autoMode {
+		m.clearAutoPilotPersistentState()
 		m.autoStatusLine = "auto-pilot enabled"
 		cmds := []tea.Cmd{m.flash.Set("Auto-pilot ON", false)}
 		if cmd := m.runAutoPilot(); cmd != nil {
@@ -32,6 +33,8 @@ func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 	m.autoStatusLine = ""
 	m.autoNoopReasons = map[int64]string{}
 	m.resetAutoLaunchBackoff()
+	m.autoPassInFlight = false
+	m.clearAutoPilotPersistentState()
 	return m, m.flash.Set("Auto-pilot OFF", false)
 }
 
@@ -83,6 +86,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		if !m.retrying && m.hasRetryableFailures() {
+			m.clearAutoPilotPersistentState()
 			if m.database != nil {
 				_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 					EventKind:  db.EventRetryManualTriggered,
@@ -112,6 +116,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		scale *= 2
 		m.retryBudgetMultiplier[instID] = scale
+		m.clearAutoPilotPersistentState()
 		m.retryAttempt = 0
 		m.retrying = true
 		m.retryResult = fmt.Sprintf("Retry: doubled budget for failed instance %s (x%.1f)", ids.FormatInstanceID(instID), scale)
@@ -119,6 +124,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		// Try cloud job row first
 		if job := m.selectedCloudJob(); job != nil && job.EffectiveStatus() == db.StatusQueued {
+			m.clearAutoPilotPersistentState()
 			return m, requestWatchJobUnplace(m.database, job.ID)
 		}
 		job := m.selectedUnplacedJob()
@@ -128,6 +134,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {
 			return m, nil
 		}
+		m.clearAutoPilotPersistentState()
 		return m, requestWatchJobUnplace(m.database, job.ID)
 	case "x":
 		var job *db.Job
@@ -142,12 +149,14 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if job != nil {
+			m.clearAutoPilotPersistentState()
 			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Killing job #%d...", job.ID), false)
 			return m, tea.Batch(flashCmd, requestWatchJobKill(m.database, job.ID))
 		}
 	case "t":
 		// Terminate a cloud instance
 		if instID := m.selectedCloudInstanceID(); instID != 0 {
+			m.clearAutoPilotPersistentState()
 			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Terminating instance %s...", ids.FormatInstanceID(instID)), false)
 			return m, tea.Batch(flashCmd, requestWatchInstanceTerminate(m.database, instID))
 		}
@@ -165,6 +174,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_, reason := campaign.MatchJobToInstance(job, capacities[0])
 			return m, m.flash.Set(fmt.Sprintf("No compatible instance for job #%d (%s)", job.ID, reason), true)
 		}
+		m.clearAutoPilotPersistentState()
 		best := ranked[0]
 		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Submitting job #%d to instance %s...", job.ID, ids.FormatInstanceID(best.Instance.ID)), false)
 		return m, tea.Batch(flashCmd, requestWatchJobSubmit(m.ctx, m.database, m.r2Client, job.ID, best.Instance.ID))
@@ -172,12 +182,14 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.unplacedJobs) == 0 {
 			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
+		m.clearAutoPilotPersistentState()
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	case "m":
 		job := m.selectedCloudJob()
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {
 			return m, nil
 		}
+		m.clearAutoPilotPersistentState()
 		sourceInstanceID := int64(0)
 		if job.LaunchID != nil {
 			sourceInstanceID = *job.LaunchID
@@ -297,6 +309,7 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job.EffectiveStatus() != db.StatusQueued {
 			return m, m.flash.Set("Only queued jobs can be unplaced", true)
 		}
+		m.clearAutoPilotPersistentState()
 		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Unplacing job #%d...", job.ID), false)
 		return m, tea.Batch(flashCmd, requestWatchJobUnplace(m.database, job.ID))
 	case "r":
@@ -322,6 +335,7 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !hasUnplaced {
 			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
+		m.clearAutoPilotPersistentState()
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	case "a":
 		return m.handleToggleAutoPilot()

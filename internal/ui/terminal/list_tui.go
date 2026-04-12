@@ -55,6 +55,10 @@ type listTUIModel struct {
 	groupedSelectableRows      []int
 	autoMode                   bool
 	autoInProgress             bool
+	autoPersistentError        string
+	autoPersistentBlocked      string
+	autoPersistentBlockedN     int
+	autoNextPassAt             time.Time
 	autoLeaseOwner             string
 	autoLeaseScope             string
 	autoBlockReasons           map[int64]string
@@ -257,11 +261,13 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
 				if m.autoMode {
+					m.clearAutoPilotPersistentState()
 					m.statusMessage = "Auto-pilot ON"
 					return m, m.runAutoPilot()
 				}
 				m.autoInProgress = false
 				m.autoBlockReasons = nil
+				m.clearAutoPilotPersistentState()
 				_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 				m.statusMessage = "Auto-pilot OFF"
 				return m, nil
@@ -278,6 +284,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMessage = "No queued jobs to launch."
 				return m, nil
 			}
+			m.clearAutoPilotPersistentState()
 			m.quickLaunching = true
 			m.statusMessage = "Launching new instance..."
 			progressCh := make(chan listQuickLaunchProgressMsg, 16)
@@ -435,6 +442,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.lastAutoPilotErrorRaw = msg.err.Error()
 			m.showAutoPilotErrorDetails = false
+			m.autoPersistentError = summarizeAutoPilotError(msg.err)
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot failed: " + summarizeAutoPilotError(msg.err)
 			}
@@ -443,11 +451,21 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastAutoPilotErrorRaw = ""
 		m.showAutoPilotErrorDetails = false
+		m.autoPersistentError = ""
 		if msg.anotherHolding {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot: another TUI is active for this scope"
 			}
 			return m, nil
+		}
+		m.autoPersistentBlocked = ""
+		m.autoPersistentBlockedN = 0
+		if summary := autoPilotBlockSummary(msg.blockedReasons); summary != "" {
+			m.autoPersistentBlocked = summary
+			m.autoPersistentBlockedN = len(msg.blockedReasons)
+		}
+		if msg.placed > 0 || msg.launched > 0 {
+			m.clearAutoPilotPersistentState()
 		}
 		if !m.quickLaunchStatusProtected() {
 			switch {
@@ -457,12 +475,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d", msg.placed)
 			case msg.launched > 0:
 				m.statusMessage = "Auto-pilot: " + formatAutoPilotLaunchedSummary(msg.launched, msg.launchedClass)
-			default:
-				if summary := autoPilotBlockSummary(msg.blockedReasons); summary != "" {
-					m.statusMessage = "Auto-pilot: " + summary
-				} else {
-					m.statusMessage = "Auto-pilot: monitoring"
-				}
+			case strings.HasPrefix(m.statusMessage, "Auto-pilot:"):
+				m.statusMessage = ""
 			}
 		}
 		return m, m.reloadJobs()
@@ -689,6 +703,7 @@ func (m listTUIModel) groupedView() string {
 	statusLine := m.groupedStatusText()
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
 	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning)
+	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	baseFooterLines := 2 // blank separator + controls
 	if etaLine != "" {
@@ -698,6 +713,9 @@ func (m listTUIModel) groupedView() string {
 		baseFooterLines++
 	}
 	baseFooterLines += len(sharedStatusLines)
+	if autoPilotLine != "" {
+		baseFooterLines++
+	}
 	availableForBodyAndDetails := max(0, m.height-1-baseFooterLines)
 	if len(errorDetailsLines) > 0 {
 		maxDetailLines := availableForBodyAndDetails
@@ -747,12 +765,16 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
 		b.WriteString("\n")
 	}
+	if statusLine != "" {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
+		b.WriteString("\n")
+	}
 	for _, line := range sharedStatusLines {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	if statusLine != "" {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
+	if autoPilotLine != "" {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(autoPilotLine, m.width)))
 		b.WriteString("\n")
 	}
 	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(controlsLine, m.width)))
@@ -764,13 +786,62 @@ func (m listTUIModel) groupedStatusText() string {
 	if m.syncInProgress {
 		parts = append(parts, "syncing...")
 	}
-	if m.statusMessage != "" {
+	if m.statusMessage != "" &&
+		!strings.HasPrefix(m.statusMessage, "Auto-pilot:") &&
+		m.statusMessage != "Auto-pilot ON" &&
+		m.statusMessage != "Auto-pilot OFF" {
 		parts = append(parts, m.statusMessage)
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+func (m *listTUIModel) clearAutoPilotPersistentState() {
+	m.autoPersistentError = ""
+	m.autoPersistentBlocked = ""
+	m.autoPersistentBlockedN = 0
+}
+
+func (m listTUIModel) countUnplacedQueuedJobs() int {
+	n := 0
+	for _, job := range m.jobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if job.Host == "" && job.LaunchID == nil {
+			n++
+		}
+	}
+	return n
+}
+
+func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
+	if !m.autoMode {
+		return ""
+	}
+	unplaced := m.countUnplacedQueuedJobs()
+	if m.syncInProgress {
+		return "Auto-pilot: syncing cloud state..."
+	}
+	if m.autoInProgress {
+		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs...", unplaced)
+	}
+	if strings.TrimSpace(m.autoPersistentError) != "" {
+		return "Auto-pilot: failed — " + m.autoPersistentError
+	}
+	if strings.TrimSpace(m.autoPersistentBlocked) != "" {
+		return fmt.Sprintf("Auto-pilot: paused — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
+	}
+	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
+		wait := time.Until(m.autoNextPassAt).Round(time.Second)
+		if wait < time.Second {
+			wait = time.Second
+		}
+		return fmt.Sprintf("Auto-pilot: next pass in %s (%d unplaced)", wait, unplaced)
+	}
+	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running)", unplaced, visibleRunning)
 }
 
 func (m listTUIModel) groupedControlsText(hasQueued bool) string {
@@ -916,11 +987,13 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.autoMode = !m.autoMode
 		if m.autoMode {
+			m.clearAutoPilotPersistentState()
 			m.statusMessage = "Auto-pilot ON"
 			return m, m.runAutoPilot()
 		}
 		m.autoInProgress = false
 		m.autoBlockReasons = nil
+		m.clearAutoPilotPersistentState()
 		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 		m.statusMessage = "Auto-pilot OFF"
 		return m, nil
@@ -940,6 +1013,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "No queued jobs to launch."
 			return m, nil
 		}
+		m.clearAutoPilotPersistentState()
 		m.quickLaunching = true
 		m.statusMessage = "Launching new instance..."
 		progressCh := make(chan listQuickLaunchProgressMsg, 16)
@@ -956,6 +1030,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, nil
 		}
+		m.clearAutoPilotPersistentState()
 		m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
 		return m, requestWatchJobKill(m.database, job.ID)
 	case "u":
@@ -967,6 +1042,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("Job #%d is %s; only queued jobs can be unplaced", job.ID, job.EffectiveStatus())
 			return m, nil
 		}
+		m.clearAutoPilotPersistentState()
 		m.statusMessage = fmt.Sprintf("Unplacing job #%d...", job.ID)
 		return m, requestWatchJobUnplace(m.database, job.ID)
 	case "m":
@@ -978,6 +1054,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "Move is only available for queued jobs"
 			return m, nil
 		}
+		m.clearAutoPilotPersistentState()
 		m.moveLookupSeq++
 		reqID := m.moveLookupSeq
 		m.moveLookupPending = true
