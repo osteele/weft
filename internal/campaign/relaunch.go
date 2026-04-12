@@ -90,11 +90,29 @@ type RelaunchResult struct {
 // RelaunchOrphanedJobs finds unplaced cloud jobs, filters by attempt count,
 // groups them, fetches offers, and launches new instances. It reuses the
 // campaign from the most recent attempt (if any) for cost inheritance.
-func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
+func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	maxAttempts := cfg.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultMaxCloudAttempts
 	}
+	// Write a pass-summary lifecycle event so the autopilot's "was anything
+	// actually attempted this pass?" question is answerable from the DB.
+	// Without this, silent branches (e.g. groupOffers empty, or launch
+	// goroutines with a nil client) leave no trace beyond relaunch.eligible.
+	var eligibleCount int
+	defer func() {
+		if rr == nil {
+			return
+		}
+		_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+			EventKind: db.EventRelaunchPassSummary,
+			JobCount:  eligibleCount,
+			Detail: fmt.Sprintf(
+				"eligible=%d launched=%d skipped=%d errors=%d blocked=%q",
+				eligibleCount, len(rr.InstanceIDs), rr.Skipped, len(rr.Errors), rr.BlockedReason,
+			),
+		})
+	}()
 
 	unplaced, err := db.ListUnplacedJobs(cfg.Database)
 	if err != nil {
@@ -206,10 +224,11 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		return result, nil
 	}
 
-	slog.Info("eligible orphaned jobs for relaunch", "component", "relaunch", "count", len(eligible))
+	eligibleCount = len(eligible)
+	slog.Info("eligible orphaned jobs for relaunch", "component", "relaunch", "count", eligibleCount)
 	_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 		EventKind: db.EventRelaunchEligible,
-		JobCount:  len(eligible),
+		JobCount:  eligibleCount,
 	})
 
 	// Group by GPU requirements and estimate disk
@@ -364,7 +383,21 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		offer := launchOffers[i]
 		client := clientForProvider(cfg.Clients, offer.Provider)
 		if client == nil {
+			reason := fmt.Sprintf("no cloud client configured for provider %q (offer selected from a provider we can no longer reach)", offer.Provider)
+			slog.Warn("skipping group: no client for provider",
+				"component", "relaunch",
+				"gpu_spec", group.GPUSpec(),
+				"provider", offer.Provider,
+				"job_count", len(group.Jobs))
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchSkippedNoClient,
+				GPUSpec:   group.GPUSpec(),
+				JobCount:  len(group.Jobs),
+				Detail:    fmt.Sprintf("provider=%s", offer.Provider),
+			})
 			result.Errors = append(result.Errors, fmt.Errorf("relaunch: no client for provider %s", offer.Provider))
+			result.Skipped += len(group.Jobs)
+			recordGroupReasons(result, cfg.ResetJobs, group, reason)
 			continue
 		}
 

@@ -18,6 +18,8 @@ const (
 	EventRelaunchDiskBump           = "relaunch.disk_bump"
 	EventRelaunchLaunchSuccess      = "relaunch.launch_success"
 	EventRelaunchLaunchFailed       = "relaunch.launch_failed"
+	EventRelaunchSkippedNoClient    = "relaunch.skipped.no_client"
+	EventRelaunchPassSummary        = "relaunch.pass_summary"
 	EventRelaunchRunawayTripped     = "relaunch.runaway_tripped"
 	EventRelaunchRunawayBlocked     = "relaunch.runaway_blocked"
 	EventRelaunchRunawayResumed     = "relaunch.runaway_resumed"
