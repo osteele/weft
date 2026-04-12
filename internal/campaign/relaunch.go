@@ -231,8 +231,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		JobCount:  eligibleCount,
 	})
 
-	// Group by GPU requirements and estimate disk
-	groups := GroupByAffinity(eligible, nil)
+	// Group by GPU requirements and estimate disk.
+	// Auto-relaunch can transiently mark scoped jobs as pending_placement to
+	// prevent duplicate submissions while a pass is in flight. Treat those
+	// unplaced jobs as queued for grouping so offer search and blocked-reason
+	// reporting still run for the pass.
+	groups := GroupByAffinity(relaunchGroupingJobs(eligible), nil)
 	groups = SplitGroupsByImage(groups)
 	var r2Client *r2.Client
 	if cfg.R2Cfg.Bucket != "" && cfg.R2Cfg.AccessKeyID != "" {
@@ -444,6 +448,27 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+func relaunchGroupingJobs(jobs []*db.Job) []*db.Job {
+	if len(jobs) == 0 {
+		return nil
+	}
+	grouping := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if job.EffectiveStatus() == db.StatusPendingPlacement && job.TargetKind() == db.JobTargetUnplaced {
+			copyJob := *job
+			copyJob.Status = db.StatusQueued
+			copyJob.PendingStatus = nil
+			grouping = append(grouping, &copyJob)
+			continue
+		}
+		grouping = append(grouping, job)
+	}
+	return grouping
 }
 
 // recordJobSkipReason records a per-job skip reason into both NotReplacedReasons

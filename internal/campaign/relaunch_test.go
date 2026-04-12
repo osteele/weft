@@ -156,3 +156,34 @@ func TestRetryBudgetUsage_ProratesActualSpendByAttemptElapsed(t *testing.T) {
 		t.Fatalf("spend = %d, want 150", spend)
 	}
 }
+
+func TestRelaunchGroupingJobsTreatsUnplacedPendingPlacementAsQueued(t *testing.T) {
+	queued := &db.Job{ID: 1, Status: db.StatusQueued}
+	pendingUnplaced := &db.Job{ID: 2, Status: db.StatusPendingPlacement}
+	pendingPlaced := &db.Job{ID: 3, Status: db.StatusPendingPlacement, LaunchID: testInt64Ptr(77)}
+
+	grouping := relaunchGroupingJobs([]*db.Job{queued, pendingUnplaced, pendingPlaced})
+	if len(grouping) != 3 {
+		t.Fatalf("grouping len = %d, want 3", len(grouping))
+	}
+
+	if grouping[0] != queued {
+		t.Fatal("queued job should be passed through")
+	}
+	if grouping[1] == pendingUnplaced {
+		t.Fatal("pending unplaced job should be copied before normalization")
+	}
+	if grouping[1].Status != db.StatusQueued {
+		t.Fatalf("pending unplaced normalized status = %q, want %q", grouping[1].Status, db.StatusQueued)
+	}
+	if pendingUnplaced.Status != db.StatusPendingPlacement {
+		t.Fatalf("original pending unplaced status mutated to %q", pendingUnplaced.Status)
+	}
+	if grouping[2] != pendingPlaced {
+		t.Fatal("pending placed job should not be rewritten")
+	}
+}
+
+func testInt64Ptr(v int64) *int64 {
+	return &v
+}
