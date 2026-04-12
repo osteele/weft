@@ -447,20 +447,43 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	}
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+	useLaunchProgressTUI := watchTUI && terminal.UseLaunchProgressTUI(false)
+	var launchTUI *terminal.LaunchProgressTUI
+	if useLaunchProgressTUI {
+		launchTUI = terminal.StartLaunchProgressTUI(0, len(groupsToLaunch))
+		defer func() { _ = launchTUI.Stop() }()
+	}
 
 	result, err := campaign.LaunchCampaign(
 		clients, database, groupsToLaunch, offers, estimates, survivalModel, opts, r2Cfg,
 		func(provider cloud.Provider) (cloud.CreateOpts, error) {
 			return createOptsForProvider(cfg, provider)
 		},
-		func(group campaign.InstanceGroup, phase string) {
-			if strings.EqualFold(group.GPUClass, "campaign") {
-				fmt.Printf("  %s\n", phase)
+		func(event campaign.LaunchEvent) {
+			if launchTUI != nil {
+				launchTUI.SendEvent(event)
 				return
 			}
-			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
+			switch event.Kind {
+			case campaign.LaunchEventCampaignStatus:
+				if strings.TrimSpace(event.Phase) != "" {
+					fmt.Printf("  %s\n", event.Phase)
+				}
+			case campaign.LaunchEventGroupAssets:
+				fmt.Printf("  %s: staging (%d/%d assets ready)\n", event.Group.GPUSpec(), event.AssetsReady, event.AssetsTotal)
+			case campaign.LaunchEventGroupRetry:
+				fmt.Printf("  %s: retrying with replacement offer (attempt %d/%d)\n", event.Group.GPUSpec(), event.RetryAttempt, event.RetryMax)
+			case campaign.LaunchEventGroupPhase:
+				if strings.TrimSpace(event.Phase) != "" {
+					fmt.Printf("  %s: %s\n", event.Group.GPUSpec(), event.Phase)
+				}
+			}
 		},
 		func(id int64) {
+			if launchTUI != nil {
+				launchTUI.SetCampaign(id, len(groupsToLaunch))
+				return
+			}
 			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(groupsToLaunch))
 		},
 		nil,
@@ -477,9 +500,12 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	for _, e := range result.Errors {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", e)
 	}
+	if launchTUI != nil {
+		_ = launchTUI.Stop()
+	}
 	fmt.Printf("Campaign %d: launched %d instance(s)\n", result.CampaignID, len(result.InstanceIDs))
 	for _, id := range result.InstanceIDs {
-		fmt.Printf("  instance %s\n", ids.FormatInstanceID(id))
+		fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
 	}
 
 	// Print next steps

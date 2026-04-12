@@ -37,8 +37,10 @@ type Result struct {
 }
 
 type BulkCallbacks struct {
-	OnStatus  func(string)
-	OnWarning func(string)
+	OnStatus          func(string)
+	OnWarning         func(string)
+	OnEvent           func(campaign.LaunchEvent)
+	OnCampaignCreated func(campaignID int64, expectedWorkers int)
 }
 
 type BulkResult struct {
@@ -207,7 +209,7 @@ func ExecuteOption(
 		launchOpts,
 		r2Cfg,
 		func(cloud.Provider) (cloud.CreateOpts, error) { return createOpts, nil },
-		func(campaign.InstanceGroup, string) {},
+		func(campaign.LaunchEvent) {},
 		nil,
 		func(campaign.InstanceGroup, int64) {},
 	)
@@ -504,16 +506,20 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		func(provider cloud.Provider) (cloud.CreateOpts, error) {
 			return createOptsForProvider(cfg, provider)
 		},
-		func(group campaign.InstanceGroup, phase string) {
+		func(event campaign.LaunchEvent) {
+			if cb.OnEvent != nil {
+				cb.OnEvent(event)
+			}
 			if cb.OnStatus != nil {
-				if label := moveGroupProgressLabel(group, groupLabels); label != "" {
-					cb.OnStatus(fmt.Sprintf("  %s %s: %s", label, group.GPUSpec(), phase))
-					return
+				if line := formatMoveLaunchEventLine(event, groupLabels); line != "" {
+					cb.OnStatus(line)
 				}
-				cb.OnStatus(fmt.Sprintf("  %s: %s", group.GPUSpec(), phase))
 			}
 		},
 		func(id int64) {
+			if cb.OnCampaignCreated != nil {
+				cb.OnCampaignCreated(id, len(launchGroups))
+			}
 			if cb.OnStatus != nil {
 				cb.OnStatus(fmt.Sprintf("Campaign %d: launching %d instance(s)...", id, len(launchGroups)))
 			}
@@ -541,6 +547,50 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	}
 	logPhase("complete", moveStarted, fmt.Sprintf("instances=%d", len(result.InstanceIDs)), nil)
 	return BulkResult{InstanceIDs: result.InstanceIDs}, nil
+}
+
+func formatMoveLaunchEventLine(event campaign.LaunchEvent, groupLabels map[string]string) string {
+	switch event.Kind {
+	case campaign.LaunchEventCampaignStatus:
+		phase := strings.TrimSpace(event.Phase)
+		if phase == "" {
+			return ""
+		}
+		return "  " + phase
+	case campaign.LaunchEventGroupAssets:
+		group := event.Group
+		prefix := strings.TrimSpace(group.GPUSpec())
+		if label := moveGroupProgressLabel(group, groupLabels); label != "" {
+			prefix = strings.TrimSpace(label + " " + prefix)
+		}
+		if prefix == "" {
+			return ""
+		}
+		return fmt.Sprintf("  %s: staging (%d/%d assets ready)", prefix, event.AssetsReady, event.AssetsTotal)
+	case campaign.LaunchEventGroupRetry:
+		group := event.Group
+		prefix := strings.TrimSpace(group.GPUSpec())
+		if label := moveGroupProgressLabel(group, groupLabels); label != "" {
+			prefix = strings.TrimSpace(label + " " + prefix)
+		}
+		if prefix == "" {
+			return ""
+		}
+		return fmt.Sprintf("  %s: retrying with replacement offer (attempt %d/%d)", prefix, event.RetryAttempt, event.RetryMax)
+	case campaign.LaunchEventGroupPhase:
+		group := event.Group
+		phase := strings.TrimSpace(event.Phase)
+		prefix := strings.TrimSpace(group.GPUSpec())
+		if label := moveGroupProgressLabel(group, groupLabels); label != "" {
+			prefix = strings.TrimSpace(label + " " + prefix)
+		}
+		if prefix == "" || phase == "" {
+			return ""
+		}
+		return fmt.Sprintf("  %s: %s", prefix, phase)
+	default:
+		return ""
+	}
 }
 
 func BuildCloudClients(cfg *config.Config) ([]cloud.Client, error) {

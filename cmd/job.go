@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -123,6 +124,7 @@ var (
 	jobMoveProject string
 	jobMoveTo      string
 	jobMoveFrom    string
+	jobMoveNoTUI   bool
 )
 
 var jobMoveCmd = &cobra.Command{
@@ -165,6 +167,7 @@ Examples:
 var (
 	jobPlaceEach    bool
 	jobPlaceProject string
+	jobPlaceNoTUI   bool
 )
 
 var jobPlaceCmd = &cobra.Command{
@@ -370,9 +373,11 @@ func init() {
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobWatchCmd)
 	addJobMoveFlags(jobMoveCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
+	jobMoveCmd.Flags().BoolVar(&jobMoveNoTUI, "no-tui", false, "Disable launch progress TUI for move-to-new")
 	jobCmd.AddCommand(jobMoveCmd)
 	jobPlaceCmd.Flags().BoolVar(&jobPlaceEach, "each", false, "With 'new'/'create'/'distinct': launch a separate instance per job")
 	jobPlaceCmd.Flags().StringVar(&jobPlaceProject, "project", "", "Select all eligible unplaced queued jobs in the named project")
+	jobPlaceCmd.Flags().BoolVar(&jobPlaceNoTUI, "no-tui", false, "Disable launch progress TUI for place-to-new")
 	jobCmd.AddCommand(jobPlaceCmd)
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
@@ -438,11 +443,11 @@ func init() {
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom)
+	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveNoTUI)
 }
 
 func runJobPlace(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobPlaceProject, jobPlaceEach, true, "", "")
+	return runJobMoveOrPlace(args, jobPlaceProject, jobPlaceEach, true, "", "", jobPlaceNoTUI)
 }
 
 func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {
@@ -456,7 +461,7 @@ func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destinatio
 	}
 }
 
-func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string) error {
+func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string, noTUI bool) error {
 	dest, jobArgs, err := resolveMoveDestination(args, destinationFlag)
 	if err != nil {
 		return err
@@ -480,7 +485,7 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 
 	switch {
 	case strings.EqualFold(dest, "new") || strings.EqualFold(dest, "create"):
-		return moveJobsToNewInstances(database, eligible, each)
+		return moveJobsToNewInstances(database, eligible, each, noTUI)
 	default:
 		if each {
 			return usageErrorf("--each is only valid with 'new', 'create', or 'distinct' destination")
@@ -579,7 +584,7 @@ func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) erro
 	return err
 }
 
-func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool) error {
+func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, noTUI bool) error {
 	if !verbose {
 		restore := logging.Suppress()
 		defer restore()
@@ -602,14 +607,36 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool)
 		fmt.Printf("Moved job %s → %s\n", FormatJobID(jobs[0].ID), target)
 		return nil
 	}
-	_, err := orchestration.MoveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
+	var launchTUI *terminal.LaunchProgressTUI
+	if terminal.UseLaunchProgressTUI(noTUI) {
+		launchTUI = terminal.StartLaunchProgressTUI(0, 0)
+		defer func() { _ = launchTUI.Stop() }()
+	}
+	result, err := orchestration.MoveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {
-			fmt.Println(message)
+			if launchTUI == nil {
+				fmt.Println(message)
+			}
 		},
 		OnWarning: func(message string) {
 			fmt.Fprintln(os.Stderr, message)
 		},
+		OnEvent: func(event campaign.LaunchEvent) {
+			if launchTUI != nil {
+				launchTUI.SendEvent(event)
+			}
+		},
+		OnCampaignCreated: func(campaignID int64, expectedWorkers int) {
+			if launchTUI != nil {
+				launchTUI.SetCampaign(campaignID, expectedWorkers)
+			}
+		},
 	})
+	if err == nil && launchTUI != nil {
+		for _, id := range result.InstanceIDs {
+			fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
+		}
+	}
 	return err
 }
 

@@ -13,7 +13,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -463,6 +465,32 @@ func isRetryableCreateError(err error) bool {
 	return errors.Is(err, cloud.ErrOfferUnavailable) || errors.Is(err, cloud.ErrProviderRejected)
 }
 
+var retryAttemptPattern = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
+
+func classifyLaunchGroupPhaseEvent(group InstanceGroup, phase string) LaunchEvent {
+	event := LaunchEvent{
+		Kind:  LaunchEventGroupPhase,
+		Group: group,
+		Phase: phase,
+	}
+	if !strings.Contains(phase, "retrying with replacement offer") {
+		return event
+	}
+	matches := retryAttemptPattern.FindStringSubmatch(phase)
+	if len(matches) != 3 {
+		return event
+	}
+	attempt, errA := strconv.Atoi(matches[1])
+	maxAttempts, errM := strconv.Atoi(matches[2])
+	if errA != nil || errM != nil {
+		return event
+	}
+	event.Kind = LaunchEventGroupRetry
+	event.RetryAttempt = attempt
+	event.RetryMax = maxAttempts
+	return event
+}
+
 func createInstanceWithReplacement(
 	client cloud.Client,
 	group InstanceGroup,
@@ -540,7 +568,7 @@ func createInstanceWithReplacement(
 
 // LaunchCampaign creates a campaign record and launches instances for each group
 // in parallel. It collects results and updates the campaign status.
-// The onPhase callback, if non-nil, is called with progress updates for campaign
+// The onEvent callback, if non-nil, is called with progress updates for campaign
 // lifecycle steps and per-group launch activity.
 func LaunchCampaign(
 	clients []cloud.Client,
@@ -552,7 +580,7 @@ func LaunchCampaign(
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
-	onPhase func(group InstanceGroup, phase string),
+	onEvent func(event LaunchEvent),
 	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
 	onInstanceRegistered func(group InstanceGroup, instanceID int64),
 ) (*LaunchResult, error) {
@@ -567,7 +595,7 @@ func LaunchCampaign(
 		opts,
 		r2Cfg,
 		createOptsForProvider,
-		onPhase,
+		onEvent,
 		onCampaignCreated,
 		onInstanceRegistered,
 	)
@@ -586,7 +614,7 @@ func LaunchCampaignWithAssetStager(
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
-	onPhase func(group InstanceGroup, phase string),
+	onEvent func(event LaunchEvent),
 	onCampaignCreated func(id int64),
 	onInstanceRegistered func(group InstanceGroup, instanceID int64),
 ) (*LaunchResult, error) {
@@ -601,7 +629,7 @@ func LaunchCampaignWithAssetStager(
 		opts,
 		r2Cfg,
 		createOptsForProvider,
-		onPhase,
+		onEvent,
 		onCampaignCreated,
 		onInstanceRegistered,
 	)
@@ -618,7 +646,7 @@ func launchCampaignWithStager(
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
-	onPhase func(group InstanceGroup, phase string),
+	onEvent func(event LaunchEvent),
 	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
 	onInstanceRegistered func(group InstanceGroup, instanceID int64),
 ) (*LaunchResult, error) {
@@ -629,8 +657,12 @@ func launchCampaignWithStager(
 		return nil, fmt.Errorf("offers/groups mismatch: %d offers for %d groups", len(offers), len(groups))
 	}
 
-	if onPhase != nil {
-		onPhase(InstanceGroup{GPUClass: "campaign"}, "staging agent and sources")
+	if onEvent != nil {
+		onEvent(LaunchEvent{
+			Kind:  LaunchEventCampaignStatus,
+			Group: InstanceGroup{GPUClass: "campaign"},
+			Phase: "staging agent and sources",
+		})
 	}
 	stager := preparedStager
 	ownedStager := false
@@ -654,8 +686,12 @@ func launchCampaignWithStager(
 	}
 
 	// Create campaign batch record
-	if onPhase != nil {
-		onPhase(InstanceGroup{GPUClass: "campaign"}, "creating campaign record")
+	if onEvent != nil {
+		onEvent(LaunchEvent{
+			Kind:  LaunchEventCampaignStatus,
+			Group: InstanceGroup{GPUClass: "campaign"},
+			Phase: "creating campaign record",
+		})
 	}
 	campaignRec := &db.Campaign{
 		Status:             db.CampaignStatusLaunching,
@@ -679,8 +715,12 @@ func launchCampaignWithStager(
 	if !opts.NoDonor && len(groups) >= 2 {
 		client := clientForProvider(clients, offers[0].Provider)
 		if supportsDonorStrategy(client) {
-			if onPhase != nil {
-				onPhase(InstanceGroup{GPUClass: "campaign"}, "searching for donor instance")
+			if onEvent != nil {
+				onEvent(LaunchEvent{
+					Kind:  LaunchEventCampaignStatus,
+					Group: InstanceGroup{GPUClass: "campaign"},
+					Phase: "searching for donor instance",
+				})
 			}
 			donorCfg, err = FindDonorOffer(client, offers, estimates, groups)
 			if err != nil {
@@ -696,8 +736,12 @@ func launchCampaignWithStager(
 	if donorCfg != nil {
 		donorClient = clientForProvider(clients, donorCfg.Offer.Provider)
 		if donorClient != nil {
-			if onPhase != nil {
-				onPhase(InstanceGroup{GPUClass: "donor"}, "launching donor instance")
+			if onEvent != nil {
+				onEvent(LaunchEvent{
+					Kind:  LaunchEventCampaignStatus,
+					Group: InstanceGroup{GPUClass: "donor"},
+					Phase: "launching donor instance",
+				})
 			}
 
 			donorInst := &db.Launch{
@@ -727,8 +771,12 @@ func launchCampaignWithStager(
 				_ = db.SetLaunchRole(database, donorInstanceID, "donor")
 
 				// Generate donor bootstrap script
-				if onPhase != nil {
-					onPhase(InstanceGroup{GPUClass: "donor"}, "waiting for R2 assets")
+				if onEvent != nil {
+					onEvent(LaunchEvent{
+						Kind:  LaunchEventCampaignStatus,
+						Group: InstanceGroup{GPUClass: "donor"},
+						Phase: "waiting for R2 assets",
+					})
 				}
 				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs, nil)
 				if donorAssetErr != nil {
@@ -771,8 +819,12 @@ func launchCampaignWithStager(
 					DBInstanceID: donorInstanceID,
 				})
 
-				if onPhase != nil {
-					onPhase(InstanceGroup{GPUClass: "donor"}, "uploading bootstrap script")
+				if onEvent != nil {
+					onEvent(LaunchEvent{
+						Kind:  LaunchEventCampaignStatus,
+						Group: InstanceGroup{GPUClass: "donor"},
+						Phase: "uploading bootstrap script",
+					})
 				}
 				bootstrapKey := r2keys.BootstrapScript(donorInstanceID)
 				donorUploadCtx, donorUploadCancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -809,8 +861,12 @@ func launchCampaignWithStager(
 					}
 					if donorCfg != nil {
 						donorCreateOpts.Label = fmt.Sprintf("weft/c%d", campaignID)
-						if onPhase != nil {
-							onPhase(InstanceGroup{GPUClass: "donor"}, "creating donor instance")
+						if onEvent != nil {
+							onEvent(LaunchEvent{
+								Kind:  LaunchEventCampaignStatus,
+								Group: InstanceGroup{GPUClass: "donor"},
+								Phase: "creating donor instance",
+							})
 						}
 
 						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
@@ -837,8 +893,12 @@ func launchCampaignWithStager(
 	}
 
 	// Launch worker instances in parallel
-	if onPhase != nil {
-		onPhase(InstanceGroup{GPUClass: "campaign"}, "launching worker instances")
+	if onEvent != nil {
+		onEvent(LaunchEvent{
+			Kind:  LaunchEventCampaignStatus,
+			Group: InstanceGroup{GPUClass: "campaign"},
+			Phase: "launching worker instances",
+		})
 	}
 	var mu sync.Mutex
 	var instanceIDs []int64
@@ -895,10 +955,10 @@ func launchCampaignWithStager(
 			}
 
 			var progress cloud.ProgressFunc
-			if onPhase != nil {
+			if onEvent != nil {
 				progress = func(phase string) {
 					mu.Lock()
-					onPhase(group, phase)
+					onEvent(classifyLaunchGroupPhaseEvent(group, phase))
 					mu.Unlock()
 				}
 			}
@@ -923,8 +983,28 @@ func launchCampaignWithStager(
 				}
 			}
 
+			if onEvent != nil {
+				mu.Lock()
+				onEvent(LaunchEvent{
+					Kind:  LaunchEventGroupPhase,
+					Group: group,
+					Phase: "staging",
+				})
+				mu.Unlock()
+			}
 			groupAssets, assetErr := stager.AwaitAssetsForDirs(group.SourceDirs(), func(done, total int) {
-				progress(fmt.Sprintf("staging (%d/%d assets ready)", done, total))
+				if onEvent == nil {
+					return
+				}
+				mu.Lock()
+				onEvent(LaunchEvent{
+					Kind:        LaunchEventGroupAssets,
+					Group:       group,
+					Phase:       "staging",
+					AssetsReady: done,
+					AssetsTotal: total,
+				})
+				mu.Unlock()
 			})
 			if assetErr != nil {
 				mu.Lock()
@@ -973,8 +1053,22 @@ func launchCampaignWithStager(
 					_, _ = db.ResetLaunchJobs(database, cID, db.AttemptOutcomeOrphaned)
 				}
 				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
+				if onEvent != nil {
+					onEvent(LaunchEvent{
+						Kind:   LaunchEventGroupFailed,
+						Group:  group,
+						Reason: err.Error(),
+					})
+				}
 			} else {
 				instanceIDs = append(instanceIDs, cID)
+				if onEvent != nil {
+					onEvent(LaunchEvent{
+						Kind:       LaunchEventGroupDone,
+						Group:      group,
+						InstanceID: cID,
+					})
+				}
 				if donorCfg != nil {
 					_ = db.SetLaunchDonorID(database, cID, donorInstanceID)
 					// Retrieve the provider ID for this instance
@@ -1007,8 +1101,12 @@ func launchCampaignWithStager(
 
 	// Donor fan-out: wait for readiness, copy caches, then destroy donor
 	if donorCfg != nil && donorProviderID != "" && len(workerProviderIDs) > 0 {
-		if onPhase != nil {
-			onPhase(InstanceGroup{GPUClass: "donor"}, "waiting for donor downloads")
+		if onEvent != nil {
+			onEvent(LaunchEvent{
+				Kind:  LaunchEventCampaignStatus,
+				Group: InstanceGroup{GPUClass: "donor"},
+				Phase: "waiting for donor downloads",
+			})
 		}
 
 		donorReady := false
@@ -1032,14 +1130,22 @@ func launchCampaignWithStager(
 			_ = db.SetLaunchSeedDownloadSecs(database, donorInstanceID, downloadSecs)
 			slog.Info("donor ready, starting fan-out", "component", "donor", "download_secs", downloadSecs, "worker_count", len(workerProviderIDs))
 
-			if onPhase != nil {
-				onPhase(InstanceGroup{GPUClass: "donor"}, "copying caches to workers")
+			if onEvent != nil {
+				onEvent(LaunchEvent{
+					Kind:  LaunchEventCampaignStatus,
+					Group: InstanceGroup{GPUClass: "donor"},
+					Phase: "copying caches to workers",
+				})
 			}
 
 			var progressFunc func(int64, string)
-			if onPhase != nil {
+			if onEvent != nil {
 				progressFunc = func(dbID int64, phase string) {
-					onPhase(InstanceGroup{GPUClass: "donor"}, fmt.Sprintf("worker %d: %s", dbID, phase))
+					onEvent(LaunchEvent{
+						Kind:  LaunchEventCampaignStatus,
+						Group: InstanceGroup{GPUClass: "donor"},
+						Phase: fmt.Sprintf("worker %d: %s", dbID, phase),
+					})
 				}
 			}
 
@@ -1051,8 +1157,12 @@ func launchCampaignWithStager(
 		}
 
 		// Destroy donor instance
-		if onPhase != nil {
-			onPhase(InstanceGroup{GPUClass: "donor"}, "destroying donor instance")
+		if onEvent != nil {
+			onEvent(LaunchEvent{
+				Kind:  LaunchEventCampaignStatus,
+				Group: InstanceGroup{GPUClass: "donor"},
+				Phase: "destroying donor instance",
+			})
 		}
 		if destroyErr := donorClient.DestroyInstance(donorProviderID); destroyErr != nil {
 			slog.Warn("failed to destroy donor instance", "component", "donor", "error", destroyErr)

@@ -345,7 +345,7 @@ func TestLaunchCampaign_AutoFailsOnFirstRegistrationTimeout(t *testing.T) {
 		LaunchOpts{},
 		cloud.R2Config{},
 		func(cloud.Provider) (cloud.CreateOpts, error) { return cloud.CreateOpts{}, nil },
-		func(InstanceGroup, string) {},
+		func(LaunchEvent) {},
 		func(id int64) {
 			campaignID = id
 			// Force elapsed time past first-registration terminate threshold.

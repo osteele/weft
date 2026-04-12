@@ -2359,15 +2359,30 @@ func (m launchModel) launchInstances() tea.Cmd {
 			func(provider cloud.Provider) (cloud.CreateOpts, error) {
 				return createOptsForProvider(cfg, provider)
 			},
-			func(group campaign.InstanceGroup, phase string) {
-				if strings.EqualFold(group.GPUClass, "campaign") {
-					sendCampaignPhase(phase)
-					return
-				}
-				if idx := findGroupIndex(group); idx >= 0 {
-					sendGroupPhase(idx, phase)
-				} else {
-					sendCampaignPhase(fmt.Sprintf("%s: %s", group.GPUSpec(), phase))
+			func(event campaign.LaunchEvent) {
+				switch event.Kind {
+				case campaign.LaunchEventCampaignStatus:
+					sendCampaignPhase(event.Phase)
+				case campaign.LaunchEventGroupAssets:
+					phase := fmt.Sprintf("staging (%d/%d assets ready)", event.AssetsReady, event.AssetsTotal)
+					if idx := findGroupIndex(event.Group); idx >= 0 {
+						sendGroupPhase(idx, phase)
+					} else {
+						sendCampaignPhase(fmt.Sprintf("%s: %s", event.Group.GPUSpec(), phase))
+					}
+				case campaign.LaunchEventGroupRetry:
+					phase := fmt.Sprintf("retrying with replacement offer (attempt %d/%d)", event.RetryAttempt, event.RetryMax)
+					if idx := findGroupIndex(event.Group); idx >= 0 {
+						sendGroupPhase(idx, phase)
+					} else {
+						sendCampaignPhase(fmt.Sprintf("%s: %s", event.Group.GPUSpec(), phase))
+					}
+				case campaign.LaunchEventGroupPhase:
+					if idx := findGroupIndex(event.Group); idx >= 0 {
+						sendGroupPhase(idx, event.Phase)
+					} else {
+						sendCampaignPhase(fmt.Sprintf("%s: %s", event.Group.GPUSpec(), event.Phase))
+					}
 				}
 			},
 			func(id int64) {
