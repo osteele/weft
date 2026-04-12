@@ -17,6 +17,10 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 		return Result{}, fmt.Errorf("job is nil")
 	}
 
+	if err := db.SetRequestedStatus(database, job.ID, db.StatusKilled); err != nil {
+		return Result{}, fmt.Errorf("set requested status: %w", err)
+	}
+
 	oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithDetail("killing job"))
 
 	outcome, err := requestJobStatus(database, job, db.StatusKilled, opts)
@@ -78,6 +82,10 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 	effectiveStatus := job.EffectiveStatus()
 	if effectiveStatus != db.StatusQueued {
 		return Result{}, fmt.Errorf("job %d (status: %s): %w", job.ID, effectiveStatus, ErrNotQueued)
+	}
+
+	if err := db.SetRequestedStatus(database, job.ID, db.StatusCanceled); err != nil {
+		return Result{}, fmt.Errorf("set requested status: %w", err)
 	}
 
 	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceling queued job"))

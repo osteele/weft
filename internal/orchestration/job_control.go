@@ -26,6 +26,9 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	if !job.IsLaunchJob() {
 		return "", nil
 	}
+	if err := db.SetRequestedStatus(database, jobID, targetStatus); err != nil {
+		return "", fmt.Errorf("set requested status: %w", err)
+	}
 
 	effectiveStatus := job.EffectiveStatus()
 	if effectiveStatus == db.StatusQueued && job.LaunchID == nil {
