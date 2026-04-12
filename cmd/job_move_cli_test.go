@@ -117,6 +117,69 @@ func TestResolveEligibleJobs_FromSelectsOnlyQueuedJobs(t *testing.T) {
 	}
 }
 
+func TestResolveEligibleJobs_FromHostSelectsOnlyEligibleQueuedJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	queuedJobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "echo queued", "queued")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	runningJobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "echo running", "running")
+	if err != nil {
+		t.Fatalf("record running job: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusRunning, time.Now().Unix(), runningJobID,
+	); err != nil {
+		t.Fatalf("mark running attempt: %v", err)
+	}
+
+	otherHostJobID, err := db.RecordQueued(database, "cool100", t.TempDir(), "echo other host", "other host")
+	if err != nil {
+		t.Fatalf("record other-host job: %v", err)
+	}
+
+	jobs, err := resolveEligibleJobs(database, nil, "", "cool30", false)
+	if err != nil {
+		t.Fatalf("resolveEligibleJobs returned error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("eligible jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].ID != queuedJobID {
+		t.Fatalf("eligible job ID = %d, want %d", jobs[0].ID, queuedJobID)
+	}
+
+	if jobs[0].ID == runningJobID || jobs[0].ID == otherHostJobID {
+		t.Fatalf("unexpected job in eligible set: got %d", jobs[0].ID)
+	}
+}
+
+func TestResolveEligibleJobs_FromHostNoEligibleJobsReportsHost(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	runningJobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "echo running", "running")
+	if err != nil {
+		t.Fatalf("record running job: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusRunning, time.Now().Unix(), runningJobID,
+	); err != nil {
+		t.Fatalf("mark running attempt: %v", err)
+	}
+
+	_, err = resolveEligibleJobs(database, nil, "", "cool30", false)
+	if err == nil {
+		t.Fatal("expected no-eligible-jobs error")
+	}
+	if !strings.Contains(err.Error(), "no eligible queued jobs found on host cool30") {
+		t.Fatalf("error = %q, want host-specific empty selection message", err)
+	}
+}
+
 func TestMoveJobsVerbAlias_ExposesMoveFlags(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"move", "jobs"})
 	if err != nil {

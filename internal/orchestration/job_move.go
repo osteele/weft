@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
@@ -39,20 +40,27 @@ func ResolveEligibleJobs(
 ) ([]*db.Job, error) {
 	var jobs []*db.Job
 	var sourceInstanceID int64
+	sourceHost := ""
 	if from != "" {
-		parsedID, err := ids.ParseInstanceID(from)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --from instance %q: %v", from, err)
-		}
-		sourceInstanceID = parsedID
-		selected, err := db.GetLaunchJobsIncludingAttempts(database, sourceInstanceID)
-		if err != nil {
-			return nil, fmt.Errorf("list jobs on instance %s: %w", ids.FormatInstanceID(sourceInstanceID), err)
-		}
-		for _, job := range selected {
-			if job != nil && job.LaunchID != nil && *job.LaunchID == sourceInstanceID {
-				jobs = append(jobs, job)
+		trimmedFrom := strings.TrimSpace(from)
+		if parsedID, err := ids.ParseInstanceID(trimmedFrom); err == nil {
+			sourceInstanceID = parsedID
+			selected, err := db.GetLaunchJobsIncludingAttempts(database, sourceInstanceID)
+			if err != nil {
+				return nil, fmt.Errorf("list jobs on instance %s: %w", ids.FormatInstanceID(sourceInstanceID), err)
 			}
+			for _, job := range selected {
+				if job != nil && job.LaunchID != nil && *job.LaunchID == sourceInstanceID {
+					jobs = append(jobs, job)
+				}
+			}
+		} else {
+			sourceHost = trimmedFrom
+			selected, err := db.ListJobs(database, "", sourceHost, 0, nil, "")
+			if err != nil {
+				return nil, fmt.Errorf("list jobs on host %s: %w", sourceHost, err)
+			}
+			jobs = append(jobs, selected...)
 		}
 	} else if project != "" {
 		all, err := db.ListJobs(database, db.StatusQueued, "", 0, nil, "")
@@ -93,6 +101,9 @@ func ResolveEligibleJobs(
 	if len(eligible) == 0 {
 		if sourceInstanceID > 0 {
 			return nil, fmt.Errorf("no eligible queued jobs found on %s", ids.FormatInstanceID(sourceInstanceID))
+		}
+		if sourceHost != "" {
+			return nil, fmt.Errorf("no eligible queued jobs found on host %s", sourceHost)
 		}
 		if unplacedOnly {
 			return nil, fmt.Errorf("no eligible unplaced queued jobs")
