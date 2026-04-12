@@ -2702,14 +2702,24 @@ func ResetJobToUnplaced(database *sql.DB, jobID int64) error {
 	job, _ := GetJobByID(database, jobID)
 
 	now := time.Now().Unix()
-	if err := closeAttemptsAndRequeue(database, jobID, now); err != nil {
+	tx, err := database.Begin()
+	if err != nil {
 		return err
 	}
-	if _, err := database.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
+	if err := closeAttemptsAndRequeue(tx, jobID, now); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
 		encodeStringSlice(resetJobPlacementReasons(job)), jobID); err != nil {
+		tx.Rollback()
 		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
 func resetJobPlacementReasons(job *Job) []string {

@@ -1130,6 +1130,10 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	if err := UpdateAttemptRunning(database, jobID); err != nil {
 		t.Fatalf("UpdateAttemptRunning: %v", err)
 	}
+	var beforeAttemptNumber int
+	if err := database.QueryRow(`SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&beforeAttemptNumber); err != nil {
+		t.Fatalf("query pre-reset max attempt number: %v", err)
+	}
 
 	if err := ResetJobToUnplaced(database, jobID); err != nil {
 		t.Fatalf("ResetJobToUnplaced: %v", err)
@@ -1141,6 +1145,150 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	}
 	if got := strings.Join(job.PlacementReasons, "\n"); got != fmt.Sprintf("cloud instance %d unavailable; job reset to unplaced queue", launchID) {
 		t.Fatalf("PlacementReasons = %v", job.PlacementReasons)
+	}
+
+	var latestAttemptNumber int
+	var latestStatus string
+	var latestHost string
+	var latestLaunchID any
+	var latestEndTime any
+	err = database.QueryRow(`
+		SELECT attempt_number, status, host, launch_id, end_time
+		FROM job_attempts
+		WHERE job_id = ?
+		ORDER BY attempt_number DESC
+		LIMIT 1`, jobID).Scan(&latestAttemptNumber, &latestStatus, &latestHost, &latestLaunchID, &latestEndTime)
+	if err != nil {
+		t.Fatalf("query latest attempt: %v", err)
+	}
+	if latestAttemptNumber != beforeAttemptNumber+1 {
+		t.Fatalf("latest attempt number = %d, want %d", latestAttemptNumber, beforeAttemptNumber+1)
+	}
+	if latestStatus != StatusQueued {
+		t.Fatalf("latest status = %q, want %q", latestStatus, StatusQueued)
+	}
+	if latestHost != "" {
+		t.Fatalf("latest host = %q, want empty", latestHost)
+	}
+	if latestLaunchID != nil {
+		t.Fatalf("latest launch_id = %v, want nil", latestLaunchID)
+	}
+	if latestEndTime != nil {
+		t.Fatalf("latest end_time = %v, want nil", latestEndTime)
+	}
+}
+
+func TestResetJobToUnplaced_FromClosedFailedCloudAttemptCreatesFreshQueuedAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:            LaunchStatusFailed,
+		TerminationReason: TerminationReasonJobFailure,
+		Provider:          "vastai",
+		GPUSpec:           "H200",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if _, err := AssignJobHost(database, jobID, "cloud"); err != nil {
+		t.Fatalf("assign host: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("set launch id: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("update queued->running: %v", err)
+	}
+
+	exitCode := 1
+	endTime := time.Now().Unix()
+	if err := CloseAttempt(database, jobID, StatusFailed, &exitCode, endTime); err != nil {
+		t.Fatalf("close attempt failed: %v", err)
+	}
+	if err := CloseLaunchAttempt(database, jobID, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("set cloud outcome failed: %v", err)
+	}
+
+	var beforeAttemptNumber int
+	if err := database.QueryRow(`SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&beforeAttemptNumber); err != nil {
+		t.Fatalf("query pre-reset max attempt number: %v", err)
+	}
+
+	before, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get pre-reset job: %v", err)
+	}
+	if before.Status != StatusFailed {
+		t.Fatalf("pre-reset status = %q, want %q", before.Status, StatusFailed)
+	}
+
+	if err := ResetJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("ResetJobToUnplaced: %v", err)
+	}
+
+	after, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get post-reset job: %v", err)
+	}
+	if after.Status != StatusQueued {
+		t.Fatalf("post-reset status = %q, want %q", after.Status, StatusQueued)
+	}
+	if after.Host != "" {
+		t.Fatalf("post-reset host = %q, want empty", after.Host)
+	}
+	if after.LaunchID != nil {
+		t.Fatalf("post-reset launch_id = %v, want nil", after.LaunchID)
+	}
+
+	var latestAttemptNumber int
+	var latestStatus string
+	var latestHost string
+	var latestLaunchID any
+	var latestEndTime any
+	err = database.QueryRow(`
+		SELECT attempt_number, status, host, launch_id, end_time
+		FROM job_attempts
+		WHERE job_id = ?
+		ORDER BY attempt_number DESC
+		LIMIT 1`, jobID).Scan(&latestAttemptNumber, &latestStatus, &latestHost, &latestLaunchID, &latestEndTime)
+	if err != nil {
+		t.Fatalf("query latest attempt: %v", err)
+	}
+	if latestAttemptNumber != beforeAttemptNumber+1 {
+		t.Fatalf("latest attempt number = %d, want %d", latestAttemptNumber, beforeAttemptNumber+1)
+	}
+	if latestStatus != StatusQueued {
+		t.Fatalf("latest status = %q, want %q", latestStatus, StatusQueued)
+	}
+	if latestHost != "" {
+		t.Fatalf("latest host = %q, want empty", latestHost)
+	}
+	if latestLaunchID != nil {
+		t.Fatalf("latest launch_id = %v, want nil", latestLaunchID)
+	}
+	if latestEndTime != nil {
+		t.Fatalf("latest end_time = %v, want nil", latestEndTime)
+	}
+
+	var priorStatus string
+	var priorOutcome string
+	if err := database.QueryRow(`
+		SELECT status, COALESCE(cloud_outcome, '')
+		FROM job_attempts
+		WHERE job_id = ? AND launch_id IS NOT NULL AND end_time IS NOT NULL
+		ORDER BY attempt_number DESC
+		LIMIT 1`, jobID).Scan(&priorStatus, &priorOutcome); err != nil {
+		t.Fatalf("query prior attempt: %v", err)
+	}
+	if priorStatus != StatusFailed {
+		t.Fatalf("prior status = %q, want %q", priorStatus, StatusFailed)
+	}
+	if priorOutcome != AttemptOutcomeFailed {
+		t.Fatalf("prior cloud_outcome = %q, want %q", priorOutcome, AttemptOutcomeFailed)
 	}
 }
 
