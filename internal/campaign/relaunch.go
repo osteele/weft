@@ -22,23 +22,24 @@ const DefaultMaxCloudAttempts = 3
 
 // RelaunchConfig configures automatic relaunch of orphaned cloud jobs.
 type RelaunchConfig struct {
-	Clients         []cloud.Client
-	R2Cfg           cloud.R2Config
-	CreateOpts      cloud.CreateOpts
-	LaunchOpts      LaunchOpts
-	MaxAttempts     int // default DefaultMaxCloudAttempts
-	SurvivalModel   *bidding.SurvivalModel
-	MinSurvival     float64 // 0 to disable survival filtering
-	Strategy        bidding.SelectionStrategy
-	Database        *sql.DB
-	PredictorConfig *predictor.Config
-	ResetJobs       map[int64]int64      // jobID → failed instanceID
-	RestrictToReset bool                 // when true and ResetJobs is non-empty, only relaunch reset jobs
-	ScopeJobIDs     []int64              // optional job scope (current watch/project queue)
-	ScopeProject    string               // optional project scope label for safety events
-	SetupFactory    SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
-	RetryBudget     *RetryBudget         // optional hard stop limits for retry instances
-	RunawayPolicy   *RunawayPolicy       // optional unattended runaway breaker
+	Clients               []cloud.Client
+	R2Cfg                 cloud.R2Config
+	CreateOpts            cloud.CreateOpts
+	CreateOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error)
+	LaunchOpts            LaunchOpts
+	MaxAttempts           int // default DefaultMaxCloudAttempts
+	SurvivalModel         *bidding.SurvivalModel
+	MinSurvival           float64 // 0 to disable survival filtering
+	Strategy              bidding.SelectionStrategy
+	Database              *sql.DB
+	PredictorConfig       *predictor.Config
+	ResetJobs             map[int64]int64      // jobID → failed instanceID
+	RestrictToReset       bool                 // when true and ResetJobs is non-empty, only relaunch reset jobs
+	ScopeJobIDs           []int64              // optional job scope (current watch/project queue)
+	ScopeProject          string               // optional project scope label for safety events
+	SetupFactory          SetupOverheadFactory // per-offer setup time estimator; use OfferSetupOverheadFactory to build
+	RetryBudget           *RetryBudget         // optional hard stop limits for retry instances
+	RunawayPolicy         *RunawayPolicy       // optional unattended runaway breaker
 	// RetryBudgetMultiplierByFailedInstance scales the applicable retry-budget
 	// tier (first vs subsequent) for jobs that were orphaned from a specific
 	// failed instance. Used by watch-mode budget raise.
@@ -409,9 +410,26 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		wg.Add(1)
 		go func(group InstanceGroup, offer cloud.Offer, client cloud.Client, predecessorID int64, hasPredecessor bool) {
 			defer wg.Done()
+			createOpts, createOptsErr := resolveRelaunchCreateOpts(cfg, offer.Provider)
+			if createOptsErr != nil {
+				mu.Lock()
+				defer mu.Unlock()
+				reason := fmt.Sprintf("resolve create opts failed: %v", createOptsErr)
+				slog.Warn("launch skipped for group", "component", "relaunch", "gpu_spec", group.GPUSpec(), "provider", offer.Provider, "error", createOptsErr)
+				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+					EventKind: db.EventRelaunchSkippedNoClient,
+					GPUSpec:   group.GPUSpec(),
+					JobCount:  len(group.Jobs),
+					Detail:    reason,
+					ErrorText: createOptsErr.Error(),
+				})
+				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), createOptsErr))
+				recordGroupReasons(result, cfg.ResetJobs, group, reason)
+				return
+			}
 			instanceID, err := LaunchInstance(
 				client, cfg.Database, campaignID, group, offer,
-				cfg.LaunchOpts, cfg.R2Cfg, cfg.CreateOpts,
+				cfg.LaunchOpts, cfg.R2Cfg, createOpts,
 				*r2Assets, nil, nil, nil,
 			)
 			mu.Lock()
@@ -448,6 +466,17 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+func resolveRelaunchCreateOpts(cfg RelaunchConfig, provider cloud.Provider) (cloud.CreateOpts, error) {
+	if cfg.CreateOptsForProvider != nil {
+		return cfg.CreateOptsForProvider(provider)
+	}
+	createOpts := cfg.CreateOpts
+	if provider == cloud.ProviderVastai && strings.TrimSpace(createOpts.Image) == "" {
+		createOpts.Image = cloud.DefaultImage
+	}
+	return createOpts, nil
 }
 
 func relaunchGroupingJobs(jobs []*db.Job) []*db.Job {
