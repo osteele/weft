@@ -496,6 +496,7 @@ func summarizeBudgetDetail(detail string) string {
 }
 
 const runawayPausedReason = "paused: repeated launch failures without progress"
+const defaultResumeGracePeriod = 15 * time.Minute
 
 func runawayProjectLabel(project string) string {
 	project = strings.TrimSpace(project)
@@ -597,9 +598,9 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	// before re-evaluating the breaker.
 	gracePeriod := cfg.RunawayPolicy.ResumeGracePeriod
 	if gracePeriod <= 0 {
-		gracePeriod = 15 * time.Minute
+		gracePeriod = defaultResumeGracePeriod
 	}
-	if resumedAt > 0 && now.Unix()-resumedAt < int64(gracePeriod.Seconds()) {
+	if resumedAt > 0 && now.Before(time.Unix(resumedAt, 0).Add(gracePeriod)) {
 		return false, "", nil
 	}
 
