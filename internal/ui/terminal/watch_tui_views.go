@@ -737,11 +737,7 @@ func (m watchModel) autoPilotStatusLine() string {
 		return fmt.Sprintf("Auto-pilot: paused — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
 	}
 	if !m.autoLaunchBackoffUntil.IsZero() && time.Now().Before(m.autoLaunchBackoffUntil) {
-		wait := time.Until(m.autoLaunchBackoffUntil).Round(time.Second)
-		if wait < time.Second {
-			wait = time.Second
-		}
-		return fmt.Sprintf("Auto-pilot: next pass in %s (%d unplaced)", wait, unplaced)
+		return formatAutoPilotNextPass(m.autoLaunchBackoffUntil, unplaced)
 	}
 	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running)", unplaced, m.autoPilotRunningCount())
 }

@@ -99,12 +99,12 @@ func TestRenderJobListPlainProjectFallsBackToDirectoryTail(t *testing.T) {
 }
 
 func TestListTUIEmptyStateText(t *testing.T) {
-	m := listTUIModel{syncInProgress: true}
+	m := listTUIModel{pendingSyncHosts: map[string]struct{}{"": {}}}
 	if got := m.emptyStateText(); !strings.Contains(got, "Waiting for startup sync") {
 		t.Fatalf("emptyStateText() = %q", got)
 	}
 
-	m.syncInProgress = false
+	m.pendingSyncHosts = map[string]struct{}{}
 	m.statusMessage = ""
 	if got := m.emptyStateText(); got != "No jobs match this view." {
 		t.Fatalf("emptyStateText() = %q", got)

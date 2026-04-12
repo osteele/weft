@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,10 @@ const listDBChangeDebounce = 200 * time.Millisecond
 const listTUISyncInterval = TerminalSyncInterval
 const listAutoLeaseTTL = 30 * time.Second
 
+// backgroundSyncKey is the pendingSyncHosts sentinel for the non-worker
+// startup / tick cloud sync, which is not tied to a specific host.
+const backgroundSyncKey = ""
+
 type listTUIModel struct {
 	database                   *sql.DB
 	args                       []string
@@ -41,7 +46,8 @@ type listTUIModel struct {
 	width                      int
 	height                     int
 	syncEnabled                bool
-	syncInProgress             bool
+	pendingSyncHosts           map[string]struct{}
+	nextSyncTickAt             time.Time
 	statusMessage              string
 	dbWatcher                  *fsnotify.Watcher
 	dbWatcherTargets           map[string]struct{}
@@ -159,7 +165,8 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		title:            title,
 		jobs:             jobs,
 		syncEnabled:      syncEnabled,
-		syncInProgress:   syncEnabled,
+		pendingSyncHosts: map[string]struct{}{},
+		nextSyncTickAt:   time.Now().Add(throttledInterval(listTUISyncInterval, true)),
 		syncWorker:       sw,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -173,6 +180,17 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		cloudClients:     cloudClients,
 	}
 	model.rebuildGroupedRows()
+	if syncEnabled {
+		if sw != nil {
+			for _, j := range jobs {
+				if j != nil && j.Host != "" {
+					model.pendingSyncHosts[j.Host] = struct{}{}
+				}
+			}
+		} else {
+			model.pendingSyncHosts[backgroundSyncKey] = struct{}{}
+		}
+	}
 
 	restore := logging.Suppress()
 	defer restore()
@@ -340,7 +358,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.reloadJobs(), m.runBackgroundSync(true))
 		}
 
-		m.syncInProgress = false
+		delete(m.pendingSyncHosts, backgroundSyncKey)
 		if len(msg.warnings) > 0 {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = strings.Join(msg.warnings, " | ")
@@ -399,7 +417,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case listSyncWorkerResultMsg:
-		m.syncInProgress = false
+		if msg.result.Host != "" {
+			delete(m.pendingSyncHosts, msg.result.Host)
+		}
 		if msg.result.Error != nil {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = fmt.Sprintf("Sync error (%s): %v", msg.result.Host, msg.result.Error)
@@ -417,12 +437,13 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case listSyncTickMsg:
+		m.nextSyncTickAt = time.Now().Add(throttledInterval(listTUISyncInterval, m.focused))
 		cmds := []tea.Cmd{m.scheduleListSyncTick()}
 		if m.syncWorker != nil {
 			m.requestActiveSyncs()
 			cmds = append(cmds, m.reloadJobs())
-		} else if m.syncEnabled && !m.syncInProgress {
-			m.syncInProgress = true
+		} else if m.syncEnabled && !m.syncInProgress() {
+			m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Refreshing..."
 			}
@@ -781,11 +802,23 @@ func (m listTUIModel) groupedView() string {
 	return b.String()
 }
 
+func (m listTUIModel) syncInProgress() bool {
+	return len(m.pendingSyncHosts) > 0
+}
+
+func (m listTUIModel) pendingHostList() []string {
+	hosts := make([]string, 0, len(m.pendingSyncHosts))
+	for h := range m.pendingSyncHosts {
+		if h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
 func (m listTUIModel) groupedStatusText() string {
 	var parts []string
-	if m.syncInProgress {
-		parts = append(parts, "syncing...")
-	}
 	if m.statusMessage != "" &&
 		!strings.HasPrefix(m.statusMessage, "Auto-pilot:") &&
 		m.statusMessage != "Auto-pilot ON" &&
@@ -822,7 +855,11 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return ""
 	}
 	unplaced := m.countUnplacedQueuedJobs()
-	if m.syncInProgress {
+	if m.syncInProgress() {
+		hosts := m.pendingHostList()
+		if len(hosts) > 0 {
+			return fmt.Sprintf("Auto-pilot: syncing %s...", strings.Join(hosts, ", "))
+		}
 		return "Auto-pilot: syncing cloud state..."
 	}
 	if m.autoInProgress {
@@ -835,11 +872,10 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return fmt.Sprintf("Auto-pilot: paused — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
 	}
 	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
-		wait := time.Until(m.autoNextPassAt).Round(time.Second)
-		if wait < time.Second {
-			wait = time.Second
-		}
-		return fmt.Sprintf("Auto-pilot: next pass in %s (%d unplaced)", wait, unplaced)
+		return formatAutoPilotNextPass(m.autoNextPassAt, unplaced)
+	}
+	if !m.nextSyncTickAt.IsZero() && time.Now().Before(m.nextSyncTickAt) {
+		return fmt.Sprintf("Auto-pilot: idle — next sync in %s · watching DB (%d unplaced, %d running)", waitUntil(m.nextSyncTickAt), unplaced, visibleRunning)
 	}
 	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running)", unplaced, visibleRunning)
 }
@@ -1143,7 +1179,7 @@ func (m listTUIModel) footerText(rows int) string {
 	}
 
 	state := fmt.Sprintf("[%d-%d/%d]", start, end, len(m.jobs))
-	if m.syncInProgress {
+	if m.syncInProgress() {
 		state += " syncing..."
 	}
 	if m.statusMessage != "" {
@@ -1154,7 +1190,7 @@ func (m listTUIModel) footerText(rows int) string {
 }
 
 func (m listTUIModel) emptyStateText() string {
-	if m.syncInProgress {
+	if m.syncInProgress() {
 		return "No jobs in this view yet. Waiting for startup sync and DB updates..."
 	}
 	if m.statusMessage != "" {
@@ -1317,6 +1353,7 @@ func (m listTUIModel) requestActiveSyncs() {
 		}
 	}
 	for host, jobs := range hosts {
+		m.pendingSyncHosts[host] = struct{}{}
 		m.syncWorker.Request(hostsync.Request{
 			Host: host,
 			Rate: hostsync.GetHostSyncRate(jobs),

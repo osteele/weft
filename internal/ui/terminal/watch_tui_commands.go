@@ -252,10 +252,7 @@ func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, stri
 
 	// Back off repeated launch attempts when conditions are unchanged.
 	if !m.autoLaunchBackoffUntil.IsZero() && time.Now().Before(m.autoLaunchBackoffUntil) {
-		wait := time.Until(m.autoLaunchBackoffUntil).Round(time.Second)
-		if wait < time.Second {
-			wait = time.Second
-		}
+		wait := waitUntil(m.autoLaunchBackoffUntil)
 		if !m.autoLaunchBackoffArmed {
 			m.autoLaunchBackoffArmed = true
 			return tea.Tick(wait, func(time.Time) tea.Msg { return autoPilotBackoffReadyMsg{} }),
