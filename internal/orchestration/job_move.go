@@ -39,6 +39,8 @@ func ResolveEligibleJobs(
 	callbacks JobMoveCallbacks,
 ) ([]*db.Job, error) {
 	var jobs []*db.Job
+	explicitJobList := len(jobIDs) > 0
+	eligibleStatuses := []string{db.StatusQueued, db.StatusPendingPlacement}
 	var sourceInstanceID int64
 	sourceHost := ""
 	if from != "" {
@@ -56,22 +58,18 @@ func ResolveEligibleJobs(
 			}
 		} else {
 			sourceHost = trimmedFrom
-			selected, err := db.ListJobs(database, "", sourceHost, 0, nil, "")
+			selected, err := db.ListJobsByStatuses(database, eligibleStatuses, sourceHost, "", 0, nil, "")
 			if err != nil {
 				return nil, fmt.Errorf("list jobs on host %s: %w", sourceHost, err)
 			}
 			jobs = append(jobs, selected...)
 		}
 	} else if project != "" {
-		all, err := db.ListJobs(database, db.StatusQueued, "", 0, nil, "")
+		selected, err := db.ListJobsByStatuses(database, eligibleStatuses, "", project, 0, nil, "")
 		if err != nil {
 			return nil, fmt.Errorf("list queued jobs: %w", err)
 		}
-		for _, job := range all {
-			if job.Project == project {
-				jobs = append(jobs, job)
-			}
-		}
+		jobs = append(jobs, selected...)
 	}
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
@@ -89,11 +87,15 @@ func ResolveEligibleJobs(
 	for _, job := range jobs {
 		status := job.EffectiveStatus()
 		if status != db.StatusQueued && status != db.StatusPendingPlacement {
-			callbacks.warningf("Warning: job %d has status %s, skipping", job.ID, status)
+			if explicitJobList {
+				callbacks.warningf("Warning: job %d has status %s, skipping", job.ID, status)
+			}
 			continue
 		}
 		if unplacedOnly && job.TargetKind() != db.JobTargetUnplaced {
-			callbacks.warningf("Warning: job %d is already placed, skipping", job.ID)
+			if explicitJobList {
+				callbacks.warningf("Warning: job %d is already placed, skipping", job.ID)
+			}
 			continue
 		}
 		eligible = append(eligible, job)

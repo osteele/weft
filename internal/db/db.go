@@ -3881,6 +3881,54 @@ func ListJobs(db *sql.DB, status, host string, limit int, tags []string, process
 	return ListJobsWithMaxAge(db, status, host, limit, 0, tags, processedFilter)
 }
 
+// ListJobsByStatuses returns jobs matching any provided status and optional host/project filters.
+// An empty statuses slice means no status filter.
+func ListJobsByStatuses(db *sql.DB, statuses []string, host, project string, limit int, tags []string, processedFilter string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_status"))
+	args := make([]interface{}, 0, len(statuses)+4)
+
+	if len(statuses) > 0 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, status := range statuses {
+			trimmed := strings.TrimSpace(status)
+			if trimmed == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, trimmed)
+		}
+		if len(placeholders) > 0 {
+			query += ` AND status IN (` + strings.Join(placeholders, ", ") + `)`
+		}
+	}
+	if host != "" {
+		query += ` AND host = ?`
+		args = append(args, host)
+	}
+	if project != "" {
+		query += ` AND project = ?`
+		args = append(args, project)
+	}
+
+	// Order by running jobs first, then by job ID descending
+	query += ` ORDER BY CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, id DESC`
+	applyLimit := limit > 0 && len(normalizeTags(tags)) == 0 && processedFilter == ""
+	if applyLimit {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	jobs, err := queryJobs(db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	jobs = FilterJobsByTags(jobs, tags, processedFilter)
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
+}
+
 // ListJobsWithMaxAge returns jobs, optionally filtered by status, host, and age.
 // maxAgeDays of 0 means no age limit.
 func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, tags []string, processedFilter string) ([]*Job, error) {
