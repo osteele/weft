@@ -652,6 +652,42 @@ func TestListUnplacedJobs(t *testing.T) {
 	}
 }
 
+// TestListUnplacedJobsIncludesPendingPlacement verifies that fresh unplaced
+// jobs with requested_status='pending_placement' (the transient state
+// orchestration.markJobsPendingPlacement applies during a relaunch pass) are
+// still returned. Excluding them previously made the relaunch path
+// structurally blind to the jobs it was invoked for.
+func TestListUnplacedJobsIncludesPendingPlacement(t *testing.T) {
+	database := SetupTestDB(t)
+
+	queuedID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	pendingID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "pending", "")
+	if err != nil {
+		t.Fatalf("record pending: %v", err)
+	}
+	if err := SetPendingStatus(database, pendingID, StatusPendingPlacement); err != nil {
+		t.Fatalf("mark pending_placement: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("list unplaced: %v", err)
+	}
+	ids := make(map[int64]bool, len(jobs))
+	for _, j := range jobs {
+		ids[j.ID] = true
+	}
+	if !ids[queuedID] {
+		t.Errorf("queued job %d missing from ListUnplacedJobs", queuedID)
+	}
+	if !ids[pendingID] {
+		t.Errorf("pending_placement job %d missing from ListUnplacedJobs", pendingID)
+	}
+}
+
 func TestListUnplacedJobsExcludesAssignedCloudJobs(t *testing.T) {
 	database := SetupTestDB(t)
 

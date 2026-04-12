@@ -812,13 +812,17 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 // current cloud-instance assignment, and no open cloud attempt on a non-terminal
 // instance.
 func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
+	// Include both queued and pending_placement statuses: the latter is a
+	// transient state the orchestration layer uses to mark jobs being
+	// processed by a relaunch pass. Excluding it hides the very jobs the
+	// relaunch was invoked for — see internal/orchestration/pending_placement.go.
 	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		  AND effective_target_kind = ?
-		  AND status = ?
+		  AND status IN (?, ?)
 		  AND host = ''
 		ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, string(JobTargetUnplaced), StatusQueued)
+	return queryJobs(db, query, string(JobTargetUnplaced), StatusQueued, StatusPendingPlacement)
 }
 
 // CountJobsWaitingOnInstances returns the number of queued jobs that are
