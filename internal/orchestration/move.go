@@ -153,6 +153,9 @@ func ExecuteOption(
 	if opt.Offer == nil {
 		return "", fmt.Errorf("new-instance option missing offer")
 	}
+	if err := db.SetPendingStatus(database, job.ID, db.StatusPendingPlacement); err != nil {
+		return "", fmt.Errorf("set job %d pending_placement: %w", job.ID, err)
+	}
 	markedJobIDs, err := markJobsPendingPlacement(database, []int64{job.ID})
 	if err != nil {
 		return "", err
@@ -399,6 +402,12 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 			}
 			continue
 		}
+		if err := db.SetPendingStatus(database, job.ID, db.StatusPendingPlacement); err != nil {
+			if cb.OnWarning != nil {
+				cb.OnWarning(fmt.Sprintf("Warning: set pending placement for job %d failed: %v", job.ID, err))
+			}
+			continue
+		}
 		unplaced++
 	}
 	logPhase("unplace_jobs", unplaceStarted, fmt.Sprintf("ok=%d total=%d", unplaced, len(jobs)), nil)
@@ -430,12 +439,13 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 
 	groupStarted := time.Now()
 	var groups []campaign.InstanceGroup
+	groupCandidates := jobsForGrouping(launchable)
 	if separateEach {
-		for _, job := range launchable {
+		for _, job := range groupCandidates {
 			groups = append(groups, campaign.PrepareGroups([]*db.Job{job}, database, "", r2Client)...)
 		}
 	} else {
-		groups = campaign.PrepareGroups(launchable, database, "", r2Client)
+		groups = campaign.PrepareGroups(groupCandidates, database, "", r2Client)
 	}
 	if len(groups) == 0 {
 		groupErr := fmt.Errorf("no launchable groups from provided jobs")
@@ -610,8 +620,9 @@ func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []strin
 			warnings = append(warnings, fmt.Sprintf("Warning: job %d no longer exists, skipping", job.ID))
 			continue
 		}
-		if latest.EffectiveStatus() != db.StatusQueued {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %d has status %s after unplace, skipping", job.ID, latest.EffectiveStatus()))
+		status := latest.EffectiveStatus()
+		if status != db.StatusQueued && status != db.StatusPendingPlacement {
+			warnings = append(warnings, fmt.Sprintf("Warning: job %d has status %s after unplace, skipping", job.ID, status))
 			continue
 		}
 		if latest.HasAssignedHost() {
@@ -625,6 +636,23 @@ func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []strin
 
 func RefreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
 	return refreshLaunchableJobs(database, jobs)
+}
+
+func jobsForGrouping(jobs []*db.Job) []*db.Job {
+	grouping := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if job.EffectiveStatus() == db.StatusPendingPlacement {
+			clone := *job
+			clone.PendingStatus = nil
+			grouping = append(grouping, &clone)
+			continue
+		}
+		grouping = append(grouping, job)
+	}
+	return grouping
 }
 
 func countGroupJobs(groups []campaign.InstanceGroup) int {

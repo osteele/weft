@@ -20,6 +20,8 @@ type groupedStatusSection struct {
 	jobs  []*db.Job
 }
 
+const stalePendingPlacementNoLaunchWindow = 120 * time.Second
+
 type groupedStatusRow struct {
 	text      string
 	isHeader  bool
@@ -69,7 +71,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job, launchStatusByID) {
+		switch groupedStatusBucket(job, launchStatusByID, now) {
 		case "running":
 			running = append(running, job)
 		case "launching":
@@ -312,12 +314,15 @@ func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
 	return "blocked: " + strings.TrimSpace(job.QueueBlockedReason)
 }
 
-func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string) string {
+func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, now time.Time) string {
 	status := job.EffectiveStatus()
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
 		return "running"
 	case db.StatusPendingPlacement:
+		if groupedStatusPendingPlacementLooksStale(job, now) {
+			return "unplaced"
+		}
 		switch launchStatusForJob(job, launchStatusByID) {
 		case db.LaunchStatusRunning, db.LaunchStatusGrace, db.LaunchStatusCompleted:
 			return "queued"
@@ -386,7 +391,7 @@ func groupedStatusScopeLabel(job *db.Job) string {
 func countVisibleRunningJobs(jobs []*db.Job) int {
 	n := 0
 	for _, job := range jobs {
-		if job != nil && groupedStatusBucket(job, nil) == "running" {
+		if job != nil && groupedStatusBucket(job, nil, time.Now()) == "running" {
 			n++
 		}
 	}
@@ -415,4 +420,21 @@ func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
 		return ""
 	}
 	return strings.TrimSpace(launchStatusByID[*job.LaunchID])
+}
+
+func groupedStatusPendingPlacementLooksStale(job *db.Job, now time.Time) bool {
+	if job == nil || job.EffectiveStatus() != db.StatusPendingPlacement {
+		return false
+	}
+	if job.LaunchID != nil && *job.LaunchID > 0 {
+		return false
+	}
+	if job.PendingAt == nil || *job.PendingAt <= 0 {
+		return false
+	}
+	if now.IsZero() {
+		return false
+	}
+	pendingAt := time.Unix(*job.PendingAt, 0)
+	return now.Sub(pendingAt) >= stalePendingPlacementNoLaunchWindow
 }

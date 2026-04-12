@@ -1959,6 +1959,12 @@ func startupRepair(db *sql.DB) error {
 		return err
 	}
 
+	// Normalize stale pending_placement intents that no longer have launch
+	// anchors; fresh move operations are preserved by an age threshold.
+	if _, err := NormalizeStalePendingPlacementNoLaunch(db); err != nil {
+		return err
+	}
+
 	// Create/recreate the job_status view (joins jobs with latest attempt)
 	if err := createJobStatusView(db); err != nil {
 		return err

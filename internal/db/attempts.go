@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const stalePendingPlacementNoLaunchMaxAgeSeconds = int64(120)
+
 func sqlNormalizeGPUClassExpr(expr string) string {
 	cleaned := fmt.Sprintf("lower(trim(coalesce(%s, '')))", expr)
 	for _, token := range []string{
@@ -923,6 +925,39 @@ func NormalizePendingPlacementForLaunch(database *sql.DB, launchID int64) (int64
 		StatusQueued, launchID, StatusPendingPlacement,
 		LaunchStatusRunning, LaunchStatusGrace, LaunchStatusCompleted,
 		StatusCompleted, AttemptOutcomeOrphaned, AttemptOutcomeCancelled,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// NormalizeStalePendingPlacementNoLaunch converts stale pending_placement
+// markers to queued when a job has no launch association. This protects the UI
+// from showing long-lived "launching" jobs that are no longer being placed.
+func NormalizeStalePendingPlacementNoLaunch(database *sql.DB) (int64, error) {
+	result, err := database.Exec(`
+		UPDATE job_attempts
+		SET pending_status = ?, pending_at = COALESCE(pending_at, strftime('%s','now'))
+		WHERE id IN (
+			SELECT ja.id
+			FROM job_attempts ja
+			JOIN (
+				SELECT job_id, MAX(attempt_number) AS max_attempt
+				FROM job_attempts
+				GROUP BY job_id
+			) latest
+			  ON latest.job_id = ja.job_id AND latest.max_attempt = ja.attempt_number
+			WHERE COALESCE(ja.pending_status, '') = ?
+			  AND COALESCE(ja.launch_id, 0) = 0
+			  AND COALESCE(ja.host, '') = ''
+			  AND COALESCE(ja.status, '') IN (?, ?)
+			  AND (
+			       ja.pending_at IS NULL
+			       OR ja.pending_at <= strftime('%s','now') - ?
+			  )
+		)`,
+		StatusQueued, StatusPendingPlacement, StatusQueued, StatusPendingPlacement, stalePendingPlacementNoLaunchMaxAgeSeconds,
 	)
 	if err != nil {
 		return 0, err

@@ -329,3 +329,50 @@ func TestRenderJobListGroupedStatusPlainAt_AlignsTimingSuffixToRightEdge(t *test
 			width, lipgloss.Width(row1), lipgloss.Width(row2), out)
 	}
 }
+
+func TestRenderJobListGroupedStatusPlainAt_StalePendingPlacementWithoutLaunchShowsUnplaced(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	pending := db.StatusPendingPlacement
+	pendingAt := now.Add(-stalePendingPlacementNoLaunchWindow - time.Second).Unix()
+	jobs := []*db.Job{
+		{
+			ID:            71,
+			Status:        db.StatusQueued,
+			PendingStatus: &pending,
+			PendingAt:     &pendingAt,
+			Project:       "proj",
+			Description:   "stale pending",
+			QueuedAt:      4_700,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	if !strings.Contains(out, "Unplaced (1):") {
+		t.Fatalf("expected unplaced section, got:\n%s", out)
+	}
+	if strings.Contains(out, "Launching (1):") {
+		t.Fatalf("did not expect launching section for stale pending, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_FreshPendingPlacementWithoutLaunchStaysLaunching(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	pending := db.StatusPendingPlacement
+	pendingAt := now.Add(-30 * time.Second).Unix()
+	jobs := []*db.Job{
+		{
+			ID:            72,
+			Status:        db.StatusQueued,
+			PendingStatus: &pending,
+			PendingAt:     &pendingAt,
+			Project:       "proj",
+			Description:   "fresh pending",
+			QueuedAt:      4_700,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	if !strings.Contains(out, "Launching (1):") {
+		t.Fatalf("expected launching section, got:\n%s", out)
+	}
+}

@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestSetAttemptLaunch_NormalizesPendingPlacement(t *testing.T) {
 	database := setupTestDB(t)
@@ -109,4 +112,76 @@ func TestNormalizePendingPlacementForLaunch_SkipsCompletedNonOrphaned(t *testing
 	checkPending(jobCompleted, StatusPendingPlacement)
 	checkPending(jobOrphaned, StatusQueued)
 	checkPending(jobPlanned, StatusPendingPlacement)
+}
+
+func TestNormalizeStalePendingPlacementNoLaunch(t *testing.T) {
+	database := setupTestDB(t)
+
+	staleID := int64(3001)
+	insertTestJob(t, database, staleID, "echo stale", "/tmp", StatusQueued)
+	if err := SetAttemptPendingStatus(database, staleID, StatusPendingPlacement); err != nil {
+		t.Fatalf("SetAttemptPendingStatus(stale): %v", err)
+	}
+	stalePendingAt := time.Now().Unix() - stalePendingPlacementNoLaunchMaxAgeSeconds - 10
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET pending_at = ? WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+		stalePendingAt, staleID,
+	); err != nil {
+		t.Fatalf("set stale pending_at: %v", err)
+	}
+
+	freshID := int64(3002)
+	insertTestJob(t, database, freshID, "echo fresh", "/tmp", StatusQueued)
+	if err := SetAttemptPendingStatus(database, freshID, StatusPendingPlacement); err != nil {
+		t.Fatalf("SetAttemptPendingStatus(fresh): %v", err)
+	}
+	freshPendingAt := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET pending_at = ? WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+		freshPendingAt, freshID,
+	); err != nil {
+		t.Fatalf("set fresh pending_at: %v", err)
+	}
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	anchoredID := int64(3003)
+	insertTestJob(t, database, anchoredID, "echo anchored", "/tmp", StatusQueued, withLaunch(launchID))
+	if err := SetAttemptPendingStatus(database, anchoredID, StatusPendingPlacement); err != nil {
+		t.Fatalf("SetAttemptPendingStatus(anchored): %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET pending_at = ? WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+		stalePendingAt, anchoredID,
+	); err != nil {
+		t.Fatalf("set anchored pending_at: %v", err)
+	}
+
+	updated, err := NormalizeStalePendingPlacementNoLaunch(database)
+	if err != nil {
+		t.Fatalf("NormalizeStalePendingPlacementNoLaunch: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1", updated)
+	}
+
+	checkPending := func(jobID int64, want string) {
+		t.Helper()
+		var got string
+		if err := database.QueryRow(
+			`SELECT COALESCE(pending_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+			jobID,
+		).Scan(&got); err != nil {
+			t.Fatalf("query pending_status for job %d: %v", jobID, err)
+		}
+		if got != want {
+			t.Fatalf("job %d pending_status = %q, want %q", jobID, got, want)
+		}
+	}
+
+	checkPending(staleID, StatusQueued)
+	checkPending(freshID, StatusPendingPlacement)
+	checkPending(anchoredID, StatusPendingPlacement)
 }
