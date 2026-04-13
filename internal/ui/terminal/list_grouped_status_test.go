@@ -368,21 +368,48 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 	}
 
 	cases := []struct {
+		name         string
 		launchStatus string
+		liveState    map[int64]*db.LaunchLiveState
 		wantSection  string
 	}{
-		{db.LaunchStatusPlanned, "Launching (1):"},
-		{db.LaunchStatusLaunching, "Launching (1):"},
-		{db.LaunchStatusRunning, "Queued (1):"},
-		{db.LaunchStatusFailed, "Unplaced (1):"},
-		{db.LaunchStatusCancelled, "Unplaced (1):"},
+		{"planned", db.LaunchStatusPlanned, nil, "Launching (1):"},
+		{"launching", db.LaunchStatusLaunching, nil, "Launching (1):"},
+		// Instance VM is up but the agent has not yet dispatched any job:
+		// the queued job is still in the agent-startup window.
+		{"running_no_active_job", db.LaunchStatusRunning, nil, "Launching (1):"},
+		// Same, but live state is loaded with no active job recorded.
+		{
+			"running_live_state_idle",
+			db.LaunchStatusRunning,
+			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID}},
+			"Launching (1):",
+		},
+		// Another job (id=99) is the active workload on the instance, so this
+		// job is queued behind it.
+		{
+			"running_other_job_active",
+			db.LaunchStatusRunning,
+			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, JobProgressID: 99}},
+			"Queued (1):",
+		},
+		// This job is itself the active workload — we expect status to be
+		// running by then, but if it lags, treat as launching.
+		{
+			"running_self_active",
+			db.LaunchStatusRunning,
+			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, JobProgressID: job.ID}},
+			"Launching (1):",
+		},
+		{"failed", db.LaunchStatusFailed, nil, "Unplaced (1):"},
+		{"cancelled", db.LaunchStatusCancelled, nil, "Unplaced (1):"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.launchStatus, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			out := renderJobListGroupedStatusPlainAt(
 				[]*db.Job{job},
 				0,
-				nil,
+				tc.liveState,
 				map[int64]string{launchID: tc.launchStatus},
 				now,
 			)

@@ -117,6 +117,10 @@ entity InstanceLiveState {
     heartbeat_age: Duration?
     phase_changed_at: Timestamp?
     job_progress: Integer?
+    -- The job currently making progress on the instance, as reported by the
+    -- agent's R2 progress writes. Null while the agent is still starting up
+    -- and has not yet pulled a job from its queue.
+    active_job: jobs/Job?
     termination_intent: String?
 }
 

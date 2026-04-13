@@ -71,7 +71,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job, launchStatusByID, now) {
+		switch groupedStatusBucket(job, launchStatusByID, launchLiveByID, now) {
 		case "running":
 			running = append(running, job)
 		case "launching":
@@ -314,7 +314,7 @@ func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
 	return "blocked: " + strings.TrimSpace(job.QueueBlockedReason)
 }
 
-func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, now time.Time) string {
+func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
 	status := job.EffectiveStatus()
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
@@ -339,6 +339,13 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, now tim
 			return "launching"
 		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
 			return "unplaced"
+		case db.LaunchStatusRunning:
+			// Instance VM is up but the agent may not yet have dispatched
+			// this job. If no other job is the active workload on the
+			// instance, treat this job as still launching.
+			if !anotherJobActiveOnLaunch(job, launchLiveByID) {
+				return "launching"
+			}
 		}
 		return "queued"
 	case db.StatusKilled, db.StatusCanceled:
@@ -397,7 +404,7 @@ func groupedStatusScopeLabel(job *db.Job) string {
 func countVisibleRunningJobs(jobs []*db.Job) int {
 	n := 0
 	for _, job := range jobs {
-		if job != nil && groupedStatusBucket(job, nil, time.Now()) == "running" {
+		if job != nil && groupedStatusBucket(job, nil, nil, time.Now()) == "running" {
 			n++
 		}
 	}
@@ -419,6 +426,17 @@ func groupedStatusOutcomeSuffix(job *db.Job, sectionTitle string) string {
 	default:
 		return ""
 	}
+}
+
+func anotherJobActiveOnLaunch(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState) bool {
+	if job == nil || job.LaunchID == nil {
+		return false
+	}
+	live := launchLiveByID[*job.LaunchID]
+	if live == nil {
+		return false
+	}
+	return live.JobProgressID > 0 && live.JobProgressID != job.ID
 }
 
 func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {

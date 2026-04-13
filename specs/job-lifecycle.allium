@@ -33,6 +33,7 @@ external entity CloudInstance {
     host: Host
     gpu_spec: GPUSpec
     status: String
+    live_state: status_sync/InstanceLiveState?
 }
 
 entity Job {
@@ -96,19 +97,31 @@ entity Job {
     -- queued+unplaced means no prospective assignment yet.
     is_unplaced_queue: status = queued and target_kind = unplaced
     -- A job is "launching" when the instance or placement backing it is still
-    -- provisioning. Two paths reach this state:
+    -- provisioning, or when the instance is up but the agent has not yet
+    -- dispatched this job. Paths reaching this state:
     --   (a) pending_placement: pre-launch placement window (on-prem path,
     --       or cloud before a launch row is attached).
     --   (b) queued + rental_instance target whose CloudInstance status is
     --       still planned or launching. Cloud jobs typically skip
     --       pending_placement: once a launch is attached the job_status view
     --       returns queued even while the instance is provisioning.
+    --   (c) queued + rental_instance whose CloudInstance has reached running,
+    --       but the agent has not yet dispatched any job (or the active job
+    --       on the instance is this job). This covers the agent-startup
+    --       window after a fresh `weft move --to new` or initial campaign
+    --       launch, where the VM is up but the agent has not pulled the
+    --       job from its queue. The "active job" comes from
+    --       status-sync/InstanceLiveState.active_job, populated by the
+    --       agent's R2 progress writes.
     is_launching:
         status = pending_placement
         or (status = queued
             and target_kind = rental_instance
             and cloud_instance != null
-            and cloud_instance.status in {planned, launching})
+            and (cloud_instance.status in {planned, launching}
+                 or (cloud_instance.status = running
+                     and (cloud_instance.live_state.active_job = null
+                          or cloud_instance.live_state.active_job = this))))
     is_blocked: dep_spec != null and dependency_job.is_terminal = false
 
     -- Status
