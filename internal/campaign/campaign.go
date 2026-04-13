@@ -40,6 +40,7 @@ type InstanceGroup struct {
 	DiskGB      int      // Estimated disk space needed (0 = use default)
 	Image       string   // Per-project Docker image override ("" = use global default)
 	VastCapAdd  []string // Vast.ai-only --cap-add values (nil = none)
+	Preemptible bool     // all jobs in the group allow interruptible placement
 	Jobs        []*db.Job
 }
 
@@ -103,6 +104,9 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 
 		merged := false
 		for i := range groups {
+			if groups[i].Preemptible != job.UsesPreemptiblePlacement() {
+				continue
+			}
 			supremum, ok := gpuClassSupremum(groups[i].GPUClass, job.GPUClass)
 			if !ok {
 				continue
@@ -122,6 +126,7 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 				GPUClass:    strings.ToUpper(job.GPUClass),
 				GPUMemGB:    mem,
 				MaxGPUMemGB: memMax,
+				Preemptible: job.UsesPreemptiblePlacement(),
 				Jobs:        []*db.Job{job},
 			})
 		}
@@ -205,11 +210,15 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 		}
 
 		jobGPU := strings.TrimSpace(info.job.GPUClass)
+		jobPreemptible := info.job.UsesPreemptiblePlacement()
 
 		bestIdx := -1
 		var bestScore float64
 		jobTier := vramTierOf(mem)
 		for i, g := range groups {
+			if g.group.Preemptible != jobPreemptible {
+				continue
+			}
 			// Skip groups with incompatible GPU constraints (e.g. ampere vs hopper).
 			if _, gpuOK := gpuClassSupremum(g.group.GPUClass, jobGPU); !gpuOK {
 				continue
@@ -257,6 +266,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 					GPUClass:    strings.ToUpper(jobGPU),
 					GPUMemGB:    mem,
 					MaxGPUMemGB: memMax,
+					Preemptible: jobPreemptible,
 					Jobs:        []*db.Job{info.job},
 				},
 				hfUnion: hfUnion,
@@ -335,6 +345,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			if !gpuOK {
 				continue
 			}
+			if merged[i].Preemptible != g.Preemptible {
+				continue
+			}
 			if vramTierOf(merged[i].GPUMemGB) != vramTierOf(g.GPUMemGB) {
 				continue
 			}
@@ -363,6 +376,7 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 				MaxGPUMemGB: g.MaxGPUMemGB,
 				DiskGB:      g.DiskGB,
 				Image:       g.Image,
+				Preemptible: g.Preemptible,
 				Jobs:        append([]*db.Job(nil), g.Jobs...),
 			})
 		}
@@ -386,6 +400,7 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 				MaxGPUMemGB: g.MaxGPUMemGB,
 				DiskGB:      g.DiskGB,
 				Image:       g.Image,
+				Preemptible: g.Preemptible,
 				Jobs:        append([]*db.Job(nil), g.Jobs...),
 			})
 			continue
@@ -405,6 +420,7 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 				MaxGPUMemGB: memMax,
 				DiskGB:      g.DiskGB,
 				Image:       g.Image,
+				Preemptible: g.Preemptible,
 				Jobs:        []*db.Job{job},
 			})
 		}
@@ -492,6 +508,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 				DiskGB:      g.DiskGB,
 				Image:       sub.image,
 				VastCapAdd:  sub.vastCapAdd,
+				Preemptible: g.Preemptible,
 				Jobs:        sub.jobs,
 			})
 		}
@@ -583,6 +600,20 @@ func (g InstanceGroup) AllInputs() []string {
 func (g InstanceGroup) HasComputeIntensiveJob() bool {
 	for _, job := range g.Jobs {
 		if job.HasTag(db.TagComputeIntensive) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPreemptibleJob returns true if any job in the group explicitly allows
+// interruptible/preemptible placement.
+func (g InstanceGroup) HasPreemptibleJob() bool {
+	if g.Preemptible {
+		return true
+	}
+	for _, job := range g.Jobs {
+		if job.UsesPreemptiblePlacement() {
 			return true
 		}
 	}

@@ -144,7 +144,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
-	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement")
+	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'preemptible' allows interruptible cloud placement")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
@@ -368,6 +368,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if len(meta.Tags) > 0 {
 			runTags = mergeDedup(runTags, meta.Tags)
 			applied = append(applied, fmt.Sprintf("tags=%v", meta.Tags))
+		}
+		if meta.Preemptible {
+			runTags = mergeDedup(runTags, []string{db.TagPreemptible})
+			applied = append(applied, "preemptible=true")
 		}
 		if meta.Image != "" {
 			applied = append(applied, fmt.Sprintf("image=%s", meta.Image))

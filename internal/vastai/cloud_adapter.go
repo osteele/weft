@@ -41,6 +41,7 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 		NumGPUs:              constraints.NumGPUs,
 		ExcludeGeos:          constraints.ExcludeGeos,
 		MinCPUCoresEffective: constraints.MinCPUCoresEffective,
+		InstanceType:         constraints.InstanceType,
 	}
 	offers, err := c.inner.SearchOffers(vc)
 	if err != nil {
@@ -59,13 +60,15 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		return nil, fmt.Errorf("parse vastai offer ID %q: %w", offerID, err)
 	}
 	vopts := CreateOpts{
-		Image:      opts.Image,
-		DiskGB:     opts.DiskGB,
-		SSHEnabled: opts.SSHEnabled,
-		OnStartCmd: opts.OnStartCmd,
-		EnvVars:    opts.EnvVars,
-		CapAdd:     opts.CapAdd,
-		Label:      opts.Label,
+		Image:        opts.Image,
+		DiskGB:       opts.DiskGB,
+		SSHEnabled:   opts.SSHEnabled,
+		OnStartCmd:   opts.OnStartCmd,
+		EnvVars:      opts.EnvVars,
+		CapAdd:       opts.CapAdd,
+		Label:        opts.Label,
+		InstanceType: opts.InstanceType,
+		MaxBidPrice:  opts.MaxBidPrice,
 	}
 	inst, err := c.inner.CreateInstance(id, vopts)
 	if err != nil {
@@ -190,9 +193,14 @@ func machineIDToString(id int) string {
 }
 
 func offerToCloud(o Offer) cloud.Offer {
+	instanceType := o.InstanceType
+	if instanceType == "" {
+		instanceType = cloud.InstanceTypeOnDemand
+	}
 	return cloud.Offer{
 		ProviderID:        strconv.Itoa(o.ID),
 		Provider:          cloud.ProviderVastai,
+		InstanceType:      instanceType,
 		GPUName:           o.GPUName,
 		NumGPUs:           o.NumGPUs,
 		GPUMemGB:          o.GPUMemGB,

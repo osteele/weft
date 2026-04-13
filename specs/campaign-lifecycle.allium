@@ -157,6 +157,7 @@ entity Instance {
     has_grace: grace_period_seconds > 0
     grace_remaining: if grace_deadline != null then grace_deadline - now else null
     bootstrap_origin: provider_running_at ?? launched_at
+    pause_tolerant: jobs.any(j => "preemptible" in j.tags)
     is_retryable: termination_reason in {provider_failure, infra_failure,
                                           bootstrap_timeout, phase_stall, unknown}
 
@@ -512,6 +513,20 @@ rule ProviderInstanceDied {
     ensures: instance.status = failed
     ensures: instance.termination_reason = provider_failure
     ensures: instance.ended_at = now
+}
+
+rule ProviderInstancePausedInterruptible {
+    when: instance: Instance.provider_instance.status becomes stopped
+    requires: instance.status in {launching, running, grace}
+    requires: instance.pause_tolerant
+
+    ensures: instance.status remains in {launching, running, grace}
+
+    @guidance
+        -- Interruptible/preemptible instances may transition to provider
+        -- "stopped" without being terminal. Reconciler treats this as a
+        -- pause/wait condition for pause_tolerant jobs instead of immediate
+        -- provider_failure reset.
 }
 
 rule DiskFullDetected {

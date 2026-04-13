@@ -233,6 +233,20 @@ func TestBuildSearchFilter_NoMaxGPUMem(t *testing.T) {
 	}
 }
 
+func TestBuildCreateArgs_InterruptibleBid(t *testing.T) {
+	args := buildCreateArgs(12345, CreateOpts{
+		InstanceType: cloud.InstanceTypeInterruptible,
+		MaxBidPrice:  0.42,
+		Image:        "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
+	})
+	joined := strings.Join(args, " ")
+	for _, part := range []string{"create instance 12345", "--type bid", "--price 0.4200", "--image nvidia/cuda:12.4.1-runtime-ubuntu22.04"} {
+		if !strings.Contains(joined, part) {
+			t.Fatalf("create args %q missing %q", joined, part)
+		}
+	}
+}
+
 func TestIsUnavailableOfferError(t *testing.T) {
 	tests := []struct {
 		err  error

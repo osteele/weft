@@ -515,10 +515,14 @@ func createInstanceWithReplacement(
 			inst *cloud.Instance
 			err  error
 		)
+		createAttemptOpts := createOpts
+		if createAttemptOpts.InstanceType == cloud.InstanceTypeInterruptible && createAttemptOpts.MaxBidPrice <= 0 {
+			createAttemptOpts.MaxBidPrice = currentOffer.CostPerHour
+		}
 		if progressClient, ok := client.(cloud.ProgressClient); ok {
-			inst, err = progressClient.CreateInstanceWithProgress(currentOffer.ProviderID, createOpts, progress)
+			inst, err = progressClient.CreateInstanceWithProgress(currentOffer.ProviderID, createAttemptOpts, progress)
 		} else {
-			inst, err = client.CreateInstance(currentOffer.ProviderID, createOpts)
+			inst, err = client.CreateInstance(currentOffer.ProviderID, createAttemptOpts)
 		}
 		if err == nil {
 			return inst, currentOffer, nil
@@ -1388,6 +1392,9 @@ func LaunchInstance(
 	// Override disk size if the group has a computed estimate
 	if group.DiskGB > 0 && group.DiskGB > createOpts.DiskGB {
 		createOpts.DiskGB = group.DiskGB
+	}
+	if group.HasPreemptibleJob() {
+		createOpts.InstanceType = cloud.InstanceTypeInterruptible
 	}
 
 	// Override image if the group has a per-project image

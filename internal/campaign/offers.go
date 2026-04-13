@@ -107,6 +107,9 @@ func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
 	if group.HasComputeIntensiveJob() {
 		c.MinCPUCoresEffective = intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", 16)
 	}
+	if group.HasPreemptibleJob() {
+		c.InstanceType = cloud.InstanceTypeInterruptible
+	}
 	return c
 }
 

@@ -339,13 +339,14 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	params.ProviderInst = inst
 	params.ProviderErr = providerErr
 	params.SetupSurvival = setupSurvival
+	params.PauseTolerant = hasPreemptibleJobs(jobs)
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival
 	}
 	action := r.CheckInstance(params)
 
 	// Handle termination intent post-processing (mark destroy succeeded)
-	if action.Kind == ActionTerminationIntent && isProviderTerminal(inst) {
+	if action.Kind == ActionTerminationIntent && isProviderTerminalWithPolicy(inst, params.PauseTolerant) {
 		markTerminationIntentDestroyed(database, ci, now)
 	}
 
@@ -813,18 +814,39 @@ func batchFetchProviderInstances(clients []cloud.Client) map[string]map[string]*
 
 // isProviderTerminal returns true if the provider instance is in a terminal/dead state.
 func isProviderTerminal(inst *cloud.Instance) bool {
+	return isProviderTerminalWithPolicy(inst, false)
+}
+
+func isProviderTerminalWithPolicy(inst *cloud.Instance, pauseTolerant bool) bool {
 	if inst == nil {
 		return true // instance not found = dead
 	}
 	switch inst.Status {
-	case cloud.ProviderStatusExited, cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead, cloud.ProviderStatusStopped:
+	case cloud.ProviderStatusExited, cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead:
+		return true
+	case cloud.ProviderStatusStopped:
+		if pauseTolerant {
+			return false
+		}
 		return true
 	}
 	// Provider intended to stop/destroy but Status hasn't caught up yet
 	// (e.g., Status still "created" while IntendedStatus is "stopped")
 	if (inst.IntendedStatus == cloud.ProviderStatusStopped || inst.IntendedStatus == cloud.ProviderStatusDestroyed) &&
 		inst.Status != cloud.ProviderStatusRunning {
+		if pauseTolerant && inst.IntendedStatus == cloud.ProviderStatusStopped {
+			return false
+		}
 		return true
+	}
+	return false
+}
+
+func hasPreemptibleJobs(jobs []*db.Job) bool {
+	for _, job := range jobs {
+		if job != nil && job.UsesPreemptiblePlacement() {
+			return true
+		}
 	}
 	return false
 }

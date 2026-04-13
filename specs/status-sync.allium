@@ -524,6 +524,23 @@ rule AgentReportsPhase {
         -- Format: "verb:jobID" (e.g., "setup:123", "running:123")
         -- Or bare verb for non-job phases: "grace", "destroying"
         -- Phase sequence per job: setup → running → finalizing → uploading
+        -- During running, agent may also perform periodic output/artifact
+        -- uploads without changing the phase verb.
+}
+
+rule AgentPeriodicOutputSync {
+    when: AgentJobRunning(instance, job)
+
+    ensures: R2OutputsIncrementallyUpdated(job)
+
+    @guidance
+        -- Agent periodically uploads changed outputs/artifacts while the job
+        -- is running (incremental copy), then performs a final sync at stop.
+        -- Keys:
+        --   jobs/<jobID>/runs/<runID>/outputs/<dir>/
+        --   jobs/<jobID>/runs/<runID>/artifacts/files/
+        --   jobs/<jobID>/runs/<runID>/artifacts/manifest.json
+        -- This bounds lost work on interruptible/preemptible instances.
 }
 
 -- Agent writes heartbeat samples continuously in the background.

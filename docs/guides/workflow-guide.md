@@ -118,6 +118,7 @@ Supported keys (all optional):
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |
 | `tags`      | list of strings  | `--tag`             |
+| `preemptible` | bool          | `--tag preemptible` |
 | `image`     | string           | `.weft.toml [cloud] image` |
 | `vast-cap-add` | list of strings | Vast.ai `--cap-add` (campaign launch) |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
@@ -159,6 +160,16 @@ packages on cloud instances:
 [tool.weft]
 pre-install = "apt-get update && apt-get install -y libnuma-dev"
 ```
+
+The `preemptible` key opts the job into interruptible cloud placement:
+
+```toml
+[tool.weft]
+preemptible = true
+```
+
+Use this only for jobs that are safe to resume/retry (for example, periodic
+checkpoint writes to declared output directories).
 
 #### `[tool.uv]` index settings
 

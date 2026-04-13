@@ -177,6 +177,9 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 		if job.GPUClass != "" {
 			constraints.GPUClass = job.GPUClass
 		}
+		if job.UsesPreemptiblePlacement() {
+			constraints.InstanceType = cloud.InstanceTypeInterruptible
+		}
 
 		// Search for offers across all providers
 		offers, err := cloud.SearchAllProviders(clients, constraints)

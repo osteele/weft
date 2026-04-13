@@ -5,6 +5,7 @@ package vastai
 // Offer represents a Vast.ai GPU rental offer from search results.
 type Offer struct {
 	ID                int     `json:"id"`
+	InstanceType      string  `json:"type"`
 	GPUName           string  `json:"gpu_name"`
 	NumGPUs           int     `json:"num_gpus"`
 	GPUMemMB          int     `json:"gpu_ram"` // per GPU, in MB
@@ -55,6 +56,7 @@ type OfferConstraints struct {
 	NumGPUs              int      // number of GPUs needed (default 1)
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores
+	InstanceType         string   // "on-demand" or "interruptible"
 }
 
 // DefaultImage is the default Docker image for Vast.ai instances.
@@ -62,11 +64,13 @@ const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {
-	Image      string            // Docker image (e.g., "nvidia/cuda:12.2-devel-ubuntu22.04")
-	DiskGB     int               // disk space to request
-	SSHEnabled bool              // enable SSH access
-	OnStartCmd string            // command to run on instance start
-	EnvVars    map[string]string // environment variables passed via --env flag
-	CapAdd     []string          // extra Linux capabilities passed via --cap-add
-	Label      string            // instance label visible in Vast.ai dashboard
+	Image        string            // Docker image (e.g., "nvidia/cuda:12.2-devel-ubuntu22.04")
+	DiskGB       int               // disk space to request
+	SSHEnabled   bool              // enable SSH access
+	OnStartCmd   string            // command to run on instance start
+	EnvVars      map[string]string // environment variables passed via --env flag
+	CapAdd       []string          // extra Linux capabilities passed via --cap-add
+	Label        string            // instance label visible in Vast.ai dashboard
+	InstanceType string            // "on-demand" or "interruptible"
+	MaxBidPrice  float64           // max bid/price for interruptible instances
 }

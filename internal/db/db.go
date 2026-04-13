@@ -229,6 +229,15 @@ func (j *Job) UsesInventoryPlacement() bool {
 	return j.HasInventoryHost()
 }
 
+// UsesPreemptiblePlacement reports whether a job explicitly allows running on
+// interruptible/preemptible instances.
+func (j *Job) UsesPreemptiblePlacement() bool {
+	if j == nil {
+		return false
+	}
+	return j.HasTag(TagPreemptible)
+}
+
 // CLIResourceOverrides records the resource-related CLI flags the user passed
 // at job submission (original intent). Only fields the user explicitly set
 // are populated. On retry, these are re-applied on top of the current script
@@ -954,6 +963,7 @@ const (
 	TagBenchmark        = "benchmark"
 	TagRental           = "rental"
 	TagInventory        = "inventory"
+	TagPreemptible      = "preemptible"
 	TagComputeIntensive = "compute-intensive"
 
 	// Legacy tag aliases accepted on input and in existing database rows.
@@ -3803,6 +3813,11 @@ func IsInventoryTag(tag string) bool {
 	return CanonicalizeTag(tag) == TagInventory
 }
 
+// IsPreemptibleTag reports whether the tag means "interruptible/preemptible placement".
+func IsPreemptibleTag(tag string) bool {
+	return CanonicalizeTag(tag) == TagPreemptible
+}
+
 // HasRentalTag reports whether the tag set requests rental placement semantics.
 func HasRentalTag(tags []string) bool {
 	for _, tag := range tags {
@@ -3817,6 +3832,16 @@ func HasRentalTag(tags []string) bool {
 func HasInventoryTag(tags []string) bool {
 	for _, tag := range tags {
 		if IsInventoryTag(tag) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPreemptibleTag reports whether the tag set allows interruptible/preemptible placement.
+func HasPreemptibleTag(tags []string) bool {
+	for _, tag := range tags {
+		if IsPreemptibleTag(tag) {
 			return true
 		}
 	}

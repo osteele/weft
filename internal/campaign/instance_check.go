@@ -141,6 +141,7 @@ type CheckInstanceParams struct {
 	ProviderErr    error
 	R2Client       *r2.Client
 	JobState       JobState
+	PauseTolerant  bool
 	InstancePhase  string // reconciled display/check phase
 	BootstrapStage string // from R2
 	HeartbeatAge   time.Duration
@@ -224,7 +225,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 
 	// 3. Termination intent from R2/DB
 	if p.TerminationIntent != nil {
-		if action := r.checkTerminationIntent(ci, p.ProviderInst, p.TerminationIntent); action.Kind != ActionNone {
+		if action := r.checkTerminationIntent(ci, p.ProviderInst, p.TerminationIntent, p.PauseTolerant); action.Kind != ActionNone {
 			return action
 		}
 	}
@@ -271,7 +272,13 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	// Covers "created", "loading", and any other non-running, non-terminal status.
 	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
 	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
-		!isProviderTerminal(p.ProviderInst) {
+		!isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
+		if p.PauseTolerant && p.ProviderInst.Status == cloud.ProviderStatusStopped {
+			return InstanceAction{
+				Kind:         ActionDisplayOnly,
+				StallMessage: "provider reports paused instance (interruptible); waiting for resume/replacement",
+			}
+		}
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
 			if age > maxPreRunningStatusTime {
@@ -426,7 +433,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 
 	// 7. Provider dead detection (with hysteresis)
 	// Skip grace-period instances — a transient API failure shouldn't kill the session.
-	if p.ProviderErr == nil && isProviderTerminal(p.ProviderInst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
+	if p.ProviderErr == nil && isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
 		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now)
 	}
 
@@ -441,7 +448,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	return InstanceAction{Kind: ActionNone}
 }
 
-func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance, intent *instanceintent.Marker) InstanceAction {
+func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance, intent *instanceintent.Marker, pauseTolerant bool) InstanceAction {
 	if intent == nil {
 		return InstanceAction{Kind: ActionNone}
 	}
@@ -456,7 +463,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 			Kind:              ActionTerminationIntent,
 			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: reason,
-			DestroyProvider:   !isProviderTerminal(inst),
+			DestroyProvider:   !isProviderTerminalWithPolicy(inst, pauseTolerant),
 			AttemptOutcome:    db.AttemptOutcomeCompleted,
 		}
 	case db.LaunchStatusFailed:
@@ -467,7 +474,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 			Kind:              ActionTerminationIntent,
 			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: reason,
-			DestroyProvider:   !isProviderTerminal(inst),
+			DestroyProvider:   !isProviderTerminalWithPolicy(inst, pauseTolerant),
 			ResetJobs:         true,
 			AttemptOutcome:    db.AttemptOutcomeOrphaned,
 		}
@@ -496,7 +503,7 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	// This catches the race where the agent writes the intent, self-destructs,
 	// and the provider shows "exited" before the reconciler's step 3 picks it up.
 	if intent, err := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID); err == nil && intent != nil {
-		if action := r.checkTerminationIntent(ci, inst, intent); action.Kind != ActionNone {
+		if action := r.checkTerminationIntent(ci, inst, intent, false); action.Kind != ActionNone {
 			slog.Debug("provider dead: found termination intent",
 				"component", "reconcile", "instance", ci.ID,
 				"intent_status", intent.TerminalStatus, "intent_reason", intent.TerminationReason)

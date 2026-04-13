@@ -216,6 +216,17 @@ import torch
 			},
 		},
 		{
+			name: "preemptible",
+			content: `# /// script
+# [tool.weft]
+# preemptible = true
+# ///
+`,
+			want: &ScriptMeta{
+				Preemptible: true,
+			},
+		},
+		{
 			name: "tool.uv index-url",
 			content: `# /// script
 # dependencies = ["sglang"]

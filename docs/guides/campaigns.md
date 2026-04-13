@@ -113,6 +113,25 @@ weft campaign launch --min-survival 0   # Disable survival floor (allow all offe
 weft campaign launch --min-survival 0.6 # Stricter survival floor
 ```
 
+### Interruptible (preemptible) jobs
+
+Mark jobs that can tolerate interruption with:
+
+```bash
+weft run --tag rental --tag preemptible --gpu a100 'python train.py'
+```
+
+or via script metadata:
+
+```toml
+[tool.weft]
+preemptible = true
+```
+
+Only jobs marked preemptible are eligible for interruptible offers. Weft keeps
+non-preemptible jobs on normal offers and does not mix the two in the same
+instance group.
+
 ## Monitoring campaigns
 
 ### Watch mode

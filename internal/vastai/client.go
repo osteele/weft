@@ -133,6 +133,9 @@ func (c *Client) ShowUser() (*User, error) {
 func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	filter, postFilter := buildSearchFilter(constraints)
 	args := []string{"search", "offers", "--raw"}
+	if constraints.InstanceType == cloud.InstanceTypeInterruptible {
+		args = append(args, "--type", "bid")
+	}
 	if filter != "" {
 		args = append(args, filter)
 	}
@@ -153,6 +156,11 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	// Compute derived fields
 	for i := range offers {
 		offers[i].GPUMemGB = float64(offers[i].GPUMemMB) / 1024.0
+		if constraints.InstanceType == cloud.InstanceTypeInterruptible {
+			offers[i].InstanceType = cloud.InstanceTypeInterruptible
+		} else if offers[i].InstanceType == "" {
+			offers[i].InstanceType = cloud.InstanceTypeOnDemand
+		}
 	}
 
 	// Apply GPU class post-filter for generation/family constraints
@@ -165,38 +173,7 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 
 // CreateInstance creates a new instance from an offer.
 func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error) {
-	args := []string{"create", "instance", strconv.Itoa(offerID)}
-
-	if opts.Image != "" {
-		args = append(args, "--image", opts.Image)
-	}
-	if opts.DiskGB > 0 {
-		args = append(args, "--disk", strconv.Itoa(opts.DiskGB))
-	}
-	if opts.SSHEnabled {
-		args = append(args, "--ssh")
-	}
-	if opts.OnStartCmd != "" {
-		args = append(args, "--onstart-cmd", opts.OnStartCmd)
-	}
-	if opts.Label != "" {
-		args = append(args, "--label", opts.Label)
-	}
-	for _, capVal := range opts.CapAdd {
-		capVal = strings.TrimSpace(capVal)
-		if capVal == "" {
-			continue
-		}
-		args = append(args, "--cap-add", capVal)
-	}
-	if len(opts.EnvVars) > 0 {
-		var parts []string
-		for _, k := range slices.Sorted(maps.Keys(opts.EnvVars)) {
-			parts = append(parts, fmt.Sprintf("-e %s=%s", k, opts.EnvVars[k]))
-		}
-		args = append(args, "--env", strings.Join(parts, " "))
-	}
-	args = append(args, "--raw")
+	args := buildCreateArgs(offerID, opts)
 
 	out, err := c.run(args...)
 	if err != nil {
@@ -240,6 +217,47 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 	}
 
 	return &Instance{ID: resp.NewContract}, nil
+}
+
+func buildCreateArgs(offerID int, opts CreateOpts) []string {
+	args := []string{"create", "instance", strconv.Itoa(offerID)}
+	if opts.InstanceType == cloud.InstanceTypeInterruptible {
+		args = append(args, "--type", "bid")
+	}
+	if opts.Image != "" {
+		args = append(args, "--image", opts.Image)
+	}
+	if opts.DiskGB > 0 {
+		args = append(args, "--disk", strconv.Itoa(opts.DiskGB))
+	}
+	if opts.SSHEnabled {
+		args = append(args, "--ssh")
+	}
+	if opts.OnStartCmd != "" {
+		args = append(args, "--onstart-cmd", opts.OnStartCmd)
+	}
+	if opts.Label != "" {
+		args = append(args, "--label", opts.Label)
+	}
+	if opts.MaxBidPrice > 0 {
+		args = append(args, "--price", strconv.FormatFloat(opts.MaxBidPrice, 'f', 4, 64))
+	}
+	for _, capVal := range opts.CapAdd {
+		capVal = strings.TrimSpace(capVal)
+		if capVal == "" {
+			continue
+		}
+		args = append(args, "--cap-add", capVal)
+	}
+	if len(opts.EnvVars) > 0 {
+		var parts []string
+		for _, k := range slices.Sorted(maps.Keys(opts.EnvVars)) {
+			parts = append(parts, fmt.Sprintf("-e %s=%s", k, opts.EnvVars[k]))
+		}
+		args = append(args, "--env", strings.Join(parts, " "))
+	}
+	args = append(args, "--raw")
+	return args
 }
 
 func isUnavailableOfferError(err error) bool {

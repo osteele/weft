@@ -17,10 +17,17 @@ const (
 	ProviderRunpod Provider = "runpod"
 )
 
+// InstanceType describes cloud rental interruption behavior.
+const (
+	InstanceTypeOnDemand      = "on-demand"
+	InstanceTypeInterruptible = "interruptible"
+)
+
 // Offer represents a GPU rental offer from any cloud provider.
 type Offer struct {
 	ProviderID        string   // provider-specific offer ID
 	Provider          Provider // which provider
+	InstanceType      string   // interruption mode (on-demand, interruptible), when known
 	GPUName           string   // e.g., "RTX_4090"
 	NumGPUs           int
 	GPUMemGB          float64 // per-GPU memory in GB
@@ -83,6 +90,7 @@ type OfferConstraints struct {
 	NumGPUs              int      // number of GPUs needed (default 1)
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
+	InstanceType         string   // desired rental type ("on-demand" or "interruptible")
 }
 
 // DefaultExcludeGeos lists countries excluded by default from cloud offers.
@@ -91,14 +99,16 @@ var DefaultExcludeGeos []string
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {
-	Image      string            // Docker image
-	DiskGB     int               // disk space to request
-	SSHEnabled bool              // enable SSH access
-	OnStartCmd string            // command to run on instance start
-	EnvVars    map[string]string // environment variables passed via provider's env mechanism
-	CapAdd     []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)
-	TemplateID string            // provider template ID for startup-managed images
-	Label      string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
+	Image        string            // Docker image
+	DiskGB       int               // disk space to request
+	SSHEnabled   bool              // enable SSH access
+	OnStartCmd   string            // command to run on instance start
+	EnvVars      map[string]string // environment variables passed via provider's env mechanism
+	CapAdd       []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)
+	TemplateID   string            // provider template ID for startup-managed images
+	Label        string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
+	InstanceType string            // desired rental type ("on-demand" or "interruptible"), when provider supports it
+	MaxBidPrice  float64           // max bid/price for interruptible rentals, when provider supports it
 }
 
 // R2Config holds Cloudflare R2 credentials for instance-side uploads.

@@ -26,13 +26,14 @@ type ScriptMeta struct {
 	Env          map[string]string // Environment variables to set when running the job
 	PreInstall   string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
 	Isolated     bool              // Skip project-level uv sync; script runs in an isolated PEP 723 environment
+	Preemptible  bool              // Allow interruptible/preemptible cloud placement
 }
 
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
 		len(m.VastCapAdd) == 0 && len(m.UvArgs) == 0 && len(m.Env) == 0 &&
-		m.PreInstall == "" && !m.Isolated
+		m.PreInstall == "" && !m.Isolated && !m.Preemptible
 }
 
 var (
@@ -83,6 +84,9 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			}
 			if v, ok := wt.Get("isolated").(bool); ok {
 				meta.Isolated = v
+			}
+			if v, ok := wt.Get("preemptible").(bool); ok {
+				meta.Preemptible = v
 			}
 		}
 	}

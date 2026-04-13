@@ -392,6 +392,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			params := synced.CheckParams(ci, r2c, jobState, now)
 			params.ProviderInst = cachedInstance
 			params.ProviderErr = providerErr
+			params.PauseTolerant = hasPreemptibleJobs(jobs)
 			params.BootstrapSurvival = survival
 			action := watchReconciler.CheckInstance(params)
 

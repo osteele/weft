@@ -244,6 +244,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "rclone", "copy",
+				"--update",
 				dirPath+"/",
 				"r2:"+bucket+"/"+r2keys.JobAttemptOutputDir(jobID, runID, dir),
 			)
@@ -381,7 +382,12 @@ func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, la
 	return retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "rclone", rcloneCmd, src, "r2:"+bucket+"/"+r2Key)
+		args := []string{rcloneCmd}
+		if rcloneCmd == "copy" {
+			args = append(args, "--update")
+		}
+		args = append(args, src, "r2:"+bucket+"/"+r2Key)
+		cmd := exec.CommandContext(ctx, "rclone", args...)
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 	}, retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
@@ -452,11 +458,13 @@ func runJobWithProgress(r2Bucket string, jobID, runID, instanceID int64, logDir 
 	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
 	stopProgress := startProgressReporter(r2Bucket, jobID, runID, logPath)
 	stopLogs := startLogUploader(r2Bucket, jobID, runID, logPath)
+	stopOutputs := startOutputUploader(r2Bucket, jobID, runID, cfg.WorkingDir)
 	stopKillPoller := startKillPoller(r2Bucket, instanceID, jobID, logDir)
 	defer func() {
 		stopKillPoller()
 		stopProgress()
 		stopLogs()
+		stopOutputs()
 		r2Delete(r2Bucket, r2keys.JobAttemptProgress(jobID, runID))
 	}()
 	return runner.RunSingleJob(cfg)
@@ -627,6 +635,41 @@ func startTimeseriesUploader(bucket string, jobID, runID int64, timeseriesPath s
 // richer telemetry JSONL file to a live R2 checkpoint key.
 func startTelemetryUploader(bucket string, jobID, runID int64, telemetryPath string) func() {
 	return startFileUploader(bucket, jobID, telemetryPath, r2keys.JobAttemptLiveTelemetry(jobID, runID), "live telemetry")
+}
+
+// startOutputUploader periodically uploads changed output/checkpoint files for
+// resilience on interruptible instances. A final sync runs when stopped.
+func startOutputUploader(bucket string, jobID, runID int64, workDir string) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	stop := func() {
+		once.Do(func() { close(done) })
+		<-stopped
+	}
+
+	workDir = runner.ExpandTilde(workDir)
+	upload := func() {
+		_ = uploadOutputDirs(bucket, jobID, runID, workDir)
+		_ = uploadArtifactManifestEntries(bucket, jobID, runID, workDir)
+	}
+
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				upload()
+				return
+			case <-ticker.C:
+				upload()
+			}
+		}
+	}()
+
+	return stop
 }
 
 func startFileUploader(bucket string, jobID int64, filePath, key, detail string) func() {
