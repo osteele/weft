@@ -42,7 +42,17 @@ func CachePath(version, goos, goarch string) string {
 // EnsureBuilt checks the local build cache and extracts the agent binary from
 // the binaries/ directory if the cached binary is missing. Returns the path to
 // the binary, or ErrAgentNotAvailable if no binary exists for this platform.
+// On-demand build progress is discarded; use EnsureBuiltWithOutput to stream it.
 func EnsureBuilt(version, goos, goarch string) (string, error) {
+	return EnsureBuiltWithOutput(version, goos, goarch, io.Discard)
+}
+
+// EnsureBuiltWithOutput is like EnsureBuilt but streams on-demand build progress
+// (Fly builder start, source rsync, compile, download, stop) to output.
+func EnsureBuiltWithOutput(version, goos, goarch string, output io.Writer) (string, error) {
+	if output == nil {
+		output = io.Discard
+	}
 	path := CachePath(version, goos, goarch)
 
 	if _, err := os.Stat(path); err == nil {
@@ -54,7 +64,7 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 	}
 
 	if err := extractFunc(version, goos, goarch, path); err != nil {
-		if errBuild := buildOnDemand(version, goos, goarch, path); errBuild != nil {
+		if errBuild := buildOnDemand(version, goos, goarch, path, output); errBuild != nil {
 			if errors.Is(err, ErrAgentNotAvailable) {
 				return "", errBuild
 			}

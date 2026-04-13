@@ -63,7 +63,8 @@ func BuildViaFlyBuilder(version, goos, goarch, outputPath string, builder config
 		return "", fmt.Errorf("start Fly builder: %w", err)
 	}
 	defer func() {
-		_ = runCmd(io.Discard, "", env, "flyctl", "machine", "stop", machine, "-a", app, "--wait-timeout", "2m")
+		fmt.Fprintf(output, "Stopping Fly builder %s/%s...\n", app, machine)
+		_ = runCmd(output, "", env, "flyctl", "machine", "stop", machine, "-a", app, "--wait-timeout", "2m")
 	}()
 
 	prepare := fmt.Sprintf(`set -euo pipefail
@@ -148,7 +149,8 @@ GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64`,
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
 	tmp := outputPath + ".tmp"
-	if err := runCmd(output, "", env, "rsync", "-az", "-e", rshScript, "placeholder:"+remoteOutput, tmp); err != nil {
+	fmt.Fprintln(output, "Downloading agent binary from Fly builder...")
+	if err := runCmd(output, "", env, "rsync", "-az", "--info=progress2", "-e", rshScript, "placeholder:"+remoteOutput, tmp); err != nil {
 		return "", fmt.Errorf("download Fly build output: %w", err)
 	}
 	if err := os.Chmod(tmp, 0o755); err != nil {

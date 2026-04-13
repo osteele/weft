@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/osteele/weft/internal/agentdeploy"
@@ -38,7 +39,7 @@ func runBuildAgents(cmd *cobra.Command, args []string) error {
 		if len(parts) != 2 {
 			return fmt.Errorf("invalid target %q (expected os-arch)", target)
 		}
-		path, err := agentdeploy.EnsureBuilt(version, parts[0], parts[1])
+		path, err := agentdeploy.EnsureBuiltWithOutput(version, parts[0], parts[1], os.Stderr)
 		if err != nil {
 			return fmt.Errorf("build agent %s: %w", target, err)
 		}

@@ -3,6 +3,7 @@ package agentdeploy
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -65,7 +66,7 @@ func StartBackgroundPrewarm(goos, goarch string) {
 	}()
 }
 
-func buildOnDemand(version, goos, goarch, outputPath string) error {
+func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer) error {
 	builders, err := resolveBuilders(goos, goarch)
 	if err != nil {
 		return err
@@ -77,7 +78,7 @@ func buildOnDemand(version, goos, goarch, outputPath string) error {
 
 	var attempts []string
 	for _, builder := range builders {
-		err := runBuilder(version, goos, goarch, outputPath, builder)
+		err := runBuilder(version, goos, goarch, outputPath, builder, output)
 		if err == nil {
 			return nil
 		}
@@ -95,17 +96,17 @@ func buildOnDemand(version, goos, goarch, outputPath string) error {
 		ErrAgentNotAvailable, goos, goarch, strings.Join(attempts, "; "))
 }
 
-func runBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder) error {
+func runBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer) error {
 	switch strings.ToLower(strings.TrimSpace(builder.Type)) {
 	case "ssh":
 		return buildViaSSHBuilder(version, goos, goarch, outputPath, builder)
 	case "fly":
-		var output bytes.Buffer
-		_, err := BuildViaFlyBuilder(version, goos, goarch, outputPath, builder, &output)
+		var captured bytes.Buffer
+		_, err := BuildViaFlyBuilder(version, goos, goarch, outputPath, builder, io.MultiWriter(&captured, output))
 		if err == nil {
 			return nil
 		}
-		details := strings.TrimSpace(output.String())
+		details := strings.TrimSpace(captured.String())
 		if details == "" {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
@@ -36,7 +37,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, nil
 	}
 
-	binaryPath, err := EnsureBuilt(localVer, spec.OS, spec.Arch)
+	binaryPath, err := EnsureBuiltWithOutput(localVer, spec.OS, spec.Arch, os.Stderr)
 	if errors.Is(err, ErrAgentNotAvailable) {
 		// No pre-built binary — build natively on the remote host.
 		if err := BuildOnHost(host, localVer); err != nil {
