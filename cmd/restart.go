@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -432,6 +433,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := db.RequeueFreshAttemptByID(database, jobID, retryHost); err != nil {
 				return fmt.Errorf("create fresh queued attempt: %w", err)
 			}
+			_ = logcache.Delete(jobID)
 
 			fmt.Printf("Restarted queued job %d (fresh retry attempt)\n", jobID)
 			fmt.Printf("  Retry budget reset\n")
@@ -481,6 +483,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
 			return err
 		}
+		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %d to queued (cloud instance no longer available)\n", jobID)
 		fmt.Printf("  Use 'weft launch instances' to run on a new instance\n")
 		for _, update := range updates {
@@ -499,6 +502,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := db.ResetJobToUnplaced(database, jobID); err != nil {
 				return err
 			}
+			_ = logcache.Delete(jobID)
 			fmt.Printf("Reset job %d to queued (unplaced rental job)\n", jobID)
 			tryResumeRunawayBreaker(database, job)
 			return nil
@@ -525,6 +529,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := db.RequeueByID(database, jobID); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}
+		_ = logcache.Delete(jobID)
 		ack, err := relayRequeueJob(cfg, relayClient, job)
 		if err != nil {
 			return err

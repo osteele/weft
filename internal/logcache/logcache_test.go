@@ -62,6 +62,34 @@ func TestWriteWithMetaPartial(t *testing.T) {
 	}
 }
 
+func TestWriteForRunStoresRunIDMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	if err := WriteForRun(201, 77, "run data"); err != nil {
+		t.Fatalf("WriteForRun: %v", err)
+	}
+
+	runID, ok := RunID(201)
+	if !ok {
+		t.Fatal("expected RunID metadata to be present")
+	}
+	if runID != 77 {
+		t.Fatalf("RunID = %d, want 77", runID)
+	}
+}
+
+func TestRunIDMissingWhenMetaDoesNotIncludeRun(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	if err := WriteWithMeta(202, "legacy cache", true); err != nil {
+		t.Fatalf("WriteWithMeta: %v", err)
+	}
+
+	if _, ok := RunID(202); ok {
+		t.Fatal("expected no RunID for legacy cache metadata")
+	}
+}
+
 func TestIsCompleteReturnsFalseForMissing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/spf13/pflag"
 )
@@ -101,6 +102,41 @@ func resetLogModeState() {
 	logEventsKind = ""
 	logEventsLaunch = ""
 	logEventsStats = false
+}
+
+func TestShouldUseCachedLogForJob_RequiresMatchingRunID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	runID := int64(12)
+	job := &db.Job{ID: 77, LatestRunID: &runID}
+
+	if err := logcache.WriteForRun(job.ID, runID, "ok"); err != nil {
+		t.Fatalf("WriteForRun: %v", err)
+	}
+	if !shouldUseCachedLogForJob(job) {
+		t.Fatal("expected cache to be used when run IDs match")
+	}
+
+	if err := logcache.WriteForRun(job.ID, runID+1, "stale"); err != nil {
+		t.Fatalf("WriteForRun stale: %v", err)
+	}
+	if shouldUseCachedLogForJob(job) {
+		t.Fatal("expected cache to be rejected when run IDs mismatch")
+	}
+}
+
+func TestShouldUseCachedLogForJob_RejectsLegacyCacheForRunAwareJob(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	runID := int64(34)
+	job := &db.Job{ID: 78, LatestRunID: &runID}
+
+	if err := logcache.Write(job.ID, "legacy"); err != nil {
+		t.Fatalf("Write legacy cache: %v", err)
+	}
+	if shouldUseCachedLogForJob(job) {
+		t.Fatal("expected legacy cache to be rejected for run-aware job")
+	}
 }
 
 func TestShouldUseCloudLogsTrueForAssignedLaunchJob(t *testing.T) {

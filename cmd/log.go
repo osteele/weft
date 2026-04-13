@@ -262,7 +262,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 	// For terminal jobs, prefer local cache first (unless following).
 	// Complete caches can serve any request; partial caches only serve default tail views.
-	if !follow && shouldPreferCachedLog(job.Status) {
+	if !follow && shouldPreferCachedLog(job.Status) && shouldUseCachedLogForJob(job) {
 		if cached, err := logcache.Read(jobID); err == nil {
 			isComplete := logcache.IsComplete(jobID)
 			isDefaultTailView := !logFull && logFrom == 0 && logTo == 0 && !cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail")
@@ -324,7 +324,8 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	// For terminal jobs not yet cached, try to fetch the full file for caching.
 	// If the file is small enough, we fetch it entirely and apply filters locally.
 	if shouldPreferCachedLog(job.Status) && !logcache.Exists(jobID) {
-		if fullContent, cached := fetchAndCacheFullLog(job.Host, logFile, jobID); cached {
+		runID := currentJobRunID(job)
+		if fullContent, cached := fetchAndCacheFullLog(job.Host, logFile, jobID, runID); cached {
 			if defaultTailHint && !tailHintPrinted {
 				printDefaultTailHint(jobID)
 				tailHintPrinted = true
@@ -371,7 +372,12 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 	// Cache partial output for terminal jobs (not marked complete since it's filtered)
 	if shouldPreferCachedLog(job.Status) && !logcache.Exists(jobID) {
-		_ = logcache.WriteWithMeta(jobID, stdout, false)
+		runID := currentJobRunID(job)
+		if runID != nil {
+			_ = logcache.WriteWithMetaForRun(jobID, runID, stdout, false)
+		} else {
+			_ = logcache.WriteWithMeta(jobID, stdout, false)
+		}
 	}
 
 	// Process carriage returns - progress bars use \r to overwrite lines
@@ -412,7 +418,7 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 	}
 
 	// Prefer local cache for terminal jobs.
-	if shouldPreferCachedLog(job.Status) {
+	if shouldPreferCachedLog(job.Status) && shouldUseCachedLogForJob(job) {
 		if cached, err := logcache.Read(job.ID); err == nil {
 			isComplete := logcache.IsComplete(job.ID)
 			isDefaultTailView := !logFull && logFrom == 0 && logTo == 0 && !cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail")
@@ -571,7 +577,11 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 
 	// Cache for terminal jobs
 	if shouldPreferCachedLog(job.Status) && fetched.Final && fetched.Content != "" {
-		_ = logcache.Write(job.ID, fetched.Content)
+		if runID > 0 {
+			_ = logcache.WriteForRun(job.ID, runID, fetched.Content)
+		} else {
+			_ = logcache.Write(job.ID, fetched.Content)
+		}
 	}
 
 	if shouldShowDefaultTailHint(cmd, false) {
@@ -707,7 +717,7 @@ func shouldPreferCachedLog(status string) bool {
 // fetchAndCacheFullLog attempts to fetch the full log file from remote and cache it.
 // Returns (content, true) if the file was fetched and cached, or ("", false) if
 // the file is too large or the fetch failed.
-func fetchAndCacheFullLog(host, logFile string, jobID int64) (string, bool) {
+func fetchAndCacheFullLog(host, logFile string, jobID int64, runID *int64) (string, bool) {
 	cfg, _ := config.Load()
 	maxSize := cfg.LogCacheMaxSize
 	if maxSize <= 0 {
@@ -749,8 +759,30 @@ func fetchAndCacheFullLog(host, logFile string, jobID int64) (string, bool) {
 	}
 
 	// Cache as complete
-	_ = logcache.Write(jobID, content)
+	if runID != nil {
+		_ = logcache.WriteForRun(jobID, *runID, content)
+	} else {
+		_ = logcache.Write(jobID, content)
+	}
 	return content, true
+}
+
+func currentJobRunID(job *db.Job) *int64 {
+	if job == nil || job.LatestRunID == nil || *job.LatestRunID <= 0 {
+		return nil
+	}
+	return job.LatestRunID
+}
+
+func shouldUseCachedLogForJob(job *db.Job) bool {
+	if job == nil || job.LatestRunID == nil || *job.LatestRunID <= 0 {
+		return true
+	}
+	cachedRunID, ok := logcache.RunID(job.ID)
+	if !ok {
+		return false
+	}
+	return cachedRunID == *job.LatestRunID
 }
 
 // buildLogCommand constructs the remote command for reading log files

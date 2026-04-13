@@ -24,7 +24,8 @@ const DefaultMaxSize = 1 * 1024 * 1024
 
 // cacheMeta is the JSON structure stored in .log.meta sidecar files.
 type cacheMeta struct {
-	Complete bool `json:"complete"`
+	Complete bool   `json:"complete"`
+	RunID    *int64 `json:"run_id,omitempty"`
 }
 
 // CacheDir returns the local cache directory for log files
@@ -68,6 +69,20 @@ func Write(jobID int64, content string) error {
 
 // WriteWithMeta caches log content for a job with explicit completeness metadata.
 func WriteWithMeta(jobID int64, content string, isComplete bool) error {
+	return writeWithMeta(jobID, content, isComplete, nil)
+}
+
+// WriteForRun caches log content for a specific run/attempt ID, marking it complete.
+func WriteForRun(jobID, runID int64, content string) error {
+	return writeWithMeta(jobID, content, true, &runID)
+}
+
+// WriteWithMetaForRun caches log content for a specific run/attempt ID.
+func WriteWithMetaForRun(jobID int64, runID *int64, content string, isComplete bool) error {
+	return writeWithMeta(jobID, content, isComplete, runID)
+}
+
+func writeWithMeta(jobID int64, content string, isComplete bool, runID *int64) error {
 	cacheDir := CacheDir()
 	if cacheDir == "" {
 		return fmt.Errorf("unable to determine cache directory")
@@ -81,7 +96,7 @@ func WriteWithMeta(jobID int64, content string, isComplete bool) error {
 		return err
 	}
 
-	meta := cacheMeta{Complete: isComplete}
+	meta := cacheMeta{Complete: isComplete, RunID: runID}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -101,6 +116,22 @@ func IsComplete(jobID int64) bool {
 		return false
 	}
 	return meta.Complete
+}
+
+// RunID returns the cached run/attempt ID if metadata includes one.
+func RunID(jobID int64) (int64, bool) {
+	data, err := os.ReadFile(metaPath(jobID))
+	if err != nil {
+		return 0, false
+	}
+	var meta cacheMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return 0, false
+	}
+	if meta.RunID == nil {
+		return 0, false
+	}
+	return *meta.RunID, true
 }
 
 // Delete removes a cached log file and its metadata sidecar
