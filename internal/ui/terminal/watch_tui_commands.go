@@ -513,6 +513,25 @@ func requestWatchInstanceTerminate(database *sql.DB, instanceID int64) tea.Cmd {
 	}
 }
 
+func requestWatchJobMarkProcessed(database *sql.DB, jobID int64) tea.Cmd {
+	return func() tea.Msg {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+		}
+		if job == nil {
+			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+		}
+		if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
+			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("mark processed: %w", err)}
+		}
+		return watchProcessDoneMsg{
+			jobID:   jobID,
+			message: fmt.Sprintf("Job #%d marked as processed", jobID),
+		}
+	}
+}
+
 func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 	return func() tea.Msg {
 		onPremJobs, err := db.ListActiveOnPremJobs(database)

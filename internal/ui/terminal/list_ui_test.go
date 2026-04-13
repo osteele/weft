@@ -724,8 +724,59 @@ func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	m.rebuildGroupedRows()
 
 	line := m.groupedControlsText(true)
-	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "m:move") {
+	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "p:processed") || !strings.Contains(line, "m:move") {
 		t.Fatalf("controls line missing queued-job actions: %q", line)
+	}
+}
+
+func TestListTUIGroupedKeyPMarksSelectedJobProcessed(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil {
+		t.Fatalf("job %d not found", jobID)
+	}
+
+	m := listTUIModel{
+		database:        database,
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs:            []*db.Job{job},
+	}
+	m.rebuildGroupedRows()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	got := next.(listTUIModel)
+	if cmd == nil {
+		t.Fatal("expected command to mark selected job as processed")
+	}
+	if !strings.Contains(got.statusMessage, "Marking job #") {
+		t.Fatalf("statusMessage = %q, want marking text", got.statusMessage)
+	}
+
+	msg := cmd()
+	next2, reloadCmd := got.Update(msg)
+	got2 := next2.(listTUIModel)
+	if reloadCmd == nil {
+		t.Fatal("expected reload command after mark processed completion")
+	}
+	if !strings.Contains(got2.statusMessage, "marked as processed") {
+		t.Fatalf("statusMessage = %q, want processed confirmation", got2.statusMessage)
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID updated: %v", err)
+	}
+	if updated == nil || !updated.HasTag(db.ProcessedTag) {
+		t.Fatalf("expected job %d to have processed tag", jobID)
 	}
 }
 

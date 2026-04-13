@@ -546,6 +546,18 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.reloadJobs()
 
+	case watchProcessDoneMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Mark processed failed: %v", msg.err)
+			return m, nil
+		}
+		if strings.TrimSpace(msg.message) != "" {
+			m.statusMessage = msg.message
+		} else {
+			m.statusMessage = fmt.Sprintf("Job #%d marked as processed", msg.jobID)
+		}
+		return m, m.reloadJobs()
+
 	case moveOptionsReadyMsg:
 		// Legacy path; grouped list uses listMoveOptionsReadyMsg with request IDs.
 		if msg.err != nil {
@@ -908,7 +920,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	line := fmt.Sprintf("a:auto (%s)", autoState)
 	line += "  r:refresh"
 	if m.selectedGroupedJob() != nil {
-		line += "  k:kill  u:unplace"
+		line += "  k:kill  u:unplace  p:processed"
 		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
 			line += "  m:move"
 		}
@@ -1104,6 +1116,14 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearAutoPilotPersistentState()
 		m.statusMessage = fmt.Sprintf("Unplacing job #%d...", job.ID)
 		return m, requestWatchJobUnplace(m.database, job.ID)
+	case "p":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			return m, nil
+		}
+		m.clearAutoPilotPersistentState()
+		m.statusMessage = fmt.Sprintf("Marking job #%d as processed...", job.ID)
+		return m, requestWatchJobMarkProcessed(m.database, job.ID)
 	case "m":
 		job := m.selectedGroupedJob()
 		if job == nil {

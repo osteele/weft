@@ -108,6 +108,12 @@ type watchTerminateDoneMsg struct {
 	err        error
 }
 
+type watchProcessDoneMsg struct {
+	jobID   int64
+	message string
+	err     error
+}
+
 // ---------------------------------------------------------------------------
 // Project-mode messages
 // ---------------------------------------------------------------------------
