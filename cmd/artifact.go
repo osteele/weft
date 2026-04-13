@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +91,17 @@ var artifactAddCmd = &cobra.Command{
 	RunE:  runArtifactAdd,
 }
 
+var artifactPruneLocalCmd = &cobra.Command{
+	Use:   "prune-local",
+	Short: "Delete local files that are restorable via weft commands",
+	Long: `Delete local files that can be restored via weft artifact/sync workflows.
+
+By default this command runs in dry-run mode and only prints what would be
+deleted. Pass --apply to actually delete files.`,
+	Args: usageArgs(cobra.NoArgs),
+	RunE: runArtifactPruneLocal,
+}
+
 var artifactCatCmd = &cobra.Command{
 	Use:   "cat <job-id> <name-or-path>",
 	Short: "Write a cached artifact to stdout",
@@ -117,6 +131,14 @@ var (
 	artifactLatest   bool
 	artifactAll      bool
 	artifactTimeout  time.Duration
+	pruneLocalApply  bool
+	pruneLocalDryRun bool
+	pruneLocalDir    string
+	pruneOlderThan   string
+	pruneSince       string
+	pruneOutputs     bool
+	pruneArtifacts   bool
+	pruneRemoveEmpty bool
 )
 
 const defaultArtifactTimeout = 2 * time.Minute
@@ -128,6 +150,7 @@ func init() {
 	artifactCmd.AddCommand(artifactGetCmd)
 	artifactCmd.AddCommand(artifactCatCmd)
 	artifactCmd.AddCommand(artifactAddCmd)
+	artifactCmd.AddCommand(artifactPruneLocalCmd)
 
 	addArtifactListFlags(artifactListCmd)
 	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
@@ -138,6 +161,14 @@ func init() {
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
 	artifactCatCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactCatCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
+	artifactPruneLocalCmd.Flags().BoolVar(&pruneLocalApply, "apply", false, "Delete files (without this flag, only preview)")
+	artifactPruneLocalCmd.Flags().BoolVar(&pruneLocalDryRun, "dry-run", false, "Preview deletions without deleting files")
+	artifactPruneLocalCmd.Flags().StringVar(&pruneLocalDir, "dir", ".", "Directory scope (default: current directory)")
+	artifactPruneLocalCmd.Flags().StringVar(&pruneOlderThan, "older-than", "", "Delete only files older than this duration (e.g. 7d, 48h, or 7)")
+	artifactPruneLocalCmd.Flags().StringVar(&pruneSince, "since", "", "Delete only files modified since this time (YYYY-MM-DD, RFC3339, or duration like \"24h ago\")")
+	artifactPruneLocalCmd.Flags().BoolVar(&pruneOutputs, "include-outputs", true, "Consider convention output files (output/, outputs/)")
+	artifactPruneLocalCmd.Flags().BoolVar(&pruneArtifacts, "include-artifacts", true, "Consider artifact-backed file paths")
+	artifactPruneLocalCmd.Flags().BoolVar(&pruneRemoveEmpty, "remove-empty-dirs", false, "Remove empty directories after deleting files")
 }
 
 func addArtifactListFlags(cmd *cobra.Command) {
@@ -877,6 +908,503 @@ func upsertArtifactSpec(specs []artifacts.ArtifactSpec, spec artifacts.ArtifactS
 		}
 	}
 	return append(specs, spec)
+}
+
+type pruneTimeFilter struct {
+	olderThan time.Duration
+	since     time.Time
+}
+
+type localPruneCandidate struct {
+	AbsPath string
+	RelPath string
+	Size    int64
+	ModTime time.Time
+}
+
+type localPrunePlan struct {
+	ScopeRoot              string
+	ScannedCandidateFiles  int
+	RestorableMatchedFiles int
+	TimeFilteredFiles      int
+	Files                  []localPruneCandidate
+	Bytes                  int64
+	Warnings               []string
+}
+
+func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
+	if strings.TrimSpace(pruneOlderThan) != "" && strings.TrimSpace(pruneSince) != "" {
+		return usageErrorf("--older-than and --since are mutually exclusive")
+	}
+	if !pruneOutputs && !pruneArtifacts {
+		return usageErrorf("nothing selected: enable --include-outputs and/or --include-artifacts")
+	}
+
+	scopeRoot, err := resolveLocalPruneScope(pruneLocalDir)
+	if err != nil {
+		return err
+	}
+
+	filter, err := parsePruneTimeFilter(pruneOlderThan, pruneSince, time.Now())
+	if err != nil {
+		return err
+	}
+
+	database, err := db.OpenForReading()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	plan, err := buildLocalPrunePlan(database, scopeRoot, pruneOutputs, pruneArtifacts, filter)
+	if err != nil {
+		return err
+	}
+
+	effectiveDryRun := !pruneLocalApply || pruneLocalDryRun
+
+	for _, warning := range plan.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning)
+	}
+
+	if len(plan.Files) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "No restorable local files matched in %s\n", plan.ScopeRoot)
+		printLocalPruneSummary(cmd, plan, effectiveDryRun, 0, 0)
+		return nil
+	}
+
+	sort.Slice(plan.Files, func(i, j int) bool {
+		return plan.Files[i].RelPath < plan.Files[j].RelPath
+	})
+	for _, f := range plan.Files {
+		verb := "Would delete"
+		if !effectiveDryRun {
+			verb = "Deleting"
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", verb, f.RelPath, humanizeBytes(f.Size))
+	}
+
+	deleteFailures := 0
+	deletedFiles := 0
+	var deletedBytes int64
+	if !effectiveDryRun {
+		for _, f := range plan.Files {
+			if err := os.Remove(f.AbsPath); err != nil {
+				deleteFailures++
+				fmt.Fprintf(cmd.ErrOrStderr(), "Failed to delete %s: %v\n", f.RelPath, err)
+				continue
+			}
+			deletedFiles++
+			deletedBytes += f.Size
+		}
+		if pruneRemoveEmpty {
+			removed, err := removeEmptyOutputDirs(scopeRoot)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: remove empty dirs: %v\n", err)
+			} else if removed > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "Removed %d empty directories.\n", removed)
+			}
+		}
+	}
+
+	if effectiveDryRun {
+		fmt.Fprintf(cmd.OutOrStdout(), "Would free: %s (%d bytes)\n", humanizeBytes(plan.Bytes), plan.Bytes)
+		printLocalPruneSummary(cmd, plan, true, len(plan.Files), plan.Bytes)
+		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: no files deleted.\n")
+		fmt.Fprintf(cmd.OutOrStdout(), "To apply these deletions, run: %s\n", buildPruneLocalApplyCommand())
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Deleted: %d file(s), reclaimed %s (%d bytes)\n", deletedFiles, humanizeBytes(deletedBytes), deletedBytes)
+		printLocalPruneSummary(cmd, plan, false, deletedFiles, deletedBytes)
+	}
+	if deleteFailures > 0 {
+		return fmt.Errorf("failed to delete %d file(s)", deleteFailures)
+	}
+	return nil
+}
+
+func printLocalPruneSummary(cmd *cobra.Command, plan localPrunePlan, dryRun bool, effectiveFiles int, effectiveBytes int64) {
+	mode := "dry-run"
+	if !dryRun {
+		mode = "apply"
+	}
+	bytesLabel := "would_free"
+	if dryRun {
+		bytesLabel = "would_free"
+	} else {
+		bytesLabel = "deleted"
+	}
+	bytesWithCommas := formatIntWithCommas(effectiveBytes)
+	fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"Summary (%s): scanned %d, restorable %d, time-filtered %d, selected %d, %s %s bytes (%s)\n",
+		mode,
+		plan.ScannedCandidateFiles,
+		plan.RestorableMatchedFiles,
+		plan.TimeFilteredFiles,
+		effectiveFiles,
+		bytesLabel,
+		bytesWithCommas,
+		humanizeBytes(effectiveBytes),
+	)
+}
+
+func formatIntWithCommas(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		return s
+	}
+	negative := false
+	if s[0] == '-' {
+		negative = true
+		s = s[1:]
+	}
+	rem := len(s) % 3
+	var b strings.Builder
+	if negative {
+		b.WriteByte('-')
+	}
+	if rem > 0 {
+		b.WriteString(s[:rem])
+		if len(s) > rem {
+			b.WriteByte(',')
+		}
+	}
+	for i := rem; i < len(s); i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			b.WriteByte(',')
+		}
+	}
+	return b.String()
+}
+
+func buildPruneLocalApplyCommand() string {
+	args := []string{"weft", "artifact", "prune-local", "--apply"}
+	if strings.TrimSpace(pruneLocalDir) != "" && strings.TrimSpace(pruneLocalDir) != "." {
+		args = append(args, "--dir", shellQuote(pruneLocalDir))
+	}
+	if strings.TrimSpace(pruneOlderThan) != "" {
+		args = append(args, "--older-than", shellQuote(pruneOlderThan))
+	}
+	if strings.TrimSpace(pruneSince) != "" {
+		args = append(args, "--since", shellQuote(pruneSince))
+	}
+	if !pruneOutputs {
+		args = append(args, "--include-outputs=false")
+	}
+	if !pruneArtifacts {
+		args = append(args, "--include-artifacts=false")
+	}
+	if pruneRemoveEmpty {
+		args = append(args, "--remove-empty-dirs")
+	}
+	return strings.Join(args, " ")
+}
+
+func resolveLocalPruneScope(dir string) (string, error) {
+	cleaned := strings.TrimSpace(dir)
+	if cleaned == "" {
+		cleaned = "."
+	}
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve --dir %q: %w", dir, err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func parsePruneTimeFilter(olderThanRaw, sinceRaw string, now time.Time) (pruneTimeFilter, error) {
+	var filter pruneTimeFilter
+	if strings.TrimSpace(olderThanRaw) != "" && strings.TrimSpace(sinceRaw) != "" {
+		return filter, usageErrorf("--older-than and --since are mutually exclusive")
+	}
+	if strings.TrimSpace(olderThanRaw) != "" {
+		d, err := parseOlderThanDuration(olderThanRaw)
+		if err != nil {
+			return filter, err
+		}
+		filter.olderThan = d
+	}
+	if strings.TrimSpace(sinceRaw) != "" {
+		cutoff, err := parseSinceCutoff(sinceRaw, now)
+		if err != nil {
+			return filter, err
+		}
+		filter.since = cutoff
+	}
+	return filter, nil
+}
+
+func parseOlderThanDuration(raw string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, usageErrorf("--older-than requires a value")
+	}
+	if days, err := strconv.Atoi(trimmed); err == nil {
+		if days <= 0 {
+			return 0, usageErrorf("invalid --older-than %q (must be > 0)", raw)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	d, err := parseDuration(trimmed)
+	if err != nil {
+		return 0, usageErrorf("invalid --older-than %q (use duration like 7d, 48h, or integer days)", raw)
+	}
+	if d <= 0 {
+		return 0, usageErrorf("invalid --older-than %q (must be > 0)", raw)
+	}
+	return d, nil
+}
+
+func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool, includeArtifacts bool, filter pruneTimeFilter) (localPrunePlan, error) {
+	plan := localPrunePlan{ScopeRoot: scopeRoot}
+
+	project, _ := workdir.ResolveProjectName("", scopeRoot)
+	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+	if err != nil {
+		return plan, fmt.Errorf("list jobs: %w", err)
+	}
+	scopeJobs := filterJobsForScope(jobs, scopeRoot, project)
+
+	restorable := make(map[string]struct{})
+	if includeOutputs {
+		cfg, cfgErr := config.Load()
+		var r2Client *r2.Client
+		if cfgErr == nil {
+			r2Client, _ = buildR2Client(cfg)
+		}
+		if r2Client == nil {
+			plan.Warnings = append(plan.Warnings, "R2 not configured; cloud output discovery is limited to locally indexed entries")
+		}
+		for _, job := range scopeJobs {
+			entries, err := listJobOutputAssets(database, job.ID)
+			if err == nil {
+				for _, entry := range entries {
+					if rel, ok := normalizeLocalRelPath(entry.Path); ok {
+						restorable[rel] = struct{}{}
+					}
+				}
+			}
+			if r2Client != nil && job.IsLaunchJob() {
+				for _, f := range listCloudJobOutputFiles(r2Client, job) {
+					if rel, ok := normalizeLocalRelPath(f.RelPath); ok {
+						restorable[rel] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	if includeArtifacts {
+		for _, job := range scopeJobs {
+			arts, err := db.ListArtifactsByJob(database, job.ID)
+			if err != nil {
+				continue
+			}
+			for _, art := range arts {
+				if rel, ok := normalizeLocalRelPath(art.Path); ok {
+					restorable[rel] = struct{}{}
+				}
+			}
+		}
+	}
+
+	candidates, err := collectLocalPruneCandidates(scopeRoot, includeArtifacts, restorable)
+	if err != nil {
+		return plan, err
+	}
+	plan.ScannedCandidateFiles = len(candidates)
+
+	now := time.Now()
+	for _, candidate := range candidates {
+		if _, ok := restorable[candidate.RelPath]; !ok {
+			continue
+		}
+		plan.RestorableMatchedFiles++
+		if !passesPruneTimeFilter(candidate.ModTime, filter, now) {
+			plan.TimeFilteredFiles++
+			continue
+		}
+		plan.Files = append(plan.Files, candidate)
+		plan.Bytes += candidate.Size
+	}
+	return plan, nil
+}
+
+func filterJobsForScope(jobs []*db.Job, scopeRoot string, project string) []*db.Job {
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if localDir != "" && isWithinScope(scopeRoot, localDir) {
+			filtered = append(filtered, job)
+			continue
+		}
+		if project != "" && strings.TrimSpace(job.Project) == project {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+func collectLocalPruneCandidates(scopeRoot string, includeArtifacts bool, restorable map[string]struct{}) ([]localPruneCandidate, error) {
+	outputDirs := config.ProjectOutputDirs(scopeRoot)
+	seen := make(map[string]struct{})
+	result := make([]localPruneCandidate, 0)
+
+	addCandidate := func(absPath string, info fs.FileInfo) {
+		rel, err := filepath.Rel(scopeRoot, absPath)
+		if err != nil {
+			return
+		}
+		rel, ok := normalizeLocalRelPath(rel)
+		if !ok {
+			return
+		}
+		if !isWithinScope(scopeRoot, absPath) {
+			return
+		}
+		if _, exists := seen[rel]; exists {
+			return
+		}
+		seen[rel] = struct{}{}
+		result = append(result, localPruneCandidate{
+			AbsPath: absPath,
+			RelPath: rel,
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+	}
+
+	for _, dir := range outputDirs {
+		dir = strings.TrimSuffix(strings.TrimSpace(dir), "/")
+		if dir == "" {
+			continue
+		}
+		absDir := filepath.Join(scopeRoot, filepath.FromSlash(dir))
+		walkErr := filepath.WalkDir(absDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			info, infoErr := d.Info()
+			if infoErr != nil || !info.Mode().IsRegular() {
+				return nil
+			}
+			addCandidate(path, info)
+			return nil
+		})
+		if walkErr != nil && !os.IsNotExist(walkErr) {
+			return nil, walkErr
+		}
+	}
+
+	if includeArtifacts {
+		for relPath := range restorable {
+			absPath := filepath.Join(scopeRoot, filepath.FromSlash(relPath))
+			if !isWithinScope(scopeRoot, absPath) {
+				continue
+			}
+			info, err := os.Stat(absPath)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			addCandidate(absPath, info)
+		}
+	}
+	return result, nil
+}
+
+func normalizeLocalRelPath(p string) (string, bool) {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(trimmed))
+	if cleaned == "." || cleaned == "" {
+		return "", false
+	}
+	slashed := filepath.ToSlash(cleaned)
+	if strings.HasPrefix(slashed, "/") || strings.HasPrefix(slashed, "../") || slashed == ".." {
+		return "", false
+	}
+	return slashed, true
+}
+
+func isWithinScope(scopeRoot, path string) bool {
+	rel, err := filepath.Rel(scopeRoot, path)
+	if err != nil {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, "../"))
+}
+
+func passesPruneTimeFilter(modTime time.Time, filter pruneTimeFilter, now time.Time) bool {
+	if filter.olderThan > 0 {
+		return modTime.Before(now.Add(-filter.olderThan))
+	}
+	if !filter.since.IsZero() {
+		return !modTime.Before(filter.since)
+	}
+	return true
+}
+
+func removeEmptyOutputDirs(scopeRoot string) (int, error) {
+	outputDirs := config.ProjectOutputDirs(scopeRoot)
+	removed := 0
+	for _, dir := range outputDirs {
+		dir = strings.TrimSuffix(strings.TrimSpace(dir), "/")
+		if dir == "" {
+			continue
+		}
+		root := filepath.Join(scopeRoot, filepath.FromSlash(dir))
+		dirs := make([]string, 0)
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				dirs = append(dirs, path)
+			}
+			return nil
+		}); err != nil && !os.IsNotExist(err) {
+			return removed, err
+		}
+		sort.Slice(dirs, func(i, j int) bool {
+			return len(dirs[i]) > len(dirs[j])
+		})
+		for _, d := range dirs {
+			if err := os.Remove(d); err == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
+}
+
+func humanizeBytes(n int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case n >= gb:
+		return fmt.Sprintf("%.1f GiB", float64(n)/float64(gb))
+	case n >= mb:
+		return fmt.Sprintf("%.1f MiB", float64(n)/float64(mb))
+	case n >= kb:
+		return fmt.Sprintf("%.1f KiB", float64(n)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // listJobOutputAssets returns job-output entries from the host_data table for a given job.
