@@ -15,7 +15,8 @@ import (
 	"github.com/osteele/weft/internal/runner"
 )
 
-// version is set via -ldflags "-X main.version=<commit-hash>"
+// version is set via -ldflags "-X main.version=<agent-version>".
+// The value is a deterministic local source hash in normal builds.
 var version = "dev"
 
 // agentLogPath returns the path for the agent's operations log.

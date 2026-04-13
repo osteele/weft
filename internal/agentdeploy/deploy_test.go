@@ -2,8 +2,8 @@ package agentdeploy
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -207,35 +207,96 @@ func TestEnsureBuilt_ExtractFromFilesystem(t *testing.T) {
 	}
 }
 
-// TestLocalAgentVersion_ExcludesWorkingCopy verifies that the local agent
-// version is based on committed revisions, not the jj working copy.
-func TestLocalAgentVersion_ExcludesWorkingCopy(t *testing.T) {
-	if _, err := exec.LookPath("jj"); err != nil {
-		t.Skip("jj not installed")
-	}
-	rootCmd := exec.Command("jj", "workspace", "root")
-	if _, err := rootCmd.Output(); err != nil {
-		t.Skip("not in a jj repo")
-	}
-
-	version, err := LocalAgentVersion()
+func TestLocalAgentVersion_HashFormatAndStability(t *testing.T) {
+	version1, err := LocalAgentVersion()
 	if err != nil {
 		t.Fatalf("LocalAgentVersion: %v", err)
 	}
-	if version == "" {
-		t.Fatal("LocalAgentVersion returned empty string")
-	}
-
-	wcCmd := exec.Command("jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short(12)")
-	wcOut, err := wcCmd.Output()
+	version2, err := LocalAgentVersion()
 	if err != nil {
-		t.Fatalf("get working copy commit: %v", err)
+		t.Fatalf("LocalAgentVersion second call: %v", err)
 	}
-	wcCommit := strings.TrimSpace(string(wcOut))
+	if version1 != version2 {
+		t.Fatalf("LocalAgentVersion changed between calls: %q != %q", version1, version2)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(version1) {
+		t.Fatalf("LocalAgentVersion = %q, want 12 lowercase hex chars", version1)
+	}
+}
 
-	if version == wcCommit {
-		t.Errorf("LocalAgentVersion() = %q matches working copy commit_id; "+
-			"should use a committed ancestor instead to avoid perpetual redeploys", version)
+func TestHashVersionFromFiles_DeterministicOrdering(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a.txt")
+	b := filepath.Join(root, "b.txt")
+	if err := os.WriteFile(a, []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("beta"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := hashVersionFromFiles(root, []string{a, b})
+	if err != nil {
+		t.Fatalf("hashVersionFromFiles: %v", err)
+	}
+	h2, err := hashVersionFromFiles(root, []string{b, a})
+	if err != nil {
+		t.Fatalf("hashVersionFromFiles reversed: %v", err)
+	}
+	if h1 != h2 {
+		t.Fatalf("hash should be deterministic across file order, got %q and %q", h1, h2)
+	}
+}
+
+func TestHashVersionFromFiles_ChangesWithContent(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "agent.go")
+	if err := os.WriteFile(file, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h1, err := hashVersionFromFiles(root, []string{file})
+	if err != nil {
+		t.Fatalf("hashVersionFromFiles initial: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h2, err := hashVersionFromFiles(root, []string{file})
+	if err != nil {
+		t.Fatalf("hashVersionFromFiles updated: %v", err)
+	}
+	if h1 == h2 {
+		t.Fatalf("hash should change when file content changes: %q", h1)
+	}
+}
+
+func TestHashVersionFromFiles_ChangesWithPath(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a", "same.txt")
+	b := filepath.Join(root, "b", "same.txt")
+	if err := os.MkdirAll(filepath.Dir(a), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(b), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a, []byte("identical"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("identical"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := hashVersionFromFiles(root, []string{a})
+	if err != nil {
+		t.Fatalf("hashVersionFromFiles for a: %v", err)
+	}
+	h2, err := hashVersionFromFiles(root, []string{b})
+	if err != nil {
+		t.Fatalf("hashVersionFromFiles for b: %v", err)
+	}
+	if h1 == h2 {
+		t.Fatalf("hash should include relative path; got equal hash %q", h1)
 	}
 }
 

@@ -57,7 +57,7 @@ value R2InstanceState {
     heartbeat: HeartbeatSample?     -- instance/<id>/heartbeat
     heartbeat_age: Duration?
     termination_intent: String?     -- instance/<id>/termination-intent.json
-    agent_version: String?          -- instance/<id>/agent-version
+    agent_version: String?          -- instance/<id>/agent-version (deterministic source-hash build ID)
     job_progress: Integer?          -- 0-100 or -1
 }
 
@@ -420,7 +420,7 @@ rule SyncCloudInstanceState {
         -- instance/<id>/heartbeat — JSON with GPU, memory, disk metrics
         -- bootstrap/<id>/stage — bootstrap progress during startup
         -- instance/<id>/termination-intent.json — cleanup control
-        -- instance/<id>/agent-version — agent binary version
+        -- instance/<id>/agent-version — agent build ID (source-hash-derived)
         -- jobs/<jobID>/runs/<runID>/.complete — per-job exit code
         --
         -- The runID in R2 key paths is the job_attempts.id from the DB.
@@ -435,7 +435,7 @@ rule SyncCloudInstanceState {
 rule ParallelR2MarkerFetch {
     when: FetchR2InstanceState(instance)
 
-    -- Wave 1 (independent): termination intent, phase, agent version.
+    -- Wave 1 (independent): termination intent, phase, agent build ID.
     -- All three are issued concurrently; each is best-effort and does not
     -- fail the others.
     ensures: R2MarkersFetched(instance, {termination_intent, phase, agent_version})
