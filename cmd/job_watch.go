@@ -89,9 +89,7 @@ func watchJobsPlainAll(database *sql.DB, follow bool) error {
 	defer cancel()
 
 	for {
-		for _, warning := range syncListData(database) {
-			fmt.Fprintln(os.Stderr, warning)
-		}
+		printWarnings(syncListData(database))
 
 		jobs, err := collectJobsForList(database, nil)
 		if err != nil {

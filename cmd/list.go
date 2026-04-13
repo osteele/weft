@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -140,30 +141,10 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Kick off sync in the background. Render the table from the DB as soon
-	// as we have results or the soft deadline elapses, whichever comes first.
-	// If we render before sync finishes, we still block on it before returning
-	// so in-flight DB writes aren't abandoned mid-transaction.
-	syncCh := startListSyncAsync(database)
-	const listSyncSoftDeadline = 1 * time.Second
-
-	var (
-		syncWarnings []string
-		synced       bool
-	)
-	select {
-	case syncWarnings = <-syncCh:
-		synced = true
-	case <-time.After(listSyncSoftDeadline):
-	}
-	printWarnings(syncWarnings)
-
-	// Cleanup and single-job modes depend on fully-synced state; block on
-	// completion before proceeding.
+	// Cleanup and single-job modes need fully-synced state; run the sync
+	// synchronously for them.
 	if listCleanup > 0 || listShow > 0 {
-		if !synced {
-			printWarnings(<-syncCh)
-		}
+		printWarnings(syncListData(database))
 		if listCleanup > 0 {
 			deleted, err := db.CleanupOld(database, listCleanup)
 			if err != nil {
@@ -175,6 +156,28 @@ func runList(cmd *cobra.Command, args []string) error {
 		return showJob(database, listShow)
 	}
 
+	// Render the table from the DB as soon as the sync finishes or a short
+	// soft deadline elapses, whichever comes first. The process always
+	// blocks on the sync before returning so in-flight DB writes aren't
+	// abandoned mid-transaction.
+	syncCh := startListSyncAsync(database)
+	const listSyncSoftDeadline = 1 * time.Second
+	var (
+		syncWarnings []string
+		synced       bool
+	)
+	defer func() {
+		if !synced {
+			<-syncCh
+		}
+	}()
+	select {
+	case syncWarnings = <-syncCh:
+		synced = true
+	case <-time.After(listSyncSoftDeadline):
+	}
+	printWarnings(syncWarnings)
+
 	jobs, err := collectJobsForList(database, args)
 	if err != nil {
 		return err
@@ -185,18 +188,19 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	if !synced {
 		fmt.Fprintln(os.Stderr, degraded.CloudStateStalePendingRefresh())
-		// Our stale-pending-refresh notice already tells the user cloud
-		// state wasn't fully refreshed; drop the redundant cloud-timeout
-		// warning that SyncCloud produces on the same event.
-		printWarnings(filterCloudTimeoutWarning(<-syncCh))
+		late := <-syncCh
+		synced = true
+		printWarnings(dropCloudTimeoutWarnings(late))
 	}
 	return nil
 }
 
-func filterCloudTimeoutWarning(warnings []string) []string {
+// dropCloudTimeoutWarnings filters out the cloud-sync timeout warning, which
+// duplicates the stale-pending-refresh notice already shown on this path.
+func dropCloudTimeoutWarnings(warnings []string) []string {
 	out := warnings[:0]
 	for _, w := range warnings {
-		if strings.HasPrefix(w, "Cloud sync timed out") {
+		if degraded.IsCloudSyncTimeoutWarning(w) {
 			continue
 		}
 		out = append(out, w)
@@ -211,8 +215,12 @@ func startListSyncAsync(database *sql.DB) <-chan []string {
 }
 
 func printWarnings(warnings []string) {
-	for _, w := range warnings {
-		fmt.Fprintln(os.Stderr, w)
+	writeWarnings(os.Stderr, warnings)
+}
+
+func writeWarnings(w io.Writer, warnings []string) {
+	for _, msg := range warnings {
+		fmt.Fprintln(w, msg)
 	}
 }
 

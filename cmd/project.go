@@ -132,9 +132,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	for _, warning := range syncListData(database) {
-		fmt.Fprintln(cmd.ErrOrStderr(), warning)
-	}
+	writeWarnings(cmd.ErrOrStderr(), syncListData(database))
 
 	jobs, err := collectJobsForList(database, nil)
 	if err != nil {
@@ -164,9 +162,7 @@ func runProjectJobs(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	for _, warning := range syncListData(database) {
-		fmt.Fprintln(cmd.ErrOrStderr(), warning)
-	}
+	writeWarnings(cmd.ErrOrStderr(), syncListData(database))
 
 	jobs, err := collectJobsForList(database, args)
 	if err != nil {

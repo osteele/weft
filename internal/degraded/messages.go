@@ -1,6 +1,9 @@
 package degraded
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	HostStatusStale = "stale"
@@ -23,6 +26,13 @@ func CloudSyncTimedOutWaitingForDB(timeout string) string {
 // the sync before returning, so the shell will appear to pause briefly.
 func CloudStateStalePendingRefresh() string {
 	return "Cloud state may be stale; refreshing in background..."
+}
+
+// IsCloudSyncTimeoutWarning reports whether a warning string was produced by
+// CloudSyncTimedOutWaitingForDB. Callers that already show their own staleness
+// notice (e.g. streaming list render) use this to drop the redundant warning.
+func IsCloudSyncTimeoutWarning(s string) bool {
+	return strings.HasPrefix(s, "Cloud sync timed out")
 }
 
 func TerminalJobAttachmentDegradedNote() string {
