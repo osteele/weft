@@ -53,6 +53,7 @@ func sqlParseMemoryMiBExpr(expr string) string {
 // dbExecer is the common interface for *sql.DB and *sql.Tx.
 type dbExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 // closeAttemptsAndRequeue closes open attempts for a cloud job and sets
@@ -841,7 +842,59 @@ func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID 
 	if err != nil {
 		return 0, fmt.Errorf("create attempt for job %d: %w", jobID, err)
 	}
-	return result.LastInsertId()
+	attemptID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := carryForwardDependencyMetadata(execer, jobID, attemptID); err != nil {
+		return 0, fmt.Errorf("carry forward dependency metadata for job %d: %w", jobID, err)
+	}
+	return attemptID, nil
+}
+
+// carryForwardDependencyMetadata copies dependency metadata from the previous
+// attempt to a new attempt. This preserves cloud dependency semantics
+// (CloudNeeds/CloudAfter) across attempt rollovers (launch assignment, retry,
+// requeue) without carrying stale telemetry/resource stats into the new run.
+func carryForwardDependencyMetadata(execer dbExecer, jobID, newAttemptID int64) error {
+	var raw sql.NullString
+	err := execer.QueryRow(
+		`SELECT job_metadata
+		 FROM job_attempts
+		 WHERE job_id = ? AND id != ?
+		 ORDER BY attempt_number DESC
+		 LIMIT 1`,
+		jobID, newAttemptID,
+	).Scan(&raw)
+	if err == sql.ErrNoRows || !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	previous := decodeJobMetadata(raw)
+	if previous == nil || previous.Dependencies == nil {
+		return nil
+	}
+	deps := &JobDependencyMetadata{}
+	if len(previous.Dependencies.CloudAfter) > 0 {
+		deps.CloudAfter = append([]JobDependencyRef(nil), previous.Dependencies.CloudAfter...)
+	}
+	if len(previous.Dependencies.CloudNeeds) > 0 {
+		deps.CloudNeeds = append([]string(nil), previous.Dependencies.CloudNeeds...)
+	}
+	if len(deps.CloudAfter) == 0 && len(deps.CloudNeeds) == 0 {
+		return nil
+	}
+
+	meta := &JobMetadata{Dependencies: deps}
+	encoded, err := encodeJobMetadata(meta)
+	if err != nil {
+		return err
+	}
+	_, err = execer.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = ?`, encoded, newAttemptID)
+	return err
 }
 
 // CloseAttempt marks the current open attempt for a job as ended.

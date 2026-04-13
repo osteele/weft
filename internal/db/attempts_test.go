@@ -185,3 +185,41 @@ func TestNormalizeStalePendingPlacementNoLaunch(t *testing.T) {
 	checkPending(freshID, StatusPendingPlacement)
 	checkPending(anchoredID, StatusPendingPlacement)
 }
+
+func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID := int64(4001)
+	insertTestJob(t, database, jobID, "echo stage", "/tmp", StatusQueued)
+	meta := &JobMetadata{
+		Dependencies: &JobDependencyMetadata{
+			CloudNeeds: []string{"output/model.pt:1046"},
+			CloudAfter: []JobDependencyRef{{JobID: 1046}},
+		},
+	}
+	if err := SetJobMetadata(database, jobID, meta); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.Metadata == nil || job.Metadata.Dependencies == nil {
+		t.Fatalf("expected dependency metadata, got %+v", job)
+	}
+	if got := job.Metadata.Dependencies.CloudNeeds; len(got) != 1 || got[0] != "output/model.pt:1046" {
+		t.Fatalf("cloud_needs = %v", got)
+	}
+	if got := job.Metadata.Dependencies.CloudAfter; len(got) != 1 || got[0].JobID != 1046 {
+		t.Fatalf("cloud_after = %v", got)
+	}
+}

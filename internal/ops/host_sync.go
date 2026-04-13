@@ -571,6 +571,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			}
 		}
 		if err := materializeCloudNeeds(database, job, timeout, getR2Client); err != nil {
+			oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
+				oplog.WithDetail("cloud artifact staging failed"),
+				oplog.WithError(err),
+			)
 			recordFailure(job.ID, "cloud artifact staging failed", err)
 			continue
 		}
@@ -668,6 +672,9 @@ func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration,
 	if job.Metadata == nil || job.Metadata.Dependencies == nil || len(job.Metadata.Dependencies.CloudNeeds) == 0 {
 		return nil
 	}
+	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+		oplog.WithDetailf("cloud artifact staging start (%d artifact%s)", len(job.Metadata.Dependencies.CloudNeeds), pluralize(len(job.Metadata.Dependencies.CloudNeeds))),
+	)
 	r2Client, err := getR2Client()
 	if err != nil {
 		return err
@@ -686,6 +693,9 @@ func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration,
 	defer os.RemoveAll(tmpDir)
 
 	for _, spec := range job.Metadata.Dependencies.CloudNeeds {
+		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+			oplog.WithDetailf("cloud artifact staging attempt: %s", spec),
+		)
 		parsed, err := parseCloudNeedSpec(spec)
 		if err != nil {
 			return fmt.Errorf("parse cloud need %q: %w", spec, err)
@@ -715,7 +725,13 @@ func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration,
 		if err := ssh.CopyTo(localPath, job.Host, remotePath); err != nil {
 			return fmt.Errorf("copy %q to %s:%s: %w", spec, job.Host, remotePath, err)
 		}
+		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+			oplog.WithDetailf("cloud artifact staging success: %s", spec),
+		)
 	}
+	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+		oplog.WithDetailf("cloud artifact staging complete (%d artifact%s)", len(job.Metadata.Dependencies.CloudNeeds), pluralize(len(job.Metadata.Dependencies.CloudNeeds))),
+	)
 	return nil
 }
 
@@ -779,6 +795,13 @@ func ensureRemoteParentDir(host, remotePath string, timeout time.Duration) error
 		return fmt.Errorf("mkdir remote path: %s: %w", stderr, err)
 	}
 	return nil
+}
+
+func pluralize(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, timeout time.Duration) error {
