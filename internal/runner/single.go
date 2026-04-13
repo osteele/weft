@@ -228,11 +228,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		timer := time.AfterFunc(cfg.MaxTime, func() {
 			timedOut.Store(true)
 			slog.Warn("max-time reached, sending SIGTERM", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime, "pgid", proc.PGID)
-			syscall.Kill(-proc.PGID, syscall.SIGTERM)
-			// Give the process a grace period to clean up, then SIGKILL
-			time.AfterFunc(10*time.Second, func() {
-				syscall.Kill(-proc.PGID, syscall.SIGKILL)
-			})
+			KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, "")
 		})
 		defer timer.Stop()
 	}
@@ -309,11 +305,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 					slog.Warn("fatal error detected in job logs, sending SIGTERM",
 						"component", "runner", "job_id", cfg.JobID,
 						"pattern", d.Pattern, "message", d.Message)
-					WriteKillReasonFile(paths, d.Pattern)
-					syscall.Kill(-proc.PGID, syscall.SIGTERM)
-					time.AfterFunc(10*time.Second, func() {
-						syscall.Kill(-proc.PGID, syscall.SIGKILL)
-					})
+					KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, d.Pattern)
 					return
 				}
 			}
@@ -362,11 +354,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 					slog.Warn("watchdog firing, sending SIGTERM",
 						"component", "runner", "job_id", cfg.JobID,
 						"reason", reason, "pgid", proc.PGID)
-					WriteKillReasonFile(paths, reason)
-					syscall.Kill(-proc.PGID, syscall.SIGTERM)
-					time.AfterFunc(10*time.Second, func() {
-						syscall.Kill(-proc.PGID, syscall.SIGKILL)
-					})
+					KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, reason)
 					return
 				}
 			}

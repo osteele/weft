@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -110,10 +109,7 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 		timer := time.AfterFunc(timeout, func() {
 			timedOut.Store(true)
 			slog.Warn("setup timeout reached, sending SIGTERM", "component", "runner", "job_id", jobID, "timeout", timeout, "pgid", proc.PGID)
-			syscall.Kill(-proc.PGID, syscall.SIGTERM)
-			time.AfterFunc(10*time.Second, func() {
-				syscall.Kill(-proc.PGID, syscall.SIGKILL)
-			})
+			KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, "")
 		})
 		defer timer.Stop()
 	}

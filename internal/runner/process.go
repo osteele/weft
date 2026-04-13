@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Process tracks a running job process.
@@ -194,6 +195,20 @@ func KillProcessGroup(pgid int) {
 	syscall.Kill(-pgid, syscall.SIGTERM)
 	// Give it a moment, then force kill
 	syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+// KillProcessGroupWithGrace sends SIGTERM to the process group, then SIGKILL
+// after grace elapses. If reason is non-empty, it is written to the
+// kill-reason file first so diagnostics can report why the job was killed.
+// Callers own their own logging.
+func KillProcessGroupWithGrace(pgid int, grace time.Duration, paths JobPaths, reason string) {
+	if reason != "" {
+		WriteKillReasonFile(paths, reason)
+	}
+	syscall.Kill(-pgid, syscall.SIGTERM)
+	time.AfterFunc(grace, func() {
+		syscall.Kill(-pgid, syscall.SIGKILL)
+	})
 }
 
 // CleanupPIDFiles removes PID, PGID, paused, and heartbeat files for a job.
