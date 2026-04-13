@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -24,6 +25,77 @@ type Client struct {
 	s3       *s3.Client
 	bucket   string
 	endpoint string
+}
+
+type progressWriter struct {
+	w          io.Writer
+	onProgress func()
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if n > 0 && w.onProgress != nil {
+		w.onProgress()
+	}
+	return n, err
+}
+
+func copyWithIdleTimeout(ctx context.Context, cancel context.CancelFunc, src io.Reader, dst io.Writer, idleTimeout time.Duration) (int64, error) {
+	if idleTimeout <= 0 {
+		return io.Copy(dst, src)
+	}
+
+	progressCh := make(chan struct{}, 1)
+	timeoutCh := make(chan error, 1)
+	monitorDone := make(chan struct{})
+
+	go func() {
+		defer close(monitorDone)
+		timer := time.NewTimer(idleTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-progressCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idleTimeout)
+			case <-timer.C:
+				timeoutCh <- fmt.Errorf("download stalled: no progress for %s", idleTimeout)
+				cancel()
+				return
+			}
+		}
+	}()
+
+	progDst := &progressWriter{
+		w: dst,
+		onProgress: func() {
+			select {
+			case progressCh <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	n, copyErr := io.Copy(progDst, src)
+	cancel()
+	<-monitorDone
+
+	select {
+	case stallErr := <-timeoutCh:
+		return n, stallErr
+	default:
+	}
+	if copyErr != nil {
+		return n, copyErr
+	}
+	return n, nil
 }
 
 // IsConfigured returns true if the client has a usable S3 connection.
@@ -393,6 +465,66 @@ func (c *Client) downloadObject(ctx context.Context, key string, localPath strin
 
 	_, err = io.Copy(f, resp.Body)
 	return err
+}
+
+// DownloadObjectToWriterWithIdleTimeout streams an object to a writer and only
+// fails when no transfer progress is made for idleTimeout.
+func (c *Client) DownloadObjectToWriterWithIdleTimeout(parent context.Context, key string, dst io.Writer, idleTimeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
+	body, err := c.GetObjectReader(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	defer body.Close()
+
+	return copyWithIdleTimeout(ctx, cancel, body, dst, idleTimeout)
+}
+
+// DownloadObjectToFileWithIdleTimeout streams an object to localPath and only
+// fails when no transfer progress is made for idleTimeout.
+func (c *Client) DownloadObjectToFileWithIdleTimeout(parent context.Context, key string, localPath string, idleTimeout time.Duration) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return 0, err
+	}
+	f, err := os.Create(localPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return c.DownloadObjectToWriterWithIdleTimeout(parent, key, f, idleTimeout)
+}
+
+// DownloadResultsWithIdleTimeout downloads all files under prefix to localDir
+// using per-object idle timeout semantics.
+func (c *Client) DownloadResultsWithIdleTimeout(ctx context.Context, prefix string, localDir string, idleTimeout time.Duration) error {
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	}
+
+	paginator := s3.NewListObjectsV2Paginator(c.s3, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list objects: %w", err)
+		}
+
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			relPath := strings.TrimPrefix(key, prefix)
+			relPath = strings.TrimPrefix(relPath, "/")
+			if relPath == "" {
+				continue
+			}
+			localPath := filepath.Join(localDir, relPath)
+			if _, err := c.DownloadObjectToFileWithIdleTimeout(ctx, key, localPath, idleTimeout); err != nil {
+				return fmt.Errorf("download %s: %w", key, err)
+			}
+		}
+	}
+	return nil
 }
 
 // IsNotFound returns true if the error indicates the object was not found

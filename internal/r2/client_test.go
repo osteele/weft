@@ -1,8 +1,13 @@
 package r2
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
+	"time"
 )
 
 func jobStartedKey(jobID int64) string {
@@ -98,5 +103,83 @@ func TestJobMarkers_AnyCompletedKeyReturnsSomeKey(t *testing.T) {
 	_, ok = markers.AnyCompletedKey(999)
 	if ok {
 		t.Fatal("expected AnyCompletedKey to return false for unknown job")
+	}
+}
+
+type delayedChunkReader struct {
+	ctx    context.Context
+	chunks [][]byte
+	delay  time.Duration
+	index  int
+}
+
+func (r *delayedChunkReader) Read(p []byte) (int, error) {
+	if r.index >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	case <-time.After(r.delay):
+	}
+	n := copy(p, r.chunks[r.index])
+	r.index++
+	return n, nil
+}
+
+type stallingReader struct {
+	ctx   context.Context
+	wrote bool
+}
+
+func (r *stallingReader) Read(p []byte) (int, error) {
+	if !r.wrote {
+		r.wrote = true
+		p[0] = 'x'
+		return 1, nil
+	}
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	case <-time.After(5 * time.Second):
+		return 0, io.EOF
+	}
+}
+
+func TestCopyWithIdleTimeout_AllowsSlowProgress(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &delayedChunkReader{
+		ctx:    ctx,
+		chunks: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
+		delay:  25 * time.Millisecond,
+	}
+	var out bytes.Buffer
+	n, err := copyWithIdleTimeout(ctx, cancel, src, &out, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("copyWithIdleTimeout returned error: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("copied bytes = %d, want 3", n)
+	}
+	if out.String() != "abc" {
+		t.Fatalf("output = %q, want %q", out.String(), "abc")
+	}
+}
+
+func TestCopyWithIdleTimeout_FailsWhenStalled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &stallingReader{ctx: ctx}
+	var out bytes.Buffer
+	_, err := copyWithIdleTimeout(ctx, cancel, src, &out, 30*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected stall error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no progress") {
+		t.Fatalf("error = %q, want contains %q", err.Error(), "no progress")
+	}
+	if out.String() != "x" {
+		t.Fatalf("output = %q, want %q", out.String(), "x")
 	}
 }

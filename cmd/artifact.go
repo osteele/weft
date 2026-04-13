@@ -116,7 +116,10 @@ var (
 	artifactTag      []string
 	artifactLatest   bool
 	artifactAll      bool
+	artifactTimeout  time.Duration
 )
+
+const defaultArtifactTimeout = 2 * time.Minute
 
 func init() {
 	rootCmd.AddCommand(artifactCmd)
@@ -129,6 +132,7 @@ func init() {
 	addArtifactListFlags(artifactListCmd)
 	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
 	artifactGetCmd.Flags().BoolVar(&artifactAll, "all", false, "Download all artifacts for the job")
+	artifactGetCmd.Flags().DurationVar(&artifactTimeout, "timeout", defaultArtifactTimeout, "Fail if no download progress occurs for this duration")
 	artifactGetCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactGetCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
@@ -505,8 +509,12 @@ func fetchCloudArtifactByToken(cmd *cobra.Command, r2Client *r2.Client, job *db.
 
 // downloadSingleCloudFile downloads one cloud output file to the output destination.
 func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, f runner.OutputFile, multiple bool) error {
+	dest, err := resolveArtifactOutputPathForJob(f.RelPath, artifactOutput, job.ID, multiple)
+	if err != nil {
+		return err
+	}
+
 	var (
-		data    []byte
 		lastErr error
 	)
 	for _, runID := range jobAttemptRunIDs(job) {
@@ -519,10 +527,12 @@ func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Jo
 			r2Key = r2keys.JobAttemptOutputsPrefix(job.ID, runID) + f.RelPath
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		var err error
-		data, err = r2Client.GetObject(ctx, r2Key)
-		cancel()
+		if dest == "-" {
+			_, err = r2Client.DownloadObjectToWriterWithIdleTimeout(context.Background(), r2Key, cmd.OutOrStdout(), artifactTimeout)
+		} else {
+			err = downloadR2ObjectToFileAtomic(r2Client, r2Key, dest, artifactTimeout)
+		}
 		if err == nil {
 			lastErr = nil
 			break
@@ -536,21 +546,9 @@ func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Jo
 		return fmt.Errorf("download from R2: %w", lastErr)
 	}
 
-	dest, err := resolveArtifactOutputPathForJob(f.RelPath, artifactOutput, job.ID, multiple)
-	if err != nil {
-		return err
+	if dest != "-" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 	}
-	if dest == "-" {
-		_, err := cmd.OutOrStdout().Write(data)
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(dest, data, 0o644); err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 	return nil
 }
 
@@ -790,6 +788,18 @@ func resolveArtifactOutputPathForJob(source, output string, jobID int64, multipl
 	return "", err
 }
 
+func downloadR2ObjectToFileAtomic(r2Client *r2.Client, key, dest string, idleTimeout time.Duration) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmpDest := dest + ".part"
+	if _, err := r2Client.DownloadObjectToFileWithIdleTimeout(context.Background(), key, tmpDest, idleTimeout); err != nil {
+		_ = os.Remove(tmpDest)
+		return err
+	}
+	return os.Rename(tmpDest, dest)
+}
+
 func copyFile(src, dest string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -956,10 +966,8 @@ func syncCloudJobOutputs(job *db.Job) error {
 	var lastErr error
 	for _, runID := range jobAttemptRunIDs(job) {
 		// Download convention-based outputs
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-		err := r2Client.DownloadResults(ctx, outputsPrefix, localDir)
-		cancel()
+		err := r2Client.DownloadResultsWithIdleTimeout(context.Background(), outputsPrefix, localDir, artifactTimeout)
 		if err != nil {
 			lastErr = err
 			continue
@@ -967,9 +975,7 @@ func syncCloudJobOutputs(job *db.Job) error {
 
 		// Download artifact manifest entries (files declared via WEFT_ARTIFACT_MANIFEST)
 		artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
-		err = r2Client.DownloadResults(ctx2, artifactsPrefix, localDir)
-		cancel2()
+		err = r2Client.DownloadResultsWithIdleTimeout(context.Background(), artifactsPrefix, localDir, artifactTimeout)
 		if err == nil {
 			return nil
 		}
@@ -1006,7 +1012,21 @@ func syncCloudJobArtifacts(database *sql.DB, r2Client *r2.Client, job *db.Job) (
 
 type cloudArtifactObjectStore interface {
 	GetObject(context.Context, string) ([]byte, error)
+	GetObjectReader(context.Context, string) (io.ReadCloser, error)
 	ListObjects(context.Context, string) ([]r2.ObjectInfo, error)
+}
+
+type progressWriter struct {
+	w          io.Writer
+	onProgress func()
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	if n > 0 && w.onProgress != nil {
+		w.onProgress()
+	}
+	return n, err
 }
 
 func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectStore, job *db.Job) (artifacts.SyncResult, error) {
@@ -1061,7 +1081,7 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 		storedPath := artifacts.LocalStoredPath(job.ID, spec.Path)
 		localPath := filepath.Join(localRoot, storedPath)
 
-		size, sha, err := downloadCloudArtifact(store, filesPrefix, relPath, localPath)
+		size, sha, err := downloadCloudArtifact(store, filesPrefix, relPath, localPath, artifactTimeout)
 		if err != nil {
 			return result, fmt.Errorf("download artifact %s: %w", spec.Path, err)
 		}
@@ -1088,7 +1108,72 @@ func jobAttemptRunIDs(job *db.Job) []int64 {
 	return []int64{0}
 }
 
-func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath, localPath string) (int64, string, error) {
+func copyCloudObjectToWriterWithIdleTimeout(store cloudArtifactObjectStore, key string, dst io.Writer, idleTimeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	body, err := store.GetObjectReader(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	defer body.Close()
+
+	if idleTimeout <= 0 {
+		return io.Copy(dst, body)
+	}
+
+	progressCh := make(chan struct{}, 1)
+	timeoutCh := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(idleTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-progressCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idleTimeout)
+			case <-timer.C:
+				timeoutCh <- fmt.Errorf("download stalled: no progress for %s", idleTimeout)
+				cancel()
+				return
+			}
+		}
+	}()
+
+	pw := &progressWriter{
+		w: dst,
+		onProgress: func() {
+			select {
+			case progressCh <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	n, copyErr := io.Copy(pw, body)
+	cancel()
+	<-done
+	select {
+	case stallErr := <-timeoutCh:
+		return n, stallErr
+	default:
+	}
+	if copyErr != nil {
+		return n, copyErr
+	}
+	return n, nil
+}
+
+func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath, localPath string, idleTimeout time.Duration) (int64, string, error) {
 	r2Key := filesPrefix + relPath
 	listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	objects, err := store.ListObjects(listCtx, r2Key)
@@ -1113,16 +1198,21 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 			return 0, "", err
 		}
-		dlCtx, dlCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		data, err := store.GetObject(dlCtx, r2Key)
-		dlCancel()
+		f, err := os.Create(localPath)
 		if err != nil {
 			return 0, "", err
 		}
-		if err := os.WriteFile(localPath, data, 0o644); err != nil {
+		h := sha256.New()
+		n, err := copyCloudObjectToWriterWithIdleTimeout(store, r2Key, io.MultiWriter(f, h), idleTimeout)
+		closeErr := f.Close()
+		if err != nil {
+			_ = os.Remove(localPath)
 			return 0, "", err
 		}
-		return int64(len(data)), fmt.Sprintf("%x", sha256.Sum256(data)), nil
+		if closeErr != nil {
+			return 0, "", err
+		}
+		return n, fmt.Sprintf("%x", h.Sum(nil)), nil
 	}
 
 	if len(childKeys) == 0 {
@@ -1144,16 +1234,20 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 			return 0, "", err
 		}
 
-		dlCtx, dlCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		data, err := store.GetObject(dlCtx, key)
-		dlCancel()
+		f, err := os.Create(childPath)
 		if err != nil {
 			return 0, "", err
 		}
-		if err := os.WriteFile(childPath, data, 0o644); err != nil {
+		n, err := copyCloudObjectToWriterWithIdleTimeout(store, key, f, idleTimeout)
+		closeErr := f.Close()
+		if err != nil {
+			_ = os.Remove(childPath)
 			return 0, "", err
 		}
-		totalSize += int64(len(data))
+		if closeErr != nil {
+			return 0, "", err
+		}
+		totalSize += n
 	}
 
 	return totalSize, "", nil

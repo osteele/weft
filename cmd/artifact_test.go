@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -84,6 +85,14 @@ func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byt
 		return nil, &types.NoSuchKey{}
 	}
 	return append([]byte(nil), data...), nil
+}
+
+func (s *fakeCloudArtifactStore) GetObjectReader(_ context.Context, key string) (io.ReadCloser, error) {
+	data, ok := s.objects[key]
+	if !ok {
+		return nil, &types.NoSuchKey{}
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 func (s *fakeCloudArtifactStore) ListObjects(_ context.Context, prefix string) ([]r2.ObjectInfo, error) {
