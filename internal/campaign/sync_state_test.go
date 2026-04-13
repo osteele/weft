@@ -213,3 +213,76 @@ func TestSyncInstanceState_DoesNotEnterGraceWithActiveJobs(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncInstanceState_FetchesInParallel verifies that R2 marker reads in
+// SyncInstanceState overlap rather than running back-to-back. Each mocked
+// fetch sleeps for delay; with 4 fetches (termIntent, phase, jobProgress,
+// heartbeat) the serial cost would be ~4*delay, the parallel cost ~2*delay
+// (wave 1: termIntent + phase; wave 2: jobProgress + heartbeat).
+func TestSyncInstanceState_FetchesInParallel(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
+	})
+
+	const delay = 150 * time.Millisecond
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		time.Sleep(delay)
+		return "running:1"
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+		time.Sleep(delay)
+		return ""
+	}
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		time.Sleep(delay)
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		time.Sleep(delay)
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		time.Sleep(delay)
+		return nil, nil
+	}
+	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool { return false }
+
+	// AgentVersionFetched skips the third wave-1 fetch (agent version), so the
+	// observed waves run: {termIntent, phase} then {jobProgress, heartbeat}.
+	start := time.Now()
+	SyncInstanceState(
+		context.Background(), database, ci, &r2.Client{}, nil,
+		JobState{HasStartedJob: true},
+		SyncInstanceStateOpts{AgentVersionFetched: true},
+	)
+	elapsed := time.Since(start)
+
+	// Serial would be ~4*delay (600ms). Parallel should be ~2*delay (300ms).
+	// Allow generous headroom for CI jitter.
+	if elapsed >= 3*delay {
+		t.Fatalf("SyncInstanceState took %v; expected < %v (3*delay). R2 fetches are not running in parallel.", elapsed, 3*delay)
+	}
+}

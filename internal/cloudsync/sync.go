@@ -3,6 +3,7 @@ package cloudsync
 import (
 	"database/sql"
 	"log/slog"
+	"sync"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
@@ -20,21 +21,41 @@ func SyncState(database *sql.DB, reconciler *campaign.Reconciler, clients []clou
 	}
 
 	result := Result{}
-	if len(clients) > 0 {
-		reconcileResult, err := reconciler.ReconcileLaunches(database, clients, r2Client)
-		if err != nil {
-			slog.Warn("reconcile failed", "component", "cloudsync", "error", err)
-		} else {
-			result.ReconcileResult = reconcileResult
-			if reconcileResult != nil {
-				result.Updated += reconcileResult.Reconciled + reconcileResult.JobsUpdated
-			}
-		}
-	}
 
-	if syncResults != nil {
-		result.Updated += syncResults()
+	// ReconcileLaunches and syncResults touch disjoint R2 prefixes and DB
+	// columns, so they run concurrently. ReconcileCampaigns reads instance
+	// state produced by ReconcileLaunches, so it runs after the join.
+	var (
+		wg              sync.WaitGroup
+		reconcileResult *campaign.ReconcileResult
+		resultsUpdated  int
+	)
+	if len(clients) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, err := reconciler.ReconcileLaunches(database, clients, r2Client)
+			if err != nil {
+				slog.Warn("reconcile failed", "component", "cloudsync", "error", err)
+				return
+			}
+			reconcileResult = r
+		}()
 	}
+	if syncResults != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resultsUpdated = syncResults()
+		}()
+	}
+	wg.Wait()
+
+	result.ReconcileResult = reconcileResult
+	if reconcileResult != nil {
+		result.Updated += reconcileResult.Reconciled + reconcileResult.JobsUpdated
+	}
+	result.Updated += resultsUpdated
 
 	if _, err := campaign.ReconcileCampaigns(database); err != nil {
 		slog.Warn("reconcile campaigns failed", "component", "cloudsync", "error", err)

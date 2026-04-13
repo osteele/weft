@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
@@ -75,7 +76,35 @@ func SyncInstanceState(
 
 	instanceID := ci.ID
 
-	if fetchedIntent, err := syncFetchTermIntent(ctx, r2Client, instanceID); err == nil && fetchedIntent != nil {
+	if opts.AgentVersionFetched {
+		s.AgentVersion = opts.AgentVersion
+	}
+
+	// Wave 1: independent R2 markers. Best-effort; failures don't fail others.
+	var (
+		wave1         sync.WaitGroup
+		fetchedIntent *instanceintent.Marker
+		intentErr     error
+	)
+	wave1.Add(2)
+	go func() {
+		defer wave1.Done()
+		fetchedIntent, intentErr = syncFetchTermIntent(ctx, r2Client, instanceID)
+	}()
+	go func() {
+		defer wave1.Done()
+		s.InstancePhase = syncFetchInstancePhase(ctx, r2Client, instanceID)
+	}()
+	if !opts.AgentVersionFetched {
+		wave1.Add(1)
+		go func() {
+			defer wave1.Done()
+			s.AgentVersion = fetchR2Marker(ctx, r2Client, r2keys.InstanceAgentVersion(instanceID))
+		}()
+	}
+	wave1.Wait()
+
+	if intentErr == nil && fetchedIntent != nil {
 		s.TerminationIntent = fetchedIntent
 		_ = db.UpdateLaunchTerminationIntent(database, instanceID, fetchedIntent)
 		ci.TerminationIntent = fetchedIntent
@@ -83,11 +112,33 @@ func SyncInstanceState(
 		s.TerminationIntent = ci.TerminationIntent
 	}
 
-	s.InstancePhase = syncFetchInstancePhase(ctx, r2Client, instanceID)
-	if s.InstancePhase != "" {
-		// Job progress (only meaningful when a phase is active)
-		s.JobProgressID, s.JobProgress, s.JobProgressPhase = syncFetchJobProgress(ctx, r2Client, s.InstancePhase, jobs)
+	// Wave 2: phase-dependent markers. Each goroutine writes to a disjoint
+	// field of s; publication happens via wave2.Wait().
+	var wave2 sync.WaitGroup
+	phaseNonEmpty := s.InstancePhase != ""
+	if phaseNonEmpty {
+		wave2.Add(1)
+		go func() {
+			defer wave2.Done()
+			s.JobProgressID, s.JobProgress, s.JobProgressPhase = syncFetchJobProgress(ctx, r2Client, s.InstancePhase, jobs)
+		}()
+	} else if !jobState.HasStartedJob {
+		wave2.Add(1)
+		go func() {
+			defer wave2.Done()
+			s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
+		}()
+	}
+	if phaseNonEmpty || jobState.HasStartedJob {
+		wave2.Add(1)
+		go func() {
+			defer wave2.Done()
+			s.Heartbeat, s.HeartbeatAge = syncFetchHeartbeat(ctx, r2Client, instanceID)
+		}()
+	}
+	wave2.Wait()
 
+	if phaseNonEmpty {
 		// Mark queued jobs as running if the R2 phase says they are,
 		// and re-associate orphaned jobs with this launch.
 		if verb, phaseJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && phaseJobID > 0 {
@@ -131,12 +182,6 @@ func SyncInstanceState(
 				ci.Status = db.LaunchStatusRunning
 			}
 		}
-	} else if !jobState.HasStartedJob {
-		s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
-	}
-
-	if jobState.HasStartedJob || s.InstancePhase != "" {
-		s.Heartbeat, s.HeartbeatAge = syncFetchHeartbeat(ctx, r2Client, instanceID)
 	}
 
 	if _, currentJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && currentJobID > 0 {
@@ -154,12 +199,6 @@ func SyncInstanceState(
 		slog.Warn("failed to normalize pending placement jobs", "component", "sync", "instance", instanceID, "error", err)
 	} else if updated > 0 {
 		s.JobsUpdated += int(updated)
-	}
-
-	if opts.AgentVersionFetched {
-		s.AgentVersion = opts.AgentVersion
-	} else {
-		s.AgentVersion = fetchR2Marker(ctx, r2Client, r2keys.InstanceAgentVersion(instanceID))
 	}
 
 	// Persist to launch_live_state and get resolved PhaseChangedAt.

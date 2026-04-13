@@ -10,7 +10,7 @@ const (
 	FastHostTimeout   = 30 * time.Second
 	NormalHostTimeout = 10 * time.Minute
 
-	FastCloudTimeoutCLI   = 5 * time.Second
+	FastCloudTimeoutCLI   = 10 * time.Second
 	NormalCloudTimeoutCLI = 30 * time.Second
 
 	FastCloudTimeoutTUI   = 10 * time.Second

@@ -386,7 +386,8 @@ rule SyncCloudInstanceState {
     when: CloudSyncRequested(instance)
     requires: instance.status in {running, grace}
 
-    -- Read R2 markers
+    -- Read R2 markers. Data-independent markers are fetched concurrently
+    -- rather than sequentially; see ParallelR2MarkerFetch below.
     let r2_state = FetchR2InstanceState(instance)
 
     -- Persist to live state table
@@ -422,6 +423,58 @@ rule SyncCloudInstanceState {
         -- Both agent (writer) and sync (reader) derive it from the same
         -- DB row, established by claimJobForLaunch before the agent
         -- payload is built. See R2RunIDFromDB invariant.
+}
+
+-- Fetch R2 markers for a single instance with bounded concurrency.
+-- Data-independent markers are fetched in parallel; markers that depend
+-- on the phase observation are fetched in a second wave.
+rule ParallelR2MarkerFetch {
+    when: FetchR2InstanceState(instance)
+
+    -- Wave 1 (independent): termination intent, phase, agent version.
+    -- All three are issued concurrently; each is best-effort and does not
+    -- fail the others.
+    ensures: R2MarkersFetched(instance, {termination_intent, phase, agent_version})
+
+    -- Wave 2 (phase-dependent): issued after the phase is known.
+    --   phase non-empty → job progress + heartbeat (concurrent)
+    --   phase empty and not has_started_job → bootstrap stage
+    --   has_started_job → heartbeat
+    ensures: R2PhaseDependentMarkersFetched(instance)
+
+    @guidance
+        -- Fanning out these reads reduces per-instance R2 latency from
+        -- ~5× RTT (serial) to ~2× RTT (two waves). The per-instance loop
+        -- in ReconcilePass is already unbounded-parallel, so this
+        -- compounds: whole-pass latency approaches
+        --   Vast.ai ListAllInstances RTT + 2× R2 RTT
+        -- Implementation: internal/campaign/sync_state.go SyncInstanceState
+        -- uses two sync.WaitGroup waves over the syncFetch* hooks.
+}
+
+-- The two top-level cloudsync phases — instance reconciliation and
+-- cloud-job-result syncing — access disjoint R2 key prefixes
+-- (instance/<id>/* vs jobs/<id>/*) and update disjoint DB columns,
+-- so they run concurrently.
+rule ParallelCloudSyncPhases {
+    when: CloudSyncPassStarted()
+
+    -- Phase A: reconcile running/launching instances (provider list +
+    -- per-instance R2 markers, instance state writes).
+    -- Phase B: sync per-job result markers (R2 jobs/ prefix scan +
+    -- per-job completion/started/timeseries/opslog reads and DB writes).
+    -- A and B run concurrently; ReconcileCampaigns runs after both,
+    -- because it consumes instance-level state that A produces.
+    ensures: Concurrent(PhaseAReconcileLaunches, PhaseBSyncCloudJobResults)
+    ensures: ReconcileCampaigns runs after both A and B complete
+
+    @guidance
+        -- Implementation: internal/cloudsync/sync.go SyncState spawns
+        -- two goroutines joined by sync.WaitGroup. The serial path
+        -- dominated by two sequential R2 list operations becomes
+        -- max(A, B) + ReconcileCampaigns.
+        -- Phase B is gated on opts.SyncResults; read-oriented CLI
+        -- commands like `weft job list` currently skip it.
 }
 
 -- Sync individual job completions from R2 .complete markers.
