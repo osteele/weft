@@ -131,6 +131,9 @@ type watchModel struct {
 	autoPersistentError     string
 	autoPersistentBlocked   string
 	autoPersistentBlockedN  int
+	autoRunRateTargetCents  int
+	autoRunRateInputActive  bool
+	autoRunRateInputValue   string
 
 	// --- Move picker overlay ---
 	movePicker movePickerModel
@@ -234,6 +237,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		failedReplaceReason:    map[int64]string{},
 		budgetBlockedFailed:    map[int64]bool{},
 		autoNoopReasons:        map[int64]string{},
+		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(),
 		focused:                true,
 	}
 	m.rebuildReplacementCache()
@@ -267,6 +271,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		preservedJobAttachment: map[int64]bool{},
 		flash:                  flash.State{Message: flashMessage},
 		autoNoopReasons:        map[int64]string{},
+		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(),
 		focused:                true,
 	}
 
@@ -316,22 +321,23 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 	}
 
 	model := watchModel{
-		mode:           watchModeProject,
-		database:       database,
-		appConfig:      cfg,
-		r2Client:       r2Client,
-		ctx:            ctx,
-		cancel:         cancel,
-		spinner:        s,
-		updates:        map[int64]campaign.InstanceUpdate{},
-		channels:       map[int64]<-chan campaign.InstanceUpdate{},
-		clients:        map[int64]cloud.Client{},
-		jobProgressHWM: map[int64]int{},
-		syncWorker:     sw,
-		projectFilter:  projectFilter,
-		projectRecent:  recentWindow,
-		projectSyncing: syncEnabled,
-		focused:        true,
+		mode:                   watchModeProject,
+		database:               database,
+		appConfig:              cfg,
+		r2Client:               r2Client,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		spinner:                s,
+		updates:                map[int64]campaign.InstanceUpdate{},
+		channels:               map[int64]<-chan campaign.InstanceUpdate{},
+		clients:                map[int64]cloud.Client{},
+		jobProgressHWM:         map[int64]int{},
+		syncWorker:             sw,
+		projectFilter:          projectFilter,
+		projectRecent:          recentWindow,
+		projectSyncing:         syncEnabled,
+		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(),
+		focused:                true,
 	}
 
 	// Load unplaced jobs so Init auto-pilot can act on them immediately.

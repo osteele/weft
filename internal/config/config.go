@@ -198,6 +198,9 @@ type CampaignConfig struct {
 	// OpportunityCostWeight scales scarcity penalties for consuming reusable
 	// instance capacity in plan scoring. 0 defaults to the built-in value.
 	OpportunityCostWeight float64 `yaml:"opportunity_cost_weight" toml:"opportunity_cost_weight"`
+	// AutoRunRateSoftTarget is the unattended autopilot launch-rate target in
+	// dollars per hour. 0 disables the target.
+	AutoRunRateSoftTarget float64 `yaml:"auto_run_rate_soft_target" toml:"auto_run_rate_soft_target"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
@@ -564,6 +567,13 @@ func costUSDToCents(usd float64, fallback float64) int {
 	return int(math.Round(value * 100))
 }
 
+func rateUSDToCentsPerHour(usd float64) int {
+	if usd <= 0 {
+		return 0
+	}
+	return int(math.Round(usd * 100))
+}
+
 // RetryFirstTimeLimit returns the configured first-retry time limit, defaulting to 45m.
 func (c *Config) RetryFirstTimeLimit() time.Duration {
 	if c == nil {
@@ -665,6 +675,15 @@ func (c *Config) CampaignOpportunityCostWeight() float64 {
 		return defaultOpportunityCostWeight
 	}
 	return c.Campaign.OpportunityCostWeight
+}
+
+// AutoRunRateSoftTargetCentsPerHour returns the unattended autopilot launch-rate
+// target in cents per hour. A zero value disables launch-rate gating.
+func (c *Config) AutoRunRateSoftTargetCentsPerHour() int {
+	if c == nil {
+		return 0
+	}
+	return rateUSDToCentsPerHour(c.Campaign.AutoRunRateSoftTarget)
 }
 
 // SourceExcludeDirs returns the effective global source exclude patterns.

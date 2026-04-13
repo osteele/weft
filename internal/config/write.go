@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -88,4 +89,18 @@ func SetConfigPathsForTesting(tomlPath, yamlPath string) func() {
 		configPath = origPath
 		legacyConfigPath = origLegacy
 	}
+}
+
+// SetAutoRunRateSoftTarget updates campaign.auto_run_rate_soft_target (USD/hour)
+// in the global TOML config. Values <= 0 disable the target.
+func SetAutoRunRateSoftTarget(usdPerHour float64) error {
+	normalized := usdPerHour
+	if normalized < 0 {
+		normalized = 0
+	}
+	normalized = math.Round(normalized*100) / 100
+	return UpdateGlobalTOML(func(tree *toml.Tree) error {
+		tree.SetPath([]string{"campaign", "auto_run_rate_soft_target"}, normalized)
+		return nil
+	})
 }

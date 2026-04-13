@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ui/terminal"
@@ -59,15 +61,35 @@ Pass a project name as the first argument to override.`,
 	RunE: runProjectLaunch,
 }
 
+var (
+	projectSpentSince string
+)
+
+var projectSpentCmd = &cobra.Command{
+	Use:   "spent",
+	Short: "Show spend per project since a cutoff",
+	Long: `Show cloud spend per project since a cutoff time.
+
+Examples:
+  weft project spent --since 2026-04-01
+  weft project spent --since "36h ago"
+  weft project spent --since 7d`,
+	Args: cobra.NoArgs,
+	RunE: runProjectSpent,
+}
+
 func init() {
 	rootCmd.AddCommand(projectCmd)
 	projectCmd.AddCommand(projectListCmd)
 	projectCmd.AddCommand(projectJobsCmd)
 	projectCmd.AddCommand(projectLaunchCmd)
+	projectCmd.AddCommand(projectSpentCmd)
 
 	addListQueryFlags(projectListCmd)
 	addListQueryFlags(projectJobsCmd)
 	addCampaignLaunchFlags(projectLaunchCmd)
+	projectSpentCmd.Flags().StringVar(&projectSpentSince, "since", "", "Cutoff time as YYYY-MM-DD or duration ago (for example: \"24h ago\", \"7d\")")
+	_ = projectSpentCmd.MarkFlagRequired("since")
 }
 
 // resolveProjectArg returns the project name from args[0] if provided,
@@ -172,4 +194,44 @@ func runProjectJobs(cmd *cobra.Command, args []string) error {
 		return errNoJobsForProject(listProject)
 	}
 	return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
+}
+
+func runProjectSpent(cmd *cobra.Command, _ []string) error {
+	since, err := parseSinceCutoff(projectSpentSince, time.Now())
+	if err != nil {
+		return err
+	}
+
+	database, err := openJobsDB()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	writeWarnings(cmd.ErrOrStderr(), syncListData(database))
+
+	rows, err := db.ListProjectSpendSince(database, since.Unix())
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "No project spend found since %s\n", since.Format(time.RFC3339))
+		return nil
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "PROJECT\tSPENT\tRUNS\n")
+	total := 0.0
+	totalRuns := 0
+	for _, row := range rows {
+		fmt.Fprintf(w, "%s\t$%.2f\t%d\n", row.Project, row.SpentUSD, row.RunCount)
+		total += row.SpentUSD
+		totalRuns += row.RunCount
+	}
+	fmt.Fprintf(w, "TOTAL\t$%.2f\t%d\n", total, totalRuns)
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush output: %w", err)
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "\nSince %s\n", since.Format(time.RFC3339))
+	return err
 }

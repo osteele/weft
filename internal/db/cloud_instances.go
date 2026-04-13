@@ -1800,6 +1800,25 @@ func ListRunningLaunches(database *sql.DB) ([]*Launch, error) {
 	return instances, rows.Err()
 }
 
+// SumActiveLaunchCostPerHourCents returns the aggregate cost_per_hour_cents
+// across active cloud launches (running, launching, grace).
+func SumActiveLaunchCostPerHourCents(database *sql.DB) (int, error) {
+	if database == nil {
+		return 0, nil
+	}
+	var total int
+	err := database.QueryRow(
+		`SELECT COALESCE(SUM(COALESCE(cost_per_hour_cents, 0)), 0)
+		 FROM launches
+		 WHERE status IN (?, ?, ?)`,
+		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusGrace,
+	).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // LaunchLiveState holds ephemeral R2-sourced state for a running instance,
 // cached in the DB so consumers never need to read R2 directly.
 type LaunchLiveState struct {

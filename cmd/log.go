@@ -52,6 +52,7 @@ Operations Log (forensic debugging):
   weft log --ops --host cool30      # Filter by host
   weft log --ops --op job.start     # Filter by operation type
   weft log --ops --since 1h         # Operations in last hour
+  weft log --ops --since 2026-04-01 # Operations since date
   weft log --ops --errors           # Show only errors
 
 Lifecycle Events (structured relaunch/reconcile/retry decisions):
@@ -60,6 +61,7 @@ Lifecycle Events (structured relaunch/reconcile/retry decisions):
   weft log --events --kind reconcile             # Reconciliation actions
   weft log --events --launch wi239               # Events for instance wi239
   weft log --events --since 6h                    # Events in last 6 hours
+  weft log --events --since "24h ago"             # Events since relative cutoff
   weft log --events --stats                      # Aggregate statistics`,
 	Args: validateLogArgs,
 	RunE: runLog,
@@ -116,7 +118,7 @@ func addLogFlags(cmd *cobra.Command) {
 	cmd.Flags().Int64Var(&logOpsJob, "job", 0, "Filter operations by job ID (requires --ops)")
 	cmd.Flags().StringVar(&logOpsHost, "host", "", "Filter operations by host (requires --ops)")
 	cmd.Flags().StringVar(&logOpsOp, "op", "", "Filter by operation type (requires --ops)")
-	cmd.Flags().StringVar(&logOpsSince, "since", "", "Show operations since duration (e.g., 1h, 30m) (requires --ops)")
+	cmd.Flags().StringVar(&logOpsSince, "since", "", "Show operations/events since cutoff (YYYY-MM-DD, RFC3339, or duration like \"1h\"/\"24h ago\")")
 	cmd.Flags().BoolVar(&logOpsErrors, "errors", false, "Show only operations with errors (requires --ops)")
 
 	// Lifecycle events flags
@@ -997,13 +999,12 @@ func runOpsLog(cmd *cobra.Command) error {
 		ErrorsOnly: logOpsErrors,
 	}
 
-	// Parse --since duration
 	if logOpsSince != "" {
-		duration, err := time.ParseDuration(logOpsSince)
+		since, err := parseSinceCutoff(logOpsSince, time.Now())
 		if err != nil {
-			return fmt.Errorf("invalid --since duration %q: %w", logOpsSince, err)
+			return err
 		}
-		filterOpts.Since = time.Now().Add(-duration)
+		filterOpts.Since = since
 	}
 
 	// Apply filters
@@ -1175,11 +1176,11 @@ func runEventsLog(cmd *cobra.Command) error {
 	}
 
 	if logOpsSince != "" {
-		duration, err := time.ParseDuration(logOpsSince)
+		since, err := parseSinceCutoff(logOpsSince, time.Now())
 		if err != nil {
-			return fmt.Errorf("invalid --since duration %q: %w", logOpsSince, err)
+			return err
 		}
-		filter.Since = time.Now().Add(-duration)
+		filter.Since = since
 	}
 
 	if logEventsStats {

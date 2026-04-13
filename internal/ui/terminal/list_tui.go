@@ -65,6 +65,9 @@ type listTUIModel struct {
 	autoPersistentError        string
 	autoPersistentBlocked      string
 	autoPersistentBlockedN     int
+	autoRunRateTargetCents     int
+	autoRunRateInputActive     bool
+	autoRunRateInputValue      string
 	autoNextPassAt             time.Time
 	autoLeaseOwner             string
 	autoLeaseScope             string
@@ -166,24 +169,25 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	}
 
 	model := listTUIModel{
-		database:         database,
-		args:             append([]string(nil), args...),
-		title:            title,
-		jobs:             jobs,
-		syncEnabled:      syncEnabled,
-		pendingSyncHosts: map[string]struct{}{},
-		nextSyncTickAt:   time.Now().Add(throttledInterval(listTUISyncInterval, true)),
-		syncWorker:       sw,
-		ctx:              ctx,
-		cancel:           cancel,
-		groupedByStatus:  groupedByStatus,
-		autoMode:         groupedByStatus && autoMode,
-		autoLeaseOwner:   fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
-		autoLeaseScope:   buildListAutoLeaseScope(title),
-		quickLaunchScope: "list_quick_launch:" + buildListAutoLeaseScope(title),
-		focused:          true,
-		appConfig:        cfg,
-		cloudClients:     cloudClients,
+		database:               database,
+		args:                   append([]string(nil), args...),
+		title:                  title,
+		jobs:                   jobs,
+		syncEnabled:            syncEnabled,
+		pendingSyncHosts:       map[string]struct{}{},
+		nextSyncTickAt:         time.Now().Add(throttledInterval(listTUISyncInterval, true)),
+		syncWorker:             sw,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		groupedByStatus:        groupedByStatus,
+		autoMode:               groupedByStatus && autoMode,
+		autoLeaseOwner:         fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
+		autoLeaseScope:         buildListAutoLeaseScope(title),
+		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(),
+		quickLaunchScope:       "list_quick_launch:" + buildListAutoLeaseScope(title),
+		focused:                true,
+		appConfig:              cfg,
+		cloudClients:           cloudClients,
 	}
 	model.rebuildGroupedRows()
 	if syncEnabled {
@@ -886,16 +890,20 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 	if !m.autoMode {
 		return ""
 	}
+	if m.autoRunRateInputActive {
+		return fmt.Sprintf("Run-rate target ($/hr): %s (Enter=save, Esc=cancel)", m.autoRunRateInputValue)
+	}
 	unplaced := m.countUnplacedQueuedJobs()
+	target := formatAutoRunRateTarget(m.autoRunRateTargetCents)
 	if m.syncInProgress() {
 		hosts := m.pendingHostList()
 		if len(hosts) > 0 {
-			return fmt.Sprintf("Auto-pilot: syncing %s...", strings.Join(hosts, ", "))
+			return fmt.Sprintf("Auto-pilot: syncing %s... (target %s)", strings.Join(hosts, ", "), target)
 		}
-		return "Auto-pilot: syncing cloud state..."
+		return "Auto-pilot: syncing cloud state... (target " + target + ")"
 	}
 	if m.autoInProgress {
-		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs...", unplaced)
+		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs... (target %s)", unplaced, target)
 	}
 	if strings.TrimSpace(m.autoPersistentError) != "" {
 		return "Auto-pilot: failed — " + m.autoPersistentError
@@ -907,12 +915,15 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return formatAutoPilotNextPass(m.autoNextPassAt, unplaced)
 	}
 	if !m.nextSyncTickAt.IsZero() && time.Now().Before(m.nextSyncTickAt) {
-		return fmt.Sprintf("Auto-pilot: idle — next sync in %s · watching DB (%d unplaced, %d running)", waitUntil(m.nextSyncTickAt), unplaced, visibleRunning)
+		return fmt.Sprintf("Auto-pilot: idle — next sync in %s · watching DB (%d unplaced, %d running, target %s)", waitUntil(m.nextSyncTickAt), unplaced, visibleRunning, target)
 	}
-	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running)", unplaced, visibleRunning)
+	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running, target %s)", unplaced, visibleRunning, target)
 }
 
 func (m listTUIModel) groupedControlsText(hasQueued bool) string {
+	if m.autoRunRateInputActive {
+		return "Enter new run-rate target ($/hr): " + m.autoRunRateInputValue + "  Enter:save  Esc:cancel"
+	}
 	autoState := "OFF"
 	if m.autoMode {
 		autoState = "ON"
@@ -928,6 +939,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if hasQueued {
 		line += "  n:new instance"
 	}
+	line += "  $:target(" + formatAutoRunRateTarget(m.autoRunRateTargetCents) + ")"
 	if strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
 		if m.showAutoPilotErrorDetails {
 			line += "  e:hide error"
@@ -996,6 +1008,9 @@ func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.autoRunRateInputActive {
+		return m.handleAutoRunRateInputKey(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		if m.moveLookupPending {
@@ -1068,6 +1083,8 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 		m.statusMessage = "Auto-pilot OFF"
 		return m, nil
+	case "$":
+		return m.beginAutoRunRateInput()
 	case "e":
 		if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
 			m.statusMessage = "No auto-pilot error details."
@@ -1141,6 +1158,54 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveLookupJobID = job.ID
 		m.statusMessage = fmt.Sprintf("Searching move destinations for job #%d... (Esc to cancel)", job.ID)
 		return m, m.requestGroupedMoveOptions(reqID, job.ID)
+	}
+	return m, nil
+}
+
+func (m listTUIModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
+	m.autoRunRateInputActive = true
+	if m.autoRunRateTargetCents <= 0 {
+		m.autoRunRateInputValue = ""
+	} else {
+		m.autoRunRateInputValue = fmt.Sprintf("%.2f", float64(m.autoRunRateTargetCents)/100)
+	}
+	return m, nil
+}
+
+func (m listTUIModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.autoRunRateInputActive = false
+		m.autoRunRateInputValue = ""
+		m.statusMessage = "Run-rate target unchanged"
+		return m, nil
+	case "enter":
+		cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
+		if err != nil {
+			m.statusMessage = "Run-rate target: " + err.Error()
+			return m, nil
+		}
+		if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
+			m.statusMessage = fmt.Sprintf("Run-rate target save failed: %v", err)
+			return m, nil
+		}
+		m.autoRunRateTargetCents = cents
+		m.autoRunRateInputActive = false
+		m.autoRunRateInputValue = ""
+		m.statusMessage = "Run-rate target set to " + formatAutoRunRateTarget(cents)
+		if cmd := m.runAutoPilot(); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
+	case "backspace", "ctrl+h":
+		if len(m.autoRunRateInputValue) > 0 {
+			runes := []rune(m.autoRunRateInputValue)
+			m.autoRunRateInputValue = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	}
+	if len(msg.Runes) > 0 {
+		m.autoRunRateInputValue += string(msg.Runes)
 	}
 	return m, nil
 }
@@ -1445,6 +1510,7 @@ func buildListAutoLeaseScope(title string) string {
 }
 
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
+	m.autoRunRateTargetCents = loadAutoRunRateSoftTargetCentsPerHour()
 	if !m.groupedByStatus || !m.autoMode || m.autoInProgress || m.database == nil {
 		return nil
 	}

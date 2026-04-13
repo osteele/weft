@@ -43,6 +43,9 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.movePicker.active {
 		return m.handleMovePickerKey(msg)
 	}
+	if m.autoRunRateInputActive {
+		return m.handleAutoRunRateInputKey(msg)
+	}
 	if m.projectHelp {
 		switch msg.String() {
 		case "?", "esc", "q", "enter":
@@ -212,6 +215,8 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		))
 	case "a":
 		return m.handleToggleAutoPilot()
+	case "$":
+		return m.beginAutoRunRateInput()
 	case "?":
 		m.projectHelp = true
 		return m, nil
@@ -339,9 +344,58 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	case "a":
 		return m.handleToggleAutoPilot()
+	case "$":
+		return m.beginAutoRunRateInput()
 	case "?":
 		m.projectHelp = true
 		return m, nil
+	}
+	return m, nil
+}
+
+func (m watchModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
+	m.autoRunRateInputActive = true
+	if m.autoRunRateTargetCents <= 0 {
+		m.autoRunRateInputValue = ""
+	} else {
+		m.autoRunRateInputValue = fmt.Sprintf("%.2f", float64(m.autoRunRateTargetCents)/100)
+	}
+	return m, nil
+}
+
+func (m watchModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.autoRunRateInputActive = false
+		m.autoRunRateInputValue = ""
+		return m, m.flash.Set("Run-rate target unchanged", false)
+	case "enter":
+		cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
+		if err != nil {
+			return m, m.flash.Set("Run-rate target: "+err.Error(), true)
+		}
+		if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
+			return m, m.flash.Set(fmt.Sprintf("Run-rate target save failed: %v", err), true)
+		}
+		m.autoRunRateTargetCents = cents
+		m.autoRunRateInputActive = false
+		m.autoRunRateInputValue = ""
+		flashCmd := m.flash.Set("Run-rate target set to "+formatAutoRunRateTarget(cents), false)
+		if m.autoMode && len(m.unplacedJobs) > 0 {
+			if cmd := m.runAutoPilot(); cmd != nil {
+				return m, tea.Batch(flashCmd, cmd)
+			}
+		}
+		return m, flashCmd
+	case "backspace", "ctrl+h":
+		if len(m.autoRunRateInputValue) > 0 {
+			runes := []rune(m.autoRunRateInputValue)
+			m.autoRunRateInputValue = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	}
+	if len(msg.Runes) > 0 {
+		m.autoRunRateInputValue += string(msg.Runes)
 	}
 	return m, nil
 }

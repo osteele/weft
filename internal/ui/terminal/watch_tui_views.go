@@ -649,9 +649,9 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 // autoModeHint returns a short hint for the current auto-pilot state.
 func (m watchModel) autoModeHint() string {
 	if m.autoMode {
-		return "[a] auto: ON"
+		return "[a] auto: ON  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
 	}
-	return "[a] auto: OFF"
+	return "[a] auto: OFF  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
 }
 
 func (m watchModel) autoPilotUnplacedCount() int {
@@ -721,15 +721,19 @@ func (m watchModel) autoPilotStatusLine() string {
 	if !m.autoMode {
 		return ""
 	}
+	if m.autoRunRateInputActive {
+		return fmt.Sprintf("Run-rate target ($/hr): %s (Enter=save, Esc=cancel)", m.autoRunRateInputValue)
+	}
 	unplaced := m.autoPilotUnplacedCount()
+	target := formatAutoRunRateTarget(m.autoRunRateTargetCents)
 	if m.autoPilotSyncInProgress() {
-		return "Auto-pilot: syncing cloud state..."
+		return "Auto-pilot: syncing cloud state... (target " + target + ")"
 	}
 	if m.autoPassInFlight || m.autoPlacing {
-		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs...", unplaced)
+		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs... (target %s)", unplaced, target)
 	}
 	if m.autoLaunching {
-		return "Auto-pilot: launching instance..."
+		return "Auto-pilot: launching instance... (target " + target + ")"
 	}
 	if strings.TrimSpace(m.autoPersistentError) != "" {
 		return "Auto-pilot: failed — " + m.autoPersistentError
@@ -740,7 +744,7 @@ func (m watchModel) autoPilotStatusLine() string {
 	if !m.autoLaunchBackoffUntil.IsZero() && time.Now().Before(m.autoLaunchBackoffUntil) {
 		return formatAutoPilotNextPass(m.autoLaunchBackoffUntil, unplaced)
 	}
-	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running)", unplaced, m.autoPilotRunningCount())
+	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running, target %s)", unplaced, m.autoPilotRunningCount(), target)
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +879,7 @@ func (m watchModel) renderProjectHelpView() string {
 		"  r refresh",
 		"  l open launch planner",
 		"  a toggle auto-pilot",
+		"  $ set run-rate target ($/hr)",
 		"",
 		"Help:",
 		"  ? toggle this help",
@@ -918,6 +923,7 @@ func (m watchModel) renderWatchHelpView() string {
 		"  r retry failed instances",
 		"  B double retry budget for selected failed instance and retry",
 		"  a toggle auto-pilot",
+		"  $ set run-rate target ($/hr)",
 		"",
 		"Help:",
 		"  ? toggle this help",

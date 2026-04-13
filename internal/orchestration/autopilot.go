@@ -95,6 +95,32 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	oplog.Log("auto_pilot.plan", oplog.WithDetail(planDetail))
 
+	runRateTarget := cfg.AutoRunRateSoftTargetCentsPerHour()
+	if runRateTarget > 0 && len(plan.LaunchJobIDs) > 0 && plan.LaunchRateCentsPerHour > 0 {
+		currentRate, rateErr := db.SumActiveLaunchCostPerHourCents(database)
+		if rateErr == nil {
+			projectedRate := currentRate + plan.LaunchRateCentsPerHour
+			if projectedRate > runRateTarget {
+				reason := fmt.Sprintf(
+					"run-rate target exceeded: target %s/hr, current %s/hr + planned %s/hr = %s/hr",
+					formatRateCents(runRateTarget),
+					formatRateCents(currentRate),
+					formatRateCents(plan.LaunchRateCentsPerHour),
+					formatRateCents(projectedRate),
+				)
+				for _, jobID := range plan.LaunchJobIDs {
+					blockedReasons[jobID] = reason
+				}
+				return &GroupedAutoPilotResult{
+					Placed:         0,
+					Launched:       0,
+					LaunchedClass:  "",
+					BlockedReasons: blockedReasons,
+				}, nil
+			}
+		}
+	}
+
 	placed := 0
 	for _, assignment := range plan.ReuseAssignments {
 		if assignment.Job == nil || assignment.Instance.Instance == nil {
@@ -303,4 +329,8 @@ func sampleBlockedReason(reasons map[int64]string) string {
 		}
 	}
 	return ""
+}
+
+func formatRateCents(cents int) string {
+	return fmt.Sprintf("$%.2f", float64(cents)/100)
 }

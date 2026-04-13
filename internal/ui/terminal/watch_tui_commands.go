@@ -96,6 +96,7 @@ func (m watchModel) countRetryableFailedInstances() int {
 // It sets autoPlacing/autoLaunching flags on m (caller must use the returned
 // model state, as in Bubble Tea's value-receiver pattern).
 func (m *watchModel) runAutoPilot() tea.Cmd {
+	m.autoRunRateTargetCents = loadAutoRunRateSoftTargetCentsPerHour()
 	if m.autoNoopReasons == nil {
 		m.autoNoopReasons = map[int64]string{}
 	}
@@ -274,6 +275,21 @@ func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, stri
 	plan, planErr := buildAutoPlacementPlan(database, cfg, planScope, capacities)
 	if planErr == nil && len(plan.LaunchJobIDs) > 0 {
 		scopeJobIDs = append([]int64(nil), plan.LaunchJobIDs...)
+	}
+	if m.autoRunRateTargetCents > 0 && planErr == nil && len(scopeJobIDs) > 0 && plan.LaunchRateCentsPerHour > 0 {
+		currentRateCents, err := db.SumActiveLaunchCostPerHourCents(database)
+		if err == nil {
+			projectedRate := currentRateCents + plan.LaunchRateCentsPerHour
+			if projectedRate > m.autoRunRateTargetCents {
+				return nil, fmt.Sprintf(
+					"auto-launch: run-rate target exceeded: target %s, current %s + planned %s = %s",
+					formatAutoRunRateTarget(m.autoRunRateTargetCents),
+					formatAutoRunRateTarget(currentRateCents),
+					formatAutoRunRateTarget(plan.LaunchRateCentsPerHour),
+					formatAutoRunRateTarget(projectedRate),
+				)
+			}
+		}
 	}
 	return func() tea.Msg {
 		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0, nil, scopeJobIDs, m.projectFilter, false, true)

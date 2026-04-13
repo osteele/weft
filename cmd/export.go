@@ -30,8 +30,9 @@ Each line is a JSON object with run metadata and an embedded timeseries array.
 This format is designed for consumption by job-estimator and similar ML tools.
 
 Examples:
-  weft export training-data --output training-data.jsonl
-  weft export training-data --output training-data.jsonl --since 2025-01-01`,
+ weft export training-data --output training-data.jsonl
+  weft export training-data --output training-data.jsonl --since 2025-01-01
+  weft export training-data --output training-data.jsonl --since "36h ago"`,
 	RunE: runExportTrainingData,
 }
 
@@ -39,7 +40,7 @@ func init() {
 	rootCmd.AddCommand(exportCmd)
 	exportCmd.AddCommand(exportTrainingDataCmd)
 	exportTrainingDataCmd.Flags().StringVarP(&exportOutput, "output", "o", "", "Output file (default: stdout)")
-	exportTrainingDataCmd.Flags().StringVar(&exportSince, "since", "", "Only include jobs started after this date (YYYY-MM-DD)")
+	exportTrainingDataCmd.Flags().StringVar(&exportSince, "since", "", "Only include jobs started after this cutoff (YYYY-MM-DD, RFC3339, or duration like \"24h ago\")")
 }
 
 // trainingDataRecord is the JSONL output format for job-estimator.
@@ -109,12 +110,11 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Parse since filter
 	var sinceTime time.Time
 	if exportSince != "" {
-		sinceTime, err = time.Parse("2006-01-02", exportSince)
+		sinceTime, err = parseSinceCutoff(exportSince, time.Now())
 		if err != nil {
-			return fmt.Errorf("invalid --since date (use YYYY-MM-DD): %w", err)
+			return err
 		}
 	}
 

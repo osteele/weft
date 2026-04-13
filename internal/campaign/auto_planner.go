@@ -3,6 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -18,7 +19,10 @@ import (
 type AutoPlacementPlan struct {
 	ReuseAssignments []ReuseAssignment
 	LaunchJobIDs     []int64
-	BlockedReasons   map[int64]string
+	// LaunchRateCentsPerHour is the projected aggregate $/hr for new instances
+	// implied by this pass's launchable candidate groups.
+	LaunchRateCentsPerHour int
+	BlockedReasons         map[int64]string
 }
 
 // AutoPlannerProfile returns the cost/time profile for unattended auto mode.
@@ -109,9 +113,62 @@ func BuildAutoPlacementPlan(
 		}
 		applyGroupOffer(&plan, group, offer, reused)
 	}
+	plan.LaunchRateCentsPerHour = launchRateCentsPerHour(groups, strategyPlan.NewCandidate, reused)
 
 	sort.Slice(plan.LaunchJobIDs, func(i, j int) bool { return plan.LaunchJobIDs[i] < plan.LaunchJobIDs[j] })
 	return plan, nil
+}
+
+func launchRateCentsPerHour(splitGroups []InstanceGroup, candidate *CandidateResult, reused map[int64]struct{}) int {
+	if candidate == nil || len(candidate.Groups) == 0 || len(candidate.Offers) == 0 {
+		return 0
+	}
+	jobToCandidate := make(map[int64]int, len(splitGroups))
+	for candidateIdx, group := range candidate.Groups {
+		for _, job := range group.Jobs {
+			if job != nil {
+				jobToCandidate[job.ID] = candidateIdx
+			}
+		}
+	}
+
+	seenCandidate := make(map[int]struct{}, len(candidate.Groups))
+	total := 0
+	for _, splitGroup := range splitGroups {
+		if len(splitGroup.Jobs) == 0 {
+			continue
+		}
+		hasUnreused := false
+		for _, job := range splitGroup.Jobs {
+			if job == nil {
+				continue
+			}
+			if _, ok := reused[job.ID]; !ok {
+				hasUnreused = true
+				break
+			}
+		}
+		if !hasUnreused {
+			continue
+		}
+		candidateIdx, ok := jobToCandidate[splitGroup.Jobs[0].ID]
+		if !ok {
+			continue
+		}
+		if _, exists := seenCandidate[candidateIdx]; exists {
+			continue
+		}
+		seenCandidate[candidateIdx] = struct{}{}
+		if candidateIdx < 0 || candidateIdx >= len(candidate.Offers) {
+			continue
+		}
+		offer := candidate.Offers[candidateIdx].Offer
+		if offer == nil {
+			continue
+		}
+		total += int(math.Round(offer.CostPerHour * 100))
+	}
+	return total
 }
 
 func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}) {
