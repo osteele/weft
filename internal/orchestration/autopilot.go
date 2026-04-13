@@ -19,6 +19,10 @@ type GroupedAutoPilotResult struct {
 	BlockedReasons map[int64]string
 }
 
+var autoPilotBuildPlan = buildAutoPlacementPlan
+
+var autoPilotRelaunch = RelaunchOrphanedJobs
+
 func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (*GroupedAutoPilotResult, error) {
 	if database == nil {
 		return &GroupedAutoPilotResult{}, nil
@@ -71,7 +75,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
-	plan, err := buildAutoPlacementPlan(database, cfg, unplaced, capacities)
+	plan, err := autoPilotBuildPlan(database, cfg, unplaced, capacities)
 	if err != nil {
 		oplog.Log("auto_pilot.planner_error",
 			oplog.WithError(err),
@@ -84,9 +88,12 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
-	oplog.Log("auto_pilot.plan",
-		oplog.WithDetailf("unplaced=%d capacities=%d reuse=%d launch=%d blocked=%d",
-			len(unplaced), len(capacities), len(plan.ReuseAssignments), len(plan.LaunchJobIDs), len(blockedReasons)))
+	planDetail := fmt.Sprintf("unplaced=%d capacities=%d reuse=%d launch=%d blocked=%d",
+		len(unplaced), len(capacities), len(plan.ReuseAssignments), len(plan.LaunchJobIDs), len(blockedReasons))
+	if sampleReason := sampleBlockedReason(blockedReasons); sampleReason != "" {
+		planDetail += fmt.Sprintf(" reason=%q", sampleReason)
+	}
+	oplog.Log("auto_pilot.plan", oplog.WithDetail(planDetail))
 
 	placed := 0
 	for _, assignment := range plan.ReuseAssignments {
@@ -112,6 +119,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	for _, jobID := range plan.LaunchJobIDs {
 		launchScope[jobID] = struct{}{}
 	}
+	plannerMadeDecisions := len(plan.LaunchJobIDs) > 0 || len(plan.BlockedReasons) > 0
 	remainingByID := make(map[int64]*db.Job, len(remaining))
 	for _, job := range remaining {
 		if job != nil {
@@ -133,6 +141,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			}
 		}
 		if len(launchScope) == 0 {
+			if plannerMadeDecisions {
+				continue
+			}
 			rentalScope = append(rentalScope, job.ID)
 			continue
 		}
@@ -154,7 +165,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
 
 	failedInstanceByJob := BuildFailedInstanceByJob(database, rentalScope)
-	result, err := RelaunchOrphanedJobs(database, cfg, 0, nil, rentalScope, "", false, true)
+	result, err := autoPilotRelaunch(database, cfg, 0, nil, rentalScope, "", false, true)
 	if err != nil {
 		oplog.Log("auto_pilot.launch_error",
 			oplog.WithError(err),
@@ -283,4 +294,13 @@ func summarizeAutoPilotError(err error) string {
 		return msg
 	}
 	return strings.TrimSpace(msg[:maxLen-1]) + "…"
+}
+
+func sampleBlockedReason(reasons map[int64]string) string {
+	for _, reason := range reasons {
+		if trimmed := strings.TrimSpace(reason); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
