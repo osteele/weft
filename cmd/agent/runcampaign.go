@@ -144,6 +144,7 @@ func runCampaign(args []string) {
 		OnPhase:             currentPhase.Set,
 		SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 		GPUWarmup:           manifest.GPUWarmup,
+		CostPerHourCents:    manifest.CostPerHourCents,
 	})
 	anyFailed = seqResult.AnyFailed
 

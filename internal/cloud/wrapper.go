@@ -21,4 +21,7 @@ type CampaignManifest struct {
 	Env                 map[string]string `json:"env,omitempty"`
 	SkipWorkdirDeletion bool              `json:"skip_workdir_deletion,omitempty"`
 	GPUWarmup           bool              `json:"gpu_warmup,omitempty"`
+	// CostPerHourCents is the whole-instance cost used by the agent to pick
+	// hang-watchdog thresholds. Zero = unknown (use conservative thresholds).
+	CostPerHourCents int `json:"cost_per_hour_cents,omitempty"`
 }

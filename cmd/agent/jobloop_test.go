@@ -134,6 +134,66 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 }
 
+func TestPickWatchdogTimeouts(t *testing.T) {
+	cases := []struct {
+		name             string
+		costPerHourCents int
+		wantGPUIdle      time.Duration
+		wantSilence      time.Duration
+	}{
+		{"on-prem (zero cost)", 0, 20 * time.Minute, 30 * time.Minute},
+		{"cheap 3090 at $0.30/hr", 30, 20 * time.Minute, 30 * time.Minute},
+		{"just under threshold at $1.99/hr", 199, 20 * time.Minute, 30 * time.Minute},
+		{"at threshold $2.00/hr", 200, 8 * time.Minute, 12 * time.Minute},
+		{"H100 at $3.50/hr", 350, 8 * time.Minute, 12 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gpuIdle, silence := pickWatchdogTimeouts(tc.costPerHourCents)
+			if gpuIdle != tc.wantGPUIdle {
+				t.Errorf("gpu-idle = %s, want %s", gpuIdle, tc.wantGPUIdle)
+			}
+			if silence != tc.wantSilence {
+				t.Errorf("silence = %s, want %s", silence, tc.wantSilence)
+			}
+		})
+	}
+}
+
+func TestSingleJobConfigForAgentJob_AppliesCostTieredWatchdogs(t *testing.T) {
+	t.Run("expensive cloud host uses aggressive thresholds", func(t *testing.T) {
+		cfg := jobSequenceConfig{
+			R2Bucket:         "bucket",
+			LogDir:           "/tmp/logs",
+			StartTime:        time.Now(),
+			CostPerHourCents: 350, // H100 tier
+		}
+		got := singleJobConfigForAgentJob(cloud.AgentJob{ID: 1, Command: "echo"}, cfg, "/tmp/work", 0)
+		if got.GPUIdleTimeout != 8*time.Minute {
+			t.Errorf("gpu-idle = %s, want 8m", got.GPUIdleTimeout)
+		}
+		if got.StdoutSilenceTimeout != 12*time.Minute {
+			t.Errorf("silence = %s, want 12m", got.StdoutSilenceTimeout)
+		}
+	})
+
+	t.Run("on-prem uses conservative thresholds", func(t *testing.T) {
+		cfg := jobSequenceConfig{
+			R2Bucket:         "bucket",
+			LogDir:           "/tmp/logs",
+			StartTime:        time.Now(),
+			CostPerHourCents: 0,
+		}
+		got := singleJobConfigForAgentJob(cloud.AgentJob{ID: 2, Command: "echo"}, cfg, "/tmp/work", 0)
+		if got.GPUIdleTimeout != 20*time.Minute {
+			t.Errorf("gpu-idle = %s, want 20m", got.GPUIdleTimeout)
+		}
+		if got.StdoutSilenceTimeout != 30*time.Minute {
+			t.Errorf("silence = %s, want 30m", got.StdoutSilenceTimeout)
+		}
+	})
+}
+
 func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {
 	logDir := t.TempDir()
 	jobID := int64(42)

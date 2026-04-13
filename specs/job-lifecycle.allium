@@ -190,6 +190,7 @@ value Backend = queue_runner | slurm | vastai
 -- unrecognized non-zero exit codes.
 value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
                     | killed_sigkill | killed_sigterm
+                    | killed_gpu_idle | killed_stdout_silence
 
 value Status = draft | pending_placement | queued | starting | running
              | paused | completed | failed | dead | killed | canceled
@@ -206,6 +207,15 @@ value PlacementResult {
 config {
     setup_timeout: Duration = 20.minutes
     kill_grace_period: Duration = 10.seconds    -- SIGTERM → SIGKILL delay
+
+    -- Hang-detection watchdogs. Zero disables. Actual values are selected
+    -- per-job by the agent based on host cost-per-hour: aggressive thresholds
+    -- (8m / 12m) on expensive cloud hosts (>= $2/hr), conservative (20m / 30m)
+    -- otherwise. No per-job override in v1.
+    gpu_idle_timeout: Duration = 20.minutes
+    stdout_silence_timeout: Duration = 30.minutes
+    watchdog_initial_grace: Duration = 5.minutes  -- arms after first activity
+                                                  -- or this grace, whichever first
 }
 
 -- ==========================================================================
@@ -355,6 +365,8 @@ rule DetectFailureReason {
     -- Exit code 137 (SIGKILL) → OOM
     -- Exit code 139 (SIGSEGV) → segfault
     -- Exit code 124 → timeout
+    -- Exit code 125 → killed_gpu_idle (GPU watchdog)
+    -- Exit code 126 → killed_stdout_silence (log-silence watchdog)
     -- Disk exhaustion detected via system probes → disk_full
     -- GPU OOM detected via nvidia-smi → gpu_oom
     -- Otherwise → error or exit_N
@@ -376,6 +388,45 @@ rule UserKillsJob {
     ensures: job.status = killed
     @guidance
         -- Sends SIGTERM, waits config.kill_grace_period, then SIGKILL.
+}
+
+-- ==========================================================================
+-- Hang-detection watchdogs
+-- ==========================================================================
+-- These are automatic, not user-initiated. The runner monitors each running
+-- job and kills the process group when a hang signal fires. Only the job
+-- dies; the containing rental instance stays alive and its queue advances
+-- to the next job.
+
+rule GPUIdleKillsJob {
+    when: GPUIdleTimeout(job)
+    requires: job.status = running
+              job.gpu_class != null
+
+    ensures: job.status = failed
+             job.failure_reason = killed_gpu_idle
+             job.exit_code = 125
+    @guidance
+        -- Triggered when every GPU assigned to the job has reported 0%
+        -- utilisation for longer than config.gpu_idle_timeout, after the
+        -- watchdog has armed (first non-zero sample or config.watchdog_initial_grace,
+        -- whichever comes first). Kill path: SIGTERM to the process group,
+        -- then SIGKILL after config.kill_grace_period. The rental instance
+        -- remains alive and continues its queue.
+}
+
+rule StdoutSilenceKillsJob {
+    when: StdoutSilenceTimeout(job)
+    requires: job.status = running
+
+    ensures: job.status = failed
+             job.failure_reason = killed_stdout_silence
+             job.exit_code = 126
+    @guidance
+        -- Triggered when the job log file has not grown for longer than
+        -- config.stdout_silence_timeout, after the watchdog has armed
+        -- (first bytes written or config.watchdog_initial_grace). Kill
+        -- path is identical to GPUIdleKillsJob.
 }
 
 rule UserPausesJob {

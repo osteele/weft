@@ -1588,6 +1588,7 @@ func LaunchInstance(
 		SelfDestructCmd:     selfDestructCmd,
 		SkipWorkdirDeletion: opts.SkipWorkdirDeletion,
 		GPUWarmup:           opts.GPUWarmup,
+		CostPerHourCents:    int(offer.CostPerHour * 100),
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {

@@ -28,6 +28,29 @@ type SingleJobConfig struct {
 	SetupTimeout   time.Duration      // If >0, kill the setup command after this duration (default 20m)
 	SkipProbes     bool               // Skip cache size probes (useful in tests)
 	OnPhase        func(phase string) // Called at phase transitions: "setup", "running"
+
+	// Hang-detection watchdogs. Zero disables. See specs/job-lifecycle.allium
+	// rules GPUIdleKillsJob and StdoutSilenceKillsJob.
+	GPUIdleTimeout       time.Duration // Kill if all assigned GPUs report 0% for this long (after arming)
+	StdoutSilenceTimeout time.Duration // Kill if log file doesn't grow for this long (after arming)
+	WatchdogInitialGrace time.Duration // Grace window before watchdogs arm (default 5m)
+
+	// Test hook: returns true when any assigned GPU has non-zero utilization.
+	// If nil, watchdog polls nvidia-smi via HostGPUMetrics.
+	GPUActiveProbe func() bool
+}
+
+// watchdogTickPeriod returns the check interval for a hang watchdog given its
+// timeout. A fraction of the timeout, bounded to a sane range.
+func watchdogTickPeriod(timeout time.Duration) time.Duration {
+	p := timeout / 10
+	if p < 50*time.Millisecond {
+		return 50 * time.Millisecond
+	}
+	if p > 30*time.Second {
+		return 30 * time.Second
+	}
+	return p
 }
 
 // RunSingleJob executes a single job synchronously with full telemetry.
@@ -214,6 +237,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		defer timer.Stop()
 	}
 
+	// Closed after Wait() so background goroutines can exit promptly.
+	processDone := make(chan struct{})
+
 	// Sampling loop in background
 	samplingDone := make(chan struct{})
 	var rs RunningJobState
@@ -260,7 +286,12 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			defer scanTicker.Stop()
 
 			var lastSize int64
-			for range scanTicker.C {
+			for {
+				select {
+				case <-processDone:
+					return
+				case <-scanTicker.C:
+				}
 				if !CheckPIDAlive(proc.PID) {
 					return
 				}
@@ -291,8 +322,86 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		close(fatalScanDone)
 	}
 
+	// Hang-detection watchdogs. See specs/job-lifecycle.allium rules
+	// GPUIdleKillsJob and StdoutSilenceKillsJob.
+	grace := cfg.WatchdogInitialGrace
+	if grace <= 0 {
+		grace = 5 * time.Minute
+	}
+	runStartedAt := time.Now()
+
+	startWatchdog := func(reason string, timeout time.Duration, hasActivity func() bool) (chan struct{}, *atomic.Bool) {
+		done := make(chan struct{})
+		fired := &atomic.Bool{}
+		if timeout <= 0 {
+			close(done)
+			return done, fired
+		}
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(watchdogTickPeriod(timeout))
+			defer ticker.Stop()
+			var armed bool
+			lastActivity := time.Now()
+			for {
+				select {
+				case <-processDone:
+					return
+				case <-ticker.C:
+				}
+				if hasActivity() {
+					lastActivity = time.Now()
+					armed = true
+				}
+				if !armed && time.Since(runStartedAt) >= grace {
+					armed = true
+					lastActivity = time.Now()
+				}
+				if armed && time.Since(lastActivity) >= timeout {
+					fired.Store(true)
+					slog.Warn("watchdog firing, sending SIGTERM",
+						"component", "runner", "job_id", cfg.JobID,
+						"reason", reason, "pgid", proc.PGID)
+					WriteKillReasonFile(paths, reason)
+					syscall.Kill(-proc.PGID, syscall.SIGTERM)
+					time.AfterFunc(10*time.Second, func() {
+						syscall.Kill(-proc.PGID, syscall.SIGKILL)
+					})
+					return
+				}
+			}
+		}()
+		return done, fired
+	}
+
+	// Seed with header bytes from WriteLogHeader so the watchdog arms on
+	// actual process output, not the pre-run header.
+	silenceLastSize := int64(0)
+	if info, err := os.Stat(paths.Log); err == nil {
+		silenceLastSize = info.Size()
+	}
+	silenceDone, silenceKill := startWatchdog(KillReasonStdoutSilence, cfg.StdoutSilenceTimeout, func() bool {
+		info, err := os.Stat(paths.Log)
+		if err != nil || info.Size() <= silenceLastSize {
+			return false
+		}
+		silenceLastSize = info.Size()
+		return true
+	})
+
+	gpuIdleTimeout := cfg.GPUIdleTimeout
+	if job.GPUClass == "" && len(gpuDevices) == 0 {
+		gpuIdleTimeout = 0
+	}
+	probe := cfg.GPUActiveProbe
+	if probe == nil {
+		probe = func() bool { return HostGPUMetrics().UtilPct > 0 }
+	}
+	gpuIdleDone, gpuIdleKill := startWatchdog(KillReasonGPUIdle, gpuIdleTimeout, probe)
+
 	// Wait for process
 	waitErr := proc.Cmd.Wait()
+	close(processDone)
 	ei := ExtractExitInfo(waitErr)
 
 	// Override exit info if we timed out (like GNU timeout exit code 124)
@@ -312,12 +421,25 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		ei.Signal = syscall.SIGTERM
 	}
 
+	if gpuIdleKill.Load() {
+		ei.ExitCode = ExitCodeGPUIdleKill
+		ei.Signaled = true
+		ei.Signal = syscall.SIGTERM
+	}
+	if silenceKill.Load() {
+		ei.ExitCode = ExitCodeStdoutSilenceKill
+		ei.Signaled = true
+		ei.Signal = syscall.SIGTERM
+	}
+
 	phases.RunEnd = time.Now().Unix()
 	endTime := time.Now().Unix()
 
-	// Stop sampling and fatal scanner
+	// Stop sampling, fatal scanner, and hang watchdogs
 	<-samplingDone
 	<-fatalScanDone
+	<-silenceDone
+	<-gpuIdleDone
 
 	// Write status and log footer
 	WriteStatusFile(paths, ei)

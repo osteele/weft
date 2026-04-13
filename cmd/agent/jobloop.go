@@ -29,6 +29,21 @@ type jobSequenceConfig struct {
 	OnPhase             func(string)  // update current phase string (for heartbeat)
 	SkipWorkdirDeletion bool          // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool          // run CUDA warmup before first benchmark job
+	// CostPerHourCents drives hang-watchdog tier selection; 0 means on-prem
+	// or unknown, which picks conservative thresholds.
+	CostPerHourCents int
+}
+
+// pickWatchdogTimeouts selects GPU-idle and stdout-silence timeouts based on
+// the cost-per-hour of the current host. Expensive cloud hosts (>= $2/hr) get
+// aggressive thresholds so hangs are caught before they burn significant money.
+// See specs/job-lifecycle.allium rules GPUIdleKillsJob and StdoutSilenceKillsJob.
+func pickWatchdogTimeouts(costPerHourCents int) (gpuIdle, stdoutSilence time.Duration) {
+	const expensiveCents = 200 // $2.00/hr
+	if costPerHourCents >= expensiveCents {
+		return 8 * time.Minute, 12 * time.Minute
+	}
+	return 20 * time.Minute, 30 * time.Minute
 }
 
 // jobSequenceResult holds the outcome of running a sequence of jobs.
@@ -185,6 +200,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 }
 
 func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, jobMaxTime time.Duration) runner.SingleJobConfig {
+	gpuIdle, stdoutSilence := pickWatchdogTimeouts(cfg.CostPerHourCents)
 	return runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: ops.CommandJob{
@@ -195,11 +211,13 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 			Needs:      append([]string(nil), job.Needs...),
 			Env:        append([]string(nil), job.Env...),
 		},
-		LogDir:       cfg.LogDir,
-		WorkingDir:   workDir,
-		MaxTime:      jobMaxTime,
-		SetupTimeout: inventory.DefaultSetupTimeout,
-		OnPhase:      phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
+		LogDir:               cfg.LogDir,
+		WorkingDir:           workDir,
+		MaxTime:              jobMaxTime,
+		SetupTimeout:         inventory.DefaultSetupTimeout,
+		GPUIdleTimeout:       gpuIdle,
+		StdoutSilenceTimeout: stdoutSilence,
+		OnPhase:              phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
 	}
 }
 

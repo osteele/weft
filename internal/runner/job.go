@@ -52,8 +52,27 @@ func (ei ExitInfo) SignalName() string {
 	return ei.Signal.String()
 }
 
+// Hang-watchdog exit codes and labels. See specs/job-lifecycle.allium
+// rules GPUIdleKillsJob and StdoutSilenceKillsJob.
+const (
+	ExitCodeGPUIdleKill        = 125
+	ExitCodeStdoutSilenceKill  = 126
+	KillReasonGPUIdle          = "gpu-idle"
+	KillReasonStdoutSilence    = "stdout-silence"
+	FailureReasonGPUIdle       = "killed_gpu_idle"
+	FailureReasonStdoutSilence = "killed_stdout_silence"
+)
+
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.
 func DetectFailureReasonFromExitInfo(ei ExitInfo) string {
+	// Watchdog kills synthesize a specific exit code alongside SIGTERM;
+	// check exit code first so they aren't misclassified as killed_sigterm.
+	switch ei.ExitCode {
+	case ExitCodeGPUIdleKill:
+		return FailureReasonGPUIdle
+	case ExitCodeStdoutSilenceKill:
+		return FailureReasonStdoutSilence
+	}
 	if ei.Signaled {
 		if checkDiskFull() {
 			return "disk_full"
