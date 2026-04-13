@@ -157,6 +157,133 @@ func TestRetryBudgetUsage_ProratesActualSpendByAttemptElapsed(t *testing.T) {
 	}
 }
 
+func TestAttemptFactsForRelaunch_SkipsCanceledAttemptForTiming(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	launchA, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch A: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchA); err != nil {
+		t.Fatalf("set launch A: %v", err)
+	}
+	failedStart := time.Now().Add(-2 * time.Hour).Unix()
+	failedEnd := failedStart + 40
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ?, end_time = ?, status = ?, cloud_outcome = ?
+		 WHERE job_id = ? AND launch_id = ?`,
+		failedStart, failedEnd, db.StatusFailed, db.AttemptOutcomeFailed, jobID, launchA,
+	); err != nil {
+		t.Fatalf("update attempt A: %v", err)
+	}
+
+	launchB, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch B: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("create attempt B: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchB); err != nil {
+		t.Fatalf("set launch B: %v", err)
+	}
+	canceledStart := time.Now().Add(-90 * time.Minute).Unix()
+	canceledEnd := canceledStart + int64((12*time.Hour + 38*time.Minute + 35*time.Second).Seconds())
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ?, end_time = ?, status = ?, cloud_outcome = ?
+		 WHERE job_id = ? AND launch_id = ?`,
+		canceledStart, canceledEnd, db.StatusCanceled, db.AttemptOutcomeCancelled, jobID, launchB,
+	); err != nil {
+		t.Fatalf("update attempt B: %v", err)
+	}
+
+	facts, err := attemptFactsForRelaunch(database, jobID)
+	if err != nil {
+		t.Fatalf("attemptFactsForRelaunch: %v", err)
+	}
+	if facts.LastAttemptStartTime != failedStart {
+		t.Fatalf("LastAttemptStartTime = %d, want %d", facts.LastAttemptStartTime, failedStart)
+	}
+	if facts.LastAttemptEndTime == nil || *facts.LastAttemptEndTime != failedEnd {
+		t.Fatalf("LastAttemptEndTime = %v, want %d", facts.LastAttemptEndTime, failedEnd)
+	}
+
+	elapsed, _ := retryBudgetUsage(facts, time.Now())
+	if elapsed > time.Minute {
+		t.Fatalf("elapsed = %v, want ~40s", elapsed)
+	}
+}
+
+func TestAttemptFactsForRelaunch_AllCanceledYieldsZeroTiming(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	launch, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launch); err != nil {
+		t.Fatalf("set launch: %v", err)
+	}
+	start := time.Now().Add(-time.Hour).Unix()
+	end := start + 1800
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ?, end_time = ?, status = ?, cloud_outcome = ?
+		 WHERE job_id = ? AND launch_id = ?`,
+		start, end, db.StatusCanceled, db.AttemptOutcomeCancelled, jobID, launch,
+	); err != nil {
+		t.Fatalf("update attempt: %v", err)
+	}
+
+	facts, err := attemptFactsForRelaunch(database, jobID)
+	if err != nil {
+		t.Fatalf("attemptFactsForRelaunch: %v", err)
+	}
+	if facts.LastAttemptStartTime != 0 {
+		t.Fatalf("LastAttemptStartTime = %d, want 0", facts.LastAttemptStartTime)
+	}
+	elapsed, spend := retryBudgetUsage(facts, time.Now())
+	if elapsed != 0 || spend != 0 {
+		t.Fatalf("elapsed=%v spend=%d, want zero", elapsed, spend)
+	}
+}
+
+func TestRetryBudgetUsage_IgnoresCanceledAttemptDuration(t *testing.T) {
+	// retryBudgetUsage relies on attemptFactsForRelaunch to filter out
+	// canceled attempts before passing facts in; this test locks in the
+	// contract at the retryBudgetUsage boundary.
+	now := time.Unix(10_000, 0)
+	failedStart := int64(9_960)
+	failedEnd := int64(10_000)
+	facts := relaunchAttemptFacts{
+		LastAttemptStartTime: failedStart,
+		LastAttemptEndTime:   &failedEnd,
+	}
+	elapsed, spend := retryBudgetUsage(facts, now)
+	if elapsed != 40*time.Second {
+		t.Fatalf("elapsed = %v, want 40s", elapsed)
+	}
+	if spend != 0 {
+		t.Fatalf("spend = %d, want 0", spend)
+	}
+}
+
 func TestRelaunchGroupingJobsTreatsUnplacedPendingPlacementAsQueued(t *testing.T) {
 	queued := &db.Job{ID: 1, Status: db.StatusQueued}
 	pendingUnplaced := &db.Job{ID: 2, Status: db.StatusPendingPlacement}

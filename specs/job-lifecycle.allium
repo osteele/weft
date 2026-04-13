@@ -474,6 +474,30 @@ rule RetryReplaysSubmissionIntent {
         -- script verbatim.
 }
 
+rule RetryBudgetExcludesCanceledAttempts {
+    when: RetryBudgetEvaluated(job)
+
+    -- Retry budgets (time and cost) bound *retry-system activity*, not
+    -- total job wall-clock. The elapsed time charged against a budget is
+    -- taken from the most recent non-canceled attempt. Canceled attempts
+    -- contribute zero — whether user-initiated (`weft instance terminate`,
+    -- cancel on a stuck rental) or system-initiated cleanup, a cancel
+    -- does not represent retry effort and its duration must not block
+    -- subsequent retries. If every prior attempt was canceled, elapsed
+    -- is zero and the budget is not tripped.
+
+    @guidance
+        -- Implementation: internal/campaign/relaunch.go
+        -- attemptFactsForRelaunch() scans attempts newest-first and
+        -- selects the latest non-canceled attempt for LastAttemptStartTime
+        -- / LastAttemptEndTime, which feed retryBudgetUsage().
+        --
+        -- Regression reference: job wj1134 (2026-04-13) had a canceled
+        -- attempt that ran 12h38m before cleanup; that duration was
+        -- incorrectly charged to the 45m subsequent-retry budget,
+        -- permanently blocking every re-queue.
+}
+
 -- ==========================================================================
 -- Authoritative overrides
 -- ==========================================================================

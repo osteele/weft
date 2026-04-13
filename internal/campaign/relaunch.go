@@ -992,7 +992,22 @@ func attemptFactsForRelaunch(database *sql.DB, jobID int64) (relaunchAttemptFact
 	if err != nil || len(attempts) == 0 {
 		return relaunchAttemptFacts{}, err
 	}
-	lastAttempt := attempts[len(attempts)-1]
+	// Skip canceled attempts: their duration reflects cleanup of a stuck
+	// rental, not retry-system activity, and must not charge the budget.
+	var lastAttempt db.LaunchAttempt
+	haveLast := false
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].Outcome == db.AttemptOutcomeCancelled {
+			continue
+		}
+		lastAttempt = attempts[i]
+		haveLast = true
+		break
+	}
+	if !haveLast {
+		count, countErr := db.CountLaunchAttempts(database, jobID)
+		return relaunchAttemptFacts{Count: count}, countErr
+	}
 
 	var (
 		startTime sql.NullInt64
