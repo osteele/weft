@@ -54,6 +54,17 @@ value TerminationReason = completed | provider_failure | job_failure
 
 value InstanceRole = worker | donor
 
+-- Output of the autopilot planner for a single scheduling pass.
+value PlannerDecision {
+    launch_job_ids: List<String>        -- jobs the planner approved for launch
+    blocked_reasons: Map<String, String> -- job_id -> human-readable block reason
+}
+
+value AutoPlacementPlan {
+    decision: PlannerDecision
+    considered_job_ids: List<String>    -- all unplaced jobs examined this pass
+}
+
 -- ==========================================================================
 -- Entities
 -- ==========================================================================
@@ -672,6 +683,43 @@ rule RunawayBreakerClears {
 }
 
 -- ==========================================================================
+-- Autopilot placement pass
+-- ==========================================================================
+
+-- On each scheduling tick, the autopilot asks the planner for an
+-- AutoPlacementPlan over the current unplaced jobs, then launches the
+-- jobs the planner approved. Jobs the planner explicitly blocked MUST
+-- NOT be launched in the same pass — their block reasons are surfaced
+-- to the user and re-evaluated on the next pass.
+
+rule AutoPilotPass {
+    when: AutoPilotTick(unplaced_jobs)
+
+    let plan: AutoPlacementPlan = BuildAutoPlacementPlan(unplaced_jobs)
+    let decision = plan.decision
+    let planner_made_decisions = decision.launch_job_ids.any()
+                                 or decision.blocked_reasons.any()
+
+    ensures:
+        for job in unplaced_jobs where job.id in decision.launch_job_ids:
+            LaunchInstance(job.campaign, [job], job.gpu_spec, job.launch_options)
+
+    -- Fallback: only when the planner returned nothing at all do we
+    -- launch the remaining unplaced jobs individually.
+    if not planner_made_decisions:
+        ensures:
+            for job in unplaced_jobs:
+                LaunchInstance(job.campaign, [job], job.gpu_spec, job.launch_options)
+
+    @guidance
+        -- Planner: internal/campaign/auto_planner.go BuildAutoPlacementPlan.
+        -- Pass driver: internal/orchestration/autopilot.go RunGroupedAutoPilotPass.
+        -- A job appearing in blocked_reasons is surfaced to the user
+        -- (e.g. "waiting for donor", "no matching offers") and retried
+        -- on the next autopilot tick, not this one.
+}
+
+-- ==========================================================================
 -- Reconciliation (safety-net cleanup)
 -- ==========================================================================
 
@@ -722,4 +770,38 @@ invariant CompletedCampaignsHaveAllCompleted {
     for campaign in Campaigns:
         if campaign.status = completed:
             campaign.instances.all(i => i.status = completed)
+}
+
+invariant BlockedJobsNotRelaunchedInSamePass {
+    -- When the planner returns a non-empty blocked_reasons map for a job,
+    -- the autopilot pass MUST NOT issue a launch for that job in the
+    -- same pass. Blocked jobs remain unplaced until re-evaluated.
+    for plan in AutoPlacementPlans:
+        for job_id in plan.decision.blocked_reasons.keys():
+            job_id not in plan.decision.launch_job_ids
+
+    @guidance
+        -- Planner output contract: internal/campaign/auto_planner.go.
+        -- Enforced by caller: internal/orchestration/autopilot.go
+        -- RunGroupedAutoPilotPass, which iterates decision.LaunchJobIDs
+        -- only and does not fall through to the blanket fallback when
+        -- blocked_reasons is non-empty.
+}
+
+invariant AutoPilotFallbackRequiresNoDecisions {
+    -- The "launch all remaining unplaced jobs" fallback path in the
+    -- autopilot pass may fire only when the planner returned no
+    -- decisions at all — both LaunchJobIDs and BlockedReasons empty.
+    -- If the planner blocked anything, blocked jobs must wait for the
+    -- next pass; we do not bypass the planner.
+    for plan in AutoPlacementPlans:
+        AutoPilotFallbackFired(plan) implies
+            (not plan.decision.launch_job_ids.any()
+             and not plan.decision.blocked_reasons.any())
+
+    @guidance
+        -- See internal/orchestration/autopilot.go RunGroupedAutoPilotPass.
+        -- The fallback exists to preserve behavior when a planner is
+        -- unavailable or returns an empty plan; it is not a bypass for
+        -- blocked jobs.
 }
