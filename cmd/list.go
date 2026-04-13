@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
@@ -139,22 +140,38 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	for _, warning := range syncListData(database) {
-		fmt.Fprintln(os.Stderr, warning)
-	}
+	// Kick off sync in the background. Render the table from the DB as soon
+	// as we have results or the soft deadline elapses, whichever comes first.
+	// If we render before sync finishes, we still block on it before returning
+	// so in-flight DB writes aren't abandoned mid-transaction.
+	syncCh := startListSyncAsync(database)
+	const listSyncSoftDeadline = 1 * time.Second
 
-	// Handle cleanup mode
-	if listCleanup > 0 {
-		deleted, err := db.CleanupOld(database, listCleanup)
-		if err != nil {
-			return fmt.Errorf("cleanup: %w", err)
+	var (
+		syncWarnings []string
+		synced       bool
+	)
+	select {
+	case syncWarnings = <-syncCh:
+		synced = true
+	case <-time.After(listSyncSoftDeadline):
+	}
+	printWarnings(syncWarnings)
+
+	// Cleanup and single-job modes depend on fully-synced state; block on
+	// completion before proceeding.
+	if listCleanup > 0 || listShow > 0 {
+		if !synced {
+			printWarnings(<-syncCh)
 		}
-		fmt.Printf("Deleted %d jobs older than %d days\n", deleted, listCleanup)
-		return nil
-	}
-
-	// Handle show single job
-	if listShow > 0 {
+		if listCleanup > 0 {
+			deleted, err := db.CleanupOld(database, listCleanup)
+			if err != nil {
+				return fmt.Errorf("cleanup: %w", err)
+			}
+			fmt.Printf("Deleted %d jobs older than %d days\n", deleted, listCleanup)
+			return nil
+		}
 		return showJob(database, listShow)
 	}
 
@@ -162,8 +179,41 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := printJobs(database, jobs); err != nil {
+		return err
+	}
 
-	return printJobs(database, jobs)
+	if !synced {
+		fmt.Fprintln(os.Stderr, degraded.CloudStateStalePendingRefresh())
+		// Our stale-pending-refresh notice already tells the user cloud
+		// state wasn't fully refreshed; drop the redundant cloud-timeout
+		// warning that SyncCloud produces on the same event.
+		printWarnings(filterCloudTimeoutWarning(<-syncCh))
+	}
+	return nil
+}
+
+func filterCloudTimeoutWarning(warnings []string) []string {
+	out := warnings[:0]
+	for _, w := range warnings {
+		if strings.HasPrefix(w, "Cloud sync timed out") {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+func startListSyncAsync(database *sql.DB) <-chan []string {
+	ch := make(chan []string, 1)
+	go func() { ch <- syncListData(database) }()
+	return ch
+}
+
+func printWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, w)
+	}
 }
 
 func syncListData(database *sql.DB) []string {
