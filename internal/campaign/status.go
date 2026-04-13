@@ -66,7 +66,8 @@ type InstanceUpdate struct {
 	JobAttemptOutcomes      map[int64]string // job_id → attempt outcome for this instance
 	Instance                *cloud.Instance  // nil if not yet provisioned
 	BootstrapStage          string           // current bootstrap stage from R2 (e.g. "agent_installed")
-	InstancePhase           string           // current job execution phase from R2 (e.g. "running:123")
+	RawInstancePhase        string           // raw job execution phase from R2 (e.g. "setup:123")
+	InstancePhase           string           // reconciled job execution phase for display/checks (e.g. "running:123")
 	PhaseChangedAt          *time.Time       // first observed time of the current phase within this watcher
 	StallMessage            string           // non-empty if bootstrap appears stuck
 	JobProgress             int              // -1 = no progress, 0-100 = raw percent within current phase
@@ -176,6 +177,7 @@ func inferInitialPhaseChangedAt(phase string, ci *db.Launch, jobs []*db.Job, tim
 // Phase verb constants for R2 instance phase strings (format "verb:jobID").
 const (
 	PhaseSetup            = "setup"
+	PhaseGPUWarmup        = "gpu_warmup"
 	PhaseRunning          = "running"
 	PhaseFinalizing       = "finalizing"
 	PhaseUploading        = "uploading"
@@ -205,6 +207,74 @@ func ParsePhaseJobID(phase string) (string, int64, bool) {
 		return "", 0, false
 	}
 	return verb, jobID, true
+}
+
+// displayPhase reconciles raw R2 phase data with DB job state for display and checks.
+// DB owns the coarse running state; R2 owns richer execution sub-states.
+func displayPhase(jobStatuses map[int64]string, jobs []*db.Job, r2Phase string) (phase string, verb string) {
+	r2Phase = strings.TrimSpace(r2Phase)
+	switch r2Phase {
+	case PhaseGrace, PhaseDestroying, PhaseDiskFull:
+		return r2Phase, r2Phase
+	}
+
+	r2Verb, jobID, ok := ParsePhaseJobID(r2Phase)
+	if !ok {
+		if runningPhase, runningVerb := fallbackRunningPhase(jobStatuses, jobs); runningPhase != "" {
+			return runningPhase, runningVerb
+		}
+		return r2Phase, ""
+	}
+
+	switch r2Verb {
+	case PhaseSetup, PhaseGPUWarmup:
+		// Once DB says the job is running, setup/warmup is stale metadata.
+		if jobStatuses[jobID] == db.StatusRunning {
+			return fmt.Sprintf("%s:%d", PhaseRunning, jobID), PhaseRunning
+		}
+	}
+	return r2Phase, r2Verb
+}
+
+func fallbackRunningPhase(jobStatuses map[int64]string, jobs []*db.Job) (phase string, verb string) {
+	var (
+		bestJobID    int64
+		bestStart    int64
+		bestHasStart bool
+	)
+	for _, job := range jobs {
+		if job == nil || jobStatuses[job.ID] != db.StatusRunning {
+			continue
+		}
+		start := job.StartTime
+		hasStart := start > 0
+		if bestJobID == 0 {
+			bestJobID = job.ID
+			bestStart = start
+			bestHasStart = hasStart
+			continue
+		}
+		if hasStart && (!bestHasStart || start > bestStart) {
+			bestJobID = job.ID
+			bestStart = start
+			bestHasStart = true
+			continue
+		}
+		if hasStart == bestHasStart && start == bestStart && job.ID > bestJobID {
+			bestJobID = job.ID
+		}
+	}
+	if bestJobID == 0 {
+		for jobID, status := range jobStatuses {
+			if status == db.StatusRunning && jobID > bestJobID {
+				bestJobID = jobID
+			}
+		}
+	}
+	if bestJobID == 0 {
+		return "", ""
+	}
+	return fmt.Sprintf("%s:%d", PhaseRunning, bestJobID), PhaseRunning
 }
 
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
@@ -355,6 +425,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				JobAttemptOutcomes:      attemptOutcomes,
 				Instance:                cachedInstance,
 				BootstrapStage:          synced.BootstrapStage,
+				RawInstancePhase:        synced.RawInstancePhase,
 				InstancePhase:           synced.InstancePhase,
 				PhaseChangedAt:          synced.PhaseChangedAt,
 				StallMessage:            stallMessage,
@@ -508,6 +579,8 @@ func InstancePhaseLabel(phase string) string {
 		switch verb {
 		case PhaseSetup:
 			return fmt.Sprintf("setup (job %s)", jobID)
+		case PhaseGPUWarmup:
+			return fmt.Sprintf("gpu warmup (job %s)", jobID)
 		case PhaseRunning:
 			return fmt.Sprintf("running job %s", jobID)
 		case PhaseFinalizing:

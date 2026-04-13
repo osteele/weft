@@ -96,6 +96,7 @@ func TestInstancePhaseLabel(t *testing.T) {
 		want  string
 	}{
 		{"setup:42", "setup (job 42)"},
+		{"gpu_warmup:42", "gpu warmup (job 42)"},
 		{"running:123", "running job 123"},
 		{"finalizing:7", "finalizing job 7"},
 		{"uploading:7", "uploading outputs (job 7)"},
@@ -108,6 +109,62 @@ func TestInstancePhaseLabel(t *testing.T) {
 		if got := InstancePhaseLabel(tt.phase); got != tt.want {
 			t.Errorf("InstancePhaseLabel(%q) = %q, want %q", tt.phase, got, tt.want)
 		}
+	}
+}
+
+func TestDisplayPhase_ReconcilesWithDBStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		r2Phase   string
+		jobs      []*db.Job
+		statuses  map[int64]string
+		wantPhase string
+		wantVerb  string
+	}{
+		{
+			name:      "setup becomes running when DB is running",
+			r2Phase:   "setup:42",
+			jobs:      []*db.Job{{ID: 42, Status: db.StatusRunning, StartTime: time.Now().Add(-10 * time.Minute).Unix()}},
+			statuses:  map[int64]string{42: db.StatusRunning},
+			wantPhase: "running:42",
+			wantVerb:  PhaseRunning,
+		},
+		{
+			name:      "setup stays setup while queued",
+			r2Phase:   "setup:42",
+			jobs:      []*db.Job{{ID: 42, Status: db.StatusQueued}},
+			statuses:  map[int64]string{42: db.StatusQueued},
+			wantPhase: "setup:42",
+			wantVerb:  PhaseSetup,
+		},
+		{
+			name:      "finalizing is preserved for completed job",
+			r2Phase:   "finalizing:42",
+			jobs:      []*db.Job{{ID: 42, Status: db.StatusCompleted}},
+			statuses:  map[int64]string{42: db.StatusCompleted},
+			wantPhase: "finalizing:42",
+			wantVerb:  PhaseFinalizing,
+		},
+		{
+			name:      "empty R2 phase falls back to running job",
+			r2Phase:   "",
+			jobs:      []*db.Job{{ID: 99, Status: db.StatusRunning, StartTime: time.Now().Add(-5 * time.Minute).Unix()}},
+			statuses:  map[int64]string{99: db.StatusRunning},
+			wantPhase: "running:99",
+			wantVerb:  PhaseRunning,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPhase, gotVerb := displayPhase(tt.statuses, tt.jobs, tt.r2Phase)
+			if gotPhase != tt.wantPhase {
+				t.Fatalf("displayPhase() phase = %q, want %q", gotPhase, tt.wantPhase)
+			}
+			if gotVerb != tt.wantVerb {
+				t.Fatalf("displayPhase() verb = %q, want %q", gotVerb, tt.wantVerb)
+			}
+		})
 	}
 }
 

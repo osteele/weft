@@ -202,7 +202,8 @@ func checkForNewJobs(r2Bucket string, instanceID int64, onPhase func(string)) []
 }
 
 // writePhase writes a phase marker to R2 in a background goroutine.
-// Best-effort: errors are logged but do not block the caller.
+// Best-effort is intentional: coordinator-side phase reconciliation is DB-driven
+// for the running state, so dropped phase PUTs only affect transient sub-state display.
 func writePhase(r2Bucket, phaseKey, phase string) {
 	go r2Put(r2Bucket, phaseKey, phase)
 }

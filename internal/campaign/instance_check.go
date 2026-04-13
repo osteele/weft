@@ -141,7 +141,7 @@ type CheckInstanceParams struct {
 	ProviderErr    error
 	R2Client       *r2.Client
 	JobState       JobState
-	InstancePhase  string // from R2
+	InstancePhase  string // reconciled display/check phase
 	BootstrapStage string // from R2
 	HeartbeatAge   time.Duration
 	Now            time.Time
@@ -331,35 +331,44 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
-	// 5b. Setup phase stall: instance in setup phase for too long
-	if ci.Status == db.LaunchStatusRunning && p.PhaseChangedAt != nil {
+	// 5b. Setup phase stall: instance in setup/warmup phase for too long.
+	// Running is DB-authoritative via phase reconciliation, so setup checks
+	// only apply when reconciled phase is still setup/warmup.
+	if ci.Status == db.LaunchStatusRunning {
 		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
-		if verb == PhaseSetup {
-			phaseAge := p.Now.Sub(*p.PhaseChangedAt)
-
-			warnTimeout := defaultSetupStallWarn
-			termTimeout := defaultSetupStallTerminate
-			if p.SetupSurvival != nil {
-				warnTimeout = p.SetupSurvival.WarnAfter
-				termTimeout = p.SetupSurvival.TerminateAfter
+		if verb == PhaseSetup || verb == PhaseGPUWarmup {
+			phaseStart := p.PhaseChangedAt
+			if phaseStart == nil {
+				// Fallback for legacy rows where phase_changed_at was never recorded.
+				phaseStart = cloudInstanceLifecycleStart(ci)
 			}
+			if phaseStart != nil {
+				phaseAge := p.Now.Sub(*phaseStart)
 
-			if phaseAge >= termTimeout {
-				return InstanceAction{
-					Kind:              ActionSetupStalled,
-					TerminalStatus:    db.LaunchStatusFailed,
-					TerminationReason: db.TerminationReasonPhaseStall,
-					StallMessage:      fmt.Sprintf("setup phase stalled for %s — terminating instance", phaseAge.Truncate(time.Second)),
-					DestroyProvider:   true,
-					ResetJobs:         true,
-					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				warnTimeout := defaultSetupStallWarn
+				termTimeout := defaultSetupStallTerminate
+				if p.SetupSurvival != nil {
+					warnTimeout = p.SetupSurvival.WarnAfter
+					termTimeout = p.SetupSurvival.TerminateAfter
 				}
-			}
-			if phaseAge >= warnTimeout {
-				remaining := termTimeout - phaseAge
-				return InstanceAction{
-					Kind:         ActionDisplayOnly,
-					StallMessage: fmt.Sprintf("setup phase stalled for %s (terminating in %s)", phaseAge.Truncate(time.Second), remaining.Truncate(time.Second)),
+
+				if phaseAge >= termTimeout {
+					return InstanceAction{
+						Kind:              ActionSetupStalled,
+						TerminalStatus:    db.LaunchStatusFailed,
+						TerminationReason: db.TerminationReasonPhaseStall,
+						StallMessage:      fmt.Sprintf("setup phase stalled for %s — terminating instance", phaseAge.Truncate(time.Second)),
+						DestroyProvider:   true,
+						ResetJobs:         true,
+						AttemptOutcome:    db.AttemptOutcomeOrphaned,
+					}
+				}
+				if phaseAge >= warnTimeout {
+					remaining := termTimeout - phaseAge
+					return InstanceAction{
+						Kind:         ActionDisplayOnly,
+						StallMessage: fmt.Sprintf("setup phase stalled for %s (terminating in %s)", phaseAge.Truncate(time.Second), remaining.Truncate(time.Second)),
+					}
 				}
 			}
 		}

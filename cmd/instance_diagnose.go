@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +36,9 @@ type instanceDiagnoseReport struct {
 	LifecycleEvents   []db.LifecycleEvent
 	BootstrapSurvival *db.BootstrapSurvival
 	SetupSurvival     *db.SetupSurvival
+	LivePhaseRaw      string
+	LivePhase         string
+	LivePhaseChanged  *time.Time
 	Obs               terminal.CloudInstanceObservability
 	Diagnosis         instanceDiagnosis
 	Timeline          []timelineEntry
@@ -121,6 +126,24 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 	diagnosis := buildInstanceDiagnosis(inst, jobs, outcomes)
 	timeline := buildTimeline(inst, jobs, timings, events)
 
+	var livePhase string
+	var livePhaseChanged *time.Time
+	if liveState, err := db.GetLaunchLiveState(database, inst.ID); err == nil && liveState != nil {
+		livePhase = strings.TrimSpace(liveState.InstancePhase)
+		if liveState.PhaseChangedAt != nil {
+			ts := time.Unix(*liveState.PhaseChangedAt, 0)
+			livePhaseChanged = &ts
+		}
+	}
+	livePhaseRaw := ""
+	if r2Client, err := newR2ClientFromConfig(); err == nil && r2Client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if data, getErr := r2Client.GetObject(ctx, r2keys.InstancePhase(inst.ID)); getErr == nil {
+			livePhaseRaw = strings.TrimSpace(string(data))
+		}
+		cancel()
+	}
+
 	report := &instanceDiagnoseReport{
 		Instance:          inst,
 		Jobs:              jobs,
@@ -129,6 +152,9 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		LifecycleEvents:   events,
 		BootstrapSurvival: bootstrapSurvival,
 		SetupSurvival:     setupSurvival,
+		LivePhaseRaw:      livePhaseRaw,
+		LivePhase:         livePhase,
+		LivePhaseChanged:  livePhaseChanged,
 		Obs:               obs,
 		Diagnosis:         diagnosis,
 		Timeline:          timeline,
@@ -272,6 +298,21 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 			costStr += fmt.Sprintf("  ($%.2f/hr)", *report.Obs.Rate)
 		}
 		fmt.Fprintf(&b, "  Cost:      %s\n", costStr)
+	}
+	if report.LivePhase != "" || report.LivePhaseRaw != "" {
+		b.WriteString("\nLive Phase:\n")
+		if report.LivePhase != "" {
+			label := campaign.InstancePhaseLabel(report.LivePhase)
+			if report.LivePhaseChanged != nil {
+				fmt.Fprintf(&b, "  Reconciled: %s (%s)\n", label, report.LivePhase)
+				fmt.Fprintf(&b, "  Since:      %s\n", time.Since(*report.LivePhaseChanged).Truncate(time.Second))
+			} else {
+				fmt.Fprintf(&b, "  Reconciled: %s (%s)\n", label, report.LivePhase)
+			}
+		}
+		if report.LivePhaseRaw != "" {
+			fmt.Fprintf(&b, "  Raw R2:     %s (%s)\n", campaign.InstancePhaseLabel(report.LivePhaseRaw), report.LivePhaseRaw)
+		}
 	}
 
 	// Section 2: Root cause

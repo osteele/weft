@@ -878,7 +878,7 @@ func TestCheckInstance_SetupStall_NonSetupPhase(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_SetupStall_NilPhaseChangedAt(t *testing.T) {
+func TestCheckInstance_SetupStall_NilPhaseChangedAt_UsesLifecycleFallback(t *testing.T) {
 	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
@@ -894,12 +894,63 @@ func TestCheckInstance_SetupStall_NilPhaseChangedAt(t *testing.T) {
 		},
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "setup:459",
-		// PhaseChangedAt is nil — should be skipped
+		// PhaseChangedAt is nil — should fall back to instance lifecycle start.
 		JobState: JobState{HasStartedJob: true},
 		Now:      time.Now(),
 	})
+	if action.Kind != ActionSetupStalled {
+		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d)", action.Kind, ActionSetupStalled)
+	}
+}
+
+func TestCheckInstance_SetupStall_StaleR2SetupButDBRunning_DoesNotTerminate(t *testing.T) {
+	launchedAt := time.Now().Add(-3 * time.Hour).Unix()
+	phaseStart := time.Now().Add(-3 * time.Hour)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "running:1189", // reconciled phase from DB authority
+		PhaseChangedAt: &phaseStart,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
 	if action.Kind == ActionSetupStalled {
-		t.Fatalf("should not trigger setup stall when PhaseChangedAt is nil")
+		t.Fatalf("action.Kind = ActionSetupStalled, want non-setup behavior")
+	}
+}
+
+func TestCheckInstance_SetupStall_QueuedJobNoPhaseChangedAt_Terminates(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase: "setup:1189",
+		// PhaseChangedAt intentionally missing; should use lifecycle fallback.
+		JobState: JobState{HasStartedJob: false},
+		Now:      time.Now(),
+	})
+	if action.Kind != ActionSetupStalled {
+		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d)", action.Kind, ActionSetupStalled)
 	}
 }
 

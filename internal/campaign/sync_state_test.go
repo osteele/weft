@@ -286,3 +286,87 @@ func TestSyncInstanceState_FetchesInParallel(t *testing.T) {
 		t.Fatalf("SyncInstanceState took %v; expected < %v (3*delay). R2 fetches are not running in parallel.", elapsed, 3*delay)
 	}
 }
+
+func TestSyncInstanceState_ReconcilesDisplayPhaseFromDBAndR2(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
+	})
+
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool { return false }
+
+	tests := []struct {
+		name         string
+		rawPhase     string
+		jobs         []*db.Job
+		wantPhase    string
+		wantRawPhase string
+	}{
+		{
+			name:         "setup with running DB job shows running",
+			rawPhase:     "setup:42",
+			jobs:         []*db.Job{{ID: 42, Status: db.StatusRunning, StartTime: time.Now().Add(-10 * time.Minute).Unix()}},
+			wantPhase:    "running:42",
+			wantRawPhase: "setup:42",
+		},
+		{
+			name:         "setup with queued DB job stays setup",
+			rawPhase:     "setup:42",
+			jobs:         []*db.Job{{ID: 42, Status: db.StatusQueued}},
+			wantPhase:    "setup:42",
+			wantRawPhase: "setup:42",
+		},
+		{
+			name:         "empty raw phase falls back to running DB job",
+			rawPhase:     "",
+			jobs:         []*db.Job{{ID: 73, Status: db.StatusRunning, StartTime: time.Now().Add(-7 * time.Minute).Unix()}},
+			wantPhase:    "running:73",
+			wantRawPhase: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+				return tt.rawPhase
+			}
+			synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, tt.jobs, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
+			if synced.InstancePhase != tt.wantPhase {
+				t.Fatalf("InstancePhase = %q, want %q", synced.InstancePhase, tt.wantPhase)
+			}
+			if synced.RawInstancePhase != tt.wantRawPhase {
+				t.Fatalf("RawInstancePhase = %q, want %q", synced.RawInstancePhase, tt.wantRawPhase)
+			}
+		})
+	}
+}

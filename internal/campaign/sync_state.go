@@ -27,6 +27,7 @@ var (
 // SyncedState holds the observation state collected from R2 and the provider,
 // persisted to launch_live_state, and returned for immediate use.
 type SyncedState struct {
+	RawInstancePhase  string
 	InstancePhase     string
 	BootstrapStage    string
 	HeartbeatAge      time.Duration
@@ -93,7 +94,7 @@ func SyncInstanceState(
 	}()
 	go func() {
 		defer wave1.Done()
-		s.InstancePhase = syncFetchInstancePhase(ctx, r2Client, instanceID)
+		s.RawInstancePhase = syncFetchInstancePhase(ctx, r2Client, instanceID)
 	}()
 	if !opts.AgentVersionFetched {
 		wave1.Add(1)
@@ -111,6 +112,15 @@ func SyncInstanceState(
 	} else if ci.TerminationIntent != nil {
 		s.TerminationIntent = ci.TerminationIntent
 	}
+
+	jobStatuses := make(map[int64]string, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		jobStatuses[job.ID] = job.Status
+	}
+	s.InstancePhase, _ = displayPhase(jobStatuses, jobs, s.RawInstancePhase)
 
 	// Wave 2: phase-dependent markers. Each goroutine writes to a disjoint
 	// field of s; publication happens via wave2.Wait().
