@@ -355,6 +355,44 @@ func TestRenderJobListGroupedStatusPlainAt_StalePendingPlacementWithoutLaunchSho
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(5551)
+	job := &db.Job{
+		ID:          80,
+		Status:      db.StatusQueued,
+		LaunchID:    &launchID,
+		Project:     "proj",
+		Description: "cloud queued",
+		QueuedAt:    4_900,
+	}
+
+	cases := []struct {
+		launchStatus string
+		wantSection  string
+	}{
+		{db.LaunchStatusPlanned, "Launching (1):"},
+		{db.LaunchStatusLaunching, "Launching (1):"},
+		{db.LaunchStatusRunning, "Queued (1):"},
+		{db.LaunchStatusFailed, "Unplaced (1):"},
+		{db.LaunchStatusCancelled, "Unplaced (1):"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.launchStatus, func(t *testing.T) {
+			out := renderJobListGroupedStatusPlainAt(
+				[]*db.Job{job},
+				0,
+				nil,
+				map[int64]string{launchID: tc.launchStatus},
+				now,
+			)
+			if !strings.Contains(out, tc.wantSection) {
+				t.Fatalf("expected %q for launch status %q, got:\n%s", tc.wantSection, tc.launchStatus, out)
+			}
+		})
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_FreshPendingPlacementWithoutLaunchStaysLaunching(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	pending := db.StatusPendingPlacement

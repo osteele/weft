@@ -334,6 +334,12 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, now tim
 		if job.TargetKind() == db.JobTargetUnplaced {
 			return "unplaced"
 		}
+		switch launchStatusForJob(job, launchStatusByID) {
+		case db.LaunchStatusPlanned, db.LaunchStatusLaunching:
+			return "launching"
+		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
+			return "unplaced"
+		}
 		return "queued"
 	case db.StatusKilled, db.StatusCanceled:
 		return "killed_canceled"
