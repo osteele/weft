@@ -41,7 +41,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
-- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; rental/ephemeral producers are staged from cloud artifact storage)
+- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; rental/ephemeral producers are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
 - `--dry-run`: Show placement scores without submitting the job
 - `--no-sync`: Skip source sync before submission
 - `--wait`: Wait for the job to complete before returning

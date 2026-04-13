@@ -733,6 +733,19 @@ laptop$ weft run \
 For rental producers, weft waits for completion and artifact upload, then
 stages needed files from cloud artifact storage before the consumer starts.
 
+`--needs` resolves against the producer's recorded artifacts, not its live
+state. A rental producer that already completed (hours or days ago) works the
+same as one still running — weft looks up the job in the DB and stages the
+needed files from R2 before the consumer starts. You do **not** need
+`weft artifact get` + `--input local:` for this; reference the completed job
+by ID with `--needs path:<job-id>`.
+
+Caveat for on-prem (inventory) producers: staging reads from the producer
+host's filesystem, not R2. If the producer's on-disk artifacts have been
+cleaned up, a later `--needs` consumer can't find them. Run
+`weft artifact sync <job-id>` to restore them, or fall back to
+`weft artifact get` + `--input local:`.
+
 ## Auto-placement across hosts
 
 When you don't specify a host, weft picks the best one. The scoring considers:
