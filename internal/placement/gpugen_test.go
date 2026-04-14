@@ -7,6 +7,7 @@ func TestGenerationOf(t *testing.T) {
 		class string
 		want  GPUGeneration
 	}{
+		{"v100", GenVolta},
 		{"a100", GenAmpere},
 		{"a5000", GenAmpere},
 		{"rtxa5000", GenAmpere},
@@ -27,6 +28,9 @@ func TestGenerationOf(t *testing.T) {
 }
 
 func TestGenerationOrdering(t *testing.T) {
+	if GenVolta >= GenTuring {
+		t.Error("Volta should be older than Turing")
+	}
 	if GenTuring >= GenAmpere {
 		t.Error("Turing should be older than Ampere")
 	}
@@ -65,16 +69,19 @@ func TestParseGPUConstraint(t *testing.T) {
 
 		// Exact generation
 		{"ampere", constraintExactGen, GenAmpere, "ampere"},
+		{"volta", constraintExactGen, GenVolta, "volta"},
 		{"turing", constraintExactGen, GenTuring, "turing"},
 		{"ada", constraintExactGen, GenAdaLovelace, "ada"},
 		{"hopper", constraintExactGen, GenHopper, "hopper"},
 
 		// Minimum generation (from generation name)
 		{"ampere+", constraintMinGen, GenAmpere, "ampere"},
+		{"volta+", constraintMinGen, GenVolta, "volta"},
 		{"turing+", constraintMinGen, GenTuring, "turing"},
 
 		// Minimum generation (promoted from model name)
 		{"a100+", constraintMinGen, GenAmpere, "a100"},
+		{"v100+", constraintMinGen, GenVolta, "v100"},
 		{"rtx3090+", constraintMinGen, GenAmpere, "rtx3090"},
 		{"h100+", constraintMinGen, GenHopper, "h100"},
 		{"a5000+", constraintMinGen, GenAmpere, "a5000"},
@@ -129,7 +136,9 @@ func TestMatchesGPU(t *testing.T) {
 		{"ampere+", "rtx4090", true},    // Ada Lovelace > Ampere
 		{"ampere+", "h100", true},       // Hopper > Ampere
 		{"ampere+", "rtx2080ti", false}, // Turing < Ampere
-		{"ampere+", "m2max", false},     // Cross-family blocked
+		{"volta+", "v100", true},
+		{"volta+", "rtx2080ti", true}, // Turing > Volta
+		{"ampere+", "m2max", false},   // Cross-family blocked
 
 		// Model promoted to generation with '+'
 		{"a100+", "a100", true},
@@ -203,6 +212,8 @@ func TestMatchesGPUFullName(t *testing.T) {
 		{"ampere", "NVIDIA GeForce RTX 2080 Ti", false},
 		{"turing", "NVIDIA GeForce RTX 2080 Ti", true},
 		{"turing", "NVIDIA A100-PCIE-80GB", false},
+		{"volta", "Tesla V100-SXM2-16GB", true},
+		{"volta", "NVIDIA GeForce RTX 2080 Ti", false},
 
 		// Minimum generation
 		{"ampere+", "NVIDIA A100-PCIE-80GB", true},
@@ -312,6 +323,8 @@ func TestMinCUDAForGPU(t *testing.T) {
 		want    float64
 	}{
 		{"RTX 5090", 12.8},
+		{"Tesla V100", 9.0},
+		{"V100", 9.0},
 		{"RTX 4090", 11.8},
 		{"RTX 3090", 11.0},
 		{"RTX A5000", 11.0},
@@ -336,6 +349,7 @@ func TestMinCUDAForConstraint(t *testing.T) {
 		want     float64
 	}{
 		{"RTX-5090", 12.8},
+		{"volta", 9.0},
 		{"blackwell", 12.8},
 		{"blackwell+", 12.8},
 		{"a100+", 11.0},

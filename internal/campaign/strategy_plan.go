@@ -1674,9 +1674,7 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if cap.GraceRemaining > 0 && cap.GraceRemaining < MinGraceRemaining {
 		return false
 	}
-	if group.GPUClass != "" &&
-		!strings.EqualFold(group.GPUClass, inst.GPUClass) &&
-		!strings.EqualFold(group.GPUClass, inst.ResolvedGPUName) {
+	if !gpuClassCompatible(group.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
 		return false
 	}
 	if group.GPUMemGB > 0 && inst.GPUMemGB > 0 && group.GPUMemGB > inst.GPUMemGB {

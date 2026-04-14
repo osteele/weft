@@ -16,6 +16,7 @@ const (
 	GenUnknown GPUGeneration = iota
 
 	// NVIDIA generations (ordered oldest to newest)
+	GenVolta
 	GenTuring
 	GenAmpere
 	GenAdaLovelace
@@ -30,7 +31,7 @@ const (
 )
 
 func (g GPUGeneration) isNVIDIA() bool {
-	return g >= GenTuring && g <= GenBlackwell
+	return g >= GenVolta && g <= GenBlackwell
 }
 
 func (g GPUGeneration) isApple() bool {
@@ -58,6 +59,7 @@ var appleClassToGeneration = map[string]GPUGeneration{
 }
 
 var nvidiaGenerationNames = map[string]GPUGeneration{
+	"volta":       GenVolta,
 	"turing":      GenTuring,
 	"ampere":      GenAmpere,
 	"ada":         GenAdaLovelace,
@@ -77,6 +79,7 @@ var knownGPUClasses = func() []string {
 
 // generationNames maps user-facing generation names to their generation.
 var generationNames = map[string]GPUGeneration{
+	"volta":       GenVolta,
 	"turing":      GenTuring,
 	"ampere":      GenAmpere,
 	"ada":         GenAdaLovelace,
@@ -92,6 +95,7 @@ var generationNames = map[string]GPUGeneration{
 // generationMinCUDA maps GPU generations to the minimum CUDA toolkit version
 // required to compile kernels for that architecture.
 var generationMinCUDA = map[GPUGeneration]float64{
+	GenVolta:       9.0,
 	GenTuring:      10.0,
 	GenAmpere:      11.0,
 	GenAdaLovelace: 11.8,

@@ -17,6 +17,7 @@ type gpuGeneration int
 
 const (
 	genUnknown gpuGeneration = iota
+	genVolta
 	genTuring
 	genAmpere
 	genAdaLovelace
@@ -25,6 +26,7 @@ const (
 )
 
 var generationNameToGen = map[string]gpuGeneration{
+	"volta":       genVolta,
 	"turing":      genTuring,
 	"ampere":      genAmpere,
 	"ada":         genAdaLovelace,
@@ -34,6 +36,7 @@ var generationNameToGen = map[string]gpuGeneration{
 }
 
 var genToGenerationName = map[gpuGeneration]string{
+	genVolta:       "volta",
 	genTuring:      "turing",
 	genAmpere:      "ampere",
 	genAdaLovelace: "adalovelace",
@@ -43,6 +46,10 @@ var genToGenerationName = map[gpuGeneration]string{
 
 // vastaiGPUCatalog is the single source of truth for Vast.ai gpu_name values.
 var vastaiGPUCatalog = []vastaiGPU{
+	// Volta
+	{"Tesla V100", genVolta},
+	{"V100", genVolta},
+
 	// Turing
 	{"RTX 2080 Ti", genTuring},
 	{"RTX 2080", genTuring},
@@ -151,6 +158,12 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 		return nil, nil // no filter needed, all Vast.ai offers are NVIDIA
 	}
 
+	// Alias compatibility: treat "rtx-4080" as matching both 4080 and 4080S
+	// because Vast supply often labels equivalent Ada stock as 4080S.
+	if !minMode && norm == "rtx4080" {
+		return []string{"RTX 4080", "RTX 4080S"}, nil
+	}
+
 	// Generation name (e.g., "hopper", "hopper+")
 	if gen, ok := generationNameToGen[norm]; ok {
 		names := collectGenNames(gen, minMode)
@@ -190,6 +203,12 @@ func matchNormalizedVastaiNames(norm string) []string {
 	if names := normalizedToVastai[norm]; len(names) > 0 {
 		return slices.Clone(names)
 	}
+	if trimmed := trimTrailingMemorySuffix(norm); trimmed != norm {
+		if names := normalizedToVastai[trimmed]; len(names) > 0 {
+			return slices.Clone(names)
+		}
+		norm = trimmed
+	}
 	if !containsDigit(norm) {
 		return nil
 	}
@@ -200,6 +219,21 @@ func matchNormalizedVastaiNames(norm string) []string {
 		}
 	}
 	return filtered
+}
+
+func trimTrailingMemorySuffix(norm string) string {
+	if !strings.HasSuffix(norm, "gb") {
+		return norm
+	}
+	i := len(norm) - 3 // char before "gb"
+	for i >= 0 && norm[i] >= '0' && norm[i] <= '9' {
+		i--
+	}
+	// Only trim when there was at least one trailing digit (e.g. "80gb").
+	if i == len(norm)-3 {
+		return norm
+	}
+	return norm[:i+1]
 }
 
 func containsDigit(s string) bool {
@@ -278,4 +312,30 @@ func makePostFilter(allowedNames []string) func([]Offer) []Offer {
 		}
 		return filtered
 	}
+}
+
+// GPUClassMatchesOfferName reports whether a --gpu-class constraint can match a
+// specific Vast.ai offer gpu_name under the same mapping logic used for
+// provider-side search filtering.
+func GPUClassMatchesOfferName(gpuClass, gpuName string) bool {
+	if strings.TrimSpace(gpuClass) == "" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(gpuClass), strings.TrimSpace(gpuName)) {
+		return true
+	}
+
+	names, postFilter := resolveGPUFilter(gpuClass)
+	if len(names) > 0 {
+		for _, name := range names {
+			if strings.EqualFold(name, gpuName) {
+				return true
+			}
+		}
+		return false
+	}
+	if postFilter != nil {
+		return len(postFilter([]Offer{{GPUName: gpuName}})) > 0
+	}
+	return true
 }

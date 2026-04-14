@@ -150,12 +150,9 @@ func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
 
-	// GPU class check (case-insensitive)
-	if job.GPUClass != "" && !strings.EqualFold(job.GPUClass, inst.GPUClass) {
-		// Also check resolved GPU name
-		if !strings.EqualFold(job.GPUClass, inst.ResolvedGPUName) {
-			return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", job.GPUClass, inst.GPUClass)
-		}
+	// GPU class check (normalized aliases + Vast class mapping semantics)
+	if !gpuClassCompatible(job.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
+		return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", job.GPUClass, inst.GPUClass)
 	}
 
 	// GPU memory check

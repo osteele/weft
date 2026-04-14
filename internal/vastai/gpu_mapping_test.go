@@ -91,9 +91,35 @@ func TestResolveGPUFilter(t *testing.T) {
 			wantNames: []string{"RTX 3080"},
 		},
 		{
+			name:      "rtx-4080 alias includes 4080 and 4080S",
+			gpuClass:  "rtx-4080",
+			wantNames: []string{"RTX 4080", "RTX 4080S"},
+		},
+		{
 			name:      "short alias 2080ti",
 			gpuClass:  "2080ti",
 			wantNames: []string{"RTX 2080 Ti"},
+		},
+		{
+			name:      "v100 exact",
+			gpuClass:  "v100",
+			wantNames: []string{"V100"},
+		},
+		{
+			name:          "volta generation constraint",
+			gpuClass:      "volta",
+			wantNames:     nil,
+			wantPostFilt:  true,
+			acceptGPUName: "Tesla V100",
+			rejectGPUName: "RTX 2080 Ti",
+		},
+		{
+			name:          "volta+ includes newer generations",
+			gpuClass:      "volta+",
+			wantNames:     nil,
+			wantPostFilt:  true,
+			acceptGPUName: "RTX 5090",
+			rejectGPUName: "",
 		},
 		{
 			name:     "nvidia family",
@@ -122,6 +148,11 @@ func TestResolveGPUFilter(t *testing.T) {
 		{
 			name:      "prefix a100sxm4",
 			gpuClass:  "A100 SXM4",
+			wantNames: []string{"A100 SXM4"},
+		},
+		{
+			name:      "a100 sxm4 memory suffix variant",
+			gpuClass:  "A100-SXM4-80GB",
 			wantNames: []string{"A100 SXM4"},
 		},
 		{
@@ -235,6 +266,29 @@ func TestResolveGPUFilter(t *testing.T) {
 				if len(filtered) != 1 || filtered[0].GPUName != tt.acceptGPUName {
 					t.Errorf("postFilter: got %v, want [%s]", filtered, tt.acceptGPUName)
 				}
+			}
+		})
+	}
+}
+
+func TestGPUClassMatchesOfferName(t *testing.T) {
+	tests := []struct {
+		name     string
+		gpuClass string
+		gpuName  string
+		want     bool
+	}{
+		{name: "empty class matches all", gpuClass: "", gpuName: "RTX 4090", want: true},
+		{name: "rtx-4080 matches 4080s", gpuClass: "rtx-4080", gpuName: "RTX 4080S", want: true},
+		{name: "a6000 matches RTX A6000", gpuClass: "a6000", gpuName: "RTX A6000", want: true},
+		{name: "rtx-5090 matches RTX 5090", gpuClass: "rtx-5090", gpuName: "RTX 5090", want: true},
+		{name: "volta matches Tesla V100", gpuClass: "volta", gpuName: "Tesla V100", want: true},
+		{name: "volta rejects turing", gpuClass: "volta", gpuName: "RTX 2080 Ti", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GPUClassMatchesOfferName(tt.gpuClass, tt.gpuName); got != tt.want {
+				t.Fatalf("GPUClassMatchesOfferName(%q, %q) = %v, want %v", tt.gpuClass, tt.gpuName, got, tt.want)
 			}
 		})
 	}
