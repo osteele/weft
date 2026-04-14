@@ -35,6 +35,7 @@ func vramTierOf(memGB int) int {
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
 	GPUClass    string   // Normalized GPU class (uppercase), e.g. "H100"
+	Provider    string   // Requested provider ("vastai" or "runpod"), empty = any
 	GPUMemGB    int      // Supremum of GPU memory across all jobs in the group
 	MaxGPUMemGB int      // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
 	DiskGB      int      // Estimated disk space needed (0 = use default)
@@ -96,6 +97,7 @@ func GroupByAffinity(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
 func groupConstrained(jobs []*db.Job) []InstanceGroup {
 	var groups []InstanceGroup
 	for _, job := range jobs {
+		provider, _ := db.RequestedProvider(job.Tags)
 		mem := 0
 		if job.GPUMemGB != nil {
 			mem = *job.GPUMemGB
@@ -105,6 +107,9 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 		merged := false
 		for i := range groups {
 			if groups[i].Preemptible != job.UsesPreemptiblePlacement() {
+				continue
+			}
+			if !strings.EqualFold(groups[i].Provider, provider) {
 				continue
 			}
 			supremum, ok := gpuClassSupremum(groups[i].GPUClass, job.GPUClass)
@@ -124,6 +129,7 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 		if !merged {
 			groups = append(groups, InstanceGroup{
 				GPUClass:    strings.ToUpper(job.GPUClass),
+				Provider:    provider,
 				GPUMemGB:    mem,
 				MaxGPUMemGB: memMax,
 				Preemptible: job.UsesPreemptiblePlacement(),
@@ -211,12 +217,16 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 
 		jobGPU := strings.TrimSpace(info.job.GPUClass)
 		jobPreemptible := info.job.UsesPreemptiblePlacement()
+		jobProvider, _ := db.RequestedProvider(info.job.Tags)
 
 		bestIdx := -1
 		var bestScore float64
 		jobTier := vramTierOf(mem)
 		for i, g := range groups {
 			if g.group.Preemptible != jobPreemptible {
+				continue
+			}
+			if !strings.EqualFold(g.group.Provider, jobProvider) {
 				continue
 			}
 			// Skip groups with incompatible GPU constraints (e.g. ampere vs hopper).
@@ -264,6 +274,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			groups = append(groups, groupState{
 				group: InstanceGroup{
 					GPUClass:    strings.ToUpper(jobGPU),
+					Provider:    jobProvider,
 					GPUMemGB:    mem,
 					MaxGPUMemGB: memMax,
 					Preemptible: jobPreemptible,
@@ -324,6 +335,9 @@ func sortGroups(groups []InstanceGroup) {
 		if groups[i].GPUMemGB != groups[j].GPUMemGB {
 			return groups[i].GPUMemGB > groups[j].GPUMemGB
 		}
+		if groups[i].Provider != groups[j].Provider {
+			return groups[i].Provider < groups[j].Provider
+		}
 		return groups[i].GPUClass < groups[j].GPUClass
 	})
 }
@@ -346,6 +360,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 				continue
 			}
 			if merged[i].Preemptible != g.Preemptible {
+				continue
+			}
+			if !strings.EqualFold(merged[i].Provider, g.Provider) {
 				continue
 			}
 			if vramTierOf(merged[i].GPUMemGB) != vramTierOf(g.GPUMemGB) {
@@ -372,6 +389,7 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			// Copy the group to avoid mutating the original
 			merged = append(merged, InstanceGroup{
 				GPUClass:    g.GPUClass,
+				Provider:    g.Provider,
 				GPUMemGB:    g.GPUMemGB,
 				MaxGPUMemGB: g.MaxGPUMemGB,
 				DiskGB:      g.DiskGB,
@@ -396,6 +414,7 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 		if len(g.Jobs) <= 1 {
 			result = append(result, InstanceGroup{
 				GPUClass:    g.GPUClass,
+				Provider:    g.Provider,
 				GPUMemGB:    g.GPUMemGB,
 				MaxGPUMemGB: g.MaxGPUMemGB,
 				DiskGB:      g.DiskGB,
@@ -416,6 +435,7 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 			}
 			result = append(result, InstanceGroup{
 				GPUClass:    g.GPUClass,
+				Provider:    g.Provider,
 				GPUMemGB:    mem,
 				MaxGPUMemGB: memMax,
 				DiskGB:      g.DiskGB,
@@ -532,6 +552,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 		for _, sub := range subs {
 			result = append(result, InstanceGroup{
 				GPUClass:    g.GPUClass,
+				Provider:    g.Provider,
 				GPUMemGB:    g.GPUMemGB,
 				MaxGPUMemGB: g.MaxGPUMemGB,
 				DiskGB:      g.DiskGB,

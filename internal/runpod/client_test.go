@@ -14,6 +14,7 @@ import (
 func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 	args, err := buildCreatePodArgs("NVIDIA A100 80GB PCIe", cloud.CreateOpts{
 		TemplateID: "tpl-bootstrap",
+		GPUCount:   4,
 		DiskGB:     120,
 		Label:      "weft/c42",
 		EnvVars: map[string]string{
@@ -29,6 +30,7 @@ func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 	for _, want := range []string{
 		"pod create",
 		"--gpu-id NVIDIA A100 80GB PCIe",
+		"--gpu-count 4",
 		"--template-id tpl-bootstrap",
 		"--volume-in-gb 120",
 		"--name weft/c42",
@@ -169,6 +171,8 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 				return []byte("runpodctl 2.1.6"), nil
 			case "get --help":
 				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "gpu --help":
+				return []byte("Available Commands:\n  list\n"), nil
 			case "pod --help":
 				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
 			case "template --help":
@@ -184,7 +188,7 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 			}
 			key := strings.Join(args, " ")
 			record(key)
-			if key != "get cloud" {
+			if key != "gpu list" {
 				t.Fatalf("unexpected output command %q", key)
 			}
 			return []byte(`[
@@ -206,12 +210,25 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	for _, key := range []string{"version", "get --help", "pod --help", "template --help"} {
+	for _, key := range []string{"version", "get --help", "gpu --help", "pod --help", "template --help"} {
 		if counts[key] != 1 {
 			t.Fatalf("%s count = %d, want 1", key, counts[key])
 		}
 	}
-	if counts["get cloud"] != 2 {
-		t.Fatalf("get cloud count = %d, want 2", counts["get cloud"])
+	if counts["gpu list"] != 2 {
+		t.Fatalf("gpu list count = %d, want 2", counts["gpu list"])
+	}
+}
+
+func TestParseSearchOutput_AllowsCLIWarningPrefix(t *testing.T) {
+	input := []byte(`warning: 'runpodctl get cloud' is deprecated
+[{"id":"offer-4090","displayName":"RTX 4090","memoryInGb":24,"communityPrice":0.44,"maxGpuCount":1}]`)
+
+	offers, err := parseSearchOutput(input, cloud.OfferConstraints{})
+	if err != nil {
+		t.Fatalf("parseSearchOutput: %v", err)
+	}
+	if len(offers) != 1 || offers[0].ProviderID != "offer-4090" {
+		t.Fatalf("offers = %+v", offers)
 	}
 }

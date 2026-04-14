@@ -109,7 +109,7 @@ func TestBuildProfilePlansFromSplitRaw_ReusesCandidateOfferSearchesAcrossProfile
 	)
 	client := &cloud.MockClient{
 		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
-			key := constraintKey(constraints)
+			key := constraintKey(constraints, "")
 			mu.Lock()
 			searchCounts[key]++
 			mu.Unlock()
@@ -193,6 +193,67 @@ func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
 	}
 	if result.Offer.ProviderID != "2" {
 		t.Fatalf("replacement offer ID = %s, want 2", result.Offer.ProviderID)
+	}
+}
+
+func TestSearchBestOfferForGroup_ProviderFilter(t *testing.T) {
+	vastClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{ProviderID: "v1", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.40}}, nil
+		},
+	}
+	runpodClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderRunpod,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{ProviderID: "r1", Provider: cloud.ProviderRunpod, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.35}}, nil
+		},
+	}
+
+	result := SearchBestOfferForGroup(
+		[]cloud.Client{vastClient, runpodClient},
+		InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, Provider: "runpod"},
+		nil,
+		1.0,
+		bidding.ConstantSetup(0.5),
+		nil,
+		bidding.StrategyCheap,
+		0,
+	)
+	if result.Err != nil {
+		t.Fatalf("SearchBestOfferForGroup: %v", result.Err)
+	}
+	if result.Offer == nil {
+		t.Fatal("expected offer, got nil")
+	}
+	if result.Offer.Provider != cloud.ProviderRunpod {
+		t.Fatalf("provider = %s, want runpod", result.Offer.Provider)
+	}
+}
+
+func TestSearchBestOfferForGroup_ProviderUnavailable(t *testing.T) {
+	vastClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{ProviderID: "v1", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.40}}, nil
+		},
+	}
+
+	result := SearchBestOfferForGroup(
+		[]cloud.Client{vastClient},
+		InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, Provider: "runpod"},
+		nil,
+		1.0,
+		bidding.ConstantSetup(0.5),
+		nil,
+		bidding.StrategyCheap,
+		0,
+	)
+	if result.Err == nil {
+		t.Fatal("expected provider unavailable error")
+	}
+	if !strings.Contains(result.Err.Error(), "requested provider") {
+		t.Fatalf("unexpected error: %v", result.Err)
 	}
 }
 

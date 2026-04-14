@@ -81,10 +81,13 @@ func (r *cliRunner) detectCapabilities(ctx context.Context) (*cliCapabilities, e
 	}
 
 	getHelp, _ := r.runCombined(ctx, path, "get", "--help")
+	gpuHelp, _ := r.runCombined(ctx, path, "gpu", "--help")
 	podHelp, _ := r.runCombined(ctx, path, "pod", "--help")
 	templateHelp, _ := r.runCombined(ctx, path, "template", "--help")
 
 	switch {
+	case containsCommand(gpuHelp, "list"):
+		caps.searchCommand = []string{"gpu", "list"}
 	case containsCommand(getHelp, "cloud"):
 		caps.searchCommand = []string{"get", "cloud"}
 	case containsCommand(getHelp, "gpu"):
@@ -132,8 +135,11 @@ func decodeJSONArray(data []byte) ([]map[string]any, error) {
 	if trimmed == "" || trimmed == "null" {
 		return nil, nil
 	}
+	if payload := extractJSONPayload(trimmed, '[', ']'); payload != "" {
+		trimmed = payload
+	}
 	var arr []map[string]any
-	if err := json.Unmarshal(data, &arr); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &arr); err != nil {
 		return nil, err
 	}
 	return arr, nil
@@ -144,11 +150,29 @@ func decodeJSONObject(data []byte) (map[string]any, error) {
 	if trimmed == "" || trimmed == "null" {
 		return nil, nil
 	}
+	if payload := extractJSONPayload(trimmed, '{', '}'); payload != "" {
+		trimmed = payload
+	}
 	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
 		return nil, err
 	}
 	return obj, nil
+}
+
+func extractJSONPayload(s string, start, end byte) string {
+	if s == "" {
+		return ""
+	}
+	if s[0] == start {
+		return s
+	}
+	i := strings.IndexByte(s, start)
+	j := strings.LastIndexByte(s, end)
+	if i == -1 || j == -1 || j < i {
+		return ""
+	}
+	return strings.TrimSpace(s[i : j+1])
 }
 
 func firstString(data map[string]any, keys ...string) string {

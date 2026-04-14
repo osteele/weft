@@ -21,6 +21,7 @@ var (
 	describeGPUMem    int
 	describeCPU       int
 	describeGPUClass  string
+	describeProvider  string
 )
 
 var describeCmd = &cobra.Command{
@@ -57,6 +58,7 @@ func init() {
 	describeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
 	describeCmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	describeCmd.Flags().StringVar(&describeProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
@@ -110,10 +112,11 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
 	hasCPU := cmd.Flags().Changed("cpu")
 	hasGPUClass := gpuClassValue != ""
+	hasProvider := cmd.Flags().Changed("provider")
 
 	// Check if trying to update command/directory/gpu/allotments on non-queued job
 	effectiveStatus := job.EffectiveStatus()
-	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU) && effectiveStatus != db.StatusQueued {
+	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasProvider) && effectiveStatus != db.StatusQueued {
 		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
 	}
 
@@ -236,6 +239,28 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			updates = append(updates, fmt.Sprintf("cpu: %d%%", cpu))
 		} else {
 			updates = append(updates, "cpu: cleared")
+		}
+	}
+	if hasProvider {
+		normalizedProvider, providerErr := normalizeProviderFlag(describeProvider)
+		if providerErr != nil {
+			return fmt.Errorf("--provider: %w", providerErr)
+		}
+		if normalizedProvider != "" && job.HasInventoryHost() {
+			return fmt.Errorf("--provider=%s cannot be set while job is queued on inventory host %q; unplace the job first", normalizedProvider, job.Host)
+		}
+		newTags, providerErr := withProviderTag(job.Tags, normalizedProvider)
+		if providerErr != nil {
+			return fmt.Errorf("--provider: %w", providerErr)
+		}
+		if err := db.SetJobTags(database, jobID, newTags); err != nil {
+			return fmt.Errorf("update provider tag: %w", err)
+		}
+		job.Tags = newTags
+		if normalizedProvider == "" {
+			updates = append(updates, "provider: cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("provider: %s", normalizedProvider))
 		}
 	}
 

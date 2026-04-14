@@ -49,6 +49,7 @@ func LoadHostNames() ([]string, error) {
 // Constraints describes hard requirements for a job placement.
 type Constraints struct {
 	GPUClass string   // Required GPU class (e.g., "a100"); empty = no preference
+	Provider string   // Requested rental provider (e.g., "vastai", "runpod"); empty = any
 	GPUMemGB int      // Minimum GPU memory in GB; 0 = no minimum
 	Inputs   []string // Asset refs the job reads (for locality scoring)
 	Command  string   // For predictor-based scoring; empty = skip
@@ -64,6 +65,9 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 		Command:  j.Command,
 		Project:  j.Project,
 		Tags:     j.Tags,
+	}
+	if provider, ok := db.RequestedProvider(j.Tags); ok {
+		c.Provider = provider
 	}
 	if j.GPUMemGB != nil {
 		c.GPUMemGB = *j.GPUMemGB
@@ -430,7 +434,7 @@ func PlaceOnPrem(database *sql.DB, constraints Constraints, predict JobPredictor
 // placeOnPremWithMetrics is like PlaceOnPrem but accepts optional pre-collected
 // metrics to avoid redundant SSH probes.
 func placeOnPremWithMetrics(database *sql.DB, constraints Constraints, predict JobPredictor, preMetrics map[string]*HostMetrics) (*PlacementResult, error) {
-	if db.HasRentalTag(constraints.Tags) {
+	if db.HasRentalTag(constraints.Tags) || constraints.Provider != "" {
 		return nil, ErrNoEligibleHost
 	}
 
@@ -942,6 +946,9 @@ func DescribeConstraints(c Constraints) string {
 	if c.GPUClass != "" {
 		parts = append(parts, "gpu-class="+c.GPUClass)
 	}
+	if c.Provider != "" {
+		parts = append(parts, "provider="+c.Provider)
+	}
 	if c.GPUMemGB > 0 {
 		parts = append(parts, fmt.Sprintf("gpu-mem>=%dGB", c.GPUMemGB))
 	}
@@ -975,6 +982,9 @@ func DescribeConstraints(c Constraints) string {
 func ExplainUnplaced(database *sql.DB, constraints Constraints) ([]string, error) {
 	if db.HasRentalTag(constraints.Tags) {
 		return []string{"rental-tagged job skips local placement"}, nil
+	}
+	if constraints.Provider != "" {
+		return []string{fmt.Sprintf("provider=%s skips local placement", constraints.Provider)}, nil
 	}
 
 	scores, err := ScoreHostsWithMetrics(database, constraints, nil)

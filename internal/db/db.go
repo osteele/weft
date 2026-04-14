@@ -965,6 +965,9 @@ const (
 	TagInventory        = "inventory"
 	TagPreemptible      = "preemptible"
 	TagComputeIntensive = "compute-intensive"
+	TagProviderPrefix   = "provider:"
+	TagProviderVastai   = "provider:vastai"
+	TagProviderRunpod   = "provider:runpod"
 
 	// Legacy tag aliases accepted on input and in existing database rows.
 	TagCloudLegacy  = "cloud"
@@ -2699,10 +2702,11 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 // HasTagHostConflict reports whether a queued job's tags conflict with its
 // current host placement (e.g. rental tag on an inventory host).
 func (j *Job) HasTagHostConflict() bool {
+	_, hasRequestedProvider := RequestedProvider(j.Tags)
 	return j != nil &&
 		j.EffectiveStatus() == StatusQueued &&
 		j.HasInventoryHost() &&
-		HasRentalTag(j.Tags)
+		(HasRentalTag(j.Tags) || hasRequestedProvider)
 }
 
 // ResetJobToUnplaced resets a single job to unplaced state (queued with empty host),
@@ -3788,6 +3792,9 @@ func normalizeTags(tags []string) []string {
 // CanonicalizeTag rewrites accepted legacy aliases to their preferred names.
 func CanonicalizeTag(tag string) string {
 	tag = strings.TrimSpace(tag)
+	if provider, ok := providerFromTag(tag); ok {
+		return TagProviderPrefix + provider
+	}
 	switch tag {
 	case TagCloudLegacy:
 		return TagRental
@@ -3848,9 +3855,68 @@ func HasPreemptibleTag(tags []string) bool {
 	return false
 }
 
+// ProviderTag returns the canonical reserved provider tag for a provider name.
+func ProviderTag(provider string) (string, error) {
+	p := normalizeProviderName(provider)
+	if p == "" {
+		return "", fmt.Errorf("unsupported provider %q (expected one of: vastai, runpod)", strings.TrimSpace(provider))
+	}
+	return TagProviderPrefix + p, nil
+}
+
+// RequestedProvider returns a provider requested via reserved tags.
+func RequestedProvider(tags []string) (string, bool) {
+	for _, tag := range tags {
+		if provider, ok := providerFromTag(tag); ok {
+			return provider, true
+		}
+	}
+	return "", false
+}
+
+func normalizeProviderName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "vastai":
+		return "vastai"
+	case "runpod":
+		return "runpod"
+	default:
+		return ""
+	}
+}
+
+func providerFromTag(tag string) (string, bool) {
+	trimmed := strings.TrimSpace(tag)
+	if len(trimmed) < len(TagProviderPrefix) {
+		return "", false
+	}
+	if !strings.EqualFold(trimmed[:len(TagProviderPrefix)], TagProviderPrefix) {
+		return "", false
+	}
+	provider := normalizeProviderName(trimmed[len(TagProviderPrefix):])
+	if provider == "" {
+		return "", false
+	}
+	return provider, true
+}
+
 func validateReservedPlacementTags(tags []string) error {
 	if HasRentalTag(tags) && HasInventoryTag(tags) {
 		return fmt.Errorf("tags %q and %q cannot be combined", TagRental, TagInventory)
+	}
+	var selectedProvider string
+	for _, tag := range tags {
+		trimmed := strings.TrimSpace(tag)
+		if len(trimmed) >= len(TagProviderPrefix) && strings.EqualFold(trimmed[:len(TagProviderPrefix)], TagProviderPrefix) {
+			provider := normalizeProviderName(trimmed[len(TagProviderPrefix):])
+			if provider == "" {
+				return fmt.Errorf("unsupported provider tag %q (supported: %q, %q)", tag, TagProviderVastai, TagProviderRunpod)
+			}
+			if selectedProvider != "" && selectedProvider != provider {
+				return fmt.Errorf("tags %q and %q cannot be combined", TagProviderPrefix+selectedProvider, TagProviderPrefix+provider)
+			}
+			selectedProvider = provider
+		}
 	}
 	return nil
 }

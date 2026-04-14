@@ -54,6 +54,7 @@ func TestDetectCapabilitiesModernCommands(t *testing.T) {
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 2.1.6")},
 			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
 			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
@@ -64,7 +65,7 @@ func TestDetectCapabilitiesModernCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detectCapabilities: %v", err)
 	}
-	if got := joinCommand(caps.searchCommand); got != "get cloud" {
+	if got := joinCommand(caps.searchCommand); got != "gpu list" {
 		t.Fatalf("searchCommand = %q", got)
 	}
 	if got := joinCommand(caps.podDeleteCommand); got != "pod delete" {
@@ -80,6 +81,7 @@ func TestDetectCapabilitiesFallsBackToLegacySearch(t *testing.T) {
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 1.2.3")},
 			"get --help":      {out: []byte("Available Commands:\n  gpu\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n")},
 			"pod --help":      {out: []byte("Available Commands:\n  get\n  list\n  delete\n")},
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
@@ -100,6 +102,7 @@ func TestCreateInstanceWrapsUnavailableOffer(t *testing.T) {
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 2.1.6")},
 			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
 			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
@@ -155,6 +158,7 @@ func TestSetupReusesCompatibleConfiguredTemplate(t *testing.T) {
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 2.1.6")},
 			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
 			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
@@ -193,6 +197,7 @@ func TestSetupCreatesManagedTemplateWhenNeeded(t *testing.T) {
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 2.1.6")},
 			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
 			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},

@@ -322,9 +322,13 @@ func (c *CloudClient) createTemplate(ctx context.Context, caps *cliCapabilities,
 }
 
 func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error) {
+	gpuCount := opts.GPUCount
+	if gpuCount <= 0 {
+		gpuCount = 1
+	}
 	args := []string{"pod", "create",
 		"--gpu-id", offerID,
-		"--gpu-count", "1",
+		"--gpu-count", fmt.Sprintf("%d", gpuCount),
 	}
 	switch {
 	case opts.TemplateID != "":
@@ -465,7 +469,7 @@ func podFromMap(row map[string]any) Pod {
 	return Pod{
 		ID:          firstString(row, "id", "podId"),
 		Name:        firstString(row, "name"),
-		Status:      firstString(row, "desiredStatus", "status"),
+		Status:      firstString(row, "status", "desiredStatus"),
 		GPUType:     firstString(row, "gpuType", "gpuName"),
 		GPUCount:    firstInt(row, "gpuCount"),
 		CostPerHour: firstFloat(row, "costPerHr", "price"),

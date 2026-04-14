@@ -516,6 +516,9 @@ func createInstanceWithReplacement(
 			err  error
 		)
 		createAttemptOpts := createOpts
+		if currentOffer.NumGPUs > 0 {
+			createAttemptOpts.GPUCount = currentOffer.NumGPUs
+		}
 		if createAttemptOpts.InstanceType == cloud.InstanceTypeInterruptible && createAttemptOpts.MaxBidPrice <= 0 {
 			createAttemptOpts.MaxBidPrice = currentOffer.CostPerHour
 		}
@@ -1436,6 +1439,11 @@ func LaunchInstance(
 	if token := os.Getenv("HF_TOKEN"); token != "" {
 		envVars["HF_TOKEN"] = token
 		envVars["HUGGING_FACE_HUB_TOKEN"] = token
+	}
+	if client.Provider() == cloud.ProviderRunpod {
+		if token := os.Getenv("RUNPOD_API_KEY"); token != "" {
+			envVars["RUNPOD_API_KEY"] = token
+		}
 	}
 
 	// Merge env vars into createOpts

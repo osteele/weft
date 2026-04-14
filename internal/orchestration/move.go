@@ -79,8 +79,10 @@ func BuildOptions(
 	}
 
 	if len(cloudClients) > 0 {
+		provider, _ := db.RequestedProvider(job.Tags)
 		group := campaign.InstanceGroup{
 			GPUClass: job.GPUClass,
+			Provider: provider,
 			Jobs:     []*db.Job{job},
 		}
 		if job.GPUMemGB != nil {

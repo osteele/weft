@@ -278,7 +278,8 @@ func SearchBestOfferForGroupWithProfile(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) GroupOffer {
-	offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
+	requestedProvider := cloud.Provider(strings.TrimSpace(group.Provider))
+	offers, err, _ := searchAllProvidersWithDiagnostics(clients, offerConstraintsForGroup(group), requestedProvider)
 	if err != nil {
 		return GroupOffer{Group: group, Err: err}
 	}
@@ -335,7 +336,8 @@ func (s *offerSearchSession) SeedRawOffers(raw []GroupRawOffers) {
 		return
 	}
 	for _, groupRaw := range raw {
-		key := constraintKey(offerConstraintsForGroup(groupRaw.Group))
+		provider := cloud.Provider(strings.TrimSpace(groupRaw.Group.Provider))
+		key := constraintKey(offerConstraintsForGroup(groupRaw.Group), provider)
 		future := &offerSearchFuture{
 			done: make(chan struct{}),
 			result: offerSearchResult{
@@ -369,9 +371,10 @@ func (s *offerSearchSession) fetchGroupRawOffers(groups []InstanceGroup) []Group
 	futures := make(map[string]*offerSearchFuture, len(groups))
 	for i, group := range groups {
 		constraints := offerConstraintsForGroup(group)
-		key := constraintKey(constraints)
+		provider := cloud.Provider(strings.TrimSpace(group.Provider))
+		key := constraintKey(constraints, provider)
 		keys[i] = key
-		futures[key] = s.getOrStart(key, constraints)
+		futures[key] = s.getOrStart(key, constraints, provider)
 	}
 
 	for _, future := range futures {
@@ -386,7 +389,7 @@ func (s *offerSearchSession) fetchGroupRawOffers(groups []InstanceGroup) []Group
 	return results
 }
 
-func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConstraints) *offerSearchFuture {
+func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConstraints, provider cloud.Provider) *offerSearchFuture {
 	s.mu.Lock()
 	if future, ok := s.results[key]; ok {
 		s.mu.Unlock()
@@ -399,9 +402,9 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 	go func() {
 		constraintsText := formatProviderSearchConstraints(constraints)
 		oplog.Log("cloud.offer_search.start",
-			oplog.WithDetail(fmt.Sprintf("constraints=%s providers=%d", constraintsText, len(s.clients))))
+			oplog.WithDetail(fmt.Sprintf("constraints=%s providers=%d provider=%s", constraintsText, len(s.clients), provider)))
 
-		offers, err, diagnostics := searchAllProvidersWithDiagnostics(s.clients, constraints)
+		offers, err, diagnostics := searchAllProvidersWithDiagnostics(s.clients, constraints, provider)
 		future.result.offers = offers
 		future.result.err = err
 
@@ -416,16 +419,16 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 			successProviders++
 			totalOffers += len(d.offers)
 			oplog.Log("cloud.offer_search.provider",
-				oplog.WithDetail(fmt.Sprintf("provider=%s constraints=%s offers=%d", d.provider, constraintsText, len(d.offers))))
+				oplog.WithDetail(fmt.Sprintf("provider=%s constraints=%s requested_provider=%s offers=%d", d.provider, constraintsText, provider, len(d.offers))))
 		}
 
 		if err != nil {
 			oplog.Log("cloud.offer_search.done",
-				oplog.WithDetail(fmt.Sprintf("constraints=%s providers_ok=%d total_offers=%d", constraintsText, successProviders, totalOffers)),
+				oplog.WithDetail(fmt.Sprintf("constraints=%s requested_provider=%s providers_ok=%d total_offers=%d", constraintsText, provider, successProviders, totalOffers)),
 				oplog.WithError(err))
 		} else {
 			oplog.Log("cloud.offer_search.done",
-				oplog.WithDetail(fmt.Sprintf("constraints=%s providers_ok=%d total_offers=%d", constraintsText, successProviders, totalOffers)))
+				oplog.WithDetail(fmt.Sprintf("constraints=%s requested_provider=%s providers_ok=%d total_offers=%d", constraintsText, provider, successProviders, totalOffers)))
 		}
 		close(future.done)
 	}()
@@ -434,10 +437,10 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 
 // constraintKey returns a string key for deduplicating cloud searches.
 // Groups with identical constraints produce identical offers.
-func constraintKey(c cloud.OfferConstraints) string {
-	return fmt.Sprintf("%s/%d/%d/%d/%.2f/%d",
+func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
+	return fmt.Sprintf("%s/%d/%d/%d/%.2f/%d/%s",
 		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
-		c.MinReliability, c.MinCPUCoresEffective)
+		c.MinReliability, c.MinCPUCoresEffective, provider)
 }
 
 type providerSearchResult struct {
@@ -469,16 +472,37 @@ func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
 	return strings.Join(parts, " ")
 }
 
-func searchAllProvidersWithDiagnostics(clients []cloud.Client, constraints cloud.OfferConstraints) ([]cloud.Offer, error, []providerSearchResult) {
+func searchAllProvidersWithDiagnostics(clients []cloud.Client, constraints cloud.OfferConstraints, requestedProvider cloud.Provider) ([]cloud.Offer, error, []providerSearchResult) {
+	selectedClients := clients
+	if requestedProvider != "" {
+		selectedClients = nil
+		for _, client := range clients {
+			if client.Provider() == requestedProvider {
+				selectedClients = append(selectedClients, client)
+			}
+		}
+		if len(selectedClients) == 0 {
+			available := make([]string, 0, len(clients))
+			for _, client := range clients {
+				available = append(available, string(client.Provider()))
+			}
+			sort.Strings(available)
+			if len(available) == 0 {
+				return nil, fmt.Errorf("requested provider %q is unavailable: no cloud providers configured", requestedProvider), nil
+			}
+			return nil, fmt.Errorf("requested provider %q is unavailable; configured providers: %s", requestedProvider, strings.Join(available, ", ")), nil
+		}
+	}
+
 	type result struct {
 		provider cloud.Provider
 		offers   []cloud.Offer
 		err      error
 	}
-	results := make([]result, len(clients))
+	results := make([]result, len(selectedClients))
 	var wg sync.WaitGroup
 
-	for i, c := range clients {
+	for i, c := range selectedClients {
 		wg.Add(1)
 		go func(idx int, client cloud.Client) {
 			defer wg.Done()

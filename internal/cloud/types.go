@@ -101,6 +101,7 @@ var DefaultExcludeGeos []string
 type CreateOpts struct {
 	Image        string            // Docker image
 	DiskGB       int               // disk space to request
+	GPUCount     int               // number of GPUs to request (provider-specific; defaults to 1)
 	SSHEnabled   bool              // enable SSH access
 	OnStartCmd   string            // command to run on instance start
 	EnvVars      map[string]string // environment variables passed via provider's env mechanism

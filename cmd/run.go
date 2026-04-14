@@ -88,6 +88,7 @@ var (
 	runGPUMem       int
 	runGPUMemStrict bool
 	runGPUClass     string
+	runProvider     string
 	runInputs       []string
 	runOutputs      []string
 	runProduces     []string
@@ -152,6 +153,7 @@ func init() {
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().BoolVar(&runGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	runCmd.Flags().StringVar(&runProvider, "provider", "", "Cloud provider for rental placement (vastai or runpod)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
@@ -220,6 +222,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runGPUClass == "" && runGPU == "" {
 			runGPUClass = fromJob.GPUClass
+		}
+		if runProvider == "" {
+			if provider, ok := db.RequestedProvider(fromJob.Tags); ok {
+				runProvider = provider
+			}
 		}
 		if runGPUMem == 0 && fromJob.GPUMemGB != nil {
 			runGPUMem = *fromJob.GPUMemGB
@@ -421,6 +428,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runWait && runNoWait {
 		return fmt.Errorf("--wait and --no-wait cannot be used together")
 	}
+	providerFlagChanged := cmd.Flags().Changed("provider")
+	if providerFlagChanged {
+		normalizedProvider, providerErr := normalizeProviderFlag(runProvider)
+		if providerErr != nil {
+			return fmt.Errorf("--provider: %w", providerErr)
+		}
+		runProvider = normalizedProvider
+		runTags, err = withProviderTag(runTags, runProvider)
+		if err != nil {
+			return fmt.Errorf("--provider: %w", err)
+		}
+	}
 
 	// Resolve --gpu into --gpu-class (and optionally --gpu-mem)
 	if runGPU != "" {
@@ -455,6 +474,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		localNeeds = resolvedLocalNeeds
 		cloudNeeds = resolvedCloudNeeds
 	}
+	requestedProvider, hasRequestedProvider := db.RequestedProvider(runTags)
+	if hasRequestedProvider && host != "" && !db.IsLaunchHost(host) {
+		return fmt.Errorf("--provider=%s cannot be used with inventory host %q; omit --host to keep the job unplaced for rental launch", requestedProvider, host)
+	}
 
 	gpu := extractGPUFromEnvVars(runEnvVars)
 	gpuClass := runGPUClass
@@ -477,6 +500,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
 		GPUClass: gpuClass,
+		Provider: requestedProvider,
 		Inputs:   runInputs,
 		Command:  command,
 		Project:  projectName,

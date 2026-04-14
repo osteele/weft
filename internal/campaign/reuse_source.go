@@ -3,6 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
@@ -36,6 +37,9 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 	var candidates []placement.Candidate
 	for _, cap := range ranked {
 		inst := cap.Instance
+		if constraints.Provider != "" && !strings.EqualFold(inst.Provider, constraints.Provider) {
+			continue
+		}
 
 		// Estimate queue wait on this instance
 		var waitMin float64

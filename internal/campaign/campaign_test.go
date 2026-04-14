@@ -117,6 +117,35 @@ func TestGroupByAffinity_NvidiaNotMergedWithPinnedModel(t *testing.T) {
 	}
 }
 
+func TestGroupByAffinity_DifferentProviderTagsDoNotMerge(t *testing.T) {
+	jobs := []*db.Job{
+		{
+			ID:       1,
+			Status:   db.StatusQueued,
+			GPUClass: "nvidia",
+			GPUMemGB: intPtr(24),
+			Inputs:   []string{"hf:meta-llama/Llama-3-8B"},
+			Tags:     []string{"provider:vastai"},
+		},
+		{
+			ID:       2,
+			Status:   db.StatusQueued,
+			GPUClass: "nvidia",
+			GPUMemGB: intPtr(24),
+			Inputs:   []string{"hf:meta-llama/Llama-3-8B"},
+			Tags:     []string{"provider:runpod"},
+		},
+	}
+
+	groups := GroupByAffinity(jobs, nil)
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
+	}
+	if groups[0].Provider == groups[1].Provider {
+		t.Fatalf("expected distinct providers, got %q and %q", groups[0].Provider, groups[1].Provider)
+	}
+}
+
 func TestGroupByAffinity_NvidiaAndEmptyMergeWithSharedInputs(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),

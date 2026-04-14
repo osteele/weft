@@ -1129,6 +1129,19 @@ func TestHasTagHostConflict(t *testing.T) {
 		t.Error("expected HasTagHostConflict=false for job without rental tag")
 	}
 
+	// Queued on inventory host with provider tag → conflict
+	jobIDProvider, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := SetJobTags(database, jobIDProvider, []string{TagProviderRunpod}); err != nil {
+		t.Fatalf("set provider tag: %v", err)
+	}
+	jobProvider, _ := GetJobByID(database, jobIDProvider)
+	if !jobProvider.HasTagHostConflict() {
+		t.Error("expected HasTagHostConflict=true for provider-tagged job on inventory host")
+	}
+
 	// Unplaced job with rental tag → no conflict (already unplaced)
 	jobID3, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
 	if err != nil {
@@ -2417,6 +2430,44 @@ func TestSetJobTagsCanonicalizesLegacyPlacementAliases(t *testing.T) {
 				t.Fatalf("tags[%d] = %q, want %q", i, got[i], want[i])
 			}
 		}
+	}
+}
+
+func TestSetJobTagsProviderTagValidation(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	if err := SetJobTags(database, jobID, []string{"provider:unknown"}); err == nil {
+		t.Fatalf("expected invalid provider tag to fail")
+	}
+	if err := SetJobTags(database, jobID, []string{TagProviderVastai, TagProviderRunpod}); err == nil {
+		t.Fatalf("expected conflicting provider tags to fail")
+	}
+}
+
+func TestSetJobTagsCanonicalizesProviderTag(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	if err := SetJobTags(database, jobID, []string{"provider:VastAI", "exp-012"}); err != nil {
+		t.Fatalf("set tags: %v", err)
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !job.HasTag(TagProviderVastai) {
+		t.Fatalf("expected canonical provider tag, got %v", job.Tags)
+	}
+	provider, ok := RequestedProvider(job.Tags)
+	if !ok || provider != "vastai" {
+		t.Fatalf("RequestedProvider = %q,%v, want vastai,true", provider, ok)
 	}
 }
 

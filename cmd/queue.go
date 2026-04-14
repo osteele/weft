@@ -219,6 +219,7 @@ var (
 	editStatus          string
 	editRetry           bool
 	editGPUClass        string
+	editProvider        string
 	editInputs          []string
 	editClearInputs     bool
 	queueHost           string // Shared --host flag for queue subcommands
@@ -827,12 +828,13 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
 	tagsChanged := cmd.Flags().Changed("tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
+	providerChanged := cmd.Flags().Changed("provider")
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || inputsChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || providerChanged || inputsChanged
 	fieldChanged = fieldChanged || tagsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--input or dependency flags")
+		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--provider/--input or dependency flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
@@ -1045,6 +1047,28 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "GPU class cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("GPU class: %s", editGPUClass))
+		}
+	}
+	if providerChanged {
+		normalizedProvider, providerErr := normalizeProviderFlag(editProvider)
+		if providerErr != nil {
+			return fmt.Errorf("--provider: %w", providerErr)
+		}
+		if normalizedProvider != "" && job.HasInventoryHost() {
+			return fmt.Errorf("--provider=%s cannot be set while job is queued on inventory host %q; unplace the job first", normalizedProvider, job.Host)
+		}
+		newTags, providerErr := withProviderTag(job.Tags, normalizedProvider)
+		if providerErr != nil {
+			return fmt.Errorf("--provider: %w", providerErr)
+		}
+		if err := db.SetJobTags(database, jobID, newTags); err != nil {
+			return fmt.Errorf("update provider tag: %w", err)
+		}
+		job.Tags = newTags
+		if normalizedProvider == "" {
+			updates = append(updates, "provider: cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("provider: %s", normalizedProvider))
 		}
 	}
 
@@ -1386,6 +1410,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
 }

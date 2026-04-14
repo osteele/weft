@@ -37,6 +37,7 @@ Examples:
 var (
 	restartGPU          string
 	restartGPUClass     string
+	restartProvider     string
 	restartGPUMem       int
 	restartGPUMemStrict bool
 	restartUnplaced     bool
@@ -45,11 +46,13 @@ var (
 type restartOverrides struct {
 	GPU             string
 	GPUClass        string
+	Provider        *string
 	GPUMemGB        *int
 	GPUMemStrict    bool
 	HasAny          bool
 	HasGPUMem       bool
 	HasGPUMemStrict bool
+	HasProvider     bool
 }
 
 func init() {
@@ -106,6 +109,7 @@ func runRestart(cmd *cobra.Command, args []string) error {
 func addRestartFlags(command *cobra.Command) {
 	command.Flags().StringVar(&restartGPU, "gpu", "", "GPU constraint override: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB)")
 	command.Flags().StringVar(&restartGPUClass, "gpu-class", "", "GPU class or generation override (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	command.Flags().StringVar(&restartProvider, "provider", "", "Cloud provider override for rental placement (vastai or runpod)")
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
@@ -144,9 +148,11 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	gpuClassValue := restartGPUClass
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
 	hasGPUMemStrict := cmd.Flags().Changed("gpu-mem-strict")
+	hasProvider := cmd.Flags().Changed("provider")
 	out.HasGPUMem = hasGPUMem
 	out.HasGPUMemStrict = hasGPUMemStrict
 	out.GPUMemStrict = restartGPUMemStrict
+	out.HasProvider = hasProvider
 
 	if gpuValue != "" && gpuClassValue != "" {
 		return out, fmt.Errorf("--gpu and --gpu-class cannot be used together")
@@ -177,9 +183,16 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 			out.GPUMemGB = nil
 		}
 	}
+	if hasProvider {
+		normalizedProvider, providerErr := normalizeProviderFlag(restartProvider)
+		if providerErr != nil {
+			return out, fmt.Errorf("--provider: %w", providerErr)
+		}
+		out.Provider = &normalizedProvider
+	}
 	out.GPU = gpuValue
 	out.GPUClass = gpuClassValue
-	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict
+	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider
 	return out, nil
 }
 
@@ -225,6 +238,28 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 			updates = append(updates, "gpu-mem: cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB", *overrides.GPUMemGB))
+		}
+	}
+	if overrides.HasProvider {
+		normalizedProvider := ""
+		if overrides.Provider != nil {
+			normalizedProvider = *overrides.Provider
+		}
+		if normalizedProvider != "" && job.HasInventoryHost() {
+			return nil, fmt.Errorf("--provider=%s cannot be set while job is queued on inventory host %q; unplace the job first", normalizedProvider, job.Host)
+		}
+		newTags, providerErr := withProviderTag(job.Tags, normalizedProvider)
+		if providerErr != nil {
+			return nil, fmt.Errorf("--provider: %w", providerErr)
+		}
+		if err := db.SetJobTags(database, job.ID, newTags); err != nil {
+			return nil, fmt.Errorf("update provider tag: %w", err)
+		}
+		job.Tags = newTags
+		if normalizedProvider == "" {
+			updates = append(updates, "provider: cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("provider: %s", normalizedProvider))
 		}
 	}
 	return updates, nil
