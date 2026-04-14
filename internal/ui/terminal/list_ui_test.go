@@ -3,12 +3,15 @@ package terminal
 import (
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -707,6 +710,28 @@ func TestListTUIAutoPilotFailureStoresRawErrorAndShowsNormalizedStatus(t *testin
 	}
 	if !strings.Contains(got.statusMessage, "line one | line two") {
 		t.Fatalf("statusMessage = %q, want normalized summary", got.statusMessage)
+	}
+}
+
+func TestListTUIRunAutoPilotKeepsSessionRunRateTarget(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 0.5\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restore := config.SetConfigPathsForTesting(cfgPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	m := listTUIModel{
+		groupedByStatus:        false, // early-return path is enough to verify target stability.
+		autoMode:               false,
+		database:               nil,
+		autoRunRateTargetCents: 250,
+	}
+
+	_ = m.runAutoPilot()
+	if m.autoRunRateTargetCents != 250 {
+		t.Fatalf("autoRunRateTargetCents = %d, want 250", m.autoRunRateTargetCents)
 	}
 }
 

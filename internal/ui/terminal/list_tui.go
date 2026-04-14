@@ -1562,7 +1562,6 @@ func buildListAutoLeaseScope(title string) string {
 }
 
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
-	m.autoRunRateTargetCents = loadAutoRunRateSoftTargetCentsPerHour()
 	if !m.groupedByStatus || !m.autoMode || m.autoInProgress || m.database == nil {
 		return nil
 	}

@@ -1,6 +1,8 @@
 package terminal
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
@@ -109,6 +112,24 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 	}
 	if strings.Contains(out, "ID 5") {
 		t.Fatalf("output should omit redundant provider line ID, got:\n%s", out)
+	}
+}
+
+func TestWatchRunAutoPilotKeepsSessionRunRateTarget(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 0.5\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restore := config.SetConfigPathsForTesting(cfgPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	m := watchModel{
+		autoRunRateTargetCents: 250,
+	}
+	_ = m.runAutoPilot()
+	if m.autoRunRateTargetCents != 250 {
+		t.Fatalf("autoRunRateTargetCents = %d, want 250", m.autoRunRateTargetCents)
 	}
 }
 

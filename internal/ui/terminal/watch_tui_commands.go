@@ -96,7 +96,6 @@ func (m watchModel) countRetryableFailedInstances() int {
 // It sets autoPlacing/autoLaunching flags on m (caller must use the returned
 // model state, as in Bubble Tea's value-receiver pattern).
 func (m *watchModel) runAutoPilot() tea.Cmd {
-	m.autoRunRateTargetCents = loadAutoRunRateSoftTargetCentsPerHour()
 	if m.autoNoopReasons == nil {
 		m.autoNoopReasons = map[int64]string{}
 	}
