@@ -817,3 +817,45 @@ invariant AutoPilotFallbackRequiresNoDecisions {
         -- unavailable or returns an empty plan; it is not a bypass for
         -- blocked jobs.
 }
+
+-- ==========================================================================
+-- Autopilot pass cadence
+-- ==========================================================================
+
+-- After a pass completes, the next pass is deferred by an outcome-dependent
+-- cooldown so that transient failures do not produce a tight retry loop.
+-- Manual user actions (toggling autopilot, refresh, changing the run-rate
+-- target) clear the cooldown to force immediate re-evaluation.
+
+rule AutoPilotPassCooldown {
+    when: AutoPilotPassCompleted(outcome)
+
+    ensures:
+        match outcome:
+            Error               -> DeferNextPass(60.seconds)
+            LeaseContention     -> DeferNextPass(15.seconds)
+            Progress            -> DeferNextPass(5.seconds)
+            Blocked             -> DeferNextPass(30.seconds)
+            Idle                -> DeferNextPass(30.seconds)
+
+    @guidance
+        -- TUI driver: internal/ui/terminal/list_tui.go listAutoPilotDoneMsg
+        -- handler + runAutoPilot guard on autoNextPassAt.
+        -- Progress = at least one job placed or launched.
+        -- Blocked  = planner returned block reasons, no progress.
+        -- Idle     = plan empty, no progress, no blocks.
+        -- LeaseContention = another TUI holds the autopilot lease.
+}
+
+rule AutoPilotManualResume {
+    when: UserActionRequestsImmediatePass(action)
+
+    ensures: ClearCooldown()
+
+    @guidance
+        -- Manual actions that clear autoNextPassAt:
+        -- * toggling auto mode ON
+        -- * manual refresh ('r')
+        -- * saving a new run-rate target
+        -- Implemented via resumeAutoPilotNow() in list_tui.go.
+}

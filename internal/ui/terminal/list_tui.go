@@ -292,6 +292,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoMode = !m.autoMode
 				if m.autoMode {
 					m.clearAutoPilotPersistentState()
+					m.resumeAutoPilotNow()
 					m.statusMessage = "Auto-pilot ON"
 					return m, m.runAutoPilot()
 				}
@@ -491,6 +492,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot failed: " + summarizeAutoPilotError(msg.err)
 			}
+			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownError)
 			m.rebuildGroupedRows()
 			return m, nil
 		}
@@ -501,6 +503,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot: another TUI is active for this scope"
 			}
+			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
 			return m, nil
 		}
 		m.autoPersistentBlocked = ""
@@ -511,6 +514,11 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.placed > 0 || msg.launched > 0 {
 			m.clearAutoPilotPersistentState()
+			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownProgress)
+		} else if len(msg.blockedReasons) > 0 {
+			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownBlocked)
+		} else {
+			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownIdle)
 		}
 		if !m.quickLaunchStatusProtected() {
 			switch {
@@ -876,6 +884,10 @@ func (m *listTUIModel) clearAutoPilotPersistentState() {
 	m.autoPersistentBlockedN = 0
 }
 
+func (m *listTUIModel) resumeAutoPilotNow() {
+	m.autoNextPassAt = time.Time{}
+}
+
 func (m listTUIModel) countUnplacedQueuedJobs() int {
 	n := 0
 	for _, job := range m.jobs {
@@ -1074,6 +1086,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.autoMode = !m.autoMode
 		if m.autoMode {
 			m.clearAutoPilotPersistentState()
+			m.resumeAutoPilotNow()
 			m.statusMessage = "Auto-pilot ON"
 			return m, m.runAutoPilot()
 		}
@@ -1193,6 +1206,7 @@ func (m listTUIModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.
 		m.autoRunRateInputActive = false
 		m.autoRunRateInputValue = ""
 		m.statusMessage = "Run-rate target set to " + formatAutoRunRateTarget(cents)
+		m.resumeAutoPilotNow()
 		if cmd := m.runAutoPilot(); cmd != nil {
 			return m, cmd
 		}
@@ -1308,6 +1322,7 @@ func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {
 		m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
 		cmds = append(cmds, m.runBackgroundSync(true))
 	}
+	m.resumeAutoPilotNow()
 	if cmd := m.runAutoPilot(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
@@ -1514,6 +1529,9 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	if !m.groupedByStatus || !m.autoMode || m.autoInProgress || m.database == nil {
 		return nil
 	}
+	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
+		return nil
+	}
 	if m.countUnplacedQueuedJobs() == 0 {
 		// Nothing to evaluate; skip the pass so the status line doesn't flicker.
 		return nil
@@ -1557,6 +1575,15 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 // auto-pilot status line stays visible, even when the pass completes sooner.
 // Prevents rapid flicker between "evaluating" and idle text on every sync tick.
 const listAutoPilotMinDisplayDuration = 1200 * time.Millisecond
+
+// Cooldowns between auto-pilot passes; avoid tight retry loops on failure.
+const (
+	listAutoPilotCooldownError    = 60 * time.Second
+	listAutoPilotCooldownBlocked  = 30 * time.Second
+	listAutoPilotCooldownIdle     = 30 * time.Second
+	listAutoPilotCooldownProgress = 5 * time.Second
+	listAutoPilotCooldownContend  = 15 * time.Second
+)
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, string, map[int64]string, error) {
 	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)

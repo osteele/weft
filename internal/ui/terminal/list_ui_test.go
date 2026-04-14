@@ -502,7 +502,7 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 	}
 }
 
-func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
+func TestListTUIAutoPilotFailureSchedulesCooldown(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		autoMode:        true,
@@ -521,12 +521,100 @@ func TestListTUIAutoPilotFailureDoesNotStopSubsequentTicks(t *testing.T) {
 	if !strings.Contains(got.statusMessage, "Auto-pilot failed: boom") {
 		t.Fatalf("statusMessage = %q, want failure text", got.statusMessage)
 	}
+	if got.autoNextPassAt.IsZero() || time.Until(got.autoNextPassAt) <= 0 {
+		t.Fatalf("expected cooldown after failure, got autoNextPassAt=%v", got.autoNextPassAt)
+	}
 
 	next2, _ := got.Update(listSyncTickMsg{})
 	got2 := next2.(listTUIModel)
-	if !got2.autoInProgress {
-		t.Fatal("expected next sync tick to schedule another autopilot pass")
+	if got2.autoInProgress {
+		t.Fatal("expected cooldown to suppress immediate retry after failure")
 	}
+
+	got2.autoNextPassAt = time.Now().Add(-time.Second)
+	next3, _ := got2.Update(listSyncTickMsg{})
+	got3 := next3.(listTUIModel)
+	if !got3.autoInProgress {
+		t.Fatal("expected autopilot to re-run once cooldown elapses")
+	}
+}
+
+func TestListTUIAutoPilotOutcomeCooldowns(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  listAutoPilotDoneMsg
+		want time.Duration
+	}{
+		{"progress", listAutoPilotDoneMsg{launched: 1}, listAutoPilotCooldownProgress},
+		{"blocked", listAutoPilotDoneMsg{blockedReasons: map[int64]string{1: "waiting"}}, listAutoPilotCooldownBlocked},
+		{"idle", listAutoPilotDoneMsg{}, listAutoPilotCooldownIdle},
+		{"contention", listAutoPilotDoneMsg{anotherHolding: true}, listAutoPilotCooldownContend},
+		{"error", listAutoPilotDoneMsg{err: errors.New("boom")}, listAutoPilotCooldownError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := listTUIModel{
+				groupedByStatus: true,
+				autoMode:        true,
+				autoInProgress:  true,
+				database:        &sql.DB{},
+			}
+			start := time.Now()
+			next, _ := m.Update(tc.msg)
+			got := next.(listTUIModel)
+			if got.autoNextPassAt.IsZero() {
+				t.Fatalf("%s: autoNextPassAt not set", tc.name)
+			}
+			delta := got.autoNextPassAt.Sub(start)
+			// Allow a small scheduling tolerance around the expected duration.
+			if delta < tc.want-time.Second || delta > tc.want+time.Second {
+				t.Fatalf("%s: cooldown = %v, want ~%v", tc.name, delta, tc.want)
+			}
+		})
+	}
+}
+
+func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
+	makeModel := func() listTUIModel {
+		return listTUIModel{
+			groupedByStatus: true,
+			autoMode:        true,
+			database:        &sql.DB{},
+			autoNextPassAt:  time.Now().Add(30 * time.Second),
+		}
+	}
+
+	t.Run("toggle auto on", func(t *testing.T) {
+		m := makeModel()
+		m.autoMode = false
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		got := next.(listTUIModel)
+		if !got.autoMode {
+			t.Fatal("expected autoMode ON after 'a' toggle")
+		}
+		if !got.autoNextPassAt.IsZero() {
+			t.Fatalf("expected cooldown cleared, got %v", got.autoNextPassAt)
+		}
+	})
+
+	t.Run("manual refresh", func(t *testing.T) {
+		m := makeModel()
+		next, _ := m.triggerManualRefresh()
+		if !next.autoNextPassAt.IsZero() {
+			t.Fatalf("expected cooldown cleared after refresh, got %v", next.autoNextPassAt)
+		}
+	})
+
+	t.Run("run-rate target save", func(t *testing.T) {
+		m := makeModel()
+		m.autoRunRateInputActive = true
+		m.autoRunRateInputValue = "2.50"
+		next, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
+		got := next.(listTUIModel)
+		if !got.autoNextPassAt.IsZero() {
+			t.Fatalf("expected cooldown cleared after run-rate save, got %v", got.autoNextPassAt)
+		}
+	})
 }
 
 func TestListTUIAutoPilotFailureRebuildsGroupedRowsWithBlockReasons(t *testing.T) {
