@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,53 @@ func TestDefaultProfilePlanSpecs_FastestUsesParallelPreferred(t *testing.T) {
 	}
 	if specs[2].CandidateMode != CandidatePlanModeParallelPreferred {
 		t.Fatalf("fastest mode = %v, want parallel-preferred", specs[2].CandidateMode)
+	}
+}
+
+func TestRankOfferWithPredictedRuntime_PreservesFilterStatsAfterCUDAFilter(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "RTX-5090",
+		Jobs:     []*db.Job{{ID: 1229}},
+	}
+	offer := cloud.Offer{
+		ProviderID:  "o1",
+		GPUName:     "RTX 5090",
+		GPUMemGB:    32,
+		CostPerHour: 1.0,
+	}
+	predicted := map[string]offerRuntimePrediction{
+		offerPredictionKey(offer): {
+			complete:       true,
+			feasible:       true,
+			totalRunHrs:    1,
+			adjustedRunHrs: 1,
+		},
+	}
+
+	got, ok := rankOfferWithPredictedRuntime(
+		group,
+		[]cloud.Offer{offer},
+		nil,
+		bidding.ConstantSetup(0),
+		bidding.StrategyCheap.Profile(),
+		0,
+		predicted,
+	)
+	if !ok {
+		t.Fatal("expected ranking to complete")
+	}
+	if got.Offer != nil {
+		t.Fatalf("expected nil selected offer due to CUDA filter, got %#v", got.Offer)
+	}
+	if got.FilterStats.RawCount != 1 || got.FilterStats.AfterCUDA != 0 {
+		t.Fatalf("unexpected filter stats: %#v", got.FilterStats)
+	}
+	detail := got.FilterStats.NoOffersDetail("")
+	if strings.Contains(detail, "no offers from providers") {
+		t.Fatalf("unexpected provider-empty detail after non-empty raw offers: %q", detail)
+	}
+	if !strings.Contains(detail, "CUDA compatibility") {
+		t.Fatalf("expected CUDA compatibility detail, got %q", detail)
 	}
 }
 

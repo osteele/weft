@@ -206,8 +206,8 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
 	stats := OfferFilterStats{RawCount: len(offers)}
-	defer func() { result.FilterStats = stats }()
 	if len(offers) == 0 {
+		result.FilterStats = stats
 		return result
 	}
 	if vramFiltered, removed := filterOffersByVRAMReq(offers, group); removed > 0 {
@@ -218,6 +218,7 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	}
 	stats.AfterVRAM = len(offers)
 	if len(offers) == 0 {
+		result.FilterStats = stats
 		return result
 	}
 	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
@@ -229,12 +230,14 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	}
 	stats.AfterCUDA = len(offers)
 	if len(offers) == 0 {
+		result.FilterStats = stats
 		return result
 	}
 	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
 	result.RejectedGroups = rejected
 	stats.AfterSurvival = len(filtered)
 	if len(filtered) == 0 {
+		result.FilterStats = stats
 		return result
 	}
 	totalJobDurationHrs := jobDurationHrs
@@ -246,6 +249,7 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
 	}
+	result.FilterStats = stats
 	return result
 }
 

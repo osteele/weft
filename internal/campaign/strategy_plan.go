@@ -1421,18 +1421,33 @@ func rankOfferWithPredictedRuntime(
 	predicted map[string]offerRuntimePrediction,
 ) (GroupOffer, bool) {
 	result := GroupOffer{Group: group}
+	stats := OfferFilterStats{RawCount: len(offers)}
 	if len(offers) == 0 {
+		result.FilterStats = stats
 		return result, true
 	}
+	// Runtime-ranking path receives provider-filtered offers; treat all as
+	// VRAM-compatible for staged diagnostics parity with rankOfferWithProfile.
+	stats.AfterVRAM = len(offers)
 
-	offers, _, _, _, _, _ = filterOffersByCUDACompat(offers, group.Image)
+	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
+	if cudaFiltered > 0 {
+		stats.CUDAImage = imageRef
+		stats.CUDAImageVersion = imageCUDA
+		stats.CUDAMinRequired = minRequiredCUDA
+		stats.CUDAExampleGPU = exampleGPU
+	}
+	stats.AfterCUDA = len(offers)
 	if len(offers) == 0 {
+		result.FilterStats = stats
 		return result, true
 	}
 
 	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
 	result.RejectedGroups = rejected
+	stats.AfterSurvival = len(filtered)
 	if len(filtered) == 0 {
+		result.FilterStats = stats
 		return result, true
 	}
 
@@ -1478,10 +1493,12 @@ func rankOfferWithPredictedRuntime(
 	}
 
 	if !found {
-		return GroupOffer{}, false
+		result.FilterStats = stats
+		return result, false
 	}
 
 	result.Offer = &best
+	result.FilterStats = stats
 	return result, true
 }
 
