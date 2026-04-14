@@ -479,27 +479,29 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 				img = autoTorchImage
 			}
 
-			// Auto-upgrade inferred/default images when the GPU constraint requires
-			// a newer CUDA toolkit (e.g., Blackwell needs CUDA >= 12.8).
-			if !explicitImage {
-				requiredCUDA := placement.MinCUDAForConstraint(g.GPUClass)
-				if requiredCUDA > 0 {
-					effectiveImage := img
-					if effectiveImage == "" {
-						effectiveImage = cloud.DefaultImage
-					}
-					if imageCUDA, _, ok := parseCUDAImage(effectiveImage); ok {
-						currentCUDA := parseCUDAVersionFloat(imageCUDA)
-						if currentCUDA > 0 && currentCUDA < requiredCUDA {
-							if upgraded := chooseAutoImageForMinCUDA(requiredCUDA, hasTorch); upgraded != "" {
-								img = upgraded
-								slog.Info("auto-selected CUDA-compatible image for GPU constraint",
-									"component", "campaign",
-									"gpu_class", g.GPUClass,
-									"required_cuda", requiredCUDA,
-									"previous_image", effectiveImage,
-									"selected_image", upgraded)
-							}
+			// Auto-upgrade CUDA images when the GPU constraint requires a newer
+			// toolkit (e.g., Blackwell needs CUDA >= 12.8). This applies to both
+			// inferred and explicit CUDA images; explicit non-CUDA images are left
+			// unchanged and will fail later with a clear compatibility reason.
+			requiredCUDA := placement.MinCUDAForConstraint(g.GPUClass)
+			if requiredCUDA > 0 {
+				effectiveImage := img
+				if effectiveImage == "" {
+					effectiveImage = cloud.DefaultImage
+				}
+				if imageCUDA, _, ok := parseCUDAImage(effectiveImage); ok {
+					currentCUDA := parseCUDAVersionFloat(imageCUDA)
+					if currentCUDA > 0 && currentCUDA < requiredCUDA {
+						preferTorch := hasTorch || isPyTorchImage(effectiveImage)
+						if upgraded := chooseAutoImageForMinCUDA(requiredCUDA, preferTorch); upgraded != "" && upgraded != effectiveImage {
+							img = upgraded
+							slog.Info("auto-selected CUDA-compatible image for GPU constraint",
+								"component", "campaign",
+								"gpu_class", g.GPUClass,
+								"required_cuda", requiredCUDA,
+								"previous_image", effectiveImage,
+								"selected_image", upgraded,
+								"explicit_image", explicitImage)
 						}
 					}
 				}
