@@ -344,7 +344,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 
 			statusPart := j.Status
 			if outcome != "" && outcome != j.Status {
-				statusPart = outcome
+				statusPart = fmt.Sprintf("%s (attempt %s)", j.Status, outcome)
 			}
 			fmt.Fprintf(&b, "  Job #%d — %s\n", j.ID, statusPart)
 
@@ -483,11 +483,14 @@ func compareThreshold(elapsed, warn, terminate time.Duration) string {
 }
 
 func jobDescription(j *db.Job) string {
-	if j.Command != "" {
-		return campaign.TruncateCommand(j.Command, 80)
+	raw := j.Command
+	if raw == "" {
+		raw = j.Description
 	}
-	if j.Description != "" {
-		return campaign.TruncateCommand(j.Description, 80)
+	if raw == "" {
+		return ""
 	}
-	return ""
+	// Multi-line shell commands (heredocs, `\` line continuations) must
+	// render as a single line in the diagnose table.
+	return campaign.TruncateCommand(strings.Join(strings.Fields(raw), " "), 80)
 }

@@ -695,6 +695,32 @@ rule RunawayBreakerClears {
         -- Implementation: internal/campaign/relaunch.go ResumeRunawayBreakerForJob()
 }
 
+-- --------------------------------------------------------------------------
+-- Attempt outcomes per launch (display contract)
+-- --------------------------------------------------------------------------
+
+-- When multiple job_attempts rows exist for the same (job, launch) pair, the
+-- attempt outcome reported to UI surfaces (diagnose, watch, campaign watch)
+-- must reflect the LATEST attempt only. An older closed attempt with
+-- cloud_outcome set (e.g. "superseded") must not shadow a newer open attempt
+-- on the same launch — the job is still actively engaged with that launch.
+--
+-- Concretely: the same job may have multiple attempts on the same launch,
+-- where each prior closed attempt is marked cloud_outcome=superseded when
+-- SetJobLaunchID reattaches. GetAttemptOutcomesByLaunch (internal/db/
+-- cloud_instances.go) returns the latest attempt's cloud_outcome per job
+-- on the queried launch; jobs whose latest attempt on that launch is still
+-- open are omitted from the result.
+--
+-- Callers that rely on this: cmd/instance_diagnose.go, cmd/campaign_diagnose.go,
+-- cmd/campaign_report.go, internal/campaign/reconcile.go,
+-- internal/campaign/status.go, internal/ui/terminal/watch_*.go.
+--
+-- Display: when a job's overall status differs from the per-launch attempt
+-- outcome, diagnose renders "<status> (attempt <outcome>)" rather than
+-- replacing the status — the per-launch outcome is a historical fact
+-- about one attempt, not the job's global state.
+
 -- ==========================================================================
 -- Autopilot placement pass
 -- ==========================================================================

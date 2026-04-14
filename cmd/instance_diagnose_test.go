@@ -208,3 +208,27 @@ func TestCompareThreshold(t *testing.T) {
 		})
 	}
 }
+
+func TestJobDescription_CollapsesMultilineCommand(t *testing.T) {
+	j := &db.Job{
+		Command: "uv sync && \\\necho \"=== Download models ===\" && \\\nuv run python -c \"\nfrom transformers import AutoModel\n\"",
+	}
+	got := jobDescription(j)
+	if strings.ContainsAny(got, "\n\r") {
+		t.Fatalf("jobDescription leaked newlines: %q", got)
+	}
+	if strings.Contains(got, "  ") {
+		t.Fatalf("jobDescription should collapse whitespace runs: %q", got)
+	}
+}
+
+func TestJobDescription_UsesDescriptionWhenNoCommand(t *testing.T) {
+	j := &db.Job{Description: "line1\nline2"}
+	got := jobDescription(j)
+	if strings.ContainsAny(got, "\n\r") {
+		t.Fatalf("jobDescription leaked newlines: %q", got)
+	}
+	if got != "line1 line2" {
+		t.Fatalf("jobDescription = %q, want %q", got, "line1 line2")
+	}
+}

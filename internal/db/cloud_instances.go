@@ -1512,10 +1512,19 @@ func GetLaunchAttempts(database *sql.DB, jobID int64) ([]LaunchAttempt, error) {
 // GetAttemptOutcomesByLaunch returns the cloud_outcome for each job attempt
 // that ran on the given cloud instance. Returns map[jobID]outcome.
 func GetAttemptOutcomesByLaunch(database *sql.DB, cloudInstanceID int64) (map[int64]string, error) {
+	// Return the outcome of the LATEST attempt on this launch per job. A newer
+	// open attempt on the same launch must hide an older closed attempt's
+	// outcome — otherwise diagnose reports stale terminal states (e.g.
+	// "superseded") for jobs that have an active attempt on the instance.
 	rows, err := database.Query(
-		`SELECT job_id, cloud_outcome FROM job_attempts
-		 WHERE launch_id = ? AND cloud_outcome IS NOT NULL
-		 ORDER BY attempt_number ASC`,
+		`WITH ranked AS (
+			SELECT job_id, cloud_outcome,
+			       ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY attempt_number DESC, id DESC) AS rn
+			FROM job_attempts
+			WHERE launch_id = ?
+		)
+		SELECT job_id, cloud_outcome FROM ranked
+		WHERE rn = 1 AND cloud_outcome IS NOT NULL`,
 		cloudInstanceID,
 	)
 	if err != nil {

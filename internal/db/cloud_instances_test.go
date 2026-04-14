@@ -444,6 +444,47 @@ func TestGetAttemptOutcomesByLaunch(t *testing.T) {
 	}
 }
 
+func TestGetAttemptOutcomesByLaunch_NewerOpenAttemptHidesOlderOutcome(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
+
+	// First attempt on this launch; mark it superseded as if it was closed
+	// and replaced (the SetJobLaunchID code path marks prior closed attempts
+	// on any launch as superseded).
+	if err := SetJobLaunchID(database, 1, instanceID); err != nil {
+		t.Fatalf("set cloud instance (first): %v", err)
+	}
+	// Close the first attempt and mark it superseded directly.
+	now := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET end_time = ?, cloud_outcome = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		now, AttemptOutcomeSuperseded, 1, instanceID,
+	); err != nil {
+		t.Fatalf("mark superseded: %v", err)
+	}
+	// Re-attach on the same launch; this creates a new open attempt.
+	if err := SetJobLaunchID(database, 1, instanceID); err != nil {
+		t.Fatalf("set cloud instance (second): %v", err)
+	}
+
+	outcomes, err := GetAttemptOutcomesByLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByLaunch: %v", err)
+	}
+	if got, ok := outcomes[1]; ok {
+		t.Fatalf("expected no outcome for job with open latest attempt, got %q", got)
+	}
+}
+
 func TestCloseLaunchAttempts_CompletedSetsExitCode(t *testing.T) {
 	database := setupTestDB(t)
 
