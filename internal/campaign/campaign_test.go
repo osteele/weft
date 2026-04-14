@@ -686,6 +686,50 @@ func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
 	}
 }
 
+func TestSplitGroupsByImage_AutoUpgradesDefaultImageForBlackwell(t *testing.T) {
+	groups := SplitGroupsByImage([]InstanceGroup{
+		{
+			GPUClass: "RTX-5090",
+			GPUMemGB: 20,
+			Jobs: []*db.Job{
+				{ID: 1, Command: "python train.py"},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Image != "nvidia/cuda:12.8.1-runtime-ubuntu22.04" {
+		t.Fatalf("Image = %q, want nvidia/cuda:12.8.1-runtime-ubuntu22.04", groups[0].Image)
+	}
+}
+
+func TestSplitGroupsByImage_RespectsExplicitImageEvenIfOlderCUDA(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, ".weft.toml")
+	if err := os.WriteFile(cfg, []byte("[cloud]\nimage = \"nvidia/cuda:12.4.1-runtime-ubuntu22.04\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	groups := SplitGroupsByImage([]InstanceGroup{
+		{
+			GPUClass: "RTX-5090",
+			GPUMemGB: 20,
+			Jobs: []*db.Job{
+				{ID: 1, Command: "python train.py", WorkingDir: dir},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Image != "nvidia/cuda:12.4.1-runtime-ubuntu22.04" {
+		t.Fatalf("Image = %q, want explicit configured image", groups[0].Image)
+	}
+}
+
 func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",

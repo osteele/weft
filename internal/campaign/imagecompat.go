@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -100,9 +101,42 @@ func torchImageForCUDAVersion(cudaMajorMinor string) string {
 	switch cudaMajorMinor {
 	case "12.4":
 		return "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
+	case "12.8":
+		return "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime"
 	default:
 		return ""
 	}
+}
+
+func defaultCUDAImageForVersion(cudaMajorMinor string) string {
+	switch cudaMajorMinor {
+	case "12.4":
+		return cloud.DefaultImage
+	case "12.8":
+		return "nvidia/cuda:12.8.1-runtime-ubuntu22.04"
+	default:
+		return ""
+	}
+}
+
+func cudaVersionString(minCUDA float64) string {
+	if minCUDA <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%.1f", minCUDA)
+}
+
+func chooseAutoImageForMinCUDA(minCUDA float64, preferTorch bool) string {
+	ver := cudaVersionString(minCUDA)
+	if ver == "" {
+		return ""
+	}
+	if preferTorch {
+		if torchImage := torchImageForCUDAVersion(ver); torchImage != "" {
+			return torchImage
+		}
+	}
+	return defaultCUDAImageForVersion(ver)
 }
 
 // imageSupremum returns the most capable compatible image for both a and b,

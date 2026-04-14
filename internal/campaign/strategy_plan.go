@@ -1425,7 +1425,7 @@ func rankOfferWithPredictedRuntime(
 		return result, true
 	}
 
-	offers, _ = filterOffersByCUDACompat(offers, group.Image)
+	offers, _, _, _, _, _ = filterOffersByCUDACompat(offers, group.Image)
 	if len(offers) == 0 {
 		return result, true
 	}

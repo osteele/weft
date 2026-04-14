@@ -3,6 +3,7 @@ package campaign
 import (
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -825,6 +826,25 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNoOffersDetail_CUDAIncludesImageAndRequiredVersion(t *testing.T) {
+	stats := OfferFilterStats{
+		RawCount:         19,
+		AfterVRAM:        19,
+		AfterCUDA:        0,
+		CUDAImage:        "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
+		CUDAImageVersion: 12.4,
+		CUDAMinRequired:  12.8,
+		CUDAExampleGPU:   "RTX 5090",
+	}
+	got := stats.NoOffersDetail("")
+	if !strings.Contains(got, "CUDA compatibility") ||
+		!strings.Contains(got, "image=nvidia/cuda:12.4.1-runtime-ubuntu22.04 CUDA 12.4") ||
+		!strings.Contains(got, "requires >=12.8") ||
+		!strings.Contains(got, "RTX 5090") {
+		t.Fatalf("unexpected CUDA detail message: %q", got)
 	}
 }
 

@@ -329,3 +329,25 @@ func TestMinCUDAForGPU(t *testing.T) {
 		}
 	}
 }
+
+func TestMinCUDAForConstraint(t *testing.T) {
+	tests := []struct {
+		gpuClass string
+		want     float64
+	}{
+		{"RTX-5090", 12.8},
+		{"blackwell", 12.8},
+		{"blackwell+", 12.8},
+		{"a100+", 11.0},
+		{"ampere", 11.0},
+		{"nvidia", 0},
+		{"", 0},
+		{"unknown-model", 0},
+	}
+	for _, tt := range tests {
+		got := MinCUDAForConstraint(tt.gpuClass)
+		if got != tt.want {
+			t.Errorf("MinCUDAForConstraint(%q) = %v, want %v", tt.gpuClass, got, tt.want)
+		}
+	}
+}

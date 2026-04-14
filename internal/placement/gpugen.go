@@ -111,6 +111,21 @@ func MinCUDAForGPU(gpuName string) float64 {
 	return generationMinCUDA[gen]
 }
 
+// MinCUDAForConstraint returns the minimum CUDA toolkit version implied by a
+// --gpu-class constraint (model, generation, or generation+). Family-wide
+// constraints (e.g. "nvidia") return 0 because they do not imply one minimum.
+func MinCUDAForConstraint(gpuClass string) float64 {
+	c := ParseGPUConstraint(gpuClass)
+	switch c.mode {
+	case constraintExactModel:
+		return MinCUDAForGPU(gpuClass)
+	case constraintExactGen, constraintMinGen:
+		return generationMinCUDA[c.generation]
+	default:
+		return 0
+	}
+}
+
 // generationOf returns the generation for a normalized GPU class name.
 func generationOf(normalizedClass string) GPUGeneration {
 	if gen, ok := appleClassToGeneration[normalizedClass]; ok {

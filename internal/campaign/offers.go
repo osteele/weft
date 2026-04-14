@@ -36,6 +36,11 @@ type OfferFilterStats struct {
 	AfterVRAM     int // remaining after VRAM requirement filter
 	AfterCUDA     int // remaining after CUDA compatibility filter
 	AfterSurvival int // remaining after survival probability filter
+	// CUDA filter diagnostics (set when CUDA filtering removed offers).
+	CUDAImage        string
+	CUDAImageVersion float64
+	CUDAMinRequired  float64
+	CUDAExampleGPU   string
 }
 
 // NoOffersDetail returns a human-readable explanation of why no offers survived
@@ -52,6 +57,12 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 	case s.AfterVRAM == 0:
 		return fmt.Sprintf("%d offers found, all filtered by VRAM requirement", s.RawCount)
 	case s.AfterCUDA == 0:
+		if s.CUDAMinRequired > 0 && s.CUDAImageVersion > 0 {
+			if s.CUDAExampleGPU != "" && s.CUDAImage != "" {
+				return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility (image=%s CUDA %.1f; requires >=%.1f, e.g. %s)", s.RawCount, s.AfterVRAM, s.CUDAImage, s.CUDAImageVersion, s.CUDAMinRequired, s.CUDAExampleGPU)
+			}
+			return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", s.RawCount, s.AfterVRAM, s.CUDAImageVersion, s.CUDAMinRequired)
+		}
 		return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility", s.RawCount, s.AfterVRAM)
 	case s.AfterSurvival == 0:
 		return fmt.Sprintf("%d offers found, %d passed filters but none met survival threshold", s.RawCount, s.AfterCUDA)
@@ -127,25 +138,31 @@ func intFromEnvOrDefault(key string, defaultVal int) int {
 // filterOffersByCUDACompat removes offers whose GPU requires a newer CUDA
 // toolkit than the Docker image provides. Returns the compatible offers and
 // the count of filtered offers (for logging).
-func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer, int) {
+func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer, int, float64, float64, string, string) {
 	if image == "" {
 		image = cloud.DefaultImage
 	}
 	cudaVer, _, ok := parseCUDAImage(image)
 	if !ok {
-		return offers, 0
+		return offers, 0, 0, 0, "", image
 	}
 	imageCUDA := parseCUDAVersionFloat(cudaVer)
 	if imageCUDA == 0 {
-		return offers, 0
+		return offers, 0, 0, 0, "", image
 	}
 
 	compatible := make([]cloud.Offer, 0, len(offers))
 	filtered := 0
+	var maxRequired float64
+	exampleGPU := ""
 	for _, o := range offers {
 		minCUDA := placement.MinCUDAForGPU(o.GPUName)
 		if minCUDA > 0 && minCUDA > imageCUDA {
 			filtered++
+			if minCUDA > maxRequired {
+				maxRequired = minCUDA
+				exampleGPU = o.GPUName
+			}
 			continue
 		}
 		compatible = append(compatible, o)
@@ -154,7 +171,7 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 		slog.Debug("filtered offers by CUDA compatibility",
 			"image_cuda", imageCUDA, "filtered", filtered, "remaining", len(compatible))
 	}
-	return compatible, filtered
+	return compatible, filtered, imageCUDA, maxRequired, exampleGPU, image
 }
 
 // filterOffersByVRAMReq applies a defensive local VRAM minimum filter.
@@ -203,7 +220,13 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	if len(offers) == 0 {
 		return result
 	}
-	offers, _ = filterOffersByCUDACompat(offers, group.Image)
+	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
+	if cudaFiltered > 0 {
+		stats.CUDAImage = imageRef
+		stats.CUDAImageVersion = imageCUDA
+		stats.CUDAMinRequired = minRequiredCUDA
+		stats.CUDAExampleGPU = exampleGPU
+	}
 	stats.AfterCUDA = len(offers)
 	if len(offers) == 0 {
 		return result

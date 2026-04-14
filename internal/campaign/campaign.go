@@ -467,6 +467,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 			img := ResolveJobImage(localDir, job.Command)
+			explicitImage := img != ""
 			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
 
 			hasTorch := localDir != "" && hasCUDAPackages([]string{localDir})
@@ -476,6 +477,32 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 			// uv sync of torch + CUDA wheels on every instance launch.
 			if img == "" && hasTorch && autoTorchImage != "" {
 				img = autoTorchImage
+			}
+
+			// Auto-upgrade inferred/default images when the GPU constraint requires
+			// a newer CUDA toolkit (e.g., Blackwell needs CUDA >= 12.8).
+			if !explicitImage {
+				requiredCUDA := placement.MinCUDAForConstraint(g.GPUClass)
+				if requiredCUDA > 0 {
+					effectiveImage := img
+					if effectiveImage == "" {
+						effectiveImage = cloud.DefaultImage
+					}
+					if imageCUDA, _, ok := parseCUDAImage(effectiveImage); ok {
+						currentCUDA := parseCUDAVersionFloat(imageCUDA)
+						if currentCUDA > 0 && currentCUDA < requiredCUDA {
+							if upgraded := chooseAutoImageForMinCUDA(requiredCUDA, hasTorch); upgraded != "" {
+								img = upgraded
+								slog.Info("auto-selected CUDA-compatible image for GPU constraint",
+									"component", "campaign",
+									"gpu_class", g.GPUClass,
+									"required_cuda", requiredCUDA,
+									"previous_image", effectiveImage,
+									"selected_image", upgraded)
+							}
+						}
+					}
+				}
 			}
 
 			// Warn when an explicit image doesn't include PyTorch but the

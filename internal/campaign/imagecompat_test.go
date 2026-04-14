@@ -27,6 +27,19 @@ func TestTorchImageForCUDAVersion(t *testing.T) {
 	if got := torchImageForCUDAVersion("11.8"); got != "" {
 		t.Errorf("expected empty for unknown CUDA version, got %q", got)
 	}
+
+	if got := torchImageForCUDAVersion("12.8"); got == "" {
+		t.Error("expected pytorch image for CUDA 12.8")
+	}
+}
+
+func TestChooseAutoImageForMinCUDA(t *testing.T) {
+	if got := chooseAutoImageForMinCUDA(12.8, false); got != "nvidia/cuda:12.8.1-runtime-ubuntu22.04" {
+		t.Fatalf("chooseAutoImageForMinCUDA(12.8,false) = %q", got)
+	}
+	if got := chooseAutoImageForMinCUDA(12.8, true); got != "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime" {
+		t.Fatalf("chooseAutoImageForMinCUDA(12.8,true) = %q", got)
+	}
 }
 
 func TestParseCUDAImage(t *testing.T) {
