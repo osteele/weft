@@ -108,12 +108,12 @@ type GroupOffer struct {
 	Err            error
 }
 
-func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
+func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud.OfferConstraints {
 	c := cloud.OfferConstraints{
 		GPUClass:       group.GPUClass,
 		MinGPUMemGB:    group.GPUMemGB,
 		MinDiskGB:      group.DiskGB,
-		MinReliability: cloud.DefaultMinReliability,
+		MinReliability: minReliability,
 		// MaxGPUMemGB is intentionally NOT passed to the search filter.
 		// It is a scheduler-side planning hint, not a hard offer filter.
 	}
@@ -263,9 +263,10 @@ func SearchBestOfferForGroup(
 	setupOverhead bidding.OfferSetupFunc,
 	excludeOfferIDs map[string]struct{},
 	strategy bidding.SelectionStrategy,
+	minReliability float64,
 	minSurvival float64,
 ) GroupOffer {
-	return SearchBestOfferForGroupWithProfile(clients, group, survivalModel, jobDurationHrs, setupOverhead, excludeOfferIDs, strategy.Profile(), minSurvival)
+	return SearchBestOfferForGroupWithProfile(clients, group, survivalModel, jobDurationHrs, setupOverhead, excludeOfferIDs, strategy.Profile(), minReliability, minSurvival)
 }
 
 func SearchBestOfferForGroupWithProfile(
@@ -276,10 +277,11 @@ func SearchBestOfferForGroupWithProfile(
 	setupOverhead bidding.OfferSetupFunc,
 	excludeOfferIDs map[string]struct{},
 	profile bidding.ScoreProfile,
+	minReliability float64,
 	minSurvival float64,
 ) GroupOffer {
 	requestedProvider := cloud.Provider(strings.TrimSpace(group.Provider))
-	offers, err, _ := searchAllProvidersWithDiagnostics(clients, offerConstraintsForGroup(group), requestedProvider)
+	offers, err, _ := searchAllProvidersWithDiagnostics(clients, offerConstraintsForGroup(group, minReliability), requestedProvider)
 	if err != nil {
 		return GroupOffer{Group: group, Err: err}
 	}
@@ -318,16 +320,18 @@ type offerSearchFuture struct {
 // offerSearchSession caches cloud searches by normalized constraints for the
 // lifetime of one planning pass.
 type offerSearchSession struct {
-	clients []cloud.Client
+	clients        []cloud.Client
+	minReliability float64
 
 	mu      sync.Mutex
 	results map[string]*offerSearchFuture
 }
 
-func newOfferSearchSession(clients []cloud.Client) *offerSearchSession {
+func newOfferSearchSession(clients []cloud.Client, minReliability float64) *offerSearchSession {
 	return &offerSearchSession{
-		clients: clients,
-		results: make(map[string]*offerSearchFuture),
+		clients:        clients,
+		minReliability: minReliability,
+		results:        make(map[string]*offerSearchFuture),
 	}
 }
 
@@ -337,7 +341,7 @@ func (s *offerSearchSession) SeedRawOffers(raw []GroupRawOffers) {
 	}
 	for _, groupRaw := range raw {
 		provider := cloud.Provider(strings.TrimSpace(groupRaw.Group.Provider))
-		key := constraintKey(offerConstraintsForGroup(groupRaw.Group), provider)
+		key := constraintKey(offerConstraintsForGroup(groupRaw.Group, s.minReliability), provider)
 		future := &offerSearchFuture{
 			done: make(chan struct{}),
 			result: offerSearchResult{
@@ -370,7 +374,7 @@ func (s *offerSearchSession) fetchGroupRawOffers(groups []InstanceGroup) []Group
 	keys := make([]string, len(groups))
 	futures := make(map[string]*offerSearchFuture, len(groups))
 	for i, group := range groups {
-		constraints := offerConstraintsForGroup(group)
+		constraints := offerConstraintsForGroup(group, s.minReliability)
 		provider := cloud.Provider(strings.TrimSpace(group.Provider))
 		key := constraintKey(constraints, provider)
 		keys[i] = key
@@ -539,8 +543,8 @@ func searchAllProvidersWithDiagnostics(clients []cloud.Client, constraints cloud
 // FetchGroupRawOffers searches cloud providers for all offers per group, in parallel.
 // Groups with identical constraints share a single search to avoid redundant API calls.
 // Returns unranked offers suitable for caching and later ranking by strategy.
-func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup) []GroupRawOffers {
-	return newOfferSearchSession(clients).fetchGroupRawOffers(groups)
+func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup, minReliability float64) []GroupRawOffers {
+	return newOfferSearchSession(clients, minReliability).fetchGroupRawOffers(groups)
 }
 
 // SetupOverheadFactory builds per-group OfferSetupFuncs. If nil, a constant
@@ -617,15 +621,15 @@ func medianDLPerf(offers []cloud.Offer) float64 {
 // FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
 // retry risk from instance failure). Otherwise falls back to cheapest offer.
-func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
-	raw := FetchGroupRawOffers(clients, groups)
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minReliability float64, minSurvival float64) []GroupOffer {
+	raw := FetchGroupRawOffers(clients, groups, minReliability)
 	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
 }
 
 // FetchGroupOffersWithPredictor searches and ranks offers using predictor-backed
 // runtimes when available, and a neutral runtime fallback otherwise.
-func FetchGroupOffersWithPredictor(clients []cloud.Client, groups []InstanceGroup, predCfg *predictor.Config, survivalModel *bidding.SurvivalModel, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
-	raw := FetchGroupRawOffers(clients, groups)
+func FetchGroupOffersWithPredictor(clients []cloud.Client, groups []InstanceGroup, predCfg *predictor.Config, survivalModel *bidding.SurvivalModel, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minReliability float64, minSurvival float64) []GroupOffer {
+	raw := FetchGroupRawOffers(clients, groups, minReliability)
 	return RankGroupOffersWithPredictor(raw, predCfg, survivalModel, setupFactory, strategy, minSurvival)
 }
 
@@ -646,8 +650,8 @@ type GroupingCandidate struct {
 // using each job's individual GPU memory requirements. This allows the scoring
 // function to evaluate running jobs concurrently on separate instances, each
 // sized to the individual job's needs.
-func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup) []GroupingCandidate {
-	return fetchCandidateGroupingsWithSession(newOfferSearchSession(clients), splitGroups)
+func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup, minReliability float64) []GroupingCandidate {
+	return fetchCandidateGroupingsWithSession(newOfferSearchSession(clients, minReliability), splitGroups)
 }
 
 func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups []InstanceGroup) []GroupingCandidate {

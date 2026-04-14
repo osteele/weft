@@ -671,7 +671,7 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 			splitRaw[i] = campaign.GroupRawOffers{Group: g}
 		}
 		if len(clients) > 0 {
-			splitRaw = campaign.FetchGroupRawOffers(clients, groups)
+			splitRaw = campaign.FetchGroupRawOffers(clients, groups, m.appConfig.CampaignReliability())
 		}
 		return rawOffersLoadedMsg{raw: splitRaw, reusable: reusable, background: background, revision: revision}
 	}
@@ -744,6 +744,7 @@ func (m launchModel) buildProfilePlans(background bool) tea.Cmd {
 			overheadModel,
 			survivalModel,
 			specs,
+			m.appConfig.CampaignReliability(),
 			minSurvival,
 			onProgress,
 			planOptions,
@@ -2305,6 +2306,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			m.selected,
 			profile,
 			opts.MinSurvival,
+			m.appConfig.CampaignReliability(),
 			predCfg,
 			overheadModel,
 			survivalModel,

@@ -28,6 +28,7 @@ func prepareLaunchExecutionPlan(
 	selected map[int64]bool,
 	profile bidding.ScoreProfile,
 	minSurvival float64,
+	minReliability float64,
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
@@ -55,6 +56,7 @@ func prepareLaunchExecutionPlan(
 		overheadModel,
 		survivalModel,
 		[]bidding.ScoreProfile{profile},
+		minReliability,
 		minSurvival,
 		onProgress,
 	)

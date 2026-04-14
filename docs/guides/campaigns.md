@@ -374,6 +374,7 @@ default_image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
 max_runtime = "4h"
 
 [campaign]
+reliability = 0.95           # provider-offer reliability floor (0 disables)
 retry_first_time_limit = "45m" # first retry tier
 retry_first_cost_limit = 1.0    # USD
 retry_next_time_limit = "45m"   # second+ retry tiers
@@ -389,6 +390,9 @@ secret_access_key = "..."
 Retry limits apply to both automatic relaunch and manual `r` retries in watch
 mode. Each retry tier stops when either its time limit or cost limit is
 reached, whichever happens first.
+
+`campaign.reliability` is used during provider offer search. The default is
+`0.95`; set it to `0` to allow offers regardless of provider reliability.
 
 ### Source sync
 

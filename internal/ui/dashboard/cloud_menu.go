@@ -168,7 +168,7 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 
 		// Build constraints from job metadata
 		constraints := cloud.OfferConstraints{
-			MinReliability: cloud.DefaultMinReliability,
+			MinReliability: m.appConfig.CampaignReliability(),
 			NumGPUs:        1,
 		}
 		if job.GPUMemGB != nil {

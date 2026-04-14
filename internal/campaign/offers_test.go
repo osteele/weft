@@ -65,7 +65,7 @@ func TestFetchGroupOffersMock(t *testing.T) {
 		{GPUClass: "H100", GPUMemGB: 80},
 	}
 
-	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, nil, bidding.StrategyCheap, 0)
+	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, nil, bidding.StrategyCheap, 0.95, 0)
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
@@ -143,6 +143,7 @@ func TestBuildProfilePlansFromSplitRaw_ReusesCandidateOfferSearchesAcrossProfile
 			bidding.StrategyCheap.Profile(),
 			bidding.StrategyFastest.Profile(),
 		},
+		0.95,
 		0,
 	)
 	if len(plans) != 2 {
@@ -183,6 +184,7 @@ func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
 		bidding.ConstantSetup(0.5),
 		map[string]struct{}{"vastai:1": {}},
 		bidding.StrategyCheap,
+		0.95,
 		0,
 	)
 	if result.Err != nil {
@@ -218,6 +220,7 @@ func TestSearchBestOfferForGroup_ProviderFilter(t *testing.T) {
 		bidding.ConstantSetup(0.5),
 		nil,
 		bidding.StrategyCheap,
+		0.95,
 		0,
 	)
 	if result.Err != nil {
@@ -247,6 +250,7 @@ func TestSearchBestOfferForGroup_ProviderUnavailable(t *testing.T) {
 		bidding.ConstantSetup(0.5),
 		nil,
 		bidding.StrategyCheap,
+		0.95,
 		0,
 	)
 	if result.Err == nil {
@@ -265,7 +269,7 @@ func TestOfferConstraintsForGroup_ComputeIntensive(t *testing.T) {
 			{ID: 1, Tags: []string{"compute-intensive"}},
 		},
 	}
-	c := offerConstraintsForGroup(group)
+	c := offerConstraintsForGroup(group, 0.95)
 	if c.MinCPUCoresEffective != 16 {
 		t.Errorf("MinCPUCoresEffective = %d, want 16", c.MinCPUCoresEffective)
 	}
@@ -279,7 +283,7 @@ func TestOfferConstraintsForGroup_NoComputeIntensive(t *testing.T) {
 			{ID: 1, Tags: []string{"rental"}},
 		},
 	}
-	c := offerConstraintsForGroup(group)
+	c := offerConstraintsForGroup(group, 0.95)
 	if c.MinCPUCoresEffective != 0 {
 		t.Errorf("MinCPUCoresEffective = %d, want 0", c.MinCPUCoresEffective)
 	}
@@ -726,7 +730,7 @@ func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
 		GPUMemGB:    8,
 		MaxGPUMemGB: 12,
 	}
-	c := offerConstraintsForGroup(group)
+	c := offerConstraintsForGroup(group, 0.95)
 	if c.MaxGPUMemGB != 0 {
 		t.Errorf("MaxGPUMemGB should not be passed to search constraints (got %d); "+
 			"it's a soft signal for DLPerf capping, not a hard offer filter", c.MaxGPUMemGB)

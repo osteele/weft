@@ -11,7 +11,7 @@ type Provider string
 
 const (
 	// DefaultMinReliability is the minimum reliability score for cloud offers.
-	DefaultMinReliability = 0.98
+	DefaultMinReliability = 0.95
 
 	ProviderVastai Provider = "vastai"
 	ProviderRunpod Provider = "runpod"

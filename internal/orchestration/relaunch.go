@@ -53,6 +53,7 @@ func RelaunchOrphanedJobs(
 
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
+	minReliability := cfg.CampaignReliability()
 	relaunchCfg := campaign.RelaunchConfig{
 		Clients:               clients,
 		R2Cfg:                 cfg.Vastai.R2.ToCloudR2Config(),
@@ -60,6 +61,7 @@ func RelaunchOrphanedJobs(
 		LaunchOpts:            campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
 		MaxAttempts:           campaign.DefaultMaxCloudAttempts + extraAttempts,
 		SurvivalModel:         buildSurvivalModel(database),
+		MinReliability:        &minReliability,
 		MinSurvival:           0.4,
 		Database:              database,
 		PredictorConfig:       &predCfg,

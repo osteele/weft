@@ -111,6 +111,10 @@ func BuildAutoPlacementPlanWithOptions(
 	}
 
 	profile := AutoPlannerProfile(cfg)
+	minReliability := 0.95
+	if cfg != nil {
+		minReliability = cfg.CampaignReliability()
+	}
 	specs := []ProfilePlanSpec{{Profile: profile, CandidateMode: CandidatePlanModeFull}}
 	plans := BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 		database,
@@ -122,6 +126,7 @@ func BuildAutoPlacementPlanWithOptions(
 		overheadModel,
 		survivalModel,
 		specs,
+		minReliability,
 		minSurvival,
 		nil,
 		options,
@@ -147,7 +152,7 @@ func BuildAutoPlacementPlanWithOptions(
 		if i < len(strategyPlan.DisplayOffers) {
 			offer = strategyPlan.DisplayOffers[i]
 		}
-		applyGroupOffer(&plan, group, offer, reused)
+		applyGroupOffer(&plan, group, offer, reused, minReliability)
 	}
 	plan.LaunchGroups = buildLaunchGroups(strategyPlan.NewCandidate, reused)
 	plan.LaunchRateCentsPerHour = 0
@@ -196,14 +201,14 @@ func buildLaunchGroups(candidate *CandidateResult, reused map[int64]struct{}) []
 	return launchGroups
 }
 
-func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}) {
+func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}, minReliability float64) {
 	launchable := offer.Offer != nil && offer.Err == nil
 	reason := ""
 	if !launchable {
 		if offer.Err != nil {
 			reason = offer.Err.Error()
 		} else {
-			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(group))
+			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(group, minReliability))
 			reason = offer.FilterStats.NoOffersDetail(constraintStr)
 		}
 	}

@@ -759,11 +759,15 @@ reached, whichever comes first.
 
 ```toml
 [campaign]
+reliability = 0.95           # Default provider-offer reliability floor (0 disables)
 retry_first_time_limit = "45m" # First retry tier
 retry_first_cost_limit = 1.0    # USD
 retry_next_time_limit = "45m"   # Second+ retry tiers
 retry_next_cost_limit = 0.25    # USD
 ```
+
+`campaign.reliability` controls the minimum provider reliability accepted during
+offer search. Default is `0.95`; set to `0` to disable reliability filtering.
 
 ### Source Excludes
 

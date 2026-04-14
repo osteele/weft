@@ -35,6 +35,7 @@ func TestBuildProfilePlansFromSplitRawWithProgressReportsStages(t *testing.T) {
 		nil,
 		nil,
 		[]bidding.ScoreProfile{bidding.StrategyCheap.Profile()},
+		0.95,
 		0,
 		func(progress PlanProgress) {
 			if progress.Phase != "" {
@@ -162,7 +163,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 		nil,
 		nil,
 		nil,
-		newOfferSearchSession(nil),
+		newOfferSearchSession(nil, 0.95),
 		[]ProfilePlanSpec{{
 			Profile:       bidding.StrategyFast.Profile(),
 			CandidateMode: CandidatePlanModeSplitOnly,
@@ -245,7 +246,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredChoosesParall
 		nil,
 		nil,
 		nil,
-		newOfferSearchSession(nil),
+		newOfferSearchSession(nil, 0.95),
 		[]ProfilePlanSpec{{
 			Profile:       bidding.StrategyFastest.Profile(),
 			CandidateMode: CandidatePlanModeParallelPreferred,
@@ -326,7 +327,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredFallsBackWhen
 		nil,
 		nil,
 		nil,
-		newOfferSearchSession(nil),
+		newOfferSearchSession(nil, 0.95),
 		[]ProfilePlanSpec{{
 			Profile:       bidding.StrategyFastest.Profile(),
 			CandidateMode: CandidatePlanModeParallelPreferred,
@@ -401,7 +402,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_MergedPreferredUsesMergedCandi
 		nil,
 		nil,
 		nil,
-		newOfferSearchSession(nil),
+		newOfferSearchSession(nil, 0.95),
 		[]ProfilePlanSpec{{
 			Profile:       bidding.StrategyCheap.Profile(),
 			CandidateMode: CandidatePlanModeMergedPreferred,
@@ -564,6 +565,7 @@ func TestBuildProfilePlansFromSplitRaw_CachesSelectedOfferEstimatesAcrossProfile
 		nil,
 		nil,
 		[]bidding.ScoreProfile{bidding.StrategyCheap.Profile(), bidding.StrategyFast.Profile()},
+		0.95,
 		0,
 	)
 

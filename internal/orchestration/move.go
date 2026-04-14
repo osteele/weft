@@ -53,6 +53,7 @@ func BuildOptions(
 	capacities []campaign.InstanceCapacity,
 	queuedCounts map[int64]int,
 	sourceInstanceID int64,
+	minReliability float64,
 ) ([]Option, error) {
 	var options []Option
 
@@ -88,7 +89,7 @@ func BuildOptions(
 		if job.GPUMemGB != nil {
 			group.GPUMemGB = *job.GPUMemGB
 		}
-		rawOffers := campaign.FetchGroupRawOffers(cloudClients, []campaign.InstanceGroup{group})
+		rawOffers := campaign.FetchGroupRawOffers(cloudClients, []campaign.InstanceGroup{group}, minReliability)
 		if len(rawOffers) > 0 && rawOffers[0].Err != nil {
 			return nil, rawOffers[0].Err
 		}
@@ -312,7 +313,7 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {
 	}
 
 	optionsStarted := time.Now()
-	options, err := BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID)
+	options, err := BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability())
 	if err != nil {
 		logPhase("lookup_options", optionsStarted, "", err)
 		return Result{}, err
@@ -459,7 +460,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	logPhase("prepare_groups", groupStarted, fmt.Sprintf("groups=%d jobs=%d", len(groups), countGroupJobs(groups)), nil)
 
 	offersStarted := time.Now()
-	groupOffers := campaign.FetchGroupOffers(clients, groups, nil, 1.0, nil, bidding.StrategyCheap, 0.4)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, nil, 1.0, nil, bidding.StrategyCheap, cfg.CampaignReliability(), 0.4)
 	logPhase("fetch_offers", offersStarted, fmt.Sprintf("group_offers=%d", len(groupOffers)), nil)
 
 	selectStarted := time.Now()

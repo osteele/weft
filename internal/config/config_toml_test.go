@@ -242,3 +242,39 @@ func TestCampaignRetryLimitsDefaultsAndFallbacks(t *testing.T) {
 		t.Fatalf("invalid RetryNextCostLimitCents() fallback = %d, want 25", got)
 	}
 }
+
+func TestCampaignReliability_DefaultAndExplicit(t *testing.T) {
+	cfg := DefaultConfig()
+	if got := cfg.CampaignReliability(); got != 0.95 {
+		t.Fatalf("CampaignReliability() default = %v, want 0.95", got)
+	}
+
+	cfg.Campaign.Reliability = float64Ptr(0.9)
+	if got := cfg.CampaignReliability(); got != 0.9 {
+		t.Fatalf("CampaignReliability() explicit = %v, want 0.9", got)
+	}
+}
+
+func TestCampaignReliability_ZeroDisablesFilter(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Campaign.Reliability = float64Ptr(0)
+	if got := cfg.CampaignReliability(); got != 0 {
+		t.Fatalf("CampaignReliability() = %v, want 0", got)
+	}
+}
+
+func TestCampaignReliability_InvalidFallsBack(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Campaign.Reliability = float64Ptr(-0.1)
+	if got := cfg.CampaignReliability(); got != 0.95 {
+		t.Fatalf("CampaignReliability() negative fallback = %v, want 0.95", got)
+	}
+	cfg.Campaign.Reliability = float64Ptr(1.1)
+	if got := cfg.CampaignReliability(); got != 0.95 {
+		t.Fatalf("CampaignReliability() >1 fallback = %v, want 0.95", got)
+	}
+}
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}

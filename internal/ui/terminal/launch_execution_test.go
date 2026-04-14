@@ -87,6 +87,7 @@ func TestPrepareLaunchExecutionPlan_RevalidatesReusableInstances(t *testing.T) {
 		map[int64]bool{17: true},
 		bidding.StrategyCheap.Profile(),
 		0,
+		0.95,
 		nil,
 		nil,
 		nil,

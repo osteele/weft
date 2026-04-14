@@ -20,7 +20,7 @@ func TestApplyGroupOffer_LaunchableSkipsOnlyReusedJobs(t *testing.T) {
 	offer := GroupOffer{Offer: &cloud.Offer{}}
 	reused := map[int64]struct{}{706: {}}
 
-	applyGroupOffer(&plan, group, offer, reused)
+	applyGroupOffer(&plan, group, offer, reused, 0.95)
 
 	if len(plan.BlockedReasons) != 0 {
 		t.Fatalf("blocked reasons = %v, want none", plan.BlockedReasons)
@@ -38,7 +38,7 @@ func TestApplyGroupOffer_BlocksOnlyUnreusedJobsWhenNoOffer(t *testing.T) {
 	offer := GroupOffer{Err: errors.New("capacity unavailable")}
 	reused := map[int64]struct{}{706: {}}
 
-	applyGroupOffer(&plan, group, offer, reused)
+	applyGroupOffer(&plan, group, offer, reused, 0.95)
 
 	if got := plan.BlockedReasons[707]; got != "planner: capacity unavailable" {
 		t.Fatalf("blocked reason for 707 = %q, want %q", got, "planner: capacity unavailable")
@@ -59,7 +59,7 @@ func TestApplyGroupOffer_NoOfferEmitsConstraintAwareReason(t *testing.T) {
 		FilterStats: OfferFilterStats{RawCount: 12, AfterVRAM: 0},
 	}
 
-	applyGroupOffer(&plan, group, offer, nil)
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
 
 	got := plan.BlockedReasons[910]
 	if got == "planner: no compatible offers" {
@@ -130,7 +130,7 @@ func TestApplyGroupOffer_MappedStatsDoNotRegressToProviderEmpty(t *testing.T) {
 	}
 
 	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
-	applyGroupOffer(&plan, split[0], mapped[0], nil)
+	applyGroupOffer(&plan, split[0], mapped[0], nil, 0.95)
 
 	reason := plan.BlockedReasons[1229]
 	if strings.Contains(reason, "no offers from providers") {

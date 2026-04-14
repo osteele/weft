@@ -29,7 +29,8 @@ type RelaunchConfig struct {
 	LaunchOpts            LaunchOpts
 	MaxAttempts           int // default DefaultMaxCloudAttempts
 	SurvivalModel         *bidding.SurvivalModel
-	MinSurvival           float64 // 0 to disable survival filtering
+	MinReliability        *float64 // nil uses default; 0 disables provider reliability filtering
+	MinSurvival           float64  // 0 to disable survival filtering
 	Strategy              bidding.SelectionStrategy
 	Database              *sql.DB
 	PredictorConfig       *predictor.Config
@@ -282,14 +283,20 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	if strategy == "" {
 		strategy = bidding.StrategyCheap
 	}
-	groupOffers := FetchGroupOffersWithPredictor(cfg.Clients, groups, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, cfg.MinSurvival)
+	minReliability := 0.95
+	if cfg.MinReliability != nil {
+		if *cfg.MinReliability >= 0 && *cfg.MinReliability <= 1 {
+			minReliability = *cfg.MinReliability
+		}
+	}
+	groupOffers := FetchGroupOffersWithPredictor(cfg.Clients, groups, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, minReliability, cfg.MinSurvival)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup
 	var launchOffers []cloud.Offer
 	for _, gOffer := range groupOffers {
 		if gOffer.Offer == nil {
-			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(gOffer.Group))
+			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(gOffer.Group, minReliability))
 			detail := gOffer.FilterStats.NoOffersDetail(constraintStr)
 			slog.Warn("no offers for group, skipping", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "job_count", len(gOffer.Group.Jobs), "detail", detail)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{

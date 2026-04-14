@@ -715,7 +715,6 @@ func requestMoveOptions(
 ) tea.Cmd {
 	jobID := job.ID
 	jobHost := job.Host
-	_ = cfg
 	return func() tea.Msg {
 		lookupStarted := time.Now()
 		logPhase := func(phase string, started time.Time, detail string, err error) {
@@ -736,7 +735,7 @@ func requestMoveOptions(
 
 		// --- Existing instances + new options ---
 		existingStarted := time.Now()
-		jmOptions, buildErr := orchestration.BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID)
+		jmOptions, buildErr := orchestration.BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability())
 		if buildErr != nil {
 			logPhase("raw_offers", existingStarted, "", buildErr)
 			return moveOptionsReadyMsg{jobID: jobID, err: buildErr}

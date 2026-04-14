@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/retry"
@@ -70,9 +71,13 @@ func FindDonorOffer(client cloud.Client, workerOffers []cloud.Offer, estimates [
 	}
 
 	// Search for cheap single-GPU donor offers (one search, filter per DC)
+	minReliability := 0.95
+	if cfg, err := config.Load(); err == nil && cfg != nil {
+		minReliability = cfg.CampaignReliability()
+	}
 	donorOffers, err := client.SearchOffers(cloud.OfferConstraints{
 		NumGPUs:        1,
-		MinReliability: cloud.DefaultMinReliability,
+		MinReliability: minReliability,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search donor offers: %w", err)

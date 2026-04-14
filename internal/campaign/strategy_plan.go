@@ -193,6 +193,7 @@ func BuildStrategyPlans(
 		overheadModel,
 		survivalModel,
 		profiles,
+		0.95,
 		minSurvival,
 	)
 	plans := make(map[bidding.SelectionStrategy]StrategyPlan, len(strategies))
@@ -218,6 +219,7 @@ func BuildProfilePlans(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	profiles []bidding.ScoreProfile,
+	minReliability float64,
 	minSurvival float64,
 ) (map[string]StrategyPlan, []GroupRawOffers) {
 	return BuildProfilePlansWithProgress(
@@ -229,6 +231,7 @@ func BuildProfilePlans(
 		overheadModel,
 		survivalModel,
 		profiles,
+		minReliability,
 		minSurvival,
 		nil,
 	)
@@ -243,6 +246,7 @@ func BuildProfilePlansWithProgress(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	profiles []bidding.ScoreProfile,
+	minReliability float64,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) (map[string]StrategyPlan, []GroupRawOffers) {
@@ -263,7 +267,7 @@ func BuildProfilePlansWithProgress(
 	}
 	var offerSession *offerSearchSession
 	if len(clients) > 0 {
-		offerSession = newOfferSearchSession(clients)
+		offerSession = newOfferSearchSession(clients, minReliability)
 		splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
 	}
 
@@ -296,6 +300,7 @@ func BuildProfilePlansFromSplitRaw(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	profiles []bidding.ScoreProfile,
+	minReliability float64,
 	minSurvival float64,
 ) map[string]StrategyPlan {
 	return BuildProfilePlansFromSplitRawWithProgress(
@@ -308,6 +313,7 @@ func BuildProfilePlansFromSplitRaw(
 		overheadModel,
 		survivalModel,
 		profiles,
+		minReliability,
 		minSurvival,
 		nil,
 	)
@@ -323,6 +329,7 @@ func BuildProfilePlansFromSplitRawWithProgress(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	profiles []bidding.ScoreProfile,
+	minReliability float64,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
@@ -336,6 +343,7 @@ func BuildProfilePlansFromSplitRawWithProgress(
 		overheadModel,
 		survivalModel,
 		defaultProfilePlanSpecs(profiles),
+		minReliability,
 		minSurvival,
 		onProgress,
 		defaultPlanOptions(),
@@ -355,6 +363,7 @@ func BuildProfilePlansFromSplitRawWithPlanSpecs(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	specs []ProfilePlanSpec,
+	minReliability float64,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) map[string]StrategyPlan {
@@ -368,6 +377,7 @@ func BuildProfilePlansFromSplitRawWithPlanSpecs(
 		overheadModel,
 		survivalModel,
 		specs,
+		minReliability,
 		minSurvival,
 		onProgress,
 		defaultPlanOptions(),
@@ -387,6 +397,7 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	specs []ProfilePlanSpec,
+	minReliability float64,
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 	options PlanOptions,
@@ -394,7 +405,7 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 	var offerSession *offerSearchSession
 	switch {
 	case len(clients) > 0:
-		offerSession = newOfferSearchSession(clients)
+		offerSession = newOfferSearchSession(clients, minReliability)
 		if len(splitRaw) == len(splitGroups) {
 			offerSession.SeedRawOffers(splitRaw)
 		} else {

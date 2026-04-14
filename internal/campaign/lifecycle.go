@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
@@ -1021,6 +1022,10 @@ func launchCampaignWithStager(
 			}
 
 			originalPrice := ofr.CostPerHour
+			minReliability := 0.95
+			if cfg, err := config.Load(); err == nil && cfg != nil {
+				minReliability = cfg.CampaignReliability()
+			}
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
 				replacement := SearchBestOfferForGroupWithProfile(
 					[]cloud.Client{client},
@@ -1030,6 +1035,7 @@ func launchCampaignWithStager(
 					bidding.ConstantSetup(setupOverheadHrs),
 					excludeOfferKeys,
 					opts.ScoringProfile(),
+					minReliability,
 					opts.MinSurvival,
 				)
 				if replacement.Err != nil {

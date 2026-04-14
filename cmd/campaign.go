@@ -379,6 +379,7 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 		nil,
 		opts.ScoringProfile(),
 		opts.MinSurvival,
+		cfg.CampaignReliability(),
 		&predCfg,
 		overheadModel,
 		survivalModel,
@@ -547,6 +548,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 		overheadModel,
 		survivalModel,
 		[]bidding.ScoreProfile{strategy.Profile()},
+		cfg.CampaignReliability(),
 		minSurvival,
 		reportPlanProgress,
 	)

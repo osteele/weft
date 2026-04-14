@@ -157,6 +157,10 @@ type RemediationConfig struct {
 
 // CampaignConfig holds cloud campaign defaults.
 type CampaignConfig struct {
+	// Reliability is the default provider-offer reliability floor (0-1) used
+	// when searching rental offers. Set to 0 to disable reliability filtering.
+	Reliability *float64 `yaml:"reliability" toml:"reliability"`
+
 	// GracePeriod is the default grace period after job failure (e.g., "5m", "15m").
 	// Default: "5m"
 	GracePeriod string `yaml:"grace_period" toml:"grace_period"`
@@ -528,7 +532,25 @@ func (c *Config) DefaultGracePeriod() string {
 	return "5m"
 }
 
+// CampaignReliability returns the configured provider-offer reliability floor.
+// Valid values are in [0, 1], where 0 disables reliability filtering.
+// Invalid values fall back to the default.
+func (c *Config) CampaignReliability() float64 {
+	if c == nil {
+		return defaultCampaignReliability
+	}
+	if c.Campaign.Reliability == nil {
+		return defaultCampaignReliability
+	}
+	value := *c.Campaign.Reliability
+	if value < 0 || value > 1 {
+		return defaultCampaignReliability
+	}
+	return value
+}
+
 const (
+	defaultCampaignReliability   = 0.95
 	defaultRetryFirstTimeLimit   = 45 * time.Minute
 	defaultRetryNextTimeLimit    = 45 * time.Minute
 	defaultRetryFirstCostUSD     = 1.00
