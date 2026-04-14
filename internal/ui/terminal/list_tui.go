@@ -157,6 +157,20 @@ var (
 )
 
 func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
+	cfg, _ := config.Load()
+	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
+
+	restore := logging.Suppress()
+	defer restore()
+
+	_, err := tea.NewProgram(router, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
+	if err != nil {
+		return fmt.Errorf("run list TUI: %w", err)
+	}
+	return nil
+}
+
+func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) listTUIModel {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg, _ := config.Load()
 	cloudClients, _ := buildCloudClients(cfg)
@@ -201,19 +215,21 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 			model.pendingSyncHosts[backgroundSyncKey] = struct{}{}
 		}
 	}
+	return model
+}
 
-	restore := logging.Suppress()
-	defer restore()
-
-	_, err := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus()).Run()
-	cancel()
-	if sw != nil {
-		sw.Stop()
+func (m *listTUIModel) shutdown() {
+	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+	_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
+	if m.dbWatcher != nil {
+		_ = m.dbWatcher.Close()
 	}
-	if err != nil {
-		return fmt.Errorf("run list TUI: %w", err)
+	if m.cancel != nil {
+		m.cancel()
 	}
-	return nil
+	if m.syncWorker != nil {
+		m.syncWorker.Stop()
+	}
 }
 
 func (m listTUIModel) Init() tea.Cmd {
@@ -252,14 +268,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
-			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-			_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
-			if m.dbWatcher != nil {
-				_ = m.dbWatcher.Close()
-			}
-			if m.cancel != nil {
-				m.cancel()
-			}
+			m.shutdown()
 			return m, tea.Quit
 		case "up", "k":
 			if m.cursor > 0 {
@@ -287,6 +296,24 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			return m.triggerManualRefresh()
+		case "v":
+			if m.moveLookupPending {
+				m.moveLookupPending = false
+				m.moveLookupRequestID = 0
+			}
+			m.groupedByStatus = !m.groupedByStatus
+			m.rebuildLayout()
+			m.rebuildGroupedRows()
+			m.clampCursor()
+			m.adjustOffset()
+			if m.groupedByStatus {
+				m.statusMessage = "Grouped status view"
+			} else {
+				m.statusMessage = "Ungrouped list view"
+			}
+			return m, nil
+		case "i":
+			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
 		case "a":
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
@@ -959,6 +986,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 			line += "  e:error details"
 		}
 	}
+	line += "  v:ungroup  i:instances"
 	line += "  q:quit"
 	return line
 }
@@ -1031,24 +1059,10 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMessage = "Move lookup canceled"
 			return m, nil
 		}
-		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-		_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
-		if m.dbWatcher != nil {
-			_ = m.dbWatcher.Close()
-		}
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.shutdown()
 		return m, tea.Quit
 	case "ctrl+c", "q":
-		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-		_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
-		if m.dbWatcher != nil {
-			_ = m.dbWatcher.Close()
-		}
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.shutdown()
 		return m, tea.Quit
 	case "up":
 		if m.cursor > 0 {
@@ -1098,6 +1112,20 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "$":
 		return m.beginAutoRunRateInput()
+	case "v":
+		if m.moveLookupPending {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+		}
+		m.groupedByStatus = false
+		m.rebuildLayout()
+		m.rebuildGroupedRows()
+		m.clampCursor()
+		m.adjustOffset()
+		m.statusMessage = "Ungrouped list view"
+		return m, nil
+	case "i":
+		return m, func() tea.Msg { return switchToSystemWatchMsg{} }
 	case "e":
 		if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
 			m.statusMessage = "No auto-pilot error details."
@@ -1307,7 +1335,7 @@ func (m listTUIModel) footerText(rows int) string {
 	if m.statusMessage != "" {
 		state += "  " + m.statusMessage
 	}
-	state += "  up/down move  space/b page  g/G top/bottom  q quit"
+	state += "  up/down move  space/b page  g/G top/bottom  v:toggle  i:instances  q quit"
 	return state
 }
 

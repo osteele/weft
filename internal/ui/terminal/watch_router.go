@@ -20,6 +20,14 @@ import (
 // switchToLaunchMsg is emitted by watchModel when the user presses 'l'.
 type switchToLaunchMsg struct{}
 
+// switchToSystemWatchMsg is emitted by listTUIModel when the user presses 'i'.
+type switchToSystemWatchMsg struct{}
+
+// switchToListMsg is emitted by watchModel when the user presses 'J' or 'U'.
+type switchToListMsg struct {
+	groupedByStatus bool
+}
+
 // switchToWatchMsg is emitted by launchModel when it completes back to watch.
 type switchToWatchMsg struct {
 	flash string
@@ -48,17 +56,23 @@ type watchRouterModel struct {
 	instanceIDs   []int64       // instance IDs for instance-based modes
 	r2Client      *r2.Client    // R2 client for instance-based modes
 	autoMode      bool          // initial auto-pilot state for new watch models
+	listArgs      []string      // list query args (nil = default recent jobs)
+	listTitle     string        // list title
+	listSync      bool          // list sync mode
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, autoMode bool) watchRouterModel {
 	watch := newSystemWatchModel(database, cfg, flash)
 	watch.autoMode = autoMode
 	return watchRouterModel{
-		active:   watch,
-		database: database,
-		config:   cfg,
-		homeMode: watchModeSystem,
-		autoMode: autoMode,
+		active:    watch,
+		database:  database,
+		config:    cfg,
+		homeMode:  watchModeSystem,
+		autoMode:  autoMode,
+		listArgs:  nil,
+		listTitle: "Jobs",
+		listSync:  true,
 	}
 }
 
@@ -76,6 +90,9 @@ func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watc
 		r2Client:      r2Client,
 		projectFilter: projectFilter,
 		autoMode:      autoMode,
+		listArgs:      nil,
+		listTitle:     "Jobs",
+		listSync:      true,
 	}
 }
 
@@ -91,11 +108,43 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 		projectRecent: recentWindow,
 		projectSync:   syncEnabled,
 		autoMode:      autoMode,
+		listArgs:      nil,
+		listTitle:     "Jobs",
+		listSync:      true,
+	}
+}
+
+func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) watchRouterModel {
+	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
+	return watchRouterModel{
+		active:    list,
+		database:  database,
+		config:    cfg,
+		homeMode:  watchModeSystem,
+		autoMode:  autoMode,
+		listArgs:  append([]string(nil), args...),
+		listTitle: title,
+		listSync:  syncEnabled,
 	}
 }
 
 func (m watchRouterModel) Init() tea.Cmd {
 	return m.active.Init()
+}
+
+func (m *watchRouterModel) cleanupActive() {
+	switch active := m.active.(type) {
+	case watchModel:
+		if active.dbWatcher != nil {
+			_ = active.dbWatcher.Close()
+		}
+		active.cancel()
+		if active.syncWorker != nil {
+			active.syncWorker.Stop()
+		}
+	case listTUIModel:
+		active.shutdown()
+	}
 }
 
 // switchTo replaces the active model with a new one, returning the Init cmd
@@ -125,12 +174,25 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.homeMode.isInstanceBased() {
 				m.instanceIDs = append([]int64(nil), w.instanceIDs...)
 			}
-			w.cancel()
-			if w.syncWorker != nil {
-				w.syncWorker.Stop()
-			}
 		}
+		m.cleanupActive()
 		return m, m.prepareLaunch()
+
+	case switchToSystemWatchMsg:
+		if l, ok := m.active.(listTUIModel); ok {
+			m.autoMode = l.autoMode && l.groupedByStatus
+		}
+		m.homeMode = watchModeSystem
+		m.cleanupActive()
+		return m.switchTo(m.buildHomeWatch(""))
+
+	case switchToListMsg:
+		if w, ok := m.active.(watchModel); ok {
+			m.autoMode = w.autoMode
+		}
+		m.cleanupActive()
+		list := m.buildJobsList(msg.groupedByStatus)
+		return m.switchTo(list)
 
 	case launchPlanReadyMsg:
 		if msg.err != nil {
@@ -142,9 +204,6 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.switchTo(*msg.model)
 
 	case switchToWatchMsg:
-		if w, ok := m.active.(watchModel); ok {
-			m.autoMode = w.autoMode
-		}
 		return m.switchTo(m.buildHomeWatch(msg.flash))
 	}
 
@@ -156,6 +215,18 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m watchRouterModel) View() string {
 	return m.active.View()
+}
+
+func (m watchRouterModel) buildJobsList(groupedByStatus bool) listTUIModel {
+	return newListTUIModel(
+		m.database,
+		append([]string(nil), m.listArgs...),
+		nil,
+		m.listTitle,
+		m.listSync,
+		groupedByStatus,
+		m.autoMode,
+	)
 }
 
 // buildHomeWatch creates a watchModel for the router's home mode.

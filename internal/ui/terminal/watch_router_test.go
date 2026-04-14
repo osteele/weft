@@ -177,3 +177,61 @@ func TestWatchRouterSwitchToLaunchPreservesCurrentInstanceIDs(t *testing.T) {
 		t.Fatalf("router instance IDs = %v, want [7 11]", got.instanceIDs)
 	}
 }
+
+func TestWatchRouterSwitchToListFromWatchUsesRequestedGrouping(t *testing.T) {
+	database := db.SetupTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	router := watchRouterModel{
+		active: watchModel{
+			mode:        watchModeSystem,
+			database:    database,
+			ctx:         ctx,
+			cancel:      cancel,
+			syncWorker:  nil,
+			dbWatcher:   nil,
+			instanceIDs: []int64{7},
+		},
+		database:  database,
+		config:    &config.Config{},
+		homeMode:  watchModeSystem,
+		listTitle: "Jobs",
+		listSync:  true,
+	}
+
+	next, _ := router.Update(switchToListMsg{groupedByStatus: true})
+	got := next.(watchRouterModel)
+	list, ok := got.active.(listTUIModel)
+	if !ok {
+		t.Fatalf("active model = %T, want listTUIModel", got.active)
+	}
+	if !list.groupedByStatus {
+		t.Fatal("expected grouped list")
+	}
+}
+
+func TestWatchRouterSwitchToSystemWatchFromList(t *testing.T) {
+	database := db.SetupTestDB(t)
+	list := listTUIModel{
+		database: database,
+		cancel:   func() {},
+	}
+	router := watchRouterModel{
+		active:    list,
+		database:  database,
+		config:    &config.Config{},
+		listTitle: "Jobs",
+		listSync:  true,
+	}
+
+	next, _ := router.Update(switchToSystemWatchMsg{})
+	got := next.(watchRouterModel)
+	watch, ok := got.active.(watchModel)
+	if !ok {
+		t.Fatalf("active model = %T, want watchModel", got.active)
+	}
+	if watch.mode != watchModeSystem {
+		t.Fatalf("watch mode = %v, want watchModeSystem", watch.mode)
+	}
+}

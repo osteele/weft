@@ -187,6 +187,12 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.clearAutoPilotPersistentState()
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
+	case "J":
+		m.clearAutoPilotPersistentState()
+		return m, func() tea.Msg { return switchToListMsg{groupedByStatus: false} }
+	case "U":
+		m.clearAutoPilotPersistentState()
+		return m, func() tea.Msg { return switchToListMsg{groupedByStatus: true} }
 	case "m":
 		job := m.selectedCloudJob()
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {

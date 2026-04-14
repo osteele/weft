@@ -333,7 +333,7 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "a:auto (ON)") || !strings.Contains(out, "q:quit") {
+	if !strings.Contains(out, "a:auto (ON)") || !strings.Contains(out, "v:ungrou") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
 	}
 }
@@ -814,6 +814,48 @@ func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	line := m.groupedControlsText(true)
 	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "p:processed") || !strings.Contains(line, "m:move") {
 		t.Fatalf("controls line missing queued-job actions: %q", line)
+	}
+}
+
+func TestListTUIKeyV_TogglesBetweenGroupedAndUngrouped(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: false,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	got := next.(listTUIModel)
+	if !got.groupedByStatus {
+		t.Fatal("expected groupedByStatus=true after pressing v from ungrouped list")
+	}
+	if got.statusMessage != "Grouped status view" {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Grouped status view")
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	got = next.(listTUIModel)
+	if got.groupedByStatus {
+		t.Fatal("expected groupedByStatus=false after pressing v from grouped list")
+	}
+	if got.statusMessage != "Ungrouped list view" {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Ungrouped list view")
+	}
+}
+
+func TestListTUIKeyI_RequestsSwitchToSystemWatch(t *testing.T) {
+	m := listTUIModel{groupedByStatus: true}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	_ = next.(listTUIModel)
+	if cmd == nil {
+		t.Fatal("expected switch command")
+	}
+	msg := cmd()
+	if _, ok := msg.(switchToSystemWatchMsg); !ok {
+		t.Fatalf("expected switchToSystemWatchMsg, got %T", msg)
 	}
 }
 

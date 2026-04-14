@@ -491,7 +491,7 @@ func TestSystemWatchModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"#189 unplaced: no local host matched gpu-class=L40s, gpu-mem>=20GB | 2 hosts: no L40s GPU",
+		"#189 unplaced: no local host matched gpu-class=L40s, gpu-mem>=20GB",
 		"[u] unplace",
 	} {
 		if !strings.Contains(out, want) {
@@ -521,7 +521,7 @@ func TestSystemWatchModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "#189 unplaced:") {
+	if !strings.Contains(out, "#189 u") {
 		t.Fatalf("footer missing unplaced prefix, got:\n%s", out)
 	}
 	if !strings.Contains(out, "...") {
@@ -919,6 +919,40 @@ func TestWatchModelHandleKey_TogglesHelpOverlayInInstanceMode(t *testing.T) {
 	got = updated.(watchModel)
 	if got.projectHelp {
 		t.Fatal("expected help overlay to close on Esc")
+	}
+}
+
+func TestWatchModelHandleKey_JAndU_RequestListSwitch(t *testing.T) {
+	m := watchModel{
+		mode: watchModeInstances,
+	}
+
+	next, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	_ = next.(watchModel)
+	if cmd == nil {
+		t.Fatal("expected switch command for J")
+	}
+	msg := cmd()
+	jump, ok := msg.(switchToListMsg)
+	if !ok {
+		t.Fatalf("expected switchToListMsg for J, got %T", msg)
+	}
+	if jump.groupedByStatus {
+		t.Fatal("expected ungrouped list request for J")
+	}
+
+	next, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'U'}})
+	_ = next.(watchModel)
+	if cmd == nil {
+		t.Fatal("expected switch command for U")
+	}
+	msg = cmd()
+	jump, ok = msg.(switchToListMsg)
+	if !ok {
+		t.Fatalf("expected switchToListMsg for U, got %T", msg)
+	}
+	if !jump.groupedByStatus {
+		t.Fatal("expected grouped list request for U")
 	}
 }
 

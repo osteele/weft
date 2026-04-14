@@ -207,11 +207,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	if !m.done && !m.launchPending {
-		hint := "u unplace  x kill  t terminate  s submit  m move  ? help  q quit (instances run in background)"
+		hint := "u unplace  x kill  t terminate  s submit  m move  J jobs  U grouped jobs  ? help  q quit (instances run in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  B budget+retry  ? help  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  B budget+retry  J jobs  U grouped jobs  ? help  q quit (instances run in background)"
 		} else if len(m.unplacedJobs) > 0 {
-			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  ? help  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  J jobs  U grouped jobs  ? help  q quit (instances run in background)"
 		}
 		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))
@@ -356,9 +356,9 @@ func (m watchModel) renderSystemView() (string, int) {
 		footerParts = append(footerParts, m.retryResult)
 	}
 
-	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [r] retry  [B] budget+retry  [?] help  [q] quit"
+	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [J] jobs  [U] grouped jobs  [r] retry  [B] budget+retry  [?] help  [q] quit"
 	if !m.hasRetryableFailures() {
-		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [?] help  [q] quit"
+		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [J] jobs  [U] grouped jobs  [?] help  [q] quit"
 	}
 	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
@@ -631,7 +631,7 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 	if m.width <= 0 {
 		return detail
 	}
-	controlsWidth := lipgloss.Width("[u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [r] retry  [q] quit")
+	controlsWidth := lipgloss.Width("[u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [J] jobs  [U] grouped jobs  [r] retry  [q] quit")
 	available := m.width - controlsWidth
 	if prefixWidth > 0 {
 		available -= prefixWidth + lipgloss.Width("  ")
@@ -920,6 +920,8 @@ func (m watchModel) renderWatchHelpView() string {
 		"  s submit selected unplaced job",
 		"  m move selected queued cloud job",
 		"  l open launch planner",
+		"  J open ungrouped jobs list",
+		"  U open grouped jobs list",
 		"  r retry failed instances",
 		"  B double retry budget for selected failed instance and retry",
 		"  a toggle auto-pilot",
