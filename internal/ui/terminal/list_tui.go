@@ -82,6 +82,7 @@ type listTUIModel struct {
 	quickLaunchDone            <-chan listQuickLaunchDoneMsg
 	quickLaunchStatusHoldUntil time.Time
 	movePicker                 movePickerModel
+	showHelp                   bool
 	moveLookupPending          bool
 	moveLookupRequestID        int64
 	moveLookupJobID            int64
@@ -264,6 +265,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.movePicker.active {
 			return m.handleMovePickerKey(msg)
 		}
+		if m.showHelp {
+			switch msg.String() {
+			case "?", "esc", "q", "enter":
+				m.showHelp = false
+				return m, nil
+			}
+			return m, nil
+		}
 		if m.groupedByStatus {
 			return m.handleGroupedKey(msg)
 		}
@@ -315,6 +324,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "i":
 			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
+		case "?":
+			m.showHelp = true
+			return m, nil
 		case "a":
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
@@ -730,6 +742,9 @@ func (m listTUIModel) View() string {
 	if m.movePicker.active {
 		return m.movePicker.View(m.width, m.height)
 	}
+	if m.showHelp {
+		return m.renderListHelpView()
+	}
 	if m.groupedByStatus {
 		return m.groupedView()
 	}
@@ -995,7 +1010,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 			line += "  e:error details"
 		}
 	}
-	line += "  v:ungroup  i:instances"
+	line += "  v:ungroup  i:watch  ?:help"
 	line += "  q:quit"
 	return line
 }
@@ -1135,6 +1150,9 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "i":
 		return m, func() tea.Msg { return switchToSystemWatchMsg{} }
+	case "?":
+		m.showHelp = true
+		return m, nil
 	case "e":
 		if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
 			m.statusMessage = "No auto-pilot error details."
@@ -1344,8 +1362,55 @@ func (m listTUIModel) footerText(rows int) string {
 	if m.statusMessage != "" {
 		state += "  " + m.statusMessage
 	}
-	state += "  up/down move  space/b page  g/G top/bottom  v:toggle  i:instances  q quit"
+	state += "  up/down move  space/b page  g/G top/bottom  v:toggle  i:instances  ? help  q quit"
 	return state
+}
+
+func (m listTUIModel) renderListHelpView() string {
+	lines := []string{
+		"Jobs List Keybindings",
+		"",
+		"Navigation:",
+		"  up/down (or j/k) move selection",
+		"  pgup/pgdown (or b/space) page up/down",
+		"  g/G jump top/bottom",
+		"",
+		"Common:",
+		"  r refresh",
+		"  v toggle grouped/ungrouped view",
+		"  i open instances watch",
+		"  q quit",
+	}
+	if m.groupedByStatus {
+		lines = append(lines,
+			"",
+			"Grouped-only actions:",
+			"  a toggle auto-pilot",
+			"  $ set run-rate target ($/hr)",
+			"  n launch a new instance for queued jobs",
+			"  k kill selected job",
+			"  u unplace selected queued job",
+			"  p mark selected job as processed",
+			"  m move selected queued job",
+			"  e toggle auto-pilot error details",
+		)
+	}
+	lines = append(lines,
+		"",
+		"Help:",
+		"  ? toggle this help",
+		"  q or Esc close help",
+	)
+
+	var b strings.Builder
+	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(lines[0], m.width)))
+	b.WriteString("\n")
+	for i := 1; i < len(lines); i++ {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(lines[i], m.width)))
+		b.WriteString("\n")
+	}
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth("? close help", m.width)))
+	return b.String()
 }
 
 func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {

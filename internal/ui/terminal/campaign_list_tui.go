@@ -39,6 +39,7 @@ type campaignListModel struct {
 	cursor           int
 	database         *sql.DB
 	quitting         bool
+	showHelp         bool
 	syncEnabled      bool
 	syncInProgress   bool
 	statusMessage    string
@@ -159,6 +160,14 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.showHelp {
+			switch msg.String() {
+			case "?", "esc", "q", "enter":
+				m.showHelp = false
+				return m, nil
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			m.quitting = true
@@ -186,6 +195,9 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return switchToCampaignWatchMsg{instanceIDs: instanceIDs}
 				}
 			}
+		case "?":
+			m.showHelp = true
+			return m, nil
 		}
 		return m, nil
 
@@ -294,6 +306,10 @@ func (m campaignListModel) nextSelectable(from int) int {
 }
 
 func (m campaignListModel) View() string {
+	if m.showHelp {
+		return m.renderCampaignListHelpView()
+	}
+
 	var b strings.Builder
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, 0)
 
@@ -355,10 +371,37 @@ func (m campaignListModel) View() string {
 	if m.statusMessage != "" {
 		footer = append(footer, m.statusMessage)
 	}
-	footer = append(footer, "↑/↓ navigate", "enter to watch", "q to quit")
+	footer = append(footer, "↑/↓ navigate", "enter to watch", "? help", "q to quit")
 	b.WriteString(watchDimStyle.Render(strings.Join(footer, "  ")))
 	b.WriteString("\n")
 
+	return b.String()
+}
+
+func (m campaignListModel) renderCampaignListHelpView() string {
+	lines := []string{
+		"Campaign List Keybindings",
+		"",
+		"Navigation:",
+		"  up/down (or j/k) move selection",
+		"  enter watch selected campaign",
+		"",
+		"General:",
+		"  q or Esc quit campaign list",
+		"",
+		"Help:",
+		"  ? toggle this help",
+		"  q or Esc close help",
+	}
+
+	var b strings.Builder
+	b.WriteString(listTitleStyle.Render(lines[0]))
+	b.WriteString("\n")
+	for i := 1; i < len(lines); i++ {
+		b.WriteString(watchDimStyle.Render(lines[i]))
+		b.WriteString("\n")
+	}
+	b.WriteString(watchDimStyle.Render("? close help"))
 	return b.String()
 }
 

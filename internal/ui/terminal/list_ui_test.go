@@ -981,3 +981,54 @@ func TestListTUIGroupedIgnoresStaleMoveOptionsResult(t *testing.T) {
 		t.Fatalf("stale response should not open move picker")
 	}
 }
+
+func TestListTUIHelpOverlayOpensAndClosesInUngroupedView(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: false,
+		width:           100,
+		height:          20,
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	got := next.(listTUIModel)
+	if !got.showHelp {
+		t.Fatal("expected help overlay to open")
+	}
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "Jobs List Keybindings") {
+		t.Fatalf("expected list help title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "v toggle grouped/ungrouped view") {
+		t.Fatalf("expected shared keybinding help text, got:\n%s", out)
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got = next.(listTUIModel)
+	if got.showHelp {
+		t.Fatal("expected help overlay to close on Esc")
+	}
+}
+
+func TestListTUIHelpOverlayShowsGroupedActions(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	got := next.(listTUIModel)
+	if !got.showHelp {
+		t.Fatal("expected grouped help overlay to open")
+	}
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "Grouped-only actions:") {
+		t.Fatalf("expected grouped actions section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "m move selected queued job") {
+		t.Fatalf("expected grouped move keybinding, got:\n%s", out)
+	}
+	if !strings.Contains(out, "e toggle auto-pilot error details") {
+		t.Fatalf("expected grouped error-details keybinding, got:\n%s", out)
+	}
+}
