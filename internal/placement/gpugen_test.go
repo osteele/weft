@@ -8,6 +8,8 @@ func TestGenerationOf(t *testing.T) {
 		want  GPUGeneration
 	}{
 		{"a100", GenAmpere},
+		{"a5000", GenAmpere},
+		{"rtxa5000", GenAmpere},
 		{"rtx3090", GenAmpere},
 		{"rtx2080ti", GenTuring},
 		{"h100", GenHopper},
@@ -75,6 +77,7 @@ func TestParseGPUConstraint(t *testing.T) {
 		{"a100+", constraintMinGen, GenAmpere, "a100"},
 		{"rtx3090+", constraintMinGen, GenAmpere, "rtx3090"},
 		{"h100+", constraintMinGen, GenHopper, "h100"},
+		{"a5000+", constraintMinGen, GenAmpere, "a5000"},
 
 		// Family matching
 		{"nvidia", constraintFamily, GenUnknown, "nvidia"},
@@ -311,6 +314,8 @@ func TestMinCUDAForGPU(t *testing.T) {
 		{"RTX 5090", 12.8},
 		{"RTX 4090", 11.8},
 		{"RTX 3090", 11.0},
+		{"RTX A5000", 11.0},
+		{"A5000", 11.0},
 		{"A100 SXM4", 11.0},
 		{"H100", 12.0},
 		{"H200", 12.0},

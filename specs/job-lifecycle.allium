@@ -55,6 +55,10 @@ entity Job {
 
     -- GPU requirements
     gpu_class: String?          -- required GPU class (e.g. "A100", "nvidia>=24GB")
+                                -- matching is normalization-based:
+                                -- case/punctuation ignored, bare model aliases
+                                -- are accepted (e.g. "3090", "a5000"), and
+                                -- model+ means "this generation or newer"
     gpu_mem_gb: Integer?        -- minimum GPU memory per device
     gpu_mem_max_gb: Integer?    -- maximum GPU memory per device
     gpu_devices: String?        -- CUDA_VISIBLE_DEVICES allocation

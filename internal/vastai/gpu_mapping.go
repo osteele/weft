@@ -1,65 +1,15 @@
 package vastai
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
 )
 
-// gpuClassToVastaiNames maps normalized weft GPU class names to Vast.ai gpu_name values.
-// Vast.ai gpu_name is case-sensitive and uses specific naming (e.g. "RTX 4090", "A100 PCIE").
-var gpuClassToVastaiNames = map[string][]string{
-	// Turing
-	"rtx2080ti": {"RTX 2080 Ti"},
-	"rtx2080":   {"RTX 2080"},
-	"rtx2070":   {"RTX 2070"},
-	"rtx2060":   {"RTX 2060"},
-	"t4":        {"Tesla T4"},
-
-	// Ampere
-	"rtx3090":   {"RTX 3090"},
-	"rtx3090ti": {"RTX 3090 Ti"},
-	"rtx3080":   {"RTX 3080"},
-	"rtx3080ti": {"RTX 3080 Ti"},
-	"rtx3070":   {"RTX 3070"},
-	"rtx3070ti": {"RTX 3070 Ti"},
-	"rtx3060":   {"RTX 3060"},
-	"rtx3060ti": {"RTX 3060 Ti"},
-	"a100":      {"A100 PCIE", "A100 SXM4", "A100X"},
-	"a10":       {"A10"},
-	"a40":       {"A40"},
-	"a10g":      {"A10G"},
-
-	// Ada Lovelace
-	"rtx4090":      {"RTX 4090"},
-	"rtx4080":      {"RTX 4080"},
-	"rtx4080s":     {"RTX 4080S"},
-	"rtx4070ti":    {"RTX 4070 Ti"},
-	"rtx4070":      {"RTX 4070"},
-	"rtx4070sti":   {"RTX 4070S Ti"},
-	"rtx4060ti":    {"RTX 4060 Ti"},
-	"rtx4060":      {"RTX 4060"},
-	"rtx6000ada":   {"RTX 6000Ada"},
-	"rtxpro6000ws": {"RTX PRO 6000 WS"},
-	"l40":          {"L40"},
-	"l40s":         {"L40S"},
-	"l20":          {"L20"},
-	"l4":           {"L4"},
-
-	// Hopper
-	"h100": {"H100 SXM", "H100 NVL", "H100 PCIE"},
-	"h200": {"H200", "H200 NVL"},
-
-	// Blackwell
-	"rtx5090":    {"RTX 5090"},
-	"rtx5080":    {"RTX 5080"},
-	"rtx5070ti":  {"RTX 5070 Ti"},
-	"rtx5070":    {"RTX 5070"},
-	"rtx5060ti":  {"RTX 5060 Ti"},
-	"rtxpro5000": {"RTX PRO 5000"},
-	"b100":       {"B100"},
-	"b200":       {"B200", "B200 NVL"},
-	"gb200":      {"GB200"},
+type vastaiGPU struct {
+	Name string
+	Gen  gpuGeneration
 }
 
 // gpuGeneration represents an ordered GPU generation for Vast.ai filtering.
@@ -74,31 +24,7 @@ const (
 	genBlackwell
 )
 
-// generationGPUNames maps each generation to all Vast.ai gpu_name values in that generation.
-var generationGPUNames = map[gpuGeneration][]string{
-	genTuring: {"RTX 2080 Ti", "RTX 2080", "RTX 2070", "RTX 2060", "Tesla T4"},
-	genAmpere: {
-		"RTX 3090", "RTX 3090 Ti", "RTX 3080", "RTX 3080 Ti",
-		"RTX 3070", "RTX 3070 Ti", "RTX 3060", "RTX 3060 Ti",
-		"A100 PCIE", "A100 SXM4", "A100X", "A10", "A40", "A10G",
-	},
-	genAdaLovelace: {
-		"RTX 4090", "RTX 4080", "RTX 4080S",
-		"RTX 4070 Ti", "RTX 4070", "RTX 4070S Ti",
-		"RTX 4060 Ti", "RTX 4060",
-		"RTX 6000Ada", "RTX PRO 6000 WS",
-		"L40", "L40S", "L20", "L4",
-	},
-	genHopper: {"H100 SXM", "H100 NVL", "H100 PCIE", "H200", "H200 NVL"},
-	genBlackwell: {
-		"RTX 5090", "RTX 5080", "RTX 5070 Ti", "RTX 5070", "RTX 5060 Ti",
-		"RTX PRO 5000",
-		"B100", "B200", "B200 NVL", "GB200",
-	},
-}
-
-// genNames maps user-facing generation names to their generation.
-var genNames = map[string]gpuGeneration{
+var generationNameToGen = map[string]gpuGeneration{
 	"turing":      genTuring,
 	"ampere":      genAmpere,
 	"ada":         genAdaLovelace,
@@ -107,25 +33,103 @@ var genNames = map[string]gpuGeneration{
 	"blackwell":   genBlackwell,
 }
 
-// gpuClassToGen maps normalized GPU class names to their generation.
-var gpuClassToGen = map[string]gpuGeneration{
-	"rtx2080ti": genTuring, "rtx2080": genTuring, "rtx2070": genTuring, "rtx2060": genTuring, "t4": genTuring,
+var genToGenerationName = map[gpuGeneration]string{
+	genTuring:      "turing",
+	genAmpere:      "ampere",
+	genAdaLovelace: "adalovelace",
+	genHopper:      "hopper",
+	genBlackwell:   "blackwell",
+}
 
-	"rtx3090": genAmpere, "rtx3090ti": genAmpere, "rtx3080": genAmpere, "rtx3080ti": genAmpere,
-	"rtx3070": genAmpere, "rtx3070ti": genAmpere, "rtx3060": genAmpere, "rtx3060ti": genAmpere,
-	"a100": genAmpere, "a10": genAmpere, "a40": genAmpere, "a10g": genAmpere,
+// vastaiGPUCatalog is the single source of truth for Vast.ai gpu_name values.
+var vastaiGPUCatalog = []vastaiGPU{
+	// Turing
+	{"RTX 2080 Ti", genTuring},
+	{"RTX 2080", genTuring},
+	{"RTX 2070", genTuring},
+	{"RTX 2060", genTuring},
+	{"Tesla T4", genTuring},
 
-	"rtx4090": genAdaLovelace, "rtx4080": genAdaLovelace, "rtx4080s": genAdaLovelace,
-	"rtx4070ti": genAdaLovelace, "rtx4070": genAdaLovelace, "rtx4070sti": genAdaLovelace,
-	"rtx4060ti": genAdaLovelace, "rtx4060": genAdaLovelace,
-	"rtx6000ada": genAdaLovelace, "rtxpro6000ws": genAdaLovelace,
-	"l40": genAdaLovelace, "l40s": genAdaLovelace, "l20": genAdaLovelace, "l4": genAdaLovelace,
+	// Ampere
+	{"RTX 3090", genAmpere},
+	{"RTX 3090 Ti", genAmpere},
+	{"RTX 3080", genAmpere},
+	{"RTX 3080 Ti", genAmpere},
+	{"RTX 3070", genAmpere},
+	{"RTX 3070 Ti", genAmpere},
+	{"RTX 3060", genAmpere},
+	{"RTX 3060 Ti", genAmpere},
+	{"RTX A5000", genAmpere},
+	{"RTX A6000", genAmpere},
+	{"A100 PCIE", genAmpere},
+	{"A100 SXM4", genAmpere},
+	{"A100X", genAmpere},
+	{"A10", genAmpere},
+	{"A40", genAmpere},
+	{"A10G", genAmpere},
 
-	"h100": genHopper, "h200": genHopper,
+	// Ada Lovelace
+	{"RTX 4090", genAdaLovelace},
+	{"RTX 4080", genAdaLovelace},
+	{"RTX 4080S", genAdaLovelace},
+	{"RTX 4070 Ti", genAdaLovelace},
+	{"RTX 4070", genAdaLovelace},
+	{"RTX 4070S Ti", genAdaLovelace},
+	{"RTX 4060 Ti", genAdaLovelace},
+	{"RTX 4060", genAdaLovelace},
+	{"RTX 6000Ada", genAdaLovelace},
+	{"RTX PRO 6000 WS", genAdaLovelace},
+	{"L40", genAdaLovelace},
+	{"L40S", genAdaLovelace},
+	{"L20", genAdaLovelace},
+	{"L4", genAdaLovelace},
 
-	"rtx5090": genBlackwell, "rtx5080": genBlackwell, "rtx5070ti": genBlackwell,
-	"rtx5070": genBlackwell, "rtx5060ti": genBlackwell, "rtxpro5000": genBlackwell,
-	"b100": genBlackwell, "b200": genBlackwell, "gb200": genBlackwell,
+	// Hopper
+	{"H100 SXM", genHopper},
+	{"H100 NVL", genHopper},
+	{"H100 PCIE", genHopper},
+	{"H200", genHopper},
+	{"H200 NVL", genHopper},
+
+	// Blackwell
+	{"RTX 5090", genBlackwell},
+	{"RTX 5080", genBlackwell},
+	{"RTX 5070 Ti", genBlackwell},
+	{"RTX 5070", genBlackwell},
+	{"RTX 5060 Ti", genBlackwell},
+	{"RTX PRO 5000", genBlackwell},
+	{"B100", genBlackwell},
+	{"B200", genBlackwell},
+	{"B200 NVL", genBlackwell},
+	{"GB200", genBlackwell},
+}
+
+var (
+	normalizedToVastai    map[string][]string
+	vastaiToGen           map[string]gpuGeneration
+	genToVastaiNames      map[gpuGeneration][]string
+	normalizedClassToGen  map[string]gpuGeneration
+	normalizedClassLookup []string
+)
+
+func init() {
+	normalizedToVastai = make(map[string][]string, len(vastaiGPUCatalog))
+	vastaiToGen = make(map[string]gpuGeneration, len(vastaiGPUCatalog))
+	genToVastaiNames = make(map[gpuGeneration][]string, len(genToGenerationName))
+	normalizedClassToGen = make(map[string]gpuGeneration, len(vastaiGPUCatalog))
+	seenClass := make(map[string]bool, len(vastaiGPUCatalog))
+
+	for _, entry := range vastaiGPUCatalog {
+		norm := inventory.NormalizeGPUClass(entry.Name)
+		normalizedToVastai[norm] = append(normalizedToVastai[norm], entry.Name)
+		vastaiToGen[entry.Name] = entry.Gen
+		genToVastaiNames[entry.Gen] = append(genToVastaiNames[entry.Gen], entry.Name)
+		normalizedClassToGen[norm] = entry.Gen
+		if !seenClass[norm] {
+			normalizedClassLookup = append(normalizedClassLookup, norm)
+			seenClass[norm] = true
+		}
+	}
 }
 
 // resolveGPUFilter determines whether the GPU class constraint can be sent
@@ -148,47 +152,33 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 	}
 
 	// Generation name (e.g., "hopper", "hopper+")
-	if gen, ok := genNames[norm]; ok {
+	if gen, ok := generationNameToGen[norm]; ok {
 		names := collectGenNames(gen, minMode)
 		return nil, makePostFilter(names)
 	}
 
-	// minModeFilter returns a post-filter for "model+" (this generation and newer),
-	// or nil if the model's generation is unknown.
-	minModeFilter := func(key string) (func([]Offer) []Offer, bool) {
-		if gen, ok := gpuClassToGen[key]; ok {
-			return makePostFilter(collectGenNames(gen, true)), true
+	matchAndApply := func(matchNorm string) ([]string, func([]Offer) []Offer, bool) {
+		names := matchNormalizedVastaiNames(matchNorm)
+		if len(names) == 0 {
+			return nil, nil, false
 		}
-		return nil, false
-	}
-
-	// Known GPU model
-	if names, ok := gpuClassToVastaiNames[norm]; ok {
 		if minMode {
-			// e.g., "a100+" → Ampere or newer
-			if filter, ok := minModeFilter(norm); ok {
-				return nil, filter
+			if gen, ok := generationFromVastaiNames(names); ok {
+				return nil, makePostFilter(collectGenNames(gen, true)), true
 			}
 		}
-		return names, nil
+		return names, nil, true
 	}
 
-	// Prefix-based fallback: e.g. "a100sxm" → prefix key "a100" → filter to {"A100 SXM4"}
-	if prefixKey, ok := longestPrefixKey(norm, gpuClassToVastaiNames); ok {
-		candidates := gpuClassToVastaiNames[prefixKey]
-		var filtered []string
-		for _, name := range candidates {
-			if strings.HasPrefix(inventory.NormalizeGPUClass(name), norm) {
-				filtered = append(filtered, name)
-			}
-		}
-		if len(filtered) > 0 {
-			if minMode {
-				if filter, ok := minModeFilter(prefixKey); ok {
-					return nil, filter
-				}
-			}
-			return filtered, nil
+	// Exact/prefix normalized match.
+	if names, postFilter, ok := matchAndApply(norm); ok {
+		return names, postFilter
+	}
+
+	// Retry with an RTX prefix when no direct match exists.
+	if !strings.HasPrefix(norm, "rtx") {
+		if names, postFilter, ok := matchAndApply("rtx" + norm); ok {
+			return names, postFilter
 		}
 	}
 
@@ -196,18 +186,65 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 	return []string{gpuClass}, nil
 }
 
-// longestPrefixKey finds the longest key in m that is a prefix of s.
-func longestPrefixKey[V any](s string, m map[string]V) (string, bool) {
-	best := ""
-	for k := range m {
-		if strings.HasPrefix(s, k) && len(k) > len(best) {
-			best = k
+func matchNormalizedVastaiNames(norm string) []string {
+	if names := normalizedToVastai[norm]; len(names) > 0 {
+		return slices.Clone(names)
+	}
+	if !containsDigit(norm) {
+		return nil
+	}
+	filtered := make([]string, 0)
+	for _, entry := range vastaiGPUCatalog {
+		if strings.HasPrefix(inventory.NormalizeGPUClass(entry.Name), norm) {
+			filtered = append(filtered, entry.Name)
 		}
 	}
-	if best == "" {
-		return "", false
+	return filtered
+}
+
+func containsDigit(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
 	}
-	return best, true
+	return false
+}
+
+func generationFromVastaiNames(names []string) (gpuGeneration, bool) {
+	if len(names) == 0 {
+		return genUnknown, false
+	}
+	gen, ok := vastaiToGen[names[0]]
+	if !ok {
+		return genUnknown, false
+	}
+	return gen, true
+}
+
+// NVIDIAGenerationNameForNormalizedGPUClass returns the NVIDIA generation name
+// for a normalized GPU class token (e.g. "a5000", "rtx4090", "h100sxm4").
+func NVIDIAGenerationNameForNormalizedGPUClass(normalizedClass string) (string, bool) {
+	for _, key := range []string{normalizedClass, "rtx" + normalizedClass} {
+		if gen, ok := normalizedClassToGen[key]; ok {
+			return genToGenerationName[gen], true
+		}
+		if names := matchNormalizedVastaiNames(key); len(names) > 0 {
+			if gen, ok := generationFromVastaiNames(names); ok {
+				return genToGenerationName[gen], true
+			}
+		}
+		if strings.HasPrefix(key, "rtx") {
+			break
+		}
+	}
+	return "", false
+}
+
+// KnownNormalizedGPUClasses returns normalized NVIDIA class tokens derived from
+// the Vast.ai GPU catalog. Callers can use these for full-name substring probes.
+func KnownNormalizedGPUClasses() []string {
+	return slices.Clone(normalizedClassLookup)
 }
 
 // collectGenNames collects all Vast.ai gpu_names for a generation,
@@ -215,7 +252,7 @@ func longestPrefixKey[V any](s string, m map[string]V) (string, bool) {
 func collectGenNames(gen gpuGeneration, minMode bool) []string {
 	var names []string
 	for g := gen; g <= genBlackwell; g++ {
-		if gNames, ok := generationGPUNames[g]; ok {
+		if gNames, ok := genToVastaiNames[g]; ok {
 			names = append(names, gNames...)
 		}
 		if !minMode {

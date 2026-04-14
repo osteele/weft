@@ -29,6 +29,16 @@ func TestResolveGPUFilter(t *testing.T) {
 			wantNames: []string{"RTX 4090"},
 		},
 		{
+			name:      "a5000 retry matches RTX A5000",
+			gpuClass:  "a5000",
+			wantNames: []string{"RTX A5000"},
+		},
+		{
+			name:      "rtxa5000 exact",
+			gpuClass:  "rtxa5000",
+			wantNames: []string{"RTX A5000"},
+		},
+		{
 			name:      "case insensitive A100",
 			gpuClass:  "A100",
 			wantNames: []string{"A100 PCIE", "A100 SXM4", "A100X"},
@@ -57,6 +67,14 @@ func TestResolveGPUFilter(t *testing.T) {
 		{
 			name:          "a100+ promotes to ampere+",
 			gpuClass:      "a100+",
+			wantNames:     nil,
+			wantPostFilt:  true,
+			acceptGPUName: "RTX 4090",
+			rejectGPUName: "RTX 2080 Ti",
+		},
+		{
+			name:          "a5000+ promotes to ampere+ via retry",
+			gpuClass:      "a5000+",
 			wantNames:     nil,
 			wantPostFilt:  true,
 			acceptGPUName: "RTX 4090",

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/vastai"
 )
 
 // GPUGeneration represents an ordered GPU generation/architecture.
@@ -36,62 +37,8 @@ func (g GPUGeneration) isApple() bool {
 	return g >= GenAppleM1 && g <= GenAppleM4
 }
 
-// gpuClassToGeneration maps normalized GPU class names to their generation.
-var gpuClassToGeneration = map[string]GPUGeneration{
-	// Turing (RTX 20-series, Quadro RTX, Tesla T4)
-	"rtx2080ti": GenTuring,
-	"rtx2080":   GenTuring,
-	"rtx2070":   GenTuring,
-	"rtx2060":   GenTuring,
-	"t4":        GenTuring,
-
-	// Ampere (RTX 30-series, A100, A10, A40)
-	"rtx3090":   GenAmpere,
-	"rtx3090ti": GenAmpere,
-	"rtx3080":   GenAmpere,
-	"rtx3080ti": GenAmpere,
-	"rtx3070":   GenAmpere,
-	"rtx3070ti": GenAmpere,
-	"rtx3060":   GenAmpere,
-	"rtx3060ti": GenAmpere,
-	"a100":      GenAmpere,
-	"a10":       GenAmpere,
-	"a40":       GenAmpere,
-	"a10g":      GenAmpere,
-	"a100sxm4":  GenAmpere,
-
-	// Ada Lovelace (RTX 40-series, L40, L4)
-	"rtx4090":      GenAdaLovelace,
-	"rtx4080":      GenAdaLovelace,
-	"rtx4080s":     GenAdaLovelace,
-	"rtx4070ti":    GenAdaLovelace,
-	"rtx4070":      GenAdaLovelace,
-	"rtx4070sti":   GenAdaLovelace,
-	"rtx4060ti":    GenAdaLovelace,
-	"rtx4060":      GenAdaLovelace,
-	"rtx6000ada":   GenAdaLovelace,
-	"rtxpro6000ws": GenAdaLovelace,
-	"l40":          GenAdaLovelace,
-	"l40s":         GenAdaLovelace,
-	"l20":          GenAdaLovelace,
-	"l4":           GenAdaLovelace,
-
-	// Hopper (H100, H200)
-	"h100":    GenHopper,
-	"h100sxm": GenHopper,
-	"h200":    GenHopper,
-
-	// Blackwell (B100, B200, GB200, RTX 50-series)
-	"b100":       GenBlackwell,
-	"b200":       GenBlackwell,
-	"gb200":      GenBlackwell,
-	"rtx5090":    GenBlackwell,
-	"rtx5080":    GenBlackwell,
-	"rtx5070ti":  GenBlackwell,
-	"rtx5070":    GenBlackwell,
-	"rtx5060ti":  GenBlackwell,
-	"rtxpro5000": GenBlackwell,
-
+// appleClassToGeneration maps normalized Apple GPU class names to generation.
+var appleClassToGeneration = map[string]GPUGeneration{
 	// Apple Silicon
 	"m1":      GenAppleM1,
 	"m1pro":   GenAppleM1,
@@ -109,6 +56,24 @@ var gpuClassToGeneration = map[string]GPUGeneration{
 	"m4pro":   GenAppleM4,
 	"m4max":   GenAppleM4,
 }
+
+var nvidiaGenerationNames = map[string]GPUGeneration{
+	"turing":      GenTuring,
+	"ampere":      GenAmpere,
+	"ada":         GenAdaLovelace,
+	"adalovelace": GenAdaLovelace,
+	"hopper":      GenHopper,
+	"blackwell":   GenBlackwell,
+}
+
+var knownGPUClasses = func() []string {
+	classes := make([]string, 0, len(appleClassToGeneration)+len(vastai.KnownNormalizedGPUClasses()))
+	for class := range appleClassToGeneration {
+		classes = append(classes, class)
+	}
+	classes = append(classes, vastai.KnownNormalizedGPUClasses()...)
+	return classes
+}()
 
 // generationNames maps user-facing generation names to their generation.
 var generationNames = map[string]GPUGeneration{
@@ -148,8 +113,13 @@ func MinCUDAForGPU(gpuName string) float64 {
 
 // generationOf returns the generation for a normalized GPU class name.
 func generationOf(normalizedClass string) GPUGeneration {
-	if gen, ok := gpuClassToGeneration[normalizedClass]; ok {
+	if gen, ok := appleClassToGeneration[normalizedClass]; ok {
 		return gen
+	}
+	if genName, ok := vastai.NVIDIAGenerationNameForNormalizedGPUClass(normalizedClass); ok {
+		if gen, ok := nvidiaGenerationNames[genName]; ok {
+			return gen
+		}
 	}
 	return GenUnknown
 }
@@ -337,7 +307,7 @@ func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
 		// of the normalized full name. Use the longest match to avoid e.g.
 		// "a10" matching before "a100".
 		bestClass := ""
-		for class := range gpuClassToGeneration {
+		for _, class := range knownGPUClasses {
 			if strings.Contains(normFull, class) && len(class) > len(bestClass) {
 				bestClass = class
 			}
@@ -351,7 +321,7 @@ func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
 			}
 			return false
 		}
-		return c.matchesGeneration(gpuClassToGeneration[bestClass])
+		return c.matchesGeneration(generationOf(bestClass))
 	}
 	return false
 }
