@@ -3485,3 +3485,17 @@ func TestCleanupStaleAttempts_SkipsCompletedInstances(t *testing.T) {
 		t.Errorf("expected launch_id=%d, got %v", instanceID, job.LaunchID)
 	}
 }
+
+func TestRewriteQueryForMissingCLIOverrides(t *testing.T) {
+	query := `SELECT id, placement_reasons, cli_overrides, launch_id FROM job_status WHERE tombstoned = 0`
+	rewritten, ok := rewriteQueryForMissingCLIOverrides(query, fmt.Errorf("SQL logic error: no such column: job_status.cli_overrides (1)"))
+	if !ok {
+		t.Fatal("expected rewrite for missing cli_overrides")
+	}
+	if strings.Contains(rewritten, "placement_reasons, cli_overrides, launch_id") {
+		t.Fatalf("rewrite did not replace cli_overrides expression: %q", rewritten)
+	}
+	if !strings.Contains(rewritten, "NULL AS cli_overrides") {
+		t.Fatalf("rewrite missing NULL alias: %q", rewritten)
+	}
+}

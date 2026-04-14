@@ -4521,6 +4521,11 @@ func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, 
 func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 	rows, err := db.Query(query, args...)
 	if err != nil {
+		if legacyQuery, ok := rewriteQueryForMissingCLIOverrides(query, err); ok {
+			rows, err = db.Query(legacyQuery, args...)
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
@@ -4531,11 +4536,43 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 func queryJobsTx(tx *sql.Tx, query string, args ...interface{}) ([]*Job, error) {
 	rows, err := tx.Query(query, args...)
 	if err != nil {
+		if legacyQuery, ok := rewriteQueryForMissingCLIOverrides(query, err); ok {
+			rows, err = tx.Query(legacyQuery, args...)
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	return scanJobs(rows)
+}
+
+func rewriteQueryForMissingCLIOverrides(query string, err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "no such column") {
+		return "", false
+	}
+	if !strings.Contains(msg, "cli_overrides") {
+		return "", false
+	}
+	replacements := map[string]string{
+		"placement_reasons, cli_overrides, launch_id":                                  "placement_reasons, NULL AS cli_overrides, launch_id",
+		"job_status.placement_reasons, job_status.cli_overrides, job_status.launch_id": "job_status.placement_reasons, NULL AS cli_overrides, job_status.launch_id",
+		"js.placement_reasons, js.cli_overrides, js.launch_id":                         "js.placement_reasons, NULL AS cli_overrides, js.launch_id",
+		"j.placement_reasons, j.cli_overrides, j.launch_id":                            "j.placement_reasons, NULL AS cli_overrides, j.launch_id",
+	}
+	rewritten := query
+	for oldExpr, newExpr := range replacements {
+		rewritten = strings.ReplaceAll(rewritten, oldExpr, newExpr)
+	}
+	if rewritten == query {
+		return "", false
+	}
+	return rewritten, true
 }
 
 func queryJobTx(tx *sql.Tx, query string, args ...interface{}) (*Job, error) {
