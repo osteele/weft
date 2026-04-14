@@ -221,12 +221,17 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	if err != nil {
 		return fmt.Errorf("locate repo root: %w", err)
 	}
+	if err := quickCheckSSHBuilder(builder.Host); err != nil {
+		return err
+	}
 	remoteDir := envOrDefault(builder.RemoteDir, "~/.cache/weft/agent-build")
 	remoteGo := envOrDefault(builder.GoBin, "/usr/local/go/bin/go")
 	remoteOut := filepath.Join(remoteDir, fmt.Sprintf("weft-agent-%s-%s", goos, goarch))
 
+	rsyncSSH := rsyncSSHCommand()
 	args := []string{
 		"-az", "--delete",
+		"-e", rsyncSSH,
 		"--exclude=.git/", "--exclude=.jj/", "--exclude=.claude/",
 		"--exclude=.gocache/", "--exclude=.gomodcache/", "--exclude=.cache/",
 		"--exclude=.bench-*-gocache/", "--exclude=.bench-*-gomodcache/",
@@ -244,7 +249,8 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	buildCmd := fmt.Sprintf("cd %s && CGO_ENABLED=1 GOOS=%s GOARCH=%s %s build -buildvcs=false -ldflags %s -o %s ./cmd/agent",
 		shellQuote(remoteDir), goos, goarch, shellQuote(remoteGo),
 		shellQuote("-X main.version="+version), shellQuote(remoteOut))
-	if out, err := runCommandCapture("", nil, "ssh", builder.Host, buildCmd); err != nil {
+	sshArgs := append(sshBaseArgs(builder.Host), buildCmd)
+	if out, err := runCommandCapture("", nil, "ssh", sshArgs...); err != nil {
 		return fmt.Errorf("remote build: %s", strings.TrimSpace(out))
 	}
 
@@ -252,7 +258,7 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
-	if out, err := runCommandCapture("", nil, "rsync", "-az", builder.Host+":"+remoteOut, tmp); err != nil {
+	if out, err := runCommandCapture("", nil, "rsync", "-az", "-e", rsyncSSH, builder.Host+":"+remoteOut, tmp); err != nil {
 		return fmt.Errorf("download build: %s", strings.TrimSpace(out))
 	}
 	if err := os.Chmod(tmp, 0o755); err != nil {
@@ -264,6 +270,28 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 		return fmt.Errorf("install binary: %w", err)
 	}
 	return nil
+}
+
+func quickCheckSSHBuilder(host string) error {
+	args := append(sshBaseArgs(host), "true")
+	if out, err := runCommandCapture("", nil, "ssh", args...); err != nil {
+		return fmt.Errorf("connect ssh builder: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+func sshBaseArgs(host string) []string {
+	return []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=3",
+		"-o", "ConnectionAttempts=1",
+		host,
+	}
+}
+
+func rsyncSSHCommand() string {
+	// Keep this in sync with sshBaseArgs for consistent fast-fail behavior.
+	return "ssh -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1"
 }
 
 func runCommandCapture(dir string, env []string, name string, args ...string) (string, error) {

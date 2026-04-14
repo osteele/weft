@@ -27,6 +27,16 @@ ssh titan 'tmux kill-session -t weft-runner 2>/dev/null; true'
 ## Key files
 
 - `internal/agentdeploy/deploy.go` — `EnsureAgentUpToDate`, deploys via scp + atomic rename
-- `internal/agentdeploy/build.go` — `EnsureBuilt`, local cache at `~/.cache/weft/builds/<version>/`
-- `internal/agentdeploy/version.go` — `LocalAgentVersion`, uses jj commit hash of agent source files
+- `internal/agentdeploy/build.go` — `EnsureBuilt`, local cache at `~/Library/Caches/weft/builds/<version>/` on macOS (or platform `os.UserCacheDir()/weft/builds/<version>/`)
+- `internal/agentdeploy/version.go` — `LocalAgentVersion`, prefers a deterministic source hash (with VCS fallback)
 - Remote binary path: `~/.cache/weft/bin/weft-agent`
+
+## Background prewarm notes
+
+`just build` and `just install` start an asynchronous best-effort prewarm (`weft build-agents --targets linux-amd64`) before the main command completes. This is intentional for latency and does not block install/build success.
+
+If you suspect prewarm/build issues, inspect:
+
+```bash
+tail -n 100 ~/.cache/weft/agent-prewarm.log
+```

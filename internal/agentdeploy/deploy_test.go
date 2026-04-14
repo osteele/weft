@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCachePath(t *testing.T) {
@@ -172,6 +175,55 @@ func TestEnsureBuilt_CacheHit_SkipsExtract(t *testing.T) {
 	}
 	if string(data) != "sentinel-value" {
 		t.Error("cache hit should return existing file without extracting")
+	}
+}
+
+func TestEnsureBuilt_ConcurrentCalls_SingleExtraction(t *testing.T) {
+	var extractCalls int32
+	cleanup := SetExtractFunc(func(version, goos, goarch, outputPath string) error {
+		atomic.AddInt32(&extractCalls, 1)
+		// Keep extraction slow enough to force concurrent overlap.
+		time.Sleep(120 * time.Millisecond)
+		return os.WriteFile(outputPath, []byte("fake-agent"), 0o755)
+	})
+	defer cleanup()
+
+	version := "test-concurrent-build-" + t.Name()
+	path := CachePath(version, "linux", "amd64")
+	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
+
+	const workers = 6
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	results := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := EnsureBuilt(version, "linux", "amd64")
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- got
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(results)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureBuilt concurrent call failed: %v", err)
+		}
+	}
+	for got := range results {
+		if got != path {
+			t.Fatalf("result path = %q, want %q", got, path)
+		}
+	}
+	if calls := atomic.LoadInt32(&extractCalls); calls != 1 {
+		t.Fatalf("extract called %d times, want 1", calls)
 	}
 }
 

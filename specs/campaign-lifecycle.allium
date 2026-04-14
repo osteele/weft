@@ -270,8 +270,14 @@ rule BeginLaunching {
         -- The launch sequence:
         -- 1. Create provider instance via API
         -- 2. Record provider instance ID
-        -- 3. Upload bootstrap shell script to R2
-        -- 4. Write agent startup manifest to R2 with job list and environment
+        -- 3. Ensure agent binary exists in R2 for the computed agent version:
+        --    a) use local cache if present
+        --    b) otherwise try builders in configured order
+        --    c) ssh builders must fail fast on basic connectivity failures
+        --       (short connect timeout / single attempt) so fallback builders
+        --       (for example Fly) can be tried immediately
+        -- 4. Upload bootstrap shell script to R2
+        -- 5. Write agent startup manifest to R2 with job list and environment
         -- The provider's onstart handler fetches and executes the bootstrap script.
 }
 

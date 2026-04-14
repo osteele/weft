@@ -12,8 +12,16 @@ build:
     (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
     echo "Building weft binary..."
     if command -v weft >/dev/null 2>&1; then
-        echo "Starting non-blocking background agent prewarm via installed weft..."
-        (weft build-agents --targets linux-amd64 >/dev/null 2>&1 || true) &
+        PREWARM_LOG="${HOME}/.cache/weft/agent-prewarm.log"
+        mkdir -p "$(dirname "${PREWARM_LOG}")"
+        echo "Starting non-blocking background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
+        (
+            printf '[%s] prewarm start (build)\n' "$(date -u +%FT%TZ)"
+            weft build-agents --targets linux-amd64
+            printf '[%s] prewarm ok (build)\n' "$(date -u +%FT%TZ)"
+        ) >>"${PREWARM_LOG}" 2>&1 || (
+            printf '[%s] prewarm failed (build)\n' "$(date -u +%FT%TZ)" >>"${PREWARM_LOG}"
+        ) &
     else
         echo "info: installed weft not found; skipping agent prewarm"
     fi
@@ -28,8 +36,18 @@ install:
     (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
     echo "Installing weft..."
     if command -v weft >/dev/null 2>&1; then
-        echo "Starting non-blocking background agent prewarm via installed weft..."
-        (weft build-agents --targets linux-amd64 >/dev/null 2>&1 || true) &
+        PREWARM_LOG="${HOME}/.cache/weft/agent-prewarm.log"
+        mkdir -p "$(dirname "${PREWARM_LOG}")"
+        # Intentionally starts before go install to overlap work with install.
+        # This is a latency optimization and remains best-effort.
+        echo "Starting non-blocking background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
+        (
+            printf '[%s] prewarm start (install)\n' "$(date -u +%FT%TZ)"
+            weft build-agents --targets linux-amd64
+            printf '[%s] prewarm ok (install)\n' "$(date -u +%FT%TZ)"
+        ) >>"${PREWARM_LOG}" 2>&1 || (
+            printf '[%s] prewarm failed (install)\n' "$(date -u +%FT%TZ)" >>"${PREWARM_LOG}"
+        ) &
     else
         echo "info: installed weft not found; skipping agent prewarm"
     fi

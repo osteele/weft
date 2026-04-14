@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ErrAgentNotAvailable is returned when the agent binary for a platform is not
@@ -63,6 +64,17 @@ func EnsureBuiltWithOutput(version, goos, goarch string, output io.Writer) (stri
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 
+	releaseLock, err := acquireBuildLock(path)
+	if err != nil {
+		return "", fmt.Errorf("acquire build lock: %w", err)
+	}
+	defer releaseLock()
+
+	// Another process may have populated the cache while we waited for the lock.
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+
 	if err := extractFunc(version, goos, goarch, path); err != nil {
 		if errBuild := buildOnDemand(version, goos, goarch, path, output); errBuild != nil {
 			if errors.Is(err, ErrAgentNotAvailable) {
@@ -73,6 +85,41 @@ func EnsureBuiltWithOutput(version, goos, goarch string, output io.Writer) (stri
 	}
 
 	return path, nil
+}
+
+// acquireBuildLock serializes concurrent builds targeting the same output path.
+// It coordinates across processes by using an atomic lock directory.
+func acquireBuildLock(outputPath string) (func(), error) {
+	lockDir := outputPath + ".lock.d"
+	const (
+		waitInterval = 200 * time.Millisecond
+		waitTimeout  = 10 * time.Minute
+		staleAfter   = 30 * time.Minute
+	)
+	deadline := time.Now().Add(waitTimeout)
+
+	for {
+		if err := os.Mkdir(lockDir, 0o700); err == nil {
+			return func() { _ = os.Remove(lockDir) }, nil
+		} else if !os.IsExist(err) {
+			return nil, err
+		}
+
+		// If another process completed while we were waiting, no need to keep waiting.
+		if _, err := os.Stat(outputPath); err == nil {
+			return func() {}, nil
+		}
+
+		// Reclaim lock if it appears stale (best effort).
+		if info, err := os.Stat(lockDir); err == nil && time.Since(info.ModTime()) > staleAfter {
+			_ = os.Remove(lockDir)
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timeout waiting for build lock %s", lockDir)
+		}
+		time.Sleep(waitInterval)
+	}
 }
 
 // BinariesVersion returns the version recorded in the binaries/ directory.
