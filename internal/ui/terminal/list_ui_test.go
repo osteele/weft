@@ -192,6 +192,24 @@ func TestGroupedJobsWithAutoReasonsOnlyAppliesToUnplacedQueuedJobs(t *testing.T)
 	}
 }
 
+func TestGroupedJobsWithAutoReasons_UnprocessedGroupedViewExcludesCanceledKeepsKilled(t *testing.T) {
+	killed := &db.Job{ID: 21, Status: db.StatusKilled}
+	canceled := &db.Job{ID: 22, Status: db.StatusCanceled}
+	m := listTUIModel{
+		groupedByStatus:        true,
+		groupedUnprocessedView: true,
+		jobs:                   []*db.Job{killed, canceled},
+	}
+
+	grouped := m.groupedJobsWithAutoReasons()
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1", len(grouped))
+	}
+	if grouped[0] != killed {
+		t.Fatalf("expected killed job to remain, got %#v", grouped[0])
+	}
+}
+
 func TestListTUIJobsLoadedClearsStalePersistentBlockedSummaryWhenNoUnplacedJobs(t *testing.T) {
 	m := listTUIModel{
 		autoMode:               true,

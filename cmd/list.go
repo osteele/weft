@@ -549,6 +549,9 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
 
 	if listGroupBy == "status" {
+		if groupedUnprocessedViewExcludesCanceled() {
+			jobs = excludeStatusForGroupedView(jobs, db.StatusCanceled)
+		}
 		liveByLaunchID := loadLaunchLiveStateForJobs(database, jobs)
 		launchStatusByID := loadLaunchStatusForJobs(database, jobs)
 		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithLaunchState(jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID))
@@ -572,6 +575,25 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 	default:
 		return fmt.Errorf("unknown format %q (use table, json, or tsv)", listFormat)
 	}
+}
+
+func groupedUnprocessedViewExcludesCanceled() bool {
+	_, processedFilter, _, err := listFilters()
+	return err == nil && processedFilter == "unprocessed"
+}
+
+func excludeStatusForGroupedView(jobs []*db.Job, status string) []*db.Job {
+	if len(jobs) == 0 {
+		return jobs
+	}
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == status {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	return filtered
 }
 
 func validateListGroupingOptions() error {

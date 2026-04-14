@@ -478,6 +478,11 @@ rule UserCancelsJob {
     requires: job.status in {queued, running, pending_placement}
 
     ensures: job.status = canceled
+
+    @guidance
+        -- Cancel is typically an operator/agent-requested administrative
+        -- action. It records intent to stop/retract a job, not an external
+        -- failure signal from runtime infrastructure.
 }
 
 -- ==========================================================================

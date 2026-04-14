@@ -423,6 +423,8 @@ weft jobs list [flags]      # Alias
 
 `--group-by status` only supports table/plain output; combining it with
 `--format json` or `--format tsv` returns an error.
+When combined with `--unprocessed`, grouped views omit `canceled` jobs (which
+were already handled by the agent) but still include `killed` jobs.
 
 **Examples:**
 ```bash

@@ -763,6 +763,8 @@ rule TUIPeriodicSync {
         --               launch has Failed/Cancelled, plus stale pending
         --               placements without a launch.
         --   - Completed / Failed / Killed/Canceled: terminal buckets.
+        --   - In grouped unprocessed outcome triage, canceled rows are
+        --     omitted while killed rows remain visible.
         --
         -- Footer "N jobs running" counts rows where status in
         -- {running, starting} AND effective_target_kind != unplaced. Paused

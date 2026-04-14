@@ -222,6 +222,47 @@ func TestPrintJobsGroupedStatus(t *testing.T) {
 	}
 }
 
+func TestPrintJobsGroupedStatusUnprocessedExcludesCanceledKeepsKilled(t *testing.T) {
+	prevGroupBy := listGroupBy
+	prevFormat := listFormat
+	prevUnprocessed := listUnprocessed
+	prevProcessed := listProcessed
+	prevStatus := listStatus
+	listGroupBy = "status"
+	listFormat = "table"
+	listUnprocessed = true
+	listProcessed = false
+	listStatus = ""
+	t.Cleanup(func() {
+		listGroupBy = prevGroupBy
+		listFormat = prevFormat
+		listUnprocessed = prevUnprocessed
+		listProcessed = prevProcessed
+		listStatus = prevStatus
+	})
+
+	jobs := []*db.Job{
+		{ID: 8, Status: db.StatusKilled, Host: "cool30", Project: "proj", Description: "killed"},
+		{ID: 9, Status: db.StatusCanceled, Host: "cool30", Project: "proj", Description: "canceled"},
+	}
+
+	out := captureStdout(t, func() {
+		if err := printJobs(nil, jobs); err != nil {
+			t.Fatalf("printJobs: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Killed/Canceled (1):") {
+		t.Fatalf("expected grouped killed/canceled section with one job, got:\n%s", out)
+	}
+	if !strings.Contains(out, "killed") {
+		t.Fatalf("expected killed job line, got:\n%s", out)
+	}
+	if strings.Contains(out, "canceled") {
+		t.Fatalf("did not expect canceled job line in grouped unprocessed output, got:\n%s", out)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

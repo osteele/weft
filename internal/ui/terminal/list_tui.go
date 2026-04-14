@@ -57,6 +57,7 @@ type listTUIModel struct {
 	ctx                        context.Context
 	cancel                     context.CancelFunc
 	groupedByStatus            bool
+	groupedUnprocessedView     bool
 	groupedRows                []groupedStatusRow
 	groupedSelectableRows      []int
 	autoMode                   bool
@@ -196,6 +197,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		ctx:                    ctx,
 		cancel:                 cancel,
 		groupedByStatus:        groupedByStatus,
+		groupedUnprocessedView: groupedStatusUnprocessedView(title),
 		autoMode:               groupedByStatus && autoMode,
 		autoLeaseOwner:         fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		autoLeaseScope:         buildListAutoLeaseScope(title),
@@ -1789,11 +1791,16 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 }
 
 func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
-	if len(m.autoBlockReasons) == 0 {
-		return m.jobs
+	baseJobs := m.jobs
+	if m.groupedByStatus && m.groupedUnprocessedView {
+		baseJobs = excludeJobsWithStatus(baseJobs, db.StatusCanceled)
 	}
-	decorated := make([]*db.Job, 0, len(m.jobs))
-	for _, job := range m.jobs {
+
+	if len(m.autoBlockReasons) == 0 {
+		return baseJobs
+	}
+	decorated := make([]*db.Job, 0, len(baseJobs))
+	for _, job := range baseJobs {
 		if job == nil {
 			decorated = append(decorated, nil)
 			continue
@@ -1808,6 +1815,29 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 		decorated = append(decorated, &copyJob)
 	}
 	return decorated
+}
+
+func groupedStatusUnprocessedView(title string) bool {
+	for _, part := range strings.Split(strings.ToLower(title), "•") {
+		if strings.TrimSpace(part) == "unprocessed" {
+			return true
+		}
+	}
+	return false
+}
+
+func excludeJobsWithStatus(jobs []*db.Job, status string) []*db.Job {
+	if len(jobs) == 0 {
+		return jobs
+	}
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == status {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	return filtered
 }
 
 func autoPilotBlockSummary(reasons map[int64]string) string {
