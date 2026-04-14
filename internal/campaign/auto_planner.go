@@ -18,11 +18,19 @@ import (
 // AutoPlacementPlan captures planner decisions for one unattended auto pass.
 type AutoPlacementPlan struct {
 	ReuseAssignments []ReuseAssignment
+	LaunchGroups     []LaunchGroup
 	LaunchJobIDs     []int64
 	// LaunchRateCentsPerHour is the projected aggregate $/hr for new instances
 	// implied by this pass's launchable candidate groups.
 	LaunchRateCentsPerHour int
 	BlockedReasons         map[int64]string
+}
+
+// LaunchGroup captures one launchable candidate group and its projected run-rate cost.
+type LaunchGroup struct {
+	JobIDs           []int64
+	CostPerHourCents int
+	Offer            *cloud.Offer
 }
 
 // AutoPlannerProfile returns the cost/time profile for unattended auto mode.
@@ -63,6 +71,34 @@ func BuildAutoPlacementPlan(
 	survivalModel *bidding.SurvivalModel,
 	minSurvival float64,
 ) (AutoPlacementPlan, error) {
+	return BuildAutoPlacementPlanWithOptions(
+		database,
+		cfg,
+		clients,
+		jobs,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		minSurvival,
+		AutoPlannerOptions(cfg),
+	)
+}
+
+// BuildAutoPlacementPlanWithOptions computes a single-pass reuse-vs-launch plan
+// for the provided queued jobs using explicit planner options.
+func BuildAutoPlacementPlanWithOptions(
+	database *sql.DB,
+	cfg *config.Config,
+	clients []cloud.Client,
+	jobs []*db.Job,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	minSurvival float64,
+	options PlanOptions,
+) (AutoPlacementPlan, error) {
 	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
 	if len(jobs) == 0 {
 		return plan, nil
@@ -88,7 +124,7 @@ func BuildAutoPlacementPlan(
 		specs,
 		minSurvival,
 		nil,
-		AutoPlannerOptions(cfg),
+		options,
 	)
 	strategyPlan, ok := plans[profile.ID]
 	if !ok {
@@ -113,62 +149,51 @@ func BuildAutoPlacementPlan(
 		}
 		applyGroupOffer(&plan, group, offer, reused)
 	}
-	plan.LaunchRateCentsPerHour = launchRateCentsPerHour(groups, strategyPlan.NewCandidate, reused)
+	plan.LaunchGroups = buildLaunchGroups(strategyPlan.NewCandidate, reused)
+	plan.LaunchRateCentsPerHour = 0
+	for _, group := range plan.LaunchGroups {
+		plan.LaunchRateCentsPerHour += group.CostPerHourCents
+		plan.LaunchJobIDs = append(plan.LaunchJobIDs, group.JobIDs...)
+	}
 
 	sort.Slice(plan.LaunchJobIDs, func(i, j int) bool { return plan.LaunchJobIDs[i] < plan.LaunchJobIDs[j] })
 	return plan, nil
 }
 
-func launchRateCentsPerHour(splitGroups []InstanceGroup, candidate *CandidateResult, reused map[int64]struct{}) int {
+func buildLaunchGroups(candidate *CandidateResult, reused map[int64]struct{}) []LaunchGroup {
 	if candidate == nil || len(candidate.Groups) == 0 || len(candidate.Offers) == 0 {
-		return 0
+		return nil
 	}
-	jobToCandidate := make(map[int64]int, len(splitGroups))
-	for candidateIdx, group := range candidate.Groups {
-		for _, job := range group.Jobs {
-			if job != nil {
-				jobToCandidate[job.ID] = candidateIdx
-			}
-		}
-	}
-
-	seenCandidate := make(map[int]struct{}, len(candidate.Groups))
-	total := 0
-	for _, splitGroup := range splitGroups {
-		if len(splitGroup.Jobs) == 0 {
+	launchGroups := make([]LaunchGroup, 0, len(candidate.Groups))
+	for idx, group := range candidate.Groups {
+		if idx < 0 || idx >= len(candidate.Offers) {
 			continue
 		}
-		hasUnreused := false
-		for _, job := range splitGroup.Jobs {
+		groupOffer := candidate.Offers[idx]
+		if groupOffer.Err != nil || groupOffer.Offer == nil {
+			continue
+		}
+		jobIDs := make([]int64, 0, len(group.Jobs))
+		for _, job := range group.Jobs {
 			if job == nil {
 				continue
 			}
-			if _, ok := reused[job.ID]; !ok {
-				hasUnreused = true
-				break
+			if _, ok := reused[job.ID]; ok {
+				continue
 			}
+			jobIDs = append(jobIDs, job.ID)
 		}
-		if !hasUnreused {
+		if len(jobIDs) == 0 {
 			continue
 		}
-		candidateIdx, ok := jobToCandidate[splitGroup.Jobs[0].ID]
-		if !ok {
-			continue
-		}
-		if _, exists := seenCandidate[candidateIdx]; exists {
-			continue
-		}
-		seenCandidate[candidateIdx] = struct{}{}
-		if candidateIdx < 0 || candidateIdx >= len(candidate.Offers) {
-			continue
-		}
-		offer := candidate.Offers[candidateIdx].Offer
-		if offer == nil {
-			continue
-		}
-		total += int(math.Round(offer.CostPerHour * 100))
+		sort.Slice(jobIDs, func(i, j int) bool { return jobIDs[i] < jobIDs[j] })
+		launchGroups = append(launchGroups, LaunchGroup{
+			JobIDs:           jobIDs,
+			CostPerHourCents: int(math.Round(groupOffer.Offer.CostPerHour * 100)),
+			Offer:            groupOffer.Offer,
+		})
 	}
-	return total
+	return launchGroups
 }
 
 func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}) {
@@ -189,10 +214,8 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 		if _, ok := reused[job.ID]; ok {
 			continue
 		}
-		if launchable {
-			plan.LaunchJobIDs = append(plan.LaunchJobIDs, job.ID)
-			continue
+		if !launchable {
+			plan.BlockedReasons[job.ID] = "planner: " + strings.TrimSpace(reason)
 		}
-		plan.BlockedReasons[job.ID] = "planner: " + strings.TrimSpace(reason)
 	}
 }

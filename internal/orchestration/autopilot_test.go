@@ -3,11 +3,15 @@ package orchestration
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T) {
@@ -20,9 +24,11 @@ func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T)
 
 	originalBuildPlan := autoPilotBuildPlan
 	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
 	t.Cleanup(func() {
 		autoPilotBuildPlan = originalBuildPlan
 		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
 	})
 
 	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
@@ -70,9 +76,11 @@ func TestRunGroupedAutoPilotPass_FallbackRelaunchesWhenPlannerReturnsNoDecisions
 
 	originalBuildPlan := autoPilotBuildPlan
 	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
 	t.Cleanup(func() {
 		autoPilotBuildPlan = originalBuildPlan
 		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
 	})
 
 	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
@@ -107,5 +115,383 @@ func TestRunGroupedAutoPilotPass_FallbackRelaunchesWhenPlannerReturnsNoDecisions
 	}
 	if result == nil {
 		t.Fatal("result is nil")
+	}
+}
+
+func TestSelectLaunchGroupsWithinHeadroom_PicksBestFitByJobsPerCost(t *testing.T) {
+	groups := []campaign.LaunchGroup{
+		{JobIDs: []int64{1, 2}, CostPerHourCents: 50},
+		{JobIDs: []int64{3}, CostPerHourCents: 99},
+		{JobIDs: []int64{4}, CostPerHourCents: 110},
+	}
+
+	accepted, rejected := selectLaunchGroupsWithinHeadroom(groups, 100)
+	if len(accepted) != 1 {
+		t.Fatalf("accepted groups = %d, want 1", len(accepted))
+	}
+	if accepted[0].CostPerHourCents != 50 {
+		t.Fatalf("accepted group cost = %d, want 50", accepted[0].CostPerHourCents)
+	}
+	if len(rejected) != 2 {
+		t.Fatalf("rejected groups = %d, want 2", len(rejected))
+	}
+}
+
+func TestSelectLaunchGroupsWithinHeadroom_NoneFit(t *testing.T) {
+	groups := []campaign.LaunchGroup{
+		{JobIDs: []int64{1}, CostPerHourCents: 150},
+		{JobIDs: []int64{2}, CostPerHourCents: 200},
+	}
+
+	accepted, rejected := selectLaunchGroupsWithinHeadroom(groups, 100)
+	if len(accepted) != 0 {
+		t.Fatalf("accepted groups = %d, want 0", len(accepted))
+	}
+	if len(rejected) != 2 {
+		t.Fatalf("rejected groups = %d, want 2", len(rejected))
+	}
+}
+
+func TestApplyAcceptedLaunchGroups_UpdatesLegacyLaunchFields(t *testing.T) {
+	plan := campaign.AutoPlacementPlan{
+		LaunchJobIDs: []int64{1, 2, 3},
+		BlockedReasons: map[int64]string{
+			1: "old reason",
+			2: "old reason",
+		},
+	}
+	groups := []campaign.LaunchGroup{
+		{JobIDs: []int64{3, 1}, CostPerHourCents: 70},
+	}
+
+	applyAcceptedLaunchGroups(&plan, groups, plan.BlockedReasons)
+	if plan.LaunchRateCentsPerHour != 70 {
+		t.Fatalf("launch rate = %d, want 70", plan.LaunchRateCentsPerHour)
+	}
+	if len(plan.LaunchJobIDs) != 2 || plan.LaunchJobIDs[0] != 1 || plan.LaunchJobIDs[1] != 3 {
+		t.Fatalf("launch job ids = %v, want [1 3]", plan.LaunchJobIDs)
+	}
+	if _, exists := plan.BlockedReasons[1]; exists {
+		t.Fatalf("blocked reason for accepted job 1 should be cleared, got %q", plan.BlockedReasons[1])
+	}
+}
+
+func TestNoRentalHeadroomReason_IncludesMatchDiagnostic(t *testing.T) {
+	mem := 80
+	job := &db.Job{GPUClass: "A100", GPUMemGB: &mem}
+	caps := []campaign.InstanceCapacity{{
+		Instance: &db.Launch{
+			GPUClass: "A100",
+			GPUMemGB: 40,
+		},
+	}}
+
+	reason := noRentalHeadroomReason(job, caps, nil)
+	if !strings.Contains(reason, "no rental headroom; running instances couldn't accept this job") {
+		t.Fatalf("reason = %q, want base message", reason)
+	}
+	if !strings.Contains(reason, "GPU memory insufficient") {
+		t.Fatalf("reason = %q, want MatchJobToInstance diagnostic", reason)
+	}
+}
+
+func TestRunGroupedAutoPilotPass_NoSubsetFitsTriggersPreferReuseRetry(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUClass:         "A100",
+		ResolvedGPUName:  "A100",
+		GPUMemGB:         80,
+		CostPerHourCents: 100,
+		DiskGB:           200,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 1.0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restoreConfig := config.SetConfigPathsForTesting(cfgPath, filepath.Join(cfgDir, "config.yaml"))
+	defer restoreConfig()
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalBuildPlanWithOptions := autoPilotBuildPlanWithOptions
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotBuildPlanWithOptions = originalBuildPlanWithOptions
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchGroups:           []campaign.LaunchGroup{{JobIDs: []int64{jobID}, CostPerHourCents: 150}},
+			LaunchJobIDs:           []int64{jobID},
+			LaunchRateCentsPerHour: 150,
+			BlockedReasons:         map[int64]string{},
+		}, nil
+	}
+
+	retryCalled := false
+	autoPilotBuildPlanWithOptions = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity, options campaign.PlanOptions) (campaign.AutoPlacementPlan, error) {
+		retryCalled = true
+		if !options.PreferReuse {
+			t.Fatalf("retry options PreferReuse = false, want true")
+		}
+		return campaign.AutoPlacementPlan{
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		t.Fatalf("autoPilotRelaunch should not be called when no subset fits and retry does not produce reuse")
+		return nil, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if !retryCalled {
+		t.Fatalf("expected PreferReuse retry call")
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+	if got := result.BlockedReasons[jobID]; !strings.Contains(got, "no subset fits") {
+		t.Fatalf("blocked reason = %q, want no-subset-fits marker", got)
+	}
+}
+
+func TestRunGroupedAutoPilotPass_RunRateAllFitLeavesLaunchScope(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobA, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train_a.py", "job a", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU jobA: %v", err)
+	}
+	jobB, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train_b.py", "job b", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU jobB: %v", err)
+	}
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 10.0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restoreConfig := config.SetConfigPathsForTesting(cfgPath, filepath.Join(cfgDir, "config.yaml"))
+	defer restoreConfig()
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchGroups: []campaign.LaunchGroup{
+				{JobIDs: []int64{jobA}, CostPerHourCents: 120},
+				{JobIDs: []int64{jobB}, CostPerHourCents: 180},
+			},
+			LaunchJobIDs:           []int64{jobA, jobB},
+			LaunchRateCentsPerHour: 300,
+			BlockedReasons:         map[int64]string{},
+		}, nil
+	}
+
+	var gotScope []int64
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		gotScope = append([]int64(nil), scope...)
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, id := range gotScope {
+		got[id] = true
+	}
+	if len(got) != 2 || !got[jobA] || !got[jobB] {
+		t.Fatalf("relaunch scope = %v, want both jobs [%d %d]", gotScope, jobA, jobB)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+}
+
+func TestRunGroupedAutoPilotPass_RunRateNoneFitBlocksAll(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobA, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train_a.py", "job a", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU jobA: %v", err)
+	}
+	jobB, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train_b.py", "job b", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU jobB: %v", err)
+	}
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 1.0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restoreConfig := config.SetConfigPathsForTesting(cfgPath, filepath.Join(cfgDir, "config.yaml"))
+	defer restoreConfig()
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalBuildPlanWithOptions := autoPilotBuildPlanWithOptions
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotBuildPlanWithOptions = originalBuildPlanWithOptions
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchGroups: []campaign.LaunchGroup{
+				{JobIDs: []int64{jobA}, CostPerHourCents: 120},
+				{JobIDs: []int64{jobB}, CostPerHourCents: 150},
+			},
+			LaunchJobIDs:           []int64{jobA, jobB},
+			LaunchRateCentsPerHour: 270,
+			BlockedReasons:         map[int64]string{},
+		}, nil
+	}
+	autoPilotBuildPlanWithOptions = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity, _ campaign.PlanOptions) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{BlockedReasons: map[int64]string{}}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		t.Fatalf("autoPilotRelaunch should not run when no subset fits")
+		return nil, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+	if got := result.BlockedReasons[jobA]; !strings.Contains(got, "no subset fits") {
+		t.Fatalf("blocked reason A = %q, want no-subset-fits marker", got)
+	}
+	if got := result.BlockedReasons[jobB]; !strings.Contains(got, "no subset fits") {
+		t.Fatalf("blocked reason B = %q, want no-subset-fits marker", got)
+	}
+}
+
+func TestRunGroupedAutoPilotPass_ReuseFallbackExecutesAssignmentsWithoutLaunch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUClass:         "A100",
+		ResolvedGPUName:  "A100",
+		GPUMemGB:         80,
+		CostPerHourCents: 100,
+		DiskGB:           200,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 1.0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restoreConfig := config.SetConfigPathsForTesting(cfgPath, filepath.Join(cfgDir, "config.yaml"))
+	defer restoreConfig()
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalBuildPlanWithOptions := autoPilotBuildPlanWithOptions
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotBuildPlanWithOptions = originalBuildPlanWithOptions
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchGroups:           []campaign.LaunchGroup{{JobIDs: []int64{jobID}, CostPerHourCents: 150}},
+			LaunchJobIDs:           []int64{jobID},
+			LaunchRateCentsPerHour: 150,
+			BlockedReasons:         map[int64]string{},
+		}, nil
+	}
+
+	autoPilotBuildPlanWithOptions = func(_ *sql.DB, _ *config.Config, jobs []*db.Job, capacities []campaign.InstanceCapacity, options campaign.PlanOptions) (campaign.AutoPlacementPlan, error) {
+		if !options.PreferReuse {
+			t.Fatalf("retry options PreferReuse = false, want true")
+		}
+		if len(jobs) == 0 || len(capacities) == 0 || capacities[0].Instance == nil {
+			t.Fatalf("expected jobs/capacities in retry")
+		}
+		return campaign.AutoPlacementPlan{
+			ReuseAssignments: []campaign.ReuseAssignment{{
+				Job:      jobs[0],
+				Instance: capacities[0],
+			}},
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+
+	submitCalls := 0
+	autoPilotSubmitJobsToInstance = func(_ context.Context, _ *sql.DB, _ *r2.Client, instanceID int64, jobs []*db.Job) error {
+		submitCalls++
+		if len(jobs) != 1 || jobs[0] == nil || jobs[0].ID != jobID {
+			t.Fatalf("submitted jobs = %#v, want [%d]", jobs, jobID)
+		}
+		if instanceID == 0 {
+			t.Fatalf("instanceID = 0, want running instance id")
+		}
+		return nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		if len(scope) != 0 {
+			t.Fatalf("expected no launch scope after reuse fallback, got %v", scope)
+		}
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if submitCalls != 1 {
+		t.Fatalf("submit calls = %d, want 1", submitCalls)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+	if result.Placed != 1 {
+		t.Fatalf("Placed = %d, want 1", result.Placed)
+	}
+	if result.Launched != 0 {
+		t.Fatalf("Launched = %d, want 0", result.Launched)
 	}
 }

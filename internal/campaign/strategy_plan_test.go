@@ -440,7 +440,7 @@ func TestPruneReuseCandidates_LimitsPoolAndKeepsStrongCandidates(t *testing.T) {
 		DiskFreeGB: 200,
 	})
 
-	candidates := pruneReuseCandidates(group, working)
+	candidates := pruneReuseCandidates(group, working, false)
 	if len(candidates) != maxReuseCandidatesPerGroup {
 		t.Fatalf("pruned candidate count = %d, want %d", len(candidates), maxReuseCandidatesPerGroup)
 	}
@@ -1316,5 +1316,35 @@ func TestBuildStrategyPlans_CheapPrefersGraceReuse(t *testing.T) {
 	}
 	if len(plan.DisplayOffers) != 1 || plan.DisplayOffers[0].Offer == nil {
 		t.Fatalf("expected display offer for reused group, got %#v", plan.DisplayOffers)
+	}
+}
+
+func TestDefaultPlanOptions_PreferReuseDisabled(t *testing.T) {
+	opts := defaultPlanOptions()
+	if opts.PreferReuse {
+		t.Fatalf("default plan options unexpectedly enable PreferReuse")
+	}
+}
+
+func TestReuseHeuristicScore_PreferReuseDisablesBusyPenalty(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{{ID: 1}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 24,
+			DLPerf:   10,
+		},
+		RunningJobCount: 3,
+		DiskFreeGB:      100,
+	}
+
+	withPenalty := reuseHeuristicScore(group, nil, cap, false)
+	withoutPenalty := reuseHeuristicScore(group, nil, cap, true)
+	if withoutPenalty-withPenalty != 60 {
+		t.Fatalf("score delta = %v, want 60", withoutPenalty-withPenalty)
 	}
 }

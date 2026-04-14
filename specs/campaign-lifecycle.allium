@@ -726,9 +726,49 @@ rule AutoPilotPass {
     @guidance
         -- Planner: internal/campaign/auto_planner.go BuildAutoPlacementPlan.
         -- Pass driver: internal/orchestration/autopilot.go RunGroupedAutoPilotPass.
+        -- When the run-rate soft target would be exceeded, autopilot now keeps a
+        -- subset of launch groups that fit remaining headroom instead of blocking
+        -- the entire launch plan.
         -- A job appearing in blocked_reasons is surfaced to the user
         -- (e.g. "waiting for donor", "no matching offers") and retried
         -- on the next autopilot tick, not this one.
+}
+
+rule AutoPilotRunRateSubset {
+    when: AutoPilotTick(unplaced_jobs)
+    requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
+
+    ensures:
+        plan.reuse_assignments.any() implies
+            plan.reuse_assignments.all(a => a.job.id not in plan.blocked_reasons.keys())
+        plan.launch_groups = GreedyFitByJobsPerCost(plan.launch_groups, plan.headroom)
+        plan.blocked_reasons.keys().all(job_id => job_id not in plan.launch_job_ids)
+
+    @guidance
+        -- Reuse assignments are zero-launch-cost and are never run-rate gated.
+        -- Launch groups are sorted by jobs-per-cost (tie: lower cost), then
+        -- accepted greedily while cumulative launch cost stays within headroom.
+        -- Rejected groups are blocked with per-group headroom reasons.
+}
+
+rule AutoPilotReusePreferredFallback {
+    when: AutoPilotTick(unplaced_jobs)
+    requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
+    requires: no launch_group in plan.launch_groups where launch_group.cost <= plan.headroom
+    requires: reusable_instances.any()
+
+    ensures:
+        retry_plan = BuildAutoPlacementPlan(unplaced_jobs, prefer_reuse=true)
+        retry_plan.reuse_assignments.any() implies
+            ApplyReuseAssignments(retry_plan.reuse_assignments)
+
+    @guidance
+        -- If no new-launch subset fits headroom, autopilot retries planning with
+        -- PreferReuse=true (busy-instance penalty disabled) so running instances
+        -- can win when compatible.
+        -- Jobs still unplaced after that retry are blocked with
+        -- "no rental headroom; running instances couldn't accept this job",
+        -- plus the first available MatchJobToInstance diagnostic.
 }
 
 -- ==========================================================================

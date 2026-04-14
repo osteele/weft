@@ -45,6 +45,7 @@ type StrategyPlan struct {
 // PlanOptions configures scoring behavior for launch planning.
 type PlanOptions struct {
 	OpportunityCostWeight float64
+	PreferReuse           bool
 }
 
 func defaultPlanOptions() PlanOptions {
@@ -130,6 +131,7 @@ type planEvaluator struct {
 	reuseInputBytes map[string]int64
 
 	opportunityCostWeight float64
+	preferReuse           bool
 }
 
 type reuseEstimateCacheEntry struct {
@@ -161,6 +163,7 @@ func newPlanEvaluator(
 		reusePredictions:      make(map[string]map[int64]estimate.DurationPrediction),
 		reuseInputBytes:       make(map[string]int64),
 		opportunityCostWeight: options.OpportunityCostWeight,
+		preferReuse:           options.PreferReuse,
 	}
 }
 
@@ -545,6 +548,7 @@ func buildStrategyPlanForSplitRaw(
 		reusable,
 		evaluator,
 		profile,
+		evaluator.preferReuse,
 		evaluator.opportunityCostWeight,
 		onProgress,
 		progressLabel,
@@ -1510,6 +1514,7 @@ func chooseReuseGroups(
 	reusable []InstanceCapacity,
 	evaluator *planEvaluator,
 	profile bidding.ScoreProfile,
+	preferReuse bool,
 	opportunityWeight float64,
 	onProgress PlanProgressFunc,
 	progressLabel string,
@@ -1521,7 +1526,7 @@ func chooseReuseGroups(
 	working := cloneInstanceCapacities(reusable)
 	var decisions []reuseGroupDecision
 	for idx, group := range splitGroups {
-		candidates := pruneReuseCandidates(group, working)
+		candidates := pruneReuseCandidates(group, working, preferReuse)
 		reportPlanProgressForLane(
 			onProgress,
 			"Checking reusable instances",
@@ -1618,7 +1623,7 @@ type reuseCandidate struct {
 	score float64
 }
 
-func pruneReuseCandidates(group InstanceGroup, working []InstanceCapacity) []reuseCandidate {
+func pruneReuseCandidates(group InstanceGroup, working []InstanceCapacity, preferReuse bool) []reuseCandidate {
 	if len(working) == 0 {
 		return nil
 	}
@@ -1632,7 +1637,7 @@ func pruneReuseCandidates(group InstanceGroup, working []InstanceCapacity) []reu
 		candidates = append(candidates, reuseCandidate{
 			idx:   idx,
 			cap:   cap,
-			score: reuseHeuristicScore(group, groupInputs, cap),
+			score: reuseHeuristicScore(group, groupInputs, cap, preferReuse),
 		})
 	}
 	if len(candidates) <= maxReuseCandidatesPerGroup {
@@ -1663,7 +1668,7 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	return true
 }
 
-func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap InstanceCapacity) float64 {
+func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap InstanceCapacity, preferReuse bool) float64 {
 	inst := cap.Instance
 	if inst == nil {
 		return math.Inf(-1)
@@ -1674,7 +1679,9 @@ func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap Instance
 		score += 1000
 	}
 	score += float64(countOverlap(groupInputs, cap.ProvisionedInputs)) * 25
-	score -= float64(cap.RunningJobCount) * 20
+	if !preferReuse {
+		score -= float64(cap.RunningJobCount) * 20
+	}
 	score += inst.DLPerf * 2
 	if inst.GPUMemGB > 0 && group.GPUMemGB > 0 {
 		headroom := inst.GPUMemGB - group.GPUMemGB

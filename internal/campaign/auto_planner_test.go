@@ -22,9 +22,6 @@ func TestApplyGroupOffer_LaunchableSkipsOnlyReusedJobs(t *testing.T) {
 
 	applyGroupOffer(&plan, group, offer, reused)
 
-	if len(plan.LaunchJobIDs) != 1 || plan.LaunchJobIDs[0] != 707 {
-		t.Fatalf("launch job ids = %v, want [707]", plan.LaunchJobIDs)
-	}
 	if len(plan.BlockedReasons) != 0 {
 		t.Fatalf("blocked reasons = %v, want none", plan.BlockedReasons)
 	}
@@ -43,9 +40,6 @@ func TestApplyGroupOffer_BlocksOnlyUnreusedJobsWhenNoOffer(t *testing.T) {
 
 	applyGroupOffer(&plan, group, offer, reused)
 
-	if len(plan.LaunchJobIDs) != 0 {
-		t.Fatalf("launch job ids = %v, want []", plan.LaunchJobIDs)
-	}
 	if got := plan.BlockedReasons[707]; got != "planner: capacity unavailable" {
 		t.Fatalf("blocked reason for 707 = %q, want %q", got, "planner: capacity unavailable")
 	}
@@ -73,5 +67,33 @@ func TestApplyGroupOffer_NoOfferEmitsConstraintAwareReason(t *testing.T) {
 	}
 	if !strings.Contains(got, "12 offers found") || !strings.Contains(got, "VRAM") {
 		t.Fatalf("blocked reason = %q, want a constraint-aware message mentioning offer count and VRAM", got)
+	}
+}
+
+func TestBuildLaunchGroups_SkipsReusedJobsAndCostsPerGroup(t *testing.T) {
+	candidate := &CandidateResult{
+		Groups: []InstanceGroup{
+			{Jobs: []*db.Job{{ID: 101}, {ID: 102}}},
+			{Jobs: []*db.Job{{ID: 103}}},
+		},
+		Offers: []GroupOffer{
+			{Offer: &cloud.Offer{CostPerHour: 0.99}},
+			{Offer: &cloud.Offer{CostPerHour: 0.50}},
+		},
+	}
+	reused := map[int64]struct{}{101: {}}
+
+	groups := buildLaunchGroups(candidate, reused)
+	if len(groups) != 2 {
+		t.Fatalf("launch groups len = %d, want 2", len(groups))
+	}
+	if got, want := groups[0].JobIDs, []int64{102}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("group 0 job ids = %v, want %v", got, want)
+	}
+	if groups[0].CostPerHourCents != 99 {
+		t.Fatalf("group 0 cost = %d, want 99", groups[0].CostPerHourCents)
+	}
+	if groups[1].CostPerHourCents != 50 {
+		t.Fatalf("group 1 cost = %d, want 50", groups[1].CostPerHourCents)
 	}
 }

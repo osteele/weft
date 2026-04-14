@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/r2"
 )
 
 type GroupedAutoPilotResult struct {
@@ -20,8 +22,10 @@ type GroupedAutoPilotResult struct {
 }
 
 var autoPilotBuildPlan = buildAutoPlacementPlan
+var autoPilotBuildPlanWithOptions = buildAutoPlacementPlanWithOptions
 
 var autoPilotRelaunch = RelaunchOrphanedJobs
+var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
 
 func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (*GroupedAutoPilotResult, error) {
 	if database == nil {
@@ -96,27 +100,87 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	oplog.Log("auto_pilot.plan", oplog.WithDetail(planDetail))
 
 	runRateTarget := cfg.AutoRunRateSoftTargetCentsPerHour()
+	reusePreferredFallback := false
 	if runRateTarget > 0 && len(plan.LaunchJobIDs) > 0 && plan.LaunchRateCentsPerHour > 0 {
 		currentRate, rateErr := db.SumActiveLaunchCostPerHourCents(database)
 		if rateErr == nil {
 			projectedRate := currentRate + plan.LaunchRateCentsPerHour
 			if projectedRate > runRateTarget {
-				reason := fmt.Sprintf(
-					"run-rate target exceeded: target %s/hr, current %s/hr + planned %s/hr = %s/hr",
-					formatRateCents(runRateTarget),
-					formatRateCents(currentRate),
-					formatRateCents(plan.LaunchRateCentsPerHour),
-					formatRateCents(projectedRate),
-				)
-				for _, jobID := range plan.LaunchJobIDs {
-					blockedReasons[jobID] = reason
+				headroom := max(0, runRateTarget-currentRate)
+				acceptedGroups, rejectedGroups := selectLaunchGroupsWithinHeadroom(plan.LaunchGroups, headroom)
+				oplog.Log("auto_pilot.run_rate_subset",
+					oplog.WithDetailf(
+						"headroom=%s/hr accepted_groups=%d rejected_groups=%d accepted_rate=%s/hr rejected_rate=%s/hr",
+						formatRateCents(headroom),
+						len(acceptedGroups),
+						len(rejectedGroups),
+						formatRateCents(sumLaunchGroupCost(acceptedGroups)),
+						formatRateCents(sumLaunchGroupCost(rejectedGroups)),
+					))
+				if len(acceptedGroups) > 0 {
+					applyAcceptedLaunchGroups(&plan, acceptedGroups, blockedReasons)
+					for _, group := range rejectedGroups {
+						reason := fmt.Sprintf(
+							"run-rate headroom exhausted (%s/hr free, this group needs %s/hr)",
+							formatRateCents(headroom),
+							formatRateCents(group.CostPerHourCents),
+						)
+						for _, jobID := range group.JobIDs {
+							blockedReasons[jobID] = reason
+						}
+					}
+				} else {
+					cheapest := cheapestLaunchGroupCost(plan.LaunchGroups)
+					if cheapest > 0 && headroom < cheapest && len(capacities) > 0 {
+						retryOptions := campaign.AutoPlannerOptions(cfg)
+						retryOptions.PreferReuse = true
+						retryPlan, retryErr := autoPilotBuildPlanWithOptions(database, cfg, unplaced, capacities, retryOptions)
+						if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
+							reusePreferredFallback = true
+							plan.ReuseAssignments = retryPlan.ReuseAssignments
+							plan.LaunchGroups = nil
+							plan.LaunchJobIDs = nil
+							plan.LaunchRateCentsPerHour = 0
+							plan.BlockedReasons = retryPlan.BlockedReasons
+							for jobID, reason := range retryPlan.BlockedReasons {
+								if strings.TrimSpace(reason) != "" {
+									blockedReasons[jobID] = reason
+								}
+							}
+							for _, job := range unplaced {
+								if job == nil {
+									continue
+								}
+								if _, exists := blockedReasons[job.ID]; exists {
+									continue
+								}
+								reason := noRentalHeadroomReason(job, capacities, r2Client)
+								blockedReasons[job.ID] = reason
+								plan.BlockedReasons[job.ID] = reason
+							}
+						}
+					}
+					if !reusePreferredFallback {
+						reason := fmt.Sprintf(
+							"run-rate target exceeded (no subset fits): target %s/hr, current %s/hr + planned %s/hr = %s/hr (headroom %s/hr, cheapest group %s/hr)",
+							formatRateCents(runRateTarget),
+							formatRateCents(currentRate),
+							formatRateCents(plan.LaunchRateCentsPerHour),
+							formatRateCents(projectedRate),
+							formatRateCents(headroom),
+							formatRateCents(cheapest),
+						)
+						for _, jobID := range plan.LaunchJobIDs {
+							blockedReasons[jobID] = reason
+						}
+						return &GroupedAutoPilotResult{
+							Placed:         0,
+							Launched:       0,
+							LaunchedClass:  "",
+							BlockedReasons: blockedReasons,
+						}, nil
+					}
 				}
-				return &GroupedAutoPilotResult{
-					Placed:         0,
-					Launched:       0,
-					LaunchedClass:  "",
-					BlockedReasons: blockedReasons,
-				}, nil
 			}
 		}
 	}
@@ -126,7 +190,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if assignment.Job == nil || assignment.Instance.Instance == nil {
 			continue
 		}
-		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
+		if err := autoPilotSubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
 			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
 				oplog.WithError(err),
 				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
@@ -276,6 +340,139 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		LaunchedClass:  launchedClassFromResult(database, result.InstanceIDs),
 		BlockedReasons: blockedReasons,
 	}, nil
+}
+
+func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom int) ([]campaign.LaunchGroup, []campaign.LaunchGroup) {
+	if len(groups) == 0 || headroom <= 0 {
+		return nil, append([]campaign.LaunchGroup(nil), groups...)
+	}
+	sorted := append([]campaign.LaunchGroup(nil), groups...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		a := sorted[i]
+		b := sorted[j]
+		ratioA := launchGroupValue(a)
+		ratioB := launchGroupValue(b)
+		if ratioA != ratioB {
+			return ratioA > ratioB
+		}
+		if a.CostPerHourCents != b.CostPerHourCents {
+			return a.CostPerHourCents < b.CostPerHourCents
+		}
+		return minLaunchGroupJobID(a) < minLaunchGroupJobID(b)
+	})
+
+	accepted := make([]campaign.LaunchGroup, 0, len(sorted))
+	rejected := make([]campaign.LaunchGroup, 0, len(sorted))
+	used := 0
+	for _, group := range sorted {
+		if group.CostPerHourCents <= 0 {
+			continue
+		}
+		if used+group.CostPerHourCents <= headroom {
+			accepted = append(accepted, group)
+			used += group.CostPerHourCents
+			continue
+		}
+		rejected = append(rejected, group)
+	}
+	return accepted, rejected
+}
+
+func applyAcceptedLaunchGroups(plan *campaign.AutoPlacementPlan, groups []campaign.LaunchGroup, blockedReasons map[int64]string) {
+	plan.LaunchGroups = append([]campaign.LaunchGroup(nil), groups...)
+	plan.LaunchJobIDs = nil
+	plan.LaunchRateCentsPerHour = 0
+	for _, group := range groups {
+		plan.LaunchRateCentsPerHour += group.CostPerHourCents
+		plan.LaunchJobIDs = append(plan.LaunchJobIDs, group.JobIDs...)
+		for _, jobID := range group.JobIDs {
+			delete(blockedReasons, jobID)
+		}
+	}
+	sort.Slice(plan.LaunchJobIDs, func(i, j int) bool { return plan.LaunchJobIDs[i] < plan.LaunchJobIDs[j] })
+}
+
+func cheapestLaunchGroupCost(groups []campaign.LaunchGroup) int {
+	cheapest := 0
+	for _, group := range groups {
+		if group.CostPerHourCents <= 0 {
+			continue
+		}
+		if cheapest == 0 || group.CostPerHourCents < cheapest {
+			cheapest = group.CostPerHourCents
+		}
+	}
+	return cheapest
+}
+
+func launchGroupValue(group campaign.LaunchGroup) float64 {
+	cost := group.CostPerHourCents
+	if cost <= 0 {
+		return 0
+	}
+	return float64(len(group.JobIDs)) / float64(cost)
+}
+
+func sumLaunchGroupCost(groups []campaign.LaunchGroup) int {
+	total := 0
+	for _, group := range groups {
+		if group.CostPerHourCents > 0 {
+			total += group.CostPerHourCents
+		}
+	}
+	return total
+}
+
+func minLaunchGroupJobID(group campaign.LaunchGroup) int64 {
+	if len(group.JobIDs) == 0 {
+		return 0
+	}
+	minID := group.JobIDs[0]
+	for _, id := range group.JobIDs[1:] {
+		if id < minID {
+			minID = id
+		}
+	}
+	return minID
+}
+
+func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {
+	const base = "no rental headroom; running instances couldn't accept this job"
+	if job == nil || len(capacities) == 0 {
+		return base
+	}
+	sorted := append([]campaign.InstanceCapacity(nil), capacities...)
+	sort.Slice(sorted, func(i, j int) bool {
+		a := int64(0)
+		b := int64(0)
+		if sorted[i].Instance != nil {
+			a = sorted[i].Instance.ID
+		}
+		if sorted[j].Instance != nil {
+			b = sorted[j].Instance.ID
+		}
+		return a < b
+	})
+	firstReason := ""
+	for _, cap := range sorted {
+		ok := false
+		reason := ""
+		if r2Client != nil {
+			ok, reason = campaign.MatchJobToInstanceWithUV(job, cap, r2Client)
+		} else {
+			ok, reason = campaign.MatchJobToInstance(job, cap)
+		}
+		if ok {
+			return base
+		}
+		if firstReason == "" && strings.TrimSpace(reason) != "" {
+			firstReason = reason
+		}
+	}
+	if firstReason != "" {
+		return base + ": " + firstReason
+	}
+	return base
 }
 
 func countRunningJobs(jobs []*db.Job) int {

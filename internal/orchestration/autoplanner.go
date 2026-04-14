@@ -14,6 +14,16 @@ func buildAutoPlacementPlan(
 	jobs []*db.Job,
 	reusable []campaign.InstanceCapacity,
 ) (campaign.AutoPlacementPlan, error) {
+	return buildAutoPlacementPlanWithOptions(database, cfg, jobs, reusable, campaign.AutoPlannerOptions(cfg))
+}
+
+func buildAutoPlacementPlanWithOptions(
+	database *sql.DB,
+	cfg *config.Config,
+	jobs []*db.Job,
+	reusable []campaign.InstanceCapacity,
+	options campaign.PlanOptions,
+) (campaign.AutoPlacementPlan, error) {
 	if cfg == nil {
 		var err error
 		cfg, err = config.Load()
@@ -28,7 +38,7 @@ func buildAutoPlacementPlan(
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
 	survivalModel := buildSurvivalModel(database)
-	return campaign.BuildAutoPlacementPlan(
+	return campaign.BuildAutoPlacementPlanWithOptions(
 		database,
 		cfg,
 		clients,
@@ -38,5 +48,6 @@ func buildAutoPlacementPlan(
 		overheadModel,
 		survivalModel,
 		0,
+		options,
 	)
 }
