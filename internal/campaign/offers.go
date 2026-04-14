@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 )
@@ -368,7 +370,36 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 	s.mu.Unlock()
 
 	go func() {
-		future.result.offers, future.result.err = cloud.SearchAllProviders(s.clients, constraints)
+		constraintsText := formatProviderSearchConstraints(constraints)
+		oplog.Log("cloud.offer_search.start",
+			oplog.WithDetail(fmt.Sprintf("constraints=%s providers=%d", constraintsText, len(s.clients))))
+
+		offers, err, diagnostics := searchAllProvidersWithDiagnostics(s.clients, constraints)
+		future.result.offers = offers
+		future.result.err = err
+
+		totalOffers := 0
+		successProviders := 0
+		for _, d := range diagnostics {
+			if d.err != nil {
+				oplog.Log("cloud.offer_search.provider",
+					oplog.WithDetail(fmt.Sprintf("provider=%s constraints=%s error=%v", d.provider, constraintsText, d.err)))
+				continue
+			}
+			successProviders++
+			totalOffers += len(d.offers)
+			oplog.Log("cloud.offer_search.provider",
+				oplog.WithDetail(fmt.Sprintf("provider=%s constraints=%s offers=%d", d.provider, constraintsText, len(d.offers))))
+		}
+
+		if err != nil {
+			oplog.Log("cloud.offer_search.done",
+				oplog.WithDetail(fmt.Sprintf("constraints=%s providers_ok=%d total_offers=%d", constraintsText, successProviders, totalOffers)),
+				oplog.WithError(err))
+		} else {
+			oplog.Log("cloud.offer_search.done",
+				oplog.WithDetail(fmt.Sprintf("constraints=%s providers_ok=%d total_offers=%d", constraintsText, successProviders, totalOffers)))
+		}
 		close(future.done)
 	}()
 	return future
@@ -380,6 +411,78 @@ func constraintKey(c cloud.OfferConstraints) string {
 	return fmt.Sprintf("%s/%d/%d/%d/%.2f/%d",
 		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
 		c.MinReliability, c.MinCPUCoresEffective)
+}
+
+type providerSearchResult struct {
+	provider cloud.Provider
+	offers   []cloud.Offer
+	err      error
+}
+
+func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
+	parts := []string{}
+	if base := FormatOfferConstraints(c); base != "" {
+		parts = append(parts, base)
+	}
+	numGPUs := c.NumGPUs
+	if numGPUs == 0 {
+		numGPUs = 1
+	}
+	parts = append(parts, fmt.Sprintf("num_gpus=%d", numGPUs))
+	if c.InstanceType != "" {
+		parts = append(parts, "instance_type="+c.InstanceType)
+	}
+	if len(c.ExcludeGeos) > 0 {
+		geos := append([]string(nil), c.ExcludeGeos...)
+		sort.Strings(geos)
+		parts = append(parts, "exclude_geos="+strings.Join(geos, ","))
+	}
+	// These provider-side defaults are always injected by Vast.ai search.
+	parts = append(parts, "direct_port_count>=1", "verified=true", "gpu_frac=1")
+	return strings.Join(parts, " ")
+}
+
+func searchAllProvidersWithDiagnostics(clients []cloud.Client, constraints cloud.OfferConstraints) ([]cloud.Offer, error, []providerSearchResult) {
+	type result struct {
+		provider cloud.Provider
+		offers   []cloud.Offer
+		err      error
+	}
+	results := make([]result, len(clients))
+	var wg sync.WaitGroup
+
+	for i, c := range clients {
+		wg.Add(1)
+		go func(idx int, client cloud.Client) {
+			defer wg.Done()
+			offers, err := client.SearchOffers(constraints)
+			results[idx] = result{
+				provider: client.Provider(),
+				offers:   offers,
+				err:      err,
+			}
+		}(i, c)
+	}
+	wg.Wait()
+
+	diags := make([]providerSearchResult, len(results))
+	var allOffers []cloud.Offer
+	var lastErr error
+	successCount := 0
+
+	for i, r := range results {
+		diags[i] = providerSearchResult{provider: r.provider, offers: r.offers, err: r.err}
+		if r.err != nil {
+			lastErr = r.err
+			continue
+		}
+		successCount++
+		allOffers = append(allOffers, r.offers...)
+	}
+	if successCount == 0 && lastErr != nil {
+		return nil, lastErr, diags
+	}
+	return allOffers, nil, diags
 }
 
 // FetchGroupRawOffers searches cloud providers for all offers per group, in parallel.
@@ -667,6 +770,7 @@ func MapOffersToSplitGroups(splitGroups []InstanceGroup, result CandidateResult)
 			mapped[si].Offer = result.Offers[ci].Offer
 			mapped[si].SurvivalProb = result.Offers[ci].SurvivalProb
 			mapped[si].RejectedGroups = result.Offers[ci].RejectedGroups
+			mapped[si].FilterStats = result.Offers[ci].FilterStats
 			mapped[si].Err = result.Offers[ci].Err
 		}
 	}

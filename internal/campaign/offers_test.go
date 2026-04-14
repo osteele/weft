@@ -409,6 +409,36 @@ func TestMapOffersToSplitGroups_SplitCandidate(t *testing.T) {
 	}
 }
 
+func TestMapOffersToSplitGroups_PreservesFilterStats(t *testing.T) {
+	splitGroups := []InstanceGroup{
+		{GPUClass: "RTX-5090", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+	}
+	result := CandidateResult{
+		Label:  "split",
+		Groups: splitGroups,
+		Offers: []GroupOffer{
+			{
+				Group: splitGroups[0],
+				Offer: &cloud.Offer{ProviderID: "offer-1"},
+				FilterStats: OfferFilterStats{
+					RawCount:      19,
+					AfterVRAM:     19,
+					AfterCUDA:     0,
+					AfterSurvival: 0,
+				},
+			},
+		},
+	}
+
+	mapped := MapOffersToSplitGroups(splitGroups, result)
+	if len(mapped) != 1 {
+		t.Fatalf("expected 1 mapped offer, got %d", len(mapped))
+	}
+	if mapped[0].FilterStats.RawCount != 19 || mapped[0].FilterStats.AfterCUDA != 0 {
+		t.Fatalf("mapped filter stats were not preserved: %#v", mapped[0].FilterStats)
+	}
+}
+
 func TestMapOffersToSplitGroups_UnmatchedGroupGetsNilOffer(t *testing.T) {
 	// Split group with a job not in any candidate group
 	splitGroups := []InstanceGroup{
