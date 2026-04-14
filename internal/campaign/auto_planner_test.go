@@ -97,3 +97,46 @@ func TestBuildLaunchGroups_SkipsReusedJobsAndCostsPerGroup(t *testing.T) {
 		t.Fatalf("group 1 cost = %d, want 50", groups[1].CostPerHourCents)
 	}
 }
+
+func TestApplyGroupOffer_MappedStatsDoNotRegressToProviderEmpty(t *testing.T) {
+	split := []InstanceGroup{
+		{
+			GPUClass: "RTX-5090",
+			GPUMemGB: 20,
+			Jobs:     []*db.Job{{ID: 1229}},
+		},
+	}
+	result := CandidateResult{
+		Groups: split,
+		Offers: []GroupOffer{
+			{
+				Group: split[0],
+				// Simulate: provider search found offers, but they were filtered later.
+				FilterStats: OfferFilterStats{
+					RawCount:         20,
+					AfterVRAM:        20,
+					AfterCUDA:        0,
+					CUDAImage:        "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
+					CUDAImageVersion: 12.4,
+					CUDAMinRequired:  12.8,
+					CUDAExampleGPU:   "RTX 5090",
+				},
+			},
+		},
+	}
+	mapped := MapOffersToSplitGroups(split, result)
+	if len(mapped) != 1 {
+		t.Fatalf("mapped len = %d, want 1", len(mapped))
+	}
+
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	applyGroupOffer(&plan, split[0], mapped[0], nil)
+
+	reason := plan.BlockedReasons[1229]
+	if strings.Contains(reason, "no offers from providers") {
+		t.Fatalf("blocked reason regressed to provider-empty despite RawCount>0: %q", reason)
+	}
+	if !strings.Contains(reason, "CUDA compatibility") {
+		t.Fatalf("blocked reason should mention CUDA compatibility, got: %q", reason)
+	}
+}
