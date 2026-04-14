@@ -745,6 +745,32 @@ rule TUIPeriodicSync {
         --     are elided). If all jobs in a section are elided, render
         --     "Section (N)" (without a colon), preserving section order and
         --     omitting blank separator lines between abbreviated sections.
+        --
+        -- Grouped status buckets (in display order):
+        --   - Running:   job.status in {running, starting}.
+        --   - Paused:    job.status = paused. Paused jobs are NOT counted as
+        --               running in the footer "N jobs running" summary.
+        --   - Queued:    placed job.status = queued AND a sibling on the same
+        --               launch is in Running/Starting. The sibling membership
+        --               is computed from actual job statuses in the current
+        --               snapshot, not from LaunchLiveState.JobProgressID
+        --               (which can go stale).
+        --   - Launching: placed job whose launch is Planned/Launching, OR
+        --               rental-assigned job whose launch is Running but no
+        --               sibling job is genuinely Running/Starting yet
+        --               (agent-dispatch window).
+        --   - Unplaced:  queued/pending jobs with no target, plus jobs whose
+        --               launch has Failed/Cancelled, plus stale pending
+        --               placements without a launch.
+        --   - Completed / Failed / Killed/Canceled: terminal buckets.
+        --
+        -- Footer "N jobs running" counts rows where status in
+        -- {running, starting} AND effective_target_kind != unplaced. Paused
+        -- jobs are excluded so the count agrees with the Running section.
+        --
+        -- ETA line: the "with +1 instance" suffix is suppressed unless a
+        -- concrete improved estimate is available; otherwise the hint is
+        -- not actionable and clutters the footer.
 }
 
 -- ==========================================================================

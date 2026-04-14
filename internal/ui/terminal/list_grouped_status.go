@@ -60,6 +60,7 @@ func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]
 
 func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
+	paused := make([]*db.Job, 0)
 	launching := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
 	unplaced := make([]*db.Job, 0)
@@ -67,13 +68,29 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 	failures := make([]*db.Job, 0)
 	killedCanceled := make([]*db.Job, 0)
 
+	// Launch-active set is derived from actual job statuses rather than
+	// LaunchLiveState.JobProgressID, which can point at a job that has
+	// since finished or fallen back to queued.
+	launchesWithActiveJob := make(map[int64]bool)
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil {
+			continue
+		}
+		switch job.EffectiveStatus() {
+		case db.StatusRunning, db.StatusStarting:
+			launchesWithActiveJob[*job.LaunchID] = true
+		}
+	}
+
 	for _, job := range jobs {
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job, launchStatusByID, launchLiveByID, now) {
+		switch groupedStatusBucket(job, launchStatusByID, launchesWithActiveJob, now) {
 		case "running":
 			running = append(running, job)
+		case "paused":
+			paused = append(paused, job)
 		case "launching":
 			launching = append(launching, job)
 		case "queued":
@@ -91,6 +108,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 
 	sections := []groupedStatusSection{
 		{title: "Running", key: "running", jobs: running},
+		{title: "Paused", key: "paused", jobs: paused},
 		{title: "Queued", key: "queued", jobs: queued},
 		{title: "Launching", key: "launching", jobs: launching},
 		{title: "Unplaced", key: "unplaced", jobs: unplaced},
@@ -314,11 +332,13 @@ func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
 	return "blocked: " + strings.TrimSpace(job.QueueBlockedReason)
 }
 
-func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
+func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, now time.Time) string {
 	status := job.EffectiveStatus()
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
 		return "running"
+	case db.StatusPaused:
+		return "paused"
 	case db.StatusPendingPlacement:
 		if groupedStatusPendingPlacementLooksStale(job, now) {
 			return "unplaced"
@@ -340,12 +360,14 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchL
 		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
 			return "unplaced"
 		case db.LaunchStatusRunning:
-			// Instance VM is up but the agent may not yet have dispatched
-			// this job. If no other job is the active workload on the
-			// instance, treat this job as still launching.
-			if !anotherJobActiveOnLaunch(job, launchLiveByID) {
-				return "launching"
+			// Instance VM is up. If a sibling job on this launch is
+			// genuinely Running/Starting, this job is queued behind it;
+			// otherwise the agent hasn't dispatched any job yet, so
+			// classify as still launching.
+			if job.LaunchID != nil && launchesWithActiveJob[*job.LaunchID] {
+				return "queued"
 			}
+			return "launching"
 		}
 		return "queued"
 	case db.StatusKilled, db.StatusCanceled:
@@ -426,17 +448,6 @@ func groupedStatusOutcomeSuffix(job *db.Job, sectionTitle string) string {
 	default:
 		return ""
 	}
-}
-
-func anotherJobActiveOnLaunch(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState) bool {
-	if job == nil || job.LaunchID == nil {
-		return false
-	}
-	live := launchLiveByID[*job.LaunchID]
-	if live == nil {
-		return false
-	}
-	return live.JobProgressID > 0 && live.JobProgressID != job.ID
 }
 
 func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {

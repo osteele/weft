@@ -79,14 +79,14 @@ func TestFormatETAApprox(t *testing.T) {
 	}
 }
 
-func TestFormatETALine_ShowsNewInstanceWithoutEstimateWhenNotBetter(t *testing.T) {
+func TestFormatETALine_OmitsNewInstanceWhenNotBetter(t *testing.T) {
 	line := formatETALine(etaResult{
 		ETACurrent:     estimate.Constant(5 * time.Hour),
 		ETAWithNewInst: estimate.Constant(5*time.Hour + 4*time.Minute),
 		HasQueued:      true,
 	})
-	if line != "ETA: ~5h  ·  with +1 instance" {
-		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h  ·  with +1 instance")
+	if line != "ETA: ~5h" {
+		t.Fatalf("formatETALine() = %q, want %q", line, "ETA: ~5h")
 	}
 }
 

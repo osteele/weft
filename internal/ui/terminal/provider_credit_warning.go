@@ -219,9 +219,9 @@ func countRunningJobsInDB(database *sql.DB) (int, error) {
 		SELECT COUNT(*)
 		FROM job_status
 		WHERE tombstoned = 0
-		  AND status IN (?, ?, ?)
+		  AND status IN (?, ?)
 		  AND effective_target_kind != ?`,
-		dbpkg.StatusRunning, dbpkg.StatusStarting, dbpkg.StatusPaused,
+		dbpkg.StatusRunning, dbpkg.StatusStarting,
 		string(dbpkg.JobTargetUnplaced),
 	).Scan(&running)
 	if err != nil {

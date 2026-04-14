@@ -367,47 +367,52 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 		QueuedAt:    4_900,
 	}
 
+	siblingRunning := &db.Job{
+		ID:          99,
+		Status:      db.StatusRunning,
+		LaunchID:    &launchID,
+		Project:     "proj",
+		Description: "sibling running",
+	}
+
 	cases := []struct {
 		name         string
 		launchStatus string
 		liveState    map[int64]*db.LaunchLiveState
+		siblings     []*db.Job
 		wantSection  string
 	}{
-		{"planned", db.LaunchStatusPlanned, nil, "Launching (1):"},
-		{"launching", db.LaunchStatusLaunching, nil, "Launching (1):"},
-		// Instance VM is up but the agent has not yet dispatched any job:
-		// the queued job is still in the agent-startup window.
-		{"running_no_active_job", db.LaunchStatusRunning, nil, "Launching (1):"},
-		// Same, but live state is loaded with no active job recorded.
+		{"planned", db.LaunchStatusPlanned, nil, nil, "Launching (1):"},
+		{"launching", db.LaunchStatusLaunching, nil, nil, "Launching (1):"},
+		// Instance VM is up but no sibling is genuinely running: treat as
+		// still launching (agent hasn't dispatched yet).
+		{"running_no_active_job", db.LaunchStatusRunning, nil, nil, "Launching (1):"},
+		// Stale JobProgressID must not matter — without a genuinely
+		// running sibling we still bucket as launching.
 		{
-			"running_live_state_idle",
-			db.LaunchStatusRunning,
-			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID}},
-			"Launching (1):",
-		},
-		// Another job (id=99) is the active workload on the instance, so this
-		// job is queued behind it.
-		{
-			"running_other_job_active",
+			"running_stale_progress_id",
 			db.LaunchStatusRunning,
 			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, JobProgressID: 99}},
-			"Queued (1):",
-		},
-		// This job is itself the active workload — we expect status to be
-		// running by then, but if it lags, treat as launching.
-		{
-			"running_self_active",
-			db.LaunchStatusRunning,
-			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, JobProgressID: job.ID}},
+			nil,
 			"Launching (1):",
 		},
-		{"failed", db.LaunchStatusFailed, nil, "Unplaced (1):"},
-		{"cancelled", db.LaunchStatusCancelled, nil, "Unplaced (1):"},
+		// A sibling is actually Running on this launch, so this job is
+		// queued behind it.
+		{
+			"running_sibling_active",
+			db.LaunchStatusRunning,
+			nil,
+			[]*db.Job{siblingRunning},
+			"Queued (1):",
+		},
+		{"failed", db.LaunchStatusFailed, nil, nil, "Unplaced (1):"},
+		{"cancelled", db.LaunchStatusCancelled, nil, nil, "Unplaced (1):"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			jobs := append([]*db.Job{job}, tc.siblings...)
 			out := renderJobListGroupedStatusPlainAt(
-				[]*db.Job{job},
+				jobs,
 				0,
 				tc.liveState,
 				map[int64]string{launchID: tc.launchStatus},
@@ -417,6 +422,20 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 				t.Fatalf("expected %q for launch status %q, got:\n%s", tc.wantSection, tc.launchStatus, out)
 			}
 		})
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_PausedJobBucketsToPausedSection(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{ID: 81, Status: db.StatusPaused, Host: "cool30", Project: "proj", Description: "paused job"},
+	}
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	if !strings.Contains(out, "Paused (1):") {
+		t.Fatalf("expected Paused section, got:\n%s", out)
+	}
+	if strings.Contains(out, "Running (") {
+		t.Fatalf("did not expect Running section for paused job, got:\n%s", out)
 	}
 }
 

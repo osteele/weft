@@ -120,11 +120,8 @@ func formatETALine(result etaResult) string {
 		return ""
 	}
 	line := "ETA: " + result.ETACurrent.FormatWithBounds()
-	if result.HasQueued {
-		line += "  ·  with +1 instance"
-		if result.ETAWithNewInst.Mean > 0 && result.ETAWithNewInst.Mean < result.ETACurrent.Mean {
-			line += ": " + result.ETAWithNewInst.FormatWithBounds()
-		}
+	if result.HasQueued && result.ETAWithNewInst.Mean > 0 && result.ETAWithNewInst.Mean < result.ETACurrent.Mean {
+		line += "  ·  with +1 instance: " + result.ETAWithNewInst.FormatWithBounds()
 	}
 	return line
 }
