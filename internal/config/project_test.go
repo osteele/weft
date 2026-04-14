@@ -211,3 +211,30 @@ func TestProjectOutputDirs(t *testing.T) {
 		}
 	})
 }
+
+func TestProjectAutoPilotConfig(t *testing.T) {
+	t.Run("defaults when absent", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if got := ProjectAutoPilotRebalanceEnabled(tmpDir); !got {
+			t.Fatalf("ProjectAutoPilotRebalanceEnabled() = %v, want true", got)
+		}
+		if got := ProjectAutoPilotRebalanceCostCeiling(tmpDir); got != 1.10 {
+			t.Fatalf("ProjectAutoPilotRebalanceCostCeiling() = %v, want 1.10", got)
+		}
+	})
+
+	t.Run("reads values from config", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := "[autopilot]\nrebalance_enabled = false\nrebalance_cost_ceiling = 1.25\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, ".weft.toml"), []byte(cfgContent), 0o644); err != nil {
+			t.Fatalf("write .weft.toml: %v", err)
+		}
+
+		if got := ProjectAutoPilotRebalanceEnabled(tmpDir); got {
+			t.Fatalf("ProjectAutoPilotRebalanceEnabled() = %v, want false", got)
+		}
+		if got := ProjectAutoPilotRebalanceCostCeiling(tmpDir); got != 1.25 {
+			t.Fatalf("ProjectAutoPilotRebalanceCostCeiling() = %v, want 1.25", got)
+		}
+	})
+}

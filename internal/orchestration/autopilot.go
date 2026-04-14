@@ -16,6 +16,7 @@ import (
 
 type GroupedAutoPilotResult struct {
 	Placed         int
+	Rebalanced     int
 	Launched       int
 	LaunchedClass  string
 	BlockedReasons map[int64]string
@@ -55,7 +56,16 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		unplaced = append(unplaced, job)
 	}
 	if len(unplaced) == 0 {
-		return &GroupedAutoPilotResult{}, nil
+		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+			Apply:     true,
+			Operation: "auto_pilot.rebalance",
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &GroupedAutoPilotResult{
+			Rebalanced: len(rebalanceResult.Moves),
+		}, nil
 	}
 
 	cfg, err := config.Load()
@@ -200,6 +210,16 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		placed++
 	}
 
+	rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+		Apply:     true,
+		R2Client:  r2Client,
+		Operation: "auto_pilot.rebalance",
+	})
+	if err != nil {
+		return nil, err
+	}
+	rebalanced := len(rebalanceResult.Moves)
+
 	remaining, err := db.ListUnplacedJobs(database)
 	if err != nil {
 		return nil, err
@@ -246,6 +266,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
 		return &GroupedAutoPilotResult{
 			Placed:         placed,
+			Rebalanced:     rebalanced,
 			Launched:       0,
 			LaunchedClass:  "",
 			BlockedReasons: blockedReasons,
@@ -270,6 +291,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if result == nil {
 		return &GroupedAutoPilotResult{
 			Placed:         placed,
+			Rebalanced:     rebalanced,
 			Launched:       0,
 			LaunchedClass:  "",
 			BlockedReasons: blockedReasons,
@@ -336,6 +358,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	return &GroupedAutoPilotResult{
 		Placed:         placed,
+		Rebalanced:     rebalanced,
 		Launched:       len(result.InstanceIDs),
 		LaunchedClass:  launchedClassFromResult(database, result.InstanceIDs),
 		BlockedReasons: blockedReasons,

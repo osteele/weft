@@ -171,3 +171,10 @@ func imageSupremum(a, b string) (merged string, ok bool) {
 	}
 	return b, true
 }
+
+// ImagesCompatible reports whether two job/instance images are mutually
+// compatible under the same rules used by launch grouping and merge logic.
+func ImagesCompatible(a, b string) bool {
+	_, ok := imageSupremum(a, b)
+	return ok
+}

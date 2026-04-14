@@ -19,10 +19,11 @@ const (
 
 // ProjectConfig holds per-project configuration loaded from .weft.toml.
 type ProjectConfig struct {
-	Sync    ProjectSyncConfig    `yaml:"sync" toml:"sync"`
-	Outputs ProjectOutputsConfig `yaml:"outputs" toml:"outputs"`
-	Cloud   ProjectCloudConfig   `yaml:"cloud" toml:"cloud"`
-	Inputs  []string             `yaml:"inputs" toml:"inputs"` // e.g. ["hf:gpt2", "hf:meta-llama/Llama-3.1-8B"]
+	Sync      ProjectSyncConfig      `yaml:"sync" toml:"sync"`
+	Outputs   ProjectOutputsConfig   `yaml:"outputs" toml:"outputs"`
+	Cloud     ProjectCloudConfig     `yaml:"cloud" toml:"cloud"`
+	AutoPilot ProjectAutoPilotConfig `yaml:"autopilot" toml:"autopilot"`
+	Inputs    []string               `yaml:"inputs" toml:"inputs"` // e.g. ["hf:gpt2", "hf:meta-llama/Llama-3.1-8B"]
 }
 
 // ProjectCloudConfig holds per-project cloud instance settings.
@@ -30,6 +31,21 @@ type ProjectCloudConfig struct {
 	// Image overrides the default Docker image for cloud instances.
 	Image string `yaml:"image" toml:"image"`
 }
+
+// ProjectAutoPilotConfig holds per-project autopilot tuning.
+type ProjectAutoPilotConfig struct {
+	// RebalanceEnabled controls queue re-balance across existing instances.
+	// nil defaults to true.
+	RebalanceEnabled *bool `yaml:"rebalance_enabled" toml:"rebalance_enabled"`
+	// RebalanceCostCeiling caps destination/source cost ratio for re-balance.
+	// Zero or negative uses default 1.10.
+	RebalanceCostCeiling float64 `yaml:"rebalance_cost_ceiling" toml:"rebalance_cost_ceiling"`
+}
+
+const (
+	defaultRebalanceEnabled     = true
+	defaultRebalanceCostCeiling = 1.10
+)
 
 // ProjectOutputsConfig holds output collection settings for convention-based output discovery.
 type ProjectOutputsConfig struct {
@@ -166,6 +182,26 @@ func ProjectCloudImage(localDir string) string {
 		return cfg.Cloud.Image
 	}
 	return ""
+}
+
+// ProjectAutoPilotRebalanceEnabled returns whether queue re-balance is enabled
+// for the project at localDir. Defaults to true when unset or no config exists.
+func ProjectAutoPilotRebalanceEnabled(localDir string) bool {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil && cfg.AutoPilot.RebalanceEnabled != nil {
+		return *cfg.AutoPilot.RebalanceEnabled
+	}
+	return defaultRebalanceEnabled
+}
+
+// ProjectAutoPilotRebalanceCostCeiling returns the re-balance cost ceiling for
+// the project at localDir. Defaults to 1.10 when unset or invalid.
+func ProjectAutoPilotRebalanceCostCeiling(localDir string) float64 {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		if v := cfg.AutoPilot.RebalanceCostCeiling; v > 0 {
+			return v
+		}
+	}
+	return defaultRebalanceCostCeiling
 }
 
 // loadProjectConfigOrWarn loads the project config, logging a warning on error.

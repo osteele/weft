@@ -120,6 +120,7 @@ type listSyncWorkerResultMsg struct {
 }
 type listAutoPilotDoneMsg struct {
 	placed         int
+	rebalanced     int
 	launched       int
 	launchedClass  string
 	blockedReasons map[int64]string
@@ -539,7 +540,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoPersistentBlocked = summary
 			m.autoPersistentBlockedN = len(msg.blockedReasons)
 		}
-		if msg.placed > 0 || msg.launched > 0 {
+		if msg.placed > 0 || msg.rebalanced > 0 || msg.launched > 0 {
 			m.clearAutoPilotPersistentState()
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownProgress)
 		} else if len(msg.blockedReasons) > 0 {
@@ -549,10 +550,18 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.quickLaunchStatusProtected() {
 			switch {
+			case msg.placed > 0 && msg.rebalanced > 0 && msg.launched > 0:
+				m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d, rebalanced %d, %s", msg.placed, msg.rebalanced, formatAutoPilotLaunchedSummary(msg.launched, msg.launchedClass))
+			case msg.placed > 0 && msg.rebalanced > 0:
+				m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d, rebalanced %d", msg.placed, msg.rebalanced)
+			case msg.rebalanced > 0 && msg.launched > 0:
+				m.statusMessage = fmt.Sprintf("Auto-pilot: rebalanced %d, %s", msg.rebalanced, formatAutoPilotLaunchedSummary(msg.launched, msg.launchedClass))
 			case msg.placed > 0 && msg.launched > 0:
 				m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d, %s", msg.placed, formatAutoPilotLaunchedSummary(msg.launched, msg.launchedClass))
 			case msg.placed > 0:
 				m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d", msg.placed)
+			case msg.rebalanced > 0:
+				m.statusMessage = fmt.Sprintf("Auto-pilot: rebalanced %d job(s) across existing instances.", msg.rebalanced)
 			case msg.launched > 0:
 				m.statusMessage = "Auto-pilot: " + formatAutoPilotLaunchedSummary(msg.launched, msg.launchedClass)
 			case strings.HasPrefix(m.statusMessage, "Auto-pilot:"):
@@ -1588,9 +1597,10 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 			return listAutoPilotDoneMsg{anotherHolding: true}
 		}
 		defer db.ReleaseAutoLease(database, scope, owner)
-		placed, launched, launchedClass, blockedReasons, runErr := runGroupedAutoPilotPass(ctx, database, jobs)
+		placed, rebalanced, launched, launchedClass, blockedReasons, runErr := runGroupedAutoPilotPass(ctx, database, jobs)
 		return listAutoPilotDoneMsg{
 			placed:         placed,
+			rebalanced:     rebalanced,
 			launched:       launched,
 			launchedClass:  launchedClass,
 			blockedReasons: blockedReasons,
@@ -1613,15 +1623,15 @@ const (
 	listAutoPilotCooldownContend  = 15 * time.Second
 )
 
-func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, string, map[int64]string, error) {
+func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, int, string, map[int64]string, error) {
 	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)
 	if err != nil {
-		return 0, 0, "", nil, err
+		return 0, 0, 0, "", nil, err
 	}
 	if result == nil {
-		return 0, 0, "", nil, nil
+		return 0, 0, 0, "", nil, nil
 	}
-	return result.Placed, result.Launched, result.LaunchedClass, result.BlockedReasons, nil
+	return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, nil
 }
 
 func launchedClassFromResult(database *sql.DB, instanceIDs []int64) string {

@@ -734,6 +734,64 @@ rule AutoPilotPass {
         -- on the next autopilot tick, not this one.
 }
 
+-- ==========================================================================
+-- Queue re-balance across existing instances
+-- ==========================================================================
+
+-- After placement decisions, pending jobs may migrate to an already-running
+-- instance that is cheaper (or at most ceiling × current cost) and has an
+-- idle slot, so they start sooner without exceeding the cost envelope.
+-- Running jobs are never moved.
+
+config {
+    rebalance_cost_ceiling: Decimal = 1.10    -- upper bound on dst/src $/hr
+    rebalance_enabled: Bool = true
+}
+
+rule QueueRebalanceJob {
+    when: AutoPilotTick(_) or UserRequestsRebalance()
+    requires: config.rebalance_enabled
+
+    for job in jobs where job.status in {queued, pending_placement}:
+      let src = job.assigned_instance
+      requires: src is not None
+      requires: not InstanceHasIdleSlotFor(src, job)
+
+      let dst = BestRebalanceTarget(job, exclude=src)
+      requires: dst is not None
+      requires: InstanceHasIdleSlotFor(dst, job)
+      requires: InstanceSatisfiesJob(dst, job)
+      requires: dst.cost_per_hour <= config.rebalance_cost_ceiling
+                                     * src.cost_per_hour
+
+      ensures: ReassignJobToInstance(job, dst)
+      ensures: AppendPlacementReason(job,
+                 "rebalanced from " + src.id + " → " + dst.id
+                 + " (cost ratio " + (dst.cost_per_hour
+                                      / src.cost_per_hour) + ")")
+}
+
+invariant RebalanceRespectsCostCeiling {
+    for move in QueueRebalanceMoves:
+        move.dst.cost_per_hour
+            <= config.rebalance_cost_ceiling * move.src.cost_per_hour
+}
+
+invariant RebalanceNeverPreemptsRunning {
+    -- A re-balance target slot must be idle at decision time. Running jobs
+    -- are not candidates for moving, and running slots on dst are not
+    -- candidates for receiving.
+    for move in QueueRebalanceMoves:
+        move.job.status in {queued, pending_placement}
+        and SlotWasIdle(move.dst, move.slot, move.decision_time)
+}
+
+invariant RebalanceOnlyWhenSourceBlocked {
+    -- Don't move a job that could just start on its current instance.
+    for move in QueueRebalanceMoves:
+        not InstanceHasIdleSlotFor(move.src, move.job, move.decision_time)
+}
+
 rule AutoPilotRunRateSubset {
     when: AutoPilotTick(unplaced_jobs)
     requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
