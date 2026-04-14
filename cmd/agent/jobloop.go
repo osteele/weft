@@ -87,13 +87,28 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		fmt.Printf("--- Job %d ---\n", job.ID)
 		oplog.LogJob(oplog.OpJobStart, job.ID, "", oplog.WithDetailf("cmd=%s", job.Command))
 
+		workDir := job.Dir
+		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
+			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
+			result.AnyFailed = true
+			result.FailedJobs = append(result.FailedJobs, job.ID)
+
+			// Mark job complete with failure even when command did not start.
+			ei := runner.ExitInfo{ExitCode: 1}
+			paths := runner.NewJobPaths(cfg.LogDir, job.ID)
+			_ = runner.WriteStatusFile(paths, ei)
+			now := time.Now().Unix()
+			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", "artifact_stage_failed", now, now, nil)
+			r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+			continue
+		}
+
 		// Write .started marker to R2
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", time.Now().Unix()))
 		paths := runner.NewJobPaths(cfg.LogDir, job.ID)
 		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Timeseries)
 		stopTelemetryUploader := startTelemetryUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Telemetry)
-
-		workDir := job.Dir
 
 		// Compute per-job max time from remaining budget
 		var jobMaxTime time.Duration

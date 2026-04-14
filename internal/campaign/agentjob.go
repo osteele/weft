@@ -1,13 +1,19 @@
 package campaign
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"path"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudneeds"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/workdir"
 )
+
+var resolveCloudNeedsFunc = cloudneeds.ResolveSpecs
 
 func newAgentJob(job *db.Job, remoteDir string) cloud.AgentJob {
 	runID := int64(0)
@@ -51,4 +57,23 @@ func remoteDirForAgentJob(job *db.Job, localToRemote map[string]string) string {
 		return ""
 	}
 	return path.Join(cloud.ProjectRootDir, path.Base(localDir))
+}
+
+func resolveCloudNeedsForJob(ctx context.Context, database *sql.DB, client *r2.Client, job *db.Job) ([]cloud.CloudNeed, error) {
+	if job == nil {
+		return nil, fmt.Errorf("job is nil")
+	}
+	// Re-read metadata to avoid stale in-memory structs dropping cloud_needs.
+	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
+		job.Metadata = fresh.Metadata
+	}
+	var specs []string
+	if job.Metadata != nil && job.Metadata.Dependencies != nil {
+		specs = job.Metadata.Dependencies.CloudNeeds
+	}
+	resolved, err := resolveCloudNeedsFunc(ctx, database, client, specs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve cloud needs for job %d: %w", job.ID, err)
+	}
+	return resolved, nil
 }

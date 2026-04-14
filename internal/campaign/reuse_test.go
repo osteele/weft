@@ -2,11 +2,13 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
@@ -423,6 +425,13 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if err := db.SetJobNeeds(database, jobID, []string{"inputs/data.csv:41"}); err != nil {
 		t.Fatalf("SetJobNeeds: %v", err)
 	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
+		Dependencies: &db.JobDependencyMetadata{
+			CloudNeeds: []string{"inputs/data.csv:41"},
+		},
+	}); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
 	if err := db.SetJobInputs(database, jobID, []string{"local:data/conllu/"}); err != nil {
 		t.Fatalf("SetJobInputs: %v", err)
 	}
@@ -433,9 +442,11 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 
 	prevUpload := uploadSourceToR2
 	prevSendNoAck := sendGraceJobPayloadNoAck
+	prevResolveCloudNeeds := resolveCloudNeedsFunc
 	t.Cleanup(func() {
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
+		resolveCloudNeedsFunc = prevResolveCloudNeeds
 	})
 
 	var uploadedInputs []string
@@ -448,6 +459,13 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) error {
 		got = payload
 		return nil
+	}
+	resolveCloudNeedsFunc = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ []string) ([]cloud.CloudNeed, error) {
+		return []cloud.CloudNeed{{
+			Spec:  "inputs/data.csv:41",
+			Path:  "inputs/data.csv",
+			R2Key: "jobs/41/runs/0/artifacts/files/inputs/data.csv",
+		}}, nil
 	}
 
 	if err := SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job}); err != nil {
@@ -467,6 +485,13 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Jobs[0].Needs, []string{"inputs/data.csv:41"}) {
 		t.Fatalf("needs = %v", got.Jobs[0].Needs)
+	}
+	if !reflect.DeepEqual(got.Jobs[0].CloudNeeds, []cloud.CloudNeed{{
+		Spec:  "inputs/data.csv:41",
+		Path:  "inputs/data.csv",
+		R2Key: "jobs/41/runs/0/artifacts/files/inputs/data.csv",
+	}}) {
+		t.Fatalf("cloud needs = %v", got.Jobs[0].CloudNeeds)
 	}
 	if len(got.Sources) != 1 {
 		t.Fatalf("sources len = %d, want 1", len(got.Sources))
