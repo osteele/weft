@@ -285,6 +285,13 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	var inst *cloud.Instance
 	var providerErr error
 	client := clientForProvider(clients, cloud.Provider(ci.Provider))
+	if client == nil {
+		providerList := make([]string, 0, len(clients))
+		for _, c := range clients {
+			providerList = append(providerList, string(c.Provider()))
+		}
+		slog.Debug("reconcile: no client for provider", "component", "reconcile", "instance", ci.ID, "ci_provider", ci.Provider, "available_clients", providerList)
+	}
 	if providerID != "" && client != nil {
 		providerKey := ci.Provider
 		if byProvider, ok := providerInstances[providerKey]; ok {

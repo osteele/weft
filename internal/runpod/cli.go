@@ -187,6 +187,16 @@ func firstString(data map[string]any, keys ...string) string {
 				if vv == float64(int64(vv)) {
 					return strconv.FormatInt(int64(vv), 10)
 				}
+			case []any:
+				parts := make([]string, 0, len(vv))
+				for _, item := range vv {
+					if s, ok := item.(string); ok {
+						parts = append(parts, s)
+					}
+				}
+				if joined := strings.Join(parts, " "); strings.TrimSpace(joined) != "" {
+					return joined
+				}
 			}
 		}
 	}
@@ -281,6 +291,10 @@ func isOfferUnavailableError(err error) bool {
 	case strings.Contains(msg, "offer") && strings.Contains(msg, "unavailable"):
 		return true
 	case strings.Contains(msg, "gpu") && strings.Contains(msg, "unavailable"):
+		return true
+	case strings.Contains(msg, "no longer any instances available"):
+		return true
+	case strings.Contains(msg, "no instances available"):
 		return true
 	default:
 		return false

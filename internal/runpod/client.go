@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -64,15 +65,13 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 
-	caps, err := c.capabilities(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out, err := c.runner.runOutput(ctx, caps.path, caps.searchCommand...)
+	// runpodctl gpu list no longer returns pricing fields, so we fetch GPU
+	// types with pricing via the RunPod GraphQL API directly.
+	gpuTypes, err := fetchGPUTypes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
-	return parseSearchOutput(out, constraints)
+	return buildOffersFromGraphQL(gpuTypes, constraints), nil
 }
 
 func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
@@ -134,6 +133,15 @@ func podToInstance(pod Pod) cloud.Instance {
 }
 
 func (c *CloudClient) ListAllInstances() ([]cloud.Instance, error) {
+	// RunPod's pod list API is eventually consistent: newly created pods can
+	// take 1+ minute to appear. If the reconciler treats absence-from-batch
+	// as "instance gone", it will prematurely declare new pods dead. Return
+	// (nil, nil) to signal batch unsupported — the reconciler falls back to
+	// per-instance ShowInstance calls which are consistent.
+	return nil, nil
+}
+
+func (c *CloudClient) listAllInstancesViaCLI() ([]cloud.Instance, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 
@@ -168,6 +176,14 @@ func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {
 	args := append(append([]string{}, caps.podGetCommand...), instanceID)
 	out, err := c.runner.runOutput(ctx, caps.path, args...)
 	if err != nil {
+		slog.Debug("runpod ShowInstance cli error", "id", instanceID, "err", err)
+		// Map "pod not found" (HTTP 404) to the standard not-found error
+		// so reconcile sweeps can treat destroyed pods as expected rather
+		// than retrying forever.
+		msg := err.Error()
+		if strings.Contains(msg, "pod not found") || strings.Contains(msg, "status 404") {
+			return nil, fmt.Errorf("%w: pod %s", cloud.ErrInstanceNotFound, instanceID)
+		}
 		return nil, fmt.Errorf("get pod %s: %w", instanceID, err)
 	}
 
@@ -176,6 +192,7 @@ func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {
 		return nil, fmt.Errorf("parse pod response: %w", err)
 	}
 	inst := podToInstance(*pod)
+	slog.Debug("runpod ShowInstance ok", "id", instanceID, "status", inst.Status, "providerID", inst.ProviderID)
 	return &inst, nil
 }
 
@@ -210,6 +227,12 @@ func (c *CloudClient) DestroyInstance(instanceID string) error {
 	}
 	args := append(append([]string{}, caps.podDeleteCommand...), instanceID)
 	if _, err := c.runner.runOutput(ctx, caps.path, args...); err != nil {
+		// "pod not found to terminate" means it's already gone — treat as success
+		// so the reconciler stops retrying every pass.
+		msg := err.Error()
+		if strings.Contains(msg, "pod not found") || strings.Contains(msg, "status 404") {
+			return nil
+		}
 		return fmt.Errorf("remove pod %s: %w", instanceID, err)
 	}
 	return nil
@@ -382,6 +405,71 @@ func parseCreatedPodID(out []byte) (string, error) {
 
 func parseGPUTypeOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
 	return parseSearchOutput(data, constraints)
+}
+
+func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstraints) []cloud.Offer {
+	var offers []cloud.Offer
+	var constraint placement.GPUConstraint
+	if constraints.GPUClass != "" {
+		constraint = placement.ParseGPUConstraint(constraints.GPUClass)
+	}
+	numGPUs := constraints.NumGPUs
+	if numGPUs == 0 {
+		numGPUs = 1
+	}
+	for _, gt := range gpuTypes {
+		if constraints.MinGPUMemGB > 0 && gt.MemoryInGb < constraints.MinGPUMemGB {
+			continue
+		}
+		if constraints.MaxGPUMemGB > 0 && gt.MemoryInGb > constraints.MaxGPUMemGB {
+			continue
+		}
+		if gt.MaxGPUCount > 0 && gt.MaxGPUCount < numGPUs {
+			continue
+		}
+		name := gt.DisplayName
+		if name == "" {
+			name = gt.ID
+		}
+		// RunPod's displayName is terse (e.g. "A100 SXM"), while the gpuId
+		// carries the precise model (e.g. "NVIDIA A100-SXM4-80GB"). Match
+		// constraints against both so job classes like "a100-sxm4-80gb" resolve.
+		if constraints.GPUClass != "" {
+			matched := constraint.MatchesGPUFullName(name) ||
+				constraint.MatchesGPU(inventory.NormalizeGPUClass(name)) ||
+				constraint.MatchesGPUFullName(gt.ID) ||
+				constraint.MatchesGPU(inventory.NormalizeGPUClass(gt.ID))
+			if !matched {
+				continue
+			}
+		}
+		if gt.LowestPrice == nil {
+			continue
+		}
+		// Skip GPU types with no stock — pod create will fail.
+		if gt.LowestPrice.StockStatus == nil || *gt.LowestPrice.StockStatus == "" {
+			continue
+		}
+		var price float64
+		if gt.LowestPrice.UninterruptablePrice != nil && *gt.LowestPrice.UninterruptablePrice > 0 {
+			price = *gt.LowestPrice.UninterruptablePrice
+		} else if gt.LowestPrice.MinimumBidPrice != nil && *gt.LowestPrice.MinimumBidPrice > 0 {
+			price = *gt.LowestPrice.MinimumBidPrice
+		}
+		if price <= 0 {
+			continue
+		}
+		offers = append(offers, cloud.Offer{
+			ProviderID:  gt.ID,
+			Provider:    cloud.ProviderRunpod,
+			GPUName:     name,
+			NumGPUs:     numGPUs,
+			GPUMemGB:    float64(gt.MemoryInGb),
+			CostPerHour: price,
+			Verified:    gt.SecureCloud,
+		})
+	}
+	return offers
 }
 
 func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {

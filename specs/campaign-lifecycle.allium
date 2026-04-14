@@ -234,6 +234,12 @@ config {
 
 -- Provider offer searches enforce config.offer_min_reliability as a hard floor
 -- during candidate discovery. Setting it to 0 disables this filter.
+--
+-- GPU-class matching during offer search must normalise case and punctuation
+-- on BOTH the provider's machine-readable gpuId and its human-readable
+-- displayName, and succeed when either matches the user-supplied class
+-- (e.g. "a100-sxm4-80gb" against a displayName of "A100 SXM4 80GB").
+-- Implementation: internal/runpod/client.go offer discovery.
 
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
@@ -262,6 +268,17 @@ rule LaunchInstance {
         for job in jobs:
             job.cloud_instance = instance
             job.target_kind = rental_instance
+
+    @guidance
+        -- Provider routing is strict. Every operation against an Instance
+        -- (launch, status query, destroy, reconcile) MUST use the cloud
+        -- client whose provider.name matches instance.provider.name. If no
+        -- matching client is registered, the operation MUST fail explicitly
+        -- rather than silently falling back to a differently-named client —
+        -- such fallback routes instances through the wrong provider API
+        -- and makes them invisible to reconcile.
+        -- Implementation: internal/runpod/client.go, provider-keyed client
+        -- registry consumed by internal/campaign/lifecycle.go.
 }
 
 rule BeginLaunching {
@@ -523,6 +540,15 @@ rule ProviderInstanceDied {
     ensures: instance.status = failed
     ensures: instance.termination_reason = provider_failure
     ensures: instance.ended_at = now
+
+    @guidance
+        -- A provider "not found" result for a specific instance ID (HTTP 404
+        -- or equivalent) is a terminal signal: the ProviderInstance has been
+        -- destroyed out from under us. Reconcile MUST map this to
+        -- termination_reason = provider_failure and mark the Instance failed,
+        -- rather than retrying the lookup or treating it as transient.
+        -- Implementation: internal/campaign/lifecycle.go reconcile path;
+        -- per-instance ShowInstance in internal/runpod/client.go.
 }
 
 rule ProviderInstancePausedInterruptible {
@@ -881,6 +907,16 @@ rule ReconcileOrphanedProviderInstance {
         -- Safety-net: if a provider instance is still running after the
         -- weft instance reached terminal state, destroy it again.
         -- Checked during periodic reconciliation passes.
+        --
+        -- A provider's bulk "list all instances" API may be eventually
+        -- consistent and return an empty or null result even when instances
+        -- genuinely exist. Reconcile and instance-status readers MUST treat
+        -- an empty bulk response as "no signal" and fall back to per-instance
+        -- ShowInstance lookup before concluding that tracked instances were
+        -- destroyed. Only an explicit per-ID not-found (see
+        -- ProviderInstanceDied) is terminal.
+        -- Implementation: internal/campaign/lifecycle.go reconcile path;
+        -- internal/runpod/client.go ListInstances / ShowInstance.
 }
 
 -- ==========================================================================

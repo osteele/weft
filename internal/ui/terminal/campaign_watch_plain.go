@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -237,9 +238,12 @@ func campaignPlainViews(instanceIDs []int64, updates map[int64]campaign.Instance
 func clientForInstance(database *sql.DB, instanceID int64) cloud.Client {
 	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil || ci == nil {
+		slog.Debug("clientForInstance: launch not found, defaulting to vastai", "instance", instanceID, "err", err)
 		return cloudClientForDBInstance("vastai") // fallback
 	}
-	return cloudClientForDBInstance(ci.Provider)
+	c := cloudClientForDBInstance(ci.Provider)
+	slog.Debug("clientForInstance", "instance", instanceID, "ci_provider", ci.Provider, "client_provider", c.Provider())
+	return c
 }
 
 // campaignInfoFromInstances looks up campaign ID and launch time from the first instance.

@@ -434,6 +434,13 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	// 7. Provider dead detection (with hysteresis)
 	// Skip grace-period instances — a transient API failure shouldn't kill the session.
 	if p.ProviderErr == nil && isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
+		var instDescr string
+		if p.ProviderInst == nil {
+			instDescr = "<nil>"
+		} else {
+			instDescr = fmt.Sprintf("status=%q intended=%q providerID=%q", p.ProviderInst.Status, p.ProviderInst.IntendedStatus, p.ProviderInst.ProviderID)
+		}
+		slog.Debug("reconcile: entering provider_dead path", "component", "reconcile", "instance", ci.ID, "inst", instDescr, "ci_status", ci.Status)
 		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now)
 	}
 

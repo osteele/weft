@@ -89,10 +89,13 @@ func selectLaunchGroups(groups []campaign.InstanceGroup, selected map[int64]bool
 		requestedJobs += len(selectedJobs)
 		selectedGroups = append(selectedGroups, campaign.InstanceGroup{
 			GPUClass:    group.GPUClass,
+			Provider:    group.Provider,
 			GPUMemGB:    group.GPUMemGB,
 			MaxGPUMemGB: group.MaxGPUMemGB,
 			DiskGB:      group.DiskGB,
 			Image:       group.Image,
+			VastCapAdd:  group.VastCapAdd,
+			Preemptible: group.Preemptible,
 			Jobs:        selectedJobs,
 		})
 	}

@@ -17,15 +17,18 @@ func buildCloudClients(cfg *config.Config) ([]cloud.Client, error) {
 }
 
 // cloudClientForProvider finds the client matching a provider from a list.
+// If provider is empty, returns the first client as a default. Otherwise
+// returns the exact match or nil — never fall back to a different provider,
+// since routing a runpod instance to the vastai client (or vice versa)
+// corrupts instance lookups and destroys.
 func cloudClientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Client {
+	if provider == "" && len(clients) > 0 {
+		return clients[0]
+	}
 	for _, c := range clients {
 		if c.Provider() == provider {
 			return c
 		}
-	}
-	// If only one client, use it regardless of provider
-	if len(clients) == 1 {
-		return clients[0]
 	}
 	return nil
 }
