@@ -690,6 +690,34 @@ func TestRestartUnplacedRentalJob_ResetsToQueued(t *testing.T) {
 	}
 }
 
+func TestRestartUnplacedFailedJobWithoutRentalTag_ResetsToQueued(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "orphan-retry-untagged")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusFailed, 1000, jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("status = %q, want %q", job.EffectiveStatus(), db.StatusQueued)
+	}
+	if job.Host != "" {
+		t.Fatalf("host = %q, want empty", job.Host)
+	}
+}
+
 func intPtrRestart(v int) *int {
 	return &v
 }
