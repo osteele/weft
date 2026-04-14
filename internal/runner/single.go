@@ -378,7 +378,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	})
 
 	gpuIdleTimeout := cfg.GPUIdleTimeout
-	if job.GPUClass == "" && len(gpuDevices) == 0 {
+	if !JobHasExplicitGPUIntent(job) {
 		gpuIdleTimeout = 0
 	}
 	probe := cfg.GPUActiveProbe

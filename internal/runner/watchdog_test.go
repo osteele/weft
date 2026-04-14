@@ -174,6 +174,35 @@ func TestSilenceTimerRespectsInitialGrace(t *testing.T) {
 	}
 }
 
+// TestGPUIdleNotArmedWithoutExplicitRequest: a job that does not declare any
+// GPU intent (no GPUClass, no GPU, no GPUMem) must not arm the GPU idle
+// watchdog, even when GPUIdleTimeout is set and the probe reports idle. This
+// protects compute-only jobs running on GPU rentals from being killed as
+// gpu-idle; the stdout-silence watchdog remains the fallback stall signal.
+func TestGPUIdleNotArmedWithoutExplicitRequest(t *testing.T) {
+	logDir := t.TempDir()
+
+	cfg := SingleJobConfig{
+		JobID:                707,
+		Job:                  opsqueue.CommandJob{Cmd: "for i in 1 2 3 4; do echo tick$i; sleep 0.2; done"},
+		LogDir:               logDir,
+		SampleInterval:       50 * time.Millisecond,
+		GPUIdleTimeout:       500 * time.Millisecond, // would fire well within the job's runtime
+		StdoutSilenceTimeout: 0,
+		WatchdogInitialGrace: 50 * time.Millisecond,
+		GPUActiveProbe:       func() bool { return false }, // always idle
+		SkipProbes:           true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (GPU watchdog must not arm without explicit GPU intent)", ei.ExitCode)
+	}
+}
+
 // TestWatchdogDisabledWhenTimeoutZero: zero timeout means the watchdog does
 // not fire even if the job would otherwise trigger it.
 func TestWatchdogDisabledWhenTimeoutZero(t *testing.T) {

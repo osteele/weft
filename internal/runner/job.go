@@ -670,6 +670,14 @@ func GetJobGPUDevices(job *opsqueue.CommandJob) []string {
 	return nil
 }
 
+// JobHasExplicitGPUIntent reports whether the user declared GPU intent on the
+// job via GPUClass, GPU, or GPUMem. Auto-assigned devices from a GPU host do
+// not count. Used to gate GPU-specific runtime behavior (e.g. idle watchdog)
+// on compute-only jobs scheduled onto GPU rentals.
+func JobHasExplicitGPUIntent(job *opsqueue.CommandJob) bool {
+	return job.GPUClass != "" || job.GPU != "" || job.GPUMem != nil
+}
+
 // GetJobGPUMem returns the GPU memory reservation in GB per device.
 func GetJobGPUMem(job *opsqueue.CommandJob, defaultGB int) int {
 	if job.GPUMem != nil {
