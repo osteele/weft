@@ -45,7 +45,10 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	unplaced := make([]*db.Job, 0, len(unplacedJobs))
 	for _, job := range unplacedJobs {
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+		// IsUnplacedAwaitingPlacement (rather than IsUnplacedQueued) so jobs
+		// stuck in pending_placement still get a blocked reason — see
+		// internal/orchestration/pending_placement.go.
+		if !job.IsUnplacedAwaitingPlacement() {
 			continue
 		}
 		if len(scoped) > 0 {

@@ -79,13 +79,10 @@ func HydrateRelaunchBlockedReasons(database *sql.DB, jobs []*db.Job) {
 	}
 	queueFloorByJob := make(map[int64]int64, len(jobs))
 	for _, job := range jobs {
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+		if !job.IsUnplacedAwaitingPlacement() {
 			continue
 		}
 		if strings.TrimSpace(job.QueueBlockedReason) != "" {
-			continue
-		}
-		if job.TargetKind() != db.JobTargetUnplaced {
 			continue
 		}
 		floor := job.QueuedAt

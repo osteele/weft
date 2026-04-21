@@ -165,6 +165,18 @@ func (j *Job) IsUnplacedQueued() bool {
 	return j != nil && j.EffectiveStatus() == StatusQueued && j.TargetKind() == JobTargetUnplaced
 }
 
+// IsUnplacedAwaitingPlacement is like IsUnplacedQueued but also accepts
+// pending_placement, the transient state used while a relaunch pass is
+// processing the job. Use this for read paths (UI, blocked-reason hydration,
+// auto-pilot planner input) that must not lose sight of jobs mid-placement.
+func (j *Job) IsUnplacedAwaitingPlacement() bool {
+	if j == nil || j.TargetKind() != JobTargetUnplaced {
+		return false
+	}
+	es := j.EffectiveStatus()
+	return es == StatusQueued || es == StatusPendingPlacement
+}
+
 // HasInventoryHost reports whether the job is currently assigned to an
 // inventory host.
 func (j *Job) HasInventoryHost() bool {

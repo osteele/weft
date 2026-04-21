@@ -1807,7 +1807,7 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	}
 	visibleUnplaced := make(map[int64]struct{}, len(m.jobs))
 	for _, job := range m.jobs {
-		if job != nil && job.IsUnplacedQueued() {
+		if job.IsUnplacedAwaitingPlacement() {
 			visibleUnplaced[job.ID] = struct{}{}
 		}
 	}
@@ -1834,7 +1834,7 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 			continue
 		}
 		reason, ok := m.autoBlockReasons[job.ID]
-		if !ok || strings.TrimSpace(reason) == "" || !job.IsUnplacedQueued() {
+		if !ok || strings.TrimSpace(reason) == "" || !job.IsUnplacedAwaitingPlacement() {
 			decorated = append(decorated, job)
 			continue
 		}
