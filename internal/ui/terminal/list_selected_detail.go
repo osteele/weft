@@ -11,20 +11,20 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 )
 
-// renderSelectedJobDetail returns the "Job:" and "Host:" footer lines for the
-// job under the cursor. The Host line is omitted for unplaced jobs (their
-// placement context is carried in the Job line's status segment). Returns
-// nil when no job is selected.
+// renderSelectedJobDetail returns the "Job:" and "Host:" footer lines for
+// the job under the cursor. The Host line is omitted for unplaced jobs —
+// their placement context is carried on the Job line. Returns nil when no
+// job is selected.
 //
 // Fields deliberately excluded: project (already shown in the job list row),
 // queue name (only one queue is in practical use), and the command / script
 // tail (too long for the footer and already visible in the row).
-func renderSelectedJobDetail(job *db.Job, live *db.LaunchLiveState, now time.Time) []string {
+func renderSelectedJobDetail(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) []string {
 	if job == nil {
 		return nil
 	}
 	var lines []string
-	if s := renderJobFooterLine(job, live, now); s != "" {
+	if s := renderJobFooterLine(job, launchLiveByID, now); s != "" {
 		lines = append(lines, s)
 	}
 	if s := renderHostFooterLine(job); s != "" {
@@ -33,18 +33,16 @@ func renderSelectedJobDetail(job *db.Job, live *db.LaunchLiveState, now time.Tim
 	return lines
 }
 
-// renderJobFooterLine returns "Job: wj<id> · <status> · ETA …" summarising
-// the job under the cursor. Returns "" when job is nil.
-func renderJobFooterLine(job *db.Job, live *db.LaunchLiveState, now time.Time) string {
+func renderJobFooterLine(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, now time.Time) string {
 	if job == nil {
 		return ""
 	}
-	parts := []string{"Job: " + formatJobIDDisplay(job.ID)}
+	parts := []string{fmt.Sprintf("Job: wj%d", job.ID)}
 	parts = appendJobStatusParts(parts, job, now)
 	if job.TargetKind() == db.JobTargetUnplaced {
 		parts = appendUnplacedParts(parts, job)
 	}
-	if remaining, ok := estimateRunningJobRemaining(job, singletonLive(live, job.LaunchID), now); ok && remaining.Mean > 0 {
+	if remaining, ok := estimateRunningJobRemaining(job, launchLiveByID, now); ok && remaining.Mean > 0 {
 		parts = append(parts, "ETA "+remaining.FormatWithBounds())
 	}
 	return strings.Join(parts, " · ")
@@ -52,8 +50,7 @@ func renderJobFooterLine(job *db.Job, live *db.LaunchLiveState, now time.Time) s
 
 // renderHostFooterLine returns "Host: <target> · provider: <Display>" for
 // placed jobs, or "" for unplaced / nil jobs. Inventory jobs render just
-// "Host: <hostname>" (no provider suffix — the provider concept applies only
-// to rentals).
+// "Host: <hostname>" — the provider concept applies only to rentals.
 func renderHostFooterLine(job *db.Job) string {
 	if job == nil {
 		return ""
@@ -66,29 +63,12 @@ func renderHostFooterLine(job *db.Job) string {
 		return ""
 	case db.JobTargetRentalInstance:
 		parts := []string{"Host: " + job.TargetDisplay()}
-		if display := providerDisplayName(job.ProviderName()); display != "" {
+		if display := cloud.Provider(job.ProviderName()).DisplayName(); display != "" {
 			parts = append(parts, "provider: "+display)
 		}
 		return strings.Join(parts, " · ")
 	}
 	return ""
-}
-
-// providerDisplayName returns the human-readable provider name for display
-// (e.g. "Vast.ai", "RunPod"), or "" for unknown providers.
-func providerDisplayName(provider string) string {
-	switch provider {
-	case string(cloud.ProviderVastai):
-		return "Vast.ai"
-	case string(cloud.ProviderRunpod):
-		return "RunPod"
-	default:
-		return ""
-	}
-}
-
-func formatJobIDDisplay(id int64) string {
-	return fmt.Sprintf("wj%d", id)
 }
 
 func appendJobStatusParts(parts []string, job *db.Job, now time.Time) []string {
@@ -134,16 +114,6 @@ func formatResourceRequest(job *db.Job) string {
 		parts = append(parts, fmt.Sprintf("≥%dGB", *job.GPUMemGB))
 	}
 	return strings.Join(parts, " ")
-}
-
-// singletonLive converts a single (live, launchID) pair into the map form
-// expected by estimateRunningJobRemaining. Avoids allocating for the nil
-// case.
-func singletonLive(live *db.LaunchLiveState, launchID *int64) map[int64]*db.LaunchLiveState {
-	if live == nil || launchID == nil {
-		return nil
-	}
-	return map[int64]*db.LaunchLiveState{*launchID: live}
 }
 
 func firstNonZeroTimestamp(xs ...int64) int64 {

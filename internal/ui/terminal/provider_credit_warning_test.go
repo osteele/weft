@@ -152,6 +152,56 @@ func resetProviderCreditWarningCacheForTest(t *testing.T) {
 	providerCreditWarningCache.refreshing.Store(false)
 }
 
+// TestSharedTUIStatusLineHasSystemPrefix pins a regression: the shared
+// status footer line is labelled "System: " so it reads as a sibling of the
+// per-job "Job:" and per-host "Host:" lines in the list TUI footer.
+func TestSharedTUIStatusLineHasSystemPrefix(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, CostPerHourCents: 10}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	// Reset cache so the renderer re-reads the fresh DB rather than a cached
+	// value from a prior test.
+	sharedTUIStatusCache.mu.Lock()
+	sharedTUIStatusCache.expires = time.Time{}
+	sharedTUIStatusCache.mu.Unlock()
+
+	line := renderSharedTUIStatusLine(database, 0)
+	plain := stripANSI(line)
+	if !strings.HasPrefix(plain, "System: ") {
+		t.Fatalf("expected System: prefix, got: %q", plain)
+	}
+}
+
+func TestSharedTUIStatusLineWithVisibleRunning_GlobalMismatchPrefix(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, CostPerHourCents: 10}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	// Create one running job in the DB — "global" count is 1.
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo", "desc", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	sharedTUIStatusCache.mu.Lock()
+	sharedTUIStatusCache.expires = time.Time{}
+	sharedTUIStatusCache.mu.Unlock()
+
+	// Pass visibleRunning=0 so globalRunning(1) != visibleRunning(0); the
+	// prefix should switch to "System (global): ".
+	lines := renderSharedTUIStatusLinesWithVisibleRunning(database, 0, 0)
+	if len(lines) == 0 {
+		t.Fatal("expected at least one status line")
+	}
+	plain := stripANSI(lines[0])
+	if !strings.HasPrefix(plain, "System (global): ") {
+		t.Fatalf("expected 'System (global): ' prefix, got: %q", plain)
+	}
+}
+
 // TestProviderCreditWarningTextDoesNotBlockOnRefresh is a regression: a stale
 // cache must never block the caller on the provider fetch (which spawns the
 // vastai CLI / hits the network). The fetch runs asynchronously; stale calls

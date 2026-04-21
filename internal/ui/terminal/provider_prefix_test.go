@@ -8,21 +8,6 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestProviderShortPrefix(t *testing.T) {
-	tests := map[string]string{
-		"vastai": "va",
-		"runpod": "rp",
-		"":       "",
-		"gcp":    "",
-		"aws":    "",
-	}
-	for provider, want := range tests {
-		if got := providerShortPrefix(provider); got != want {
-			t.Errorf("providerShortPrefix(%q) = %q, want %q", provider, got, want)
-		}
-	}
-}
-
 func TestFormatJobListHost_RentalShowsProviderPrefix(t *testing.T) {
 	launchID := int64(1210)
 	cases := []struct {

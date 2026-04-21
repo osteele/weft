@@ -1032,11 +1032,7 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 	if job == nil {
 		return nil
 	}
-	var live *db.LaunchLiveState
-	if job.LaunchID != nil && m.launchLiveByID != nil {
-		live = m.launchLiveByID[*job.LaunchID]
-	}
-	return renderSelectedJobDetail(job, live, time.Now())
+	return renderSelectedJobDetail(job, m.launchLiveByID, time.Now())
 }
 
 func (m listTUIModel) selectedGroupedRow() int {

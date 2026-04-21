@@ -471,6 +471,31 @@ func TestListTUIUngroupedViewShowsSelectedJobDetail(t *testing.T) {
 	}
 }
 
+// TestListTUIGroupedViewOmitsStandaloneCampaignETA pins a regression: the
+// standalone "ETA: …" footer line was removed from the grouped view when
+// the per-job ETA moved onto the "Job:" line. The only "ETA " occurrence
+// on screen should be the one inside the Job line (prefixed by " · ETA ").
+func TestListTUIGroupedViewOmitsStandaloneCampaignETA(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           120,
+		height:          30,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "r", Project: "proj", StartTime: time.Now().Add(-1 * time.Minute).Unix()},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ETA:") || strings.HasPrefix(trimmed, "ETA ~") {
+			t.Fatalf("standalone ETA footer line must be removed; got line:\n%s\n(full output:\n%s)", trimmed, out)
+		}
+	}
+}
+
 func TestSelectGroupedRowsForViewport_EllidesSectionTailWithDots(t *testing.T) {
 	rows := buildGroupedStatusRows([]*db.Job{
 		{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "run 1", Project: "proj"},

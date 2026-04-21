@@ -32,8 +32,8 @@ func TestSelectedJobDetail_InventoryHost(t *testing.T) {
 	if !strings.Contains(host1, "Host: cool30") {
 		t.Errorf("expected 'Host: cool30' in Host line, got: %s", host1)
 	}
+	joined := strings.Join(lines, " | ")
 	for _, unwanted := range []string{"project", "my-proj", "train.py", "epochs"} {
-		joined := strings.Join(lines, " | ")
 		if strings.Contains(joined, unwanted) {
 			t.Errorf("unexpected %q in detail lines (project/command must be excluded): %s", unwanted, joined)
 		}
@@ -61,6 +61,33 @@ func TestSelectedJobDetail_RentalInstance(t *testing.T) {
 	for _, want := range []string{"Host:", "wi7", "provider: Vast.ai"} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("expected %q in Host line, got: %s", want, lines[1])
+		}
+	}
+}
+
+// TestSelectedJobDetail_RentalHostLineOmitsPhase pins a regression: the
+// launch "phase" (e.g. running:316) used to appear on the placement line of
+// the previous single-line design. The new Host line must NOT carry it;
+// phase is internal state that belongs in `weft instance watch`, not on
+// every list-TUI frame.
+func TestSelectedJobDetail_RentalHostLineOmitsPhase(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	launchID := int64(7)
+	job := &db.Job{
+		ID:        9,
+		LaunchID:  &launchID,
+		Tags:      []string{"provider:vastai"},
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-1 * time.Minute).Unix(),
+	}
+	live := map[int64]*db.LaunchLiveState{
+		launchID: {InstancePhase: "running:316"},
+	}
+	lines := renderSelectedJobDetail(job, live, now)
+	joined := strings.Join(lines, " | ")
+	for _, forbidden := range []string{"phase", "running:316"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("expected %q NOT to appear in footer lines, got: %s", forbidden, joined)
 		}
 	}
 }
@@ -119,18 +146,5 @@ func TestSelectedJobDetail_Failed(t *testing.T) {
 func TestSelectedJobDetail_NilJob(t *testing.T) {
 	if lines := renderSelectedJobDetail(nil, nil, time.Now()); lines != nil {
 		t.Fatalf("expected nil for nil job, got %v", lines)
-	}
-}
-
-func TestProviderDisplayName(t *testing.T) {
-	for provider, want := range map[string]string{
-		"vastai": "Vast.ai",
-		"runpod": "RunPod",
-		"":       "",
-		"gcp":    "",
-	} {
-		if got := providerDisplayName(provider); got != want {
-			t.Errorf("providerDisplayName(%q) = %q, want %q", provider, got, want)
-		}
 	}
 }

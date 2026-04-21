@@ -17,6 +17,35 @@ const (
 	ProviderRunpod Provider = "runpod"
 )
 
+// DisplayName returns the human-readable provider name for UI output
+// (e.g. "Vast.ai", "RunPod"). Returns "" for unknown providers so callers
+// can omit the segment entirely.
+func (p Provider) DisplayName() string {
+	switch p {
+	case ProviderVastai:
+		return "Vast.ai"
+	case ProviderRunpod:
+		return "RunPod"
+	default:
+		return ""
+	}
+}
+
+// ShortCode returns a 2-letter tag for compact UI contexts — jobs-list HOST
+// column, grouped "launching" row suffix — where naming the provider
+// explicitly would blow the column budget. Returns "" for unknown providers
+// (callers should fall back to the bare instance id).
+func (p Provider) ShortCode() string {
+	switch p {
+	case ProviderVastai:
+		return "va"
+	case ProviderRunpod:
+		return "rp"
+	default:
+		return ""
+	}
+}
+
 // InstanceType describes cloud rental interruption behavior.
 const (
 	InstanceTypeOnDemand      = "on-demand"
