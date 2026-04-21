@@ -419,6 +419,40 @@ func TestFormatPlainUpdate_BootstrapStallNoRepeat(t *testing.T) {
 	}
 }
 
+// Regression: WatchInstance must not panic when passed a nil cloud client
+// (e.g. when the user config has no client for the instance's provider).
+// The watch loop should continue emitting DB-only updates and skip the
+// provider poll entirely.
+func TestWatchInstance_NilClientSkipsProviderPoll(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "mock",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "nil-client-test"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ch := WatchInstance(ctx, nil, database, instanceID, 20*time.Millisecond, 20*time.Millisecond)
+
+	gotUpdate := false
+	for update := range ch {
+		if update.Launch != nil && update.Launch.ID == instanceID {
+			gotUpdate = true
+		}
+	}
+	if !gotUpdate {
+		t.Fatal("expected at least one DB-only update with a nil client")
+	}
+}
+
 func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	database := db.SetupTestDB(t)
 

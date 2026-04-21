@@ -242,6 +242,10 @@ func clientForInstance(database *sql.DB, instanceID int64) cloud.Client {
 		return cloudClientForDBInstance("vastai") // fallback
 	}
 	c := cloudClientForDBInstance(ci.Provider)
+	if c == nil {
+		slog.Debug("clientForInstance: no client for provider", "instance", instanceID, "ci_provider", ci.Provider)
+		return nil
+	}
 	slog.Debug("clientForInstance", "instance", instanceID, "ci_provider", ci.Provider, "client_provider", c.Provider())
 	return c
 }

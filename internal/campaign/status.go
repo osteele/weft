@@ -354,10 +354,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
-			// Refresh cloud instance info periodically
+			// Refresh cloud instance info periodically. Skip when no provider
+			// client is available (e.g. config has no client for this
+			// provider) — DB-only updates still flow.
 			providerInstID := ci.EffectiveProviderID()
 			var providerErr error
-			if providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
+			if client != nil && providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
 				inst, showErr := client.ShowInstance(providerInstID)
 				if showErr == nil {
 					cachedInstance = inst
