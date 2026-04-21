@@ -15,7 +15,13 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ssh"
 )
+
+// rsyncConnectTimeout governs ssh connection establishment for rsync. Longer
+// than per-command pool timeouts because rsync sessions tolerate more latency
+// (bulk transfer over potentially-slow links).
+const rsyncConnectTimeout = 15 * time.Second
 
 // SyncFunc is the function signature for syncing sources to a remote host.
 // Tests can replace it with SetSyncFunc to avoid spawning rsync processes.
@@ -151,7 +157,7 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 
 // BuildRsyncArgsWithOptions constructs rsync arguments with an optional --delete.
 func BuildRsyncArgsWithOptions(host, localDir, remoteDir string, excludes []string, delete bool) []string {
-	args := []string{"-az"}
+	args := []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout)}
 	if delete {
 		args = append(args, "--delete")
 	}
@@ -251,7 +257,7 @@ func SyncSources(host, localDir, remoteDir string) error {
 // to a remote host. Unlike BuildRsyncArgs, this does NOT use --delete since the
 // remote directory may contain content from other sources.
 func BuildExtraPathRsyncArgs(host, localDir, remoteDir string) []string {
-	args := []string{"-az"}
+	args := []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout)}
 	src, dst := rsyncSrcDst(host, localDir, remoteDir)
 	args = append(args, src, dst)
 	return args
@@ -360,7 +366,7 @@ func SyncTree(host, localDir, remoteDir string, delete bool) error {
 
 // SyncFile copies a single file to a remote path on the target host.
 func SyncFile(host, localPath, remotePath string) error {
-	args := []string{"-az", localPath, host + ":" + remotePath}
+	args := []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout), localPath, host + ":" + remotePath}
 
 	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
 	defer cancel()

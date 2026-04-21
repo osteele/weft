@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 var (
@@ -280,18 +282,14 @@ func quickCheckSSHBuilder(host string) error {
 	return nil
 }
 
+const builderSSHTimeout = 3 * time.Second
+
 func sshBaseArgs(host string) []string {
-	return []string{
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=3",
-		"-o", "ConnectionAttempts=1",
-		host,
-	}
+	return append(ssh.BatchModeArgs(builderSSHTimeout, "ConnectionAttempts=1"), host)
 }
 
 func rsyncSSHCommand() string {
-	// Keep this in sync with sshBaseArgs for consistent fast-fail behavior.
-	return "ssh -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1"
+	return ssh.BatchModeRsyncCommand(builderSSHTimeout, "ConnectionAttempts=1")
 }
 
 func runCommandCapture(dir string, env []string, name string, args ...string) (string, error) {

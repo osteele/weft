@@ -92,9 +92,10 @@ func TestBuildRsyncArgs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			args := BuildRsyncArgs(tt.host, tt.localDir, tt.remoteDir, tt.excludes)
 
-			// Check that args start with -az --delete
-			if len(args) < 2 || args[0] != "-az" || args[1] != "--delete" {
-				t.Errorf("args should start with -az --delete, got: %v", args[:min(4, len(args))])
+			// Check that args contain -az and --delete
+			joinedEarly := strings.Join(args, " ")
+			if !strings.Contains(joinedEarly, "-az") || !strings.Contains(joinedEarly, "--delete") {
+				t.Errorf("args should contain -az and --delete, got: %v", args[:min(6, len(args))])
 			}
 
 			// Check source and destination are last two args
@@ -342,9 +343,9 @@ func TestBuildExtraPathRsyncArgs(t *testing.T) {
 				}
 			}
 
-			// Must start with -az
-			if len(args) < 1 || args[0] != "-az" {
-				t.Errorf("args should start with -az, got: %v", args)
+			// Must contain -az
+			if !slices.Contains(args, "-az") {
+				t.Errorf("args should contain -az, got: %v", args)
 			}
 
 			// Check source and destination
@@ -355,6 +356,31 @@ func TestBuildExtraPathRsyncArgs(t *testing.T) {
 			}
 			if dst != tt.wantDst {
 				t.Errorf("destination = %q, want %q", dst, tt.wantDst)
+			}
+		})
+	}
+}
+
+// TestRsyncArgsUseNonInteractiveSSH is a regression test: rsync args must pass
+// "-e ssh -o BatchMode=yes ..." so ssh never prompts via /dev/tty, which would
+// corrupt a TUI running in the same terminal and hang the process waiting for
+// a yes/no answer.
+func TestRsyncArgsUseNonInteractiveSSH(t *testing.T) {
+	cases := map[string][]string{
+		"BuildRsyncArgs":            BuildRsyncArgs("host", "/tmp/src", "~/dst", []string{".git"}),
+		"BuildRsyncArgsWithOptions": BuildRsyncArgsWithOptions("host", "/tmp/src", "~/dst", nil, false),
+		"BuildExtraPathRsyncArgs":   BuildExtraPathRsyncArgs("host", "/tmp/x", "~/x"),
+		"BuildOutputSyncArgs":       BuildOutputSyncArgs("host", "~/remote", "/tmp/local", "output"),
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			idx := slices.Index(args, "-e")
+			if idx < 0 || idx+1 >= len(args) {
+				t.Fatalf("%s: missing -e <ssh-command>: %v", name, args)
+			}
+			sshCmd := args[idx+1]
+			if !strings.Contains(sshCmd, "BatchMode=yes") {
+				t.Errorf("%s: -e value %q missing BatchMode=yes", name, sshCmd)
 			}
 		})
 	}

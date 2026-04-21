@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // SyncOutputsBack rsyncs output directories from a remote host back to a local directory.
@@ -31,5 +33,5 @@ func BuildOutputSyncArgs(host, remoteDir, localDir, outputDir string) []string {
 	dir := strings.TrimSuffix(outputDir, "/")
 	src := host + ":" + strings.TrimRight(remoteDir, "/") + "/" + dir + "/"
 	dst := strings.TrimRight(localDir, "/") + "/" + dir + "/"
-	return []string{"-az", src, dst}
+	return []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout), src, dst}
 }

@@ -162,6 +162,39 @@ config {
 -- On-prem SSH sync
 -- ==========================================================================
 
+-- Every ssh and rsync invocation that weft spawns for on-prem sync, source
+-- sync, output pull, or agent deploy must be non-interactive: BatchMode=yes
+-- plus a bounded ConnectTimeout. Without BatchMode=yes, ssh opens /dev/tty
+-- directly to prompt for host-key confirmation, passwords, or passphrases,
+-- bypassing piped stdin/stdout. When the spawning process is a Bubble Tea
+-- TUI in alt-screen mode, such a prompt corrupts the frame buffer and blocks
+-- the process on stdin that never arrives, hanging the UI. A previously-
+-- unknown host key alone is enough to trigger this, regardless of whether
+-- the flow is expected to require auth.
+invariant NonInteractiveSSH {
+    for invocation in SSHInvocations ++ RsyncInvocations:
+        invocation.options.contains("BatchMode=yes")
+        invocation.options.contains_connect_timeout()
+
+    @guidance
+        -- Implementation anchor: internal/ssh/batchmode.go
+        --   ssh.BatchModeArgs(connectTimeout, extraOpts...)       — exec-form args
+        --   ssh.BatchModeRsyncCommand(connectTimeout, extraOpts...) — rsync -e string
+        -- These are the single source of the option set.
+        --
+        -- Callers:
+        --   internal/ssh/pool.go            — SSH session pool
+        --                                      (10 s connect timeout + keepalive)
+        --   internal/agentdeploy/ondemand.go — builder probe + rsync
+        --                                      (3 s + ConnectionAttempts=1)
+        --   internal/sync/sources.go        — source rsync (15 s)
+        --   internal/sync/outputs.go        — output pull (15 s)
+        --
+        -- New ssh/rsync invocations added in future code must route through
+        -- these helpers (or match their behaviour) rather than inlining
+        -- ssh option strings.
+}
+
 -- Host-level sync: iterate all active jobs on a host and sync each one.
 rule SyncHost {
     when: SyncHostRequested(host, mode)

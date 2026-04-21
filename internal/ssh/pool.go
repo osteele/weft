@@ -299,12 +299,13 @@ func (hp *hostPool) newSession() (*Session, error) {
 	// to stdin before the SSH channel is established (SSH drops data
 	// sent to stdin before the remote shell is ready).
 	remoteCmd := fmt.Sprintf("echo '%s'; exec bash -s", sessionReadyMarker)
-	cmd := execCommand("ssh",
-		"-o", "BatchMode=yes",
-		"-o", fmt.Sprintf("ConnectTimeout=%d", defaultConnTimeout),
-		"-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=3",
-		hp.host, remoteCmd)
+	sshArgs := BatchModeArgs(
+		time.Duration(defaultConnTimeout)*time.Second,
+		"ServerAliveInterval=15",
+		"ServerAliveCountMax=3",
+	)
+	sshArgs = append(sshArgs, hp.host, remoteCmd)
+	cmd := execCommand("ssh", sshArgs...)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
