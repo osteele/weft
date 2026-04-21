@@ -37,6 +37,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
+	cloudClients, _ := buildCloudClients(cfg)
 
 	campaignID, launchTime := campaignInfoFromInstances(database, instanceIDs)
 
@@ -122,7 +123,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client := clientForInstance(database, instanceID)
+			client := clientForInstance(database, cloudClients, instanceID)
 			ch := campaign.WatchInstance(ctx, client, database, instanceID, 2*time.Second, 10*time.Second, r2Client)
 			var prev campaign.InstanceUpdate
 
@@ -234,14 +235,16 @@ func campaignPlainViews(instanceIDs []int64, updates map[int64]campaign.Instance
 	return views
 }
 
-// clientForInstance creates a cloud.Client based on the provider stored in the DB.
-func clientForInstance(database *sql.DB, instanceID int64) cloud.Client {
+// clientForInstance picks the cloud.Client matching the instance's provider
+// from a pre-built client list. Returns nil when no client is configured for
+// the provider; callers must tolerate that (DB-only watch path).
+func clientForInstance(database *sql.DB, cloudClients []cloud.Client, instanceID int64) cloud.Client {
 	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil || ci == nil {
 		slog.Debug("clientForInstance: launch not found, defaulting to vastai", "instance", instanceID, "err", err)
-		return cloudClientForDBInstance("vastai") // fallback
+		return cloudClientForProvider(cloudClients, cloud.ProviderVastai)
 	}
-	c := cloudClientForDBInstance(ci.Provider)
+	c := cloudClientForProvider(cloudClients, cloud.Provider(ci.Provider))
 	if c == nil {
 		slog.Debug("clientForInstance: no client for provider", "instance", instanceID, "ci_provider", ci.Provider)
 		return nil

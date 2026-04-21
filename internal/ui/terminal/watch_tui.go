@@ -181,9 +181,11 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
 
+	allCloudClients, _ := buildCloudClients(cfg)
+
 	clients := make(map[int64]cloud.Client)
 	for _, id := range instanceIDs {
-		clients[id] = clientForInstance(database, id)
+		clients[id] = clientForInstance(database, allCloudClients, id)
 	}
 
 	initInfo := make(map[int64]initialInstanceInfo)
@@ -195,8 +197,6 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	}
 
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
-
-	allCloudClients, _ := buildCloudClients(cfg)
 
 	var sw *hostsync.Worker
 	if cfg != nil {
@@ -407,7 +407,7 @@ func (m *watchModel) startWatchingInstance(instanceID int64) tea.Cmd {
 	if _, ok := m.channels[instanceID]; ok {
 		return nil
 	}
-	client := clientForInstance(m.database, instanceID)
+	client := clientForInstance(m.database, m.cloudClients, instanceID)
 	ch := campaign.WatchInstance(m.ctx, client, m.database, instanceID, 2*time.Second, 10*time.Second, m.r2Client)
 	m.clients[instanceID] = client
 	m.channels[instanceID] = ch

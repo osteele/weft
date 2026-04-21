@@ -275,19 +275,6 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	}
 }
 
-func cloudClientForDBInstance(provider string) cloud.Client {
-	// Use the real user config so the requested provider's client is actually
-	// built. Passing an empty config.Config{} here silently disabled runpod,
-	// leaving only a vastai fallback client, which then got routed to runpod
-	// instances and failed every lookup/destroy with "parse vastai instance ID".
-	cfg, _ := config.Load()
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
-	clients, _ := buildCloudClients(cfg)
-	return cloudClientForProvider(clients, cloud.Provider(provider))
-}
-
 func cloudClientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Client {
 	if provider == "" && len(clients) > 0 {
 		return clients[0]
