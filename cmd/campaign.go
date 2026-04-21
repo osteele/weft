@@ -199,6 +199,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("list unplaced jobs: %w", err)
 	}
 	jobs = filterRentalLaunchJobs(jobs)
+	jobs = filterLaunchJobsByDependencies(database, jobs, printDeferredJob)
 
 	// Filter by --jobs if specified
 	if campaignLaunchJobs != "" {
@@ -321,6 +322,73 @@ func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 	return filtered
 }
 
+// filterLaunchJobsByDependencies excludes jobs whose --after / --after-any
+// dependencies have not yet terminated successfully (or, for --after-any,
+// terminated at all). This makes --after act as a placement gate for
+// rentals: downstream jobs are not launched until the upstream job finishes,
+// without forcing co-location on a single instance.
+//
+// If onDefer is non-nil, it is called once for each job that is excluded,
+// with the deferral reason.
+func filterLaunchJobsByDependencies(database *sql.DB, jobs []*db.Job, onDefer func(job *db.Job, reason string)) []*db.Job {
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		deps := decodeQueueDependencies(job.DepSpec)
+		if len(deps) == 0 {
+			filtered = append(filtered, job)
+			continue
+		}
+		reason, ok := dependencySatisfied(database, deps)
+		if ok {
+			filtered = append(filtered, job)
+			continue
+		}
+		if onDefer != nil {
+			onDefer(job, reason)
+		}
+	}
+	return filtered
+}
+
+// dependencySatisfied reports whether every dependency in deps is satisfied.
+// A strict (--after) dependency is satisfied when the upstream job reached
+// Completed with exit code 0. An AllowFailure (--after-any) dependency is
+// satisfied when the upstream reached any terminal status. Returns the
+// reason for the first unsatisfied dependency when ok is false.
+func dependencySatisfied(database *sql.DB, deps []queueDependency) (string, bool) {
+	for _, dep := range deps {
+		depLabel := ids.FormatJobID(dep.JobID)
+		depJob, err := db.GetJobByID(database, dep.JobID)
+		if err != nil || depJob == nil {
+			return fmt.Sprintf("dependency %s not found", depLabel), false
+		}
+		if dep.AllowFailure {
+			if db.IsTerminalStatus(depJob.Status) {
+				continue
+			}
+			return fmt.Sprintf("waiting for %s to finish (status: %s)", depLabel, depJob.Status), false
+		}
+		switch {
+		case depJob.Status == db.StatusCompleted && depJob.ExitCode != nil && *depJob.ExitCode == 0:
+			continue
+		case depJob.Status == db.StatusCompleted:
+			return fmt.Sprintf("dependency %s exited non-zero; re-queue or switch to --after-any", depLabel), false
+		case db.IsTerminalStatus(depJob.Status):
+			return fmt.Sprintf("dependency %s %s; re-queue or switch to --after-any", depLabel, depJob.Status), false
+		default:
+			return fmt.Sprintf("waiting for %s to succeed (status: %s)", depLabel, depJob.Status), false
+		}
+	}
+	return "", true
+}
+
+func printDeferredJob(job *db.Job, reason string) {
+	fmt.Printf("Job %s deferred: %s\n", ids.FormatJobID(job.ID), reason)
+}
+
 func filterLaunchJobsForScope(jobs []*db.Job, projectFilter string) []*db.Job {
 	if projectFilter != "" {
 		return db.FilterJobsByProject(jobs, projectFilter)
@@ -334,6 +402,7 @@ func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilt
 		return nil, fmt.Errorf("list unplaced jobs: %w", err)
 	}
 	jobs = filterRentalLaunchJobs(jobs)
+	jobs = filterLaunchJobsByDependencies(database, jobs, nil)
 	jobs = filterLaunchJobsForScope(jobs, projectFilter)
 	jobs = prefilterOnPremWithProgress(database, jobs, cfg, onProgress, onPhase)
 

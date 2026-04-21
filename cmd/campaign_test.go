@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,69 @@ func TestFilterRentalLaunchJobsExcludesInventoryJobs(t *testing.T) {
 		if job.HasTag(db.TagInventory) {
 			t.Fatalf("inventory job should be excluded: %+v", job)
 		}
+	}
+}
+
+func TestFilterLaunchJobsByDependencies(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// upstreamSucceeded: completed with exit 0
+	upstreamSucceeded, err := db.RecordJobStarting(database, "cool30", "/tmp/p", "cmd", "ok")
+	if err != nil {
+		t.Fatalf("RecordJobStarting: %v", err)
+	}
+	if err := db.RecordCompletionByID(database, upstreamSucceeded, 0, time.Now().Unix()); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+
+	// upstreamFailed: completed with exit 1
+	upstreamFailed, err := db.RecordJobStarting(database, "cool30", "/tmp/p", "cmd", "fail")
+	if err != nil {
+		t.Fatalf("RecordJobStarting: %v", err)
+	}
+	if err := db.RecordCompletionByID(database, upstreamFailed, 1, time.Now().Unix()); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+
+	// upstreamRunning: still going
+	upstreamRunning, err := db.RecordJobStarting(database, "cool30", "/tmp/p", "cmd", "run")
+	if err != nil {
+		t.Fatalf("RecordJobStarting: %v", err)
+	}
+
+	jobs := []*db.Job{
+		{ID: 100, Status: db.StatusQueued, DepSpec: ""},
+		{ID: 101, Status: db.StatusQueued, DepSpec: strconv.FormatInt(upstreamSucceeded, 10)},
+		{ID: 102, Status: db.StatusQueued, DepSpec: strconv.FormatInt(upstreamRunning, 10)},
+		{ID: 103, Status: db.StatusQueued, DepSpec: strconv.FormatInt(upstreamFailed, 10)},
+		{ID: 104, Status: db.StatusQueued, DepSpec: strconv.FormatInt(upstreamFailed, 10) + ":any"},
+		{ID: 105, Status: db.StatusQueued, DepSpec: strconv.FormatInt(upstreamRunning, 10) + ":any"},
+	}
+
+	var deferred []int64
+	filtered := filterLaunchJobsByDependencies(database, jobs, func(job *db.Job, _ string) {
+		deferred = append(deferred, job.ID)
+	})
+
+	keptIDs := make(map[int64]bool, len(filtered))
+	for _, j := range filtered {
+		keptIDs[j.ID] = true
+	}
+
+	// Kept: 100 (no deps), 101 (--after upstream ok), 104 (--after-any upstream failed)
+	for _, id := range []int64{100, 101, 104} {
+		if !keptIDs[id] {
+			t.Errorf("expected job %d to be kept", id)
+		}
+	}
+	// Deferred: 102 (--after upstream running), 103 (--after upstream failed), 105 (--after-any upstream running)
+	for _, id := range []int64{102, 103, 105} {
+		if keptIDs[id] {
+			t.Errorf("expected job %d to be deferred", id)
+		}
+	}
+	if len(deferred) != 3 {
+		t.Errorf("expected 3 deferred callbacks, got %d: %v", len(deferred), deferred)
 	}
 }
 

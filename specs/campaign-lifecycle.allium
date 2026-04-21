@@ -241,6 +241,50 @@ config {
 -- (e.g. "a100-sxm4-80gb" against a displayName of "A100 SXM4 80GB").
 -- Implementation: internal/runpod/client.go offer discovery.
 
+-- --------------------------------------------------------------------------
+-- Dependency-gated launch selection
+-- --------------------------------------------------------------------------
+
+-- A job's `dep_spec` (set by `--after` / `--after-any` at submission) acts as
+-- a placement gate for rental launches. The gate is NOT a co-location
+-- constraint — dependent jobs may land on different instances with different
+-- GPU specs. It is a "not yet" signal: the downstream job is invisible to
+-- the launch selector until its upstream terminates.
+--
+-- Semantics by dependency mode:
+--   --after (strict):    upstream must be Completed with exit_code = 0
+--   --after-any:         upstream must be terminal (any status)
+--
+-- Rationale: lets a cheap prep job gate an expensive GPU job without forcing
+-- both onto one instance, and prevents silent ordering violations when
+-- chained `--after` jobs would otherwise fan out to parallel rentals.
+
+rule DependencyGatesRentalLaunch {
+    when: RentalLaunchSelection(unplaced_jobs) or AutoPilotTick(unplaced_jobs)
+
+    for job in unplaced_jobs where job.dep_spec != null:
+      for dep in ParseDepSpec(job.dep_spec):
+        let upstream = Job(dep.job_id)
+        if dep.allow_failure:
+          -- --after-any: gate clears on any terminal status
+          requires: upstream.is_terminal
+                    else job is excluded from this launch pass
+        else:
+          -- --after (strict): gate clears only on success
+          requires: upstream.status = completed and upstream.exit_code = 0
+                    else job is excluded from this launch pass
+
+    @guidance
+        -- Implementation: cmd/campaign.go filterLaunchJobsByDependencies,
+        -- applied in runCampaignLaunch and refreshLaunchGroupsWithOnPrem.
+        -- The per-host queue on on-prem instances honors dep_spec on its
+        -- own; this rule is specifically about keeping unsatisfied
+        -- dependencies out of the rental-launch selection set so they do
+        -- not get scheduled onto independent cloud instances that cannot
+        -- coordinate queue ordering with each other.
+        -- Deferred jobs are re-evaluated on the next launch pass.
+}
+
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
 

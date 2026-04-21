@@ -31,8 +31,8 @@ Use `start <job-id>` to start a queued job immediately.
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
-- `--after, --depends-on ID`: Start job after another job succeeds (works for inventory and rental/ephemeral upstream jobs)
-- `--after-any ID`: Start job after another job completes, success or failure (works for inventory and rental/ephemeral upstream jobs)
+- `--after, --depends-on ID`: Start job after another job succeeds. For inventory jobs this is enforced by the per-host queue; for rental jobs it is a placement gate — the downstream is held back from `campaign launch` selection until the upstream succeeds, but co-location is not forced
+- `--after-any ID`: Start job after another job completes, success or failure. Same gating behavior as `--after` for rentals
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs

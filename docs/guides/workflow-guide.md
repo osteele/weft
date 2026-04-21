@@ -721,7 +721,14 @@ laptop$ weft run \
 ### Chaining jobs after rental runs
 
 You can chain downstream jobs to rental/ephemeral producers with `--after`,
-`--after-any`, and `--needs`, the same as inventory jobs.
+`--after-any`, and `--needs`.
+
+For rentals, `--after` acts as a **placement gate** rather than a co-location
+constraint: the downstream job is held back from rental launch until its
+upstream succeeds (or, for `--after-any`, terminates). Dependent jobs may
+still land on different instances with different GPU specs — if you want
+them on the same instance, declare the data edge with `--input`/`--output`
+or `--needs`/`--produces` so the launcher groups them by affinity.
 
 ```bash
 # Producer on a rental instance
