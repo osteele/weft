@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -25,9 +26,11 @@ var (
 	providerCreditWarningFetch = fetchProviderCreditWarning
 
 	providerCreditWarningCache struct {
-		mu      sync.Mutex
-		expires time.Time
-		warning string
+		mu          sync.Mutex
+		expires     time.Time
+		warning     string
+		refreshing  atomic.Bool
+		initialized bool
 	}
 
 	sharedTUIStatusFetch = fetchSharedTUIStatusWithCount
@@ -98,24 +101,37 @@ func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, v
 	return lines
 }
 
+// providerCreditWarningText returns the cached warning line and fires an
+// async refresh when the cache is stale. The fetch hits the Vast.ai CLI and
+// network, which easily blocks for a second or more — doing it synchronously
+// on the View() path causes visible TUI hangs when the cache expires.
 func providerCreditWarningText() string {
 	now := providerCreditWarningNow()
 
 	providerCreditWarningCache.mu.Lock()
-	if now.Before(providerCreditWarningCache.expires) {
-		warning := providerCreditWarningCache.warning
-		providerCreditWarningCache.mu.Unlock()
-		return warning
-	}
+	cached := providerCreditWarningCache.warning
+	stale := !now.Before(providerCreditWarningCache.expires)
+	initialized := providerCreditWarningCache.initialized
 	providerCreditWarningCache.mu.Unlock()
 
-	warning := strings.TrimSpace(providerCreditWarningFetch())
+	if stale && providerCreditWarningCache.refreshing.CompareAndSwap(false, true) {
+		go refreshProviderCreditWarning()
+	}
+	if !initialized {
+		return ""
+	}
+	return cached
+}
 
+func refreshProviderCreditWarning() {
+	defer providerCreditWarningCache.refreshing.Store(false)
+	warning := strings.TrimSpace(providerCreditWarningFetch())
+	now := providerCreditWarningNow()
 	providerCreditWarningCache.mu.Lock()
 	providerCreditWarningCache.warning = warning
 	providerCreditWarningCache.expires = now.Add(providerCreditWarningTTL)
+	providerCreditWarningCache.initialized = true
 	providerCreditWarningCache.mu.Unlock()
-	return warning
 }
 
 func sharedTUIStatusText(database *sql.DB) string {

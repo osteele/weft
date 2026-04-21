@@ -2,7 +2,9 @@ package terminal
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -131,5 +133,55 @@ func TestFetchSharedTUIStatusOmitsStartingWhenZero(t *testing.T) {
 	}
 	if strings.Contains(status, "starting") {
 		t.Fatalf("status = %q, want no starting split when starting=0", status)
+	}
+}
+
+// TestProviderCreditWarningTextDoesNotBlockOnRefresh is a regression: a stale
+// cache must never block the caller on the provider fetch (which spawns the
+// vastai CLI / hits the network). The fetch runs asynchronously; stale calls
+// return the previously-cached value immediately.
+func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
+	// Reset cache so each run starts clean.
+	providerCreditWarningCache.mu.Lock()
+	providerCreditWarningCache.warning = ""
+	providerCreditWarningCache.expires = time.Time{}
+	providerCreditWarningCache.initialized = false
+	providerCreditWarningCache.mu.Unlock()
+
+	fetchStarted := make(chan struct{})
+	fetchRelease := make(chan struct{})
+	var fetchCalls atomic.Int32
+
+	prevFetch := providerCreditWarningFetch
+	providerCreditWarningFetch = func() string {
+		fetchCalls.Add(1)
+		close(fetchStarted)
+		<-fetchRelease
+		return "low credit warning"
+	}
+	t.Cleanup(func() {
+		providerCreditWarningFetch = prevFetch
+		// Drain any in-flight goroutine before the test ends.
+		close(fetchRelease)
+		providerCreditWarningCache.refreshing.Store(false)
+	})
+
+	start := time.Now()
+	got := providerCreditWarningText()
+	elapsed := time.Since(start)
+	if got != "" {
+		t.Fatalf("first call must return empty (nothing cached yet), got %q", got)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("first call blocked on fetch for %v; fetch must run async", elapsed)
+	}
+
+	select {
+	case <-fetchStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("async fetch was not kicked off")
+	}
+	if n := fetchCalls.Load(); n != 1 {
+		t.Fatalf("fetch called %d times; want exactly 1", n)
 	}
 }
