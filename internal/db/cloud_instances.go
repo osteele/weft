@@ -351,6 +351,51 @@ func GetLaunch(db *sql.DB, id int64) (*Launch, error) {
 	return c, err
 }
 
+// GetLaunchesByIDs returns the launches matching the given IDs as a map
+// keyed by launch ID. Non-positive and duplicate IDs are skipped; missing
+// rows are omitted from the result. Mirrors the input-handling style of
+// GetLaunchLiveStates / GetLaunchStatuses so all three can be called with
+// the same launchIDs slice.
+func GetLaunchesByIDs(database *sql.DB, ids []int64) (map[int64]*Launch, error) {
+	out := make(map[int64]*Launch, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	placeholders := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	if len(placeholders) == 0 {
+		return out, nil
+	}
+	rows, err := database.Query(
+		`SELECT `+launchSelectColumns+` FROM launches WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		c, err := scanLaunchFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[c.ID] = c
+	}
+	return out, rows.Err()
+}
+
 // GetLaunchByProviderID retrieves a launch by its provider instance ID.
 // Returns nil, nil if no matching launch is found.
 func GetLaunchByProviderID(database *sql.DB, providerID string) (*Launch, error) {

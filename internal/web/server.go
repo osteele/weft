@@ -392,7 +392,6 @@ func buildHostFilters(hosts []*hostinfo.Host) []hostFilterOption {
 }
 
 func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Time) []hostSummary {
-	const staleThreshold = 5 * time.Minute
 	summaries := make([]hostSummary, 0, len(hosts))
 	for _, host := range hosts {
 		if host == nil {
@@ -407,7 +406,7 @@ func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Ti
 		}
 
 		// Dim hosts that are offline or have stale data
-		isStale := !host.LastCheck.IsZero() && time.Since(host.LastCheck) > staleThreshold
+		isStale := !host.LastCheck.IsZero() && time.Since(host.LastCheck) > db.HostInfoStaleThreshold
 		dimmed := host.Status != hostinfo.HostStatusOnline || isStale || !recentlySynced
 
 		// Show metrics for online hosts even if data is stale (will be dimmed visually).

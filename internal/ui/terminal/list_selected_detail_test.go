@@ -19,7 +19,7 @@ func TestSelectedJobDetail_InventoryHost(t *testing.T) {
 		Status:    db.StatusRunning,
 		StartTime: now.Add(-5 * time.Minute).Unix(),
 	}
-	lines := renderSelectedJobDetail(job, nil, now)
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines (Job + Host), got %d: %v", len(lines), lines)
 	}
@@ -51,7 +51,7 @@ func TestSelectedJobDetail_RentalInstance(t *testing.T) {
 		Status:    db.StatusRunning,
 		StartTime: now.Add(-90 * time.Second).Unix(),
 	}
-	lines := renderSelectedJobDetail(job, nil, now)
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %v", lines)
 	}
@@ -80,10 +80,12 @@ func TestSelectedJobDetail_RentalHostLineOmitsPhase(t *testing.T) {
 		Status:    db.StatusRunning,
 		StartTime: now.Add(-1 * time.Minute).Unix(),
 	}
-	live := map[int64]*db.LaunchLiveState{
-		launchID: {InstancePhase: "running:316"},
+	ctx := selectedJobContext{
+		launchLiveByID: map[int64]*db.LaunchLiveState{
+			launchID: {InstancePhase: "running:316"},
+		},
 	}
-	lines := renderSelectedJobDetail(job, live, now)
+	lines := renderSelectedJobDetail(job, ctx, now)
 	joined := strings.Join(lines, " | ")
 	for _, forbidden := range []string{"phase", "running:316"} {
 		if strings.Contains(joined, forbidden) {
@@ -104,7 +106,7 @@ func TestSelectedJobDetail_Unplaced(t *testing.T) {
 		QueueName:        "default",
 		CreatedAt:        now.Add(-2 * time.Hour).Unix(),
 	}
-	lines := renderSelectedJobDetail(job, nil, now)
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
 	if len(lines) != 1 {
 		t.Fatalf("unplaced jobs should have no Host line (got %d lines): %v", len(lines), lines)
 	}
@@ -129,7 +131,7 @@ func TestSelectedJobDetail_Failed(t *testing.T) {
 		ExitCode:      &exit,
 		FailureReason: "oom",
 	}
-	lines := renderSelectedJobDetail(job, nil, now)
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %v", lines)
 	}
@@ -144,7 +146,162 @@ func TestSelectedJobDetail_Failed(t *testing.T) {
 }
 
 func TestSelectedJobDetail_NilJob(t *testing.T) {
-	if lines := renderSelectedJobDetail(nil, nil, time.Now()); lines != nil {
+	if lines := renderSelectedJobDetail(nil, selectedJobContext{}, time.Now()); lines != nil {
 		t.Fatalf("expected nil for nil job, got %v", lines)
+	}
+}
+
+func TestSelectedJobDetail_RentalQueuedWaitingForSibling(t *testing.T) {
+	now := time.Unix(2_000_000, 0)
+	launchID := int64(1236)
+	job := &db.Job{
+		ID:       1268,
+		LaunchID: &launchID,
+		Tags:     []string{"provider:vastai"},
+		Status:   db.StatusQueued,
+		QueuedAt: now.Add(-8 * time.Minute).Unix(),
+	}
+	ctx := selectedJobContext{
+		launchLiveByID: map[int64]*db.LaunchLiveState{
+			launchID: {JobProgressID: 1267},
+		},
+	}
+	lines := renderSelectedJobDetail(job, ctx, now)
+	if len(lines) == 0 {
+		t.Fatalf("expected detail lines, got none")
+	}
+	if !strings.Contains(lines[0], "waiting for wj1267") {
+		t.Fatalf("expected 'waiting for wj1267' in Job line, got: %s", lines[0])
+	}
+}
+
+func TestSelectedJobDetail_InventoryQueuedWaitingForSibling(t *testing.T) {
+	now := time.Unix(2_000_000, 0)
+	job := &db.Job{
+		ID:       200,
+		Host:     "cool30",
+		Status:   db.StatusQueued,
+		QueuedAt: now.Add(-3 * time.Minute).Unix(),
+	}
+	running := &db.Job{
+		ID:        199,
+		Host:      "cool30",
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-30 * time.Minute).Unix(),
+	}
+	ctx := selectedJobContext{siblingJobs: []*db.Job{job, running}}
+	lines := renderSelectedJobDetail(job, ctx, now)
+	if !strings.Contains(lines[0], "waiting for wj199") {
+		t.Fatalf("expected 'waiting for wj199' in Job line, got: %s", lines[0])
+	}
+}
+
+func TestSelectedJobDetail_WaitingForOnlyWhenQueued(t *testing.T) {
+	now := time.Unix(2_000_000, 0)
+	launchID := int64(5)
+	runningJob := &db.Job{
+		ID:        100,
+		LaunchID:  &launchID,
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-1 * time.Minute).Unix(),
+	}
+	// A different running job reported via JobProgressID must not make
+	// the *running* job render as "waiting for".
+	ctx := selectedJobContext{
+		launchLiveByID: map[int64]*db.LaunchLiveState{
+			launchID: {JobProgressID: 999},
+		},
+	}
+	lines := renderSelectedJobDetail(runningJob, ctx, now)
+	joined := strings.Join(lines, " | ")
+	if strings.Contains(joined, "waiting for") {
+		t.Fatalf("non-queued job must not show 'waiting for', got: %s", joined)
+	}
+}
+
+func TestSelectedJobDetail_RentalHostEnriched(t *testing.T) {
+	now := time.Unix(3_000_000, 0)
+	launchID := int64(1236)
+	launchedAt := now.Add(-1 * time.Hour).Unix()
+	launch := &db.Launch{
+		ID:               launchID,
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		ResolvedGPUName:  "RTX 3090",
+		GPUMemGB:         24,
+		NumGPUs:          1,
+		CostPerHourCents: 15,
+		LaunchedAt:       &launchedAt,
+	}
+	job := &db.Job{
+		ID:        1267,
+		LaunchID:  &launchID,
+		Tags:      []string{"provider:vastai"},
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-30 * time.Minute).Unix(),
+	}
+	ctx := selectedJobContext{
+		launchByID: map[int64]*db.Launch{launchID: launch},
+	}
+	lines := renderSelectedJobDetail(job, ctx, now)
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines, got %v", lines)
+	}
+	host := lines[1]
+	for _, want := range []string{"Host: wi1236", "RTX 3090 24GB", "Vast.ai", "$0.15/hr", "uptime 1h", "$0.15"} {
+		if !strings.Contains(host, want) {
+			t.Errorf("expected %q in Host line, got: %s", want, host)
+		}
+	}
+}
+
+func TestSelectedJobDetail_RentalHostFallbackWhenLaunchMissing(t *testing.T) {
+	now := time.Unix(3_000_000, 0)
+	launchID := int64(77)
+	job := &db.Job{
+		ID:        1,
+		LaunchID:  &launchID,
+		Tags:      []string{"provider:vastai"},
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-1 * time.Minute).Unix(),
+	}
+	// launchByID is empty — simulate race during reload.
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines, got %v", lines)
+	}
+	host := lines[1]
+	if !strings.Contains(host, "Host: wi77") || !strings.Contains(host, "provider: Vast.ai") {
+		t.Fatalf("expected fallback 'Host: wi77 · provider: Vast.ai', got: %s", host)
+	}
+	for _, unwanted := range []string{"$", "uptime", "/hr"} {
+		if strings.Contains(host, unwanted) {
+			t.Errorf("unexpected enrichment %q in fallback line, got: %s", unwanted, host)
+		}
+	}
+}
+
+func TestSelectedJobDetail_InventoryLastSeenWhenStale(t *testing.T) {
+	now := time.Unix(4_000_000, 0)
+	job := &db.Job{
+		ID:        10,
+		Host:      "cool30",
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-1 * time.Minute).Unix(),
+	}
+	// Fresh (under threshold): no suffix.
+	fresh := selectedJobContext{hostInfoByName: map[string]*db.CachedHostInfo{
+		"cool30": {Name: "cool30", LastUpdated: now.Add(-4 * time.Minute).Unix()},
+	}}
+	if got := renderHostFooterLine(job, fresh, now); got != "Host: cool30" {
+		t.Errorf("fresh host info must not add 'last seen', got: %s", got)
+	}
+	// Stale (over threshold): suffix present.
+	stale := selectedJobContext{hostInfoByName: map[string]*db.CachedHostInfo{
+		"cool30": {Name: "cool30", LastUpdated: now.Add(-10 * time.Minute).Unix()},
+	}}
+	got := renderHostFooterLine(job, stale, now)
+	if !strings.Contains(got, "Host: cool30") || !strings.Contains(got, "last seen") {
+		t.Errorf("stale host info must show 'last seen', got: %s", got)
 	}
 }

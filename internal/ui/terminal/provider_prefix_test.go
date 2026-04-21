@@ -49,7 +49,7 @@ func TestSelectedJobDetail_RentalHostLineIncludesProvider(t *testing.T) {
 		Status:    db.StatusRunning,
 		StartTime: now.Add(-2 * time.Minute).Unix(),
 	}
-	lines := renderSelectedJobDetail(job, nil, now)
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 detail lines (Job + Host), got %v", lines)
 	}
@@ -70,7 +70,7 @@ func TestSelectedJobDetail_RentalWithoutProviderFallsBack(t *testing.T) {
 		Status:    db.StatusRunning,
 		StartTime: now.Add(-1 * time.Minute).Unix(),
 	}
-	lines := renderSelectedJobDetail(job, nil, now)
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 detail lines, got %v", lines)
 	}

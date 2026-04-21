@@ -171,6 +171,16 @@ func sharedTUIStatusTextWithCount(database *sql.DB) (string, int) {
 	return status, count
 }
 
+// pluralize returns "%d singular" when n == 1, else "%d plural". The "up"
+// / "starting" sub-phrase uses raw %d because the counts always appear as
+// a pair where both singular and plural forms read naturally.
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
 func fetchProviderCreditWarning() string {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
@@ -224,9 +234,9 @@ func fetchSharedTUIStatusWithCount(database *sql.DB) (string, int) {
 		burnCentsPerHour += l.CostPerHourCents
 	}
 
-	status := fmt.Sprintf("%d jobs running  ·  %d instances", runningJobs, totalInstances)
+	status := fmt.Sprintf("%s running  ·  %s", pluralize(runningJobs, "job", "jobs"), pluralize(totalInstances, "instance", "instances"))
 	if startingInstances > 0 {
-		status = fmt.Sprintf("%d jobs running  ·  %d instances (%d up, %d starting)", runningJobs, totalInstances, runningInstances, startingInstances)
+		status = fmt.Sprintf("%s running  ·  %s (%d up, %d starting)", pluralize(runningJobs, "job", "jobs"), pluralize(totalInstances, "instance", "instances"), runningInstances, startingInstances)
 	}
 	if burnCentsPerHour > 0 {
 		status += fmt.Sprintf("  ·  $%.2f/hr", float64(burnCentsPerHour)/100)

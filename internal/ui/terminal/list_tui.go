@@ -77,6 +77,8 @@ type listTUIModel struct {
 	showAutoPilotErrorDetails  bool
 	launchLiveByID             map[int64]*db.LaunchLiveState
 	launchStatusByID           map[int64]string
+	launchByID                 map[int64]*db.Launch
+	hostInfoByName             map[string]*db.CachedHostInfo
 	quickLaunching             bool
 	quickLaunchScope           string
 	quickLaunchProgress        <-chan listQuickLaunchProgressMsg
@@ -97,6 +99,8 @@ type listJobsLoadedMsg struct {
 	jobs             []*db.Job
 	launchLiveByID   map[int64]*db.LaunchLiveState
 	launchStatusByID map[int64]string
+	launchByID       map[int64]*db.Launch
+	hostInfoByName   map[string]*db.CachedHostInfo
 	err              error
 }
 
@@ -390,6 +394,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.jobs = msg.jobs
 		m.launchLiveByID = msg.launchLiveByID
 		m.launchStatusByID = msg.launchStatusByID
+		m.launchByID = msg.launchByID
+		m.hostInfoByName = msg.hostInfoByName
 		m.pruneAutoBlockReasons()
 		if m.countUnplacedQueuedJobs() == 0 {
 			m.autoPersistentBlocked = ""
@@ -1032,7 +1038,12 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 	if job == nil {
 		return nil
 	}
-	return renderSelectedJobDetail(job, m.launchLiveByID, time.Now())
+	return renderSelectedJobDetail(job, selectedJobContext{
+		launchLiveByID: m.launchLiveByID,
+		launchByID:     m.launchByID,
+		hostInfoByName: m.hostInfoByName,
+		siblingJobs:    m.jobs,
+	}, time.Now())
 }
 
 func (m listTUIModel) selectedGroupedRow() int {
@@ -1572,13 +1583,56 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if statusErr != nil {
 			launchStatusByID = map[int64]string{}
 		}
+		launchByID, launchErr := db.GetLaunchesByIDs(database, launchIDs)
+		if launchErr != nil {
+			launchByID = map[int64]*db.Launch{}
+		}
+		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		return listJobsLoadedMsg{
 			jobs:             jobs,
 			launchLiveByID:   launchLiveByID,
 			launchStatusByID: launchStatusByID,
+			launchByID:       launchByID,
+			hostInfoByName:   hostInfoByName,
 			err:              nil,
 		}
 	}
+}
+
+// loadInventoryHostInfo returns CachedHostInfo keyed by host name, filtered
+// to the distinct inventory hosts referenced by the given jobs. One DB
+// query (LoadAllCachedHosts) regardless of host count. Rental hosts are
+// skipped — they don't populate host_info_cache. Errors return an empty
+// map; callers fall back to the bare Host: <name> form.
+func loadInventoryHostInfo(database *sql.DB, jobs []*db.Job) map[string]*db.CachedHostInfo {
+	names := map[string]struct{}{}
+	for _, job := range jobs {
+		if job == nil || !job.HasInventoryHost() {
+			continue
+		}
+		host := strings.TrimSpace(job.Host)
+		if host == "" {
+			continue
+		}
+		names[host] = struct{}{}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	all, err := db.LoadAllCachedHosts(database)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]*db.CachedHostInfo, len(names))
+	for _, info := range all {
+		if info == nil {
+			continue
+		}
+		if _, want := names[info.Name]; want {
+			out[info.Name] = info
+		}
+	}
+	return out
 }
 
 func (m listTUIModel) runBackgroundSync(full bool) tea.Cmd {

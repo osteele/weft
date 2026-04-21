@@ -5102,6 +5102,11 @@ func NormalizeCommand(cmd string) (workingDir, command string, envVars []string)
 	return workingDir, cmd, envVars
 }
 
+// HostInfoStaleThreshold is the age beyond which CachedHostInfo.LastUpdated
+// is considered stale — shared by the dashboard, web UI, and list-TUI Host
+// footer so "last seen" messaging fires at a single breakpoint.
+const HostInfoStaleThreshold = 5 * time.Minute
+
 // CachedHostInfo represents cached static information about a host
 type CachedHostInfo struct {
 	Name        string

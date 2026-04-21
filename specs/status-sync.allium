@@ -828,6 +828,20 @@ rule TUIPeriodicSync {
         --       - failed:                   "exit <code>", then
         --                                   "<FailureReason>" or the first
         --                                   line of ErrorMessage.
+        --   - Sibling-wait segment: "waiting for wj<sibling-id>" appears
+        --     between the status-context segment and the ETA segment when
+        --     EffectiveStatus is queued or pending_placement AND a running
+        --     sibling exists on the same target.
+        --       - Rental target: sibling ID comes from
+        --         LaunchLiveState.JobProgressID for the job's launch.
+        --         Rendered only when JobProgressID is non-zero and differs
+        --         from the selected job's own ID.
+        --       - Inventory target: scan the loaded job set for a sibling
+        --         with the same Host whose EffectiveStatus is Running or
+        --         Starting; first match wins.
+        --     Helper: waitingForSiblingJobID(job, ctx) in
+        --     list_selected_detail.go resolves the target ID; null → no
+        --     segment rendered.
         --   - When TargetKind is unplaced, the Job line also carries
         --     "unplaced", plus "wants <gpu-class ≥NGB>" when a GPU
         --     constraint is set, plus "blocked: <reasons>"
@@ -839,24 +853,65 @@ rule TUIPeriodicSync {
         --     history-backed remaining estimates.
         --
         -- Host line (rendered only for placed jobs, selected by TargetKind):
-        --   - inventory host:   "Host: <hostname>" (no provider suffix —
-        --                       provider applies only to rentals).
-        --   - rental instance:  "Host: wi<launch-id> · provider: <Display>"
-        --                       where <Display> is the human-readable
-        --                       provider name from providerDisplayName()
-        --                       ("Vast.ai" for vastai, "RunPod" for
-        --                       runpod; suffix omitted entirely for
-        --                       unknown providers). The va:/rp: prefix on
-        --                       wi<id> is NOT used on the Host line — the
-        --                       "provider:" segment names it explicitly.
+        --   - inventory host: "Host: <hostname>", optionally followed by
+        --     " · last seen <dur> ago" when CachedHostInfo.LastUpdated for
+        --     the host is older than 5 minutes. When the cached info is
+        --     fresh (within 5 minutes) or absent, only "Host: <hostname>"
+        --     is rendered. The DB does not track boot-time uptime for
+        --     on-prem hosts; this "last seen" freshness indicator is the
+        --     closest derivable signal.
+        --   - rental instance (enriched): when the list TUI has a Launch
+        --     record for the job's LaunchID, the Host line reads
+        --       "Host: wi<launch-id> · <GPU brief> · <Provider> ·
+        --        $<rate>/hr · uptime <dur> · $<cost>"
+        --     with segment sources:
+        --       - <GPU brief>: db.Launch.DisplayGPUBrief() (e.g.
+        --         "RTX 3090 24GB" or "2x A100 80GB").
+        --       - <Provider>: cloud.Provider.DisplayName() on
+        --         launch.Provider (e.g. "Vast.ai", "RunPod").
+        --       - $<rate>/hr, uptime <dur>, $<cost>: produced by
+        --         observeLaunch(ci, inst=nil, now) in
+        --         cloud_instance_observability.go. Uptime is the
+        --         wall-clock duration since Launch.LaunchedAt; cost is
+        --         the currently accumulated dollar total.
+        --     Each of these segments is omitted independently when the
+        --     underlying field is absent (e.g. a just-launched record
+        --     with no LaunchedAt yet).
+        --   - rental instance (fallback): when the Launch record itself
+        --     is missing (e.g. a race during reload), the line falls
+        --     back to the bare form
+        --       "Host: wi<launch-id> · provider: <Display>"
+        --     where <Display> is providerDisplayName() on the job's
+        --     provider tag ("Vast.ai" for vastai, "RunPod" for runpod;
+        --     suffix omitted entirely for unknown providers). The
+        --     va:/rp: prefix on wi<id> is NOT used on the Host line.
+        --
+        -- Per-reload plumbing for the above:
+        --   - db.GetLaunchesByIDs batch-loads all Launch rows for the
+        --     rental jobs on screen (parallels GetLaunchLiveStates).
+        --   - db.LoadCachedHostInfo is called per distinct inventory
+        --     host in the loaded job set.
+        --   - Both populate maps on listJobsLoadedMsg / listTUIModel:
+        --     launchByID and hostInfoByName. Rendering reads only from
+        --     these maps — no per-render DB queries.
+        --   - The four lookup maps (launchByID, hostInfoByName,
+        --     launch-live-state map, sibling job slice) are bundled into
+        --     a selectedJobContext struct in list_selected_detail.go and
+        --     passed into renderSelectedJobDetail(job, ctx, now).
         --
         -- System line (formerly "shared-status"):
         --   - Always rendered, whether or not a job is selected.
         --   - Prefixed with "System: " — or "System (global): " when the
         --     visible running-job count differs from the global count —
         --     so it sits as a sibling of the Job:/Host: lines.
-        --   - Content unchanged: running-job count, instance count,
-        --     cost/hour.
+        --   - Content: running-job count, instance count, cost/hour.
+        --   - Count nouns are singularised when the count is 1:
+        --       "1 job running"  / "2 jobs running"
+        --       "1 instance"     / "2 instances"
+        --       "(1 up, 1 starting)" / "(2 up, 2 starting)" in the
+        --         instance-breakdown sub-phrase.
+        --     Helper: pluralize(n, singular, plural) in
+        --     provider_credit_warning.go.
         --
         -- The standalone campaign-wide "ETA: …" line is no longer
         -- rendered in the grouped view. Per-job ETA now lives on the Job

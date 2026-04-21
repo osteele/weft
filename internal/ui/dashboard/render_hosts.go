@@ -14,9 +14,7 @@ import (
 func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) string {
 	statusSymbol, statusStyle := hostStatusIndicator(host)
 
-	// Consider data stale if LastCheck is more than 5 minutes old
-	const staleThreshold = 5 * time.Minute
-	isStale := !host.LastCheck.IsZero() && time.Since(host.LastCheck) > staleThreshold
+	isStale := !host.LastCheck.IsZero() && time.Since(host.LastCheck) > db.HostInfoStaleThreshold
 
 	nameStyle := hostSummaryNameStyle
 	if host.Status != HostStatusOnline || isStale {

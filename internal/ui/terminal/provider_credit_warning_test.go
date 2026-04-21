@@ -247,3 +247,53 @@ func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
 		t.Fatalf("fetch called %d times; want exactly 1", n)
 	}
 }
+
+func TestPluralize(t *testing.T) {
+	cases := []struct {
+		n        int
+		singular string
+		plural   string
+		want     string
+	}{
+		{0, "job", "jobs", "0 jobs"},
+		{1, "job", "jobs", "1 job"},
+		{2, "job", "jobs", "2 jobs"},
+		{1, "instance", "instances", "1 instance"},
+	}
+	for _, tc := range cases {
+		if got := pluralize(tc.n, tc.singular, tc.plural); got != tc.want {
+			t.Errorf("pluralize(%d, %q, %q) = %q, want %q", tc.n, tc.singular, tc.plural, got, tc.want)
+		}
+	}
+}
+
+// TestSharedTUIStatusSingularises pins the user-visible "1 job running · 1 instance"
+// form when counts are exactly 1.
+func TestSharedTUIStatusSingularises(t *testing.T) {
+	database := db.SetupTestDB(t)
+	i1, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, CostPerHourCents: 14})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo one", "one", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, i1); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+
+	status, _ := fetchSharedTUIStatusWithCount(database)
+	if !strings.Contains(status, "1 job running") {
+		t.Errorf("expected '1 job running', got: %s", status)
+	}
+	if !strings.Contains(status, "1 instance") {
+		t.Errorf("expected '1 instance' (singular), got: %s", status)
+	}
+	if strings.Contains(status, "1 jobs") || strings.Contains(status, "1 instances") {
+		t.Errorf("plural form at count=1, got: %s", status)
+	}
+}
