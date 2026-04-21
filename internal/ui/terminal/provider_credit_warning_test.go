@@ -136,17 +136,28 @@ func TestFetchSharedTUIStatusOmitsStartingWhenZero(t *testing.T) {
 	}
 }
 
-// TestProviderCreditWarningTextDoesNotBlockOnRefresh is a regression: a stale
-// cache must never block the caller on the provider fetch (which spawns the
-// vastai CLI / hits the network). The fetch runs asynchronously; stale calls
-// return the previously-cached value immediately.
-func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
-	// Reset cache so each run starts clean.
+// resetProviderCreditWarningCacheForTest clears the package-level cache and
+// the refresh-in-flight flag. Tests that touch providerCreditWarningText()
+// must call this both before manipulating the fetch hook and during cleanup;
+// otherwise an outstanding refresh goroutine (from an earlier test's real
+// fetch) can leave refreshing=true, and a synthetic warning from this test's
+// fetch can leak into the cache and poison later tests that render it.
+func resetProviderCreditWarningCacheForTest(t *testing.T) {
+	t.Helper()
 	providerCreditWarningCache.mu.Lock()
 	providerCreditWarningCache.warning = ""
 	providerCreditWarningCache.expires = time.Time{}
 	providerCreditWarningCache.initialized = false
 	providerCreditWarningCache.mu.Unlock()
+	providerCreditWarningCache.refreshing.Store(false)
+}
+
+// TestProviderCreditWarningTextDoesNotBlockOnRefresh is a regression: a stale
+// cache must never block the caller on the provider fetch (which spawns the
+// vastai CLI / hits the network). The fetch runs asynchronously; stale calls
+// return the previously-cached value immediately.
+func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
+	resetProviderCreditWarningCacheForTest(t)
 
 	fetchStarted := make(chan struct{})
 	fetchRelease := make(chan struct{})
@@ -157,13 +168,14 @@ func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
 		fetchCalls.Add(1)
 		close(fetchStarted)
 		<-fetchRelease
-		return "low credit warning"
+		// Return empty so the in-flight goroutine can't leak a synthetic
+		// warning into the shared cache.
+		return ""
 	}
 	t.Cleanup(func() {
 		providerCreditWarningFetch = prevFetch
-		// Drain any in-flight goroutine before the test ends.
 		close(fetchRelease)
-		providerCreditWarningCache.refreshing.Store(false)
+		resetProviderCreditWarningCacheForTest(t)
 	})
 
 	start := time.Now()

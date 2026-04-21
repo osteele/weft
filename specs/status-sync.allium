@@ -812,10 +812,24 @@ rule TUIPeriodicSync {
         -- block between the ETA/status lines and the shared-status/
         -- auto-pilot lines. Line 1 is placement:
         --   - inventory host:   "#<id>  host <name> · GPU <cuda-vis-devices>"
-        --   - rental instance:  "#<id>  instance wi<launch-id> · phase <instance-phase>"
+        --   - rental instance:  "#<id>  instance <pp>:wi<launch-id> · phase <instance-phase>"
         --   - unplaced:         "#<id>  unplaced · wants <gpu-class ≥NGB> ·
         --                        blocked: <placement_reasons joined>"
         -- with "· project <name>" appended when a project is set.
+        --
+        -- Provider prefix on rental instance labels: wherever the list TUI
+        -- renders a rental instance reference (ungrouped HOST column,
+        -- grouped "launching" row suffix "instance <pp>:wi<id> starting",
+        -- selected-job detail line above), the wi<id> is prefixed with a
+        -- 2-letter provider tag derived from the job's provider:<name> tag:
+        --   - "va:wi<id>" for provider:vastai
+        --   - "rp:wi<id>" for provider:runpod
+        --   - bare "wi<id>" when the provider tag is absent or unknown.
+        -- The prefix applies only to rental references; inventory host
+        -- names are unchanged. Implementation: providerShortPrefix in
+        -- internal/ui/terminal/list_render.go (fed by db.Job.ProviderName()
+        -- / db.TagProviderPrefix), applied in formatJobListHost,
+        -- renderSelectedJobDetail, and groupedStatusTimingSuffix.
         -- Line 2 is status context, selected by EffectiveStatus:
         --   - running/starting:              "elapsed <duration>"
         --   - queued/pending_placement:      "waiting <duration> · queue <name>"

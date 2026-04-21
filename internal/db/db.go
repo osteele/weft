@@ -195,6 +195,21 @@ func (j *Job) HasFreshStatus(freshHosts map[string]struct{}) bool {
 	return ok
 }
 
+// ProviderName returns the normalised cloud provider name ("vastai", "runpod")
+// extracted from the job's "provider:<name>" tag, or "" if no provider tag is
+// present or the value is unknown.
+func (j *Job) ProviderName() string {
+	if j == nil {
+		return ""
+	}
+	for _, tag := range j.Tags {
+		if name, ok := providerFromTag(tag); ok {
+			return name
+		}
+	}
+	return ""
+}
+
 // TargetDisplay returns a user-facing label for the current target.
 func (j *Job) TargetDisplay() string {
 	switch j.TargetKind() {

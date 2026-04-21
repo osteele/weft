@@ -240,6 +240,9 @@ func formatJobListHost(job *db.Job) string {
 	if job == nil {
 		return ""
 	}
+	if job.TargetKind() == db.JobTargetRentalInstance && job.LaunchID != nil {
+		return formatRentalInstanceLabel(job)
+	}
 	return job.TargetDisplay()
 }
 

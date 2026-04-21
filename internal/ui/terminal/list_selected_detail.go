@@ -8,7 +8,6 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
-	"github.com/osteele/weft/internal/ids"
 )
 
 // renderSelectedJobDetail returns a single footer line summarising the job
@@ -41,7 +40,7 @@ func appendPlacementParts(parts []string, job *db.Job, live *db.LaunchLiveState)
 		}
 	case db.JobTargetRentalInstance:
 		if job.LaunchID != nil {
-			parts = append(parts, "instance "+ids.FormatInstanceID(*job.LaunchID))
+			parts = append(parts, "instance "+formatRentalInstanceLabel(job))
 		} else {
 			parts = append(parts, "rental")
 		}

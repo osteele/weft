@@ -8,7 +8,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/dashboard"
@@ -280,7 +279,7 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 	}
 	if sectionKey == "launching" {
 		if job.LaunchID != nil && *job.LaunchID > 0 {
-			return fmt.Sprintf("instance %s starting", ids.FormatInstanceID(*job.LaunchID))
+			return fmt.Sprintf("instance %s starting", formatRentalInstanceLabel(job))
 		}
 		return "instance starting"
 	}
