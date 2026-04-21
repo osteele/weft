@@ -6,62 +6,92 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 )
 
-// renderSelectedJobDetail returns a single footer line summarising the job
-// under the cursor — placement (host+GPU or instance+phase or unplaced+wants)
-// joined with status-specific context (elapsed, waiting, or exit+reason).
-// Returns nil when job is nil or no useful detail is available.
+// renderSelectedJobDetail returns the "Job:" and "Host:" footer lines for the
+// job under the cursor. The Host line is omitted for unplaced jobs (their
+// placement context is carried in the Job line's status segment). Returns
+// nil when no job is selected.
 //
 // Fields deliberately excluded: project (already shown in the job list row),
 // queue name (only one queue is in practical use), and the command / script
-// tail (too long for the footer and already visible in the job list row).
+// tail (too long for the footer and already visible in the row).
 func renderSelectedJobDetail(job *db.Job, live *db.LaunchLiveState, now time.Time) []string {
 	if job == nil {
 		return nil
 	}
-	parts := []string{fmt.Sprintf("#%d", job.ID)}
-	parts = appendPlacementParts(parts, job, live)
-	parts = appendStatusParts(parts, job, now)
-	if len(parts) <= 1 {
-		return nil
+	var lines []string
+	if s := renderJobFooterLine(job, live, now); s != "" {
+		lines = append(lines, s)
 	}
-	return []string{parts[0] + "  " + strings.Join(parts[1:], " · ")}
+	if s := renderHostFooterLine(job); s != "" {
+		lines = append(lines, s)
+	}
+	return lines
 }
 
-func appendPlacementParts(parts []string, job *db.Job, live *db.LaunchLiveState) []string {
+// renderJobFooterLine returns "Job: wj<id> · <status> · ETA …" summarising
+// the job under the cursor. Returns "" when job is nil.
+func renderJobFooterLine(job *db.Job, live *db.LaunchLiveState, now time.Time) string {
+	if job == nil {
+		return ""
+	}
+	parts := []string{"Job: " + formatJobIDDisplay(job.ID)}
+	parts = appendJobStatusParts(parts, job, now)
+	if job.TargetKind() == db.JobTargetUnplaced {
+		parts = appendUnplacedParts(parts, job)
+	}
+	if remaining, ok := estimateRunningJobRemaining(job, singletonLive(live, job.LaunchID), now); ok && remaining.Mean > 0 {
+		parts = append(parts, "ETA "+remaining.FormatWithBounds())
+	}
+	return strings.Join(parts, " · ")
+}
+
+// renderHostFooterLine returns "Host: <target> · provider: <Display>" for
+// placed jobs, or "" for unplaced / nil jobs. Inventory jobs render just
+// "Host: <hostname>" (no provider suffix — the provider concept applies only
+// to rentals).
+func renderHostFooterLine(job *db.Job) string {
+	if job == nil {
+		return ""
+	}
 	switch job.TargetKind() {
 	case db.JobTargetInventoryHost:
-		parts = append(parts, "host "+job.Host)
-		if gpu := strings.TrimSpace(job.GPU); gpu != "" {
-			parts = append(parts, "GPU "+gpu)
+		if h := strings.TrimSpace(job.Host); h != "" {
+			return "Host: " + h
 		}
+		return ""
 	case db.JobTargetRentalInstance:
-		if job.LaunchID != nil {
-			parts = append(parts, "instance "+formatRentalInstanceLabel(job))
-		} else {
-			parts = append(parts, "rental")
+		parts := []string{"Host: " + job.TargetDisplay()}
+		if display := providerDisplayName(job.ProviderName()); display != "" {
+			parts = append(parts, "provider: "+display)
 		}
-		if live != nil {
-			if phase := strings.TrimSpace(live.InstancePhase); phase != "" {
-				parts = append(parts, "phase "+phase)
-			}
-		}
-	case db.JobTargetUnplaced:
-		parts = append(parts, "unplaced")
-		if req := formatResourceRequest(job); req != "" {
-			parts = append(parts, "wants "+req)
-		}
-		if len(job.PlacementReasons) > 0 {
-			parts = append(parts, "blocked: "+strings.Join(job.PlacementReasons, "; "))
-		}
+		return strings.Join(parts, " · ")
 	}
-	return parts
+	return ""
 }
 
-func appendStatusParts(parts []string, job *db.Job, now time.Time) []string {
+// providerDisplayName returns the human-readable provider name for display
+// (e.g. "Vast.ai", "RunPod"), or "" for unknown providers.
+func providerDisplayName(provider string) string {
+	switch provider {
+	case string(cloud.ProviderVastai):
+		return "Vast.ai"
+	case string(cloud.ProviderRunpod):
+		return "RunPod"
+	default:
+		return ""
+	}
+}
+
+func formatJobIDDisplay(id int64) string {
+	return fmt.Sprintf("wj%d", id)
+}
+
+func appendJobStatusParts(parts []string, job *db.Job, now time.Time) []string {
 	switch job.EffectiveStatus() {
 	case db.StatusRunning, db.StatusStarting:
 		if job.StartTime > 0 {
@@ -84,6 +114,17 @@ func appendStatusParts(parts []string, job *db.Job, now time.Time) []string {
 	return parts
 }
 
+func appendUnplacedParts(parts []string, job *db.Job) []string {
+	parts = append(parts, "unplaced")
+	if req := formatResourceRequest(job); req != "" {
+		parts = append(parts, "wants "+req)
+	}
+	if len(job.PlacementReasons) > 0 {
+		parts = append(parts, "blocked: "+strings.Join(job.PlacementReasons, "; "))
+	}
+	return parts
+}
+
 func formatResourceRequest(job *db.Job) string {
 	var parts []string
 	if job.GPUClass != "" {
@@ -93,6 +134,16 @@ func formatResourceRequest(job *db.Job) string {
 		parts = append(parts, fmt.Sprintf("≥%dGB", *job.GPUMemGB))
 	}
 	return strings.Join(parts, " ")
+}
+
+// singletonLive converts a single (live, launchID) pair into the map form
+// expected by estimateRunningJobRemaining. Avoids allocating for the nil
+// case.
+func singletonLive(live *db.LaunchLiveState, launchID *int64) map[int64]*db.LaunchLiveState {
+	if live == nil || launchID == nil {
+		return nil
+	}
+	return map[int64]*db.LaunchLiveState{*launchID: live}
 }
 
 func firstNonZeroTimestamp(xs ...int64) int64 {

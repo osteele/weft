@@ -437,7 +437,7 @@ func TestListTUIGroupedViewShowsSelectedJobDetail(t *testing.T) {
 	m.rebuildGroupedRows()
 
 	out := stripANSI(m.View())
-	for _, want := range []string{"#42", "host cool30", "GPU 0,1"} {
+	for _, want := range []string{"Job: wj42", "elapsed 5m", "Host: cool30"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in grouped view output, got:\n%s", want, out)
 		}
@@ -464,7 +464,7 @@ func TestListTUIUngroupedViewShowsSelectedJobDetail(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	for _, want := range []string{"#7", "unplaced", "ampere+", "blocked: no capacity", "waiting 2h"} {
+	for _, want := range []string{"Job: wj7", "unplaced", "ampere+", "blocked: no capacity", "waiting 2h"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in ungrouped view output, got:\n%s", want, out)
 		}

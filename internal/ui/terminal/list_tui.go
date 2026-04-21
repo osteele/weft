@@ -830,8 +830,9 @@ func (m listTUIModel) groupedView() string {
 	}
 
 	// Build footer lines first so we can reserve space for them.
+	// Per-job ETA now lives on the "Job:" line in selectedDetailLines, so
+	// no standalone campaign-wide ETA line is rendered.
 	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
-	etaLine := formatETALine(eta)
 	statusLine := m.groupedStatusText()
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
 	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning)
@@ -839,9 +840,6 @@ func (m listTUIModel) groupedView() string {
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
 	baseFooterLines := 2 // blank separator + controls
-	if etaLine != "" {
-		baseFooterLines++
-	}
 	if statusLine != "" {
 		baseFooterLines++
 	}
@@ -888,16 +886,12 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
 	}
-	if etaLine != "" {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(etaLine, m.width)))
+	for _, line := range selectedDetailLines {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
 	}
 	if statusLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
-		b.WriteString("\n")
-	}
-	for _, line := range selectedDetailLines {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
 	}
 	for _, line := range sharedStatusLines {

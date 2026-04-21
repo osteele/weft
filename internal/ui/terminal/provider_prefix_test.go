@@ -54,7 +54,7 @@ func TestFormatJobListHost_InventoryUnchanged(t *testing.T) {
 	}
 }
 
-func TestSelectedJobDetail_RentalIncludesProviderPrefix(t *testing.T) {
+func TestSelectedJobDetail_RentalHostLineIncludesProvider(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	launchID := int64(42)
 	job := &db.Job{
@@ -65,11 +65,14 @@ func TestSelectedJobDetail_RentalIncludesProviderPrefix(t *testing.T) {
 		StartTime: now.Add(-2 * time.Minute).Unix(),
 	}
 	lines := renderSelectedJobDetail(job, nil, now)
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 detail line, got %v", lines)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 detail lines (Job + Host), got %v", lines)
 	}
-	if !strings.Contains(lines[0], "instance rp:wi42") {
-		t.Errorf("expected 'instance rp:wi42' in detail line, got: %s", lines[0])
+	hostLine := lines[1]
+	for _, want := range []string{"Host: wi42", "provider: RunPod"} {
+		if !strings.Contains(hostLine, want) {
+			t.Errorf("expected %q in Host line, got: %s", want, hostLine)
+		}
 	}
 }
 
@@ -83,13 +86,14 @@ func TestSelectedJobDetail_RentalWithoutProviderFallsBack(t *testing.T) {
 		StartTime: now.Add(-1 * time.Minute).Unix(),
 	}
 	lines := renderSelectedJobDetail(job, nil, now)
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 detail line, got %v", lines)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 detail lines, got %v", lines)
 	}
-	if !strings.Contains(lines[0], "instance wi9") {
-		t.Errorf("expected 'instance wi9' fallback, got: %s", lines[0])
+	hostLine := lines[1]
+	if !strings.Contains(hostLine, "wi9") {
+		t.Errorf("expected 'wi9' in Host line, got: %s", hostLine)
 	}
-	if strings.Contains(lines[0], "instance :wi9") || strings.Contains(lines[0], "instance va:") || strings.Contains(lines[0], "instance rp:") {
-		t.Errorf("unexpected provider prefix without a provider tag, got: %s", lines[0])
+	if strings.Contains(hostLine, "provider:") {
+		t.Errorf("unexpected provider suffix without a provider tag, got: %s", hostLine)
 	}
 }

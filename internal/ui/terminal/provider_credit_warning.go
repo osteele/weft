@@ -57,12 +57,15 @@ func renderProviderCreditWarningLine(width int) string {
 	return tuiFailedStyle.Render(warning)
 }
 
-// renderSharedTUIStatusLine returns a dim status line shared by TUIs.
+// renderSharedTUIStatusLine returns a dim status line shared by TUIs,
+// prefixed with "System: " so it sits next to the per-job "Job:" and
+// per-host "Host:" footer lines as a sibling.
 func renderSharedTUIStatusLine(database *sql.DB, width int) string {
 	status := sharedTUIStatusText(database)
 	if status == "" {
 		return ""
 	}
+	status = "System: " + status
 	if width > 0 {
 		status = truncateDisplayWidth(status, width)
 	}
@@ -87,9 +90,11 @@ func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, v
 	lines := make([]string, 0, 2)
 	status, globalRunning := sharedTUIStatusTextWithCount(database)
 	if status != "" {
+		prefix := "System: "
 		if visibleRunning >= 0 && globalRunning != visibleRunning {
-			status = "global status: " + status
+			prefix = "System (global): "
 		}
+		status = prefix + status
 		if width > 0 {
 			status = truncateDisplayWidth(status, width)
 		}

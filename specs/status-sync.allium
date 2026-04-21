@@ -808,46 +808,100 @@ rule TUIPeriodicSync {
         -- not actionable and clutters the footer.
         --
         -- Selected-job detail footer: when a job is under the cursor, both
-        -- the grouped and ungrouped list views render a 1-2 line detail
-        -- block between the ETA/status lines and the shared-status/
-        -- auto-pilot lines. Line 1 is placement:
-        --   - inventory host:   "#<id>  host <name> · GPU <cuda-vis-devices>"
-        --   - rental instance:  "#<id>  instance <pp>:wi<launch-id> · phase <instance-phase>"
-        --   - unplaced:         "#<id>  unplaced · wants <gpu-class ≥NGB> ·
-        --                        blocked: <placement_reasons joined>"
-        -- with "· project <name>" appended when a project is set.
+        -- the grouped and ungrouped list views render up to two detail
+        -- lines between the grouped error-details block and the System
+        -- line (formerly the "shared-status" line). The renderer returns
+        -- 0, 1, or 2 lines:
         --
-        -- Provider prefix on rental instance labels: wherever the list TUI
-        -- renders a rental instance reference (ungrouped HOST column,
-        -- grouped "launching" row suffix "instance <pp>:wi<id> starting",
-        -- selected-job detail line above), the wi<id> is prefixed with a
+        --   Job:  <always rendered when a job is selected>
+        --   Host: <rendered only when the job is placed>
+        --
+        -- When no job is selected, neither line is rendered.
+        --
+        -- Job line:
+        --   "Job: wj<id>" (canonical CLI job-id notation), followed by
+        --   " · "-joined segments:
+        --   - Status-context segments, selected by EffectiveStatus:
+        --       - running/starting:         "elapsed <duration>" when
+        --                                   StartTime > 0.
+        --       - queued/pending_placement: "waiting <duration>".
+        --       - failed:                   "exit <code>", then
+        --                                   "<FailureReason>" or the first
+        --                                   line of ErrorMessage.
+        --   - When TargetKind is unplaced, the Job line also carries
+        --     "unplaced", plus "wants <gpu-class ≥NGB>" when a GPU
+        --     constraint is set, plus "blocked: <reasons>"
+        --     (placement_reasons joined with "; ") when non-empty. No
+        --     separate Host line is rendered for unplaced jobs.
+        --   - ETA suffix: "ETA <estimate-with-bounds>" when
+        --     estimateRunningJobRemaining(job, live, now) yields a
+        --     positive estimate — typically only for running jobs with
+        --     history-backed remaining estimates.
+        --
+        -- Host line (rendered only for placed jobs, selected by TargetKind):
+        --   - inventory host:   "Host: <hostname>" (no provider suffix —
+        --                       provider applies only to rentals).
+        --   - rental instance:  "Host: wi<launch-id> · provider: <Display>"
+        --                       where <Display> is the human-readable
+        --                       provider name from providerDisplayName()
+        --                       ("Vast.ai" for vastai, "RunPod" for
+        --                       runpod; suffix omitted entirely for
+        --                       unknown providers). The va:/rp: prefix on
+        --                       wi<id> is NOT used on the Host line — the
+        --                       "provider:" segment names it explicitly.
+        --
+        -- System line (formerly "shared-status"):
+        --   - Always rendered, whether or not a job is selected.
+        --   - Prefixed with "System: " — or "System (global): " when the
+        --     visible running-job count differs from the global count —
+        --     so it sits as a sibling of the Job:/Host: lines.
+        --   - Content unchanged: running-job count, instance count,
+        --     cost/hour.
+        --
+        -- The standalone campaign-wide "ETA: …" line is no longer
+        -- rendered in the grouped view. Per-job ETA now lives on the Job
+        -- line. The underlying computeGroupedETA call is still made
+        -- because eta.HasQueued is consumed by groupedControlsText to
+        -- label the "new instance" keybinding.
+        --
+        -- Excluded by design: project label (already shown in the job
+        -- list row), queue name (only one queue in practical use), and
+        -- the command / script tail (too long; already visible in the
+        -- job row).
+        --
+        -- Provider prefix on rental instance labels: where the list TUI
+        -- renders a rental instance reference in the list row (ungrouped
+        -- HOST column) or as the grouped "launching" row suffix
+        -- ("instance <pp>:wi<id> starting"), the wi<id> is prefixed with a
         -- 2-letter provider tag derived from the job's provider:<name> tag:
         --   - "va:wi<id>" for provider:vastai
         --   - "rp:wi<id>" for provider:runpod
         --   - bare "wi<id>" when the provider tag is absent or unknown.
-        -- The prefix applies only to rental references; inventory host
-        -- names are unchanged. Implementation: providerShortPrefix in
+        -- The prefix applies only to rental references in the list row;
+        -- inventory host names are unchanged. The footer Host line does
+        -- NOT use this prefix — it renders "Host: wi<id> · provider:
+        -- <Display>" with an explicit "provider:" segment instead.
+        -- Implementation: providerShortPrefix in
         -- internal/ui/terminal/list_render.go (fed by db.Job.ProviderName()
-        -- / db.TagProviderPrefix), applied in formatJobListHost,
-        -- renderSelectedJobDetail, and groupedStatusTimingSuffix.
-        -- Line 2 is status context, selected by EffectiveStatus:
-        --   - running/starting:              "elapsed <duration>"
-        --   - queued/pending_placement:      "waiting <duration> · queue <name>"
-        --   - failed:                        "exit <code> · <failure_reason
-        --                                    or first line of error_message>"
-        -- plus a trimmed command tail (script basename + first positional
-        -- args, up to ~60 chars). Line 2 is omitted when it would be empty.
+        -- / db.TagProviderPrefix), applied in formatJobListHost and
+        -- groupedStatusTimingSuffix.
         --
-        -- Viewport reservation: the detail block's line count is subtracted
-        -- from the body viewport so grouped section headers remain visible
-        -- on short terminals. The body-height calculation counts ETA,
-        -- status, selected-detail, shared-status, auto-pilot, and controls
-        -- as footer lines. This applies equally to the grouped-by-status
-        -- and ungrouped flat-list views.
+        -- Viewport reservation: the Job/Host detail lines' count (0, 1,
+        -- or 2) is subtracted from the body viewport so grouped section
+        -- headers remain visible on short terminals. The body-height
+        -- calculation counts ETA, status, Job/Host detail lines, System,
+        -- auto-pilot, and controls as footer lines. This applies equally
+        -- to the grouped-by-status and ungrouped flat-list views.
         --
-        -- Implementation: internal/ui/terminal/list_selected_detail.go
-        -- (renderSelectedJobDetail) and internal/ui/terminal/list_tui.go
-        -- (integration in both View() and groupedView()).
+        -- Implementation:
+        --   internal/ui/terminal/list_selected_detail.go —
+        --     renderSelectedJobDetail (returns []string of 0/1/2 lines),
+        --     renderJobFooterLine, renderHostFooterLine,
+        --     providerDisplayName.
+        --   internal/ui/terminal/provider_credit_warning.go —
+        --     "System: " / "System (global): " prefix.
+        --   internal/ui/terminal/list_tui.go — View() and groupedView()
+        --     integration; campaign ETA line removed from grouped view.
 }
 
 -- ==========================================================================
