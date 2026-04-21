@@ -589,11 +589,11 @@ rejecting it:
 laptop$ weft run --gpu-class hopper+ 'python train.py'
 No local host matches constraints: gpu-class=hopper+
 Job #4820 accepted (needs rental host)
-Use 'weft campaign launch' or press 'c' in the TUI to launch on a rental GPU.
+Use 'weft place' or press 'c' in the TUI to launch on a rental GPU.
 ```
 
 The job appears in the TUI with status `$ needs rental`. From there, press `c`
-to open the rental menu for a single job, or use `weft campaign launch` to batch-
+to open the rental menu for a single job, or use `weft place` to batch-
 launch all unplaced jobs at once.
 
 ### Prerequisites
@@ -603,25 +603,29 @@ pip install vastai
 vastai set api-key YOUR_API_KEY
 ```
 
-### Using `weft campaign launch`
+### Using `weft place`
 
-The campaign launcher groups unplaced jobs by GPU requirements, searches
-for Vast.ai offers in parallel, and launches instances concurrently:
+`weft place` (alias: `weft campaign launch`) groups unplaced jobs by GPU
+requirements, searches for Vast.ai offers in parallel, and launches instances
+concurrently:
 
 ```
-laptop$ weft campaign launch
+laptop$ weft place
 ```
 
 The interactive TUI shows jobs grouped by GPU class with checkboxes. Deselect
 jobs you don't want to launch, review cost estimates, and press Enter. Weft
-creates a campaign (batch record), provisions one instance per GPU group **in
-parallel**, then segues into watch mode.
+creates a campaign (a batch record grouping the launched instances),
+provisions one instance per GPU group **in parallel**, then segues into watch
+mode.
 
 ```
-laptop$ weft campaign launch --dry-run    # Preview without launching
-laptop$ weft campaign launch --watch      # Explicitly enter watch mode after launch
-laptop$ weft campaign launch --no-watch   # Launch and exit immediately
-laptop$ weft campaign launch --project X  # Only jobs from project X
+laptop$ weft place --dry-run    # Preview without launching
+laptop$ weft place --watch      # Explicitly enter watch mode after launch
+laptop$ weft place --no-watch   # Launch and exit immediately
+laptop$ weft place --project X  # Only jobs from project X
+laptop$ weft place wj42 wj43    # Only these specific jobs
+laptop$ weft place --all --yes  # Non-interactive batch of everything unplaced
 ```
 
 To launch only jobs for the current directory's project:
@@ -634,7 +638,8 @@ laptop$ weft project launch --dry-run     # Preview for this project only
 After launch, monitor and manage:
 
 ```
-laptop$ weft campaign watch <id>          # Live status updates
+laptop$ weft instance watch               # Live status of the latest campaign's instances
+laptop$ weft campaign watch <id>          # Live status for a specific campaign
 laptop$ weft campaign list                # List campaigns
 laptop$ weft campaign show <id>           # Campaign details
 laptop$ weft campaign terminate <id>      # Destroy all instances

@@ -49,17 +49,18 @@ Remote Hosts (titan, atlas)
 - **Graceful degradation**: When the coordinator is unreachable, the CLI falls
   back to local placement scoring and direct SSH dispatch
 - **Cloud GPU bursting**: When local GPUs are busy or no host matches,
-  `weft campaign launch` batch-provisions Vast.ai instances, runs jobs, and
-  tears down on completion. Failed jobs enter a grace period for resubmission
+  `weft place` (alias: `weft campaign launch`) batch-provisions Vast.ai instances,
+  runs jobs, and tears down on completion. Failed jobs enter a grace period for
+  resubmission
 - **Auto-relaunch on instance failure**: When a cloud instance fails or hits an
-  infrastructure error, `weft campaign watch` automatically relaunches orphaned
+  infrastructure error, `weft instance watch` automatically relaunches orphaned
   jobs on a new instance (up to 3 attempts per job), bounded by configurable
   retry time/cost limits
 - **Stall detection**: Adaptive timeouts detect stuck instances (bootstrap stall,
   setup phase stall) using survival analysis on historical durations — thresholds
   are learned per command and workspace, with automatic fallback
 - **Campaign management**: Launch, watch, and terminate batches of cloud
-  instances from the CLI or TUI. `weft campaign watch` streams live status,
+  instances from the CLI or TUI. `weft instance watch` streams live status,
   cost, and per-job progress until all instances finish
 - **System watch**: `weft watch` shows all active cloud instances, on-prem jobs,
   and unplaced jobs in a simplified TUI or periodic plain-text summary
@@ -69,9 +70,9 @@ Remote Hosts (titan, atlas)
 - **Web dashboard**: Browser UI at `localhost:8127/cluster` with host cards,
   live GPU utilization bars, coordinator status, and recent placement decisions
 
-#### Campaign Planner
+#### Placement Planner
 
-`weft campaign launch` opens an interactive planner:
+`weft place` (alias: `weft campaign launch`) opens an interactive planner:
 
 ```
 Rental GPU jobs (12 jobs, 3 GPU groups)
@@ -91,9 +92,9 @@ Rental GPU jobs (12 jobs, 3 GPU groups)
 ↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit
 ```
 
-#### Campaign Watch
+#### Instance Watch
 
-Monitor running instances with `weft campaign watch`:
+Monitor running instances with `weft instance watch`:
 
 ```
 Campaign 7 — 3 instances
@@ -115,9 +116,9 @@ Instance 14  RTX 3060 12GB   grace      ⏱ 51m   $0.10
 When an instance enters the grace period after a failure, the watch output
 shows remaining time and suggested commands for resubmission or release.
 
-`weft campaign watch` watches a single campaign. If you omit the campaign ID, it
-watches the most recent campaign. Use `--tui` or `--plain` to override the
-default terminal-based mode selection.
+`weft instance watch` (alias: `weft campaign watch`) watches a single campaign.
+If you omit the campaign ID, it watches the most recent campaign. Use `--tui` or
+`--plain` to override the default terminal-based mode selection.
 
 #### System Watch
 
@@ -139,25 +140,40 @@ The system watch shows:
 Press `l` in the watch TUI to jump into the cloud launch planner.
 
 Post-launch scope behavior:
-- `weft launch instances` (or `weft instance launch`) returns to an
-  all-instances view and shows all unplaced jobs.
-- `weft launch campaign` (or `weft campaign launch`) watches the campaign's
+- `weft place` (or `weft launch instances` / `weft instance launch` /
+  legacy `weft campaign launch`) watches the just-launched campaign's
   instances (including relaunch replacements) and shows all unplaced jobs.
 - `weft launch project` (or `weft project launch`) watches project-scoped
   instances (including relaunch replacements) and filters unplaced jobs to
   that project.
 
-#### Campaign Commands
+#### Placement and instance commands
 
-Current campaign subcommands are:
+The primary command for launching cloud instances for unplaced jobs is
+`weft place`:
 
 ```bash
-weft campaign launch [--dry-run|--yes|--watch|--no-watch|--project|--plain|--tui]
-weft campaign watch [campaign-id] [--plain|--tui]
+weft place [job-id...] [--all|--project NAME] \
+  [--dry-run|--yes|--watch|--no-watch|--plain|--tui] \
+  [--strategy cheap|fast|fastest] [--max-spend USD] [--max-time DURATION] \
+  [--grace-period DURATION]
+weft instance watch [campaign-id] [--plain|--tui]
+weft instance list [--plain|--tui]
+weft instance ssh <instance-id>
+```
+
+A "campaign" is the batch record grouping the instances launched together; you
+can also inspect or tear one down directly:
+
+```bash
 weft campaign list [--plain|--tui]
 weft campaign show <campaign-id>
 weft campaign terminate <campaign-id>
 ```
+
+Legacy aliases: `weft campaign launch` is equivalent to `weft place`, and
+`weft campaign watch` is equivalent to `weft instance watch`. New workflows
+should prefer the `place` / `instance` forms.
 
 #### Project Commands
 
@@ -548,8 +564,8 @@ historical data. These estimates feed into placement as:
 
 ### Cost-Optimal Cloud Bidding
 
-The `weft campaign launch` command selects cloud instances using one of three
-strategies (`--strategy`):
+The `weft place` command (alias: `weft campaign launch`) selects cloud
+instances using one of three strategies (`--strategy`):
 
 - **cheap** (default): Minimizes expected dollar cost including retry risk from
   instance failure, using the Beta-Binomial survival model.
@@ -574,19 +590,19 @@ Press `s` in the TUI to cycle between strategies.
 
 ```bash
 # Launch with automatic instance selection (default: cheap)
-weft campaign launch
+weft place
 
 # Launch with fastest strategy
-weft campaign launch --strategy fastest
+weft place --strategy fastest
 
 # Disable survival floor (allow all offers)
-weft campaign launch --min-survival 0
+weft place --min-survival 0
 
 # Show the survival model
 weft campaign survival
 
 # Dry-run to see the cost plan
-weft campaign launch --dry-run
+weft place --dry-run
 ```
 
 ### Transfer Bandwidth Learning

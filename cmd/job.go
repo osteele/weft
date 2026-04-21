@@ -164,26 +164,6 @@ Examples:
 	RunE: runJobMove,
 }
 
-var (
-	jobPlaceEach    bool
-	jobPlaceProject string
-	jobPlaceNoTUI   bool
-)
-
-var jobPlaceCmd = &cobra.Command{
-	Use:   "place <job-id>... <destination>",
-	Short: "Place unplaced queued jobs on a host, instance, or new instance(s)",
-	Long: `Place one or more unplaced queued jobs on a destination.
-
-Like 'move', but only acts on jobs that are currently unplaced.
-Already-placed jobs are skipped with a warning. If all jobs are
-already placed, it's an error.
-
-Accepts the same destinations, --each, and --project flags as 'move'.`,
-	Args: usageArgs(cobra.MinimumNArgs(1)),
-	RunE: runJobPlace,
-}
-
 var jobStartCmd = &cobra.Command{
 	Use:   "start <job-id>...",
 	Short: "Start a queued job immediately",
@@ -375,10 +355,6 @@ func init() {
 	addJobMoveFlags(jobMoveCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
 	jobMoveCmd.Flags().BoolVar(&jobMoveNoTUI, "no-tui", false, "Disable launch progress TUI for move-to-new")
 	jobCmd.AddCommand(jobMoveCmd)
-	jobPlaceCmd.Flags().BoolVar(&jobPlaceEach, "each", false, "With 'new'/'create'/'distinct': launch a separate instance per job")
-	jobPlaceCmd.Flags().StringVar(&jobPlaceProject, "project", "", "Select all eligible unplaced queued jobs in the named project")
-	jobPlaceCmd.Flags().BoolVar(&jobPlaceNoTUI, "no-tui", false, "Disable launch progress TUI for place-to-new")
-	jobCmd.AddCommand(jobPlaceCmd)
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
 	jobCmd.AddCommand(jobInfoCmd)
@@ -446,10 +422,6 @@ func init() {
 
 func runJobMove(cmd *cobra.Command, args []string) error {
 	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveNoTUI)
-}
-
-func runJobPlace(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobPlaceProject, jobPlaceEach, true, "", "", jobPlaceNoTUI)
 }
 
 func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {

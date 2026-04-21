@@ -743,17 +743,79 @@ weft job move --project myproj --to new
 weft job move --from wi872 --to wi900
 ```
 
-### weft job place
+### weft place
 
-Place one or more unplaced queued jobs. Like `move`, but only acts on
-jobs that are currently unplaced — already-placed jobs are skipped with
-a warning, and if all jobs are already placed it's an error.
+Launch cloud instances for queued unplaced jobs. This is the primary command
+for placing jobs that could not be scheduled on on-prem inventory (for example,
+jobs tagged `rental` or jobs whose GPU constraints no inventory host satisfies).
 
 ```bash
-weft job place <job-id>... <destination>
+weft place [job-id]... [flags]
+weft jobs place [job-id]... [flags]   # Alias
 ```
 
-Accepts the same destinations, `--each`, and `--project` flags as `move`.
+Without arguments, all queued unplaced jobs are considered. You can narrow the
+selection with positional job IDs, `--project`, or `--all` (explicit form of
+"every queued unplaced job").
+
+**Flags (selection):**
+- `--project NAME`: Only jobs from the named project
+- `--all`: All queued unplaced jobs (explicit; same as no arguments). Cannot be combined with job IDs or `--project`.
+- `--status queued|unplaced`: Filter by effective status (accepts `queued` or the alias `unplaced`)
+
+**Flags (launch mechanics, shared with `weft campaign launch`):**
+- `--yes`: Skip the interactive confirmation
+- `--watch` / `--no-watch`: Explicitly enter or skip watch mode after launching
+- `--dry-run`: Preview the plan without launching
+- `--max-spend USD`: Hard dollar cap for the launch
+- `--max-time DURATION`: Hard wall-clock cap
+- `--grace-period DURATION`: Grace period after failure (default: `5m`)
+- `--strategy cheap|fast|fastest`: Offer selection strategy (default: `cheap`)
+- `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`; `0` disables)
+- `--plain` / `--tui`: Force output mode
+
+**Examples:**
+```bash
+weft place                          # All queued unplaced jobs (interactive)
+weft place wj42 wj43                # Only these jobs
+weft place --project myproj         # Unplaced jobs from one project
+weft place --all --yes --watch      # Launch everything, then watch
+weft place --dry-run                # Preview without launching
+weft place --strategy fastest       # Prefer fastest GPUs
+weft place --min-survival 0         # Disable survival floor
+```
+
+Conceptually, a launch creates a **campaign** (a batch of cloud instances) in
+the local database. You can watch or manage that campaign through the
+`weft campaign …` and `weft instance …` subcommands below.
+
+### weft campaign launch
+
+Legacy alias for `weft place`. Accepts the same flags. New workflows should
+prefer `weft place`.
+
+### weft campaign watch
+
+Watch a campaign's instances stream to terminal state. Prefer
+`weft instance watch` for watching individual instances or the most recent
+launch.
+
+```bash
+weft campaign watch [campaign-id] [--plain|--tui]
+```
+
+### weft campaign list / show / terminate
+
+Enumerate, inspect, or tear down campaigns.
+
+```bash
+weft campaign list [--plain|--tui]
+weft campaign show <campaign-id>
+weft campaign terminate <campaign-id>
+```
+
+See [Campaigns](../guides/campaigns.md) for the deep-dive guide on cloud
+instance lifecycle, grace periods, and survival-based offer selection.
 
 ### weft job start
 
