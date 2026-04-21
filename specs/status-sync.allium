@@ -773,6 +773,34 @@ rule TUIPeriodicSync {
         -- ETA line: the "with +1 instance" suffix is suppressed unless a
         -- concrete improved estimate is available; otherwise the hint is
         -- not actionable and clutters the footer.
+        --
+        -- Selected-job detail footer: when a job is under the cursor, both
+        -- the grouped and ungrouped list views render a 1-2 line detail
+        -- block between the ETA/status lines and the shared-status/
+        -- auto-pilot lines. Line 1 is placement:
+        --   - inventory host:   "#<id>  host <name> · GPU <cuda-vis-devices>"
+        --   - rental instance:  "#<id>  instance wi<launch-id> · phase <instance-phase>"
+        --   - unplaced:         "#<id>  unplaced · wants <gpu-class ≥NGB> ·
+        --                        blocked: <placement_reasons joined>"
+        -- with "· project <name>" appended when a project is set.
+        -- Line 2 is status context, selected by EffectiveStatus:
+        --   - running/starting:              "elapsed <duration>"
+        --   - queued/pending_placement:      "waiting <duration> · queue <name>"
+        --   - failed:                        "exit <code> · <failure_reason
+        --                                    or first line of error_message>"
+        -- plus a trimmed command tail (script basename + first positional
+        -- args, up to ~60 chars). Line 2 is omitted when it would be empty.
+        --
+        -- Viewport reservation: the detail block's line count is subtracted
+        -- from the body viewport so grouped section headers remain visible
+        -- on short terminals. The body-height calculation counts ETA,
+        -- status, selected-detail, shared-status, auto-pilot, and controls
+        -- as footer lines. This applies equally to the grouped-by-status
+        -- and ungrouped flat-list views.
+        --
+        -- Implementation: internal/ui/terminal/list_selected_detail.go
+        -- (renderSelectedJobDetail) and internal/ui/terminal/list_tui.go
+        -- (integration in both View() and groupedView()).
 }
 
 -- ==========================================================================

@@ -397,7 +397,7 @@ func TestListTUIGroupedViewShortViewportPreservesAllSectionHeaders(t *testing.T)
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           100,
-		height:          8,
+		height:          9,
 		title:           "Jobs",
 		jobs: []*db.Job{
 			{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "run", Project: "proj"},
@@ -417,6 +417,56 @@ func TestListTUIGroupedViewShortViewportPreservesAllSectionHeaders(t *testing.T)
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in grouped short viewport output, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestListTUIGroupedViewShowsSelectedJobDetail verifies the selected-job
+// detail footer block (placement + context lines) appears under the job list
+// when a job is under the cursor, in both grouped and ungrouped views.
+func TestListTUIGroupedViewShowsSelectedJobDetail(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           120,
+		height:          30,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 42, Status: db.StatusRunning, Host: "cool30", GPU: "0,1", Project: "my-proj", Command: "uv run train.py", StartTime: time.Now().Add(-5 * time.Minute).Unix()},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	for _, want := range []string{"#42", "host cool30", "GPU 0,1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in grouped view output, got:\n%s", want, out)
+		}
+	}
+	// The detail footer must not repeat the project label (already in the
+	// job row). "train.py" is legitimately shown in the row itself, so we
+	// can't forbid it globally; detail-line-specific exclusions are covered
+	// by the unit tests in list_selected_detail_test.go.
+	if strings.Contains(out, "project my-proj") {
+		t.Fatalf("unexpected project label in grouped view, got:\n%s", out)
+	}
+}
+
+func TestListTUIUngroupedViewShowsSelectedJobDetail(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: false,
+		width:           120,
+		height:          30,
+		title:           "Jobs",
+		layout:          newJobListLayout(120, nil, nil, false),
+		jobs: []*db.Job{
+			{ID: 7, Status: db.StatusQueued, Host: "", GPUClass: "ampere+", PlacementReasons: []string{"no capacity"}, Project: "bench", CreatedAt: time.Now().Add(-2 * time.Hour).Unix()},
+		},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{"#7", "unplaced", "ampere+", "blocked: no capacity", "waiting 2h"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in ungrouped view output, got:\n%s", want, out)
 		}
 	}
 }

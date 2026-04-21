@@ -758,6 +758,7 @@ func (m listTUIModel) View() string {
 	layout := m.layout
 	var b strings.Builder
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
+	selectedDetailLines := m.selectedJobDetailLines()
 
 	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
@@ -765,7 +766,7 @@ func (m listTUIModel) View() string {
 	b.WriteString(listTUIHeaderStyle.Render(truncateDisplayWidth(formatJobListHeader(layout), m.width)))
 	b.WriteString("\n")
 
-	footerBlockLines := len(sharedStatusLines) + 1 // shared status + controls/footer text
+	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
 	bodyRows := max(0, m.height-2-1-footerBlockLines)
 	bodyLinesWritten := 0
 	if len(m.jobs) == 0 {
@@ -800,6 +801,10 @@ func (m listTUIModel) View() string {
 
 	// Always keep a visible separator above the status/footer block.
 	b.WriteString("\n")
+	for _, line := range selectedDetailLines {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
+		b.WriteString("\n")
+	}
 	for _, line := range sharedStatusLines {
 		b.WriteString(line)
 		b.WriteString("\n")
@@ -832,6 +837,7 @@ func (m listTUIModel) groupedView() string {
 	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning)
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
+	selectedDetailLines := m.selectedJobDetailLines()
 	baseFooterLines := 2 // blank separator + controls
 	if etaLine != "" {
 		baseFooterLines++
@@ -840,6 +846,7 @@ func (m listTUIModel) groupedView() string {
 		baseFooterLines++
 	}
 	baseFooterLines += len(sharedStatusLines)
+	baseFooterLines += len(selectedDetailLines)
 	if autoPilotLine != "" {
 		baseFooterLines++
 	}
@@ -887,6 +894,10 @@ func (m listTUIModel) groupedView() string {
 	}
 	if statusLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
+		b.WriteString("\n")
+	}
+	for _, line := range selectedDetailLines {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
 	}
 	for _, line := range sharedStatusLines {
@@ -1015,6 +1026,23 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	line += "  v:ungroup  i:watch  ?:help"
 	line += "  q:quit"
 	return line
+}
+
+func (m listTUIModel) selectedJobDetailLines() []string {
+	var job *db.Job
+	if m.groupedByStatus {
+		job = m.selectedGroupedJob()
+	} else if m.cursor >= 0 && m.cursor < len(m.jobs) {
+		job = m.jobs[m.cursor]
+	}
+	if job == nil {
+		return nil
+	}
+	var live *db.LaunchLiveState
+	if job.LaunchID != nil && m.launchLiveByID != nil {
+		live = m.launchLiveByID[*job.LaunchID]
+	}
+	return renderSelectedJobDetail(job, live, time.Now())
 }
 
 func (m listTUIModel) selectedGroupedRow() int {
