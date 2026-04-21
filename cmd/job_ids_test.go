@@ -211,12 +211,6 @@ func TestParseJobIDArg(t *testing.T) {
 	}
 }
 
-func TestFormatJobID(t *testing.T) {
-	if got := FormatJobID(750); got != "wj750" {
-		t.Fatalf("FormatJobID(750) = %q, want %q", got, "wj750")
-	}
-}
-
 func TestParseJobIDsWithExplicitPrefix(t *testing.T) {
 	tests := []struct {
 		name    string

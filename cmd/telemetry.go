@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/spf13/cobra"
 )
 
@@ -82,7 +83,7 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 
 		out, err := collectTelemetryOutput(database, jobID)
 		if err != nil {
-			return fmt.Errorf("job %s: %w", FormatJobID(jobID), err)
+			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), err)
 		}
 
 		if telemetryJSON {
@@ -91,16 +92,16 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		}
 
 		if out.Samples == 0 {
-			fmt.Printf("Job %s: no telemetry data\n", FormatJobID(jobID))
+			fmt.Printf("Job %s: no telemetry data\n", ids.FormatJobID(jobID))
 			continue
 		}
 
 		if out.GPU == nil && (out.Summary == nil || len(out.Summary.GPUs) == 0) {
-			fmt.Printf("Job %s: no GPU telemetry data (%d samples)\n", FormatJobID(jobID), out.Samples)
+			fmt.Printf("Job %s: no GPU telemetry data (%d samples)\n", ids.FormatJobID(jobID), out.Samples)
 			continue
 		}
 
-		fmt.Printf("Job %s — GPU Telemetry (%d samples)\n", FormatJobID(jobID), out.Samples)
+		fmt.Printf("Job %s — GPU Telemetry (%d samples)\n", ids.FormatJobID(jobID), out.Samples)
 
 		first := time.Unix(out.TimeMin, 0)
 		last := time.Unix(out.TimeMax, 0)
@@ -173,7 +174,7 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 		return telemetryOutput{}, fmt.Errorf("job not found")
 	}
 
-	out := telemetryOutput{JobID: jobID, Job: FormatJobID(jobID)}
+	out := telemetryOutput{JobID: jobID, Job: ids.FormatJobID(jobID)}
 	if job.LatestRunID == nil {
 		return out, nil
 	}

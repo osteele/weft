@@ -217,7 +217,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		fmt.Fprintf(w, "  JOB\tSTATUS\tINSTANCE\tPROJECT\tDESCRIPTION\n")
 		for _, j := range jobs {
 			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n",
-				FormatJobID(j.id), j.status, ids.FormatInstanceID(j.instanceID), truncate(j.project, projectWidth), truncate(j.fullDescription, descWidth))
+				ids.FormatJobID(j.id), j.status, ids.FormatInstanceID(j.instanceID), truncate(j.project, projectWidth), truncate(j.fullDescription, descWidth))
 		}
 		w.Flush()
 	}

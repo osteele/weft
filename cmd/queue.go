@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuefile"
@@ -475,10 +476,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 		}
 		if queueAfter > 0 {
-			fmt.Printf("  After job: %s (will wait for success when queued)\n", FormatJobID(queueAfter))
+			fmt.Printf("  After job: %s (will wait for success when queued)\n", ids.FormatJobID(queueAfter))
 		}
 		if queueAfterAny > 0 {
-			fmt.Printf("  After job: %s (will wait for completion when queued)\n", FormatJobID(queueAfterAny))
+			fmt.Printf("  After job: %s (will wait for completion when queued)\n", ids.FormatJobID(queueAfterAny))
 		}
 		return nil
 	}
@@ -502,7 +503,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	jobID := result.JobID
 
-	fmt.Printf("Job %s added to queue on %s\n\n", FormatJobID(jobID), host)
+	fmt.Printf("Job %s added to queue on %s\n\n", ids.FormatJobID(jobID), host)
 	fmt.Printf("  Working dir: %s\n", workingDir)
 	fmt.Printf("  Command: %s\n", command)
 	if queueDescription != "" {
@@ -515,10 +516,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 	}
 	if queueAfter > 0 {
-		fmt.Printf("  After job: %s (will wait for success)\n", FormatJobID(queueAfter))
+		fmt.Printf("  After job: %s (will wait for success)\n", ids.FormatJobID(queueAfter))
 	}
 	if queueAfterAny > 0 {
-		fmt.Printf("  After job: %s (will wait for completion)\n", FormatJobID(queueAfterAny))
+		fmt.Printf("  After job: %s (will wait for completion)\n", ids.FormatJobID(queueAfterAny))
 	}
 
 	// Handle --wait: block until job completes
@@ -633,7 +634,7 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			FormatJobID(job.ID), host, job.Status, display)
+			ids.FormatJobID(job.ID), host, job.Status, display)
 	}
 
 	return w.Flush()
@@ -716,38 +717,38 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		// Get job from database
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("job %s: database error: %v", FormatJobID(jobID), err))
+			errors = append(errors, fmt.Sprintf("job %s: database error: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		if job == nil {
-			errors = append(errors, fmt.Sprintf("job %s not found", FormatJobID(jobID)))
+			errors = append(errors, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
 
 		// Check if job is cancellable (queued)
 		effectiveStatus := job.EffectiveStatus()
 		if effectiveStatus != db.StatusQueued {
-			errors = append(errors, fmt.Sprintf("job %s has status '%s', can only cancel queued jobs", FormatJobID(jobID), effectiveStatus))
+			errors = append(errors, fmt.Sprintf("job %s has status '%s', can only cancel queued jobs", ids.FormatJobID(jobID), effectiveStatus))
 			continue
 		}
 
 		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("job %s: %v", FormatJobID(jobID), err))
+			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		if !job.HasInventoryHost() {
 			if job.IsRentalJob() {
-				fmt.Printf("Job %s cancelled (was assigned to %s)\n", FormatJobID(jobID), job.TargetDisplay())
+				fmt.Printf("Job %s cancelled (was assigned to %s)\n", ids.FormatJobID(jobID), job.TargetDisplay())
 			} else {
-				fmt.Printf("Job %s cancelled (was awaiting rental instance)\n", FormatJobID(jobID))
+				fmt.Printf("Job %s cancelled (was awaiting rental instance)\n", ids.FormatJobID(jobID))
 			}
 			continue
 		}
 		if result.Deferred {
-			fmt.Printf("Job %s marked for removal on next sync\n", FormatJobID(jobID))
+			fmt.Printf("Job %s marked for removal on next sync\n", ids.FormatJobID(jobID))
 		} else {
-			fmt.Printf("Job %s removed from queue on %s\n", FormatJobID(jobID), job.TargetDisplay())
+			fmt.Printf("Job %s removed from queue on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
 		}
 	}
 
@@ -758,7 +759,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueFront(cmd *cobra.Command, args []string) error {
-	jobID, err := ParseJobID(args[0])
+	jobID, err := ids.ParseJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -774,14 +775,14 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %s not found", FormatJobID(jobID))
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	effectiveStatus := job.EffectiveStatus()
 	if effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("job %s has status '%s', can only move queued jobs", FormatJobID(jobID), effectiveStatus)
+		return fmt.Errorf("job %s has status '%s', can only move queued jobs", ids.FormatJobID(jobID), effectiveStatus)
 	}
 	if !job.HasInventoryHost() {
-		return fmt.Errorf("job %s is not queued on an inventory host", FormatJobID(jobID))
+		return fmt.Errorf("job %s is not queued on an inventory host", ids.FormatJobID(jobID))
 	}
 
 	relayCfg, relayClient, err := loadCoordinatorRelay()
@@ -793,7 +794,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		_ = db.SetQueuedAtBefore(database, jobID, job.Host)
-		fmt.Printf("Job %s submitted to coordinator to move to the front on %s\n", FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Job %s submitted to coordinator to move to the front on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
 		return nil
 	}
 
@@ -802,14 +803,14 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if result.Deferred {
-		fmt.Printf("Job %s saved locally. %s is offline — it will move to the front automatically when the host is reachable.\n", FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Job %s saved locally. %s is offline — it will move to the front automatically when the host is reachable.\n", ids.FormatJobID(jobID), job.TargetDisplay())
 		_ = syncHostAfterQueueChange(database, job.Host)
 		return nil
 	}
 	if result.Moved {
-		fmt.Printf("Job %s moved to front of queue on %s\n", FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Job %s moved to front of queue on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
 	} else {
-		fmt.Printf("Job %s is already at the front of queue on %s\n", FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Job %s is already at the front of queue on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
 	}
 	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil {
 		reportQueueChangeSyncFailure(job.Host, syncErr)
@@ -818,7 +819,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 }
 
 func runEdit(cmd *cobra.Command, args []string) error {
-	jobID, err := ParseJobID(args[0])
+	jobID, err := ids.ParseJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -873,7 +874,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %s not found", FormatJobID(jobID))
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
 	// Handle status change (requeue)
@@ -884,10 +885,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			// allow the edit to proceed (e.g. to re-sync sources).
 			statusChanged = false
 		} else if !requeueableStatuses[effectiveStatus] {
-			return fmt.Errorf("cannot change job %s from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", FormatJobID(jobID), effectiveStatus)
+			return fmt.Errorf("cannot change job %s from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", ids.FormatJobID(jobID), effectiveStatus)
 		}
 	} else if effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("job %s has status '%s', can only edit queued jobs", FormatJobID(jobID), effectiveStatus)
+		return fmt.Errorf("job %s has status '%s', can only edit queued jobs", ids.FormatJobID(jobID), effectiveStatus)
 	}
 
 	var updates []string
@@ -1000,7 +1001,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("reload tags: %w", err)
 		}
 		if updated == nil {
-			return fmt.Errorf("job %s not found after updating tags", FormatJobID(jobID))
+			return fmt.Errorf("job %s not found after updating tags", ids.FormatJobID(jobID))
 		}
 		job.Tags = updated.Tags
 		if job.HasTagHostConflict() {
@@ -1189,7 +1190,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Updated job %s via coordinator relay\n", FormatJobID(jobID))
+		fmt.Printf("Updated job %s via coordinator relay\n", ids.FormatJobID(jobID))
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}
@@ -1242,18 +1243,18 @@ func runEdit(cmd *cobra.Command, args []string) error {
 				return err
 			}
 			if result.Deferred {
-				fmt.Printf("Job %s saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", FormatJobID(job.ID), job.TargetDisplay())
+				fmt.Printf("Job %s saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", ids.FormatJobID(job.ID), job.TargetDisplay())
 				deferredUpdate = true
 			}
 		}
 	}
 
 	if deferredUpdate {
-		fmt.Printf("Updated job %s locally (will apply to %s when reachable)\n", FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Updated job %s locally (will apply to %s when reachable)\n", ids.FormatJobID(jobID), job.TargetDisplay())
 	} else if job.Host == "" {
-		fmt.Printf("Updated job %s (unplaced — sources will be synced at launch)\n", FormatJobID(jobID))
+		fmt.Printf("Updated job %s (unplaced — sources will be synced at launch)\n", ids.FormatJobID(jobID))
 	} else {
-		fmt.Printf("Updated job %s in queue on %s\n", FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Updated job %s in queue on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
 	}
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)
@@ -1304,12 +1305,12 @@ func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64
 				if value == "" {
 					continue
 				}
-				depID, err := ParseJobID(value)
+				depID, err := ids.ParseJobID(value)
 				if err != nil {
 					return fmt.Errorf("%w: %q", errInvalidDepJobID, part)
 				}
 				if depID == targetJobID {
-					return fmt.Errorf("job %s: %w", FormatJobID(targetJobID), errSelfDependency)
+					return fmt.Errorf("job %s: %w", ids.FormatJobID(targetJobID), errSelfDependency)
 				}
 				if seen[depID] {
 					continue
@@ -1365,7 +1366,7 @@ func formatQueueDependencies(deps []queueDependency) string {
 		if dep.AllowFailure {
 			mode = "completion"
 		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", FormatJobID(dep.JobID), mode))
+		parts = append(parts, fmt.Sprintf("%s (%s)", ids.FormatJobID(dep.JobID), mode))
 	}
 	return strings.Join(parts, ", ")
 }

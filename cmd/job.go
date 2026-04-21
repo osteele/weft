@@ -562,7 +562,7 @@ func moveJobsToHost(database *sql.DB, jobs []*db.Job, host string) error {
 			fmt.Fprintln(os.Stderr, message)
 		},
 		OnMoved: func(jobID int64, _ string) {
-			fmt.Printf("Moved job %s → %s\n", FormatJobID(jobID), host)
+			fmt.Printf("Moved job %s → %s\n", ids.FormatJobID(jobID), host)
 		},
 	})
 	if err != nil {
@@ -580,7 +580,7 @@ func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) erro
 			fmt.Fprintln(os.Stderr, message)
 		},
 		OnMoved: func(jobID int64, target string) {
-			fmt.Printf("Moved job %s → %s\n", FormatJobID(jobID), target)
+			fmt.Printf("Moved job %s → %s\n", ids.FormatJobID(jobID), target)
 		},
 	})
 	return err
@@ -606,7 +606,7 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 		if strings.TrimSpace(target) == "" {
 			target = "new instance"
 		}
-		fmt.Printf("Moved job %s → %s\n", FormatJobID(jobs[0].ID), target)
+		fmt.Printf("Moved job %s → %s\n", ids.FormatJobID(jobs[0].ID), target)
 		return nil
 	}
 	var launchTUI *terminal.LaunchProgressTUI
@@ -807,7 +807,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		display := queueblock.Display(job, nil)
 
 		// Show full job details
-		fmt.Printf("Job ID:      %s\n", FormatJobID(job.ID))
+		fmt.Printf("Job ID:      %s\n", ids.FormatJobID(job.ID))
 		fmt.Printf("Host:        %s\n", job.TargetDisplay())
 		// Show status with waiting info
 		if display.Blocked {

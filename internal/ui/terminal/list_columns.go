@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // columnDef defines a displayable column for job list output.
@@ -42,13 +43,13 @@ func allColumnDefs() []columnDef {
 		},
 		{
 			key: "id", title: "ID", width: 6, alignRight: true,
-			value:     func(job *db.Job) string { return fmt.Sprintf("wj%d", job.ID) },
+			value:     func(job *db.Job) string { return ids.FormatJobID(job.ID) },
 			jsonValue: func(job *db.Job) any { return job.ID },
 		},
 		{
 			key: "job_id", title: "JOB_ID", width: 8,
-			value:     func(job *db.Job) string { return fmt.Sprintf("wj%d", job.ID) },
-			jsonValue: func(job *db.Job) any { return fmt.Sprintf("wj%d", job.ID) },
+			value:     func(job *db.Job) string { return ids.FormatJobID(job.ID) },
+			jsonValue: func(job *db.Job) any { return ids.FormatJobID(job.ID) },
 		},
 		{
 			key: "host", title: "HOST", width: 12,

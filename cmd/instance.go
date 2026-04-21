@@ -382,7 +382,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				if desc == "" {
 					desc = campaign.TruncateCommand(j.EffectiveCommand(), 50)
 				}
-				fmt.Printf("    %-6s %-12s %s\n", FormatJobID(j.ID), displayStatus, desc)
+				fmt.Printf("    %-6s %-12s %s\n", ids.FormatJobID(j.ID), displayStatus, desc)
 				if campaign.IsJobTerminal(displayStatus) {
 					if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil {
 						if summary := terminal.FormatUploadSummary(timings); summary != "" {
@@ -528,7 +528,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
-	jobID, err := ParseJobID(args[1])
+	jobID, err := ids.ParseJobID(args[1])
 	if err != nil {
 		return fmt.Errorf("invalid job ID %q: %w", args[1], err)
 	}
@@ -548,7 +548,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %s not found", FormatJobID(jobID))
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
 	// Override command if specified via CLI flag
@@ -562,7 +562,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	fmt.Printf("Re-syncing sources and submitting job %s to instance %s...\n", FormatJobID(jobID), ids.FormatInstanceID(instanceID))
+	fmt.Printf("Re-syncing sources and submitting job %s to instance %s...\n", ids.FormatJobID(jobID), ids.FormatInstanceID(instanceID))
 
 	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
 		return err
@@ -575,7 +575,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Job %s resubmitted to instance %s.\n", FormatJobID(jobID), ids.FormatInstanceID(instanceID))
+	fmt.Printf("Job %s resubmitted to instance %s.\n", ids.FormatJobID(jobID), ids.FormatInstanceID(instanceID))
 	fmt.Println("Use 'weft campaign watch' or 'weft instance status' to monitor progress.")
 	return nil
 }

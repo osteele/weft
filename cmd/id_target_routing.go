@@ -6,7 +6,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const instanceIDPrefix = "wi"
+const (
+	jobIDPrefix      = "wj"
+	instanceIDPrefix = "wi"
+)
 
 type idTargetKind int
 

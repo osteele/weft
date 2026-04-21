@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // FormatResolvedGPU formats the GPU constraint and resolved name.
@@ -191,7 +192,7 @@ func FormatJobIDs(jobs []*db.Job, maxShow int) string {
 			parts = append(parts, fmt.Sprintf("…+%d", len(jobs)-maxShow))
 			break
 		}
-		parts = append(parts, fmt.Sprintf("wj%d", j.ID))
+		parts = append(parts, ids.FormatJobID(j.ID))
 	}
 	return strings.Join(parts, ",")
 }

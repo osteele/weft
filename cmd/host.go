@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
@@ -344,7 +345,7 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			FormatJobID(job.ID), job.Status, started, display)
+			ids.FormatJobID(job.ID), job.Status, started, display)
 	}
 
 	w.Flush()

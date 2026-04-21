@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
@@ -220,7 +221,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Job %s: %v\n", FormatJobID(jobID), err)
+			fmt.Fprintf(os.Stderr, "Job %s: %v\n", ids.FormatJobID(jobID), err)
 			if singleJob {
 				os.Exit(ExitNotFound)
 			}
@@ -265,7 +266,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 
 func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComplete bool, alreadySynced bool) {
 	if job == nil {
-		fmt.Printf("Job %s not found\n", FormatJobID(jobID))
+		fmt.Printf("Job %s not found\n", ids.FormatJobID(jobID))
 		if exitOnComplete {
 			os.Exit(ExitNotFound)
 		}
@@ -303,7 +304,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	// Re-read job from DB after sync
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil || job == nil {
-		fmt.Fprintf(os.Stderr, "Job %s: failed to reload: %v\n", FormatJobID(jobID), err)
+		fmt.Fprintf(os.Stderr, "Job %s: failed to reload: %v\n", ids.FormatJobID(jobID), err)
 		return
 	}
 	hydrateQueueBlockedReasons([]*db.Job{job})
@@ -332,13 +333,13 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, 
 			return nil, err
 		}
 		if job == nil {
-			return nil, fmt.Errorf("job %s not found", FormatJobID(jobID))
+			return nil, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 		}
 		if isWaitTerminalStatus(job.Status) {
 			return job, nil
 		}
 		if timeout > 0 && time.Now().After(deadline) {
-			return job, fmt.Errorf("%w waiting for job %s", errWaitTimeout, FormatJobID(jobID))
+			return job, fmt.Errorf("%w waiting for job %s", errWaitTimeout, ids.FormatJobID(jobID))
 		}
 
 		if shouldAttemptSync(job.Status) {
@@ -386,7 +387,7 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 	for _, req := range jobs {
 		final[req.ID] = req.Job
 		if req.Job == nil {
-			fmt.Printf("Job %s not found\n", FormatJobID(req.ID))
+			fmt.Printf("Job %s not found\n", ids.FormatJobID(req.ID))
 			continue
 		}
 		lastReported[req.ID] = req.Job.Status
@@ -437,7 +438,7 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 			}
 			final[id] = job
 			if job == nil {
-				fmt.Printf("Job %s not found\n", FormatJobID(id))
+				fmt.Printf("Job %s not found\n", ids.FormatJobID(id))
 				delete(pending, id)
 				continue
 			}
@@ -525,8 +526,8 @@ func allJobsSucceeded(requests []jobStatusRequest, final map[int64]*db.Job) bool
 	return true
 }
 
-func formatJobIDList(ids []int64) string {
-	return FormatJobIDListCompact(ids)
+func formatJobIDList(jobIDs []int64) string {
+	return ids.FormatJobIDListCompact(jobIDs)
 }
 
 func mapKeys(m map[string]struct{}) []string {
@@ -614,7 +615,7 @@ func printJobStatusLine(job *db.Job) {
 	if job == nil {
 		return
 	}
-	line := fmt.Sprintf("Job %s (%s): %s", FormatJobID(job.ID), job.Host, job.EffectiveStatus())
+	line := fmt.Sprintf("Job %s (%s): %s", ids.FormatJobID(job.ID), job.Host, job.EffectiveStatus())
 	if job.ExitCode != nil {
 		line = fmt.Sprintf("%s (exit %d)", line, *job.ExitCode)
 	}
@@ -625,7 +626,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	effectiveStatus := job.EffectiveStatus()
 	display := queueblock.Display(job, nil)
 
-	fmt.Printf("Job ID:   %s\n", FormatJobID(job.ID))
+	fmt.Printf("Job ID:   %s\n", ids.FormatJobID(job.ID))
 	fmt.Printf("Host:     %s\n", job.TargetDisplay())
 	if display.Blocked {
 		fmt.Printf("Status:   %s\n", display.Status)
@@ -660,14 +661,14 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		printDiagnosisSummary(job)
 	}
 
-	fmt.Printf("Details:  weft info %s  # Show directory, command, env vars\n", FormatJobID(job.ID))
+	fmt.Printf("Details:  weft info %s  # Show directory, command, env vars\n", ids.FormatJobID(job.ID))
 
 	// Print usage hints
 	if exitOnComplete && usageHintsEnabled() {
 		fmt.Println()
-		fmt.Printf("Hints:    weft log %s        # View job output\n", FormatJobID(job.ID))
+		fmt.Printf("Hints:    weft log %s        # View job output\n", ids.FormatJobID(job.ID))
 		if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusQueued || effectiveStatus == db.StatusStarting {
-			fmt.Printf("          weft status %s --wait   # Don't exit until the job completes\n", FormatJobID(job.ID))
+			fmt.Printf("          weft status %s --wait   # Don't exit until the job completes\n", ids.FormatJobID(job.ID))
 		}
 	}
 
@@ -793,7 +794,7 @@ func printJobSummary(job *db.Job) {
 	if len(desc) > 60 {
 		desc = desc[:57] + "..."
 	}
-	fmt.Printf("  %-8s  %-14s  %s\n", FormatJobID(job.ID), job.HostWithGPU(), desc)
+	fmt.Printf("  %-8s  %-14s  %s\n", ids.FormatJobID(job.ID), job.HostWithGPU(), desc)
 }
 
 func jobsWithEffectiveStatus(jobs []*db.Job, status string) []*db.Job {
@@ -840,7 +841,7 @@ func printFailedJobSummary(job *db.Job) {
 		reason += " (diagnosed)"
 	}
 
-	fmt.Printf("  %-8s  %-10s  %-14s  %s\n", FormatJobID(job.ID), job.TargetDisplay(), reason, desc)
+	fmt.Printf("  %-8s  %-10s  %-14s  %s\n", ids.FormatJobID(job.ID), job.TargetDisplay(), reason, desc)
 }
 
 // printDiagnosisSummary prints the auto-remediation diagnosis for a failed job.

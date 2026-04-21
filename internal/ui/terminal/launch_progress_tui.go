@@ -345,9 +345,9 @@ func launchRowJobLabel(group campaign.InstanceGroup) string {
 		return "group"
 	}
 	if count > 1 {
-		return fmt.Sprintf("wj%d+", minID)
+		return ids.FormatJobID(minID) + "+"
 	}
-	return fmt.Sprintf("wj%d", minID)
+	return ids.FormatJobID(minID)
 }
 
 func fitText(s string, width int) string {

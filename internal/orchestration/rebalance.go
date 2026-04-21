@@ -575,5 +575,5 @@ func countActiveRunningJobs(jobs []*db.Job) int {
 }
 
 func formatRebalanceJobID(id int64) string {
-	return fmt.Sprintf("wj%d", id)
+	return ids.FormatJobID(id)
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // renderSelectedJobDetail returns the "Job:" and "Host:" footer lines for
@@ -37,7 +38,7 @@ func renderJobFooterLine(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveSta
 	if job == nil {
 		return ""
 	}
-	parts := []string{fmt.Sprintf("Job: wj%d", job.ID)}
+	parts := []string{"Job: " + ids.FormatJobID(job.ID)}
 	parts = appendJobStatusParts(parts, job, now)
 	if job.TargetKind() == db.JobTargetUnplaced {
 		parts = appendUnplacedParts(parts, job)

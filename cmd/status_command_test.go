@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -136,7 +137,7 @@ func TestRunJobInfoFormatsJobIDWithPrefix(t *testing.T) {
 			t.Fatalf("runJobInfo: %v", err)
 		}
 	})
-	want := fmt.Sprintf("Job ID:      %s", FormatJobID(jobID))
+	want := fmt.Sprintf("Job ID:      %s", ids.FormatJobID(jobID))
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing formatted job ID %q, got:\n%s", want, out)
 	}

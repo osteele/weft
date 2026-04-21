@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -169,7 +170,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 func runProjectJobs(cmd *cobra.Command, args []string) error {
 	// If --project not set, check if first arg is a project name (non-numeric)
 	if listProject == "" && len(args) > 0 {
-		if _, err := ParseJobID(args[0]); err != nil {
+		if _, err := ids.ParseJobID(args[0]); err != nil {
 			listProject = args[0]
 			args = args[1:]
 		}

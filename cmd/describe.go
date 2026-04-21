@@ -6,6 +6,7 @@ import (
 
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -62,7 +63,7 @@ func init() {
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
-	jobID, err := ParseJobID(args[0])
+	jobID, err := ids.ParseJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -83,7 +84,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %s not found", FormatJobID(jobID))
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
 	// Normalize GPU flags (--gpu and --gpus are aliases)

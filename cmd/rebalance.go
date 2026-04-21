@@ -138,7 +138,7 @@ func printRebalanceMovesTable(out io.Writer, moves []orchestration.QueueRebalanc
 		fmt.Fprintln(w, "JOB\tFROM\tTO\tRATIO\tSAVING\tREASON")
 	}
 	for _, move := range moves {
-		jobID := FormatJobID(move.JobID)
+		jobID := ids.FormatJobID(move.JobID)
 		fromID := ids.FormatInstanceID(move.FromInstanceID)
 		toID := ids.FormatInstanceID(move.ToInstanceID)
 		ratio := fmt.Sprintf("%.2f", move.CostRatio)

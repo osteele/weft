@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
@@ -497,10 +498,10 @@ func showJob(database *sql.DB, id int64) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %s not found", FormatJobID(id))
+		return fmt.Errorf("job %s not found", ids.FormatJobID(id))
 	}
 
-	fmt.Printf("Job ID:       %s\n", FormatJobID(job.ID))
+	fmt.Printf("Job ID:       %s\n", ids.FormatJobID(job.ID))
 	fmt.Printf("Target:       %s\n", job.TargetDisplay())
 	fmt.Printf("Working Dir:  %s\n", job.EffectiveWorkingDir())
 	if job.Project != "" {
