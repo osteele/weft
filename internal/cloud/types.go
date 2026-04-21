@@ -126,6 +126,10 @@ type ProgressFunc func(phase string)
 // DefaultImage is the default Docker image for cloud instances.
 const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 
+// DefaultRunpodImage is the default Docker image for RunPod pods.
+// It includes RunPod's init/SSH stack used by weft's SSH bootstrap path.
+const DefaultRunpodImage = "runpod/base:1.0.2-ubuntu2204"
+
 // DefaultOnStartCmd installs dependencies, uv, and rclone on fresh instances.
 // The runtime CUDA images lack unzip (needed by rclone installer) and build tools.
 const DefaultOnStartCmd = "apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev && curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash"

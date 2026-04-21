@@ -533,6 +533,20 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 				slog.Warn("job has torch dependencies but image does not include PyTorch", "component", "campaign", "job_id", job.ID, "image", img)
 			}
 
+			// RunPod SSH bootstrap requires runpod/* images with init/sshd.
+			if strings.EqualFold(g.Provider, string(cloud.ProviderRunpod)) {
+				originalImage := img
+				img = normalizeRunpodGroupImage(img)
+				if originalImage != "" && originalImage != img {
+					slog.Warn("remapped image to RunPod-compatible image",
+						"component", "campaign",
+						"job_id", job.ID,
+						"provider", g.Provider,
+						"original_image", originalImage,
+						"selected_image", img)
+				}
+			}
+
 			merged := false
 			for i := range subs {
 				supremum, ok := imageSupremum(subs[i].image, img)
@@ -607,6 +621,17 @@ func mergeVastCapAdd(a, b []string) []string {
 		}
 	}
 	return out
+}
+
+func normalizeRunpodGroupImage(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return cloud.DefaultRunpodImage
+	}
+	if strings.HasPrefix(strings.ToLower(image), "runpod/") {
+		return image
+	}
+	return cloud.DefaultRunpodImage
 }
 
 // SourceDirs returns the unique local absolute paths for all jobs in the group.

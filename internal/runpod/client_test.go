@@ -5,11 +5,37 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
+
+func TestEncodeTemplateStartCommandArg(t *testing.T) {
+	t.Run("encodes bash -lc command", func(t *testing.T) {
+		got, err := encodeTemplateStartCommandArg("bash -lc echo hello")
+		if err != nil {
+			t.Fatalf("encodeTemplateStartCommandArg: %v", err)
+		}
+		if got != "bash,-lc,echo hello" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("rejects missing prefix", func(t *testing.T) {
+		_, err := encodeTemplateStartCommandArg("echo hello")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("rejects commas in payload", func(t *testing.T) {
+		_, err := encodeTemplateStartCommandArg("bash -lc echo a,b")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
 
 func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 	args, err := buildCreatePodArgs("NVIDIA A100 80GB PCIe", cloud.CreateOpts{
@@ -39,6 +65,39 @@ func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
+	}
+}
+
+func TestBuildCreatePodArgs_DefaultRunpodImageUsesOfficialTemplate(t *testing.T) {
+	args, err := buildCreatePodArgs("NVIDIA L4", cloud.CreateOpts{
+		Image: cloud.DefaultRunpodImage,
+	})
+	if err != nil {
+		t.Fatalf("buildCreatePodArgs: %v", err)
+	}
+	got := strings.Join(args, " ")
+	if strings.Contains(got, "--image") {
+		t.Fatalf("args %q unexpectedly contain --image", got)
+	}
+	if !strings.Contains(got, "--template-id "+officialRunpodUbuntuTemplateID) {
+		t.Fatalf("args %q missing official template", got)
+	}
+}
+
+func TestBuildCreatePodArgs_NonDefaultImageUsesImageFlag(t *testing.T) {
+	const image = "runpod/pytorch:stable"
+	args, err := buildCreatePodArgs("NVIDIA L4", cloud.CreateOpts{
+		Image: image,
+	})
+	if err != nil {
+		t.Fatalf("buildCreatePodArgs: %v", err)
+	}
+	got := strings.Join(args, " ")
+	if !strings.Contains(got, "--image "+image) {
+		t.Fatalf("args %q missing --image %q", got, image)
+	}
+	if strings.Contains(got, "--template-id "+officialRunpodUbuntuTemplateID) {
+		t.Fatalf("args %q unexpectedly contain official template", got)
 	}
 }
 
@@ -145,59 +204,32 @@ func TestParseGPUTypeOutput(t *testing.T) {
 }
 
 func TestSearchOffersCachesCapabilities(t *testing.T) {
-	const path = "/opt/homebrew/bin/runpodctl"
-
-	var (
-		mu     sync.Mutex
-		counts = make(map[string]int)
-	)
-	record := func(key string) {
-		mu.Lock()
-		counts[key]++
-		mu.Unlock()
+	prev := fetchGPUTypesFunc
+	t.Cleanup(func() { fetchGPUTypesFunc = prev })
+	calls := 0
+	fetchGPUTypesFunc = func(context.Context) ([]gqlGPUType, error) {
+		calls++
+		price := 0.44
+		stock := "High"
+		return []gqlGPUType{
+			{
+				ID:          "offer-4090",
+				DisplayName: "RTX 4090",
+				MemoryInGb:  24,
+				SecureCloud: true,
+				LowestPrice: &struct {
+					MinimumBidPrice      *float64 `json:"minimumBidPrice"`
+					UninterruptablePrice *float64 `json:"uninterruptablePrice"`
+					StockStatus          *string  `json:"stockStatus"`
+				}{
+					UninterruptablePrice: &price,
+					StockStatus:          &stock,
+				},
+			},
+		}, nil
 	}
 
-	runner := &cliRunner{
-		cliPath:  "runpodctl",
-		lookPath: func(string) (string, error) { return path, nil },
-		runCombined: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
-			if gotPath != path {
-				t.Fatalf("runCombined path = %q, want %q", gotPath, path)
-			}
-			key := strings.Join(args, " ")
-			record(key)
-			switch key {
-			case "version":
-				return []byte("runpodctl 2.1.6"), nil
-			case "get --help":
-				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
-			case "gpu --help":
-				return []byte("Available Commands:\n  list\n"), nil
-			case "pod --help":
-				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
-			case "template --help":
-				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
-			default:
-				t.Fatalf("unexpected combined command %q", key)
-				return nil, nil
-			}
-		},
-		runOutput: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
-			if gotPath != path {
-				t.Fatalf("runOutput path = %q, want %q", gotPath, path)
-			}
-			key := strings.Join(args, " ")
-			record(key)
-			if key != "gpu list" {
-				t.Fatalf("unexpected output command %q", key)
-			}
-			return []byte(`[
-				{"id":"offer-4090","displayName":"RTX 4090","memoryInGb":24,"communityPrice":0.44,"maxGpuCount":1}
-			]`), nil
-		},
-	}
-
-	client := newCloudClientForTests(runner)
+	client := newCloudClientForTests(newCLIRunner("runpodctl"))
 	for range 2 {
 		offers, err := client.SearchOffers(cloud.OfferConstraints{})
 		if err != nil {
@@ -207,16 +239,8 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 			t.Fatalf("offers = %+v", offers)
 		}
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	for _, key := range []string{"version", "get --help", "gpu --help", "pod --help", "template --help"} {
-		if counts[key] != 1 {
-			t.Fatalf("%s count = %d, want 1", key, counts[key])
-		}
-	}
-	if counts["gpu list"] != 2 {
-		t.Fatalf("gpu list count = %d, want 2", counts["gpu list"])
+	if calls != 2 {
+		t.Fatalf("fetchGPUTypes calls = %d, want 2", calls)
 	}
 }
 
@@ -230,5 +254,97 @@ func TestParseSearchOutput_AllowsCLIWarningPrefix(t *testing.T) {
 	}
 	if len(offers) != 1 || offers[0].ProviderID != "offer-4090" {
 		t.Fatalf("offers = %+v", offers)
+	}
+}
+
+func TestParseSSHInfoCommand(t *testing.T) {
+	t.Run("json command", func(t *testing.T) {
+		got, err := parseSSHInfoCommand([]byte(`{"command":"ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4"}`))
+		if err != nil {
+			t.Fatalf("parseSSHInfoCommand: %v", err)
+		}
+		if got != "ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("json snake_case command", func(t *testing.T) {
+		got, err := parseSSHInfoCommand([]byte(`{"ssh_command":"ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4"}`))
+		if err != nil {
+			t.Fatalf("parseSSHInfoCommand: %v", err)
+		}
+		if got != "ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("json error", func(t *testing.T) {
+		_, err := parseSSHInfoCommand([]byte(`{"error":"pod not ready"}`))
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !isPodNotReadyError(err) {
+			t.Fatalf("error should be not-ready, got %v", err)
+		}
+	})
+
+	t.Run("text fallback", func(t *testing.T) {
+		got, err := parseSSHInfoCommand([]byte("Use this command:\nssh -i /tmp/key -p 22000 root@8.8.8.8\n"))
+		if err != nil {
+			t.Fatalf("parseSSHInfoCommand: %v", err)
+		}
+		if got != "ssh -i /tmp/key -p 22000 root@8.8.8.8" {
+			t.Fatalf("got %q", got)
+		}
+	})
+}
+
+func TestWaitForSSHCommand_RespectsContextDeadline(t *testing.T) {
+	const path = "/opt/homebrew/bin/runpodctl"
+	runner := &cliRunner{
+		cliPath:  "runpodctl",
+		lookPath: func(string) (string, error) { return path, nil },
+		runCombined: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runCombined path = %q, want %q", gotPath, path)
+			}
+			switch strings.Join(args, " ") {
+			case "version":
+				return []byte("runpodctl 2.1.6"), nil
+			case "get --help":
+				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "gpu --help":
+				return []byte("Available Commands:\n  list\n"), nil
+			case "pod --help":
+				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
+			case "template --help":
+				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
+			default:
+				t.Fatalf("unexpected combined command %q", strings.Join(args, " "))
+				return nil, nil
+			}
+		},
+		runOutput: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runOutput path = %q, want %q", gotPath, path)
+			}
+			if strings.Join(args, " ") == "ssh info pod-123" {
+				return nil, errors.New("runpodctl ssh info pod-123: pod not ready")
+			}
+			t.Fatalf("unexpected output command %q", strings.Join(args, " "))
+			return nil, nil
+		},
+	}
+
+	client := newCloudClientForTests(runner)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := client.waitForSSHCommand(ctx, "pod-123")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("waitForSSHCommand took too long after deadline: %s", elapsed)
 	}
 }

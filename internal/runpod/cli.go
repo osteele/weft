@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ func newCLIRunner(cliPath string) *cliRunner {
 		lookPath: exec.LookPath,
 		runOutput: func(ctx context.Context, path string, args ...string) ([]byte, error) {
 			cmd := exec.CommandContext(ctx, path, args...)
+			cmd.Env = runpodctlCommandEnv()
 			out, err := cmd.Output()
 			if err != nil {
 				if exitErr, ok := err.(*exec.ExitError); ok {
@@ -51,6 +53,7 @@ func newCLIRunner(cliPath string) *cliRunner {
 		},
 		runCombined: func(ctx context.Context, path string, args ...string) ([]byte, error) {
 			cmd := exec.CommandContext(ctx, path, args...)
+			cmd.Env = runpodctlCommandEnv()
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				prefix := args
@@ -62,6 +65,18 @@ func newCLIRunner(cliPath string) *cliRunner {
 			return out, nil
 		},
 	}
+}
+
+func runpodctlCommandEnv() []string {
+	env := os.Environ()
+	if strings.TrimSpace(os.Getenv("RUNPOD_API_KEY")) != "" {
+		return env
+	}
+	apiKey, err := readAPIKey()
+	if err != nil || strings.TrimSpace(apiKey) == "" {
+		return env
+	}
+	return append(env, "RUNPOD_API_KEY="+apiKey)
 }
 
 func (r *cliRunner) detectCapabilities(ctx context.Context) (*cliCapabilities, error) {

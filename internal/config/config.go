@@ -367,13 +367,17 @@ func defaultAutomapDirs() []string {
 func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, error) {
 	switch provider {
 	case cloud.ProviderRunpod:
-		if c == nil || c.Runpod.BootstrapTemplateID == "" {
-			return cloud.CreateOpts{}, fmt.Errorf("runpod campaigns require runpod.bootstrap_template_id; run `weft runpod setup` or `weft runpod template print-bootstrap`")
+		image := cloud.DefaultRunpodImage
+		if c != nil {
+			configured := strings.TrimSpace(c.Runpod.DefaultImage)
+			if strings.HasPrefix(strings.ToLower(configured), "runpod/") {
+				image = configured
+			}
 		}
 		return cloud.CreateOpts{
+			Image:      image,
 			DiskGB:     50,
 			SSHEnabled: true,
-			TemplateID: c.Runpod.BootstrapTemplateID,
 		}, nil
 	case cloud.ProviderVastai:
 		if c == nil {

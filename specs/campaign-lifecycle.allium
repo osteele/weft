@@ -300,6 +300,36 @@ rule BeginLaunching {
         -- 4. Upload bootstrap shell script to R2
         -- 5. Write agent startup manifest to R2 with job list and environment
         -- The provider's onstart handler fetches and executes the bootstrap script.
+
+        -- Container image defaults are provider-specific. Each Provider
+        -- declares its own default image; when LaunchInstance.options
+        -- does not specify docker_image, the provider's default applies
+        -- (e.g. RunPod defaults to a runpod/* base image published by the
+        -- provider itself; Vast.ai has a separate default). User-supplied
+        -- overrides MUST be compatible with the provider family — for
+        -- RunPod specifically, custom images MUST match the runpod/*
+        -- pattern, which the provider itself requires.
+        -- Implementation: internal/runpod/cli.go (RunPod image defaults
+        -- and override validation).
+
+        -- Provider startup / SSH bootstrap commands are provider-determined.
+        -- Some providers (e.g. RunPod) require a specific container start
+        -- command so that sshd comes up ready for the agent handshake.
+        -- That command is sourced from provider config, not from user
+        -- input, and when non-empty MUST be surfaced in diagnosis and
+        -- debug output so failed-bootstrap investigations can see what
+        -- was actually requested of the provider.
+        -- Implementation: RunPod CLI adapter (internal/runpod/cli.go).
+
+        -- Provider credentials fall back to the provider's standard
+        -- config file. Agent launchers (coordinator daemon, autopilot
+        -- sync loop, interactive CLI) MUST load provider credentials
+        -- from the provider's conventional config path when the
+        -- corresponding environment variable is absent — e.g. RunPod
+        -- loads RUNPOD_API_KEY from ~/.runpod/config.toml if not in
+        -- the environment. This keeps non-interactive flows working
+        -- without explicit env plumbing.
+        -- Implementation: RunPod CLI adapter credential loader.
 }
 
 rule InstanceBecomesReady {

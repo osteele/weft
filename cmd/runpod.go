@@ -142,7 +142,7 @@ func printRunpodDiagnosis(w io.Writer, diag *runpod.Diagnosis) {
 		fmt.Fprintf(w, "  Template commands: %s\n", diag.TemplateCommandFamily)
 	}
 	fmt.Fprintf(w, "  Template image: %s\n", diag.DefaultImage)
-	fmt.Fprintf(w, "  bootstrap_template_id: %s\n", valueOrUnset(diag.TemplateID))
+	fmt.Fprintf(w, "  bootstrap_template_id (legacy): %s\n", valueOrUnset(diag.TemplateID))
 	if diag.Template != nil {
 		fmt.Fprintf(w, "  Template: %s (%s)\n", diag.Template.ID, diag.Template.Name)
 	}
@@ -154,8 +154,10 @@ func printRunpodDiagnosis(w io.Writer, diag *runpod.Diagnosis) {
 	for _, check := range diag.LaunchChecks {
 		printRunpodCheck(w, check)
 	}
-	fmt.Fprintln(w, "Required startup command:")
-	fmt.Fprintln(w, diag.RequiredStartCommand)
+	if strings.TrimSpace(diag.RequiredStartCommand) != "" {
+		fmt.Fprintln(w, "Required startup command:")
+		fmt.Fprintln(w, diag.RequiredStartCommand)
+	}
 }
 
 func printRunpodCheck(w io.Writer, check runpod.Check) {

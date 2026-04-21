@@ -2,7 +2,6 @@ package runpod
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -134,26 +133,31 @@ func TestParseSearchOutputFiltersGPUClass(t *testing.T) {
 func TestTemplateMatchesSpec(t *testing.T) {
 	spec := BootstrapTemplateSpec{
 		Image:        "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
-		StartCommand: "bash   /tmp/bootstrap.sh",
+		StartCommand: "bash -lc bash   /tmp/bootstrap.sh",
 	}
 	if !templateMatchesSpec(&TemplateInfo{
 		Image:          spec.Image,
-		DockerStartCmd: "bash /tmp/bootstrap.sh",
+		DockerStartCmd: "bash,-lc,bash /tmp/bootstrap.sh",
 	}, spec) {
 		t.Fatal("expected template to match spec")
 	}
 }
 
-func TestSetupReusesCompatibleConfiguredTemplate(t *testing.T) {
+func TestNormalizeStartCommand_RunpodCSV(t *testing.T) {
+	if got := normalizeStartCommand("bash,-lc,echo hi"); got != "bash -lc echo hi" {
+		t.Fatalf("normalizeStartCommand = %q", got)
+	}
+}
+
+func TestSetupPersistsCompatibleDefaultImage(t *testing.T) {
 	dir := t.TempDir()
 	restore := config.SetConfigPathsForTesting(filepath.Join(dir, "config.toml"), filepath.Join(dir, "config.yaml"))
 	defer restore()
 
 	cfg := config.DefaultConfig()
 	cfg.Runpod.Enabled = true
-	cfg.Runpod.BootstrapTemplateID = "tpl-existing"
+	cfg.Runpod.DefaultImage = "runpod/pytorch:test"
 
-	spec := DesiredBootstrapTemplate(cfg)
 	runner := newStubRunner(t,
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 2.1.6")},
@@ -163,36 +167,41 @@ func TestSetupReusesCompatibleConfiguredTemplate(t *testing.T) {
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
 		map[string]stubCLIResponse{
-			"user":                      {out: []byte(`{"id":"me"}`)},
-			"template get tpl-existing": {out: mustJSON(t, map[string]string{"id": "tpl-existing", "name": spec.Name, "image": spec.Image, "dockerStartCmd": spec.StartCommand, "readme": spec.Readme})},
+			"user": {out: []byte(`{"id":"me"}`)},
 		},
 	)
 
 	result, err := newManagerWithClient(newCloudClientForTests(runner)).Setup(cfg)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
-	}
-	if result.CreatedTemplate {
-		t.Fatal("expected existing template to be reused")
 	}
 	data, err := os.ReadFile(config.ConfigPath())
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if !strings.Contains(string(data), `bootstrap_template_id = "tpl-existing"`) {
-		t.Fatalf("config does not contain expected template id:\n%s", string(data))
+	if !strings.Contains(string(data), `default_image = "runpod/pytorch:test"`) {
+		t.Fatalf("config does not contain expected default image:\n%s", string(data))
+	}
+	if result.Diagnosis == nil {
+		t.Fatal("expected diagnosis")
+	}
+	if !result.Diagnosis.SearchReady {
+		t.Fatalf("expected search-ready diagnosis, got %+v", result.Diagnosis)
+	}
+	if len(result.Diagnosis.LaunchChecks) < 2 || !result.Diagnosis.LaunchChecks[1].OK {
+		t.Fatalf("expected runpod image launch check to pass, got %+v", result.Diagnosis.LaunchChecks)
 	}
 }
 
-func TestSetupCreatesManagedTemplateWhenNeeded(t *testing.T) {
+func TestSetupNormalizesIncompatibleDefaultImage(t *testing.T) {
 	dir := t.TempDir()
 	restore := config.SetConfigPathsForTesting(filepath.Join(dir, "config.toml"), filepath.Join(dir, "config.yaml"))
 	defer restore()
 
 	cfg := config.DefaultConfig()
 	cfg.Runpod.Enabled = true
+	cfg.Runpod.DefaultImage = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
 
-	spec := DesiredBootstrapTemplate(cfg)
 	runner := newStubRunner(t,
 		map[string]stubCLIResponse{
 			"version":         {out: []byte("runpodctl 2.1.6")},
@@ -202,10 +211,7 @@ func TestSetupCreatesManagedTemplateWhenNeeded(t *testing.T) {
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
 		map[string]stubCLIResponse{
-			"user":                      {out: []byte(`{"id":"me"}`)},
-			"template list --type user": {out: []byte(`[]`)},
-			"template create --name " + spec.Name + " --image " + spec.Image + " --docker-start-cmd " + spec.StartCommand + " --readme " + spec.Readme: {out: []byte(`{"id":"tpl-new"}`)},
-			"template get tpl-new": {out: mustJSON(t, map[string]string{"id": "tpl-new", "name": spec.Name, "image": spec.Image, "dockerStartCmd": spec.StartCommand, "readme": spec.Readme})},
+			"user": {out: []byte(`{"id":"me"}`)},
 		},
 	)
 
@@ -213,19 +219,21 @@ func TestSetupCreatesManagedTemplateWhenNeeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if !result.CreatedTemplate {
-		t.Fatal("expected setup to create a template")
-	}
-	if result.Template == nil || result.Template.ID != "tpl-new" {
-		t.Fatalf("template = %+v", result.Template)
-	}
-}
 
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	data, err := json.Marshal(v)
+	data, err := os.ReadFile(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
+		t.Fatalf("read config: %v", err)
 	}
-	return data
+	if !strings.Contains(string(data), `default_image = "`+cloud.DefaultRunpodImage+`"`) {
+		t.Fatalf("config does not contain normalized default image:\n%s", string(data))
+	}
+	if result.Diagnosis == nil {
+		t.Fatal("expected diagnosis")
+	}
+	if !result.Diagnosis.SearchReady {
+		t.Fatalf("expected search-ready diagnosis, got %+v", result.Diagnosis)
+	}
+	if len(result.Diagnosis.LaunchChecks) < 2 || !result.Diagnosis.LaunchChecks[1].OK {
+		t.Fatalf("expected runpod image launch check to pass, got %+v", result.Diagnosis.LaunchChecks)
+	}
 }

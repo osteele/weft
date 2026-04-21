@@ -1250,13 +1250,9 @@ func firstRegistrationScopeFromOffers(offers []cloud.Offer) db.FirstRegistration
 func configureBootstrapCreateOpts(client cloud.Client, createOpts *cloud.CreateOpts, bootstrapKey string) error {
 	switch client.Provider() {
 	case cloud.ProviderRunpod:
-		if createOpts.TemplateID == "" {
-			return fmt.Errorf("runpod bootstrap requires a compatible template; run `weft runpod setup` or use startup command %q", cloud.R2BootstrapTemplateStartCmd())
-		}
-		if createOpts.EnvVars == nil {
-			createOpts.EnvVars = make(map[string]string)
-		}
-		createOpts.EnvVars[cloud.R2BootstrapKeyEnvVar] = bootstrapKey
+		// RunPod bootstrap is executed over SSH after pod creation; avoid relying
+		// on template startup hooks.
+		createOpts.TemplateID = ""
 		createOpts.OnStartCmd = ""
 	default:
 		createOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
@@ -1273,8 +1269,8 @@ type R2Assets struct {
 }
 
 // LaunchInstance creates a cloud instance record, pre-stages assets to R2, and
-// creates a cloud instance that self-bootstraps from R2. No SSH is needed for
-// setup — the instance downloads its bootstrap script via the onstart command.
+// bootstraps the instance. Most providers self-bootstrap via onstart, while
+// RunPod uses an SSH-triggered bootstrap step after pod creation.
 // Returns the cloud instance DB ID.
 func LaunchInstance(
 	client cloud.Client,
@@ -1661,6 +1657,32 @@ func LaunchInstance(
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 			"launch_id=%d reason=infra_failure detail=bootstrap upload failed: %s", instanceID, err))
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
+	}
+
+	if client.Provider() == cloud.ProviderRunpod {
+		type runpodBootstrapper interface {
+			BootstrapFromR2(context.Context, string, string, string) error
+		}
+		bootstrapper, ok := client.(runpodBootstrapper)
+		if !ok {
+			destroyLeakedInstance(client, providerInstID, instanceID)
+			err := fmt.Errorf("runpod client does not support SSH bootstrap")
+			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, err.Error())
+			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+				"launch_id=%d reason=infra_failure detail=%s", instanceID, err))
+			return instanceID, err
+		}
+		emitProgress("runpod ssh bootstrap")
+		sshCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+		defer cancel()
+		if err := bootstrapper.BootstrapFromR2(sshCtx, providerInstID, r2Cfg.Bucket, bootstrapKey); err != nil {
+			destroyLeakedInstance(client, providerInstID, instanceID)
+			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "runpod ssh bootstrap failed: "+err.Error())
+			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+				"launch_id=%d reason=infra_failure detail=runpod ssh bootstrap failed: %s", instanceID, err))
+			return instanceID, fmt.Errorf("runpod ssh bootstrap: %w", err)
+		}
 	}
 
 	// Update status to running — instance is now self-starting

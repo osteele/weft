@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -781,6 +782,58 @@ func TestSplitGroupsByImage_LeavesExplicitNonCUDAImageUnchanged(t *testing.T) {
 	}
 	if groups[0].Image != "ubuntu:22.04" {
 		t.Fatalf("Image = %q, want ubuntu:22.04", groups[0].Image)
+	}
+}
+
+func TestSplitGroupsByImage_RunpodRemapsExplicitPyTorchImage(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, ".weft.toml")
+	if err := os.WriteFile(cfg, []byte("[cloud]\nimage = \"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	groups := SplitGroupsByImage([]InstanceGroup{
+		{
+			Provider: "runpod",
+			GPUClass: "RTX_4090",
+			GPUMemGB: 24,
+			Jobs: []*db.Job{
+				{ID: 1, Command: "python train.py", WorkingDir: dir},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Image != cloud.DefaultRunpodImage {
+		t.Fatalf("Image = %q, want %q", groups[0].Image, cloud.DefaultRunpodImage)
+	}
+}
+
+func TestSplitGroupsByImage_RunpodKeepsRunpodImage(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, ".weft.toml")
+	if err := os.WriteFile(cfg, []byte("[cloud]\nimage = \"runpod/pytorch:2.6.0-py3.11-cuda12.4.1-cudnn-devel-ubuntu22.04\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	groups := SplitGroupsByImage([]InstanceGroup{
+		{
+			Provider: "runpod",
+			GPUClass: "RTX_4090",
+			GPUMemGB: 24,
+			Jobs: []*db.Job{
+				{ID: 1, Command: "python train.py", WorkingDir: dir},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Image != "runpod/pytorch:2.6.0-py3.11-cuda12.4.1-cudnn-devel-ubuntu22.04" {
+		t.Fatalf("Image = %q", groups[0].Image)
 	}
 }
 

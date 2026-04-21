@@ -35,7 +35,7 @@ func DesiredBootstrapTemplate(cfg *config.Config) BootstrapTemplateSpec {
 	if cfg != nil && strings.TrimSpace(cfg.Runpod.DefaultImage) != "" {
 		image = strings.TrimSpace(cfg.Runpod.DefaultImage)
 	}
-	startCommand := cloud.R2BootstrapTemplateStartCmd()
+	startCommand := templateStartCommand(cloud.R2BootstrapTemplateStartCmd())
 	hashInput := image + "\n" + startCommand
 	sum := sha256.Sum256([]byte(hashInput))
 	hash := hex.EncodeToString(sum[:8])
@@ -59,7 +59,7 @@ func Diagnose(cfg *config.Config) (*Diagnosis, error) {
 	return NewManager().Diagnose(cfg)
 }
 
-// Setup ensures a compatible bootstrap template exists and persists config.
+// Setup enables RunPod and persists a compatible default image.
 func Setup(cfg *config.Config) (*SetupResult, error) {
 	return NewManager().Setup(cfg)
 }
@@ -75,11 +75,12 @@ func (m *Manager) diagnose(cfg *config.Config) (*Diagnosis, BootstrapTemplateSpe
 	}
 
 	spec := DesiredBootstrapTemplate(cfg)
+	imageCheckOK, imageCheckDetail := runpodImageCheck(cfg)
 	diag := &Diagnosis{
 		Enabled:              cfg.Runpod.Enabled,
 		TemplateID:           cfg.Runpod.BootstrapTemplateID,
-		RequiredStartCommand: spec.StartCommand,
-		DefaultImage:         spec.Image,
+		RequiredStartCommand: "",
+		DefaultImage:         effectiveRunpodImage(cfg),
 	}
 
 	ctx := context.Background()
@@ -92,7 +93,7 @@ func (m *Manager) diagnose(cfg *config.Config) (*Diagnosis, BootstrapTemplateSpe
 			Check{Name: "auth", OK: false, Detail: "skipped because CLI is unavailable or incompatible"},
 		)
 		diag.SearchChecks = searchChecks
-		diag.LaunchChecks = launchChecksForConfig(cfg, diag.TemplateID, nil, false, spec)
+		diag.LaunchChecks = launchChecksForConfig(cfg, imageCheckOK, imageCheckDetail)
 		diag.SearchReady = false
 		diag.LaunchReady = false
 		return diag, spec, nil, nil
@@ -112,20 +113,7 @@ func (m *Manager) diagnose(cfg *config.Config) (*Diagnosis, BootstrapTemplateSpe
 	diag.SearchChecks = searchChecks
 	diag.SearchReady = cfg.Runpod.Enabled && authErr == nil
 
-	var tmpl *TemplateInfo
-	var tmplErr error
-	if authErr == nil && diag.TemplateID != "" && len(caps.templateGetCommand) > 0 {
-		tmpl, tmplErr = m.client.getTemplate(ctx, caps, diag.TemplateID)
-		if tmplErr == nil {
-			diag.Template = tmpl
-			diag.TemplateCompatible = templateMatchesSpec(tmpl, spec)
-		}
-	}
-
-	diag.LaunchChecks = launchChecksForConfig(cfg, diag.TemplateID, tmpl, diag.TemplateCompatible, spec)
-	if tmplErr != nil {
-		diag.LaunchChecks = append(diag.LaunchChecks, Check{Name: "template lookup", OK: false, Detail: tmplErr.Error()})
-	}
+	diag.LaunchChecks = launchChecksForConfig(cfg, imageCheckOK, imageCheckDetail)
 	diag.LaunchReady = diag.SearchReady && allChecksOK(diag.LaunchChecks)
 	return diag, spec, caps, nil
 }
@@ -144,36 +132,23 @@ func (m *Manager) Setup(cfg *config.Config) (*SetupResult, error) {
 		return result, fmt.Errorf("runpod search is not ready; run `weft runpod doctor` for details")
 	}
 
-	ctx := context.Background()
+	_ = spec
+	_ = caps
 
-	template := diag.Template
-	if template == nil || !diag.TemplateCompatible {
-		template, err = m.findReusableTemplate(ctx, caps, spec)
-		if err != nil {
-			return result, err
-		}
-		if template == nil {
-			template, err = m.client.createTemplate(ctx, caps, spec)
-			if err != nil {
-				return result, err
-			}
-			result.CreatedTemplate = true
-		}
-	}
+	image := effectiveRunpodImage(cfg)
 
 	if err := config.UpdateGlobalTOML(func(tree *toml.Tree) error {
 		tree.SetPath([]string{"runpod", "enabled"}, true)
-		tree.SetPath([]string{"runpod", "bootstrap_template_id"}, template.ID)
+		tree.SetPath([]string{"runpod", "default_image"}, image)
 		return nil
 	}); err != nil {
 		return result, fmt.Errorf("persist RunPod config: %w", err)
 	}
-	result.Template = template
 	result.UpdatedConfig = true
 
 	updatedCfg := *cfg
 	updatedCfg.Runpod.Enabled = true
-	updatedCfg.Runpod.BootstrapTemplateID = template.ID
+	updatedCfg.Runpod.DefaultImage = image
 	result.Diagnosis, err = m.Diagnose(&updatedCfg)
 	if err != nil {
 		return result, err
@@ -196,22 +171,12 @@ func setupPrereqsReady(diag *Diagnosis) bool {
 	return true
 }
 
-func launchChecksForConfig(cfg *config.Config, templateID string, template *TemplateInfo, templateCompatible bool, spec BootstrapTemplateSpec) []Check {
+func launchChecksForConfig(cfg *config.Config, imageCheckOK bool, imageCheckDetail string) []Check {
 	checks := []Check{
 		{Name: "shared R2 config", OK: cfg != nil && cfg.Vastai.R2.Bucket != "" && cfg.Vastai.R2.AccessKeyID != "", Detail: r2Detail(cfg)},
-		{Name: "bootstrap_template_id", OK: strings.TrimSpace(templateID) != "", Detail: valueOrMissing(templateID, "missing; run `weft runpod setup`")},
+		{Name: "runpod.default_image", OK: imageCheckOK, Detail: imageCheckDetail},
 	}
-	if templateID == "" {
-		return checks
-	}
-	if template == nil {
-		return append(checks, Check{Name: "template compatibility", OK: false, Detail: "template not loaded"})
-	}
-	detail := "template matches expected image and startup command"
-	if !templateCompatible {
-		detail = fmt.Sprintf("template %s does not match image=%q and startup command=%q", template.ID, spec.Image, spec.StartCommand)
-	}
-	return append(checks, Check{Name: "template compatibility", OK: templateCompatible, Detail: detail})
+	return checks
 }
 
 func (m *Manager) findReusableTemplate(ctx context.Context, caps *cliCapabilities, spec BootstrapTemplateSpec) (*TemplateInfo, error) {
@@ -241,7 +206,22 @@ func templateMatchesSpec(tmpl *TemplateInfo, spec BootstrapTemplateSpec) bool {
 }
 
 func normalizeStartCommand(cmd string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(cmd)), " ")
+	cmd = strings.TrimSpace(cmd)
+	if strings.HasPrefix(cmd, "bash,-lc,") {
+		cmd = "bash -lc " + strings.TrimPrefix(cmd, "bash,-lc,")
+	}
+	if strings.HasPrefix(cmd, "bash,-c,") {
+		cmd = "bash -c " + strings.TrimPrefix(cmd, "bash,-c,")
+	}
+	return strings.Join(strings.Fields(cmd), " ")
+}
+
+func templateStartCommand(script string) string {
+	script = strings.TrimSpace(script)
+	if script == "" {
+		return ""
+	}
+	return "bash -lc " + script
 }
 
 func allChecksOK(checks []Check) bool {
@@ -279,4 +259,32 @@ func r2Detail(cfg *config.Config) string {
 		return "missing `vastai.r2.bucket` or `vastai.r2.access_key_id`"
 	}
 	return fmt.Sprintf("bucket=%s", cfg.Vastai.R2.Bucket)
+}
+
+func isRunpodImage(image string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(image)), "runpod/")
+}
+
+func effectiveRunpodImage(cfg *config.Config) string {
+	if cfg != nil {
+		image := strings.TrimSpace(cfg.Runpod.DefaultImage)
+		if isRunpodImage(image) {
+			return image
+		}
+	}
+	return cloud.DefaultRunpodImage
+}
+
+func runpodImageCheck(cfg *config.Config) (bool, string) {
+	if cfg == nil {
+		return true, fmt.Sprintf("using default image %q", cloud.DefaultRunpodImage)
+	}
+	image := strings.TrimSpace(cfg.Runpod.DefaultImage)
+	if image == "" {
+		return true, fmt.Sprintf("using default image %q", cloud.DefaultRunpodImage)
+	}
+	if isRunpodImage(image) {
+		return true, fmt.Sprintf("configured image %q", image)
+	}
+	return false, fmt.Sprintf("configured image %q is incompatible; expected runpod/*", image)
 }

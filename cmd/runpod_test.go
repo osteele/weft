@@ -36,10 +36,9 @@ func TestRunRunpodDoctorPrintsDiagnosis(t *testing.T) {
 			SearchCommand:         "get cloud",
 			PodCommandFamily:      "pod list --all / pod get / pod delete",
 			TemplateCommandFamily: "template list --type user / template get / template create",
-			DefaultImage:          "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
-			RequiredStartCommand:  "bash /tmp/bootstrap.sh",
+			DefaultImage:          "runpod/base:1.0.2-ubuntu2204",
 			SearchChecks:          []runpod.Check{{Name: "auth", OK: true, Detail: "authenticated"}},
-			LaunchChecks:          []runpod.Check{{Name: "bootstrap_template_id", OK: false, Detail: "missing"}},
+			LaunchChecks:          []runpod.Check{{Name: "runpod.default_image", OK: false, Detail: "configured image \"pytorch/pytorch:2.6\" is incompatible; expected runpod/*"}},
 		}, nil
 	}
 	defer func() { runpodDiagnose = origDiagnose }()
@@ -57,8 +56,7 @@ func TestRunRunpodDoctorPrintsDiagnosis(t *testing.T) {
 		"RunPod readiness",
 		"Search ready: yes",
 		"Launch ready: no",
-		"[FAIL] bootstrap_template_id: missing",
-		"Required startup command:",
+		"[FAIL] runpod.default_image: configured image \"pytorch/pytorch:2.6\" is incompatible; expected runpod/*",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -71,15 +69,12 @@ func TestRunRunpodSetupPrintsTemplateAndConfigPath(t *testing.T) {
 	runpodSetup = func(*config.Config) (*runpod.SetupResult, error) {
 		return &runpod.SetupResult{
 			Diagnosis: &runpod.Diagnosis{
-				SearchReady:          true,
-				LaunchReady:          true,
-				DefaultImage:         "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
-				RequiredStartCommand: "bash /tmp/bootstrap.sh",
+				SearchReady:  true,
+				LaunchReady:  true,
+				DefaultImage: "runpod/base:1.0.2-ubuntu2204",
 			},
-			Template:        &runpod.TemplateInfo{ID: "tpl-123", Name: "weft-bootstrap"},
-			ConfigPath:      "/tmp/config.toml",
-			CreatedTemplate: true,
-			UpdatedConfig:   true,
+			ConfigPath:    "/tmp/config.toml",
+			UpdatedConfig: true,
 		}, nil
 	}
 	defer func() { runpodSetup = origSetup }()
@@ -92,10 +87,7 @@ func TestRunRunpodSetupPrintsTemplateAndConfigPath(t *testing.T) {
 		t.Fatalf("runRunpodSetup: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{
-		"Template created: tpl-123",
-		"Updated config: /tmp/config.toml",
-	} {
+	for _, want := range []string{"Updated config: /tmp/config.toml"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
