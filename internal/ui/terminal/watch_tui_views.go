@@ -649,9 +649,9 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 // autoModeHint returns a short hint for the current auto-pilot state.
 func (m watchModel) autoModeHint() string {
 	if m.autoMode {
-		return "[a] auto: ON  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
+		return "[A] auto: ON  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
 	}
-	return "[a] auto: OFF  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
+	return "[A] auto: OFF  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
 }
 
 func (m watchModel) autoPilotUnplacedCount() int {
@@ -875,10 +875,11 @@ func (m watchModel) renderProjectHelpView() string {
 		"  g/G jump top/bottom",
 		"",
 		"Actions:",
+		"  a view attempts for selected job",
 		"  u unplace selected queued job",
 		"  r refresh",
 		"  l open launch planner",
-		"  a toggle auto-pilot",
+		"  A toggle auto-pilot",
 		"  $ set run-rate target ($/hr)",
 		"",
 		"Help:",
@@ -914,6 +915,7 @@ func (m watchModel) renderWatchHelpView() string {
 		"  g/G jump top/bottom",
 		"",
 		"Actions:",
+		"  a view attempts for selected job",
 		"  u unplace selected queued job",
 		"  x kill selected running job",
 		"  t terminate selected cloud instance",
@@ -924,7 +926,7 @@ func (m watchModel) renderWatchHelpView() string {
 		"  U open grouped jobs list",
 		"  r retry failed instances",
 		"  B double retry budget for selected failed instance and retry",
-		"  a toggle auto-pilot",
+		"  A toggle auto-pilot",
 		"  $ set run-rate target ($/hr)",
 		"",
 		"Help:",

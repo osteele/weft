@@ -254,6 +254,19 @@ func (m watchModel) selectedUnplacedJob() *db.Job {
 	}
 }
 
+// selectedAnyJob returns whichever job is under the cursor across the three
+// job buckets (cloud, on-prem, unplaced). Used by the attempts drill-down,
+// which only needs the job ID.
+func (m watchModel) selectedAnyJob() *db.Job {
+	if job := m.selectedCloudJob(); job != nil {
+		return job
+	}
+	if job := m.selectedOnPremJob(); job != nil {
+		return job
+	}
+	return m.selectedUnplacedJob()
+}
+
 func (m *watchModel) removeOnPremJob(jobID int64) {
 	filteredHosts := m.onPremHosts[:0]
 	for _, host := range m.onPremHosts {

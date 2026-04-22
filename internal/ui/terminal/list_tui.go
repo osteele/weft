@@ -334,6 +334,13 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = true
 			return m, nil
 		case "a":
+			job := m.currentSelectedJob()
+			if job == nil {
+				m.statusMessage = "Select a job row to view attempts"
+				return m, nil
+			}
+			return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
+		case "A":
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
 				if m.autoMode {
@@ -1004,10 +1011,10 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.autoMode {
 		autoState = "ON"
 	}
-	line := fmt.Sprintf("a:auto (%s)", autoState)
+	line := fmt.Sprintf("A:auto (%s)", autoState)
 	line += "  r:refresh"
 	if m.selectedGroupedJob() != nil {
-		line += "  k:kill  u:unplace  p:processed"
+		line += "  a:attempts  k:kill  u:unplace  p:processed"
 		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
 			line += "  m:move"
 		}
@@ -1050,6 +1057,18 @@ func (m listTUIModel) selectedGroupedRow() int {
 		return -1
 	}
 	return m.groupedSelectableRows[m.cursor]
+}
+
+// currentSelectedJob returns the job under the cursor in either grouped or
+// ungrouped view, or nil if no row is selected.
+func (m listTUIModel) currentSelectedJob() *db.Job {
+	if m.groupedByStatus {
+		return m.selectedGroupedJob()
+	}
+	if m.cursor >= 0 && m.cursor < len(m.jobs) {
+		return m.jobs[m.cursor]
+	}
+	return nil
 }
 
 func (m listTUIModel) selectedGroupedJob() *db.Job {
@@ -1151,6 +1170,13 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m.triggerManualRefresh()
 	case "a":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			m.statusMessage = "Select a job row to view attempts"
+			return m, nil
+		}
+		return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
+	case "A":
 		m.autoMode = !m.autoMode
 		if m.autoMode {
 			m.clearAutoPilotPersistentState()
@@ -1406,6 +1432,7 @@ func (m listTUIModel) renderListHelpView() string {
 		"  g/G jump top/bottom",
 		"",
 		"Common:",
+		"  a view attempts for selected job",
 		"  r refresh",
 		"  v toggle grouped/ungrouped view",
 		"  i open instances watch",
@@ -1415,7 +1442,7 @@ func (m listTUIModel) renderListHelpView() string {
 		lines = append(lines,
 			"",
 			"Grouped-only actions:",
-			"  a toggle auto-pilot",
+			"  A toggle auto-pilot",
 			"  $ set run-rate target ($/hr)",
 			"  n launch a new instance for queued jobs",
 			"  k kill selected job",

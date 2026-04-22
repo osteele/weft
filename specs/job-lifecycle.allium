@@ -6,9 +6,14 @@
 -- Excludes:
 --   - Cloud instance management (separate spec: campaign lifecycle)
 --   - Source/data syncing implementation
---   - TUI/dashboard rendering
 --   - Telemetry sampling and timeseries collection
 --   - Output artifact sync
+--
+-- TUI view contracts: specifications for what job-related TUI views show
+-- and how they are formatted live at the end of this file under "TUI
+-- views". Rendering details that depend on sync state (job status list,
+-- selected-job detail footer) live in status-sync.allium alongside the
+-- sync rules that drive them.
 --
 -- Naming convention: Allium enum literals use underscores (e.g. queue_runner).
 -- The implementation uses hyphens in serialized string values (e.g. "queue-runner").
@@ -677,4 +682,85 @@ invariant RunningJobsAreNotTerminal {
     for job in Jobs:
         if job.status = running:
             job.is_terminal = false
+}
+
+-- ==========================================================================
+-- TUI views
+-- ==========================================================================
+--
+-- View contracts documented here specify WHAT a job-centric TUI view
+-- shows, HOW its rows are ordered, and HOW each field is formatted.
+-- Drill-downs invoked from job-listing TUIs (the grouped/ungrouped list,
+-- the system/project/instance watches, and the launch planner) belong
+-- here alongside the data they display.
+--
+-- Views are specified as @guidance blocks on the entity whose state they
+-- render, rather than as first-class language constructs. Implementations
+-- live in internal/ui/terminal/*.go and are free to evolve colors,
+-- spacing, and navigation details; the guidance constrains the semantic
+-- content (columns, ordering, empty states, available keys).
+
+-- AttemptsView is a read-only drill-down reachable by pressing `a` on a
+-- selected job row from any TUI that lists jobs. It shows the full
+-- history of attempts recorded in job_attempts for that job.
+rule AttemptsViewIsReadOnly {
+    when: UserPressesAttemptsKey(job)
+    ensures: AttemptsViewOpened(job)
+
+    @guidance
+        -- The view displays db.JobAttempt rows for the selected job,
+        -- newest first (attempt_number DESC). It does not mutate DB
+        -- state — no retry, cancel, or kill actions are offered here.
+        --
+        -- Header line (fields joined by two spaces):
+        --   - "Attempts for job #<id>"
+        --   - job.description (or generated_description, or command)
+        --     truncated to ~80 display cols
+        --   - job.effective_status
+        --   - "project: <name>" when job.project is non-empty
+        --
+        -- Columns (in order):
+        --   #        attempt_number
+        --   Status   attempt.status (raw value)
+        --   Host     attempt.host, or "—" when unset
+        --   Started  attempt.start_time formatted "YYYY-MM-DD HH:MM:SS"
+        --            in local time, or "—" when null/zero
+        --   Duration end_time - start_time, formatted as "Ns" /
+        --            "Nm Ns" / "Nh Nm"; uses now() when end_time is
+        --            null (attempt still in progress); "—" when
+        --            start_time is null
+        --   Exit     attempt.exit_code, or "—" when null
+        --   Outcome/Reason — derived in this precedence:
+        --            1. cloud_outcome when non-empty and not "completed":
+        --               "<outcome>" or "<outcome> — <failure_reason>"
+        --            2. failure_reason when non-empty
+        --            3. error_message (first line) when non-empty
+        --            4. "completed" when cloud_outcome = "completed"
+        --            5. "—"
+        --
+        -- Empty state: "No attempts recorded for this job." is shown
+        -- when ListAttempts returns zero rows. Error state shows the
+        -- error and offers `r` to retry loading.
+        --
+        -- Keys:
+        --   j/k or up/down — move cursor
+        --   g/G or home/end — jump top/bottom
+        --   r              — reload attempts from DB
+        --   esc/q          — return to the calling view
+        --
+        -- enter is intentionally unbound; per-attempt log viewing is
+        -- accessed via `weft log <job-id>` from the shell (see
+        -- docs/guides/debugging.md).
+        --
+        -- Entry from TUIs: pressing `a` on a selected job row in the
+        -- jobs list, system/project/instance watches, or any future
+        -- job-listing TUI pushes this view and restores the caller on
+        -- return. The `A` key (shift-a) remains the auto-pilot toggle
+        -- in watches and the grouped jobs list.
+        --
+        -- Implementation:
+        --   internal/db/attempts.go               — ListAttempts query
+        --   internal/ui/terminal/attempts_tui.go  — attemptsListModel
+        --   internal/ui/terminal/watch_router.go  — switchToAttemptsMsg,
+        --                                           switchBackFromAttemptsMsg
 }

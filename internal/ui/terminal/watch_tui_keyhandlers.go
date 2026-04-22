@@ -220,6 +220,11 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			job, capacities, queuedCounts, sourceInstanceID,
 		))
 	case "a":
+		if job := m.selectedAnyJob(); job != nil {
+			return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
+		}
+		return m, m.flash.Set("Select a job row to view attempts", true)
+	case "A":
 		return m.handleToggleAutoPilot()
 	case "$":
 		return m.beginAutoRunRateInput()
@@ -349,6 +354,12 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearAutoPilotPersistentState()
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	case "a":
+		job, _ := m.selectedProjectJob()
+		if job == nil {
+			return m, m.flash.Set("Select a job row to view attempts", true)
+		}
+		return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
+	case "A":
 		return m.handleToggleAutoPilot()
 	case "$":
 		return m.beginAutoRunRateInput()

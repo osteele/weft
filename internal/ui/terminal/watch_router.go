@@ -33,6 +33,17 @@ type switchToWatchMsg struct {
 	flash string
 }
 
+// switchToAttemptsMsg is emitted by a job-listing TUI when the user presses 'a'
+// on a selected job row. The router pushes the attempts drill-down screen and
+// remembers the caller so it can be restored on switchBackFromAttemptsMsg.
+type switchToAttemptsMsg struct {
+	jobID int64
+}
+
+// switchBackFromAttemptsMsg is emitted by attemptsListModel when the user
+// presses esc/q to leave the drill-down.
+type switchBackFromAttemptsMsg struct{}
+
 // launchPlanReadyMsg carries the prepared launch TUI model (or error).
 type launchPlanReadyMsg struct {
 	model *launchModel
@@ -59,6 +70,7 @@ type watchRouterModel struct {
 	listArgs      []string      // list query args (nil = default recent jobs)
 	listTitle     string        // list title
 	listSync      bool          // list sync mode
+	attemptsPrev  tea.Model     // caller to restore when leaving attempts drill-down
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, autoMode bool) watchRouterModel {
@@ -205,6 +217,35 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case switchToWatchMsg:
 		return m.switchTo(m.buildHomeWatch(msg.flash))
+
+	case switchToAttemptsMsg:
+		if m.attemptsPrev != nil {
+			// Already inside the drill-down; ignore nested pushes so the
+			// back-stack doesn't get clobbered.
+			return m, nil
+		}
+		m.attemptsPrev = m.active
+		attempts := newAttemptsListModel(m.database, msg.jobID)
+		m.active = attempts
+		cmds := []tea.Cmd{attempts.Init()}
+		if m.windowSize.Width > 0 {
+			ws := m.windowSize
+			cmds = append(cmds, func() tea.Msg { return ws })
+		}
+		return m, tea.Batch(cmds...)
+
+	case switchBackFromAttemptsMsg:
+		if m.attemptsPrev == nil {
+			return m, nil
+		}
+		prev := m.attemptsPrev
+		m.attemptsPrev = nil
+		m.active = prev
+		if m.windowSize.Width > 0 {
+			ws := m.windowSize
+			return m, func() tea.Msg { return ws }
+		}
+		return m, nil
 	}
 
 	// Delegate all other messages to the active model

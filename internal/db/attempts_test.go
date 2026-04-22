@@ -5,6 +5,63 @@ import (
 	"time"
 )
 
+func TestListAttempts_OrderAndFields(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID := int64(4001)
+	insertTestJob(t, database, jobID, "echo test", "/tmp", StatusQueued)
+
+	// Close the auto-created attempt, then create two more. Should see 3 total.
+	if err := CloseAttempt(database, jobID, StatusFailed, intPtr(1), time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt #1: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "host-alpha", nil, StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt #2: %v", err)
+	}
+	if err := CloseAttempt(database, jobID, StatusCompleted, intPtr(0), time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt #2: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "host-beta", nil, StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt #3: %v", err)
+	}
+
+	attempts, err := ListAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 3 {
+		t.Fatalf("len(attempts) = %d, want 3", len(attempts))
+	}
+
+	// Newest first — attempt_number DESC.
+	if attempts[0].AttemptNumber <= attempts[1].AttemptNumber ||
+		attempts[1].AttemptNumber <= attempts[2].AttemptNumber {
+		t.Fatalf("not in DESC order: %d,%d,%d",
+			attempts[0].AttemptNumber, attempts[1].AttemptNumber, attempts[2].AttemptNumber)
+	}
+
+	if attempts[0].Host != "host-beta" || attempts[0].Status != StatusRunning {
+		t.Fatalf("latest = %+v; want host=host-beta status=running", attempts[0])
+	}
+	if attempts[1].Host != "host-alpha" || attempts[1].Status != StatusCompleted {
+		t.Fatalf("middle = %+v; want host=host-alpha status=completed", attempts[1])
+	}
+	if attempts[2].Status != StatusFailed {
+		t.Fatalf("oldest status = %q, want %q", attempts[2].Status, StatusFailed)
+	}
+}
+
+func TestListAttempts_EmptyForMissingJob(t *testing.T) {
+	database := setupTestDB(t)
+	attempts, err := ListAttempts(database, 9999)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("expected 0 attempts, got %d", len(attempts))
+	}
+}
+
 func TestSetAttemptLaunch_NormalizesPendingPlacement(t *testing.T) {
 	database := setupTestDB(t)
 

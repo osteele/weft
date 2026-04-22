@@ -1184,6 +1184,75 @@ func ClearAttemptPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) 
 	return err
 }
 
+// JobAttempt is a row from job_attempts for display purposes.
+type JobAttempt struct {
+	ID            int64
+	JobID         int64
+	AttemptNumber int
+	Host          string
+	LaunchID      *int64
+	Status        string
+	QueuedAt      *int64
+	StartTime     *int64
+	EndTime       *int64
+	ExitCode      *int
+	ErrorMessage  string
+	FailureReason string
+	CloudOutcome  string
+	Backend       string
+}
+
+// ListAttempts returns every attempt for a job, newest first.
+func ListAttempts(database *sql.DB, jobID int64) ([]JobAttempt, error) {
+	rows, err := database.Query(`
+		SELECT id, job_id, attempt_number, host, launch_id, status,
+		       queued_at, start_time, end_time, exit_code,
+		       COALESCE(error_message, ''), COALESCE(failure_reason, ''),
+		       COALESCE(cloud_outcome, ''), COALESCE(backend, '')
+		FROM job_attempts
+		WHERE job_id = ?
+		ORDER BY attempt_number DESC`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("list attempts for job %d: %w", jobID, err)
+	}
+	defer rows.Close()
+
+	var out []JobAttempt
+	for rows.Next() {
+		var a JobAttempt
+		var launchID, queuedAt, startTime, endTime, exitCode sql.NullInt64
+		if err := rows.Scan(
+			&a.ID, &a.JobID, &a.AttemptNumber, &a.Host, &launchID, &a.Status,
+			&queuedAt, &startTime, &endTime, &exitCode,
+			&a.ErrorMessage, &a.FailureReason, &a.CloudOutcome, &a.Backend,
+		); err != nil {
+			return nil, err
+		}
+		if launchID.Valid {
+			v := launchID.Int64
+			a.LaunchID = &v
+		}
+		if queuedAt.Valid {
+			v := queuedAt.Int64
+			a.QueuedAt = &v
+		}
+		if startTime.Valid {
+			v := startTime.Int64
+			a.StartTime = &v
+		}
+		if endTime.Valid {
+			v := endTime.Int64
+			a.EndTime = &v
+		}
+		if exitCode.Valid {
+			v := int(exitCode.Int64)
+			a.ExitCode = &v
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // MarkAttemptQueuedByID closes any open attempt and creates a fresh queued
 // attempt, preserving the historical record of the previous attempt.
 // Carries over host, pending_status, and pending_at from the old attempt so

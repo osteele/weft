@@ -9,8 +9,14 @@
 --   - Job submission and placement (see job-lifecycle.allium)
 --   - Campaign/instance launch and termination (see campaign-lifecycle.allium)
 --   - Output artifact collection and log caching
---   - TUI rendering and display
 --   - Queue dispatch policy details (except cloud dependency readiness signals)
+--
+-- TUI view contracts: rendering contracts for views whose content is driven
+-- by sync state (the grouped/ungrouped job list, the selected-job detail
+-- footer, and related views) are documented within the rules that drive
+-- them — e.g. rule TUIPeriodicSync below. Pure job-centric views that do
+-- not depend on sync state (such as the per-job Attempts drill-down) are
+-- specified in job-lifecycle.allium.
 
 use "./job-lifecycle.allium" as jobs
 use "./campaign-lifecycle.allium" as cloud

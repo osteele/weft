@@ -329,7 +329,7 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	if strings.Contains(out, "Auto-pilot failed:") {
 		t.Fatalf("expected auto-pilot message to be rendered only in the dedicated auto line, got:\n%s", out)
 	}
-	if !strings.Contains(out, "a:auto (ON)") {
+	if !strings.Contains(out, "A:auto (ON)") {
 		t.Fatalf("expected controls line with auto state, got:\n%s", out)
 	}
 	if !strings.Contains(out, "q:quit") {
@@ -354,7 +354,7 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "a:auto (ON)") || !strings.Contains(out, "v:ungrou") {
+	if !strings.Contains(out, "A:auto (ON)") || !strings.Contains(out, "v:ungrou") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
 	}
 }
@@ -589,7 +589,7 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 	out := stripANSI(m.View())
 	sharedIdx := strings.Index(out, "0 jobs running")
 	statusIdx := strings.Index(out, "Auto-pilot: monitoring")
-	controlsIdx := strings.Index(out, "a:auto (ON)")
+	controlsIdx := strings.Index(out, "A:auto (ON)")
 	if sharedIdx < 0 || statusIdx < 0 || controlsIdx < 0 {
 		t.Fatalf("missing grouped footer parts, got:\n%s", out)
 	}
@@ -683,10 +683,10 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 	t.Run("toggle auto on", func(t *testing.T) {
 		m := makeModel()
 		m.autoMode = false
-		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
 		got := next.(listTUIModel)
 		if !got.autoMode {
-			t.Fatal("expected autoMode ON after 'a' toggle")
+			t.Fatal("expected autoMode ON after 'A' toggle")
 		}
 		if !got.autoNextPassAt.IsZero() {
 			t.Fatalf("expected cooldown cleared, got %v", got.autoNextPassAt)
