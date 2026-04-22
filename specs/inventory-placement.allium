@@ -1,0 +1,675 @@
+-- allium: 3
+-- inventory-placement.allium
+--
+-- Scope: Resource inventory (host capabilities), GPU class matching,
+-- on-prem placement eligibility and scoring, and data locality.
+--
+-- Includes:
+--   - Host capability model (static YAML + discovered)
+--   - GPUSpec and GPU class normalization / matching rules
+--   - Placement Constraints, eligibility filters, and scoring
+--   - Data asset locality tracking and scan/download rules
+--   - Host discovery via SSH
+--
+-- Excludes:
+--   - Rental / cloud offer search and bidding (see campaign-lifecycle.allium)
+--   - Job status transitions (see job-lifecycle.allium)
+--   - Runtime host-info sync and reachability probing display
+--     (see status-sync.allium; this spec only models the data model)
+--   - Predictor internals, Monte Carlo simulation, CPU perf lookup tables
+--     (implementation details of scoring)
+--
+-- Naming: enum literals use underscores (e.g. min_generation).
+-- Normalized GPU class strings use the implementation form (lowercase,
+-- no punctuation, e.g. rtx3090) since the normalization itself is
+-- domain-level behaviour.
+
+-- =========================================================================
+-- Host capability model
+-- =========================================================================
+
+-- A Host is an external resource. Weft persists a capability record for it
+-- (sourced from discovery + operator edits) but does not control the host
+-- itself. The capability record is the canonical Host definition; the
+-- job-lifecycle.allium Host stub is a cross-reference to this entity.
+entity Host {
+    name: String                -- SSH-reachable hostname
+    os: String                  -- e.g. "Linux", "Darwin"
+    arch: String                -- e.g. "x86_64", "arm64"
+
+    cpu_cores: Integer
+    memory: String              -- human size, e.g. "128GB"
+    network_bw: String?         -- e.g. "1Gbps", "10Gbps"; null = unknown
+
+    gpus: List<GPUSpec>
+
+    -- Performance factors, 1.0 = baseline. Used as a multiplier on predicted
+    -- run time during scoring. Unset (0) is treated as 1.0.
+    cpu_factor: Decimal
+    gpu_factor: Decimal
+
+    hf_cache_dir: String?       -- resolved HF hub cache path on the host
+    setup_timeout: Duration     -- max duration for setup commands (uv sync etc.)
+
+    -- Derived
+    total_gpus: sum(g.count for g in gpus)
+    network_bw_bytes_per_sec: parse_network_bw(network_bw)
+
+    @guidance
+        -- Records live under ~/.config/weft/hosts/<name>.yaml, one file
+        -- per host. At load time, entries in config.toml [hosts.<name>]
+        -- override non-zero fields on the YAML record.
+        -- Implementation: internal/inventory/inventory.go
+}
+
+-- A group of identical GPUs on a host. Multiple GPUSpecs may appear on
+-- one host when hardware is heterogeneous (e.g. cool100 has A100s +
+-- 2080 Tis).
+value GPUSpec {
+    name: String                -- original name, e.g. "NVIDIA A100 80GB PCIe"
+    class: String               -- normalized class, e.g. "a100"
+    memory: String              -- per-device memory, e.g. "80GB"
+    indices: List<Integer>      -- device indices (CUDA_VISIBLE_DEVICES values)
+
+    -- Derived
+    count: indices.length
+    memory_gb: parse_memory_gb(memory)
+}
+
+config {
+    default_setup_timeout: Duration = 20.minutes
+    default_cpu_factor: Decimal = 1.0
+    default_gpu_factor: Decimal = 1.0
+}
+
+-- =========================================================================
+-- GPU class normalization and matching
+-- =========================================================================
+
+-- Normalized form for fuzzy matching: lowercase, letters/digits only.
+-- Bare numeric RTX model names are expanded with the "rtx" prefix.
+--
+-- Examples:
+--   "RTX 3090"    -> "rtx3090"
+--   "rtx-3090"    -> "rtx3090"
+--   "3090"        -> "rtx3090"        (bare model expansion)
+--   "2080ti"      -> "rtx2080ti"
+--   "A100 80GB"   -> "a10080gb"
+--   "ampere"      -> "ampere"
+rule NormalizeGPUClass {
+    when: NormalizeRequested(input)
+    let letters_digits = input.lowercase.filter(c => c.is_alphanumeric)
+    let expanded =
+        if letters_digits.starts_with_digit and looks_like_rtx_model(letters_digits):
+            "rtx" + letters_digits
+        else: letters_digits
+    ensures: NormalizedResult(expanded)
+
+    @guidance
+        -- "Looks like an RTX model" covers the well-known GeForce RTX
+        -- 20xx/30xx/40xx lines and their "ti" / "super" variants.
+        -- NVIDIA data-center SKUs (A100, H100, etc.) do not get the
+        -- rtx prefix. Implementation: inventory.NormalizeGPUClass.
+}
+
+-- Generations group GPU models by architecture. The `family` marks whether
+-- two generations can be compared by "newer than" — NVIDIA and Apple are
+-- incomparable.
+value GPUFamily = nvidia | apple
+
+value GPUGeneration {
+    name: String                -- e.g. "ampere", "ada_lovelace", "m2"
+    family: GPUFamily
+    rank: Integer               -- monotonic within family; higher = newer
+}
+
+-- Parsed form of a --gpu / --gpu-class constraint string.
+value GPUConstraint {
+    mode: exact_model | exact_generation | min_generation | family
+    model: String?              -- set when mode = exact_model (normalized)
+    generation: GPUGeneration?  -- set when mode in {exact_generation, min_generation}
+    family: GPUFamily?          -- set when mode = family
+}
+
+rule ParseGPUConstraint {
+    when: ParseRequested(raw: String)
+
+    -- Recognition precedence:
+    --   1. "nvidia" / "apple" (bare family)       -> family
+    --   2. "<generation>+" or "<model>+"          -> min_generation
+    --   3. exact generation name                  -> exact_generation
+    --   4. everything else                        -> exact_model (normalized)
+    --
+    -- In min_generation mode the string may name a specific model
+    -- (e.g. "a100+"); the parser resolves it to that model's generation.
+    -- The "+" suffix is always generation-level: it never matches
+    -- "this exact model or a newer submodel".
+
+    ensures: GPUConstraintParsed(result)
+
+    @guidance
+        -- Implementation: internal/placement/gpugen.go
+        -- ParseGPUConstraint. Cross-family comparisons under
+        -- min_generation are rejected at match time, not parse time.
+}
+
+rule MatchGPU {
+    when: MatchRequested(constraint: GPUConstraint, gpu: GPUSpec)
+
+    if constraint.mode = exact_model:
+        ensures: Matches = (gpu.class = constraint.model)
+
+    if constraint.mode = family:
+        ensures: Matches = (family_of(gpu.class) = constraint.family)
+
+    if constraint.mode = exact_generation:
+        ensures: Matches = (generation_of(gpu.class) = constraint.generation)
+
+    if constraint.mode = min_generation:
+        let gpu_gen = generation_of(gpu.class)
+        ensures: Matches = (
+            gpu_gen != null
+            and gpu_gen.family = constraint.generation.family
+            and gpu_gen.rank >= constraint.generation.rank
+        )
+
+    @guidance
+        -- min_generation never matches across families: an M2 does not
+        -- satisfy "ampere+" and an A100 does not satisfy "m1+".
+        -- Known generations live in placement/gpugen.go; additions are
+        -- implementation detail. Implementation: MatchesGPU.
+}
+
+-- When two candidate GPUs both match a constraint on the same host,
+-- the selector takes the first matching device in the host's GPU list.
+-- No explicit tie-breaking on model or memory.
+invariant FirstMatchWinsOnHost {
+    -- A caller evaluating MatchGPU against gpu_specs in order must not
+    -- reorder the list for the purpose of matching. The ordering on the
+    -- host YAML is authoritative.
+    for host in Hosts:
+        first_match_is_deterministic(host.gpus)
+}
+
+-- =========================================================================
+-- Placement constraints
+-- =========================================================================
+
+-- Constraints derived from a Job's resource-related fields at placement
+-- time. Job-lifecycle.allium owns the user-facing flags; this spec owns
+-- how those flags resolve into a placement query.
+value Constraints {
+    gpu_class: String?          -- raw constraint string (pre-parse)
+    gpu_mem_gb: Integer?        -- min GPU memory per device
+    gpu_mem_strict: Boolean     -- if true, reject hosts whose only matching
+                                -- GPUs exceed gpu_mem_gb by a wide margin
+    provider: String?           -- rental provider name ("" = on-prem first)
+    inputs: List<String>        -- asset refs (see Data locality below)
+    tags: Set<Tag>              -- rental/inventory/benchmark/compute_intensive
+    preferred_instance_ids: List<Integer>   -- soft hint for instance reuse
+}
+
+rule BuildConstraintsFromJob {
+    when: PlacementEvaluationStarts(job)
+
+    let tags = job.tags
+    let provider = parse_provider_from_tags(tags)  -- "rental:vastai" -> "vastai"
+
+    ensures: Constraints.built(
+        gpu_class: job.gpu_class,
+        gpu_mem_gb: job.gpu_mem_gb,
+        gpu_mem_strict: job.gpu_mem_strict,
+        provider: provider,
+        inputs: job.inputs,
+        tags: tags
+    )
+
+    @guidance
+        -- Implementation: placement.ConstraintsFromJob.
+        -- --gpu-mem-strict rejects hosts where the best matching device
+        -- has memory >> request; the policy guards against wastefully
+        -- placing a 24GB job on an 80GB A100 when a 3090 is free.
+}
+
+-- =========================================================================
+-- Placement eligibility (hard constraints)
+-- =========================================================================
+
+rule EvaluateEligibility {
+    when: EligibilityEvaluated(host: Host, c: Constraints, metrics: HostMetrics)
+
+    -- A host is eligible iff every hard constraint passes. Failing hosts
+    -- still return a Score with placement_reasons explaining why they
+    -- were rejected; those reasons surface in the TUI and `weft run`
+    -- error output.
+
+    -- 1. Opt-in exclusion. Hosts marked opt-in-only in config are
+    --    eligible only for jobs that explicitly name them.
+    requires: not host.opt_in_only or c.names(host)
+
+    -- 2. GPU class match.
+    if c.gpu_class != null:
+        let gc = ParseGPUConstraint(c.gpu_class)
+        requires: host.gpus.any(g => MatchGPU(gc, g))
+
+    -- 3. GPU memory.
+    if c.gpu_mem_gb != null:
+        requires: host.gpus.any(g => g.memory_gb >= c.gpu_mem_gb)
+
+    -- 4. Benchmark jobs must land on an idle host.
+    if benchmark in c.tags:
+        requires: metrics.is_idle
+
+    ensures: EligibilityResult(host, eligible: true)
+
+    @guidance
+        -- Reasons for rejection are surfaced as human-readable strings
+        -- collected on the Score.placement_reasons list. Examples:
+        --   "has RTX 3090 GPU"           (pass)
+        --   "no GPU with >=24GB"         (fail on memory)
+        --   "no GPU matching ampere+"    (fail on class)
+        --   "not idle (2 jobs running)"  (fail on benchmark idleness)
+        -- Implementation: placement.scoreHost, applyResourceHardConstraints.
+}
+
+-- =========================================================================
+-- Placement scoring (soft constraints)
+-- =========================================================================
+
+-- A scored candidate. Lower completion_minutes ranks higher; score
+-- is -completion_minutes so that "higher is better" semantics apply.
+value Score {
+    host: Host
+    eligible: Boolean
+    completion_minutes: Decimal
+    queue_drain_minutes: Decimal
+    transfer_minutes: Decimal
+    run_minutes: Decimal
+    data_locality_score: Decimal?   -- fraction of inputs already local
+    reasons: List<String>           -- human-readable rationale fragments
+}
+
+config {
+    -- Scoring defaults (fallbacks when no prediction is available).
+    default_queue_drain_per_job: Duration = 30.minutes
+    default_run_time: Duration = 1.hour
+
+    -- Predictor confidence threshold below which the static default is
+    -- used instead. Implementation-defined; the spec only names that the
+    -- fall-through exists.
+}
+
+rule ScoreHost {
+    when: ScoreRequested(host: Host, c: Constraints, metrics: HostMetrics)
+    requires: EligibilityResult(host, eligible: true)
+
+    -- Total completion = queue drain + data transfer + run time.
+    -- Each component contributes a reasons fragment.
+
+    let queue_drain = estimate_queue_drain(host, metrics)
+    -- Default 30m/queued job, compounded across queue depth.
+
+    let transfer = estimate_transfer(host, c.inputs)
+    -- For each input asset, if the asset is already on host, count it
+    -- local. Otherwise sum its size across the most recent remote
+    -- copy's total. Divide by effective bandwidth (see transferbw
+    -- below). Produces a "K/N inputs local" fragment and, when any
+    -- are missing, a "~Xm transfer for K missing inputs
+    -- (learned, n=<samples> | static)" fragment.
+
+    let run = estimate_run_time(host, c, metrics)
+    -- Base run time comes from the predictor when available, else the
+    -- default. Scaled by contention factor (metrics-driven GPU
+    -- occupancy) and then by host.cpu_factor / host.gpu_factor.
+    -- The compute_intensive tag skips the contention scaling because
+    -- these jobs saturate the GPU regardless of neighbours.
+
+    ensures: Score.computed(
+        host: host,
+        completion_minutes: queue_drain + transfer + run,
+        queue_drain_minutes: queue_drain,
+        transfer_minutes: transfer,
+        run_minutes: run,
+        data_locality_score: transfer.local_fraction
+    )
+
+    @guidance
+        -- Reasons strings are constructed in placement.scoreHost. A
+        -- typical complete reason set on a healthy candidate:
+        --   "has RTX 3090 GPU"
+        --   "3/3 inputs local"
+        --   "est. ~45m total (30m queue + 0m transfer + 15m run)"
+        -- Implementation: internal/placement/placement.go scoreHost,
+        -- applyDurationScoring, applyResourceSoftConstraints.
+}
+
+rule SelectBestHost {
+    when: BestHostRequested(c: Constraints)
+
+    let candidates = Hosts.map(h => ScoreHost(h, c, metrics_of(h)))
+    let eligible = candidates.filter(s => s.eligible)
+    let best = eligible.max_by(s => -s.completion_minutes)
+
+    if best != null:
+        ensures: PlacementResult.selected(host: best.host, score: best)
+    else:
+        ensures: PlacementResult.unplaced(reasons: candidates.flat_map(s => s.reasons))
+
+    @guidance
+        -- The unplaced path feeds job.placement_reasons (see
+        -- job-lifecycle.allium rule PlaceJob). The union of per-host
+        -- reasons is shown to the user so they can understand why each
+        -- host was rejected. Implementation: placement.BestHost.
+}
+
+-- =========================================================================
+-- On-prem vs rental fallback
+-- =========================================================================
+
+rule PlaceWithFallback {
+    when: PlaceWithFallbackRequested(c: Constraints)
+
+    -- If no rental tag, prefer on-prem. Spill to rental only when the
+    -- on-prem estimate exceeds the rental estimate by a material margin.
+    -- The threshold and rental estimation are owned by
+    -- campaign-lifecycle.allium; this rule only names that the
+    -- comparison happens.
+
+    let onprem = PlaceOnPrem(c)
+
+    if onprem = null:
+        ensures: fallback_to_rental = true
+
+    if onprem != null and should_spill_to_rental(onprem, c):
+        ensures: PlacementResult.spilled_to_rental(
+            onprem_estimate: onprem.completion_minutes
+        )
+    else:
+        ensures: PlacementResult.from(onprem)
+
+    @guidance
+        -- Implementation: placement.PlaceWithFallback (placement.go:464).
+        -- Jobs explicitly tagged `inventory` skip this rule and stay
+        -- on-prem regardless of estimate. Jobs tagged `rental` skip
+        -- on-prem entirely.
+}
+
+-- =========================================================================
+-- Data locality
+-- =========================================================================
+
+value AssetKind = hf_model | hf_dataset | checkpoint | job_output | corpus
+
+-- A data asset referenced by a job input. Assets have a kind and an ID;
+-- the ID shape depends on kind (e.g. "meta-llama/Llama-3-8B" for
+-- hf_model, "output/model.pt:42" for job_output).
+value DataAsset {
+    kind: AssetKind
+    id: String
+}
+
+rule ParseAssetRef {
+    when: ParseRequested(raw: String)
+
+    -- Prefix syntax: "<kind>:<id>". Recognized prefixes:
+    --   hf:          -> hf_model
+    --   hf-dataset:  -> hf_dataset
+    --   checkpoint:  -> checkpoint
+    --   corpus:      -> corpus
+    --   <N>:         -> job_output where N is a job id
+    --   local:<path> -> treated as a file path (not an asset)
+    --
+    -- Unprefixed strings that look like filesystem paths are file inputs;
+    -- everything else is an error at parse time.
+
+    ensures: AssetRefParsed(asset)
+
+    @guidance
+        -- Implementation: dataloc.ParseAssetRef, ParseInputRef.
+        -- Spec-level view: only the prefix -> kind mapping matters.
+        -- The set of prefixes is extensible in implementation; additions
+        -- should be reflected here.
+}
+
+-- Per-host record of a known asset. Records are updated on scan and
+-- on successful download; they are the source of truth for "is this
+-- asset already here?" at placement time.
+entity HostAssetRecord {
+    host: Host
+    asset: DataAsset
+    path: String                -- filesystem path on the host
+    size_bytes: Integer
+    last_seen: Timestamp
+
+    -- Uniqueness: (host, asset.kind, asset.id) is unique per host.
+    @guidance
+        -- Implementation: dataloc/store.go, table host_data.
+}
+
+rule RecordAsset {
+    when: AssetObserved(host, asset, path, size_bytes)
+    ensures: HostAssetRecord.upserted(
+        host: host,
+        asset: asset,
+        path: path,
+        size_bytes: size_bytes,
+        last_seen: now
+    )
+}
+
+rule ScanHFCache {
+    when: HFCacheScanRequested(host)
+    requires: host.hf_cache_dir != null
+
+    -- The scan lists models--* and datasets--* directories under the
+    -- host's hf_cache_dir via SSH + `du -sb`, parses each "<bytes>\t<path>"
+    -- line, and maps the directory name to an asset ID by replacing
+    -- "--" with "/" after the kind prefix.
+    --
+    --   models--meta-llama--Llama-3-8B   -> hf_model     "meta-llama/Llama-3-8B"
+    --   datasets--allenai--c4            -> hf_dataset   "allenai/c4"
+
+    ensures: for entry in scan_results:
+        HostAssetRecord.upserted(
+            host: host,
+            asset: DataAsset(kind: entry.kind, id: entry.id),
+            path: entry.path,
+            size_bytes: entry.size_bytes,
+            last_seen: now
+        )
+
+    @guidance
+        -- Implementation: dataloc.ScanHFCache / ScanHFCacheDetailed.
+        -- The scan does not remove records for assets that have
+        -- disappeared — RemoveStaleEntries handles that with a cutoff.
+}
+
+rule FindAssetHosts {
+    when: AssetLocationRequested(asset)
+
+    -- Returns hosts that hold `asset`, ordered by most recent last_seen
+    -- descending. Used at placement time to compute transfer estimates
+    -- and locality scores.
+
+    ensures: result = HostAssetRecords
+        .filter(r => r.asset = asset)
+        .sort_by(r => r.last_seen, desc)
+        .map(r => r.host)
+}
+
+-- A request to stage an asset onto a host, created by placement when a
+-- job's input is absent from the target. The request's lifecycle
+-- (pending -> running -> completed/failed) is owned by this spec; other
+-- specs may observe it but must not mutate it.
+entity DataRequest {
+    host: Host
+    asset: DataAsset
+    status: DataRequestStatus
+    created_at: Timestamp
+    started_at: Timestamp?
+    completed_at: Timestamp?
+    error: String?
+
+    transitions status {
+        pending -> running
+        running -> completed
+        running -> failed
+        pending -> failed
+        terminal: completed, failed
+    }
+}
+
+value DataRequestStatus = pending | running | completed | failed
+
+rule CreateDataRequest {
+    when: AssetDownloadRequested(host, asset)
+    requires: not HostAssetRecords.any(r => r.host = host and r.asset = asset)
+
+    ensures: DataRequest.created(
+        host: host,
+        asset: asset,
+        status: pending,
+        created_at: now
+    )
+}
+
+rule DownloadAssetToHost {
+    when: DataRequest.status becomes running
+
+    -- For HF assets, the download runs `huggingface-cli download` (or
+    -- equivalent) over SSH on the target host into host.hf_cache_dir.
+    -- On success, rescan and record the new asset. On failure, record
+    -- the error and mark the request failed.
+
+    ensures: on_success:
+        HostAssetRecord.upserted(host: request.host, asset: request.asset, ...)
+        request.status = completed
+        request.completed_at = now
+    ensures: on_failure:
+        request.status = failed
+        request.error = reason
+        request.completed_at = now
+}
+
+rule EvictStaleRecords {
+    when: EvictionRequested(cutoff: Timestamp)
+
+    -- Records whose last_seen < cutoff are removed. This is a reaper;
+    -- scans do not proactively delete records for missing assets so
+    -- that a transient scan failure does not clear the inventory.
+
+    ensures: for record in HostAssetRecords where record.last_seen < cutoff:
+        HostAssetRecord.deleted(record)
+}
+
+-- =========================================================================
+-- Host discovery
+-- =========================================================================
+
+rule DiscoverHost {
+    when: UserRunsDiscover(hostname)
+
+    -- Discovery runs a canonical probe script over SSH and turns the
+    -- result into a HostSpec record. The probe collects:
+    --   - OS kernel / architecture
+    --   - CPU count and model string
+    --   - Total memory
+    --   - Disk free/total
+    --   - 1-minute load average
+    --   - GPU inventory (nvidia-smi table + `-L` for untruncated names;
+    --     system_profiler on macOS for Apple GPUs)
+    --   - Resolved HF hub cache directory
+
+    let probe = SSHProbe(hostname)
+    let cpu_factor = lookup_cpu_factor(probe.cpu_model) ?? 1.0
+    let gpus = group_identical_gpus(probe.gpus)
+
+    ensures: HostSpec.written(
+        name: hostname,
+        os: probe.os,
+        arch: probe.arch,
+        cpu_cores: probe.cpu_cores,
+        memory: probe.memory,
+        gpus: gpus.map(g => GPUSpec(
+            name: g.name,
+            class: NormalizeGPUClass(g.name),
+            memory: g.memory,
+            indices: g.indices
+        )),
+        cpu_factor: cpu_factor,
+        gpu_factor: 1.0,
+        hf_cache_dir: probe.hf_cache_dir
+    )
+
+    @guidance
+        -- The generated file goes to ~/.config/weft/hosts/<hostname>.yaml
+        -- and replaces any existing file. Operators may edit the file
+        -- after discovery; fields set non-zero in config.toml
+        -- [hosts.<name>] then override on subsequent loads.
+        -- Implementation: internal/inventory/discover.go,
+        --   internal/hostinfo/host.go.
+        -- Network bandwidth is not probed; operators set it manually.
+        -- Performance factors (cpu_factor, gpu_factor) default to 1.0
+        -- when the CPU model is unknown to the lookup table.
+}
+
+-- =========================================================================
+-- Invariants
+-- =========================================================================
+
+invariant GPUClassIsNormalized {
+    -- GPUSpec.class on a persisted HostSpec must equal the normalized
+    -- form of GPUSpec.name. Editing the YAML to a raw "RTX 3090" is a
+    -- configuration error; discovery never produces one.
+    for host in Hosts:
+        for g in host.gpus:
+            g.class = NormalizeGPUClass(g.name)
+}
+
+invariant GPUIndicesAreUnique {
+    -- Across all GPUSpecs on a single host, no device index appears
+    -- twice. A host with 6x 3090 is one GPUSpec with indices [0..5],
+    -- not six overlapping specs.
+    for host in Hosts:
+        all_indices_unique(host.gpus.flat_map(g => g.indices))
+}
+
+invariant AssetRecordsHaveValidKind {
+    -- HostAssetRecord.asset.kind must be one of the AssetKind enum
+    -- members. Legacy free-form strings in the host_data table are
+    -- a migration concern, not a design surface.
+    for record in HostAssetRecords:
+        record.asset.kind in AssetKind
+}
+
+invariant DataRequestsConverge {
+    -- Every DataRequest eventually reaches a terminal status. A request
+    -- stuck in `running` past the host's setup_timeout is a bug in the
+    -- downloader, not a valid state.
+    for request in DataRequests:
+        eventually: request.status in {completed, failed}
+}
+
+invariant PlacementReasonsExplainUnplaced {
+    -- When SelectBestHost returns unplaced, the aggregate reasons list
+    -- must be non-empty. A silent "no host available" with no
+    -- explanation is a UX regression.
+    for result in PlacementResults where result.host = null:
+        result.reasons.length > 0
+}
+
+-- =========================================================================
+-- Cross-references
+-- =========================================================================
+--
+-- job-lifecycle.allium/PlaceJob calls SelectBestHost here. The
+-- placement_reasons it stores on the Job come from PlacementResult.reasons.
+--
+-- campaign-lifecycle.allium owns the rental / cloud-offer side of
+-- placement: when PlaceWithFallback decides to spill, control passes
+-- to the campaign launch workflow.
+--
+-- status-sync.allium owns the runtime reachability view of hosts
+-- (Online/Offline/Checking) and the TUI rendering of host metrics.
+-- This spec defines only the static capability model and the
+-- placement-time query interface.

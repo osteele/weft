@@ -1,0 +1,742 @@
+-- allium: 3
+-- source-data-sync.allium
+--
+-- Scope: How weft moves a job's source tree and declared data inputs from the
+--        user's working directory to the host (or cloud instance) that will
+--        actually run the job.
+-- Includes:
+--   - Source snapshotting: deterministic, content-addressed tarballs of the
+--     user's working directory with exclude rules for VCS, caches, build
+--     artifacts, and declared output dirs.
+--   - On-prem source sync: rsync over SSH to inventory hosts, with reuse of
+--     recently-synced snapshots.
+--   - Cloud source staging: R2 upload of the source tarball keyed by content
+--     hash, extracted by the agent at instance startup.
+--   - Data input classification: separating --input values into HF-style
+--     asset refs vs. file-path overlays (including local: paths stitched
+--     into the source snapshot).
+--   - On-prem data prestaging: rsync HF models and datasets from a donor
+--     host into the target host's HF cache before dispatch.
+--   - Cloud data staging: intended prestaging of HF assets and producer
+--     outputs to R2 so the agent starts with all declared inputs in place.
+-- Excludes:
+--   - Job lifecycle, placement and dispatch (job-lifecycle.allium)
+--   - Campaign/instance lifecycle (campaign-lifecycle.allium)
+--   - Status reconciliation and R2 progress markers (status-sync.allium)
+--   - Output/artifact collection after job completion
+--   - Agent deploy (cross-compiled binaries shipped separately from sources)
+--
+-- Guiding principle: weft arranges that every declared input a job needs is
+-- already present at its expected path when the agent starts the command.
+-- The command itself should never be the thing that fetches a declared
+-- input — otherwise disk budgeting, bandwidth observations, and failure
+-- reporting all lose signal.
+
+use "./job-lifecycle.allium" as jobs
+use "./campaign-lifecycle.allium" as cloud
+
+-- ==========================================================================
+-- External Entities
+-- ==========================================================================
+
+-- DataAsset identifies a piece of named, addressable data (an HF model,
+-- dataset, or named corpus) that may exist on zero or more hosts. Managed
+-- by the dataloc subsystem; this spec only observes its presence.
+external entity DataAsset {
+    kind: InputKind
+    id: String                      -- e.g. "meta-llama/Llama-3-8B"
+    ref: String                     -- canonical serialised form, e.g. "hf:<id>"
+}
+
+-- HostAssetEntry records that a given asset is present on a given inventory
+-- host at a specific path, with a size last observed at last_seen. Populated
+-- by HF-cache scans and corpus scans on each host.
+external entity HostAssetEntry {
+    host: jobs/Host
+    asset: DataAsset
+    path: String                    -- filesystem path on the host
+    size_bytes: Integer             -- 0 if unknown
+    last_seen: Timestamp
+}
+
+-- ==========================================================================
+-- Value Types
+-- ==========================================================================
+
+-- How a declared --input value classifies for sync purposes.
+-- hf_model / hf_dataset: fetched into a per-host HF cache directory.
+-- checkpoint / corpus:   named assets that exist as on-host paths.
+-- job_output:            produced by a previous weft job; resolved via
+--                        dataloc or R2 staging depending on venue.
+-- local_path:            a path inside (or beneath) the job's working_dir
+--                        that would otherwise be excluded; overlaid into
+--                        the source snapshot so it ships with the source.
+value InputKind = hf_model | hf_dataset | checkpoint | corpus
+                | job_output | local_path
+
+-- A declared input, parsed from the user's --input flag or [tool.weft]
+-- inputs list. Exactly one of asset or file_path is populated.
+value InputRef {
+    kind: InputKind
+    raw: String                     -- original flag value, e.g. "hf:foo/bar"
+    asset: DataAsset?               -- populated for asset kinds
+    file_path: String?              -- populated for local_path kind
+                                    -- (absolute or project-relative)
+}
+
+-- Where a source exclude pattern originated. Distinguishing origins lets
+-- the checker report overrides coherently and keeps the default list
+-- stable across projects.
+value SourceExcludeOrigin = builtin | user_config | project_config
+                          | gitignore | project_output_dir
+
+value ExcludePattern {
+    pattern: String
+    origin: SourceExcludeOrigin
+}
+
+-- Record of a single observed source or data transfer, written to the
+-- oplog and (for prestage) to the transferbw observation table.
+value TransferObservation {
+    source: String                  -- "host:<name>" or "r2"
+    destination: String             -- "host:<name>" or "instance:<id>"
+    bytes: Integer
+    duration: Duration
+    ok: Boolean
+}
+
+-- ==========================================================================
+-- Contracts
+-- ==========================================================================
+
+-- The obligations the cloud agent relies on weft having discharged before
+-- the agent begins executing a job. weft fulfils this contract by writing
+-- the source tarball, the campaign manifest, and the job's declared inputs
+-- to R2 under content-addressed keys; the agent demands it by refusing to
+-- start a job whose declared inputs are not all resolvable.
+contract AgentStagingContract {
+    source_tarball_present: (source_hash: String) -> Boolean
+    manifest_present: (instance_id: String) -> Boolean
+    need_object_present: (r2_key: String) -> Boolean
+
+    @invariant SourceHashMatchesManifest
+        -- The source_hash referenced by the manifest served to the agent
+        -- resolves to an object under the sources/ prefix whose content
+        -- hashes to that value. The agent is entitled to reject mismatches
+        -- as a hard failure.
+
+    @invariant NeedsResolvableBeforeStart
+        -- Every CloudNeed entry in a job's manifest entry has an R2 key
+        -- that exists by the time the agent begins that job. weft must
+        -- not publish a manifest referencing objects it has not staged.
+
+    @invariant DeclaredInputsEnumerated
+        -- The manifest enumerates both the source tarball and every
+        -- cross-instance input the job depends on. The agent trusts the
+        -- manifest; inputs omitted from it are invisible to the job.
+}
+
+-- ==========================================================================
+-- Entities
+-- ==========================================================================
+
+-- A deterministic snapshot of a user's working directory at submission time,
+-- with exclude rules and declared local_path overlays applied. Identified
+-- by the SHA-256 of the gzipped tarball contents; the same tree always
+-- produces the same hash. Snapshots are not persisted entities in the DB —
+-- they exist as the R2 object `sources/<hash>` and as rsync state on each
+-- host that has received them — but they are modelled here as an entity
+-- because sync and reuse rules need to refer to "the snapshot for this
+-- working dir at this time".
+entity SourceSnapshot {
+    working_dir: String             -- absolute local path at submission
+    content_hash: String            -- hex SHA-256 of tarball
+    size_bytes: Integer
+    excludes: List<ExcludePattern>
+    local_overlays: List<String>    -- relative paths that were overlaid
+                                    -- back in (declared local_path inputs)
+    built_at: Timestamp
+}
+
+-- HostSourceState tracks what source snapshot is currently installed in a
+-- host's sources directory, so weft can skip redundant rsyncs. There is
+-- at most one active snapshot per (host, working_dir) pair at a time.
+entity HostSourceState {
+    host: jobs/Host
+    working_dir: String
+    snapshot: SourceSnapshot
+    synced_at: Timestamp
+    marker_written: Boolean         -- success marker on the remote host;
+                                    -- only written after rsync returned 0
+}
+
+-- CloudSourceObject represents the R2-hosted tarball for a given source
+-- snapshot. Content-addressed: one object per distinct content_hash,
+-- shared across all instances that reference it.
+entity CloudSourceObject {
+    snapshot: SourceSnapshot
+    r2_key: String                  -- e.g. "sources/<hash>.tar.gz"
+    uploaded_at: Timestamp
+}
+
+-- ==========================================================================
+-- Config
+-- ==========================================================================
+
+config {
+    -- Size limit on an uncompressed source snapshot. Enforced before a
+    -- tarball is written so a runaway working directory fails fast with
+    -- a size report rather than filling up /tmp or R2.
+    max_source_bytes: Integer = 500_000_000     -- 500 MB
+
+    -- Per-rsync deadlines.
+    rsync_connect_timeout: Duration = 15.seconds   -- ssh connection window
+    rsync_total_timeout: Duration = 30.seconds     -- one sync invocation
+    rsync_cloud_ssh_timeout: Duration = 5.minutes  -- cloud instance over SSH
+
+    -- Time window during which an existing host snapshot whose content hash
+    -- matches the submitted snapshot can be reused without re-rsyncing.
+    -- Below this, we skip the rsync entirely.
+    host_snapshot_reuse_window: Duration = 5.minutes
+
+    -- Maximum time the prestage orchestrator waits for all declared data
+    -- transfers to an on-prem host before failing the dispatch. A separate
+    -- timeout from rsync_total_timeout because prestage transfers are bulk
+    -- and run over the cross-host fabric.
+    prestage_transfer_timeout: Duration = 10.minutes
+
+    -- R2 object-exists probe timeout. Used both when deciding whether to
+    -- upload a source tarball and when verifying that a CloudNeed key is
+    -- resolvable before publishing a manifest.
+    r2_object_exists_timeout: Duration = 20.seconds
+}
+
+-- ==========================================================================
+-- Defaults
+-- ==========================================================================
+
+-- The default source excludes ship with weft and are applied unless a
+-- project explicitly overrides them. They cover VCS metadata, language
+-- caches, editor state, and common build outputs, plus weft's own
+-- convention-based output directories.
+default ExcludePattern exclude_git       = { pattern: ".git",       origin: builtin }
+default ExcludePattern exclude_jj        = { pattern: ".jj",        origin: builtin }
+default ExcludePattern exclude_venv      = { pattern: ".venv",      origin: builtin }
+default ExcludePattern exclude_node_mod  = { pattern: "node_modules", origin: builtin }
+default ExcludePattern exclude_pycache   = { pattern: "__pycache__", origin: builtin }
+default ExcludePattern exclude_pytest    = { pattern: ".pytest_cache", origin: builtin }
+default ExcludePattern exclude_ds_store  = { pattern: ".DS_Store",  origin: builtin }
+default ExcludePattern exclude_outputs   = { pattern: "output",     origin: builtin }
+default ExcludePattern exclude_outputs_s = { pattern: "outputs",    origin: builtin }
+default ExcludePattern exclude_testdata  = { pattern: "testdata",   origin: builtin }
+default ExcludePattern exclude_env       = { pattern: ".env",       origin: builtin }
+
+-- ==========================================================================
+-- Rules: source snapshotting
+-- ==========================================================================
+
+-- Produce a content-addressed tarball for a submitted job's working
+-- directory, applying default and project-specific excludes plus any
+-- declared local_path overlays. The snapshot's hash is deterministic:
+-- identical content yields identical hash regardless of mtimes.
+rule BuildSourceSnapshot {
+    when: BuildSnapshotRequested(working_dir, inputs)
+
+    let excludes = DefaultExcludes ++ ProjectExcludes(working_dir)
+                                  ++ GitignorePatterns(working_dir)
+    let overlays = inputs where kind = local_path
+
+    ensures: EnforceSourceSizeLimit(working_dir, excludes)
+
+    ensures: SourceSnapshot.created(
+        working_dir: working_dir,
+        content_hash: HashTarball(working_dir, excludes, overlays),
+        size_bytes: MeasureSize(working_dir, excludes),
+        excludes: excludes,
+        local_overlays: overlays.file_path,
+        built_at: now
+    )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/sync/tarball.go       — CreateSourceTarball
+        --   internal/sync/snapshot.go      — BuildSourceSnapshot
+        --   internal/sync/sources.go       — sourceExcludes, parseGitignorePatterns
+        -- Tarball entries are written with zero mtime/uid/gid so content
+        -- hashes are stable across rebuilds and across machines.
+}
+
+-- Reject a snapshot build when the non-excluded working dir would exceed
+-- the size limit. Emits a size report naming the largest contributors so
+-- the user can add them to .gitignore / .weftignore.
+rule EnforceSourceSizeLimit {
+    when: EnforceSourceSizeLimit(working_dir, excludes)
+    requires: MeasureSize(working_dir, excludes) > config.max_source_bytes
+
+    ensures: SubmissionRejected(
+        working_dir: working_dir,
+        reason: source_too_large,
+        report: LargestDirsAndFiles(working_dir, excludes)
+    )
+}
+
+-- ==========================================================================
+-- Rules: on-prem source sync
+-- ==========================================================================
+
+-- Send a snapshot to an inventory host over rsync+ssh. --delete is used so
+-- remote sources mirror local sources exactly; the remote sources directory
+-- is treated as weft's own scratch space, not a place the user edits.
+rule SyncSourceToOnPremHost {
+    when: DispatchToOnPremHost(job, host)
+    requires: host.name != "" and not IsLocalHost(host)
+    requires: job.working_dir != ""
+
+    let snapshot = LatestSnapshotFor(job.working_dir)
+
+    ensures:
+        if not HasRecentMatchingSnapshot(host, snapshot):
+            RsyncSourceToHost(
+                host: host,
+                local_dir: job.working_dir,
+                remote_dir: HostSourcesDir(host, job.working_dir),
+                excludes: snapshot.excludes
+            )
+            HostSourceState.created(
+                host: host,
+                working_dir: job.working_dir,
+                snapshot: snapshot,
+                synced_at: now,
+                marker_written: true
+            )
+            RecordTransferObservation(
+                source: "local",
+                destination: "host:" + host.name,
+                bytes: snapshot.size_bytes,
+                ok: true
+            )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/sync/sync_to_host.go  — SyncSourcesToHost
+        --   internal/sync/sources.go       — SyncSources, BuildRsyncArgs
+        -- rsync uses BatchMode=yes ssh (see status-sync NonInteractiveSSH)
+        -- so a fresh host key never blocks the TUI on a tty prompt.
+}
+
+-- Skip re-syncing when we know the host already has this exact snapshot
+-- installed within the reuse window. Keyed on (host, working_dir, hash)
+-- so moving a job between two projects in the same cwd does not reuse
+-- stale state.
+rule ReuseRecentOnPremSnapshot {
+    when: DispatchToOnPremHost(job, host)
+    requires: exists HostSourceState{host: host, working_dir: job.working_dir}
+
+    let state = HostSourceState{host: host, working_dir: job.working_dir}
+    requires: state.snapshot.content_hash
+              = LatestSnapshotFor(job.working_dir).content_hash
+    requires: state.synced_at + config.host_snapshot_reuse_window > now
+    requires: state.marker_written = true
+
+    ensures: SourceSyncSkipped(host: host, job: job, reason: recent_match)
+}
+
+-- After an auto-remediation run or a user-requested `weft sync`, re-run the
+-- sync unconditionally so stale state cannot paper over a missing file on
+-- the remote side.
+rule ResyncAfterRemediation {
+    when: ForceSourceResync(host, working_dir)
+    requires: working_dir != ""
+
+    ensures: RsyncSourceToHost(
+        host: host,
+        local_dir: working_dir,
+        remote_dir: HostSourcesDir(host, working_dir),
+        excludes: LatestSnapshotFor(working_dir).excludes
+    )
+    ensures:
+        for state in HostSourceStates where host = host and working_dir = working_dir:
+            state.synced_at = now
+            state.marker_written = true
+}
+
+-- ==========================================================================
+-- Rules: cloud source staging
+-- ==========================================================================
+
+-- Upload the source tarball for a job's snapshot to R2 under a
+-- content-addressed key. Skipped when an object with that key already
+-- exists, which is the common case for repeated submissions from an
+-- unchanged working directory.
+rule UploadSourceToCloud {
+    when: CloudStagingRequested(job)
+    requires: job.working_dir != ""
+
+    let snapshot = LatestSnapshotFor(job.working_dir)
+    let key = "sources/" + snapshot.content_hash + ".tar.gz"
+
+    ensures:
+        if not R2ObjectExists(key):
+            R2Put(key: key, body: TarballFor(snapshot), content_type: "application/gzip")
+            CloudSourceObject.created(
+                snapshot: snapshot,
+                r2_key: key,
+                uploaded_at: now
+            )
+            RecordTransferObservation(
+                source: "local",
+                destination: "r2",
+                bytes: snapshot.size_bytes,
+                ok: true
+            )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/sync/r2upload.go     — UploadSourceToR2WithProgressForInputs
+        --   internal/dataplane/keys.go    — SourceTarball key helper
+}
+
+-- When a cloud instance reaches the sources_extracted bootstrap stage, the
+-- agent has pulled sources/<hash>.tar.gz and expanded it at the expected
+-- path. After that point, per-job dispatches on that instance reuse the
+-- already-extracted tree and do not re-download the tarball.
+rule StageSourceOnCloudInstance {
+    when: instance: cloud/Instance.bootstrap_stage
+          transitions_to status_sync/sources_extracted
+
+    requires: instance.campaign_manifest.source_hash != null
+
+    ensures: InstanceSourceReady(
+        instance: instance,
+        source_hash: instance.campaign_manifest.source_hash
+    )
+
+    @guidance
+        -- The R2 key the agent pulls is written by weft via UploadSourceToCloud
+        -- before the manifest is published; see AgentStagingContract.
+}
+
+-- ==========================================================================
+-- Rules: data input classification and on-prem prestaging
+-- ==========================================================================
+
+-- Split a job's --input list into parsed InputRefs before placement and
+-- dispatch can use them. Parsing failures are surface-level errors, not
+-- silent drops — an unrecognised prefix aborts submission.
+rule ClassifyInputs {
+    when: ClassifyInputsRequested(job)
+
+    ensures:
+        for raw in job.inputs:
+            InputParsed(job: job, ref: ParseInputRef(raw))
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/dataloc/types.go  — ParseInputRef, ClassifyInputs
+        -- Prefixes: hf:, hf-dataset:, checkpoint:, corpus:, job-output:, local:
+}
+
+-- Declared file-path inputs that live outside working_dir (e.g.
+-- ~/sources/vidur/data/) are rsynced to the same absolute path on the
+-- target host before dispatch. Paths inside working_dir use the local_path
+-- overlay path instead (see BuildSourceSnapshot).
+rule SyncExtraFilePaths {
+    when: DispatchToOnPremHost(job, host)
+    requires: not IsLocalHost(host)
+
+    let extras = job.inputs where kind = local_path and not IsInsideWorkingDir(file_path, job.working_dir)
+
+    ensures:
+        for input in extras:
+            RsyncExtraPath(host: host, path: input.file_path)
+}
+
+-- Before dispatch to an on-prem host, transfer any HF-cache assets the job
+-- declares that are missing on that host but present on some donor host in
+-- the inventory. This keeps job startup time off the critical path and
+-- makes the download visible to the planner (for cost and bandwidth
+-- accounting) instead of buried inside user code.
+rule PrestageMissingAssetsOnPrem {
+    when: DispatchToOnPremHost(job, host)
+    requires: not IsLocalHost(host)
+
+    let hf_inputs = job.inputs where kind in {hf_model, hf_dataset}
+    let missing = hf_inputs where not AssetPresentOn(asset, host)
+
+    ensures:
+        for input in missing:
+            let donor = BestDonorFor(input.asset)
+            if donor != null:
+                RequireHFCacheDir(host: host, asset: input.asset)
+                RsyncAssetBetweenHosts(
+                    source_host: donor,
+                    target_host: host,
+                    asset: input.asset,
+                    timeout: config.prestage_transfer_timeout
+                )
+                RecordTransferObservation(
+                    source: "host:" + donor.name,
+                    destination: "host:" + host.name,
+                    bytes: SizeOn(donor, input.asset),
+                    ok: true
+                )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/prestage/prestage.go  — BuildPlan, Execute
+        -- Push-then-pull fallback: if the donor can't reach the target,
+        -- target SSHes into donor and pulls.
+}
+
+-- Guard: prestaging to a target host requires knowing where that host's
+-- HF cache lives. If hf_cache_dir is not configured, fail fast and
+-- direct the user to `weft host discover <host>` rather than dumping
+-- files in an arbitrary location.
+rule RequireHFCacheDir {
+    when: RequireHFCacheDir(host, asset)
+    requires: HFCacheDirFor(host) = null
+
+    ensures: PrestageAborted(
+        host: host,
+        asset: asset,
+        reason: hf_cache_dir_not_configured,
+        hint: "run 'weft host discover " + host.name + "'"
+    )
+}
+
+-- A declared input on a job dispatched to the local machine (the studio
+-- coordinator host itself, for example) does not need prestaging — the
+-- asset either already lives in the local HF cache or will be downloaded
+-- to it by the command using its standard tooling. The spec records this
+-- case explicitly rather than silently relying on the local_host skip
+-- inside the rsync path.
+rule DownloadHFAssetOnDemand {
+    when: DispatchToOnPremHost(job, host)
+    requires: IsLocalHost(host)
+
+    let hf_inputs = job.inputs where kind in {hf_model, hf_dataset}
+
+    ensures:
+        for input in hf_inputs:
+            if not AssetPresentOn(input.asset, host):
+                LocalHFDownloadExpected(job: job, asset: input.asset)
+}
+
+-- ==========================================================================
+-- Rules: cloud data staging
+-- ==========================================================================
+
+-- Producer job outputs that a consumer depends on via `--needs` and that
+-- are no longer reachable via same-instance co-location must be staged
+-- into R2 at a content-addressed key and referenced from the consumer's
+-- manifest entry as a CloudNeed. This is the only path by which a cloud
+-- job consumes an on-prem-produced or previously-completed output.
+rule CloudDataStagingViaR2 {
+    when: CloudNeedResolutionRequested(job, need_spec)
+    requires: job.target_kind = rental_instance
+    requires: not ProducerCoLocatedWith(job, need_spec)
+
+    let producer_output = ResolveProducerOutput(need_spec)
+    let key = "needs/" + ContentHashOf(producer_output)
+
+    ensures:
+        if not R2ObjectExists(key):
+            R2PutFromHost(
+                source_host: producer_output.host,
+                source_path: producer_output.path,
+                key: key
+            )
+        ManifestCloudNeedRecorded(
+            job: job,
+            spec: need_spec,
+            path: producer_output.consumer_path,
+            r2_key: key
+        )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/cloudneeds/  — needs resolution and R2 staging
+        --   internal/cloud/wrapper.go CloudNeed struct — manifest entry shape
+        -- The agent reads cloud_needs from the manifest and rclone-copies
+        -- each r2_key into path before starting the job.
+}
+
+-- Design intent: HF models and datasets declared on a cloud-bound job are
+-- prestaged by weft to the instance (either by uploading to R2 under an
+-- assets/ prefix and having the agent pull them, or by transferring from
+-- a donor host into the instance's HF cache) before the job starts. Same
+-- motivation as PrestageMissingAssetsOnPrem: disk budgeting and bandwidth
+-- accounting are impossible if the job itself fetches undeclared bytes.
+rule HFAssetsPrestagedOnCloud {
+    when: CloudStagingRequested(job)
+    requires: job.target_kind = rental_instance
+
+    let hf_inputs = job.inputs where kind in {hf_model, hf_dataset}
+
+    ensures:
+        for input in hf_inputs:
+            CloudAssetStaged(
+                instance: job.cloud_instance,
+                asset: input.asset,
+                via: PreferredCloudStagingVenue(input.asset)
+            )
+
+    @guidance
+        -- IMPLEMENTATION DIVERGENCE (2026-04-22):
+        -- The current cloud agent wrapper lets the job's own command
+        -- download HF assets at runtime; weft does not pre-populate the
+        -- cloud instance's HF cache and does not add hf:... declarations
+        -- to the manifest as prestage targets. This is the intent the
+        -- spec is asserting — cloud should match on-prem here — and a
+        -- future /weed pass should surface the gap:
+        --   internal/cloud/wrapper.go GenerateAgentWrapper  — no prestage
+        --   internal/cloudneeds/                            — only handles
+        --                                                     producer outputs
+        -- The consequence is disk-full failures on cloud instances when a
+        -- job's declared hf inputs undercount the actual download footprint;
+        -- see CLAUDE.md § "Declaring data dependencies".
+}
+
+-- Every source or data transfer weft performs gets a TransferObservation
+-- recorded, whether it succeeded or not. Observations feed the transferbw
+-- estimator and show up in the oplog for manual debugging.
+rule RecordTransferObservation {
+    when: RecordTransferObservation(source, destination, bytes, ok)
+
+    ensures: TransferObservationLogged(
+        source: source,
+        destination: destination,
+        bytes: bytes,
+        duration: MeasureElapsed,
+        ok: ok,
+        at: now
+    )
+}
+
+-- ==========================================================================
+-- Invariants
+-- ==========================================================================
+
+-- The SHA-256 of a source tarball is a pure function of (file contents +
+-- paths + exclude set + overlay set). Mtimes, uids, gids, and file order
+-- within the tarball do not enter. Two submissions from identical source
+-- trees must produce byte-identical tarballs and therefore identical hashes.
+invariant SourceHashDeterministic {
+    for s1, s2 in SourceSnapshots:
+        (s1.working_dir = s2.working_dir
+         and s1.excludes = s2.excludes
+         and s1.local_overlays = s2.local_overlays
+         and SameTreeContents(s1.built_at, s2.built_at, s1.working_dir, s1.excludes))
+        implies s1.content_hash = s2.content_hash
+}
+
+-- The "marker_written" flag on a HostSourceState must only be true after
+-- the corresponding rsync has returned success. Marker-before-success is
+-- a safety hazard: a subsequent dispatch would skip the sync while the
+-- remote tree is incomplete.
+invariant SourceMarkerOnlyAfterSuccess {
+    for state in HostSourceStates:
+        state.marker_written
+            implies LastRsyncForHostReturnedOK(state.host, state.working_dir)
+}
+
+-- Syncing to the machine weft is running on is a no-op. Rsyncing a
+-- directory to itself is not merely wasteful; with --delete it can
+-- permanently destroy files. The local-host short-circuit is load-bearing.
+invariant LocalHostSourceSyncIsNoOp {
+    for job in jobs/Jobs:
+        (job.host != null and IsLocalHost(job.host))
+            implies not exists RsyncInvocation{host: job.host, working_dir: job.working_dir}
+}
+
+-- Declared local_path inputs must resolve to a path inside (or beneath)
+-- the job's working directory. Paths that escape working_dir via "../"
+-- are rejected at classification time; they cannot safely be carried in
+-- a content-addressed source snapshot whose identity is tied to working_dir.
+invariant LocalInputsInsideWorkingDir {
+    for job in jobs/Jobs:
+        for input in job.inputs where kind = local_path:
+            IsInsideWorkingDir(input.file_path, job.working_dir)
+}
+
+-- Every R2 object under the sources/ prefix is keyed by the content hash
+-- of the object it stores. This lets many instances share one tarball and
+-- lets the uploader skip work when the hash already exists.
+invariant R2SourceObjectsContentAddressed {
+    for obj in CloudSourceObjects:
+        obj.r2_key = "sources/" + obj.snapshot.content_hash + ".tar.gz"
+}
+
+-- Every byte a job's command downloads from an HF-style source at runtime
+-- must correspond to some declared input on the job. Undeclared downloads
+-- break disk budgeting and make cloud instances susceptible to disk-full
+-- termination. Enforced by post-mortem comparison of observed_inputs
+-- against declared inputs (see Job.observed_inputs in job-lifecycle).
+invariant DeclaredInputsCoverDownloads {
+    for job in jobs/Jobs where job.is_terminal:
+        for observed in job.observed_inputs:
+            exists declared in job.inputs: declared = observed
+
+    @guidance
+        -- Violations are not hard errors — the job has already finished —
+        -- but they surface as warnings in `weft job show` and feed into
+        -- the divergence tooling so maintainers can update script
+        -- metadata to declare the missing input.
+}
+
+-- ==========================================================================
+-- Surfaces
+-- ==========================================================================
+
+-- The boundary between weft (the scheduler running on the coordinator)
+-- and the cloud agent (running on a rental instance). weft fulfils the
+-- staging contract; the agent demands it by refusing to start a job
+-- whose declared inputs are not all resolvable.
+surface AgentStagingInterface {
+    facing agent: cloud/Instance
+
+    context instance: cloud/Instance
+
+    exposes:
+        instance.campaign_manifest
+        instance.source_hash
+
+    contracts:
+        fulfils AgentStagingContract
+
+    @guarantee ManifestPublishedAfterAllInputsStaged
+        -- weft does not publish the campaign manifest for an instance
+        -- until (a) the sources/<hash> object exists in R2, and (b)
+        -- every needs/<key> referenced by any job in the manifest exists
+        -- in R2. The agent may treat a published manifest as proof that
+        -- all declared inputs are resolvable.
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/cloud/wrapper.go       — manifest publication + grace wrapper
+        --   internal/campaign/launch.go     — orchestrates upload → manifest
+        --   cmd/agent/jobloop.go            — agent side of the contract
+}
+
+-- ==========================================================================
+-- Open Questions
+-- ==========================================================================
+
+open question "HF cloud prestaging venue: should HF assets be staged via R2
+(weft uploads, agent pulls) or via direct transfer from a donor host into
+the instance at bootstrap? The current absence of either path is a bug;
+which one to implement is not yet settled. R2 costs more but unifies the
+staging story; donor-host transfer is cheaper but requires the donor to
+be reachable from the instance."
+
+open question "Source snapshot reuse across working directories: if two
+sibling project checkouts produce the same content_hash, should they share
+a HostSourceState row, or are host sources directories keyed strictly by
+working_dir? Current rules assume the latter; cross-working-dir sharing
+would save rsync time but complicates --delete semantics."
+
+open question "Extra-path sync with --delete: SyncExtraFilePaths currently
+does not pass --delete, so files deleted locally linger on the remote.
+Acceptable for HF caches (the user wouldn't use local_path for those) but
+surprising for general data directories. Should extras gain an opt-in
+--delete or a per-path policy?"

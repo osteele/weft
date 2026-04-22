@@ -80,6 +80,13 @@ entity Job {
     gpu_mem_max_gb: Integer?    -- maximum GPU memory per device
     gpu_devices: String?        -- CUDA_VISIBLE_DEVICES allocation
 
+    -- CPU allotment (percent of host CPU) requested by the user. null
+    -- means "unset" — the runner applies config.default_cpu_allotment
+    -- at dispatch. Value 0 is not used; use null to indicate unset.
+    -- Edited via the TUI in edit mode on queued jobs; not exposed on
+    -- the CLI.
+    cpu_allotment: Integer?
+
     -- Placement
     host: Host?
     target_kind: TargetKind
@@ -262,6 +269,18 @@ config {
     stdout_silence_timeout: Duration = 30.minutes
     watchdog_initial_grace: Duration = 5.minutes  -- arms after first activity
                                                   -- or this grace, whichever first
+
+    -- Queue-runner concurrency. The runner schedules multiple jobs per
+    -- host while keeping total local CPU allotment under a target cap.
+    -- Tuning constants (adaptive step sizes, sample intervals, hysteresis
+    -- window shapes) are implementation details of the runner and are
+    -- not pinned by the spec.
+    host_cpu_utilization_target: Integer = 80    -- percent of host CPU
+    default_cpu_allotment: Integer = 20          -- percent, applied when
+                                                 -- Job.cpu_allotment is null
+    min_cpu_allotment: Integer = 10
+    max_cpu_allotment: Integer = 100
+    warmup_duration: Duration = 2.minutes        -- new-dispatch gating window
 }
 
 -- ==========================================================================
@@ -403,6 +422,104 @@ rule JobDied {
     requires: job.status in {running, starting, queued}
 
     ensures: job.status = dead
+}
+
+-- ==========================================================================
+-- Queue-runner dispatch and concurrency
+-- ==========================================================================
+-- The queue runner on each host dispatches queued jobs subject to a
+-- host-wide CPU utilization cap and a per-job warm-up window. GPU jobs
+-- claim a device exclusively among our own jobs; CPU-only jobs share
+-- host cores, governed by the allotment rules below.
+
+rule QueueRunnerDispatch {
+    when: QueueRunnerTick(host)
+
+    -- Evaluate only the head of the host's pending queue. Do not skip
+    -- ahead when the head cannot start: preserving submitted order is
+    -- a first-class property of the queue runner.
+    let head = host.pending_queue.first
+
+    requires: head != null
+    requires: head.dep_spec = null or head.is_blocked = false
+    requires: head.target_kind in {inventory_host, rental_instance}
+
+    -- Warm-up gate: while any running job on this host is still within
+    -- its warm-up window, do not start additional jobs. This lets new
+    -- jobs' CPU use stabilize before the runner makes further decisions.
+    requires: host.running_jobs.all(j =>
+        now >= j.latest_attempt.start_time + config.warmup_duration)
+
+    -- CPU capacity gate (CPU-only jobs): the sum of local allotments
+    -- for running jobs plus the initial allotment for the head job
+    -- must not exceed the host utilization target.
+    let initial = head.cpu_allotment ?? config.default_cpu_allotment
+    requires: head.gpu_class != null
+              or (sum(j.local_cpu_allotment for j in host.running_jobs)
+                  + initial <= config.host_cpu_utilization_target)
+
+    -- GPU capacity gate: GPU jobs claim a device exclusively among our
+    -- own jobs on this host. See GPUJobsAreExclusivePerDevice invariant.
+    requires: head.gpu_class = null
+              or host.has_device_available_for(head)
+
+    ensures: head.status = starting
+    ensures: head.local_cpu_allotment = initial
+    ensures: head.warmup_until = now + config.warmup_duration
+
+    @guidance
+        -- CPU jobs and GPU jobs can run concurrently on the same host as
+        -- long as they use disjoint resources (GPU device vs CPU cores).
+        -- CPU-only jobs are identified by the absence of gpu_class,
+        -- gpu_mem_gb, and gpu_devices; they bypass the GPU gate and are
+        -- governed solely by the CPU allotment rules.
+        --
+        -- If total local allotment already exceeds the target (e.g. after
+        -- adaptive increases on currently running jobs), the runner does
+        -- NOT preempt — it simply refuses to start additional jobs until
+        -- the sum drops below the target again.
+        --
+        -- Shared hosts: the exclusivity rule applies only to our own
+        -- jobs. Other users' jobs on the same GPU are tolerated; we do
+        -- not wait for a device to be fully vacant before starting.
+}
+
+rule AdaptiveCPUAllotment {
+    when: CPUSampleWindowClosed(job)
+    requires: job.status = running
+    requires: now >= job.warmup_until
+
+    -- The runner adjusts local_cpu_allotment based on observed CPU use.
+    -- A move (up or down) only fires when the observation has held for
+    -- a majority of recent windows — transient spikes do not change the
+    -- allotment. Specific step sizes and window shapes are runner
+    -- implementation details.
+    if job.observation_persistently_above(job.local_cpu_allotment):
+        ensures: job.local_cpu_allotment increases
+                 bounded by config.max_cpu_allotment
+    else if job.observation_persistently_below(job.local_cpu_allotment):
+        ensures: job.local_cpu_allotment decreases
+                 bounded by config.min_cpu_allotment
+
+    @guidance
+        -- Hysteresis: a threshold number of recent sample windows must
+        -- agree before local_cpu_allotment moves. This avoids
+        -- oscillation when a job's CPU use hovers near its current
+        -- allotment. Decreases use a dead-band below the current
+        -- allotment so jobs that land slightly under their allotment
+        -- are not immediately decayed.
+}
+
+rule CPUAllotmentEditApplied {
+    when: Job.cpu_allotment transitions_to new_value
+    requires: Job.status in {queued, starting, running}
+
+    -- When the user edits cpu_allotment in the TUI, the runner applies
+    -- the new value as local_cpu_allotment immediately and resets any
+    -- adaptive state (hysteresis counters, sample buffers) so the next
+    -- adjustment decision starts from a clean observation window.
+    ensures: Job.local_cpu_allotment = new_value ?? config.default_cpu_allotment
+    ensures: AdaptiveStateReset(Job)
 }
 
 -- ==========================================================================
@@ -708,6 +825,57 @@ invariant PendingPlacementClearedOnTerminalLaunch {
         -- whose effective_status (COALESCE(pending_status, status)) is not
         -- exactly 'queued', so re-placement returns (false, nil) without
         -- updating the attempt, leaving the job unplaced.
+}
+
+invariant QueueOrderPreserved {
+    -- The queue runner never dispatches a job ahead of an earlier-submitted
+    -- pending job on the same host when that earlier job is eligible. If
+    -- the head of the queue cannot start (warm-up active, insufficient CPU
+    -- capacity, dependencies unsatisfied, GPU device busy), later jobs
+    -- wait — they are not considered for dispatch in its place.
+    for host in Hosts:
+        for job in host.pending_queue:
+            if job.dispatched_at != null:
+                for earlier in host.pending_queue
+                    where earlier.created_at < job.created_at
+                    and earlier.is_blocked = false:
+                        earlier.dispatched_at != null
+                        earlier.dispatched_at <= job.dispatched_at
+}
+
+invariant HostCPUAllotmentCapped {
+    -- The sum of local CPU allotments for jobs the runner has just
+    -- admitted on a host must not exceed the configured utilization
+    -- target at admission time. Adaptive increases on already-running
+    -- jobs may push the running sum over the target; the invariant
+    -- describes the admission gate, not the steady-state sum.
+    for host in Hosts:
+        let admitted = host.running_jobs.filter(j => j.gpu_class = null)
+        sum(j.local_cpu_allotment for j in admitted)
+            <= config.host_cpu_utilization_target
+
+    @guidance
+        -- When the sum would be exceeded by a new dispatch, the runner
+        -- holds the head of the queue until a running job finishes or
+        -- decays its allotment. Running jobs are never preempted to
+        -- reclaim capacity.
+}
+
+invariant GPUJobsAreExclusivePerDevice {
+    -- Among our own jobs on a single host, each GPU device carries at
+    -- most one running job. Other users on shared hosts are outside
+    -- our control and may use the same device concurrently; this
+    -- invariant scopes only to jobs weft manages.
+    for host in Hosts:
+        for device in host.gpu_devices:
+            count(j for j in host.running_jobs
+                  where j.gpu_devices contains device) <= 1
+
+    @guidance
+        -- GPU compute (SMs/warps) cannot be partitioned the way OS
+        -- scheduling partitions CPU cores, so GPU jobs get the device
+        -- exclusively among our jobs. Memory tracking supplements
+        -- this to avoid stacking our own jobs' VRAM on a device.
 }
 
 -- ==========================================================================
