@@ -30,11 +30,13 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 	wantOrder := []string{
 		"Running (2):",
 		"Queued (1):",
-		"Launching (1):",
-		"Unplaced (1):",
+		"Unplaced (2):",
 		"Completed (1):",
 		"Failed (3):",
 		"Killed/Canceled (2):",
+	}
+	if strings.Contains(out, "Launching") {
+		t.Fatalf("did not expect Launching section for pending-placement job with no launch, got:\n%s", out)
 	}
 	last := -1
 	for _, marker := range wantOrder {
@@ -56,9 +58,6 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 	}
 	if !strings.Contains(out, "- wj9 — proj canceled (rental) — canceled") {
 		t.Fatalf("missing rental canceled line in output:\n%s", out)
-	}
-	if !strings.Contains(out, "- wj10 — proj needs placement — instance starting") {
-		t.Fatalf("missing launching suffix in output:\n%s", out)
 	}
 }
 
@@ -330,30 +329,47 @@ func TestRenderJobListGroupedStatusPlainAt_AlignsTimingSuffixToRightEdge(t *test
 	}
 }
 
-func TestRenderJobListGroupedStatusPlainAt_StalePendingPlacementWithoutLaunchShowsUnplaced(t *testing.T) {
+// Jobs in pending_placement with no launch attached are unplaced, regardless
+// of how recently they entered that state. The grouped-list detail line
+// already labels these "unplaced" via TargetKind; the group classification
+// must agree — otherwise the section header and the selected-job footer
+// disagree (see wj1307-style reports).
+func TestRenderJobListGroupedStatusPlainAt_PendingPlacementWithoutLaunchIsUnplaced(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	pending := db.StatusPendingPlacement
-	pendingAt := now.Add(-stalePendingPlacementNoLaunchWindow - time.Second).Unix()
-	jobs := []*db.Job{
-		{
-			ID:            71,
-			Status:        db.StatusQueued,
-			PendingStatus: &pending,
-			PendingAt:     &pendingAt,
-			Project:       "proj",
-			Description:   "stale pending",
-			QueuedAt:      4_700,
-		},
+	cases := []struct {
+		name      string
+		pendingAt *int64
+	}{
+		{"fresh (just submitted)", ptrInt64(now.Add(-30 * time.Second).Unix())},
+		{"stale (long pending)", ptrInt64(now.Add(-10 * time.Minute).Unix())},
+		{"no pending_at recorded", nil},
 	}
-
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	if !strings.Contains(out, "Unplaced (1):") {
-		t.Fatalf("expected unplaced section, got:\n%s", out)
-	}
-	if strings.Contains(out, "Launching (1):") {
-		t.Fatalf("did not expect launching section for stale pending, got:\n%s", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := []*db.Job{
+				{
+					ID:            71,
+					Status:        db.StatusQueued,
+					PendingStatus: &pending,
+					PendingAt:     tc.pendingAt,
+					Project:       "proj",
+					Description:   "pending placement",
+					QueuedAt:      4_700,
+				},
+			}
+			out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+			if !strings.Contains(out, "Unplaced (1):") {
+				t.Fatalf("expected unplaced section, got:\n%s", out)
+			}
+			if strings.Contains(out, "Launching") {
+				t.Fatalf("did not expect launching section, got:\n%s", out)
+			}
+		})
 	}
 }
+
+func ptrInt64(v int64) *int64 { return &v }
 
 func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(t *testing.T) {
 	now := time.Unix(5_000, 0)
@@ -436,27 +452,5 @@ func TestRenderJobListGroupedStatusPlainAt_PausedJobBucketsToPausedSection(t *te
 	}
 	if strings.Contains(out, "Running (") {
 		t.Fatalf("did not expect Running section for paused job, got:\n%s", out)
-	}
-}
-
-func TestRenderJobListGroupedStatusPlainAt_FreshPendingPlacementWithoutLaunchStaysLaunching(t *testing.T) {
-	now := time.Unix(5_000, 0)
-	pending := db.StatusPendingPlacement
-	pendingAt := now.Add(-30 * time.Second).Unix()
-	jobs := []*db.Job{
-		{
-			ID:            72,
-			Status:        db.StatusQueued,
-			PendingStatus: &pending,
-			PendingAt:     &pendingAt,
-			Project:       "proj",
-			Description:   "fresh pending",
-			QueuedAt:      4_700,
-		},
-	}
-
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	if !strings.Contains(out, "Launching (1):") {
-		t.Fatalf("expected launching section, got:\n%s", out)
 	}
 }

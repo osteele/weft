@@ -19,8 +19,6 @@ type groupedStatusSection struct {
 	jobs  []*db.Job
 }
 
-const stalePendingPlacementNoLaunchWindow = 120 * time.Second
-
 type groupedStatusRow struct {
 	text      string
 	isHeader  bool
@@ -339,7 +337,7 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launche
 	case db.StatusPaused:
 		return "paused"
 	case db.StatusPendingPlacement:
-		if groupedStatusPendingPlacementLooksStale(job, now) {
+		if job.TargetKind() == db.JobTargetUnplaced {
 			return "unplaced"
 		}
 		switch launchStatusForJob(job, launchStatusByID) {
@@ -454,21 +452,4 @@ func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
 		return ""
 	}
 	return strings.TrimSpace(launchStatusByID[*job.LaunchID])
-}
-
-func groupedStatusPendingPlacementLooksStale(job *db.Job, now time.Time) bool {
-	if job == nil || job.EffectiveStatus() != db.StatusPendingPlacement {
-		return false
-	}
-	if job.LaunchID != nil && *job.LaunchID > 0 {
-		return false
-	}
-	if job.PendingAt == nil || *job.PendingAt <= 0 {
-		return false
-	}
-	if now.IsZero() {
-		return false
-	}
-	pendingAt := time.Unix(*job.PendingAt, 0)
-	return now.Sub(pendingAt) >= stalePendingPlacementNoLaunchWindow
 }
