@@ -3,11 +3,14 @@ package campaign
 import (
 	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 )
@@ -132,6 +135,50 @@ func TestEstimateGroupDisk_FallsBackWhenAnyJobLacksHistory(t *testing.T) {
 	disk := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
 	if disk != DefaultMinDiskGB {
 		t.Fatalf("disk = %d, want %d", disk, DefaultMinDiskGB)
+	}
+}
+
+// TestEstimateGroupDisk_UnresolvedInputsGetFallback verifies that when some HF
+// refs resolve but one fails (e.g. a gated model, or a dataset ref
+// misrouted as a model like "hf:wikitext"), the estimator uses the
+// successfully resolved bytes PLUS a per-unresolved-ref fallback budget —
+// not zero HF bytes, which was the bug that caused instances to be
+// provisioned with too little disk and fail with disk_full.
+func TestEstimateGroupDisk_UnresolvedInputsGetFallback(t *testing.T) {
+	// Model "good/model" resolves (10 GB); "wikitext" 404s as a model and
+	// matches the datasets endpoint (triggering ErrHFRefIsDataset).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/good/model/tree/main":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"path":"model.bin","size":10000000000}]`))
+		case "/api/datasets/wikitext":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"id":"wikitext"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(dataloc.OverrideHFURLsForTesting(server.URL, server.Client()))
+
+	group := InstanceGroup{
+		Jobs: []*db.Job{{
+			ID:     1,
+			Inputs: []string{"hf:good/model", "hf:wikitext"},
+		}},
+	}
+	disk := EstimateGroupDisk(group, nil, nil)
+
+	// hfBytes = 10 GB (good/model), unresolvedFallback = 20 GB (hf:wikitext).
+	// inputDiskGB = ceil((10 + 20) * 1.5) = 45
+	// overhead (default image, non-CUDA) = BaseOverheadGB(6) + NonCUDAOverheadGB(3) = 9
+	// total = 45 + 0 (no uv) + 9 = 54
+	if disk < 54 {
+		t.Fatalf("disk = %d, want >= 54 (resolved + unresolved fallback); "+
+			"without the fix this would fall back to %d (overhead only, HF bytes dropped)",
+			disk, DefaultMinDiskGB)
 	}
 }
 

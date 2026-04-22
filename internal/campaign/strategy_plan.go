@@ -893,9 +893,7 @@ func (e *planEvaluator) reuseDownloadBytes(inputs []string) int64 {
 	}
 	var totalBytes int64
 	if len(inputs) > 0 {
-		if resolved, err := dataloc.ResolveInputSizes(inputs, nil); err == nil {
-			totalBytes = resolved
-		}
+		totalBytes, _, _ = dataloc.ResolveInputSizes(inputs, nil)
 	}
 	e.reuseInputBytes[key] = totalBytes
 	e.reuseInputMu.Unlock()
@@ -1869,10 +1867,8 @@ func (c reuseEstimateContext) downloadBytes(inputs []string) int64 {
 	if len(inputs) == 0 {
 		return 0
 	}
-	if totalBytes, err := dataloc.ResolveInputSizes(inputs, nil); err == nil {
-		return totalBytes
-	}
-	return 0
+	totalBytes, _, _ := dataloc.ResolveInputSizes(inputs, nil)
+	return totalBytes
 }
 
 func estimateReuseGroupWithSharedData(ctx reuseEstimateContext, group InstanceGroup, cap InstanceCapacity) (CostEstimate, bool) {

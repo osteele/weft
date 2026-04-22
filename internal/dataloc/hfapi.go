@@ -19,6 +19,12 @@ var ErrHFAuthRequired = errors.New("HF API auth required")
 // ErrHFNoFiles is returned when the HF API returns no files for a model.
 var ErrHFNoFiles = errors.New("HF API returned no files")
 
+var ErrHFModelNotFound = errors.New("HF model not found")
+
+var ErrHFRefIsDataset = errors.New("HF ref resolves to a dataset, not a model; use hf-dataset: prefix")
+
+var fetchHFDatasetURL = "https://huggingface.co/api/datasets/%s"
+
 // hfModelSizeCache caches model sizes in-process to avoid redundant API calls
 // within a campaign launch (multiple jobs may reference the same model).
 var hfModelSizeCache sync.Map // map[string]int64
@@ -128,6 +134,8 @@ func FetchHFModelSize(modelID string) (int64, error) {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return 0, fmt.Errorf("%w for %s; set HF_TOKEN", ErrHFAuthRequired, modelID)
+	case http.StatusNotFound:
+		return 0, fmt.Errorf("%w: %s", ErrHFModelNotFound, modelID)
 	default:
 		return 0, fmt.Errorf("HF API returned %d for model %s", resp.StatusCode, modelID)
 	}
@@ -214,13 +222,14 @@ func PrefetchInputSizes(inputs []string, onProgress func(resolved, total int)) {
 	saveDiskCache()
 }
 
-// ResolveInputSizes computes the total size in bytes of all sized asset refs
-// in the given input list. HF models are resolved via the HF API (with local
-// DB fallback). Corpus assets are resolved from the host_data DB only.
-// Other input types are ignored.
-func ResolveInputSizes(inputs []string, localDB *sql.DB) (int64, error) {
+// ResolveInputSizes computes the total size in bytes of all sized asset refs.
+// Per-ref failures are non-fatal: the total is the sum of successfully
+// resolved refs, unresolved lists the original input strings that failed,
+// and err wraps the individual errors. Callers needing only a best-effort
+// total can ignore err and unresolved.
+func ResolveInputSizes(inputs []string, localDB *sql.DB) (totalBytes int64, unresolved []string, err error) {
 	seen := make(map[string]bool)
-	var totalBytes int64
+	var errs []error
 
 	for _, input := range inputs {
 		asset, ok := ParseAssetRef(input)
@@ -235,9 +244,11 @@ func ResolveInputSizes(inputs []string, localDB *sql.DB) (int64, error) {
 
 		switch asset.Kind {
 		case AssetHFModel:
-			size, err := resolveModelSize(asset, localDB)
-			if err != nil {
-				return totalBytes, err
+			size, resolveErr := resolveModelSize(asset, localDB)
+			if resolveErr != nil {
+				unresolved = append(unresolved, input)
+				errs = append(errs, fmt.Errorf("%s: %w", input, resolveErr))
+				continue
 			}
 			totalBytes += size
 		case AssetCorpus:
@@ -245,7 +256,10 @@ func ResolveInputSizes(inputs []string, localDB *sql.DB) (int64, error) {
 		}
 	}
 
-	return totalBytes, nil
+	if len(errs) > 0 {
+		err = errors.Join(errs...)
+	}
+	return totalBytes, unresolved, err
 }
 
 // resolveAssetSizeFromDB looks up the size of an asset from the host_data table.
@@ -267,16 +281,73 @@ func resolveAssetSizeFromDB(asset DataAsset, localDB *sql.DB) int64 {
 }
 
 // resolveModelSize returns the size of a single model, checking the local DB
-// first and falling back to the HF API.
+// first and falling back to the HF API. A 404 that also matches the datasets
+// API is wrapped as ErrHFRefIsDataset so the caller can nudge the user to
+// the correct hf-dataset: prefix.
 func resolveModelSize(asset DataAsset, localDB *sql.DB) (int64, error) {
 	if size := resolveAssetSizeFromDB(asset, localDB); size > 0 {
 		return size, nil
 	}
-	return FetchHFModelSize(asset.ID)
+	size, err := FetchHFModelSize(asset.ID)
+	if err != nil && errors.Is(err, ErrHFModelNotFound) && hfRefIsDataset(asset.ID) {
+		return 0, fmt.Errorf("%w: %s (did you mean hf-dataset:%s?)", ErrHFRefIsDataset, asset.ID, asset.ID)
+	}
+	return size, err
+}
+
+// hfDatasetExistsCache memoises hfRefIsDataset probes for this process so
+// repeated unresolved refs across a campaign don't each pay an HF API call.
+var hfDatasetExistsCache sync.Map // map[string]bool
+
+// hfRefIsDataset returns true if the given ref exists as a dataset on HF.
+// Network/API errors are treated as false — the caller falls back to the
+// original model-not-found error.
+func hfRefIsDataset(ref string) bool {
+	if v, ok := hfDatasetExistsCache.Load(ref); ok {
+		return v.(bool)
+	}
+	url := fmt.Sprintf(fetchHFDatasetURL, ref)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	if token := os.Getenv("HF_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := hfHTTPClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	exists := resp.StatusCode == http.StatusOK
+	hfDatasetExistsCache.Store(ref, exists)
+	return exists
 }
 
 // ClearHFModelSizeCache clears the in-process model size cache (for testing).
 func ClearHFModelSizeCache() {
 	hfModelSizeCache = sync.Map{}
+	hfDatasetExistsCache = sync.Map{}
 	diskCacheOnce = sync.Once{}
+}
+
+// OverrideHFURLsForTesting swaps the HF API URL templates and HTTP client to
+// point at a test server. Returns a restore function the caller should defer.
+// Also clears the in-memory size cache so stale values don't bleed between
+// tests.
+func OverrideHFURLsForTesting(baseURL string, client *http.Client) (restore func()) {
+	ClearHFModelSizeCache()
+	origClient := hfHTTPClient
+	origModelURL := fetchHFModelSizeURL
+	origDatasetURL := fetchHFDatasetURL
+	if client != nil {
+		hfHTTPClient = client
+	}
+	fetchHFModelSizeURL = baseURL + "/api/models/%s/tree/main"
+	fetchHFDatasetURL = baseURL + "/api/datasets/%s"
+	return func() {
+		hfHTTPClient = origClient
+		fetchHFModelSizeURL = origModelURL
+		fetchHFDatasetURL = origDatasetURL
+	}
 }

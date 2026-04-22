@@ -401,6 +401,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Prefer hf-dataset:X over a same-ID hf:X: the former is the authoritative
+	// form (code-scanned from load_dataset or explicit), the latter is almost
+	// always user error since datasets don't exist as HF models.
+	if deduped, removed := dropModelRefsShadowedByDatasetRefs(runInputs); len(removed) > 0 {
+		runInputs = deduped
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Warning: dropping %s — also declared as hf-dataset. Use hf-dataset:<id> for HF datasets.\n",
+			strings.Join(removed, ", "))
+	}
+
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
 
@@ -1181,8 +1191,30 @@ func printCommandRecommendations(command string) bool {
 	return false
 }
 
-// mergeDedup merges two string slices, removing duplicates. Items from a appear
-// first, then unique items from b.
+// dropModelRefsShadowedByDatasetRefs removes any "hf:<id>" entry from inputs
+// when "hf-dataset:<id>" is also present, returning the filtered slice and
+// the dropped refs.
+func dropModelRefsShadowedByDatasetRefs(inputs []string) (filtered, removed []string) {
+	datasets := make(map[string]bool)
+	for _, s := range inputs {
+		if strings.HasPrefix(s, "hf-dataset:") {
+			datasets[strings.TrimPrefix(s, "hf-dataset:")] = true
+		}
+	}
+	if len(datasets) == 0 {
+		return inputs, nil
+	}
+	filtered = make([]string, 0, len(inputs))
+	for _, s := range inputs {
+		if strings.HasPrefix(s, "hf:") && datasets[strings.TrimPrefix(s, "hf:")] {
+			removed = append(removed, s)
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered, removed
+}
+
 func mergeDedup(a, b []string) []string {
 	if len(a) == 0 {
 		return b

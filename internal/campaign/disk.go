@@ -42,6 +42,12 @@ const HFCacheMultiplier = 1.5
 // DefaultMinDiskGB is the minimum disk size for any cloud instance.
 const DefaultMinDiskGB = 50
 
+// UnresolvedHFFallbackGB is the conservative raw-size budget applied per HF
+// input ref that could not be resolved (e.g. a gated model the HF token can't
+// reach, or a dataset ref misrouted as a model). Sized to cover a mid-range
+// LLM; over-provisioning disk is cheap compared to a disk_full failure.
+const UnresolvedHFFallbackGB = 20
+
 // EmpiricalDiskSafetyMultiplier inflates observed peak disk to leave room for
 // run-to-run variation when we have historical measurements for similar jobs.
 const EmpiricalDiskSafetyMultiplier = 1.15
@@ -85,13 +91,12 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 		allInputs = mergeStringSlices(allInputs, observed)
 	}
 
-	var hfBytes int64
-	totalBytes, err := dataloc.ResolveInputSizes(allInputs, localDB)
+	hfBytes, unresolved, err := dataloc.ResolveInputSizes(allInputs, localDB)
 	if err != nil {
-		slog.Warn("resolving input sizes failed, continuing without HF input sizes", "component", "disk", "error", err)
-	} else {
-		hfBytes = totalBytes
+		slog.Warn("some input sizes could not be resolved; applying fallback for those refs",
+			"component", "disk", "unresolved", unresolved, "error", err)
 	}
+	unresolvedFallbackBytes := int64(len(unresolved)) * UnresolvedHFFallbackGB * 1_000_000_000
 
 	overhead := BaseOverheadGB + imageOverheadGB(group.Image)
 	if hasCUDAPackages(group.SourceDirs()) {
@@ -106,7 +111,7 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 
 	uvBytes := estimateGroupUVBytes(group.SourceDirs(), r2Client)
 
-	inputDiskGB := int(math.Ceil(float64(hfBytes) / 1e9 * HFCacheMultiplier))
+	inputDiskGB := int(math.Ceil(float64(hfBytes+unresolvedFallbackBytes) / 1e9 * HFCacheMultiplier))
 	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
 	inputDiskGB += overhead
 

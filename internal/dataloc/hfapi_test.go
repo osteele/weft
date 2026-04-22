@@ -22,6 +22,10 @@ func setupHFTestServer(t *testing.T, server *httptest.Server) {
 	origURL := fetchHFModelSizeURL
 	fetchHFModelSizeURL = server.URL + "/api/models/%s/tree/main"
 	t.Cleanup(func() { fetchHFModelSizeURL = origURL })
+
+	origDatasetURL := fetchHFDatasetURL
+	fetchHFDatasetURL = server.URL + "/api/datasets/%s"
+	t.Cleanup(func() { fetchHFDatasetURL = origDatasetURL })
 }
 
 func TestFetchHFModelSize(t *testing.T) {
@@ -156,11 +160,66 @@ func TestResolveInputSizes(t *testing.T) {
 		"checkpoint:my-model",        // non-HF asset, ignored
 	}
 
-	total, err := ResolveInputSizes(inputs, nil)
+	total, unresolved, err := ResolveInputSizes(inputs, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(unresolved) != 0 {
+		t.Errorf("unexpected unresolved refs: %v", unresolved)
+	}
 	if total != 32158192699 {
 		t.Errorf("got total %d, want 32158192699", total)
+	}
+}
+
+// TestResolveInputSizes_PartialFailureReturnsResolvedPlusUnresolved verifies
+// that a per-ref failure (e.g. 404) does not abort the whole batch: the
+// returned total is the sum of the successful refs, and the failing ref
+// appears in unresolved. This is the contract the disk estimator relies on
+// to keep sizing correct in the presence of one bad input ref.
+func TestResolveInputSizes_PartialFailureReturnsResolvedPlusUnresolved(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models/good/model/tree/main" {
+			w.Write([]byte(`[{"path":"m.bin","size":5000}]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	setupHFTestServer(t, server)
+
+	total, unresolved, err := ResolveInputSizes([]string{"hf:good/model", "hf:missing/model"}, nil)
+	if err == nil {
+		t.Fatalf("expected non-nil error listing the unresolved ref")
+	}
+	if total != 5000 {
+		t.Errorf("got total %d, want 5000 (the resolved ref's size)", total)
+	}
+	if len(unresolved) != 1 || unresolved[0] != "hf:missing/model" {
+		t.Errorf("unresolved = %v, want [hf:missing/model]", unresolved)
+	}
+}
+
+// TestResolveModelSize_DatasetRefSurfacesClearError verifies that a bare
+// "hf:<id>" ref that exists on HF as a dataset (not a model) surfaces
+// ErrHFRefIsDataset rather than a generic 404. This is the signal users
+// need to fix their PEP 723 metadata from hf: to hf-dataset:.
+func TestResolveModelSize_DatasetRefSurfacesClearError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/datasets/wikitext" {
+			w.Write([]byte(`{"id":"wikitext"}`))
+			return
+		}
+		http.NotFound(w, r) // models endpoint 404s for "wikitext"
+	}))
+	defer server.Close()
+	setupHFTestServer(t, server)
+
+	_, err := resolveModelSize(DataAsset{Kind: AssetHFModel, ID: "wikitext"}, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrHFRefIsDataset) {
+		t.Fatalf("err = %v, want ErrHFRefIsDataset", err)
 	}
 }

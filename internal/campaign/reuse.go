@@ -127,8 +127,8 @@ func estimateInputsDisk(inputs []string) int {
 	if len(inputs) == 0 {
 		return 0
 	}
-	totalBytes, err := dataloc.ResolveInputSizes(inputs, nil)
-	if err != nil || totalBytes == 0 {
+	totalBytes, _, _ := dataloc.ResolveInputSizes(inputs, nil)
+	if totalBytes == 0 {
 		return 0
 	}
 	return int(math.Ceil(float64(totalBytes) / 1e9 * HFCacheMultiplier))

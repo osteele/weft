@@ -153,11 +153,9 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 		startup := estimate.EstimateStartupWithModel(string(go_.Offer.Provider), overheadModel, ctx)
 		sshSetup := estimate.EstimateSSHSetup(overheadModel, ctx)
 
-		var downloadBytes int64
-		if totalBytes, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil); err != nil {
-			slog.Warn("could not resolve input sizes", "component", "cost", "error", err)
-		} else {
-			downloadBytes = totalBytes
+		downloadBytes, _, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil)
+		if err != nil {
+			slog.Warn("some input sizes could not be resolved", "component", "cost", "error", err)
 		}
 
 		// Compute UV sync bytes for this group's source dirs
@@ -280,11 +278,11 @@ func OfferSetupOverheadFactory(database *sql.DB, overheadModel *estimate.Overhea
 		if cached, ok := downloadBytesCache.Load(key); ok {
 			downloadBytes = cached.(int64)
 		} else {
-			if totalBytes, err := dataloc.ResolveInputSizes(group.AllInputs(), nil); err != nil {
-				slog.Warn("could not resolve input sizes for setup estimate", "component", "cost", "error", err)
-			} else {
-				downloadBytes = totalBytes
+			totalBytes, _, err := dataloc.ResolveInputSizes(group.AllInputs(), nil)
+			if err != nil {
+				slog.Warn("some input sizes could not be resolved for setup estimate", "component", "cost", "error", err)
 			}
+			downloadBytes = totalBytes
 			downloadBytesCache.Store(key, downloadBytes)
 		}
 		return offerSetupFunc(database, overheadModel, downloadBytes)
