@@ -2925,7 +2925,7 @@ func (m launchModel) renderInlineWatchView() string {
 
 func (m launchModel) View() string {
 	var b strings.Builder
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, 0)
 
 	if m.err != nil && m.inlineWatch == nil {
 		b.WriteString(launchErrStyle.Render(fmt.Sprintf("Error: %v", m.err)))

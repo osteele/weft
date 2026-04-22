@@ -54,7 +54,7 @@ func TestSelectedJobDetail_RentalHostLineIncludesProvider(t *testing.T) {
 		t.Fatalf("expected 2 detail lines (Job + Host), got %v", lines)
 	}
 	hostLine := lines[1]
-	for _, want := range []string{"Host: wi42", "provider: RunPod"} {
+	for _, want := range []string{"Host: wi42", "@ RunPod"} {
 		if !strings.Contains(hostLine, want) {
 			t.Errorf("expected %q in Host line, got: %s", want, hostLine)
 		}

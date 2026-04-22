@@ -763,7 +763,7 @@ func (m listTUIModel) View() string {
 
 	layout := m.layout
 	var b strings.Builder
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
 	selectedDetailLines := m.selectedJobDetailLines()
 
 	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
@@ -841,7 +841,7 @@ func (m listTUIModel) groupedView() string {
 	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
 	statusLine := m.groupedStatusText()
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
-	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning)
+	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning, m.autoRunRateTargetCents)
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
@@ -1015,7 +1015,6 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if hasQueued {
 		line += "  n:new instance"
 	}
-	line += "  $:target(" + formatAutoRunRateTarget(m.autoRunRateTargetCents) + ")"
 	if strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
 		if m.showAutoPilotErrorDetails {
 			line += "  e:hide error"

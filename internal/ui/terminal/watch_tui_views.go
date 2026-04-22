@@ -199,7 +199,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 	} else if m.retryResult != "" {
 		addLine(m.retryResult)
 	}
-	for _, line := range renderSharedTUIStatusLines(m.database, width) {
+	for _, line := range renderSharedTUIStatusLines(m.database, width, m.autoRunRateTargetCents) {
 		addLine(line)
 	}
 	if line := m.autoPilotStatusLine(); line != "" {
@@ -228,7 +228,7 @@ func (m watchModel) renderSystemView() (string, int) {
 	if width <= 0 {
 		width = 100
 	}
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, width)
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, width, m.autoRunRateTargetCents)
 
 	rows := make([]watchRenderRow, 0, 8+len(m.cloudInstances)+len(m.unplacedJobs))
 	selectedVisualIndex := -1
@@ -787,7 +787,7 @@ func (m watchModel) renderProjectView() string {
 	}
 
 	lines := m.projectLines
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width)
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
 	autoLine := m.autoPilotStatusLine()
 	rows := m.projectPageSize()
 	if rows > 1 {

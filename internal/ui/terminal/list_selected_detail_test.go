@@ -58,7 +58,7 @@ func TestSelectedJobDetail_RentalInstance(t *testing.T) {
 	if !strings.Contains(lines[0], "Job: wj9") || !strings.Contains(lines[0], "elapsed 1m") {
 		t.Errorf("expected 'Job: wj9 · elapsed 1m', got: %s", lines[0])
 	}
-	for _, want := range []string{"Host:", "wi7", "provider: Vast.ai"} {
+	for _, want := range []string{"Host:", "wi7", "@ Vast.ai"} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("expected %q in Host line, got: %s", want, lines[1])
 		}
@@ -90,6 +90,45 @@ func TestSelectedJobDetail_RentalHostLineOmitsPhase(t *testing.T) {
 	for _, forbidden := range []string{"phase", "running:316"} {
 		if strings.Contains(joined, forbidden) {
 			t.Errorf("expected %q NOT to appear in footer lines, got: %s", forbidden, joined)
+		}
+	}
+}
+
+// TestSelectedJobDetail_RentalHostShowsLaunchState pins that the Host line
+// carries the Launch.Status label (launching / running / grace) right after
+// the "id @ provider" head so the user can see whether the rental is alive.
+func TestSelectedJobDetail_RentalHostShowsLaunchState(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	launchID := int64(55)
+	job := &db.Job{
+		ID:       3,
+		LaunchID: &launchID,
+		Tags:     []string{"provider:vastai"},
+		Status:   db.StatusRunning,
+	}
+	for _, tc := range []struct {
+		status string
+		label  string
+	}{
+		{db.LaunchStatusLaunching, "launching"},
+		{db.LaunchStatusRunning, "running"},
+		{db.LaunchStatusGrace, "grace"},
+	} {
+		ctx := selectedJobContext{
+			launchByID: map[int64]*db.Launch{
+				launchID: {ID: launchID, Status: tc.status, Provider: "vastai"},
+			},
+		}
+		lines := renderSelectedJobDetail(job, ctx, now)
+		if len(lines) != 2 {
+			t.Fatalf("status=%s: expected 2 lines, got %v", tc.status, lines)
+		}
+		host := lines[1]
+		if !strings.Contains(host, "wi55 @ Vast.ai") {
+			t.Errorf("status=%s: expected 'wi55 @ Vast.ai' head, got: %s", tc.status, host)
+		}
+		if !strings.Contains(host, " · "+tc.label) {
+			t.Errorf("status=%s: expected ' · %s' state segment, got: %s", tc.status, tc.label, host)
 		}
 	}
 }
@@ -271,8 +310,8 @@ func TestSelectedJobDetail_RentalHostFallbackWhenLaunchMissing(t *testing.T) {
 		t.Fatalf("expected 2 lines, got %v", lines)
 	}
 	host := lines[1]
-	if !strings.Contains(host, "Host: wi77") || !strings.Contains(host, "provider: Vast.ai") {
-		t.Fatalf("expected fallback 'Host: wi77 · provider: Vast.ai', got: %s", host)
+	if host != "Host: wi77 @ Vast.ai" {
+		t.Fatalf("expected fallback 'Host: wi77 @ Vast.ai', got: %s", host)
 	}
 	for _, unwanted := range []string{"$", "uptime", "/hr"} {
 		if strings.Contains(host, unwanted) {

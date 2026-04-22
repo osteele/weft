@@ -65,9 +65,9 @@ func renderJobFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) str
 }
 
 // renderHostFooterLine returns the enriched Host line. For rental instances
-// with a known Launch record: "Host: wi<id> · <GPU brief> · <Provider> ·
-// $<rate>/hr · uptime <dur> · $<cost>". For inventory hosts: just
-// "Host: <name>", with an optional "· last seen <dur> ago" when cached
+// with a known Launch record: "Host: wi<id> @ <Provider> · <state> ·
+// <GPU brief> · $<rate>/hr · uptime <dur> · $<cost>". For inventory hosts:
+// just "Host: <name>", with an optional "· last seen <dur> ago" when cached
 // host info is older than db.HostInfoStaleThreshold. Returns "" for
 // unplaced or nil jobs.
 func renderHostFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) string {
@@ -95,27 +95,30 @@ func renderHostFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 }
 
 func renderRentalHostLine(job *db.Job, ctx selectedJobContext, now time.Time) string {
-	parts := []string{"Host: " + job.TargetDisplay()}
 	var launch *db.Launch
 	if job.LaunchID != nil {
 		launch = ctx.launchByID[*job.LaunchID]
 	}
+	providerDisplay := ""
+	if launch != nil {
+		providerDisplay = cloud.Provider(launch.Provider).DisplayName()
+	}
+	if providerDisplay == "" {
+		providerDisplay = cloud.Provider(job.ProviderName()).DisplayName()
+	}
+	head := "Host: " + job.TargetDisplay()
+	if providerDisplay != "" {
+		head += " @ " + providerDisplay
+	}
+	parts := []string{head}
 	if launch == nil {
-		// Launch row unavailable (row deleted or mid-reload); render the
-		// minimal bare-ID + provider form so the line still names where
-		// the job is even without rate/uptime/cost context.
-		if display := cloud.Provider(job.ProviderName()).DisplayName(); display != "" {
-			parts = append(parts, "provider: "+display)
-		}
 		return strings.Join(parts, " · ")
+	}
+	if state := launchStateLabel(launch.Status); state != "" {
+		parts = append(parts, state)
 	}
 	if brief := launch.DisplayGPUBrief(); brief != "" {
 		parts = append(parts, brief)
-	}
-	if display := cloud.Provider(launch.Provider).DisplayName(); display != "" {
-		parts = append(parts, display)
-	} else if display := cloud.Provider(job.ProviderName()).DisplayName(); display != "" {
-		parts = append(parts, display)
 	}
 	obs := observeLaunch(launch, nil, now)
 	if obs.Rate != nil {
@@ -128,6 +131,23 @@ func renderRentalHostLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 		parts = append(parts, fmt.Sprintf("$%.2f", *obs.Cost))
 	}
 	return strings.Join(parts, " · ")
+}
+
+// launchStateLabel returns the Launch.Status verbatim when it matches a
+// known constant, and "" otherwise so the Host-line segment is omitted for
+// empty or unrecognised values.
+func launchStateLabel(status string) string {
+	switch status {
+	case db.LaunchStatusPlanned,
+		db.LaunchStatusLaunching,
+		db.LaunchStatusRunning,
+		db.LaunchStatusGrace,
+		db.LaunchStatusCompleted,
+		db.LaunchStatusFailed,
+		db.LaunchStatusCancelled:
+		return status
+	}
+	return ""
 }
 
 // waitingForSiblingJobID returns the ID of the currently-running job that

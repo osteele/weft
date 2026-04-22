@@ -311,7 +311,7 @@ func (m campaignListModel) View() string {
 	}
 
 	var b strings.Builder
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, 0)
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, 0, 0)
 
 	b.WriteString(listTitleStyle.Render("Campaigns"))
 	if m.syncInProgress {

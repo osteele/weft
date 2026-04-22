@@ -80,12 +80,12 @@ func TestFetchSharedTUIStatusSplitsRunningAndStartingInstances(t *testing.T) {
 		t.Fatalf("MarkQueuedJobRunning(job2): %v", err)
 	}
 
-	status, _ := fetchSharedTUIStatusWithCount(database)
+	status, _, burn := fetchSharedTUIStatusWithCount(database)
 	if !strings.Contains(status, "4 instances (2 up, 2 starting)") {
 		t.Fatalf("status = %q, want split instance counts", status)
 	}
-	if !strings.Contains(status, "$1.00/hr") {
-		t.Fatalf("status = %q, want cost suffix", status)
+	if burn != 100 {
+		t.Fatalf("burnCentsPerHour = %d, want 100", burn)
 	}
 }
 
@@ -127,7 +127,7 @@ func TestFetchSharedTUIStatusOmitsStartingWhenZero(t *testing.T) {
 		t.Fatalf("SetJobLaunchID(job3): %v", err)
 	}
 
-	status, _ := fetchSharedTUIStatusWithCount(database)
+	status, _, _ := fetchSharedTUIStatusWithCount(database)
 	if !strings.Contains(status, "3 instances") {
 		t.Fatalf("status = %q, want compact instance count", status)
 	}
@@ -166,7 +166,7 @@ func TestSharedTUIStatusLineHasSystemPrefix(t *testing.T) {
 	sharedTUIStatusCache.expires = time.Time{}
 	sharedTUIStatusCache.mu.Unlock()
 
-	line := renderSharedTUIStatusLine(database, 0)
+	line := renderSharedTUIStatusLine(database, 0, 0)
 	plain := stripANSI(line)
 	if !strings.HasPrefix(plain, "System: ") {
 		t.Fatalf("expected System: prefix, got: %q", plain)
@@ -192,7 +192,7 @@ func TestSharedTUIStatusLineWithVisibleRunning_GlobalMismatchPrefix(t *testing.T
 
 	// Pass visibleRunning=0 so globalRunning(1) != visibleRunning(0); the
 	// prefix should switch to "System (global): ".
-	lines := renderSharedTUIStatusLinesWithVisibleRunning(database, 0, 0)
+	lines := renderSharedTUIStatusLinesWithVisibleRunning(database, 0, 0, 0)
 	if len(lines) == 0 {
 		t.Fatal("expected at least one status line")
 	}
@@ -248,6 +248,25 @@ func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
 	}
 }
 
+func TestFormatCostRateSegment(t *testing.T) {
+	cases := []struct {
+		burn   int
+		target int
+		want   string
+	}{
+		{0, 0, ""},
+		{123, 0, "$1.23/hr"},
+		{0, 500, "target $5.00/hr"},
+		{123, 500, "$1.23/hr of $5.00/hr target"},
+	}
+	for _, tc := range cases {
+		got := formatCostRateSegment(tc.burn, tc.target)
+		if got != tc.want {
+			t.Errorf("formatCostRateSegment(%d, %d) = %q, want %q", tc.burn, tc.target, got, tc.want)
+		}
+	}
+}
+
 func TestPluralize(t *testing.T) {
 	cases := []struct {
 		n        int
@@ -286,7 +305,7 @@ func TestSharedTUIStatusSingularises(t *testing.T) {
 		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
 
-	status, _ := fetchSharedTUIStatusWithCount(database)
+	status, _, _ := fetchSharedTUIStatusWithCount(database)
 	if !strings.Contains(status, "1 job running") {
 		t.Errorf("expected '1 job running', got: %s", status)
 	}

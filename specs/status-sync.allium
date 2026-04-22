@@ -862,13 +862,20 @@ rule TUIPeriodicSync {
         --     closest derivable signal.
         --   - rental instance (enriched): when the list TUI has a Launch
         --     record for the job's LaunchID, the Host line reads
-        --       "Host: wi<launch-id> · <GPU brief> · <Provider> ·
-        --        $<rate>/hr · uptime <dur> · $<cost>"
+        --       "Host: wi<launch-id> @ <Provider> · <state> ·
+        --        <GPU brief> · $<rate>/hr · uptime <dur> · $<cost>"
         --     with segment sources:
+        --       - <Provider>: cloud.Provider.DisplayName() on
+        --         launch.Provider (e.g. "Vast.ai", "RunPod"). Falls back
+        --         to the job's provider tag when the Launch provider is
+        --         unknown. When both are empty, the "@ <Provider>"
+        --         suffix is omitted and the head collapses to
+        --         "Host: wi<launch-id>".
+        --       - <state>: Launch.Status rendered as one of "launching",
+        --         "running", "grace", "completed", "failed", "canceled",
+        --         "planned". Omitted for empty or unknown statuses.
         --       - <GPU brief>: db.Launch.DisplayGPUBrief() (e.g.
         --         "RTX 3090 24GB" or "2x A100 80GB").
-        --       - <Provider>: cloud.Provider.DisplayName() on
-        --         launch.Provider (e.g. "Vast.ai", "RunPod").
         --       - $<rate>/hr, uptime <dur>, $<cost>: produced by
         --         observeLaunch(ci, inst=nil, now) in
         --         cloud_instance_observability.go. Uptime is the
@@ -880,11 +887,12 @@ rule TUIPeriodicSync {
         --   - rental instance (fallback): when the Launch record itself
         --     is missing (e.g. a race during reload), the line falls
         --     back to the bare form
-        --       "Host: wi<launch-id> · provider: <Display>"
-        --     where <Display> is providerDisplayName() on the job's
-        --     provider tag ("Vast.ai" for vastai, "RunPod" for runpod;
-        --     suffix omitted entirely for unknown providers). The
-        --     va:/rp: prefix on wi<id> is NOT used on the Host line.
+        --       "Host: wi<launch-id> @ <Display>"
+        --     where <Display> is cloud.Provider.DisplayName() on the
+        --     job's provider tag ("Vast.ai" for vastai, "RunPod" for
+        --     runpod; the "@ <Display>" suffix is omitted entirely for
+        --     unknown providers). The va:/rp: prefix on wi<id> is NOT
+        --     used on the Host line.
         --
         -- Per-reload plumbing for the above:
         --   - db.GetLaunchesByIDs batch-loads all Launch rows for the
@@ -904,7 +912,8 @@ rule TUIPeriodicSync {
         --   - Prefixed with "System: " — or "System (global): " when the
         --     visible running-job count differs from the global count —
         --     so it sits as a sibling of the Job:/Host: lines.
-        --   - Content: running-job count, instance count, cost/hour.
+        --   - Content: running-job count, instance count, and the
+        --     cost-rate segment.
         --   - Count nouns are singularised when the count is 1:
         --       "1 job running"  / "2 jobs running"
         --       "1 instance"     / "2 instances"
@@ -912,6 +921,20 @@ rule TUIPeriodicSync {
         --         instance-breakdown sub-phrase.
         --     Helper: pluralize(n, singular, plural) in
         --     provider_credit_warning.go.
+        --   - Cost-rate segment combines the current burn rate with the
+        --     auto-pilot run-rate soft target:
+        --       - burn > 0 and target > 0:
+        --           "$<burn>/hr of $<target>/hr target"
+        --       - burn > 0 and target = 0: "$<burn>/hr"
+        --       - burn = 0 and target > 0: "target $<target>/hr"
+        --       - burn = 0 and target = 0: segment omitted.
+        --     The target comes from listTUIModel / watchModel
+        --     autoRunRateTargetCents (loaded via
+        --     config.AutoRunRateSoftTargetCentsPerHour). Helper:
+        --     formatCostRateSegment(burn, target) in
+        --     provider_credit_warning.go. The grouped-view controls row
+        --     no longer carries a "$:target(...)" segment; the `$` key
+        --     still opens the rate-input prompt.
         --
         -- The standalone campaign-wide "ETA: …" line is no longer
         -- rendered in the grouped view. Per-job ETA now lives on the Job
@@ -934,8 +957,8 @@ rule TUIPeriodicSync {
         --   - bare "wi<id>" when the provider tag is absent or unknown.
         -- The prefix applies only to rental references in the list row;
         -- inventory host names are unchanged. The footer Host line does
-        -- NOT use this prefix — it renders "Host: wi<id> · provider:
-        -- <Display>" with an explicit "provider:" segment instead.
+        -- NOT use this prefix — it renders "Host: wi<id> @ <Display>"
+        -- with the provider fused into the head via "@".
         -- Implementation: providerShortPrefix in
         -- internal/ui/terminal/list_render.go (fed by db.Job.ProviderName()
         -- / db.TagProviderPrefix), applied in formatJobListHost and
