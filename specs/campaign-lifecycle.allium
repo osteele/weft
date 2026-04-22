@@ -105,7 +105,7 @@ entity Instance {
     -- GPU specification
     gpu_spec: String                -- user-specified GPU request
     gpu_class: String               -- resolved GPU class
-    gpu_mem_gb: Integer
+    gpu_mem_gb: Integer             -- actual per-GPU memory from the offer, not the job constraint
     num_gpus: Integer
     resolved_gpu_name: String?      -- actual GPU name from offer
     docker_image: String
@@ -303,7 +303,7 @@ rule LaunchInstance {
         provider: options.provider,
         gpu_spec: gpu_spec,
         gpu_class: options.gpu_class,
-        gpu_mem_gb: options.gpu_mem_gb,
+        gpu_mem_gb: options.offer.gpu_mem_gb,
         num_gpus: options.num_gpus,
         docker_image: options.docker_image,
         offer: options.offer,
@@ -936,6 +936,23 @@ invariant RebalanceOnlyWhenSourceBlocked {
     -- Don't move a job that could just start on its current instance.
     for move in QueueRebalanceMoves:
         not InstanceHasIdleSlotFor(move.src, move.job, move.decision_time)
+}
+
+rule InstanceReuseGPUMemoryCheck {
+    when: MatchJobToInstance(job, instance)
+    requires: job.gpu_mem_gb != null
+    requires: instance.gpu_mem_gb > 0
+
+    ensures: job.gpu_mem_gb <= instance.gpu_mem_gb
+
+    @guidance
+        -- The reuse matcher compares the job's required GPU memory against
+        -- the instance's actual per-GPU memory (recorded from the offer at
+        -- launch). An instance with gpu_mem_gb = 0 is treated as "unknown":
+        -- see MatchJobToInstance in internal/campaign/reuse.go for the
+        -- conservative behavior. Recording the offer's actual memory at
+        -- launch time (see LaunchInstance) is required so that running
+        -- rentals are eligible for reuse by new jobs with memory constraints.
 }
 
 rule AutoPilotRunRateSubset {

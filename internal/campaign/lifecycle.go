@@ -1302,7 +1302,7 @@ func LaunchInstance(
 		Provider:          string(client.Provider()),
 		GPUSpec:           group.GPUSpec(),
 		GPUClass:          group.GPUClass,
-		GPUMemGB:          group.GPUMemGB,
+		GPUMemGB:          int(math.Round(offer.GPUMemGB)),
 		MaxSpendCents:     opts.MaxSpendCents,
 		MaxTimeSeconds:    opts.MaxTimeSeconds,
 		ResolvedGPUName:   offer.GPUName,

@@ -132,6 +132,7 @@ func TestUpdateLaunchOfferMetadata(t *testing.T) {
 		GPUName:           "RTX_5090",
 		CostPerHour:       1.24,
 		NumGPUs:           2,
+		GPUMemGB:          32,
 		DLPerf:            42,
 		Reliability:       0.995,
 		DownloadBandwidth: 500,
@@ -152,6 +153,9 @@ func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	}
 	if inst.DiskGB != 160 || inst.CUDAVersion != 12.4 || inst.InetDownMbps != 500 || inst.InetUpMbps != 200 {
 		t.Fatalf("updated network/disk metadata = %+v", inst)
+	}
+	if inst.GPUMemGB != 32 {
+		t.Fatalf("updated gpu_mem_gb = %d, want 32", inst.GPUMemGB)
 	}
 }
 

@@ -259,6 +259,67 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 	}
 }
 
+// Regression: Instance.gpu_mem_gb must record the offer's actual per-GPU
+// memory, not the job group's minimum memory requirement. Otherwise a
+// running rental's GPUMemGB is 0 in the DB and the reuse matcher rejects
+// new jobs with memory constraints.
+func TestLaunchInstanceRecordsOfferGPUMemory(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	errStop := errors.New("stop after registration")
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, errStop
+		},
+	}
+
+	job := &db.Job{ID: 701, Status: db.StatusQueued, Command: "python train.py"}
+	group := InstanceGroup{
+		GPUClass: "RTX_3090",
+		GPUMemGB: 20, // job constraint: needs at least 20GB
+		Jobs:     []*db.Job{job},
+	}
+	// Offer is the actual hardware — a 24GB RTX 3090 satisfies the 20GB constraint.
+	offer := cloud.Offer{
+		ProviderID: "900",
+		Provider:   cloud.ProviderVastai,
+		GPUName:    "RTX_3090",
+		GPUMemGB:   24,
+	}
+	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
+	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	instanceID, err := LaunchInstance(
+		mockClient, database, nil, group, offer,
+		LaunchOpts{}, r2Cfg, createOpts,
+		R2Assets{Client: &r2.Client{}},
+		nil, func(string) {}, nil,
+	)
+	if err == nil || !errors.Is(err, errStop) {
+		t.Fatalf("LaunchInstance() error = %v, want stop-after-registration failure", err)
+	}
+	if instanceID == 0 {
+		t.Fatal("expected DB instance ID")
+	}
+
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if ci.GPUMemGB != 24 {
+		t.Fatalf("Instance.GPUMemGB = %d, want 24 (actual offer memory, not job constraint)", ci.GPUMemGB)
+	}
+}
+
 func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

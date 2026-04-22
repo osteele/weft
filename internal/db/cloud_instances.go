@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -535,7 +536,7 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 	_, err := database.Exec(
 		`UPDATE launches
 		 SET resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
-		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?, disk_gb = ?
+		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?, disk_gb = ?, gpu_mem_gb = ?
 		 WHERE id = ?`,
 		offer.GPUName,
 		int(offer.CostPerHour*100),
@@ -546,6 +547,7 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 		offer.UploadBandwidth,
 		offer.CUDAVersion,
 		int(offer.DiskSpaceGB),
+		int(math.Round(offer.GPUMemGB)),
 		id,
 	)
 	return err

@@ -68,6 +68,10 @@ func TestMatchJobToInstance_GPUMemory(t *testing.T) {
 		{"exact match", &mem24, 24, true},
 		{"sufficient", &mem24, 80, true},
 		{"insufficient", &mem80, 24, false},
+		// Regression: a running rental with unknown per-GPU memory (0 in DB)
+		// is rejected by the matcher. The fix is at launch time — Instance
+		// rows must record offer.GPUMemGB so this check has real data.
+		{"unknown instance memory rejected", &mem24, 0, false},
 	}
 
 	for _, tt := range tests {
