@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -278,5 +279,162 @@ func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
 	}
 	if got := job.Metadata.Dependencies.CloudAfter; len(got) != 1 || got[0].JobID != 1046 {
 		t.Fatalf("cloud_after = %v", got)
+	}
+}
+
+// Covers spec invariant PendingPlacementClearedOnTerminalLaunch: once a launch
+// reaches a terminal status, any pending_placement on attempts referencing it
+// must be cleared, otherwise AssignJobHost will refuse to re-place the job.
+func TestTrigger_LaunchTerminal_ClearsPendingPlacement(t *testing.T) {
+	for _, terminalStatus := range []string{LaunchStatusFailed, LaunchStatusCancelled, LaunchStatusCompleted} {
+		t.Run(terminalStatus, func(t *testing.T) {
+			database := setupTestDB(t)
+			launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+			if err != nil {
+				t.Fatalf("CreateLaunch: %v", err)
+			}
+
+			jobID := int64(7001)
+			insertTestJob(t, database, jobID, "echo pending", "/tmp", StatusQueued, withLaunch(launchID))
+			if err := SetAttemptPendingStatus(database, jobID, StatusPendingPlacement); err != nil {
+				t.Fatalf("SetAttemptPendingStatus: %v", err)
+			}
+
+			if _, err := database.Exec(`UPDATE launches SET status = ? WHERE id = ?`, terminalStatus, launchID); err != nil {
+				t.Fatalf("UPDATE launches: %v", err)
+			}
+
+			var pending sql.NullString
+			var pendingAt sql.NullInt64
+			if err := database.QueryRow(
+				`SELECT pending_status, pending_at FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+				jobID,
+			).Scan(&pending, &pendingAt); err != nil {
+				t.Fatalf("query attempt: %v", err)
+			}
+			if pending.Valid {
+				t.Fatalf("pending_status = %q, want NULL after launch %s", pending.String, terminalStatus)
+			}
+			if pendingAt.Valid {
+				t.Fatalf("pending_at = %d, want NULL after launch %s", pendingAt.Int64, terminalStatus)
+			}
+		})
+	}
+}
+
+func TestTrigger_LaunchTerminal_DoesNotTouchOtherPendingStatuses(t *testing.T) {
+	database := setupTestDB(t)
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// A pending_status of "queued" (user intent to re-queue) must be preserved
+	// when the launch fails — only pending_placement is cleared.
+	jobID := int64(7101)
+	insertTestJob(t, database, jobID, "echo queued-intent", "/tmp", StatusQueued, withLaunch(launchID))
+	if err := SetAttemptPendingStatus(database, jobID, StatusQueued); err != nil {
+		t.Fatalf("SetAttemptPendingStatus: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE launches SET status = ? WHERE id = ?`, LaunchStatusFailed, launchID); err != nil {
+		t.Fatalf("UPDATE launches: %v", err)
+	}
+
+	var pending string
+	if err := database.QueryRow(
+		`SELECT COALESCE(pending_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&pending); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if pending != StatusQueued {
+		t.Fatalf("pending_status = %q, want %q (non-pending_placement intent must survive)", pending, StatusQueued)
+	}
+}
+
+func TestTrigger_LaunchTerminal_DoesNotTouchOtherLaunches(t *testing.T) {
+	database := setupTestDB(t)
+	terminalID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch(terminal): %v", err)
+	}
+	otherID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch(other): %v", err)
+	}
+
+	jobOther := int64(7201)
+	insertTestJob(t, database, jobOther, "echo other", "/tmp", StatusQueued, withLaunch(otherID))
+	if err := SetAttemptPendingStatus(database, jobOther, StatusPendingPlacement); err != nil {
+		t.Fatalf("SetAttemptPendingStatus: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE launches SET status = ? WHERE id = ?`, LaunchStatusFailed, terminalID); err != nil {
+		t.Fatalf("UPDATE launches: %v", err)
+	}
+
+	var pending string
+	if err := database.QueryRow(
+		`SELECT COALESCE(pending_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobOther,
+	).Scan(&pending); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if pending != StatusPendingPlacement {
+		t.Fatalf("pending_status = %q, want %q (other launch's attempts must be untouched)", pending, StatusPendingPlacement)
+	}
+}
+
+// End-to-end: once the trigger has cleared the stale pending_placement,
+// AssignJobHost can place the job again.
+func TestTrigger_LaunchTerminal_UnblocksAssignJobHost(t *testing.T) {
+	database := setupTestDB(t)
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID := int64(7301)
+	insertTestJob(t, database, jobID, "echo stuck", "/tmp", StatusQueued, withLaunch(launchID))
+	// job_status maps an orphaned attempt back to 'queued' only when the job's
+	// requested_status is explicitly 'queued'.
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = 'queued' WHERE id = ?`, jobID); err != nil {
+		t.Fatalf("set requested_status: %v", err)
+	}
+	if err := SetAttemptPendingStatus(database, jobID, StatusPendingPlacement); err != nil {
+		t.Fatalf("SetAttemptPendingStatus: %v", err)
+	}
+
+	// Simulate the orphan-on-destroy trigger's output on the attempt (canceled
+	// + orphaned + end_time + host cleared). It does not touch pending_status,
+	// so the pending_placement from above is still set.
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, cloud_outcome = ?, end_time = ?, host = '' WHERE job_id = ?`,
+		StatusCanceled, AttemptOutcomeOrphaned, time.Now().Unix(), jobID,
+	); err != nil {
+		t.Fatalf("simulate orphan: %v", err)
+	}
+
+	// Pre-trigger: AssignJobHost refuses because effective_status is pending_placement.
+	assigned, err := AssignJobHost(database, jobID, "host-alpha")
+	if err != nil {
+		t.Fatalf("AssignJobHost (pre-trigger): %v", err)
+	}
+	if assigned {
+		t.Fatalf("AssignJobHost succeeded while job was pending_placement; the stuck-job bug has returned")
+	}
+
+	// Launch goes terminal → trigger clears pending_status on the attempt.
+	if _, err := database.Exec(`UPDATE launches SET status = ? WHERE id = ?`, LaunchStatusFailed, launchID); err != nil {
+		t.Fatalf("UPDATE launches: %v", err)
+	}
+
+	assigned, err = AssignJobHost(database, jobID, "host-alpha")
+	if err != nil {
+		t.Fatalf("AssignJobHost (post-trigger): %v", err)
+	}
+	if !assigned {
+		t.Fatalf("AssignJobHost returned false after launch went terminal; trigger did not unblock placement")
 	}
 }

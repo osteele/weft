@@ -666,6 +666,21 @@ func createIntegrityTriggers(db *sql.DB) error {
 			   AND end_time IS NULL
 			   AND status IN ('queued', 'pending_placement');
 		END`,
+		// Enforces spec invariant PendingPlacementClearedOnTerminalLaunch:
+		// pending_placement is meaningful only while the referenced launch is
+		// still a placement candidate, so clear it on terminal transitions.
+		`CREATE TRIGGER IF NOT EXISTS launches_clear_pending_placement_on_terminal
+		AFTER UPDATE OF status ON launches
+		FOR EACH ROW
+		WHEN NEW.status IN ('failed', 'canceled', 'completed')
+		     AND OLD.status <> NEW.status
+		BEGIN
+			UPDATE job_attempts
+			   SET pending_status = NULL,
+			       pending_at = NULL
+			 WHERE launch_id = NEW.id
+			   AND pending_status = 'pending_placement';
+		END`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -699,6 +714,7 @@ func dropIntegrityViewsAndTriggers(db *sql.DB) error {
 		"job_timeseries_validate_job_run_ownership_on_update",
 		"launch_live_state_orphan_open_queued_attempts_on_insert",
 		"launch_live_state_orphan_open_queued_attempts_on_update",
+		"launches_clear_pending_placement_on_terminal",
 	} {
 		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 			return err

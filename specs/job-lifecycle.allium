@@ -355,7 +355,11 @@ rule LaunchPlacementWindow {
         -- queued once assigned to a host/instance.
         -- pending_placement is an intent marker, not durable truth:
         -- reconciliation may normalize stale pending_placement back to queued
-        -- after launch progress is observed.
+        -- after launch progress is observed. Because the marker blocks
+        -- subsequent placement (AssignJobHost refuses jobs whose effective
+        -- status is not queued), it must be cleared whenever the launch it
+        -- was set for stops being a valid placement target — see the
+        -- PendingPlacementClearedOnTerminalLaunch invariant.
 }
 
 rule ReleaseDependency {
@@ -682,6 +686,28 @@ invariant RunningJobsAreNotTerminal {
     for job in Jobs:
         if job.status = running:
             job.is_terminal = false
+}
+
+invariant PendingPlacementClearedOnTerminalLaunch {
+    -- A pending_placement intent only makes sense while the launch it was set
+    -- for is still a placement candidate. Once the launch reaches a terminal
+    -- status, any residual pending_placement on attempts referencing that
+    -- launch must be cleared.
+    for attempt in JobAttempts where attempt.pending_status = pending_placement:
+        if attempt.cloud_instance != null
+           and attempt.cloud_instance.status in {failed, canceled, completed}:
+            unreachable
+
+    @guidance
+        -- Enforced by the SQLite trigger
+        -- launches_clear_pending_placement_on_terminal in
+        -- internal/db/db.go createIntegrityTriggers.
+        --
+        -- A stale pending_placement silently blocks re-placement:
+        -- AssignJobHost (internal/db/cloud_instances.go) rejects any job
+        -- whose effective_status (COALESCE(pending_status, status)) is not
+        -- exactly 'queued', so re-placement returns (false, nil) without
+        -- updating the attempt, leaving the job unplaced.
 }
 
 -- ==========================================================================
