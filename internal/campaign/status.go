@@ -24,6 +24,12 @@ const (
 	bootstrapWarnTimeout      = 15 * time.Minute // warn after this long with no progress
 	BootstrapTerminateTimeout = 20 * time.Minute // auto-terminate after this long
 	bootstrapStageReady       = "ready"          // R2 marker value when bootstrap is complete
+
+	// launchingPhaseTimeout bounds `launching` when BootstrapOrigin is nil.
+	// MUST exceed the launching goroutine's own context timeout so its
+	// cancellation fires first; this is the safety net. Matches
+	// config.launching_phase_timeout in campaign-lifecycle.allium.
+	launchingPhaseTimeout = 25 * time.Minute
 )
 
 // Setup phase stall defaults (used when no survival data is available).

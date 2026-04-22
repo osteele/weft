@@ -214,6 +214,11 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
+    -- Catch-all wall-clock ceiling on the `launching` status when no
+    -- bootstrap_origin has been recorded yet. See LaunchingPhaseTimeout.
+    -- MUST exceed any provider-internal bootstrap context timeout so the
+    -- launching goroutine's own cancellation normally fires first.
+    launching_phase_timeout: Duration = 25.minutes
     self_destruct_linger_threshold: Duration = 2.minutes
     self_destruct_unknown_end_fallback: Duration = 3.minutes
     self_destruct_retries: Integer = 3
@@ -590,6 +595,24 @@ rule BootstrapTimeout {
     ensures: instance.ended_at = now
 }
 
+rule LaunchingPhaseTimeout {
+    when: instance: Instance.created_at + config.launching_phase_timeout <= now
+    requires: instance.status = launching
+    requires: instance.bootstrap_origin = null
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Closes the gap where BootstrapTimeout cannot fire because
+        -- bootstrap_origin is still null (provider-specific pre-running
+        -- step has not recorded launched_at or provider_running_at yet).
+        -- Reason is infra_failure (retryable) so RelaunchAfterInfraFailure
+        -- applies. The launching goroutine's own context timeout is the
+        -- primary bound; this rule is the safety net for a wedged goroutine.
+}
+
 rule SetupStall {
     when: SetupPhaseStalled(instance)
     requires: instance.status = running
@@ -763,8 +786,29 @@ rule CampaignFailed {
 }
 
 -- ==========================================================================
--- Runaway breaker (launch safety)
+-- Runaway prevention (defense in depth)
 -- ==========================================================================
+
+-- Every Instance reaches terminal status within a bounded wall-clock
+-- window of creation, regardless of provider responsiveness. Four layers,
+-- outermost-in:
+--
+--   1. Offer-time filters — config.offer_min_reliability plus the
+--      SurvivalModel / MachinePenalty score used by FilterOffersBySurvival.
+--   2. Per-instance kill rules (see §Failure and termination rules) —
+--      LaunchingPhaseTimeout, BootstrapTimeout, SetupStall, HeartbeatStale,
+--      ProviderInstanceDied, DiskFullDetected, GraceExpired.
+--   3. Adaptive phase thresholds — BootstrapSurvival / SetupSurvival
+--      override the static bootstrap_/setup_ defaults when sample size is
+--      sufficient; refreshed every config.survival_cache_ttl.
+--   4. Per-scope churn breaker — RunawayBreakerTrips / RunawayBreakerClears
+--      pause auto-relaunch when a campaign+project churns without progress.
+--
+-- The top-level bound is formalised by invariant InstanceEventuallyTerminal.
+
+-- --------------------------------------------------------------------------
+-- Runaway breaker (per-scope churn limiter)
+-- --------------------------------------------------------------------------
 
 -- The runaway breaker pauses automatic relaunches when repeated failures
 -- indicate a systemic problem (bad GPU class, broken setup, etc.).
@@ -1034,6 +1078,26 @@ invariant TerminalInstancesHaveReason {
     for instance in Instances:
         if instance.status in {failed, canceled}:
             instance.termination_reason != null
+}
+
+invariant InstanceEventuallyTerminal {
+    -- Every Instance reaches a terminal status within a bounded wall-clock
+    -- window of creation. The window is the maximum of the per-status
+    -- ceilings enforced by the kill-candidate rules enumerated in
+    -- §Runaway prevention layer 2. Adaptive thresholds (layer 3) may
+    -- shorten but MUST NOT extend this bound beyond
+    --     config.launching_phase_timeout + config.setup_stall_timeout
+    --     + config.running_stall_timeout + config.grace_shutdown_timeout.
+    -- Any new pre-running bootstrap phase added to the Instance lifecycle
+    -- MUST be covered by a rule that fires within this bound; otherwise
+    -- this invariant is violated.
+    for instance in Instances:
+        instance.is_terminal
+        or (now - instance.created_at)
+           < config.launching_phase_timeout
+             + config.setup_stall_timeout
+             + config.running_stall_timeout
+             + config.grace_shutdown_timeout
 }
 
 invariant GraceRequiresDeadline {

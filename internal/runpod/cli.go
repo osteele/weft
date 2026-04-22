@@ -41,11 +41,7 @@ func newCLIRunner(cliPath string) *cliRunner {
 			out, err := cmd.Output()
 			if err != nil {
 				if exitErr, ok := err.(*exec.ExitError); ok {
-					prefix := args
-					if len(prefix) > 3 {
-						prefix = args[:3]
-					}
-					return nil, fmt.Errorf("%s: %s", strings.Join(prefix, " "), strings.TrimSpace(string(exitErr.Stderr)))
+					return nil, formatRunpodctlError(args, exitErr, exitErr.Stderr)
 				}
 				return nil, err
 			}
@@ -56,15 +52,28 @@ func newCLIRunner(cliPath string) *cliRunner {
 			cmd.Env = runpodctlCommandEnv()
 			out, err := cmd.CombinedOutput()
 			if err != nil {
-				prefix := args
-				if len(prefix) > 3 {
-					prefix = args[:3]
-				}
-				return out, fmt.Errorf("%s: %s", strings.Join(prefix, " "), strings.TrimSpace(string(out)))
+				return out, formatRunpodctlError(args, err, out)
 			}
 			return out, nil
 		},
 	}
+}
+
+// formatRunpodctlError builds a non-empty error message for a failed
+// runpodctl invocation. When the command's stderr/output is empty (e.g. the
+// process exits non-zero with no diagnostic text), fall back to the exec
+// error string (typically "exit status N") so callers never see a message
+// with a trailing empty segment like "ssh info POD: ".
+func formatRunpodctlError(args []string, err error, stream []byte) error {
+	prefix := args
+	if len(prefix) > 3 {
+		prefix = args[:3]
+	}
+	detail := strings.TrimSpace(string(stream))
+	if detail == "" {
+		detail = err.Error()
+	}
+	return fmt.Errorf("%s: %s", strings.Join(prefix, " "), detail)
 }
 
 func runpodctlCommandEnv() []string {

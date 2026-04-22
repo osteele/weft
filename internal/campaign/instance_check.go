@@ -295,10 +295,29 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
-	// 5. Bootstrap stall: instance running but no job progress after timeout.
-	// BootstrapOrigin prefers provider "running" time over LaunchedAt so time
-	// spent in provider "loading" state doesn't count against the timeout.
-	if bootstrapOrigin := ci.BootstrapOrigin(); ci.Status == db.LaunchStatusRunning && bootstrapOrigin != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
+	// 4c. Launching phase catch-all: no BootstrapOrigin means rule 5 and
+	// spec BootstrapTimeout can't anchor. Fire on CreatedAt; reason
+	// infra_failure so the retry path applies. See spec LaunchingPhaseTimeout.
+	if ci.Status == db.LaunchStatusLaunching && ci.BootstrapOrigin() == nil {
+		if start := cloudInstanceLifecycleStart(ci); start != nil && p.Now.Sub(*start) >= launchingPhaseTimeout {
+			return InstanceAction{
+				Kind:              ActionEmptyStatusTimeout,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("launching phase exceeded %s with no provider progress — terminating", launchingPhaseTimeout),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
+		}
+	}
+
+	// 5. Bootstrap stall: no job progress after timeout. Fires during
+	// `running` (post-bootstrap wait) and `launching` once BootstrapOrigin
+	// is known. BootstrapOrigin prefers provider "running" time over
+	// LaunchedAt so time spent in provider "loading" doesn't count.
+	bootstrapPhaseActive := ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching
+	if bootstrapOrigin := ci.BootstrapOrigin(); bootstrapPhaseActive && bootstrapOrigin != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		elapsed := p.Now.Sub(time.Unix(*bootstrapOrigin, 0))
 
 		warnTimeout := bootstrapWarnTimeout

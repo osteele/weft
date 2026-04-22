@@ -525,8 +525,19 @@ func SetLaunchProviderRunningAt(db *sql.DB, id int64, t time.Time) error {
 }
 
 // SetLaunchProviderID sets the provider-neutral instance ID for a cloud instance.
+// Also stamps launched_at if it is still null, so that bootstrap-timeout rules
+// have an anchor even when the launching goroutine is wedged in a provider-
+// specific pre-running step (e.g. RunPod SSH-readiness polling) and the
+// instance never reaches status=running.
 func SetLaunchProviderID(db *sql.DB, id int64, providerID string) error {
-	_, err := db.Exec(`UPDATE launches SET provider_instance_id = ? WHERE id = ?`, providerID, id)
+	now := time.Now().Unix()
+	_, err := db.Exec(
+		`UPDATE launches
+		 SET provider_instance_id = ?,
+		     launched_at = COALESCE(launched_at, ?)
+		 WHERE id = ?`,
+		providerID, now, id,
+	)
 	return err
 }
 
