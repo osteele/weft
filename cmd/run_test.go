@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -142,5 +143,47 @@ func TestSubmitJobToCloudReuse_SubmitFailure(t *testing.T) {
 	}
 	if outcome != cloudReuseSubmitFailed {
 		t.Fatalf("outcome = %v, want %v", outcome, cloudReuseSubmitFailed)
+	}
+}
+
+func TestPersistDraftArtifactFields(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordDraftJobWithGPU(database, "cool30", "/tmp/project", "echo hello", "draft", "")
+	if err != nil {
+		t.Fatalf("RecordDraftJobWithGPU: %v", err)
+	}
+
+	inputs := []string{"hf-dataset:allenai/c4"}
+	outputs := []string{"output/representations/model_a_train.pkl"}
+	outputDirs := []string{"output/representations"}
+	produces := []string{"output/representations/model_a_train.pkl"}
+	needs := []string{
+		"output/representations/model_b_train.pkl:1285",
+		"output/representations/model_b_dev.pkl:1285",
+	}
+
+	if err := persistDraftArtifactFields(database, jobID, inputs, outputs, outputDirs, produces, needs); err != nil {
+		t.Fatalf("persistDraftArtifactFields: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if !reflect.DeepEqual(job.Inputs, inputs) {
+		t.Fatalf("Inputs = %v, want %v", job.Inputs, inputs)
+	}
+	if !reflect.DeepEqual(job.Outputs, outputs) {
+		t.Fatalf("Outputs = %v, want %v", job.Outputs, outputs)
+	}
+	if !reflect.DeepEqual(job.OutputDirs, outputDirs) {
+		t.Fatalf("OutputDirs = %v, want %v", job.OutputDirs, outputDirs)
+	}
+	if !reflect.DeepEqual(job.Produces, produces) {
+		t.Fatalf("Produces = %v, want %v", job.Produces, produces)
+	}
+	if !reflect.DeepEqual(job.Needs, needs) {
+		t.Fatalf("Needs = %v, want %v", job.Needs, needs)
 	}
 }

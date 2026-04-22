@@ -907,6 +907,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("set project: %w", err)
 			}
 		}
+		if err := persistDraftArtifactFields(database, jobID, runInputs, runOutputs, outputDirs, runProduces, resolvedNeeds); err != nil {
+			return err
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -1277,6 +1280,54 @@ func buildRunDependencies() []queueDependency {
 		deps = append(deps, queueDependency{JobID: runAfterAny, AllowFailure: true})
 	}
 	return deps
+}
+
+func persistDraftArtifactFields(database *sql.DB, jobID int64, inputs, outputs, outputDirs, produces, needs []string) error {
+	if len(inputs) > 0 {
+		if err := db.SetJobInputs(database, jobID, inputs); err != nil {
+			return fmt.Errorf("set draft job inputs: %w", err)
+		}
+	}
+	if len(outputs) > 0 {
+		if err := db.SetJobOutputs(database, jobID, outputs); err != nil {
+			return fmt.Errorf("set draft job outputs: %w", err)
+		}
+	}
+	if len(outputDirs) > 0 {
+		if err := db.SetJobOutputDirs(database, jobID, outputDirs); err != nil {
+			return fmt.Errorf("set draft job output dirs: %w", err)
+		}
+	}
+	if len(produces) > 0 {
+		if err := db.SetJobProduces(database, jobID, produces); err != nil {
+			return fmt.Errorf("set draft job produces: %w", err)
+		}
+	}
+	if len(needs) > 0 {
+		if err := db.SetJobNeeds(database, jobID, needs); err != nil {
+			return fmt.Errorf("set draft job needs: %w", err)
+		}
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return fmt.Errorf("verify draft job needs persistence: %w", err)
+		}
+		if !equalStringSlices(job.Needs, needs) {
+			return fmt.Errorf("verify draft job needs persistence: stored=%v requested=%v", job.Needs, needs)
+		}
+	}
+	return nil
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // syncHostQuietly syncs a host to push queued jobs to the remote.
