@@ -410,7 +410,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 			}
 			return fmt.Errorf("build agent job payload for job %d: %w", job.ID, err)
 		}
-		cloudNeeds, err := resolveCloudNeedsForJob(ctx, database, r2Client, job)
+		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Client, job, instanceID)
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
@@ -419,6 +419,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 			return fmt.Errorf("resolve cloud needs for job %d: %w", job.ID, err)
 		}
 		agentJob.CloudNeeds = cloudNeeds
+		agentJob.CloudAfter = cloudAfter
 		payload.Jobs = append(payload.Jobs, agentJob)
 		payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
 			RemoteDir: remoteDir,

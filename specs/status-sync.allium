@@ -94,6 +94,9 @@ value SyncResult {
 --   - cloud_after(any): upstream status must be terminal
 -- These dependencies are evaluated during queue dispatch, not by remote
 -- queue-runner status files.
+-- cloud_after itself is derived at placement/launch time from the consumer's
+-- Job.needs list and the current state of each referenced producer job; it is
+-- not a user-facing input.
 
 -- Outcome of three-way merge reconciliation.
 value ReconcileResult {

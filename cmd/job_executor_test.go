@@ -33,7 +33,7 @@ func TestQueueJob_PersistsGPUMemMaxGB(t *testing.T) {
 	}
 }
 
-func TestResolveArtifactNeedsHost(t *testing.T) {
+func TestResolveArtifactNeedsPlacement(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	hostJobID, err := db.RecordQueued(database, "host-a", "/tmp/project", "echo one", "producer")
@@ -53,24 +53,24 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 		t.Fatalf("RecordQueued cloud: %v", err)
 	}
 
-	t.Run("infer host from producers", func(t *testing.T) {
-		host, localNeeds, cloudNeeds, err := resolveArtifactNeedsHost(database, []string{
+	t.Run("infer host from on-prem producers", func(t *testing.T) {
+		host, needs, err := resolveArtifactNeedsPlacement(database, []string{
 			fmt.Sprintf("results/model.pt:%d", hostJobID),
 			fmt.Sprintf("results/metrics.json:%d", hostJobID2),
 		}, "")
 		if err != nil {
-			t.Fatalf("resolveArtifactNeedsHost: %v", err)
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
 		}
 		if host != "host-a" {
 			t.Fatalf("host = %q, want host-a", host)
 		}
-		if len(localNeeds) != 2 || len(cloudNeeds) != 0 {
-			t.Fatalf("unexpected needs split local=%v cloud=%v", localNeeds, cloudNeeds)
+		if len(needs) != 2 {
+			t.Fatalf("needs = %v, want 2 entries", needs)
 		}
 	})
 
 	t.Run("reject mismatched explicit host", func(t *testing.T) {
-		_, _, _, err := resolveArtifactNeedsHost(database, []string{
+		_, _, err := resolveArtifactNeedsPlacement(database, []string{
 			fmt.Sprintf("results/model.pt:%d", hostJobID),
 		}, "host-b")
 		if err == nil {
@@ -79,7 +79,7 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 	})
 
 	t.Run("reject multiple producer hosts", func(t *testing.T) {
-		_, _, _, err := resolveArtifactNeedsHost(database, []string{
+		_, _, err := resolveArtifactNeedsPlacement(database, []string{
 			fmt.Sprintf("results/model.pt:%d", hostJobID),
 			fmt.Sprintf("results/metrics.json:%d", otherHostJobID),
 		}, "")
@@ -88,18 +88,18 @@ func TestResolveArtifactNeedsHost(t *testing.T) {
 		}
 	})
 
-	t.Run("allow producer without host as cloud need", func(t *testing.T) {
-		host, localNeeds, cloudNeeds, err := resolveArtifactNeedsHost(database, []string{
+	t.Run("unplaced/rental producer passes through without host pinning", func(t *testing.T) {
+		host, needs, err := resolveArtifactNeedsPlacement(database, []string{
 			fmt.Sprintf("results/model.pt:%d", cloudJobID),
 		}, "")
 		if err != nil {
-			t.Fatalf("resolveArtifactNeedsHost: %v", err)
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
 		}
 		if host != "" {
 			t.Fatalf("host = %q, want empty", host)
 		}
-		if len(localNeeds) != 0 || len(cloudNeeds) != 1 {
-			t.Fatalf("unexpected needs split local=%v cloud=%v", localNeeds, cloudNeeds)
+		if len(needs) != 1 {
+			t.Fatalf("needs = %v, want 1 entry", needs)
 		}
 	})
 }

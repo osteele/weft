@@ -55,6 +55,15 @@ type Constraints struct {
 	Command  string   // For predictor-based scoring; empty = skip
 	Project  string   // For predictor-based scoring; empty = skip
 	Tags     []string // Job tags; "benchmark" triggers idle-host requirement
+
+	// PreferredInstanceIDs is a soft preference toward reusing these specific
+	// rental instances. Used to co-locate a consumer on its --needs
+	// producer's rental instance so the agent can read outputs from the
+	// shared workdir instead of staging from R2. The preference is a
+	// tie-breaker / tip: if the preferred instance fails the GPU class /
+	// capacity / provider filters, placement falls through to the normal
+	// ranking.
+	PreferredInstanceIDs []int64
 }
 
 // ConstraintsFromJob builds Constraints from a db.Job's fields.

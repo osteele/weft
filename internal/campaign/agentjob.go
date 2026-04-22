@@ -59,21 +59,30 @@ func remoteDirForAgentJob(job *db.Job, localToRemote map[string]string) string {
 	return path.Join(cloud.ProjectRootDir, path.Base(localDir))
 }
 
-func resolveCloudNeedsForJob(ctx context.Context, database *sql.DB, client *r2.Client, job *db.Job) ([]cloud.CloudNeed, error) {
+// resolveCloudNeedsForJob classifies the consumer's --needs specs against the
+// current state of each producer and the target rental instance. Specs
+// pointing at a producer co-located on targetInstanceID (status running/grace)
+// become CloudAfter refs; all others fall through to R2 staging.
+//
+// The consumer job is re-read from the database so that a stale in-memory
+// struct cannot drop Needs captured after submission.
+func resolveCloudNeedsForJob(
+	ctx context.Context,
+	database *sql.DB,
+	client *r2.Client,
+	job *db.Job,
+	targetInstanceID int64,
+) ([]cloud.CloudNeed, []cloud.CloudAfterRef, error) {
 	if job == nil {
-		return nil, fmt.Errorf("job is nil")
+		return nil, nil, fmt.Errorf("job is nil")
 	}
-	// Re-read metadata to avoid stale in-memory structs dropping cloud_needs.
 	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
+		job.Needs = fresh.Needs
 		job.Metadata = fresh.Metadata
 	}
-	var specs []string
-	if job.Metadata != nil && job.Metadata.Dependencies != nil {
-		specs = job.Metadata.Dependencies.CloudNeeds
-	}
-	resolved, err := resolveCloudNeedsFunc(ctx, database, client, specs)
+	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(ctx, database, client, job, targetInstanceID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve cloud needs for job %d: %w", job.ID, err)
+		return nil, nil, fmt.Errorf("classify needs for job %d: %w", job.ID, err)
 	}
-	return resolved, nil
+	return cloudNeeds, cloudAfter, nil
 }

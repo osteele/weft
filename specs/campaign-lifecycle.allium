@@ -251,6 +251,16 @@ config {
 -- GPU specs. It is a "not yet" signal: the downstream job is invisible to
 -- the launch selector until its upstream terminates.
 --
+-- Separately, a job's `needs` (set by `--needs` at submission, see
+-- job-lifecycle.allium) is a data dependency, not a placement gate. At
+-- launch time the placement classifier inspects each referenced producer's
+-- current state: if the producer is live on a reusable rental instance the
+-- consumer is co-located there (and the agent gates the consumer on
+-- producer success via cloud_after); otherwise the classifier emits
+-- cloud_needs so the producer's outputs are staged from R2 onto the
+-- consumer's fresh instance. Users who require the producer to finish
+-- before the consumer can run must combine `--needs` with `--after`.
+--
 -- Semantics by dependency mode:
 --   --after (strict):    upstream must be Completed with exit_code = 0
 --   --after-any:         upstream must be terminal (any status)

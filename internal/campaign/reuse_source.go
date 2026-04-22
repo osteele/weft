@@ -34,6 +34,11 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 		return nil, nil
 	}
 
+	preferred := make(map[int64]bool, len(constraints.PreferredInstanceIDs))
+	for _, id := range constraints.PreferredInstanceIDs {
+		preferred[id] = true
+	}
+
 	var candidates []placement.Candidate
 	for _, cap := range ranked {
 		inst := cap.Instance
@@ -41,9 +46,12 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 			continue
 		}
 
-		// Estimate queue wait on this instance
+		// Estimate queue wait on this instance. Preferred instances (e.g.
+		// the consumer's --needs producer) get a zero-wait estimate so they
+		// outrank equivalently-priced candidates; this is a soft tip, not a
+		// hard requirement — filters above still apply.
 		var waitMin float64
-		if cap.RunningJobCount > 0 {
+		if cap.RunningJobCount > 0 && !preferred[inst.ID] {
 			waitMin = float64(cap.RunningJobCount) * 30
 		}
 		waitEst := estimate.FromSeconds(waitMin*60, waitMin*60*0.5, waitMin*60*1.5)

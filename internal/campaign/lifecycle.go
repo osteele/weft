@@ -1390,12 +1390,13 @@ func LaunchInstance(
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 			return instanceID, fmt.Errorf("build agent job payload for job %d: %w", job.ID, err)
 		}
-		cloudNeeds, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job)
+		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 			return instanceID, fmt.Errorf("resolve cloud needs for job %d: %w", job.ID, err)
 		}
 		agentJob.CloudNeeds = cloudNeeds
+		agentJob.CloudAfter = cloudAfter
 		agentJobs = append(agentJobs, agentJob)
 	}
 

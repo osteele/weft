@@ -46,12 +46,24 @@ entity Job {
     outputs: List<String>       -- declared output assets
     output_dirs: List<String>   -- convention-based output directories
     produces: List<String>      -- artifact specs this job produces
-    needs: List<String>         -- host-local artifact specs this job requires
+    needs: List<String>         -- artifact specs this job requires (e.g. "output/model.pt:42");
+                                -- classified at placement/launch time as either same-instance
+                                -- co-location (cloud_after on the consumer's agent manifest) or
+                                -- cross-instance R2 staging (cloud_needs on the manifest).
     tags: Set<Tag>
     env_vars: List<String>
     dep_spec: String?           -- host-local dependency on another job (e.g. "42" or "42:any")
-    -- Cloud-backed dependencies (e.g. rental upstream jobs) are stored in job metadata:
-    --   metadata.dependencies.cloud_after / metadata.dependencies.cloud_needs
+    -- Launch-time derived manifest fields (not persisted on the job row):
+    --   agent_job.cloud_after   -- populated when a producer of a --needs spec
+    --                              shares the consumer's rental LaunchID and
+    --                              that launch is not terminal / self-destructing.
+    --                              Covers both same-batch co-location (producer
+    --                              and consumer placed on one instance in the
+    --                              same campaign launch, launch still
+    --                              planned/launching) and reuse of an existing
+    --                              running/grace instance.
+    --   agent_job.cloud_needs   -- populated when a producer is no longer reachable by
+    --                              co-location and its outputs must be staged from R2
 
     -- GPU requirements
     gpu_class: String?          -- required GPU class (e.g. "A100", "nvidia>=24GB")

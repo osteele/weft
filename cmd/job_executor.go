@@ -322,41 +322,78 @@ func resolveDependencyForTarget(database *sql.DB, depID int64, host string, allo
 	return &queueDependency{JobID: depID, AllowFailure: allowFailure}, nil, nil
 }
 
-func resolveArtifactNeedsHost(database *sql.DB, needs []string, host string) (string, []string, []string, error) {
+// collectPreferredInstanceIDs inspects the consumer's --needs specs and
+// returns the set of rental instance IDs currently hosting any named
+// producer. Used as a soft placement tip so the consumer can co-locate with
+// its producer (see internal/placement.Constraints.PreferredInstanceIDs).
+// Best-effort: ignores unknown specs and DB lookup errors.
+func collectPreferredInstanceIDs(database *sql.DB, needs []string) []int64 {
+	if len(needs) == 0 {
+		return nil
+	}
+	seen := make(map[int64]bool)
+	var out []int64
+	for _, spec := range needs {
+		parsed, err := runner.ParseNeedsSpec(spec)
+		if err != nil {
+			continue
+		}
+		job, err := db.GetJobByID(database, parsed.Version)
+		if err != nil || job == nil {
+			continue
+		}
+		if job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		if seen[*job.LaunchID] {
+			continue
+		}
+		seen[*job.LaunchID] = true
+		out = append(out, *job.LaunchID)
+	}
+	return out
+}
+
+// resolveArtifactNeedsPlacement validates `--needs` specs and applies on-prem
+// host pinning. All specs are returned in a single slice, stored on jobs.needs
+// and later re-classified at placement/launch time (see
+// internal/campaign/needs_classify.go) into same-instance co-location
+// (CloudAfter) or cross-instance R2 staging (CloudNeeds).
+func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string) (string, []string, error) {
 	resolvedHost := strings.TrimSpace(host)
 	seenJobs := make(map[int64]bool)
-	localNeeds := make([]string, 0, len(needs))
-	cloudNeeds := make([]string, 0, len(needs))
+	out := make([]string, 0, len(needs))
 
 	for _, spec := range needs {
 		parsed, err := runner.ParseNeedsSpec(spec)
 		if err != nil {
-			return "", nil, nil, err
+			return "", nil, err
 		}
 
 		job, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return "", nil, nil, fmt.Errorf("lookup artifact producer job %d: %w", parsed.Version, err)
+			return "", nil, fmt.Errorf("lookup artifact producer job %d: %w", parsed.Version, err)
 		}
 		if job == nil {
-			return "", nil, nil, fmt.Errorf("artifact producer job %d not found", parsed.Version)
-		}
-		if job.IsRentalJob() || strings.TrimSpace(job.Host) == "" {
-			cloudNeeds = append(cloudNeeds, spec)
-			continue
+			return "", nil, fmt.Errorf("artifact producer job %d not found", parsed.Version)
 		}
 
-		producerHost := strings.TrimSpace(job.Host)
-		if !seenJobs[parsed.Version] {
-			if resolvedHost == "" {
-				resolvedHost = producerHost
-			} else if producerHost != resolvedHost {
-				return "", nil, nil, fmt.Errorf("artifact dependency %q is on host %s, but target host is %s", spec, producerHost, resolvedHost)
+		// On-prem producer: pin the consumer to the producer's host so the
+		// shared filesystem / queue-runner dep chain handles artifact reuse.
+		// Rental and unplaced producers are classified later at launch time.
+		if !job.IsRentalJob() && strings.TrimSpace(job.Host) != "" {
+			producerHost := strings.TrimSpace(job.Host)
+			if !seenJobs[parsed.Version] {
+				if resolvedHost == "" {
+					resolvedHost = producerHost
+				} else if producerHost != resolvedHost {
+					return "", nil, fmt.Errorf("artifact dependency %q is on host %s, but target host is %s", spec, producerHost, resolvedHost)
+				}
+				seenJobs[parsed.Version] = true
 			}
-			seenJobs[parsed.Version] = true
 		}
-		localNeeds = append(localNeeds, spec)
+		out = append(out, spec)
 	}
 
-	return resolvedHost, localNeeds, cloudNeeds, nil
+	return resolvedHost, out, nil
 }

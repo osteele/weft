@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -416,25 +417,38 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 
+	// Seed a rental producer (different instance, already terminated) so the
+	// classifier treats the consumer's --needs spec as a cross-instance
+	// staging request rather than same-instance co-location.
+	producerInstanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch producer: %v", err)
+	}
+	producerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "echo producer", "producer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, producerID, producerInstanceID); err != nil {
+		t.Fatalf("SetJobLaunchID producer: %v", err)
+	}
+
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
+	needsSpec := fmt.Sprintf("inputs/data.csv:%d", producerID)
 	if err := db.SetJobOutputDirs(database, jobID, []string{"results/"}); err != nil {
 		t.Fatalf("SetJobOutputDirs: %v", err)
 	}
 	if err := db.SetJobProduces(database, jobID, []string{"results/model.pt"}); err != nil {
 		t.Fatalf("SetJobProduces: %v", err)
 	}
-	if err := db.SetJobNeeds(database, jobID, []string{"inputs/data.csv:41"}); err != nil {
+	if err := db.SetJobNeeds(database, jobID, []string{needsSpec}); err != nil {
 		t.Fatalf("SetJobNeeds: %v", err)
-	}
-	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
-		Dependencies: &db.JobDependencyMetadata{
-			CloudNeeds: []string{"inputs/data.csv:41"},
-		},
-	}); err != nil {
-		t.Fatalf("SetJobMetadata: %v", err)
 	}
 	if err := db.SetJobInputs(database, jobID, []string{"local:data/conllu/"}); err != nil {
 		t.Fatalf("SetJobInputs: %v", err)
@@ -466,9 +480,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 	resolveCloudNeedsFunc = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ []string) ([]cloud.CloudNeed, error) {
 		return []cloud.CloudNeed{{
-			Spec:  "inputs/data.csv:41",
+			Spec:  needsSpec,
 			Path:  "inputs/data.csv",
-			R2Key: "jobs/41/runs/0/artifacts/files/inputs/data.csv",
+			R2Key: fmt.Sprintf("jobs/%d/runs/0/artifacts/files/inputs/data.csv", producerID),
 		}}, nil
 	}
 
@@ -487,13 +501,13 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if !reflect.DeepEqual(got.Jobs[0].Produces, []string{"results/model.pt"}) {
 		t.Fatalf("produces = %v", got.Jobs[0].Produces)
 	}
-	if !reflect.DeepEqual(got.Jobs[0].Needs, []string{"inputs/data.csv:41"}) {
+	if !reflect.DeepEqual(got.Jobs[0].Needs, []string{needsSpec}) {
 		t.Fatalf("needs = %v", got.Jobs[0].Needs)
 	}
 	if !reflect.DeepEqual(got.Jobs[0].CloudNeeds, []cloud.CloudNeed{{
-		Spec:  "inputs/data.csv:41",
+		Spec:  needsSpec,
 		Path:  "inputs/data.csv",
-		R2Key: "jobs/41/runs/0/artifacts/files/inputs/data.csv",
+		R2Key: fmt.Sprintf("jobs/%d/runs/0/artifacts/files/inputs/data.csv", producerID),
 	}}) {
 		t.Fatalf("cloud needs = %v", got.Jobs[0].CloudNeeds)
 	}

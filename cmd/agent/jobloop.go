@@ -87,6 +87,23 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		fmt.Printf("--- Job %d ---\n", job.ID)
 		oplog.LogJob(oplog.OpJobStart, job.ID, "", oplog.WithDetailf("cmd=%s", job.Command))
 
+		// Cloud-after gate: if a same-instance producer this job depends on
+		// has failed, skip the consumer with a clear reason.
+		if skip, reason := checkCloudAfter(job, result.FailedJobs); skip {
+			fmt.Fprintf(os.Stderr, "job %d skipped: %s\n", job.ID, reason)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetail(reason))
+			result.AnyFailed = true
+			result.FailedJobs = append(result.FailedJobs, job.ID)
+
+			ei := runner.ExitInfo{ExitCode: 1}
+			paths := runner.NewJobPaths(cfg.LogDir, job.ID)
+			_ = runner.WriteStatusFile(paths, ei)
+			now := time.Now().Unix()
+			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", reason, now, now, nil)
+			r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+			continue
+		}
+
 		workDir := job.Dir
 		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
@@ -408,6 +425,32 @@ func runGPUWarmup(r2Bucket, phaseKey string, nextJobID int64, onPhase func(strin
 	} else {
 		fmt.Printf("GPU warmup completed in %s\n", time.Since(start).Round(time.Millisecond))
 	}
+}
+
+// checkCloudAfter returns (skip=true, reason) when any CloudAfter ref points
+// at a producer job that failed earlier in this agent session. Producers that
+// are not in failedJobs (i.e. they succeeded, or were never run by this
+// agent — e.g. completed in a prior session before a grace-wake) are treated
+// as satisfied: we only skip on observed failure, not on "not observed".
+//
+// AllowFailure refs are not skip-triggers.
+func checkCloudAfter(job cloud.AgentJob, failedJobs []int64) (bool, string) {
+	if len(job.CloudAfter) == 0 || len(failedJobs) == 0 {
+		return false, ""
+	}
+	failed := make(map[int64]bool, len(failedJobs))
+	for _, id := range failedJobs {
+		failed[id] = true
+	}
+	for _, ref := range job.CloudAfter {
+		if ref.AllowFailure {
+			continue
+		}
+		if failed[ref.JobID] {
+			return true, fmt.Sprintf("cloud_after_failed: producer job %d failed on this instance", ref.JobID)
+		}
+	}
+	return false, ""
 }
 
 func hasOutputDirs(workDir string) bool {

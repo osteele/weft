@@ -187,8 +187,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	var host, command string
-	localNeeds := append([]string(nil), runNeeds...)
-	cloudNeeds := []string{}
+	// All --needs specs flow into jobs.needs and are classified later at
+	// placement/launch time (see internal/campaign/needs_classify.go).
+	resolvedNeeds := append([]string(nil), runNeeds...)
 
 	// --host flag takes priority
 	host = runHost
@@ -466,13 +467,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if len(runNeeds) > 0 {
-		resolvedHost, resolvedLocalNeeds, resolvedCloudNeeds, err := resolveArtifactNeedsHost(database, runNeeds, host)
+		resolvedHost, allNeeds, err := resolveArtifactNeedsPlacement(database, runNeeds, host)
 		if err != nil {
 			return fmt.Errorf("--needs: %w", err)
 		}
 		host = resolvedHost
-		localNeeds = resolvedLocalNeeds
-		cloudNeeds = resolvedCloudNeeds
+		resolvedNeeds = allNeeds
 	}
 	requestedProvider, hasRequestedProvider := db.RequestedProvider(runTags)
 	if hasRequestedProvider && host != "" && !db.IsLaunchHost(host) {
@@ -509,6 +509,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if resolvedGPUMemGB != nil {
 		placementConstraints.GPUMemGB = *resolvedGPUMemGB
 	}
+	// Tip placement toward producers' live rental instances so --needs
+	// consumers co-locate with their producers and can read outputs from
+	// the shared workdir (the classifier in internal/campaign/
+	// needs_classify.go does the actual routing at launch time).
+	placementConstraints.PreferredInstanceIDs = collectPreferredInstanceIDs(database, resolvedNeeds)
 
 	// Build predictor closure if configured
 	predict := placement.BuildJobPredictorFromConfig(cfg, placementConstraints)
@@ -590,8 +595,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
-			Needs:       localNeeds,
-			Metadata:    buildCloudDependencyMetadata(nil, cloudNeeds),
+			Needs:       resolvedNeeds,
 		}
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
 		if err != nil {
@@ -670,8 +674,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
-			Needs:       localNeeds,
-			Metadata:    buildCloudDependencyMetadata(nil, cloudNeeds),
+			Needs:       resolvedNeeds,
 		}
 
 		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
@@ -831,8 +834,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
-			Needs:       localNeeds,
-			Metadata:    buildCloudDependencyMetadata(nil, cloudNeeds),
+			Needs:       resolvedNeeds,
 		})
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
@@ -953,9 +955,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Outputs:      runOutputs,
 			OutputDirs:   outputDirs,
 			Produces:     runProduces,
-			Needs:        localNeeds,
+			Needs:        resolvedNeeds,
 			CloudAfter:   cloudAfter,
-			CloudNeeds:   cloudNeeds,
 			GPUMemStrict: true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 		})
 		if err != nil {
