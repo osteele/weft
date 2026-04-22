@@ -50,7 +50,7 @@ type QueueCommand struct {
 
 // CommandsFileName returns the path to the commands file for a queue.
 func CommandsFileName() string {
-	return fmt.Sprintf("%s.commands", DefaultQueueName)
+	return queueName + ".commands"
 }
 
 // CommandsFilePath returns the full remote path to the commands file.
@@ -209,7 +209,7 @@ type RunnerJobState struct {
 
 // StateFileName returns the filename for the runner state file.
 func StateFileName() string {
-	return fmt.Sprintf("%s.state.json", DefaultQueueName)
+	return queueName + ".state.json"
 }
 
 // StateFilePath returns the full remote path to the state file.

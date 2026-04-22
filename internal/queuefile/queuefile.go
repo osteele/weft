@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
-// DefaultQueueName is used when no explicit queue name is provided.
-const DefaultQueueName = "default"
-
-const queueDir = "~/.cache/weft/queue"
+const queueDir = opsqueue.QueueDir
 
 // Entry represents a job line stored in the remote queue file.
 type Entry struct {
@@ -81,17 +79,9 @@ func FetchEntry(host string, jobID int64) (*Entry, error) {
 	}, nil
 }
 
-func commandsFilePath() string {
-	return fmt.Sprintf("%s/%s.commands", queueDir, DefaultQueueName)
-}
-
-func stateFilePath() string {
-	return fmt.Sprintf("%s/%s.state.json", queueDir, DefaultQueueName)
-}
-
 // appendCommand appends a command to the commands file
 func appendCommand(host, cmdJSON string) error {
-	commandsFile := commandsFilePath()
+	commandsFile := opsqueue.CommandsFilePath()
 	// Append command to the commands file with locking
 	lockDir := commandsFile + ".lock.d"
 	appendCmd := fmt.Sprintf(
@@ -131,7 +121,7 @@ func RemoveEntry(host string, jobID int64) error {
 // Returns true if the job was moved, false if it was already at the front or not found.
 func MoveToFront(host string, jobID int64) (bool, error) {
 	// Check if job is in the pending list
-	stateFile := stateFilePath()
+	stateFile := opsqueue.StateFilePath()
 	checkCmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
 	stdout, stderr, err := ssh.Run(host, checkCmd)
 	if err != nil {

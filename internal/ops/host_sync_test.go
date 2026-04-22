@@ -228,7 +228,7 @@ func TestProcessDeferredQueueOps_RemoveQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
-	if err := db.AddDeferredOperation(database, "test-host", db.OpRemoveQueued, jobID, "", ""); err != nil {
+	if err := db.AddDeferredOperation(database, "test-host", db.OpRemoveQueued, jobID, ""); err != nil {
 		t.Fatalf("add deferred op: %v", err)
 	}
 	if err := db.MoveQueuedJobToUnplaced(database, jobID); err != nil {

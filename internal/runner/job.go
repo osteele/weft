@@ -171,7 +171,7 @@ func ArchiveExistingFiles(logDir string, jobID int64) {
 }
 
 // WriteMetaFile writes the job metadata file.
-func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description, queueName string, startTime int64, sourceSHA string) error {
+func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description string, startTime int64, sourceSHA string) error {
 	hostname, _ := os.Hostname()
 	var lines []string
 	lines = append(lines, fmt.Sprintf("job_id=%d", jobID))
@@ -182,7 +182,6 @@ func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description
 	if description != "" {
 		lines = append(lines, fmt.Sprintf("description=%s", description))
 	}
-	lines = append(lines, fmt.Sprintf("queue=%s", queueName))
 	if sourceSHA != "" {
 		lines = append(lines, fmt.Sprintf("source_sha256=%s", sourceSHA))
 	}

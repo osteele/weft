@@ -39,7 +39,7 @@ const (
 	multihostQueueDir  = multihostHomeDir + "/.cache/weft/queue"
 	multihostLogDir    = multihostHomeDir + "/.cache/weft/logs"
 	multihostBinPath   = "~/.cache/weft/bin/weft-agent"
-	multihostQueueName = ops.DefaultQueueName
+	multihostQueueName = "default"
 )
 
 type multihostTestHost struct {

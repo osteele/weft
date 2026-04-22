@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -119,7 +120,7 @@ func applyQueueUpdate(job *db.Job, envVars []string, depSpec string, timeout tim
 }
 
 func applyQueuePriority(host string, jobID int64, timeout time.Duration) (bool, error) {
-	stateFile := fmt.Sprintf("%s/%s.state.json", QueueDir, DefaultQueueName)
+	stateFile := opsqueue.StateFilePath()
 	checkCmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
 	stdout, stderr, err := ssh.RunWithTimeout(host, checkCmd, timeout)
 	if err != nil {
@@ -176,7 +177,7 @@ func ensureDeferredQueueOp(database *sql.DB, job *db.Job, op string) error {
 	if pending {
 		return nil
 	}
-	return db.AddDeferredOperation(database, job.Host, op, job.ID, "", "")
+	return db.AddDeferredOperation(database, job.Host, op, job.ID, "")
 }
 
 // RequestQueueUpdate records a queue update operation and attempts to apply it immediately.

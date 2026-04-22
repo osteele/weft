@@ -508,16 +508,16 @@ Jobs enqueued via `weft queue add`, `weft run`, or plan
 
 - The agent binary is cross-compiled and deployed via `internal/agentdeploy/`
   to `~/.cache/weft/bin/weft-agent` on remote hosts.
-- A tmux session named `rj-queue-{queue}` runs `weft-agent run-queue` so it
+- A tmux session named `weft-queue-default` runs `weft-agent run-queue` so it
   keeps running even when you disconnect.
 - Queue data is purely file-based to avoid keeping a network service running:
-  - `~/.cache/weft/queue/{queue}.commands`: append-only JSONL command log.
-  - `~/.cache/weft/queue/{queue}.state.json`: runner state (pending list,
+  - `~/.cache/weft/queue/default.commands`: append-only JSONL command log.
+  - `~/.cache/weft/queue/default.state.json`: runner state (pending list,
     running jobs, current job).
-  - `~/.cache/weft/queue/{queue}.current`: ID of the most recently
+  - `~/.cache/weft/queue/default.current`: ID of the most recently
     started job (used by `status`/`sync` to detect runner progress).
-  - `~/.cache/weft/queue/{queue}.runner.pid`: PID of the runner itself.
-  - `~/.cache/weft/queue/{queue}.stop`: Presence signals the runner to
+  - `~/.cache/weft/queue/default.runner.pid`: PID of the runner itself.
+  - `~/.cache/weft/queue/default.stop`: Presence signals the runner to
     exit after the current jobs complete.
 - Each queue entry includes environment variables, dependency metadata, and
   optional CPU allotment so the runner can schedule concurrent jobs while
@@ -525,8 +525,8 @@ Jobs enqueued via `weft queue add`, `weft run`, or plan
 
 ```mermaid
 flowchart TD
-    A[CLI queues job] --> B["Append JSON command to ~/.cache/weft/queue/{queue}.commands"]
-    B --> C["rj-queue-{queue} tmux session"]
+    A[CLI queues job] --> B["Append JSON command to ~/.cache/weft/queue/default.commands"]
+    B --> C["weft-queue-default tmux session"]
     C --> D{Queue runner loop}
     D -->|Read pending list| E[Update .state.json / .current]
     E --> F[Check dependency status files]

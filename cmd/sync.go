@@ -192,7 +192,7 @@ func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts [
 		Verbose:          verbose,
 		StartQueueRunner: startQueueRunner,
 		EnsureQueueRunner: func(host string) (bool, error) {
-			return ensureQueueRunnerStarted(host, defaultQueueName)
+			return ensureQueueRunnerStarted(host)
 		},
 	})
 	return result.Completed, result.Unreachable, result.Warnings
@@ -214,7 +214,7 @@ func syncHostWithTimeoutDetailed(database *sql.DB, host string, timeout time.Dur
 	onQueueStart := func(string) (bool, error) { return false, nil }
 	if startQueueRunner {
 		onQueueStart = func(h string) (bool, error) {
-			return ensureQueueRunnerStarted(h, defaultQueueName)
+			return ensureQueueRunnerStarted(h)
 		}
 	}
 	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{

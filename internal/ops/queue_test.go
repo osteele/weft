@@ -135,32 +135,6 @@ func TestQueueJob_ExtractsGPU(t *testing.T) {
 	}
 }
 
-func TestQueueJob_DefaultQueueName(t *testing.T) {
-	database := db.SetupTestDB(t)
-	mockSSHFunc(t, func(host, command string) (string, string, int) {
-		if strings.Contains(command, "jq -e") {
-			return "NO\n", "", 0
-		}
-		return "", "", 0
-	})
-
-	params := QueueJobParams{
-		Host:       "test-host",
-		WorkingDir: "/tmp",
-		Command:    "echo",
-		// QueueName omitted - should default to "default"
-	}
-	result, err := QueueJob(database, params, DefaultOptions())
-	if err != nil {
-		t.Fatalf("QueueJob failed: %v", err)
-	}
-
-	job, _ := db.GetJobByID(database, result.JobID)
-	if job.QueueName != "default" {
-		t.Errorf("expected queue name to be 'default', got %q", job.QueueName)
-	}
-}
-
 // Artifact env vars (WEFT_ARTIFACT_MANIFEST, etc.) are injected by the runner
 // package at execution time, not at queue entry creation time. See
 // runner.go:startJob and single.go:RunSingleJob.

@@ -801,7 +801,7 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 		if err != nil || count == 0 {
 			continue
 		}
-		_, err = ensureQueueRunnerStarted(host, defaultQueueName)
+		_, err = ensureQueueRunnerStarted(host)
 		if err != nil {
 			slog.Warn("could not start queue runner", "host", host, "error", err)
 			continue

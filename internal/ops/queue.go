@@ -14,9 +14,8 @@ import (
 
 // Re-export queue types from opsqueue.
 const (
-	QueueDir         = opsqueue.QueueDir
-	DefaultQueueName = opsqueue.DefaultQueueName
-	DefaultGPUMemGB  = opsqueue.DefaultGPUMemGB
+	QueueDir        = opsqueue.QueueDir
+	DefaultGPUMemGB = opsqueue.DefaultGPUMemGB
 )
 
 type QueueEntry = opsqueue.QueueEntry

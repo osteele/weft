@@ -36,7 +36,6 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/ids"
-	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/util"
 	"github.com/osteele/weft/internal/workdir"
@@ -58,7 +57,6 @@ type Job struct {
 	RemoteID             string // Backend-specific job identifier (e.g., SLURM job ID)
 	RemoteState          string // Backend-specific state (e.g., SLURM state)
 	FailureReason        string // Normalized failure reason (e.g., "timeout", "oom")
-	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	GPUClass             string // GPU class name (e.g., "A100") — resolved to device at runtime
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
@@ -290,9 +288,9 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
 
-const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
+const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
@@ -2528,16 +2526,6 @@ func MarkQueuedByID(db *sql.DB, id int64) error {
 	return MarkAttemptQueuedByID(db, id)
 }
 
-// ClearQueueAssignment removes the queue association from a job so its queue
-// metadata can be rebuilt (e.g., when re-queuing via deferred operations).
-func ClearQueueAssignment(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET queue_name = NULL WHERE id = ?`,
-		id,
-	)
-	return err
-}
-
 // SetPendingStatus sets the pending (target) status for a job.
 // This represents what the user wants the job state to become.
 // For jobs without an attempt (unplaced), it sets requested_status directly
@@ -2714,11 +2702,10 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 	}
 	// Update attempt
 	_, _ = db.Exec(`UPDATE job_attempts SET host = '', launch_id = NULL, pending_status = NULL, pending_at = NULL, last_synced_status = NULL, queued_at = NULL WHERE job_id = ? AND end_time IS NULL`, id)
-	// Update spec columns on jobs (tags, placement_reasons, queue_name)
+	// Update spec columns on jobs (tags, placement_reasons)
 	_, err = db.Exec(
 		`UPDATE jobs
-		 SET queue_name = NULL,
-		     tags = ?,
+		 SET tags = ?,
 		     placement_reasons = ?
 		 WHERE id = ?`,
 		tagValue, encodeStringSlice([]string{"manually moved to unplaced queue"}), id,
@@ -2873,17 +2860,16 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 	}
 	if explicitID {
 		_, err := db.Exec(
-			`INSERT INTO jobs (id, working_dir, command, description, created_at, queue_name, gpu, placement_host, requested_status)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			 	working_dir = excluded.working_dir,
 			 	command = excluded.command,
 			 	description = excluded.description,
-			 	queue_name = excluded.queue_name,
 			 	gpu = excluded.gpu,
 			 	placement_host = excluded.placement_host,
 			 	requested_status = excluded.requested_status`,
-			id, workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host, requestedStatus,
+			id, workingDir, command, description, now, gpu, host, requestedStatus,
 		)
 		if err != nil {
 			return 0, err
@@ -2897,9 +2883,9 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 		return id, nil
 	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, queue_name, gpu, placement_host, requested_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host, requestedStatus,
+		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, now, gpu, host, requestedStatus,
 	)
 	if err != nil {
 		return 0, err
@@ -2934,9 +2920,9 @@ func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, dep
 	}
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, queue_name, gpu, dep_spec, placement_host)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		workingDir, command, description, createdAt, queuefile.DefaultQueueName, gpu, depSpec, host,
+		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, dep_spec, placement_host)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, createdAt, gpu, depSpec, host,
 	)
 	if err != nil {
 		return 0, err
@@ -3530,7 +3516,6 @@ type jobScanFields struct {
 	remoteID         sql.NullString
 	remoteState      sql.NullString
 	failureReason    sql.NullString
-	queueName        sql.NullString
 	gpu              sql.NullString
 	gpuClass         sql.NullString
 	cpuAllotment     sql.NullInt64
@@ -3576,7 +3561,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 		&f.desc, &f.generatedDesc, &f.generationHash,
 		&f.createdAt, &f.queuedAt, &f.startTime, &f.endTime, &f.exitCode,
 		&j.Status, &f.errorMsg, &f.backend, &f.remoteID, &f.remoteState,
-		&f.failureReason, &f.queueName, &f.gpu, &f.gpuClass,
+		&f.failureReason, &f.gpu, &f.gpuClass,
 		&f.cpuAllotment, &f.gpuMemGB, &f.gpuMemMaxGB,
 		&f.envVars, &f.tags, &f.depSpec,
 		&f.inputs, &f.observedInputs, &f.outputs, &f.outputDirs,
@@ -3616,9 +3601,6 @@ func (f *jobScanFields) populateJob(j *Job) {
 	}
 	if f.failureReason.Valid {
 		j.FailureReason = f.failureReason.String
-	}
-	if f.queueName.Valid {
-		j.QueueName = f.queueName.String
 	}
 	if f.gpu.Valid {
 		j.GPU = f.gpu.String
@@ -5359,7 +5341,6 @@ type DeferredOperation struct {
 	Host      string
 	Operation string
 	JobID     int64
-	QueueName string
 	Payload   string
 	CreatedAt int64
 }
@@ -5378,18 +5359,18 @@ const (
 )
 
 // AddDeferredOperation adds an operation to execute when host becomes reachable
-func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, queueName string, payload string) error {
-	_, err := AddDeferredOperationReturningID(db, host, operation, jobID, queueName, payload)
+func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, payload string) error {
+	_, err := AddDeferredOperationReturningID(db, host, operation, jobID, payload)
 	return err
 }
 
 // AddDeferredOperationReturningID adds an operation and returns its ID
-func AddDeferredOperationReturningID(db *sql.DB, host, operation string, jobID int64, queueName string, payload string) (int64, error) {
+func AddDeferredOperationReturningID(db *sql.DB, host, operation string, jobID int64, payload string) (int64, error) {
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO deferred_operations (host, operation, job_id, queue_name, payload, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		host, operation, jobID, queueName, payload, createdAt,
+		`INSERT INTO deferred_operations (host, operation, job_id, payload, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		host, operation, jobID, payload, createdAt,
 	)
 	if err != nil {
 		return 0, err
@@ -5400,7 +5381,7 @@ func AddDeferredOperationReturningID(db *sql.DB, host, operation string, jobID i
 // GetDeferredOperations returns all deferred operations for a host
 func GetDeferredOperations(db *sql.DB, host string) ([]*DeferredOperation, error) {
 	rows, err := db.Query(
-		`SELECT id, host, operation, job_id, queue_name, payload, created_at
+		`SELECT id, host, operation, job_id, payload, created_at
 		 FROM deferred_operations
 		 WHERE host = ?
 		 ORDER BY created_at ASC`,
@@ -5414,13 +5395,9 @@ func GetDeferredOperations(db *sql.DB, host string) ([]*DeferredOperation, error
 	var ops []*DeferredOperation
 	for rows.Next() {
 		op := &DeferredOperation{}
-		var queueName sql.NullString
 		var payload sql.NullString
-		if err := rows.Scan(&op.ID, &op.Host, &op.Operation, &op.JobID, &queueName, &payload, &op.CreatedAt); err != nil {
+		if err := rows.Scan(&op.ID, &op.Host, &op.Operation, &op.JobID, &payload, &op.CreatedAt); err != nil {
 			return nil, err
-		}
-		if queueName.Valid {
-			op.QueueName = queueName.String
 		}
 		if payload.Valid {
 			op.Payload = payload.String

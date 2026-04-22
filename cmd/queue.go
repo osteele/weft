@@ -18,16 +18,12 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
-	"github.com/osteele/weft/internal/queuefile"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
-)
-
-const (
-	defaultQueueName = queuefile.DefaultQueueName
 )
 
 var queueCmd = &cobra.Command{
@@ -538,7 +534,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		if err == nil && backend == db.BackendSlurm {
 			return nil
 		}
-		_, err = ensureQueueRunnerStarted(host, defaultQueueName)
+		_, err = ensureQueueRunnerStarted(host)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to start queue runner: %v\n", err)
 		}
@@ -551,8 +547,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 // It also ensures the agent binary is up-to-date before starting.
 // Returns (true, nil) if the runner was started, (false, nil) if already running,
 // or (false, error) if starting failed.
-func ensureQueueRunnerStarted(host, queue string) (bool, error) {
-	_ = queue
+func ensureQueueRunnerStarted(host string) (bool, error) {
 	return hostsyncapp.EnsureQueueRunnerStarted(host)
 }
 
@@ -562,7 +557,7 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	_, err = ensureQueueRunnerStarted(host, defaultQueueName)
+	_, err = ensureQueueRunnerStarted(host)
 	return err
 }
 
@@ -646,7 +641,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	runnerSession := fmt.Sprintf("weft-queue-%s", defaultQueueName)
+	runnerSession := opsqueue.TmuxSessionName()
 
 	// Check if runner is active
 	exists, err := ssh.TmuxSessionExists(host, runnerSession)
@@ -663,7 +658,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get currently running job
-	currentFile := fmt.Sprintf("%s/%s.current", queuerunner.QueueDir(), defaultQueueName)
+	currentFile := opsqueue.CurrentFilePath()
 	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
 	currentID = strings.TrimSpace(currentID)
 
@@ -674,13 +669,13 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get queue depth
-	stateFile := fmt.Sprintf("%s/%s.state.json", queuerunner.QueueDir(), defaultQueueName)
+	stateFile := opsqueue.StateFilePath()
 	countOutput, _, _ := ssh.Run(host, fmt.Sprintf("jq -r '.pending | length // 0' %s 2>/dev/null || echo 0", stateFile))
 	countOutput = strings.TrimSpace(countOutput)
 	fmt.Printf("Jobs waiting: %s\n", countOutput)
 
 	// Check for stop signal
-	stopFile := fmt.Sprintf("%s/%s.stop", queuerunner.QueueDir(), defaultQueueName)
+	stopFile := opsqueue.StopFilePath()
 	stopExists, _, _ := ssh.Run(host, fmt.Sprintf("test -f %s && echo yes || echo no", stopFile))
 	if strings.TrimSpace(stopExists) == "yes" {
 		fmt.Println("\nSTOP signal pending - runner will exit after current job")

@@ -1257,7 +1257,7 @@ func syncHostQuietly(database *sql.DB, host string, noSync bool) bool {
 		Timeout: 10 * time.Second,
 		Logger:  ops.NewSilentSyncLogger(),
 	}, func(h string) (bool, error) {
-		return ensureQueueRunnerStarted(h, defaultQueueName)
+		return ensureQueueRunnerStarted(h)
 	})
 	return syncResult.HostContacted
 }

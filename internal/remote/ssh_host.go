@@ -7,16 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
 
-const (
-	// QueueDir is the remote directory for queue state files
-	QueueDir = "~/.cache/weft/queue"
-	// DefaultQueueName is the only queue name used on remote hosts.
-	DefaultQueueName = "default"
-)
+// QueueDir is the remote directory for queue state files.
+const QueueDir = opsqueue.QueueDir
 
 // SSHHost implements the Host interface using SSH.
 type SSHHost struct {
@@ -39,7 +36,7 @@ func NewSSHHost(hostname string, timeout time.Duration) *SSHHost {
 
 // IsJobInQueue checks if a job is in the queue's pending list.
 func (h *SSHHost) IsJobInQueue(jobID int64) (bool, error) {
-	stateFile := fmt.Sprintf("%s/%s.state.json", QueueDir, DefaultQueueName)
+	stateFile := opsqueue.StateFilePath()
 	// Redirect jq output to /dev/null to avoid output pollution
 	cmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s >/dev/null 2>&1 && echo YES || echo NO", jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
@@ -51,7 +48,7 @@ func (h *SSHHost) IsJobInQueue(jobID int64) (bool, error) {
 
 // IsJobCurrent checks if a job is the currently running job in the queue.
 func (h *SSHHost) IsJobCurrent(jobID int64) (bool, error) {
-	currentFile := fmt.Sprintf("%s/%s.current", QueueDir, DefaultQueueName)
+	currentFile := opsqueue.CurrentFilePath()
 	cmd := fmt.Sprintf("cat %s 2>/dev/null || true", currentFile)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
 	if err != nil {
@@ -90,7 +87,7 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 		return fmt.Errorf("marshal command: %w", err)
 	}
 
-	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
+	commandsFile := opsqueue.CommandsFilePath()
 	// Use single quotes to prevent shell expansion of $(), backticks, etc.
 	escaped := strings.ReplaceAll(string(jsonBytes), "'", `'\''`)
 	appendCmd := fmt.Sprintf(
@@ -120,7 +117,7 @@ func (h *SSHHost) RemoveFromQueue(jobID int64) error {
 		return fmt.Errorf("marshal command: %w", err)
 	}
 
-	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
+	commandsFile := opsqueue.CommandsFilePath()
 	escaped := strings.ReplaceAll(string(jsonBytes), "'", `'\''`)
 	appendCmd := fmt.Sprintf(
 		`mkdir -p %s && printf '%%s\n' '%s' >> %s`,
@@ -138,7 +135,7 @@ func (h *SSHHost) RemoveFromQueue(jobID int64) error {
 
 // IsJobInCommandsFile checks if a job ID appears in the default commands file (for testing).
 func (h *SSHHost) IsJobInCommandsFile(jobID int64) (bool, error) {
-	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
+	commandsFile := opsqueue.CommandsFilePath()
 	cmd := fmt.Sprintf(`grep -q '"id":%d' %s 2>/dev/null && echo YES || echo NO`, jobID, commandsFile)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
 	if err != nil {
@@ -149,7 +146,7 @@ func (h *SSHHost) IsJobInCommandsFile(jobID int64) (bool, error) {
 
 // GetLastCommandForJob returns the last command entry for a job ID from the default commands file.
 func (h *SSHHost) GetLastCommandForJob(jobID int64) (string, error) {
-	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
+	commandsFile := opsqueue.CommandsFilePath()
 	cmd := fmt.Sprintf(`grep '"id":%d' %s 2>/dev/null | tail -1`, jobID, commandsFile)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
 	if err != nil {

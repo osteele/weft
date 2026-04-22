@@ -11,7 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -130,10 +130,10 @@ func parseRunQueueArgs(args []string) (runQueueArgs, error) {
 				return result, fmt.Errorf("invalid --setup-timeout: %w", err)
 			}
 			result.SetupTimeout = d
-		case arg == ops.DefaultQueueName:
+		case arg == opsqueue.AgentLegacyQueueArg:
 			// Accept the legacy positional default queue name for compatibility.
 		default:
-			return result, fmt.Errorf("unsupported queue %q; only %q is supported", arg, ops.DefaultQueueName)
+			return result, fmt.Errorf("unsupported queue %q; only %q is supported", arg, opsqueue.AgentLegacyQueueArg)
 		}
 	}
 	return result, nil

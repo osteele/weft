@@ -28,9 +28,8 @@ func initTestRunner(t *testing.T) (*Runner, string) {
 	}
 
 	r := New(Config{
-		QueueName: "test",
-		QueueDir:  queueDir,
-		LogDir:    logDir,
+		QueueDir: queueDir,
+		LogDir:   logDir,
 	})
 	r.state = NewState()
 	r.cpuConfig = DefaultCPUConfig()

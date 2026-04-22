@@ -575,11 +575,11 @@ type mockSSHHost struct {
 	pausedErr        error
 }
 
-func (m *mockSSHHost) IsJobInQueue(queueName string, jobID int64) (bool, error) {
+func (m *mockSSHHost) IsJobInQueue(jobID int64) (bool, error) {
 	return m.inQueueResult, m.inQueueErr
 }
 
-func (m *mockSSHHost) IsJobCurrent(queueName string, jobID int64) (bool, error) {
+func (m *mockSSHHost) IsJobCurrent(jobID int64) (bool, error) {
 	return m.currentResult, m.currentErr
 }
 
@@ -600,8 +600,8 @@ type testableSSHProber struct {
 	mock *mockSSHHost
 }
 
-func (p *testableSSHProber) ProbeInQueue(queueName string, jobID int64) ProbeResult {
-	result, err := p.mock.IsJobInQueue(queueName, jobID)
+func (p *testableSSHProber) ProbeInQueue(jobID int64) ProbeResult {
+	result, err := p.mock.IsJobInQueue(jobID)
 	if err != nil {
 		return ProbeUnknown
 	}
@@ -611,8 +611,8 @@ func (p *testableSSHProber) ProbeInQueue(queueName string, jobID int64) ProbeRes
 	return ProbeFalse
 }
 
-func (p *testableSSHProber) ProbeCurrent(queueName string, jobID int64) ProbeResult {
-	result, err := p.mock.IsJobCurrent(queueName, jobID)
+func (p *testableSSHProber) ProbeCurrent(jobID int64) ProbeResult {
+	result, err := p.mock.IsJobCurrent(jobID)
 	if err != nil {
 		return ProbeUnknown
 	}
@@ -674,7 +674,7 @@ func TestSSHProberProbeInQueue(t *testing.T) {
 				inQueueErr:    tt.err,
 			}}
 
-			got := prober.ProbeInQueue("default", 123)
+			got := prober.ProbeInQueue(123)
 			if got != tt.wantProbe {
 				t.Errorf("ProbeInQueue() = %v, want %v", got, tt.wantProbe)
 			}
@@ -701,7 +701,7 @@ func TestSSHProberProbeCurrent(t *testing.T) {
 				currentErr:    tt.err,
 			}}
 
-			got := prober.ProbeCurrent("default", 123)
+			got := prober.ProbeCurrent(123)
 			if got != tt.wantProbe {
 				t.Errorf("ProbeCurrent() = %v, want %v", got, tt.wantProbe)
 			}

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -20,7 +20,7 @@ func batchStatus(jobIDs []int64) {
 		homeDir = "/tmp"
 	}
 	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
-	stateFile := filepath.Join(homeDir, ".cache", "weft", "queue", ops.DefaultQueueName+".state.json")
+	stateFile := filepath.Join(homeDir, ".cache", "weft", "queue", opsqueue.StateFileName())
 
 	// Load runner state
 	state, err := runner.LoadState(stateFile)
@@ -153,8 +153,8 @@ func checkProcessState(logDir string, jobID int64) string {
 func parseBatchStatusArgs(args []string) (jobIDs []int64, err error) {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--queue" && i+1 < len(args) {
-			if args[i+1] != ops.DefaultQueueName {
-				return nil, fmt.Errorf("unsupported queue %q; only %q is supported", args[i+1], ops.DefaultQueueName)
+			if args[i+1] != opsqueue.AgentLegacyQueueArg {
+				return nil, fmt.Errorf("unsupported queue %q; only %q is supported", args[i+1], opsqueue.AgentLegacyQueueArg)
 			}
 			i++
 			continue

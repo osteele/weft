@@ -9,15 +9,6 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
-const (
-	queueDir = "~/.cache/weft/queue"
-)
-
-// QueueDir returns the remote directory used for queue files.
-func QueueDir() string {
-	return queueDir
-}
-
 const agentBinaryPath = "$HOME/.cache/weft/bin/weft-agent"
 
 // RunnerCommand builds the command to start the Go queue runner.
@@ -34,7 +25,7 @@ func RunnerCommand(envPrefix, r2Bucket string, setupTimeout time.Duration) strin
 
 // RunnerSessionName returns the tmux session name for the queue runner.
 func RunnerSessionName() string {
-	return "weft-queue-" + opsqueue.DefaultQueueName
+	return opsqueue.TmuxSessionName()
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
@@ -72,7 +63,7 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 	return true, nil
 }
 
-// Runner models the default queue runner on a specific host.
+// Runner models the queue runner on a specific host.
 type Runner struct {
 	host string
 }
@@ -84,9 +75,6 @@ func NewRunner(host string) *Runner {
 
 // Host returns the runner host.
 func (r *Runner) Host() string { return r.host }
-
-// Queue returns the runner's queue name.
-func (r *Runner) Queue() string { return opsqueue.DefaultQueueName }
 
 // SessionName returns the tmux session associated with this runner.
 func (r *Runner) SessionName() string { return RunnerSessionName() }

@@ -12,11 +12,34 @@ import (
 const (
 	// QueueDir is the remote directory where queue files are stored
 	QueueDir = "~/.cache/weft/queue"
-	// DefaultQueueName is the default queue name when none is specified
-	DefaultQueueName = "default"
+	// queueName is the only queue name used. It's retained as a literal in remote
+	// filenames for backward compatibility with in-flight jobs and agent wrappers.
+	queueName = "default"
 	// DefaultGPUMemGB is the default GPU memory reservation when a job uses a GPU
 	DefaultGPUMemGB = 20
 )
+
+// CurrentFileName returns the filename for the "current job" marker file.
+func CurrentFileName() string { return queueName + ".current" }
+
+// CurrentFilePath returns the full remote path to the current-job marker file.
+func CurrentFilePath() string { return QueueDir + "/" + CurrentFileName() }
+
+// PidFileName returns the filename for the runner's PID file.
+func PidFileName() string { return queueName + ".runner.pid" }
+
+// StopFilePath returns the full remote path to the runner stop file.
+func StopFilePath() string { return QueueDir + "/" + queueName + ".stop" }
+
+// RunnerLogName returns the filename for the runner's log file.
+func RunnerLogName() string { return "runner-" + queueName + ".log" }
+
+// TmuxSessionName returns the name of the tmux session hosting the queue runner.
+func TmuxSessionName() string { return "weft-queue-" + queueName }
+
+// AgentLegacyQueueArg is the queue name accepted by the agent CLI for backward
+// compatibility with existing wrappers. No other value is accepted.
+const AgentLegacyQueueArg = queueName
 
 // QueueEntry represents a job entry to be added to a remote queue
 type QueueEntry struct {

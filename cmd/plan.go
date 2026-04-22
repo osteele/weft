@@ -390,7 +390,7 @@ func maybeStartQueueRunner(host string, started map[string]bool) {
 		return
 	}
 	started[key] = true
-	_, err := ensureQueueRunnerStarted(host, defaultQueueName)
+	_, err := ensureQueueRunnerStarted(host)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to start queue runner on %s: %v\n", host, err)
 		return

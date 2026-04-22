@@ -14,6 +14,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
@@ -71,9 +72,9 @@ func clearRemoteJobState(t *testing.T, host string, jobID int64) {
 
 // stopQueueRunner stops the queue runner on the remote host.
 // Returns true if the runner was stopped, false if it wasn't running.
-func stopQueueRunner(t *testing.T, host string, queueName string) bool {
+func stopQueueRunner(t *testing.T, host string) bool {
 	t.Helper()
-	pidFile := fmt.Sprintf("~/.cache/weft/queue/%s.runner.pid", queueName)
+	pidFile := opsqueue.QueueDir + "/" + opsqueue.PidFileName()
 	cmd := fmt.Sprintf("if [ -f %s ]; then kill $(cat %s) 2>/dev/null && rm -f %s && echo stopped; else echo not_running; fi", pidFile, pidFile, pidFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -234,7 +235,7 @@ func TestIntegration_QueueEntryContainsArtifactEnvVars(t *testing.T) {
 	t.Logf("Queued job %d, checking queue entry...", jobID)
 
 	// Fetch the queue entry from remote to verify env vars
-	entry, err := fetchQueueEntryFromRemote(host, ops.DefaultQueueName, jobID, 10*time.Second)
+	entry, err := fetchQueueEntryFromRemote(host, jobID, 10*time.Second)
 	if err != nil {
 		t.Fatalf("fetchQueueEntryFromRemote failed: %v", err)
 	}
@@ -332,7 +333,7 @@ func TestIntegration_StateTransition_QueuedToCanceled(t *testing.T) {
 	database := setupIntegrationTestDB(t)
 
 	// Stop queue runner so jobs stay queued (don't actually run)
-	if stopped := stopQueueRunner(t, host, ops.DefaultQueueName); stopped {
+	if stopped := stopQueueRunner(t, host); stopped {
 		t.Log("Stopped queue runner for state transition test")
 	}
 
@@ -396,7 +397,7 @@ func TestIntegration_StateTransition_QueueEntryRemovedOnCancel(t *testing.T) {
 	t.Logf("Queued job %d", jobID)
 
 	// Verify job is in commands file
-	entry, err := fetchQueueEntryFromRemote(host, ops.DefaultQueueName, jobID, 10*time.Second)
+	entry, err := fetchQueueEntryFromRemote(host, jobID, 10*time.Second)
 	if err != nil {
 		t.Fatalf("Job not found in commands file: %v", err)
 	}
@@ -411,7 +412,7 @@ func TestIntegration_StateTransition_QueueEntryRemovedOnCancel(t *testing.T) {
 	}
 
 	// Verify cancel command was appended (we can check the commands file has a cancel entry)
-	commandsFile := fmt.Sprintf("%s/%s.commands", ops.QueueDir, ops.DefaultQueueName)
+	commandsFile := opsqueue.CommandsFilePath()
 	cmd := fmt.Sprintf(`grep -c '"op":"cancel".*"job_id":%d\|"op":"cancel".*"id":%d' %s 2>/dev/null || echo 0`, jobID, jobID, commandsFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -434,11 +435,7 @@ type queueEntry struct {
 
 // fetchQueueEntryFromRemote reads the queue entry for a job from the remote commands file.
 // Uses the production remote.SSHHost.GetLastCommandForJob() for the SSH call.
-func fetchQueueEntryFromRemote(host, queueName string, jobID int64, timeout time.Duration) (*queueEntry, error) {
-	if queueName != DefaultQueueName {
-		return nil, fmt.Errorf("unsupported queue %q", queueName)
-	}
-	// Use production code path for SSH call
+func fetchQueueEntryFromRemote(host string, jobID int64, timeout time.Duration) (*queueEntry, error) {
 	sshHost := remote.NewSSHHost(host, timeout)
 	content, err := sshHost.GetLastCommandForJob(jobID)
 	if err != nil {
@@ -505,7 +502,7 @@ func TestIntegration_ExclusiveTagSynced(t *testing.T) {
 	}
 
 	// Verify tags are synced to remote by checking the commands file
-	commandsFile := fmt.Sprintf("%s/%s.commands", ops.QueueDir, ops.DefaultQueueName)
+	commandsFile := opsqueue.CommandsFilePath()
 	cmd := fmt.Sprintf(`tail -20 %s | grep '"id":%d' | tail -1`, commandsFile, jobID)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -721,7 +718,7 @@ func TestIntegration_FinishedMapRecordsCompletion(t *testing.T) {
 	}
 
 	// Read state.json and verify finished map contains this job
-	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", ops.DefaultQueueName)
+	stateFile := opsqueue.StateFilePath()
 	cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id] // empty' %s 2>/dev/null`, jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -794,7 +791,7 @@ func TestIntegration_FinishedMapRecordsFailure(t *testing.T) {
 	}
 
 	// Read state.json and verify finished map contains this job with exit_code=1
-	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", ops.DefaultQueueName)
+	stateFile := opsqueue.StateFilePath()
 	cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id] // empty' %s 2>/dev/null`, jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -852,7 +849,7 @@ func TestIntegration_BatchSyncUsesFinishedMap(t *testing.T) {
 	t.Logf("Queued job %d, waiting for it to appear in finished map...", jobID)
 
 	// Poll remote state.json finished map directly until job appears
-	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", ops.DefaultQueueName)
+	stateFile := opsqueue.StateFilePath()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id].exit_code // empty' %s 2>/dev/null`, jobID, stateFile)

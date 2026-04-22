@@ -142,7 +142,6 @@ func TestSelectedJobDetail_Unplaced(t *testing.T) {
 		GPUMemGB:         &memGB,
 		PlacementReasons: []string{"no capacity"},
 		Status:           db.StatusQueued,
-		QueueName:        "default",
 		CreatedAt:        now.Add(-2 * time.Hour).Unix(),
 	}
 	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)

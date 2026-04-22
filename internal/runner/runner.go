@@ -22,7 +22,6 @@ import (
 
 // Runner is the main queue runner that manages job execution.
 type Runner struct {
-	queueName    string
 	queueDir     string
 	logDir       string
 	setupTimeout time.Duration
@@ -62,7 +61,6 @@ type Runner struct {
 
 // Config holds configuration for the runner.
 type Config struct {
-	QueueName    string
 	QueueDir     string
 	LogDir       string
 	SetupTimeout time.Duration // If >0, kill setup commands after this duration
@@ -72,28 +70,22 @@ type Config struct {
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		QueueName: opsqueue.DefaultQueueName,
-		QueueDir:  filepath.Join(home, ".cache", "weft", "queue"),
-		LogDir:    filepath.Join(home, ".cache", "weft", "logs"),
+		QueueDir: filepath.Join(home, ".cache", "weft", "queue"),
+		LogDir:   filepath.Join(home, ".cache", "weft", "logs"),
 	}
 }
 
 // New creates a new Runner with the given configuration.
 func New(cfg Config) *Runner {
-	queueName := cfg.QueueName
-	if queueName == "" {
-		queueName = opsqueue.DefaultQueueName
-	}
 	return &Runner{
-		queueName:       queueName,
 		queueDir:        cfg.QueueDir,
 		logDir:          cfg.LogDir,
 		setupTimeout:    cfg.SetupTimeout,
-		commandsFile:    filepath.Join(cfg.QueueDir, queueName+".commands"),
-		stateFile:       filepath.Join(cfg.QueueDir, queueName+".state.json"),
-		currentFile:     filepath.Join(cfg.QueueDir, queueName+".current"),
-		pidFile:         filepath.Join(cfg.QueueDir, queueName+".runner.pid"),
-		runnerLog:       filepath.Join(cfg.QueueDir, "runner-"+queueName+".log"),
+		commandsFile:    filepath.Join(cfg.QueueDir, opsqueue.CommandsFileName()),
+		stateFile:       filepath.Join(cfg.QueueDir, opsqueue.StateFileName()),
+		currentFile:     filepath.Join(cfg.QueueDir, opsqueue.CurrentFileName()),
+		pidFile:         filepath.Join(cfg.QueueDir, opsqueue.PidFileName()),
+		runnerLog:       filepath.Join(cfg.QueueDir, opsqueue.RunnerLogName()),
 		cpuConfig:       DefaultCPUConfig(),
 		telemetryConfig: DefaultTelemetryConfig(),
 		benchCfg:        DefaultBenchmarkConfig(),
@@ -154,8 +146,8 @@ func (r *Runner) Run() error {
 		os.Remove(r.currentFile)
 	}()
 
-	oplog.Log(oplog.OpQueueStart, oplog.WithDetailf("queue=%s pid=%d", r.queueName, os.Getpid()))
-	fmt.Printf("Queue runner started for queue: %s\n", r.queueName)
+	oplog.Log(oplog.OpQueueStart, oplog.WithDetailf("pid=%d", os.Getpid()))
+	fmt.Printf("Queue runner started\n")
 	fmt.Printf("Commands file: %s\n", r.commandsFile)
 	fmt.Printf("State file: %s\n", r.stateFile)
 	fmt.Printf("PID: %d\n\n", os.Getpid())
@@ -440,7 +432,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	// Write metadata
-	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, r.queueName, startTime, job.SourceSHA)
+	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, startTime, job.SourceSHA)
 
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command, job.SourceSHA)

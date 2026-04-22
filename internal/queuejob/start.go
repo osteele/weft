@@ -180,7 +180,7 @@ func isConnectionFailure(stderr string, err error) bool {
 // 2. There's a PID file for this job with a running process
 func isQueueRunnerRunningJob(host string, jobID int64) bool {
 	// Check if this job is the current job in the queue runner
-	currentFile := fmt.Sprintf("~/.cache/weft/queue/%s.current", queuefile.DefaultQueueName)
+	currentFile := opsqueue.CurrentFilePath()
 	pidPattern := session.PidFilePattern(jobID)
 
 	// Combined check: is this job current OR has a running process?

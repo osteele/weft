@@ -33,7 +33,7 @@ const (
 	remoteQueueDir = testHomeDir + "/.cache/weft/queue"
 	remoteLogDir   = testHomeDir + "/.cache/weft/logs"
 	remoteBinPath  = "~/.cache/weft/bin/weft-agent"
-	testQueueName  = opsqueue.DefaultQueueName
+	testQueueName  = "default"
 )
 
 func getTestHost(t *testing.T) string {

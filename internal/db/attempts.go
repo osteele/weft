@@ -518,7 +518,6 @@ func createJobStatusView(db *sql.DB) error {
 			la.remote_id,
 			la.remote_state,
 			la.failure_reason,
-			j.queue_name,
 			j.gpu,
 			j.gpu_class,
 			j.cpu_allotment,

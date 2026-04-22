@@ -1062,9 +1062,6 @@ func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	if job.LastSyncedStatus != "" {
 		t.Errorf("LastSyncedStatus = %q, want empty", job.LastSyncedStatus)
 	}
-	if job.QueueName != "" {
-		t.Errorf("QueueName = %q, want empty", job.QueueName)
-	}
 	if job.QueuedAt != 0 {
 		t.Errorf("QueuedAt = %d, want 0", job.QueuedAt)
 	}
@@ -1742,7 +1739,7 @@ func TestListUniqueActiveHostsIncludesDeferredOpHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if err := AddDeferredOperation(database, "cool30", OpRemoveQueued, jobID, "", ""); err != nil {
+	if err := AddDeferredOperation(database, "cool30", OpRemoveQueued, jobID, ""); err != nil {
 		t.Fatalf("add deferred op: %v", err)
 	}
 
