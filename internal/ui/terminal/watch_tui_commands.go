@@ -560,14 +560,12 @@ func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 			return watchOnPremRefreshedMsg{err: err}
 		}
 		orchestration.HydrateRelaunchBlockedReasons(database, unplacedJobs)
-		phaseLabel, phaseAt := loadLatestAutoPilotPhase(database)
 		return watchOnPremRefreshedMsg{
-			updateOnPremHosts:   true,
-			onPremHosts:         groupOnPremHosts(onPremJobs),
-			updateUnplacedJobs:  true,
-			unplacedJobs:        unplacedJobs,
-			autoPassLatestPhase: phaseLabel,
-			autoPassLatestAt:    phaseAt,
+			updateOnPremHosts:  true,
+			onPremHosts:        groupOnPremHosts(onPremJobs),
+			updateUnplacedJobs: true,
+			unplacedJobs:       unplacedJobs,
+			autoPassPhase:      loadLatestAutoPilotPhase(database),
 		}
 	}
 }
@@ -579,12 +577,10 @@ func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
 			return watchOnPremRefreshedMsg{err: err}
 		}
 		orchestration.HydrateRelaunchBlockedReasons(database, unplacedJobs)
-		phaseLabel, phaseAt := loadLatestAutoPilotPhase(database)
 		return watchOnPremRefreshedMsg{
-			updateUnplacedJobs:  true,
-			unplacedJobs:        unplacedJobs,
-			autoPassLatestPhase: phaseLabel,
-			autoPassLatestAt:    phaseAt,
+			updateUnplacedJobs: true,
+			unplacedJobs:       unplacedJobs,
+			autoPassPhase:      loadLatestAutoPilotPhase(database),
 		}
 	}
 }

@@ -77,13 +77,12 @@ type watchSyncResultMsg struct {
 }
 
 type watchOnPremRefreshedMsg struct {
-	updateOnPremHosts   bool
-	onPremHosts         []onPremHostSummary
-	updateUnplacedJobs  bool
-	unplacedJobs        []*db.Job
-	autoPassLatestPhase string
-	autoPassLatestAt    time.Time
-	err                 error
+	updateOnPremHosts  bool
+	onPremHosts        []onPremHostSummary
+	updateUnplacedJobs bool
+	unplacedJobs       []*db.Job
+	autoPassPhase      autoPilotPhaseHint
+	err                error
 }
 
 type watchUnplaceDoneMsg struct {

@@ -737,7 +737,7 @@ func (m watchModel) autoPilotStatusLine() string {
 		if !m.autoPassStartedAt.IsZero() {
 			elapsed = fmt.Sprintf(" (%s)", time.Since(m.autoPassStartedAt).Round(time.Second))
 		}
-		phase := activePassPhase(m.autoPassLatestPhase, m.autoPassLatestAt, m.autoPassStartedAt)
+		phase := activePassPhase(m.autoPassPhase, m.autoPassStartedAt)
 		return fmt.Sprintf("Auto-pilot: evaluating %s%s%s... (target %s)", pluralize(unplaced, "unplaced job", "unplaced jobs"), phase, elapsed, target)
 	}
 	if m.autoLaunching {

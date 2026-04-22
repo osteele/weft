@@ -32,20 +32,19 @@ func TestAutoPilotPhaseLabel(t *testing.T) {
 }
 
 func TestActivePassPhaseIgnoresEventsBeforePassStart(t *testing.T) {
-	// Events from a prior autopilot pass must not leak into the current
-	// pass's status line — otherwise the user sees stale phase text that
-	// has no relationship to what's happening right now.
+	// Regression: events from a prior autopilot pass must not leak into the
+	// current pass's status line.
 	start := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	stale := start.Add(-5 * time.Minute)
-	fresh := start.Add(2 * time.Second)
+	stale := autoPilotPhaseHint{Label: "scanning candidates", At: start.Add(-5 * time.Minute)}
+	fresh := autoPilotPhaseHint{Label: "scanning candidates", At: start.Add(2 * time.Second)}
 
-	if got := activePassPhase("scanning candidates", stale, start); got != "" {
+	if got := activePassPhase(stale, start); got != "" {
 		t.Errorf("stale event should produce empty suffix, got %q", got)
 	}
-	if got := activePassPhase("scanning candidates", fresh, start); got != " — scanning candidates" {
+	if got := activePassPhase(fresh, start); got != " — scanning candidates" {
 		t.Errorf("fresh event suffix = %q, want %q", got, " — scanning candidates")
 	}
-	if got := activePassPhase("", fresh, start); got != "" {
+	if got := activePassPhase(autoPilotPhaseHint{At: start.Add(time.Second)}, start); got != "" {
 		t.Errorf("empty label should produce empty suffix, got %q", got)
 	}
 }

@@ -63,8 +63,7 @@ type listTUIModel struct {
 	autoMode                   bool
 	autoInProgress             bool
 	autoPassStartedAt          time.Time
-	autoPassLatestPhase        string    // latest relaunch.* event label for the current pass
-	autoPassLatestAt           time.Time // timestamp of that event
+	autoPassPhase              autoPilotPhaseHint
 	autoPersistentError        string
 	autoPersistentBlocked      string
 	autoPersistentBlockedN     int
@@ -98,14 +97,13 @@ type listTUIModel struct {
 }
 
 type listJobsLoadedMsg struct {
-	jobs                []*db.Job
-	launchLiveByID      map[int64]*db.LaunchLiveState
-	launchStatusByID    map[int64]string
-	launchByID          map[int64]*db.Launch
-	hostInfoByName      map[string]*db.CachedHostInfo
-	autoPassLatestPhase string    // mapped from latest relaunch.* event
-	autoPassLatestAt    time.Time // timestamp of that event
-	err                 error
+	jobs             []*db.Job
+	launchLiveByID   map[int64]*db.LaunchLiveState
+	launchStatusByID map[int64]string
+	launchByID       map[int64]*db.Launch
+	hostInfoByName   map[string]*db.CachedHostInfo
+	autoPassPhase    autoPilotPhaseHint
+	err              error
 }
 
 type listSyncFinishedMsg struct {
@@ -407,8 +405,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchStatusByID = msg.launchStatusByID
 		m.launchByID = msg.launchByID
 		m.hostInfoByName = msg.hostInfoByName
-		m.autoPassLatestPhase = msg.autoPassLatestPhase
-		m.autoPassLatestAt = msg.autoPassLatestAt
+		m.autoPassPhase = msg.autoPassPhase
 		m.pruneAutoBlockReasons()
 		if m.countUnplacedQueuedJobs() == 0 {
 			m.autoPersistentBlocked = ""
@@ -993,7 +990,7 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 	}
 	if m.autoInProgress {
 		elapsed := time.Since(m.autoPassStartedAt).Round(time.Second)
-		phase := activePassPhase(m.autoPassLatestPhase, m.autoPassLatestAt, m.autoPassStartedAt)
+		phase := activePassPhase(m.autoPassPhase, m.autoPassStartedAt)
 		return fmt.Sprintf("Auto-pilot: evaluating %s%s (%s)... (target %s)", pluralize(unplaced, "unplaced job", "unplaced jobs"), phase, elapsed, target)
 	}
 	if strings.TrimSpace(m.autoPersistentError) != "" {
@@ -1622,40 +1619,15 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			launchByID = map[int64]*db.Launch{}
 		}
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
-		phaseLabel, phaseAt := loadLatestAutoPilotPhase(database)
 		return listJobsLoadedMsg{
-			jobs:                jobs,
-			launchLiveByID:      launchLiveByID,
-			launchStatusByID:    launchStatusByID,
-			launchByID:          launchByID,
-			hostInfoByName:      hostInfoByName,
-			autoPassLatestPhase: phaseLabel,
-			autoPassLatestAt:    phaseAt,
-			err:                 nil,
+			jobs:             jobs,
+			launchLiveByID:   launchLiveByID,
+			launchStatusByID: launchStatusByID,
+			launchByID:       launchByID,
+			hostInfoByName:   hostInfoByName,
+			autoPassPhase:    loadLatestAutoPilotPhase(database),
 		}
 	}
-}
-
-// loadLatestAutoPilotPhase returns a short label describing the most recent
-// relaunch.* lifecycle event within the query window. Returns ("", zero)
-// when no recent event is present or the event maps to no meaningful label
-// (e.g. pass_summary, which means the pass completed).
-func loadLatestAutoPilotPhase(database *sql.DB) (string, time.Time) {
-	if database == nil {
-		return "", time.Time{}
-	}
-	ev, err := db.LatestLifecycleEvent(database, db.LifecycleEventFilter{
-		KindPrefix: "relaunch.",
-		Since:      time.Now().Add(-autoPilotPhaseQueryWindow),
-	})
-	if err != nil || ev == nil {
-		return "", time.Time{}
-	}
-	label := autoPilotPhaseLabel(ev)
-	if label == "" {
-		return "", time.Time{}
-	}
-	return label, time.Unix(ev.OccurredAt, 0)
 }
 
 // loadInventoryHostInfo returns CachedHostInfo keyed by host name, filtered
