@@ -172,7 +172,7 @@ var jobStartCmd = &cobra.Command{
 This removes the job from the remote queue file, updates the database,
 and launches the job right away.`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
-	RunE: runJobStartNow,
+	RunE: runJobStartNowBare,
 }
 
 var jobInfoCmd = &cobra.Command{
@@ -221,19 +221,20 @@ Examples:
 
 // Top-level start command (alias for job start)
 var startCmd = &cobra.Command{
-	Use:   "start <job-id>...",
+	Use:   "start <wj-id>...",
 	Short: "Start a queued job immediately",
 	Long: `Start a queued job immediately on its host, bypassing queue order.
 
 This removes the job from the remote queue file, updates the database,
 and launches the job right away.
 
-This is an alias for 'job start'.
+This is an alias for 'job start'. The top-level form requires wj-prefixed IDs;
+use 'weft job start' to pass bare numeric IDs.
 
 Examples:
-  weft start 42`,
+  weft start wj42`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
-	RunE: runJobStartNow,
+	RunE: runJobStartNowExplicitPrefix,
 }
 
 var jobCancelCmd = &cobra.Command{
@@ -337,7 +338,6 @@ func init() {
 
 	// Register top-level aliases
 	rootCmd.AddCommand(infoCmd)
-	startCmd.Deprecated = "use 'weft job start' instead"
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(startCmd)
 
@@ -659,8 +659,16 @@ func runJobUnplace(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runJobStartNow(cmd *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDs(args)
+func runJobStartNowBare(cmd *cobra.Command, args []string) error {
+	return runJobStartNowWithParser(cmd, args, ParseJobIDs)
+}
+
+func runJobStartNowExplicitPrefix(cmd *cobra.Command, args []string) error {
+	return runJobStartNowWithParser(cmd, args, ParseJobIDsWithExplicitPrefix)
+}
+
+func runJobStartNowWithParser(cmd *cobra.Command, args []string, parser func([]string) ([]int64, error)) error {
+	jobIDs, err := parser(args)
 	if err != nil {
 		return err
 	}
