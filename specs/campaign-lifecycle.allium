@@ -894,9 +894,17 @@ rule RunawayBreakerClears {
 -- jobs the planner approved. Jobs the planner explicitly blocked MUST
 -- NOT be launched in the same pass — their block reasons are surfaced
 -- to the user and re-evaluated on the next pass.
+--
+-- The unplaced_jobs input is defined by jobs.is_unplaced_awaiting_placement
+-- (target_kind = unplaced AND status in {queued, pending_placement}),
+-- NOT the narrower is_unplaced_queue. UI counters that gate a tick MUST
+-- use the same predicate — otherwise a job left in pending_placement by
+-- an interrupted relaunch is hidden from the count and the tick is
+-- skipped, stalling the job indefinitely.
 
 rule AutoPilotPass {
     when: AutoPilotTick(unplaced_jobs)
+    requires: for job in unplaced_jobs: job.is_unplaced_awaiting_placement
 
     let plan: AutoPlacementPlan = BuildAutoPlacementPlan(unplaced_jobs)
     let planner_made_decisions = plan.launch_job_ids.any()

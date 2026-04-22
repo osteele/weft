@@ -116,10 +116,11 @@ type watchModel struct {
 	projectOffset  int // top visible line (offset-based scroll)
 
 	// --- Auto-pilot mode ---
-	autoMode         bool // when true, auto-relaunch, auto-place, and auto-launch are active
-	autoLaunching    bool // true while an auto-launch is in progress
-	autoPlacing      bool // true while an auto-place is in progress
-	autoPassInFlight bool
+	autoMode          bool // when true, auto-relaunch, auto-place, and auto-launch are active
+	autoLaunching     bool // true while an auto-launch is in progress
+	autoPlacing       bool // true while an auto-place is in progress
+	autoPassInFlight  bool
+	autoPassStartedAt time.Time // set when autoPassInFlight flips to true
 	// Auto-pilot diagnostics and relaunch backoff.
 	autoStatusLine          string
 	autoNoopReasons         map[int64]string

@@ -648,16 +648,19 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 
 // autoModeHint returns a short hint for the current auto-pilot state.
 func (m watchModel) autoModeHint() string {
+	// The target value lives on the Auto-pilot status line; keep only the
+	// `[$]` key hint here so the binding is still discoverable.
+	state := "OFF"
 	if m.autoMode {
-		return "[A] auto: ON  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
+		state = "ON"
 	}
-	return "[A] auto: OFF  [$] target: " + formatAutoRunRateTarget(m.autoRunRateTargetCents)
+	return fmt.Sprintf("[A] auto: %s  [$] target", state)
 }
 
 func (m watchModel) autoPilotUnplacedCount() int {
 	n := 0
 	for _, job := range m.unplacedJobs {
-		if job.IsUnplacedQueued() {
+		if job.IsUnplacedAwaitingPlacement() {
 			n++
 		}
 	}
@@ -730,7 +733,11 @@ func (m watchModel) autoPilotStatusLine() string {
 		return "Auto-pilot: syncing cloud state... (target " + target + ")"
 	}
 	if m.autoPassInFlight || m.autoPlacing {
-		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs... (target %s)", unplaced, target)
+		elapsed := ""
+		if !m.autoPassStartedAt.IsZero() {
+			elapsed = fmt.Sprintf(" (%s)", time.Since(m.autoPassStartedAt).Round(time.Second))
+		}
+		return fmt.Sprintf("Auto-pilot: evaluating %s%s... (target %s)", pluralize(unplaced, "unplaced job", "unplaced jobs"), elapsed, target)
 	}
 	if m.autoLaunching {
 		return "Auto-pilot: launching instance... (target " + target + ")"

@@ -124,6 +124,14 @@ entity Job {
     needs_placement: status = pending_placement
     -- queued+unplaced means no prospective assignment yet.
     is_unplaced_queue: status = queued and target_kind = unplaced
+    -- Broader predicate used by autopilot input and UI counters that gate
+    -- the autopilot. Includes pending_placement so jobs mid-relaunch (or
+    -- stuck in pending_placement after an interrupted pass) remain
+    -- visible to the planner instead of silently disappearing from the
+    -- unplaced count. UI counters MUST use this form, not is_unplaced_queue,
+    -- when deciding whether to run an autopilot pass.
+    is_unplaced_awaiting_placement:
+        target_kind = unplaced and status in {queued, pending_placement}
     -- A job is "launching" when the instance or placement backing it is still
     -- provisioning, or when the instance is up but the agent has not yet
     -- dispatched this job. Paths reaching this state:

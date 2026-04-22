@@ -161,6 +161,7 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 		return nil
 	}
 	m.autoPassInFlight = true
+	m.autoPassStartedAt = time.Now()
 	m.autoPersistentError = ""
 	return tea.Batch(cmds...)
 }

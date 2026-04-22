@@ -962,7 +962,7 @@ func (m *listTUIModel) resumeAutoPilotNow() {
 func (m listTUIModel) countUnplacedQueuedJobs() int {
 	n := 0
 	for _, job := range m.jobs {
-		if job.IsUnplacedQueued() {
+		if job.IsUnplacedAwaitingPlacement() {
 			n++
 		}
 	}
@@ -986,7 +986,8 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return "Auto-pilot: syncing cloud state... (target " + target + ")"
 	}
 	if m.autoInProgress {
-		return fmt.Sprintf("Auto-pilot: evaluating %d unplaced jobs... (target %s)", unplaced, target)
+		elapsed := time.Since(m.autoPassStartedAt).Round(time.Second)
+		return fmt.Sprintf("Auto-pilot: evaluating %s (%s)... (target %s)", pluralize(unplaced, "unplaced job", "unplaced jobs"), elapsed, target)
 	}
 	if strings.TrimSpace(m.autoPersistentError) != "" {
 		return "Auto-pilot: failed — " + m.autoPersistentError

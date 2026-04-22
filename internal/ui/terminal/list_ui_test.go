@@ -139,6 +139,26 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 }
 
+func TestListTUICountUnplacedQueuedJobsIncludesPendingPlacement(t *testing.T) {
+	// Regression: the autopilot gate in runAutoPilot early-returns when this
+	// counter is 0. The backend planner accepts both queued and
+	// pending_placement unplaced jobs, so the UI counter must too —
+	// otherwise a job left in pending_placement (e.g. after an interrupted
+	// relaunch pass) hides the autopilot's work item entirely.
+	pending := db.StatusPendingPlacement
+	m := listTUIModel{
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued},
+			{ID: 2, Status: db.StatusQueued, PendingStatus: &pending},
+			{ID: 3, Status: db.StatusCompleted},
+			{ID: 4, Status: db.StatusQueued, Host: "studio"},
+		},
+	}
+	if got, want := m.countUnplacedQueuedJobs(), 2; got != want {
+		t.Fatalf("countUnplacedQueuedJobs() = %d, want %d (should include pending_placement unplaced job)", got, want)
+	}
+}
+
 func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T) {
 	m := listTUIModel{
 		autoBlockReasons: map[int64]string{
