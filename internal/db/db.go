@@ -3237,6 +3237,20 @@ func FilterJobsByProject(jobs []*Job, project string) []*Job {
 	return filtered
 }
 
+// ProjectHasAnyJobs reports whether any job is associated with the given project.
+// An empty project returns true (no narrowing).
+func ProjectHasAnyJobs(database *sql.DB, project string) (bool, error) {
+	if project == "" {
+		return true, nil
+	}
+	var exists int
+	err := database.QueryRow(`SELECT EXISTS(SELECT 1 FROM jobs WHERE project = ? LIMIT 1)`, project).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 // backfillRecentProjects populates the project column for recent jobs that don't have it set.
 func backfillRecentProjects(db *sql.DB) error {
 	cutoff := time.Now().Unix() - 86400

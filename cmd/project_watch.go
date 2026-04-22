@@ -86,7 +86,7 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 	}
 	groups = terminal.FilterProjectGroups(groups, project)
 	if len(groups) == 0 && project != "" {
-		return errNoJobsForProject(project)
+		return errNoJobsForProject(database, project)
 	}
 	_, err = io.WriteString(cmd.OutOrStdout(), terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), time.Now(), projectWatchRecent))
 	return err

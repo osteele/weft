@@ -90,6 +90,56 @@ func TestFilterJobsByProject(t *testing.T) {
 	}
 }
 
+func TestProjectHasAnyJobs(t *testing.T) {
+	tmpfile, err := os.CreateTemp("", "project-has-any-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	tmpfile.Close()
+	defer os.Remove(tmpfile.Name())
+
+	cleanup := SetDBPath(tmpfile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer database.Close()
+
+	jobID, err := RecordJobStarting(database, "test-host", "/home/user/alpha", "echo hi", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := SetJobProject(database, jobID, "alpha"); err != nil {
+		t.Fatalf("SetJobProject: %v", err)
+	}
+
+	has, err := ProjectHasAnyJobs(database, "alpha")
+	if err != nil {
+		t.Fatalf("ProjectHasAnyJobs(alpha): %v", err)
+	}
+	if !has {
+		t.Errorf("ProjectHasAnyJobs(alpha) = false, want true")
+	}
+
+	has, err = ProjectHasAnyJobs(database, "nonexistent")
+	if err != nil {
+		t.Fatalf("ProjectHasAnyJobs(nonexistent): %v", err)
+	}
+	if has {
+		t.Errorf("ProjectHasAnyJobs(nonexistent) = true, want false")
+	}
+
+	has, err = ProjectHasAnyJobs(database, "")
+	if err != nil {
+		t.Fatalf("ProjectHasAnyJobs(empty): %v", err)
+	}
+	if !has {
+		t.Errorf("ProjectHasAnyJobs(\"\") = false, want true (empty means no narrowing)")
+	}
+}
+
 func TestSetJobProjectRoundtrip(t *testing.T) {
 	tmpfile, err := os.CreateTemp("", "project-roundtrip-*.db")
 	if err != nil {

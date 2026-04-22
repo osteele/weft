@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"text/tabwriter"
@@ -110,7 +111,11 @@ func resolveProjectArg(args []string) (string, error) {
 	return project, nil
 }
 
-func errNoJobsForProject(project string) error {
+func errNoJobsForProject(database *sql.DB, project string) error {
+	hasAny, err := db.ProjectHasAnyJobs(database, project)
+	if err == nil && hasAny {
+		return fmt.Errorf("no jobs found for project %q matching the current filters", project)
+	}
 	return fmt.Errorf("no jobs found for project %q; is the current directory a known project?", project)
 }
 
@@ -162,7 +167,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(jobs) == 0 && listProject != "" {
-		return errNoJobsForProject(listProject)
+		return errNoJobsForProject(database, listProject)
 	}
 	return terminal.WriteListPlainOutput(terminal.RenderProjectListPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
 }
@@ -192,7 +197,7 @@ func runProjectJobs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(jobs) == 0 && listProject != "" {
-		return errNoJobsForProject(listProject)
+		return errNoJobsForProject(database, listProject)
 	}
 	return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
 }
