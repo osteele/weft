@@ -116,11 +116,13 @@ type watchModel struct {
 	projectOffset  int // top visible line (offset-based scroll)
 
 	// --- Auto-pilot mode ---
-	autoMode          bool // when true, auto-relaunch, auto-place, and auto-launch are active
-	autoLaunching     bool // true while an auto-launch is in progress
-	autoPlacing       bool // true while an auto-place is in progress
-	autoPassInFlight  bool
-	autoPassStartedAt time.Time // set when autoPassInFlight flips to true
+	autoMode            bool // when true, auto-relaunch, auto-place, and auto-launch are active
+	autoLaunching       bool // true while an auto-launch is in progress
+	autoPlacing         bool // true while an auto-place is in progress
+	autoPassInFlight    bool
+	autoPassStartedAt   time.Time // set when autoPassInFlight flips to true
+	autoPassLatestPhase string    // latest relaunch.* event label for the current pass
+	autoPassLatestAt    time.Time // timestamp of that event
 	// Auto-pilot diagnostics and relaunch backoff.
 	autoStatusLine          string
 	autoNoopReasons         map[int64]string
@@ -606,6 +608,8 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.unplacedJobs = filterInstanceModeUnplacedJobs(msg.unplacedJobs, m.projectFilter)
 			m.clampCursor()
 		}
+		m.autoPassLatestPhase = msg.autoPassLatestPhase
+		m.autoPassLatestAt = msg.autoPassLatestAt
 		if m.autoMode && (m.mode.isInstanceBased() || m.mode == watchModeProject) {
 			return m, m.runAutoPilot()
 		}

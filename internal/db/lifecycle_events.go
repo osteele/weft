@@ -184,6 +184,19 @@ func ListLifecycleEvents(database *sql.DB, filter LifecycleEventFilter) ([]Lifec
 	return events, rows.Err()
 }
 
+// LatestLifecycleEvent returns the most recent event matching the filter, or
+// nil if none found. Convenience wrapper over ListLifecycleEvents with
+// Limit=1. Intended for "what is the autopilot doing right now?" queries
+// where only the most recent event matters.
+func LatestLifecycleEvent(database *sql.DB, filter LifecycleEventFilter) (*LifecycleEvent, error) {
+	filter.Limit = 1
+	events, err := ListLifecycleEvents(database, filter)
+	if err != nil || len(events) == 0 {
+		return nil, err
+	}
+	return &events[0], nil
+}
+
 // LifecycleEventKindCount holds a count for a single event kind.
 type LifecycleEventKindCount struct {
 	Kind  string
