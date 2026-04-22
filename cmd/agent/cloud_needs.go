@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/retry"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -62,14 +63,22 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 }
 
 func copyCloudNeedFromR2(bucket, r2Key, targetPath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "rclone", "copyto", fmt.Sprintf("r2:%s/%s", bucket, r2Key), targetPath)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("copy r2:%s/%s to %s: %w", bucket, r2Key, targetPath, err)
-	}
-	return nil
+	const copyTimeout = 20 * time.Minute
+	src := fmt.Sprintf("r2:%s/%s", bucket, r2Key)
+	return retry.Do(
+		context.Background(),
+		retry.ExplicitDelays(5*time.Second, 15*time.Second),
+		func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), copyTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "rclone", "copyto", src, targetPath)
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("copy %s to %s: %w", src, targetPath, err)
+			}
+			return nil
+		},
+	)
 }
 
 func pluralSuffix(n int) string {

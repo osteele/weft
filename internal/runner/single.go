@@ -449,6 +449,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// Discover outputs
 	var outputFiles []OutputFile
 	if ei.ExitCode == 0 {
+		if err := RecordProducedArtifacts(cfg.JobID, job.Produces); err != nil {
+			slog.Warn("failed to write artifact manifest from --produces",
+				"component", "runner", "job_id", cfg.JobID, "error", err)
+		}
 		dirs := job.OutputDirs
 		if len(dirs) == 0 {
 			dirs = config.DefaultOutputDirs

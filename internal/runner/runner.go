@@ -600,6 +600,11 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			fmt.Fprintf(os.Stderr, "Job %d: failed to write artifact satisfied file %s: %v\n", jobID, satisfiedPath, err)
 		}
 	}
+	if ei.ExitCode == 0 {
+		if err := RecordProducedArtifacts(jobID, rj.Data.Produces); err != nil {
+			fmt.Fprintf(os.Stderr, "Job %d: failed to write artifact manifest from --produces: %v\n", jobID, err)
+		}
+	}
 
 	// On failure, detect the failure reason using signal-aware detection
 	var failureReason string

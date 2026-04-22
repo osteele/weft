@@ -1,8 +1,11 @@
 package runner
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/osteele/weft/internal/artifacts"
 )
 
 func TestParseProducesSpec(t *testing.T) {
@@ -79,5 +82,68 @@ func TestArtifactSatisfiedFile(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestRecordProducedArtifacts_WritesManifestEntries(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	jobID := int64(123)
+
+	if err := RecordProducedArtifacts(jobID, []string{
+		"cache/model.bin",
+		"output/result.json:456",
+	}); err != nil {
+		t.Fatalf("RecordProducedArtifacts: %v", err)
+	}
+
+	manifestPath := filepath.Join(home, ".cache", "weft", "artifacts", "123.json")
+	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
+	if err != nil {
+		t.Fatalf("ReadManifestFile: %v", err)
+	}
+	if got, want := len(manifest.Artifacts), 2; got != want {
+		t.Fatalf("artifact count = %d, want %d", got, want)
+	}
+	if manifest.Artifacts[0].Path != "cache/model.bin" {
+		t.Fatalf("first artifact path = %q, want %q", manifest.Artifacts[0].Path, "cache/model.bin")
+	}
+	if manifest.Artifacts[1].Path != "output/result.json" {
+		t.Fatalf("second artifact path = %q, want %q", manifest.Artifacts[1].Path, "output/result.json")
+	}
+}
+
+func TestRecordProducedArtifacts_MergesExistingManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	jobID := int64(124)
+	manifestPath := filepath.Join(home, ".cache", "weft", "artifacts", "124.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatalf("mkdir manifest dir: %v", err)
+	}
+	seed := artifacts.Manifest{
+		JobID:     jobID,
+		Artifacts: []artifacts.ArtifactSpec{{Path: "output/already.json"}},
+	}
+	if err := artifacts.WriteManifestFile(manifestPath, seed); err != nil {
+		t.Fatalf("WriteManifestFile: %v", err)
+	}
+
+	if err := RecordProducedArtifacts(jobID, []string{
+		"output/already.json",
+		"output/new.json",
+	}); err != nil {
+		t.Fatalf("RecordProducedArtifacts: %v", err)
+	}
+
+	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
+	if err != nil {
+		t.Fatalf("ReadManifestFile: %v", err)
+	}
+	if got, want := len(manifest.Artifacts), 2; got != want {
+		t.Fatalf("artifact count = %d, want %d", got, want)
+	}
+	if manifest.Artifacts[0].Path != "output/already.json" || manifest.Artifacts[1].Path != "output/new.json" {
+		t.Fatalf("artifact paths = %+v", manifest.Artifacts)
 	}
 }
