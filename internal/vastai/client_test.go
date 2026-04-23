@@ -162,7 +162,7 @@ func TestBuildSearchFilter(t *testing.T) {
 		{
 			name:        "defaults only",
 			constraints: OfferConstraints{},
-			wantParts:   []string{"num_gpus=1", "direct_port_count>=1", "verified=true", "gpu_frac=1"},
+			wantParts:   []string{"num_gpus=1", "direct_port_count>=1", "verified=true"},
 		},
 		{
 			name: "with GPU class and memory",
@@ -230,6 +230,17 @@ func TestBuildSearchFilter_NoMaxGPUMem(t *testing.T) {
 	filter, _ := buildSearchFilter(OfferConstraints{MinGPUMemGB: 24})
 	if strings.Contains(filter, "gpu_ram<=") {
 		t.Errorf("filter %q should not contain gpu_ram<= when MaxGPUMemGB=0", filter)
+	}
+}
+
+// Regression: gpu_frac=1 must NOT be in the filter. It excluded all multi-GPU
+// host families (A100/H100 SXM) because their per-GPU offers report
+// gpu_frac < 1 (e.g. 0.125 on an 8x A100 host), making num_gpus=1 jobs
+// against a100/h100 unsatisfiable. See diagnosis 2026-04-23.
+func TestBuildSearchFilter_NoGPUFrac(t *testing.T) {
+	filter, _ := buildSearchFilter(OfferConstraints{GPUClass: "A100", MinGPUMemGB: 42, MinReliability: 0.95})
+	if strings.Contains(filter, "gpu_frac") {
+		t.Errorf("filter %q must not include gpu_frac (excludes multi-GPU-host A100/H100 supply)", filter)
 	}
 }
 

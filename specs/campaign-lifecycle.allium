@@ -246,6 +246,15 @@ config {
 -- (e.g. "a100-sxm4-80gb" against a displayName of "A100 SXM4 80GB").
 -- Implementation: internal/runpod/client.go offer discovery.
 
+-- Vast.ai provider search must NOT constrain `gpu_frac` (the fraction of the
+-- host's GPU pool included in this offer). Doing so excludes every multi-GPU
+-- host family (A100, H100 SXM, etc.), since per-GPU offers on those hosts
+-- report gpu_frac well below 1.0 (e.g. 0.125 on an 8x A100 machine). The
+-- desired GPU count is already expressed via num_gpus; gpu_frac is a
+-- host-topology artefact, not a placement constraint.
+-- Implementation: internal/vastai/client.go buildSearchFilter.
+-- Regression: internal/vastai/client_test.go TestBuildSearchFilter_NoGPUFrac.
+
 -- --------------------------------------------------------------------------
 -- Dependency-gated launch selection
 -- --------------------------------------------------------------------------

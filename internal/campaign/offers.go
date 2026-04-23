@@ -472,7 +472,7 @@ func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
 		parts = append(parts, "exclude_geos="+strings.Join(geos, ","))
 	}
 	// These provider-side defaults are always injected by Vast.ai search.
-	parts = append(parts, "direct_port_count>=1", "verified=true", "gpu_frac=1")
+	parts = append(parts, "direct_port_count>=1", "verified=true")
 	return strings.Join(parts, " ")
 }
 

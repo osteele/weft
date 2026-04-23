@@ -448,10 +448,14 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 		parts = append(parts, fmt.Sprintf("geolocation notin [%s]", strings.Join(quoted, ",")))
 	}
 
-	// Always require SSH, verified machines, and full GPU allocation
+	// Always require SSH and verified machines.
+	// Note: gpu_frac is intentionally NOT filtered. It represents the fraction
+	// of the host's GPU pool in this offer (e.g., 0.125 for 1 GPU on an 8x A100
+	// host). Requiring gpu_frac=1 would restrict supply to single-GPU hosts and
+	// eliminate all multi-GPU machine families (A100, H100 SXM, etc.) even when
+	// only 1 GPU is requested. num_gpus already specifies the desired count.
 	parts = append(parts, "direct_port_count>=1")
 	parts = append(parts, "verified=true")
-	parts = append(parts, "gpu_frac=1")
 
 	return strings.Join(parts, " "), postFilter
 }
