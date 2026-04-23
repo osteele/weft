@@ -170,7 +170,7 @@ func TestValidateListGroupingOptionsUnknownValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown group-by value")
 	}
-	if !strings.Contains(err.Error(), "supported: status") {
+	if !strings.Contains(err.Error(), "supported: status, project") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -179,6 +179,25 @@ func TestValidateListGroupingOptionsRejectsJSON(t *testing.T) {
 	prevGroupBy := listGroupBy
 	prevFormat := listFormat
 	listGroupBy = "status"
+	listFormat = "json"
+	t.Cleanup(func() {
+		listGroupBy = prevGroupBy
+		listFormat = prevFormat
+	})
+
+	err := validateListGroupingOptions()
+	if err == nil {
+		t.Fatal("expected error for --group-by with json format")
+	}
+	if !strings.Contains(err.Error(), "table output only") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateListGroupingOptionsRejectsJSONForProject(t *testing.T) {
+	prevGroupBy := listGroupBy
+	prevFormat := listFormat
+	listGroupBy = "project"
 	listFormat = "json"
 	t.Cleanup(func() {
 		listGroupBy = prevGroupBy
@@ -219,6 +238,33 @@ func TestPrintJobsGroupedStatus(t *testing.T) {
 	}
 	if !strings.Contains(out, "Queued (1):") {
 		t.Fatalf("expected grouped queued section, got:\n%s", out)
+	}
+}
+
+func TestPrintJobsGroupedProject(t *testing.T) {
+	prevGroupBy := listGroupBy
+	prevFormat := listFormat
+	listGroupBy = "project"
+	listFormat = "table"
+	t.Cleanup(func() {
+		listGroupBy = prevGroupBy
+		listFormat = prevFormat
+	})
+
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusRunning, Host: "cool30", Project: "proj-a", WorkingDir: "/tmp/proj-a", Description: "run"},
+		{ID: 2, Status: db.StatusQueued, Host: "cool100", Project: "proj-b", WorkingDir: "/tmp/proj-b", Description: "wait"},
+	}
+	out := captureStdout(t, func() {
+		if err := printJobs(nil, jobs); err != nil {
+			t.Fatalf("printJobs: %v", err)
+		}
+	})
+
+	for _, want := range []string{"proj-a", "proj-b", "dir: /tmp/proj-a", "dir: /tmp/proj-b", "DESCRIPTION"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
 	}
 }
 

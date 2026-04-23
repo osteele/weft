@@ -43,7 +43,8 @@ Examples:
   weft list projects           # Projects with job counts
   weft list --all              # All jobs including older
   weft list --queued           # Jobs waiting in queue
-  weft list jobs --group-by status --unprocessed  # Grouped status sections`,
+  weft list jobs --group-by status --unprocessed  # Grouped status sections
+  weft list jobs --group-by project               # Grouped project sections`,
 	RunE: runList,
 }
 
@@ -119,7 +120,7 @@ func addListFlags(cmd *cobra.Command) {
 	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	cmd.Flags().BoolVarP(&listWatch, "watch", "w", false, "Watch mode: show live-updating TUI or poll for changes (same as 'weft job watch')")
 	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start watch mode with auto-pilot enabled (grouped status views)")
-	cmd.Flags().StringVar(&listGroupBy, "group-by", "", `Group output: "status"`)
+	cmd.Flags().StringVar(&listGroupBy, "group-by", "", `Group output: "status", "project"`)
 }
 
 func init() {
@@ -557,6 +558,9 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 		launchStatusByID := loadLaunchStatusForJobs(database, jobs)
 		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithLaunchState(jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID))
 	}
+	if listGroupBy == "project" {
+		return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
+	}
 
 	switch listFormat {
 	case "json":
@@ -601,11 +605,11 @@ func validateListGroupingOptions() error {
 	if listGroupBy == "" {
 		return nil
 	}
-	if listGroupBy != "status" {
-		return usageErrorf("unknown value %q for --group-by (supported: status)", listGroupBy)
+	if listGroupBy != "status" && listGroupBy != "project" {
+		return usageErrorf("unknown value %q for --group-by (supported: status, project)", listGroupBy)
 	}
 	if listFormat != "" && listFormat != "table" {
-		return usageErrorf("--group-by status supports table output only (remove --format or use --format table)")
+		return usageErrorf("--group-by %s supports table output only (remove --format or use --format table)", listGroupBy)
 	}
 	return nil
 }
