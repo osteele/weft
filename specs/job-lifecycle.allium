@@ -90,7 +90,17 @@ entity Job {
     -- Placement
     host: Host?
     target_kind: TargetKind
-    placement_reasons: List<String>     -- why job is unplaced
+    -- Why the job is unplaced. Each string is one reason, e.g. "no local
+    -- host matched <constraints>", per-host non-eligibility ("2 hosts: no
+    -- A100 GPU"), or rental-side reasons ("no offers from providers ...",
+    -- "offer query failed: ..."). UI surfaces are responsible for
+    -- distinguishing actionable blockers from routine handoff state — when
+    -- any cloud provider is configured, the on-prem rejection reasons
+    -- (HasPrefix "no local host matched " / matches `^\d+ hosts?: `) are
+    -- expected hand-offs to autopilot, not blockers, and SHOULD be hidden
+    -- from at-a-glance "blocked:" labels. They remain in the underlying
+    -- list for diagnostic detail views.
+    placement_reasons: List<String>
     cloud_instance: CloudInstance?
 
     -- Execution backend

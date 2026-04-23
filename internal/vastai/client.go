@@ -388,7 +388,11 @@ func (c *Client) run(args ...string) ([]byte, error) {
 			if len(prefix) > 3 {
 				prefix = args[:3]
 			}
-			return nil, fmt.Errorf("%s: %s", strings.Join(prefix, " "), strings.TrimSpace(string(exitErr.Stderr)))
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if stderr == "" {
+				stderr = fmt.Sprintf("exit %d (no stderr)", exitErr.ExitCode())
+			}
+			return nil, fmt.Errorf("%s: %s", strings.Join(prefix, " "), stderr)
 		}
 		return nil, err
 	}

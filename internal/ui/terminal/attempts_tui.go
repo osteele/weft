@@ -21,6 +21,7 @@ type attemptsListModel struct {
 	views    []attemptView
 	err      error
 	cursor   int
+	width    int
 }
 
 // attemptView pairs an attempt with its launch (if any) and the derived
@@ -149,6 +150,9 @@ func derivePhase(a db.JobAttempt, l *db.Launch) (attemptPhase, int64) {
 
 func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 	case attemptsLoadedMsg:
 		m.job = msg.job
 		m.views = msg.views
@@ -218,18 +222,33 @@ func (m attemptsListModel) renderHeader() string {
 	if m.job == nil {
 		return title
 	}
-	parts := []string{title}
-	if desc := m.job.EffectiveDescription(); desc != "" {
-		parts = append(parts, tuiDimStyle.Render(truncate(desc, 80)))
-	}
+	// Title + status + project share the first line; the description goes on
+	// its own line(s) below, wrapped to the terminal width so it doesn't get
+	// truncated.
+	firstLine := []string{title}
 	status := m.job.EffectiveStatus()
 	if status != "" {
-		parts = append(parts, attemptStatusStyle(status).Render(status))
+		firstLine = append(firstLine, attemptStatusStyle(status).Render(status))
 	}
 	if m.job.Project != "" {
-		parts = append(parts, tuiDimStyle.Render("project: "+m.job.Project))
+		firstLine = append(firstLine, tuiDimStyle.Render("project: "+m.job.Project))
 	}
-	return strings.Join(parts, "  ")
+	header := strings.Join(firstLine, "  ")
+
+	desc := m.job.EffectiveDescription()
+	if desc == "" {
+		return header
+	}
+	wrapWidth := m.width
+	if wrapWidth <= 0 {
+		wrapWidth = 100
+	}
+	wrapped := wrapDisplayWidth(desc, wrapWidth)
+	descLines := make([]string, len(wrapped))
+	for i, line := range wrapped {
+		descLines[i] = tuiDimStyle.Render(line)
+	}
+	return header + "\n" + strings.Join(descLines, "\n")
 }
 
 type attemptColumn struct {

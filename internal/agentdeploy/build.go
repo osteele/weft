@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/util"
 )
 
 // ErrAgentNotAvailable is returned when the agent binary for a platform is not
@@ -88,20 +91,31 @@ func EnsureBuiltWithOutput(version, goos, goarch string, output io.Writer) (stri
 }
 
 // acquireBuildLock serializes concurrent builds targeting the same output path.
-// It coordinates across processes by using an atomic lock directory.
+// The lock is a single file (atomically created via O_CREATE|O_EXCL) whose
+// contents are the holder's PID. Waiters reclaim the lock when the holder
+// process is gone, preventing crashed builds from blocking subsequent attempts
+// for the full wait timeout.
 func acquireBuildLock(outputPath string) (func(), error) {
-	lockDir := outputPath + ".lock.d"
+	lockFile := outputPath + ".lock"
 	const (
 		waitInterval = 200 * time.Millisecond
 		waitTimeout  = 10 * time.Minute
-		staleAfter   = 30 * time.Minute
+		// Reclaim a lock older than this even if the recorded PID is still
+		// alive (cheap defence against PID reuse on long-lived systems).
+		// Must be < waitTimeout so a stuck holder is reclaimed rather than
+		// timing out the waiter.
+		staleAfter = 5 * time.Minute
 	)
 	deadline := time.Now().Add(waitTimeout)
 
 	for {
-		if err := os.Mkdir(lockDir, 0o700); err == nil {
-			return func() { _ = os.Remove(lockDir) }, nil
-		} else if !os.IsExist(err) {
+		f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = f.WriteString(strconv.Itoa(os.Getpid()))
+			_ = f.Close()
+			return func() { _ = os.Remove(lockFile) }, nil
+		}
+		if !os.IsExist(err) {
 			return nil, err
 		}
 
@@ -110,16 +124,41 @@ func acquireBuildLock(outputPath string) (func(), error) {
 			return func() {}, nil
 		}
 
-		// Reclaim lock if it appears stale (best effort).
-		if info, err := os.Stat(lockDir); err == nil && time.Since(info.ModTime()) > staleAfter {
-			_ = os.Remove(lockDir)
+		// Reclaim if the holder is gone or the lock is too old.
+		if shouldReclaimBuildLock(lockFile, staleAfter) {
+			_ = os.Remove(lockFile)
+			continue
 		}
 
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for build lock %s", lockDir)
+			return nil, fmt.Errorf("timeout waiting for build lock %s", lockFile)
 		}
 		time.Sleep(waitInterval)
 	}
+}
+
+// shouldReclaimBuildLock reports whether a held lock can be safely taken over.
+// True when (a) the recorded PID is no longer a running process or (b) the
+// lock file is older than staleAfter (defensive against PID reuse).
+func shouldReclaimBuildLock(lockFile string, staleAfter time.Duration) bool {
+	info, err := os.Stat(lockFile)
+	if err != nil {
+		return false // disappeared on its own; loop will try OpenFile again
+	}
+	if time.Since(info.ModTime()) > staleAfter {
+		return true
+	}
+	data, err := os.ReadFile(lockFile)
+	if err != nil {
+		return true
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		// Empty file (writer raced us between OpenFile and WriteString) —
+		// give the writer a small grace window before reclaiming.
+		return time.Since(info.ModTime()) > 500*time.Millisecond
+	}
+	return !util.IsProcessAlive(pid)
 }
 
 // BinariesVersion returns the version recorded in the binaries/ directory.

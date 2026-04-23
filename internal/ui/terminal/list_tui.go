@@ -1050,10 +1050,11 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		return nil
 	}
 	return renderSelectedJobDetail(job, selectedJobContext{
-		launchLiveByID: m.launchLiveByID,
-		launchByID:     m.launchByID,
-		hostInfoByName: m.hostInfoByName,
-		siblingJobs:    m.jobs,
+		launchLiveByID:  m.launchLiveByID,
+		launchByID:      m.launchByID,
+		hostInfoByName:  m.hostInfoByName,
+		siblingJobs:     m.jobs,
+		cloudConfigured: len(m.cloudClients) > 0,
 	}, time.Now())
 }
 

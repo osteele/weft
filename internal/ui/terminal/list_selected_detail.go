@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +23,12 @@ type selectedJobContext struct {
 	launchByID     map[int64]*db.Launch
 	hostInfoByName map[string]*db.CachedHostInfo
 	siblingJobs    []*db.Job
+	// cloudConfigured is true when at least one cloud provider client is
+	// available. When true, an unplaced job whose only blocker is "no local
+	// host matched ..." is not actionable (autopilot is responsible for
+	// finding a rental), so the on-prem rejection reason is hidden from the
+	// footer to avoid presenting routine handoff state as a problem.
+	cloudConfigured bool
 }
 
 // renderSelectedJobDetail returns the "Job:" and "Host:" footer lines for
@@ -53,7 +60,7 @@ func renderJobFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) str
 	parts := []string{"Job: " + ids.FormatJobID(job.ID)}
 	parts = appendJobStatusParts(parts, job, now)
 	if job.TargetKind() == db.JobTargetUnplaced {
-		parts = appendUnplacedParts(parts, job)
+		parts = appendUnplacedParts(parts, job, ctx.cloudConfigured)
 	}
 	if sibling := waitingForSiblingJobID(job, ctx); sibling > 0 {
 		parts = append(parts, "waiting for "+ids.FormatJobID(sibling))
@@ -220,16 +227,51 @@ func appendJobStatusParts(parts []string, job *db.Job, now time.Time) []string {
 	return parts
 }
 
-func appendUnplacedParts(parts []string, job *db.Job) []string {
+func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool) []string {
 	parts = append(parts, "unplaced")
 	if req := formatResourceRequest(job); req != "" {
 		parts = append(parts, "wants "+req)
 	}
-	if len(job.PlacementReasons) > 0 {
-		parts = append(parts, "blocked: "+strings.Join(job.PlacementReasons, "; "))
+	reasons := job.PlacementReasons
+	if cloudConfigured {
+		reasons = filterOutOnPremRejectionReasons(reasons)
+	}
+	if len(reasons) > 0 {
+		parts = append(parts, "blocked: "+strings.Join(reasons, "; "))
 	}
 	return parts
 }
+
+// filterOutOnPremRejectionReasons drops PlacementReasons that describe purely
+// on-prem rejection (no host matched, per-host non-eligibility). When cloud is
+// available these are normal handoff state, not blockers worth surfacing.
+// Other reasons (e.g. dependency gates, retry budget exhausted, "no offers
+// from providers") are kept.
+func filterOutOnPremRejectionReasons(reasons []string) []string {
+	filtered := reasons[:0:0]
+	for _, r := range reasons {
+		if isOnPremRejectionReason(r) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
+}
+
+func isOnPremRejectionReason(reason string) bool {
+	r := strings.TrimSpace(reason)
+	if strings.HasPrefix(r, "no local host matched ") {
+		return true
+	}
+	// Per-host rejection summary emitted by placement.go alongside the
+	// "no local host matched ..." line (e.g. "2 hosts: no L40s GPU").
+	if onPremHostsRejectionPattern.MatchString(r) {
+		return true
+	}
+	return false
+}
+
+var onPremHostsRejectionPattern = regexp.MustCompile(`^\d+ hosts?: `)
 
 func formatResourceRequest(job *db.Job) string {
 	var parts []string

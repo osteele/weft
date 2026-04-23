@@ -13,6 +13,7 @@ import (
 	appconfig "github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -140,15 +141,7 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid PID file: %w", err)
 	}
 
-	// Check if process is actually running
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		fmt.Printf("Status: stale PID file (PID %d)\n", pid)
-		return nil
-	}
-
-	// On Unix, FindProcess always succeeds. Send signal 0 to check.
-	if err := process.Signal(syscall.Signal(0)); err != nil {
+	if !util.IsProcessAlive(pid) {
 		fmt.Printf("Status: stale PID file (PID %d, process not running)\n", pid)
 		return nil
 	}

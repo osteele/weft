@@ -295,6 +295,20 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	var launchGroups []InstanceGroup
 	var launchOffers []cloud.Offer
 	for _, gOffer := range groupOffers {
+		// Err must be checked before Offer == nil: a search error always leaves
+		// Offer nil, so the inverse order would mis-classify provider failures
+		// as "no offers" (with a misleading FilterStats-derived detail).
+		if gOffer.Err != nil {
+			slog.Warn("offer error for group", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "error", gOffer.Err)
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchSkippedOfferError,
+				GPUSpec:   gOffer.Group.GPUSpec(),
+				ErrorText: gOffer.Err.Error(),
+			})
+			result.Errors = append(result.Errors, gOffer.Err)
+			recordGroupReasons(result, cfg.ResetJobs, gOffer.Group, "offer query failed: "+gOffer.Err.Error())
+			continue
+		}
 		if gOffer.Offer == nil {
 			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(gOffer.Group, minReliability))
 			detail := gOffer.FilterStats.NoOffersDetail(constraintStr)
@@ -307,17 +321,6 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			})
 			result.Skipped += len(gOffer.Group.Jobs)
 			recordGroupReasons(result, cfg.ResetJobs, gOffer.Group, detail)
-			continue
-		}
-		if gOffer.Err != nil {
-			slog.Warn("offer error for group", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "error", gOffer.Err)
-			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
-				EventKind: db.EventRelaunchSkippedOfferError,
-				GPUSpec:   gOffer.Group.GPUSpec(),
-				ErrorText: gOffer.Err.Error(),
-			})
-			result.Errors = append(result.Errors, gOffer.Err)
-			recordGroupReasons(result, cfg.ResetJobs, gOffer.Group, "offer query failed: "+gOffer.Err.Error())
 			continue
 		}
 		launchGroups = append(launchGroups, gOffer.Group)
