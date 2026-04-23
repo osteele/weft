@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // attemptsListModel is a read-only drill-down screen pushed by the watch
@@ -17,15 +18,60 @@ type attemptsListModel struct {
 	database *sql.DB
 	jobID    int64
 	job      *db.Job
-	attempts []db.JobAttempt
+	views    []attemptView
 	err      error
 	cursor   int
 }
 
+// attemptView pairs an attempt with its launch (if any) and the derived
+// lifecycle fields used across columns, so the per-row cascade over
+// timestamp candidates runs once instead of once per column.
+type attemptView struct {
+	attempt db.JobAttempt
+	launch  *db.Launch
+	phase   attemptPhase
+	// when is the timestamp that defines `phase`, used both for the When
+	// column and as the duration start when the job never ran.
+	when int64
+}
+
+type attemptPhase int
+
+const (
+	phaseNone attemptPhase = iota
+	phaseQueued
+	phaseRequest
+	phaseLaunch
+	phaseBooting
+	phaseReady
+	phaseRunning
+	phaseEnded
+)
+
+func (p attemptPhase) Label() string {
+	switch p {
+	case phaseQueued:
+		return "queued"
+	case phaseRequest:
+		return "request"
+	case phaseLaunch:
+		return "launch"
+	case phaseBooting:
+		return "booting"
+	case phaseReady:
+		return "ready"
+	case phaseRunning:
+		return "running"
+	case phaseEnded:
+		return "ended"
+	}
+	return "—"
+}
+
 type attemptsLoadedMsg struct {
-	job      *db.Job
-	attempts []db.JobAttempt
-	err      error
+	job   *db.Job
+	views []attemptView
+	err   error
 }
 
 func newAttemptsListModel(database *sql.DB, jobID int64) attemptsListModel {
@@ -48,18 +94,67 @@ func (m attemptsListModel) loadAttempts() tea.Cmd {
 		if err != nil {
 			return attemptsLoadedMsg{job: job, err: fmt.Errorf("list attempts: %w", err)}
 		}
-		return attemptsLoadedMsg{job: job, attempts: attempts}
+		launchIDs := make([]int64, 0, len(attempts))
+		for _, a := range attempts {
+			if a.LaunchID != nil && *a.LaunchID > 0 {
+				launchIDs = append(launchIDs, *a.LaunchID)
+			}
+		}
+		launches, err := db.GetLaunchesByIDs(database, launchIDs)
+		if err != nil {
+			return attemptsLoadedMsg{job: job, err: fmt.Errorf("load launches: %w", err)}
+		}
+		views := make([]attemptView, len(attempts))
+		for i, a := range attempts {
+			v := attemptView{attempt: a}
+			if a.LaunchID != nil {
+				v.launch = launches[*a.LaunchID]
+			}
+			v.phase, v.when = derivePhase(a, v.launch)
+			views[i] = v
+		}
+		return attemptsLoadedMsg{job: job, views: views}
 	}
+}
+
+// derivePhase returns the furthest lifecycle checkpoint the attempt
+// reached, along with the timestamp that marks it. This is the single
+// source of truth the row columns key off.
+func derivePhase(a db.JobAttempt, l *db.Launch) (attemptPhase, int64) {
+	if ts := ptrVal(a.EndTime); ts > 0 {
+		return phaseEnded, ts
+	}
+	if ts := ptrVal(a.StartTime); ts > 0 {
+		return phaseRunning, ts
+	}
+	if l != nil {
+		if ts := ptrVal(l.ReadyAt); ts > 0 {
+			return phaseReady, ts
+		}
+		if ts := ptrVal(l.ProviderRunningAt); ts > 0 {
+			return phaseBooting, ts
+		}
+		if ts := ptrVal(l.LaunchedAt); ts > 0 {
+			return phaseLaunch, ts
+		}
+		if l.CreatedAt > 0 {
+			return phaseRequest, l.CreatedAt
+		}
+	}
+	if ts := ptrVal(a.QueuedAt); ts > 0 {
+		return phaseQueued, ts
+	}
+	return phaseNone, 0
 }
 
 func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case attemptsLoadedMsg:
 		m.job = msg.job
-		m.attempts = msg.attempts
+		m.views = msg.views
 		m.err = msg.err
-		if m.cursor >= len(m.attempts) {
-			m.cursor = max(0, len(m.attempts)-1)
+		if m.cursor >= len(m.views) {
+			m.cursor = max(0, len(m.views)-1)
 		}
 		return m, nil
 
@@ -73,7 +168,7 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "down", "j":
-			if m.cursor < len(m.attempts)-1 {
+			if m.cursor < len(m.views)-1 {
 				m.cursor++
 			}
 			return m, nil
@@ -81,8 +176,8 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			return m, nil
 		case "G", "end":
-			if len(m.attempts) > 0 {
-				m.cursor = len(m.attempts) - 1
+			if len(m.views) > 0 {
+				m.cursor = len(m.views) - 1
 			}
 			return m, nil
 		case "r":
@@ -105,7 +200,7 @@ func (m attemptsListModel) View() string {
 		return b.String()
 	}
 
-	if len(m.attempts) == 0 {
+	if len(m.views) == 0 {
 		b.WriteString(tuiDimStyle.Render("No attempts recorded for this job."))
 		b.WriteString("\n\n")
 		b.WriteString(tuiDimStyle.Render("esc/q back · r reload"))
@@ -140,33 +235,30 @@ func (m attemptsListModel) renderHeader() string {
 type attemptColumn struct {
 	title string
 	width int
-	value func(a db.JobAttempt) string
+	value func(v attemptView, now int64) string
 }
 
 func attemptColumns() []attemptColumn {
 	return []attemptColumn{
-		{"#", 4, func(a db.JobAttempt) string { return fmt.Sprintf("%d", a.AttemptNumber) }},
-		{"Status", 12, func(a db.JobAttempt) string { return a.Status }},
-		{"Host", 20, func(a db.JobAttempt) string {
-			if a.Host == "" {
+		{"#", 4, func(v attemptView, _ int64) string { return fmt.Sprintf("%d", v.attempt.AttemptNumber) }},
+		{"Status", 10, func(v attemptView, _ int64) string { return v.attempt.Status }},
+		{"Phase", 8, func(v attemptView, _ int64) string { return v.phase.Label() }},
+		{"Host", 22, func(v attemptView, _ int64) string { return attemptHostCell(v) }},
+		{"When", 24, func(v attemptView, _ int64) string { return attemptWhenCell(v) }},
+		{"Duration", 10, func(v attemptView, now int64) string { return attemptDurationCell(v, now) }},
+		{"Exit", 5, func(v attemptView, _ int64) string {
+			if v.attempt.ExitCode == nil {
 				return "—"
 			}
-			return a.Host
+			return fmt.Sprintf("%d", *v.attempt.ExitCode)
 		}},
-		{"Started", 19, func(a db.JobAttempt) string { return formatAttemptTime(a.StartTime) }},
-		{"Duration", 10, func(a db.JobAttempt) string { return formatAttemptDuration(a.StartTime, a.EndTime) }},
-		{"Exit", 5, func(a db.JobAttempt) string {
-			if a.ExitCode == nil {
-				return "—"
-			}
-			return fmt.Sprintf("%d", *a.ExitCode)
-		}},
-		{"Outcome/Reason", 40, func(a db.JobAttempt) string { return attemptOutcomeText(a) }},
+		{"Outcome/Reason", 40, func(v attemptView, _ int64) string { return attemptOutcomeText(v.attempt) }},
 	}
 }
 
 func (m attemptsListModel) renderTable() string {
 	cols := attemptColumns()
+	now := time.Now().Unix()
 	var b strings.Builder
 
 	headerCells := make([]string, len(cols))
@@ -176,13 +268,13 @@ func (m attemptsListModel) renderTable() string {
 	b.WriteString(tuiAccentStyle.Render(strings.Join(headerCells, " ")))
 	b.WriteString("\n")
 
-	for i, a := range m.attempts {
+	for i, v := range m.views {
 		cells := make([]string, len(cols))
 		for j, c := range cols {
-			cells[j] = padOrTruncateDisplay(c.value(a), c.width, false)
+			cells[j] = padOrTruncateDisplay(c.value(v, now), c.width, false)
 		}
 		row := strings.Join(cells, " ")
-		styled := attemptStatusStyle(a.Status).Render(row)
+		styled := attemptStatusStyle(v.attempt.Status).Render(row)
 		if i == m.cursor {
 			styled = tuiSelectedRowStyle.Render(styled)
 		}
@@ -205,6 +297,56 @@ func attemptStatusStyle(status string) lipgloss.Style {
 	}
 }
 
+func attemptHostCell(v attemptView) string {
+	if v.attempt.Host != "" && !db.IsLaunchHost(v.attempt.Host) {
+		return v.attempt.Host
+	}
+	if v.launch != nil {
+		label := ids.FormatInstanceID(v.launch.ID)
+		if gpu := v.launch.DisplayGPUBrief(); gpu != "" {
+			label = label + " " + gpu
+		}
+		return label
+	}
+	return "—"
+}
+
+func attemptWhenCell(v attemptView) string {
+	if v.when == 0 {
+		return "—"
+	}
+	ts := formatAttemptTimestamp(v.when)
+	// Running/ended attempts show a bare timestamp; earlier phases get a
+	// short prefix so the column conveys both when *and* how far it got.
+	switch v.phase {
+	case phaseRunning, phaseEnded:
+		return ts
+	}
+	return v.phase.Label() + " " + ts
+}
+
+func attemptDurationCell(v attemptView, now int64) string {
+	start := ptrVal(v.attempt.StartTime)
+	if start == 0 {
+		start = v.when
+	}
+	if start == 0 {
+		return "—"
+	}
+	end := ptrVal(v.attempt.EndTime)
+	if end == 0 && v.launch != nil {
+		end = ptrVal(v.launch.EndedAt)
+	}
+	if end == 0 {
+		end = now
+	}
+	elapsed := end - start
+	if elapsed < 0 {
+		return "—"
+	}
+	return db.FormatDuration(elapsed)
+}
+
 func attemptOutcomeText(a db.JobAttempt) string {
 	if a.CloudOutcome != "" && a.CloudOutcome != db.AttemptOutcomeCompleted {
 		if a.FailureReason != "" {
@@ -224,24 +366,13 @@ func attemptOutcomeText(a db.JobAttempt) string {
 	return "—"
 }
 
-func formatAttemptTime(ts *int64) string {
-	if ts == nil || *ts == 0 {
-		return "—"
-	}
-	return time.Unix(*ts, 0).Format("2006-01-02 15:04:05")
+func formatAttemptTimestamp(ts int64) string {
+	return time.Unix(ts, 0).Format("2006-01-02 15:04:05")
 }
 
-func formatAttemptDuration(start, end *int64) string {
-	if start == nil || *start == 0 {
-		return "—"
+func ptrVal(ts *int64) int64 {
+	if ts == nil || *ts <= 0 {
+		return 0
 	}
-	endUnix := time.Now().Unix()
-	if end != nil && *end != 0 {
-		endUnix = *end
-	}
-	elapsed := endUnix - *start
-	if elapsed < 0 {
-		return "—"
-	}
-	return db.FormatDuration(elapsed)
+	return *ts
 }
