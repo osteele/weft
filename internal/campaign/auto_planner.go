@@ -220,7 +220,55 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 			continue
 		}
 		if !launchable {
-			plan.BlockedReasons[job.ID] = "planner: " + strings.TrimSpace(reason)
+			plan.BlockedReasons[job.ID] = "planner: " + SanitizeBlockedReason(reason)
 		}
 	}
+}
+
+// SanitizeBlockedReason collapses multi-line errors (e.g. Python tracebacks
+// bubbled up from the vastai CLI, or wrapped S3 upload failures) into a compact
+// single-line summary suitable for TUI display and oplog details. It keeps the
+// first non-empty line and appends the final exception-style line when present,
+// then truncates to a reasonable length.
+func SanitizeBlockedReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return reason
+	}
+	lines := strings.Split(reason, "\n")
+	first := ""
+	last := ""
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if first == "" {
+			first = ln
+		}
+		last = ln
+	}
+	summary := first
+	if last != "" && last != first && looksLikeExceptionLine(last) {
+		summary = first + " … " + last
+	}
+	const maxLen = 240
+	if len(summary) > maxLen {
+		summary = summary[:maxLen-1] + "…"
+	}
+	return summary
+}
+
+func looksLikeExceptionLine(s string) bool {
+	// Heuristic: Python exception lines are "pkg.Error: message" — a
+	// colon-separated identifier prefix with no spaces before the colon.
+	idx := strings.Index(s, ":")
+	if idx <= 0 {
+		return false
+	}
+	prefix := s[:idx]
+	if strings.ContainsAny(prefix, " \t") {
+		return false
+	}
+	return strings.Contains(prefix, "Error") || strings.Contains(prefix, "Exception")
 }

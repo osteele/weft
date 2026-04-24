@@ -1795,13 +1795,13 @@ const (
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, int, string, map[int64]string, error) {
 	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)
+	if result != nil {
+		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, err
+	}
 	if err != nil {
 		return 0, 0, 0, "", nil, err
 	}
-	if result == nil {
-		return 0, 0, 0, "", nil, nil
-	}
-	return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, nil
+	return 0, 0, 0, "", nil, nil
 }
 
 func launchedClassFromResult(database *sql.DB, instanceIDs []int64) string {
