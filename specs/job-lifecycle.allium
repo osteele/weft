@@ -658,6 +658,28 @@ rule UserRequeuesJob {
         status: queued,
         backend: job.backend
     )
+
+    @guidance
+        -- Applies uniformly to on-prem and cloud/rental jobs. A fresh
+        -- attempt is required (not merely setting requested_status='queued')
+        -- because the job_status view derives cloud-job status from the
+        -- latest attempt: without a new attempt, a terminal attempt with
+        -- exit_code != 0 keeps the job visible as 'failed' in listings and
+        -- the autopilot never re-places it.
+        --
+        -- For cloud retries the new attempt is unplaced (host='',
+        -- launch_id=NULL); the scheduler re-places it on the next sweep.
+        -- Prior cloud attempts are marked cloud_outcome='superseded' so
+        -- retry-budget accounting does not keep charging elapsed/spend
+        -- from the failed chain.
+        --
+        -- Implementation: internal/db/db.go RequeueByID delegates to
+        -- RequeueFreshAttemptByID for cloud jobs.
+        --
+        -- Regression reference: jobs wj1379, wj1381 (2026-04-24) —
+        -- `weft edit --retry` reported success locally but listings kept
+        -- showing 'failed' because the cloud branch only set
+        -- requested_status='queued' without creating a fresh attempt.
 }
 
 rule ResetJobToUnplaced {

@@ -2654,6 +2654,81 @@ func TestRequeueByIDArchivesPreviousRun(t *testing.T) {
 	t.Skip("job_runs archival removed; job_attempts tracks history")
 }
 
+// TestRequeueByID_FailedCloudJob_ViewReportsQueued is a regression test for a
+// bug where `weft edit --retry` on a failed rental/cloud job reported success
+// locally but `jobs list` continued to show the job as failed. Root cause:
+// the cloud branch of RequeueByID only updated attempts with end_time IS NULL,
+// so a terminal attempt (exit_code=1, status='failed') was unchanged, and the
+// job_status view kept computing 'failed' because its first cloud case only
+// matches when the attempt's status='canceled' or cloud_outcome is
+// orphaned|canceled. The fix makes the cloud path create a fresh queued
+// attempt so the latest attempt drives the view to 'queued'.
+func TestRequeueByID_FailedCloudJob_ViewReportsQueued(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// Failed cloud job: terminal attempt with exit_code=1, status='failed',
+	// end_time set, launch_id pointing at the rental.
+	insertTestJob(t, database, 1, "python train.py", "/tmp", StatusFailed,
+		withHost("vastai:42"),
+		withLaunch(launchID),
+		withExitCode(1),
+	)
+
+	before, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID before: %v", err)
+	}
+	if before.Status != StatusFailed {
+		t.Fatalf("before requeue: got status %q, want %q", before.Status, StatusFailed)
+	}
+
+	if err := RequeueByID(database, 1); err != nil {
+		t.Fatalf("RequeueByID: %v", err)
+	}
+
+	after, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.Status != StatusQueued {
+		t.Fatalf("after requeue: got status %q, want %q (bug: view still reports failed)", after.Status, StatusQueued)
+	}
+	// Unplaced: the rental instance is gone, so the scheduler must re-place.
+	if after.Host != "" {
+		t.Fatalf("after requeue: got host %q, want empty (unplaced)", after.Host)
+	}
+
+	// Prior cloud attempt should be marked 'superseded' so retry budgeting
+	// does not keep charging elapsed/spend from the failed chain.
+	var outcome sql.NullString
+	if err := database.QueryRow(
+		`SELECT cloud_outcome FROM job_attempts WHERE job_id = 1 AND attempt_number = 1`,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("query prior attempt outcome: %v", err)
+	}
+	if outcome.String != AttemptOutcomeSuperseded {
+		t.Fatalf("prior attempt cloud_outcome = %q, want %q", outcome.String, AttemptOutcomeSuperseded)
+	}
+
+	// A fresh attempt (#2) should exist.
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = 1`).Scan(&count); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("attempt count = %d, want 2 (original failed + fresh queued)", count)
+	}
+}
+
 func TestUpdateQueuedToRunningCreatesLatestRun(t *testing.T) {
 	t.Skip("job_runs archival removed; job_attempts tracks history via LatestRunID → attempt ID")
 }

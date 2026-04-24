@@ -1201,21 +1201,24 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reload job: %w", err)
 		}
-		// Remove old completion files so the runner doesn't skip the requeued job
-		timeout := ops.DefaultOptions().Timeout
-		if err := ops.RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
-			slog.Warn("failed to remove remote completion files", "component", "edit", "job_id", job.ID, "error", err)
-		}
-		if err := ops.AppendJobToQueue(job, timeout); err != nil {
-			// Best effort - job is queued locally, sync will eventually push it
-			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.TargetDisplay())
-			deferredUpdate = true
+		if job.IsUnplacedQueued() {
+			// No remote queue; scheduler re-places on next sweep.
+			fmt.Printf("Job %s re-queued (unplaced — scheduler will re-place on next sweep)\n", ids.FormatJobID(job.ID))
 		} else {
-			if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
-				slog.Warn("failed to clear pending status", "component", "queue", "job_id", job.ID, "error", err)
+			timeout := ops.DefaultOptions().Timeout
+			if err := ops.RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
+				slog.Warn("failed to remove remote completion files", "component", "edit", "job_id", job.ID, "error", err)
 			}
-			if err := db.SetQueuedAtNow(database, job.ID); err != nil {
-				slog.Warn("failed to update queued_at", "component", "queue", "job_id", job.ID, "error", err)
+			if err := ops.AppendJobToQueue(job, timeout); err != nil {
+				fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.TargetDisplay())
+				deferredUpdate = true
+			} else {
+				if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+					slog.Warn("failed to clear pending status", "component", "queue", "job_id", job.ID, "error", err)
+				}
+				if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+					slog.Warn("failed to update queued_at", "component", "queue", "job_id", job.ID, "error", err)
+				}
 			}
 		}
 	} else {

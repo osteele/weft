@@ -2624,11 +2624,14 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, newStatus string) erro
 func RequeueByID(database *sql.DB, id int64) error {
 	warnTransition(database, id, StatusQueued, false, status.SourceUserAction)
 
-	// Cloud jobs: close attempt and set requested_status='queued'.
+	// Cloud retries need a fresh attempt, not just requested_status='queued':
+	// job_status derives cloud status from the latest attempt, so a terminal
+	// attempt with exit_code != 0 would keep the job visible as 'failed'. See
+	// UserRequeuesJob in specs/job-lifecycle.allium.
 	var launchID sql.NullInt64
 	_ = database.QueryRow(`SELECT launch_id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`, id).Scan(&launchID)
 	if launchID.Valid {
-		return closeAttemptsAndRequeue(database, id, time.Now().Unix())
+		return RequeueFreshAttemptByID(database, id, "")
 	}
 
 	// On-prem jobs: close+recreate attempt with pending_status for three-way merge.
