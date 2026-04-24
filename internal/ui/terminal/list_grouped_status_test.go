@@ -244,7 +244,7 @@ func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *test
 			t.Fatalf("missing subheader %q in output:\n%s", want, out)
 		}
 	}
-	if i1, i2, i3 := strings.Index(out, ampereHead), strings.Index(out, nvidiaHead), strings.Index(out, hunk3090); !(i1 < i2 && i2 < i3) {
+	if i1, i2, i3 := strings.Index(out, hunk3090), strings.Index(out, nvidiaHead), strings.Index(out, ampereHead); !(i1 < i2 && i2 < i3) {
 		t.Fatalf("subheaders out of order in output:\n%s", out)
 	}
 

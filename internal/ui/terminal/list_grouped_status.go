@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -101,6 +102,10 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		case "killed_canceled":
 			killedCanceled = append(killedCanceled, job)
 		}
+	}
+
+	for _, s := range [][]*db.Job{running, paused, launching, queued, unplaced, completions, failures, killedCanceled} {
+		sort.SliceStable(s, func(i, j int) bool { return s[i].ID < s[j].ID })
 	}
 
 	sections := []groupedStatusSection{
