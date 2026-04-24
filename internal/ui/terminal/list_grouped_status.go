@@ -202,7 +202,7 @@ func groupedStatusBlockedReason(job *db.Job, sectionKey string) string {
 	if sectionKey != "queued" && sectionKey != "unplaced" {
 		return ""
 	}
-	return strings.TrimSpace(job.QueueBlockedReason)
+	return campaign.SanitizeBlockedReason(job.QueueBlockedReason)
 }
 
 func appendGroupedStatusJobRow(

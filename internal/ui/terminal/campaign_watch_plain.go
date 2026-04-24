@@ -179,7 +179,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 									return
 								}
 								if outcome != nil && outcome.BlockedReason != "" && len(outcome.InstanceIDs) == 0 {
-									fmt.Printf("instance %s: auto-relaunch blocked: %s\n", ids.FormatInstanceID(instanceID), outcome.BlockedReason)
+									fmt.Printf("instance %s: auto-relaunch blocked: %s\n", ids.FormatInstanceID(instanceID), campaign.SanitizeBlockedReason(outcome.BlockedReason))
 									return
 								}
 								if outcome != nil && outcome.Skipped > 0 && len(outcome.InstanceIDs) == 0 {

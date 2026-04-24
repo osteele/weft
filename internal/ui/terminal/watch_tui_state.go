@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/queueblock"
 )
@@ -439,7 +440,7 @@ func (m watchModel) selectedProjectStatusDetail() string {
 	if !display.Blocked {
 		return ""
 	}
-	reason := strings.TrimSpace(display.Reason)
+	reason := campaign.SanitizeBlockedReason(display.Reason)
 	if reason == "" {
 		return ""
 	}
