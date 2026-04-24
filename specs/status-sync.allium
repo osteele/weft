@@ -728,6 +728,14 @@ rule AutoSyncBeforeDisplay {
     @guidance
         -- Uses fast timeouts (2s SSH, 30s per host) to avoid blocking
         -- the display. Falls back gracefully if hosts are unreachable.
+        -- Display commands must also fall back gracefully when writable DB
+        -- open/repair is unavailable (for example SQLITE_READONLY in
+        -- sandboxed agents): show cached local state instead of failing.
+        -- Optional pre-display sync remains best-effort; inability to write
+        -- DB state during sync must not be a hard error for list/status/log/
+        -- info/artifact listing.
+        -- User-facing warnings should focus on potential staleness, not on
+        -- startup-repair deferral itself.
 }
 
 -- Explicit sync command.

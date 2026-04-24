@@ -69,3 +69,31 @@ func TestOpen_StartupRepairNonLockStillFails(t *testing.T) {
 		t.Fatalf("Open() error = %q, want startup repair failure", got)
 	}
 }
+
+func TestOpen_StartupRepairReadOnlyIsDeferred(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "weft-open-readonly-*.db")
+	if err != nil {
+		t.Fatalf("create temp db path: %v", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	restorePath := SetDBPath(tmpPath)
+	t.Cleanup(restorePath)
+
+	origStartupRepair := startupRepairFn
+	startupRepairFn = func(*sql.DB) error {
+		return fmt.Errorf("close duplicate open attempts: attempt to write a readonly database (8)")
+	}
+	t.Cleanup(func() { startupRepairFn = origStartupRepair })
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v, want nil", err)
+	}
+	if database == nil {
+		t.Fatal("Open() returned nil database")
+	}
+	database.Close()
+}

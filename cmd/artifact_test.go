@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/spf13/cobra"
 )
 
 func TestResolveArtifactOutputPath(t *testing.T) {
@@ -272,5 +275,52 @@ func TestSyncCloudJobArtifactsWithStore_FallsBackToRunZeroManifest(t *testing.T)
 	}
 	if entry.Path != "results/metrics.json" {
 		t.Fatalf("path = %q, want results/metrics.json", entry.Path)
+	}
+}
+
+func TestRunArtifactListSync_ReadOnlySyncFailureFallsBackToCachedArtifacts(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "echo hi", "artifact list", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.UpsertArtifact(database, db.Artifact{
+		JobID:      jobID,
+		Name:       "model",
+		Path:       "output/model.bin",
+		StoredPath: "output/model.bin",
+		SizeBytes:  1234,
+		SHA256:     "abc123",
+	}); err != nil {
+		t.Fatalf("UpsertArtifact: %v", err)
+	}
+
+	prevSync := syncLocalJobArtifacts
+	prevListSync := artifactListSync
+	t.Cleanup(func() {
+		syncLocalJobArtifacts = prevSync
+		artifactListSync = prevListSync
+	})
+	syncLocalJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, errors.New("attempt to write a readonly database (8)")
+	}
+	artifactListSync = true
+
+	outBuf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	c := &cobra.Command{}
+	c.SetOut(outBuf)
+	c.SetErr(errBuf)
+
+	if err := runArtifactList(c, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactList: %v", err)
+	}
+
+	if got := outBuf.String(); !strings.Contains(got, "output/model.bin") {
+		t.Fatalf("stdout missing cached artifact listing, got:\n%s", got)
+	}
+	if got := errBuf.String(); !strings.Contains(got, "skipped artifact sync") {
+		t.Fatalf("stderr missing readonly sync warning, got:\n%s", got)
 	}
 }

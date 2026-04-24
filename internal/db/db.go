@@ -1085,6 +1085,8 @@ func Open() (*sql.DB, error) {
 	if err := startupRepairFn(db); err != nil {
 		if IsDatabaseLocked(err) {
 			slog.Warn("startup repair deferred due database lock; continuing with existing schema/state", "error", err)
+		} else if IsDatabaseReadOnly(err) {
+			slog.Debug("startup repair deferred due read-only database; continuing with existing schema/state", "error", err)
 		} else {
 			db.Close()
 			return nil, fmt.Errorf("startup repair: %w", err)
@@ -1100,7 +1102,11 @@ func Open() (*sql.DB, error) {
 func OpenForReading() (*sql.DB, error) {
 	database, err := Open()
 	if err != nil {
-		slog.Warn("database not writable, opening read-only (startup repair deferred)", "error", err)
+		if IsDatabaseLocked(err) || IsDatabaseReadOnly(err) {
+			slog.Debug("database not writable, opening read-only (startup repair deferred)", "error", err)
+		} else {
+			slog.Warn("database not writable, opening read-only (startup repair deferred)", "error", err)
+		}
 		database, err = OpenReadOnly()
 	}
 	return database, err

@@ -28,6 +28,19 @@ func IsDatabaseLocked(err error) bool {
 	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy")
 }
 
+// IsDatabaseReadOnly reports whether err indicates SQLite denied writes
+// because the database is read-only.
+func IsDatabaseReadOnly(err error) bool {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code() == sqlite3.SQLITE_READONLY
+	}
+	msg := strings.ToLower(errString(err))
+	return strings.Contains(msg, "readonly database") ||
+		strings.Contains(msg, "read-only database") ||
+		strings.Contains(msg, "sqlite_readonly")
+}
+
 func errString(err error) string {
 	if err == nil {
 		return ""

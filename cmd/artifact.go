@@ -321,11 +321,7 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	openDB := db.OpenForReading
-	if artifactListSync {
-		openDB = db.Open
-	}
-	database, err := openDB()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return err
 	}
@@ -358,8 +354,12 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 
 		if artifactListSync {
 			if err := syncArtifactsForJob(database, job, r2Client, NormalSyncTimeout); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
-				continue
+				if db.IsDatabaseReadOnly(err) || db.IsDatabaseLocked(err) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: skipped artifact sync for job %s; database is not writable, showing cached artifacts\n", ids.FormatJobID(jobID))
+				} else {
+					errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
+					continue
+				}
 			}
 		}
 
