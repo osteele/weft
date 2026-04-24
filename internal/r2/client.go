@@ -366,8 +366,9 @@ func (c *Client) DeletePrefix(ctx context.Context, prefix string) error {
 
 // ObjectInfo holds basic metadata about an R2 object.
 type ObjectInfo struct {
-	Key       string
-	SizeBytes int64
+	Key          string
+	SizeBytes    int64
+	LastModified time.Time
 }
 
 // ListObjects returns all objects under a prefix.
@@ -389,9 +390,14 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 			if obj.Size != nil {
 				size = *obj.Size
 			}
+			var lastModified time.Time
+			if obj.LastModified != nil {
+				lastModified = *obj.LastModified
+			}
 			result = append(result, ObjectInfo{
-				Key:       aws.ToString(obj.Key),
-				SizeBytes: size,
+				Key:          aws.ToString(obj.Key),
+				SizeBytes:    size,
+				LastModified: lastModified,
 			})
 		}
 	}

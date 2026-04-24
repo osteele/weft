@@ -374,6 +374,14 @@ rule BeginLaunching {
         --    c) ssh builders must fail fast on basic connectivity failures
         --       (short connect timeout / single attempt) so fallback builders
         --       (for example Fly) can be tried immediately
+        --    d) if every builder fails AND no exact-version object is in R2,
+        --       fall back to the most recently uploaded cached agent binary
+        --       in R2 for the target platform. This is a soft-match path
+        --       intended for cold-network launches where builders are
+        --       unreachable. The warning MUST name the stale version used
+        --       and its upload time so operators can tell a fallback apart
+        --       from a fresh build.
+        --       Implementation: internal/agentdeploy/r2.go (latestAgentInR2).
         -- 4. Upload bootstrap shell script to R2
         -- 5. Write agent startup manifest to R2 with job list and environment
         -- The provider's onstart handler fetches and executes the bootstrap script.
