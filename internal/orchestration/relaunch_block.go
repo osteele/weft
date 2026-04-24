@@ -5,9 +5,20 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
+
+// relaunchOfferErrorFreshness bounds how long a relaunch.skipped.offer_error
+// event remains a visible block reason. Offer-error events come from transient
+// provider API failures (e.g. vastai SSL flakes); a successful subsequent poll
+// does not emit a companion "cleared" event, so an old error would otherwise
+// stick as the job's blocked reason forever. Any skip event older than this
+// window is treated as stale and ignored, letting a fresher event (or silence)
+// take over. Other skip kinds (max_attempts, no_offers, no_client) reflect
+// durable conditions and are not subject to this window.
+const relaunchOfferErrorFreshness = 5 * time.Minute
 
 func BuildFailedInstanceByJob(database *sql.DB, jobIDs []int64) map[int64]int64 {
 	result := make(map[int64]int64, len(jobIDs))
@@ -23,54 +34,6 @@ func LatestAttemptLaunchID(database *sql.DB, jobID int64) int64 {
 		return 0
 	}
 	return attempts[len(attempts)-1].LaunchID
-}
-
-func RelaunchBlockedReasonsFromEvents(database *sql.DB, jobIDs []int64, sinceUnix int64) map[int64]string {
-	reasons := make(map[int64]string)
-	if database == nil || len(jobIDs) == 0 {
-		return reasons
-	}
-	placeholders := make([]string, 0, len(jobIDs))
-	for range jobIDs {
-		placeholders = append(placeholders, "?")
-	}
-	query := fmt.Sprintf(`SELECT job_id, event_kind, detail, attempt_number, max_attempts
-		FROM lifecycle_events
-		WHERE event_kind LIKE 'relaunch.skipped.%%'
-		  AND job_id IN (%s)`, strings.Join(placeholders, ","))
-	if sinceUnix > 0 {
-		query += "\n\t\t  AND occurred_at >= ?"
-	}
-	query += "\n\t\tORDER BY occurred_at DESC, id DESC"
-	args := make([]any, 0, len(jobIDs)+1)
-	for _, jobID := range jobIDs {
-		args = append(args, jobID)
-	}
-	if sinceUnix > 0 {
-		args = append(args, sinceUnix)
-	}
-	rows, err := database.Query(query, args...)
-	if err != nil {
-		return reasons
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			jobID         int64
-			eventKind     string
-			detail        sql.NullString
-			attemptNumber int
-			maxAttempts   int
-		)
-		if err := rows.Scan(&jobID, &eventKind, &detail, &attemptNumber, &maxAttempts); err != nil {
-			continue
-		}
-		if _, exists := reasons[jobID]; exists {
-			continue
-		}
-		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, attemptNumber, maxAttempts)
-	}
-	return reasons
 }
 
 func HydrateRelaunchBlockedReasons(database *sql.DB, jobs []*db.Job) {
@@ -139,8 +102,8 @@ func RelaunchBlockedReasonsFromEventsWithFloor(database *sql.DB, floorByJob map[
 			occurredAt    int64
 			eventKind     string
 			detail        sql.NullString
-			attemptNumber int
-			maxAttempts   int
+			attemptNumber sql.NullInt64
+			maxAttempts   sql.NullInt64
 		)
 		if err := rows.Scan(&jobID, &occurredAt, &eventKind, &detail, &attemptNumber, &maxAttempts); err != nil {
 			continue
@@ -151,9 +114,19 @@ func RelaunchBlockedReasonsFromEventsWithFloor(database *sql.DB, floorByJob map[
 		if floor, ok := floorByJob[jobID]; ok && floor > 0 && occurredAt < floor {
 			continue
 		}
-		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, attemptNumber, maxAttempts)
+		if eventKind == db.EventRelaunchSkippedOfferError && isRelaunchOfferErrorStale(occurredAt) {
+			continue
+		}
+		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, int(attemptNumber.Int64), int(maxAttempts.Int64))
 	}
 	return reasons
+}
+
+func isRelaunchOfferErrorStale(occurredAt int64) bool {
+	if occurredAt <= 0 {
+		return false
+	}
+	return time.Since(time.Unix(occurredAt, 0)) > relaunchOfferErrorFreshness
 }
 
 func summarizeRelaunchSkipEvent(kind, detail string, attemptNumber, maxAttempts int) string {
