@@ -755,7 +755,7 @@ rule RelaunchAfterInfraFailure {
         created_at: now
     )
     ensures:
-        for job in instance.jobs where job.status != completed:
+        for job in instance.jobs where job.status not in {completed, canceled, killed}:
             job.cloud_instance = new_instance
 
     @guidance
@@ -763,6 +763,12 @@ rule RelaunchAfterInfraFailure {
         -- bootstrap_timeout, phase_stall) are automatically relaunched
         -- on a different provider instance. Job-level failures (job_failure,
         -- disk_full) are not retried automatically.
+        --
+        -- Canceled and killed jobs are excluded: a user-issued cancel/kill
+        -- is a durable retraction intent. Carrying those jobs onto the
+        -- replacement instance would silently re-provision capacity the
+        -- user already declined. See CancelSurvivesInstanceTermination
+        -- in specs/job-lifecycle.allium.
 }
 
 -- ==========================================================================

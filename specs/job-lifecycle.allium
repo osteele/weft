@@ -641,6 +641,32 @@ rule UserCancelsJob {
         -- failure signal from runtime infrastructure.
 }
 
+rule CancelSurvivesInstanceTermination {
+    when: InstanceTerminated(instance)
+    requires: job in instance.jobs and job.requested_status = canceled
+
+    ensures: job.requested_status = canceled
+             and job.status = canceled
+             and not Dispatchable(job)
+
+    @guidance
+        -- A user-issued cancel is a durable intent to retract the job.
+        -- Termination of the hosting rental/instance must NOT resurrect
+        -- that intent into queued, or the dispatcher will provision a
+        -- fresh rental to satisfy demand from a job the user cancelled.
+        --
+        -- Implementation: internal/db/attempts.go closeAttemptsAndRequeue
+        -- preserves requested_status='canceled' when requeuing attempts
+        -- after instance teardown; internal/db/cloud_instances.go
+        -- ResetLaunchJobs filters canceled jobs out of the requeue set
+        -- both by view status and by raw requested_status.
+        --
+        -- Regression reference: jobs wj1383, wj1386, wj1387 (2026-04-24)
+        -- on structural-probes were individually cancelled while placed
+        -- on rental wi1362; terminating wi1362 re-dispatched them to a
+        -- fresh rental wi1366, costing the user a second instance.
+}
+
 -- ==========================================================================
 -- Retry and requeue
 -- ==========================================================================

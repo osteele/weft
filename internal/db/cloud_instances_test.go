@@ -608,6 +608,16 @@ func TestResetLaunchJobs_PreservesCanceledJobs(t *testing.T) {
 	if canceledJob.Host != "" {
 		t.Fatalf("canceled job host = %q, want empty", canceledJob.Host)
 	}
+	// The durable intent lives on jobs.requested_status; closeAttemptsAndRequeue
+	// must not overwrite it. See CancelSurvivesInstanceTermination.
+	var requested sql.NullString
+	if err := database.QueryRow(`SELECT requested_status FROM jobs WHERE id = 1`).Scan(&requested); err != nil {
+		t.Fatalf("read requested_status: %v", err)
+	}
+	if !requested.Valid || requested.String != StatusCanceled {
+		t.Fatalf("canceled job requested_status = %q (valid=%v), want %q",
+			requested.String, requested.Valid, StatusCanceled)
+	}
 
 	resetJob, err := GetJobByID(database, 2)
 	if err != nil {
@@ -620,6 +630,56 @@ func TestResetLaunchJobs_PreservesCanceledJobs(t *testing.T) {
 	// The job_status view shows the latest attempt's cloud_instance_id.
 	if resetJob.Host != "" {
 		t.Fatalf("reset job host = %q, want empty", resetJob.Host)
+	}
+}
+
+// TestResetLaunchJobs_CancelWithOpenAttempt reproduces the production bug
+// (2026-04-24, wj1383/wj1386/wj1387 on structural-probes): a job is cancelled
+// while placed on a rental with an open (non-terminal) attempt; terminating
+// the instance must not flip requested_status back to 'queued' and re-expose
+// the job to the dispatcher.
+func TestResetLaunchJobs_CancelWithOpenAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// Job is placed on the instance with an OPEN attempt (status=running, no end_time).
+	insertTestJob(t, database, 1383, "echo placed", "/tmp", StatusRunning, withLaunch(instanceID))
+
+	// Simulate `weft job cancel wj1383`: user cancel while attempt is still open.
+	// KillOrCancelCloudJob sets requested_status='canceled' but does not itself
+	// close the attempt (the agent does that asynchronously).
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusCanceled, 1383); err != nil {
+		t.Fatalf("set requested_status: %v", err)
+	}
+
+	// Simulate `weft instance terminate wi<instanceID>`.
+	if _, err := ResetLaunchJobs(database, instanceID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+
+	var requested sql.NullString
+	if err := database.QueryRow(`SELECT requested_status FROM jobs WHERE id = ?`, 1383).Scan(&requested); err != nil {
+		t.Fatalf("read requested_status: %v", err)
+	}
+	if !requested.Valid || requested.String != StatusCanceled {
+		t.Fatalf("after terminate: requested_status = %q (valid=%v), want %q",
+			requested.String, requested.Valid, StatusCanceled)
+	}
+
+	job, err := GetJobByID(database, 1383)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusCanceled {
+		t.Fatalf("after terminate: job.Status = %q, want %q", job.Status, StatusCanceled)
 	}
 }
 

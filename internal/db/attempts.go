@@ -60,13 +60,21 @@ type dbExecer interface {
 // requested_status='queued' so the view derives "queued" without a hostless
 // attempt. Used by ResetLaunchJobs, RequeueByID, ResetJobToUnplaced, and
 // cleanupStaleAttempts.
+//
+// Preserves requested_status='canceled': a user cancel is a durable intent
+// to retract the job (see CancelSurvivesInstanceTermination in
+// specs/job-lifecycle.allium). Overwriting it to 'queued' would let the
+// dispatcher re-place the job on a fresh rental after its original instance
+// terminates.
 func closeAttemptsAndRequeue(db dbExecer, jobID int64, now int64) error {
 	if _, err := db.Exec(
 		`UPDATE job_attempts SET status = ?, end_time = COALESCE(NULLIF(end_time, 0), ?) WHERE job_id = ? AND (end_time IS NULL OR end_time = 0)`,
 		StatusCanceled, now, jobID); err != nil {
 		return err
 	}
-	_, err := db.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID)
+	_, err := db.Exec(
+		`UPDATE jobs SET requested_status = ? WHERE id = ? AND COALESCE(requested_status, '') != ?`,
+		StatusQueued, jobID, StatusCanceled)
 	return err
 }
 

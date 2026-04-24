@@ -959,10 +959,16 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	}
 	placementReasons := encodeStringSlice(launchResetPlacementReasons(ci, outcome))
 
+	// Filter by both the derived view status AND the raw requested_status:
+	// a job with requested_status='canceled' must never be requeued even if
+	// the view hasn't yet surfaced 'canceled' (e.g., because the latest
+	// attempt is still open). See CancelSurvivesInstanceTermination in
+	// specs/job-lifecycle.allium.
 	jobs, err := queryJobsTx(tx,
-		fmt.Sprintf(`SELECT %s FROM job_status WHERE launch_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
+		fmt.Sprintf(`SELECT %s FROM job_status js WHERE js.launch_id = ? AND js.status NOT IN (?, ?, ?, ?, ?, ?) AND js.tombstoned = 0 AND COALESCE((SELECT requested_status FROM jobs WHERE jobs.id = js.id), '') NOT IN (?, ?, ?) ORDER BY js.id ASC`, qualifiedJobSelectColumns("js")),
 		instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+		StatusCanceled, StatusKilled, StatusDraft,
 	)
 	if err != nil {
 		tx.Rollback()
