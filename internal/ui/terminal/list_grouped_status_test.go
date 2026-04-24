@@ -197,13 +197,121 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	lineWant := "- wj50 — proj waiting — queued 5m ago"
+	lineWant := "  - wj50 — proj waiting — queued 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
 	}
-	blockedWant := "    blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m"
+	blockedWant := "  blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m (1)"
 	if !strings.Contains(out, blockedWant) {
 		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	reasonAmpere := "planner: no offers from providers for gpu=AMPERE+ vram>=26GB reliability>=0.95"
+	reasonNvidia := "planner: no offers from providers for gpu=NVIDIA vram>=26GB reliability>=0.95"
+	reason3090 := "planner: no offers from providers for gpu=3090 vram>=20GB reliability>=0.95"
+	end := int64(4_820)
+	mk := func(id int64, desc, reason string) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        desc,
+			QueuedAt:           4_000,
+			EndTime:            &end,
+			QueueBlockedReason: reason,
+		}
+	}
+	jobs := []*db.Job{
+		mk(1394, "role-encoding-injection EXP-050", reasonAmpere),
+		mk(1392, "role-encoding-injection EXP-049", reasonAmpere),
+		mk(1388, "head-type-ontology EXP-163", reasonNvidia),
+		mk(1387, "structural-probes EXP-084 baseline", reason3090),
+		mk(1386, "structural-probes EXP-084 anonymized", reason3090),
+		mk(1383, "structural-probes EXP-085 c-command", reason3090),
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+
+	// Subheaders present with correct counts, in first-seen order.
+	ampereHead := "  blocked: " + reasonAmpere + " (2)"
+	nvidiaHead := "  blocked: " + reasonNvidia + " (1)"
+	hunk3090 := "  blocked: " + reason3090 + " (3)"
+	for _, want := range []string{ampereHead, nvidiaHead, hunk3090} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing subheader %q in output:\n%s", want, out)
+		}
+	}
+	if i1, i2, i3 := strings.Index(out, ampereHead), strings.Index(out, nvidiaHead), strings.Index(out, hunk3090); !(i1 < i2 && i2 < i3) {
+		t.Fatalf("subheaders out of order in output:\n%s", out)
+	}
+
+	// Jobs are indented under their subheader, and the old per-job
+	// "    blocked: ..." form is gone.
+	for _, want := range []string{
+		"  - wj1394 — ",
+		"  - wj1392 — ",
+		"  - wj1388 — ",
+		"  - wj1387 — ",
+		"  - wj1386 — ",
+		"  - wj1383 — ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing grouped job row %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "    blocked: ") {
+		t.Fatalf("unexpected per-job blocked line survived:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngrouped(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	reason := "planner: no offers from providers for gpu=3090 vram>=20GB reliability>=0.95"
+	jobs := []*db.Job{
+		{
+			ID:                 201,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "has reason",
+			QueuedAt:           4_000,
+			QueueBlockedReason: reason,
+		},
+		{
+			ID:          202,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "no reason",
+			QueuedAt:    4_000,
+		},
+	}
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+
+	headWant := "  blocked: " + reason + " (1)"
+	if !strings.Contains(out, headWant) {
+		t.Fatalf("missing subheader %q in output:\n%s", headWant, out)
+	}
+	// Grouped job is indented; ungrouped job uses the base indent.
+	if !strings.Contains(out, "  - wj201 — ") {
+		t.Fatalf("missing indented grouped row for wj201 in output:\n%s", out)
+	}
+	lines := strings.Split(out, "\n")
+	foundUngrouped := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "- wj202 — ") {
+			foundUngrouped = true
+			break
+		}
+	}
+	if !foundUngrouped {
+		t.Fatalf("expected ungrouped row starting with '- wj202 — ', got:\n%s", out)
+	}
+
+	// Ungrouped row must follow the grouped subheader+job.
+	if strings.Index(out, "- wj202") < strings.Index(out, headWant) {
+		t.Fatalf("ungrouped row should trail grouped output in:\n%s", out)
 	}
 }
 

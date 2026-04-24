@@ -127,60 +127,11 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 			isHeader: true,
 			section:  section.key,
 		})
-		for _, job := range section.jobs {
-			project, desc := groupedStatusJobParts(job)
-			projectCol := formatProjectColumn(project, projectWidth)
-
-			// Build suffix parts (progress, ETA, timing, outcome).
-			var suffixParts []string
-			if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
-				suffixParts = append(suffixParts, progressText)
-			}
-			if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
-				suffixParts = append(suffixParts, etaText)
-			}
-			if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
-				suffixParts = append(suffixParts, timing)
-			}
-			if suffix := groupedStatusOutcomeSuffix(job, section.title); suffix != "" {
-				suffixParts = append(suffixParts, suffix)
-			}
-			suffix := ""
-			if len(suffixParts) > 0 {
-				suffix = " — " + strings.Join(suffixParts, " — ")
-			}
-
-			prefix := fmt.Sprintf("- wj%d — %s ", job.ID, projectCol)
-			line := prefix + desc + suffix
-			if width > 0 {
-				prefixWidth := lipgloss.Width(prefix)
-				suffixWidth := lipgloss.Width(suffix)
-				descWidth := width - prefixWidth - suffixWidth
-				if descWidth < 0 {
-					descWidth = 0
-				}
-				desc = truncateDisplayWidth(desc, descWidth)
-				line = prefix + desc
-				if suffix != "" {
-					padding := descWidth - lipgloss.Width(desc)
-					if padding < 0 {
-						padding = 0
-					}
-					line += strings.Repeat(" ", padding) + suffix
-				}
-			}
-			rows = append(rows, groupedStatusRow{
-				text:    line,
-				job:     job,
-				section: section.key,
-			})
-			if blocked := groupedStatusBlockedSuffix(job, section.key); blocked != "" {
-				rows = append(rows, groupedStatusRow{
-					text:      "    " + blocked,
-					isBlocked: true,
-					job:       job,
-					section:   section.key,
-				})
+		if section.key == "unplaced" || section.key == "queued" {
+			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, launchLiveByID, now)
+		} else {
+			for _, job := range section.jobs {
+				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, now, false)
 			}
 		}
 		rows = append(rows, groupedStatusRow{text: ""})
@@ -202,6 +153,116 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 	}
 
 	return rows
+}
+
+// appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
+// jobs by their blocked reason. Each distinct reason becomes a subheader
+// ("  blocked: <reason> (N)") followed by indented job rows. Jobs with no
+// blocked reason are emitted last without a subheader at the normal indent.
+func appendBlockedGroupedJobRows(
+	rows []groupedStatusRow,
+	section groupedStatusSection,
+	projectWidth, width int,
+	launchLiveByID map[int64]*db.LaunchLiveState,
+	now time.Time,
+) []groupedStatusRow {
+	order := make([]string, 0, len(section.jobs))
+	buckets := make(map[string][]*db.Job, len(section.jobs))
+	for _, job := range section.jobs {
+		reason := groupedStatusBlockedReason(job, section.key)
+		if _, ok := buckets[reason]; !ok {
+			order = append(order, reason)
+		}
+		buckets[reason] = append(buckets[reason], job)
+	}
+	for _, reason := range order {
+		if reason == "" {
+			continue
+		}
+		jobs := buckets[reason]
+		rows = append(rows, groupedStatusRow{
+			text:      fmt.Sprintf("  blocked: %s (%d)", reason, len(jobs)),
+			isBlocked: true,
+			section:   section.key,
+		})
+		for _, job := range jobs {
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, now, true)
+		}
+	}
+	for _, job := range buckets[""] {
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, now, false)
+	}
+	return rows
+}
+
+func groupedStatusBlockedReason(job *db.Job, sectionKey string) string {
+	if job == nil {
+		return ""
+	}
+	if sectionKey != "queued" && sectionKey != "unplaced" {
+		return ""
+	}
+	return strings.TrimSpace(job.QueueBlockedReason)
+}
+
+func appendGroupedStatusJobRow(
+	rows []groupedStatusRow,
+	job *db.Job,
+	section groupedStatusSection,
+	projectWidth, width int,
+	launchLiveByID map[int64]*db.LaunchLiveState,
+	now time.Time,
+	indented bool,
+) []groupedStatusRow {
+	project, desc := groupedStatusJobParts(job)
+	projectCol := formatProjectColumn(project, projectWidth)
+
+	var suffixParts []string
+	if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
+		suffixParts = append(suffixParts, progressText)
+	}
+	if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
+		suffixParts = append(suffixParts, etaText)
+	}
+	if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
+		suffixParts = append(suffixParts, timing)
+	}
+	if outcome := groupedStatusOutcomeSuffix(job, section.title); outcome != "" {
+		suffixParts = append(suffixParts, outcome)
+	}
+	suffix := ""
+	if len(suffixParts) > 0 {
+		suffix = " — " + strings.Join(suffixParts, " — ")
+	}
+
+	indent := ""
+	if indented {
+		indent = "  "
+	}
+	prefix := fmt.Sprintf("%s- wj%d — %s ", indent, job.ID, projectCol)
+	line := prefix + desc + suffix
+	if width > 0 {
+		prefixWidth := lipgloss.Width(prefix)
+		suffixWidth := lipgloss.Width(suffix)
+		descWidth := width - prefixWidth - suffixWidth
+		if descWidth < 0 {
+			descWidth = 0
+		}
+		desc = truncateDisplayWidth(desc, descWidth)
+		line = prefix + desc
+		if suffix != "" {
+			padding := descWidth - lipgloss.Width(desc)
+			if padding < 0 {
+				padding = 0
+			}
+			line += strings.Repeat(" ", padding) + suffix
+		}
+	}
+	return append(rows, groupedStatusRow{
+		text:    line,
+		job:     job,
+		section: section.key,
+	})
 }
 
 // computeProjectColumnWidth determines a uniform project column width
@@ -317,16 +378,6 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 		return ""
 	}
 	return "ETA " + remaining.FormatWithBounds()
-}
-
-func groupedStatusBlockedSuffix(job *db.Job, sectionKey string) string {
-	if job == nil || strings.TrimSpace(job.QueueBlockedReason) == "" {
-		return ""
-	}
-	if sectionKey != "queued" && sectionKey != "unplaced" {
-		return ""
-	}
-	return "blocked: " + strings.TrimSpace(job.QueueBlockedReason)
 }
 
 func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, now time.Time) string {
