@@ -173,6 +173,11 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Queue-runner startup is only needed when actively progressing work
+	// (e.g. --wait); plain read-only status checks should not pay the
+	// ssh/rclone-deploy cost.
+	startRunners := statusWait
+
 	// Sync logic: default 5s, fast 2s, full 30s, --ssh-timeout overrides, or skip
 	if needsSync {
 		hosts := mapKeys(hostsToSync)
@@ -181,8 +186,9 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			for _, host := range hosts {
 				_, _ = syncHost(database, host)
 			}
-			// Start queue runners (full sync mode)
-			startQueueRunnersForHosts(database, hosts)
+			if startRunners {
+				startQueueRunnersForHosts(database, hosts)
+			}
 		} else if statusFast && statusSSHTimeout == 0 {
 			// Fast sync (2s timeout) - skip queue starting for speed
 			completed, unreachable := performFastSyncForHosts(database, hosts, false)
@@ -203,8 +209,9 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 					fmt.Fprintln(os.Stderr, note)
 				}
 			}
-			// Start queue runners (default mode)
-			startQueueRunnersForHosts(database, hosts)
+			if startRunners {
+				startQueueRunnersForHosts(database, hosts)
+			}
 		}
 		if needsRentalSync {
 			syncRentalJobsStatusFunc(database, preDisplayCloudSyncTimeout(statusSync))

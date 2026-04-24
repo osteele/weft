@@ -736,6 +736,13 @@ rule AutoSyncBeforeDisplay {
         -- info/artifact listing.
         -- User-facing warnings should focus on potential staleness, not on
         -- startup-repair deferral itself.
+        -- Read-only display commands (`weft status <id>` without --wait) must
+        -- NOT trigger queue-runner startup (agent deploy, rclone config
+        -- deployment, runner ensure). Those are side-effectful ssh operations
+        -- that belong to progression paths (--wait, dashboard `weft status`
+        -- with no args, explicit `weft sync --full`), not read-only checks.
+        -- A stuck runner-ensure (e.g. 30s rclone-write timeout) must never
+        -- appear as latency on a plain status query.
 }
 
 -- Explicit sync command.
