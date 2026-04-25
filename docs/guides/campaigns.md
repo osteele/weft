@@ -132,6 +132,36 @@ Only jobs marked preemptible are eligible for interruptible offers. Weft keeps
 non-preemptible jobs on normal offers and does not mix the two in the same
 instance group.
 
+**Price.** The bid is the offer's asking `cost/hr` (`max_bid = ask`). There is
+no separate bid knob in this first pass — if you want a stricter ceiling, pick
+a cheaper offer via the usual GPU/memory filters. The launch plan table
+annotates preemptible groups as `$X.YY/hr (int, bid $X.YY)` so the chosen bid
+is visible in `--dry-run`.
+
+To see how much interruptible currently saves vs on-demand for a given GPU
+class, run:
+
+```bash
+weft cloud price-spread                       # default: rtx_3090 rtx_4090 a100 h100
+weft cloud price-spread rtx_5090 h200         # specific classes
+weft cloud price-spread --min-gpu-mem 40      # filter by per-GPU memory
+weft cloud price-spread --json                # machine-readable output
+```
+
+The table reports min and median `$/hr` for on-demand vs interruptible in each
+market, plus the savings ratio. In practice median savings are roughly 25-30%
+across most tiers; the larger gaps (50-75%) show up at the min on the less-
+liquid ends of the market.
+
+**Policy.** Preemptible instances are *pause-tolerant*: when the provider
+marks them `stopped` (typically after losing a bid) weft leaves them in place
+and waits for the provider to resume them. If the pause lasts longer than
+~6 hours, weft gives up, fails the launch with `termination_reason = preempted`,
+and the standard retry path ([Relaunch after infra failure](campaigns.md))
+relaunches the jobs on a fresh offer. Jobs that already completed are not
+re-run. The runaway breaker (see [Unattended runaway protection](#unattended-runaway-protection))
+is the backstop against a pathological offer churning launches.
+
 ## Monitoring campaigns
 
 ### Watch mode

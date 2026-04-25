@@ -774,6 +774,12 @@ const maxEmptyStatusTime = 1 * time.Minute
 // "loading", etc.) beyond this threshold are terminated as infra failures.
 const maxPreRunningStatusTime = 5 * time.Minute
 
+// stalePauseTimeout is the maximum time an interruptible instance may sit in
+// provider "stopped" state before we give up waiting for the provider to
+// resume it and relaunch the jobs on a fresh offer. Chosen generously so a
+// short outbid window does not churn launches.
+const stalePauseTimeout = 6 * time.Hour
+
 // recordProviderStatusTransition detects when a provider instance's status
 // changes and records the transition in the DB. The DB write is performed
 // outside the lock to avoid holding it during I/O.

@@ -50,7 +50,7 @@ value OfferSnapshot {
 
 value TerminationReason = completed | provider_failure | job_failure
                         | disk_full | infra_failure | bootstrap_timeout
-                        | canceled | phase_stall | unknown
+                        | canceled | phase_stall | preempted | unknown
 
 value InstanceRole = worker | donor
 
@@ -159,7 +159,8 @@ entity Instance {
     bootstrap_origin: provider_running_at ?? launched_at
     pause_tolerant: jobs.any(j => "preemptible" in j.tags)
     is_retryable: termination_reason in {provider_failure, infra_failure,
-                                          bootstrap_timeout, phase_stall, unknown}
+                                          bootstrap_timeout, phase_stall,
+                                          preempted, unknown}
 
     -- Status
     status: planned | launching | running | grace | completed | failed | canceled
@@ -214,6 +215,10 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
+    -- Maximum time an interruptible instance may sit in provider "stopped"
+    -- state before we give up waiting for a provider resume and relaunch the
+    -- jobs on a fresh offer. Generous so a short outbid window does not churn.
+    stale_pause_timeout: Duration = 6.hours
     -- Catch-all wall-clock ceiling on the `launching` status when no
     -- bootstrap_origin has been recorded yet. See LaunchingPhaseTimeout.
     -- MUST exceed any provider-internal bootstrap context timeout so the
@@ -317,6 +322,39 @@ rule DependencyGatesRentalLaunch {
         -- coordinate queue ordering with each other.
         -- Deferred jobs are re-evaluated on the next launch pass.
 }
+
+-- --------------------------------------------------------------------------
+-- Preemptible (interruptible) placement
+-- --------------------------------------------------------------------------
+
+-- A job opts into preemptible placement by either:
+--   * tagging the job with "preemptible", or
+--   * setting `preemptible = true` in its PEP 723 [tool.weft] block.
+-- Both paths set Job.preemptible; InstanceGroup.preemptible is the OR of its
+-- member jobs. An entire group runs as either all-interruptible or all-on-
+-- demand — preemptible and non-preemptible jobs never share an instance.
+--
+-- For preemptible groups:
+--   * Offer search is restricted to provider interruptible offers.
+--   * The bid price is the offer's asking `cost_per_hour` (max_bid = ask).
+--     A separate bid knob is intentionally not exposed in this first pass.
+--   * The instance is pause_tolerant: a provider "stopped" transition is a
+--     wait condition, not an immediate failure (see
+--     ProviderInstancePausedInterruptible).
+--   * If the pause does not clear within config.stale_pause_timeout the
+--     instance is failed with termination_reason = preempted and the jobs
+--     are relaunched on a fresh offer (see InterruptiblePauseStale and
+--     RelaunchAfterInfraFailure).
+--
+-- This is the entire policy. No per-job retry cap or premium ceiling is
+-- maintained at this layer — the runaway breaker (see §Runaway prevention)
+-- is the backstop.
+--
+-- Implementation: internal/db/db.go TagPreemptible,
+-- internal/dataloc/scriptmeta.go (PEP 723), internal/campaign/campaign.go
+-- InstanceGroup.Preemptible + HasPreemptibleJob, internal/campaign/
+-- offers.go offerConstraintsForGroup, internal/campaign/lifecycle.go
+-- (MaxBidPrice default = offer cost).
 
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
@@ -696,6 +734,28 @@ rule ProviderInstancePausedInterruptible {
         -- "stopped" without being terminal. Reconciler treats this as a
         -- pause/wait condition for pause_tolerant jobs instead of immediate
         -- provider_failure reset.
+        -- Implementation: internal/campaign/instance_check.go §4b.
+}
+
+rule InterruptiblePauseStale {
+    -- A pause_tolerant instance that has been in provider "stopped" state
+    -- since before now - config.stale_pause_timeout has almost certainly
+    -- lost its bid and will not come back. Fail the launch as `preempted`
+    -- (retryable) so RelaunchAfterInfraFailure picks a fresh offer.
+    when: instance: Instance.provider_instance.status = stopped
+    requires: instance.pause_tolerant
+    requires: instance.status in {launching, running, grace}
+    requires: (now - instance.created_at) > config.stale_pause_timeout
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = preempted
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Implementation: internal/campaign/instance_check.go §4b
+        -- (stalePauseTimeout branch). Jobs not in a terminal state are
+        -- reset to unplaced so the standard relaunch path carries them
+        -- onto a fresh instance.
 }
 
 rule DiskFullDetected {
@@ -768,9 +828,9 @@ rule RelaunchAfterInfraFailure {
 
     @guidance
         -- Infrastructure failures (provider_failure, infra_failure,
-        -- bootstrap_timeout, phase_stall) are automatically relaunched
-        -- on a different provider instance. Job-level failures (job_failure,
-        -- disk_full) are not retried automatically.
+        -- bootstrap_timeout, phase_stall, preempted) are automatically
+        -- relaunched on a different provider instance. Job-level failures
+        -- (job_failure, disk_full) are not retried automatically.
         --
         -- Canceled and killed jobs are excluded: a user-issued cancel/kill
         -- is a durable retraction intent. Carrying those jobs onto the

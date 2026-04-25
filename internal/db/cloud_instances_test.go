@@ -966,6 +966,7 @@ func TestIsRetryableTermination(t *testing.T) {
 		{"job failure", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonJobFailure}, false},
 		{"disk full", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonDiskFull}, false},
 		{"canceled reason", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonCancelled}, false},
+		{"preempted", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonPreempted}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

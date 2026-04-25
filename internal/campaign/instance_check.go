@@ -274,6 +274,20 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
 		!isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
 		if p.PauseTolerant && p.ProviderInst.Status == cloud.ProviderStatusStopped {
+			if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
+				age := p.Now.Sub(*lifecycleStart)
+				if age > stalePauseTimeout {
+					return InstanceAction{
+						Kind:              ActionEmptyStatusTimeout,
+						TerminalStatus:    db.LaunchStatusFailed,
+						TerminationReason: db.TerminationReasonPreempted,
+						StallMessage:      fmt.Sprintf("interruptible instance paused for %s with no resume — relaunching on a fresh offer", age.Truncate(time.Minute)),
+						DestroyProvider:   true,
+						ResetJobs:         true,
+						AttemptOutcome:    db.AttemptOutcomeOrphaned,
+					}
+				}
+			}
 			return InstanceAction{
 				Kind:         ActionDisplayOnly,
 				StallMessage: "provider reports paused instance (interruptible); waiting for resume/replacement",

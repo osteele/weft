@@ -52,6 +52,7 @@ const (
 	TerminationReasonBootstrapTimeout = "bootstrap_timeout"
 	TerminationReasonCancelled        = "canceled"
 	TerminationReasonPhaseStall       = "phase_stall"
+	TerminationReasonPreempted        = "preempted"
 	TerminationReasonUnknown          = "unknown"
 )
 
@@ -65,7 +66,7 @@ func IsRetryableTermination(ci *Launch) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonUnknown, "":
+	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonUnknown, "":
 		return true
 	default:
 		return false
@@ -103,7 +104,7 @@ type Launch struct {
 	GraceDeadline      *int64 // when the grace period expires
 
 	// Termination classification
-	TerminationReason      string // "completed", "provider_failure", "job_failure", "disk_full", "infra_failure", "canceled"
+	TerminationReason      string // "completed", "provider_failure", "job_failure", "disk_full", "infra_failure", "preempted", "canceled"
 	TerminationDetail      string // human-readable detail for the termination reason
 	TerminationRequestedAt *int64
 	TerminationIntent      *instanceintent.Marker
@@ -299,6 +300,8 @@ func HumanizeTerminationReason(reason string) string {
 		return "bootstrap timeout"
 	case TerminationReasonPhaseStall:
 		return "setup phase stalled"
+	case TerminationReasonPreempted:
+		return "preempted (interruptible lost bid)"
 	case TerminationReasonCancelled:
 		return "cancelled by user"
 	case TerminationReasonUnknown:

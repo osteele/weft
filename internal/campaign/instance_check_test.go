@@ -695,6 +695,61 @@ func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_PauseTolerant_RecentPause_DisplayOnly(t *testing.T) {
+	// Interruptible instance paused for less than stalePauseTimeout: should be
+	// displayed as paused, not terminated.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusStopped},
+		PauseTolerant: true,
+		Now:           now,
+	})
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
+	}
+}
+
+func TestCheckInstance_PauseTolerant_StalePause_Preempted(t *testing.T) {
+	// Interruptible instance paused past stalePauseTimeout: should be terminated
+	// with TerminationReasonPreempted and jobs reset for relaunch.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-7 * time.Hour).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusStopped},
+		PauseTolerant: true,
+		Now:           now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if action.TerminationReason != db.TerminationReasonPreempted {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonPreempted)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs=true so relaunch picks a fresh offer")
+	}
+	if !action.DestroyProvider {
+		t.Error("expected DestroyProvider=true")
+	}
+}
+
 func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 	// Provider allocated but intended_status is "stopped" while actual_status is "created".
 	// isProviderTerminal should detect this immediately via intended_status check.
