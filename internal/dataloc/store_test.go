@@ -248,6 +248,96 @@ func TestRemoveStaleEntries_OnlyAffectsSpecifiedHost(t *testing.T) {
 	}
 }
 
+func TestRemoveStaleEntriesForKinds(t *testing.T) {
+	db := setupTestDB(t)
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	now := time.Now().Truncate(time.Second)
+
+	// Mix of stale and fresh, across different kinds.
+	seed := []HostDataEntry{
+		// Stale on host-alpha
+		{Host: "host-alpha", Asset: DataAsset{AssetHFModel, "stale-hf-model"}, LastSeen: old},
+		{Host: "host-alpha", Asset: DataAsset{AssetHFDataset, "stale-hf-dataset"}, LastSeen: old},
+		{Host: "host-alpha", Asset: DataAsset{AssetCorpus, "stale-corpus"}, LastSeen: old},
+		// Stale checkpoint and job-output — these must NOT be removed
+		// because the HF/corpus scans don't cover them.
+		{Host: "host-alpha", Asset: DataAsset{AssetCheckpoint, "stale-checkpoint"}, LastSeen: old},
+		{Host: "host-alpha", Asset: DataAsset{AssetJobOutput, "stale-output"}, LastSeen: old},
+		// Fresh on host-alpha
+		{Host: "host-alpha", Asset: DataAsset{AssetHFModel, "fresh-hf-model"}, LastSeen: now},
+		// Stale on host-beta — must NOT be removed by a host-alpha scan.
+		{Host: "host-beta", Asset: DataAsset{AssetHFModel, "stale-other-host"}, LastSeen: old},
+	}
+	for _, e := range seed {
+		if err := RecordAsset(db, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	removed, err := RemoveStaleEntriesForKinds(db, "host-alpha", cutoff,
+		[]AssetKind{AssetHFModel, AssetHFDataset})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Errorf("removed %d, want 2 (stale-hf-model + stale-hf-dataset)", removed)
+	}
+
+	entries, err := ListHostAssets(db, "host-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	survived := map[string]bool{}
+	for _, e := range entries {
+		survived[string(e.Asset.Kind)+":"+e.Asset.ID] = true
+	}
+	for _, want := range []string{
+		"corpus:stale-corpus",
+		"checkpoint:stale-checkpoint",
+		"job-output:stale-output",
+		"hf-model:fresh-hf-model",
+	} {
+		if !survived[want] {
+			t.Errorf("expected %s to survive on host-alpha", want)
+		}
+	}
+	for _, gone := range []string{
+		"hf-model:stale-hf-model",
+		"hf-dataset:stale-hf-dataset",
+	} {
+		if survived[gone] {
+			t.Errorf("expected %s to be removed", gone)
+		}
+	}
+
+	// host-beta should be untouched.
+	betaEntries, err := ListHostAssets(db, "host-beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(betaEntries) != 1 {
+		t.Errorf("host-beta should still have 1 entry, got %d", len(betaEntries))
+	}
+}
+
+func TestRemoveStaleEntriesForKinds_EmptyKinds(t *testing.T) {
+	db := setupTestDB(t)
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	if err := RecordAsset(db, HostDataEntry{
+		Host: "host-alpha", Asset: DataAsset{AssetHFModel, "m"}, LastSeen: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := RemoveStaleEntriesForKinds(db, "host-alpha", time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Errorf("empty kinds slice should remove nothing, got %d", removed)
+	}
+}
+
 func TestListAllAssets(t *testing.T) {
 	db := setupTestDB(t)
 	now := time.Now()

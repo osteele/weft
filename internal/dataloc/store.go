@@ -2,6 +2,7 @@ package dataloc
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -154,6 +155,30 @@ func RemoveStaleEntries(db *sql.DB, host string, before time.Time) (int64, error
 	result, err := db.Exec(`
 		DELETE FROM host_data WHERE host = ? AND last_seen < ?
 	`, host, before.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// RemoveStaleEntriesForKinds deletes entries for the given host whose
+// last_seen is older than `before` AND whose kind is one of `kinds`. Use
+// this after a scan that only covers a subset of asset kinds, so that
+// checkpoints/job-outputs (which scans don't surface) are not removed.
+func RemoveStaleEntriesForKinds(db *sql.DB, host string, before time.Time, kinds []AssetKind) (int64, error) {
+	if len(kinds) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(kinds))
+	args := make([]any, 0, len(kinds)+2)
+	args = append(args, host, before.Unix())
+	for i, k := range kinds {
+		placeholders[i] = "?"
+		args = append(args, string(k))
+	}
+	query := `DELETE FROM host_data WHERE host = ? AND last_seen < ? AND asset_kind IN (` +
+		strings.Join(placeholders, ",") + `)`
+	result, err := db.Exec(query, args...)
 	if err != nil {
 		return 0, err
 	}

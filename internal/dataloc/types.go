@@ -125,6 +125,6 @@ type HostDataEntry struct {
 	Host      string
 	Asset     DataAsset
 	Path      string    // Filesystem path on the host (may be empty for HF cache)
-	SizeBytes int64     // Size in bytes (0 if unknown)
+	SizeBytes int64     // Size in bytes (0 if unknown), excluding *.incomplete files
 	LastSeen  time.Time // When this entry was last confirmed
 }

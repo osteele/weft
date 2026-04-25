@@ -40,7 +40,7 @@ func TestRunDataFetchRecordsCompletedRequest(t *testing.T) {
 		case strings.Contains(command, "$_hfdl --repo-type model"):
 			return "", "", nil
 		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
-			return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", nil
+			return "2048\tok\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", nil
 		default:
 			return "", "", fmt.Errorf("unexpected command %q", command)
 		}

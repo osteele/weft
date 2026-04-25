@@ -3,6 +3,7 @@ package dataloc
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 )
@@ -24,66 +25,115 @@ func ScanHFCache(host string) ([]DataAsset, error) {
 }
 
 // ScanHFCacheDetailed scans the HuggingFace cache on a remote host and returns
-// entries with full path and size information for each discovered asset.
+// entries with full path and size information for each well-formed asset.
+// Entries that fail structural validation (doubly-nested cache, missing
+// snapshots/) are logged and dropped — they are not loadable via the normal
+// HF resolver. Sizes exclude *.incomplete blobs (partial downloads).
 func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
-	// Try GNU du -sb (bytes) first; fall back to BSD du -sk (1K blocks) with
-	// awk conversion; last resort ls -1d (no size).
 	cmd := ResolveHFCacheDirShellVar() + `
 _dirs=()
 for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
 [ ${#_dirs[@]} -eq 0 ] && exit 0
-_out=$(du -sb "${_dirs[@]}" 2>/dev/null)
-if [ -n "$_out" ]; then
-  printf '%s\n' "$_out"
-else
-  _out=$(du -sk "${_dirs[@]}" 2>/dev/null)
-  if [ -n "$_out" ]; then
-    printf '%s\n' "$_out" | awk '{printf "%d\t%s\n", $1*1024, $2}'
-  else
-    printf '%s\n' "${_dirs[@]}"
+for _d in "${_dirs[@]}"; do
+  _name=$(basename "$_d")
+  _status="ok"
+  if [ -d "$_d/$_name" ]; then
+    _status="nested"
+  elif [ ! -d "$_d/snapshots" ]; then
+    _status="no-snapshots"
   fi
-fi`
+  _bytes=""
+  if _g=$(du -sb "$_d" 2>/dev/null) && [ -n "$_g" ]; then
+    _bytes=$(printf '%s' "$_g" | awk 'NR==1{print $1}')
+    _inc=$(find "$_d" -name '*.incomplete' -type f -print0 2>/dev/null | xargs -0 du -sb 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+    if [ -n "$_inc" ] && [ "$_inc" != "0" ]; then
+      _bytes=$((_bytes - _inc))
+      if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
+    fi
+  fi
+  if [ -z "$_bytes" ]; then
+    if _g=$(du -sk "$_d" 2>/dev/null) && [ -n "$_g" ]; then
+      _bytes=$(printf '%s' "$_g" | awk 'NR==1{printf "%d", $1*1024}')
+      _inc_kb=$(find "$_d" -name '*.incomplete' -type f -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+      if [ -n "$_inc_kb" ] && [ "$_inc_kb" != "0" ]; then
+        _bytes=$((_bytes - _inc_kb*1024))
+        if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
+      fi
+    fi
+  fi
+  printf '%s\t%s\t%s\n' "${_bytes:-0}" "$_status" "$_d"
+done`
 	stdout, _, err := hostCommandRunner(context.Background(), host, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
 	}
-	return parseHFCacheDetailedOutput(stdout, host), nil
-}
-
-// parseHFCacheDetailedOutput parses output from du -sb or ls -1d into HostDataEntries.
-// du -sb format: "<bytes>\t<path>"
-// ls -1d format: "<path>"
-func parseHFCacheDetailedOutput(output string, host string) []HostDataEntry {
-	var entries []HostDataEntry
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	results := parseHFCacheDetailedOutput(stdout)
+	entries := make([]HostDataEntry, 0, len(results))
+	for _, r := range results {
+		if r.Status != "ok" {
+			slog.Warn("skipping malformed HF cache entry",
+				"host", host, "asset", r.Asset.Ref(), "path", r.Path, "status", r.Status)
 			continue
 		}
+		entries = append(entries, HostDataEntry{
+			Host:      host,
+			Asset:     r.Asset,
+			Path:      r.Path,
+			SizeBytes: r.SizeBytes,
+		})
+	}
+	return entries, nil
+}
 
-		path, sizeBytes := parseDuLine(line)
+// hfScanResult is the parsed form of a single line emitted by the
+// ScanHFCacheDetailed shell script. Status is one of "ok", "nested",
+// "no-snapshots", "incomplete", or a comma-joined combination.
+type hfScanResult struct {
+	Asset     DataAsset
+	Path      string
+	SizeBytes int64
+	Status    string
+}
 
-		// Extract directory name from path
-		parts := strings.Split(path, "/")
-		dirName := parts[len(parts)-1]
+// parseHFCacheDetailedOutput parses lines of the form
+// "<bytes>\t<status>\t<path>" emitted by the ScanHFCacheDetailed shell
+// script. Lines with unrecognized HF directory names are skipped.
+func parseHFCacheDetailedOutput(output string) []hfScanResult {
+	var results []hfScanResult
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		sizeBytes, _ := strconv.ParseInt(strings.TrimSpace(fields[0]), 10, 64)
+		status := strings.TrimSpace(fields[1])
+		path := strings.TrimSpace(fields[2])
 
+		dirName := path
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			dirName = path[i+1:]
+		}
 		asset, ok := ParseHFDirName(dirName)
 		if !ok {
 			continue
 		}
-
-		entries = append(entries, HostDataEntry{
-			Host:      host,
+		results = append(results, hfScanResult{
 			Asset:     asset,
 			Path:      path,
 			SizeBytes: sizeBytes,
+			Status:    status,
 		})
 	}
-	return entries
+	return results
 }
 
-// parseDuLine parses a line of du output in "<bytes>\t<path>" format.
-// Falls back to treating the whole line as a plain path with size 0.
+// parseDuLine parses "<bytes>\t<path>" output from `du`, used by scanners
+// other than HF (see corpusscan.go). Lines without a tab are treated as
+// plain paths with size 0.
 func parseDuLine(line string) (path string, sizeBytes int64) {
 	if idx := strings.IndexByte(line, '\t'); idx > 0 {
 		sizeBytes, _ = strconv.ParseInt(line[:idx], 10, 64)
@@ -94,45 +144,22 @@ func parseDuLine(line string) (path string, sizeBytes int64) {
 	return
 }
 
-// parseHFCacheOutput parses `ls` output of HF cache directories into DataAssets.
-func parseHFCacheOutput(output string) []DataAsset {
-	var assets []DataAsset
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Extract the directory name from the path
-		parts := strings.Split(line, "/")
-		dirName := parts[len(parts)-1]
-
-		if asset, ok := ParseHFDirName(dirName); ok {
-			assets = append(assets, asset)
-		}
-	}
-	return assets
-}
-
 // ParseHFDirName parses a HuggingFace cache directory name like
 // "models--meta-llama--Llama-3-8B" into a DataAsset.
 func ParseHFDirName(name string) (DataAsset, bool) {
 	if strings.HasPrefix(name, "models--") {
 		id := strings.TrimPrefix(name, "models--")
-		id = hfDirToID(id)
-		return DataAsset{Kind: AssetHFModel, ID: id}, true
+		return DataAsset{Kind: AssetHFModel, ID: hfDirToID(id)}, true
 	}
 	if strings.HasPrefix(name, "datasets--") {
 		id := strings.TrimPrefix(name, "datasets--")
-		id = hfDirToID(id)
-		return DataAsset{Kind: AssetHFDataset, ID: id}, true
+		return DataAsset{Kind: AssetHFDataset, ID: hfDirToID(id)}, true
 	}
 	return DataAsset{}, false
 }
 
-// hfDirToID converts a HF cache directory name component to a HF ID.
-// HF uses "--" as separator in cache dir names: "meta-llama--Llama-3-8B" -> "meta-llama/Llama-3-8B"
+// hfDirToID converts a HF cache directory name component to a HF ID:
+// HF uses "--" as the org/name separator in cache dir names.
 func hfDirToID(dirPart string) string {
-	// Replace the first "--" with "/", which separates org from model name.
-	// Subsequent "--" are not expected in standard HF naming.
 	return strings.Replace(dirPart, "--", "/", 1)
 }

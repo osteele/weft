@@ -431,6 +431,12 @@ func runHostData(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Printf("Found %d HF asset(s)\n", len(entries))
+		// The scan ran to completion (SSH or non-zero shell exit would have
+		// errored above), so any stale HF entries can be pruned safely.
+		if err := pruneStaleAssets(database, host, now, "HF",
+			dataloc.AssetHFModel, dataloc.AssetHFDataset); err != nil {
+			return err
+		}
 
 		fmt.Printf("Scanning corpus directory on %s...\n", host)
 		corpusEntries, err := dataloc.ScanCorpusDir(host)
@@ -445,6 +451,9 @@ func runHostData(cmd *cobra.Command, args []string) error {
 		}
 		if len(corpusEntries) > 0 {
 			fmt.Printf("Found %d corpus asset(s)\n", len(corpusEntries))
+		}
+		if err := pruneStaleAssets(database, host, now, "corpus", dataloc.AssetCorpus); err != nil {
+			return err
 		}
 	}
 
@@ -469,6 +478,24 @@ func runHostData(cmd *cobra.Command, args []string) error {
 	}
 	w.Flush()
 
+	return nil
+}
+
+// pruneStaleAssets removes host_data entries on host whose kind is in kinds
+// and whose last_seen is older than now, then prints a one-line summary.
+// label appears in error messages and the summary ("HF", "corpus", ...).
+func pruneStaleAssets(database *sql.DB, host string, now time.Time, label string, kinds ...dataloc.AssetKind) error {
+	removed, err := dataloc.RemoveStaleEntriesForKinds(database, host, now, kinds)
+	if err != nil {
+		return fmt.Errorf("prune stale %s entries: %w", label, err)
+	}
+	if removed > 0 {
+		noun := "entries"
+		if removed == 1 {
+			noun = "entry"
+		}
+		fmt.Printf("Removed %d stale %s %s no longer present on %s\n", removed, label, noun, host)
+	}
 	return nil
 }
 

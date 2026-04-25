@@ -276,7 +276,7 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
 			scanCount++
 			if scanCount >= 2 {
-				return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", 0
+				return "2048\tok\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", 0
 			}
 			return "", "", 0
 		default:
