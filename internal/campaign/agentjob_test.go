@@ -67,3 +67,47 @@ func TestNewCloudAgentJobRejectsMissingRunID(t *testing.T) {
 		t.Fatal("expected error for missing latest_run_id")
 	}
 }
+
+func TestAssertNeedsClassified(t *testing.T) {
+	t.Run("empty needs is fine", func(t *testing.T) {
+		job := &db.Job{ID: 100}
+		if err := assertNeedsClassified(job, nil, nil, nil); err != nil {
+			t.Fatalf("assertNeedsClassified: %v", err)
+		}
+	})
+
+	t.Run("on-prem skipped spec passes", func(t *testing.T) {
+		spec := "out/x.pkl:42"
+		job := &db.Job{ID: 101, Needs: []string{spec}}
+		if err := assertNeedsClassified(job, nil, nil, []string{spec}); err != nil {
+			t.Fatalf("assertNeedsClassified: %v", err)
+		}
+	})
+
+	t.Run("rental need with matching CloudNeed passes", func(t *testing.T) {
+		spec := "out/x.pkl:42"
+		job := &db.Job{ID: 102, Needs: []string{spec}}
+		cn := []cloud.CloudNeed{{Spec: spec, Path: "out/x.pkl", R2Key: "k"}}
+		if err := assertNeedsClassified(job, cn, nil, nil); err != nil {
+			t.Fatalf("assertNeedsClassified: %v", err)
+		}
+	})
+
+	t.Run("rental need with matching CloudAfter passes", func(t *testing.T) {
+		spec := "out/x.pkl:42"
+		job := &db.Job{ID: 103, Needs: []string{spec}}
+		ca := []cloud.CloudAfterRef{{JobID: 42}}
+		if err := assertNeedsClassified(job, nil, ca, nil); err != nil {
+			t.Fatalf("assertNeedsClassified: %v", err)
+		}
+	})
+
+	t.Run("rental need with empty classification fails (the wj1213 bug)", func(t *testing.T) {
+		spec := "out/x.pkl:42"
+		job := &db.Job{ID: 104, Needs: []string{spec}}
+		err := assertNeedsClassified(job, nil, nil, nil)
+		if err == nil {
+			t.Fatal("expected invariant failure for unclassified rental need")
+		}
+	})
+}

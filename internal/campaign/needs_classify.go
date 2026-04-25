@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -41,35 +40,37 @@ func ClassifyNeedsForLaunch(
 	client *r2.Client,
 	job *db.Job,
 	targetInstanceID int64,
-) ([]cloud.CloudNeed, []cloud.CloudAfterRef, error) {
+) ([]cloud.CloudNeed, []cloud.CloudAfterRef, []string, error) {
 	if job == nil {
-		return nil, nil, fmt.Errorf("job is nil")
+		return nil, nil, nil, fmt.Errorf("job is nil")
 	}
 	if len(job.Needs) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	var (
 		r2Specs    []string
 		cloudAfter []cloud.CloudAfterRef
+		onPrem     []string
 		seenAfter  = make(map[int64]bool)
 	)
 
 	for _, spec := range job.Needs {
 		parsed, err := runner.ParseNeedsSpec(spec)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parse --needs %q: %w", spec, err)
+			return nil, nil, nil, fmt.Errorf("parse --needs %q: %w", spec, err)
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return nil, nil, fmt.Errorf("lookup producer job %d for %q: %w", parsed.Version, spec, err)
+			return nil, nil, nil, fmt.Errorf("lookup producer job %d for %q: %w", parsed.Version, spec, err)
 		}
 		if producer == nil {
-			return nil, nil, fmt.Errorf("producer job %d for %q not found", parsed.Version, spec)
+			return nil, nil, nil, fmt.Errorf("producer job %d for %q not found", parsed.Version, spec)
 		}
 
 		// On-prem producer: handled by submit-time host pinning.
-		if !producer.IsRentalJob() && strings.TrimSpace(producer.Host) != "" {
+		if producer.HasInventoryHost() {
+			onPrem = append(onPrem, spec)
 			continue
 		}
 
@@ -94,14 +95,14 @@ func ClassifyNeedsForLaunch(
 	}
 
 	if len(r2Specs) == 0 {
-		return nil, cloudAfter, nil
+		return nil, cloudAfter, onPrem, nil
 	}
 
 	cloudNeeds, err := resolveCloudNeedsFunc(ctx, database, client, r2Specs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return cloudNeeds, cloudAfter, nil
+	return cloudNeeds, cloudAfter, onPrem, nil
 }
 
 // isSameLiveInstance reports whether the producer job is bound to the same

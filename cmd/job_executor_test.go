@@ -102,6 +102,47 @@ func TestResolveArtifactNeedsPlacement(t *testing.T) {
 			t.Fatalf("needs = %v, want 1 entry", needs)
 		}
 	})
+
+	t.Run("reject path that is not in producer's --produces", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobProduces(database, producerID, []string{"output/exp_021/model.pt"}); err != nil {
+			t.Fatalf("SetJobProduces: %v", err)
+		}
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("output/exp_022/model.pt:%d", producerID), // typo: 022 not 021
+		}, "")
+		if err == nil {
+			t.Fatal("expected error for path not in producer's --produces")
+		}
+	})
+
+	t.Run("accept matching path against producer's --produces", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobProduces(database, producerID, []string{"output/exp_021/model.pt"}); err != nil {
+			t.Fatalf("SetJobProduces: %v", err)
+		}
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("output/exp_021/model.pt:%d", producerID),
+		}, "")
+		if err != nil {
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
+		}
+	})
+
+	t.Run("accept any path when producer has no --produces declared", func(t *testing.T) {
+		_, _, err := resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("anything/goes.pt:%d", cloudJobID),
+		}, "")
+		if err != nil {
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
+		}
+	})
 }
 
 func TestResolveDependencyForTarget(t *testing.T) {

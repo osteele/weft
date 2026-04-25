@@ -378,6 +378,10 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 			return "", nil, fmt.Errorf("artifact producer job %d not found", parsed.Version)
 		}
 
+		if err := validateNeedsPathAgainstProduces(spec, parsed.Path, job); err != nil {
+			return "", nil, err
+		}
+
 		// On-prem producer: pin the consumer to the producer's host so the
 		// shared filesystem / queue-runner dep chain handles artifact reuse.
 		// Rental and unplaced producers are classified later at launch time.
@@ -396,4 +400,27 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 	}
 
 	return resolvedHost, out, nil
+}
+
+// validateNeedsPathAgainstProduces rejects a --needs spec whose path does not
+// match any of the producer's --produces declarations. When the producer did
+// not declare any --produces, the spec is accepted (we cannot tell whether the
+// path is a typo or a convention-collected output). This catches consumer
+// path typos at submit time instead of letting them surface as missing-file
+// errors on a rental instance.
+func validateNeedsPathAgainstProduces(spec, needsPath string, producer *db.Job) error {
+	if len(producer.Produces) == 0 {
+		return nil
+	}
+	want := strings.TrimPrefix(strings.TrimSpace(needsPath), "/")
+	for _, raw := range producer.Produces {
+		got := strings.TrimPrefix(strings.TrimSpace(runner.ParseProducesSpec(raw).Path), "/")
+		if got != "" && got == want {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"--needs %q: producer job %d declares --produces %v, which does not include %q (typo? add the path to --produces, or correct the --needs path)",
+		spec, producer.ID, producer.Produces, needsPath,
+	)
 }

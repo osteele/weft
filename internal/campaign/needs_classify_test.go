@@ -26,7 +26,7 @@ func TestClassifyNeedsForLaunch_OnPremProducer(t *testing.T) {
 		return nil, nil
 	}
 
-	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, 0)
+	cloudNeeds, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, 0)
 	if err != nil {
 		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestClassifyNeedsForLaunch_RentalSameLiveInstance(t *testing.T) {
 		return nil, nil
 	}
 
-	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, instanceID)
+	cloudNeeds, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, instanceID)
 	if err != nil {
 		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestClassifyNeedsForLaunch_RentalOtherLiveInstance_Fallback(t *testing.T) {
 		return []cloud.CloudNeed{{Spec: specs[0], Path: "out/x.pkl", R2Key: "mock"}}, nil
 	}
 
-	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, targetInstanceID)
+	cloudNeeds, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, targetInstanceID)
 	if err != nil {
 		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestClassifyNeedsForLaunch_DeadProducerInstance_Fallback(t *testing.T) {
 		return []cloud.CloudNeed{{Spec: specs[0], Path: "out/x.pkl", R2Key: "mock"}}, nil
 	}
 
-	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, deadInstance)
+	cloudNeeds, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, deadInstance)
 	if err != nil {
 		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestClassifyNeedsForLaunch_RentalSameBatch_Launching(t *testing.T) {
 		return nil, nil
 	}
 
-	_, cloudAfter, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, instanceID)
+	_, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, instanceID)
 	if err != nil {
 		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestClassifyNeedsForLaunch_RentalSameBatch_Launching(t *testing.T) {
 
 func TestClassifyNeedsForLaunch_EmptyNeeds(t *testing.T) {
 	database := db.SetupTestDB(t)
-	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(context.Background(), database, nil, &db.Job{ID: 1}, 0)
+	cloudNeeds, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, &db.Job{ID: 1}, 0)
 	if err != nil {
 		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
 	}

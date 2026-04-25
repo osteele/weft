@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/cloudneeds"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -80,9 +81,61 @@ func resolveCloudNeedsForJob(
 		job.Needs = fresh.Needs
 		job.Metadata = fresh.Metadata
 	}
-	cloudNeeds, cloudAfter, err := ClassifyNeedsForLaunch(ctx, database, client, job, targetInstanceID)
+	cloudNeeds, cloudAfter, onPrem, err := ClassifyNeedsForLaunch(ctx, database, client, job, targetInstanceID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("classify needs for job %d: %w", job.ID, err)
 	}
+	if err := assertNeedsClassified(job, cloudNeeds, cloudAfter, onPrem); err != nil {
+		return nil, nil, err
+	}
 	return cloudNeeds, cloudAfter, nil
+}
+
+// assertNeedsClassified is a defense-in-depth invariant against silently
+// dropped --needs metadata. The wj1213/wj1231/wj1240 incident shipped jobs
+// to rental instances with empty cloud_needs manifests because submission
+// wrote attempt-scoped metadata to job rows that had no job_attempts row
+// yet. The classifier was later fixed to read jobs.needs directly; this
+// check ensures any future regression that lets a rental-bound need fall
+// out of classification fails at launch instead of crashing inside the
+// user's command.
+func assertNeedsClassified(
+	job *db.Job,
+	cloudNeeds []cloud.CloudNeed,
+	cloudAfter []cloud.CloudAfterRef,
+	onPremSpecs []string,
+) error {
+	if len(job.Needs) == 0 {
+		return nil
+	}
+	resolvedSpecs := make(map[string]bool, len(cloudNeeds)+len(onPremSpecs))
+	for _, n := range cloudNeeds {
+		resolvedSpecs[n.Spec] = true
+	}
+	for _, spec := range onPremSpecs {
+		resolvedSpecs[spec] = true
+	}
+	resolvedAfter := make(map[int64]bool, len(cloudAfter))
+	for _, a := range cloudAfter {
+		resolvedAfter[a.JobID] = true
+	}
+	for _, spec := range job.Needs {
+		if resolvedSpecs[spec] {
+			continue
+		}
+		parsed, err := runner.ParseNeedsSpec(spec)
+		if err != nil {
+			return fmt.Errorf("invariant check parse --needs %q: %w", spec, err)
+		}
+		if resolvedAfter[parsed.Version] {
+			continue
+		}
+		return fmt.Errorf(
+			"--needs %q for job %d was not classified (cloudNeeds=%d, cloudAfter=%d, onPrem=%d): "+
+				"this indicates dropped dependency metadata; "+
+				"refusing to launch because the user command would crash on missing input",
+			spec, job.ID, len(cloudNeeds), len(cloudAfter), len(onPremSpecs),
+		)
+	}
+	return nil
 }
