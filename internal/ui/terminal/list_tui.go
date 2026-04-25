@@ -133,6 +133,7 @@ type listAutoPilotDoneMsg struct {
 	launchedClass  string
 	blockedReasons map[int64]string
 	anotherHolding bool
+	paused         bool
 	err            error
 	// deferred marks a redelivery after the minimum-display hold so the handler
 	// knows to apply the result rather than schedule another tick.
@@ -557,9 +558,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastAutoPilotErrorRaw = ""
 		m.showAutoPilotErrorDetails = false
 		m.autoPersistentError = ""
+		if msg.paused {
+			if !m.quickLaunchStatusProtected() {
+				m.statusMessage = "Auto-pilot: paused (resume with `weft autopilot resume`)"
+			}
+			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
+			return m, nil
+		}
 		if msg.anotherHolding {
 			if !m.quickLaunchStatusProtected() {
-				m.statusMessage = "Auto-pilot: another TUI is active for this scope"
+				m.statusMessage = "Auto-pilot: another runner is active"
 			}
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
 			return m, nil
@@ -1767,7 +1775,15 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 			return listAutoPilotDoneMsg{anotherHolding: true}
 		}
 		defer db.ReleaseAutoLease(database, scope, owner)
-		placed, rebalanced, launched, launchedClass, blockedReasons, runErr := runGroupedAutoPilotPass(ctx, database, jobs)
+		placed, rebalanced, launched, launchedClass, blockedReasons, runErr := runGatedAutoPilotPass(ctx, database, jobs, "list-tui")
+		if runErr != nil {
+			if errors.Is(runErr, orchestration.ErrAutopilotPaused) {
+				return listAutoPilotDoneMsg{paused: true}
+			}
+			if errors.Is(runErr, orchestration.ErrAutopilotBusy) {
+				return listAutoPilotDoneMsg{anotherHolding: true}
+			}
+		}
 		return listAutoPilotDoneMsg{
 			placed:         placed,
 			rebalanced:     rebalanced,
@@ -1795,6 +1811,20 @@ const (
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, int, string, map[int64]string, error) {
 	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)
+	if result != nil {
+		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, err
+	}
+	if err != nil {
+		return 0, 0, 0, "", nil, err
+	}
+	return 0, 0, 0, "", nil, nil
+}
+
+// runGatedAutoPilotPass wraps the orchestration pass with the singleton
+// pause/active-runner gate. It returns ErrAutopilotPaused or ErrAutopilotBusy
+// (via the runner package) without running a pass when those conditions hold.
+func runGatedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string) (int, int, int, string, map[int64]string, error) {
+	result, err := orchestration.RunGroupedAutoPilotPassGated(ctx, database, scopedJobs, label)
 	if result != nil {
 		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, err
 	}

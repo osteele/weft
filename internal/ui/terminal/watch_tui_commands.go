@@ -99,6 +99,16 @@ func (m *watchModel) runAutoPilot() tea.Cmd {
 	if m.autoNoopReasons == nil {
 		m.autoNoopReasons = map[int64]string{}
 	}
+	// Honor the global pause flag. We don't claim the singleton pass slot here
+	// (watch_tui's auto-place and auto-launch run as concurrent commands), but
+	// we short-circuit so paused autopilot truly takes no actions.
+	if m.database != nil {
+		if paused, err := orchestration.IsAutopilotPaused(m.database); err == nil && paused {
+			m.autoStatusLine = "auto-pilot paused (resume with `weft autopilot resume`)"
+			m.autoPassInFlight = false
+			return nil
+		}
+	}
 	// New unplaced set => clear stale diagnostics and launch backoff.
 	if sig := autoUnplacedSignature(m.unplacedJobs); sig != m.autoLastUnplacedSig {
 		m.autoLastUnplacedSig = sig

@@ -437,6 +437,27 @@ weft coordinator install
 weft coordinator uninstall
 ```
 
+### Autopilot Status & Pause
+
+The TUIs (list, watch) drive an autopilot that auto-places, auto-launches, and
+auto-relaunches jobs. The CLI exposes a singleton state row so other terminals
+and external automation can see whether autopilot is currently making
+decisions, and pause it when manual control is needed:
+
+```bash
+weft autopilot status              # idle | running | stale | paused | never
+weft autopilot status --json       # machine-readable
+weft autopilot status --quiet      # exit codes: 0=idle, 10=running, 11=stale, 12=paused
+
+weft autopilot pause --reason "..."
+weft autopilot resume
+```
+
+Pause is sticky across restarts — every autopilot runner (TUIs, future
+coordinator daemon) skips its work while paused. Use it before launching
+instances or restarting orphaned jobs by hand from another terminal to avoid
+racing the autopilot.
+
 ### Placement Scoring
 
 When a job has no explicit host, the coordinator scores all eligible hosts:

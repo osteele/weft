@@ -60,12 +60,40 @@ Each pass runs `runAutoPilot()`, which fires two independent actions:
 
 ### Concurrency Control
 
-- A **DB-based lease** (`auto_leases` table, 30s TTL) prevents multiple TUI
-  instances from running auto-pilot simultaneously for the same scope.
-- The lease scope is derived from the TUI title (e.g.,
-  `list_grouped_status:Jobs • unprocessed`).
-- If another TUI holds the lease, the status shows "another TUI is active for
-  this scope".
+Two layers, used together:
+
+1. **Per-scope lease** — `auto_leases` table, 30s TTL. Prevents two TUIs
+   sharing the same TUI title from running auto-pilot simultaneously. The
+   lease scope is derived from the title (e.g.
+   `list_grouped_status:Jobs • unprocessed`). Status shows "another runner
+   is active" on contention.
+2. **Singleton state row** — `autopilot_state` table (one row, id=1). Coarser
+   layer that ensures *only one* autopilot pass is in flight across all weft
+   processes regardless of scope, and exposes a sticky `paused` flag. Holders
+   heartbeat every 5s; an aged-out claim (> 30s without a heartbeat) is
+   reclaimed by the next runner. See `internal/db/autopilot_state.go` and
+   `internal/orchestration/autopilot_runner.go`.
+
+### External Pause / Status
+
+The CLI surfaces the singleton state for users and external automation:
+
+```
+weft autopilot status            # text: idle | running | stale | paused | never
+weft autopilot status --json     # machine-readable (stable contract)
+weft autopilot status --quiet    # exit codes: 0=idle, 10=running, 11=stale, 12=paused
+weft autopilot pause [--reason ...] [--by ...]
+weft autopilot resume
+```
+
+While paused, every autopilot runner skips its pass — no auto-placement, no
+auto-launch, no automatic relaunch of orphaned jobs. Pause is sticky across
+restarts. Use it before manually launching instances or restarting jobs from
+another terminal to avoid racing the autopilot.
+
+Pause does *not* interrupt a pass already in flight. After pausing, observe
+`weft autopilot status` until it leaves the `running` state before issuing
+manual launch commands.
 
 ### Blocked Reasons
 

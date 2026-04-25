@@ -1369,3 +1369,65 @@ rule AutoPilotManualResume {
         -- * saving a new run-rate target
         -- Implemented via resumeAutoPilotNow() in list_tui.go.
 }
+
+-- ==========================================================================
+-- Autopilot singleton state (cross-process gate)
+-- ==========================================================================
+--
+-- A single row in the `autopilot_state` table provides a coarse,
+-- externally-observable, externally-controllable layer above the
+-- per-scope auto_leases. Two functions:
+--
+--   1. Contention: only one autopilot pass may execute at a time across
+--      all weft processes that share the database. A pass holder
+--      heartbeats every few seconds; an aged-out claim is reclaimed.
+--   2. Pause: a sticky `paused` flag halts every autopilot runner
+--      (list TUI, watch TUI, future coordinator daemon) without
+--      requiring any process to exit.
+--
+-- The CLI (`weft autopilot status|pause|resume`) reads and mutates this
+-- row. External agents that intend to launch instances or restart
+-- orphaned jobs by hand SHOULD pause the autopilot first to avoid
+-- racing it.
+
+rule AutoPilotPassRespectsSingletonGate {
+    when: AutoPilotTick(_)
+
+    requires:
+        not autopilot_state.paused
+        and (autopilot_state.pass_started_at is None
+             or now - autopilot_state.last_heartbeat
+                >= AutopilotPassStaleAfter)
+
+    ensures:
+        ClaimAutopilotPassSlot(runner_pid, runner_label)
+        and HeartbeatWhileRunning(runner_pid, AutopilotHeartbeatInterval)
+        and ReleaseSlotOnCompletion(runner_pid)
+
+    @guidance
+        -- Schema: internal/db/autopilot_state.go (singleton, id=1).
+        -- Runner: internal/orchestration/autopilot_runner.go
+        --   AutopilotRunner.TryAcquire / Release.
+        -- Stale threshold: AutopilotPassStaleAfter (30s).
+        -- Heartbeat interval: 5s (must be << stale threshold).
+        -- list_tui calls RunGroupedAutoPilotPassGated which wraps the
+        -- existing per-scope auto_lease with this gate.
+        -- watch_tui short-circuits via IsAutopilotPaused() at the top
+        -- of runAutoPilot (it does not take the slot because its
+        -- auto-place / auto-launch fan out across multiple commands).
+}
+
+invariant PausedAutopilotTakesNoActions {
+    -- While paused, no process may issue auto-placements, auto-launches,
+    -- or automatic relaunches of orphaned jobs.
+    invariant_holds:
+        autopilot_state.paused implies
+            not AutoPlacementApplied(_)
+            and not AutoLaunchInstanceFromUnplaced(_, _)
+            and not RelaunchOrphanedJobsAutomatically(_)
+
+    @guidance
+        -- Manual user-driven launches and `weft instance submit` are
+        -- still permitted while the autopilot is paused — pause is
+        -- specifically about the *automated* policy loop.
+}

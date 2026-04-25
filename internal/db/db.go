@@ -1046,7 +1046,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 7
+const currentSchemaVersion = 8
 
 var dbPath string
 var startupRepairFn = startupRepair
@@ -1548,6 +1548,29 @@ func initSchema(db *sql.DB) error {
 			updated_at INTEGER NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_auto_leases_expires ON auto_leases(expires_at);
+	`); err != nil {
+		return err
+	}
+
+	// Create autopilot_state singleton (paused flag + active-runner heartbeat).
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS autopilot_state (
+			id                       INTEGER PRIMARY KEY CHECK (id = 1),
+			paused                   INTEGER NOT NULL DEFAULT 0,
+			paused_at                INTEGER,
+			paused_by                TEXT,
+			paused_reason            TEXT,
+			active_runner_pid        INTEGER,
+			active_runner_label      TEXT,
+			active_runner_host       TEXT,
+			pass_started_at          INTEGER,
+			last_heartbeat           INTEGER,
+			last_pass_finished_at    INTEGER,
+			last_pass_duration_ms    INTEGER,
+			last_pass_summary        TEXT,
+			last_pass_error          TEXT
+		);
+		INSERT OR IGNORE INTO autopilot_state(id, paused) VALUES (1, 0);
 	`); err != nil {
 		return err
 	}
