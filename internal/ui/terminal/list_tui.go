@@ -247,9 +247,12 @@ func (m listTUIModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), m.scheduleListSyncTick()}
 	if m.syncWorker != nil {
 		m.requestActiveSyncs()
-		cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
-			return listSyncWorkerResultMsg{result: r}
-		}))
+		cmds = append(cmds,
+			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
+				return listSyncWorkerResultMsg{result: r}
+			}),
+			m.runBackgroundCloudSync(false),
+		)
 	} else if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
@@ -518,7 +521,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{m.scheduleListSyncTick()}
 		if m.syncWorker != nil {
 			m.requestActiveSyncs()
-			cmds = append(cmds, m.reloadJobs())
+			cmds = append(cmds, m.reloadJobs(), m.runBackgroundCloudSync(true))
 		} else if m.syncEnabled && !m.syncInProgress() {
 			m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
 			if !m.quickLaunchStatusProtected() {
@@ -1676,18 +1679,30 @@ func loadInventoryHostInfo(database *sql.DB, jobs []*db.Job) map[string]*db.Cach
 }
 
 func (m listTUIModel) runBackgroundSync(full bool) tea.Cmd {
+	return m.runBackgroundSyncFn(full, syncListTUIData)
+}
+
+// runBackgroundCloudSync runs only the cloud-side sync. Used when a
+// hostsync.Worker is handling host-side syncing on its own tick, so the cloud
+// reconciler (which performs orphan sweep + termination reconcile) still runs
+// every list-TUI tick.
+func (m listTUIModel) runBackgroundCloudSync(full bool) tea.Cmd {
+	return m.runBackgroundSyncFn(full, syncCloudStateForTUI)
+}
+
+func (m listTUIModel) runBackgroundSyncFn(full bool, fn func(*sql.DB, bool) []string) tea.Cmd {
 	database := m.database
 	ctx := m.ctx
 	return func() tea.Msg {
 		done := make(chan listSyncFinishedMsg, 1)
 		go func() {
-			done <- listSyncFinishedMsg{warnings: syncListTUIData(database, full), full: full}
+			done <- listSyncFinishedMsg{warnings: fn(database, full), full: full}
 		}()
 		select {
 		case msg := <-done:
 			return msg
 		case <-ctx.Done():
-			return listSyncFinishedMsg{full: true} // return terminal msg so no further syncs are triggered
+			return listSyncFinishedMsg{full: true} // terminal msg so no further syncs are triggered
 		}
 	}
 }
