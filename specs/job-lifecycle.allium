@@ -466,6 +466,85 @@ rule JobDied {
 }
 
 -- ==========================================================================
+-- Artifact uploads (cloud agent)
+-- ==========================================================================
+-- The cloud agent uploads job outputs to R2 in two parallel ways:
+--   1. Convention-based output directories (anything written under output/ or
+--      outputs/ in the working dir) -- uploaded by uploadOutputDirs.
+--   2. Declared --produces artifacts -- uploaded by uploadArtifactManifestEntries
+--      using the manifest at $WEFT_ARTIFACT_MANIFEST.
+-- Each runs on a 60-second ticker during the job, and once more in a final
+-- flush after the script exits, then again as background post-job work
+-- before the agent self-destructs.
+
+rule ProducesPreRegisteredAtJobStart {
+    when: job: Job transitions_to running
+    requires: job.produces is not empty
+
+    ensures: $WEFT_ARTIFACT_MANIFEST contains every spec in job.produces
+
+    @guidance
+        -- Pre-registration is REQUIRED so the periodic 60s output-uploader
+        -- ticker can pick up large files (e.g. checkpoints written every N
+        -- training steps) DURING the run, not only after the script exits.
+        -- Post-exit registration alone leaves a narrow upload window for any
+        -- file written close to job exit (e.g. final-epoch checkpoints written
+        -- seconds before exit), and gives no chance to upload incrementally
+        -- during long runs. Implementation: internal/runner/single.go calls
+        -- RecordProducedArtifacts both at job start (after env merge) and
+        -- post-exit (idempotent; the script may have appended additional
+        -- paths to $WEFT_ARTIFACT_MANIFEST during the run).
+}
+
+rule ArtifactUploadTimeoutScalesWithSize {
+    when: rclone_invocation(payload_bytes)
+
+    ensures: per_invocation_timeout >= max(5.minutes, payload_bytes / 1.MB.per_second)
+
+    @guidance
+        -- A fixed 5-minute deadline killed in-progress 500MB+ checkpoint
+        -- uploads on bursty cloud rental networks (kill via context.WithTimeout
+        -- abandons the in-flight S3 multipart). The timeout is now scaled by
+        -- the payload size at a 1 MB/s throughput floor, with a 5-minute
+        -- minimum. Implementation: cmd/agent/runcampaign.go
+        -- rcloneTimeoutForBytes() applied in uploadOutputDirs and
+        -- rcloneUploadWithRetry. Retries (5s, 10s delays, 3 attempts) still
+        -- handle transient failures; the scaling addresses the stalled-but-
+        -- progressing case where a long upload would otherwise be killed.
+}
+
+rule ManifestUpdateFailureSurfaced {
+    when: RecordProducedArtifacts(job) returns error
+
+    ensures: job_log_dir / "{job_id}.manifest_error" exists with the error message
+    ensures: weft artifact list <job> emits a WARNING that includes the message
+
+    @guidance
+        -- Silent manifest write failures (disk full, permission denied) used
+        -- to be logged via slog.Warn only, leaving the user with a manifest
+        -- that did not include their --produces entries and no signal that
+        -- something went wrong. Implementation: WriteManifestErrorFile (in
+        -- internal/runner/job.go) and warnOnFailedCloudOutputUpload (in
+        -- cmd/artifact.go) read the manifest_error file and emit a warning
+        -- alongside any output-upload status warnings.
+}
+
+rule PerArtifactUploadOutcomeRecorded {
+    when: uploadArtifactManifestEntries(job, runID)
+    for each artifact in manifest:
+        ensures: completion_record.output_upload.dirs contains an entry for the artifact
+                 with status (ok | failed), file count, byte size, duration, and any error message
+
+    @guidance
+        -- Both directory and single-file artifacts populate a per-entry
+        -- result. A failure on a single large file (e.g. a 500MB checkpoint
+        -- whose upload timed out) must be visible per-path so users can see
+        -- which artifact failed without inspecting agent logs.
+        -- Implementation: cmd/agent/runcampaign.go uploadArtifactManifestEntries
+        -- appends one result.Dirs entry per artifact regardless of kind.
+}
+
+-- ==========================================================================
 -- Queue-runner dispatch and concurrency
 -- ==========================================================================
 -- The queue runner on each host dispatches queued jobs subject to a

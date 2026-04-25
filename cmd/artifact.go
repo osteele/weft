@@ -411,7 +411,18 @@ func warnOnFailedCloudOutputUpload(cmd *cobra.Command, jobID int64) {
 	if err != nil {
 		return
 	}
-	completionPath := filepath.Join(home, ".cache", "weft", "logs", fmt.Sprintf("%d.completion.json", jobID))
+	logsDir := filepath.Join(home, ".cache", "weft", "logs")
+
+	// Surface manifest_error even when completion.json is absent (e.g. job
+	// killed before writing completion).
+	manifestErrPath := filepath.Join(logsDir, fmt.Sprintf("%d.manifest_error", jobID))
+	if data, err := os.ReadFile(manifestErrPath); err == nil {
+		if msg := strings.TrimSpace(string(data)); msg != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: artifact manifest update failed for this job: %s\n", msg)
+		}
+	}
+
+	completionPath := filepath.Join(logsDir, fmt.Sprintf("%d.completion.json", jobID))
 	data, err := os.ReadFile(completionPath)
 	if err != nil {
 		return
@@ -423,8 +434,19 @@ func warnOnFailedCloudOutputUpload(cmd *cobra.Command, jobID int64) {
 	if rec.OutputUpload == nil {
 		return
 	}
-	if rec.OutputUpload.Status == "failed" || rec.OutputUpload.Status == "partial" {
-		fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: Output upload failed — outputs were not uploaded to R2 (disk may have been full)")
+	if rec.OutputUpload.Status != runner.UploadStatusFailed && rec.OutputUpload.Status != runner.UploadStatusPartial {
+		return
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: Output upload failed — outputs were not uploaded to R2 (disk may have been full)")
+	for _, d := range rec.OutputUpload.Dirs {
+		if d.Status != runner.UploadStatusFailed && d.Status != runner.UploadStatusPartial {
+			continue
+		}
+		detail := fmt.Sprintf("  - %s (%d files, %d bytes): %s", d.Dir, d.FileCount, d.Bytes, d.Status)
+		if d.Error != "" {
+			detail += " — " + d.Error
+		}
+		fmt.Fprintln(cmd.ErrOrStderr(), detail)
 	}
 }
 

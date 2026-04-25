@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestParseProducesSpec(t *testing.T) {
@@ -110,6 +112,63 @@ func TestRecordProducedArtifacts_WritesManifestEntries(t *testing.T) {
 	}
 	if manifest.Artifacts[1].Path != "output/result.json" {
 		t.Fatalf("second artifact path = %q, want %q", manifest.Artifacts[1].Path, "output/result.json")
+	}
+}
+
+// Regression: --produces declarations must be visible in the manifest BEFORE
+// the script runs (so the periodic 60s output uploader can pick up large
+// in-progress files like checkpoints), not only after exit. We exercise the
+// full RunSingleJob path with a script that sleeps long enough that the
+// manifest must be present before the script writes its files.
+func TestRunSingleJob_PreRegistersProducesBeforeRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	logDir := t.TempDir()
+	workDir := t.TempDir()
+	jobID := int64(7777)
+
+	manifestPath := filepath.Join(home, ".cache", "weft", "artifacts", "7777.json")
+
+	// Script: assert the manifest already contains both --produces entries
+	// before doing any work. If pre-registration regresses, the script will
+	// fail and the test will catch it.
+	cmd := `python3 -c '
+import json, os, sys
+m = json.load(open(os.environ["WEFT_ARTIFACT_MANIFEST"]))
+paths = sorted(a["path"] for a in m["artifacts"])
+expected = ["output/ckpt.pt", "output/results.json"]
+assert paths == expected, f"manifest paths = {paths!r}, want {expected!r}"
+'`
+
+	cfg := SingleJobConfig{
+		JobID: jobID,
+		Job: opsqueue.CommandJob{
+			Cmd:      cmd,
+			Produces: []string{"output/ckpt.pt", "output/results.json"},
+		},
+		LogDir:         logDir,
+		WorkingDir:     workDir,
+		SampleInterval: 100 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		// Surface log to help debugging if the assertion failed.
+		paths := NewJobPaths(logDir, jobID)
+		logData, _ := os.ReadFile(paths.Log)
+		t.Fatalf("script exit %d (manifest pre-registration regression?). log:\n%s", ei.ExitCode, logData)
+	}
+
+	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
+	if err != nil {
+		t.Fatalf("ReadManifestFile: %v", err)
+	}
+	if got, want := len(manifest.Artifacts), 2; got != want {
+		t.Fatalf("artifact count = %d, want %d (manifest=%+v)", got, want, manifest.Artifacts)
 	}
 }
 

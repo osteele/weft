@@ -237,6 +237,29 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)
 	}
 }
 
+// rcloneMinTimeout is the floor for any single rclone invocation. Even small
+// uploads should tolerate brief network stalls.
+const rcloneMinTimeout = 5 * time.Minute
+
+// rcloneBytesPerSecondFloor is the assumed worst-case sustained throughput
+// used to scale per-call rclone timeouts. ~1 MB/s is conservative for cloud
+// rental networks where R2 uploads can be bursty.
+const rcloneBytesPerSecondFloor = 1 << 20
+
+// rcloneTimeoutForBytes returns a per-rclone-call deadline that scales with
+// the payload size, so a 500 MB checkpoint is not killed by a fixed 5-minute
+// ceiling on a slow link. Callers pass 0 if size is unknown to get the floor.
+func rcloneTimeoutForBytes(bytes int64) time.Duration {
+	if bytes <= 0 {
+		return rcloneMinTimeout
+	}
+	scaled := time.Duration(bytes/rcloneBytesPerSecondFloor) * time.Second
+	if scaled < rcloneMinTimeout {
+		return rcloneMinTimeout
+	}
+	return scaled
+}
+
 // uploadOutputDirs uploads convention-based output directories to R2.
 func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.OutputUploadResult {
 	startedAt := time.Now()
@@ -255,10 +278,11 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		}
 		attempted++
 		fileCount, bytes := measureUploadTree(dirPath)
+		timeout := rcloneTimeoutForBytes(bytes)
 		start := time.Now()
 		retryCount := 0
 		lastErr := retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "rclone", "copy",
 				"--update",
@@ -281,7 +305,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 				oplog.WithDuration(duration))
 			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
 				Dir:        dir,
-				Status:     "failed",
+				Status:     runner.UploadStatusFailed,
 				Error:      lastErr.Error(),
 				FileCount:  fileCount,
 				Bytes:      bytes,
@@ -304,7 +328,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		result.RetryCount += retryCount
 		result.Dirs = append(result.Dirs, runner.OutputDirUpload{
 			Dir:        dir,
-			Status:     "ok",
+			Status:     runner.UploadStatusOK,
 			FileCount:  fileCount,
 			Bytes:      bytes,
 			RetryCount: retryCount,
@@ -324,7 +348,7 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(jobID))
 	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
 	if err != nil || len(manifest.Artifacts) == 0 {
-		return runner.OutputUploadResult{Status: "ok"}
+		return runner.OutputUploadResult{Status: runner.UploadStatusOK}
 	}
 
 	manifestData, err := json.Marshal(manifest)
@@ -356,38 +380,36 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 			continue
 		}
 		attempted++
+		var (
+			src, dest, rcloneCmd string
+			fileCount            int
+			bytes                int64
+		)
+		localRel := artifacts.LocalRelativePath(spec.Path)
 		if info.IsDir() {
-			fileCount, bytes := measureUploadTree(remotePath)
-			r2Dest := filesPrefix + artifacts.LocalRelativePath(spec.Path) + "/"
-			start := time.Now()
-			uploadErr := rcloneUploadWithRetry(bucket, remotePath+"/", r2Dest, "copy", jobID, spec.Path)
-			duration := time.Since(start)
-			totalDuration += duration
-			status := "ok"
-			var errStr string
-			if uploadErr != nil {
-				failed++
-				status = "failed"
-				errStr = uploadErr.Error()
-			}
-			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
-				Dir: spec.Path, Status: status, Error: errStr,
-				FileCount: fileCount, Bytes: bytes, DurationMS: duration.Milliseconds(),
-			})
-			result.FileCount += fileCount
-			result.Bytes += bytes
+			fileCount, bytes = measureUploadTree(remotePath)
+			src, dest, rcloneCmd = remotePath+"/", filesPrefix+localRel+"/", "copy"
 		} else {
-			r2Key := filesPrefix + artifacts.LocalRelativePath(spec.Path)
-			start := time.Now()
-			uploadErr := rcloneUploadWithRetry(bucket, remotePath, r2Key, "copyto", jobID, spec.Path)
-			duration := time.Since(start)
-			totalDuration += duration
-			if uploadErr != nil {
-				failed++
-			}
-			result.FileCount++
-			result.Bytes += info.Size()
+			fileCount, bytes = 1, info.Size()
+			src, dest, rcloneCmd = remotePath, filesPrefix+localRel, "copyto"
 		}
+		start := time.Now()
+		uploadErr := rcloneUploadWithRetry(bucket, src, dest, rcloneCmd, jobID, spec.Path, bytes)
+		duration := time.Since(start)
+		totalDuration += duration
+		status := runner.UploadStatusOK
+		var errStr string
+		if uploadErr != nil {
+			failed++
+			status = runner.UploadStatusFailed
+			errStr = uploadErr.Error()
+		}
+		result.Dirs = append(result.Dirs, runner.OutputDirUpload{
+			Dir: spec.Path, Status: status, Error: errStr,
+			FileCount: fileCount, Bytes: bytes, DurationMS: duration.Milliseconds(),
+		})
+		result.FileCount += fileCount
+		result.Bytes += bytes
 	}
 
 	finalizeUploadResult(&result, attempted, failed, startedAt, totalDuration)
@@ -395,9 +417,11 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 }
 
 // rcloneUploadWithRetry runs an rclone command with retries on transient failures.
-func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, label string) error {
+// sizeBytes scales the per-call timeout; pass 0 if unknown.
+func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, label string, sizeBytes int64) error {
+	timeout := rcloneTimeoutForBytes(sizeBytes)
 	return retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		args := []string{rcloneCmd}
 		if rcloneCmd == "copy" {
@@ -417,11 +441,11 @@ func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, la
 func finalizeUploadResult(result *runner.OutputUploadResult, attempted, failed int, startedAt time.Time, totalDuration time.Duration) {
 	switch {
 	case attempted == 0 || failed == 0:
-		result.Status = "ok"
+		result.Status = runner.UploadStatusOK
 	case failed == attempted:
-		result.Status = "failed"
+		result.Status = runner.UploadStatusFailed
 	default:
-		result.Status = "partial"
+		result.Status = runner.UploadStatusPartial
 	}
 	result.DurationMS = totalDuration.Milliseconds()
 	if attempted > 0 {

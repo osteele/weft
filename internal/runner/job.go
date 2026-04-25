@@ -113,6 +113,7 @@ type JobPaths struct {
 	Heartbeat     string
 	Completion    string
 	Phases        string
+	ManifestError string
 }
 
 // TimeseriesSample holds a single time-series telemetry sample for a running job.
@@ -152,12 +153,13 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 		Heartbeat:     filepath.Join(logDir, fmt.Sprintf("%d.heartbeat", jobID)),
 		Completion:    filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID)),
 		Phases:        filepath.Join(logDir, fmt.Sprintf("%d.phases.json", jobID)),
+		ManifestError: filepath.Join(logDir, fmt.Sprintf("%d.manifest_error", jobID)),
 	}
 }
 
 // ArchiveExistingFiles renames existing job files with a timestamp suffix.
 func ArchiveExistingFiles(logDir string, jobID int64) {
-	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json"}
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json", "manifest_error"}
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
 		info, err := os.Stat(path)
@@ -312,6 +314,19 @@ func ReadFailureReasonFile(path string) string {
 	return readReasonFile(path)
 }
 
+// WriteManifestErrorFile records a non-fatal error encountered while updating
+// the artifact manifest from --produces declarations. The completion record
+// reader surfaces this in user-facing artifact listings so silent manifest
+// failures (e.g. disk full, permission denied) become visible.
+func WriteManifestErrorFile(paths JobPaths, reason string) error {
+	return writeReasonFile(paths.ManifestError, reason)
+}
+
+// ReadManifestErrorFile reads the manifest-error file. Returns empty string if not present.
+func ReadManifestErrorFile(path string) string {
+	return readReasonFile(path)
+}
+
 // Kill reason constants written to the kill_reason file before sending signals.
 const (
 	KillReasonUserKill        = "user_kill"
@@ -365,10 +380,17 @@ type OutputFile struct {
 	SizeBytes int64  `json:"size_bytes"`
 }
 
-// OutputDirUpload describes the upload outcome for a single output directory.
+// Upload status constants used by OutputDirUpload, OutputUploadResult, and UploadSummary.
+const (
+	UploadStatusOK      = "ok"
+	UploadStatusFailed  = "failed"
+	UploadStatusPartial = "partial"
+)
+
+// OutputDirUpload describes the upload outcome for a single output directory or artifact file.
 type OutputDirUpload struct {
 	Dir        string `json:"dir"`
-	Status     string `json:"status"` // "ok" or "failed"
+	Status     string `json:"status"` // UploadStatus*
 	Error      string `json:"error,omitempty"`
 	FileCount  int    `json:"file_count,omitempty"`
 	Bytes      int64  `json:"bytes,omitempty"`
@@ -378,7 +400,7 @@ type OutputDirUpload struct {
 
 // OutputUploadResult summarizes output directory uploads for a job.
 type OutputUploadResult struct {
-	Status          string            `json:"status"` // "ok", "partial", "failed"
+	Status          string            `json:"status"` // UploadStatus*
 	FileCount       int               `json:"file_count,omitempty"`
 	Bytes           int64             `json:"bytes,omitempty"`
 	RetryCount      int               `json:"retry_count,omitempty"`
