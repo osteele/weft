@@ -1223,6 +1223,16 @@ rule ReconcileOrphanedProviderInstance {
 --     Distinct from "orphaned" so analytics can separate bid-loss
 --     relaunches from generic infra-failure relaunches.
 
+invariant ClosedCloudAttemptHasOutcome {
+    -- A closed cloud attempt with cloud_outcome=null is wedged: the
+    -- job_status view derives it as 'dead' and the orphan-recovery
+    -- exclusion filter then skips it, so the job can never re-enter
+    -- placement. Closing paths MUST stamp cloud_outcome in the same
+    -- UPDATE rather than via a follow-up predicated on end_time.
+    for ja in JobAttempts where ja.launch_id != null and ja.end_time != null:
+        ja.cloud_outcome != null
+}
+
 invariant AttemptChainPointsBackwards {
     -- A new attempt's predecessor_attempt_id, when set, refers to an
     -- earlier attempt of the same job. Together with cloud_outcome on

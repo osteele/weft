@@ -1041,15 +1041,9 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 
 	now := time.Now().Unix()
 	for _, jobID := range jobIDs {
-		if err := closeAttemptsAndRequeue(tx, jobID, now); err != nil {
+		if err := closeAttemptsAndRequeueWithOutcome(tx, jobID, now, outcome); err != nil {
 			tx.Rollback()
 			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
-		}
-		// Also record cloud_outcome on the closed attempt.
-		if _, err := tx.Exec(`UPDATE job_attempts SET cloud_outcome = ? WHERE job_id = ? AND end_time = ?`,
-			outcome, jobID, now); err != nil {
-			tx.Rollback()
-			return 0, fmt.Errorf("set cloud_outcome for job %d: %w", jobID, err)
 		}
 		// Clear start_time on orphaned attempts so the retry budget doesn't
 		// charge infrastructure overhead (bootstrap/setup) against the job.

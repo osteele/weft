@@ -159,6 +159,75 @@ func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	}
 }
 
+// TestJobStatusView_CanceledAttemptOnLiveLaunch verifies that an attempt
+// closed with status='canceled' on a launch that's still running surfaces as
+// 'canceled' rather than the previous 'dead' fallthrough.
+func TestJobStatusView_CanceledAttemptOnLiveLaunch(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const jobID = int64(7100)
+	insertTestJob(t, database, jobID, "echo hi", "/tmp", StatusQueued, withLaunch(launchID))
+
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ?`,
+		StatusCanceled, time.Now().Unix(), jobID,
+	); err != nil {
+		t.Fatalf("close attempt as canceled: %v", err)
+	}
+
+	var derived string
+	if err := database.QueryRow(`SELECT status FROM job_status WHERE id = ?`, jobID).Scan(&derived); err != nil {
+		t.Fatalf("read job_status: %v", err)
+	}
+	if derived != StatusCanceled {
+		t.Errorf("derived status = %q, want %q (regression: previously fell through to 'dead')", derived, StatusCanceled)
+	}
+}
+
+// TestCleanupStaleAttempts_StampsCloudOutcomeOnSupersededDuplicate verifies
+// the wj1483 fix: when cleanupStaleAttempts closes a duplicate open cloud
+// attempt as 'canceled', it also records cloud_outcome='superseded' so the
+// view's cloud-job branch doesn't strand the job as 'dead'.
+func TestCleanupStaleAttempts_StampsCloudOutcomeOnSupersededDuplicate(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const jobID = int64(7101)
+	insertTestJob(t, database, jobID, "echo hi", "/tmp", StatusQueued, withLaunch(launchID))
+
+	// Create a second open attempt on the same job + launch, simulating the
+	// duplicate-open-attempt state that triggers cleanupStaleAttempts.
+	if _, err := database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
+		 VALUES (?, 2, '', ?, ?, ?)`,
+		jobID, launchID, StatusQueued, time.Now().Unix(),
+	); err != nil {
+		t.Fatalf("insert duplicate attempt: %v", err)
+	}
+
+	if err := cleanupStaleAttempts(database); err != nil {
+		t.Fatalf("cleanupStaleAttempts: %v", err)
+	}
+
+	var outcome sql.NullString
+	if err := database.QueryRow(
+		`SELECT cloud_outcome FROM job_attempts WHERE job_id = ? AND attempt_number = 1`,
+		jobID,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("read cloud_outcome on superseded attempt: %v", err)
+	}
+	if !outcome.Valid || outcome.String != AttemptOutcomeSuperseded {
+		t.Errorf("superseded attempt cloud_outcome = %v, want %q (regression: wj1483 wedge)", outcome, AttemptOutcomeSuperseded)
+	}
+}
+
 func TestTerminalLaunchJobDisposition_PreemptedYieldsPreemptedOutcome(t *testing.T) {
 	reset, outcome := terminalLaunchJobDisposition(&Launch{
 		Status:            LaunchStatusFailed,

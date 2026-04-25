@@ -67,9 +67,22 @@ type dbExecer interface {
 // dispatcher re-place the job on a fresh rental after its original instance
 // terminates.
 func closeAttemptsAndRequeue(db dbExecer, jobID int64, now int64) error {
+	return closeAttemptsAndRequeueWithOutcome(db, jobID, now, "")
+}
+
+// closeAttemptsAndRequeueWithOutcome closes the open attempts for a job,
+// requeues the spec, and (when cloudOutcome != "") records cloud_outcome on
+// the just-closed attempts. Status and cloud_outcome are written in one
+// UPDATE so a follow-up predicated on end_time can't race with an earlier
+// close.
+func closeAttemptsAndRequeueWithOutcome(db dbExecer, jobID int64, now int64, cloudOutcome string) error {
 	if _, err := db.Exec(
-		`UPDATE job_attempts SET status = ?, end_time = COALESCE(NULLIF(end_time, 0), ?) WHERE job_id = ? AND (end_time IS NULL OR end_time = 0)`,
-		StatusCanceled, now, jobID); err != nil {
+		`UPDATE job_attempts
+		    SET status = ?,
+		        end_time = COALESCE(NULLIF(end_time, 0), ?),
+		        cloud_outcome = COALESCE(cloud_outcome, NULLIF(?, ''))
+		  WHERE job_id = ? AND (end_time IS NULL OR end_time = 0)`,
+		StatusCanceled, now, cloudOutcome, jobID); err != nil {
 		return err
 	}
 	_, err := db.Exec(
@@ -321,15 +334,25 @@ func cleanupStaleAttempts(db *sql.DB) error {
 	now := time.Now().Unix()
 
 	// Step 1: Close duplicate open attempts. For each job with multiple open
-	// attempts, keep only the one with the highest attempt_number.
+	// attempts, keep only the one with the highest attempt_number. Cloud
+	// attempts (launch_id IS NOT NULL) are stamped cloud_outcome='superseded'
+	// so the view's cloud-job branch can recognise them as terminated by an
+	// internal sweep, not by a user cancel — preventing the canceled-with-no-
+	// cloud_outcome wedge that previously left jobs stuck as 'dead'.
 	if _, err := db.Exec(`
-		UPDATE job_attempts SET end_time = ?, status = 'canceled'
+		UPDATE job_attempts
+		   SET end_time = ?,
+		       status = 'canceled',
+		       cloud_outcome = CASE
+		           WHEN launch_id IS NOT NULL AND cloud_outcome IS NULL THEN ?
+		           ELSE cloud_outcome
+		       END
 		WHERE end_time IS NULL
 		  AND id NOT IN (
 			SELECT MAX(id) FROM job_attempts
 			WHERE end_time IS NULL
 			GROUP BY job_id
-		  )`, now); err != nil {
+		  )`, now, AttemptOutcomeSuperseded); err != nil {
 		return fmt.Errorf("close duplicate open attempts: %w", err)
 	}
 
@@ -519,6 +542,7 @@ func createJobStatusView(db *sql.DB) error {
 								WHEN la.exit_code IS NOT NULL THEN 'failed'
 								WHEN l.termination_reason = 'job_failure' THEN 'failed'
 								WHEN l.status IN ('failed','canceled') THEN 'orphaned'
+								WHEN la.status = 'canceled' THEN 'canceled'
 								ELSE 'dead'
 							END
 						WHEN la.start_time IS NOT NULL THEN
