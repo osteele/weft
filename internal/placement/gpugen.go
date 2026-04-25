@@ -116,8 +116,10 @@ func MinCUDAForGPU(gpuName string) float64 {
 }
 
 // MinCUDAForConstraint returns the minimum CUDA toolkit version implied by a
-// --gpu-class constraint (model, generation, or generation+). Family-wide
-// constraints (e.g. "nvidia") return 0 because they do not imply one minimum.
+// --gpu-class constraint (model, generation, or generation+). For a family
+// constraint, returns the max over members in generationMinCUDA: a family
+// admits every member, so the image must support the most demanding
+// architecture the placer might pick.
 func MinCUDAForConstraint(gpuClass string) float64 {
 	c := ParseGPUConstraint(gpuClass)
 	switch c.mode {
@@ -125,6 +127,18 @@ func MinCUDAForConstraint(gpuClass string) float64 {
 		return MinCUDAForGPU(gpuClass)
 	case constraintExactGen, constraintMinGen:
 		return generationMinCUDA[c.generation]
+	case constraintFamily:
+		checker, ok := familyCheckers[c.normalized]
+		if !ok {
+			return 0
+		}
+		var maxCUDA float64
+		for gen, v := range generationMinCUDA {
+			if checker(gen) && v > maxCUDA {
+				maxCUDA = v
+			}
+		}
+		return maxCUDA
 	default:
 		return 0
 	}

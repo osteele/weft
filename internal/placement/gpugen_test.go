@@ -354,7 +354,8 @@ func TestMinCUDAForConstraint(t *testing.T) {
 		{"blackwell+", 12.8},
 		{"a100+", 11.0},
 		{"ampere", 11.0},
-		{"nvidia", 0},
+		{"nvidia", 12.8},
+		{"apple", 0},
 		{"", 0},
 		{"unknown-model", 0},
 	}
