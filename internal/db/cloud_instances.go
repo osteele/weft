@@ -29,7 +29,8 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		termination_requested_at, termination_intent_json,
 		results_verified,
 		machine_id, docker_image,
-		provider_running_at`
+		provider_running_at,
+		instance_type, max_bid_price_cents, on_demand_ref_cents`
 
 // Launch status constants (same values used for both Launch and Campaign).
 const (
@@ -137,6 +138,12 @@ type Launch struct {
 	// as "running" (Docker container started, onstart can execute). Bootstrap
 	// timeout is measured from this timestamp, not LaunchedAt.
 	ProviderRunningAt *int64
+
+	// Rental type and pricing metadata (for preemptible / interruptible
+	// instance analysis).
+	InstanceType     string // "on-demand" or "interruptible"; empty for pre-migration rows
+	MaxBidPriceCents *int   // Bid ceiling paid on interruptible offers; nil for on-demand
+	OnDemandRefCents *int   // Cheapest concurrent on-demand $/hr at launch, for the same GPU class; nil if not captured
 }
 
 // BootstrapOrigin returns the best timestamp to measure bootstrap elapsed time
@@ -323,18 +330,32 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 	}
 
 	return RetryOnDatabaseLockedValue(context.Background(), "create launch row", func() (int64, error) {
+		var instanceType any
+		if c.InstanceType != "" {
+			instanceType = c.InstanceType
+		}
+		var maxBidPriceCents any
+		if c.MaxBidPriceCents != nil {
+			maxBidPriceCents = *c.MaxBidPriceCents
+		}
+		var onDemandRefCents any
+		if c.OnDemandRefCents != nil {
+			onDemandRefCents = *c.OnDemandRefCents
+		}
 		result, err := db.Exec(
 			`INSERT INTO launches (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 			 max_spend_cents, max_time_seconds, created_at,
 			 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 			 inet_down_mbps, inet_up_mbps, cuda_version,
-			 disk_gb, provisioned_inputs, machine_id, docker_image)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 disk_gb, provisioned_inputs, machine_id, docker_image,
+			 instance_type, max_bid_price_cents, on_demand_ref_cents)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 			c.MaxSpendCents, c.MaxTimeSeconds, now,
 			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
 			c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
 			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
+			instanceType, maxBidPriceCents, onDemandRefCents,
 		)
 		if err != nil {
 			return 0, err
@@ -483,6 +504,13 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 // UpdateLaunchDockerImage sets the Docker image used for a launch.
 func UpdateLaunchDockerImage(db *sql.DB, id int64, image string) error {
 	_, err := db.Exec(`UPDATE launches SET docker_image = ? WHERE id = ?`, image, id)
+	return err
+}
+
+// UpdateLaunchOnDemandRefCents sets the cheapest-concurrent-on-demand
+// counterfactual captured for an interruptible launch.
+func UpdateLaunchOnDemandRefCents(db *sql.DB, id int64, cents int) error {
+	_, err := db.Exec(`UPDATE launches SET on_demand_ref_cents = ? WHERE id = ?`, cents, id)
 	return err
 }
 
@@ -724,15 +752,34 @@ func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64) error {
 		}
 	}
 
+	// Capture the latest pre-existing attempt id (if any) so the new
+	// attempt can record it as its predecessor — letting runtime-estimation
+	// queries follow the relaunch chain across instances.
+	var predecessorID sql.NullInt64
+	_ = tx.QueryRow(
+		`SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&predecessorID)
+
 	// Close any existing open attempt and create the placement attempt.
 	now := time.Now().Unix()
 	if err := closeOpenAttempts(tx, jobID, now); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if _, err := createAttemptTx(tx, jobID, "", &instanceID, StatusQueued); err != nil {
+	newAttemptID, err := createAttemptTx(tx, jobID, "", &instanceID, StatusQueued)
+	if err != nil {
 		tx.Rollback()
 		return err
+	}
+	if predecessorID.Valid {
+		if _, err := tx.Exec(
+			`UPDATE job_attempts SET predecessor_attempt_id = ? WHERE id = ?`,
+			predecessorID.Int64, newAttemptID,
+		); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("link predecessor attempt %d -> %d: %w", predecessorID.Int64, newAttemptID, err)
+		}
 	}
 	// Clear requested_status since the job is now placed.
 	if _, err := tx.Exec(`UPDATE jobs SET requested_status = NULL WHERE id = ?`, jobID); err != nil {
@@ -1244,6 +1291,8 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var machineID sql.NullString
 	var dockerImage sql.NullString
 	var providerRunningAt sql.NullInt64
+	var instanceType sql.NullString
+	var maxBidPriceCents, onDemandRefCents sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -1260,6 +1309,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&resultsVerified,
 		&machineID, &dockerImage,
 		&providerRunningAt,
+		&instanceType, &maxBidPriceCents, &onDemandRefCents,
 	)
 	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
@@ -1386,6 +1436,17 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	if providerRunningAt.Valid {
 		c.ProviderRunningAt = &providerRunningAt.Int64
 	}
+	if instanceType.Valid {
+		c.InstanceType = instanceType.String
+	}
+	if maxBidPriceCents.Valid {
+		v := int(maxBidPriceCents.Int64)
+		c.MaxBidPriceCents = &v
+	}
+	if onDemandRefCents.Valid {
+		v := int(onDemandRefCents.Int64)
+		c.OnDemandRefCents = &v
+	}
 	return &c, nil
 }
 
@@ -1396,6 +1457,12 @@ const (
 	AttemptOutcomeCancelled  = "canceled"
 	AttemptOutcomeOrphaned   = "orphaned"
 	AttemptOutcomeSuperseded = "superseded"
+	// AttemptOutcomePreempted marks an attempt that was running on an
+	// interruptible cloud instance whose pause was not recovered before
+	// stale_pause_timeout, triggering a relaunch on a fresh offer. The
+	// successor attempt's predecessor_attempt_id points back to this one
+	// so runtime-estimation queries can sum durations across the chain.
+	AttemptOutcomePreempted = "preempted"
 )
 
 // LaunchAttempt records a single association between a job and a cloud instance.
@@ -1784,6 +1851,9 @@ func terminalLaunchJobDisposition(ci *Launch) (reset bool, outcome string) {
 	switch ci.Status {
 	case LaunchStatusFailed:
 		if IsRetryableTermination(ci) {
+			if ci.TerminationReason == TerminationReasonPreempted {
+				return true, AttemptOutcomePreempted
+			}
 			return true, AttemptOutcomeOrphaned
 		}
 		switch ci.TerminationReason {

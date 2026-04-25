@@ -243,12 +243,35 @@ entity JobAttempt {
     end_time: Timestamp?
     exit_code: Integer?
     failure_reason: FailureReason?
+    cloud_outcome: AttemptOutcome?      -- set on closed cloud attempts; see
+                                        -- campaign-lifecycle.allium for the
+                                        -- enum and what each outcome means.
+    predecessor_attempt_id: Integer?    -- id of the prior attempt this one
+                                        -- continues (set when the job is
+                                        -- reattached to a fresh launch after
+                                        -- a preempted/orphaned termination).
 
     -- Three-way merge fields (for on-prem sync reconciliation)
     last_synced_status: String?     -- remote state at last successful sync
     pending_status: String?         -- what user wants (nil = no pending change)
     pending_at: Timestamp?          -- when user requested change
 }
+
+-- Job processes get a small set of WEFT_* environment variables that let
+-- them detect they are running under weft and reflect on their runtime
+-- environment:
+--   WEFT_JOB_ID           weft DB id of the job (always set)
+--   WEFT_ARTIFACT_MANIFEST  manifest path; jobs append outputs here
+--   WEFT_ARTIFACT_ROOT    artifact root, defaulting to "."
+--   WEFT_TARGET_KIND      "host" (inventory) or "rental" (cloud agent)
+--   WEFT_LAUNCH_ID        weft DB launch id (rental only)
+--   WEFT_PROVIDER         "vastai" / "runpod" (rental only)
+--   WEFT_INSTANCE_TYPE    "on-demand" / "interruptible" (rental only)
+--   WEFT_RESUMED          "1" if the agent's container restarted after a
+--                         docker stop on the same disk (Vast.ai
+--                         interruptible pause/resume). Absent on first
+--                         boot. Detected by an agent-written sentinel.
+-- The legacy RJ_* prefix is also set for backward compatibility.
 
 value Tag = exclusive | benchmark | rental | inventory | compute_intensive
 

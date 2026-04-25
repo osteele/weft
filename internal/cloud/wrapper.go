@@ -44,4 +44,8 @@ type CampaignManifest struct {
 	// CostPerHourCents is the whole-instance cost used by the agent to pick
 	// hang-watchdog thresholds. Zero = unknown (use conservative thresholds).
 	CostPerHourCents int `json:"cost_per_hour_cents,omitempty"`
+	// Provider and InstanceType are passed through so the agent can expose
+	// them to job processes via WEFT_PROVIDER / WEFT_INSTANCE_TYPE.
+	Provider     string `json:"provider,omitempty"`
+	InstanceType string `json:"instance_type,omitempty"`
 }

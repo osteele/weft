@@ -1316,10 +1316,25 @@ func LaunchInstance(
 		DiskGB:            int(offer.DiskSpaceGB),
 		ProvisionedInputs: group.AllInputs(),
 		MachineID:         offer.MachineID,
+		InstanceType:      cloud.InstanceTypeOnDemand,
+	}
+	if group.HasPreemptibleJob() {
+		instance.InstanceType = cloud.InstanceTypeInterruptible
+		bidCents := int(offer.CostPerHour * 100)
+		instance.MaxBidPriceCents = &bidCents
 	}
 	instanceID, err := db.CreateLaunch(database, instance)
 	if err != nil {
 		return 0, fmt.Errorf("create cloud instance: failed to register local launch record before provider create: %w", err)
+	}
+	if instance.InstanceType == cloud.InstanceTypeInterruptible {
+		go func() {
+			if ref := snapshotOnDemandRefCents(client, group, offer); ref != nil {
+				if err := db.UpdateLaunchOnDemandRefCents(database, instanceID, *ref); err != nil {
+					slog.Debug("record on-demand counterfactual failed", "launch_id", instanceID, "error", err)
+				}
+			}
+		}()
 	}
 	emitProgress := func(phase string) {
 		progress(phase)
@@ -1617,6 +1632,8 @@ func LaunchInstance(
 		SkipWorkdirDeletion: opts.SkipWorkdirDeletion,
 		GPUWarmup:           opts.GPUWarmup,
 		CostPerHourCents:    int(offer.CostPerHour * 100),
+		Provider:            string(client.Provider()),
+		InstanceType:        instance.InstanceType,
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {

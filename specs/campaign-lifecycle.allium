@@ -52,6 +52,14 @@ value TerminationReason = completed | provider_failure | job_failure
                         | disk_full | infra_failure | bootstrap_timeout
                         | canceled | phase_stall | preempted | unknown
 
+-- AttemptOutcome classifies how a single Job attempt on a Launch ended.
+-- "preempted" specifically indicates the attempt was running on an
+-- interruptible launch that was relaunched after a stale pause. The
+-- successor attempt's predecessor_attempt_id points back to it so
+-- runtime-estimation queries can sum per-attempt durations across the
+-- relaunch chain.
+value AttemptOutcome = completed | failed | canceled | orphaned | superseded | preempted
+
 value InstanceRole = worker | donor
 
 -- Planner decision categories for an unplaced job in one autopilot pass.
@@ -112,6 +120,15 @@ entity Instance {
 
     -- Offer metadata (captured at launch, immutable)
     offer: OfferSnapshot
+
+    -- Rental type and pricing (captured at launch, immutable)
+    instance_type: on_demand | interruptible
+    max_bid_price_cents: Integer?       -- bid paid; null for on-demand
+    on_demand_ref_cents: Integer?       -- cheapest concurrent on-demand $/hr
+                                        -- at launch for the same GPU class,
+                                        -- for preemptible-savings analysis;
+                                        -- null when the counterfactual search
+                                        -- was unavailable or returned nothing
 
     -- Budgets
     max_spend_cents: Integer
@@ -349,6 +366,24 @@ rule DependencyGatesRentalLaunch {
 -- This is the entire policy. No per-job retry cap or premium ceiling is
 -- maintained at this layer — the runaway breaker (see §Runaway prevention)
 -- is the backstop.
+--
+-- Benchmark jobs are incompatible with preemptible placement: preemption
+-- pauses the container mid-run, invalidating timing measurements (cold GPU
+-- and state on resume), and a stale-pause relaunch puts the job on a
+-- different physical machine, breaking the "same hardware" control that
+-- benchmark analyses rely on. The submission path rejects the combined
+-- {"benchmark", "preemptible"} tag set.
+--
+-- For provenance of historical launches, three columns on `launches`
+-- capture the rental decision at create time:
+--   * instance_type          ("on-demand" or "interruptible")
+--   * max_bid_price_cents    (bid paid; nil for on-demand)
+--   * on_demand_ref_cents    (cheapest concurrent on-demand ask at launch
+--                             time for the same GPU class; best-effort,
+--                             nil when the counterfactual search fails)
+-- This makes "what did we actually save vs on-demand?" answerable as a
+-- per-launch query rather than inferred from tag joins that can drift as
+-- tags are edited after the fact.
 --
 -- Implementation: internal/db/db.go TagPreemptible,
 -- internal/dataloc/scriptmeta.go (PEP 723), internal/campaign/campaign.go
@@ -1167,6 +1202,46 @@ rule ReconcileOrphanedProviderInstance {
 -- ==========================================================================
 -- Invariants
 -- ==========================================================================
+
+-- ==========================================================================
+-- Job runtime accounting (analytics)
+-- ==========================================================================
+--
+-- For runtime estimation of preempted/relaunched jobs we record:
+--   * provider_status_transitions — every observed status change on a
+--     ProviderInstance, with timestamp. Total paused duration on a
+--     Launch is derived as the sum of intervals where status = stopped
+--     (the open interval at the right edge is extended to "now"). This
+--     gives the wall-clock-vs-runtime split without an additional
+--     materialized column. Implementation: db.LaunchPausedSeconds.
+--   * job_attempts.predecessor_attempt_id — points the new attempt
+--     created when a job is reattached to a fresh Launch back to the
+--     attempt that ran on the prior, terminated Launch. Lets queries
+--     follow the relaunch chain across instances.
+--   * job_attempts.cloud_outcome = preempted — the prior attempt's
+--     outcome when its Launch failed with termination_reason = preempted.
+--     Distinct from "orphaned" so analytics can separate bid-loss
+--     relaunches from generic infra-failure relaunches.
+
+invariant AttemptChainPointsBackwards {
+    -- A new attempt's predecessor_attempt_id, when set, refers to an
+    -- earlier attempt of the same job. Together with cloud_outcome on
+    -- the predecessor it reconstructs the full relaunch chain.
+    for ja in JobAttempts where ja.predecessor_attempt_id != null:
+        let pred = JobAttempt(ja.predecessor_attempt_id)
+        pred.job_id = ja.job_id
+        pred.attempt_number < ja.attempt_number
+}
+
+invariant BenchmarkIncompatibleWithPreemptible {
+    -- Benchmark and preemptible are semantically incompatible: a
+    -- preemption mid-measurement invalidates the benchmark (cold GPU
+    -- on resume, broken timing), and a stale-pause relaunch moves the
+    -- job to a different physical machine. Enforced at job submission
+    -- by validateReservedPlacementTags (internal/db/db.go).
+    for job in Jobs:
+        not ("benchmark" in job.tags and "preemptible" in job.tags)
+}
 
 invariant TerminalInstancesHaveEndTime {
     for instance in Instances:

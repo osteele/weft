@@ -120,6 +120,20 @@ func runCampaign(args []string) {
 	startTime := time.Now()
 	anyFailed := false
 
+	// Detect docker-restart-on-same-disk via a sentinel file. The sentinel
+	// is written below this block on every agent start; if it already exists
+	// at boot, the container has restarted (typical of a Vast.ai
+	// pause/resume on an interruptible instance). The sentinel survives
+	// docker stop because it lives on the instance disk.
+	resumed := false
+	const resumeSentinel = "/var/run/weft-agent-started"
+	if _, err := os.Stat(resumeSentinel); err == nil {
+		resumed = true
+	} else {
+		_ = os.MkdirAll(filepath.Dir(resumeSentinel), 0o755)
+		_ = os.WriteFile(resumeSentinel, []byte(startTime.UTC().Format(time.RFC3339)), 0o644)
+	}
+
 	// Upload agent startup timestamp to R2 for boot timing analysis
 	go func() {
 		payload, _ := json.Marshal(map[string]int64{"agent_start_unix": startTime.Unix()})
@@ -145,6 +159,9 @@ func runCampaign(args []string) {
 		SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 		GPUWarmup:           manifest.GPUWarmup,
 		CostPerHourCents:    manifest.CostPerHourCents,
+		Provider:            manifest.Provider,
+		InstanceType:        manifest.InstanceType,
+		Resumed:             resumed,
 	})
 	anyFailed = seqResult.AnyFailed
 

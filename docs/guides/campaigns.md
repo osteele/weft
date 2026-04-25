@@ -138,6 +138,42 @@ a cheaper offer via the usual GPU/memory filters. The launch plan table
 annotates preemptible groups as `$X.YY/hr (int, bid $X.YY)` so the chosen bid
 is visible in `--dry-run`.
 
+**Not compatible with `benchmark`.** The submission path rejects jobs that
+combine `benchmark` and `preemptible`: preemption pauses the container
+mid-measurement (invalidating timing; the GPU is cold on resume), and a
+stale-pause relaunch moves the job to a different physical machine, breaking
+the "same hardware" control that benchmark analyses rely on.
+
+**Historical accounting.** Every launch records its `instance_type`
+(`on-demand` / `interruptible`), `max_bid_price_cents` (nil for on-demand),
+and `on_demand_ref_cents` — the cheapest concurrent on-demand ask for the
+same GPU class at launch time — so savings can be computed per-run rather
+than inferred from tag history.
+
+**Pause time and relaunch chains.** Provider status transitions (every
+move into and out of `stopped`) are persisted in
+`provider_status_transitions`; `db.LaunchPausedSeconds(launchID, refTime)`
+sums the stopped intervals to give wall-clock-vs-runtime split. When a
+preempted launch is replaced, the new attempt records its predecessor via
+`job_attempts.predecessor_attempt_id`, and the old attempt's `cloud_outcome`
+is set to `preempted` (distinct from generic `orphaned`). Together these
+let runtime-estimation queries follow a job across the full relaunch
+chain and account for pause time separately.
+
+**Job-visible env vars.** Jobs get the following on every run:
+
+| Var | Value |
+|-----|-------|
+| `WEFT_JOB_ID` | weft DB job id |
+| `WEFT_TARGET_KIND` | `host` or `rental` |
+| `WEFT_LAUNCH_ID` | weft DB launch id (rental only) |
+| `WEFT_PROVIDER` | `vastai` / `runpod` (rental only) |
+| `WEFT_INSTANCE_TYPE` | `on-demand` / `interruptible` (rental only) |
+| `WEFT_RESUMED` | `1` if the agent's container has restarted on the same disk (typical Vast.ai pause/resume); unset on first boot |
+
+Use `WEFT_RESUMED` to fork checkpoint-loading vs cold-start logic in jobs
+that may run on interruptible instances.
+
 To see how much interruptible currently saves vs on-demand for a given GPU
 class, run:
 

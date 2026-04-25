@@ -39,6 +39,42 @@ func InsertProviderStatusTransition(database *sql.DB, cloudInstanceID int64, obs
 	return RecordProviderStatus(database, cloudInstanceID, observedAt, oldStatus, newStatus)
 }
 
+// LaunchPausedSeconds returns the total number of seconds the launch's
+// provider instance spent in the "stopped" state (typical of a Vast.ai
+// interruptible bid loss). Open stop intervals — where the instance is
+// stopped now and we haven't yet observed a resume — are extended to
+// referenceTime. The result is wall-clock minus runtime for analytics that
+// want to attribute pause time separately. Returns 0 with no error when
+// the launch has no recorded transitions.
+func LaunchPausedSeconds(database *sql.DB, cloudInstanceID int64, referenceTime time.Time) (int64, error) {
+	transitions, err := GetProviderStatusTransitions(database, cloudInstanceID)
+	if err != nil {
+		return 0, err
+	}
+	const stopped = "stopped"
+	var total int64
+	var stopStart int64
+	inStop := false
+	for _, t := range transitions {
+		if t.NewStatus == stopped && !inStop {
+			stopStart = t.ObservedAt
+			inStop = true
+			continue
+		}
+		if t.NewStatus != stopped && inStop {
+			total += t.ObservedAt - stopStart
+			inStop = false
+		}
+	}
+	if inStop {
+		total += referenceTime.Unix() - stopStart
+	}
+	if total < 0 {
+		return 0, nil
+	}
+	return total, nil
+}
+
 // GetProviderStatusTransitions returns all recorded transitions for a cloud instance, ordered by time.
 func GetProviderStatusTransitions(database *sql.DB, cloudInstanceID int64) ([]ProviderStatusTransition, error) {
 	rows, err := database.Query(

@@ -108,6 +108,34 @@ type GroupOffer struct {
 	Err            error
 }
 
+// snapshotOnDemandRefCents returns the cheapest on-demand $/hr (in cents) for
+// the same GPU class as the chosen offer, to record a counterfactual for
+// preemptible savings analysis. Best-effort: returns nil on any failure.
+// Intended for async use off the launch path.
+func snapshotOnDemandRefCents(client cloud.Client, group InstanceGroup, chosen cloud.Offer) *int {
+	constraints := offerConstraintsForGroup(group, cloud.DefaultMinReliability)
+	constraints.InstanceType = cloud.InstanceTypeOnDemand
+	constraints.NumGPUs = chosen.NumGPUs
+	offers, err := client.SearchOffers(constraints)
+	if err != nil {
+		return nil
+	}
+	var cheapest float64
+	for _, o := range offers {
+		if o.CostPerHour <= 0 {
+			continue
+		}
+		if cheapest == 0 || o.CostPerHour < cheapest {
+			cheapest = o.CostPerHour
+		}
+	}
+	if cheapest == 0 {
+		return nil
+	}
+	cents := int(cheapest * 100)
+	return &cents
+}
+
 func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud.OfferConstraints {
 	c := cloud.OfferConstraints{
 		GPUClass:       group.GPUClass,

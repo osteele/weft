@@ -221,9 +221,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 
 func buildCreateArgs(offerID int, opts CreateOpts) []string {
 	args := []string{"create", "instance", strconv.Itoa(offerID)}
-	if opts.InstanceType == cloud.InstanceTypeInterruptible {
-		args = append(args, "--type", "bid")
-	}
+	// vastai's `create instance` has no --type flag; presence of --bid_price
+	// is what makes the instance interruptible. Emitting --type here would
+	// produce an unknown-flag error.
 	if opts.Image != "" {
 		args = append(args, "--image", opts.Image)
 	}
@@ -239,8 +239,8 @@ func buildCreateArgs(offerID int, opts CreateOpts) []string {
 	if opts.Label != "" {
 		args = append(args, "--label", opts.Label)
 	}
-	if opts.MaxBidPrice > 0 {
-		args = append(args, "--price", strconv.FormatFloat(opts.MaxBidPrice, 'f', 4, 64))
+	if opts.InstanceType == cloud.InstanceTypeInterruptible && opts.MaxBidPrice > 0 {
+		args = append(args, "--bid_price", strconv.FormatFloat(opts.MaxBidPrice, 'f', 4, 64))
 	}
 	for _, capVal := range opts.CapAdd {
 		capVal = strings.TrimSpace(capVal)

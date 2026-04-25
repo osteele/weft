@@ -294,7 +294,7 @@ const jobTableColumns = `id, working_dir, command, description, generated_descri
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
-const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, docker_image, provider_running_at`
+const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, docker_image, provider_running_at, instance_type, max_bid_price_cents, on_demand_ref_cents`
 
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
@@ -360,6 +360,7 @@ func terminationReasonValues() []string {
 		TerminationReasonInfraFailure,
 		TerminationReasonBootstrapTimeout,
 		TerminationReasonPhaseStall,
+		TerminationReasonPreempted,
 		TerminationReasonCancelled,
 		TerminationReasonUnknown,
 	}
@@ -1045,7 +1046,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 6
+const currentSchemaVersion = 7
 
 var dbPath string
 var startupRepairFn = startupRepair
@@ -1669,6 +1670,20 @@ func initSchema(db *sql.DB) error {
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN termination_detail TEXT`); err != nil {
 		return err
+	}
+
+	// Migration: rental type and pricing metadata for preemptible / interruptible
+	// instance analysis. on_demand_ref_cents stores the cheapest concurrent
+	// on-demand $/hr at launch for the same GPU class, to enable savings analysis.
+	preemptibleMigrations := []string{
+		`ALTER TABLE launches ADD COLUMN instance_type TEXT`,
+		`ALTER TABLE launches ADD COLUMN max_bid_price_cents INTEGER`,
+		`ALTER TABLE launches ADD COLUMN on_demand_ref_cents INTEGER`,
+	}
+	for _, stmt := range preemptibleMigrations {
+		if err := addColumnIfMissing(db, stmt); err != nil {
+			return err
+		}
 	}
 
 	// Backfill termination_detail from lifecycle_events for existing instances.
@@ -3903,6 +3918,16 @@ func HasPreemptibleTag(tags []string) bool {
 	return false
 }
 
+// HasBenchmarkTag reports whether the tag set marks the job as a benchmark.
+func HasBenchmarkTag(tags []string) bool {
+	for _, tag := range tags {
+		if CanonicalizeTag(tag) == TagBenchmark {
+			return true
+		}
+	}
+	return false
+}
+
 // ProviderTag returns the canonical reserved provider tag for a provider name.
 func ProviderTag(provider string) (string, error) {
 	p := normalizeProviderName(provider)
@@ -3951,6 +3976,9 @@ func providerFromTag(tag string) (string, bool) {
 func validateReservedPlacementTags(tags []string) error {
 	if HasRentalTag(tags) && HasInventoryTag(tags) {
 		return fmt.Errorf("tags %q and %q cannot be combined", TagRental, TagInventory)
+	}
+	if HasBenchmarkTag(tags) && HasPreemptibleTag(tags) {
+		return fmt.Errorf("tags %q and %q cannot be combined: preemption invalidates benchmark timing", TagBenchmark, TagPreemptible)
 	}
 	var selectedProvider string
 	for _, tag := range tags {

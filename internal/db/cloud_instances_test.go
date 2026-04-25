@@ -159,6 +159,165 @@ func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	}
 }
 
+func TestTerminalLaunchJobDisposition_PreemptedYieldsPreemptedOutcome(t *testing.T) {
+	reset, outcome := terminalLaunchJobDisposition(&Launch{
+		Status:            LaunchStatusFailed,
+		TerminationReason: TerminationReasonPreempted,
+	})
+	if !reset {
+		t.Errorf("preempted launch should reset jobs (retryable)")
+	}
+	if outcome != AttemptOutcomePreempted {
+		t.Errorf("outcome = %q, want %q", outcome, AttemptOutcomePreempted)
+	}
+}
+
+func TestSetJobLaunchID_LinksPredecessorAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	firstLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusPlanned, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const jobID = int64(7001)
+	insertTestJob(t, database, jobID, "echo hi", "/tmp", StatusQueued, withLaunch(firstLaunch))
+
+	var firstAttemptID int64
+	if err := database.QueryRow(`SELECT id FROM job_attempts WHERE job_id = ? AND launch_id = ?`, jobID, firstLaunch).Scan(&firstAttemptID); err != nil {
+		t.Fatalf("read first attempt id: %v", err)
+	}
+
+	// Close the first attempt and fail the first launch as preempted so the
+	// new SetJobLaunchID accepts the reassignment to a fresh launch.
+	if _, err := database.Exec(`UPDATE job_attempts SET end_time = ?, cloud_outcome = ? WHERE id = ?`,
+		time.Now().Unix(), AttemptOutcomePreempted, firstAttemptID); err != nil {
+		t.Fatalf("close first attempt: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, firstLaunch, LaunchStatusFailed, TerminationReasonPreempted); err != nil {
+		t.Fatalf("fail first launch: %v", err)
+	}
+
+	secondLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusPlanned, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch second: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, secondLaunch); err != nil {
+		t.Fatalf("second SetJobLaunchID: %v", err)
+	}
+
+	var predecessorID sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT predecessor_attempt_id FROM job_attempts WHERE job_id = ? AND launch_id = ?`,
+		jobID, secondLaunch).Scan(&predecessorID); err != nil {
+		t.Fatalf("read second attempt: %v", err)
+	}
+	if !predecessorID.Valid || predecessorID.Int64 != firstAttemptID {
+		t.Errorf("predecessor_attempt_id = %v, want %d", predecessorID, firstAttemptID)
+	}
+}
+
+func TestLaunchPausedSeconds(t *testing.T) {
+	database := setupTestDB(t)
+	id, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	now := time.Now()
+	// Sequence: running -> stopped (60s) -> running -> stopped (still stopped at ref).
+	steps := []struct {
+		old, new string
+		offset   time.Duration
+	}{
+		{"created", "running", -300 * time.Second},
+		{"running", "stopped", -240 * time.Second},
+		{"stopped", "running", -180 * time.Second},
+		{"running", "stopped", -60 * time.Second},
+	}
+	for _, s := range steps {
+		if err := RecordProviderStatus(database, id, now.Add(s.offset), s.old, s.new); err != nil {
+			t.Fatalf("RecordProviderStatus: %v", err)
+		}
+	}
+	// Closed stop interval: 60s. Open stop interval extends to now: 60s.
+	got, err := LaunchPausedSeconds(database, id, now)
+	if err != nil {
+		t.Fatalf("LaunchPausedSeconds: %v", err)
+	}
+	if got < 110 || got > 130 {
+		t.Errorf("paused seconds = %d, want ~120 (60+60)", got)
+	}
+}
+
+func TestValidateReservedPlacementTags_BenchmarkPreemptibleRejected(t *testing.T) {
+	err := validateReservedPlacementTags([]string{TagBenchmark, TagPreemptible})
+	if err == nil {
+		t.Fatal("expected error for benchmark + preemptible, got nil")
+	}
+	// Each tag alone is fine.
+	if err := validateReservedPlacementTags([]string{TagBenchmark}); err != nil {
+		t.Errorf("benchmark alone should be valid: %v", err)
+	}
+	if err := validateReservedPlacementTags([]string{TagPreemptible}); err != nil {
+		t.Errorf("preemptible alone should be valid: %v", err)
+	}
+}
+
+func TestCreateLaunch_RentalTypeMetadata_RoundTrip(t *testing.T) {
+	database := setupTestDB(t)
+
+	bid := 145
+	ref := 210
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:           LaunchStatusPlanned,
+		Provider:         "vastai",
+		GPUSpec:          "RTX_4090",
+		CostPerHourCents: 145,
+		InstanceType:     "interruptible",
+		MaxBidPriceCents: &bid,
+		OnDemandRefCents: &ref,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	got, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.InstanceType != "interruptible" {
+		t.Errorf("InstanceType = %q, want interruptible", got.InstanceType)
+	}
+	if got.MaxBidPriceCents == nil || *got.MaxBidPriceCents != bid {
+		t.Errorf("MaxBidPriceCents = %v, want %d", got.MaxBidPriceCents, bid)
+	}
+	if got.OnDemandRefCents == nil || *got.OnDemandRefCents != ref {
+		t.Errorf("OnDemandRefCents = %v, want %d", got.OnDemandRefCents, ref)
+	}
+
+	// On-demand launch: no bid, no counterfactual.
+	onDemandID, err := CreateLaunch(database, &Launch{
+		Status:       LaunchStatusPlanned,
+		Provider:     "vastai",
+		GPUSpec:      "A100",
+		InstanceType: "on-demand",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch on-demand: %v", err)
+	}
+	od, err := GetLaunch(database, onDemandID)
+	if err != nil {
+		t.Fatalf("GetLaunch on-demand: %v", err)
+	}
+	if od.InstanceType != "on-demand" {
+		t.Errorf("on-demand InstanceType = %q", od.InstanceType)
+	}
+	if od.MaxBidPriceCents != nil {
+		t.Errorf("on-demand MaxBidPriceCents = %v, want nil", od.MaxBidPriceCents)
+	}
+	if od.OnDemandRefCents != nil {
+		t.Errorf("on-demand OnDemandRefCents = %v, want nil", od.OnDemandRefCents)
+	}
+}
+
 func TestGetLaunchJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T) {
 	database := setupTestDB(t)
 

@@ -32,6 +32,36 @@ type jobSequenceConfig struct {
 	// CostPerHourCents drives hang-watchdog tier selection; 0 means on-prem
 	// or unknown, which picks conservative thresholds.
 	CostPerHourCents int
+
+	// Provider and InstanceType are exposed to job processes via
+	// WEFT_PROVIDER / WEFT_INSTANCE_TYPE env vars. Resumed indicates this
+	// container has restarted after a docker stop on the same disk (typical
+	// of a pause/resume on interruptible Vast.ai instances).
+	Provider     string
+	InstanceType string
+	Resumed      bool
+}
+
+// agentRentalEnv builds the rental-context env vars set by the agent for
+// every job it runs. These let job processes detect that they're on a weft
+// rental, identify the provider and rental type, and notice that they've
+// been restarted after a container pause (the typical preemption symptom on
+// Vast.ai interruptible instances).
+func agentRentalEnv(cfg jobSequenceConfig) []string {
+	env := []string{
+		"WEFT_TARGET_KIND=rental",
+		fmt.Sprintf("WEFT_LAUNCH_ID=%d", cfg.InstanceID),
+	}
+	if cfg.Provider != "" {
+		env = append(env, "WEFT_PROVIDER="+cfg.Provider)
+	}
+	if cfg.InstanceType != "" {
+		env = append(env, "WEFT_INSTANCE_TYPE="+cfg.InstanceType)
+	}
+	if cfg.Resumed {
+		env = append(env, "WEFT_RESUMED=1")
+	}
+	return env
 }
 
 // pickWatchdogTimeouts selects GPU-idle and stdout-silence timeouts based on
@@ -233,6 +263,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, jobMaxTime time.Duration) runner.SingleJobConfig {
 	gpuIdle, stdoutSilence := pickWatchdogTimeouts(cfg.CostPerHourCents)
+	env := agentRentalEnv(cfg)
+	env = append(env, job.Env...)
 	return runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: ops.CommandJob{
@@ -241,7 +273,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 			OutputDirs: append([]string(nil), job.OutputDirs...),
 			Produces:   append([]string(nil), job.Produces...),
 			Needs:      append([]string(nil), job.Needs...),
-			Env:        append([]string(nil), job.Env...),
+			Env:        env,
 		},
 		LogDir:               cfg.LogDir,
 		WorkingDir:           workDir,

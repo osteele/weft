@@ -119,10 +119,15 @@ func createJobAttemptsTableSQL() string {
 		-- Cloud instance outcome (replaces job_cloud_attempts table)
 		cloud_outcome TEXT,
 
+		-- Predecessor in a relaunch chain (e.g. set when a preempted
+		-- interruptible launch is replaced and the job is reattached to
+		-- a fresh launch). Lets queries sum runtime across the chain.
+		predecessor_attempt_id INTEGER REFERENCES job_attempts(id),
+
 		UNIQUE(job_id, attempt_number),
 		CONSTRAINT job_attempts_status_check CHECK (%s),
 		CONSTRAINT job_attempts_cloud_outcome_check CHECK (
-			cloud_outcome IS NULL OR cloud_outcome IN ('completed','failed','canceled','orphaned','superseded')
+			cloud_outcome IS NULL OR cloud_outcome IN ('completed','failed','canceled','orphaned','superseded','preempted')
 		)
 	)`, statusCheckConstraintSQL("status", jobStatusValues(), false))
 }
@@ -134,6 +139,9 @@ func initJobAttemptsSchema(db *sql.DB) error {
 	}
 	// Migrations: column renames must run before index creation.
 	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN cloud_outcome TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN predecessor_attempt_id INTEGER`); err != nil {
 		return err
 	}
 	// Drop views and triggers that reference old column names before renaming.
@@ -163,19 +171,26 @@ func initJobAttemptsSchema(db *sql.DB) error {
 		}
 	}
 
-	// Rebuild if the table has stale columns (vastai_instance_id) or missing
-	// constraints (cloud_outcome CHECK). The DDL defines the canonical schema.
+	// Rebuild if the table has stale columns (vastai_instance_id), missing
+	// constraints (cloud_outcome CHECK), or an outdated CHECK that doesn't
+	// include the 'preempted' outcome. The DDL defines the canonical schema.
 	hasStaleCol, _ := tableSchemaContains(db, "job_attempts", "vastai_instance_id")
 	hasOutcomeCheck, _ := tableSchemaContains(db, "job_attempts", "job_attempts_cloud_outcome_check")
-	if hasStaleCol || !hasOutcomeCheck {
+	hasPreemptedOutcome, _ := tableSchemaContains(db, "job_attempts", "preempted")
+	if hasStaleCol || !hasOutcomeCheck || !hasPreemptedOutcome {
 		// Drop views/triggers that reference job_attempts before rebuild.
 		for _, v := range []string{"launch_job_membership", "cloud_instance_job_membership", "job_status", "training_examples"} {
 			db.Exec(`DROP VIEW IF EXISTS ` + v)
 		}
-		for _, t := range []string{"jobs_insert_create_attempt"} {
+		for _, t := range []string{
+			"jobs_insert_create_attempt",
+			"launch_live_state_orphan_open_queued_attempts_on_insert",
+			"launch_live_state_orphan_open_queued_attempts_on_update",
+			"launches_clear_pending_placement_on_terminal",
+		} {
 			db.Exec(`DROP TRIGGER IF EXISTS ` + t)
 		}
-		const cols = `id, job_id, attempt_number, host, launch_id, status, queued_at, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, session_name, remote_id, remote_state, backend, last_synced_status, pending_status, pending_at, cost, placement_meta, job_metadata, observed_inputs, cloud_outcome`
+		const cols = `id, job_id, attempt_number, host, launch_id, status, queued_at, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, session_name, remote_id, remote_state, backend, last_synced_status, pending_status, pending_at, cost, placement_meta, job_metadata, observed_inputs, cloud_outcome, predecessor_attempt_id`
 		if err := rebuildTable(db,
 			strings.Replace(createJobAttemptsTableSQL(), "job_attempts", "job_attempts_new", 1),
 			fmt.Sprintf(`INSERT INTO job_attempts_new (%s) SELECT %s FROM job_attempts`, cols, cols),
