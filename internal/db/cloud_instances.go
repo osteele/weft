@@ -37,6 +37,7 @@ const (
 	LaunchStatusPlanned   = "planned"
 	LaunchStatusLaunching = "launching"
 	LaunchStatusRunning   = "running"
+	LaunchStatusPaused    = "paused"
 	LaunchStatusGrace     = "grace"
 	LaunchStatusCompleted = "completed"
 	LaunchStatusFailed    = "failed"
@@ -248,15 +249,49 @@ func (c *Launch) IsTerminal() bool {
 		c.Status == LaunchStatusCancelled
 }
 
+// liveLaunchStatuses are launch statuses that still hold (or may still hold) a
+// provider instance — not terminal, not destroyed. Used by reconciler queries
+// and aggregations that should include in-flight rentals.
+var liveLaunchStatuses = []string{
+	LaunchStatusRunning,
+	LaunchStatusLaunching,
+	LaunchStatusPaused,
+	LaunchStatusGrace,
+}
+
 // isActiveLaunchStatus reports whether a launch status represents an
-// actively-progressing instance that should claim its jobs.
+// actively-progressing instance that should claim its jobs. Unlike
+// liveLaunchStatuses this also includes Completed, since a completed launch
+// still owns its jobs until they are reconciled.
 func isActiveLaunchStatus(status string) bool {
 	switch status {
-	case LaunchStatusLaunching, LaunchStatusRunning, LaunchStatusGrace, LaunchStatusCompleted:
+	case LaunchStatusLaunching, LaunchStatusRunning, LaunchStatusPaused, LaunchStatusGrace, LaunchStatusCompleted:
 		return true
 	default:
 		return false
 	}
+}
+
+func anySliceArgs(values []string) []any {
+	args := make([]any, len(values))
+	for i, v := range values {
+		args[i] = v
+	}
+	return args
+}
+
+func sqlPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	out := make([]byte, 0, n*3-1)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			out = append(out, ',', ' ')
+		}
+		out = append(out, '?')
+	}
+	return string(out)
 }
 
 // HasActiveTerminationIntent reports whether the instance has started a
@@ -472,7 +507,9 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 	return RetryOnDatabaseLocked(context.Background(), "update launch status", func() error {
 		switch status {
 		case LaunchStatusRunning:
-			_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
+			// COALESCE preserves launched_at on resume from paused/grace, so
+			// bootstrap-survival metrics anchor to the original launch.
+			_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ?`, status, now, id)
 			return err
 		case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
 			// Don't overwrite an already-terminal instance that has a termination
@@ -1119,10 +1156,10 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 		AND NOT EXISTS (
 			SELECT 1 FROM launches ci
 			WHERE ci.id = CAST(SUBSTR(js.host, 8) AS INTEGER)
-			AND ci.status IN (?, ?, ?, ?)
+			AND ci.status IN (?, ?, ?, ?, ?)
 		)`,
 		StatusQueued, StatusRunning,
-		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusGrace, LaunchStatusCompleted,
+		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusPaused, LaunchStatusGrace, LaunchStatusCompleted,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -1918,11 +1955,12 @@ func ResetJobsOnTerminalLaunches(database *sql.DB) (map[int64]int64, error) {
 	return resetMap, nil
 }
 
-// ListRunningLaunches returns all cloud instances with "running", "launching", or "grace" status.
+// ListRunningLaunches returns all cloud instances in a live (non-terminal)
+// state: running, launching, paused, or grace.
 func ListRunningLaunches(database *sql.DB) ([]*Launch, error) {
 	rows, err := database.Query(
-		`SELECT `+launchSelectColumns+` FROM launches WHERE status IN (?, ?, ?) ORDER BY created_at DESC`,
-		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusGrace,
+		`SELECT `+launchSelectColumns+` FROM launches WHERE status IN (`+sqlPlaceholders(len(liveLaunchStatuses))+`) ORDER BY created_at DESC`,
+		anySliceArgs(liveLaunchStatuses)...,
 	)
 	if err != nil {
 		return nil, err
@@ -1940,8 +1978,19 @@ func ListRunningLaunches(database *sql.DB) ([]*Launch, error) {
 	return instances, rows.Err()
 }
 
+// CountPausedLaunches returns the number of launches in the paused state.
+func CountPausedLaunches(database *sql.DB) (int, error) {
+	if database == nil {
+		return 0, nil
+	}
+	var n int
+	err := database.QueryRow(`SELECT COUNT(*) FROM launches WHERE status = ?`, LaunchStatusPaused).Scan(&n)
+	return n, err
+}
+
 // SumActiveLaunchCostPerHourCents returns the aggregate cost_per_hour_cents
-// across active cloud launches (running, launching, grace).
+// across live cloud launches. Paused instances still accrue storage charges,
+// so they are included.
 func SumActiveLaunchCostPerHourCents(database *sql.DB) (int, error) {
 	if database == nil {
 		return 0, nil
@@ -1950,8 +1999,8 @@ func SumActiveLaunchCostPerHourCents(database *sql.DB) (int, error) {
 	err := database.QueryRow(
 		`SELECT COALESCE(SUM(COALESCE(cost_per_hour_cents, 0)), 0)
 		 FROM launches
-		 WHERE status IN (?, ?, ?)`,
-		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusGrace,
+		 WHERE status IN (`+sqlPlaceholders(len(liveLaunchStatuses))+`)`,
+		anySliceArgs(liveLaunchStatuses)...,
 	).Scan(&total)
 	if err != nil {
 		return 0, err
@@ -2212,8 +2261,8 @@ func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]in
 		SELECT id FROM launches
 		WHERE provider_instance_id != ''
 		AND (
-			-- Running/grace instances always need sync
-			status IN (?, ?)
+			-- Running/paused/grace instances always need sync
+			status IN (?, ?, ?)
 			OR (
 				-- Recently terminal instances, excluding known-not-found or timed-out
 				status IN (?, ?, ?)
@@ -2225,7 +2274,7 @@ func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]in
 			)
 		)
 		ORDER BY id`,
-		LaunchStatusRunning, LaunchStatusGrace,
+		LaunchStatusRunning, LaunchStatusPaused, LaunchStatusGrace,
 		LaunchStatusFailed, LaunchStatusCompleted, LaunchStatusCancelled,
 		cutoff, safetyBuffer)
 	if err != nil {

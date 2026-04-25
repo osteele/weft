@@ -818,7 +818,8 @@ func IsJobTerminal(displayStatus string) bool {
 }
 
 // IsInstanceTerminal returns true if the instance status is a terminal state.
-// Note: "grace" is NOT terminal — the instance is still alive waiting for resubmission.
+// Note: "grace" and "paused" are NOT terminal — the instance is still alive
+// (grace: waiting for resubmission; paused: provider stopped, may resume).
 // When you have a Launch struct, prefer inst.IsTerminal() instead.
 func IsInstanceTerminal(status string) bool {
 	return status == db.LaunchStatusCompleted ||

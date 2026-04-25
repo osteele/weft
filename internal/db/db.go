@@ -333,6 +333,7 @@ func cloudInstanceStatusValues() []string {
 		LaunchStatusPlanned,
 		LaunchStatusLaunching,
 		LaunchStatusRunning,
+		LaunchStatusPaused,
 		LaunchStatusGrace,
 		LaunchStatusCompleted,
 		LaunchStatusFailed,

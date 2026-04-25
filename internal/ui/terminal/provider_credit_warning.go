@@ -42,6 +42,7 @@ var (
 		status           string
 		runningJobs      int
 		burnCentsPerHour int
+		pausedLaunches   int
 	}
 )
 
@@ -74,14 +75,43 @@ func renderSharedTUIStatusLines(database *sql.DB, width int, targetCents int) []
 // "System (global): " when the global running count differs from visibleRunning.
 // Pass visibleRunning < 0 to skip the comparison.
 func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, visibleRunning int, targetCents int) []string {
-	lines := make([]string, 0, 2)
+	lines := make([]string, 0, 3)
 	if line := renderSystemLine(database, width, visibleRunning, targetCents); line != "" {
 		lines = append(lines, line)
 	}
 	if warning := renderProviderCreditWarningLine(width); warning != "" {
 		lines = append(lines, warning)
 	}
+	if banner := renderPausedLaunchesBanner(database, width); banner != "" {
+		lines = append(lines, banner)
+	}
 	return lines
+}
+
+// renderPausedLaunchesBanner shows a warning when one or more launches are in
+// the paused state. Provider-paused instances still incur storage charges; if
+// many are paused at once it is usually an account-wide pause (credit
+// exhaustion) rather than per-instance preemption.
+func renderPausedLaunchesBanner(database *sql.DB, width int) string {
+	if database == nil {
+		return ""
+	}
+	// Populate the shared cache (cheap if already warm); read paused count from it.
+	_, _, _ = sharedTUIStatusTextWithCount(database)
+	sharedTUIStatusCache.mu.Lock()
+	count := sharedTUIStatusCache.pausedLaunches
+	sharedTUIStatusCache.mu.Unlock()
+	if count == 0 {
+		return ""
+	}
+	msg := fmt.Sprintf("PAUSED: %s — provider stopped (preempted or account credit) — instance still billable for storage", pluralize(count, "instance", "instances"))
+	if count >= 3 {
+		msg += " — likely account credit exhausted"
+	}
+	if width > 0 {
+		msg = truncateDisplayWidth(msg, width)
+	}
+	return tuiFailedStyle.Render(msg)
 }
 
 func renderSystemLine(database *sql.DB, width int, visibleRunning int, targetCents int) string {
@@ -167,12 +197,14 @@ func sharedTUIStatusTextWithCount(database *sql.DB) (string, int, int) {
 
 	status, count, burn := sharedTUIStatusFetch(database)
 	status = strings.TrimSpace(status)
+	paused, _ := dbpkg.CountPausedLaunches(database)
 
 	sharedTUIStatusCache.mu.Lock()
 	sharedTUIStatusCache.database = database
 	sharedTUIStatusCache.status = status
 	sharedTUIStatusCache.runningJobs = count
 	sharedTUIStatusCache.burnCentsPerHour = burn
+	sharedTUIStatusCache.pausedLaunches = paused
 	sharedTUIStatusCache.expires = now.Add(sharedTUIStatusTTL)
 	sharedTUIStatusCache.mu.Unlock()
 	return status, count, burn
@@ -188,6 +220,11 @@ func pluralize(n int, singular, plural string) string {
 	return fmt.Sprintf("%d %s", n, plural)
 }
 
+// lowCreditBurnHours is the runway, in hours of current burn, below which we
+// raise a credit-low warning even if the absolute balance is above the
+// configured floor. Catches "balance dropping faster than expected" cases.
+const lowCreditBurnHours = 2.0
+
 func fetchProviderCreditWarning() string {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
@@ -200,13 +237,30 @@ func fetchProviderCreditWarning() string {
 		user, err := client.ShowUser()
 		if err == nil && user != nil {
 			threshold := max(defaultLowProviderCreditThreshold, cfg.Vastai.SpendingLimit)
-			if user.Credit < threshold {
+			burnHours := burnHoursAtCurrentRate(user.Credit)
+			switch {
+			case user.Credit < threshold:
 				warnings = append(warnings, fmt.Sprintf("WARNING: %s credits low ($%.2f < $%.2f)", cloud.ProviderVastai, user.Credit, threshold))
+			case burnHours > 0 && burnHours < lowCreditBurnHours:
+				warnings = append(warnings, fmt.Sprintf("WARNING: %s balance $%.2f covers ~%.1fh at current burn", cloud.ProviderVastai, user.Credit, burnHours))
 			}
 		}
 	}
 
 	return strings.Join(warnings, " | ")
+}
+
+// burnHoursAtCurrentRate returns the cached burn-rate runway for the given
+// balance. Uses sharedTUIStatusCache.burnCentsPerHour, which is populated by
+// the periodic system-line refresh. Returns 0 if no burn data is available.
+func burnHoursAtCurrentRate(balanceDollars float64) float64 {
+	sharedTUIStatusCache.mu.Lock()
+	burnCents := sharedTUIStatusCache.burnCentsPerHour
+	sharedTUIStatusCache.mu.Unlock()
+	if burnCents <= 0 {
+		return 0
+	}
+	return balanceDollars / (float64(burnCents) / 100.0)
 }
 
 func fetchSharedTUIStatusWithCount(database *sql.DB) (string, int, int) {

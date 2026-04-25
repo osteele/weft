@@ -695,9 +695,9 @@ func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_PauseTolerant_RecentPause_DisplayOnly(t *testing.T) {
-	// Interruptible instance paused for less than stalePauseTimeout: should be
-	// displayed as paused, not terminated.
+func TestCheckInstance_PauseTolerant_RecentPause_Pause(t *testing.T) {
+	// Running launch whose provider instance just transitioned to stopped:
+	// flip the launch to paused.
 	r := NewReconciler()
 	now := time.Now()
 	launchedAt := now.Add(-30 * time.Minute).Unix()
@@ -713,8 +713,52 @@ func TestCheckInstance_PauseTolerant_RecentPause_DisplayOnly(t *testing.T) {
 		PauseTolerant: true,
 		Now:           now,
 	})
+	if action.Kind != ActionPause {
+		t.Fatalf("action.Kind = %d, want ActionPause (%d)", action.Kind, ActionPause)
+	}
+}
+
+func TestCheckInstance_AlreadyPaused_DisplayOnly(t *testing.T) {
+	// Launch already in paused state, provider still stopped: keep paused, no
+	// repeated DB writes.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusPaused,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusStopped},
+		PauseTolerant: true,
+		Now:           now,
+	})
 	if action.Kind != ActionDisplayOnly {
 		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
+	}
+}
+
+func TestCheckInstance_PausedLaunchResumed(t *testing.T) {
+	// Launch is paused, provider now reports running again: emit ActionResume.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusPaused,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		Now:          now,
+	})
+	if action.Kind != ActionResume {
+		t.Fatalf("action.Kind = %d, want ActionResume (%d)", action.Kind, ActionResume)
 	}
 }
 

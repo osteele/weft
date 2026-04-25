@@ -31,6 +31,8 @@ const (
 	ActionSelfDestructFailed                    // jobs terminal, instance lingering -> finalize launch + destroy
 	ActionSetupStalled                          // setup phase unchanged too long -> fail
 	ActionRunningStalled                        // running phase + stale heartbeat too long -> fail
+	ActionPause                                 // provider stopped instance (preempted / account pause) -> launch=paused
+	ActionResume                                // previously paused launch resumed by provider -> launch=running
 )
 
 // graceShutdownTimeout is how long after the grace deadline the coordinator
@@ -268,31 +270,55 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
+	// 4a-resume. Previously paused launch is now running again at the provider.
+	if ci.Status == db.LaunchStatusPaused && p.ProviderInst != nil &&
+		p.ProviderInst.Status == cloud.ProviderStatusRunning {
+		return InstanceAction{
+			Kind:         ActionResume,
+			StallMessage: "instance resumed by provider",
+		}
+	}
+
+	// 4a-pause. Provider stopped the instance (preemption or account-wide
+	// pause). Reflect as paused in the DB and wait up to stalePauseTimeout for
+	// resume; after that, give up and fail. Runs regardless of preemptible flag
+	// so account-wide credit pauses are also caught.
+	if p.ProviderInst != nil && p.ProviderInst.Status == cloud.ProviderStatusStopped {
+		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
+			age := p.Now.Sub(*lifecycleStart)
+			if age > stalePauseTimeout {
+				reason := db.TerminationReasonPreempted
+				if !p.PauseTolerant {
+					reason = db.TerminationReasonProviderFailure
+				}
+				return InstanceAction{
+					Kind:              ActionEmptyStatusTimeout,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: reason,
+					StallMessage:      fmt.Sprintf("instance paused for %s with no resume — giving up", age.Truncate(time.Minute)),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
+			}
+		}
+		if ci.Status != db.LaunchStatusPaused {
+			return InstanceAction{
+				Kind:         ActionPause,
+				StallMessage: "provider stopped instance — marking paused",
+			}
+		}
+		return InstanceAction{
+			Kind:         ActionDisplayOnly,
+			StallMessage: "provider reports paused instance; waiting for resume/replacement",
+		}
+	}
+
 	// 4b. Stale pre-running status: provider allocated but never reached "running".
 	// Covers "created", "loading", and any other non-running, non-terminal status.
 	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
 	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
 		!isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
-		if p.PauseTolerant && p.ProviderInst.Status == cloud.ProviderStatusStopped {
-			if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
-				age := p.Now.Sub(*lifecycleStart)
-				if age > stalePauseTimeout {
-					return InstanceAction{
-						Kind:              ActionEmptyStatusTimeout,
-						TerminalStatus:    db.LaunchStatusFailed,
-						TerminationReason: db.TerminationReasonPreempted,
-						StallMessage:      fmt.Sprintf("interruptible instance paused for %s with no resume — relaunching on a fresh offer", age.Truncate(time.Minute)),
-						DestroyProvider:   true,
-						ResetJobs:         true,
-						AttemptOutcome:    db.AttemptOutcomeOrphaned,
-					}
-				}
-			}
-			return InstanceAction{
-				Kind:         ActionDisplayOnly,
-				StallMessage: "provider reports paused instance (interruptible); waiting for resume/replacement",
-			}
-		}
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
 			if age > maxPreRunningStatusTime {
@@ -609,6 +635,27 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 		return false, false
 	}
 
+	// Pause/resume are non-terminal status flips; no destroy, no job reset.
+	if action.Kind == ActionPause || action.Kind == ActionResume {
+		newStatus := db.LaunchStatusPaused
+		if action.Kind == ActionResume {
+			newStatus = db.LaunchStatusRunning
+		}
+		if err := db.UpdateLaunchStatus(database, ci.ID, newStatus, "", action.StallMessage); err != nil {
+			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", newStatus, "error", err)
+			return false, false
+		}
+		if eventKind := actionEventKind(action.Kind); eventKind != "" {
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: eventKind,
+				LaunchID:  ci.ID,
+				GPUSpec:   ci.GPUSpec,
+				Detail:    action.StallMessage,
+			})
+		}
+		return true, false
+	}
+
 	providerID := ci.EffectiveProviderID()
 
 	if action.DestroyProvider && providerID != "" && client != nil {
@@ -675,6 +722,10 @@ func actionEventKind(kind InstanceActionKind) string {
 		return db.EventReconcileSetupStall
 	case ActionRunningStalled:
 		return db.EventReconcileRunningStall
+	case ActionPause:
+		return db.EventReconcileProviderPaused
+	case ActionResume:
+		return db.EventReconcileProviderResumed
 	default:
 		return ""
 	}

@@ -387,6 +387,14 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 
 func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, now time.Time) string {
 	status := job.EffectiveStatus()
+	// Launch-level pause overrides the job-status bucket for any non-terminal
+	// job: the job is not actually progressing while the rental is paused.
+	if launchStatusForJob(job, launchStatusByID) == db.LaunchStatusPaused {
+		switch status {
+		case db.StatusRunning, db.StatusStarting, db.StatusQueued, db.StatusPendingPlacement, db.StatusPaused:
+			return "paused"
+		}
+	}
 	switch status {
 	case db.StatusRunning, db.StatusStarting:
 		return "running"
