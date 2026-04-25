@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/config"
 )
@@ -72,6 +73,52 @@ func ExpandTilde(path string) string {
 func DiscoverOutputsWithDefaults(workDir string) ([]OutputFile, error) {
 	dirs := config.ProjectOutputDirs(workDir)
 	return DiscoverOutputs(workDir, dirs)
+}
+
+// anyOutputMtimeAfter reports whether any regular file under the configured
+// output directories has an mtime strictly after threshold. Bounded to a
+// 5k-entry per-call cap and short-circuits on the first match so the
+// hang-watchdog probe stays cheap on large output trees.
+func anyOutputMtimeAfter(workDir string, dirs []string, threshold time.Time) bool {
+	if workDir == "" || len(dirs) == 0 {
+		return false
+	}
+	workDir = ExpandTilde(workDir)
+	const maxEntries = 5000
+	scanned := 0
+	found := false
+	for _, dir := range dirs {
+		absDir := filepath.Join(workDir, dir)
+		info, err := os.Stat(absDir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		filepath.WalkDir(absDir, func(_ string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if scanned >= maxEntries {
+				return filepath.SkipAll
+			}
+			scanned++
+			if d.IsDir() {
+				return nil
+			}
+			fi, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			if fi.ModTime().After(threshold) {
+				found = true
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // TotalSizeMB returns the total size of all output files in megabytes.

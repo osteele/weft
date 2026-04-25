@@ -859,6 +859,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if job.ExitCode != nil {
 			fmt.Printf("Exit Code:   %d\n", *job.ExitCode)
 		}
+		if reason := humanizeFailureReason(job.FailureReason); reason != "" {
+			fmt.Printf("Reason:      %s\n", reason)
+		}
 		if job.ErrorMessage != "" {
 			fmt.Printf("Error:       %s\n", job.ErrorMessage)
 		}

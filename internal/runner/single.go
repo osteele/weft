@@ -368,13 +368,25 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	if info, err := os.Stat(paths.Log); err == nil {
 		silenceLastSize = info.Size()
 	}
+	// Output-dir mtime updates (e.g. periodic checkpoint writes) count as a
+	// sign of life alongside log growth. Seed at run start so files staged
+	// before the run don't falsely arm the watchdog.
+	outputDirs := job.OutputDirs
+	if len(outputDirs) == 0 {
+		outputDirs = config.DefaultOutputDirs
+	}
+	silenceOutputThreshold := time.Now()
 	silenceDone, silenceKill := startWatchdog(KillReasonStdoutSilence, cfg.StdoutSilenceTimeout, func() bool {
-		info, err := os.Stat(paths.Log)
-		if err != nil || info.Size() <= silenceLastSize {
-			return false
+		active := false
+		if info, err := os.Stat(paths.Log); err == nil && info.Size() > silenceLastSize {
+			silenceLastSize = info.Size()
+			active = true
 		}
-		silenceLastSize = info.Size()
-		return true
+		if anyOutputMtimeAfter(workingDir, outputDirs, silenceOutputThreshold) {
+			silenceOutputThreshold = time.Now()
+			active = true
+		}
+		return active
 	})
 
 	gpuIdleTimeout := cfg.GPUIdleTimeout

@@ -609,10 +609,13 @@ rule StdoutSilenceKillsJob {
              job.failure_reason = killed_stdout_silence
              job.exit_code = 126
     @guidance
-        -- Triggered when the job log file has not grown for longer than
+        -- Triggered when neither the job log file has grown nor any file
+        -- under the configured output directories (output/, outputs/, or
+        -- the job's OutputDirs override) has been modified for longer than
         -- config.stdout_silence_timeout, after the watchdog has armed
-        -- (first bytes written or config.watchdog_initial_grace). Kill
-        -- path is identical to GPUIdleKillsJob.
+        -- (first bytes written or config.watchdog_initial_grace). Either
+        -- form of activity counts as a sign of life. Kill path is
+        -- identical to GPUIdleKillsJob.
 }
 
 rule UserPausesJob {

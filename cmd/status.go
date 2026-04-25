@@ -626,6 +626,9 @@ func printJobStatusLine(job *db.Job) {
 	if job.ExitCode != nil {
 		line = fmt.Sprintf("%s (exit %d)", line, *job.ExitCode)
 	}
+	if reason := humanizeFailureReason(job.FailureReason); reason != "" {
+		line = fmt.Sprintf("%s — %s", line, reason)
+	}
 	fmt.Println(line)
 }
 
@@ -661,6 +664,9 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 
 	if job.ExitCode != nil {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
+	}
+	if reason := humanizeFailureReason(job.FailureReason); reason != "" {
+		fmt.Printf("Reason:   %s\n", reason)
 	}
 
 	// Show remediation info for failed jobs

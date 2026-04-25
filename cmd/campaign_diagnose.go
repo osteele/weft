@@ -285,6 +285,10 @@ func humanizeFailureReason(reason string) string {
 		return "disk full"
 	case "timeout":
 		return "timed out"
+	case "killed_stdout_silence":
+		return "killed: no stdout output for the silence-watchdog timeout"
+	case "killed_gpu_idle":
+		return "killed: GPU idle for the GPU-watchdog timeout"
 	default:
 		return strings.ReplaceAll(reason, "_", " ")
 	}
