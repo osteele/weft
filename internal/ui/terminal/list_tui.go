@@ -94,6 +94,7 @@ type listTUIModel struct {
 	focused                    bool
 	appConfig                  *config.Config
 	cloudClients               []cloud.Client
+	aiAssist                   *aiAssistState
 }
 
 type listJobsLoadedMsg struct {
@@ -277,6 +278,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.movePicker.active {
 			return m.handleMovePickerKey(msg)
 		}
+		if m.aiAssist != nil {
+			return m.handleAIAssistKey(msg)
+		}
 		if m.showHelp {
 			switch msg.String() {
 			case "?", "esc", "q", "enter":
@@ -346,6 +350,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
+		case "c":
+			job := m.currentSelectedJob()
+			if job == nil {
+				m.statusMessage = "Select a job row for coding-assistant"
+				return m, nil
+			}
+			cmd := m.beginAIAssist(job)
+			return m, cmd
 		case "A":
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
@@ -398,6 +410,15 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		m.focused = false
 		return m, nil
+
+	case aiAssistResultMsg:
+		return m.applyAIAssistResult(msg)
+
+	case aiAssistChunkMsg:
+		return m.applyAIAssistChunk(msg)
+
+	case aiAssistDoneMsg:
+		return m.applyAIAssistDone(msg)
 
 	case listJobsLoadedMsg:
 		if msg.err != nil {
@@ -770,6 +791,9 @@ func (m listTUIModel) waitForQuickLaunchDone() tea.Cmd {
 func (m listTUIModel) View() string {
 	if m.movePicker.active {
 		return m.movePicker.View(m.width, m.height)
+	}
+	if m.aiAssist != nil {
+		return m.renderAIAssistOverlay()
 	}
 	if m.showHelp {
 		return m.renderListHelpView()
@@ -1193,6 +1217,14 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
+	case "c":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			m.statusMessage = "Select a job row for coding-assistant"
+			return m, nil
+		}
+		cmd := m.beginAIAssist(job)
+		return m, cmd
 	case "A":
 		m.autoMode = !m.autoMode
 		if m.autoMode {
@@ -1450,6 +1482,7 @@ func (m listTUIModel) renderListHelpView() string {
 		"",
 		"Common:",
 		"  a view attempts for selected job",
+		"  c coding-assistant (progress / review / remediate, status-dependent)",
 		"  r refresh",
 		"  v toggle grouped/ungrouped view",
 		"  i open instances watch",
