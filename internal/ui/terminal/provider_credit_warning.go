@@ -43,6 +43,8 @@ var (
 		runningJobs      int
 		burnCentsPerHour int
 		pausedLaunches   int
+		refreshing       atomic.Bool
+		initialized      bool
 	}
 )
 
@@ -179,6 +181,11 @@ func refreshProviderCreditWarning() {
 	providerCreditWarningCache.mu.Unlock()
 }
 
+// sharedTUIStatusTextWithCount returns cached system-line state. View() calls
+// it on every render; never block here on DB. On cache miss we serve the
+// previous value and kick off an async refresh — same pattern as
+// providerCreditWarningText. Until the first refresh lands, returns zero
+// values (caller renders an empty system line for one tick).
 func sharedTUIStatusTextWithCount(database *sql.DB) (string, int, int) {
 	if database == nil {
 		return "", 0, 0
@@ -186,18 +193,28 @@ func sharedTUIStatusTextWithCount(database *sql.DB) (string, int, int) {
 
 	now := providerCreditWarningNow()
 	sharedTUIStatusCache.mu.Lock()
-	if database == sharedTUIStatusCache.database && now.Before(sharedTUIStatusCache.expires) {
-		status := sharedTUIStatusCache.status
-		count := sharedTUIStatusCache.runningJobs
-		burn := sharedTUIStatusCache.burnCentsPerHour
-		sharedTUIStatusCache.mu.Unlock()
-		return status, count, burn
-	}
+	stale := database != sharedTUIStatusCache.database || !now.Before(sharedTUIStatusCache.expires)
+	status := sharedTUIStatusCache.status
+	count := sharedTUIStatusCache.runningJobs
+	burn := sharedTUIStatusCache.burnCentsPerHour
+	initialized := sharedTUIStatusCache.initialized
 	sharedTUIStatusCache.mu.Unlock()
 
+	if stale && sharedTUIStatusCache.refreshing.CompareAndSwap(false, true) {
+		go refreshSharedTUIStatus(database)
+	}
+	if !initialized {
+		return "", 0, 0
+	}
+	return status, count, burn
+}
+
+func refreshSharedTUIStatus(database *sql.DB) {
+	defer sharedTUIStatusCache.refreshing.Store(false)
 	status, count, burn := sharedTUIStatusFetch(database)
 	status = strings.TrimSpace(status)
 	paused, _ := dbpkg.CountPausedLaunches(database)
+	now := providerCreditWarningNow()
 
 	sharedTUIStatusCache.mu.Lock()
 	sharedTUIStatusCache.database = database
@@ -206,8 +223,8 @@ func sharedTUIStatusTextWithCount(database *sql.DB) (string, int, int) {
 	sharedTUIStatusCache.burnCentsPerHour = burn
 	sharedTUIStatusCache.pausedLaunches = paused
 	sharedTUIStatusCache.expires = now.Add(sharedTUIStatusTTL)
+	sharedTUIStatusCache.initialized = true
 	sharedTUIStatusCache.mu.Unlock()
-	return status, count, burn
 }
 
 // pluralize returns "%d singular" when n == 1, else "%d plural". The "up"

@@ -606,6 +606,14 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 		statusMessage: "Auto-pilot: monitoring",
 	}
 
+	// Seed shared-status cache: View() is async-refresh and would otherwise
+	// render an empty system line on first call.
+	sharedTUIStatusCache.mu.Lock()
+	sharedTUIStatusCache.expires = time.Time{}
+	sharedTUIStatusCache.initialized = false
+	sharedTUIStatusCache.mu.Unlock()
+	refreshSharedTUIStatus(database)
+
 	out := stripANSI(m.View())
 	sharedIdx := strings.Index(out, "0 jobs running")
 	statusIdx := strings.Index(out, "Auto-pilot: monitoring")

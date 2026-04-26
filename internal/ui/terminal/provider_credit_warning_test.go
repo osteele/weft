@@ -161,10 +161,13 @@ func TestSharedTUIStatusLineHasSystemPrefix(t *testing.T) {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 	// Reset cache so the renderer re-reads the fresh DB rather than a cached
-	// value from a prior test.
+	// value from a prior test, then seed it synchronously (renderer is
+	// async-refresh in production).
 	sharedTUIStatusCache.mu.Lock()
 	sharedTUIStatusCache.expires = time.Time{}
+	sharedTUIStatusCache.initialized = false
 	sharedTUIStatusCache.mu.Unlock()
+	refreshSharedTUIStatus(database)
 
 	line := renderSharedTUIStatusLine(database, 0, 0)
 	plain := stripANSI(line)
@@ -188,7 +191,9 @@ func TestSharedTUIStatusLineWithVisibleRunning_GlobalMismatchPrefix(t *testing.T
 	}
 	sharedTUIStatusCache.mu.Lock()
 	sharedTUIStatusCache.expires = time.Time{}
+	sharedTUIStatusCache.initialized = false
 	sharedTUIStatusCache.mu.Unlock()
+	refreshSharedTUIStatus(database)
 
 	// Pass visibleRunning=0 so globalRunning(1) != visibleRunning(0); the
 	// prefix should switch to "System (global): ".
