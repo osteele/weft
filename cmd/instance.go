@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -396,7 +397,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 						excerpt = terminal.ReadCachedJobFailureExcerpt(j.ID)
 					}
 					if excerpt == "" {
-						excerpt = truncate(strings.TrimSpace(strings.Join([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | ")), 180)
+						excerpt = util.Truncate(strings.TrimSpace(strings.Join([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | ")), 180)
 					}
 					if excerpt != "" {
 						fmt.Printf("             failure: %s\n", excerpt)

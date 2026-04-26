@@ -545,7 +545,7 @@ func TestSystemWatchModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.
 	if !strings.Contains(out, "#189 u") {
 		t.Fatalf("footer missing unplaced prefix, got:\n%s", out)
 	}
-	if !strings.Contains(out, "...") {
+	if !strings.Contains(out, "…") {
 		t.Fatalf("footer should truncate detail, got:\n%s", out)
 	}
 	if strings.Contains(out, "another long reason") {

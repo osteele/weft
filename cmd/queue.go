@@ -1266,13 +1266,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
 func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, []db.JobDependencyRef, error) {
 	var deps []queueDependency
 	var cloudAfter []db.JobDependencyRef

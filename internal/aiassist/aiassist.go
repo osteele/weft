@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/util"
 )
 
 // Kind selects which prompt to send and how to interpret the response.
@@ -372,8 +373,5 @@ func unmarshalLoose(data []byte, v any) error {
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
+	return util.Truncate(s, n)
 }

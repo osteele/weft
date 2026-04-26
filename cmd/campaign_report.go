@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/util"
 )
 
 // watchAndReport runs the appropriate watch mode (TUI or plain) and prints
@@ -217,7 +218,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		fmt.Fprintf(w, "  JOB\tSTATUS\tINSTANCE\tPROJECT\tDESCRIPTION\n")
 		for _, j := range jobs {
 			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n",
-				ids.FormatJobID(j.id), j.status, ids.FormatInstanceID(j.instanceID), truncate(j.project, projectWidth), truncate(j.fullDescription, descWidth))
+				ids.FormatJobID(j.id), j.status, ids.FormatInstanceID(j.instanceID), util.Truncate(j.project, projectWidth), util.Truncate(j.fullDescription, descWidth))
 		}
 		w.Flush()
 	}

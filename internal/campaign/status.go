@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/util"
 )
 
 // Bootstrap timeout thresholds.
@@ -656,13 +657,7 @@ func HasActiveTerminationIntent(marker *instanceintent.Marker) bool {
 }
 
 func truncateText(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-3] + "..."
+	return util.Truncate(s, maxLen)
 }
 
 // BootstrapStageLabel returns a human-readable label for a bootstrap stage.

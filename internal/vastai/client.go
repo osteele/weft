@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/util"
 )
 
 // cliTimeout is the maximum time to wait for a vastai CLI command to complete.
@@ -480,8 +481,5 @@ func extractCLIError(out []byte) string {
 }
 
 func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
+	return util.Truncate(s, max)
 }
