@@ -430,7 +430,7 @@ rule ApplyPendingToRemote {
 -- Sync a cloud instance's state from R2 markers and provider API.
 rule SyncCloudInstanceState {
     when: CloudSyncRequested(instance)
-    requires: instance.status in {running, grace}
+    requires: instance.status in {running, paused, grace}
 
     -- Read R2 markers. Data-independent markers are fetched concurrently
     -- rather than sequentially; see ParallelR2MarkerFetch below.
@@ -680,7 +680,7 @@ rule ReconcilePass {
 -- Heal stale pending_placement intents once a launch is past bootstrap.
 rule NormalizePendingPlacementAfterLaunchProgress {
     when: InstanceReconciled(instance)
-    requires: instance.status in {running, grace, completed}
+    requires: instance.status in {running, paused, grace, completed}
 
     ensures: StalePendingPlacementNormalized(instance)
 

@@ -180,7 +180,12 @@ entity Instance {
                                           preempted, unknown}
 
     -- Status
-    status: planned | launching | running | grace | completed | failed | canceled
+    --
+    -- "paused" reflects a provider-side pause while the rental is still
+    -- billable for storage: per-instance preemption (outbid spot), manual
+    -- stop, or account-wide credit pause. Non-terminal — the reconciler
+    -- waits up to stale_pause_timeout for the provider to resume.
+    status: planned | launching | running | paused | grace | completed | failed | canceled
 
     transitions status {
         planned -> launching
@@ -188,10 +193,14 @@ entity Instance {
         launching -> running
         launching -> failed
         launching -> canceled
+        running -> paused             -- provider stopped (preempted / account pause)
         running -> grace
         running -> completed
         running -> failed
         running -> canceled
+        paused -> running             -- provider resumed the instance
+        paused -> failed              -- stale_pause_timeout exceeded
+        paused -> canceled
         grace -> running              -- jobs resubmitted during grace
         grace -> completed            -- resubmitted jobs all succeed
         grace -> failed               -- grace expired or released
@@ -232,9 +241,11 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
-    -- Maximum time an interruptible instance may sit in provider "stopped"
-    -- state before we give up waiting for a provider resume and relaunch the
-    -- jobs on a fresh offer. Generous so a short outbid window does not churn.
+    -- Maximum time a launch may sit in the paused state (provider "stopped")
+    -- before we give up waiting for a provider resume and relaunch the jobs
+    -- on a fresh offer. Applies to per-instance preemption AND account-wide
+    -- pauses (e.g. credit exhaustion). Generous so a short outbid window or
+    -- a brief credit top-up does not churn launches.
     stale_pause_timeout: Duration = 6.hours
     -- Catch-all wall-clock ceiling on the `launching` status when no
     -- bootstrap_origin has been recorded yet. See LaunchingPhaseTimeout.
@@ -355,13 +366,14 @@ rule DependencyGatesRentalLaunch {
 --   * Offer search is restricted to provider interruptible offers.
 --   * The bid price is the offer's asking `cost_per_hour` (max_bid = ask).
 --     A separate bid knob is intentionally not exposed in this first pass.
---   * The instance is pause_tolerant: a provider "stopped" transition is a
---     wait condition, not an immediate failure (see
---     ProviderInstancePausedInterruptible).
+--   * Provider "stopped" transitions are not immediate failures (see
+--     ProviderInstancePaused) — for any rental, not just preemptible.
+--     pause_tolerant only affects the termination_reason chosen if
+--     stale_pause_timeout is exceeded.
 --   * If the pause does not clear within config.stale_pause_timeout the
---     instance is failed with termination_reason = preempted and the jobs
---     are relaunched on a fresh offer (see InterruptiblePauseStale and
---     RelaunchAfterInfraFailure).
+--     instance is failed (termination_reason = preempted for preemptible,
+--     provider_failure otherwise) and jobs relaunch on a fresh offer (see
+--     PausedInstanceStale and RelaunchAfterInfraFailure).
 --
 -- This is the entire policy. No per-job retry cap or premium ceiling is
 -- maintained at this layer — the runaway breaker (see §Runaway prevention)
@@ -741,7 +753,7 @@ rule HeartbeatStale {
 
 rule ProviderInstanceDied {
     when: instance: Instance.provider_instance.status becomes exited
-    requires: instance.status in {launching, running, grace}
+    requires: instance.status in {launching, running, paused, grace}
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = provider_failure
@@ -757,37 +769,54 @@ rule ProviderInstanceDied {
         -- per-instance ShowInstance in internal/runpod/client.go.
 }
 
-rule ProviderInstancePausedInterruptible {
+rule ProviderInstancePaused {
+    -- Provider stopped the instance: per-instance preemption (outbid spot),
+    -- manual stop, or account-wide credit pause. The launch flips to the
+    -- non-terminal `paused` state and waits for the provider to resume it.
+    -- Applies regardless of the pause_tolerant flag, so account-wide pauses
+    -- are caught even on on-demand rentals.
     when: instance: Instance.provider_instance.status becomes stopped
     requires: instance.status in {launching, running, grace}
-    requires: instance.pause_tolerant
 
-    ensures: instance.status remains in {launching, running, grace}
+    ensures: instance.status = paused
 
     @guidance
-        -- Interruptible/preemptible instances may transition to provider
-        -- "stopped" without being terminal. Reconciler treats this as a
-        -- pause/wait condition for pause_tolerant jobs instead of immediate
-        -- provider_failure reset.
-        -- Implementation: internal/campaign/instance_check.go §4b.
+        -- Implementation: internal/campaign/instance_check.go §4a-pause
+        -- (ActionPause). No DestroyProvider, no ResetJobs — jobs stay
+        -- attached to the rental so they pick up where they left off when
+        -- the provider resumes.
 }
 
-rule InterruptiblePauseStale {
-    -- A pause_tolerant instance that has been in provider "stopped" state
-    -- since before now - config.stale_pause_timeout has almost certainly
-    -- lost its bid and will not come back. Fail the launch as `preempted`
-    -- (retryable) so RelaunchAfterInfraFailure picks a fresh offer.
+rule ProviderInstanceResumes {
+    -- A previously paused launch is observed in provider "running" state
+    -- again. Move back to running so jobs resume normally.
+    when: instance: Instance.provider_instance.status becomes running
+    requires: instance.status = paused
+
+    ensures: instance.status = running
+
+    @guidance
+        -- Implementation: internal/campaign/instance_check.go §4a-resume
+        -- (ActionResume). UpdateLaunchStatus uses COALESCE on launched_at
+        -- so bootstrap-survival metrics stay anchored to the original
+        -- launch, not the resume time.
+}
+
+rule PausedInstanceStale {
+    -- A launch that has been paused since before
+    -- now - config.stale_pause_timeout has almost certainly lost its bid
+    -- (preemptible) or will not be resumed by the provider (account pause).
+    -- Fail it so RelaunchAfterInfraFailure picks a fresh offer.
     when: instance: Instance.provider_instance.status = stopped
-    requires: instance.pause_tolerant
-    requires: instance.status in {launching, running, grace}
+    requires: instance.status in {launching, running, paused, grace}
     requires: (now - instance.created_at) > config.stale_pause_timeout
 
     ensures: instance.status = failed
-    ensures: instance.termination_reason = preempted
+    ensures: instance.termination_reason = preempted if instance.pause_tolerant else provider_failure
     ensures: instance.ended_at = now
 
     @guidance
-        -- Implementation: internal/campaign/instance_check.go §4b
+        -- Implementation: internal/campaign/instance_check.go §4a-pause
         -- (stalePauseTimeout branch). Jobs not in a terminal state are
         -- reset to unplaced so the standard relaunch path carries them
         -- onto a fresh instance.
@@ -811,7 +840,7 @@ rule DiskFullDetected {
 
 rule UserTerminatesInstance {
     when: UserTerminate(instance)
-    requires: instance.status in {launching, running, grace}
+    requires: instance.status in {launching, running, paused, grace}
 
     ensures: instance.status = canceled
     ensures: instance.termination_reason = canceled
