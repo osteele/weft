@@ -351,7 +351,10 @@ func (c *Client) WaitReady(instanceID int, timeout time.Duration) (*Instance, er
 
 // DestroyInstance tears down an instance.
 func (c *Client) DestroyInstance(instanceID int) error {
-	_, err := c.run("destroy", "instance", strconv.Itoa(instanceID), "--raw")
+	// -y skips the interactive confirmation prompt. Without it the CLI reads
+	// stdin, gets EOF, prints "Aborted." to stdout, and exits 0 — silently
+	// turning every destroy into a no-op and stranding stopped instances.
+	_, err := c.run("destroy", "instance", strconv.Itoa(instanceID), "-y", "--raw")
 	if err != nil {
 		return fmt.Errorf("destroy instance %d: %w", instanceID, err)
 	}

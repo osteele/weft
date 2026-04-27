@@ -3,6 +3,8 @@ package vastai
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -365,5 +367,29 @@ func TestRecentlyAvailable(t *testing.T) {
 	}
 	if recentlyAvailable(10 * time.Second) {
 		t.Fatalf("recentlyAvailable should be false outside grace window")
+	}
+}
+
+// Without -y, vastai destroy reads stdin for confirmation, gets EOF, prints
+// "Aborted." and exits 0 — silently no-opping every destroy call.
+func TestDestroyInstancePassesYesFlag(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	c := &Client{CLIPath: stub}
+	if err := c.DestroyInstance(12345); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	if !strings.Contains(string(got), "\n-y\n") && !strings.Contains(string(got), "\n--yes\n") {
+		t.Fatalf("DestroyInstance must pass -y/--yes; got args:\n%s", got)
 	}
 }

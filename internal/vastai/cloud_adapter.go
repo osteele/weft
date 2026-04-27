@@ -148,14 +148,31 @@ func (c *CloudClient) CopyBetweenInstances(srcInstanceID, srcPath, dstInstanceID
 }
 
 func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
-	// Prefer Vast.ai's per-instance credentials (CONTAINER_ID + CONTAINER_API_KEY),
-	// which are set in PID 1's environment and inherited by the onstart script.
-	// Fall back to the user's API key if the env vars aren't available.
-	// -f (--fail) makes curl return non-zero on HTTP errors so retries work.
+	return c.selfDestructCmdWithKey(providerInstanceID, ReadAPIKey())
+}
+
+// selfDestructCmdWithKey tries the per-instance Vast credentials first and
+// falls back to the user key on *any* failure (auth, network, missing var) —
+// not just when CONTAINER_API_KEY is unset. On HTTP failure the helper writes
+// "HTTP=<code> url=<url> body=<body>" to stderr so termination-intent.json's
+// LastError distinguishes 401/403/404/5xx instead of all looking like
+// "exit status 22".
+func (c *CloudClient) selfDestructCmdWithKey(providerInstanceID, userKey string) string {
 	return fmt.Sprintf(
-		`curl -sf -X DELETE "https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-%s}/" `+
-			`-H "Authorization: Bearer ${CONTAINER_API_KEY:-%s}"`,
-		providerInstanceID, ReadAPIKey(),
+		`_d() { `+
+			`local url=$1 key=$2 body code; body=$(mktemp); `+
+			`code=$(curl -sS -o "$body" -w '%%{http_code}' -X DELETE "$url" `+
+			`-H "Authorization: Bearer $key" 2>>"$body"); `+
+			`case "$code" in `+
+			`2*) rm -f "$body"; return 0;; `+
+			`*) printf 'HTTP=%%s url=%%s body=%%s\n' "$code" "$url" `+
+			`"$(tr -d "\n" < "$body" | head -c 500)" >&2; rm -f "$body"; return 22;; `+
+			`esac; `+
+			`}; `+
+			`{ [ -n "${CONTAINER_API_KEY:-}" ] && `+
+			`_d "https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-%s}/" "$CONTAINER_API_KEY"; } || `+
+			`_d "https://console.vast.ai/api/v0/instances/%s/" "%s"`,
+		providerInstanceID, providerInstanceID, userKey,
 	)
 }
 
