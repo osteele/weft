@@ -1,6 +1,6 @@
 # Command Reference
 
-This is the canonical CLI reference for `weft` commands. For end-to-end workflows, see [Workflow Guide](../guides/workflow-guide.md) and [Campaigns](../guides/campaigns.md).
+This is the canonical CLI reference for `weft` commands. For end-to-end workflows, see [Workflow Guide](../guides/workflow-guide.md) and [Cloud GPU Instances](../guides/instances.md).
 
 ## Commands
 
@@ -31,7 +31,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
-- `--after, --depends-on ID`: Start job after another job succeeds. For inventory jobs this is enforced by the per-host queue; for rental jobs it is a placement gate — the downstream is held back from `campaign launch` selection until the upstream succeeds, but co-location is not forced
+- `--after, --depends-on ID`: Start job after another job succeeds. For inventory jobs this is enforced by the per-host queue; for rental jobs it is a placement gate — the downstream is held back from `weft start instance` selection until the upstream succeeds, but co-location is not forced
 - `--after-any ID`: Start job after another job completes, success or failure. Same gating behavior as `--after` for rentals
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
@@ -50,7 +50,7 @@ Use `start <job-id>` to start a queued job immediately.
 using a [PEP 723](https://peps.python.org/pep-0723/) `[tool.weft]` table.
 These are applied as defaults — CLI flags take precedence. See
 [Workflow Guide § Script metadata](../guides/workflow-guide.md#script-metadata).
-For Vast.ai campaign launches, metadata also supports `vast-cap-add` to request
+For Vast.ai instance launches, metadata also supports `vast-cap-add` to request
 extra container capabilities (for example, `["SYS_ADMIN"]`).
 Set `interruptible = true` in `[tool.weft]` to opt a script into interruptible
 cloud placement (equivalent to tagging the job with `--tag interruptible`). The
@@ -749,16 +749,26 @@ weft job move --project myproj --to new
 weft job move --from wi872 --to wi900
 ```
 
-### weft place
+### weft start instance
 
 Launch cloud instances for queued unplaced jobs. This is the primary command
 for placing jobs that could not be scheduled on on-prem inventory (for example,
 jobs tagged `rental` or jobs whose GPU constraints no inventory host satisfies).
 
 ```bash
-weft place [job-id]... [flags]
-weft jobs place [job-id]... [flags]   # Alias
+weft start instance [job-id]... [flags]
+weft start instances [job-id]... [flags]  # Plural alias
+weft instance launch [job-id]... [flags]  # Equivalent
+weft place [job-id]... [flags]            # Short alias
 ```
+
+> **Skip this if an autopilot is running.** Run `weft autopilot status` first.
+> If it reports `running`, the autopilot will pick up unplaced jobs and launch
+> instances for them on its own — an explicit launch won't be faster, only
+> more controllable. Launch manually when you want to choose offers, cap
+> spend, or parallelize differently than the autopilot would. See
+> [Coordinating with the autopilot](../guides/instances.md#coordinating-with-the-autopilot)
+> for details.
 
 Without arguments, all queued unplaced jobs are considered. You can narrow the
 selection with positional job IDs, `--project`, or `--all` (explicit form of
@@ -769,7 +779,7 @@ selection with positional job IDs, `--project`, or `--all` (explicit form of
 - `--all`: All queued unplaced jobs (explicit; same as no arguments). Cannot be combined with job IDs or `--project`.
 - `--status queued|unplaced`: Filter by effective status (accepts `queued` or the alias `unplaced`)
 
-**Flags (launch mechanics, shared with `weft campaign launch`):**
+**Flags (launch mechanics):**
 - `--yes`: Skip the interactive confirmation
 - `--watch` / `--no-watch`: Explicitly enter or skip watch mode after launching
 - `--dry-run`: Preview the plan without launching
@@ -782,46 +792,46 @@ selection with positional job IDs, `--project`, or `--all` (explicit form of
 
 **Examples:**
 ```bash
-weft place                          # All queued unplaced jobs (interactive)
-weft place wj42 wj43                # Only these jobs
-weft place --project myproj         # Unplaced jobs from one project
-weft place --all --yes --watch      # Launch everything, then watch
-weft place --dry-run                # Preview without launching
-weft place --strategy fastest       # Prefer fastest GPUs
-weft place --min-survival 0         # Disable survival floor
+weft start instance                 # All queued unplaced jobs (interactive)
+weft start instance wj42 wj43       # Only these jobs
+weft start instance --project myproj # Unplaced jobs from one project
+weft start instance --yes --watch   # Launch everything, then watch
+weft start instance --dry-run       # Preview without launching
+weft start instance --strategy fastest # Prefer fastest GPUs
+weft start instance --min-survival 0 # Disable survival floor
 ```
 
-Conceptually, a launch creates a **campaign** (a batch of cloud instances) in
-the local database. You can watch or manage that campaign through the
-`weft campaign …` and `weft instance …` subcommands below.
+A launch is recorded as a **campaign** — a batch row grouping the instances
+provisioned together. Per-instance operations live under `weft instance …`;
+batch-level operations live under `weft campaign …` (see below).
 
-### weft campaign launch
+### weft instance watch / list / status / ssh / terminate
 
-Legacy alias for `weft place`. Accepts the same flags. New workflows should
-prefer `weft place`.
-
-### weft campaign watch
-
-Watch a campaign's instances stream to terminal state. Prefer
-`weft instance watch` for watching individual instances or the most recent
-launch.
+Per-instance commands.
 
 ```bash
-weft campaign watch [campaign-id] [--plain|--tui]
+weft instance watch [instance-id]       # Watch active instances (or one)
+weft instance list                       # List instances
+weft instance status <instance-id>       # Single instance details
+weft instance ssh <instance-id>          # SSH in
+weft instance terminate <instance-id>    # Destroy a single instance
 ```
 
-### weft campaign list / show / terminate
+### weft campaign launch / watch / list / show / terminate
 
-Enumerate, inspect, or tear down campaigns.
+Batch-level commands. `weft campaign launch` is a deprecated alias for
+`weft start instance`.
 
 ```bash
-weft campaign list [--plain|--tui]
-weft campaign show <campaign-id>
-weft campaign terminate <campaign-id>
+weft campaign watch [campaign-id] [--plain|--tui]   # Watch a batch (incl. relaunches)
+weft campaign list [--plain|--tui]                  # List batches
+weft campaign show <campaign-id>                    # Inspect a batch
+weft campaign terminate <campaign-id>               # Terminate every instance in the batch
 ```
 
-See [Campaigns](../guides/campaigns.md) for the deep-dive guide on cloud
-instance lifecycle, grace periods, and survival-based offer selection.
+See [Cloud GPU Instances](../guides/instances.md) for lifecycle, grace
+periods, interruptible jobs, and survival-based offer selection, and
+[Campaigns](../guides/campaigns.md) for the batching concept.
 
 ### weft job start
 

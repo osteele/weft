@@ -120,7 +120,7 @@ Supported keys (all optional):
 | `tags`      | list of strings  | `--tag`             |
 | `interruptible` | bool        | `--tag interruptible` |
 | `image`     | string           | `.weft.toml [cloud] image` |
-| `vast-cap-add` | list of strings | Vast.ai `--cap-add` (campaign launch) |
+| `vast-cap-add` | list of strings | Vast.ai `--cap-add` (cloud instance launch) |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
 | `env`        | table of strings | `--env` (merged)           |
 | `pre-install` | string          | *(prepended to command)*   |
@@ -202,7 +202,7 @@ PyTorch image > global default. Script metadata works with any command that
 references a `.py` file, including `uv run script.py`, `python script.py`, and
 compound commands like `pip install foo && python script.py`.
 
-The `vast-cap-add` key requests extra Linux capabilities on Vast.ai campaign
+The `vast-cap-add` key requests extra Linux capabilities on Vast.ai
 instances. Example:
 
 ```python
@@ -604,29 +604,34 @@ pip install vastai
 vastai set api-key YOUR_API_KEY
 ```
 
-### Using `weft place`
+### Using `weft start instance`
 
-`weft place` (alias: `weft campaign launch`) groups unplaced jobs by GPU
-requirements, searches for Vast.ai offers in parallel, and launches instances
-concurrently:
+> **Check the autopilot first.** Run `weft autopilot status` — if it's
+> `running`, you usually don't need to launch by hand: the autopilot will
+> pick up unplaced jobs on its own. Manual launching is not faster, just
+> more controllable (cost limits, offer selection, parallelism). See
+> [Coordinating with the autopilot](instances.md#coordinating-with-the-autopilot).
 
-```
-laptop$ weft place
-```
-
-The interactive TUI shows jobs grouped by GPU class with checkboxes. Deselect
-jobs you don't want to launch, review cost estimates, and press Enter. Weft
-creates a campaign (a batch record grouping the launched instances),
-provisions one instance per GPU group **in parallel**, then segues into watch
-mode.
+`weft start instance` (also `weft start instances` and `weft instance
+launch`) groups unplaced jobs by GPU requirements, searches for Vast.ai
+offers in parallel, and launches instances concurrently:
 
 ```
-laptop$ weft place --dry-run    # Preview without launching
-laptop$ weft place --watch      # Explicitly enter watch mode after launch
-laptop$ weft place --no-watch   # Launch and exit immediately
-laptop$ weft place --project X  # Only jobs from project X
-laptop$ weft place wj42 wj43    # Only these specific jobs
-laptop$ weft place --all --yes  # Non-interactive batch of everything unplaced
+laptop$ weft start instance
+```
+
+The interactive TUI shows jobs grouped by GPU class with checkboxes.
+Deselect jobs you don't want to launch, review cost estimates, and press
+Enter. Weft provisions one instance per GPU group **in parallel** (recorded
+together as a campaign batch), then segues into watch mode.
+
+```
+laptop$ weft start instance --dry-run    # Preview without launching
+laptop$ weft start instance --watch      # Explicitly enter watch mode after launch
+laptop$ weft start instance --no-watch   # Launch and exit immediately
+laptop$ weft start instance --project X  # Only jobs from project X
+laptop$ weft start instance --jobs wj42,wj43  # Only these specific jobs
+laptop$ weft start instance --yes        # Non-interactive batch of everything unplaced
 ```
 
 To launch only jobs for the current directory's project:
@@ -636,18 +641,22 @@ laptop$ weft project launch --yes --watch # Non-interactive, watch progress
 laptop$ weft project launch --dry-run     # Preview for this project only
 ```
 
+`weft place` and `weft campaign launch` remain as deprecated aliases.
+
 After launch, monitor and manage:
 
 ```
-laptop$ weft instance watch               # Live status of the latest campaign's instances
-laptop$ weft campaign watch <id>          # Live status for a specific campaign
-laptop$ weft campaign list                # List campaigns
-laptop$ weft campaign show <id>           # Campaign details
-laptop$ weft campaign terminate <id>      # Destroy all instances
+laptop$ weft instance watch               # Live status of active instances
+laptop$ weft instance list                # List instances
 laptop$ weft instance ssh <id>            # SSH into an instance
+laptop$ weft instance terminate <id>      # Destroy a single instance
+laptop$ weft campaign watch <id>          # Watch a specific batch (and its relaunches)
+laptop$ weft campaign terminate <id>      # Terminate every instance in the batch
 ```
 
-See [Campaigns](campaigns.md) for the full campaign guide.
+See [Cloud GPU Instances](instances.md) for the full instance guide
+(launching, monitoring, grace periods, configuration, lifecycle), and
+[Campaigns](campaigns.md) for the batching concept.
 
 ### Using the TUI rental menu (single job)
 
