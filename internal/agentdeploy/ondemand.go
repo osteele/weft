@@ -68,7 +68,10 @@ func StartBackgroundPrewarm(goos, goarch string) {
 	}()
 }
 
-func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer) error {
+func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer, onProgress BuildProgressFunc) error {
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
 	builders, err := resolveBuilders(goos, goarch)
 	if err != nil {
 		return err
@@ -80,7 +83,7 @@ func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer) e
 
 	var attempts []string
 	for _, builder := range builders {
-		err := runBuilder(version, goos, goarch, outputPath, builder, output)
+		err := runBuilder(version, goos, goarch, outputPath, builder, output, onProgress)
 		if err == nil {
 			return nil
 		}
@@ -98,13 +101,13 @@ func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer) e
 		ErrAgentNotAvailable, goos, goarch, strings.Join(attempts, "; "))
 }
 
-func runBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer) error {
+func runBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer, onProgress BuildProgressFunc) error {
 	switch strings.ToLower(strings.TrimSpace(builder.Type)) {
 	case "ssh":
-		return buildViaSSHBuilder(version, goos, goarch, outputPath, builder)
+		return buildViaSSHBuilder(version, goos, goarch, outputPath, builder, onProgress)
 	case "fly":
 		var captured bytes.Buffer
-		_, err := BuildViaFlyBuilder(version, goos, goarch, outputPath, builder, io.MultiWriter(&captured, output))
+		_, err := BuildViaFlyBuilderWithProgress(version, goos, goarch, outputPath, builder, io.MultiWriter(&captured, output), onProgress)
 		if err == nil {
 			return nil
 		}
@@ -218,11 +221,15 @@ func envOrDefault(v, fallback string) string {
 	return v
 }
 
-func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder) error {
+func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, onProgress BuildProgressFunc) error {
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
 	root, err := RepoRoot()
 	if err != nil {
 		return fmt.Errorf("locate repo root: %w", err)
 	}
+	onProgress("connecting to ssh builder")
 	if err := quickCheckSSHBuilder(builder.Host); err != nil {
 		return err
 	}
@@ -231,6 +238,7 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	remoteOut := filepath.Join(remoteDir, fmt.Sprintf("weft-agent-%s-%s", goos, goarch))
 
 	rsyncSSH := rsyncSSHCommand()
+	onProgress("syncing source")
 	args := []string{
 		"-az", "--delete",
 		"-e", rsyncSSH,
@@ -248,6 +256,7 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 		return fmt.Errorf("rsync source: %s", strings.TrimSpace(out))
 	}
 
+	onProgress("building")
 	buildCmd := fmt.Sprintf("cd %s && CGO_ENABLED=1 GOOS=%s GOARCH=%s %s build -buildvcs=false -ldflags %s -o %s ./cmd/agent",
 		shellQuote(remoteDir), goos, goarch, shellQuote(remoteGo),
 		shellQuote("-X main.version="+version), shellQuote(remoteOut))
@@ -260,6 +269,7 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
+	onProgress("downloading")
 	if out, err := runCommandCapture("", nil, "rsync", "-az", "-e", rsyncSSH, builder.Host+":"+remoteOut, tmp); err != nil {
 		return fmt.Errorf("download build: %s", strings.TrimSpace(out))
 	}

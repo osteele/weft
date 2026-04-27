@@ -3,6 +3,7 @@ package agentdeploy
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -15,10 +16,42 @@ import (
 
 const remoteBinDir = "~/.cache/weft/bin"
 
+// EnsureAgentOptions tunes how EnsureAgentUpToDateWithOptions reports progress.
+//   - Output receives raw subprocess stdout/stderr from the underlying builder
+//     (rsync, flyctl, ssh build). Defaults to os.Stderr; pass io.Discard from
+//     TUI contexts to avoid corrupting the screen.
+//   - OnProgress receives coarse phase events ("starting fly builder",
+//     "syncing source", "building", "downloading"). Use this to render a
+//     status line.
+type EnsureAgentOptions struct {
+	Output     io.Writer
+	OnProgress BuildProgressFunc
+}
+
 // EnsureAgentUpToDate checks whether the remote agent is current, and if not,
 // deploys a matching local build or falls back to a native build on the host.
-// Returns true if a new binary was deployed.
+// Returns true if a new binary was deployed. Subprocess output is sent to
+// os.Stderr; for callers that render their own UI, use
+// EnsureAgentUpToDateWithOptions.
 func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
+	return EnsureAgentUpToDateWithOptions(host, spec, EnsureAgentOptions{Output: os.Stderr})
+}
+
+// EnsureAgentUpToDateWithOptions is like EnsureAgentUpToDate but lets the
+// caller redirect subprocess output and observe build phases. The active
+// build phase for this host is cleared from the global registry on return so
+// the TUI doesn't show a stale entry if the build errors out partway.
+func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts EnsureAgentOptions) (bool, error) {
+	defer SetBuildPhase(host, "")
+	output := opts.Output
+	if output == nil {
+		output = io.Discard
+	}
+	onProgress := opts.OnProgress
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
+
 	localVer, err := LocalAgentVersion()
 	if err != nil {
 		return false, fmt.Errorf("local agent version: %w", err)
@@ -37,7 +70,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, nil
 	}
 
-	binaryPath, err := EnsureBuiltWithOutput(localVer, spec.OS, spec.Arch, os.Stderr)
+	binaryPath, err := EnsureBuiltWithProgress(localVer, spec.OS, spec.Arch, output, onProgress)
 	if errors.Is(err, ErrAgentNotAvailable) {
 		// No pre-built binary — build natively on the remote host.
 		if err := BuildOnHost(host, localVer); err != nil {

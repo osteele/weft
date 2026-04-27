@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/inventory"
@@ -40,7 +41,7 @@ func TestEnsureQueueRunnerStartedSurfacesAgentDeployFailure(t *testing.T) {
 		t.Fatal("runner should not start when agent deploy fails")
 		return false, nil
 	}
-	ensureAgentUpToDateFunc = func(host string, spec inventory.HostSpec) (bool, error) {
+	ensureAgentUpToDateFunc = func(host string, spec inventory.HostSpec, opts agentdeploy.EnsureAgentOptions) (bool, error) {
 		return false, os.ErrPermission
 	}
 
@@ -79,7 +80,7 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 	findHostSpecFunc = func(host string) *inventory.HostSpec {
 		return &inventory.HostSpec{Name: host, OS: "linux", Arch: "amd64"}
 	}
-	ensureAgentUpToDateFunc = func(host string, spec inventory.HostSpec) (bool, error) {
+	ensureAgentUpToDateFunc = func(host string, spec inventory.HostSpec, opts agentdeploy.EnsureAgentOptions) (bool, error) {
 		return false, nil
 	}
 	loadConfigFunc = func() (*config.Config, error) {

@@ -955,8 +955,10 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 }
 
 // ensureQueueRunnerStarted checks if queue runner is running and starts it if not.
+// Uses the quiet variant so agent build progress goes to the TUI status line
+// rather than bleeding onto stderr (which corrupts the dashboard).
 func ensureQueueRunnerStarted(host string) (bool, error) {
-	return hostsyncapp.EnsureQueueRunnerStarted(host)
+	return hostsyncapp.EnsureQueueRunnerStartedQuiet(host)
 }
 
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely.

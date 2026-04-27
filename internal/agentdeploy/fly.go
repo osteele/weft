@@ -29,11 +29,21 @@ func BuildViaFly(version, goos, goarch string, output io.Writer) (string, error)
 // BuildViaFlyBuilder builds linux/amd64 agent binary via a Fly machine and
 // downloads it to outputPath.
 func BuildViaFlyBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer) (string, error) {
+	return BuildViaFlyBuilderWithProgress(version, goos, goarch, outputPath, builder, output, nil)
+}
+
+// BuildViaFlyBuilderWithProgress is like BuildViaFlyBuilder but also reports
+// coarse phase changes (e.g. "starting fly builder", "syncing source",
+// "building", "downloading") via onProgress.
+func BuildViaFlyBuilderWithProgress(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer, onProgress BuildProgressFunc) (string, error) {
 	if goos != "linux" || goarch != "amd64" {
 		return "", fmt.Errorf("Fly builder only supports linux/amd64, got %s/%s", goos, goarch)
 	}
 	if output == nil {
 		output = io.Discard
+	}
+	if onProgress == nil {
+		onProgress = func(string) {}
 	}
 	root, err := RepoRoot()
 	if err != nil {
@@ -58,11 +68,13 @@ func BuildViaFlyBuilder(version, goos, goarch, outputPath string, builder config
 	remoteGoCache := filepath.Join(baseDir, "cache", "go-build")
 	remoteGoModCache := filepath.Join(baseDir, "cache", "gomod")
 
+	onProgress("starting fly builder")
 	fmt.Fprintf(output, "Starting Fly builder %s/%s...\n", app, machine)
 	if err := runCmd(output, "", env, "flyctl", "machine", "start", machine, "-a", app); err != nil {
 		return "", fmt.Errorf("start Fly builder: %w", err)
 	}
 	defer func() {
+		onProgress("stopping fly builder")
 		fmt.Fprintf(output, "Stopping Fly builder %s/%s...\n", app, machine)
 		_ = runCmd(output, "", env, "flyctl", "machine", "stop", machine, "-a", app, "--wait-timeout", "2m")
 	}()
@@ -89,11 +101,13 @@ if [ "$NEED_APT" = "1" ]; then
 fi
 mkdir -p %s %s %s %s
 `, shellQuote(remoteWorktree), shellQuote(filepath.Join(baseDir, "output")), shellQuote(remoteGoCache), shellQuote(remoteGoModCache))
+	onProgress("preparing fly builder")
 	if err := runFlySSHConsole(output, env, app, machine, prepare); err != nil {
 		return "", fmt.Errorf("prepare Fly builder: %w", err)
 	}
 
 	if zigTarget != "" {
+		onProgress("installing zig")
 		installZig := fmt.Sprintf(`set -euo pipefail
 ZIG_VERSION=%s
 ZIG_DIR=/data/zig-${ZIG_VERSION}
@@ -114,6 +128,7 @@ fi
 	}
 	defer cleanup()
 
+	onProgress("syncing source")
 	fmt.Fprintln(output, "Syncing source tree to Fly builder...")
 	rsyncArgs := []string{
 		"-az", "--delete",
@@ -141,6 +156,7 @@ GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64`,
 	}
 	buildCmd += fmt.Sprintf(` %s build -buildvcs=false -ldflags %s -o %s ./cmd/agent`,
 		shellQuote(goBin), shellQuote("-X main.version="+version), shellQuote(remoteOutput))
+	onProgress("building")
 	if err := runFlySSHConsole(output, env, app, machine, buildCmd); err != nil {
 		return "", fmt.Errorf("build on Fly builder: %w", err)
 	}
@@ -149,6 +165,7 @@ GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64`,
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
 	tmp := outputPath + ".tmp"
+	onProgress("downloading")
 	fmt.Fprintln(output, "Downloading agent binary from Fly builder...")
 	if err := runCmd(output, "", env, "rsync", "-az", "--info=progress2", "-e", rshScript, "placeholder:"+remoteOutput, tmp); err != nil {
 		return "", fmt.Errorf("download Fly build output: %w", err)

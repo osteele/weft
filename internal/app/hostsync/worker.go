@@ -528,7 +528,7 @@ func (w *Worker) doSync(host string, mode ops.SyncMode) {
 		UseBatchSync: true,
 		Mode:         mode,
 		Logger:       ops.NewSilentSyncLogger(),
-	}, EnsureQueueRunnerStarted)
+	}, EnsureQueueRunnerStartedQuiet)
 	if err != nil {
 		result.Error = err
 		return

@@ -6,11 +6,13 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
+	"github.com/osteele/weft/internal/util"
 )
 
 // renderStructuredBlock renders an instance block's structured lines, making
@@ -720,12 +722,36 @@ func (m watchModel) autoPilotSyncInProgress() bool {
 	}
 }
 
+// formatAgentBuildStatus returns a status line describing in-progress agent
+// builds, or "" if no build is running. The autopilot's hostsync queue
+// publishes phases via agentdeploy.SetBuildPhase so the TUI can render them
+// here instead of letting subprocess output bleed onto the screen.
+func formatAgentBuildStatus() string {
+	phases := agentdeploy.ActiveBuildPhases()
+	if len(phases) == 0 {
+		return ""
+	}
+	hosts := make([]string, 0, len(phases))
+	for h := range phases {
+		hosts = append(hosts, h)
+	}
+	util.NaturalSortStrings(hosts)
+	parts := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		parts = append(parts, fmt.Sprintf("%s: %s", h, phases[h]))
+	}
+	return "Auto-pilot: building agent (" + strings.Join(parts, ", ") + ")"
+}
+
 func (m watchModel) autoPilotStatusLine() string {
 	if !m.autoMode {
 		return ""
 	}
 	if m.autoRunRateInputActive {
 		return fmt.Sprintf("Run-rate target ($/hr): %s (Enter=save, Esc=cancel)", m.autoRunRateInputValue)
+	}
+	if line := formatAgentBuildStatus(); line != "" {
+		return line
 	}
 	unplaced := m.autoPilotUnplacedCount()
 	target := formatAutoRunRateTarget(m.autoRunRateTargetCents)

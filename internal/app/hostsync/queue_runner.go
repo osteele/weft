@@ -2,7 +2,9 @@ package hostsync
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
@@ -14,7 +16,7 @@ import (
 
 var (
 	findHostSpecFunc         = inventory.FindHost
-	ensureAgentUpToDateFunc  = agentdeploy.EnsureAgentUpToDate
+	ensureAgentUpToDateFunc  = agentdeploy.EnsureAgentUpToDateWithOptions
 	ensureRcloneConfigFunc   = agentdeploy.EnsureRcloneConfig
 	loadConfigFunc           = config.Load
 	getSlackWebhookFunc      = slack.GetWebhook
@@ -27,10 +29,29 @@ var (
 )
 
 // EnsureQueueRunnerStarted ensures the queue runner is present and running.
+// Subprocess output from agent builds is streamed to os.Stderr; for callers
+// that render their own UI (autopilot/TUI) use EnsureQueueRunnerStartedQuiet.
 func EnsureQueueRunnerStarted(host string) (bool, error) {
+	return ensureQueueRunnerStarted(host, agentdeploy.EnsureAgentOptions{Output: os.Stderr})
+}
+
+// EnsureQueueRunnerStartedQuiet is like EnsureQueueRunnerStarted but suppresses
+// raw subprocess output and publishes build phases via
+// agentdeploy.SetBuildPhase so a TUI can render them.
+func EnsureQueueRunnerStartedQuiet(host string) (bool, error) {
+	return ensureQueueRunnerStarted(host, agentdeploy.EnsureAgentOptions{
+		Output: io.Discard,
+		OnProgress: func(phase string) {
+			agentdeploy.SetBuildPhase(host, phase)
+			slog.Info("agent deploy progress", "component", "hostsync", "host", host, "phase", phase)
+		},
+	})
+}
+
+func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOptions) (bool, error) {
 	spec := findHostSpecFunc(host)
 	if spec != nil {
-		if _, err := ensureAgentUpToDateFunc(host, *spec); err != nil {
+		if _, err := ensureAgentUpToDateFunc(host, *spec, agentOpts); err != nil {
 			return false, fmt.Errorf("agent deploy failed: %w", err)
 		}
 	}

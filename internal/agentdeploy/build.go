@@ -48,14 +48,24 @@ func CachePath(version, goos, goarch string) string {
 // the binary, or ErrAgentNotAvailable if no binary exists for this platform.
 // On-demand build progress is discarded; use EnsureBuiltWithOutput to stream it.
 func EnsureBuilt(version, goos, goarch string) (string, error) {
-	return EnsureBuiltWithOutput(version, goos, goarch, io.Discard)
+	return EnsureBuiltWithProgress(version, goos, goarch, io.Discard, nil)
 }
 
 // EnsureBuiltWithOutput is like EnsureBuilt but streams on-demand build progress
 // (Fly builder start, source rsync, compile, download, stop) to output.
 func EnsureBuiltWithOutput(version, goos, goarch string, output io.Writer) (string, error) {
+	return EnsureBuiltWithProgress(version, goos, goarch, output, nil)
+}
+
+// EnsureBuiltWithProgress is like EnsureBuiltWithOutput but also reports
+// coarse phase changes via onProgress. Callers that render their own UI
+// (e.g. TUIs) typically pass io.Discard for output and use onProgress.
+func EnsureBuiltWithProgress(version, goos, goarch string, output io.Writer, onProgress BuildProgressFunc) (string, error) {
 	if output == nil {
 		output = io.Discard
+	}
+	if onProgress == nil {
+		onProgress = func(string) {}
 	}
 	path := CachePath(version, goos, goarch)
 
@@ -79,7 +89,7 @@ func EnsureBuiltWithOutput(version, goos, goarch string, output io.Writer) (stri
 	}
 
 	if err := extractFunc(version, goos, goarch, path); err != nil {
-		if errBuild := buildOnDemand(version, goos, goarch, path, output); errBuild != nil {
+		if errBuild := buildOnDemand(version, goos, goarch, path, output, onProgress); errBuild != nil {
 			if errors.Is(err, ErrAgentNotAvailable) {
 				return "", errBuild
 			}
