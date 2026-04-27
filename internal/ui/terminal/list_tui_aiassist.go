@@ -2,23 +2,29 @@ package terminal
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/aiassist"
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/ops"
 )
 
 // aiAssistPhase tracks where the assist overlay is in its lifecycle.
 type aiAssistPhase int
 
 const (
-	aiAssistPhaseLoading   aiAssistPhase = iota // first claude call in flight
-	aiAssistPhaseResult                         // showing summary (+ optional menu)
-	aiAssistPhaseExecuting                      // second claude call in flight, streaming
-	aiAssistPhaseDone                           // second call finished
+	aiAssistPhaseSyncingLog       aiAssistPhase = iota // caching log from host
+	aiAssistPhaseSyncingArtifacts                      // syncing artifacts from host
+	aiAssistPhaseLoading                               // first claude call in flight
+	aiAssistPhaseResult                                // showing summary (+ optional menu)
+	aiAssistPhaseExecuting                             // second claude call in flight, streaming
+	aiAssistPhaseDone                                  // second call finished
 )
 
 // aiAssistState is the per-overlay state. Lives on listTUIModel as a pointer
@@ -26,11 +32,14 @@ const (
 type aiAssistState struct {
 	jobID     int64
 	jobLabel  string
+	host      string
 	kind      aiassist.Kind
 	phase     aiAssistPhase
 	result    aiassist.AssistResult
 	selected  map[int]bool
 	cursor    int
+	syncLines []string
+	syncCh    chan tea.Msg
 	execLines []string
 	err       error
 	cancel    context.CancelFunc
@@ -53,6 +62,17 @@ type aiAssistDoneMsg struct {
 	err   error
 }
 
+type aiAssistSyncStartMsg struct {
+	jobID int64
+	phase aiAssistPhase
+}
+
+type aiAssistSyncDoneMsg struct {
+	jobID   int64
+	phase   aiAssistPhase
+	summary string
+}
+
 // Pointer receiver: mutates m.aiAssist in place. Caller still returns m
 // from Update so bubbletea sees the change.
 func (m *listTUIModel) beginAIAssist(job *db.Job) tea.Cmd {
@@ -61,21 +81,101 @@ func (m *listTUIModel) beginAIAssist(job *db.Job) tea.Cmd {
 		m.statusMessage = fmt.Sprintf("AI assist not available for %s jobs", job.EffectiveStatus())
 		return nil
 	}
-	resultCh := make(chan aiAssistResultMsg, 1)
 	ctx, cancel := context.WithCancel(m.ctx)
+	syncRelevant := job.HasInventoryHost()
+	startPhase := aiAssistPhaseSyncingLog
+	if !syncRelevant {
+		startPhase = aiAssistPhaseLoading
+	}
+	syncCh := make(chan tea.Msg, 8)
 	m.aiAssist = &aiAssistState{
 		jobID:    job.ID,
 		jobLabel: fmt.Sprintf("#%d %s", job.ID, job.DirectoryTailDisplay()),
+		host:     job.Host,
 		kind:     kind,
-		phase:    aiAssistPhaseLoading,
+		phase:    startPhase,
 		selected: map[int]bool{},
 		cancel:   cancel,
+		syncCh:   syncCh,
 	}
+	resultCh := make(chan aiAssistResultMsg, 1)
+
+	if !syncRelevant {
+		close(syncCh)
+		go func() {
+			res, err := aiassist.Assist(ctx, job, kind)
+			resultCh <- aiAssistResultMsg{jobID: job.ID, res: res, err: err}
+		}()
+		return m.waitForAIAssistResult(resultCh)
+	}
+
+	database := m.database
 	go func() {
+		defer close(syncCh)
+
+		runSyncStep := func(phase aiAssistPhase, fn func() string) bool {
+			syncCh <- aiAssistSyncStartMsg{jobID: job.ID, phase: phase}
+			summary := fn()
+			syncCh <- aiAssistSyncDoneMsg{jobID: job.ID, phase: phase, summary: summary}
+			return ctx.Err() == nil
+		}
+
+		if !runSyncStep(aiAssistPhaseSyncingLog, func() string { return runLogSync(job) }) {
+			return
+		}
+		if !runSyncStep(aiAssistPhaseSyncingArtifacts, func() string { return runArtifactSync(database, job) }) {
+			return
+		}
+
+		syncCh <- aiAssistSyncStartMsg{jobID: job.ID, phase: aiAssistPhaseLoading}
 		res, err := aiassist.Assist(ctx, job, kind)
 		resultCh <- aiAssistResultMsg{jobID: job.ID, res: res, err: err}
 	}()
-	return m.waitForAIAssistResult(resultCh)
+
+	return tea.Batch(
+		waitForSyncMsg(syncCh),
+		m.waitForAIAssistResult(resultCh),
+	)
+}
+
+func waitForSyncMsg(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func runLogSync(job *db.Job) string {
+	ops.CacheCompletedJobLog(job, NormalSyncTimeout)
+	if logcache.Exists(job.ID) {
+		return "Log cached"
+	}
+	return "Log unavailable"
+}
+
+func hostOrDefault(host string) string {
+	if host == "" {
+		return "host"
+	}
+	return host
+}
+
+func runArtifactSync(database *sql.DB, job *db.Job) string {
+	res, err := artifacts.SyncOutstandingJob(database, job, NormalSyncTimeout)
+	if err != nil {
+		return fmt.Sprintf("Artifact sync failed: %v", truncateDisplayWidth(err.Error(), 80))
+	}
+	switch {
+	case res.Added == 0 && res.Skipped == 0:
+		return "No artifacts to sync"
+	case res.Added == 0:
+		return fmt.Sprintf("Artifacts already cached (%d)", res.Skipped)
+	default:
+		return fmt.Sprintf("Synced %d artifact(s) (skipped %d)", res.Added, res.Skipped)
+	}
 }
 
 func (m listTUIModel) waitForAIAssistResult(ch <-chan aiAssistResultMsg) tea.Cmd {
@@ -180,6 +280,26 @@ func (m listTUIModel) handleAIAssistKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m listTUIModel) applyAIAssistSyncStart(msg aiAssistSyncStartMsg) (tea.Model, tea.Cmd) {
+	if m.aiAssist == nil {
+		return m, nil
+	}
+	if m.aiAssist.jobID == msg.jobID {
+		m.aiAssist.phase = msg.phase
+	}
+	return m, waitForSyncMsg(m.aiAssist.syncCh)
+}
+
+func (m listTUIModel) applyAIAssistSyncDone(msg aiAssistSyncDoneMsg) (tea.Model, tea.Cmd) {
+	if m.aiAssist == nil {
+		return m, nil
+	}
+	if m.aiAssist.jobID == msg.jobID && strings.TrimSpace(msg.summary) != "" {
+		m.aiAssist.syncLines = append(m.aiAssist.syncLines, msg.summary)
+	}
+	return m, waitForSyncMsg(m.aiAssist.syncCh)
+}
+
 func (m listTUIModel) applyAIAssistResult(msg aiAssistResultMsg) (tea.Model, tea.Cmd) {
 	if m.aiAssist == nil || m.aiAssist.jobID != msg.jobID {
 		return m, nil
@@ -249,7 +369,18 @@ func (m listTUIModel) renderAIAssistOverlay() string {
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, width)))
 	b.WriteString("\n\n")
 
+	for _, line := range st.syncLines {
+		b.WriteString(listTUIFooterStyle.Render(line))
+		b.WriteString("\n")
+	}
+
 	switch st.phase {
+	case aiAssistPhaseSyncingLog:
+		b.WriteString(listTUIFooterStyle.Render(fmt.Sprintf("Syncing log from %s…  (esc cancels)", hostOrDefault(st.host))))
+		b.WriteString("\n")
+	case aiAssistPhaseSyncingArtifacts:
+		b.WriteString(listTUIFooterStyle.Render(fmt.Sprintf("Syncing artifacts from %s…  (esc cancels)", hostOrDefault(st.host))))
+		b.WriteString("\n")
 	case aiAssistPhaseLoading:
 		b.WriteString(listTUIFooterStyle.Render("Asking Claude…  (esc cancels)"))
 		b.WriteString("\n")

@@ -411,6 +411,12 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focused = false
 		return m, nil
 
+	case aiAssistSyncStartMsg:
+		return m.applyAIAssistSyncStart(msg)
+
+	case aiAssistSyncDoneMsg:
+		return m.applyAIAssistSyncDone(msg)
+
 	case aiAssistResultMsg:
 		return m.applyAIAssistResult(msg)
 
