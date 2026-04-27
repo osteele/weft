@@ -52,6 +52,12 @@ install:
         echo "info: installed weft not found; skipping agent prewarm"
     fi
     go install .
+    WEFT_DOCS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/weft/docs"
+    mkdir -p "${WEFT_DOCS_DIR}"
+    rsync -a --delete docs/ "${WEFT_DOCS_DIR}/"
+    cp CLAUDE.md "${WEFT_DOCS_DIR}/CLAUDE.md" 2>/dev/null || true
+    cp AGENTS.md "${WEFT_DOCS_DIR}/AGENTS.md" 2>/dev/null || true
+    echo "Docs installed to ${WEFT_DOCS_DIR}"
     echo "Install complete."
 
 # Run tests (skips slow build tests; use test-all for full suite)
