@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
+	"github.com/osteele/weft/internal/status"
 )
 
 type onPremHostSummary struct {
@@ -35,38 +36,50 @@ type watchSystemSnapshot struct {
 	CloudReason     string
 }
 
-func watchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions) error {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-	reconciler := campaign.NewReconciler()
-	var previousLaunchIDs []int64
+// WatchPlainStep is one iteration's worth of data for the shared loop in
+// RunWatchPlainLoop: the deduped flat job list (driving JSONL emission and
+// the transition tracker), an optional text-snapshot renderer, and a flag
+// that drives default-exit quiescence detection.
+type WatchPlainStep struct {
+	Jobs       []*db.Job
+	RenderText func() error
+	HasActive  bool
+}
 
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
+// WatchPlainStepFunc is invoked once per loop iteration. It is responsible
+// for any per-iteration syncing, loading, and warning printing it requires.
+type WatchPlainStepFunc func(now time.Time) (WatchPlainStep, error)
 
+// RunWatchPlainLoop drives a plain-mode watch command's polling loop. It
+// owns signal handling, the SnapshotMode dispatch, the TransitionTracker
+// lifecycle, and the exit/sleep semantics shared across `weft watch`,
+// `weft job watch`, and `weft project watch`.
+//
+// Each call to step returns the iteration's flat (deduped) job slice plus
+// optional text-snapshot rendering. Step is responsible for any sync work
+// and may return an error to abort the loop (e.g. a one-shot
+// "no jobs for project" error).
+func RunWatchPlainLoop(ctx context.Context, opts WatchPlainOptions, step WatchPlainStepFunc) error {
 	var tracker *TransitionTracker
 	if opts.EmitsEvents() {
 		tracker = NewTransitionTracker()
 	}
-
 	for {
-		performFastSync(database, false)
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true, previousLaunchIDs)
+		now := time.Now()
+		s, err := step(now)
 		if err != nil {
 			return err
 		}
-		previousLaunchIDs = launchIDs(snapshot.Launches)
-		now := time.Now()
-
-		jobs := flattenSystemSnapshotJobs(snapshot)
 
 		switch opts.SnapshotMode() {
 		case SnapshotText:
-			fmt.Fprint(stdout, formatWatchPlainSnapshot(snapshot, now))
+			if s.RenderText != nil {
+				if err := s.RenderText(); err != nil {
+					return err
+				}
+			}
 		case SnapshotJSON:
-			if err := opts.EmitSnapshotJSON(jobs, now); err != nil {
+			if err := opts.EmitSnapshotJSON(s.Jobs, now); err != nil {
 				return err
 			}
 		case SnapshotNone:
@@ -74,8 +87,7 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions)
 
 		var anyTerminalTransition bool
 		if tracker != nil {
-			events := tracker.Diff(jobs, now)
-			anyTerminalTransition, err = opts.EmitTransitions(events)
+			anyTerminalTransition, err = opts.EmitTransitions(tracker.Diff(s.Jobs, now))
 			if err != nil {
 				return err
 			}
@@ -84,7 +96,7 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions)
 		if opts.UntilAnyTerminal && anyTerminalTransition {
 			return nil
 		}
-		if !opts.Follow && !opts.UntilAnyTerminal && snapshot.IsEmpty() {
+		if !opts.Follow && !opts.UntilAnyTerminal && !s.HasActive {
 			return nil
 		}
 
@@ -96,39 +108,50 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions)
 	}
 }
 
+func watchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	reconciler := campaign.NewReconciler()
+	var previousLaunchIDs []int64
+
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
+	step := func(now time.Time) (WatchPlainStep, error) {
+		performFastSync(database, false)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true, previousLaunchIDs)
+		if err != nil {
+			return WatchPlainStep{}, err
+		}
+		previousLaunchIDs = launchIDs(snapshot.Launches)
+		return WatchPlainStep{
+			Jobs: flattenSystemSnapshotJobs(snapshot),
+			RenderText: func() error {
+				_, err := fmt.Fprint(stdout, formatWatchPlainSnapshot(snapshot, now))
+				return err
+			},
+			HasActive: !snapshot.IsEmpty(),
+		}, nil
+	}
+	return RunWatchPlainLoop(ctx, opts, step)
+}
+
 // flattenSystemSnapshotJobs returns one *db.Job per unique job ID across all
 // of a system snapshot's buckets (cloud-instance jobs, on-prem jobs,
 // unplaced jobs). Cloud-instance Jobs lists may include attempt history;
 // the latest *db.Job for each ID wins.
 func flattenSystemSnapshotJobs(snapshot watchSystemSnapshot) []*db.Job {
-	by := make(map[int64]*db.Job)
+	all := make([][]*db.Job, 0, len(snapshot.InstanceUpdates)+len(snapshot.OnPremHosts)+1)
 	for _, upd := range snapshot.InstanceUpdates {
-		for _, j := range upd.Jobs {
-			if j == nil {
-				continue
-			}
-			by[j.ID] = j
-		}
+		all = append(all, upd.Jobs)
 	}
 	for _, host := range snapshot.OnPremHosts {
-		for _, j := range host.Jobs {
-			if j == nil {
-				continue
-			}
-			by[j.ID] = j
-		}
+		all = append(all, host.Jobs)
 	}
-	for _, j := range snapshot.UnplacedJobs {
-		if j == nil {
-			continue
-		}
-		by[j.ID] = j
-	}
-	out := make([]*db.Job, 0, len(by))
-	for _, j := range by {
-		out = append(out, j)
-	}
-	return out
+	all = append(all, snapshot.UnplacedJobs)
+	return DedupeJobsByID(all...)
 }
 
 func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool, previousLaunchIDs []int64) (watchSystemSnapshot, error) {
@@ -399,16 +422,10 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 		stderr = os.Stderr
 	}
 
-	var tracker *TransitionTracker
-	if opts.EmitsEvents() {
-		tracker = NewTransitionTracker()
-	}
-
 	var lastIssues string
 
-	for {
+	step := func(_ time.Time) (WatchPlainStep, error) {
 		warnings := syncWatchedJobHostsQuiet(database, jobIDs)
-		now := time.Now()
 
 		watchedJobs := make([]*db.Job, 0, len(jobIDs))
 		for _, jobID := range jobIDs {
@@ -425,38 +442,15 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 		}
 		queueblock.Apply(watchedJobs, queueblock.Fetch(watchedJobs, 5*time.Second))
 
-		allTerminal := true
+		hasActive := false
 		for _, job := range watchedJobs {
-			if !isTerminalStatus(job.EffectiveStatus()) {
-				allTerminal = false
+			if !status.IsTerminal(job.EffectiveStatus()) {
+				hasActive = true
+				break
 			}
 		}
 
-		switch opts.SnapshotMode() {
-		case SnapshotText:
-			for i, job := range watchedJobs {
-				if i > 0 {
-					fmt.Fprintln(stdout, "---")
-				}
-				printJobStatus(job, false)
-			}
-		case SnapshotJSON:
-			if err := opts.EmitSnapshotJSON(watchedJobs, now); err != nil {
-				return err
-			}
-		case SnapshotNone:
-		}
-
-		var anyTerminalTransition bool
-		if tracker != nil {
-			events := tracker.Diff(watchedJobs, now)
-			var err error
-			anyTerminalTransition, err = opts.EmitTransitions(events)
-			if err != nil {
-				return err
-			}
-		}
-
+		// Issue-block dedupe across iterations.
 		if len(warnings) > 0 {
 			issueBlock := formatIssuesBlock(warnings)
 			if issueBlock != lastIssues {
@@ -467,19 +461,21 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 			lastIssues = ""
 		}
 
-		if opts.UntilAnyTerminal && anyTerminalTransition {
-			return nil
-		}
-		if !opts.Follow && !opts.UntilAnyTerminal && allTerminal {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(TerminalSyncInterval):
-		}
+		return WatchPlainStep{
+			Jobs: watchedJobs,
+			RenderText: func() error {
+				for i, job := range watchedJobs {
+					if i > 0 {
+						fmt.Fprintln(stdout, "---")
+					}
+					printJobStatus(job, false)
+				}
+				return nil
+			},
+			HasActive: hasActive,
+		}, nil
 	}
+	return RunWatchPlainLoop(ctx, opts, step)
 }
 
 // syncWatchedJobHostsQuiet syncs hosts for the given jobs, suppressing log noise
@@ -489,7 +485,7 @@ func syncWatchedJobHostsQuiet(database *sql.DB, jobIDs []int64) []string {
 	needsRentalSync := false
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
-		if err != nil || job == nil || isTerminalStatus(job.EffectiveStatus()) {
+		if err != nil || job == nil || status.IsTerminal(job.EffectiveStatus()) {
 			continue
 		}
 		if job.HasInventoryHost() {

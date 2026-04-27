@@ -286,12 +286,3 @@ func cloudClientForProvider(clients []cloud.Client, provider cloud.Provider) clo
 	}
 	return nil
 }
-
-func isTerminalStatus(status string) bool {
-	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusDraft:
-		return true
-	default:
-		return false
-	}
-}

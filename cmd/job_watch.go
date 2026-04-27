@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -88,60 +89,24 @@ func watchJobsPlainAll(database *sql.DB, opts terminal.WatchPlainOptions) error 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	var tracker *terminal.TransitionTracker
-	if opts.EmitsEvents() {
-		tracker = terminal.NewTransitionTracker()
-	}
-
-	for {
+	step := func(_ time.Time) (terminal.WatchPlainStep, error) {
 		printWarnings(syncListData(database))
-		now := time.Now()
-
 		jobs, err := collectJobsForList(database, nil)
 		if err != nil {
-			return err
+			return terminal.WatchPlainStep{}, err
 		}
-
-		switch opts.SnapshotMode() {
-		case terminal.SnapshotText:
-			if err := printJobs(database, jobs); err != nil {
-				return err
-			}
-		case terminal.SnapshotJSON:
-			if err := opts.EmitSnapshotJSON(jobs, now); err != nil {
-				return err
-			}
-		case terminal.SnapshotNone:
-		}
-
-		var anyTerminalTransition bool
-		if tracker != nil {
-			events := tracker.Diff(jobs, now)
-			anyTerminalTransition, err = opts.EmitTransitions(events)
-			if err != nil {
-				return err
-			}
-		}
-
 		hasActive := false
 		for _, job := range jobs {
-			if !isTerminalStatus(job.EffectiveStatus()) {
+			if !status.IsTerminal(job.EffectiveStatus()) {
 				hasActive = true
 				break
 			}
 		}
-
-		if opts.UntilAnyTerminal && anyTerminalTransition {
-			return nil
-		}
-		if !opts.Follow && !opts.UntilAnyTerminal && !hasActive {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(terminal.TerminalSyncInterval):
-		}
+		return terminal.WatchPlainStep{
+			Jobs:       jobs,
+			RenderText: func() error { return printJobs(database, jobs) },
+			HasActive:  hasActive,
+		}, nil
 	}
+	return terminal.RunWatchPlainLoop(ctx, opts, step)
 }

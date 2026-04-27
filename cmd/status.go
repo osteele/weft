@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -161,7 +162,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			if err != nil || job == nil {
 				continue
 			}
-			if !isTerminalStatus(job.Status) {
+			if !status.IsTerminal(job.Status) {
 				needsSync = true
 				if job.HasInventoryHost() {
 					hostsToSync[job.Host] = struct{}{}
@@ -552,15 +553,6 @@ func mapKeys(m map[string]struct{}) []string {
 func isWaitTerminalStatus(status string) bool {
 	switch status {
 	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
-		return true
-	default:
-		return false
-	}
-}
-
-func isTerminalStatus(status string) bool {
-	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusDraft:
 		return true
 	default:
 		return false

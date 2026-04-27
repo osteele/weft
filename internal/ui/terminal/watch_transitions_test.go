@@ -153,18 +153,32 @@ func TestEncodeTransitionJSONStableFields(t *testing.T) {
 	}
 }
 
-func TestBuildSnapshotEventDedupesByID(t *testing.T) {
+func TestBuildSnapshotEventSkipsNilsAndPassesThrough(t *testing.T) {
 	now := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC)
-	jobs := []*db.Job{mkJob(1, "running"), mkJob(1, "running"), mkJob(2, "queued")}
+	jobs := []*db.Job{mkJob(1, "running"), nil, mkJob(2, "queued")}
 	snap := BuildSnapshotEvent(jobs, now)
-	if snap.Type != "snapshot" {
+	if snap.Type != EventTypeSnapshot {
 		t.Errorf("type=%q want snapshot", snap.Type)
 	}
 	if len(snap.Jobs) != 2 {
-		t.Errorf("want 2 deduped jobs, got %d", len(snap.Jobs))
+		t.Errorf("want 2 jobs, got %d", len(snap.Jobs))
 	}
 	if snap.Timestamp != "2026-04-27T00:00:00Z" {
 		t.Errorf("timestamp=%q", snap.Timestamp)
+	}
+}
+
+func TestDedupeJobsByIDPreservesOrderAndSkipsNils(t *testing.T) {
+	a := []*db.Job{mkJob(1, "running"), nil, mkJob(2, "queued")}
+	b := []*db.Job{mkJob(2, "queued"), mkJob(3, "running")}
+	out := DedupeJobsByID(a, b)
+	if len(out) != 3 {
+		t.Fatalf("want 3 jobs, got %d", len(out))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if out[i].ID != want {
+			t.Errorf("position %d: got id=%d want %d", i, out[i].ID, want)
+		}
 	}
 }
 

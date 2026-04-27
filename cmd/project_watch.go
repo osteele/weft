@@ -104,14 +104,10 @@ func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, 
 		stderr = os.Stderr
 	}
 
-	var tracker *terminal.TransitionTracker
-	if opts.EmitsEvents() {
-		tracker = terminal.NewTransitionTracker()
-	}
-
 	first := true
 	var lastWarnings []string
-	for {
+
+	step := func(now time.Time) (terminal.WatchPlainStep, error) {
 		warnings := terminal.SyncProjectWatchData(database, projectWatchSync, projectWatchNoSync)
 		if !slices.Equal(warnings, lastWarnings) {
 			for _, warning := range warnings {
@@ -121,51 +117,24 @@ func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, 
 		}
 		groups, err := terminal.LoadProjectWatchGroups(database, projectWatchRecent)
 		if err != nil {
-			return err
+			return terminal.WatchPlainStep{}, err
 		}
 		groups = terminal.FilterProjectGroups(groups, project)
 		if first && len(groups) == 0 && project != "" {
-			return errNoJobsForProject(database, project)
+			return terminal.WatchPlainStep{}, errNoJobsForProject(database, project)
 		}
 		first = false
-		now := time.Now()
 
-		jobs := flattenProjectGroupJobs(groups)
-
-		switch opts.SnapshotMode() {
-		case terminal.SnapshotText:
-			if _, err := io.WriteString(stdout, terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), now, projectWatchRecent)); err != nil {
+		return terminal.WatchPlainStep{
+			Jobs: flattenProjectGroupJobs(groups),
+			RenderText: func() error {
+				_, err := io.WriteString(stdout, terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), now, projectWatchRecent))
 				return err
-			}
-		case terminal.SnapshotJSON:
-			if err := opts.EmitSnapshotJSON(jobs, now); err != nil {
-				return err
-			}
-		case terminal.SnapshotNone:
-		}
-
-		var anyTerminalTransition bool
-		if tracker != nil {
-			events := tracker.Diff(jobs, now)
-			anyTerminalTransition, err = opts.EmitTransitions(events)
-			if err != nil {
-				return err
-			}
-		}
-
-		if opts.UntilAnyTerminal && anyTerminalTransition {
-			return nil
-		}
-		if !opts.Follow && !opts.UntilAnyTerminal && !projectGroupsHaveActive(groups) {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(terminal.TerminalSyncInterval):
-		}
+			},
+			HasActive: projectGroupsHaveActive(groups),
+		}, nil
 	}
+	return terminal.RunWatchPlainLoop(ctx, opts, step)
 }
 
 func projectGroupsHaveActive(groups []terminal.ProjectGroup) bool {
@@ -182,20 +151,9 @@ func projectGroupsHaveActive(groups []terminal.ProjectGroup) bool {
 // included so already-terminal jobs are baselined as terminal and don't fire
 // spurious transitions.
 func flattenProjectGroupJobs(groups []terminal.ProjectGroup) []*db.Job {
-	by := make(map[int64]*db.Job)
+	all := make([][]*db.Job, 0, 4*len(groups))
 	for _, g := range groups {
-		for _, bucket := range [][]*db.Job{g.Running, g.Queued, g.Unplaced, g.Recent} {
-			for _, j := range bucket {
-				if j == nil {
-					continue
-				}
-				by[j.ID] = j
-			}
-		}
+		all = append(all, g.Running, g.Queued, g.Unplaced, g.Recent)
 	}
-	out := make([]*db.Job, 0, len(by))
-	for _, j := range by {
-		out = append(out, j)
-	}
-	return out
+	return terminal.DedupeJobsByID(all...)
 }

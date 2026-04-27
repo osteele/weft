@@ -25,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -236,7 +237,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 	// For terminal jobs, default to showing the full log unless the user
 	// explicitly requested a specific range or line count.
-	if isTerminalStatus(job.Status) && !logFull && logFrom == 0 && logTo == 0 &&
+	if status.IsTerminal(job.Status) && !logFull && logFrom == 0 && logTo == 0 &&
 		!cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail") {
 		logFrom = 1
 		logFull = true
@@ -254,7 +255,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 
 	follow := logFollow
-	if follow && isTerminalStatus(job.Status) {
+	if follow && status.IsTerminal(job.Status) {
 		fmt.Fprintf(os.Stderr, "Job %d already completed; showing log output without following.\n", jobID)
 		follow = false
 	}
@@ -436,7 +437,7 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 	}
 
 	// Follow mode requires a live SSH connection to the instance.
-	if logFollow && !isTerminalStatus(job.Status) {
+	if logFollow && !status.IsTerminal(job.Status) {
 		inst, err := resolveLaunchSSH(database, job)
 		if err == nil {
 			return runLogViaCloudSSH(cmd, database, job, inst)
@@ -700,7 +701,7 @@ func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
 		if refreshed != nil {
 			job = refreshed
 		}
-		if job != nil && isTerminalStatus(job.Status) {
+		if job != nil && status.IsTerminal(job.Status) {
 			return fmt.Errorf("log file not found for job %d on %s", job.ID, job.Host)
 		}
 		time.Sleep(1 * time.Second)

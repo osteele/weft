@@ -6,34 +6,6 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestIsTerminalStatus(t *testing.T) {
-	terminal := []string{
-		db.StatusCompleted,
-		db.StatusDead,
-		db.StatusFailed,
-		db.StatusKilled,
-		db.StatusCanceled,
-		db.StatusDraft,
-	}
-	for _, s := range terminal {
-		if !isTerminalStatus(s) {
-			t.Errorf("isTerminalStatus(%q) = false, want true", s)
-		}
-	}
-
-	nonTerminal := []string{
-		db.StatusRunning,
-		db.StatusStarting,
-		db.StatusQueued,
-		db.StatusPaused,
-	}
-	for _, s := range nonTerminal {
-		if isTerminalStatus(s) {
-			t.Errorf("isTerminalStatus(%q) = true, want false", s)
-		}
-	}
-}
-
 func TestIsWaitTerminalStatus(t *testing.T) {
 	waitTerminal := []string{
 		db.StatusCompleted,

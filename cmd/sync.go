@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/spf13/cobra"
 )
@@ -426,7 +427,7 @@ func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout ti
 	needsRentalSync := false
 
 	for _, job := range jobs {
-		if isTerminalStatus(job.Status) {
+		if status.IsTerminal(job.Status) {
 			continue
 		}
 		if job.HasInventoryHost() {

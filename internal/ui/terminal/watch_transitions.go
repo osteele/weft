@@ -15,6 +15,31 @@ import (
 
 var stdoutDefault io.Writer = os.Stdout
 
+// DedupeJobsByID flattens any number of job slices and returns one job per
+// unique ID. Within a single ID, the last seen non-nil entry wins (callers
+// that need a specific winner should order their inputs accordingly). nils
+// are skipped.
+func DedupeJobsByID(slices ...[]*db.Job) []*db.Job {
+	by := make(map[int64]*db.Job)
+	order := make([]int64, 0)
+	for _, s := range slices {
+		for _, j := range s {
+			if j == nil {
+				continue
+			}
+			if _, seen := by[j.ID]; !seen {
+				order = append(order, j.ID)
+			}
+			by[j.ID] = j
+		}
+	}
+	out := make([]*db.Job, 0, len(order))
+	for _, id := range order {
+		out = append(out, by[id])
+	}
+	return out
+}
+
 // WatchPlainOptions configures the plain-mode watch loops shared by
 // `weft watch`, `weft job watch`, and `weft project watch`.
 type WatchPlainOptions struct {
@@ -219,17 +244,14 @@ func transitionEventFor(j *db.Job, prev, cur string, now time.Time) TransitionEv
 }
 
 // BuildSnapshotEvent constructs the SnapshotEvent for `--jsonl` snapshot mode.
+// Caller is responsible for deduplicating the job slice (flatten helpers
+// already do, as do the per-ID walks in watchJobsPlain).
 func BuildSnapshotEvent(jobs []*db.Job, now time.Time) SnapshotEvent {
 	out := make([]SnapshotJob, 0, len(jobs))
-	seen := make(map[int64]struct{}, len(jobs))
 	for _, j := range jobs {
 		if j == nil {
 			continue
 		}
-		if _, ok := seen[j.ID]; ok {
-			continue
-		}
-		seen[j.ID] = struct{}{}
 		out = append(out, SnapshotJob{
 			JobID:      ids.FormatJobID(j.ID),
 			ID:         j.ID,
