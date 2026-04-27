@@ -35,11 +35,21 @@ type watchSystemSnapshot struct {
 	CloudReason     string
 }
 
-func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
+func watchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	reconciler := campaign.NewReconciler()
 	var previousLaunchIDs []int64
+
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+
+	var tracker *TransitionTracker
+	if opts.EmitsEvents() {
+		tracker = NewTransitionTracker()
+	}
 
 	for {
 		performFastSync(database, false)
@@ -48,10 +58,33 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 			return err
 		}
 		previousLaunchIDs = launchIDs(snapshot.Launches)
+		now := time.Now()
 
-		fmt.Print(formatWatchPlainSnapshot(snapshot, time.Now()))
+		jobs := flattenSystemSnapshotJobs(snapshot)
 
-		if !follow && snapshot.IsEmpty() {
+		switch opts.SnapshotMode() {
+		case SnapshotText:
+			fmt.Fprint(stdout, formatWatchPlainSnapshot(snapshot, now))
+		case SnapshotJSON:
+			if err := opts.EmitSnapshotJSON(jobs, now); err != nil {
+				return err
+			}
+		case SnapshotNone:
+		}
+
+		var anyTerminalTransition bool
+		if tracker != nil {
+			events := tracker.Diff(jobs, now)
+			anyTerminalTransition, err = opts.EmitTransitions(events)
+			if err != nil {
+				return err
+			}
+		}
+
+		if opts.UntilAnyTerminal && anyTerminalTransition {
+			return nil
+		}
+		if !opts.Follow && !opts.UntilAnyTerminal && snapshot.IsEmpty() {
 			return nil
 		}
 
@@ -61,6 +94,41 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 		case <-time.After(TerminalSyncInterval):
 		}
 	}
+}
+
+// flattenSystemSnapshotJobs returns one *db.Job per unique job ID across all
+// of a system snapshot's buckets (cloud-instance jobs, on-prem jobs,
+// unplaced jobs). Cloud-instance Jobs lists may include attempt history;
+// the latest *db.Job for each ID wins.
+func flattenSystemSnapshotJobs(snapshot watchSystemSnapshot) []*db.Job {
+	by := make(map[int64]*db.Job)
+	for _, upd := range snapshot.InstanceUpdates {
+		for _, j := range upd.Jobs {
+			if j == nil {
+				continue
+			}
+			by[j.ID] = j
+		}
+	}
+	for _, host := range snapshot.OnPremHosts {
+		for _, j := range host.Jobs {
+			if j == nil {
+				continue
+			}
+			by[j.ID] = j
+		}
+	}
+	for _, j := range snapshot.UnplacedJobs {
+		if j == nil {
+			continue
+		}
+		by[j.ID] = j
+	}
+	out := make([]*db.Job, 0, len(by))
+	for _, j := range by {
+		out = append(out, j)
+	}
+	return out
 }
 
 func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool, previousLaunchIDs []int64) (watchSystemSnapshot, error) {
@@ -317,52 +385,92 @@ func countHostJobStates(jobs []*db.Job) (running, queued, blocked int) {
 }
 
 // watchJobsPlain watches specific jobs by ID, printing their status periodically
-// until all reach a terminal state (or indefinitely with follow=true).
-func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
+// until all reach a terminal state (or indefinitely with opts.Follow).
+func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := opts.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	var tracker *TransitionTracker
+	if opts.EmitsEvents() {
+		tracker = NewTransitionTracker()
+	}
 
 	var lastIssues string
 
 	for {
 		warnings := syncWatchedJobHostsQuiet(database, jobIDs)
+		now := time.Now()
 
-		allTerminal := true
 		watchedJobs := make([]*db.Job, 0, len(jobIDs))
-		for i, jobID := range jobIDs {
-			if i > 0 {
-				fmt.Println("---")
-			}
+		for _, jobID := range jobIDs {
 			job, err := db.GetJobByID(database, jobID)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Job %d: %v\n", jobID, err)
+				fmt.Fprintf(stderr, "Job %d: %v\n", jobID, err)
 				continue
 			}
 			if job == nil {
-				fmt.Printf("Job %d not found\n", jobID)
+				fmt.Fprintf(stderr, "Job %d not found\n", jobID)
 				continue
 			}
 			watchedJobs = append(watchedJobs, job)
 		}
 		queueblock.Apply(watchedJobs, queueblock.Fetch(watchedJobs, 5*time.Second))
+
+		allTerminal := true
 		for _, job := range watchedJobs {
-			printJobStatus(job, false)
 			if !isTerminalStatus(job.EffectiveStatus()) {
 				allTerminal = false
+			}
+		}
+
+		switch opts.SnapshotMode() {
+		case SnapshotText:
+			for i, job := range watchedJobs {
+				if i > 0 {
+					fmt.Fprintln(stdout, "---")
+				}
+				printJobStatus(job, false)
+			}
+		case SnapshotJSON:
+			if err := opts.EmitSnapshotJSON(watchedJobs, now); err != nil {
+				return err
+			}
+		case SnapshotNone:
+		}
+
+		var anyTerminalTransition bool
+		if tracker != nil {
+			events := tracker.Diff(watchedJobs, now)
+			var err error
+			anyTerminalTransition, err = opts.EmitTransitions(events)
+			if err != nil {
+				return err
 			}
 		}
 
 		if len(warnings) > 0 {
 			issueBlock := formatIssuesBlock(warnings)
 			if issueBlock != lastIssues {
-				fmt.Fprint(os.Stderr, issueBlock)
+				fmt.Fprint(stderr, issueBlock)
 				lastIssues = issueBlock
 			}
 		} else {
 			lastIssues = ""
 		}
 
-		if !follow && allTerminal {
+		if opts.UntilAnyTerminal && anyTerminalTransition {
+			return nil
+		}
+		if !opts.Follow && !opts.UntilAnyTerminal && allTerminal {
 			return nil
 		}
 

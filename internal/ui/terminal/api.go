@@ -98,12 +98,12 @@ func WatchInstancesPlain(database *sql.DB, mode Mode, instanceIDs []int64, estim
 	return watchInstancesPlain(database, mode, instanceIDs, estimateSummary, projectFilter)
 }
 
-func WatchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
-	return watchJobsPlain(database, jobIDs, follow)
+func WatchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) error {
+	return watchJobsPlain(database, jobIDs, opts)
 }
 
-func WatchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
-	return watchAllPlain(database, cfg, follow)
+func WatchAllPlain(database *sql.DB, cfg *config.Config, opts WatchPlainOptions) error {
+	return watchAllPlain(database, cfg, opts)
 }
 
 func RunCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {

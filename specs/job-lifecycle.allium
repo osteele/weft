@@ -1166,9 +1166,79 @@ rule PlainWatchPollsUntilQuiescent {
         -- "no jobs found for project ..." on the first iteration; the
         -- error is not retried in the polling loop.
         --
+        -- Streaming/event-mode flags (--transitions-only, --jsonl,
+        -- --until-any-terminal) layer on top of this loop and are
+        -- specified by rule WatchEmitsTransitionEvents below.
+        --
         -- Implementation:
         --   cmd/watch.go            — watchAllPlain entry
         --   cmd/job_watch.go        — watchJobsPlainAll
         --   cmd/project_watch.go    — runProjectWatchPlain
         --   internal/ui/terminal/watch_plain.go — shared snapshot loop
+}
+
+-- Streaming flags (--transitions-only, --jsonl, --until-any-terminal) turn
+-- the plain-mode watch into an event source. They are agent-oriented and
+-- must produce stable, machine-parseable output across weft versions.
+rule WatchEmitsTransitionEvents {
+    when: UserInvokesPlainWatch(scope) and
+          (TransitionsOnlyFlagSet or JSONLinesFlagSet or UntilAnyTerminalFlagSet)
+    ensures: SeedIterationEmitsNoEvents and
+             SubsequentIterationsEmitOnePerStatusChange and
+             EventSchemaIsStable
+
+    @guidance
+        -- Trigger semantics:
+        --   - --transitions-only       suppresses the snapshot block; only
+        --                              event lines are written to stdout.
+        --   - --jsonl                  emits JSON Lines output. With
+        --                              --transitions-only, one JSON
+        --                              transition per line. Without it, one
+        --                              JSON snapshot object per iteration.
+        --   - --until-any-terminal     exits on the first terminal
+        --                              transition (mutually exclusive with
+        --                              --follow).
+        --
+        -- Seed iteration:
+        --   The first poll establishes the (job_id → effective_status)
+        --   baseline. No transition events are emitted on the seed, so
+        --   already-terminal jobs (e.g. project_watch's Recent bucket) do
+        --   not trip --until-any-terminal. A job appearing for the first
+        --   time after the seed is emitted with prev_status = "" (new
+        --   arrival).
+        --
+        -- Transition trigger:
+        --   Only EffectiveStatus() change. Other field changes (host,
+        --   exit_code) ride along on the event but do not, by themselves,
+        --   trigger one. Jobs disappearing from the iteration's job set
+        --   (e.g. aging out of the --recent window) are forgotten without
+        --   emission so a later reappearance is reported as a new arrival.
+        --
+        -- v1 stable JSON schema:
+        --   transition: {
+        --     "type":        "transition",
+        --     "timestamp":   "RFC3339 UTC string",
+        --     "job_id":      "wj<id>",
+        --     "id":          int64,
+        --     "status":      string,
+        --     "prev_status": string  (empty on new arrival),
+        --     "host":        string  (empty when unset),
+        --     "project":     string  (empty when unset),
+        --     "instance_id": int64 | null,
+        --     "exit_code":   int | null,
+        --   }
+        --   snapshot: {"type":"snapshot","timestamp":..., "jobs":[<as above
+        --     minus type/prev_status>]}
+        --
+        --   These v1 fields are committed-stable: never renamed or removed
+        --   without a major version bump. Additional fields may be added.
+        --
+        -- Implementation:
+        --   internal/ui/terminal/watch_transitions.go — TransitionTracker,
+        --                                               TransitionEvent,
+        --                                               SnapshotEvent,
+        --                                               WatchPlainOptions
+        --   cmd/watch.go            — addWatchEventFlags, watchPlainOptions
+        --   cmd/job_watch.go        — watchJobsPlainAll uses the tracker
+        --   cmd/project_watch.go    — runProjectWatchPlain uses the tracker
 }

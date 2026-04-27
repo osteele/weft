@@ -43,7 +43,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer database.Close()
-		return terminal.WatchJobsPlain(database, jobIDs, watchFollow)
+		return terminal.WatchJobsPlain(database, jobIDs, watchPlainOptions())
 	}
 
 	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
@@ -68,7 +68,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 		}
 		return terminal.RunListTUI(database, nil, jobs, buildListTitle(nil), !listNoSync, listGroupBy == "status", autoMode)
 	}
-	return watchJobsPlainAll(database, watchFollow)
+	return watchJobsPlainAll(database, watchPlainOptions())
 }
 
 func openJobWatchDatabase(useTUI bool) (*sql.DB, error) {
@@ -84,20 +84,43 @@ func jobWatchNeedsWritableDB(useTUI bool) bool {
 
 // watchJobsPlainAll polls all jobs matching the current list filters,
 // printing their status periodically.
-func watchJobsPlainAll(database *sql.DB, follow bool) error {
+func watchJobsPlainAll(database *sql.DB, opts terminal.WatchPlainOptions) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	var tracker *terminal.TransitionTracker
+	if opts.EmitsEvents() {
+		tracker = terminal.NewTransitionTracker()
+	}
+
 	for {
 		printWarnings(syncListData(database))
+		now := time.Now()
 
 		jobs, err := collectJobsForList(database, nil)
 		if err != nil {
 			return err
 		}
 
-		if err := printJobs(database, jobs); err != nil {
-			return err
+		switch opts.SnapshotMode() {
+		case terminal.SnapshotText:
+			if err := printJobs(database, jobs); err != nil {
+				return err
+			}
+		case terminal.SnapshotJSON:
+			if err := opts.EmitSnapshotJSON(jobs, now); err != nil {
+				return err
+			}
+		case terminal.SnapshotNone:
+		}
+
+		var anyTerminalTransition bool
+		if tracker != nil {
+			events := tracker.Diff(jobs, now)
+			anyTerminalTransition, err = opts.EmitTransitions(events)
+			if err != nil {
+				return err
+			}
 		}
 
 		hasActive := false
@@ -108,14 +131,17 @@ func watchJobsPlainAll(database *sql.DB, follow bool) error {
 			}
 		}
 
-		if !follow && !hasActive {
+		if opts.UntilAnyTerminal && anyTerminalTransition {
+			return nil
+		}
+		if !opts.Follow && !opts.UntilAnyTerminal && !hasActive {
 			return nil
 		}
 
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(30 * time.Second):
+		case <-time.After(terminal.TerminalSyncInterval):
 		}
 	}
 }

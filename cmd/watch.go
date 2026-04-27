@@ -32,10 +32,13 @@ Subcommands:
 }
 
 var (
-	watchTUI    bool
-	watchPlain  bool
-	watchFollow bool
-	watchAuto   bool
+	watchTUI              bool
+	watchPlain            bool
+	watchFollow           bool
+	watchAuto             bool
+	watchTransitionsOnly  bool
+	watchJSONLines        bool
+	watchUntilAnyTerminal bool
 )
 
 func init() {
@@ -48,7 +51,33 @@ func configureWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&watchPlain, "plain", false, "Force plain text mode")
 	cmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing summaries even when nothing is active")
 	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
+	addWatchEventFlags(cmd)
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+}
+
+// addWatchEventFlags registers the streaming/transition flags shared by all
+// plain-mode watch commands and the related mutual-exclusivity rules.
+// Callers must register --tui and --follow before calling this helper.
+func addWatchEventFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&watchTransitionsOnly, "transitions-only", false, "Emit one line per status change instead of full snapshots")
+	cmd.Flags().BoolVar(&watchJSONLines, "jsonl", false, "Emit JSON Lines output (one JSON object per line)")
+	cmd.Flags().BoolVar(&watchUntilAnyTerminal, "until-any-terminal", false, "Exit on the first terminal status transition")
+	cmd.MarkFlagsMutuallyExclusive("follow", "until-any-terminal")
+	if cmd.Flags().Lookup("tui") != nil {
+		cmd.MarkFlagsMutuallyExclusive("tui", "transitions-only")
+		cmd.MarkFlagsMutuallyExclusive("tui", "jsonl")
+	}
+}
+
+// watchPlainOptions assembles the plain-mode watch options from the shared
+// flag globals.
+func watchPlainOptions() terminal.WatchPlainOptions {
+	return terminal.WatchPlainOptions{
+		Follow:           watchFollow,
+		TransitionsOnly:  watchTransitionsOnly,
+		JSONLines:        watchJSONLines,
+		UntilAnyTerminal: watchUntilAnyTerminal,
+	}
 }
 
 func runWatchCommand(cmd *cobra.Command, args []string) error {
@@ -64,7 +93,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer database.Close()
-		return terminal.WatchJobsPlain(database, jobIDs, watchFollow)
+		return terminal.WatchJobsPlain(database, jobIDs, watchPlainOptions())
 	}
 
 	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
@@ -87,7 +116,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 	if useTUI {
 		return runWatchLoop(database, cfg, watchAuto)
 	}
-	return terminal.WatchAllPlain(database, cfg, watchFollow)
+	return terminal.WatchAllPlain(database, cfg, watchPlainOptions())
 }
 
 func runWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {

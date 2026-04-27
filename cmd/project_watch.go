@@ -51,6 +51,7 @@ func addProjectWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&projectWatchNoSync, "no-sync", false, "Skip syncing job statuses before displaying")
 	cmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing snapshots even when nothing is active")
 	cmd.Flags().DurationVar(&projectWatchRecent, "recent", 24*time.Hour, "Window for recent terminal jobs")
+	addWatchEventFlags(cmd)
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
@@ -84,12 +85,29 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 		return terminal.RunProjectWatchTUI(database, cfg, projectWatchRecent, !projectWatchNoSync, project, watchAuto)
 	}
 
-	return runProjectWatchPlain(cmd, database, project, watchFollow)
+	opts := watchPlainOptions()
+	opts.Stdout = cmd.OutOrStdout()
+	opts.Stderr = cmd.ErrOrStderr()
+	return runProjectWatchPlain(cmd, database, project, opts)
 }
 
-func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, follow bool) error {
+func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, opts terminal.WatchPlainOptions) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := opts.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	var tracker *terminal.TransitionTracker
+	if opts.EmitsEvents() {
+		tracker = terminal.NewTransitionTracker()
+	}
 
 	first := true
 	var lastWarnings []string
@@ -97,7 +115,7 @@ func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, 
 		warnings := terminal.SyncProjectWatchData(database, projectWatchSync, projectWatchNoSync)
 		if !slices.Equal(warnings, lastWarnings) {
 			for _, warning := range warnings {
-				fmt.Fprintln(cmd.ErrOrStderr(), warning)
+				fmt.Fprintln(stderr, warning)
 			}
 			lastWarnings = warnings
 		}
@@ -110,12 +128,35 @@ func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, 
 			return errNoJobsForProject(database, project)
 		}
 		first = false
+		now := time.Now()
 
-		if _, err := io.WriteString(cmd.OutOrStdout(), terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), time.Now(), projectWatchRecent)); err != nil {
-			return err
+		jobs := flattenProjectGroupJobs(groups)
+
+		switch opts.SnapshotMode() {
+		case terminal.SnapshotText:
+			if _, err := io.WriteString(stdout, terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), now, projectWatchRecent)); err != nil {
+				return err
+			}
+		case terminal.SnapshotJSON:
+			if err := opts.EmitSnapshotJSON(jobs, now); err != nil {
+				return err
+			}
+		case terminal.SnapshotNone:
 		}
 
-		if !follow && !projectGroupsHaveActive(groups) {
+		var anyTerminalTransition bool
+		if tracker != nil {
+			events := tracker.Diff(jobs, now)
+			anyTerminalTransition, err = opts.EmitTransitions(events)
+			if err != nil {
+				return err
+			}
+		}
+
+		if opts.UntilAnyTerminal && anyTerminalTransition {
+			return nil
+		}
+		if !opts.Follow && !opts.UntilAnyTerminal && !projectGroupsHaveActive(groups) {
 			return nil
 		}
 
@@ -134,4 +175,27 @@ func projectGroupsHaveActive(groups []terminal.ProjectGroup) bool {
 		}
 	}
 	return false
+}
+
+// flattenProjectGroupJobs collects every *db.Job referenced by the project
+// groups (Running/Queued/Unplaced/Recent), deduplicating by ID. Recent is
+// included so already-terminal jobs are baselined as terminal and don't fire
+// spurious transitions.
+func flattenProjectGroupJobs(groups []terminal.ProjectGroup) []*db.Job {
+	by := make(map[int64]*db.Job)
+	for _, g := range groups {
+		for _, bucket := range [][]*db.Job{g.Running, g.Queued, g.Unplaced, g.Recent} {
+			for _, j := range bucket {
+				if j == nil {
+					continue
+				}
+				by[j.ID] = j
+			}
+		}
+	}
+	out := make([]*db.Job, 0, len(by))
+	for _, j := range by {
+		out = append(out, j)
+	}
+	return out
 }

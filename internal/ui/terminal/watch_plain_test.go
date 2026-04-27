@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +127,95 @@ func TestLaunchIDs(t *testing.T) {
 	ids := launchIDs([]*db.Launch{{ID: 11}, nil, {ID: 42}})
 	if len(ids) != 2 || ids[0] != 11 || ids[1] != 42 {
 		t.Fatalf("launchIDs = %v, want [11 42]", ids)
+	}
+}
+
+func TestFlattenSystemSnapshotJobsDedupes(t *testing.T) {
+	j1 := &db.Job{ID: 1, Status: "running"}
+	j2 := &db.Job{ID: 2, Status: "queued"}
+	j3 := &db.Job{ID: 3, Status: "queued"}
+	snap := watchSystemSnapshot{
+		InstanceUpdates: map[int64]campaign.InstanceUpdate{
+			10: {Jobs: []*db.Job{j1, j1}},
+			11: {Jobs: []*db.Job{j2}},
+		},
+		OnPremHosts:  []onPremHostSummary{{Name: "h1", Jobs: []*db.Job{j2}}},
+		UnplacedJobs: []*db.Job{j3},
+	}
+	jobs := flattenSystemSnapshotJobs(snap)
+	seen := make(map[int64]bool)
+	for _, j := range jobs {
+		seen[j.ID] = true
+	}
+	if len(jobs) != 3 || !seen[1] || !seen[2] || !seen[3] {
+		t.Fatalf("got %d jobs, ids=%v", len(jobs), seen)
+	}
+}
+
+func TestEmitTransitionsTextMode(t *testing.T) {
+	var buf bytes.Buffer
+	opts := WatchPlainOptions{TransitionsOnly: true, Stdout: &buf}
+	events := []TransitionEvent{
+		{JobID: "wj1", PrevStatus: "running", Status: "completed"},
+		{JobID: "wj2", PrevStatus: "queued", Status: "running"},
+	}
+	anyTerm, err := opts.EmitTransitions(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !anyTerm {
+		t.Error("completed should mark anyTerminal true")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "wj1") || !strings.Contains(out, "wj2") {
+		t.Errorf("missing job IDs in output: %q", out)
+	}
+	if strings.Count(out, "\n") != 2 {
+		t.Errorf("want 2 lines, got %d: %q", strings.Count(out, "\n"), out)
+	}
+}
+
+func TestEmitTransitionsJSONLMode(t *testing.T) {
+	var buf bytes.Buffer
+	opts := WatchPlainOptions{JSONLines: true, Stdout: &buf}
+	events := []TransitionEvent{
+		{Type: "transition", JobID: "wj1", Status: "running", PrevStatus: "queued"},
+	}
+	if _, err := opts.EmitTransitions(events); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(buf.String(), "{") {
+		t.Errorf("want JSON line, got %q", buf.String())
+	}
+}
+
+func TestEmitTransitionsSnapshotModeIsNoOp(t *testing.T) {
+	var buf bytes.Buffer
+	opts := WatchPlainOptions{Stdout: &buf}
+	events := []TransitionEvent{{JobID: "wj1", Status: "completed"}}
+	anyTerm, err := opts.EmitTransitions(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !anyTerm {
+		t.Error("anyTerminal should still report regardless of output mode")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("snapshot mode should not write transition lines, got %q", buf.String())
+	}
+}
+
+func TestEmitSnapshotJSONHasTypeAndNewline(t *testing.T) {
+	var buf bytes.Buffer
+	opts := WatchPlainOptions{JSONLines: true, Stdout: &buf}
+	jobs := []*db.Job{{ID: 1, Status: "running"}}
+	if err := opts.EmitSnapshotJSON(jobs, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"snapshot"`) {
+		t.Errorf("want type=snapshot, got %q", buf.String())
+	}
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Error("want trailing newline")
 	}
 }

@@ -489,7 +489,14 @@ is active.
 - `--sync`: Perform a full sync before loading data
 - `--no-sync`: Skip syncing before loading data
 - `-f`, `--follow`: Keep printing snapshots even when nothing is active
+- `--transitions-only`: Emit one line per status change instead of full snapshots (suppresses the seed snapshot)
+- `--jsonl`: Emit JSON Lines output (one JSON object per line). Composes with `--transitions-only` for an event stream; without it, emits one snapshot object per poll
+- `--until-any-terminal`: Exit on the first terminal status transition (mutually exclusive with `--follow`)
 - `--recent DURATION`: Window for recent terminal jobs (default: `24h`)
+
+The `--transitions-only`, `--jsonl`, and `--until-any-terminal` flags are
+also available on `weft watch` and `weft job watch`. See [JSON event
+schema](#watch-json-schema) below for the stable v1 fields.
 
 **Examples:**
 ```bash
@@ -497,7 +504,33 @@ weft project watch
 weft project watch --plain
 weft project watch --plain --follow
 weft project watch --recent 48h
+
+# Agent-friendly: stream JSON events, exit on first terminal transition.
+weft project watch --plain --transitions-only --jsonl --until-any-terminal
+
+# Human-readable transition stream, keep going after first terminal.
+weft project watch --plain --transitions-only --follow
 ```
+
+<a id="watch-json-schema"></a>
+**JSON event schema (v1, stable):**
+
+Transition event (`--jsonl --transitions-only`):
+```json
+{"type":"transition","timestamp":"2026-04-27T10:30:00Z","job_id":"wj1531","id":1531,"status":"completed","prev_status":"running","host":"cool30","project":"structural-probes","instance_id":1542,"exit_code":0}
+```
+
+Snapshot event (`--jsonl` without `--transitions-only`):
+```json
+{"type":"snapshot","timestamp":"...","jobs":[{"job_id":"wj1531","id":1531,"status":"running","host":"cool30","project":"structural-probes","instance_id":1542,"exit_code":null}]}
+```
+
+Stable v1 fields are committed: `type`, `timestamp` (RFC3339 UTC), `job_id`
+(canonical `wj<id>`), `id` (numeric), `status`, `prev_status` (transitions
+only — empty string for jobs first seen after the seed iteration), `host`,
+`project`, `instance_id` (nullable), `exit_code` (nullable). Additional
+fields may be added in future versions; existing fields will not be renamed
+or removed without a major-version bump.
 
 ### weft job tag
 
