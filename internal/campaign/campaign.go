@@ -42,7 +42,13 @@ type InstanceGroup struct {
 	Image       string   // Per-project Docker image override ("" = use global default)
 	VastCapAdd  []string // Vast.ai-only --cap-add values (nil = none)
 	Preemptible bool     // all jobs in the group allow interruptible placement
-	Jobs        []*db.Job
+	// MaxComputeCap is the most restrictive (lowest) CUDA compute-capability
+	// upper bound across the jobs in the group, expressed as a string like
+	// "9.0" or "12.0". Empty string means "no upper bound" (at least one job
+	// in the group has no inferred limit). Inferred from each job's torch
+	// pin or set explicitly via [tool.weft] gpu-arch-max.
+	MaxComputeCap string
+	Jobs          []*db.Job
 }
 
 // ModelSizeFunc returns the cached size in bytes for a model ID (without the
@@ -565,15 +571,16 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 
 		for _, sub := range subs {
 			result = append(result, InstanceGroup{
-				GPUClass:    g.GPUClass,
-				Provider:    g.Provider,
-				GPUMemGB:    g.GPUMemGB,
-				MaxGPUMemGB: g.MaxGPUMemGB,
-				DiskGB:      g.DiskGB,
-				Image:       sub.image,
-				VastCapAdd:  sub.vastCapAdd,
-				Preemptible: g.Preemptible,
-				Jobs:        sub.jobs,
+				GPUClass:      g.GPUClass,
+				Provider:      g.Provider,
+				GPUMemGB:      g.GPUMemGB,
+				MaxGPUMemGB:   g.MaxGPUMemGB,
+				DiskGB:        g.DiskGB,
+				Image:         sub.image,
+				VastCapAdd:    sub.vastCapAdd,
+				Preemptible:   g.Preemptible,
+				MaxComputeCap: groupMaxComputeCap(sub.jobs),
+				Jobs:          sub.jobs,
 			})
 		}
 	}
@@ -594,6 +601,53 @@ func ResolveJobImage(localDir, command string) string {
 		}
 	}
 	return img
+}
+
+// ResolveJobMaxComputeCap returns the inferred CUDA compute-capability upper
+// bound for a job, combining its [tool.weft] gpu-arch-max override with the
+// project's torch pin. Returns "" when no bound applies.
+func ResolveJobMaxComputeCap(localDir, command string) string {
+	archMax := ""
+	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
+		slog.Warn("script metadata error in arch-max resolution", "component", "campaign", "error", err)
+	} else if meta != nil {
+		archMax = meta.GPUArchMax
+	}
+	return placement.MaxComputeCapForJob(archMax, localDir)
+}
+
+// groupMaxComputeCap reduces per-job arch caps into the most restrictive
+// (lowest) cap for a group. If any job has no inferred bound, the group has
+// no bound — we cannot constrain a job we know nothing about.
+//
+// Multiple jobs from the same project share a cap (it depends on the
+// project's torch pin and per-script gpu-arch-max), so cache resolution by
+// (localDir, command) to avoid re-reading uv.lock and the .py file once per
+// job in a group of N.
+func groupMaxComputeCap(jobs []*db.Job) string {
+	type capKey struct{ dir, cmd string }
+	cache := map[capKey]string{}
+	resolve := func(dir, cmd string) string {
+		k := capKey{dir, cmd}
+		if v, ok := cache[k]; ok {
+			return v
+		}
+		v := ResolveJobMaxComputeCap(dir, cmd)
+		cache[k] = v
+		return v
+	}
+	minCap := ""
+	for _, job := range jobs {
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		cap := resolve(localDir, job.Command)
+		if cap == "" {
+			return ""
+		}
+		if minCap == "" || placement.CompareComputeCap(cap, minCap) < 0 {
+			minCap = cap
+		}
+	}
+	return minCap
 }
 
 // ResolveJobVastCapAdd returns the Vast.ai-only capabilities to request for a

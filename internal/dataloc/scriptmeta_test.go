@@ -82,6 +82,24 @@ import torch
 			want: &ScriptMeta{GPUClass: "ampere+"},
 		},
 		{
+			name: "gpu-arch-max key",
+			content: `# /// script
+# [tool.weft]
+# gpu-arch-max = "hopper"
+# ///
+`,
+			want: &ScriptMeta{GPUArchMax: "hopper"},
+		},
+		{
+			name: "gpu-arch-max any disables filter",
+			content: `# /// script
+# [tool.weft]
+# gpu-arch-max = "any"
+# ///
+`,
+			want: &ScriptMeta{GPUArchMax: "any"},
+		},
+		{
 			name: "local: inputs with outputs",
 			content: `# /// script
 # [tool.weft]

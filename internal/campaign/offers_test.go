@@ -926,3 +926,40 @@ func TestFormatOfferConstraints(t *testing.T) {
 		t.Fatalf("FormatOfferConstraints = %q, want %q", got, want)
 	}
 }
+
+func TestFilterOffersByTorchArch(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "a100", GPUName: "A100"},
+		{ProviderID: "h100", GPUName: "H100"},
+		{ProviderID: "b200", GPUName: "B200"},
+		{ProviderID: "rtxpro", GPUName: "RTX PRO 4500 Blackwell"},
+		{ProviderID: "unknown", GPUName: "weird-future-gpu"},
+	}
+	// Cap at 9.0 (Hopper): A100 and H100 pass; B200/RTX PRO Blackwell rejected;
+	// unknown GPU passes (we cannot prove violation).
+	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "9.0")
+	if filtered != 2 {
+		t.Errorf("filtered = %d, want 2", filtered)
+	}
+	if exGPU == "" || exCap == "" {
+		t.Errorf("expected example GPU and cap to be set, got %q %q", exGPU, exCap)
+	}
+	keepIDs := map[string]bool{}
+	for _, o := range got {
+		keepIDs[o.ProviderID] = true
+	}
+	if !keepIDs["a100"] || !keepIDs["h100"] || !keepIDs["unknown"] {
+		t.Errorf("expected a100, h100, unknown to survive; got %+v", keepIDs)
+	}
+	if keepIDs["b200"] || keepIDs["rtxpro"] {
+		t.Errorf("expected b200, rtxpro to be filtered; got %+v", keepIDs)
+	}
+}
+
+func TestFilterOffersByTorchArch_NoBound(t *testing.T) {
+	offers := []cloud.Offer{{ProviderID: "x", GPUName: "RTX 5090"}}
+	got, filtered, _, _ := filterOffersByTorchArch(offers, "")
+	if filtered != 0 || len(got) != 1 {
+		t.Errorf("unbounded filter dropped offers: filtered=%d remaining=%d", filtered, len(got))
+	}
+}

@@ -1888,3 +1888,42 @@ func TestTimeBasedScoring_ReasonIncludesEstimate(t *testing.T) {
 		t.Errorf("reasons should include completion estimate summary, got: %v", alpha.Reasons)
 	}
 }
+
+func TestScoreHosts_MaxComputeCap_Hopper(t *testing.T) {
+	// Bound at sm_9.0: host-alpha (A100=8.0, 2080Ti=7.5) eligible;
+	// host-beta (3090=8.6) eligible (8.6 < 9.0); host-gamma (Apple) eligible (unknown cap).
+	db := setupTestDB(t)
+	scores := scoreTestHosts(db, Constraints{MaxComputeCap: "9.0"})
+	for _, s := range scores {
+		if !s.Eligible {
+			t.Errorf("host %s should be eligible at cap 9.0: %v", s.Host, s.Reasons)
+		}
+	}
+}
+
+func TestScoreHosts_MaxComputeCap_Ampere(t *testing.T) {
+	// Bound at sm_8.0: host-alpha eligible (A100=8.0 and 2080Ti=7.5 both <= 8.0);
+	// host-beta NOT eligible (3090 = 8.6 > 8.0); host-gamma eligible (unknown cap).
+	db := setupTestDB(t)
+	scores := scoreTestHosts(db, Constraints{MaxComputeCap: "8.0"})
+	var alpha, beta, gamma *Score
+	for i := range scores {
+		switch scores[i].Host {
+		case "host-alpha":
+			alpha = &scores[i]
+		case "host-beta":
+			beta = &scores[i]
+		case "host-gamma":
+			gamma = &scores[i]
+		}
+	}
+	if alpha == nil || !alpha.Eligible {
+		t.Errorf("host-alpha should be eligible at cap 8.0")
+	}
+	if beta == nil || beta.Eligible {
+		t.Errorf("host-beta should NOT be eligible at cap 8.0 (3090 sm_8.6)")
+	}
+	if gamma == nil || !gamma.Eligible {
+		t.Errorf("host-gamma should be eligible (unknown cap)")
+	}
+}

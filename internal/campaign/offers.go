@@ -28,19 +28,24 @@ func parseCUDAVersionFloat(s string) float64 {
 }
 
 // OfferFilterStats tracks how many offers survived each filtering stage.
-// Fields are evaluated in order: VRAM → CUDA → Survival. A zero value means
-// either "all filtered out at this stage" or "stage not reached" (because
-// an earlier stage already eliminated everything).
+// Fields are evaluated in order: VRAM → CUDA → TorchArch → Survival. A zero
+// value means either "all filtered out at this stage" or "stage not reached"
+// (because an earlier stage already eliminated everything).
 type OfferFilterStats struct {
-	RawCount      int // offers returned by provider search
-	AfterVRAM     int // remaining after VRAM requirement filter
-	AfterCUDA     int // remaining after CUDA compatibility filter
-	AfterSurvival int // remaining after survival probability filter
+	RawCount       int // offers returned by provider search
+	AfterVRAM      int // remaining after VRAM requirement filter
+	AfterCUDA      int // remaining after CUDA compatibility filter
+	AfterTorchArch int // remaining after torch arch upper-bound filter
+	AfterSurvival  int // remaining after survival probability filter
 	// CUDA filter diagnostics (set when CUDA filtering removed offers).
 	CUDAImage        string
 	CUDAImageVersion float64
 	CUDAMinRequired  float64
 	CUDAExampleGPU   string
+	// Torch arch filter diagnostics (set when arch filtering removed offers).
+	TorchArchMaxCap     string
+	TorchArchExampleCap string
+	TorchArchExampleGPU string
 }
 
 // NoOffersDetail returns a human-readable explanation of why no offers survived
@@ -64,8 +69,17 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 			return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", s.RawCount, s.AfterVRAM, s.CUDAImageVersion, s.CUDAMinRequired)
 		}
 		return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility", s.RawCount, s.AfterVRAM)
+	case s.TorchArchMaxCap != "" && s.AfterTorchArch == 0:
+		if s.TorchArchExampleGPU != "" && s.TorchArchExampleCap != "" {
+			return fmt.Sprintf("%d offers found, %d passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s; e.g. %s sm_%s)", s.RawCount, s.AfterCUDA, s.TorchArchMaxCap, s.TorchArchExampleGPU, s.TorchArchExampleCap)
+		}
+		return fmt.Sprintf("%d offers found, %d passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s)", s.RawCount, s.AfterCUDA, s.TorchArchMaxCap)
 	case s.AfterSurvival == 0:
-		return fmt.Sprintf("%d offers found, %d passed filters but none met survival threshold", s.RawCount, s.AfterCUDA)
+		passed := s.AfterCUDA
+		if s.TorchArchMaxCap != "" {
+			passed = s.AfterTorchArch
+		}
+		return fmt.Sprintf("%d offers found, %d passed filters but none met survival threshold", s.RawCount, passed)
 	default:
 		// Defensive: all stages passed but no offer was selected.
 		return fmt.Sprintf("%d offers found, none met all criteria", s.RawCount)
@@ -202,6 +216,41 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 	return compatible, filtered, imageCUDA, maxRequired, exampleGPU, image
 }
 
+// filterOffersByTorchArch removes offers whose GPU compute capability exceeds
+// the upper bound implied by the group's torch pin (or explicit gpu-arch-max).
+// Returns the surviving offers, the count filtered, and one example GPU+cap
+// for diagnostics.
+func filterOffersByTorchArch(offers []cloud.Offer, maxCap string) ([]cloud.Offer, int, string, string) {
+	if maxCap == "" {
+		return offers, 0, "", ""
+	}
+	compatible := make([]cloud.Offer, 0, len(offers))
+	filtered := 0
+	exampleGPU, exampleCap := "", ""
+	for _, o := range offers {
+		gpuCap := placement.ComputeCapForGPU(o.GPUName)
+		if gpuCap == "" {
+			compatible = append(compatible, o)
+			continue
+		}
+		if placement.CompareComputeCap(gpuCap, maxCap) > 0 {
+			filtered++
+			if exampleGPU == "" {
+				exampleGPU = o.GPUName
+				exampleCap = gpuCap
+			}
+			continue
+		}
+		compatible = append(compatible, o)
+	}
+	if filtered > 0 {
+		slog.Debug("filtered offers by torch arch upper bound",
+			"max_cap", maxCap, "filtered", filtered,
+			"remaining", len(compatible), "example_gpu", exampleGPU)
+	}
+	return compatible, filtered, exampleGPU, exampleCap
+}
+
 // filterOffersByVRAMReq applies a defensive local VRAM minimum filter.
 // We still rely on provider-side filtering, but this guards against provider
 // inconsistencies. MaxGPUMemGB is not enforced here — it is a soft signal
@@ -257,6 +306,20 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		stats.CUDAExampleGPU = exampleGPU
 	}
 	stats.AfterCUDA = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
+	if group.MaxComputeCap != "" {
+		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MaxComputeCap)
+		if archFiltered > 0 {
+			stats.TorchArchMaxCap = group.MaxComputeCap
+			stats.TorchArchExampleGPU = exampleGPU
+			stats.TorchArchExampleCap = exampleCap
+		}
+		offers = archOffers
+	}
+	stats.AfterTorchArch = len(offers)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result

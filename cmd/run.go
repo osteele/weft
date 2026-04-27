@@ -519,6 +519,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if resolvedGPUMemGB != nil {
 		placementConstraints.GPUMemGB = *resolvedGPUMemGB
 	}
+	archMax := ""
+	if scriptMeta != nil {
+		archMax = scriptMeta.GPUArchMax
+	}
+	if cap := placement.MaxComputeCapForJob(archMax, localDir); cap != "" {
+		placementConstraints.MaxComputeCap = cap
+		fmt.Fprintf(cmd.ErrOrStderr(), "Inferred GPU arch ceiling: compute cap <= %s (override with [tool.weft] gpu-arch-max = \"any\")\n", cap)
+	}
 	// Tip placement toward producers' live rental instances so --needs
 	// consumers co-locate with their producers and can read outputs from
 	// the shared workdir (the classifier in internal/campaign/

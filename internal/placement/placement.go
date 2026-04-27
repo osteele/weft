@@ -64,6 +64,13 @@ type Constraints struct {
 	// capacity / provider filters, placement falls through to the normal
 	// ranking.
 	PreferredInstanceIDs []int64
+
+	// MaxComputeCap is the highest CUDA compute capability the job's
+	// installed PyTorch wheel can target ("9.0", "12.0", ...). Empty string
+	// disables this filter. Inferred from the project's uv.lock or
+	// pyproject.toml via dataloc.ScanTorchPin and TorchMaxComputeCap, or
+	// supplied explicitly via [tool.weft] gpu-arch-max.
+	MaxComputeCap string
 }
 
 // ConstraintsFromJob builds Constraints from a db.Job's fields.
@@ -512,6 +519,16 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			return s
 		}
 		s.Reasons = append(s.Reasons, fmt.Sprintf("has %s GPU", matchedName))
+	}
+
+	// Hard constraint: GPU compute capability upper bound (from torch pin /
+	// gpu-arch-max). A host is eligible if at least one of its GPUs has a
+	// known cap at or below the bound. GPUs with unknown caps are accepted
+	// (we cannot prove they violate).
+	if c.MaxComputeCap != "" && !hostHasGPUWithinCap(host, c.MaxComputeCap) {
+		s.Eligible = false
+		s.Reasons = append(s.Reasons, fmt.Sprintf("no GPU with compute cap <= %s", c.MaxComputeCap))
+		return s
 	}
 
 	// Hard constraint: GPU memory

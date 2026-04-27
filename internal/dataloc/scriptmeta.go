@@ -17,20 +17,26 @@ type ScriptMeta struct {
 	GPUClass     string // GPU class/generation
 	GPUMemGB     int    // Requested GPU memory in GB (headroom may be applied by CLI)
 	GPUMemStrict *bool  // Exact gpu-mem matching (no headroom), when explicitly set
-	Inputs       []string
-	Outputs      []string
-	Tags         []string          // Job tags
-	Image        string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
-	VastCapAdd   []string          // Vast.ai-only --cap-add values (e.g., ["SYS_ADMIN"])
-	UvArgs       []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
-	Env          map[string]string // Environment variables to set when running the job
-	PreInstall   string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
-	Isolated     bool              // Skip project-level uv sync; script runs in an isolated PEP 723 environment
-	Preemptible  bool              // Allow interruptible cloud placement (also accepts legacy "preemptible" key)
+	// GPUArchMax bounds the GPU's CUDA compute capability from above. Accepted
+	// values: a numeric cap ("9.0", "12.0"), a generation name ("ampere",
+	// "hopper", "blackwell"), or "any" to disable inferred filtering. Empty
+	// string means "auto-infer from the project's torch pin".
+	GPUArchMax  string
+	Inputs      []string
+	Outputs     []string
+	Tags        []string          // Job tags
+	Image       string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
+	VastCapAdd  []string          // Vast.ai-only --cap-add values (e.g., ["SYS_ADMIN"])
+	UvArgs      []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
+	Env         map[string]string // Environment variables to set when running the job
+	PreInstall  string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
+	Isolated    bool              // Skip project-level uv sync; script runs in an isolated PEP 723 environment
+	Preemptible bool              // Allow interruptible cloud placement (also accepts legacy "preemptible" key)
 }
 
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
+		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
 		len(m.VastCapAdd) == 0 && len(m.UvArgs) == 0 && len(m.Env) == 0 &&
 		m.PreInstall == "" && !m.Isolated && !m.Preemptible
@@ -69,6 +75,9 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			meta.GPUMemGB = parseGPUMem(wt.Get("gpu-mem"))
 			if v, ok := wt.Get("gpu-mem-strict").(bool); ok {
 				meta.GPUMemStrict = &v
+			}
+			if v, ok := wt.Get("gpu-arch-max").(string); ok {
+				meta.GPUArchMax = v
 			}
 			meta.Inputs = tomlStringSlice(wt, "inputs")
 			meta.Outputs = tomlStringSlice(wt, "outputs")

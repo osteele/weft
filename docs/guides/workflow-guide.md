@@ -115,6 +115,7 @@ Supported keys (all optional):
 | `gpu-class` | string           | `--gpu-class`       |
 | `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
 | `gpu-mem-strict` | bool       | `--gpu-mem-strict`  |
+| `gpu-arch-max`   | string      | *(no CLI flag — overrides auto-inferred GPU arch upper bound; see below)* |
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |
 | `tags`      | list of strings  | `--tag`             |
@@ -229,6 +230,43 @@ scripts whose PEP 723 `dependencies` list everything they need — `uv run`
 creates an isolated environment that does **not** include the project's
 packages. Scripts that import from the project package must not set
 `isolated = true`.
+
+### GPU architecture upper bound (auto-inferred from torch pin)
+
+Pinned PyTorch wheels target a fixed set of CUDA compute capabilities. Running
+on a newer GPU than the wheel was built for fails at kernel-launch time —
+sometimes with a clear "no kernel image is available for execution" error,
+sometimes with a confusing illegal-memory-access. To prevent this, weft infers
+an upper bound on GPU compute capability from the project's torch pin and
+filters out incompatible hosts and cloud offers.
+
+How it works:
+
+- At submission time, weft reads `uv.lock` (preferred) or `pyproject.toml`,
+  finds the pinned torch version and CUDA wheel variant (e.g. `cu121`, `cu128`),
+  and looks up the highest compute capability supported by those wheels.
+- That cap becomes a **hard filter**: hosts and cloud offers whose GPUs
+  exceed the cap are excluded. GPUs with unknown caps are accepted.
+- Weft prints the inferred ceiling once at submission, e.g.
+  `Inferred GPU arch ceiling: compute cap <= 9.0`.
+
+To override, set `gpu-arch-max` in `[tool.weft]`:
+
+| Value          | Effect                                                     |
+|----------------|------------------------------------------------------------|
+| `"any"`        | Disable filtering (use when wheels are source-built/nightly with broader arch coverage). |
+| `"hopper"`     | Cap at the highest cap for that generation (`9.0`).         |
+| `"9.0"`        | Cap at exactly that compute capability.                     |
+| `""` *(default)* | Auto-infer from `uv.lock` / `pyproject.toml`.            |
+
+Example: a project pinned to `torch==2.4.1+cu121` only ships kernels up to
+`sm_9.0`. Without this filter, a Vast.ai offer for an `RTX PRO 4500 Blackwell`
+(`sm_12.0`) would be picked, the instance would launch, and the job would die
+on first kernel call. With the filter, the offer is rejected before launch.
+
+If you've upgraded to wheels that *do* include newer arches but `uv.lock` hasn't
+been refreshed, set `gpu-arch-max = "any"` for that script as a temporary
+escape hatch.
 
 ### Avoiding GPU over-provisioning
 
