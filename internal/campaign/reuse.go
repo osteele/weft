@@ -58,6 +58,13 @@ func instanceAcceptsReuse(inst *db.Launch) (bool, string) {
 	if inst.HasActiveTerminationIntent() {
 		return false, fmt.Sprintf("instance %s is self-destructing", ids.FormatInstanceID(inst.ID))
 	}
+	if inst.Cordoned {
+		msg := fmt.Sprintf("instance %s is cordoned", ids.FormatInstanceID(inst.ID))
+		if inst.CordonReason != "" {
+			msg += " (" + inst.CordonReason + ")"
+		}
+		return false, msg
+	}
 	return true, ""
 }
 

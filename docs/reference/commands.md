@@ -838,17 +838,23 @@ A launch is recorded as a **campaign** — a batch row grouping the instances
 provisioned together. Per-instance operations live under `weft instance …`;
 batch-level operations live under `weft campaign …` (see below).
 
-### weft instance watch / list / status / ssh / terminate
+### weft instance watch / list / status / ssh / terminate / cordon
 
 Per-instance commands.
 
 ```bash
-weft instance watch [instance-id]       # Watch active instances (or one)
-weft instance list                       # List instances
-weft instance status <instance-id>       # Single instance details
-weft instance ssh <instance-id>          # SSH in
-weft instance terminate <instance-id>    # Destroy a single instance
+weft instance watch [instance-id]                       # Watch active instances (or one)
+weft instance list                                      # List instances
+weft instance status <instance-id>                      # Single instance details
+weft instance ssh <instance-id>                         # SSH in
+weft instance terminate <instance-id>                   # Destroy a single instance
+weft instance cordon <instance-id> [--reason "..."]    # Stop new jobs from landing here
+weft instance uncordon <instance-id>                    # Clear the cordon flag
 ```
+
+Cordoning lets the current job finish without the autopilot routing new
+work to the instance — useful when an instance has a stale agent or you
+want to drain just one instance without pausing the autopilot globally.
 
 ### weft campaign launch / watch / list / show / terminate
 

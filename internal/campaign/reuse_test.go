@@ -250,6 +250,64 @@ func TestFindReusableInstancesExcludesActiveTerminationIntent(t *testing.T) {
 	}
 }
 
+func TestFindReusableInstancesExcludesCordoned(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	runningID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(running): %v", err)
+	}
+	cordonedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(cordoned): %v", err)
+	}
+	if err := db.SetLaunchCordoned(database, cordonedID, true, "stale agent"); err != nil {
+		t.Fatalf("SetLaunchCordoned: %v", err)
+	}
+
+	instances, err := FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 reusable instance, got %d", len(instances))
+	}
+	if instances[0].Instance.ID != runningID {
+		t.Fatalf("reusable instance id = %d, want %d", instances[0].Instance.ID, runningID)
+	}
+
+	if err := db.SetLaunchCordoned(database, cordonedID, false, ""); err != nil {
+		t.Fatalf("SetLaunchCordoned(false): %v", err)
+	}
+	instances, err = FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances after uncordon: %v", err)
+	}
+	if len(instances) != 2 {
+		t.Fatalf("expected 2 reusable instances after uncordon, got %d", len(instances))
+	}
+	got, err := db.GetLaunch(database, cordonedID)
+	if err != nil || got == nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.Cordoned || got.CordonReason != "" || got.CordonedAt != nil {
+		t.Fatalf("uncordon did not clear fields: cordoned=%v reason=%q at=%v",
+			got.Cordoned, got.CordonReason, got.CordonedAt)
+	}
+
+	if err := db.SetLaunchCordoned(database, 999999, true, ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("SetLaunchCordoned on missing id: got %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestFindReusableInstancesIncludesNormalGraceAndRunningInstances(t *testing.T) {
 	database := db.SetupTestDB(t)
 

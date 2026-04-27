@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -96,6 +97,26 @@ Unlike terminate, this does a clean shutdown with proper completion markers.`,
 	RunE: runInstanceRelease,
 }
 
+var instanceCordonReason string
+
+var instanceCordonCmd = &cobra.Command{
+	Use:   "cordon <instance-id> [id...]",
+	Short: "Mark an instance so autopilot stops routing new jobs to it",
+	Long: `Cordon flags an instance as ineligible for reuse. The instance keeps
+running and any active job continues to completion, but the autopilot and
+explicit reuse paths will skip it when placing new jobs. Use 'uncordon' to
+clear the flag.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runInstanceCordon,
+}
+
+var instanceUncordonCmd = &cobra.Command{
+	Use:   "uncordon <instance-id> [id...]",
+	Short: "Clear the cordon flag on an instance",
+	Args:  cobra.MinimumNArgs(1),
+	RunE:  runInstanceUncordon,
+}
+
 var instanceWatchCmd = &cobra.Command{
 	Use:   "watch",
 	Short: "Watch cloud instances, on-prem jobs, and unplaced jobs",
@@ -125,12 +146,15 @@ func init() {
 	instanceCmd.AddCommand(instanceSubmitCmd)
 	instanceCmd.AddCommand(instanceExtendCmd)
 	instanceCmd.AddCommand(instanceReleaseCmd)
+	instanceCmd.AddCommand(instanceCordonCmd)
+	instanceCmd.AddCommand(instanceUncordonCmd)
 	instanceCmd.AddCommand(instanceWatchCmd)
 	instanceCmd.AddCommand(instanceLaunchCmd)
 	instanceCmd.AddCommand(instanceDiagnoseCmd)
 
 	instanceSSHCmd.Flags().BoolVar(&instanceSSHPrint, "print", false, "Print the SSH command instead of connecting")
 	instanceSubmitCmd.Flags().StringVar(&instanceSubmitCommand, "command", "", "Override the job command")
+	instanceCordonCmd.Flags().StringVar(&instanceCordonReason, "reason", "", "Optional human-readable reason (recorded with the cordon)")
 
 	configureWatchFlags(instanceWatchCmd)
 	addCampaignLaunchFlags(instanceLaunchCmd)
@@ -223,8 +247,13 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 			typeStr = "—"
 		}
 
+		statusStr := inst.Status
+		if inst.Cordoned {
+			statusStr += " [cordoned]"
+		}
+
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			ids.FormatInstanceID(inst.ID), campaignStr, inst.Status, inst.Provider, typeStr, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
+			ids.FormatInstanceID(inst.ID), campaignStr, statusStr, inst.Provider, typeStr, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
 	}
 	w.Flush()
 	return nil
@@ -379,6 +408,12 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Cleanup: %s\n", label)
 			if detail := campaign.TerminationIntentDetail(ci.TerminationIntent); detail != "" {
 				fmt.Printf("  Cleanup status: %s\n", detail)
+			}
+		}
+		if detail := ci.CordonDetail(); detail != "" {
+			fmt.Printf("  Cordoned: %s\n", detail)
+			if ci.CordonedAt != nil {
+				fmt.Printf("  Cordoned at: %s\n", time.Unix(*ci.CordonedAt, 0).Format("01/02 15:04"))
 			}
 		}
 
@@ -679,6 +714,46 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Instance %s released. It will self-destruct shortly.\n", ids.FormatInstanceID(instanceID))
+	return nil
+}
+
+func runInstanceCordon(cmd *cobra.Command, args []string) error {
+	return setInstanceCordon(args, true, instanceCordonReason)
+}
+
+func runInstanceUncordon(cmd *cobra.Command, args []string) error {
+	return setInstanceCordon(args, false, "")
+}
+
+func setInstanceCordon(args []string, cordoned bool, reason string) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	for _, arg := range args {
+		id, err := ids.ParseInstanceID(arg)
+		if err != nil {
+			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
+		}
+		err = db.SetLaunchCordoned(database, id, cordoned, reason)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("instance %s not found", ids.FormatInstanceID(id))
+		}
+		if err != nil {
+			return fmt.Errorf("set cordon on %s: %w", ids.FormatInstanceID(id), err)
+		}
+		if !cordoned {
+			fmt.Printf("Instance %s uncordoned.\n", ids.FormatInstanceID(id))
+			continue
+		}
+		suffix := ""
+		if reason != "" {
+			suffix = " (" + reason + ")"
+		}
+		fmt.Printf("Instance %s cordoned%s. Autopilot will not route new jobs to it.\n", ids.FormatInstanceID(id), suffix)
+	}
 	return nil
 }
 

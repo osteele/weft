@@ -30,7 +30,8 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		results_verified,
 		machine_id, docker_image,
 		provider_running_at,
-		instance_type, max_bid_price_cents, on_demand_ref_cents`
+		instance_type, max_bid_price_cents, on_demand_ref_cents,
+		cordoned, cordon_reason, cordoned_at`
 
 // Launch status constants (same values used for both Launch and Campaign).
 const (
@@ -145,6 +146,14 @@ type Launch struct {
 	InstanceType     string // "on-demand" or "interruptible"; empty for pre-migration rows
 	MaxBidPriceCents *int   // Bid ceiling paid on interruptible offers; nil for on-demand
 	OnDemandRefCents *int   // Cheapest concurrent on-demand $/hr at launch, for the same GPU class; nil if not captured
+
+	// Cordon: when true, autopilot/reuse skips this instance for new job
+	// placement. The instance keeps running and its current job continues;
+	// only new routing is suppressed. CordonReason is an optional human-
+	// readable note. CordonedAt is the unix timestamp the cordon was set.
+	Cordoned     bool
+	CordonReason string
+	CordonedAt   *int64
 }
 
 // BootstrapOrigin returns the best timestamp to measure bootstrap elapsed time
@@ -155,6 +164,19 @@ func (c *Launch) BootstrapOrigin() *int64 {
 		return c.ProviderRunningAt
 	}
 	return c.LaunchedAt
+}
+
+// CordonDetail returns the human-readable detail string shown after the
+// "Cordoned:" label in status/watch output. Empty when not cordoned.
+func (c *Launch) CordonDetail() string {
+	if c == nil || !c.Cordoned {
+		return ""
+	}
+	prefix := "yes"
+	if c.CordonReason != "" {
+		prefix = c.CordonReason
+	}
+	return prefix + " (no new jobs will be routed here)"
 }
 
 // DisplayGPUSpec returns a human-readable GPU spec string, falling back to
@@ -555,6 +577,35 @@ func UpdateLaunchOnDemandRefCents(db *sql.DB, id int64, cents int) error {
 func UpdateLaunchResultsVerified(db *sql.DB, id int64, verified bool) error {
 	_, err := db.Exec(`UPDATE launches SET results_verified = ? WHERE id = ?`, verified, id)
 	return err
+}
+
+// SetLaunchCordoned marks a launch as cordoned (excluded from autopilot reuse).
+// reason is optional human-readable detail. Setting cordoned=false clears the
+// reason and timestamp. Returns sql.ErrNoRows if id does not exist.
+func SetLaunchCordoned(db *sql.DB, id int64, cordoned bool, reason string) error {
+	var reasonArg, cordonedAtArg any
+	flag := 0
+	if cordoned {
+		flag = 1
+		if reason != "" {
+			reasonArg = reason
+		}
+		cordonedAtArg = time.Now().Unix()
+	}
+	res, err := db.Exec(
+		`UPDATE launches SET cordoned = ?, cordon_reason = ?, cordoned_at = ? WHERE id = ?`,
+		flag, reasonArg, cordonedAtArg, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func UpdateLaunchTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
@@ -1324,6 +1375,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var providerRunningAt sql.NullInt64
 	var instanceType sql.NullString
 	var maxBidPriceCents, onDemandRefCents sql.NullInt64
+	var cordoned sql.NullInt64
+	var cordonReason sql.NullString
+	var cordonedAt sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -1341,6 +1395,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&machineID, &dockerImage,
 		&providerRunningAt,
 		&instanceType, &maxBidPriceCents, &onDemandRefCents,
+		&cordoned, &cordonReason, &cordonedAt,
 	)
 	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
@@ -1477,6 +1532,15 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	if onDemandRefCents.Valid {
 		v := int(onDemandRefCents.Int64)
 		c.OnDemandRefCents = &v
+	}
+	if cordoned.Valid {
+		c.Cordoned = cordoned.Int64 != 0
+	}
+	if cordonReason.Valid {
+		c.CordonReason = cordonReason.String
+	}
+	if cordonedAt.Valid {
+		c.CordonedAt = &cordonedAt.Int64
 	}
 	return &c, nil
 }

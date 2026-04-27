@@ -83,6 +83,9 @@ func formatWatchInstanceBlockStructured(update campaign.InstanceUpdate, jobProgr
 			addLine(fmt.Sprintf("  Status: %s", detail))
 		}
 	}
+	if detail := ci.CordonDetail(); detail != "" {
+		addLine("  Cordoned: " + detail)
+	}
 	if costLine := formatWatchInstanceCostLine(ci, update.Instance, opts.now); costLine != "" {
 		addLine(costLine)
 	}

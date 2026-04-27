@@ -341,6 +341,26 @@ Termination destroys the provider instance, resets associated jobs to
 unplaced (queued with no host), and updates the instance status to
 `canceled`.
 
+### Cordoning (drain without terminating)
+
+When you want an instance's current job to finish but no new jobs to land
+on it — for example, the instance is running an outdated agent build, or
+you want to take it out of rotation while you investigate — cordon it:
+
+```bash
+weft instance cordon <instance-id> --reason "stale agent"
+weft instance uncordon <instance-id>
+```
+
+A cordoned instance keeps running, its active job continues to
+completion, and grace-period behaviour is unchanged. The autopilot and
+explicit reuse paths simply skip it when assigning new jobs. Cordon
+state is shown in `weft instance list` (as `[cordoned]` next to the
+status), in `weft instance info`, and in the watch TUI.
+
+Use this instead of pausing the autopilot globally when you only need
+to drain one instance. The flag clears immediately on `uncordon`.
+
 ## Grace period
 
 Cloud instances have a default 15-minute grace period after job failures.

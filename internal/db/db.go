@@ -1049,7 +1049,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 9
+const currentSchemaVersion = 10
 
 var dbPath string
 var startupRepairFn = startupRepair
@@ -2016,6 +2016,17 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN oplog_timeout INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+
+	// schema v10: cordon flag (see Launch.Cordoned).
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN cordoned INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN cordon_reason TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN cordoned_at INTEGER`); err != nil {
 		return err
 	}
 

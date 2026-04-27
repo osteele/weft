@@ -163,6 +163,13 @@ entity Instance {
     termination_detail: String?
     termination_requested_at: Timestamp?
 
+    -- Cordon (drain): when true, autopilot/reuse skips this instance. The
+    -- instance keeps running and its current job continues — only new
+    -- placement is suppressed. Cleared via `weft instance uncordon`.
+    cordoned: Boolean
+    cordon_reason: String?
+    cordoned_at: Timestamp?
+
     -- Result verification
     results_verified: Boolean?          -- nil=legacy, true=ok, false=partial
 
@@ -1160,6 +1167,24 @@ invariant RebalanceOnlyWhenSourceBlocked {
     -- Don't move a job that could just start on its current instance.
     for move in QueueRebalanceMoves:
         not InstanceHasIdleSlotFor(move.src, move.job, move.decision_time)
+}
+
+rule InstanceReuseSkipsCordoned {
+    when: BuildAutoPlacementPlan(unplaced_jobs)
+
+    ensures:
+        for instance in reusable_instances_considered:
+            instance.cordoned implies
+                instance.id not in plan.reuse_assignments.map(a => a.instance.id)
+
+    @guidance
+        -- Operators may cordon a running or grace-period instance to drain it
+        -- (for example, when its agent is on a stale build). A cordon does not
+        -- terminate the instance or interrupt its current job — it only marks
+        -- the instance as ineligible for new job assignment by the autopilot
+        -- and explicit reuse paths. The cordon flag is cleared via
+        -- `weft instance uncordon`. See instanceAcceptsReuse in
+        -- internal/campaign/reuse.go.
 }
 
 rule InstanceReuseGPUMemoryCheck {
