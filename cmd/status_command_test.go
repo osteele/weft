@@ -96,7 +96,7 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 
 	var gotSSHTimeout time.Duration
 	var gotCloudTimeout time.Duration
-	quickSyncJobsFunc = func(_ *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout time.Duration) []string {
+	quickSyncJobsFunc = func(_ *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout time.Duration) {
 		if len(jobs) != 1 {
 			t.Fatalf("quickSyncJobs got %d jobs, want 1", len(jobs))
 		}
@@ -105,7 +105,6 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 		}
 		gotSSHTimeout = sshTimeout
 		gotCloudTimeout = cloudTimeout
-		return nil
 	}
 
 	captureStdout(t, func() {

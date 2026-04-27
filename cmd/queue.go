@@ -583,9 +583,9 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	completed, unreachable := performFastSyncForHosts(database, []string{host}, false)
+	completed, unreachable, slow := performFastSyncForHosts(database, []string{host}, false)
 	if !completed {
-		if note := buildStaleDataNote(database, unreachable); note != "" {
+		if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 			fmt.Fprintln(os.Stderr, note)
 		}
 	}

@@ -45,11 +45,11 @@ type Dependencies struct {
 	FilterRentalLaunchJobs                            func([]*db.Job) []*db.Job
 	KillOrCancelCloudJob                              func(*sql.DB, int64, string) (string, error)
 	NewR2ClientFromConfig                             func() (*r2.Client, error)
-	PerformFastSync                                   func(*sql.DB, bool) (bool, []string)
-	PerformSyncWithTimeoutForHostsDetailed            func(*sql.DB, []string, time.Duration, bool) (bool, []string, []string)
-	PerformSyncWithTimeoutForHostsDetailedWithOptions func(*sql.DB, []string, time.Duration, bool, bool) (bool, []string, []string)
+	PerformFastSync                                   func(*sql.DB, bool) (bool, []string, []string)
+	PerformSyncWithTimeoutForHostsDetailed            func(*sql.DB, []string, time.Duration, bool) (bool, []string, []string, []string)
+	PerformSyncWithTimeoutForHostsDetailedWithOptions func(*sql.DB, []string, time.Duration, bool, bool) (bool, []string, []string, []string)
 	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64, []int64, string, bool, bool) (*campaign.RelaunchResult, error)
-	BuildStaleDataNote                                func(*sql.DB, []string) string
+	BuildStaleDataNote                                func(*sql.DB, []string, []string) string
 	PrintJobStatus                                    func(*db.Job, bool)
 	RefreshLaunchGroupsWithOnPrem                     func(*sql.DB, *config.Config, string, string, func(int, int), func(string)) ([]campaign.InstanceGroup, error)
 	SyncRentalJobsStatus                              func(*sql.DB) bool
@@ -164,23 +164,23 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	return deps.KillOrCancelCloudJob(database, jobID, targetStatus)
 }
 
-func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
+func performFastSync(database *sql.DB, verbose bool) (bool, []string, []string) {
 	if deps.PerformFastSync == nil {
-		return true, nil
+		return true, nil, nil
 	}
 	return deps.PerformFastSync(database, verbose)
 }
 
-func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, timeout time.Duration, verbose bool) (bool, []string, []string) {
+func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, timeout time.Duration, verbose bool) (bool, []string, []string, []string) {
 	if deps.PerformSyncWithTimeoutForHostsDetailed == nil {
-		return true, nil, nil
+		return true, nil, nil, nil
 	}
 	return deps.PerformSyncWithTimeoutForHostsDetailed(database, hosts, timeout, verbose)
 }
 
-func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts []string, timeout time.Duration, verbose bool, startQueueRunner bool) (bool, []string, []string) {
+func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts []string, timeout time.Duration, verbose bool, startQueueRunner bool) (bool, []string, []string, []string) {
 	if deps.PerformSyncWithTimeoutForHostsDetailedWithOptions == nil {
-		return true, nil, nil
+		return true, nil, nil, nil
 	}
 	return deps.PerformSyncWithTimeoutForHostsDetailedWithOptions(database, hosts, timeout, verbose, startQueueRunner)
 }
@@ -210,11 +210,11 @@ func attemptRelaunchOrphanedJobs(
 	)
 }
 
-func buildStaleDataNote(database *sql.DB, hosts []string) string {
+func buildStaleDataNote(database *sql.DB, unreachable, slow []string) string {
 	if deps.BuildStaleDataNote == nil {
 		return ""
 	}
-	return deps.BuildStaleDataNote(database, hosts)
+	return deps.BuildStaleDataNote(database, unreachable, slow)
 }
 
 func printJobStatus(job *db.Job, exitOnComplete bool) {

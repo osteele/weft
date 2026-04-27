@@ -562,6 +562,105 @@ func TestJobEligibleForStartedMarker_AllowsQueuedJobOnRunningInstance(t *testing
 	}
 }
 
+func TestBuildStaleDataNote_OfflineOnly(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.SaveCachedHostInfo(database, &db.CachedHostInfo{
+		Name:        "alpha",
+		LastUpdated: time.Now().Add(-2 * time.Minute).Unix(),
+	}); err != nil {
+		t.Fatalf("SaveCachedHostInfo: %v", err)
+	}
+
+	note := buildStaleDataNote(database, []string{"alpha"}, nil)
+
+	if note == "" {
+		t.Fatal("note empty, want non-empty")
+	}
+	if !strings.Contains(note, "Could not reach host alpha") {
+		t.Errorf("note = %q, want 'Could not reach host alpha'", note)
+	}
+	if strings.Contains(note, "currently offline") {
+		t.Errorf("note still uses old phrasing: %q", note)
+	}
+	if strings.Contains(note, "ssh directly") {
+		t.Errorf("note still claims ssh won't help: %q", note)
+	}
+}
+
+func TestBuildStaleDataNote_SlowOnly(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.SaveCachedHostInfo(database, &db.CachedHostInfo{
+		Name:        "beta",
+		LastUpdated: time.Now().Add(-2 * time.Minute).Unix(),
+	}); err != nil {
+		t.Fatalf("SaveCachedHostInfo: %v", err)
+	}
+
+	note := buildStaleDataNote(database, nil, []string{"beta"})
+
+	if note == "" {
+		t.Fatal("note empty, want non-empty")
+	}
+	if !strings.Contains(note, "host beta") {
+		t.Errorf("note = %q, want mention of beta", note)
+	}
+	if !strings.Contains(note, "may be reachable but slow") {
+		t.Errorf("note = %q, want slow phrasing", note)
+	}
+	if strings.Contains(note, "Could not reach") {
+		t.Errorf("note uses offline phrasing for slow host: %q", note)
+	}
+}
+
+func TestBuildStaleDataNote_OfflineAndSlow(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now()
+	for _, h := range []string{"alpha", "beta"} {
+		if err := db.SaveCachedHostInfo(database, &db.CachedHostInfo{
+			Name:        h,
+			LastUpdated: now.Add(-2 * time.Minute).Unix(),
+		}); err != nil {
+			t.Fatalf("SaveCachedHostInfo %s: %v", h, err)
+		}
+	}
+
+	note := buildStaleDataNote(database, []string{"alpha"}, []string{"beta"})
+
+	if !strings.Contains(note, "Could not reach host alpha") {
+		t.Errorf("missing offline clause: %q", note)
+	}
+	if !strings.Contains(note, "host beta") || !strings.Contains(note, "may be reachable but slow") {
+		t.Errorf("missing slow clause: %q", note)
+	}
+}
+
+func TestBuildStaleDataNote_DedupesHostInBoth(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.SaveCachedHostInfo(database, &db.CachedHostInfo{
+		Name:        "alpha",
+		LastUpdated: time.Now().Add(-2 * time.Minute).Unix(),
+	}); err != nil {
+		t.Fatalf("SaveCachedHostInfo: %v", err)
+	}
+
+	// A host that appears in both slices should be reported as unreachable only.
+	note := buildStaleDataNote(database, []string{"alpha"}, []string{"alpha"})
+
+	if !strings.Contains(note, "Could not reach host alpha") {
+		t.Errorf("missing offline clause: %q", note)
+	}
+	if strings.Contains(note, "may be reachable but slow") {
+		t.Errorf("alpha appears in slow clause too: %q", note)
+	}
+}
+
+func TestBuildStaleDataNote_EmptyInputsReturnsEmpty(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if got := buildStaleDataNote(database, nil, nil); got != "" {
+		t.Errorf("note = %q, want empty", got)
+	}
+}
+
 func TestHostSyncWarningsIncludesQueueDispatchFailure(t *testing.T) {
 	warnings := hostSyncWarnings("studio", ops.HostSyncResult{
 		QueueDispatchError: "job 289 input staging failed: context deadline exceeded",

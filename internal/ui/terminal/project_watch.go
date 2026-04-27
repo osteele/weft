@@ -85,9 +85,9 @@ func syncProjectWatchData(database *sql.DB, fullSync bool, skipSync bool) []stri
 	if fullSync {
 		timeout = DefaultSyncTimeout
 	}
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, nil, timeout, false)
+	completed, unreachable, slow, warnings := performSyncWithTimeoutForHostsDetailed(database, nil, timeout, false)
 	if !completed {
-		if note := buildStaleDataNote(database, unreachable); note != "" {
+		if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
@@ -99,9 +99,9 @@ func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
 	if full {
 		timeout = NormalSyncTimeout
 	}
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailedWithOptions(database, nil, timeout, false, full)
+	completed, unreachable, slow, warnings := performSyncWithTimeoutForHostsDetailedWithOptions(database, nil, timeout, false, full)
 	if !completed {
-		if note := buildStaleDataNote(database, unreachable); note != "" {
+		if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 			warnings = append(warnings, note)
 		}
 	}

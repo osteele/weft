@@ -1771,9 +1771,9 @@ func syncListTUIData(database *sql.DB, full bool) []string {
 	if full {
 		timeout = NormalSyncTimeout
 	}
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailedWithOptions(database, nil, timeout, false, full)
+	completed, unreachable, slow, warnings := performSyncWithTimeoutForHostsDetailedWithOptions(database, nil, timeout, false, full)
 	if !completed {
-		if note := buildStaleDataNote(database, unreachable); note != "" {
+		if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 			warnings = append(warnings, note)
 		}
 	}

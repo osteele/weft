@@ -39,7 +39,8 @@ type SyncOptions struct {
 type SyncResult struct {
 	HostsUpdated     int
 	HostsReached     int
-	HostsUnreachable []string
+	HostsUnreachable []string // hosts that produced a hard connection failure (offline)
+	HostsSlow        []string // hosts whose sync hit a non-connection error or our deadline (alive but slow)
 	CloudUpdated     int
 	Warnings         []string
 	AllCompleted     bool
@@ -84,6 +85,7 @@ func SyncAll(database *sql.DB, cfg *config.Config, opts SyncOptions) SyncResult 
 		HostsUpdated:     hostResult.Updated,
 		HostsReached:     hostResult.Reached,
 		HostsUnreachable: hostResult.Unreachable,
+		HostsSlow:        hostResult.Slow,
 		CloudUpdated:     cloudResult.Updated,
 		Warnings:         append([]string{}, hostResult.Warnings...),
 		AllCompleted:     hostResult.Completed,

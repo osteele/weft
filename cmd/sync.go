@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -50,8 +51,10 @@ var (
 )
 
 const (
-	// FastSyncTimeout is the per-SSH-call timeout for quick syncs
-	FastSyncTimeout = 2 * time.Second
+	// FastSyncTimeout is the per-SSH-call timeout for quick syncs.
+	// 5s tolerates slow-but-alive handshakes without making the CLI feel sluggish
+	// on healthy paths; the overall per-host budget remains FastSyncHostTimeout.
+	FastSyncTimeout = 5 * time.Second
 	// FastSyncHostTimeout is the overall timeout per host for quick syncs
 	// Must be long enough to sync multiple jobs (each with FastSyncTimeout)
 	FastSyncHostTimeout = 30 * time.Second
@@ -116,6 +119,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	totalUpdated := result.HostsUpdated + result.CloudUpdated
 	hostsReached := result.HostsReached
 	hostsUnreachable := len(result.HostsUnreachable)
+	hostsSlow := len(result.HostsSlow)
 
 	// Deploy agent binary and start queue runners only in full mode (after sync completes)
 	if syncFull {
@@ -133,10 +137,17 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print summary
-	if hostsUnreachable > 0 {
+	switch {
+	case hostsUnreachable > 0 && hostsSlow > 0:
+		fmt.Printf("Synced %d job(s) on %d host(s) (%d offline, %d slow)\n",
+			totalUpdated, hostsReached, hostsUnreachable, hostsSlow)
+	case hostsUnreachable > 0:
 		fmt.Printf("Synced %d job(s) on %d host(s) (%d host(s) offline)\n",
 			totalUpdated, hostsReached, hostsUnreachable)
-	} else {
+	case hostsSlow > 0:
+		fmt.Printf("Synced %d job(s) on %d host(s) (%d host(s) slow)\n",
+			totalUpdated, hostsReached, hostsSlow)
+	default:
 		fmt.Printf("Synced %d job(s) on %d host(s)\n", totalUpdated, hostsReached)
 	}
 
@@ -153,37 +164,38 @@ func syncHost(database *sql.DB, host string) (ops.HostSyncResult, error) {
 }
 
 // performSyncWithTimeout performs a sync with specified timeout for list/status commands
-// Returns true if sync completed, false if timed out along with the hosts that timed out
-func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose bool) (bool, []string) {
+// Returns (completed, unreachable, slow) — unreachable = hard connection failures,
+// slow = non-connection errors or deadline expirations.
+func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose bool) (bool, []string, []string) {
 	hosts, err := db.ListUniqueActiveHosts(database)
 	if err != nil || len(hosts) == 0 {
-		return true, nil
+		return true, nil, nil
 	}
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, hosts, timeout, verbose)
+	completed, unreachable, slow, warnings := performSyncWithTimeoutForHostsDetailed(database, hosts, timeout, verbose)
 	emitWarnings(warnings)
-	return completed, unreachable
+	return completed, unreachable, slow
 }
 
 // performFastSync performs a quick sync with fast timeout for list/status commands
-// Returns true if sync completed, false if timed out, along with hosts that timed out
-func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
+// Returns (completed, unreachable, slow).
+func performFastSync(database *sql.DB, verbose bool) (bool, []string, []string) {
 	return performSyncWithTimeout(database, FastSyncTimeout, verbose)
 }
 
 // performSyncWithTimeoutForHosts performs a sync with specified timeout for a host subset.
 // The sshTimeout is used for individual SSH calls; overall host timeout is FastSyncHostTimeout.
-// Returns true if sync completed, false if timed out, along with hosts that timed out.
-func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string) {
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, hosts, sshTimeout, verbose)
+// Returns (completed, unreachable, slow).
+func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string, []string) {
+	completed, unreachable, slow, warnings := performSyncWithTimeoutForHostsDetailed(database, hosts, sshTimeout, verbose)
 	emitWarnings(warnings)
-	return completed, unreachable
+	return completed, unreachable, slow
 }
 
-func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string, []string) {
+func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string, []string, []string) {
 	return performSyncWithTimeoutForHostsDetailedWithOptions(database, hosts, sshTimeout, verbose, false)
 }
 
-func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool, startQueueRunner bool) (bool, []string, []string) {
+func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool, startQueueRunner bool) (bool, []string, []string, []string) {
 	hostTimeout := syncHostWaitTimeout(startQueueRunner)
 	result := syncorch.SyncHosts(database, syncorch.SyncOptions{
 		Hosts:            hosts,
@@ -195,11 +207,11 @@ func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts [
 			return ensureQueueRunnerStarted(host)
 		},
 	})
-	return result.Completed, result.Unreachable, result.Warnings
+	return result.Completed, result.Unreachable, result.Slow, result.Warnings
 }
 
 // performFastSyncForHosts performs a quick sync with fast timeout for a host subset.
-func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bool, []string) {
+func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bool, []string, []string) {
 	return performSyncWithTimeoutForHosts(database, hosts, FastSyncTimeout, verbose)
 }
 
@@ -283,28 +295,41 @@ func reportQueueChangeSyncFailure(host string, err error) {
 }
 
 // buildStaleDataNote renders a warning that results are from cached data.
-func buildStaleDataNote(database *sql.DB, hosts []string) string {
-	names := uniqueHosts(hosts)
-	if len(names) == 0 {
-		return ""
-	}
-	sort.Strings(names)
+// unreachable lists hosts whose sync produced a hard connection failure (offline);
+// slow lists hosts whose sync hit a non-connection error or our deadline (alive but
+// did not respond in time).
+func buildStaleDataNote(database *sql.DB, unreachable, slow []string) string {
+	unreachableNames := uniqueHosts(unreachable)
+	// A host classified both ways in the same call is reported as unreachable only.
+	slowNames := slices.DeleteFunc(uniqueHosts(slow), func(h string) bool {
+		return slices.Contains(unreachableNames, h)
+	})
+	sort.Strings(unreachableNames)
+	sort.Strings(slowNames)
 
-	summaries := hostAgeSummaries(database, names)
-	if len(summaries) == 0 {
-		return ""
+	clause := func(names []string, tmpl string) string {
+		if len(names) == 0 {
+			return ""
+		}
+		summaries := hostAgeSummaries(database, names)
+		if len(summaries) == 0 {
+			return ""
+		}
+		subject := "hosts " + strings.Join(names, ", ")
+		if len(names) == 1 {
+			subject = "host " + names[0]
+		}
+		return fmt.Sprintf(tmpl, subject, strings.Join(summaries, ", "))
 	}
 
-	subject := "hosts " + strings.Join(names, ", ") + " are"
-	if len(names) == 1 {
-		subject = "host " + names[0] + " is"
+	var clauses []string
+	if c := clause(unreachableNames, "Could not reach %s (%s); showing cached data."); c != "" {
+		clauses = append(clauses, c)
 	}
-
-	return fmt.Sprintf(
-		"Because %s currently offline, these results are from cached data (%s). Try again later. Attempts to use ssh directly or inspect the local or remote filesystem won't reveal newer information.",
-		subject,
-		strings.Join(summaries, ", "),
-	)
+	if c := clause(slowNames, "Could not refresh data from %s in time (%s); showing cached data — the host may be reachable but slow."); c != "" {
+		clauses = append(clauses, c)
+	}
+	return strings.Join(clauses, " ")
 }
 
 func uniqueHosts(hosts []string) []string {
@@ -396,8 +421,7 @@ func deployAgentsToHosts(hosts []string) {
 // quickSyncJobs performs a bounded sync for a set of jobs before display
 // commands. It skips jobs in terminal states, separates on-prem vs rental jobs,
 // and syncs each type appropriately. Sync failures are silently ignored.
-// Returns unreachable on-prem hosts (caller may optionally warn).
-func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout time.Duration) []string {
+func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout time.Duration) {
 	hostsToSync := make(map[string]struct{})
 	needsRentalSync := false
 
@@ -413,13 +437,11 @@ func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout ti
 		}
 	}
 
-	var unreachable []string
 	if len(hostsToSync) > 0 {
 		hosts := mapKeys(hostsToSync)
-		_, unreachable = performSyncWithTimeoutForHosts(database, hosts, sshTimeout, false)
+		_, _, _ = performSyncWithTimeoutForHosts(database, hosts, sshTimeout, false)
 	}
 	if needsRentalSync {
 		syncRentalJobsStatusFunc(database, cloudTimeout)
 	}
-	return unreachable
 }

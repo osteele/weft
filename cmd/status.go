@@ -191,9 +191,9 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			}
 		} else if statusFast && statusSSHTimeout == 0 {
 			// Fast sync (2s timeout) - skip queue starting for speed
-			completed, unreachable := performFastSyncForHosts(database, hosts, false)
+			completed, unreachable, slow := performFastSyncForHosts(database, hosts, false)
 			if !completed {
-				if note := buildStaleDataNote(database, unreachable); note != "" {
+				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 					fmt.Fprintln(os.Stderr, note)
 				}
 			}
@@ -203,9 +203,9 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			if statusSSHTimeout > 0 {
 				syncTimeout = statusSSHTimeout
 			}
-			completed, unreachable := performSyncWithTimeoutForHosts(database, hosts, syncTimeout, false)
+			completed, unreachable, slow := performSyncWithTimeoutForHosts(database, hosts, syncTimeout, false)
 			if !completed {
-				if note := buildStaleDataNote(database, unreachable); note != "" {
+				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 					fmt.Fprintln(os.Stderr, note)
 				}
 			}

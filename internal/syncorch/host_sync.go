@@ -14,10 +14,14 @@ import (
 type HostSyncResult struct {
 	Updated     int
 	Reached     int
-	Unreachable []string
+	Unreachable []string // hosts that produced a hard connection failure (offline)
+	Slow        []string // hosts that produced a non-connection error or hit our deadline (alive but unresponsive within budget)
 	Warnings    []string
 	Completed   bool
 }
+
+// hostSyncFn is the per-host sync entry point. Overridden in tests.
+var hostSyncFn = syncHostWithTimeoutDetailed
 
 func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 	hosts := uniqueHosts(opts.Hosts)
@@ -60,7 +64,7 @@ func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 				err error
 			}, 1)
 			go func() {
-				res, err := syncHostWithTimeoutDetailed(database, host, sshTimeout, opts.StartQueueRunner, opts.EnsureQueueRunner)
+				res, err := hostSyncFn(database, host, sshTimeout, opts.StartQueueRunner, opts.EnsureQueueRunner)
 				done <- struct {
 					res ops.HostSyncResult
 					err error
@@ -73,9 +77,13 @@ func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 				defer mu.Unlock()
 				if out.err != nil {
 					result.Completed = false
-					result.Unreachable = append(result.Unreachable, host)
-					if opts.Verbose && !ssh.IsConnectionError(out.err.Error()) {
-						result.Warnings = append(result.Warnings, fmt.Sprintf("Warning: quick sync %s failed: %v", host, out.err))
+					if ssh.IsConnectionError(out.err.Error()) {
+						result.Unreachable = append(result.Unreachable, host)
+					} else {
+						result.Slow = append(result.Slow, host)
+						if opts.Verbose {
+							result.Warnings = append(result.Warnings, fmt.Sprintf("Warning: quick sync %s failed: %v", host, out.err))
+						}
 					}
 					return
 				}
@@ -85,7 +93,7 @@ func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 			case <-time.After(hostTimeout):
 				mu.Lock()
 				result.Completed = false
-				result.Unreachable = append(result.Unreachable, host)
+				result.Slow = append(result.Slow, host)
 				mu.Unlock()
 			}
 		}()

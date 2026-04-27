@@ -404,7 +404,7 @@ func syncWatchedJobHostsQuiet(database *sql.DB, jobIDs []int64) []string {
 		for h := range hosts {
 			hostList = append(hostList, h)
 		}
-		_, _, hostWarnings := performSyncWithTimeoutForHostsDetailed(database, hostList, FastSyncTimeout, false)
+		_, _, _, hostWarnings := performSyncWithTimeoutForHostsDetailed(database, hostList, FastSyncTimeout, false)
 		warnings = append(warnings, hostWarnings...)
 	}
 	if needsRentalSync {

@@ -258,7 +258,7 @@ func syncListData(database *sql.DB) []string {
 	})
 	warnings = append(warnings, result.Warnings...)
 	if !result.AllCompleted {
-		if note := buildStaleDataNote(database, result.HostsUnreachable); note != "" {
+		if note := buildStaleDataNote(database, result.HostsUnreachable, result.HostsSlow); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
