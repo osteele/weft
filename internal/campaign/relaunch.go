@@ -550,14 +550,24 @@ func recordNotReplacedReason(result *RelaunchResult, failedInstanceID int64, rea
 	if result == nil || failedInstanceID == 0 || reason == "" {
 		return
 	}
-	if existing, ok := result.NotReplacedReasons[failedInstanceID]; ok {
-		if existing == reason {
-			return
-		}
-		result.NotReplacedReasons[failedInstanceID] = "multiple reasons (" + existing + "; " + reason + ")"
+	existing, ok := result.NotReplacedReasons[failedInstanceID]
+	if !ok {
+		result.NotReplacedReasons[failedInstanceID] = reason
 		return
 	}
-	result.NotReplacedReasons[failedInstanceID] = reason
+	if existing == reason {
+		return
+	}
+	inner := existing
+	if strings.HasPrefix(inner, "multiple reasons (") && strings.HasSuffix(inner, ")") {
+		inner = strings.TrimSuffix(strings.TrimPrefix(inner, "multiple reasons ("), ")")
+	}
+	for _, part := range strings.Split(inner, "; ") {
+		if part == reason {
+			return
+		}
+	}
+	result.NotReplacedReasons[failedInstanceID] = "multiple reasons (" + inner + "; " + reason + ")"
 }
 
 // recordGroupReasons records reason for every job in the group: both in

@@ -7,6 +7,46 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+func TestRecordNotReplacedReason_DoesNotNestMultipleReasonsPrefix(t *testing.T) {
+	result := &RelaunchResult{NotReplacedReasons: map[int64]string{}}
+	recordNotReplacedReason(result, 1, "reason A")
+	recordNotReplacedReason(result, 1, "reason B")
+	recordNotReplacedReason(result, 1, "reason C")
+
+	got := result.NotReplacedReasons[1]
+	want := "multiple reasons (reason A; reason B; reason C)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestRecordNotReplacedReason_DedupesIdenticalReasons(t *testing.T) {
+	result := &RelaunchResult{NotReplacedReasons: map[int64]string{}}
+	recordNotReplacedReason(result, 1, "reason A")
+	recordNotReplacedReason(result, 1, "reason B")
+	recordNotReplacedReason(result, 1, "reason A")
+
+	got := result.NotReplacedReasons[1]
+	want := "multiple reasons (reason A; reason B)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestRecordNotReplacedReason_PreservesParensInReasonText(t *testing.T) {
+	// New "waiting for ... (running)" reasons end with ')'. Make sure we
+	// don't trim that when the existing entry isn't already wrapped.
+	result := &RelaunchResult{NotReplacedReasons: map[int64]string{}}
+	recordNotReplacedReason(result, 1, `waiting for "X" from wj1 (running)`)
+	recordNotReplacedReason(result, 1, "no offers")
+
+	got := result.NotReplacedReasons[1]
+	want := `multiple reasons (waiting for "X" from wj1 (running); no offers)`
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestExceedsRetryBudget_FirstRetry(t *testing.T) {
 	budget := RetryBudget{
 		FirstTimeLimit: 45 * time.Minute,
