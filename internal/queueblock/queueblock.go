@@ -79,7 +79,7 @@ func Apply(jobs []*db.Job, lookup Lookup) {
 			continue
 		}
 		job.QueueBlockedReason = ""
-		if job.EffectiveStatus() != db.StatusQueued {
+		if !isBlockable(job.EffectiveStatus()) {
 			continue
 		}
 		job.QueueBlockedReason = reasonForJob(job, lookup)
@@ -96,7 +96,7 @@ func Display(job *db.Job, lookup Lookup) DisplayState {
 	if reason == "" {
 		reason = reasonForJob(job, lookup)
 	}
-	if status == db.StatusQueued && reason != "" {
+	if isBlockable(status) && reason != "" {
 		return DisplayState{
 			Status:  "blocked",
 			Reason:  reason,
@@ -107,6 +107,14 @@ func Display(job *db.Job, lookup Lookup) DisplayState {
 		Status: status,
 		Reason: reason,
 	}
+}
+
+// isBlockable reports whether a job in this effective status can carry a
+// blocked-reason overlay. Both inventory-host queued jobs (StatusQueued with a
+// host) and unplaced rental jobs (StatusQueued or StatusPendingPlacement with
+// no host) qualify.
+func isBlockable(status string) bool {
+	return status == db.StatusQueued || status == db.StatusPendingPlacement
 }
 
 func reasonForJob(job *db.Job, lookup Lookup) string {

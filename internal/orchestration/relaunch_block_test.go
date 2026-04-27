@@ -106,6 +106,36 @@ func TestHydrateRelaunchBlockedReasons_IgnoresStalePriorQueueEpoch(t *testing.T)
 	}
 }
 
+func TestHydrateRelaunchBlockedReasons_SurfacesWaitingOnProducer(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python eval.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchSkippedWaitingOnProducer,
+		JobID:     jobID,
+		Detail:    `waiting for "output/model.pt" from wj1555 (running)`,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	jobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	HydrateRelaunchBlockedReasons(database, jobs)
+
+	if len(jobs) != 1 {
+		t.Fatalf("ListUnplacedJobs returned %d jobs, want 1", len(jobs))
+	}
+	want := `waiting for "output/model.pt" from wj1555 (running)`
+	if jobs[0].QueueBlockedReason != want {
+		t.Fatalf("QueueBlockedReason = %q, want %q", jobs[0].QueueBlockedReason, want)
+	}
+}
+
 func TestHydrateRelaunchBlockedReasons_IgnoresStaleOfferError(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "A100")

@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queueblock"
 )
@@ -51,4 +52,10 @@ func validatePinnedHostQueueGate(host, gpuClass string) error {
 
 func hydrateQueueBlockedReasons(jobs []*db.Job) {
 	queueblock.Apply(jobs, queueblock.Fetch(jobs, queueBlockedReasonTimeout))
+	database, err := db.OpenForReading()
+	if err != nil {
+		return
+	}
+	defer database.Close()
+	orchestration.HydrateUnplacedBlockedReasons(database, jobs)
 }

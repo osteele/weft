@@ -125,7 +125,7 @@ func TestSelectLaunchGroupsWithinHeadroom_PicksBestFitByJobsPerCost(t *testing.T
 		{JobIDs: []int64{4}, CostPerHourCents: 110},
 	}
 
-	accepted, rejected := selectLaunchGroupsWithinHeadroom(groups, 100)
+	accepted, rejected, used := selectLaunchGroupsWithinHeadroom(groups, 100)
 	if len(accepted) != 1 {
 		t.Fatalf("accepted groups = %d, want 1", len(accepted))
 	}
@@ -135,6 +135,9 @@ func TestSelectLaunchGroupsWithinHeadroom_PicksBestFitByJobsPerCost(t *testing.T
 	if len(rejected) != 2 {
 		t.Fatalf("rejected groups = %d, want 2", len(rejected))
 	}
+	if used != 50 {
+		t.Fatalf("used = %d, want 50", used)
+	}
 }
 
 func TestSelectLaunchGroupsWithinHeadroom_NoneFit(t *testing.T) {
@@ -143,12 +146,15 @@ func TestSelectLaunchGroupsWithinHeadroom_NoneFit(t *testing.T) {
 		{JobIDs: []int64{2}, CostPerHourCents: 200},
 	}
 
-	accepted, rejected := selectLaunchGroupsWithinHeadroom(groups, 100)
+	accepted, rejected, used := selectLaunchGroupsWithinHeadroom(groups, 100)
 	if len(accepted) != 0 {
 		t.Fatalf("accepted groups = %d, want 0", len(accepted))
 	}
 	if len(rejected) != 2 {
 		t.Fatalf("rejected groups = %d, want 2", len(rejected))
+	}
+	if used != 0 {
+		t.Fatalf("used = %d, want 0", used)
 	}
 }
 

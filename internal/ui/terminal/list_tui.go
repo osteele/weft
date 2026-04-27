@@ -1670,7 +1670,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if err != nil {
 			return listJobsLoadedMsg{jobs: jobs, err: err}
 		}
-		orchestration.HydrateRelaunchBlockedReasons(database, jobs)
+		orchestration.HydrateUnplacedBlockedReasons(database, jobs)
 		launchIDs := make([]int64, 0, len(jobs))
 		seen := make(map[int64]bool, len(jobs))
 		for _, job := range jobs {

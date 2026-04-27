@@ -8,7 +8,16 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queueblock"
 )
+
+// HydrateUnplacedBlockedReasons populates QueueBlockedReason on unplaced
+// jobs from both fresh relaunch lifecycle events and on-demand producer
+// state. Pairs the two existing hydration steps so callers only need one.
+func HydrateUnplacedBlockedReasons(database *sql.DB, jobs []*db.Job) {
+	HydrateRelaunchBlockedReasons(database, jobs)
+	queueblock.HydrateWaitingOnProducerReasons(database, jobs)
+}
 
 // relaunchOfferErrorFreshness bounds how long a relaunch.skipped.offer_error
 // event remains a visible block reason. Offer-error events come from transient

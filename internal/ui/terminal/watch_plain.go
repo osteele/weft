@@ -207,7 +207,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	if err != nil {
 		return watchSystemSnapshot{}, fmt.Errorf("list unplaced jobs: %w", err)
 	}
-	orchestration.HydrateRelaunchBlockedReasons(database, unplacedJobs)
+	orchestration.HydrateUnplacedBlockedReasons(database, unplacedJobs)
 
 	return watchSystemSnapshot{
 		Launches:        cloudInstances,

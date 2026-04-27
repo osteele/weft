@@ -120,7 +120,8 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			projectedRate := currentRate + plan.LaunchRateCentsPerHour
 			if projectedRate > runRateTarget {
 				headroom := max(0, runRateTarget-currentRate)
-				acceptedGroups, rejectedGroups := selectLaunchGroupsWithinHeadroom(plan.LaunchGroups, headroom)
+				acceptedGroups, rejectedGroups, usedHeadroom := selectLaunchGroupsWithinHeadroom(plan.LaunchGroups, headroom)
+				remainingHeadroom := max(0, headroom-usedHeadroom)
 				oplog.Log("auto_pilot.run_rate_subset",
 					oplog.WithDetailf(
 						"headroom=%s/hr accepted_groups=%d rejected_groups=%d accepted_rate=%s/hr rejected_rate=%s/hr",
@@ -135,7 +136,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 					for _, group := range rejectedGroups {
 						reason := fmt.Sprintf(
 							"run-rate headroom exhausted (%s/hr free, this group needs %s/hr)",
-							formatRateCents(headroom),
+							formatRateCents(remainingHeadroom),
 							formatRateCents(group.CostPerHourCents),
 						)
 						for _, jobID := range group.JobIDs {
@@ -375,9 +376,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}, nil
 }
 
-func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom int) ([]campaign.LaunchGroup, []campaign.LaunchGroup) {
+func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom int) ([]campaign.LaunchGroup, []campaign.LaunchGroup, int) {
 	if len(groups) == 0 || headroom <= 0 {
-		return nil, append([]campaign.LaunchGroup(nil), groups...)
+		return nil, append([]campaign.LaunchGroup(nil), groups...), 0
 	}
 	sorted := append([]campaign.LaunchGroup(nil), groups...)
 	sort.SliceStable(sorted, func(i, j int) bool {
@@ -408,7 +409,7 @@ func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom in
 		}
 		rejected = append(rejected, group)
 	}
-	return accepted, rejected
+	return accepted, rejected, used
 }
 
 func applyAcceptedLaunchGroups(plan *campaign.AutoPlacementPlan, groups []campaign.LaunchGroup, blockedReasons map[int64]string) {

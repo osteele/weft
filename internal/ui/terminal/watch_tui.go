@@ -208,7 +208,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	}
 
 	unplaced, _ := db.ListUnplacedJobs(database)
-	orchestration.HydrateRelaunchBlockedReasons(database, unplaced)
+	orchestration.HydrateUnplacedBlockedReasons(database, unplaced)
 	onPremJobs, _ := db.ListActiveOnPremJobs(database)
 	queueblock.Apply(onPremJobs, queueblock.Fetch(onPremJobs, 5*time.Second))
 
@@ -343,7 +343,7 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 
 	// Load unplaced jobs so Init auto-pilot can act on them immediately.
 	if unplaced, err := db.ListUnplacedJobs(database); err == nil {
-		orchestration.HydrateRelaunchBlockedReasons(database, unplaced)
+		orchestration.HydrateUnplacedBlockedReasons(database, unplaced)
 		model.unplacedJobs = filterInstanceModeUnplacedJobs(unplaced, projectFilter)
 	}
 
