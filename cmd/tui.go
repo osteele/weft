@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/monitor"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/web"
 	"github.com/spf13/cobra"
 )
@@ -84,8 +85,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// even without the coordinator daemon running.
 	mon.EnableRemediationWithLogger(cfg, logging.Discard())
 
-	// Suppress log output while the TUI is running to avoid corrupting the alternate screen.
-	restore := logging.Suppress()
+	// Suppress log output and capture stdout/stderr while the TUI runs to
+	// avoid corrupting the alternate screen.
+	outputOpt, restore := terminal.InstallTUIStdioCapture()
 	defer restore()
 	opts.Monitor = mon
 	defer mon.Stop()
@@ -100,7 +102,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		useMouse = tuiMouse
 	}
 
-	programOpts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithReportFocus()}
+	programOpts := []tea.ProgramOption{outputOpt, tea.WithAltScreen(), tea.WithReportFocus()}
 	if useMouse {
 		programOpts = append(programOpts, tea.WithMouseCellMotion())
 	}

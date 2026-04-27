@@ -12,7 +12,6 @@ import (
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/logging"
 )
 
 const campaignListSyncInterval = TerminalSyncInterval
@@ -175,6 +174,8 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.dbWatcher.Close()
 			}
 			return m, tea.Quit
+		case "ctrl+z":
+			return m, tea.Suspend
 		case "up", "k":
 			m.cursor = m.prevSelectable(m.cursor)
 		case "down", "j":
@@ -493,11 +494,11 @@ func (m campaignListModel) scheduleCampaignListSyncTick() tea.Cmd {
 func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 	router := newCampaignListRouterModel(database, campaigns)
 
-	restore := logging.Suppress()
-	defer restore()
+	outputOpt, restore := InstallTUIStdioCapture()
 
-	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithReportFocus())
+	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus())
 	finalModel, err := p.Run()
+	restore()
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}

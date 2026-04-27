@@ -66,6 +66,8 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.cancel()
 		return m, tea.Quit
+	case "ctrl+z":
+		return m, tea.Suspend
 	case "up", "k":
 		m.moveCursor(-1)
 		return m, nil
@@ -285,6 +287,8 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.cancel()
 		return m, tea.Quit
+	case "ctrl+z":
+		return m, tea.Suspend
 	case "up", "k":
 		m.moveCursor(-1)
 		m.adjustProjectOffset()

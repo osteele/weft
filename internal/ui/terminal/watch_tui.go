@@ -15,7 +15,6 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
@@ -724,11 +723,11 @@ func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estim
 		}
 	}
 
-	restore := logging.Suppress()
-	defer restore()
+	outputOpt, restore := InstallTUIStdioCapture()
 
-	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
+	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
+	restore()
 	if err != nil {
 		return instanceIDs, err
 	}

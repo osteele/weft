@@ -1791,6 +1791,9 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "esc", "ctrl+c":
 		return m, m.quitOrSwitchToWatch("Launch canceled.")
 
+	case "ctrl+z":
+		return m, tea.Suspend
+
 	case "up", "k":
 		if m.focusArea == focusJobs {
 			if m.cursor > 0 {

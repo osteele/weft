@@ -13,7 +13,6 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
-	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -46,8 +45,8 @@ type LaunchResult struct {
 func RunWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
 	router := newWatchRouterModel(database, cfg, "", autoMode)
 
-	restore := logging.Suppress()
-	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
+	outputOpt, restore := InstallTUIStdioCapture()
+	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
 	restore()
 
@@ -70,8 +69,8 @@ func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 	predCfg := buildPredictorConfig(cfg)
 	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, "", reconciling, fromWatch, inlineWatchEnabled)
 
-	restore := logging.Suppress()
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	outputOpt, restore := InstallTUIStdioCapture()
+	p := tea.NewProgram(model, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	restore()
 	if err != nil {
@@ -113,10 +112,10 @@ func RunCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string, autoMode bool) error {
 	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled, projectFilter, autoMode)
 
-	restore := logging.Suppress()
+	outputOpt, restore := InstallTUIStdioCapture()
 	defer restore()
 
-	finalModel, err := tea.NewProgram(router, tea.WithAltScreen(), tea.WithReportFocus()).Run()
+	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus()).Run()
 	if r, ok := finalModel.(watchRouterModel); ok {
 		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
 			w.syncWorker.Stop()

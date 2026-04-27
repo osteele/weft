@@ -23,7 +23,6 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
-	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
 )
@@ -191,10 +190,10 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	cfg, _ := config.Load()
 	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
 
-	restore := logging.Suppress()
+	outputOpt, restore := InstallTUIStdioCapture()
 	defer restore()
 
-	_, err := tea.NewProgram(router, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
+	_, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
 	if err != nil {
 		return fmt.Errorf("run list TUI: %w", err)
 	}
@@ -316,6 +315,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q", "esc":
 			m.shutdown()
 			return m, tea.Quit
+		case "ctrl+z":
+			return m, tea.Suspend
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -1040,6 +1041,9 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 	if m.autoRunRateInputActive {
 		return fmt.Sprintf("Run-rate target ($/hr): %s (Enter=save, Esc=cancel)", m.autoRunRateInputValue)
 	}
+	if line := formatAgentBuildStatus(); line != "" {
+		return line
+	}
 	unplaced := m.countUnplacedQueuedJobs()
 	target := formatAutoRunRateTarget(m.autoRunRateTargetCents)
 	if m.syncInProgress() {
@@ -1204,6 +1208,8 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		m.shutdown()
 		return m, tea.Quit
+	case "ctrl+z":
+		return m, tea.Suspend
 	case "up":
 		if m.cursor > 0 {
 			m.cursor--

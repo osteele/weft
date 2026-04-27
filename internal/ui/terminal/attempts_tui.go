@@ -166,6 +166,8 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q", "ctrl+c", "backspace":
 			return m, func() tea.Msg { return switchBackFromAttemptsMsg{} }
+		case "ctrl+z":
+			return m, tea.Suspend
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
