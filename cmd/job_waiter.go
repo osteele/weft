@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
@@ -23,7 +24,7 @@ func waitForQueuedJobCompletion(database *sql.DB, jobID int64, deferred bool) er
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
 	if deferred {
@@ -101,7 +102,7 @@ func waitUntilJobRunning(database *sql.DB, jobID int64, tracker *hostConnectionT
 			return nil, err
 		}
 		if job == nil {
-			return nil, fmt.Errorf("job %d not found", jobID)
+			return nil, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 		}
 
 		// Report status changes

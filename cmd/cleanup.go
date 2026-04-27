@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
@@ -110,7 +111,7 @@ func cleanupFinishedSessions(host string) (int, error) {
 			if jobID, err := strconv.ParseInt(sessionName[3:], 10, 64); err == nil {
 				job, err = db.GetJobByID(database, jobID)
 				if err != nil {
-					return 0, fmt.Errorf("get job %d: %w", jobID, err)
+					return 0, fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 				}
 			}
 		} else {

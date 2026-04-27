@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/ssh"
@@ -245,7 +246,7 @@ func (m Model) deleteHost(hostName string) tea.Cmd {
 		// Tombstone (delete) inactive jobs for this host
 		for _, jobID := range jobsToTombstone {
 			if err := db.DeleteJob(database, jobID); err != nil {
-				return hostDeletedMsg{hostName: hostName, err: fmt.Errorf("tombstone job %d: %w", jobID, err)}
+				return hostDeletedMsg{hostName: hostName, err: fmt.Errorf("tombstone job %s: %w", ids.FormatJobID(jobID), err)}
 			}
 		}
 

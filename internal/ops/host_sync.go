@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/prestage"
@@ -498,7 +499,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	}
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
-		failures = append(failures, fmt.Sprintf("job %d %s: %v", jobID, stage, err))
+		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
 	}
 	for _, job := range jobs {
 		ready, reason, err := cloudDepsReady(database, job)
@@ -640,16 +641,16 @@ func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {
 		}
 		upstream, err := db.GetJobByID(database, dep.JobID)
 		if err != nil {
-			return false, "", fmt.Errorf("lookup cloud dependency job %d: %w", dep.JobID, err)
+			return false, "", fmt.Errorf("lookup cloud dependency job %s: %w", ids.FormatJobID(dep.JobID), err)
 		}
 		if upstream == nil {
-			return false, fmt.Sprintf("dependency job %d not found", dep.JobID), nil
+			return false, fmt.Sprintf("dependency job %s not found", ids.FormatJobID(dep.JobID)), nil
 		}
 		if !db.IsTerminalStatus(upstream.Status) {
-			return false, fmt.Sprintf("dependency job %d not complete (%s)", dep.JobID, upstream.Status), nil
+			return false, fmt.Sprintf("dependency job %s not complete (%s)", ids.FormatJobID(dep.JobID), upstream.Status), nil
 		}
 		if !dep.AllowFailure && upstream.Status != db.StatusCompleted {
-			return false, fmt.Sprintf("dependency job %d did not succeed (%s)", dep.JobID, upstream.Status), nil
+			return false, fmt.Sprintf("dependency job %s did not succeed (%s)", ids.FormatJobID(dep.JobID), upstream.Status), nil
 		}
 	}
 	return true, "", nil
@@ -702,10 +703,10 @@ func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration,
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return fmt.Errorf("lookup producer job %d for %q: %w", parsed.Version, spec, err)
+			return fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)
 		}
 		if producer == nil {
-			return fmt.Errorf("producer job %d for %q not found", parsed.Version, spec)
+			return fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
 		}
 		data, err := fetchCloudNeedObject(r2Client, producer.ID, producer.LatestRunID, parsed.Path)
 		if err != nil {

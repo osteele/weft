@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuejob"
 )
@@ -86,7 +87,7 @@ func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
 	// Use EffectiveStatus to be consistent with the handler
 	if job.EffectiveStatus() != db.StatusQueued {
 		return func() tea.Msg {
-			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("job %d is %s, not queued", job.ID, job.EffectiveStatus())}
+			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("job %s is %s, not queued", ids.FormatJobID(job.ID), job.EffectiveStatus())}
 		}
 	}
 	database := m.database

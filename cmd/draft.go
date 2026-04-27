@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
@@ -37,14 +38,14 @@ func runJobDraft(cmd *cobra.Command, args []string) error {
 	for _, jobID := range jobIDs {
 		result, err := service.DraftJob(jobID, ops.TimeoutNormal)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		if result.Outcome.Message != "" {
 			fmt.Println(result.Outcome.Message)
 			continue
 		}
-		fmt.Printf("Job %d marked as draft\n", jobID)
+		fmt.Printf("Job %s marked as draft\n", ids.FormatJobID(jobID))
 	}
 
 	if len(errorsList) > 0 {

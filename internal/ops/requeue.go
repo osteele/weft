@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
@@ -36,7 +37,7 @@ func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, err
 		Success:  true,
 		Deferred: true,
 		JobID:    job.ID,
-		Message:  fmt.Sprintf("Job %d requeued locally; source sync + dispatch will run on next host sync", job.ID),
+		Message:  fmt.Sprintf("Job %s requeued locally; source sync + dispatch will run on next host sync", ids.FormatJobID(job.ID)),
 	}, nil
 }
 

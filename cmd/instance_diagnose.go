@@ -189,7 +189,7 @@ func buildTimeline(inst *db.Launch, jobs []*db.Job, timings map[int64]*db.JobPha
 		if t == nil {
 			continue
 		}
-		prefix := fmt.Sprintf("job %d", j.ID)
+		prefix := fmt.Sprintf("job %s", ids.FormatJobID(j.ID))
 		add(t.WrapperStart, prefix+": wrapper started")
 		add(t.SetupStart, prefix+": setup started")
 		add(t.SetupEnd, prefix+": setup ended")

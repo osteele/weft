@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
@@ -39,10 +40,10 @@ func ResolveSpecs(ctx context.Context, database *sql.DB, client *r2.Client, spec
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return nil, fmt.Errorf("lookup producer job %d for %q: %w", parsed.Version, spec, err)
+			return nil, fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)
 		}
 		if producer == nil {
-			return nil, fmt.Errorf("producer job %d for %q not found", parsed.Version, spec)
+			return nil, fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
 		}
 
 		key, err := resolveNeedR2Key(ctx, client, producer.ID, producer.LatestRunID, parsed.Path)

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -136,7 +137,7 @@ func (m Model) renderInputForm(background string) string {
 
 	var b strings.Builder
 	if m.editMode {
-		b.WriteString(fmt.Sprintf("Edit Job %d\n\n", m.editingJobID))
+		b.WriteString(fmt.Sprintf("Edit Job %s\n\n", ids.FormatJobID(m.editingJobID)))
 	} else {
 		b.WriteString("New Job\n\n")
 	}
@@ -659,7 +660,7 @@ func (m Model) renderLogsOnly(height int) string {
 		}
 	}
 
-	jobInfo := fmt.Sprintf("Job %d on %s", job.ID, job.TargetDisplay())
+	jobInfo := fmt.Sprintf("Job %s on %s", ids.FormatJobID(job.ID), job.TargetDisplay())
 	if m.logStale {
 		staleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render(" (cached - host offline)")
 	}
@@ -831,7 +832,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Underline(true)
 
 	// Header line with job ID and host (progress shown in Progress section)
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Job %d", job.ID)))
+	b.WriteString(headerStyle.Render(fmt.Sprintf("Job %s", ids.FormatJobID(job.ID))))
 	b.WriteString(dimStyle.Render(" on "))
 	b.WriteString(headerStyle.Render(job.TargetDisplay()))
 

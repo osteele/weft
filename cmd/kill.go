@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/orchestration"
@@ -45,13 +46,13 @@ func runKill(cmd *cobra.Command, args []string) error {
 
 		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutNormal)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 
 		message := result.Message
 		if message == "" {
-			message = fmt.Sprintf("Job %d updated", jobID)
+			message = fmt.Sprintf("Job %s updated", ids.FormatJobID(jobID))
 		}
 		fmt.Println(message)
 	}

@@ -232,7 +232,7 @@ func (m watchModel) autoPlaceUnplacedJobs() (tea.Cmd, string, map[int64]string, 
 	return func() tea.Msg {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil || job == nil {
-			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)}
 		}
 		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
 			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
@@ -486,10 +486,10 @@ func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
 	return func() tea.Msg {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return watchUnplaceDoneMsg{err: fmt.Errorf("get job %d: %w", jobID, err)}
+			return watchUnplaceDoneMsg{err: fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)}
 		}
 		if job == nil {
-			return watchUnplaceDoneMsg{err: fmt.Errorf("job %d not found", jobID)}
+			return watchUnplaceDoneMsg{err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
 		}
 		result, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
 		if err != nil {
@@ -497,7 +497,7 @@ func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
 		}
 		updatedJob, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return watchUnplaceDoneMsg{err: fmt.Errorf("reload job %d: %w", jobID, err)}
+			return watchUnplaceDoneMsg{err: fmt.Errorf("reload job %s: %w", ids.FormatJobID(jobID), err)}
 		}
 		return watchUnplaceDoneMsg{job: updatedJob, message: result.Message}
 	}
@@ -507,10 +507,10 @@ func requestWatchJobSubmit(ctx context.Context, database *sql.DB, r2Client *r2.C
 	return func() tea.Msg {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)}
 		}
 		if job == nil {
-			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("job %d not found", jobID)}
+			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
 		}
 		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
 			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
@@ -543,10 +543,10 @@ func requestWatchJobMarkProcessed(database *sql.DB, jobID int64) tea.Cmd {
 	return func() tea.Msg {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)}
 		}
 		if job == nil {
-			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
 		}
 		if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
 			return watchProcessDoneMsg{jobID: jobID, err: fmt.Errorf("mark processed: %w", err)}

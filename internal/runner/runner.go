@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -252,7 +253,7 @@ func (r *Runner) tryStartNextJob() {
 	// Load job data
 	job, err := ReadJobFile(r.queueDir, jobID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Job %d: cannot read job file: %v\n", jobID, err)
+		fmt.Fprintf(os.Stderr, "Job %s: cannot read job file: %v\n", ids.FormatJobID(jobID), err)
 		r.state.AddPending(jobID)
 		r.saveState()
 		return
@@ -352,7 +353,7 @@ func (r *Runner) tryStartNextJob() {
 		slog.Debug("job requeued", "component", "runner", "job_id", jobID)
 		r.state.AddPending(jobID)
 	} else if err != nil {
-		fmt.Fprintf(os.Stderr, "Job %d: start failed: %v\n", jobID, err)
+		fmt.Fprintf(os.Stderr, "Job %s: start failed: %v\n", ids.FormatJobID(jobID), err)
 	} else {
 		slog.Info("job started successfully", "component", "runner", "job_id", jobID)
 	}
@@ -365,13 +366,13 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	command := job.Cmd
 	if command == "" {
-		fmt.Printf("Job %d: no command found, skipping\n", jobID)
+		fmt.Printf("Job %s: no command found, skipping\n", ids.FormatJobID(jobID))
 		return nil
 	}
 
 	// Check if already completed or running
 	if JobCompleted(r.logDir, jobID) {
-		fmt.Printf("Job %d: already completed, skipping\n", jobID)
+		fmt.Printf("Job %s: already completed, skipping\n", ids.FormatJobID(jobID))
 		removeJobFile(r.queueDir, jobID)
 		return nil
 	}
@@ -380,11 +381,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	depResult := CheckDependencies(job.Deps, job.Needs, r.logDir)
 	switch depResult.Result {
 	case DepWaiting:
-		fmt.Printf("Job %d: waiting for dependencies\n", jobID)
+		fmt.Printf("Job %s: waiting for dependencies\n", ids.FormatJobID(jobID))
 		return errRequeue
 	case DepFailed:
 		oplog.LogJob("job.skipped", jobID, "", oplog.WithDetailf("dependency %s failed", depResult.FailedDep))
-		fmt.Printf("Job %d: skipped, dependency %s failed\n", jobID, depResult.FailedDep)
+		fmt.Printf("Job %s: skipped, dependency %s failed\n", ids.FormatJobID(jobID), depResult.FailedDep)
 		paths := NewJobPaths(r.logDir, jobID)
 		os.WriteFile(paths.Log, []byte(fmt.Sprintf("SKIPPED: dependency %s failed\n", depResult.FailedDep)), 0644)
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
@@ -415,7 +416,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 
 	oplog.LogJob(oplog.OpJobStart, jobID, "", oplog.WithDetailf("cmd=%s", command))
 	fmt.Printf("==========================================\n")
-	fmt.Printf("Starting job %d\n", jobID)
+	fmt.Printf("Starting job %s\n", ids.FormatJobID(jobID))
 	fmt.Printf("  Working dir: %s\n", job.Dir)
 	fmt.Printf("  Command: %s\n", command)
 	if job.Desc != "" {
@@ -600,12 +601,12 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		}
 		satisfiedPath := ArtifactSatisfiedFile(r.logDir, parsed.Path, version)
 		if err := os.WriteFile(satisfiedPath, []byte(fmt.Sprintf("%d\n", ei.ExitCode)), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Job %d: failed to write artifact satisfied file %s: %v\n", jobID, satisfiedPath, err)
+			fmt.Fprintf(os.Stderr, "Job %s: failed to write artifact satisfied file %s: %v\n", ids.FormatJobID(jobID), satisfiedPath, err)
 		}
 	}
 	if ei.ExitCode == 0 {
 		if err := RecordProducedArtifacts(jobID, rj.Data.Produces); err != nil {
-			fmt.Fprintf(os.Stderr, "Job %d: failed to write artifact manifest from --produces: %v\n", jobID, err)
+			fmt.Fprintf(os.Stderr, "Job %s: failed to write artifact manifest from --produces: %v\n", ids.FormatJobID(jobID), err)
 			WriteManifestErrorFile(paths, "post-exit: "+err.Error())
 		}
 	}
@@ -633,10 +634,10 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		if discovered, err := DiscoverOutputs(rj.Data.Dir, dirs); err == nil && len(discovered) > 0 {
 			outputFiles = discovered
 			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
-			fmt.Printf("Job %d: discovered %d output files\n", jobID, len(discovered))
+			fmt.Printf("Job %s: discovered %d output files\n", ids.FormatJobID(jobID), len(discovered))
 		}
 		oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("exit=0 duration=%ds", duration))
-		fmt.Printf("Job %d completed successfully\n", jobID)
+		fmt.Printf("Job %s completed successfully\n", ids.FormatJobID(jobID))
 	} else {
 		reason := ReadFailureReasonFile(paths.FailureReason)
 		detail := fmt.Sprintf("exit=%d duration=%ds reason=%s", ei.ExitCode, duration, reason)
@@ -644,7 +645,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			detail += fmt.Sprintf(" signal=%s", ei.SignalName())
 		}
 		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail(detail))
-		fmt.Printf("Job %d failed with exit code %d (%s)\n", jobID, ei.ExitCode, reason)
+		fmt.Printf("Job %s failed with exit code %d (%s)\n", ids.FormatJobID(jobID), ei.ExitCode, reason)
 	}
 
 	// Write rusage and completion record
@@ -733,7 +734,7 @@ func (r *Runner) refreshRunningJobs() {
 			if _, err := os.Stat(paths.Paused); err == nil {
 				continue // Intentionally paused
 			}
-			fmt.Printf("Job %d process %d is stopped (state T) - marking as failed\n", jobID, checkPID)
+			fmt.Printf("Job %s process %d is stopped (state T) - marking as failed\n", ids.FormatJobID(jobID), checkPID)
 			oplog.LogJob("job.stopped_detected", jobID, "", oplog.WithDetailf("pid=%d state=T", checkPID))
 
 			WriteKillReasonFile(paths, KillReasonStoppedDetected)
@@ -778,7 +779,7 @@ func (r *Runner) refreshRunningJobs() {
 		// Wrapper gone — kill orphaned process group
 		if hasPGID && CheckPIDAlive(pgid) {
 			WriteKillReasonFile(paths, KillReasonOrphan)
-			fmt.Printf("Killing orphaned process group %d for job %d\n", pgid, jobID)
+			fmt.Printf("Killing orphaned process group %d for job %s\n", pgid, ids.FormatJobID(jobID))
 			KillProcessGroup(pgid)
 			oplog.LogJob("job.orphan_killed", jobID, "", oplog.WithDetailf("pgid=%d", pgid))
 		}

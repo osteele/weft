@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuefile"
@@ -35,10 +36,10 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		return false, fmt.Errorf("fetch job: %w", err)
 	}
 	if freshJob == nil {
-		return false, fmt.Errorf("job %d not found", job.ID)
+		return false, fmt.Errorf("job %s not found", ids.FormatJobID(job.ID))
 	}
 	if freshJob.EffectiveStatus() != db.StatusQueued {
-		return false, fmt.Errorf("job %d is %s, not queued", job.ID, freshJob.EffectiveStatus())
+		return false, fmt.Errorf("job %s is %s, not queued", ids.FormatJobID(job.ID), freshJob.EffectiveStatus())
 	}
 
 	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting job immediately"))
@@ -132,7 +133,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, entry *queuefile.Entry) (bo
 	stdout, _, err := ssh.RunWithTimeout(job.Host, checkCmd, sshTimeout)
 	if err == nil && strings.TrimSpace(stdout) == "exists" {
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetailf("session %s already exists", tmuxSession))
-		return false, fmt.Errorf("job %d is already running (session %s exists)", job.ID, tmuxSession)
+		return false, fmt.Errorf("job %s is already running (session %s exists)", ids.FormatJobID(job.ID), tmuxSession)
 	}
 
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)

@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -174,7 +175,7 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 				updated++
 				mu.Unlock()
 				if verbose {
-					fmt.Printf("  cloud job %d: started\n", jobID)
+					fmt.Printf("  cloud job %s: started\n", ids.FormatJobID(jobID))
 				}
 			}(jobID)
 		}
@@ -200,10 +201,10 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 			go func(jobID int64) {
 				defer func() { <-sem; wg.Done() }()
 				if err := syncCloudLiveTimeseries(ctx, r2Client, database, jobID); err != nil && verbose {
-					fmt.Fprintf(os.Stderr, "Warning: cloud job %d live timeseries sync failed: %v\n", jobID, err)
+					fmt.Fprintf(os.Stderr, "Warning: cloud job %s live timeseries sync failed: %v\n", ids.FormatJobID(jobID), err)
 				}
 				if err := syncCloudLiveTelemetry(ctx, r2Client, database, jobID); err != nil && verbose {
-					fmt.Fprintf(os.Stderr, "Warning: cloud job %d live telemetry sync failed: %v\n", jobID, err)
+					fmt.Fprintf(os.Stderr, "Warning: cloud job %s live telemetry sync failed: %v\n", ids.FormatJobID(jobID), err)
 				}
 			}(jobID)
 		}
@@ -377,10 +378,10 @@ func syncOneCompletedJobMarker(
 
 	if haveResults {
 		if err := importCloudTimeseriesFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)), "single"); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %d final timeseries import failed: %v\n", jobID, err)
+			fmt.Fprintf(os.Stderr, "Warning: cloud job %s final timeseries import failed: %v\n", ids.FormatJobID(jobID), err)
 		}
 		if err := importCloudTelemetryFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID))); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %d final telemetry import failed: %v\n", jobID, err)
+			fmt.Fprintf(os.Stderr, "Warning: cloud job %s final telemetry import failed: %v\n", ids.FormatJobID(jobID), err)
 		}
 
 		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
@@ -400,7 +401,7 @@ func syncOneCompletedJobMarker(
 		if *exitCode != 0 {
 			statusLabel = db.StatusFailed
 		}
-		fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, statusLabel, *exitCode)
+		fmt.Printf("  cloud job %s: %s (exit %d)\n", ids.FormatJobID(jobID), statusLabel, *exitCode)
 	}
 
 	if source == "results" {

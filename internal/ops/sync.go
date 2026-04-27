@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hooks"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/opscore"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -272,7 +273,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		// Job completed
 		var exitCode int
 		if _, err := fmt.Sscanf(sfResult.Content, "%d", &exitCode); err != nil {
-			return SyncResult{HostContacted: true}, fmt.Errorf("parse exit code for job %d on %s from %q: %w", job.ID, job.Host, sfResult.Content, err)
+			return SyncResult{HostContacted: true}, fmt.Errorf("parse exit code for job %s on %s from %q: %w", ids.FormatJobID(job.ID), job.Host, sfResult.Content, err)
 		}
 		if err := RecordJobCompletion(database, job.ID, exitCode, sfResult.Mtime); err != nil {
 			return SyncResult{HostContacted: true}, err
@@ -477,7 +478,7 @@ func startQueuedJobNow(database *sql.DB, job *db.Job, timeout time.Duration) err
 
 	updated, err := db.GetJobByID(database, job.ID)
 	if err != nil || updated == nil {
-		return fmt.Errorf("refresh job %d: %w", job.ID, err)
+		return fmt.Errorf("refresh job %s: %w", ids.FormatJobID(job.ID), err)
 	}
 
 	if err := startJobFromRecord(updated, job.EnvVars, timeout); err != nil {
@@ -511,11 +512,11 @@ func UpdateTimesFromMetadata(database *sql.DB, job *db.Job, timeout time.Duratio
 		if startTimeStr, ok := metadata["start_time"]; ok {
 			startTime, parseErr := strconv.ParseInt(startTimeStr, 10, 64)
 			if parseErr != nil {
-				return 0, nil, fmt.Errorf("parse metadata start time for job %d: %w", job.ID, parseErr)
+				return 0, nil, fmt.Errorf("parse metadata start time for job %s: %w", ids.FormatJobID(job.ID), parseErr)
 			}
 			if startTime > 0 {
 				if dbErr := db.UpdateStartTime(database, job.ID, startTime); dbErr != nil {
-					return 0, nil, fmt.Errorf("update start time for job %d: %w", job.ID, dbErr)
+					return 0, nil, fmt.Errorf("update start time for job %s: %w", ids.FormatJobID(job.ID), dbErr)
 				}
 				job.StartTime = startTime
 			}

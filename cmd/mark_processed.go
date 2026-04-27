@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/spf13/cobra"
 )
 
@@ -59,10 +60,10 @@ func setProcessedTag(args []string, processed bool) error {
 	var errorsList []string
 	for _, jobID := range jobIDs {
 		if err := tagFn(database, jobID, db.ProcessedTag); err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
-		fmt.Printf("Job %d marked as %s\n", jobID, verb)
+		fmt.Printf("Job %s marked as %s\n", ids.FormatJobID(jobID), verb)
 	}
 
 	if len(errorsList) > 0 {

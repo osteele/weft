@@ -25,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -1375,7 +1376,7 @@ func LaunchInstance(
 		group.Jobs[i] = updatedJob
 		if err := db.SetJobCampaignIndex(database, job.ID, i); err != nil {
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, fmt.Errorf("set campaign_job_index for job %d: %w", job.ID, err)
+			return instanceID, fmt.Errorf("set campaign_job_index for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		claimedJobs = append(claimedJobs, group.Jobs[i])
 	}
@@ -1403,12 +1404,12 @@ func LaunchInstance(
 		agentJob, err := newCloudAgentJob(job, remoteDirForAgentJob(job, localToRemote))
 		if err != nil {
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, fmt.Errorf("build agent job payload for job %d: %w", job.ID, err)
+			return instanceID, fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, fmt.Errorf("resolve cloud needs for job %d: %w", job.ID, err)
+			return instanceID, fmt.Errorf("resolve cloud needs for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
@@ -65,7 +66,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			fmt.Println("These jobs may have died unexpectedly. Marking as dead...")
 			for _, job := range runningJobs {
 				if err := db.MarkDeadByID(database, job.ID); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to mark job %d as dead: %v\n", job.ID, err)
+					fmt.Fprintf(os.Stderr, "Warning: failed to mark job %s as dead: %v\n", ids.FormatJobID(job.ID), err)
 				}
 			}
 		}
@@ -83,7 +84,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			if jobID, err := strconv.ParseInt(sessionName[3:], 10, 64); err == nil {
 				job, err = db.GetJobByID(database, jobID)
 				if err != nil {
-					return fmt.Errorf("get job %d: %w", jobID, err)
+					return fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 				}
 			}
 		} else {
@@ -140,7 +141,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			// Update database
 			if job != nil {
 				if err := ops.RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
-					return fmt.Errorf("record completion for job %d: %w", job.ID, err)
+					return fmt.Errorf("record completion for job %s: %w", ids.FormatJobID(job.ID), err)
 				}
 			}
 		} else if hasChildren {
@@ -151,7 +152,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			// Mark as dead in database
 			if job != nil {
 				if err := db.MarkDeadByID(database, job.ID); err != nil {
-					return fmt.Errorf("mark job %d dead: %w", job.ID, err)
+					return fmt.Errorf("mark job %s dead: %w", ids.FormatJobID(job.ID), err)
 				}
 			}
 		}

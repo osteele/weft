@@ -69,7 +69,7 @@ func TestFormatPlainUpdate_JobStatusChange(t *testing.T) {
 	}
 
 	output := FormatPlainUpdate(prev, curr)
-	if !strings.Contains(output, "job 88 status=running") {
+	if !strings.Contains(output, "job wj88 status=running") {
 		t.Errorf("should contain job status change, got %q", output)
 	}
 	if !strings.Contains(output, "dir=alpha") {
@@ -764,7 +764,7 @@ func TestFormatPlainUpdate_ProgressChange(t *testing.T) {
 	curr := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
 
 	output := FormatPlainUpdate(prev, curr)
-	if !strings.Contains(output, "job 42 progress: 50%") {
+	if !strings.Contains(output, "job wj42 progress: 50%") {
 		t.Errorf("should contain progress update, got %q", output)
 	}
 }
@@ -853,7 +853,7 @@ func TestFormatPlainUpdate_AttemptDisplayStatusUsed(t *testing.T) {
 	}
 
 	output := FormatPlainUpdate(prev, curr)
-	if !strings.Contains(output, "job 88 status=orphaned") {
+	if !strings.Contains(output, "job wj88 status=orphaned") {
 		t.Errorf("should show attempt outcome instead of queued, got %q", output)
 	}
 }

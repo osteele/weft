@@ -740,9 +740,9 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	// Report job progress changes
 	if curr.JobProgress >= 0 && (curr.JobProgress != prev.JobProgress || curr.JobProgressID != prev.JobProgressID || curr.JobProgressPhase != prev.JobProgressPhase) {
 		if curr.JobProgressPhase > 1 {
-			lines = append(lines, fmt.Sprintf("instance %s: job %d progress: phase %d %d%%", instanceRef, curr.JobProgressID, curr.JobProgressPhase, curr.JobProgress))
+			lines = append(lines, fmt.Sprintf("instance %s: job %s progress: phase %d %d%%", instanceRef, ids.FormatJobID(curr.JobProgressID), curr.JobProgressPhase, curr.JobProgress))
 		} else {
-			lines = append(lines, fmt.Sprintf("instance %s: job %d progress: %d%%", instanceRef, curr.JobProgressID, curr.JobProgress))
+			lines = append(lines, fmt.Sprintf("instance %s: job %s progress: %d%%", instanceRef, ids.FormatJobID(curr.JobProgressID), curr.JobProgress))
 		}
 	}
 
@@ -769,7 +769,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 			for _, j := range curr.Jobs {
 				if j.Status == db.StatusFailed {
 					lines = append(lines, "")
-					lines = append(lines, fmt.Sprintf("  To resubmit job %d with updated sources:", j.ID))
+					lines = append(lines, fmt.Sprintf("  To resubmit job %s with updated sources:", ids.FormatJobID(j.ID)))
 					lines = append(lines, fmt.Sprintf("    weft instance submit %s %d", instanceRef, j.ID))
 					lines = append(lines, "  To resubmit with a modified command:")
 					lines = append(lines, fmt.Sprintf("    weft instance submit %s %d --command '...'", instanceRef, j.ID))
@@ -790,7 +790,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	for _, j := range curr.Jobs {
 		displayStatus := AttemptDisplayStatus(j, curr.JobAttemptOutcomes)
 		if prevJobStatus[j.ID] != displayStatus {
-			line := fmt.Sprintf("instance %s: job %d status=%s dir=%s", instanceRef, j.ID, displayStatus, j.DirectoryTailDisplay())
+			line := fmt.Sprintf("instance %s: job %s status=%s dir=%s", instanceRef, ids.FormatJobID(j.ID), displayStatus, j.DirectoryTailDisplay())
 			if j.ExitCode != nil {
 				line += fmt.Sprintf(" exit=%d", *j.ExitCode)
 			}

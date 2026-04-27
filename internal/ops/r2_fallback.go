@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -46,12 +47,12 @@ func syncJobStatusFromR2(database *sql.DB, job *db.Job) (SyncResult, error) {
 	completeKey := r2keys.JobComplete(job.ID)
 	data, err := r2Client.GetObject(ctx, completeKey)
 	if err != nil {
-		return SyncResult{}, fmt.Errorf("R2 .complete not found for job %d", job.ID)
+		return SyncResult{}, fmt.Errorf("R2 .complete not found for job %s", ids.FormatJobID(job.ID))
 	}
 
 	exitCode, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		return SyncResult{}, fmt.Errorf("parse R2 exit code for job %d: %w", job.ID, err)
+		return SyncResult{}, fmt.Errorf("parse R2 exit code for job %s: %w", ids.FormatJobID(job.ID), err)
 	}
 
 	// Try to read the completion record for end_time
@@ -70,7 +71,7 @@ func syncJobStatusFromR2(database *sql.DB, job *db.Job) (SyncResult, error) {
 	}
 
 	if err := RecordJobCompletion(database, job.ID, exitCode, endTime); err != nil {
-		return SyncResult{}, fmt.Errorf("record R2 completion for job %d: %w", job.ID, err)
+		return SyncResult{}, fmt.Errorf("record R2 completion for job %s: %w", ids.FormatJobID(job.ID), err)
 	}
 
 	return SyncResult{Updated: true, HostContacted: false}, nil

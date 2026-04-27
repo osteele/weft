@@ -36,7 +36,7 @@ func TestQueueJob_Success(t *testing.T) {
 	if result.Deferred {
 		t.Error("expected Deferred to be false")
 	}
-	if result.Message != "Job 1 added to queue" {
+	if result.Message != "Job wj1 added to queue" {
 		t.Errorf("unexpected message: %q", result.Message)
 	}
 

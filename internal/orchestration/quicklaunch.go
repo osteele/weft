@@ -99,13 +99,13 @@ func RunQuickLaunch(
 	launchJobID := minLaunchJobID(plan.LaunchJobIDs)
 	launchJob := byID[launchJobID]
 	if launchJob == nil {
-		return QuickLaunchResult{}, fmt.Errorf("launch job %d not found in current scope", launchJobID)
+		return QuickLaunchResult{}, fmt.Errorf("launch job %s not found in current scope", ids.FormatJobID(launchJobID))
 	}
 
 	emit(fmt.Sprintf("Preparing job #%d for new instance...", launchJobID))
 	if launchJob.TargetKind() != db.JobTargetUnplaced {
 		if _, err := ops.UnplaceQueuedJob(database, launchJob, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
-			return QuickLaunchResult{}, fmt.Errorf("prepare launch anchor job %d: %w", launchJob.ID, err)
+			return QuickLaunchResult{}, fmt.Errorf("prepare launch anchor job %s: %w", ids.FormatJobID(launchJob.ID), err)
 		}
 	}
 
@@ -342,10 +342,10 @@ func rebalanceQueuedJobsToLaunchedInstance(
 		}
 		refreshed, getErr := db.GetJobByID(database, job.ID)
 		if getErr != nil || refreshed == nil {
-			return moved, warning, fmt.Errorf("reload moved job %d: %w", job.ID, getErr)
+			return moved, warning, fmt.Errorf("reload moved job %s: %w", ids.FormatJobID(job.ID), getErr)
 		}
 		if submitErr := campaign.SubmitJobsToInstance(ctx, database, r2Client, targetInstanceID, []*db.Job{refreshed}); submitErr != nil {
-			return moved, warning, fmt.Errorf("submit moved job %d to instance %s: %w", job.ID, ids.FormatInstanceID(targetInstanceID), submitErr)
+			return moved, warning, fmt.Errorf("submit moved job %s to instance %s: %w", ids.FormatJobID(job.ID), ids.FormatInstanceID(targetInstanceID), submitErr)
 		}
 		moved++
 		state.QueuedByInstance[src]--

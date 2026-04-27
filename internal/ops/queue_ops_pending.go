@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -127,12 +128,12 @@ func applyQueuePriority(host string, jobID int64, timeout time.Duration) (bool, 
 		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			return false, fmt.Errorf("%w: %s", errQueueConnection, strings.TrimSpace(stderr))
 		}
-		return false, fmt.Errorf("check job %d in queue: %s", jobID, ssh.FriendlyError(host, stderr, err))
+		return false, fmt.Errorf("check job %s in queue: %s", ids.FormatJobID(jobID), ssh.FriendlyError(host, stderr, err))
 	}
 
 	result := strings.TrimSpace(stdout)
 	if result != "YES" {
-		return false, fmt.Errorf("job %d not found in queue", jobID)
+		return false, fmt.Errorf("job %s not found in queue", ids.FormatJobID(jobID))
 	}
 
 	frontCmd := fmt.Sprintf("jq -r '.pending[0] // \"\"' %s 2>/dev/null", stateFile)
@@ -187,7 +188,7 @@ func RequestQueueUpdate(database *sql.DB, job *db.Job, opts ExecuteOptions) (Res
 		return Result{}, fmt.Errorf("job is nil")
 	}
 	if job.EffectiveStatus() != db.StatusQueued {
-		return Result{}, fmt.Errorf("job %d (status: %s): %w", job.ID, job.EffectiveStatus(), ErrNotQueued)
+		return Result{}, fmt.Errorf("job %s (status: %s): %w", ids.FormatJobID(job.ID), job.EffectiveStatus(), ErrNotQueued)
 	}
 	if !job.UsesQueueRunner() {
 		return Result{}, fmt.Errorf("queue updates only supported for queue-runner jobs")
@@ -204,7 +205,7 @@ func RequestQueueUpdate(database *sql.DB, job *db.Job, opts ExecuteOptions) (Res
 				Success:  true,
 				Deferred: true,
 				JobID:    job.ID,
-				Message:  fmt.Sprintf("Job %d update pending (host unreachable)", job.ID),
+				Message:  fmt.Sprintf("Job %s update pending (host unreachable)", ids.FormatJobID(job.ID)),
 			}, nil
 		}
 		if delErr := db.DeletePendingOperation(database, job.ID, db.OpUpdateQueuedJob); delErr != nil {
@@ -219,7 +220,7 @@ func RequestQueueUpdate(database *sql.DB, job *db.Job, opts ExecuteOptions) (Res
 	return Result{
 		Success: true,
 		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d updated in queue", job.ID),
+		Message: fmt.Sprintf("Job %s updated in queue", ids.FormatJobID(job.ID)),
 	}, nil
 }
 
@@ -230,7 +231,7 @@ func RequestQueuePriority(database *sql.DB, job *db.Job, opts ExecuteOptions) (Q
 		return QueuePriorityResult{}, fmt.Errorf("job is nil")
 	}
 	if job.EffectiveStatus() != db.StatusQueued {
-		return QueuePriorityResult{}, fmt.Errorf("job %d (status: %s): %w", job.ID, job.EffectiveStatus(), ErrNotQueued)
+		return QueuePriorityResult{}, fmt.Errorf("job %s (status: %s): %w", ids.FormatJobID(job.ID), job.EffectiveStatus(), ErrNotQueued)
 	}
 	if !job.UsesQueueRunner() {
 		return QueuePriorityResult{}, fmt.Errorf("queue priority only supported for queue-runner jobs")

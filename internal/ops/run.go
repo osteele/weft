@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -45,7 +46,7 @@ func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result,
 				Success:  true,
 				Deferred: true,
 				JobID:    jobID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+				Message:  fmt.Sprintf("Host %s unreachable, job %s will start on next sync", params.Host, ids.FormatJobID(jobID)),
 			}, nil
 		}
 		return Result{}, err
@@ -68,7 +69,7 @@ func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result,
 				Success:  true,
 				Deferred: true,
 				JobID:    jobID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+				Message:  fmt.Sprintf("Host %s unreachable, job %s will start on next sync", params.Host, ids.FormatJobID(jobID)),
 			}, nil
 		}
 		return Result{}, err
@@ -77,6 +78,6 @@ func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result,
 	return Result{
 		Success: true,
 		JobID:   jobID,
-		Message: fmt.Sprintf("Job %d started", jobID),
+		Message: fmt.Sprintf("Job %s started", ids.FormatJobID(jobID)),
 	}, nil
 }

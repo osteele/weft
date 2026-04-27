@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
@@ -43,22 +44,22 @@ func runPause(cmd *cobra.Command, args []string) error {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("pause"), oplog.WithJobID(jobID))
 
 		if isCloud, err := isCloudJob(service.Database(), jobID); err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		} else if isCloud {
-			errors = append(errors, fmt.Sprintf("job %d: pause is not supported for rental jobs", jobID))
+			errors = append(errors, fmt.Sprintf("job %s: pause is not supported for rental jobs", ids.FormatJobID(jobID)))
 			continue
 		}
 
 		result, err := service.PauseJob(jobID, ops.TimeoutNormal)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 
 		message := result.Outcome.Message
 		if message == "" {
-			message = fmt.Sprintf("Job %d paused", jobID)
+			message = fmt.Sprintf("Job %s paused", ids.FormatJobID(jobID))
 		}
 		fmt.Println(message)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -19,7 +20,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d already draft", job.ID),
+			Message: fmt.Sprintf("Job %s already draft", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
@@ -36,7 +37,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d marked as draft", job.ID),
+			Message: fmt.Sprintf("Job %s marked as draft", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
@@ -49,7 +50,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		return Result{}, fmt.Errorf("reload job: %w", err)
 	}
 	if refreshed == nil {
-		return Result{}, fmt.Errorf("job %d not found after marking draft", job.ID)
+		return Result{}, fmt.Errorf("job %s not found after marking draft", ids.FormatJobID(job.ID))
 	}
 
 	syncResult, err := SyncDraftJob(database, refreshed, SyncOptions{Timeout: opts.Timeout})
@@ -59,7 +60,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 				Success:  true,
 				Deferred: true,
 				JobID:    job.ID,
-				Message:  fmt.Sprintf("Job %d draft pending (host unreachable)", job.ID),
+				Message:  fmt.Sprintf("Job %s draft pending (host unreachable)", ids.FormatJobID(job.ID)),
 			}, nil
 		}
 		return Result{}, err
@@ -70,13 +71,13 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 			Success:  true,
 			Deferred: true,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %d draft pending (remote state uncertain)", job.ID),
+			Message:  fmt.Sprintf("Job %s draft pending (remote state uncertain)", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
 	return Result{
 		Success: true,
 		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d marked as draft", job.ID),
+		Message: fmt.Sprintf("Job %s marked as draft", ids.FormatJobID(job.ID)),
 	}, nil
 }

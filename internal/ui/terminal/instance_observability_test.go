@@ -70,7 +70,7 @@ func TestFormatObservedActivityFallsBackToDBRunningJob(t *testing.T) {
 		},
 	}, time.Now())
 
-	if activity.Phase != "running job 88 (observed from DB)" {
+	if activity.Phase != "running job wj88 (observed from DB)" {
 		t.Fatalf("phase = %q, want DB-running fallback", activity.Phase)
 	}
 	if activity.Bootstrap != "" {

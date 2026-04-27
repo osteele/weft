@@ -1,12 +1,12 @@
 package orchestration
 
 import (
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func TestResolveEligibleJobs_FromHostSuppressesStatusWarnings(t *testing.T) {
@@ -79,7 +79,7 @@ func TestResolveEligibleJobs_ExplicitJobIDsWarnOnSkippedStatus(t *testing.T) {
 	if len(warnings) != 1 {
 		t.Fatalf("warnings len = %d, want 1 (warnings=%v)", len(warnings), warnings)
 	}
-	if !strings.Contains(warnings[0], "job "+strconv.FormatInt(completedJobID, 10)+" has status completed, skipping") {
+	if !strings.Contains(warnings[0], "job "+ids.FormatJobID(completedJobID)+" has status completed, skipping") {
 		t.Fatalf("warning = %q, want completed-status skip warning", warnings[0])
 	}
 }

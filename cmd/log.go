@@ -208,7 +208,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 			if i > 0 {
 				fmt.Println()
 			}
-			fmt.Printf("Job %d:\n", jobID)
+			fmt.Printf("Job %s:\n", ids.FormatJobID(jobID))
 		}
 		if err := runLogForJob(cmd, database, jobID); err != nil {
 			errorsList = append(errorsList, err.Error())
@@ -232,7 +232,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
 	// For terminal jobs, default to showing the full log unless the user
@@ -251,12 +251,12 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 	// Queued jobs on inventory hosts haven't run yet.
 	if job.Status == db.StatusQueued && job.Host == "" {
-		return fmt.Errorf("job %d is queued; no log available yet", job.ID)
+		return fmt.Errorf("job %s is queued; no log available yet", ids.FormatJobID(job.ID))
 	}
 
 	follow := logFollow
 	if follow && status.IsTerminal(job.Status) {
-		fmt.Fprintf(os.Stderr, "Job %d already completed; showing log output without following.\n", jobID)
+		fmt.Fprintf(os.Stderr, "Job %s already completed; showing log output without following.\n", ids.FormatJobID(jobID))
 		follow = false
 	}
 
@@ -310,7 +310,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		if r2Err := tryLogFromR2(cmd, job); r2Err == nil {
 			return nil
 		}
-		return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)
+		return fmt.Errorf("log file not found for job %s on %s", ids.FormatJobID(jobID), job.Host)
 	}
 
 	// Build the remote command based on flags
@@ -350,7 +350,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {
 			if cached, cacheErr := logcache.Read(jobID); cacheErr == nil {
-				fmt.Fprintf(os.Stderr, "Warning: host unreachable; using cached log for job %d.\n", jobID)
+				fmt.Fprintf(os.Stderr, "Warning: host unreachable; using cached log for job %s.\n", ids.FormatJobID(jobID))
 				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
 				fmt.Print(processCarriageReturns(output))
 				return nil
@@ -362,15 +362,15 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		}
 		// Provide user-friendly error messages without leaking internal paths
 		if strings.Contains(stderr, "No such file") || strings.Contains(stderr, "cannot open") {
-			return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)
+			return fmt.Errorf("log file not found for job %s on %s", ids.FormatJobID(jobID), job.Host)
 		}
 		if strings.Contains(stderr, "Permission denied") {
-			return fmt.Errorf("permission denied reading log for job %d on %s", jobID, job.Host)
+			return fmt.Errorf("permission denied reading log for job %s on %s", ids.FormatJobID(jobID), job.Host)
 		}
 		if stderr != "" {
-			return fmt.Errorf("could not read log for job %d on %s: %s", jobID, job.Host, stderr)
+			return fmt.Errorf("could not read log for job %s on %s: %s", ids.FormatJobID(jobID), job.Host, stderr)
 		}
-		return fmt.Errorf("could not read log for job %d on %s: %w", jobID, job.Host, err)
+		return fmt.Errorf("could not read log for job %s on %s: %w", ids.FormatJobID(jobID), job.Host, err)
 	}
 
 	// Cache partial output for terminal jobs (not marked complete since it's filtered)
@@ -413,10 +413,10 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 	if job.Status == db.StatusQueued {
 		attempts, err := db.GetLaunchAttempts(database, job.ID)
 		if err != nil {
-			return fmt.Errorf("lookup cloud attempts for job %d: %w", job.ID, err)
+			return fmt.Errorf("lookup cloud attempts for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		if len(attempts) == 0 {
-			return fmt.Errorf("job %d is queued; no log available yet", job.ID)
+			return fmt.Errorf("job %s is queued; no log available yet", ids.FormatJobID(job.ID))
 		}
 	}
 
@@ -647,7 +647,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 
 		var manifest cloudlog.Manifest
 		if err := json.Unmarshal(manifestData, &manifest); err != nil {
-			return nil, fmt.Errorf("parse live log manifest for job %d: %w", jobID, err)
+			return nil, fmt.Errorf("parse live log manifest for job %s: %w", ids.FormatJobID(jobID), err)
 		}
 		parts := cloudlog.SelectParts(manifest, from, to, lines)
 		if len(parts) == 0 {
@@ -673,7 +673,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 		}, nil
 	}
 
-	return nil, fmt.Errorf("log not found in R2 for job %d (the job may not have produced output, or the instance was terminated before log upload)", jobID)
+	return nil, fmt.Errorf("log not found in R2 for job %s (the job may not have produced output, or the instance was terminated before log upload)", ids.FormatJobID(jobID))
 }
 
 func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
@@ -702,7 +702,7 @@ func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
 			job = refreshed
 		}
 		if job != nil && status.IsTerminal(job.Status) {
-			return fmt.Errorf("log file not found for job %d on %s", job.ID, job.Host)
+			return fmt.Errorf("log file not found for job %s on %s", ids.FormatJobID(job.ID), job.Host)
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -970,7 +970,7 @@ func tryLogFromR2(cmd *cobra.Command, job *db.Job) error {
 	if err := fetchAndDisplayLogFromR2(cmd, job, 0); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log from R2 for job %d.\n", job.ID)
+	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log from R2 for job %s.\n", ids.FormatJobID(job.ID))
 	return nil
 }
 

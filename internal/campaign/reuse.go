@@ -382,9 +382,9 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
-				return fmt.Errorf("claim job %d for instance %s: %w (rollback: %v)", job.ID, ids.FormatInstanceID(instanceID), err, rollbackErr)
+				return fmt.Errorf("claim job %s for instance %s: %w (rollback: %v)", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err, rollbackErr)
 			}
-			return fmt.Errorf("claim job %d for instance %s: %w", job.ID, ids.FormatInstanceID(instanceID), err)
+			return fmt.Errorf("claim job %s for instance %s: %w", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err)
 		}
 		claimedJobs = append(claimedJobs, claimedJob)
 		claimedJobIDs = append(claimedJobIDs, claimedJob.ID)
@@ -401,9 +401,9 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
-				return fmt.Errorf("upload source for job %d: %w (rollback: %v)", job.ID, err, rollbackErr)
+				return fmt.Errorf("upload source for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
 			}
-			return fmt.Errorf("upload source for job %d: %w", job.ID, err)
+			return fmt.Errorf("upload source for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 
 		// Compute remote working directory under the synced project root.
@@ -413,17 +413,17 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
-				return fmt.Errorf("build agent job payload for job %d: %w (rollback: %v)", job.ID, err, rollbackErr)
+				return fmt.Errorf("build agent job payload for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
 			}
-			return fmt.Errorf("build agent job payload for job %d: %w", job.ID, err)
+			return fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Client, job, instanceID)
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
-				return fmt.Errorf("resolve cloud needs for job %d: %w (rollback: %v)", job.ID, err, rollbackErr)
+				return fmt.Errorf("resolve cloud needs for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
 			}
-			return fmt.Errorf("resolve cloud needs for job %d: %w", job.ID, err)
+			return fmt.Errorf("resolve cloud needs for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter
@@ -479,7 +479,7 @@ func resetClaimedJobsToUnplaced(database *sql.DB, jobIDs []int64) error {
 	var rollbackErr error
 	for _, jobID := range jobIDs {
 		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("reset job %d to unplaced: %w", jobID, err))
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("reset job %s to unplaced: %w", ids.FormatJobID(jobID), err))
 		}
 	}
 	return rollbackErr

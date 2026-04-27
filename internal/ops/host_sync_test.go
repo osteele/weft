@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	srcsync "github.com/osteele/weft/internal/sync"
 )
@@ -124,7 +125,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 	if ensured != 0 {
 		t.Errorf("expected 0 jobs ensured (sync failed), got %d", ensured)
 	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("job %d source sync failed", jobID)) {
+	if !strings.Contains(err.Error(), fmt.Sprintf("job %s source sync failed", ids.FormatJobID(jobID))) {
 		t.Fatalf("error = %q, want job-specific source sync failure", err)
 	}
 
@@ -161,7 +162,7 @@ func TestSyncHost_SurfacesQueueDispatchFailure(t *testing.T) {
 	if result.QueueDispatchError == "" {
 		t.Fatal("expected QueueDispatchError to be populated")
 	}
-	if !strings.Contains(result.QueueDispatchError, fmt.Sprintf("job %d source sync failed", jobID)) {
+	if !strings.Contains(result.QueueDispatchError, fmt.Sprintf("job %s source sync failed", ids.FormatJobID(jobID))) {
 		t.Fatalf("QueueDispatchError = %q, want job-specific source sync failure", result.QueueDispatchError)
 	}
 	if result.Updated != 0 {

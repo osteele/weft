@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 )
 
@@ -41,7 +42,7 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 	}
 
 	if runningJob := observedRunningJob(update); runningJob != nil {
-		activity.Phase = fmt.Sprintf("running job %d (observed from DB)", runningJob.ID)
+		activity.Phase = fmt.Sprintf("running job %s (observed from DB)", ids.FormatJobID(runningJob.ID))
 		return activity
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -62,10 +63,10 @@ func ClassifyNeedsForLaunch(
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("lookup producer job %d for %q: %w", parsed.Version, spec, err)
+			return nil, nil, nil, fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)
 		}
 		if producer == nil {
-			return nil, nil, nil, fmt.Errorf("producer job %d for %q not found", parsed.Version, spec)
+			return nil, nil, nil, fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
 		}
 
 		// On-prem producer: handled by submit-time host pinning.

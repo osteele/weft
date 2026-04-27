@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -30,7 +31,7 @@ func RequestStatus(database *sql.DB, job *db.Job, targetStatus string, mode Time
 			Success:  true,
 			Deferred: true,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %d %s pending (host unreachable)", job.ID, targetStatus),
+			Message:  fmt.Sprintf("Job %s %s pending (host unreachable)", ids.FormatJobID(job.ID), targetStatus),
 		}, nil
 	}
 
@@ -39,14 +40,14 @@ func RequestStatus(database *sql.DB, job *db.Job, targetStatus string, mode Time
 			Success:  true,
 			Deferred: true,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %d %s pending (remote state uncertain)", job.ID, targetStatus),
+			Message:  fmt.Sprintf("Job %s %s pending (remote state uncertain)", ids.FormatJobID(job.ID), targetStatus),
 		}, nil
 	}
 
 	return Result{
 		Success: true,
 		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d now %s", job.ID, outcome.currentStatus),
+		Message: fmt.Sprintf("Job %s now %s", ids.FormatJobID(job.ID), outcome.currentStatus),
 	}, nil
 }
 
@@ -84,7 +85,7 @@ func requestJobStatus(database *sql.DB, job *db.Job, targetStatus string, opts E
 		return outcome, fmt.Errorf("reload job: %w", err)
 	}
 	if refreshed == nil {
-		return outcome, fmt.Errorf("job %d not found after setting pending status", job.ID)
+		return outcome, fmt.Errorf("job %s not found after setting pending status", ids.FormatJobID(job.ID))
 	}
 	job = refreshed
 	outcome.currentStatus = job.Status

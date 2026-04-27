@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
@@ -182,7 +183,7 @@ func (p *RelayProcessor) handleSubmit(ctx context.Context, req *coordinatorrelay
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("mirrored job %d not found", req.JobID)
+		return fmt.Errorf("mirrored job %s not found", ids.FormatJobID(req.JobID))
 	}
 
 	host := job.Host
@@ -241,7 +242,7 @@ func (p *RelayProcessor) handleUpdate(ctx context.Context, req *coordinatorrelay
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found on coordinator", req.JobID)
+		return fmt.Errorf("job %s not found on coordinator", ids.FormatJobID(req.JobID))
 	}
 	if req.Update.Description != nil {
 		if err := db.UpdateJobDescription(p.db, job.ID, *req.Update.Description); err != nil {
@@ -352,7 +353,7 @@ func (p *RelayProcessor) handlePriority(req *coordinatorrelay.Request, ack *coor
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found on coordinator", req.JobID)
+		return fmt.Errorf("job %s not found on coordinator", ids.FormatJobID(req.JobID))
 	}
 	result, err := ops.RequestQueuePriority(p.db, job, ops.DefaultOptions())
 	if err != nil {
@@ -373,7 +374,7 @@ func (p *RelayProcessor) handleCancel(req *coordinatorrelay.Request, ack *coordi
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found on coordinator", req.JobID)
+		return fmt.Errorf("job %s not found on coordinator", ids.FormatJobID(req.JobID))
 	}
 	result, err := ops.CancelQueuedJob(p.db, job, ops.DefaultOptions())
 	if err != nil {
@@ -390,7 +391,7 @@ func (p *RelayProcessor) handleStatus(req *coordinatorrelay.Request, ack *coordi
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found on coordinator", req.JobID)
+		return fmt.Errorf("job %s not found on coordinator", ids.FormatJobID(req.JobID))
 	}
 	var result ops.Result
 	switch targetStatus {
@@ -413,7 +414,7 @@ func (p *RelayProcessor) handleRequeue(ctx context.Context, req *coordinatorrela
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found on coordinator", req.JobID)
+		return fmt.Errorf("job %s not found on coordinator", ids.FormatJobID(req.JobID))
 	}
 	if req.Source != nil {
 		if err := coordinatorrelay.HydrateSources(ctx, p.r2Client, job.Host, req.Source); err != nil {

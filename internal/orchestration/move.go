@@ -135,17 +135,17 @@ func ExecuteOption(
 ) (string, error) {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
-		return "", fmt.Errorf("get job %d: %w", jobID, err)
+		return "", fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 	}
 	if job == nil {
-		return "", fmt.Errorf("job %d not found", jobID)
+		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	if _, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
 		return "", fmt.Errorf("unplace: %w", err)
 	}
 	job, err = db.GetJobByID(database, jobID)
 	if err != nil {
-		return "", fmt.Errorf("reload job %d: %w", jobID, err)
+		return "", fmt.Errorf("reload job %s: %w", ids.FormatJobID(jobID), err)
 	}
 
 	if !opt.IsNew {
@@ -159,7 +159,7 @@ func ExecuteOption(
 		return "", fmt.Errorf("new-instance option missing offer")
 	}
 	if err := db.SetPendingStatus(database, job.ID, db.StatusPendingPlacement); err != nil {
-		return "", fmt.Errorf("set job %d pending_placement: %w", job.ID, err)
+		return "", fmt.Errorf("set job %s pending_placement: %w", ids.FormatJobID(job.ID), err)
 	}
 	markedJobIDs, err := markJobsPendingPlacement(database, []int64{job.ID})
 	if err != nil {
@@ -245,15 +245,15 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		logPhase("load_job", jobLoadStarted, "", err)
-		return Result{}, fmt.Errorf("get job %d: %w", jobID, err)
+		return Result{}, fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 	}
 	if job == nil {
 		logPhase("load_job", jobLoadStarted, "", fmt.Errorf("job not found"))
-		return Result{}, fmt.Errorf("job %d not found", jobID)
+		return Result{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	logPhase("load_job", jobLoadStarted, fmt.Sprintf("status=%s host=%s", job.EffectiveStatus(), job.Host), nil)
 	if job.EffectiveStatus() != db.StatusQueued {
-		return Result{}, fmt.Errorf("can only move queued jobs (job %d has status: %s)", jobID, job.EffectiveStatus())
+		return Result{}, fmt.Errorf("can only move queued jobs (job %s has status: %s)", ids.FormatJobID(jobID), job.EffectiveStatus())
 	}
 
 	configStarted := time.Now()
@@ -403,13 +403,13 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	for _, job := range jobs {
 		if err := unplaceIfNeeded(database, job); err != nil {
 			if cb.OnWarning != nil {
-				cb.OnWarning(fmt.Sprintf("Warning: unplace job %d failed: %v", job.ID, err))
+				cb.OnWarning(fmt.Sprintf("Warning: unplace job %s failed: %v", ids.FormatJobID(job.ID), err))
 			}
 			continue
 		}
 		if err := db.SetPendingStatus(database, job.ID, db.StatusPendingPlacement); err != nil {
 			if cb.OnWarning != nil {
-				cb.OnWarning(fmt.Sprintf("Warning: set pending placement for job %d failed: %v", job.ID, err))
+				cb.OnWarning(fmt.Sprintf("Warning: set pending placement for job %s failed: %v", ids.FormatJobID(job.ID), err))
 			}
 			continue
 		}
@@ -666,20 +666,20 @@ func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []strin
 		}
 		latest, err := db.GetJobByID(database, job.ID)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("Warning: reload job %d failed: %v", job.ID, err))
+			warnings = append(warnings, fmt.Sprintf("Warning: reload job %s failed: %v", ids.FormatJobID(job.ID), err))
 			continue
 		}
 		if latest == nil {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %d no longer exists, skipping", job.ID))
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s no longer exists, skipping", ids.FormatJobID(job.ID)))
 			continue
 		}
 		status := latest.EffectiveStatus()
 		if status != db.StatusQueued && status != db.StatusPendingPlacement {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %d has status %s after unplace, skipping", job.ID, status))
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s has status %s after unplace, skipping", ids.FormatJobID(job.ID), status))
 			continue
 		}
 		if latest.HasAssignedHost() {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %d is still placed after unplace, skipping", job.ID))
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s is still placed after unplace, skipping", ids.FormatJobID(job.ID)))
 			continue
 		}
 		launchable = append(launchable, latest)

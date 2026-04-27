@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -21,7 +22,7 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		return "", fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return "", fmt.Errorf("job %d not found", jobID)
+		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	if !job.IsLaunchJob() {
 		return "", nil
@@ -35,7 +36,7 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Job %d %s (was awaiting rental instance)", jobID, targetStatus), nil
+		return fmt.Sprintf("Job %s %s (was awaiting rental instance)", ids.FormatJobID(jobID), targetStatus), nil
 	}
 
 	var inst *db.Launch
@@ -50,7 +51,7 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		if inst != nil {
 			suffix = " (cloud instance already terminated)"
 		}
-		return fmt.Sprintf("Job %d %s%s", jobID, targetStatus, suffix), nil
+		return fmt.Sprintf("Job %s %s%s", ids.FormatJobID(jobID), targetStatus, suffix), nil
 	}
 
 	if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
@@ -70,7 +71,7 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	if err := r2Client.PutObject(context.Background(), killKey, strings.NewReader(fmt.Sprintf("%d", jobID)), "text/plain"); err != nil {
 		return "", fmt.Errorf("write kill signal to R2: %w", err)
 	}
-	return fmt.Sprintf("Job %d %s on rental instance (kill signal sent)", jobID, targetStatus), nil
+	return fmt.Sprintf("Job %s %s on rental instance (kill signal sent)", ids.FormatJobID(jobID), targetStatus), nil
 }
 
 // KillOrCancelJob routes cloud jobs through cloud control and non-cloud jobs through ops.
@@ -86,7 +87,7 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 		return ops.Result{}, fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return ops.Result{}, fmt.Errorf("job %d not found", jobID)
+		return ops.Result{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
 	opts := ops.OptionsForMode(mode)
@@ -96,6 +97,6 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		return ops.KillJob(database, job, opts)
 	default:
-		return ops.Result{}, fmt.Errorf("job %d is %s; nothing to kill", job.ID, job.EffectiveStatus())
+		return ops.Result{}, fmt.Errorf("job %s is %s; nothing to kill", ids.FormatJobID(job.ID), job.EffectiveStatus())
 	}
 }

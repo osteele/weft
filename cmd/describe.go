@@ -118,7 +118,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	// Check if trying to update command/directory/gpu/allotments on non-queued job
 	effectiveStatus := job.EffectiveStatus()
 	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasProvider) && effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
+		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued jobs (job %s has status: %s)", ids.FormatJobID(jobID), effectiveStatus)
 	}
 
 	// Track what was updated
@@ -303,9 +303,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 				return err
 			}
 			if len(updates) == 0 {
-				fmt.Printf("No changes made to job %d\n", jobID)
+				fmt.Printf("No changes made to job %s\n", ids.FormatJobID(jobID))
 			} else {
-				fmt.Printf("Updated job %d via coordinator relay:\n", jobID)
+				fmt.Printf("Updated job %s via coordinator relay:\n", ids.FormatJobID(jobID))
 				for _, u := range updates {
 					fmt.Printf("  %s\n", u)
 				}
@@ -329,9 +329,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(updates) == 0 {
-		fmt.Printf("No changes made to job %d\n", jobID)
+		fmt.Printf("No changes made to job %s\n", ids.FormatJobID(jobID))
 	} else {
-		fmt.Printf("Updated job %d:\n", jobID)
+		fmt.Printf("Updated job %s:\n", ids.FormatJobID(jobID))
 		for _, u := range updates {
 			fmt.Printf("  %s\n", u)
 		}

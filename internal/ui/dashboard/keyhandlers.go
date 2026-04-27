@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
@@ -406,17 +407,17 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=cancel"))
 			return m, tea.Batch(m.setFlash("Cancelling queued job...", false), m.cancelQueuedJob(job))
 		case db.StatusCompleted:
-			return m, m.setFlash(fmt.Sprintf("Job %d already completed", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %s already completed", ids.FormatJobID(job.ID)), true)
 		case db.StatusDead:
-			return m, m.setFlash(fmt.Sprintf("Job %d already failed to start", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %s already failed to start", ids.FormatJobID(job.ID)), true)
 		case db.StatusFailed:
-			return m, m.setFlash(fmt.Sprintf("Job %d already crashed", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %s already crashed", ids.FormatJobID(job.ID)), true)
 		case db.StatusKilled:
-			return m, m.setFlash(fmt.Sprintf("Job %d already killed", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %s already killed", ids.FormatJobID(job.ID)), true)
 		case db.StatusCanceled:
-			return m, m.setFlash(fmt.Sprintf("Job %d already canceled", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %s already canceled", ids.FormatJobID(job.ID)), true)
 		default:
-			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, status), true)
+			return m, m.setFlash(fmt.Sprintf("Can't kill job %s (status: %s)", ids.FormatJobID(job.ID), status), true)
 		}
 
 	case key.Matches(msg, keys.Pause):
@@ -433,9 +434,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=p action=pause"))
 			return m, tea.Batch(m.setFlash("Pausing job...", false), m.pauseJob(job))
 		case db.StatusPaused:
-			return m, m.setFlash(fmt.Sprintf("Job %d already paused (press g to resume)", job.ID), false)
+			return m, m.setFlash(fmt.Sprintf("Job %s already paused (press g to resume)", ids.FormatJobID(job.ID)), false)
 		default:
-			return m, m.setFlash(fmt.Sprintf("Can't pause job %d (status: %s)", job.ID, status), true)
+			return m, m.setFlash(fmt.Sprintf("Can't pause job %s (status: %s)", ids.FormatJobID(job.ID), status), true)
 		}
 
 	case key.Matches(msg, keys.Draft):
@@ -466,9 +467,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash("Restart already in progress...", false)
 		}
 		m.restarting = true
-		m.restartingJobName = fmt.Sprintf("job %d", job.ID)
+		m.restartingJobName = fmt.Sprintf("job %s", ids.FormatJobID(job.ID))
 		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=r action=restart"))
-		return m, tea.Batch(m.setFlash(fmt.Sprintf("Restarting job %d...", job.ID), false), m.restartJob(job))
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Restarting job %s...", ids.FormatJobID(job.ID)), false), m.restartJob(job))
 
 	case key.Matches(msg, keys.Retry):
 		if m.viewMode != ViewModeJobs {
@@ -479,7 +480,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash("No job selected", true)
 		}
 		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=y action=retry"))
-		return m, tea.Batch(m.setFlash(fmt.Sprintf("Retrying job %d...", job.ID), false), m.retryJob(job))
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Retrying job %s...", ids.FormatJobID(job.ID)), false), m.retryJob(job))
 
 	case key.Matches(msg, keys.Remove):
 		if m.viewMode == ViewModeHosts {
@@ -498,7 +499,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Refuse to remove active jobs - suggest killing first
 		status := job.EffectiveStatus()
 		if status == db.StatusRunning || status == db.StatusQueued || status == db.StatusStarting || status == db.StatusPaused {
-			return m, m.setFlash(fmt.Sprintf("Job %d is %s. Kill it first (k)", job.ID, status), true)
+			return m, m.setFlash(fmt.Sprintf("Job %s is %s. Kill it first (k)", ids.FormatJobID(job.ID), status), true)
 		}
 		return m, tea.Batch(m.setFlash("Removing job...", false), m.removeJob(job))
 
@@ -574,23 +575,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Check for pending start first (idempotent behavior)
 		if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning {
-			return m, m.setFlash(fmt.Sprintf("Job %d is already starting (pending)", job.ID), false)
+			return m, m.setFlash(fmt.Sprintf("Job %s is already starting (pending)", ids.FormatJobID(job.ID)), false)
 		}
 		// Use effective status so pending state is respected
 		switch job.EffectiveStatus() {
 		case db.StatusPaused:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=resume"))
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Resuming job %d...", job.ID), false), m.resumeJob(job))
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Resuming job %s...", ids.FormatJobID(job.ID)), false), m.resumeJob(job))
 		case db.StatusQueued:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=start_now"))
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %s now...", ids.FormatJobID(job.ID)), false), m.startQueuedJobNow(job))
 		case db.StatusDraft:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=run_draft"))
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Running draft job %d...", job.ID), false), m.runDraftJob(job))
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Running draft job %s...", ids.FormatJobID(job.ID)), false), m.runDraftJob(job))
 		case db.StatusRunning:
-			return m, m.setFlash(fmt.Sprintf("Job %d is already running", job.ID), false)
+			return m, m.setFlash(fmt.Sprintf("Job %s is already running", ids.FormatJobID(job.ID)), false)
 		default:
-			return m, m.setFlash(fmt.Sprintf("Can only start queued or draft jobs (job %d is %s)", job.ID, job.EffectiveStatus()), true)
+			return m, m.setFlash(fmt.Sprintf("Can only start queued or draft jobs (job %s is %s)", ids.FormatJobID(job.ID), job.EffectiveStatus()), true)
 		}
 
 	case key.Matches(msg, keys.MoveToFront):
@@ -600,7 +601,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		job := m.getTargetJob()
 		if job != nil && job.EffectiveStatus() == db.StatusQueued {
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=G action=move_to_front"))
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Moving job %d to front...", job.ID), false), m.moveJobToFront(job))
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Moving job %s to front...", ids.FormatJobID(job.ID)), false), m.moveJobToFront(job))
 		}
 		return m, m.setFlash("Can only move queued jobs to front", true)
 
@@ -624,7 +625,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Batch(
-			m.setFlash(fmt.Sprintf("Generating description for job %d...", job.ID), false),
+			m.setFlash(fmt.Sprintf("Generating description for job %s...", ids.FormatJobID(job.ID)), false),
 			m.regenerateDescription(job),
 		)
 

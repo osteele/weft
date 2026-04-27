@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/plan"
@@ -98,11 +99,11 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 			oplog.Log(oplog.OpCLICommand, oplog.WithDetail("plan kill"), oplog.WithJobID(id))
 			result, err := killJobWithService(coreSvc, id, ops.TimeoutNormal)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to kill job %d: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to kill job %s: %v\n", ids.FormatJobID(id), err)
 			} else {
 				message := result.Outcome.Message
 				if message == "" {
-					message = fmt.Sprintf("Killed job %d", id)
+					message = fmt.Sprintf("Killed job %s", ids.FormatJobID(id))
 				}
 				fmt.Println(message)
 			}
@@ -364,7 +365,7 @@ func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[
 		Description: job.Description,
 		EnvVars:     job.EnvVars,
 		OnPrepared: func(info StartJobPreparedInfo) {
-			fmt.Printf("Starting %s as job %d on %s\n", label, info.JobID, job.Host)
+			fmt.Printf("Starting %s as job %s on %s\n", label, ids.FormatJobID(info.JobID), job.Host)
 		},
 	})
 	if err != nil {
@@ -532,7 +533,7 @@ func printPlanJobStatusLine(job scheduledPlanJob, record *db.Job) {
 	if record == nil {
 		return
 	}
-	fmt.Printf("Plan job %s (job %d on %s): %s\n", job.Label, job.JobID, job.Host, record.Status)
+	fmt.Printf("Plan job %s (job %s on %s): %s\n", job.Label, ids.FormatJobID(job.JobID), job.Host, record.Status)
 }
 
 func printWatchSummary(statusByID map[int64]*db.Job, jobs []scheduledPlanJob) {
@@ -544,7 +545,7 @@ func printWatchSummary(statusByID map[int64]*db.Job, jobs []scheduledPlanJob) {
 		if record != nil {
 			status = classifyJobStatus(record)
 		}
-		fmt.Printf("  %s (job %d on %s): %s\n", job.Label, job.JobID, job.Host, status)
+		fmt.Printf("  %s (job %s on %s): %s\n", job.Label, ids.FormatJobID(job.JobID), job.Host, status)
 	}
 }
 

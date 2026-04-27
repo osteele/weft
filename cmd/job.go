@@ -638,16 +638,16 @@ func runJobUnplace(cmd *cobra.Command, args []string) error {
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		if job == nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
 		result, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		fmt.Println(result.Message)
@@ -683,31 +683,31 @@ func runJobStartNowWithParser(cmd *cobra.Command, args []string, parser func([]s
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: get job: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: get job: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		if job == nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
 		effectiveStatus := job.EffectiveStatus()
 		if effectiveStatus != db.StatusQueued {
-			errorsList = append(errorsList, fmt.Sprintf("job %d is not queued (status: %s)", jobID, effectiveStatus))
+			errorsList = append(errorsList, fmt.Sprintf("job %s is not queued (status: %s)", ids.FormatJobID(jobID), effectiveStatus))
 			continue
 		}
 
 		deferred, err := queuejob.StartNow(database, job)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 
 		if deferred {
-			fmt.Printf("Job %d saved locally. %s is offline — it will start on the next sync.\n", jobID, job.Host)
+			fmt.Printf("Job %s saved locally. %s is offline — it will start on the next sync.\n", ids.FormatJobID(jobID), job.Host)
 			continue
 		}
 
-		fmt.Printf("Job %d started immediately on %s\n", jobID, job.Host)
+		fmt.Printf("Job %s started immediately on %s\n", ids.FormatJobID(jobID), job.Host)
 	}
 
 	if len(errorsList) > 0 {
@@ -776,11 +776,11 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d: get job: %v", jobID, err))
+			errorsList = append(errorsList, fmt.Sprintf("job %s: get job: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 		if job == nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
 		hydrateQueueBlockedReasons([]*db.Job{job})

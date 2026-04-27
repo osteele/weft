@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 type jobWaitResult struct {
@@ -44,7 +45,7 @@ func streamCommandUntilJobDone(database *sql.DB, jobID int64, cmd *exec.Cmd) err
 			tailErrCh = nil
 			if !tailStopped && jobCh != nil {
 				tailClosedEarly = true
-				fmt.Fprintf(os.Stderr, "\nStopped streaming logs (connection closed). Waiting for job %d to complete...\n", jobID)
+				fmt.Fprintf(os.Stderr, "\nStopped streaming logs (connection closed). Waiting for job %s to complete...\n", ids.FormatJobID(jobID))
 			}
 		case res := <-jobCh:
 			finalJob = res.job

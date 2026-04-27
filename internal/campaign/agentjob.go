@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudneeds"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/workdir"
@@ -40,11 +41,11 @@ func newCloudAgentJob(job *db.Job, remoteDir string) (cloud.AgentJob, error) {
 		return cloud.AgentJob{}, fmt.Errorf("job is nil")
 	}
 	if job.LatestRunID == nil || *job.LatestRunID <= 0 {
-		return cloud.AgentJob{}, fmt.Errorf("job %d missing non-zero latest_run_id", job.ID)
+		return cloud.AgentJob{}, fmt.Errorf("job %s missing non-zero latest_run_id", ids.FormatJobID(job.ID))
 	}
 	agentJob := newAgentJob(job, remoteDir)
 	if agentJob.RunID <= 0 {
-		return cloud.AgentJob{}, fmt.Errorf("job %d produced invalid run_id=%d", job.ID, agentJob.RunID)
+		return cloud.AgentJob{}, fmt.Errorf("job %s produced invalid run_id=%d", ids.FormatJobID(job.ID), agentJob.RunID)
 	}
 	return agentJob, nil
 }
@@ -83,7 +84,7 @@ func resolveCloudNeedsForJob(
 	}
 	cloudNeeds, cloudAfter, onPrem, err := ClassifyNeedsForLaunch(ctx, database, client, job, targetInstanceID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("classify needs for job %d: %w", job.ID, err)
+		return nil, nil, fmt.Errorf("classify needs for job %s: %w", ids.FormatJobID(job.ID), err)
 	}
 	if err := assertNeedsClassified(job, cloudNeeds, cloudAfter, onPrem); err != nil {
 		return nil, nil, err
@@ -131,10 +132,10 @@ func assertNeedsClassified(
 			continue
 		}
 		return fmt.Errorf(
-			"--needs %q for job %d was not classified (cloudNeeds=%d, cloudAfter=%d, onPrem=%d): "+
+			"--needs %q for job %s was not classified (cloudNeeds=%d, cloudAfter=%d, onPrem=%d): "+
 				"this indicates dropped dependency metadata; "+
 				"refusing to launch because the user command would crash on missing input",
-			spec, job.ID, len(cloudNeeds), len(cloudAfter), len(onPremSpecs),
+			spec, ids.FormatJobID(job.ID), len(cloudNeeds), len(cloudAfter), len(onPremSpecs),
 		)
 	}
 	return nil

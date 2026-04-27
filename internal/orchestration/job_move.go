@@ -74,13 +74,13 @@ func ResolveEligibleJobs(
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return nil, fmt.Errorf("get job %d: %w", jobID, err)
+			return nil, fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 		}
 		if job != nil {
 			jobs = append(jobs, job)
 			continue
 		}
-		callbacks.warningf("Warning: job %d not found, skipping", jobID)
+		callbacks.warningf("Warning: job %s not found, skipping", ids.FormatJobID(jobID))
 	}
 
 	var eligible []*db.Job
@@ -88,13 +88,13 @@ func ResolveEligibleJobs(
 		status := job.EffectiveStatus()
 		if status != db.StatusQueued && status != db.StatusPendingPlacement {
 			if explicitJobList {
-				callbacks.warningf("Warning: job %d has status %s, skipping", job.ID, status)
+				callbacks.warningf("Warning: job %s has status %s, skipping", ids.FormatJobID(job.ID), status)
 			}
 			continue
 		}
 		if unplacedOnly && job.TargetKind() != db.JobTargetUnplaced {
 			if explicitJobList {
-				callbacks.warningf("Warning: job %d is already placed, skipping", job.ID)
+				callbacks.warningf("Warning: job %s is already placed, skipping", ids.FormatJobID(job.ID))
 			}
 			continue
 		}
@@ -119,15 +119,15 @@ func MoveJobsToHost(database *sql.DB, jobs []*db.Job, host string, callbacks Job
 	moved := 0
 	for _, job := range jobs {
 		if err := unplaceIfNeededForMove(database, job); err != nil {
-			callbacks.warningf("Warning: unplace job %d failed: %v", job.ID, err)
+			callbacks.warningf("Warning: unplace job %s failed: %v", ids.FormatJobID(job.ID), err)
 			continue
 		}
 		if err := db.UpdateJobHost(database, job.ID, host); err != nil {
-			callbacks.warningf("Warning: move job %d failed: %v", job.ID, err)
+			callbacks.warningf("Warning: move job %s failed: %v", ids.FormatJobID(job.ID), err)
 			continue
 		}
 		if err := db.SetPendingStatus(database, job.ID, db.StatusQueued); err != nil {
-			callbacks.warningf("Warning: set pending status for job %d: %v", job.ID, err)
+			callbacks.warningf("Warning: set pending status for job %s: %v", ids.FormatJobID(job.ID), err)
 		}
 		moved++
 		callbacks.moved(job.ID, host)
@@ -151,7 +151,7 @@ func MoveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64, call
 	var ready []*db.Job
 	for _, job := range jobs {
 		if err := unplaceIfNeededForMove(database, job); err != nil {
-			callbacks.warningf("Warning: unplace job %d failed: %v", job.ID, err)
+			callbacks.warningf("Warning: unplace job %s failed: %v", ids.FormatJobID(job.ID), err)
 			continue
 		}
 		ready = append(ready, job)

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/session"
@@ -287,16 +288,16 @@ func ensureSameHostDependency(database *sql.DB, depID int64, host string) error 
 	}
 	job, err := db.GetJobByID(database, depID)
 	if err != nil {
-		return fmt.Errorf("lookup dependency job %d: %w", depID, err)
+		return fmt.Errorf("lookup dependency job %s: %w", ids.FormatJobID(depID), err)
 	}
 	if job == nil {
-		return fmt.Errorf("dependency job %d not found", depID)
+		return fmt.Errorf("dependency job %s not found", ids.FormatJobID(depID))
 	}
 	if job.IsRentalJob() || strings.TrimSpace(job.Host) == "" {
 		return nil
 	}
 	if job.Host != host {
-		return fmt.Errorf("dependency job %d runs on host %s, target on %s: %w", depID, job.Host, host, errCrossHostDep)
+		return fmt.Errorf("dependency job %s runs on host %s, target on %s: %w", ids.FormatJobID(depID), job.Host, host, errCrossHostDep)
 	}
 	return nil
 }
@@ -307,17 +308,17 @@ func resolveDependencyForTarget(database *sql.DB, depID int64, host string, allo
 	}
 	job, err := db.GetJobByID(database, depID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("lookup dependency job %d: %w", depID, err)
+		return nil, nil, fmt.Errorf("lookup dependency job %s: %w", ids.FormatJobID(depID), err)
 	}
 	if job == nil {
-		return nil, nil, fmt.Errorf("dependency job %d not found", depID)
+		return nil, nil, fmt.Errorf("dependency job %s not found", ids.FormatJobID(depID))
 	}
 	if job.IsRentalJob() || strings.TrimSpace(job.Host) == "" {
 		ref := &db.JobDependencyRef{JobID: depID, AllowFailure: allowFailure}
 		return nil, ref, nil
 	}
 	if strings.TrimSpace(host) != "" && job.Host != host {
-		return nil, nil, fmt.Errorf("dependency job %d runs on host %s, target on %s: %w", depID, job.Host, host, errCrossHostDep)
+		return nil, nil, fmt.Errorf("dependency job %s runs on host %s, target on %s: %w", ids.FormatJobID(depID), job.Host, host, errCrossHostDep)
 	}
 	return &queueDependency{JobID: depID, AllowFailure: allowFailure}, nil, nil
 }
@@ -372,10 +373,10 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 
 		job, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return "", nil, fmt.Errorf("lookup artifact producer job %d: %w", parsed.Version, err)
+			return "", nil, fmt.Errorf("lookup artifact producer job %s: %w", ids.FormatJobID(parsed.Version), err)
 		}
 		if job == nil {
-			return "", nil, fmt.Errorf("artifact producer job %d not found", parsed.Version)
+			return "", nil, fmt.Errorf("artifact producer job %s not found", ids.FormatJobID(parsed.Version))
 		}
 
 		if err := validateNeedsPathAgainstProduces(spec, parsed.Path, job); err != nil {
@@ -420,7 +421,7 @@ func validateNeedsPathAgainstProduces(spec, needsPath string, producer *db.Job) 
 		}
 	}
 	return fmt.Errorf(
-		"--needs %q: producer job %d declares --produces %v, which does not include %q (typo? add the path to --produces, or correct the --needs path)",
-		spec, producer.ID, producer.Produces, needsPath,
+		"--needs %q: producer job %s declares --produces %v, which does not include %q (typo? add the path to --produces, or correct the --needs path)",
+		spec, ids.FormatJobID(producer.ID), producer.Produces, needsPath,
 	)
 }

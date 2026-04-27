@@ -1423,10 +1423,10 @@ func (m listTUIModel) requestGroupedMoveOptions(requestID int64, jobID int64) te
 	return func() tea.Msg {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)}
 		}
 		if job == nil {
-			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
 		}
 
 		cfg := appCfg

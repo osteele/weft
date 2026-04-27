@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func markJobsPendingPlacement(database *sql.DB, jobIDs []int64) ([]int64, error) {
@@ -13,12 +14,12 @@ func markJobsPendingPlacement(database *sql.DB, jobIDs []int64) ([]int64, error)
 		return nil, nil
 	}
 
-	ids := uniqueSortedJobIDs(jobIDs)
-	marked := make([]int64, 0, len(ids))
-	for _, jobID := range ids {
+	jobIDList := uniqueSortedJobIDs(jobIDs)
+	marked := make([]int64, 0, len(jobIDList))
+	for _, jobID := range jobIDList {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return marked, fmt.Errorf("get job %d: %w", jobID, err)
+			return marked, fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 		}
 		if job == nil {
 			continue
@@ -28,7 +29,7 @@ func markJobsPendingPlacement(database *sql.DB, jobIDs []int64) ([]int64, error)
 			continue
 		}
 		if err := db.SetPendingStatus(database, jobID, db.StatusPendingPlacement); err != nil {
-			return marked, fmt.Errorf("set job %d pending_placement: %w", jobID, err)
+			return marked, fmt.Errorf("set job %s pending_placement: %w", ids.FormatJobID(jobID), err)
 		}
 		marked = append(marked, jobID)
 	}
@@ -43,13 +44,13 @@ func restorePendingPlacementToQueued(database *sql.DB, jobIDs []int64) error {
 	for _, jobID := range uniqueSortedJobIDs(jobIDs) {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
-			return fmt.Errorf("get job %d: %w", jobID, err)
+			return fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 		}
 		if job == nil || job.EffectiveStatus() != db.StatusPendingPlacement {
 			continue
 		}
 		if err := db.SetPendingStatus(database, jobID, db.StatusQueued); err != nil {
-			return fmt.Errorf("set job %d queued: %w", jobID, err)
+			return fmt.Errorf("set job %s queued: %w", ids.FormatJobID(jobID), err)
 		}
 	}
 	return nil

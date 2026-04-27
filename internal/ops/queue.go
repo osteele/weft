@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/ssh"
@@ -279,7 +280,7 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 				Success:  true,
 				Deferred: true,
 				JobID:    job.ID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", job.Host, job.ID),
+				Message:  fmt.Sprintf("Host %s unreachable, job %s will start on next sync", job.Host, ids.FormatJobID(job.ID)),
 			}, nil
 		}
 		return Result{}, err
@@ -298,7 +299,7 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 				Success:  true,
 				Deferred: true,
 				JobID:    job.ID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", job.Host, job.ID),
+				Message:  fmt.Sprintf("Host %s unreachable, job %s will start on next sync", job.Host, ids.FormatJobID(job.ID)),
 			}, nil
 		}
 		if !outcome.resolved {
@@ -306,13 +307,13 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 				Success:  true,
 				Deferred: true,
 				JobID:    job.ID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", job.Host, job.ID),
+				Message:  fmt.Sprintf("Host %s unreachable, job %s will start on next sync", job.Host, ids.FormatJobID(job.ID)),
 			}, nil
 		}
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d submitted", job.ID),
+			Message: fmt.Sprintf("Job %s submitted", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
@@ -322,7 +323,7 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 				Success:  true,
 				Deferred: true,
 				JobID:    job.ID,
-				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", job.ID),
+				Message:  fmt.Sprintf("Job %s queued locally (will append to queue when host is online)", ids.FormatJobID(job.ID)),
 			}, nil
 		}
 		return Result{}, err
@@ -337,7 +338,7 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 	return Result{
 		Success: true,
 		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d added to queue", job.ID),
+		Message: fmt.Sprintf("Job %s added to queue", ids.FormatJobID(job.ID)),
 	}, nil
 }
 

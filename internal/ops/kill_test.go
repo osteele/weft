@@ -33,7 +33,7 @@ func TestKillJob_Success(t *testing.T) {
 	if result.Deferred {
 		t.Error("expected Deferred to be false")
 	}
-	if result.Message != "Job 1 killed" {
+	if result.Message != "Job wj1 killed" {
 		t.Errorf("unexpected message: %q", result.Message)
 	}
 
@@ -65,7 +65,7 @@ func TestKillJob_QuickTimeout(t *testing.T) {
 	if !result.Deferred {
 		t.Error("expected Deferred to be true")
 	}
-	if result.Message != "Job 1 kill pending (host unreachable)" {
+	if result.Message != "Job wj1 kill pending (host unreachable)" {
 		t.Errorf("unexpected message: %q", result.Message)
 	}
 
@@ -136,7 +136,7 @@ func TestCancelQueuedJob_Success(t *testing.T) {
 	if result.Deferred {
 		t.Error("expected Deferred to be false")
 	}
-	if result.Message != "Job 1 canceled" {
+	if result.Message != "Job wj1 canceled" {
 		t.Errorf("unexpected message: %q", result.Message)
 	}
 
@@ -205,7 +205,7 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	if !result.Deferred {
 		t.Error("expected Deferred to be true on pending cancel")
 	}
-	if result.Message != "Job 1 cancel pending (host unreachable)" {
+	if result.Message != "Job wj1 cancel pending (host unreachable)" {
 		t.Errorf("unexpected message: %q", result.Message)
 	}
 
@@ -242,7 +242,7 @@ func TestCancelQueuedJob_UnplacedNoAttempt(t *testing.T) {
 	if result.Deferred {
 		t.Fatal("expected Deferred to be false")
 	}
-	if result.Message != "Job 1 canceled" {
+	if result.Message != "Job wj1 canceled" {
 		t.Fatalf("unexpected message: %q", result.Message)
 	}
 

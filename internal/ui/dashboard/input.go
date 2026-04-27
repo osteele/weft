@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/ops"
@@ -124,7 +125,7 @@ func (m Model) editJob() tea.Cmd {
 			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("get job: %w", err)}
 		}
 		if job == nil {
-			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
 		}
 		if job.EffectiveStatus() != db.StatusQueued {
 			return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("can only edit queued jobs")}

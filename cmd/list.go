@@ -393,13 +393,13 @@ func listFilters() (statusFilter, processedFilter string, failedOnly bool, err e
 	return statusFilter, processedFilter, listFailed, nil
 }
 
-func listJobsByID(database *sql.DB, ids []int64) ([]*db.Job, []int64, error) {
-	jobs := make([]*db.Job, 0, len(ids))
+func listJobsByID(database *sql.DB, jobIDs []int64) ([]*db.Job, []int64, error) {
+	jobs := make([]*db.Job, 0, len(jobIDs))
 	missing := make([]int64, 0)
-	for _, id := range ids {
+	for _, id := range jobIDs {
 		job, err := db.GetJobByID(database, id)
 		if err != nil {
-			return nil, nil, fmt.Errorf("get job %d: %w", id, err)
+			return nil, nil, fmt.Errorf("get job %s: %w", ids.FormatJobID(id), err)
 		}
 		if job == nil || job.Tombstoned {
 			missing = append(missing, id)

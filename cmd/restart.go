@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/workdir"
@@ -93,7 +94,7 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	var errors []string
 	for _, jobID := range jobIDs {
 		if err := restartJob(database, jobID, overrides); err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 		}
 	}
 
@@ -444,7 +445,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		hasCloudRetryHistory := cloudAttemptCount > 0
 		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory
 		if !shouldForceFreshAttempt && len(updates) == 0 {
-			fmt.Printf("Job %d is already queued (no changes)\n", jobID)
+			fmt.Printf("Job %s is already queued (no changes)\n", ids.FormatJobID(jobID))
 			tryResumeRunawayBreaker(database, job)
 			return nil
 		}
@@ -470,7 +471,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			}
 			_ = logcache.Delete(jobID)
 
-			fmt.Printf("Restarted queued job %d (fresh retry attempt)\n", jobID)
+			fmt.Printf("Restarted queued job %s (fresh retry attempt)\n", ids.FormatJobID(jobID))
 			fmt.Printf("  Retry budget reset\n")
 			fmt.Printf("  Source metadata refreshed; changed sources will be re-synced on dispatch\n")
 			for _, update := range updates {
@@ -480,7 +481,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return nil
 		}
 
-		fmt.Printf("Updated queued job %d\n", jobID)
+		fmt.Printf("Updated queued job %s\n", ids.FormatJobID(jobID))
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}
@@ -519,7 +520,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return err
 		}
 		_ = logcache.Delete(jobID)
-		fmt.Printf("Reset job %d to queued (cloud instance no longer available)\n", jobID)
+		fmt.Printf("Reset job %s to queued (cloud instance no longer available)\n", ids.FormatJobID(jobID))
 		fmt.Printf("  Use 'weft launch instances' to run on a new instance\n")
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
@@ -538,7 +539,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return err
 		}
 		_ = logcache.Delete(jobID)
-		fmt.Printf("Reset job %d to queued (unplaced job)\n", jobID)
+		fmt.Printf("Reset job %s to queued (unplaced job)\n", ids.FormatJobID(jobID))
 		tryResumeRunawayBreaker(database, job)
 		return nil
 	}
@@ -567,7 +568,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Restarted job %d via coordinator relay\n", jobID)
+		fmt.Printf("Restarted job %s via coordinator relay\n", ids.FormatJobID(jobID))
 		fmt.Printf("  Status: %s → queued\n", oldStatus)
 		if ack != nil && ack.Message != "" {
 			fmt.Printf("  relay: %s\n", ack.Message)
@@ -585,7 +586,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 	}
 
-	fmt.Printf("Restarted job %d on %s\n", jobID, job.Host)
+	fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), job.Host)
 	fmt.Printf("  Status: %s → queued\n", oldStatus)
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)

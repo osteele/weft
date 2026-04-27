@@ -195,7 +195,7 @@ func TestFormatWatchInstanceBlockShowsObservedDBRunningPhase(t *testing.T) {
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
-	if !strings.Contains(out, "Phase: running job 203 (observed from DB)") {
+	if !strings.Contains(out, "Phase: running job wj203 (observed from DB)") {
 		t.Fatalf("expected DB-observed phase fallback, got:\n%s", out)
 	}
 }

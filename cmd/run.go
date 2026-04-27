@@ -198,10 +198,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runFrom > 0 {
 		fromJob, err := db.GetJobByID(database, runFrom)
 		if err != nil {
-			return fmt.Errorf("get job %d: %w", runFrom, err)
+			return fmt.Errorf("get job %s: %w", ids.FormatJobID(runFrom), err)
 		}
 		if fromJob == nil {
-			return fmt.Errorf("job %d not found", runFrom)
+			return fmt.Errorf("job %s not found", ids.FormatJobID(runFrom))
 		}
 
 		// Copy settings from existing job (explicit flags take priority)
@@ -581,16 +581,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			depJob, err := db.GetJobByID(database, depID)
 			if err != nil {
-				return fmt.Errorf("get dependency job %d: %w", depID, err)
+				return fmt.Errorf("get dependency job %s: %w", ids.FormatJobID(depID), err)
 			}
 			if depJob == nil {
-				return fmt.Errorf("dependency job %d not found", depID)
+				return fmt.Errorf("dependency job %s not found", ids.FormatJobID(depID))
 			}
 			if host == "" {
 				host = depJob.Host
 			}
 			if depJob.Host != host {
-				return fmt.Errorf("dependency job %d runs on host %s; relay submission must target the same host %s", depID, depJob.Host, host)
+				return fmt.Errorf("dependency job %s runs on host %s; relay submission must target the same host %s", ids.FormatJobID(depID), depJob.Host, host)
 			}
 		}
 		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
@@ -984,7 +984,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("queue job: %w", err)
 		}
 		jobID := res.JobID
-		fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterID, waitType)
+		fmt.Printf("Job %s added to queue on %s, will run after job %s %s\n\n", ids.FormatJobID(jobID), host, ids.FormatJobID(afterID), waitType)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
 		if runDescription != "" {

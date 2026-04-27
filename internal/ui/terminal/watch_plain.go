@@ -431,11 +431,11 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 		for _, jobID := range jobIDs {
 			job, err := db.GetJobByID(database, jobID)
 			if err != nil {
-				fmt.Fprintf(stderr, "Job %d: %v\n", jobID, err)
+				fmt.Fprintf(stderr, "Job %s: %v\n", ids.FormatJobID(jobID), err)
 				continue
 			}
 			if job == nil {
-				fmt.Fprintf(stderr, "Job %d not found\n", jobID)
+				fmt.Fprintf(stderr, "Job %s not found\n", ids.FormatJobID(jobID))
 				continue
 			}
 			watchedJobs = append(watchedJobs, job)

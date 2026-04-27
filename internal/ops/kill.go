@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 )
 
@@ -35,12 +36,12 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 			Success:  true,
 			Deferred: !outcome.hostAvailable,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %d kill pending (host unreachable)", job.ID),
+			Message:  fmt.Sprintf("Job %s kill pending (host unreachable)", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
 	if !outcome.resolved {
-		return Result{}, fmt.Errorf("unable to reconcile kill for job %d (status: %s)", job.ID, outcome.currentStatus)
+		return Result{}, fmt.Errorf("unable to reconcile kill for job %s (status: %s)", ids.FormatJobID(job.ID), outcome.currentStatus)
 	}
 
 	switch outcome.currentStatus {
@@ -50,22 +51,22 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d killed", job.ID),
+			Message: fmt.Sprintf("Job %s killed", ids.FormatJobID(job.ID)),
 		}, nil
 	case db.StatusCompleted:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d already completed", job.ID),
+			Message: fmt.Sprintf("Job %s already completed", ids.FormatJobID(job.ID)),
 		}, nil
 	case db.StatusFailed, db.StatusDead:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d already failed", job.ID),
+			Message: fmt.Sprintf("Job %s already failed", ids.FormatJobID(job.ID)),
 		}, nil
 	default:
-		return Result{}, fmt.Errorf("job %d remains %s after kill request", job.ID, outcome.currentStatus)
+		return Result{}, fmt.Errorf("job %s remains %s after kill request", ids.FormatJobID(job.ID), outcome.currentStatus)
 	}
 
 }
@@ -81,7 +82,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 
 	effectiveStatus := job.EffectiveStatus()
 	if effectiveStatus != db.StatusQueued {
-		return Result{}, fmt.Errorf("job %d (status: %s): %w", job.ID, effectiveStatus, ErrNotQueued)
+		return Result{}, fmt.Errorf("job %s (status: %s): %w", ids.FormatJobID(job.ID), effectiveStatus, ErrNotQueued)
 	}
 
 	if err := db.SetRequestedStatus(database, job.ID, db.StatusCanceled); err != nil {
@@ -106,7 +107,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d canceled", job.ID),
+			Message: fmt.Sprintf("Job %s canceled", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
@@ -122,7 +123,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 			Success:  true,
 			Deferred: true,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %d cancel pending (host unreachable)", job.ID),
+			Message:  fmt.Sprintf("Job %s cancel pending (host unreachable)", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
@@ -131,7 +132,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 			Success:  true,
 			Deferred: true,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %d cancel pending (remote state uncertain)", job.ID),
+			Message:  fmt.Sprintf("Job %s cancel pending (remote state uncertain)", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 
@@ -141,25 +142,25 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d canceled", job.ID),
+			Message: fmt.Sprintf("Job %s canceled", ids.FormatJobID(job.ID)),
 		}, nil
 	case db.StatusCompleted:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d already completed", job.ID),
+			Message: fmt.Sprintf("Job %s already completed", ids.FormatJobID(job.ID)),
 		}, nil
 	case db.StatusFailed, db.StatusDead, db.StatusKilled:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d already %s", job.ID, outcome.currentStatus),
+			Message: fmt.Sprintf("Job %s already %s", ids.FormatJobID(job.ID), outcome.currentStatus),
 		}, nil
 	default:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %d now %s", job.ID, outcome.currentStatus),
+			Message: fmt.Sprintf("Job %s now %s", ids.FormatJobID(job.ID), outcome.currentStatus),
 		}, nil
 	}
 }

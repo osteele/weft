@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/llm"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
@@ -620,15 +621,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
 			if msg.cancelled {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d canceled (removal queued for when host is online)", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %s canceled (removal queued for when host is online)", ids.FormatJobID(msg.jobID)), false)
 			} else {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d kill pending (host offline)", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %s kill pending (host offline)", ids.FormatJobID(msg.jobID)), false)
 			}
 		} else {
 			if msg.cancelled {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d canceled", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %s canceled", ids.FormatJobID(msg.jobID)), false)
 			} else {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %s killed", ids.FormatJobID(msg.jobID)), false)
 			}
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
@@ -640,9 +641,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.message != "" {
 			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d pause pending (host offline)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s pause pending (host offline)", ids.FormatJobID(msg.jobID)), false)
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d paused", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s paused", ids.FormatJobID(msg.jobID)), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -653,9 +654,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.message != "" {
 			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d resume pending (host offline)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s resume pending (host offline)", ids.FormatJobID(msg.jobID)), false)
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d resumed", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s resumed", ids.FormatJobID(msg.jobID)), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -666,9 +667,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.message != "" {
 			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d draft pending (sync when host online)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s draft pending (sync when host online)", ids.FormatJobID(msg.jobID)), false)
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d marked draft", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s marked draft", ids.FormatJobID(msg.jobID)), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -679,9 +680,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.message != "" {
 			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued (pending sync)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s queued (pending sync)", ids.FormatJobID(msg.jobID)), false)
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s queued", ids.FormatJobID(msg.jobID)), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -692,9 +693,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Restart failed: %v", msg.err), true)
 		}
 		if msg.deferred {
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d restarted (will start when host is online)", msg.jobID), false), m.refreshJobs())
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %s restarted (will start when host is online)", ids.FormatJobID(msg.jobID)), false), m.refreshJobs())
 		}
-		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d restarted", msg.jobID), false), m.refreshJobs())
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %s restarted", ids.FormatJobID(msg.jobID)), false), m.refreshJobs())
 
 	case jobRetriedMsg:
 		if msg.err != nil {
@@ -702,9 +703,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var flashCmd tea.Cmd
 		if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d retried (pending sync)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s retried (pending sync)", ids.FormatJobID(msg.jobID)), false)
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d retried", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s retried", ids.FormatJobID(msg.jobID)), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -714,11 +715,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.deferred {
 			return m, tea.Batch(
-				m.setFlash(fmt.Sprintf("Host %s unreachable. Job %d will start on next sync.", msg.host, msg.jobID), false),
+				m.setFlash(fmt.Sprintf("Host %s unreachable. Job %s will start on next sync.", msg.host, ids.FormatJobID(msg.jobID)), false),
 				m.refreshJobs(),
 			)
 		}
-		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d started", msg.jobID), false), m.refreshJobs())
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %s started", ids.FormatJobID(msg.jobID)), false), m.refreshJobs())
 
 	case pruneCompletedMsg:
 		var flashCmd tea.Cmd
@@ -744,13 +745,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Move to front failed: %v", msg.err), true)
 		} else if msg.deferred {
 			m.requestHostSyncPriority(msg.host)
-			return m, m.setFlash(fmt.Sprintf("Job %d move queued (will sync when host is online)", msg.jobID), false)
+			return m, m.setFlash(fmt.Sprintf("Job %s move queued (will sync when host is online)", ids.FormatJobID(msg.jobID)), false)
 		} else if !msg.moved {
 			m.requestHostSyncPriority(msg.host)
-			return m, m.setFlash(fmt.Sprintf("Job %d is already at the front", msg.jobID), false)
+			return m, m.setFlash(fmt.Sprintf("Job %s is already at the front", ids.FormatJobID(msg.jobID)), false)
 		}
 		m.requestHostSyncPriority(msg.host)
-		return m, m.setFlash(fmt.Sprintf("Job %d moved to front of queue", msg.jobID), false)
+		return m, m.setFlash(fmt.Sprintf("Job %s moved to front of queue", ids.FormatJobID(msg.jobID)), false)
 
 	case descriptionGeneratedMsg:
 		if msg.err != nil {
@@ -786,7 +787,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Remove failed: %v", msg.err), true)
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d removed", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s removed", ids.FormatJobID(msg.jobID)), false)
 			m.selectedJob = nil
 			m.logContent = ""
 			m.logStale = false
@@ -804,10 +805,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Create failed: %v", msg.err), true)
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued (will append when host is online)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s queued (will append when host is online)", ids.FormatJobID(msg.jobID)), false)
 			m.pendingSelectJobID = msg.jobID
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s queued", ids.FormatJobID(msg.jobID)), false)
 			m.pendingSelectJobID = msg.jobID
 			// Keep inputs for easy re-use (user can modify and submit again)
 		}
@@ -830,10 +831,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			flashCmd = m.setFlash(fmt.Sprintf("Edit failed: %v", msg.err), true)
 		} else if msg.deferred {
 			m.requestHostSyncPriority(msg.host)
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d updated (will sync when host is online)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s updated (will sync when host is online)", ids.FormatJobID(msg.jobID)), false)
 		} else {
 			m.requestHostSyncPriority(msg.host)
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d updated", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %s updated", ids.FormatJobID(msg.jobID)), false)
 			m.pendingSelectJobID = msg.jobID
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
@@ -1004,7 +1005,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case cloudJobProgressMsg:
-		return m, m.setFlash(fmt.Sprintf("Rental job %d: %s", msg.jobID, msg.phase), false)
+		return m, m.setFlash(fmt.Sprintf("Rental job %s: %s", ids.FormatJobID(msg.jobID), msg.phase), false)
 
 	case cloudJobCompletedMsg:
 		if msg.err != nil {
