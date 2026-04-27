@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/runner"
 )
 
-func TestBGWorkManager_RefCounts(t *testing.T) {
+func TestBGWorkManager_TracksWorkdirs(t *testing.T) {
 	jobs := []cloud.AgentJob{
 		{ID: 1, Dir: "/tmp/test-project-a"},
 		{ID: 2, Dir: "/tmp/test-project-a"},
@@ -20,11 +21,14 @@ func TestBGWorkManager_RefCounts(t *testing.T) {
 	dirA := runner.ExpandTilde("/tmp/test-project-a")
 	dirB := runner.ExpandTilde("/tmp/test-project-b")
 
-	if m.workdirRefCount[dirA] != 2 {
-		t.Errorf("refcount for dirA = %d, want 2", m.workdirRefCount[dirA])
+	if _, ok := m.workdirs[dirA]; !ok {
+		t.Errorf("dirA not tracked")
 	}
-	if m.workdirRefCount[dirB] != 1 {
-		t.Errorf("refcount for dirB = %d, want 1", m.workdirRefCount[dirB])
+	if _, ok := m.workdirs[dirB]; !ok {
+		t.Errorf("dirB not tracked")
+	}
+	if len(m.workdirs) != 2 {
+		t.Errorf("workdirs size = %d, want 2 (deduplicated)", len(m.workdirs))
 	}
 }
 
@@ -35,8 +39,54 @@ func TestBGWorkManager_RegisterNewJobs(t *testing.T) {
 	})
 
 	dir := runner.ExpandTilde("/tmp/test-new")
-	if m.workdirRefCount[dir] != 1 {
-		t.Errorf("refcount = %d, want 1", m.workdirRefCount[dir])
+	if _, ok := m.workdirs[dir]; !ok {
+		t.Errorf("new workdir not tracked")
+	}
+}
+
+// TestBGWorkManager_CleanupDeletesOnlyAtEnd verifies that workdirs are
+// preserved through the campaign and only removed by CleanupWorkdirs. This
+// is the regression test for the race that wiped a project mid-campaign
+// when refcount-driven deletion fired between checkForNewJobs polls.
+func TestBGWorkManager_CleanupDeletesOnlyAtEnd(t *testing.T) {
+	dir := t.TempDir()
+	marker := dir + "/pyproject.toml"
+	if err := os.WriteFile(marker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	m := newBGWorkManager([]cloud.AgentJob{{ID: 1, Dir: dir}}, false)
+
+	// Simulate the post-job background work completing for the only job.
+	// Under the old refcount logic this would have spawned os.RemoveAll(dir);
+	// under the new logic the dir must survive until CleanupWorkdirs.
+	m.StartPostJobWork(postJobWork{jobID: 1, workDir: dir})
+	m.Barrier()
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker file missing after Barrier (eager deletion regressed): %v", err)
+	}
+
+	// Simulate a late-arriving job for the same workdir picked up by
+	// checkForNewJobs after the initial batch finished. Cleanup must still
+	// be deferred to the end-of-campaign call.
+	m.RegisterNewJobs([]cloud.AgentJob{{ID: 2, Dir: dir}})
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker file missing after late RegisterNewJobs: %v", err)
+	}
+
+	m.CleanupWorkdirs()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("workdir still present after CleanupWorkdirs: stat err=%v", err)
+	}
+}
+
+func TestBGWorkManager_CleanupSkipDeletion(t *testing.T) {
+	dir := t.TempDir()
+	m := newBGWorkManager([]cloud.AgentJob{{ID: 1, Dir: dir}}, true) // skip
+	m.CleanupWorkdirs()
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("workdir removed despite skipDeletion: %v", err)
 	}
 }
 

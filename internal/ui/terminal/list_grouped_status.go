@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/dashboard"
@@ -244,7 +245,8 @@ func appendGroupedStatusJobRow(
 	if indented {
 		indent = "  "
 	}
-	prefix := fmt.Sprintf("%s- wj%d — %s ", indent, job.ID, projectCol)
+	glyph, jobID := groupedStatusPlacementMarker(job)
+	prefix := fmt.Sprintf("%s- %s %s — %s ", indent, glyph, jobID, projectCol)
 	line := prefix + desc + suffix
 	if width > 0 {
 		prefixWidth := lipgloss.Width(prefix)
@@ -468,6 +470,23 @@ func groupedStatusJobLabel(job *db.Job) string {
 		return project
 	}
 	return desc
+}
+
+// groupedStatusPlacementMarker returns a one-cell glyph and the styled job ID
+// indicating whether the job is on a rental instance ("☁", cyan) or on-prem
+// (" ", default). The glyph slot is always one cell wide so that ids align
+// down the column regardless of placement.
+var (
+	rentalIDStyle    = lipgloss.NewStyle().Foreground(tuiAccentColor)
+	rentalGlyphCloud = rentalIDStyle.Render("☁")
+)
+
+func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
+	id := ids.FormatJobID(job.ID)
+	if job.IsRentalJob() {
+		return rentalGlyphCloud, rentalIDStyle.Render(id)
+	}
+	return " ", id
 }
 
 func groupedStatusScopeLabel(job *db.Job) string {

@@ -135,6 +135,10 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		workDir := job.Dir
+		// Recover from a missing/empty workdir (e.g. previous campaign-mid
+		// cleanup race, manual rm, or aborted source extract) by re-staging
+		// from the locally cached source tarball before stageCloudNeeds runs.
+		ensureSourceFresh(cfg.R2Bucket, runner.ExpandTilde(workDir))
 		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
@@ -256,8 +260,11 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 	}
 
-	// Wait for remaining background work
+	// Wait for remaining background work, then clean up workdirs.
+	// Cleanup is intentionally deferred to here (after the new-job pickup
+	// loop has exited) to avoid racing with checkForNewJobs.
 	bgm.Barrier()
+	bgm.CleanupWorkdirs()
 	return result
 }
 

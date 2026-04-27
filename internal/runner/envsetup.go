@@ -68,6 +68,53 @@ func ShouldSkipSetup(setupCmd string, meta *dataloc.ScriptMeta) bool {
 	return meta != nil && meta.Isolated
 }
 
+// WarnIfWorkdirMissingEnv writes a warning to the job's log file when no
+// setup command was detected but the working directory looks like it should
+// have triggered one. Without this, a wiped or partially-staged project dir
+// produces a silent ModuleNotFoundError (the script imports a package that
+// uv sync would have installed, but uv sync was never run because the lock
+// file or pyproject.toml is missing). Logging the underlying state turns
+// that into a self-explanatory failure.
+//
+// Cases that warrant a warning:
+//   - working directory does not exist or is empty (likely wiped between jobs)
+//   - pyproject.toml present but neither uv.lock nor .venv (project state
+//     inconsistent — uv sync detection logic gives up silently here)
+func WarnIfWorkdirMissingEnv(workingDir string, jobID int64, logPath string) {
+	if workingDir == "" {
+		return
+	}
+	info, err := os.Stat(workingDir)
+	if err != nil || !info.IsDir() {
+		slog.Warn("working directory missing; running command without setup",
+			"component", "runner", "job_id", jobID, "workdir", workingDir, "error", err)
+		appendSetupLog(logPath, []byte(fmt.Sprintf(
+			"weft: working directory %q is missing; running command without env setup. Expect import errors if the job depends on a project env.\n",
+			workingDir,
+		)))
+		return
+	}
+	entries, err := os.ReadDir(workingDir)
+	if err == nil && len(entries) == 0 {
+		slog.Warn("working directory empty; running command without setup",
+			"component", "runner", "job_id", jobID, "workdir", workingDir)
+		appendSetupLog(logPath, []byte(fmt.Sprintf(
+			"weft: working directory %q is empty; running command without env setup. Expect import errors if the job depends on a project env.\n",
+			workingDir,
+		)))
+		return
+	}
+	if fileExists(filepath.Join(workingDir, "pyproject.toml")) &&
+		!fileExists(filepath.Join(workingDir, "uv.lock")) &&
+		!dirExists(filepath.Join(workingDir, ".venv")) {
+		slog.Warn("pyproject.toml present without uv.lock or .venv; uv sync will not run",
+			"component", "runner", "job_id", jobID, "workdir", workingDir)
+		appendSetupLog(logPath, []byte(
+			"weft: pyproject.toml is present but neither uv.lock nor .venv exists; uv sync will not run. If this is unexpected, the project's lockfile may be missing from the working directory.\n",
+		))
+	}
+}
+
 // RunSetupCommand runs a detected environment setup command synchronously.
 // If timeout > 0, the process is killed after that duration (exit code 124,
 // matching the timeout(1) convention). A zero timeout uses DefaultSetupTimeout.

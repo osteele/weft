@@ -91,3 +91,31 @@ Remaining intent:
 1. Derive on-prem display status from attempt facts.
 2. Remove three-way status merging for on-prem queue updates.
 3. Retire transitional status fields once all paths use derived status.
+
+## Naming Cleanup: Launch → CloudInstance
+
+Internal naming has drifted three ways: the user-facing CLI says `instance`
+(`weft instance list`, `wi<id>` IDs, docs), the Go code says `db.Launch`, and
+the SQL tables say `launches` / `launch_live_state` / `launch_job_membership`.
+The file `internal/db/cloud_instances.go` already uses the user-facing concept.
+Priority: Low — housekeeping, no functional change.
+
+Renames (all together to avoid a fourth mismatch):
+
+- Struct: `db.Launch` → `db.CloudInstance`.
+- Tables: `launches` → `cloud_instances`, `launch_live_state` →
+  `cloud_instance_live_state`, `launch_job_membership` →
+  `cloud_instance_job_membership`.
+- Columns/fields: `Job.LaunchID` → `Job.CloudInstanceID`; helpers and
+  variables named `Launch*` (e.g. `LaunchByID`, `GetLaunch`,
+  `ListLaunches`, `LaunchStatus*`) → `CloudInstance*`.
+
+Migration path: SQLite `ALTER TABLE ... RENAME TO` and `RENAME COLUMN` in a
+single migration; Go-side rename is mechanical (touches ~10 files). The
+user-facing CLI (`weft instance ...`, `wi<id>` IDs, docs) stays as-is —
+this aligns the internals to what users already see.
+
+`cloud_instances` over bare `instances`: keeps the namespace unambiguous if
+on-prem hosts ever become first-class table-backed entities, and avoids
+collisions with Go's pervasive use of "instance" for type/struct instances
+when grepping.

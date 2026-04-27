@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -86,24 +85,22 @@ func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
 	if err := os.MkdirAll(upd.RemoteDir, 0o755); err != nil {
 		return fmt.Errorf("create remote dir %s: %w", upd.RemoteDir, err)
 	}
-	tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("weft-grace-source-%d.tar.gz", time.Now().UnixNano()))
-	defer os.Remove(tmpPath)
 
-	copyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	copyCmd := exec.CommandContext(copyCtx, "rclone", "copyto", fmt.Sprintf("r2:%s/%s", bucket, upd.R2Key), tmpPath)
-	copyCmd.Stderr = os.Stderr
-	if err := copyCmd.Run(); err != nil {
+	// Cache the tarball at a stable per-R2-key path so that ensureSourceFresh
+	// can re-extract on demand if the workdir is later found empty/missing.
+	cachePath := sourceCachePath(upd.R2Key)
+	if err := downloadSourceToCache(bucket, upd.R2Key, cachePath); err != nil {
 		return fmt.Errorf("download source tarball: %w", err)
 	}
 
 	tarCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	tarCmd := exec.CommandContext(tarCtx, "tar", "xzf", tmpPath, "-C", upd.RemoteDir)
+	tarCmd := exec.CommandContext(tarCtx, "tar", "xzf", cachePath, "-C", upd.RemoteDir)
 	tarCmd.Stderr = os.Stderr
 	if err := tarCmd.Run(); err != nil {
 		return fmt.Errorf("extract source tarball: %w", err)
 	}
+	sources.record(upd.RemoteDir, upd.R2Key)
 	return nil
 }
 

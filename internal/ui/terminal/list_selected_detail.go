@@ -124,6 +124,9 @@ func renderRentalHostLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 	if state := launchStateLabel(launch.Status); state != "" {
 		parts = append(parts, state)
 	}
+	if launch.InstanceType == cloud.InstanceTypeInterruptible {
+		parts = append(parts, "interruptible")
+	}
 	if brief := launch.DisplayGPUBrief(); brief != "" {
 		parts = append(parts, brief)
 	}

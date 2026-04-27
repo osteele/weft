@@ -138,6 +138,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		envVars = resolvedEnv
 		setupCmd = ""
 	}
+	if setupCmd == "" {
+		WarnIfWorkdirMissingEnv(expandedDir, cfg.JobID, paths.Log)
+	}
 	envVars = append(envVars, job.Env...)
 	envVars = artifacts.MergeEnvVars(envVars, cfg.JobID)
 

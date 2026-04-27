@@ -50,13 +50,13 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 		last = idx
 	}
 
-	if !strings.Contains(out, "- wj4 — proj ok (inventory) — completed ok") {
+	if !strings.Contains(out, "-   wj4 — proj ok (inventory) — completed ok") {
 		t.Fatalf("missing completion line in output:\n%s", out)
 	}
-	if !strings.Contains(out, "- wj7 — proj bad exit (inventory) — completed (exit 2)") {
+	if !strings.Contains(out, "-   wj7 — proj bad exit (inventory) — completed (exit 2)") {
 		t.Fatalf("missing failed-completed line in output:\n%s", out)
 	}
-	if !strings.Contains(out, "- wj9 — proj canceled (rental) — canceled") {
+	if !strings.Contains(out, "- ☁ wj9 — proj canceled (rental) — canceled") {
 		t.Fatalf("missing rental canceled line in output:\n%s", out)
 	}
 }
@@ -106,9 +106,9 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 	}, nil, now)
 
 	for _, want := range []string{
-		"- wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
-		"- wj43 — proj queued — queued 13m ago",
-		"- wj44 — proj done — completed 1m ago — completed ok",
+		"- ☁ wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
+		"-   wj43 — proj queued — queued 13m ago",
+		"-   wj44 — proj done — completed 1m ago — completed ok",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
@@ -131,7 +131,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	want := "- wj99 — proj python worker.py (rental)"
+	want := "- ☁ wj99 — proj python worker.py (rental)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -177,7 +177,7 @@ func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMis
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	want := "- wj53 — proj legacy completion — placed 5m ago — completed ok"
+	want := "-   wj53 — proj legacy completion — placed 5m ago — completed ok"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -197,7 +197,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	lineWant := "  - wj50 — proj waiting — queued 5m ago"
+	lineWant := "  -   wj50 — proj waiting — queued 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
 	}
@@ -251,12 +251,12 @@ func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *test
 	// Jobs are indented under their subheader, and the old per-job
 	// "    blocked: ..." form is gone.
 	for _, want := range []string{
-		"  - wj1394 — ",
-		"  - wj1392 — ",
-		"  - wj1388 — ",
-		"  - wj1387 — ",
-		"  - wj1386 — ",
-		"  - wj1383 — ",
+		"  -   wj1394 — ",
+		"  -   wj1392 — ",
+		"  -   wj1388 — ",
+		"  -   wj1387 — ",
+		"  -   wj1386 — ",
+		"  -   wj1383 — ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing grouped job row %q in output:\n%s", want, out)
@@ -294,23 +294,23 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngr
 		t.Fatalf("missing subheader %q in output:\n%s", headWant, out)
 	}
 	// Grouped job is indented; ungrouped job uses the base indent.
-	if !strings.Contains(out, "  - wj201 — ") {
+	if !strings.Contains(out, "  -   wj201 — ") {
 		t.Fatalf("missing indented grouped row for wj201 in output:\n%s", out)
 	}
 	lines := strings.Split(out, "\n")
 	foundUngrouped := false
 	for _, line := range lines {
-		if strings.HasPrefix(line, "- wj202 — ") {
+		if strings.HasPrefix(line, "-   wj202 — ") {
 			foundUngrouped = true
 			break
 		}
 	}
 	if !foundUngrouped {
-		t.Fatalf("expected ungrouped row starting with '- wj202 — ', got:\n%s", out)
+		t.Fatalf("expected ungrouped row starting with '-   wj202 — ', got:\n%s", out)
 	}
 
 	// Ungrouped row must follow the grouped subheader+job.
-	if strings.Index(out, "- wj202") < strings.Index(out, headWant) {
+	if strings.Index(out, "-   wj202") < strings.Index(out, headWant) {
 		t.Fatalf("ungrouped row should trail grouped output in:\n%s", out)
 	}
 }
@@ -330,7 +330,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRet
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	want := "- wj51 — proj retry me — retry pending 1m ago"
+	want := "-   wj51 — proj retry me — retry pending 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -352,7 +352,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	want := "- wj52 — proj retry blocked — retry rejected 1m ago"
+	want := "-   wj52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}

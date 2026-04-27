@@ -499,6 +499,9 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		envVars = resolvedEnv
 		setupCmd = ""
 	}
+	if setupCmd == "" {
+		WarnIfWorkdirMissingEnv(expandedDir, jobID, paths.Log)
+	}
 
 	// Apply job env vars (override dotenv)
 	envVars = append(envVars, job.Env...)

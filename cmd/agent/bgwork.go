@@ -11,14 +11,22 @@ import (
 	"github.com/osteele/weft/internal/runner"
 )
 
-// bgWorkManager manages background post-job goroutines (uploads + workdir cleanup)
-// and provides a barrier for benchmark jobs that need a quiescent system.
+// bgWorkManager manages background post-job goroutines (uploads) and tracks
+// the set of workdirs touched during a campaign for end-of-campaign cleanup.
+// It also provides a barrier for benchmark jobs that need a quiescent system.
+//
+// Workdir deletion is intentionally deferred until CleanupWorkdirs() is called
+// at end of campaign. Eager per-job deletion (which previously fired when a
+// refcount hit zero) was racy with checkForNewJobs: a new job for the same
+// workdir could be picked up after the cleanup goroutine had already started
+// os.RemoveAll, leaving the next job to run against a missing/partial source
+// tree (e.g. pyproject.toml gone, uv sync silently skipped, ModuleNotFoundError).
 type bgWorkManager struct {
-	wg              sync.WaitGroup
-	mu              sync.Mutex
-	errors          []bgWorkError
-	workdirRefCount map[string]int // resolved absolute path → remaining job count
-	skipDeletion    bool
+	wg           sync.WaitGroup
+	mu           sync.Mutex
+	errors       []bgWorkError
+	workdirs     map[string]struct{} // resolved absolute paths touched this campaign
+	skipDeletion bool
 }
 
 type bgWorkError struct {
@@ -39,26 +47,27 @@ type postJobWork struct {
 
 func newBGWorkManager(jobs []cloud.AgentJob, skipDeletion bool) *bgWorkManager {
 	m := &bgWorkManager{
-		workdirRefCount: make(map[string]int),
-		skipDeletion:    skipDeletion,
+		workdirs:     make(map[string]struct{}),
+		skipDeletion: skipDeletion,
 	}
 	for _, job := range jobs {
 		dir := runner.ExpandTilde(job.Dir)
 		if dir != "" {
-			m.workdirRefCount[dir]++
+			m.workdirs[dir] = struct{}{}
 		}
 	}
 	return m
 }
 
-// RegisterNewJobs increments refcounts for dynamically submitted jobs.
+// RegisterNewJobs records workdirs for dynamically submitted jobs so that
+// CleanupWorkdirs cleans them up at end of campaign.
 func (m *bgWorkManager) RegisterNewJobs(jobs []cloud.AgentJob) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, job := range jobs {
 		dir := runner.ExpandTilde(job.Dir)
 		if dir != "" {
-			m.workdirRefCount[dir]++
+			m.workdirs[dir] = struct{}{}
 		}
 	}
 }
@@ -98,11 +107,6 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 
 		reuploadCompletion(pw.r2Bucket, pw.jobID, pw.runID, pw.logSnapshot)
 		os.RemoveAll(pw.logSnapshot)
-
-		// Must happen before this goroutine's deferred wg.Done(),
-		// so any spawned deletion goroutine is registered with the WaitGroup
-		// before the parent count decrements.
-		m.decrementWorkdir(pw.workDir)
 	}()
 }
 
@@ -124,27 +128,29 @@ func (m *bgWorkManager) recordError(jobID int64, op string, err error) {
 	m.mu.Unlock()
 }
 
-// decrementWorkdir decrements the refcount for a resolved absolute path.
-// When the count reaches zero and deletion is enabled, deletes the directory
-// in a background goroutine tracked by the WaitGroup.
-func (m *bgWorkManager) decrementWorkdir(resolved string) {
-	if resolved == "" {
+// CleanupWorkdirs deletes every workdir touched during the campaign. Call
+// after Barrier() at end of campaign, when no more jobs will be picked up.
+//
+// Deferred to campaign end (rather than refcount-driven per-job) because
+// checkForNewJobs can hand the agent additional jobs for an already-finished
+// workdir; per-job cleanup races with that pickup and produces silent
+// missing-source failures.
+func (m *bgWorkManager) CleanupWorkdirs() {
+	if m.skipDeletion {
 		return
 	}
 	m.mu.Lock()
-	m.workdirRefCount[resolved]--
-	remaining := m.workdirRefCount[resolved]
+	dirs := make([]string, 0, len(m.workdirs))
+	for d := range m.workdirs {
+		dirs = append(dirs, d)
+	}
 	m.mu.Unlock()
 
-	if remaining <= 0 && !m.skipDeletion {
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			slog.Debug("deleting workdir", "path", resolved)
-			if err := os.RemoveAll(resolved); err != nil {
-				m.recordError(0, "delete-workdir", err)
-			}
-		}()
+	for _, d := range dirs {
+		slog.Debug("deleting workdir", "path", d)
+		if err := os.RemoveAll(d); err != nil {
+			m.recordError(0, "delete-workdir", err)
+		}
 	}
 }
 

@@ -188,7 +188,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	jobCounts, _ := db.GetLaunchJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "ID\tCAMPAIGN\tSTATUS\tPROVIDER\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
+	fmt.Fprintf(w, "ID\tCAMPAIGN\tSTATUS\tPROVIDER\tTYPE\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
 
 	for _, inst := range instances {
 		created := time.Unix(inst.CreatedAt, 0).Format("01/02 15:04")
@@ -218,8 +218,13 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 			campaignStr = fmt.Sprintf("%d", *inst.CampaignID)
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			ids.FormatInstanceID(inst.ID), campaignStr, inst.Status, inst.Provider, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
+		typeStr := inst.InstanceType
+		if typeStr == "" {
+			typeStr = "—"
+		}
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			ids.FormatInstanceID(inst.ID), campaignStr, inst.Status, inst.Provider, typeStr, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
 	}
 	w.Flush()
 	return nil
@@ -265,6 +270,9 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Printf("  Provider: %s\n", ci.Provider)
+		if line := formatRentalLine(ci); line != "" {
+			fmt.Printf("  Rental:   %s\n", line)
+		}
 
 		// Cloud instance info
 		providerInstID := ci.EffectiveProviderID()
@@ -426,6 +434,21 @@ func walkReplacementChain(database *sql.DB, ci *db.Launch) []*db.Launch {
 		predecessor, _ := db.GetLaunch(database, id)
 		return predecessor
 	})
+}
+
+// formatRentalLine renders the rental-type segment for `weft info`. Returns
+// "" for pre-migration rows where InstanceType was never recorded.
+func formatRentalLine(ci *db.Launch) string {
+	switch ci.InstanceType {
+	case cloud.InstanceTypeInterruptible:
+		if ci.MaxBidPriceCents != nil {
+			return fmt.Sprintf("interruptible · max bid $%.2f/hr", float64(*ci.MaxBidPriceCents)/100)
+		}
+		return "interruptible"
+	case cloud.InstanceTypeOnDemand:
+		return "on-demand"
+	}
+	return ""
 }
 
 func runInstanceTerminate(cmd *cobra.Command, args []string) error {

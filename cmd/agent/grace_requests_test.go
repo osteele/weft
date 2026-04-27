@@ -98,6 +98,10 @@ func TestDrainGraceJobRequestsAppliesSourcesBeforeReturningJobs(t *testing.T) {
 	}
 	objects[path.Join(prefix, "req-a.json")] = string(data)
 
+	prevCacheDir := sourceCacheDir
+	sourceCacheDir = filepath.Join(t.TempDir(), "source-cache")
+	t.Cleanup(func() { sourceCacheDir = prevCacheDir })
+
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)

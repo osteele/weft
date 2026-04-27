@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
@@ -162,9 +163,28 @@ var (
 	listTUITitleStyle    = lipgloss.NewStyle().Bold(true)
 	listTUIHeaderStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	listTUISelectedStyle = lipgloss.NewStyle().Reverse(true)
-	listTUIFooterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	listTUIEmptyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
-	graceAckKeyPattern   = regexp.MustCompile(`grace/(\d+)/acks/`)
+)
+
+// renderSelectedRow applies the selected-row highlight to a row that may
+// already contain inner ANSI escape sequences (e.g. the cyan rental glyph
+// and job ID). lipgloss's Reverse style does not propagate across inner
+// SGR resets, so the highlight visibly stops where the styled span ends.
+// Strip inner styling first, then pad to the row width so the reverse
+// background extends across the whole line.
+func renderSelectedRow(row string, width int) string {
+	plain := ansi.Strip(row)
+	if width > 0 {
+		if pad := width - lipgloss.Width(plain); pad > 0 {
+			plain += strings.Repeat(" ", pad)
+		}
+	}
+	return listTUISelectedStyle.Render(plain)
+}
+
+var (
+	listTUIFooterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	listTUIEmptyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
+	graceAckKeyPattern = regexp.MustCompile(`grace/(\d+)/acks/`)
 )
 
 func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
@@ -844,7 +864,7 @@ func (m listTUIModel) View() string {
 			}
 			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), m.width)
 			if idx == m.cursor {
-				row = listTUISelectedStyle.Render(row)
+				row = renderSelectedRow(row, m.width)
 			}
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -924,11 +944,11 @@ func (m listTUIModel) groupedView() string {
 	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines)
 	bodyLinesWritten := 0
 	for _, row := range visibleRows {
-		line := row.text
+		line := truncateDisplayWidth(row.text, m.width)
 		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
-			line = listTUISelectedStyle.Render(line)
+			line = renderSelectedRow(line, m.width)
 		}
-		b.WriteString(truncateDisplayWidth(line, m.width))
+		b.WriteString(line)
 		b.WriteString("\n")
 		bodyLinesWritten++
 	}
