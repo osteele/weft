@@ -3209,16 +3209,19 @@ func SetJobNeeds(db *sql.DB, jobID int64, needs []string) error {
 }
 
 func setJobStringSlice(db *sql.DB, jobID int64, column string, values []string) error {
-	if len(values) == 0 {
-		_, err := db.Exec(fmt.Sprintf(`UPDATE jobs SET %s = NULL WHERE id = ?`, column), jobID)
-		return err
+	var arg any
+	if len(values) > 0 {
+		data, err := json.Marshal(values)
+		if err != nil {
+			return err
+		}
+		arg = string(data)
 	}
-	data, err := json.Marshal(values)
-	if err != nil {
+	query := fmt.Sprintf(`UPDATE jobs SET %s = ? WHERE id = ?`, column)
+	return RetryOnDatabaseLocked(context.Background(), "set job "+column, func() error {
+		_, err := db.Exec(query, arg, jobID)
 		return err
-	}
-	_, err = db.Exec(fmt.Sprintf(`UPDATE jobs SET %s = ? WHERE id = ?`, column), string(data), jobID)
-	return err
+	})
 }
 
 // NormalizeProjectName resolves placeholder project values such as "." to a

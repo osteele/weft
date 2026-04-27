@@ -8,13 +8,19 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -63,9 +69,10 @@ func Execute() error {
 		logging.SetLevel(slog.LevelDebug)
 	}
 
-	if pprofEnv := os.Getenv("WEFT_PPROF"); pprofEnv != "" && pprofEnv != "0" {
+	if os.Getenv("WEFT_PPROF") != "0" {
 		startPprof()
 	}
+	installStackDumpHandler()
 
 	// Initialize operation logger
 	initOpLog()
@@ -176,11 +183,87 @@ var versionCmd = &cobra.Command{
 func startPprof() {
 	ln, err := net.Listen("tcp", "localhost:6060")
 	if err != nil {
-		slog.Warn("pprof listener failed", "error", err)
+		// :6060 is usually claimed by another weft process. Fall back to a
+		// random local port so this process is still attachable.
+		ln, err = net.Listen("tcp", "localhost:0")
+		if err != nil {
+			slog.Warn("pprof listener failed", "error", err)
+			return
+		}
+	}
+	addr := ln.Addr().String()
+	slog.Debug("pprof enabled", "addr", "http://"+addr+"/debug/pprof/")
+	writePprofPortFile(addr)
+	go func() { _ = http.Serve(ln, nil) }()
+}
+
+// writePprofPortFile records the pprof listener address so it can be
+// discovered without grepping logs. Best-effort; failures ignored.
+func writePprofPortFile(addr string) {
+	dir := filepath.Join(os.Getenv("HOME"), ".cache", "weft", "pprof")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
-	slog.Info("pprof enabled", "addr", "http://"+ln.Addr().String()+"/debug/pprof/")
-	go func() { _ = http.Serve(ln, nil) }()
+	sweepStalePprofEntries(dir)
+	path := filepath.Join(dir, fmt.Sprintf("%d.addr", os.Getpid()))
+	_ = os.WriteFile(path, []byte(addr+"\n"), 0o644)
+}
+
+func sweepStalePprofEntries(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		pidStr, ok := strings.CutSuffix(entry.Name(), ".addr")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		if util.IsProcessAlive(pid) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
+// installStackDumpHandler lets `kill -USR1 <pid>` capture a wedged process's
+// goroutine state without killing it.
+func installStackDumpHandler() {
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGUSR1)
+	go func() {
+		for range ch {
+			dumpGoroutines()
+		}
+	}()
+}
+
+func dumpGoroutines() {
+	dir := filepath.Join(os.Getenv("HOME"), ".cache", "weft", "dumps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("stack dump: mkdir failed", "error", err)
+		return
+	}
+	name := fmt.Sprintf("%d-%s.stack", os.Getpid(), time.Now().UTC().Format("20060102T150405Z"))
+	path := filepath.Join(dir, name)
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		slog.Warn("stack dump: write failed", "error", err, "path", path)
+		return
+	}
+	slog.Info("stack dump written", "path", path)
 }
 
 func init() {
