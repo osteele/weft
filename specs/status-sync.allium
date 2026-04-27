@@ -582,7 +582,7 @@ rule AgentPeriodicOutputSync {
         --   jobs/<jobID>/runs/<runID>/outputs/<dir>/
         --   jobs/<jobID>/runs/<runID>/artifacts/files/
         --   jobs/<jobID>/runs/<runID>/artifacts/manifest.json
-        -- This bounds lost work on interruptible/preemptible instances.
+        -- This bounds lost work on interruptible instances.
 }
 
 -- Agent writes heartbeat samples continuously in the background.

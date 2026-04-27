@@ -126,7 +126,7 @@ entity Instance {
     max_bid_price_cents: Integer?       -- bid paid; null for on-demand
     on_demand_ref_cents: Integer?       -- cheapest concurrent on-demand $/hr
                                         -- at launch for the same GPU class,
-                                        -- for preemptible-savings analysis;
+                                        -- for interruptible-savings analysis;
                                         -- null when the counterfactual search
                                         -- was unavailable or returned nothing
 
@@ -174,7 +174,7 @@ entity Instance {
     has_grace: grace_period_seconds > 0
     grace_remaining: if grace_deadline != null then grace_deadline - now else null
     bootstrap_origin: provider_running_at ?? launched_at
-    pause_tolerant: jobs.any(j => "preemptible" in j.tags)
+    pause_tolerant: jobs.any(j => "interruptible" in j.tags)
     is_retryable: termination_reason in {provider_failure, infra_failure,
                                           bootstrap_timeout, phase_stall,
                                           preempted, unknown}
@@ -352,26 +352,41 @@ rule DependencyGatesRentalLaunch {
 }
 
 -- --------------------------------------------------------------------------
--- Preemptible (interruptible) placement
+-- Interruptible placement
 -- --------------------------------------------------------------------------
 
--- A job opts into preemptible placement by either:
---   * tagging the job with "preemptible", or
---   * setting `preemptible = true` in its PEP 723 [tool.weft] block.
--- Both paths set Job.preemptible; InstanceGroup.preemptible is the OR of its
--- member jobs. An entire group runs as either all-interruptible or all-on-
--- demand — preemptible and non-preemptible jobs never share an instance.
+-- A job opts into interruptible placement by either:
+--   * tagging the job with "interruptible", or
+--   * setting `interruptible = true` in its PEP 723 [tool.weft] block.
 --
--- For preemptible groups:
+-- Synonyms (input-only, normalized on intake):
+--   * The tag "preemptible" is accepted and canonicalized to "interruptible"
+--     by CanonicalizeTag at submission. After canonicalization the persisted
+--     tag set contains "interruptible"; "preemptible" never appears in
+--     stored Job.tags or in any downstream rule. Spec rules that reference
+--     `"interruptible" in job.tags` apply uniformly to jobs submitted with
+--     either spelling.
+--   * The PEP 723 key `preemptible = true` is accepted and is equivalent to
+--     `interruptible = true`. If both keys are set, `interruptible` wins.
+--
+-- These synonyms exist solely for backwards compatibility; new code, docs,
+-- and CLI output use "interruptible".
+--
+-- Both paths set Job.interruptible; InstanceGroup.interruptible is the OR of
+-- its member jobs. An entire group runs as either all-interruptible or all-
+-- on-demand — interruptible and non-interruptible jobs never share an
+-- instance.
+--
+-- For interruptible groups:
 --   * Offer search is restricted to provider interruptible offers.
 --   * The bid price is the offer's asking `cost_per_hour` (max_bid = ask).
 --     A separate bid knob is intentionally not exposed in this first pass.
 --   * Provider "stopped" transitions are not immediate failures (see
---     ProviderInstancePaused) — for any rental, not just preemptible.
+--     ProviderInstancePaused) — for any rental, not just interruptible.
 --     pause_tolerant only affects the termination_reason chosen if
 --     stale_pause_timeout is exceeded.
 --   * If the pause does not clear within config.stale_pause_timeout the
---     instance is failed (termination_reason = preempted for preemptible,
+--     instance is failed (termination_reason = preempted for interruptible,
 --     provider_failure otherwise) and jobs relaunch on a fresh offer (see
 --     PausedInstanceStale and RelaunchAfterInfraFailure).
 --
@@ -379,12 +394,12 @@ rule DependencyGatesRentalLaunch {
 -- maintained at this layer — the runaway breaker (see §Runaway prevention)
 -- is the backstop.
 --
--- Benchmark jobs are incompatible with preemptible placement: preemption
+-- Benchmark jobs are incompatible with interruptible placement: preemption
 -- pauses the container mid-run, invalidating timing measurements (cold GPU
 -- and state on resume), and a stale-pause relaunch puts the job on a
 -- different physical machine, breaking the "same hardware" control that
 -- benchmark analyses rely on. The submission path rejects the combined
--- {"benchmark", "preemptible"} tag set.
+-- {"benchmark", "interruptible"} tag set.
 --
 -- For provenance of historical launches, three columns on `launches`
 -- capture the rental decision at create time:
@@ -397,11 +412,12 @@ rule DependencyGatesRentalLaunch {
 -- per-launch query rather than inferred from tag joins that can drift as
 -- tags are edited after the fact.
 --
--- Implementation: internal/db/db.go TagPreemptible,
--- internal/dataloc/scriptmeta.go (PEP 723), internal/campaign/campaign.go
--- InstanceGroup.Preemptible + HasPreemptibleJob, internal/campaign/
--- offers.go offerConstraintsForGroup, internal/campaign/lifecycle.go
--- (MaxBidPrice default = offer cost).
+-- Implementation: internal/db/db.go TagInterruptible (TagPreemptible alias,
+-- TagPreemptibleLegacy for canonicalization),
+-- internal/dataloc/scriptmeta.go (PEP 723; accepts both keys),
+-- internal/campaign/campaign.go InstanceGroup.Preemptible +
+-- HasPreemptibleJob, internal/campaign/offers.go offerConstraintsForGroup,
+-- internal/campaign/lifecycle.go (MaxBidPrice default = offer cost).
 
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
@@ -805,7 +821,7 @@ rule ProviderInstanceResumes {
 rule PausedInstanceStale {
     -- A launch that has been paused since before
     -- now - config.stale_pause_timeout has almost certainly lost its bid
-    -- (preemptible) or will not be resumed by the provider (account pause).
+    -- (interruptible) or will not be resumed by the provider (account pause).
     -- Fail it so RelaunchAfterInfraFailure picks a fresh offer.
     when: instance: Instance.provider_instance.status = stopped
     requires: instance.status in {launching, running, paused, grace}
@@ -1272,14 +1288,16 @@ invariant AttemptChainPointsBackwards {
         pred.attempt_number < ja.attempt_number
 }
 
-invariant BenchmarkIncompatibleWithPreemptible {
-    -- Benchmark and preemptible are semantically incompatible: a
+invariant BenchmarkIncompatibleWithInterruptible {
+    -- Benchmark and interruptible are semantically incompatible: a
     -- preemption mid-measurement invalidates the benchmark (cold GPU
     -- on resume, broken timing), and a stale-pause relaunch moves the
     -- job to a different physical machine. Enforced at job submission
-    -- by validateReservedPlacementTags (internal/db/db.go).
+    -- by validateReservedPlacementTags (internal/db/db.go). Tags are
+    -- canonicalized first, so the legacy "preemptible" alias is also
+    -- caught.
     for job in Jobs:
-        not ("benchmark" in job.tags and "preemptible" in job.tags)
+        not ("benchmark" in job.tags and "interruptible" in job.tags)
 }
 
 invariant TerminalInstancesHaveEndTime {

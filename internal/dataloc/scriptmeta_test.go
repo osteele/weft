@@ -227,6 +227,17 @@ import torch
 			},
 		},
 		{
+			name: "interruptible",
+			content: `# /// script
+# [tool.weft]
+# interruptible = true
+# ///
+`,
+			want: &ScriptMeta{
+				Preemptible: true,
+			},
+		},
+		{
 			name: "tool.uv index-url",
 			content: `# /// script
 # dependencies = ["sglang"]

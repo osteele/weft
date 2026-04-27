@@ -113,33 +113,36 @@ weft campaign launch --min-survival 0   # Disable survival floor (allow all offe
 weft campaign launch --min-survival 0.6 # Stricter survival floor
 ```
 
-### Interruptible (preemptible) jobs
+### Interruptible jobs
 
 Mark jobs that can tolerate interruption with:
 
 ```bash
-weft run --tag rental --tag preemptible --gpu a100 'python train.py'
+weft run --tag rental --tag interruptible --gpu a100 'python train.py'
 ```
 
 or via script metadata:
 
 ```toml
 [tool.weft]
-preemptible = true
+interruptible = true
 ```
 
-Only jobs marked preemptible are eligible for interruptible offers. Weft keeps
-non-preemptible jobs on normal offers and does not mix the two in the same
-instance group.
+The tag and key `preemptible` are accepted as synonyms for backwards
+compatibility.
+
+Only jobs marked interruptible are eligible for interruptible offers. Weft
+keeps non-interruptible jobs on normal offers and does not mix the two in the
+same instance group.
 
 **Price.** The bid is the offer's asking `cost/hr` (`max_bid = ask`). There is
 no separate bid knob in this first pass — if you want a stricter ceiling, pick
 a cheaper offer via the usual GPU/memory filters. The launch plan table
-annotates preemptible groups as `$X.YY/hr (int, bid $X.YY)` so the chosen bid
-is visible in `--dry-run`.
+annotates interruptible groups as `$X.YY/hr (int, bid $X.YY)` so the chosen
+bid is visible in `--dry-run`.
 
 **Not compatible with `benchmark`.** The submission path rejects jobs that
-combine `benchmark` and `preemptible`: preemption pauses the container
+combine `benchmark` and `interruptible`: preemption pauses the container
 mid-measurement (invalidating timing; the GPU is cold on resume), and a
 stale-pause relaunch moves the job to a different physical machine, breaking
 the "same hardware" control that benchmark analyses rely on.
@@ -189,7 +192,7 @@ market, plus the savings ratio. In practice median savings are roughly 25-30%
 across most tiers; the larger gaps (50-75%) show up at the min on the less-
 liquid ends of the market.
 
-**Policy.** Preemptible instances are *pause-tolerant*: when the provider
+**Policy.** Interruptible instances are *pause-tolerant*: when the provider
 marks them `stopped` (typically after losing a bid) weft leaves them in place
 and waits for the provider to resume them. If the pause lasts longer than
 ~6 hours, weft gives up, fails the launch with `termination_reason = preempted`,

@@ -331,6 +331,21 @@ func TestValidateReservedPlacementTags_BenchmarkPreemptibleRejected(t *testing.T
 	}
 }
 
+func TestCanonicalizeTag_PreemptibleAlias(t *testing.T) {
+	if got := CanonicalizeTag("preemptible"); got != TagInterruptible {
+		t.Errorf("CanonicalizeTag(\"preemptible\") = %q, want %q", got, TagInterruptible)
+	}
+	if got := CanonicalizeTag("interruptible"); got != TagInterruptible {
+		t.Errorf("CanonicalizeTag(\"interruptible\") = %q, want %q", got, TagInterruptible)
+	}
+	if !HasPreemptibleTag([]string{"preemptible"}) {
+		t.Error("legacy 'preemptible' tag should canonicalize to interruptible")
+	}
+	if !HasPreemptibleTag([]string{"interruptible"}) {
+		t.Error("'interruptible' tag should be detected")
+	}
+}
+
 func TestCreateLaunch_RentalTypeMetadata_RoundTrip(t *testing.T) {
 	database := setupTestDB(t)
 

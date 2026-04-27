@@ -397,7 +397,10 @@ rule PlaceJob {
         -- data locality (input assets already cached on host), queue depth,
         -- and estimated transfer time. Jobs with `rental` tag prefer cloud
         -- instances; jobs with `inventory` tag prefer on-prem hosts.
-        -- Jobs tagged `preemptible` allow interruptible cloud offers.
+        -- Jobs tagged `interruptible` allow interruptible cloud offers.
+        -- The legacy tag `preemptible` is accepted on input and canonicalized
+        -- to `interruptible` (see Campaign Lifecycle § Interruptible
+        -- placement).
 }
 
 rule LaunchPlacementWindow {

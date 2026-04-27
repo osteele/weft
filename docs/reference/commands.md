@@ -25,7 +25,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated). Reserved tags: `exclusive` makes the job run alone; `benchmark` is like `exclusive` but also waits for system-wide idle and skips hosts marked `shared = true` during auto-placement; `rental` skips local placement and sends the job toward rental-GPU workflows; `inventory` blocks rental placement, keeps the job on inventory hosts only, and allows benchmark jobs to use shared inventory hosts; `preemptible` allows interruptible cloud offers for that job. Legacy aliases `cloud` and `on-prem` are accepted for compatibility.
+- `--tag TAG`: Tag to attach to the job (can be repeated). Reserved tags: `exclusive` makes the job run alone; `benchmark` is like `exclusive` but also waits for system-wide idle and skips hosts marked `shared = true` during auto-placement; `rental` skips local placement and sends the job toward rental-GPU workflows; `inventory` blocks rental placement, keeps the job on inventory hosts only, and allows benchmark jobs to use shared inventory hosts; `interruptible` allows interruptible cloud offers for that job (`preemptible` is accepted as a synonym). Legacy aliases `cloud` and `on-prem` are accepted for compatibility.
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -52,8 +52,9 @@ These are applied as defaults — CLI flags take precedence. See
 [Workflow Guide § Script metadata](../guides/workflow-guide.md#script-metadata).
 For Vast.ai campaign launches, metadata also supports `vast-cap-add` to request
 extra container capabilities (for example, `["SYS_ADMIN"]`).
-Set `preemptible = true` in `[tool.weft]` to opt a script into interruptible
-cloud placement (equivalent to tagging the job with `--tag preemptible`).
+Set `interruptible = true` in `[tool.weft]` to opt a script into interruptible
+cloud placement (equivalent to tagging the job with `--tag interruptible`). The
+key `preemptible` and tag `preemptible` are accepted as synonyms.
 
 **OOM history:** When a job fails with a GPU out-of-memory error, weft records
 the GPU capacity. On subsequent submissions of the same command, the minimum
