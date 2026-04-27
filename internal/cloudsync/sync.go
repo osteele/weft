@@ -1,6 +1,7 @@
 package cloudsync
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"sync"
@@ -15,7 +16,10 @@ type Result struct {
 	ReconcileResult *campaign.ReconcileResult
 }
 
-func SyncState(database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, syncResults func() int) Result {
+func SyncState(ctx context.Context, database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, syncResults func(context.Context) int) Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if reconciler == nil {
 		reconciler = campaign.NewReconciler()
 	}
@@ -46,7 +50,7 @@ func SyncState(database *sql.DB, reconciler *campaign.Reconciler, clients []clou
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resultsUpdated = syncResults()
+			resultsUpdated = syncResults(ctx)
 		}()
 	}
 	wg.Wait()

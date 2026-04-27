@@ -1,6 +1,7 @@
 package syncorch
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -18,6 +19,9 @@ import (
 )
 
 type CloudSyncOptions struct {
+	// Context bounds the work. If nil, context.Background() is used. When
+	// Timeout is also set, an inner ctx with that deadline is derived.
+	Context     context.Context
 	Timeout     time.Duration
 	Verbose     bool
 	Reconciler  any
@@ -43,21 +47,28 @@ var (
 )
 
 func SyncCloud(cfg *config.Config, database *sql.DB, opts CloudSyncOptions) CloudSyncResult {
-	run := func() CloudSyncResult {
-		return syncCloud(cfg, database, opts)
+	parent := opts.Context
+	if parent == nil {
+		parent = context.Background()
 	}
 	if opts.Timeout <= 0 {
-		result := run()
+		result := syncCloud(parent, cfg, database, opts)
 		result.Completed = true
 		return result
 	}
+	ctx, cancel := context.WithTimeout(parent, opts.Timeout)
 	done := make(chan CloudSyncResult, 1)
-	go func() { done <- run() }()
+	go func() {
+		defer cancel()
+		done <- syncCloud(ctx, cfg, database, opts)
+	}()
 	select {
 	case result := <-done:
 		result.Completed = true
 		return result
-	case <-time.After(opts.Timeout):
+	case <-ctx.Done():
+		// Caller is unblocked immediately; the worker drains in the background
+		// once it observes ctx cancellation.
 		return CloudSyncResult{
 			Completed: false,
 			Warnings:  []string{degraded.CloudSyncTimedOutWaitingForDB(opts.Timeout.String())},
@@ -65,7 +76,7 @@ func SyncCloud(cfg *config.Config, database *sql.DB, opts CloudSyncOptions) Clou
 	}
 }
 
-func syncCloud(cfg *config.Config, database *sql.DB, opts CloudSyncOptions) CloudSyncResult {
+func syncCloud(ctx context.Context, cfg *config.Config, database *sql.DB, opts CloudSyncOptions) CloudSyncResult {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -106,27 +117,27 @@ func syncCloud(cfg *config.Config, database *sql.DB, opts CloudSyncOptions) Clou
 		ok, err := db.AcquireAutoLease(database, opts.LeaseScope, owner, ttl)
 		if err != nil {
 			warnings := []string{fmt.Sprintf("cloud sync lease error: %v", err)}
-			res := syncCloudWithClients(database, reconciler, nil, nil, opts, cfg)
+			res := syncCloudWithClients(ctx, database, reconciler, nil, nil, opts, cfg)
 			res.Warnings = append(res.Warnings, warnings...)
 			return res
 		}
 		if !ok {
-			return syncCloudWithClients(database, reconciler, nil, nil, opts, cfg)
+			return syncCloudWithClients(ctx, database, reconciler, nil, nil, opts, cfg)
 		}
 		defer func() {
 			_ = db.ReleaseAutoLease(database, opts.LeaseScope, owner)
 		}()
 	}
 
-	return syncCloudWithClients(database, reconciler, clients, r2Client, opts, cfg)
+	return syncCloudWithClients(ctx, database, reconciler, clients, r2Client, opts, cfg)
 }
 
-func syncCloudWithClients(database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, opts CloudSyncOptions, cfg *config.Config) CloudSyncResult {
-	syncResults := func() int { return 0 }
+func syncCloudWithClients(ctx context.Context, database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, opts CloudSyncOptions, cfg *config.Config) CloudSyncResult {
+	syncResults := func(context.Context) int { return 0 }
 	if opts.SyncResults {
-		syncResults = func() int { return SyncCloudJobResults(cfg, database, opts.Verbose) }
+		syncResults = func(ctx context.Context) int { return SyncCloudJobResults(ctx, cfg, database, opts.Verbose) }
 	}
-	result := cloudsync.SyncState(database, reconciler, clients, r2Client, syncResults)
+	result := cloudsync.SyncState(ctx, database, reconciler, clients, r2Client, syncResults)
 	if opts.Verbose && result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
 		fmt.Printf("Reconciled %d cloud instance(s)\n", result.ReconcileResult.Reconciled)
 	}

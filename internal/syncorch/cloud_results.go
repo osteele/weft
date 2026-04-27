@@ -38,7 +38,10 @@ const (
 // This covers both legacy Vast.ai-backend jobs and campaign-launched queue-runner jobs.
 // Uses per-job DB lookups rather than pre-filtering by cloud_instance_id, so results
 // are synced even if the instance association was cleared by a concurrent reset.
-func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int {
+func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *sql.DB, verbose bool) int {
+	if parent == nil {
+		parent = context.Background()
+	}
 	updated := 0
 	if repaired, err := db.ResetJobsOnTerminalLaunches(database); err != nil {
 		if verbose {
@@ -64,9 +67,9 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		return 0
 	}
 
-	// Use a generous overall timeout — each completed job may need to download
-	// result files, and a tight timeout causes later jobs to be skipped.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Cap this phase at 60s, derived from the parent so caller cancellation
+	// also propagates here.
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
 	updatedInstanceIDs := make(map[int64]struct{})
@@ -96,6 +99,9 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		var wg sync.WaitGroup
 
 		for _, jobIDStr := range markers.Completed {
+			if ctx.Err() != nil {
+				break
+			}
 			jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
 			if jobID == 0 || markers.IsProcessed(jobID) {
 				continue
@@ -127,6 +133,9 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		var wg sync.WaitGroup
 
 		for _, jobIDStr := range markers.Started {
+			if ctx.Err() != nil {
+				break
+			}
 			jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
 			if jobID == 0 || completedJobIDs[jobID] {
 				continue
@@ -153,7 +162,7 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 					startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 				}
 
-				if _, err := database.Exec(
+				if _, err := database.ExecContext(ctx,
 					`UPDATE job_attempts SET status = ?, start_time = ?
 					 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
 					db.StatusRunning, startTimeUnix, jobID,
@@ -178,6 +187,9 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		var wg sync.WaitGroup
 
 		for _, jobIDStr := range markers.Started {
+			if ctx.Err() != nil {
+				break
+			}
 			jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
 			if jobID == 0 || completedJobIDs[jobID] {
 				continue
@@ -199,7 +211,8 @@ func SyncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	}
 	// Use a fresh context for opslog sync — the shared ctx may be nearly
 	// expired after job-marker and timeseries syncing consumed most of its budget.
-	opslogCtx, opslogCancel := context.WithTimeout(context.Background(), opslogSyncTimeout)
+	// Still derived from parent so caller cancellation propagates.
+	opslogCtx, opslogCancel := context.WithTimeout(parent, opslogSyncTimeout)
 	defer opslogCancel()
 	if err := SyncCloudInstanceOpslogs(opslogCtx, r2Client, database, nil, verbose); err != nil && verbose {
 		fmt.Fprintf(os.Stderr, "Warning: instance ops log sync failed: %v\n", err)
@@ -533,7 +546,7 @@ func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database 
 	var status string
 	var backend sql.NullString
 	var latestRunID sql.NullInt64
-	if err := database.QueryRow("SELECT status, backend, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend, &latestRunID); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT status, backend, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend, &latestRunID); err != nil {
 		return nil
 	}
 	if db.IsTerminalStatus(status) {
@@ -588,7 +601,7 @@ func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database 
 func syncCloudLiveTelemetry(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID int64) error {
 	var status string
 	var latestRunID sql.NullInt64
-	if err := database.QueryRow("SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &latestRunID); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &latestRunID); err != nil {
 		return nil
 	}
 	if db.IsTerminalStatus(status) {

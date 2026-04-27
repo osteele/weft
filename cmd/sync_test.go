@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"strings"
@@ -317,7 +318,7 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 		t.Fatalf("set job running: %v", err)
 	}
 
-	updated := syncorch.SyncCloudJobResults(&config.Config{}, database, false)
+	updated := syncorch.SyncCloudJobResults(context.Background(), &config.Config{}, database, false)
 	if updated != 1 {
 		t.Fatalf("syncCloudJobResults updated %d rows, want 1", updated)
 	}

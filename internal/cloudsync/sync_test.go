@@ -1,7 +1,9 @@
 package cloudsync
 
 import (
+	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,7 +44,7 @@ func TestSyncState_ReconcileAndResultsParallel(t *testing.T) {
 		},
 	}
 
-	syncResults := func() int {
+	syncResults := func(context.Context) int {
 		resultsStart = time.Now()
 		time.Sleep(delay)
 		resultsEnd = time.Now()
@@ -51,7 +53,7 @@ func TestSyncState_ReconcileAndResultsParallel(t *testing.T) {
 
 	reconciler := campaign.NewReconciler()
 	start := time.Now()
-	SyncState(database, reconciler, []cloud.Client{mockClient}, nil, syncResults)
+	SyncState(context.Background(), database, reconciler, []cloud.Client{mockClient}, nil, syncResults)
 	elapsed := time.Since(start)
 
 	t.Logf("elapsed=%v firstList=[%v..%v] results=[%v..%v]",
@@ -67,5 +69,35 @@ func TestSyncState_ReconcileAndResultsParallel(t *testing.T) {
 		t.Fatalf("reconcile and results did not overlap: firstList=[%v..%v] results=[%v..%v]",
 			firstListStart.Sub(start), firstListEnd.Sub(start),
 			resultsStart.Sub(start), resultsEnd.Sub(start))
+	}
+}
+
+// TestSyncState_PropagatesContextCancellation verifies that the ctx passed to
+// SyncState is forwarded to the syncResults callback, so the inner work bails
+// out when the caller's deadline expires. Regression guard: prior to ctx
+// plumbing, SyncCloudJobResults built its own context.Background() and ran for
+// up to ~120s regardless of caller cancellation, causing repeated wrapper-side
+// timeouts to pile up overlapping syncs.
+func TestSyncState_PropagatesContextCancellation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	defer database.Close()
+
+	var observedCancel atomic.Bool
+	syncResults := func(ctx context.Context) int {
+		select {
+		case <-ctx.Done():
+			observedCancel.Store(true)
+		case <-time.After(2 * time.Second):
+		}
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	SyncState(ctx, database, nil, nil, nil, syncResults)
+
+	if !observedCancel.Load() {
+		t.Fatal("inner work did not observe ctx cancellation")
 	}
 }
