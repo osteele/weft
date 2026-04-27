@@ -1132,3 +1132,43 @@ rule AttemptsViewIsReadOnly {
         --   internal/ui/terminal/watch_router.go  — switchToAttemptsMsg,
         --                                           switchBackFromAttemptsMsg
 }
+
+-- Plain-mode watch commands (`weft watch`, `weft job watch`,
+-- `weft project watch`, `weft instance watch`, and their aliases) poll the
+-- database on a fixed interval and reprint the snapshot until either all
+-- displayed jobs reach a terminal state or the user interrupts. This makes
+-- them suitable for headless / agent monitoring of any selection of jobs
+-- without external looping. Use --follow to keep printing past quiescence.
+rule PlainWatchPollsUntilQuiescent {
+    when: UserInvokesPlainWatch(scope)
+    ensures: ScopeRefreshedEveryInterval(scope) and
+             ExitsWhenAllTerminal(scope) unless FollowFlagSet
+
+    @guidance
+        -- Refresh interval is TerminalSyncInterval (60s by default,
+        -- internal/ui/terminal/deps.go). Each iteration:
+        --   1. Runs the same fast/full sync the TUI would (respecting
+        --      --sync / --no-sync), surfacing warnings on stderr.
+        --   2. Reloads the scope's job set from the DB.
+        --   3. Renders a snapshot to stdout.
+        --   4. Sleeps until next interval or SIGINT.
+        --
+        -- Quiescence (i.e. exit conditions, when --follow is unset):
+        --   - `weft watch` / `weft watch system` / `weft watch instance`:
+        --     no running launches and no on-prem jobs in non-terminal
+        --     states.
+        --   - `weft job watch <id>...`: every named job has reached a
+        --     terminal status.
+        --   - `weft project watch [name]`: the project has no running,
+        --     queued, or unplaced jobs.
+        --
+        -- Empty initial state for a named project still errors as
+        -- "no jobs found for project ..." on the first iteration; the
+        -- error is not retried in the polling loop.
+        --
+        -- Implementation:
+        --   cmd/watch.go            — watchAllPlain entry
+        --   cmd/job_watch.go        — watchJobsPlainAll
+        --   cmd/project_watch.go    — runProjectWatchPlain
+        --   internal/ui/terminal/watch_plain.go — shared snapshot loop
+}

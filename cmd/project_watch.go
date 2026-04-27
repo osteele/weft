@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"slices"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
@@ -20,7 +24,9 @@ var projectWatchCmd = &cobra.Command{
 Defaults to the current directory's project. Pass a project name to override.
 
 In an interactive terminal this defaults to a read-only TUI. Otherwise it
-prints a grouped plain-text snapshot.`,
+polls the database, printing a grouped plain-text snapshot every refresh
+interval until all jobs reach a terminal state. Use --follow to keep printing
+even when nothing is active.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runProjectWatch,
 }
@@ -43,6 +49,7 @@ func addProjectWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&projectWatchPlain, "plain", false, "Force plain text output")
 	cmd.Flags().BoolVar(&projectWatchSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	cmd.Flags().BoolVar(&projectWatchNoSync, "no-sync", false, "Skip syncing job statuses before displaying")
+	cmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing snapshots even when nothing is active")
 	cmd.Flags().DurationVar(&projectWatchRecent, "recent", 24*time.Hour, "Window for recent terminal jobs")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
@@ -77,17 +84,54 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 		return terminal.RunProjectWatchTUI(database, cfg, projectWatchRecent, !projectWatchNoSync, project, watchAuto)
 	}
 
-	for _, warning := range terminal.SyncProjectWatchData(database, projectWatchSync, projectWatchNoSync) {
-		fmt.Fprintln(cmd.ErrOrStderr(), warning)
+	return runProjectWatchPlain(cmd, database, project, watchFollow)
+}
+
+func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, follow bool) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	first := true
+	var lastWarnings []string
+	for {
+		warnings := terminal.SyncProjectWatchData(database, projectWatchSync, projectWatchNoSync)
+		if !slices.Equal(warnings, lastWarnings) {
+			for _, warning := range warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), warning)
+			}
+			lastWarnings = warnings
+		}
+		groups, err := terminal.LoadProjectWatchGroups(database, projectWatchRecent)
+		if err != nil {
+			return err
+		}
+		groups = terminal.FilterProjectGroups(groups, project)
+		if first && len(groups) == 0 && project != "" {
+			return errNoJobsForProject(database, project)
+		}
+		first = false
+
+		if _, err := io.WriteString(cmd.OutOrStdout(), terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), time.Now(), projectWatchRecent)); err != nil {
+			return err
+		}
+
+		if !follow && !projectGroupsHaveActive(groups) {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(terminal.TerminalSyncInterval):
+		}
 	}
-	groups, err := terminal.LoadProjectWatchGroups(database, projectWatchRecent)
-	if err != nil {
-		return err
+}
+
+func projectGroupsHaveActive(groups []terminal.ProjectGroup) bool {
+	for _, g := range groups {
+		if len(g.Running) > 0 || len(g.Queued) > 0 || len(g.Unplaced) > 0 {
+			return true
+		}
 	}
-	groups = terminal.FilterProjectGroups(groups, project)
-	if len(groups) == 0 && project != "" {
-		return errNoJobsForProject(database, project)
-	}
-	_, err = io.WriteString(cmd.OutOrStdout(), terminal.RenderProjectWatchPlain(groups, terminal.ListOutputWidth(), time.Now(), projectWatchRecent))
-	return err
+	return false
 }

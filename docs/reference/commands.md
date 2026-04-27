@@ -478,19 +478,24 @@ weft project watch [flags]
 ```
 
 In an interactive terminal this defaults to a read-only TUI. Otherwise it
-prints a grouped snapshot of running, queued, and recent terminal jobs.
+polls the database, printing a grouped snapshot of running, queued, and
+recent terminal jobs every refresh interval, and exits once all jobs reach a
+terminal state. Use `--follow` to keep printing snapshots even when nothing
+is active.
 
 **Flags:**
 - `--tui`: Force TUI mode
 - `--plain`: Force plain text output
 - `--sync`: Perform a full sync before loading data
 - `--no-sync`: Skip syncing before loading data
+- `-f`, `--follow`: Keep printing snapshots even when nothing is active
 - `--recent DURATION`: Window for recent terminal jobs (default: `24h`)
 
 **Examples:**
 ```bash
 weft project watch
 weft project watch --plain
+weft project watch --plain --follow
 weft project watch --recent 48h
 ```
 
