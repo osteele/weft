@@ -121,6 +121,80 @@ func TestStageArtifactNeedsFromR2_NoNeeds(t *testing.T) {
 	}
 }
 
+// TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs verifies that a
+// host-wide stage call issues exactly one SSH probe regardless of how many
+// queued jobs need their needs probed. The earlier per-job approach was
+// O(N) round-trips; this guards against that regression.
+func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Producer is a rental job (no host pin → producer.HasInventoryHost() is false).
+	producerID, err := db.RecordQueued(database, "", "/tmp", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+
+	// Two consumers on the same host, each with one --needs entry referencing
+	// the rental producer.
+	jobs := make([]*db.Job, 0, 2)
+	for i := 0; i < 2; i++ {
+		consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", fmt.Sprintf("consume-%d", i), "consumer")
+		if err != nil {
+			t.Fatalf("record consumer: %v", err)
+		}
+		if err := db.SetJobNeeds(database, consumerID, []string{fmt.Sprintf("output/x-%d.bin:%d", i, producerID)}); err != nil {
+			t.Fatalf("set needs: %v", err)
+		}
+		job, err := db.GetJobByID(database, consumerID)
+		if err != nil {
+			t.Fatalf("get consumer: %v", err)
+		}
+		jobs = append(jobs, job)
+	}
+
+	// Probe script signals "marker present" for both consumers' needs, so the
+	// stage path takes the early skip and never reaches R2 / scp.
+	probeCalls := 0
+	mockSSHFunc(t, func(_ string, command string) (string, string, int) {
+		if !strings.Contains(command, "logs=~/.cache/weft/logs") {
+			return "", "", 0
+		}
+		probeCalls++
+		// Extract every marker name the script tests for and reply that all
+		// markers are present. Each test is `[ -e "$logs"/<marker> ]`.
+		var sb strings.Builder
+		const prefix = `[ -e "$logs"/`
+		rest := command
+		for {
+			i := strings.Index(rest, prefix)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(prefix):]
+			j := strings.Index(rest, " ]")
+			if j < 0 {
+				break
+			}
+			name := rest[:j]
+			sb.WriteString(probeRemoteNeedsTagMarker + "\t" + name + "\n")
+			rest = rest[j+2:]
+		}
+		return sb.String(), "", 0
+	})
+
+	getR2 := func() (*r2.Client, error) {
+		t.Fatal("getR2Client should not be called when all markers are present")
+		return nil, nil
+	}
+	failed := stageArtifactNeedsForHost(database, "host-alpha", jobs, time.Second, getR2)
+	if len(failed) != 0 {
+		t.Fatalf("unexpected failures: %v", failed)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("probeCalls = %d, want 1 (probe should batch across jobs)", probeCalls)
+	}
+}
+
 // TestStageArtifactNeedsFromR2_MissingProducer verifies that an unknown
 // producer ID surfaces as an error rather than silently being skipped.
 func TestStageArtifactNeedsFromR2_MissingProducer(t *testing.T) {

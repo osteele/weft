@@ -482,26 +482,23 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	// Stage rental-produced --needs artifacts for every queued job on this host
 	// — synced or not — so jobs already sitting in the runner's pending list can
 	// have their satisfied markers written without having to be re-dispatched.
-	// Idempotent: skips needs whose marker already exists on the host.
-	stageSeen := make(map[int64]bool)
-	stageOne := func(job *db.Job) {
-		if job == nil || stageSeen[job.ID] || len(job.Needs) == 0 {
-			return
+	// One SSH probe covers every job's marker/file state; staging then runs
+	// only for needs whose marker is missing.
+	allQueued := make([]*db.Job, 0, len(syncedJobs)+len(jobs))
+	seenStage := make(map[int64]bool)
+	for _, job := range append(append([]*db.Job(nil), syncedJobs...), jobs...) {
+		if job == nil || seenStage[job.ID] {
+			continue
 		}
-		stageSeen[job.ID] = true
-		if err := stageArtifactNeedsFromR2(database, job, timeout, getR2Client); err != nil {
-			syncLog.Debug("artifact needs staging failed", "job_id", job.ID, "host", host, "error", err)
-			oplog.LogJob(oplog.OpJobStartFailed, job.ID, host,
-				oplog.WithDetail("artifact needs staging failed"),
-				oplog.WithError(err),
-			)
-		}
+		seenStage[job.ID] = true
+		allQueued = append(allQueued, job)
 	}
-	for _, job := range syncedJobs {
-		stageOne(job)
-	}
-	for _, job := range jobs {
-		stageOne(job)
+	for jobID, err := range stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client) {
+		syncLog.Debug("artifact needs staging failed", "job_id", jobID, "host", host, "error", err)
+		oplog.LogJob(oplog.OpJobStartFailed, jobID, host,
+			oplog.WithDetail("artifact needs staging failed"),
+			oplog.WithError(err),
+		)
 	}
 
 	if len(jobs) == 0 {
@@ -797,15 +794,12 @@ type pendingNeed struct {
 	remotePath string
 }
 
-// stageArtifactNeedsFromR2 ensures rental-produced --needs artifacts for the
-// consumer job are present on its on-prem host: bytes are scp'd into the
-// working dir and a satisfied marker is written under ~/.cache/weft/logs/ so
-// the queue runner's CheckDependencies passes. On-prem-producer needs are
-// skipped (the producer's own queue runner writes the marker on completion).
-// Idempotent — needs whose marker already exists are skipped.
-func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
+// collectPendingNeeds parses one job's --needs and returns a pendingNeed for
+// each rental-producer entry (on-prem producers are skipped — their satisfied
+// marker is written by the producer's own queue runner). No SSH or R2 IO.
+func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 	if job == nil || len(job.Needs) == 0 || strings.TrimSpace(job.Host) == "" {
-		return nil
+		return nil, nil
 	}
 	remoteBase := workdir.ToTildeRelative(job.WorkingDir)
 	if remoteBase == "" {
@@ -815,14 +809,14 @@ func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Durati
 	for _, spec := range job.Needs {
 		parsed, err := parseCloudNeedSpec(spec)
 		if err != nil {
-			return fmt.Errorf("parse --needs %q: %w", spec, err)
+			return nil, fmt.Errorf("parse --needs %q: %w", spec, err)
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
-			return fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)
+			return nil, fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)
 		}
 		if producer == nil {
-			return fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
+			return nil, fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
 		}
 		if producer.HasInventoryHost() {
 			continue
@@ -836,24 +830,91 @@ func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Durati
 			remotePath: strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(parsed.Path, "/"),
 		})
 	}
-	if len(pending) == 0 {
-		return nil
+	return pending, nil
+}
+
+// stageArtifactNeedsForHost ensures rental-produced --needs artifacts for
+// every queued job on the host are present on the host: bytes are scp'd into
+// the working dir and a satisfied marker is written under ~/.cache/weft/logs/
+// so the queue runner's CheckDependencies passes. On-prem-producer needs are
+// skipped (the producer's own queue runner writes the marker on completion).
+// Idempotent — needs whose marker already exists are skipped.
+//
+// All jobs' marker/file presence is probed in a single SSH round-trip,
+// regardless of how many jobs or specs there are; the per-job staging loop
+// then reuses that state map. Each job's failures are reported via failed,
+// without aborting the rest of the pass.
+func stageArtifactNeedsForHost(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) (failed map[int64]error) {
+	failed = make(map[int64]error)
+	if strings.TrimSpace(host) == "" || len(jobs) == 0 {
+		return
 	}
 
-	state, err := probeRemoteNeedsState(job.Host, pending, timeout)
-	if err != nil {
-		return fmt.Errorf("probe remote needs state: %w", err)
+	pendingByJob := make(map[int64][]pendingNeed)
+	var allPending []pendingNeed
+	for _, job := range jobs {
+		pending, err := collectPendingNeeds(database, job)
+		if err != nil {
+			failed[job.ID] = err
+			continue
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		pendingByJob[job.ID] = pending
+		allPending = append(allPending, pending...)
 	}
-	var todo []pendingNeed
-	for _, n := range pending {
-		if !state[n.markerName].markerExists {
-			todo = append(todo, n)
+	if len(allPending) == 0 {
+		return
+	}
+
+	state, err := probeRemoteNeedsState(host, allPending, timeout)
+	if err != nil {
+		err = fmt.Errorf("probe remote needs state: %w", err)
+		for jobID := range pendingByJob {
+			failed[jobID] = err
+		}
+		return
+	}
+
+	for _, job := range jobs {
+		pending := pendingByJob[job.ID]
+		if len(pending) == 0 {
+			continue
+		}
+		var todo []pendingNeed
+		for _, n := range pending {
+			if !state[n.markerName].markerExists {
+				todo = append(todo, n)
+			}
+		}
+		if len(todo) == 0 {
+			continue
+		}
+		if err := stageMissingNeeds(job, todo, state, timeout, getR2Client); err != nil {
+			failed[job.ID] = err
 		}
 	}
-	if len(todo) == 0 {
+	return
+}
+
+// stageArtifactNeedsFromR2 is the single-job entry point used by tests.
+// Production code calls stageArtifactNeedsForHost to amortize the SSH probe
+// across all queued jobs on a host.
+func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
+	if job == nil {
 		return nil
 	}
+	failed := stageArtifactNeedsForHost(database, job.Host, []*db.Job{job}, timeout, getR2Client)
+	return failed[job.ID]
+}
 
+// stageMissingNeeds executes the R2-download + scp + marker-write for the
+// subset of needs whose satisfied marker is not yet on the host. `state`
+// covers all of the job's needs and is consulted for the size-match
+// optimization that lets us skip the transfer when an existing on-host file
+// matches the R2 object byte-for-byte.
+func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteNeedState, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
 	r2Client, err := getR2Client()
 	if err != nil {
 		return err
