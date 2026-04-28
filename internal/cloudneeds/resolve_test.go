@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2resolve"
 )
 
 func TestResolveSpecs_PrefersArtifactFilesKey(t *testing.T) {
@@ -23,9 +24,9 @@ func TestResolveSpecs_PrefersArtifactFilesKey(t *testing.T) {
 	spec := fmt.Sprintf("%s:%d", relPath, producerID)
 	wantKey := r2keys.JobAttemptArtifactFilesPrefix(producerID, 0) + artifacts.LocalRelativePath(relPath)
 
-	prev := objectExistsFunc
-	t.Cleanup(func() { objectExistsFunc = prev })
-	objectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
+	prev := r2resolve.ObjectExistsFunc
+	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
 		return key == wantKey, nil
 	}
 
@@ -55,11 +56,11 @@ func TestResolveSpecs_FallsBackToRunZeroOutputsPrefix(t *testing.T) {
 	spec := fmt.Sprintf("%s:%d", relPath, producerID)
 	wantKey := r2keys.JobAttemptOutputsPrefix(producerID, 0) + relPath
 
-	prev := objectExistsFunc
-	t.Cleanup(func() { objectExistsFunc = prev })
+	prev := r2resolve.ObjectExistsFunc
+	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
 
 	var checked []string
-	objectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
 		checked = append(checked, key)
 		return key == wantKey, nil
 	}
@@ -84,9 +85,9 @@ func TestResolveSpecs_ReturnsErrorWhenMissing(t *testing.T) {
 	}
 
 	spec := fmt.Sprintf("output/missing.pt:%d", producerID)
-	prev := objectExistsFunc
-	t.Cleanup(func() { objectExistsFunc = prev })
-	objectExistsFunc = func(_ context.Context, _ *r2.Client, _ string) (bool, error) { return false, nil }
+	prev := r2resolve.ObjectExistsFunc
+	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, _ string) (bool, error) { return false, nil }
 
 	_, err = ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
 	if err == nil {

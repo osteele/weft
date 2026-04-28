@@ -25,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/prestage"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -873,7 +874,7 @@ func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Durati
 		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 			oplog.WithDetailf("artifact needs staging attempt: %s", n.spec))
 
-		key, err := resolveRentalNeedR2Key(r2Client, n.producerID, n.latestRun, n.path)
+		key, err := r2resolve.NeedR2Key(context.Background(), r2Client, n.producerID, n.latestRun, n.path)
 		if err != nil {
 			return fmt.Errorf("%q: %w", n.spec, err)
 		}
@@ -927,40 +928,6 @@ func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Durati
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 		oplog.WithDetailf("artifact needs staging complete (%d artifact%s)", len(todo), pluralize(len(todo))))
 	return nil
-}
-
-// resolveRentalNeedR2Key probes R2 for the producer's artifact key, trying
-// the latest-run prefix first, then the legacy run-zero prefix, and within
-// each run trying the artifact-files prefix before the outputs prefix.
-//
-// Mirrors the unexported cloudneeds.resolveNeedR2Key. We can't reuse it
-// without exporting it, and we can't pull in `runner.ParseNeedsSpec` here
-// because runner→placement→ops is a real import cycle.
-func resolveRentalNeedR2Key(client *r2.Client, jobID int64, latestRunID *int64, relPath string) (string, error) {
-	runIDs := []int64{0}
-	if latestRunID != nil && *latestRunID > 0 {
-		runIDs = append([]int64{*latestRunID}, runIDs...)
-	}
-	artifactRel := artifacts.LocalRelativePath(relPath)
-	outputRel := strings.TrimPrefix(relPath, "/")
-	for _, runID := range runIDs {
-		keys := []string{
-			r2keys.JobAttemptArtifactFilesPrefix(jobID, runID) + artifactRel,
-			r2keys.JobAttemptOutputsPrefix(jobID, runID) + outputRel,
-		}
-		for _, key := range keys {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			exists, err := client.ObjectExists(ctx, key)
-			cancel()
-			if err != nil {
-				return "", fmt.Errorf("check %s: %w", key, err)
-			}
-			if exists {
-				return key, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("artifact %q not found in cloud outputs", relPath)
 }
 
 func remoteFileSize(host, remotePath string, timeout time.Duration) (int64, error) {

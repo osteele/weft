@@ -554,11 +554,50 @@ rule CloudDataStagingViaR2 {
         )
 
     @guidance
-        -- Implementation anchor:
-        --   internal/cloudneeds/  — needs resolution and R2 staging
+        -- Implementation anchors:
+        --   internal/r2resolve/             — R2 key resolution policy
+        --                                     (shared with on-prem variant)
+        --   internal/cloudneeds/            — spec parsing and producer lookup
         --   internal/cloud/wrapper.go CloudNeed struct — manifest entry shape
         -- The agent reads cloud_needs from the manifest and rclone-copies
         -- each r2_key into path before starting the job.
+}
+
+-- Companion rule for on-prem consumers: when an on-prem-bound consumer
+-- declares `--needs` against a producer that ran on a rental, the producer's
+-- output is not on the consumer's host filesystem, and there is no
+-- producer queue runner co-located with the consumer to write the satisfied
+-- marker that CheckDependencies looks for. The host-sync dispatcher fills
+-- the gap by staging the artifact from R2 onto the host before the consumer
+-- runs, and writing the satisfied marker the on-prem queue runner expects.
+--
+-- Without this rule the consumer would sit in pending forever waiting for a
+-- marker that nothing writes (the wj1583 shape).
+rule OnPremStagingFromR2 {
+    when: OnPremDispatchTick(host)
+    requires: host.target_kind = inventory_host
+
+    for job in host.queued_jobs:
+      for need in job.needs:
+        let producer = ResolveProducerJob(need)
+        requires: producer.target_kind = rental_instance
+
+        let key = ResolveProducerR2Key(producer, need.path)
+
+        ensures:
+            ArtifactBytesPresentOnHost(host, job.working_dir / need.path)
+            SatisfiedMarkerWritten(host, need.version, need.path, exit_code: 0)
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/ops/host_sync.go stageArtifactNeedsFromR2  — staging
+        --   internal/r2resolve/             — R2 key resolution (shared)
+        -- Idempotent: needs whose marker already exists are skipped, and a
+        -- size-equality check guards against an interrupted scp leaving a
+        -- truncated file at the final path.
+        -- The atomic-rename pattern (scp to <path>.weft-staging then mv) keeps
+        -- a killed transfer from being mistaken for a complete one on the
+        -- next sync cycle.
 }
 
 -- Design intent: HF models and datasets declared on a cloud-bound job are
