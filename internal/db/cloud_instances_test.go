@@ -317,6 +317,50 @@ func TestLaunchPausedSeconds(t *testing.T) {
 	}
 }
 
+func TestLastProviderStatusTransitionTime(t *testing.T) {
+	database := setupTestDB(t)
+	id, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// No transitions yet → nil.
+	got, err := LastProviderStatusTransitionTime(database, id)
+	if err != nil {
+		t.Fatalf("LastProviderStatusTransitionTime: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %v, want nil for launch with no transitions", got)
+	}
+
+	// One transition → its observed_at.
+	now := time.Now()
+	t1 := now.Add(-5 * time.Minute)
+	if err := RecordProviderStatus(database, id, t1, "created", "running"); err != nil {
+		t.Fatalf("RecordProviderStatus: %v", err)
+	}
+	got, err = LastProviderStatusTransitionTime(database, id)
+	if err != nil {
+		t.Fatalf("LastProviderStatusTransitionTime: %v", err)
+	}
+	if got == nil || got.Unix() != t1.Unix() {
+		t.Errorf("got %v, want %v", got, t1)
+	}
+
+	// Two transitions → most recent.
+	t2 := now.Add(-1 * time.Minute)
+	if err := RecordProviderStatus(database, id, t2, "running", "offline"); err != nil {
+		t.Fatalf("RecordProviderStatus: %v", err)
+	}
+	got, err = LastProviderStatusTransitionTime(database, id)
+	if err != nil {
+		t.Fatalf("LastProviderStatusTransitionTime: %v", err)
+	}
+	if got == nil || got.Unix() != t2.Unix() {
+		t.Errorf("got %v, want %v (most recent)", got, t2)
+	}
+}
+
 func TestValidateReservedPlacementTags_BenchmarkPreemptibleRejected(t *testing.T) {
 	err := validateReservedPlacementTags([]string{TagBenchmark, TagPreemptible})
 	if err == nil {

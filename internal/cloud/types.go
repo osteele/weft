@@ -80,12 +80,17 @@ func (o Offer) Key() string {
 // ProviderStatus constants represent provider-reported instance states,
 // normalized across providers (Vast.ai, RunPod).
 const (
-	ProviderStatusCreated   = "created"
-	ProviderStatusCreating  = "creating" // RunPod initial state
-	ProviderStatusLoading   = "loading"
-	ProviderStatusRunning   = "running"
-	ProviderStatusExited    = "exited"
-	ProviderStatusStopped   = "stopped"
+	ProviderStatusCreated  = "created"
+	ProviderStatusCreating = "creating" // RunPod initial state
+	ProviderStatusLoading  = "loading"
+	ProviderStatusRunning  = "running"
+	ProviderStatusExited   = "exited"
+	ProviderStatusStopped  = "stopped"
+	// ProviderStatusOffline is Vast.ai's status for an interruptible
+	// instance that has been preempted but whose data is still preserved
+	// and may resume when capacity returns. Treated as pause-tolerant for
+	// interruptible launches; terminal otherwise.
+	ProviderStatusOffline   = "offline"
 	ProviderStatusError     = "error"
 	ProviderStatusDestroyed = "destroyed"
 	ProviderStatusDead      = "dead"
@@ -97,6 +102,7 @@ type Instance struct {
 	Provider       Provider
 	Status         string // "running", "loading", "exited", etc.
 	IntendedStatus string // provider's intended/target status (e.g., "running", "stopped")
+	StatusMsg      string // free-form provider message accompanying Status (e.g., reason for offline/error)
 	SSHHost        string
 	SSHPort        int
 	CostPerHour    float64

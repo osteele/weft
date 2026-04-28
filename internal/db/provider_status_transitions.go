@@ -75,6 +75,27 @@ func LaunchPausedSeconds(database *sql.DB, cloudInstanceID int64, referenceTime 
 	return total, nil
 }
 
+// LastProviderStatusTransitionTime returns the time of the most recent
+// recorded provider-status transition for a launch, or nil when no
+// transitions exist. Used by reconciliation to anchor stale-status
+// timeouts on the time the status went non-running rather than on the
+// original launch time.
+func LastProviderStatusTransitionTime(database *sql.DB, launchID int64) (*time.Time, error) {
+	var observedAt sql.NullInt64
+	err := database.QueryRow(
+		`SELECT MAX(observed_at) FROM provider_status_transitions WHERE launch_id = ?`,
+		launchID,
+	).Scan(&observedAt)
+	if err != nil {
+		return nil, err
+	}
+	if !observedAt.Valid {
+		return nil, nil
+	}
+	t := time.Unix(observedAt.Int64, 0)
+	return &t, nil
+}
+
 // GetProviderStatusTransitions returns all recorded transitions for a cloud instance, ordered by time.
 func GetProviderStatusTransitions(database *sql.DB, cloudInstanceID int64) ([]ProviderStatusTransition, error) {
 	rows, err := database.Query(

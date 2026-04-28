@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -50,6 +51,13 @@ type InstanceAction struct {
 	DestroyProvider   bool   // whether to destroy the provider instance
 	ResetJobs         bool   // whether to reset jobs to unplaced
 	AttemptOutcome    string // attempt outcome when resetting/closing
+
+	// Provider-state snapshot at the time the action was decided. Carried
+	// through to the oplog at ExecuteAction time so post-mortems can see
+	// the raw classifier inputs without re-fetching from the provider.
+	ObservedProviderStatus         string
+	ObservedProviderIntendedStatus string
+	ObservedProviderStatusMsg      string
 }
 
 // JobState summarizes the aggregate state of jobs associated with a cloud instance.
@@ -160,6 +168,14 @@ type CheckInstanceParams struct {
 	// Nil means unknown (phase stall check is skipped).
 	PhaseChangedAt *time.Time
 
+	// LastProviderStatusChangeAt is the time of the most recent
+	// provider_status_transitions row for this launch. Used to anchor
+	// rule 4b's pre-running timeout on time-since-status-went-non-running
+	// instead of launched_at, so a previously-running instance gets a
+	// fresh deadline when it transitions to a non-running status.
+	// Nil means unknown — falls back to lifecycle start.
+	LastProviderStatusChangeAt *time.Time
+
 	// SetupSurvival holds adaptive setup-phase thresholds from historical
 	// survival analysis. Nil means use package defaults.
 	SetupSurvival *db.SetupSurvival
@@ -172,11 +188,22 @@ type CheckInstanceParams struct {
 //
 // Hysteresis state (dead confirmation, probe failures) is tracked on the
 // Reconciler. For WatchInstance, use a per-goroutine Reconciler.
-func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
+func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction) {
 	ci := p.CI
 	if ci == nil {
 		return InstanceAction{Kind: ActionNone}
 	}
+
+	// Stamp the provider snapshot onto every non-no-op action so
+	// ExecuteAction can record it in the oplog.
+	defer func() {
+		if action.Kind == ActionNone || action.Kind == ActionDisplayOnly || p.ProviderInst == nil {
+			return
+		}
+		action.ObservedProviderStatus = p.ProviderInst.Status
+		action.ObservedProviderIntendedStatus = p.ProviderInst.IntendedStatus
+		action.ObservedProviderStatusMsg = p.ProviderInst.StatusMsg
+	}()
 
 	// 1. Grace expiry: deadline has passed.
 	// The instance entered grace because a job failed. Don't reset jobs to
@@ -279,11 +306,13 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
-	// 4a-pause. Provider stopped the instance (preemption or account-wide
-	// pause). Reflect as paused in the DB and wait up to stalePauseTimeout for
-	// resume; after that, give up and fail. Runs regardless of preemptible flag
-	// so account-wide credit pauses are also caught.
-	if p.ProviderInst != nil && p.ProviderInst.Status == cloud.ProviderStatusStopped {
+	// 4a-pause. Provider paused the instance (preemption or account-wide
+	// pause). Vast.ai reports interruptible preemption as "offline";
+	// Stopped covers explicit account/credit pauses. Reflect as paused in
+	// the DB and wait up to stalePauseTimeout for resume; after that, give
+	// up and fail. Runs regardless of preemptible flag so account-wide
+	// credit pauses are also caught.
+	if p.ProviderInst != nil && (p.ProviderInst.Status == cloud.ProviderStatusStopped || p.ProviderInst.Status == cloud.ProviderStatusOffline) {
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
 			if age > stalePauseTimeout {
@@ -295,7 +324,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 					Kind:              ActionEmptyStatusTimeout,
 					TerminalStatus:    db.LaunchStatusFailed,
 					TerminationReason: reason,
-					StallMessage:      fmt.Sprintf("instance paused for %s with no resume — giving up", age.Truncate(time.Minute)),
+					StallMessage:      fmt.Sprintf("instance %s for %s with no resume — giving up", p.ProviderInst.Status, age.Truncate(time.Minute)),
 					DestroyProvider:   true,
 					ResetJobs:         true,
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
@@ -305,28 +334,31 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		if ci.Status != db.LaunchStatusPaused {
 			return InstanceAction{
 				Kind:         ActionPause,
-				StallMessage: "provider stopped instance — marking paused",
+				StallMessage: fmt.Sprintf("provider reports %s instance — marking paused", p.ProviderInst.Status),
 			}
 		}
 		return InstanceAction{
 			Kind:         ActionDisplayOnly,
-			StallMessage: "provider reports paused instance; waiting for resume/replacement",
+			StallMessage: fmt.Sprintf("provider reports %s instance; waiting for resume/replacement", p.ProviderInst.Status),
 		}
 	}
 
-	// 4b. Stale pre-running status: provider allocated but never reached "running".
-	// Covers "created", "loading", and any other non-running, non-terminal status.
-	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
+	// 4b. Stale non-running status. Anchored on the most recent provider
+	// status transition (or lifecycle start when no transitions are
+	// recorded), so a previously-running instance that drops back to a
+	// non-running state gets a fresh deadline rather than inheriting an
+	// already-exceeded one. Skip when IntendedStatus already signals
+	// termination — step 8 catches that faster.
 	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
 		!isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
-		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
-			age := p.Now.Sub(*lifecycleStart)
+		if anchor := stalePreRunningAnchor(ci, p.LastProviderStatusChangeAt); anchor != nil {
+			age := p.Now.Sub(*anchor)
 			if age > maxPreRunningStatusTime {
 				return InstanceAction{
 					Kind:              ActionEmptyStatusTimeout,
 					TerminalStatus:    db.LaunchStatusFailed,
 					TerminationReason: db.TerminationReasonInfraFailure,
-					StallMessage:      fmt.Sprintf("provider instance stuck in %q status — terminating", p.ProviderInst.Status),
+					StallMessage:      fmt.Sprintf("provider instance stuck in %q status for %s — terminating", p.ProviderInst.Status, age.Truncate(time.Second)),
 					DestroyProvider:   true,
 					ResetJobs:         true,
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
@@ -638,13 +670,16 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	// Pause/resume are non-terminal status flips; no destroy, no job reset.
 	if action.Kind == ActionPause || action.Kind == ActionResume {
 		newStatus := db.LaunchStatusPaused
+		op := oplog.OpLaunchPaused
 		if action.Kind == ActionResume {
 			newStatus = db.LaunchStatusRunning
+			op = oplog.OpLaunchResumed
 		}
 		if err := db.UpdateLaunchStatus(database, ci.ID, newStatus, "", action.StallMessage); err != nil {
 			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", newStatus, "error", err)
 			return false, false
 		}
+		oplog.Log(op, oplog.WithDetail(formatActionDetail(ci.ID, action)))
 		if eventKind := actionEventKind(action.Kind); eventKind != "" {
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: eventKind,
@@ -670,10 +705,11 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", action.TerminalStatus, "error", err)
 			return false, false
 		}
+		op := oplog.OpLaunchTerminated
 		if action.TerminalStatus == db.LaunchStatusFailed {
-			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-				"launch_id=%d reason=%s detail=%s", ci.ID, action.TerminationReason, action.StallMessage))
+			op = oplog.OpLaunchLaunchFailed
 		}
+		oplog.Log(op, oplog.WithDetail(formatActionDetail(ci.ID, action)))
 		if eventKind := actionEventKind(action.Kind); eventKind != "" {
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: eventKind,
@@ -697,6 +733,67 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	}
 
 	return true, IsInstanceTerminal(action.TerminalStatus)
+}
+
+// actionKindName returns a stable string for an InstanceActionKind, used
+// in oplog details. Falls back to the numeric form for unknown values.
+func actionKindName(k InstanceActionKind) string {
+	switch k {
+	case ActionNone:
+		return "none"
+	case ActionDisplayOnly:
+		return "display_only"
+	case ActionGraceExpired:
+		return "grace_expired"
+	case ActionDonorComplete:
+		return "donor_complete"
+	case ActionTerminationIntent:
+		return "termination_intent"
+	case ActionEmptyStatusTimeout:
+		return "empty_status_timeout"
+	case ActionBootstrapStalled:
+		return "bootstrap_stalled"
+	case ActionBootstrapComplete:
+		return "bootstrap_complete"
+	case ActionSetupStalled:
+		return "setup_stalled"
+	case ActionRunningStalled:
+		return "running_stalled"
+	case ActionProviderDead:
+		return "provider_dead"
+	case ActionSelfDestructFailed:
+		return "self_destruct_failed"
+	case ActionPause:
+		return "pause"
+	case ActionResume:
+		return "resume"
+	default:
+		return fmt.Sprintf("kind_%d", int(k))
+	}
+}
+
+// formatActionDetail formats the per-action oplog detail string. Includes
+// the provider-status snapshot captured by CheckInstance so post-mortems
+// can identify status-classification bugs without re-fetching from the
+// provider. Empty fields are omitted.
+func formatActionDetail(launchID int64, action InstanceAction) string {
+	parts := []string{fmt.Sprintf("launch_id=%d", launchID), fmt.Sprintf("action=%s", actionKindName(action.Kind))}
+	if action.TerminationReason != "" {
+		parts = append(parts, fmt.Sprintf("reason=%s", action.TerminationReason))
+	}
+	if action.ObservedProviderStatus != "" {
+		parts = append(parts, fmt.Sprintf("status=%q", action.ObservedProviderStatus))
+	}
+	if action.ObservedProviderIntendedStatus != "" {
+		parts = append(parts, fmt.Sprintf("intended=%q", action.ObservedProviderIntendedStatus))
+	}
+	if action.ObservedProviderStatusMsg != "" {
+		parts = append(parts, fmt.Sprintf("status_msg=%q", action.ObservedProviderStatusMsg))
+	}
+	if action.StallMessage != "" {
+		parts = append(parts, fmt.Sprintf("detail=%q", action.StallMessage))
+	}
+	return strings.Join(parts, " ")
 }
 
 // actionEventKind maps an InstanceActionKind to a lifecycle event kind constant.

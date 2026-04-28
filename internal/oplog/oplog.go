@@ -76,6 +76,9 @@ const (
 	OpLaunchLaunchReadback  = "cloud.instance.launch.readback"
 	OpLaunchLaunchMismatch  = "cloud.instance.launch.mismatch"
 	OpLaunchDestroyFailed   = "cloud.instance.destroy.failed"
+	OpLaunchPaused          = "cloud.instance.launch.paused"
+	OpLaunchResumed         = "cloud.instance.launch.resumed"
+	OpLaunchTerminated      = "cloud.instance.launch.terminated"
 )
 
 // Entry represents a single log entry in JSONL format.

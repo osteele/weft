@@ -347,6 +347,9 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	params.ProviderErr = providerErr
 	params.SetupSurvival = setupSurvival
 	params.PauseTolerant = hasPreemptibleJobs(jobs)
+	if lastChange, err := db.LastProviderStatusTransitionTime(database, ci.ID); err == nil {
+		params.LastProviderStatusChangeAt = lastChange
+	}
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival
 	}
@@ -837,7 +840,7 @@ func isProviderTerminalWithPolicy(inst *cloud.Instance, pauseTolerant bool) bool
 	switch inst.Status {
 	case cloud.ProviderStatusExited, cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead:
 		return true
-	case cloud.ProviderStatusStopped:
+	case cloud.ProviderStatusStopped, cloud.ProviderStatusOffline:
 		if pauseTolerant {
 			return false
 		}

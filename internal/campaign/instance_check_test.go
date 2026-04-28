@@ -1205,3 +1205,170 @@ func TestCheckInstance_RunningStall_ZeroHeartbeatAgeNoAction(t *testing.T) {
 		t.Fatal("should not trigger running stall when heartbeat age is 0 (unknown)")
 	}
 }
+
+func TestCheckInstance_PauseTolerant_OfflineFlipsToPaused(t *testing.T) {
+	// Vast.ai reports an interruptible instance as "offline" when it has been
+	// preempted (data preserved). Treat the same as "stopped": flip the launch
+	// to paused and wait for resume.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusOffline},
+		PauseTolerant: true,
+		Now:           now,
+	})
+	if action.Kind != ActionPause {
+		t.Fatalf("action.Kind = %d, want ActionPause (%d)", action.Kind, ActionPause)
+	}
+	if action.ObservedProviderStatus != cloud.ProviderStatusOffline {
+		t.Errorf("ObservedProviderStatus = %q, want %q", action.ObservedProviderStatus, cloud.ProviderStatusOffline)
+	}
+}
+
+func TestCheckInstance_OnDemand_StaleOffline_ProviderFailure(t *testing.T) {
+	// On-demand instances also flip to paused when offline (matches the
+	// existing stopped-status handling — rule 4a-pause runs regardless of
+	// pause-tolerance), but past stalePauseTimeout the termination reason
+	// is ProviderFailure rather than Preempted.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-7 * time.Hour).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusOffline},
+		PauseTolerant: false,
+		Now:           now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if action.TerminationReason != db.TerminationReasonProviderFailure {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonProviderFailure)
+	}
+}
+
+func TestCheckInstance_PreviouslyRunning_FreshDeadlineForNonRunning(t *testing.T) {
+	// Instance launched 30m ago, ran for most of that time, just transitioned
+	// to a non-running, non-terminal status (e.g. "loading") two minutes ago.
+	// Should not fire rule 4b yet — the 5-minute deadline anchors on the
+	// last-status-change, not on launched_at.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	lastChange := now.Add(-2 * time.Minute)
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:               &cloud.Instance{Status: cloud.ProviderStatusLoading},
+		LastProviderStatusChangeAt: &lastChange,
+		Now:                        now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("rule 4b fired prematurely: action=%+v", action)
+	}
+}
+
+func TestCheckInstance_PreviouslyRunning_TerminatesAfterFreshDeadline(t *testing.T) {
+	// Same setup, but the status has been non-running for 6 minutes — past
+	// the 5-minute threshold. Should terminate as infra_failure.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	lastChange := now.Add(-6 * time.Minute)
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:               &cloud.Instance{Status: cloud.ProviderStatusLoading},
+		LastProviderStatusChangeAt: &lastChange,
+		Now:                        now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if action.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonInfraFailure)
+	}
+}
+
+func TestCheckInstance_PauseTolerant_StaleOffline_Preempted(t *testing.T) {
+	// Interruptible instance offline past stalePauseTimeout: terminate with
+	// TerminationReasonPreempted, parallels the existing stopped variant.
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-7 * time.Hour).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusOffline},
+		PauseTolerant: true,
+		Now:           now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if action.TerminationReason != db.TerminationReasonPreempted {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonPreempted)
+	}
+}
+
+func TestFormatActionDetail_IncludesProviderSnapshot(t *testing.T) {
+	got := formatActionDetail(42, InstanceAction{
+		Kind:                           ActionEmptyStatusTimeout,
+		TerminationReason:              db.TerminationReasonInfraFailure,
+		StallMessage:                   "stuck in offline",
+		ObservedProviderStatus:         "offline",
+		ObservedProviderIntendedStatus: "running",
+		ObservedProviderStatusMsg:      "host unreachable",
+	})
+	for _, want := range []string{
+		"launch_id=42",
+		"reason=" + db.TerminationReasonInfraFailure,
+		`status="offline"`,
+		`intended="running"`,
+		`status_msg="host unreachable"`,
+		`detail="stuck in offline"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("formatActionDetail missing %q\nfull: %s", want, got)
+		}
+	}
+}
+
+func TestFormatActionDetail_OmitsEmptyFields(t *testing.T) {
+	got := formatActionDetail(7, InstanceAction{Kind: ActionPause})
+	if strings.Contains(got, "status=") || strings.Contains(got, "intended=") || strings.Contains(got, "status_msg=") {
+		t.Errorf("formatActionDetail leaked empty provider fields: %s", got)
+	}
+	if !strings.Contains(got, "launch_id=7") {
+		t.Errorf("formatActionDetail missing launch_id: %s", got)
+	}
+}

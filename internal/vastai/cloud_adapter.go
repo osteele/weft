@@ -243,6 +243,7 @@ func instanceToCloud(inst *Instance) *cloud.Instance {
 		Provider:       cloud.ProviderVastai,
 		Status:         inst.Status,
 		IntendedStatus: inst.IntendedStatus,
+		StatusMsg:      inst.StatusMsg,
 		SSHHost:        inst.SSHHost,
 		SSHPort:        inst.SSHPort,
 		CostPerHour:    inst.CostPerHour,

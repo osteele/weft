@@ -98,6 +98,25 @@ func AttemptDisplayStatus(j *db.Job, outcomes map[int64]string) string {
 	return j.Status
 }
 
+// stalePreRunningAnchor returns the time from which rule 4b's
+// "stale non-running status" timer should run: the later of the most
+// recent provider status transition and the launch's lifecycle start.
+// Falling back to lifecycle start preserves behaviour for launches
+// that haven't yet recorded any transitions.
+func stalePreRunningAnchor(ci *db.Launch, lastStatusChange *time.Time) *time.Time {
+	lifecycle := cloudInstanceLifecycleStart(ci)
+	switch {
+	case lifecycle == nil:
+		return lastStatusChange
+	case lastStatusChange == nil:
+		return lifecycle
+	case lastStatusChange.After(*lifecycle):
+		return lastStatusChange
+	default:
+		return lifecycle
+	}
+}
+
 func cloudInstanceLifecycleStart(ci *db.Launch) *time.Time {
 	if ci == nil {
 		return nil
@@ -403,6 +422,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			params.ProviderErr = providerErr
 			params.PauseTolerant = hasPreemptibleJobs(jobs)
 			params.BootstrapSurvival = survival
+			if lastChange, err := db.LastProviderStatusTransitionTime(database, ci.ID); err == nil {
+				params.LastProviderStatusChangeAt = lastChange
+			}
 			action := watchReconciler.CheckInstance(params)
 
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)
