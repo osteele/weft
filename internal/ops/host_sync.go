@@ -868,7 +868,7 @@ func stageArtifactNeedsForHost(database *sql.DB, host string, jobs []*db.Job, ti
 		return
 	}
 
-	state, err := probeRemoteNeedsState(host, allPending, timeout)
+	state, err := probeRemoteNeedsStateFunc(host, allPending, timeout)
 	if err != nil {
 		err = fmt.Errorf("probe remote needs state: %w", err)
 		for jobID := range pendingByJob {
@@ -898,22 +898,11 @@ func stageArtifactNeedsForHost(database *sql.DB, host string, jobs []*db.Job, ti
 	return
 }
 
-// stageArtifactNeedsFromR2 is the single-job entry point used by tests.
-// Production code calls stageArtifactNeedsForHost to amortize the SSH probe
-// across all queued jobs on a host.
-func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
-	if job == nil {
-		return nil
-	}
-	failed := stageArtifactNeedsForHost(database, job.Host, []*db.Job{job}, timeout, getR2Client)
-	return failed[job.ID]
-}
-
 // stageMissingNeeds executes the R2-download + scp + marker-write for the
 // subset of needs whose satisfied marker is not yet on the host. `state`
-// covers all of the job's needs and is consulted for the size-match
-// optimization that lets us skip the transfer when an existing on-host file
-// matches the R2 object byte-for-byte.
+// covers all of the job's needs and carries the file/staging sizes the probe
+// already collected, so the size-match optimization (skip transfer when the
+// on-host bytes already match R2) costs no extra SSH round-trips.
 func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteNeedState, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
 	r2Client, err := getR2Client()
 	if err != nil {
@@ -939,25 +928,32 @@ func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteN
 		if err != nil {
 			return fmt.Errorf("%q: %w", n.spec, err)
 		}
-		// Skip re-transfer only when the on-host file's byte count matches R2.
-		// File existence alone is not proof of completeness — a prior interrupted
-		// scp can leave a truncated file at the final path.
+		stagingPath := n.remotePath + ".weft-staging"
+		ent := state[n.markerName]
+
+		// Pick the cheapest path that produces a complete file at the final
+		// remote path. File presence alone is not proof of completeness — only
+		// byte-count parity with R2 is. The two skip cases (already in place,
+		// or staging-file complete) avoid a 500MB re-transfer when a prior
+		// sync left bytes on disk.
+		mvStaging := false
 		needsTransfer := true
-		if state[n.markerName].fileExists {
+		if ent.fileSize >= 0 || ent.stagingSize >= 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			expected, err := r2Client.ObjectSize(ctx, key)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("get expected size for %q: %w", n.spec, err)
 			}
-			actual, err := remoteFileSize(job.Host, n.remotePath, timeout)
-			if err != nil {
-				return fmt.Errorf("stat remote %q: %w", n.spec, err)
-			}
-			if expected >= 0 && actual == expected {
+			switch {
+			case ent.fileSize == expected:
 				needsTransfer = false
+			case ent.stagingSize == expected:
+				needsTransfer = false
+				mvStaging = true
 			}
 		}
+
 		if needsTransfer {
 			localPath := filepath.Join(tmpDir, filepath.FromSlash(strings.TrimPrefix(n.path, "/")))
 			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
@@ -969,19 +965,16 @@ func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteN
 			if err := ensureRemoteParentDir(job.Host, n.remotePath, timeout); err != nil {
 				return fmt.Errorf("create remote dir for %q: %w", n.spec, err)
 			}
-			// scp to a sibling staging path, then mv into place: guards against
+			// scp to a sibling staging path then mv into place: guards against
 			// a killed scp leaving a truncated file at the final path that a
 			// future probe would mistake for a complete transfer.
-			stagingPath := n.remotePath + ".weft-staging"
 			if err := ssh.CopyTo(localPath, job.Host, stagingPath); err != nil {
 				return fmt.Errorf("copy %q to %s:%s: %w", n.spec, job.Host, stagingPath, err)
 			}
-			if err := remoteAtomicRename(job.Host, stagingPath, n.remotePath, timeout); err != nil {
-				return fmt.Errorf("rename staging file for %q: %w", n.spec, err)
-			}
+			mvStaging = true
 		}
-		if err := writeRemoteSatisfiedMarker(job.Host, n.markerName, timeout); err != nil {
-			return fmt.Errorf("write satisfied marker for %q: %w", n.spec, err)
+		if err := finalizeRemoteNeed(job.Host, mvStaging, stagingPath, n.remotePath, n.markerName, timeout); err != nil {
+			return fmt.Errorf("finalize %q: %w", n.spec, err)
 		}
 		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 			oplog.WithDetailf("artifact needs staging success: %s", n.spec))
@@ -991,68 +984,56 @@ func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteN
 	return nil
 }
 
-func remoteFileSize(host, remotePath string, timeout time.Duration) (int64, error) {
-	cmd := fmt.Sprintf(`p=$(eval echo %s); if [ -e "$p" ]; then stat -f%%z "$p" 2>/dev/null || stat -c%%s "$p"; else echo -1; fi`, shellQuote(remotePath))
-	out, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
-	if err != nil {
-		return 0, fmt.Errorf("ssh stat %s: %s: %w", remotePath, stderr, err)
+// finalizeRemoteNeed atomically renames the staging file (if requested) and
+// writes the satisfied marker in a single SSH round-trip, halving the per-need
+// SSH cost on the cold-transfer path.
+func finalizeRemoteNeed(host string, mvStaging bool, stagingPath, remotePath, markerName string, timeout time.Duration) error {
+	var sb strings.Builder
+	if mvStaging {
+		sb.WriteString(fmt.Sprintf("mv -f -- %s %s && ", shellQuote(stagingPath), shellQuote(remotePath)))
 	}
-	s := strings.TrimSpace(out)
-	if s == "" {
-		return -1, nil
-	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse remote stat %q: %w", s, err)
-	}
-	return n, nil
-}
-
-func remoteAtomicRename(host, src, dst string, timeout time.Duration) error {
-	cmd := fmt.Sprintf(`mv -f -- %s %s`, shellQuote(src), shellQuote(dst))
-	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
-	if err != nil {
-		return fmt.Errorf("ssh mv %s %s: %s: %w", src, dst, stderr, err)
+	sb.WriteString(fmt.Sprintf("mkdir -p ~/.cache/weft/logs && printf '0\\n' > ~/.cache/weft/logs/%s", shellQuote(markerName)))
+	if _, stderr, err := ssh.RunWithTimeout(host, sb.String(), timeout); err != nil {
+		return fmt.Errorf("ssh finalize %s: %s: %w", markerName, stderr, err)
 	}
 	return nil
 }
 
-func writeRemoteSatisfiedMarker(host, markerName string, timeout time.Duration) error {
-	cmd := fmt.Sprintf(`mkdir -p ~/.cache/weft/logs && printf '0\n' > ~/.cache/weft/logs/%s`, shellQuote(markerName))
-	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
-	if err != nil {
-		return fmt.Errorf("ssh write marker %s: %s: %w", markerName, stderr, err)
-	}
-	return nil
-}
-
+// remoteNeedState carries the marker presence + file/staging sizes captured
+// by a single probe round-trip. Sizes are -1 when the path is missing.
 type remoteNeedState struct {
 	markerExists bool
-	fileExists   bool
+	fileSize     int64
+	stagingSize  int64
 }
 
-// probeRemoteNeedsTag* are the leading column emitted by the probe script for
-// marker-presence and file-presence rows. Kept short to keep the script tight.
-const (
-	probeRemoteNeedsTagMarker = "M"
-	probeRemoteNeedsTagFile   = "F"
-)
+// probeRemoteNeedsStateFunc is the test seam for probeRemoteNeedsState. Tests
+// override it to assert call count and shape without parsing shell.
+var probeRemoteNeedsStateFunc = probeRemoteNeedsState
 
-// probeRemoteNeedsState checks each pending need's marker and target-file
-// presence on the host in a single SSH round-trip. Returned map is keyed by
-// marker name. Output lines from the script are of the form "M\t<marker>"
-// or "F\t<marker>", emitted only when the respective path exists.
+// probeRemoteNeedsState reports each need's marker presence and the byte
+// sizes of its final-path file and `.weft-staging` sibling, in one SSH
+// round-trip. Per spec the script emits exactly one line:
+//
+//	<markerName>\t<markerExists 0|1>\t<fileSize|-1>\t<stagingSize|-1>
+//
+// Reporting sizes here lets the size-match transfer-skip path skip a
+// per-spec stat round-trip later.
 func probeRemoteNeedsState(host string, needs []pendingNeed, timeout time.Duration) (map[string]remoteNeedState, error) {
 	if len(needs) == 0 {
 		return nil, nil
 	}
 	var sb strings.Builder
-	sb.WriteString(`logs=~/.cache/weft/logs; `)
+	sb.WriteString(`logs=~/.cache/weft/logs; statsz() { stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo -1; }; `)
 	for _, n := range needs {
-		// `|| true` so a missing marker/file does not poison the script's exit code.
-		sb.WriteString(fmt.Sprintf(`{ [ -e "$logs"/%s ] && printf '%s\t%%s\n' %s; } || true; `, shellQuote(n.markerName), probeRemoteNeedsTagMarker, shellQuote(n.markerName)))
-		// Use eval so leading "~/" expands.
-		sb.WriteString(fmt.Sprintf(`p=$(eval echo %s); { [ -e "$p" ] && printf '%s\t%%s\n' %s; } || true; `, shellQuote(n.remotePath), probeRemoteNeedsTagFile, shellQuote(n.markerName)))
+		// eval so a leading "~/" in remotePath expands.
+		sb.WriteString(fmt.Sprintf(
+			`m=0; [ -e "$logs"/%s ] && m=1; fp=$(eval echo %s); fs=-1; [ -e "$fp" ] && fs=$(statsz "$fp"); sp=$(eval echo %s); ss=-1; [ -e "$sp" ] && ss=$(statsz "$sp"); printf '%%s\t%%s\t%%s\t%%s\n' %s "$m" "$fs" "$ss"; `,
+			shellQuote(n.markerName),
+			shellQuote(n.remotePath),
+			shellQuote(n.remotePath+".weft-staging"),
+			shellQuote(n.markerName),
+		))
 	}
 	sb.WriteString(`exit 0`)
 	out, _, err := ssh.RunWithTimeout(host, sb.String(), timeout)
@@ -1065,18 +1046,19 @@ func probeRemoteNeedsState(host string, needs []pendingNeed, timeout time.Durati
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) != 4 {
 			continue
 		}
-		entry := state[parts[1]]
-		switch parts[0] {
-		case probeRemoteNeedsTagMarker:
-			entry.markerExists = true
-		case probeRemoteNeedsTagFile:
-			entry.fileExists = true
+		entry := remoteNeedState{fileSize: -1, stagingSize: -1}
+		entry.markerExists = parts[1] == "1"
+		if v, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
+			entry.fileSize = v
 		}
-		state[parts[1]] = entry
+		if v, err := strconv.ParseInt(parts[3], 10, 64); err == nil {
+			entry.stagingSize = v
+		}
+		state[parts[0]] = entry
 	}
 	return state, nil
 }

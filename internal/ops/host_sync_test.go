@@ -68,11 +68,26 @@ func TestMaterializeCloudNeeds_RefreshesStaleMetadata(t *testing.T) {
 	}
 }
 
-// TestStageArtifactNeedsFromR2_SkipsOnPremProducers verifies that when every
-// producer is on-prem, the function returns without ever calling getR2Client
-// — those needs are satisfied by the producer's own queue runner writing the
-// satisfied marker on completion, not by R2 staging.
-func TestStageArtifactNeedsFromR2_SkipsOnPremProducers(t *testing.T) {
+// stubProbeRemoteNeedsState swaps probeRemoteNeedsStateFunc for the duration
+// of a test, recording call count and the last needs slice it received.
+func stubProbeRemoteNeedsState(t *testing.T, reply map[string]remoteNeedState) (calls *int, lastNeeds *[]pendingNeed) {
+	t.Helper()
+	prev := probeRemoteNeedsStateFunc
+	t.Cleanup(func() { probeRemoteNeedsStateFunc = prev })
+	calls = new(int)
+	lastNeeds = new([]pendingNeed)
+	probeRemoteNeedsStateFunc = func(_ string, needs []pendingNeed, _ time.Duration) (map[string]remoteNeedState, error) {
+		*calls++
+		*lastNeeds = needs
+		return reply, nil
+	}
+	return calls, lastNeeds
+}
+
+// TestStageArtifactNeedsForHost_SkipsOnPremProducers verifies that when every
+// producer is on-prem, the function returns without ever probing or calling
+// getR2Client — those needs are satisfied by the producer's own queue runner.
+func TestStageArtifactNeedsForHost_SkipsOnPremProducers(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	producerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "produce", "producer")
@@ -91,18 +106,23 @@ func TestStageArtifactNeedsFromR2_SkipsOnPremProducers(t *testing.T) {
 		t.Fatalf("get consumer: %v", err)
 	}
 
+	probeCalls, _ := stubProbeRemoteNeedsState(t, nil)
 	getR2 := func() (*r2.Client, error) {
 		t.Fatal("getR2Client should not be called when all producers are on-prem")
 		return nil, nil
 	}
-	if err := stageArtifactNeedsFromR2(database, consumer, time.Second, getR2); err != nil {
-		t.Fatalf("stageArtifactNeedsFromR2: %v", err)
+	failed := stageArtifactNeedsForHost(database, "host-alpha", []*db.Job{consumer}, time.Second, getR2)
+	if len(failed) != 0 {
+		t.Fatalf("unexpected failures: %v", failed)
+	}
+	if *probeCalls != 0 {
+		t.Fatalf("probeCalls = %d, want 0 (no rental needs to probe)", *probeCalls)
 	}
 }
 
-// TestStageArtifactNeedsFromR2_NoNeeds verifies the early-return for jobs with
-// no --needs entries. No R2 or SSH should be touched.
-func TestStageArtifactNeedsFromR2_NoNeeds(t *testing.T) {
+// TestStageArtifactNeedsForHost_NoNeeds verifies the early-return for jobs
+// with no --needs entries. No probe, no R2.
+func TestStageArtifactNeedsForHost_NoNeeds(t *testing.T) {
 	database := db.SetupTestDB(t)
 	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "echo", "no-needs")
 	if err != nil {
@@ -112,19 +132,23 @@ func TestStageArtifactNeedsFromR2_NoNeeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get consumer: %v", err)
 	}
+	probeCalls, _ := stubProbeRemoteNeedsState(t, nil)
 	getR2 := func() (*r2.Client, error) {
 		t.Fatal("getR2Client should not be called for jobs with no --needs")
 		return nil, nil
 	}
-	if err := stageArtifactNeedsFromR2(database, consumer, time.Second, getR2); err != nil {
-		t.Fatalf("stageArtifactNeedsFromR2: %v", err)
+	failed := stageArtifactNeedsForHost(database, "host-alpha", []*db.Job{consumer}, time.Second, getR2)
+	if len(failed) != 0 {
+		t.Fatalf("unexpected failures: %v", failed)
+	}
+	if *probeCalls != 0 {
+		t.Fatalf("probeCalls = %d, want 0 (no needs)", *probeCalls)
 	}
 }
 
 // TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs verifies that a
-// host-wide stage call issues exactly one SSH probe regardless of how many
-// queued jobs need their needs probed. The earlier per-job approach was
-// O(N) round-trips; this guards against that regression.
+// host-wide stage call issues exactly one probe regardless of how many queued
+// jobs need probing — guards against the per-job-probe regression.
 func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -134,8 +158,6 @@ func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
 		t.Fatalf("record producer: %v", err)
 	}
 
-	// Two consumers on the same host, each with one --needs entry referencing
-	// the rental producer.
 	jobs := make([]*db.Job, 0, 2)
 	for i := 0; i < 2; i++ {
 		consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", fmt.Sprintf("consume-%d", i), "consumer")
@@ -152,35 +174,17 @@ func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
 		jobs = append(jobs, job)
 	}
 
-	// Probe script signals "marker present" for both consumers' needs, so the
-	// stage path takes the early skip and never reaches R2 / scp.
-	probeCalls := 0
-	mockSSHFunc(t, func(_ string, command string) (string, string, int) {
-		if !strings.Contains(command, "logs=~/.cache/weft/logs") {
-			return "", "", 0
+	// Probe replies "marker present" for everything → no transfer, no R2.
+	probeCalls, lastNeeds := stubProbeRemoteNeedsState(t, nil)
+	probeRemoteNeedsStateFunc = func(_ string, needs []pendingNeed, _ time.Duration) (map[string]remoteNeedState, error) {
+		*probeCalls++
+		*lastNeeds = needs
+		reply := make(map[string]remoteNeedState, len(needs))
+		for _, n := range needs {
+			reply[n.markerName] = remoteNeedState{markerExists: true, fileSize: -1, stagingSize: -1}
 		}
-		probeCalls++
-		// Extract every marker name the script tests for and reply that all
-		// markers are present. Each test is `[ -e "$logs"/<marker> ]`.
-		var sb strings.Builder
-		const prefix = `[ -e "$logs"/`
-		rest := command
-		for {
-			i := strings.Index(rest, prefix)
-			if i < 0 {
-				break
-			}
-			rest = rest[i+len(prefix):]
-			j := strings.Index(rest, " ]")
-			if j < 0 {
-				break
-			}
-			name := rest[:j]
-			sb.WriteString(probeRemoteNeedsTagMarker + "\t" + name + "\n")
-			rest = rest[j+2:]
-		}
-		return sb.String(), "", 0
-	})
+		return reply, nil
+	}
 
 	getR2 := func() (*r2.Client, error) {
 		t.Fatal("getR2Client should not be called when all markers are present")
@@ -190,14 +194,17 @@ func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
 	if len(failed) != 0 {
 		t.Fatalf("unexpected failures: %v", failed)
 	}
-	if probeCalls != 1 {
-		t.Fatalf("probeCalls = %d, want 1 (probe should batch across jobs)", probeCalls)
+	if *probeCalls != 1 {
+		t.Fatalf("probeCalls = %d, want 1 (probe should batch across jobs)", *probeCalls)
+	}
+	if got := len(*lastNeeds); got != 2 {
+		t.Fatalf("probe saw %d needs, want 2 (one per consumer)", got)
 	}
 }
 
-// TestStageArtifactNeedsFromR2_MissingProducer verifies that an unknown
+// TestStageArtifactNeedsForHost_MissingProducer verifies that an unknown
 // producer ID surfaces as an error rather than silently being skipped.
-func TestStageArtifactNeedsFromR2_MissingProducer(t *testing.T) {
+func TestStageArtifactNeedsForHost_MissingProducer(t *testing.T) {
 	database := db.SetupTestDB(t)
 	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "consume", "consumer")
 	if err != nil {
@@ -210,8 +217,10 @@ func TestStageArtifactNeedsFromR2_MissingProducer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get consumer: %v", err)
 	}
+	stubProbeRemoteNeedsState(t, nil)
 	getR2 := func() (*r2.Client, error) { return &r2.Client{}, nil }
-	err = stageArtifactNeedsFromR2(database, consumer, time.Second, getR2)
+	failed := stageArtifactNeedsForHost(database, "host-alpha", []*db.Job{consumer}, time.Second, getR2)
+	err = failed[consumer.ID]
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected 'not found' error, got %v", err)
 	}

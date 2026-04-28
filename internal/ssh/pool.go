@@ -93,16 +93,11 @@ func ClosePool() {
 	}
 }
 
-// SessionPool manages persistent SSH sessions across hosts.
-//
-// Rationale: weft uses a homegrown session pool (persistent ssh+bash
-// subprocesses, one shell command per round-trip) rather than OpenSSH's
-// ControlMaster connection multiplexing. ControlMaster has been tried and
-// found unsuitable for weft's workloads — do not switch back to it without
-// reproducing the original failure on current hosts and capturing the
-// outcome in this comment. The session-pool design predates this note;
-// the failure details are no longer easily reachable but the conclusion
-// stood under repeated investigation.
+// SessionPool manages persistent SSH sessions across hosts via long-lived
+// ssh+bash subprocesses, one shell command per round-trip. Do NOT switch to
+// OpenSSH ControlMaster connection multiplexing — it has been tried for weft
+// and found unsuitable. Reproduce the original failure on current hosts and
+// capture the outcome here before changing the transport.
 type SessionPool struct {
 	mu        sync.Mutex
 	hosts     map[string]*hostPool
