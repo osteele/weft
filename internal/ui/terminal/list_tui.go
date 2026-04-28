@@ -838,10 +838,14 @@ func (m listTUIModel) View() string {
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
 	selectedDetailLines := m.selectedJobDetailLines()
 
+	mateRows, matesActive := hostMatesForFlatView(m.jobs, m.cursor)
+	rowWidth := m.width
+
 	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
 	b.WriteString("\n")
-	b.WriteString(listTUIHeaderStyle.Render(truncateDisplayWidth(formatJobListHeader(layout), m.width)))
+	header := truncateDisplayWidth(formatJobListHeader(layout), rowWidth)
+	b.WriteString(listTUIHeaderStyle.Render(truncateDisplayWidth(header, m.width)))
 	b.WriteString("\n")
 
 	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
@@ -863,7 +867,10 @@ func (m listTUIModel) View() string {
 				bodyLinesWritten++
 				continue
 			}
-			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), m.width)
+			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), rowWidth)
+			if matesActive && mateRows[idx] {
+				row = applyHostMateMarker(row)
+			}
 			if idx == m.cursor {
 				row = renderSelectedRow(row, m.width)
 			}
@@ -942,10 +949,17 @@ func (m listTUIModel) groupedView() string {
 	footerLines += len(errorDetailsLines)
 	maxBodyLines := max(0, m.height-1-footerLines) // 1 for title
 	selectedRow := m.selectedGroupedRow()
+	mateJobs, matesActive := hostMatesForGroupedView(m.selectedGroupedJob(), m.jobs)
+	rowWidth := m.width
 	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines)
 	bodyLinesWritten := 0
 	for _, row := range visibleRows {
-		line := truncateDisplayWidth(row.text, m.width)
+		line := truncateDisplayWidth(row.text, rowWidth)
+		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
+			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateJobs[rj.ID] {
+				line = applyHostMateMarker(line)
+			}
+		}
 		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
 			line = renderSelectedRow(line, m.width)
 		}
