@@ -98,6 +98,20 @@ func AttemptDisplayStatus(j *db.Job, outcomes map[int64]string) string {
 	return j.Status
 }
 
+// resolveLastProviderStatusChange looks up the most recent
+// provider_status_transitions row for a launch and stores its
+// observed_at on the params. A DB error is logged at debug level and
+// otherwise swallowed — rule 4b falls back to the lifecycle anchor,
+// matching pre-feature behaviour.
+func resolveLastProviderStatusChange(database *sql.DB, params *CheckInstanceParams, launchID int64) {
+	lastChange, err := db.LastProviderStatusTransitionTime(database, launchID)
+	if err != nil {
+		slog.Debug("last provider status change lookup failed", "component", "reconcile", "launch", launchID, "error", err)
+		return
+	}
+	params.LastProviderStatusChangeAt = lastChange
+}
+
 // stalePreRunningAnchor returns the time from which rule 4b's
 // "stale non-running status" timer should run: the later of the most
 // recent provider status transition and the launch's lifecycle start.
@@ -422,9 +436,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			params.ProviderErr = providerErr
 			params.PauseTolerant = hasPreemptibleJobs(jobs)
 			params.BootstrapSurvival = survival
-			if lastChange, err := db.LastProviderStatusTransitionTime(database, ci.ID); err == nil {
-				params.LastProviderStatusChangeAt = lastChange
-			}
+			resolveLastProviderStatusChange(database, &params, ci.ID)
 			action := watchReconciler.CheckInstance(params)
 
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)

@@ -312,7 +312,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// the DB and wait up to stalePauseTimeout for resume; after that, give
 	// up and fail. Runs regardless of preemptible flag so account-wide
 	// credit pauses are also caught.
-	if p.ProviderInst != nil && (p.ProviderInst.Status == cloud.ProviderStatusStopped || p.ProviderInst.Status == cloud.ProviderStatusOffline) {
+	if p.ProviderInst != nil && isPausedProviderStatus(p.ProviderInst.Status) {
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
 			if age > stalePauseTimeout {
@@ -735,9 +735,9 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	return true, IsInstanceTerminal(action.TerminalStatus)
 }
 
-// actionKindName returns a stable string for an InstanceActionKind, used
-// in oplog details. Falls back to the numeric form for unknown values.
-func actionKindName(k InstanceActionKind) string {
+// String returns a stable name for use in oplog details, slog fields,
+// and `%v` formatting. Falls back to the numeric form for unknown values.
+func (k InstanceActionKind) String() string {
 	switch k {
 	case ActionNone:
 		return "none"
@@ -777,7 +777,7 @@ func actionKindName(k InstanceActionKind) string {
 // can identify status-classification bugs without re-fetching from the
 // provider. Empty fields are omitted.
 func formatActionDetail(launchID int64, action InstanceAction) string {
-	parts := []string{fmt.Sprintf("launch_id=%d", launchID), fmt.Sprintf("action=%s", actionKindName(action.Kind))}
+	parts := []string{fmt.Sprintf("launch_id=%d", launchID), fmt.Sprintf("action=%s", action.Kind)}
 	if action.TerminationReason != "" {
 		parts = append(parts, fmt.Sprintf("reason=%s", action.TerminationReason))
 	}

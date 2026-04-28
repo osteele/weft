@@ -347,9 +347,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	params.ProviderErr = providerErr
 	params.SetupSurvival = setupSurvival
 	params.PauseTolerant = hasPreemptibleJobs(jobs)
-	if lastChange, err := db.LastProviderStatusTransitionTime(database, ci.ID); err == nil {
-		params.LastProviderStatusChangeAt = lastChange
-	}
+	resolveLastProviderStatusChange(database, &params, ci.ID)
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival
 	}
@@ -840,11 +838,9 @@ func isProviderTerminalWithPolicy(inst *cloud.Instance, pauseTolerant bool) bool
 	switch inst.Status {
 	case cloud.ProviderStatusExited, cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead:
 		return true
-	case cloud.ProviderStatusStopped, cloud.ProviderStatusOffline:
-		if pauseTolerant {
-			return false
-		}
-		return true
+	}
+	if isPausedProviderStatus(inst.Status) {
+		return !pauseTolerant
 	}
 	// Provider intended to stop/destroy but Status hasn't caught up yet
 	// (e.g., Status still "created" while IntendedStatus is "stopped")
@@ -856,6 +852,15 @@ func isProviderTerminalWithPolicy(inst *cloud.Instance, pauseTolerant bool) bool
 		return true
 	}
 	return false
+}
+
+// isPausedProviderStatus reports whether the provider status indicates a
+// pause that may resume — Vast.ai's "stopped" (explicit pause / credit
+// hold) and "offline" (interruptible preemption with data preserved) are
+// both treated this way. Used by isProviderTerminalWithPolicy and rule
+// 4a-pause to decide whether to wait for resume.
+func isPausedProviderStatus(status string) bool {
+	return status == cloud.ProviderStatusStopped || status == cloud.ProviderStatusOffline
 }
 
 func hasPreemptibleJobs(jobs []*db.Job) bool {
