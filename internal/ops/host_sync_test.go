@@ -68,6 +68,81 @@ func TestMaterializeCloudNeeds_RefreshesStaleMetadata(t *testing.T) {
 	}
 }
 
+// TestStageArtifactNeedsFromR2_SkipsOnPremProducers verifies that when every
+// producer is on-prem, the function returns without ever calling getR2Client
+// — those needs are satisfied by the producer's own queue runner writing the
+// satisfied marker on completion, not by R2 staging.
+func TestStageArtifactNeedsFromR2_SkipsOnPremProducers(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	producerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "consume", "consumer")
+	if err != nil {
+		t.Fatalf("record consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, consumerID, []string{fmt.Sprintf("output/x.bin:%d", producerID)}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("get consumer: %v", err)
+	}
+
+	getR2 := func() (*r2.Client, error) {
+		t.Fatal("getR2Client should not be called when all producers are on-prem")
+		return nil, nil
+	}
+	if err := stageArtifactNeedsFromR2(database, consumer, time.Second, getR2); err != nil {
+		t.Fatalf("stageArtifactNeedsFromR2: %v", err)
+	}
+}
+
+// TestStageArtifactNeedsFromR2_NoNeeds verifies the early-return for jobs with
+// no --needs entries. No R2 or SSH should be touched.
+func TestStageArtifactNeedsFromR2_NoNeeds(t *testing.T) {
+	database := db.SetupTestDB(t)
+	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "echo", "no-needs")
+	if err != nil {
+		t.Fatalf("record consumer: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("get consumer: %v", err)
+	}
+	getR2 := func() (*r2.Client, error) {
+		t.Fatal("getR2Client should not be called for jobs with no --needs")
+		return nil, nil
+	}
+	if err := stageArtifactNeedsFromR2(database, consumer, time.Second, getR2); err != nil {
+		t.Fatalf("stageArtifactNeedsFromR2: %v", err)
+	}
+}
+
+// TestStageArtifactNeedsFromR2_MissingProducer verifies that an unknown
+// producer ID surfaces as an error rather than silently being skipped.
+func TestStageArtifactNeedsFromR2_MissingProducer(t *testing.T) {
+	database := db.SetupTestDB(t)
+	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "consume", "consumer")
+	if err != nil {
+		t.Fatalf("record consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, consumerID, []string{"output/x.bin:99999"}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("get consumer: %v", err)
+	}
+	getR2 := func() (*r2.Client, error) { return &r2.Client{}, nil }
+	err = stageArtifactNeedsFromR2(database, consumer, time.Second, getR2)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected 'not found' error, got %v", err)
+	}
+}
+
 func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	database := db.SetupTestDB(t)
 

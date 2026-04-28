@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -451,28 +452,6 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		}
 	}
 
-	if len(jobs) == 0 {
-		return 0, false, nil
-	}
-
-	// Resolve backend once for this host (all jobs share the same backend).
-	backend := jobs[0].Backend
-	contacted := false
-	if backend == "" {
-		var err error
-		backend, err = ResolveBackend(host, timeout)
-		if err != nil {
-			if ssh.IsConnectionError(err.Error()) {
-				return 0, false, nil
-			}
-			return 0, false, err
-		}
-		contacted = true
-	}
-
-	ensured := 0
-	syncedDirs := make(map[string]bool)
-	sourceSHAByDir := make(map[string]string)
 	var r2Client *r2.Client
 	var r2ClientErr error
 	r2ClientLoaded := false
@@ -498,6 +477,54 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		}
 		return r2Client, nil
 	}
+
+	// Stage rental-produced --needs artifacts for every queued job on this host
+	// — synced or not — so jobs already sitting in the runner's pending list can
+	// have their satisfied markers written without having to be re-dispatched.
+	// Idempotent: skips needs whose marker already exists on the host.
+	stageSeen := make(map[int64]bool)
+	stageOne := func(job *db.Job) {
+		if job == nil || stageSeen[job.ID] || len(job.Needs) == 0 {
+			return
+		}
+		stageSeen[job.ID] = true
+		if err := stageArtifactNeedsFromR2(database, job, timeout, getR2Client); err != nil {
+			syncLog.Debug("artifact needs staging failed", "job_id", job.ID, "host", host, "error", err)
+			oplog.LogJob(oplog.OpJobStartFailed, job.ID, host,
+				oplog.WithDetail("artifact needs staging failed"),
+				oplog.WithError(err),
+			)
+		}
+	}
+	for _, job := range syncedJobs {
+		stageOne(job)
+	}
+	for _, job := range jobs {
+		stageOne(job)
+	}
+
+	if len(jobs) == 0 {
+		return 0, false, nil
+	}
+
+	// Resolve backend once for this host (all jobs share the same backend).
+	backend := jobs[0].Backend
+	contacted := false
+	if backend == "" {
+		var err error
+		backend, err = ResolveBackend(host, timeout)
+		if err != nil {
+			if ssh.IsConnectionError(err.Error()) {
+				return 0, false, nil
+			}
+			return 0, false, err
+		}
+		contacted = true
+	}
+
+	ensured := 0
+	syncedDirs := make(map[string]bool)
+	sourceSHAByDir := make(map[string]string)
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
 		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
@@ -758,6 +785,272 @@ func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration,
 		oplog.WithDetailf("cloud artifact staging complete (%d artifact%s)", len(job.Metadata.Dependencies.CloudNeeds), pluralize(len(job.Metadata.Dependencies.CloudNeeds))),
 	)
 	return nil
+}
+
+type pendingNeed struct {
+	spec       string
+	path       string
+	producerID int64
+	latestRun  *int64
+	markerName string
+	remotePath string
+}
+
+// stageArtifactNeedsFromR2 ensures rental-produced --needs artifacts for the
+// consumer job are present on its on-prem host: bytes are scp'd into the
+// working dir and a satisfied marker is written under ~/.cache/weft/logs/ so
+// the queue runner's CheckDependencies passes. On-prem-producer needs are
+// skipped (the producer's own queue runner writes the marker on completion).
+// Idempotent — needs whose marker already exists are skipped.
+func stageArtifactNeedsFromR2(database *sql.DB, job *db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
+	if job == nil || len(job.Needs) == 0 || strings.TrimSpace(job.Host) == "" {
+		return nil
+	}
+	remoteBase := workdir.ToTildeRelative(job.WorkingDir)
+	if remoteBase == "" {
+		remoteBase = job.WorkingDir
+	}
+	var pending []pendingNeed
+	for _, spec := range job.Needs {
+		parsed, err := parseCloudNeedSpec(spec)
+		if err != nil {
+			return fmt.Errorf("parse --needs %q: %w", spec, err)
+		}
+		producer, err := db.GetJobByID(database, parsed.Version)
+		if err != nil {
+			return fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)
+		}
+		if producer == nil {
+			return fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
+		}
+		if producer.HasInventoryHost() {
+			continue
+		}
+		pending = append(pending, pendingNeed{
+			spec:       spec,
+			path:       parsed.Path,
+			producerID: producer.ID,
+			latestRun:  producer.LatestRunID,
+			markerName: fmt.Sprintf("artifact-%d-%s.satisfied", parsed.Version, url.PathEscape(parsed.Path)),
+			remotePath: strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(parsed.Path, "/"),
+		})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	state, err := probeRemoteNeedsState(job.Host, pending, timeout)
+	if err != nil {
+		return fmt.Errorf("probe remote needs state: %w", err)
+	}
+	var todo []pendingNeed
+	for _, n := range pending {
+		if !state[n.markerName].markerExists {
+			todo = append(todo, n)
+		}
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+
+	r2Client, err := getR2Client()
+	if err != nil {
+		return err
+	}
+	if r2Client == nil || !r2Client.IsConfigured() {
+		return fmt.Errorf("R2 is not configured")
+	}
+
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-needs-%d-*", job.ID))
+	if err != nil {
+		return fmt.Errorf("create temp dir for needs staging: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+		oplog.WithDetailf("artifact needs staging start (%d artifact%s)", len(todo), pluralize(len(todo))))
+	for _, n := range todo {
+		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+			oplog.WithDetailf("artifact needs staging attempt: %s", n.spec))
+
+		key, err := resolveRentalNeedR2Key(r2Client, n.producerID, n.latestRun, n.path)
+		if err != nil {
+			return fmt.Errorf("%q: %w", n.spec, err)
+		}
+		// Skip re-transfer only when the on-host file's byte count matches R2.
+		// File existence alone is not proof of completeness — a prior interrupted
+		// scp can leave a truncated file at the final path.
+		needsTransfer := true
+		if state[n.markerName].fileExists {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			expected, err := r2Client.ObjectSize(ctx, key)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("get expected size for %q: %w", n.spec, err)
+			}
+			actual, err := remoteFileSize(job.Host, n.remotePath, timeout)
+			if err != nil {
+				return fmt.Errorf("stat remote %q: %w", n.spec, err)
+			}
+			if expected >= 0 && actual == expected {
+				needsTransfer = false
+			}
+		}
+		if needsTransfer {
+			localPath := filepath.Join(tmpDir, filepath.FromSlash(strings.TrimPrefix(n.path, "/")))
+			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+				return fmt.Errorf("prepare local staging path for %q: %w", n.spec, err)
+			}
+			if _, err := r2Client.DownloadObjectToFileWithIdleTimeout(context.Background(), key, localPath, 5*time.Minute); err != nil {
+				return fmt.Errorf("download %s for %q: %w", key, n.spec, err)
+			}
+			if err := ensureRemoteParentDir(job.Host, n.remotePath, timeout); err != nil {
+				return fmt.Errorf("create remote dir for %q: %w", n.spec, err)
+			}
+			// scp to a sibling staging path, then mv into place: guards against
+			// a killed scp leaving a truncated file at the final path that a
+			// future probe would mistake for a complete transfer.
+			stagingPath := n.remotePath + ".weft-staging"
+			if err := ssh.CopyTo(localPath, job.Host, stagingPath); err != nil {
+				return fmt.Errorf("copy %q to %s:%s: %w", n.spec, job.Host, stagingPath, err)
+			}
+			if err := remoteAtomicRename(job.Host, stagingPath, n.remotePath, timeout); err != nil {
+				return fmt.Errorf("rename staging file for %q: %w", n.spec, err)
+			}
+		}
+		if err := writeRemoteSatisfiedMarker(job.Host, n.markerName, timeout); err != nil {
+			return fmt.Errorf("write satisfied marker for %q: %w", n.spec, err)
+		}
+		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+			oplog.WithDetailf("artifact needs staging success: %s", n.spec))
+	}
+	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+		oplog.WithDetailf("artifact needs staging complete (%d artifact%s)", len(todo), pluralize(len(todo))))
+	return nil
+}
+
+// resolveRentalNeedR2Key probes R2 for the producer's artifact key, trying
+// the latest-run prefix first, then the legacy run-zero prefix, and within
+// each run trying the artifact-files prefix before the outputs prefix.
+//
+// Mirrors the unexported cloudneeds.resolveNeedR2Key. We can't reuse it
+// without exporting it, and we can't pull in `runner.ParseNeedsSpec` here
+// because runner→placement→ops is a real import cycle.
+func resolveRentalNeedR2Key(client *r2.Client, jobID int64, latestRunID *int64, relPath string) (string, error) {
+	runIDs := []int64{0}
+	if latestRunID != nil && *latestRunID > 0 {
+		runIDs = append([]int64{*latestRunID}, runIDs...)
+	}
+	artifactRel := artifacts.LocalRelativePath(relPath)
+	outputRel := strings.TrimPrefix(relPath, "/")
+	for _, runID := range runIDs {
+		keys := []string{
+			r2keys.JobAttemptArtifactFilesPrefix(jobID, runID) + artifactRel,
+			r2keys.JobAttemptOutputsPrefix(jobID, runID) + outputRel,
+		}
+		for _, key := range keys {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			exists, err := client.ObjectExists(ctx, key)
+			cancel()
+			if err != nil {
+				return "", fmt.Errorf("check %s: %w", key, err)
+			}
+			if exists {
+				return key, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("artifact %q not found in cloud outputs", relPath)
+}
+
+func remoteFileSize(host, remotePath string, timeout time.Duration) (int64, error) {
+	cmd := fmt.Sprintf(`p=$(eval echo %s); if [ -e "$p" ]; then stat -f%%z "$p" 2>/dev/null || stat -c%%s "$p"; else echo -1; fi`, shellQuote(remotePath))
+	out, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return 0, fmt.Errorf("ssh stat %s: %s: %w", remotePath, stderr, err)
+	}
+	s := strings.TrimSpace(out)
+	if s == "" {
+		return -1, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse remote stat %q: %w", s, err)
+	}
+	return n, nil
+}
+
+func remoteAtomicRename(host, src, dst string, timeout time.Duration) error {
+	cmd := fmt.Sprintf(`mv -f -- %s %s`, shellQuote(src), shellQuote(dst))
+	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return fmt.Errorf("ssh mv %s %s: %s: %w", src, dst, stderr, err)
+	}
+	return nil
+}
+
+func writeRemoteSatisfiedMarker(host, markerName string, timeout time.Duration) error {
+	cmd := fmt.Sprintf(`mkdir -p ~/.cache/weft/logs && printf '0\n' > ~/.cache/weft/logs/%s`, shellQuote(markerName))
+	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return fmt.Errorf("ssh write marker %s: %s: %w", markerName, stderr, err)
+	}
+	return nil
+}
+
+type remoteNeedState struct {
+	markerExists bool
+	fileExists   bool
+}
+
+// probeRemoteNeedsTag* are the leading column emitted by the probe script for
+// marker-presence and file-presence rows. Kept short to keep the script tight.
+const (
+	probeRemoteNeedsTagMarker = "M"
+	probeRemoteNeedsTagFile   = "F"
+)
+
+// probeRemoteNeedsState checks each pending need's marker and target-file
+// presence on the host in a single SSH round-trip. Returned map is keyed by
+// marker name. Output lines from the script are of the form "M\t<marker>"
+// or "F\t<marker>", emitted only when the respective path exists.
+func probeRemoteNeedsState(host string, needs []pendingNeed, timeout time.Duration) (map[string]remoteNeedState, error) {
+	if len(needs) == 0 {
+		return nil, nil
+	}
+	var sb strings.Builder
+	sb.WriteString(`logs=~/.cache/weft/logs; `)
+	for _, n := range needs {
+		// `|| true` so a missing marker/file does not poison the script's exit code.
+		sb.WriteString(fmt.Sprintf(`{ [ -e "$logs"/%s ] && printf '%s\t%%s\n' %s; } || true; `, shellQuote(n.markerName), probeRemoteNeedsTagMarker, shellQuote(n.markerName)))
+		// Use eval so leading "~/" expands.
+		sb.WriteString(fmt.Sprintf(`p=$(eval echo %s); { [ -e "$p" ] && printf '%s\t%%s\n' %s; } || true; `, shellQuote(n.remotePath), probeRemoteNeedsTagFile, shellQuote(n.markerName)))
+	}
+	sb.WriteString(`exit 0`)
+	out, _, err := ssh.RunWithTimeout(host, sb.String(), timeout)
+	if err != nil {
+		return nil, err
+	}
+	state := make(map[string]remoteNeedState)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		entry := state[parts[1]]
+		switch parts[0] {
+		case probeRemoteNeedsTagMarker:
+			entry.markerExists = true
+		case probeRemoteNeedsTagFile:
+			entry.fileExists = true
+		}
+		state[parts[1]] = entry
+	}
+	return state, nil
 }
 
 type cloudNeedSpec struct {

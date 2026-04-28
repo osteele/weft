@@ -71,7 +71,7 @@ done`
 	entries := make([]HostDataEntry, 0, len(results))
 	for _, r := range results {
 		if r.Status != "ok" {
-			slog.Warn("skipping malformed HF cache entry",
+			slog.Debug("skipping malformed HF cache entry",
 				"host", host, "asset", r.Asset.Ref(), "path", r.Path, "status", r.Status)
 			continue
 		}

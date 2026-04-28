@@ -438,6 +438,25 @@ func (c *Client) ObjectExists(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// ObjectSize returns the size in bytes of the object at the given key.
+// Returns -1 if the object does not exist.
+func (c *Client) ObjectSize(ctx context.Context, key string) (int64, error) {
+	out, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return -1, nil
+		}
+		return 0, fmt.Errorf("head object %s: %w", key, err)
+	}
+	if out.ContentLength == nil {
+		return 0, nil
+	}
+	return *out.ContentLength, nil
+}
+
 // Bucket returns the bucket name this client is configured for.
 func (c *Client) Bucket() string {
 	return c.bucket
