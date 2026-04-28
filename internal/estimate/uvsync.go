@@ -1,6 +1,7 @@
 package estimate
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -31,6 +32,26 @@ type UVPackageRef struct {
 	Version        string `json:"version"`
 	SizeBytes      int64  `json:"size_bytes"`
 	InstalledBytes int64  `json:"installed_bytes,omitempty"`
+}
+
+// CountLockfilePackages counts [[package]] blocks in a uv.lock TOML file.
+// Returns 0 on any error or when the file is missing.
+func CountLockfilePackages(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	count := 0
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "[[package]]" {
+			count++
+		}
+	}
+	return count
 }
 
 // LockfileHash computes SHA256 hashes for uv.lock files found in the given
@@ -83,12 +104,18 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 	// Strip "sha256:" prefix for the cache path
 	hashHex, _ := strings.CutPrefix(lockHash, "sha256:")
 
-	// Check local cache first (immutable, never invalidated)
+	// Check local cache first. A non-empty manifest is content-addressable and
+	// safe to treat as immutable. Empty manifests (zero packages) can result
+	// from agent runs that did not populate the wheel cache; treat them as
+	// missing and remove so the next call can refetch.
 	cachePath := filepath.Join(cacheBase, hashHex, platform+".json")
 	if data, err := os.ReadFile(cachePath); err == nil {
 		var m UVManifestRef
 		if json.Unmarshal(data, &m) == nil {
-			return &m
+			if len(m.Packages) > 0 {
+				return &m
+			}
+			os.Remove(cachePath)
 		}
 	}
 
@@ -112,6 +139,10 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 	var m UVManifestRef
 	if err := json.Unmarshal(data, &m); err != nil {
 		slog.Warn("uv manifest parse failed", "component", "estimate", "r2_key", r2Key, "error", err)
+		return nil
+	}
+	if len(m.Packages) == 0 {
+		slog.Warn("skipping empty uv manifest", "component", "estimate", "r2_key", r2Key)
 		return nil
 	}
 

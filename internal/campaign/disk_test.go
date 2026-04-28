@@ -88,6 +88,58 @@ func TestEstimateGroupDisk_UsesCachedUVManifestUnion(t *testing.T) {
 	}
 }
 
+// TestEstimateGroupDisk_FallsBackToLockfileCountWhenManifestMissing verifies
+// the regression case for wj1586: a CUDA project whose uv.lock had no
+// corresponding manifest in the local cache or R2 must fall back to a
+// per-package estimate, not collapse to overhead-only.
+func TestEstimateGroupDisk_FallsBackToLockfileCountWhenManifestMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`[project]
+dependencies = ["torch>=2.0", "transformer-lens>=2.0"]
+`), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	// Synthesize a large uv.lock with 1000 [[package]] blocks, modeling a
+	// heavy ML stack like markov-attention's where torch + nvidia-cu* +
+	// transformers + jupyterlab + spacy + wandb + gradio resolve into a
+	// long dependency tree.
+	const pkgCount = 1000
+	var b []byte
+	for i := 0; i < pkgCount; i++ {
+		b = append(b, []byte("[[package]]\nname = \"p\"\nversion = \"1.0\"\n\n")...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), b, 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 1, WorkingDir: dir}}}
+	disk := EstimateGroupDisk(group, nil, nil)
+
+	// Per-package CUDA fallback is 80 MB; 1000 × 80MB = 80 GB.
+	// + BaseOverheadGB (6) + CUDAOverheadGB (18) = 104 GB. Must exceed
+	// DefaultMinDiskGB by a wide margin to prove the fallback engaged
+	// (overhead-only would have been 24 GB, raised to floor 50).
+	if disk <= DefaultMinDiskGB {
+		t.Fatalf("disk = %d, want > %d (lockfile fallback should escape floor)",
+			disk, DefaultMinDiskGB)
+	}
+	if disk < 100 {
+		t.Errorf("disk = %d, want >= ~100 GB for %d-package CUDA lockfile", disk, pkgCount)
+	}
+
+	// Tiny lockfile should stay at the floor (no over-provisioning).
+	smallDir := t.TempDir()
+	os.WriteFile(filepath.Join(smallDir, "pyproject.toml"), []byte("[project]\ndependencies = [\"requests\"]\n"), 0o644)
+	os.WriteFile(filepath.Join(smallDir, "uv.lock"), []byte("[[package]]\nname=\"p\"\nversion=\"1\"\n"), 0o644)
+	smallGroup := InstanceGroup{Jobs: []*db.Job{{ID: 2, WorkingDir: smallDir}}}
+	smallDisk := EstimateGroupDisk(smallGroup, nil, nil)
+	if smallDisk != DefaultMinDiskGB {
+		t.Errorf("small lockfile disk = %d, want %d (floor)", smallDisk, DefaultMinDiskGB)
+	}
+}
+
 // addHistoricalDiskRecord records a completed job with disk usage for testing empirical disk estimation.
 func addHistoricalDiskRecord(t *testing.T, database *sql.DB, project, cmd string, diskBytes int64) {
 	t.Helper()

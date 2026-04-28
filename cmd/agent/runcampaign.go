@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -480,6 +481,14 @@ func promoteUVManifest(bucket, logDir string) {
 	}
 	var m runner.UVManifest
 	if json.Unmarshal(data, &m) != nil || m.LockfileHash == "" || m.Platform == "" {
+		return
+	}
+	if len(m.Packages) == 0 {
+		// An empty package list (e.g. from a `uv run --script` invocation that
+		// did not populate the project's wheel cache) would poison the
+		// content-addressable disk estimator for this lockfile. Skip upload.
+		slog.Warn("skipping upload of empty uv manifest",
+			"component", "agent", "lockfile_hash", m.LockfileHash, "platform", m.Platform)
 		return
 	}
 	key := r2keys.UVManifest(m.LockfileHash, m.Platform)

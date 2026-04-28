@@ -1,9 +1,12 @@
 package estimate
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLockfileHash(t *testing.T) {
@@ -122,6 +125,46 @@ func TestEstimateUVSyncBytes_PrefersInstalledBytes(t *testing.T) {
 	total := EstimateUVSyncBytes(manifests)
 	if total != 3200 {
 		t.Errorf("total = %d, want 3200", total)
+	}
+}
+
+// TestFetchUVManifests_EmptyCachedManifestTreatedAsMissing verifies that an
+// empty (zero-package) cached manifest is treated as missing rather than
+// returning an apparent uv-sync size of 0 — the bug that previously poisoned
+// disk estimates after a single bad agent upload.
+func TestFetchUVManifests_EmptyCachedManifestTreatedAsMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte("lock\n"), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	hashes := LockfileHash([]string{dir})
+	hash := hashes[dir]
+	hashHex := strings.TrimPrefix(hash, "sha256:")
+	cachePath := filepath.Join(home, ".cache", "weft", "uv-manifests", hashHex, "linux-amd64.json")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	empty := UVManifestRef{
+		LockfileHash: hash,
+		Platform:     "linux-amd64",
+		CollectedAt:  time.Now().UTC(),
+		Packages:     nil,
+	}
+	data, _ := json.Marshal(empty)
+	if err := os.WriteFile(cachePath, data, 0o644); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	manifests := FetchUVManifests(nil, hashes, "linux-amd64")
+	if len(manifests) != 0 {
+		t.Fatalf("expected empty manifest to be treated as missing, got %d", len(manifests))
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Errorf("expected empty cache file to be removed, got err=%v", err)
 	}
 }
 

@@ -241,16 +241,40 @@ func empiricalRequiredDiskGB(peakUsedBytes int64) int {
 	return diskGB
 }
 
+// Per-package installed-size estimates used when no uv manifest is available.
+// CUDA projects pin significantly larger wheels (torch + nvidia-* runtime).
+const (
+	fallbackPerPackageCUDABytes    = 80_000_000
+	fallbackPerPackageNonCUDABytes = 25_000_000
+)
+
 func estimateGroupUVBytes(sourceDirs []string, r2Client *r2.Client) int64 {
 	lockfileHashes := estimate.LockfileHash(sourceDirs)
 	if len(lockfileHashes) == 0 {
 		return 0
 	}
 	manifests := estimate.FetchUVManifests(r2Client, lockfileHashes, "linux-amd64")
-	if len(manifests) == 0 {
-		return 0
+	var total int64
+	if len(manifests) > 0 {
+		total = estimate.EstimateUVSyncBytes(manifests)
 	}
-	return estimate.EstimateUVSyncBytes(manifests)
+	// Without this fallback, a missing or empty manifest collapses the
+	// estimate to overhead-only and undersizes the rental.
+	for dir := range lockfileHashes {
+		if _, hasManifest := manifests[dir]; hasManifest {
+			continue
+		}
+		count := estimate.CountLockfilePackages(filepath.Join(dir, "uv.lock"))
+		if count == 0 {
+			continue
+		}
+		perPkg := int64(fallbackPerPackageNonCUDABytes)
+		if hasCUDAInPyproject(filepath.Join(dir, "pyproject.toml")) {
+			perPkg = fallbackPerPackageCUDABytes
+		}
+		total += int64(count) * perPkg
+	}
+	return total
 }
 
 // lookupObservedInputs queries the DB for observed_inputs from prior runs of
