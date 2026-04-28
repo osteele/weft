@@ -20,6 +20,16 @@ import (
 const AutopilotPassStaleAfter = 30 * time.Second
 const autopilotHeartbeatInterval = 5 * time.Second
 
+// Cooldowns between auto-pilot passes; shared by every runner (TUI and CLI)
+// so dispatch policy is defined once.
+const (
+	AutopilotCooldownProgress = 5 * time.Second
+	AutopilotCooldownIdle     = 30 * time.Second
+	AutopilotCooldownBlocked  = 30 * time.Second
+	AutopilotCooldownError    = 60 * time.Second
+	AutopilotCooldownContend  = 15 * time.Second
+)
+
 var ErrAutopilotPaused = errors.New("autopilot is paused")
 var ErrAutopilotBusy = errors.New("autopilot pass is in progress on another runner")
 

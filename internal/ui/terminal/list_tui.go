@@ -1880,13 +1880,14 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 // Prevents rapid flicker between "evaluating" and idle text on every sync tick.
 const listAutoPilotMinDisplayDuration = 1200 * time.Millisecond
 
-// Cooldowns between auto-pilot passes; avoid tight retry loops on failure.
+// Aliases for the shared autopilot cooldowns; preserves call sites in this
+// file and the existing list_ui_test.go references.
 const (
-	listAutoPilotCooldownError    = 60 * time.Second
-	listAutoPilotCooldownBlocked  = 30 * time.Second
-	listAutoPilotCooldownIdle     = 30 * time.Second
-	listAutoPilotCooldownProgress = 5 * time.Second
-	listAutoPilotCooldownContend  = 15 * time.Second
+	listAutoPilotCooldownError    = orchestration.AutopilotCooldownError
+	listAutoPilotCooldownBlocked  = orchestration.AutopilotCooldownBlocked
+	listAutoPilotCooldownIdle     = orchestration.AutopilotCooldownIdle
+	listAutoPilotCooldownProgress = orchestration.AutopilotCooldownProgress
+	listAutoPilotCooldownContend  = orchestration.AutopilotCooldownContend
 )
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, int, string, map[int64]string, error) {
