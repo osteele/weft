@@ -359,19 +359,32 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 		}
 		return "retry pending " + shortRelativeTime(now.Unix()-*job.EndTime)
 	}
-	placedAt := job.QueuedAt
-	if placedAt == 0 {
+	var placedAt int64
+	label := "placed"
+	if sectionKey == "unplaced" {
+		// Unplaced jobs aren't actually queued, and QueuedAt is reset to
+		// "now" on every autopilot retry that closes and recreates the
+		// open attempt. Prefer CreatedAt so the displayed age reflects
+		// the job's true age rather than the latest retry.
 		placedAt = job.CreatedAt
-	}
-	if placedAt == 0 {
-		placedAt = job.StartTime
+		if placedAt == 0 {
+			placedAt = job.QueuedAt
+		}
+		if placedAt == 0 {
+			placedAt = job.StartTime
+		}
+		label = "created"
+	} else {
+		placedAt = job.QueuedAt
+		if placedAt == 0 {
+			placedAt = job.CreatedAt
+		}
+		if placedAt == 0 {
+			placedAt = job.StartTime
+		}
 	}
 	if placedAt <= 0 {
 		return ""
-	}
-	label := "placed"
-	if sectionKey == "unplaced" {
-		label = "queued"
 	}
 	return label + " " + shortRelativeTime(now.Unix()-placedAt)
 }

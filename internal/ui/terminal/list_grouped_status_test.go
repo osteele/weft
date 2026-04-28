@@ -107,7 +107,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 
 	for _, want := range []string{
 		"- ☁ wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
-		"-   wj43 — proj queued — queued 13m ago",
+		"-   wj43 — proj queued — created 16m ago",
 		"-   wj44 — proj done — completed 1m ago — completed ok",
 	} {
 		if !strings.Contains(out, want) {
@@ -197,7 +197,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
-	lineWant := "  -   wj50 — proj waiting — queued 5m ago"
+	lineWant := "  -   wj50 — proj waiting — created 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
 	}
@@ -312,6 +312,33 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngr
 	// Ungrouped row must follow the grouped subheader+job.
 	if strings.Index(out, "-   wj202") < strings.Index(out, headWant) {
 		t.Fatalf("ungrouped row should trail grouped output in:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_UnplacedShowsCreatedNotQueuedAge(t *testing.T) {
+	// Each autopilot retry pass closes the open attempt and creates a new
+	// one, which stamps queued_at to "now" via createAttemptTx. The
+	// unplaced section must show the job's true age (CreatedAt), not the
+	// freshly-reset QueuedAt.
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          1561,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "blocked job",
+			CreatedAt:   2_600,             // job was created 40m ago
+			QueuedAt:    now.Unix() - 2*60, // last retry 2m ago
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	want := "-   wj1561 — proj blocked job — created 40m ago"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+	if strings.Contains(out, "queued 2m ago") {
+		t.Fatalf("unplaced row should not show reset queued_at as the age:\n%s", out)
 	}
 }
 
