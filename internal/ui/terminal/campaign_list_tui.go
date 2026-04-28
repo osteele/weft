@@ -229,7 +229,7 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if len(m.items) == 0 {
 			m.statusMessage = "No campaigns yet."
 		} else {
-			m.statusMessage = "Synced."
+			m.statusMessage = ""
 		}
 		return m, m.reloadCampaigns()
 

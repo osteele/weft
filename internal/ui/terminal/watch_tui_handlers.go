@@ -650,7 +650,7 @@ func (m watchModel) handleProjectSyncFinished(msg watchProjectSyncFinishedMsg) (
 	if len(msg.warnings) > 0 {
 		m.projectStatus = strings.Join(msg.warnings, " | ")
 	} else {
-		m.projectStatus = "Synced."
+		m.projectStatus = ""
 	}
 	return m, m.reloadProjectGroups()
 }

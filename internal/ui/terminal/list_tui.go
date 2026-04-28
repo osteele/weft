@@ -497,7 +497,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			if !m.quickLaunchStatusProtected() {
-				m.statusMessage = "Synced."
+				m.statusMessage = ""
 			}
 		}
 		return m, m.reloadJobs()
