@@ -27,6 +27,7 @@ import (
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/util"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -500,6 +501,17 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
 		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchFailed,
+			JobID:     jobID,
+			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
+		})
+	}
+	recordDispatchOK := func(jobID int64) {
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchOK,
+			JobID:     jobID,
+		})
 	}
 	for _, job := range jobs {
 		ready, reason, err := cloudDepsReady(database, job)
@@ -595,6 +607,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 				if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
 					return ensured, contacted, err
 				}
+				recordDispatchOK(job.ID)
 				ensured++
 			}
 			continue
@@ -615,12 +628,23 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
 			return ensured, contacted, err
 		}
+		recordDispatchOK(job.ID)
 		ensured++
 	}
 	if len(failures) > 0 {
 		return ensured, contacted, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 	return ensured, contacted, nil
+}
+
+// truncateDispatchDetail caps a dispatch failure detail at a length suitable
+// for storage and TUI display. rsync errors can be multi-line and very long;
+// the first line is usually the actionable summary.
+func truncateDispatchDetail(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return util.Truncate(strings.TrimSpace(s), 240)
 }
 
 func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {

@@ -17,6 +17,121 @@ import (
 func HydrateUnplacedBlockedReasons(database *sql.DB, jobs []*db.Job) {
 	HydrateRelaunchBlockedReasons(database, jobs)
 	queueblock.HydrateWaitingOnProducerReasons(database, jobs)
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+}
+
+// HydrateInventoryDispatchBlockedReasons populates QueueBlockedReason on
+// inventory-host queued jobs whose remote dispatch has been failing
+// (source-sync rsync error, HF input staging failure, queue append failure,
+// etc.). Such failures are otherwise invisible in weft's UI: the job appears
+// as a normal "queued" job indefinitely while ensureQueuedJobsOnRemote logs
+// only to operations.log.
+//
+// Reads queue.dispatch.failed events for each candidate job, ignoring events
+// older than the most recent queue.dispatch.ok (so a successful dispatch
+// clears stale failure reasons).
+func HydrateInventoryDispatchBlockedReasons(database *sql.DB, jobs []*db.Job) {
+	if database == nil || len(jobs) == 0 {
+		return
+	}
+	floorByJob := make(map[int64]int64, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if !job.HasInventoryHost() || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if strings.TrimSpace(job.QueueBlockedReason) != "" {
+			continue
+		}
+		floor := job.QueuedAt
+		if floor <= 0 {
+			floor = job.CreatedAt
+		}
+		floorByJob[job.ID] = floor
+	}
+	if len(floorByJob) == 0 {
+		return
+	}
+	reasons := dispatchBlockedReasonsFromEvents(database, floorByJob)
+	if len(reasons) == 0 {
+		return
+	}
+	for _, job := range jobs {
+		if job == nil || strings.TrimSpace(job.QueueBlockedReason) != "" {
+			continue
+		}
+		if reason := strings.TrimSpace(reasons[job.ID]); reason != "" {
+			job.QueueBlockedReason = reason
+		}
+	}
+}
+
+// dispatchBlockedReasonsFromEvents returns the latest queue.dispatch.failed
+// detail per job, suppressed if a queue.dispatch.ok event exists at the same
+// or later timestamp (the failure has been resolved on a subsequent pass).
+func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int64) map[int64]string {
+	reasons := make(map[int64]string)
+	if database == nil || len(floorByJob) == 0 {
+		return reasons
+	}
+	jobIDs := make([]int64, 0, len(floorByJob))
+	for jobID := range floorByJob {
+		jobIDs = append(jobIDs, jobID)
+	}
+	placeholders := make([]string, 0, len(jobIDs))
+	args := make([]any, 0, len(jobIDs))
+	for _, jobID := range jobIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, jobID)
+	}
+	query := fmt.Sprintf(`SELECT job_id, occurred_at, event_kind, COALESCE(detail, '')
+		FROM lifecycle_events
+		WHERE event_kind IN (?, ?)
+		  AND job_id IN (%s)
+		ORDER BY occurred_at DESC, id DESC`, strings.Join(placeholders, ","))
+	queryArgs := append([]any{db.EventQueueDispatchFailed, db.EventQueueDispatchOK}, args...)
+	rows, err := database.Query(query, queryArgs...)
+	if err != nil {
+		return reasons
+	}
+	defer rows.Close()
+
+	latestOK := make(map[int64]int64)
+	for rows.Next() {
+		var (
+			jobID      int64
+			occurredAt int64
+			kind       string
+			detail     string
+		)
+		if err := rows.Scan(&jobID, &occurredAt, &kind, &detail); err != nil {
+			continue
+		}
+		if floor, ok := floorByJob[jobID]; ok && floor > 0 && occurredAt < floor {
+			continue
+		}
+		switch kind {
+		case db.EventQueueDispatchOK:
+			if existing, ok := latestOK[jobID]; !ok || occurredAt > existing {
+				latestOK[jobID] = occurredAt
+			}
+		case db.EventQueueDispatchFailed:
+			if _, exists := reasons[jobID]; exists {
+				continue
+			}
+			if okAt := latestOK[jobID]; okAt > 0 && okAt >= occurredAt {
+				continue
+			}
+			detail = strings.TrimSpace(detail)
+			if detail == "" {
+				continue
+			}
+			reasons[jobID] = detail
+		}
+	}
+	return reasons
 }
 
 // relaunchOfferErrorFreshness bounds how long a relaunch.skipped.offer_error

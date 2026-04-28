@@ -7,11 +7,26 @@ import (
 )
 
 func TestCollectExtraPaths_RelativeResolution(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir: %v", err)
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	localDir := filepath.Join(home, "code", "research", "structural-probes")
+	if err := os.MkdirAll(filepath.Join(localDir, "data"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, "cache"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "external", "data"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "shared", "models"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll("/tmp/weft-extras-test-data", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll("/tmp/weft-extras-test-data") })
 
 	tests := []struct {
 		name     string
@@ -33,9 +48,9 @@ func TestCollectExtraPaths_RelativeResolution(t *testing.T) {
 		},
 		{
 			name:     "absolute path passed through",
-			inputs:   []string{"/tmp/data"},
+			inputs:   []string{"/tmp/weft-extras-test-data"},
 			localDir: localDir,
-			want:     []string{"/tmp/data"},
+			want:     []string{"/tmp/weft-extras-test-data"},
 		},
 		{
 			name:     "asset refs excluded",
@@ -63,5 +78,65 @@ func TestCollectExtraPaths_RelativeResolution(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Regression: local: inputs that name artifacts produced on a remote host
+// should be skipped (not fed to rsync) when the path is absent locally.
+// Triggered by wj1547: three local:runs/... paths that lived only on cool30
+// caused rsync to exit 23 every host-sync pass, blocking dispatch indefinitely.
+func TestCollectExtraPaths_AbsentLocalPathsAreSkipped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := filepath.Join(home, "code", "project")
+	if err := os.MkdirAll(filepath.Join(localDir, "data"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	inputs := []string{
+		"local:data/",                         // exists locally — keep
+		"local:runs/produced-on-host-only/",   // absent locally — drop
+		"local:runs/another-remote-artifact/", // absent locally — drop
+		"hf:bert-base-cased",                  // asset ref — ignored by CollectExtraPaths
+	}
+	got := CollectExtraPaths(inputs, localDir)
+
+	want := []string{"~/code/project/data"}
+	if len(got) != len(want) {
+		t.Fatalf("CollectExtraPaths() = %v, want %v", got, want)
+	}
+	if got[0] != want[0] {
+		t.Errorf("path[0] = %q, want %q", got[0], want[0])
+	}
+}
+
+func TestCollectExtraPaths_AbsentTildePathSkipped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := filepath.Join(home, "project")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	got := CollectExtraPaths([]string{"~/does-not-exist/"}, localDir)
+	if len(got) != 0 {
+		t.Fatalf("CollectExtraPaths() = %v, want []", got)
+	}
+}
+
+func TestCollectExtraPaths_AbsentAbsolutePathSkipped(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := filepath.Join(home, "project")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	got := CollectExtraPaths([]string{"/tmp/weft-definitely-not-here-7e9d2"}, localDir)
+	if len(got) != 0 {
+		t.Fatalf("CollectExtraPaths() = %v, want []", got)
 	}
 }

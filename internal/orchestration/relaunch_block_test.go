@@ -209,3 +209,126 @@ func TestHydrateRelaunchBlockedReasons_KeepsFreshOfferError(t *testing.T) {
 		t.Fatalf("QueueBlockedReason empty, want fresh offer_error to surface")
 	}
 }
+
+func TestHydrateInventoryDispatchBlockedReasons_AppliesLatestFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventQueueDispatchFailed,
+		JobID:      jobID,
+		OccurredAt: time.Now().Unix() + 60,
+		Detail:     "source sync failed: rsync extra path runs/foo: No such file or directory",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	jobs, err := db.ListQueued(database, "cool30")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+
+	if len(jobs) != 1 {
+		t.Fatalf("ListQueued returned %d jobs, want 1", len(jobs))
+	}
+	want := "source sync failed: rsync extra path runs/foo: No such file or directory"
+	if jobs[0].QueueBlockedReason != want {
+		t.Fatalf("QueueBlockedReason = %q, want %q", jobs[0].QueueBlockedReason, want)
+	}
+}
+
+func TestHydrateInventoryDispatchBlockedReasons_OKClearsPriorFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	now := time.Now().Unix()
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventQueueDispatchFailed,
+		JobID:      jobID,
+		OccurredAt: now + 60,
+		Detail:     "source sync failed: rsync ...",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent failed: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventQueueDispatchOK,
+		JobID:      jobID,
+		OccurredAt: now + 120,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent ok: %v", err)
+	}
+
+	jobs, err := db.ListQueued(database, "cool30")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+
+	if jobs[0].QueueBlockedReason != "" {
+		t.Fatalf("QueueBlockedReason = %q, want empty after dispatch.ok", jobs[0].QueueBlockedReason)
+	}
+}
+
+func TestHydrateInventoryDispatchBlockedReasons_FailureAfterOKReappears(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	now := time.Now().Unix()
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchOK, JobID: jobID, OccurredAt: now + 60,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed, JobID: jobID, OccurredAt: now + 120,
+		Detail: "queue append failed: ssh: connection refused",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	jobs, err := db.ListQueued(database, "cool30")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+
+	if jobs[0].QueueBlockedReason != "queue append failed: ssh: connection refused" {
+		t.Fatalf("QueueBlockedReason = %q, want fresh failure to surface", jobs[0].QueueBlockedReason)
+	}
+}
+
+func TestHydrateInventoryDispatchBlockedReasons_RespectsExistingReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed, JobID: jobID,
+		Detail: "source sync failed: rsync ...",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	jobs, err := db.ListQueued(database, "cool30")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	jobs[0].QueueBlockedReason = "gpu gate: no GPU with 26GB free"
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+
+	if jobs[0].QueueBlockedReason != "gpu gate: no GPU with 26GB free" {
+		t.Fatalf("QueueBlockedReason = %q, want pre-existing reason preserved", jobs[0].QueueBlockedReason)
+	}
+}

@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -169,7 +170,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 		}
 		addLine(watchTitleStyle.Render(fmt.Sprintf("Inventory Hosts (%d active)", len(m.onPremHosts))))
 		for _, host := range m.onPremHosts {
-			addLine(watchStatusStyle.Render("  " + host.Name))
+			header := "  " + host.Name
+			if summary := summarizeOnPremHostBlock(host); summary != "" {
+				header += "  " + watchDimStyle.Render(truncate(summary, max(width-len(host.Name)-6, 20)))
+			}
+			addLine(watchStatusStyle.Render(header))
 			for _, job := range host.Jobs {
 				addSelectable("    " + truncate(m.formatOnPremJobRow(job, projectWidth), max(width-4, 40)))
 			}
@@ -532,6 +537,70 @@ func formatWatchSummaryLine(launchedAt time.Time, views []cloudInstanceView, now
 // ---------------------------------------------------------------------------
 // View helpers: system mode
 // ---------------------------------------------------------------------------
+
+// summarizeOnPremHostBlock returns a compact host-level note about why nothing
+// is starting on the host, derived from queued jobs' QueueBlockedReason. Only
+// emits when no job on the host is currently running (running jobs already
+// communicate progress).
+func summarizeOnPremHostBlock(host onPremHostSummary) string {
+	queued := 0
+	running := 0
+	counts := make(map[string]int)
+	for _, job := range host.Jobs {
+		if job == nil {
+			continue
+		}
+		if isRunningOnPremJob(job) {
+			running++
+			continue
+		}
+		if job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		queued++
+		reason := strings.TrimSpace(job.QueueBlockedReason)
+		if reason == "" {
+			continue
+		}
+		counts[reason]++
+	}
+	if running > 0 || queued == 0 || len(counts) == 0 {
+		return ""
+	}
+	type kv struct {
+		reason string
+		n      int
+	}
+	ranked := make([]kv, 0, len(counts))
+	for r, n := range counts {
+		ranked = append(ranked, kv{r, n})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].n != ranked[j].n {
+			return ranked[i].n > ranked[j].n
+		}
+		return ranked[i].reason < ranked[j].reason
+	})
+	top := ranked[0]
+	if top.n == queued {
+		if queued == 1 {
+			return "blocked: " + top.reason
+		}
+		return fmt.Sprintf("all %d queued blocked: %s", queued, top.reason)
+	}
+	if len(ranked) == 1 {
+		return fmt.Sprintf("%d/%d blocked: %s", top.n, queued, top.reason)
+	}
+	return fmt.Sprintf("%d/%d blocked: %s; +%d other", top.n, queued, top.reason, len(ranked)-1)
+}
+
+func isRunningOnPremJob(job *db.Job) bool {
+	switch job.EffectiveStatus() {
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+		return true
+	}
+	return false
+}
 
 func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 	display := queueblock.Display(job, nil)

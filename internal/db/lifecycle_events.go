@@ -46,6 +46,16 @@ const (
 	EventReconcileProviderPaused    = "reconcile.provider_paused"
 	EventReconcileProviderResumed   = "reconcile.provider_resumed"
 
+	// Queue dispatch (host-sync push of queued jobs to remote queue runner).
+	// EventQueueDispatchFailed records a per-job failure during
+	// ensureQueuedJobsOnRemote (source sync, HF input staging, cloud artifact
+	// staging, queue append, slurm submit). The detail field carries a short
+	// "<stage>: <truncated err>" string suitable for surfacing as a job's
+	// QueueBlockedReason. EventQueueDispatchOK clears prior failures by
+	// providing a fresher floor for the hydrator query.
+	EventQueueDispatchFailed = "queue.dispatch.failed"
+	EventQueueDispatchOK     = "queue.dispatch.ok"
+
 	// TUI retry outcomes
 	EventRetryAutoTriggered   = "retry.auto_triggered"
 	EventRetryManualTriggered = "retry.manual_triggered"
