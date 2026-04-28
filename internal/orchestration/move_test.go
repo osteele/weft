@@ -77,6 +77,26 @@ func TestRefreshLaunchableJobs_AcceptsPendingPlacement(t *testing.T) {
 	}
 }
 
+func TestUnplaceIfNeeded_AlreadyUnplaced(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "unplaced job", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.TargetKind() != db.JobTargetUnplaced {
+		t.Fatalf("setup: TargetKind = %q, want %q", job.TargetKind(), db.JobTargetUnplaced)
+	}
+
+	if err := unplaceIfNeeded(database, job); err != nil {
+		t.Fatalf("unplaceIfNeeded on already-unplaced job: %v", err)
+	}
+}
+
 func TestJobsForGrouping_ClonesPendingPlacementAsQueued(t *testing.T) {
 	pending := db.StatusPendingPlacement
 	original := &db.Job{ID: 1, Status: db.StatusQueued, PendingStatus: &pending}

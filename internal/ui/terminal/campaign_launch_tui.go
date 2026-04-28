@@ -278,8 +278,9 @@ type launchModel struct {
 	providerErr             error
 	appConfig               *config.Config
 	launchOpts              campaign.LaunchOpts
-	gpuFilter               string // --gpu filter to reapply after reconciliation
-	projectFilter           string // project scope when launching from project watch
+	gpuFilter               string         // --gpu filter to reapply after reconciliation
+	projectFilter           string         // project scope when launching from project watch
+	jobIDFilter             map[int64]bool // explicit job ID set (from positional args / --jobs); nil = unrestricted
 	reconciler              *campaign.Reconciler
 	reconcileDropped        int
 	onPremChecking          bool
@@ -556,7 +557,7 @@ func (m *launchModel) adjustOffset() {
 	}
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, projectFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, projectFilter string, jobIDFilter map[int64]bool, reconciling bool, fromWatch bool, inlineWatchEnabled bool) launchModel {
 	items, selected, cursor := buildItemsFromGroups(groups)
 
 	s := spinner.New()
@@ -583,6 +584,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		assetStageCh:            make(chan assetStageChangedMsg, 64),
 		gpuFilter:               gpuFilter,
 		projectFilter:           projectFilter,
+		jobIDFilter:             jobIDFilter,
 		estimateCache:           make(map[string][]campaign.CostEstimate),
 		reconciler:              campaign.NewReconciler(),
 		spinner:                 s,
@@ -629,6 +631,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
 	projectFilter := m.projectFilter
+	jobIDFilter := m.jobIDFilter
 	return func() tea.Msg {
 		var warn string
 		warnings := syncCloudStateTwoPhaseForTUI(database)
@@ -644,6 +647,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		}
 		jobs = filterRentalLaunchJobs(jobs)
 		jobs = filterLaunchJobsForScope(jobs, projectFilter)
+		jobs = db.FilterJobsByIDSet(jobs, jobIDFilter)
 
 		groups := campaign.PrepareGroups(jobs, database, gpuFilter, r2Client)
 
@@ -682,9 +686,10 @@ func (m launchModel) runOnPremRefresh() tea.Cmd {
 	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
 	projectFilter := m.projectFilter
+	jobIDFilter := m.jobIDFilter
 	ch := m.onPremProgressCh
 	return func() tea.Msg {
-		groups, err := refreshLaunchGroupsWithOnPrem(database, cfg, gpuFilter, projectFilter, func(current, total int) {
+		groups, err := refreshLaunchGroupsWithOnPrem(database, cfg, gpuFilter, projectFilter, jobIDFilter, func(current, total int) {
 			select {
 			case ch <- onPremProgressMsg{current: current, total: total}:
 			default:

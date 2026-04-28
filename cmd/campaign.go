@@ -201,24 +201,15 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	jobs = filterRentalLaunchJobs(jobs)
 	jobs = filterLaunchJobsByDependencies(database, jobs, printDeferredJob)
 
-	// Filter by --jobs if specified
-	if campaignLaunchJobs != "" {
-		jobFilter := make(map[int64]bool)
-		for _, idStr := range strings.Split(campaignLaunchJobs, ",") {
-			id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
-			if err != nil {
-				return fmt.Errorf("invalid job ID %q: %w", idStr, err)
-			}
-			jobFilter[id] = true
-		}
-		var filtered []*db.Job
-		for _, j := range jobs {
-			if jobFilter[j.ID] {
-				filtered = append(filtered, j)
-			}
-		}
-		jobs = filtered
+	// Filter by --jobs if specified. The filter is also retained on the
+	// launch model so the TUI's background reload paths (reconciliation,
+	// on-prem refresh) keep honoring it instead of widening to every
+	// unplaced job.
+	jobIDFilter, err := parseLaunchJobIDFilter(campaignLaunchJobs)
+	if err != nil {
+		return err
 	}
+	jobs = db.FilterJobsByIDSet(jobs, jobIDFilter)
 
 	jobs = filterLaunchJobsByProject(jobs)
 
@@ -285,7 +276,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return runNonInteractiveLaunch(cmd, database, cfg, groups, opts, useTUI)
 	}
 
-	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false, shouldWatch())
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, jobIDFilter, !needsSyncReconcile, false, shouldWatch())
 	if err != nil {
 		return err
 	}
@@ -389,6 +380,24 @@ func printDeferredJob(job *db.Job, reason string) {
 	fmt.Printf("Job %s deferred: %s\n", ids.FormatJobID(job.ID), reason)
 }
 
+// parseLaunchJobIDFilter parses the comma-separated --jobs flag into a set of
+// job IDs. Returns nil for the empty string.
+func parseLaunchJobIDFilter(spec string) (map[int64]bool, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	out := make(map[int64]bool)
+	for _, idStr := range strings.Split(spec, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid job ID %q: %w", idStr, err)
+		}
+		out[id] = true
+	}
+	return out, nil
+}
+
 func filterLaunchJobsForScope(jobs []*db.Job, projectFilter string) []*db.Job {
 	if projectFilter != "" {
 		return db.FilterJobsByProject(jobs, projectFilter)
@@ -396,7 +405,7 @@ func filterLaunchJobsForScope(jobs []*db.Job, projectFilter string) []*db.Job {
 	return filterLaunchJobsByProject(jobs)
 }
 
-func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilter string, projectFilter string, onProgress func(int, int), onPhase func(string)) ([]campaign.InstanceGroup, error) {
+func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilter string, projectFilter string, jobIDFilter map[int64]bool, onProgress func(int, int), onPhase func(string)) ([]campaign.InstanceGroup, error) {
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
 		return nil, fmt.Errorf("list unplaced jobs: %w", err)
@@ -404,6 +413,7 @@ func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilt
 	jobs = filterRentalLaunchJobs(jobs)
 	jobs = filterLaunchJobsByDependencies(database, jobs, nil)
 	jobs = filterLaunchJobsForScope(jobs, projectFilter)
+	jobs = db.FilterJobsByIDSet(jobs, jobIDFilter)
 	jobs = prefilterOnPremWithProgress(database, jobs, cfg, onProgress, onPhase)
 
 	r2Client, err := buildR2Client(cfg)

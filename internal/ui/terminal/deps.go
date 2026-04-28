@@ -51,7 +51,7 @@ type Dependencies struct {
 	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64, []int64, string, bool, bool) (*campaign.RelaunchResult, error)
 	BuildStaleDataNote                                func(*sql.DB, []string, []string) string
 	PrintJobStatus                                    func(*db.Job, bool)
-	RefreshLaunchGroupsWithOnPrem                     func(*sql.DB, *config.Config, string, string, func(int, int), func(string)) ([]campaign.InstanceGroup, error)
+	RefreshLaunchGroupsWithOnPrem                     func(*sql.DB, *config.Config, string, string, map[int64]bool, func(int, int), func(string)) ([]campaign.InstanceGroup, error)
 	SyncRentalJobsStatus                              func(*sql.DB) bool
 	SyncCloudState                                    func(*config.Config, *sql.DB, *campaign.Reconciler, bool) CloudSyncResult
 	SyncCloudStateWithTimeout                         func(*config.Config, *sql.DB, *campaign.Reconciler, time.Duration, bool) (CloudSyncResult, bool)
@@ -223,11 +223,11 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	}
 }
 
-func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilter string, projectFilter string, onProgress func(int, int), onPhase func(string)) ([]campaign.InstanceGroup, error) {
+func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilter string, projectFilter string, jobIDFilter map[int64]bool, onProgress func(int, int), onPhase func(string)) ([]campaign.InstanceGroup, error) {
 	if deps.RefreshLaunchGroupsWithOnPrem == nil {
 		return nil, nil
 	}
-	return deps.RefreshLaunchGroupsWithOnPrem(database, cfg, gpuFilter, projectFilter, onProgress, onPhase)
+	return deps.RefreshLaunchGroupsWithOnPrem(database, cfg, gpuFilter, projectFilter, jobIDFilter, onProgress, onPhase)
 }
 
 func hasLaunchGroupsOnPremRefresh() bool {

@@ -331,7 +331,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 
 		clients, providerErr := buildCloudClients(cfg)
 		predCfg := buildPredictorConfig(cfg)
-		model := newLaunchModel(database, clients, providerErr, cfg, groups, opts, &predCfg, "", m.projectFilter, true, true, true)
+		model := newLaunchModel(database, clients, providerErr, cfg, groups, opts, &predCfg, "", m.projectFilter, nil, true, true, true)
 		return launchPlanReadyMsg{model: &model}
 	}
 }

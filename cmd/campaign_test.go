@@ -53,27 +53,26 @@ func TestParseLaunchOpts(t *testing.T) {
 
 func intPtr(n int) *int { return &n }
 
-func TestFilterJobsByIDs(t *testing.T) {
-	jobs := []*db.Job{
-		{ID: 10, Status: db.StatusQueued},
-		{ID: 20, Status: db.StatusQueued},
-		{ID: 30, Status: db.StatusQueued},
+func TestParseLaunchJobIDFilter(t *testing.T) {
+	got, err := parseLaunchJobIDFilter("1570, 1571 ,1572")
+	if err != nil {
+		t.Fatalf("parseLaunchJobIDFilter: %v", err)
 	}
-
-	// Filter to jobs 10 and 30
-	filter := map[int64]bool{10: true, 30: true}
-	var filtered []*db.Job
-	for _, j := range jobs {
-		if filter[j.ID] {
-			filtered = append(filtered, j)
+	want := map[int64]bool{1570: true, 1571: true, 1572: true}
+	if len(got) != len(want) {
+		t.Fatalf("got %d ids, want %d", len(got), len(want))
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("missing id %d", id)
 		}
 	}
 
-	if len(filtered) != 2 {
-		t.Fatalf("expected 2 jobs, got %d", len(filtered))
+	if got, err := parseLaunchJobIDFilter(""); err != nil || got != nil {
+		t.Errorf("empty input: got (%v, %v), want (nil, nil)", got, err)
 	}
-	if filtered[0].ID != 10 || filtered[1].ID != 30 {
-		t.Errorf("expected jobs [10, 30], got [%d, %d]", filtered[0].ID, filtered[1].ID)
+	if _, err := parseLaunchJobIDFilter("nonsense"); err == nil {
+		t.Error("expected error on non-numeric input")
 	}
 }
 

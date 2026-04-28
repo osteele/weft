@@ -3303,6 +3303,21 @@ func FilterJobsByProject(jobs []*Job, project string) []*Job {
 	return filtered
 }
 
+// FilterJobsByIDSet filters jobs to those whose IDs appear in ids. A nil or
+// empty set is treated as "no restriction" and returns the input unchanged.
+func FilterJobsByIDSet(jobs []*Job, ids map[int64]bool) []*Job {
+	if len(ids) == 0 {
+		return jobs
+	}
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && ids[job.ID] {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
 // ProjectHasAnyJobs reports whether any job is associated with the given project.
 // An empty project returns true (no narrowing).
 func ProjectHasAnyJobs(database *sql.DB, project string) (bool, error) {

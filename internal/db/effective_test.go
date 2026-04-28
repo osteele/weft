@@ -90,6 +90,22 @@ func TestFilterJobsByProject(t *testing.T) {
 	}
 }
 
+func TestFilterJobsByIDSet(t *testing.T) {
+	jobs := []*Job{{ID: 10}, {ID: 20}, {ID: 30}}
+
+	got := FilterJobsByIDSet(jobs, map[int64]bool{10: true, 30: true})
+	if len(got) != 2 || got[0].ID != 10 || got[1].ID != 30 {
+		t.Errorf("FilterJobsByIDSet({10,30}) = %+v, want IDs [10, 30]", got)
+	}
+
+	if got := FilterJobsByIDSet(jobs, nil); len(got) != 3 {
+		t.Errorf("nil filter dropped jobs: got %d, want 3", len(got))
+	}
+	if got := FilterJobsByIDSet(jobs, map[int64]bool{}); len(got) != 3 {
+		t.Errorf("empty filter dropped jobs: got %d, want 3", len(got))
+	}
+}
+
 func TestProjectHasAnyJobs(t *testing.T) {
 	tmpfile, err := os.CreateTemp("", "project-has-any-*.db")
 	if err != nil {

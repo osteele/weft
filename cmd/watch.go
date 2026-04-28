@@ -123,6 +123,6 @@ func runWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
 	return terminal.RunWatchLoop(database, cfg, autoMode)
 }
 
-func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (terminal.LaunchResult, error) {
-	return terminal.RunLaunchProgram(database, cfg, groups, opts, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
+func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, jobIDFilter map[int64]bool, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (terminal.LaunchResult, error) {
+	return terminal.RunLaunchProgram(database, cfg, groups, opts, gpuFilter, jobIDFilter, reconciling, fromWatch, inlineWatchEnabled)
 }

@@ -61,13 +61,13 @@ func RunWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
 	return nil
 }
 
-func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (LaunchResult, error) {
+func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, jobIDFilter map[int64]bool, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (LaunchResult, error) {
 	clients, providerErr := buildCloudClients(cfg)
 	if providerErr != nil {
 		return LaunchResult{Err: providerErr}, nil
 	}
 	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, "", reconciling, fromWatch, inlineWatchEnabled)
+	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, "", jobIDFilter, reconciling, fromWatch, inlineWatchEnabled)
 
 	outputOpt, restore := InstallTUIStdioCapture()
 	p := tea.NewProgram(model, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion())

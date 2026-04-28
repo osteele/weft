@@ -140,7 +140,7 @@ func ExecuteOption(
 	if job == nil {
 		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
-	if _, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
+	if err := unplaceIfNeeded(database, job); err != nil {
 		return "", fmt.Errorf("unplace: %w", err)
 	}
 	job, err = db.GetJobByID(database, jobID)
