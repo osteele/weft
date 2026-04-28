@@ -188,12 +188,29 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			oplog.LogJob(oplog.OpJobComplete, job.ID, "", oplog.WithDetail("exit=0"))
 		}
 
-		// Write .complete marker synchronously so the coordinator sees
-		// this job as finished before the next job's .started marker.
+		// Compute the exit code that will be written to .complete and used in
+		// any fallback completion record. err != nil from runJobWithProgress
+		// means the runner returned early without finishing normally — treat
+		// as exit=1 if it didn't already give us a non-zero code.
 		exitCode := ei.ExitCode
 		if err != nil && exitCode == 0 {
 			exitCode = 1
 		}
+
+		// Defense in depth: if the runner returned an error and didn't leave a
+		// failure_reason / completion.json behind, synthesize stubs so the
+		// "why" reaches the coordinator (and the DB) instead of being silently
+		// dropped. Without this, a runner-level start failure produces an
+		// instance whose status reads "exit 1" with nothing else.
+		ensureFailureArtifacts(cfg.LogDir, job.ID, ei, err)
+
+		// Upload the opslog before writing .complete so a self-destruct that
+		// races the post-job work still leaves the agent's diagnostic trail
+		// (which captures the stderr message from runJobWithProgress) in R2.
+		uploadOpslog(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir)
+
+		// Write .complete marker synchronously so the coordinator sees
+		// this job as finished before the next job's .started marker.
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
 
 		// === Synchronous post-job work ===
@@ -441,6 +458,40 @@ func snapshotLogDir(logDir string, jobID int64) (string, error) {
 		os.WriteFile(dst, data, 0o644)
 	}
 	return snapshot, nil
+}
+
+// ensureFailureArtifacts writes a stub failure_reason and completion.json when
+// the runner returned an error or non-zero exit code without leaving them
+// behind itself. This catches early returns from RunSingleJob (e.g. setup
+// failures that didn't reach the normal completion path) so the coordinator
+// has something to ingest into job_attempts.failure_reason instead of
+// surfacing only "exit 1" with no diagnosis.
+func ensureFailureArtifacts(logDir string, jobID int64, ei runner.ExitInfo, runErr error) {
+	if runErr == nil && ei.ExitCode == 0 {
+		return
+	}
+	paths := runner.NewJobPaths(logDir, jobID)
+
+	reason := ""
+	if runErr != nil {
+		reason = runErr.Error()
+	}
+	if reason == "" {
+		reason = runner.DetectFailureReasonFromExitInfo(ei)
+	}
+
+	if existing := runner.ReadFailureReasonFile(paths.FailureReason); existing == "" {
+		_ = runner.WriteFailureReasonFile(paths, reason)
+	}
+
+	if _, err := os.Stat(paths.Completion); err != nil {
+		exitCode := ei.ExitCode
+		if exitCode == 0 {
+			exitCode = 1
+		}
+		now := time.Now().Unix()
+		_ = runner.WriteCompletionRecord(paths, runner.ExitInfo{ExitCode: exitCode}, runner.RunningJobState{}, "", reason, now, now, nil)
+	}
 }
 
 // runGPUWarmup runs a lightweight Python command to prime the CUDA context

@@ -159,6 +159,51 @@ func TestSelectedJobDetail_Unplaced(t *testing.T) {
 	}
 }
 
+func TestSelectedJobDetail_UnplacedShowsAllBlockedReasons(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	memGB := 34
+	job := &db.Job{
+		ID:                 1571,
+		GPUClass:           "ampere+",
+		GPUMemGB:           &memGB,
+		Status:             db.StatusQueued,
+		CreatedAt:          now.Add(-3 * time.Minute).Unix(),
+		QueueBlockedReason: `waiting for "output/model.pt" from wj1570 (running)`,
+		PlacementReasons:   []string{"cloud instance 1778 unavailable; job reset to unplaced queue"},
+	}
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
+	}
+	line := lines[0]
+	for _, want := range []string{
+		`waiting for "output/model.pt" from wj1570 (running)`,
+		"cloud instance 1778 unavailable",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("expected %q in line, got: %s", want, line)
+		}
+	}
+}
+
+func TestSelectedJobDetail_UnplacedDeduplicatesBlockedReasons(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	job := &db.Job{
+		ID:                 7,
+		Status:             db.StatusQueued,
+		CreatedAt:          now.Add(-time.Minute).Unix(),
+		QueueBlockedReason: "no offers",
+		PlacementReasons:   []string{"no offers"},
+	}
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+	if got := strings.Count(lines[0], "no offers"); got != 1 {
+		t.Errorf("expected reason once, got %d copies in: %s", got, lines[0])
+	}
+}
+
 func TestSelectedJobDetail_Failed(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	exit := 137

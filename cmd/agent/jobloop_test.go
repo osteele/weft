@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,5 +220,79 @@ func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(snapshot, "wj42.completion.json")); err != nil {
 		t.Fatalf("expected completion file in snapshot: %v", err)
+	}
+}
+
+func TestEnsureFailureArtifacts_WritesStubsWhenMissing(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(99)
+	paths := runner.NewJobPaths(logDir, jobID)
+
+	runErr := errors.New("start process: exec: \"missing-bin\": no such file")
+	ensureFailureArtifacts(logDir, jobID, runner.ExitInfo{ExitCode: 0}, runErr)
+
+	reason := runner.ReadFailureReasonFile(paths.FailureReason)
+	if reason == "" {
+		t.Fatal("expected failure_reason file to be written")
+	}
+	if !strings.Contains(reason, "start process") {
+		t.Fatalf("failure_reason = %q, want it to mention start process", reason)
+	}
+
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatalf("expected completion.json to be written: %v", err)
+	}
+	var rec runner.CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("decode completion: %v", err)
+	}
+	if rec.ExitCode != 1 {
+		t.Errorf("exit_code = %d, want 1", rec.ExitCode)
+	}
+	if rec.FailureReason == "" {
+		t.Error("expected FailureReason to be populated in completion.json")
+	}
+}
+
+func TestEnsureFailureArtifacts_LeavesExistingArtifactsAlone(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(100)
+	paths := runner.NewJobPaths(logDir, jobID)
+
+	if err := runner.WriteFailureReasonFile(paths, "preexisting"); err != nil {
+		t.Fatalf("seed failure_reason: %v", err)
+	}
+	seedCompletion := []byte(`{"exit_code":137,"failure_reason":"oom"}` + "\n")
+	if err := os.WriteFile(paths.Completion, seedCompletion, 0o644); err != nil {
+		t.Fatalf("seed completion: %v", err)
+	}
+
+	ensureFailureArtifacts(logDir, jobID, runner.ExitInfo{ExitCode: 137}, nil)
+
+	if got := runner.ReadFailureReasonFile(paths.FailureReason); got != "preexisting" {
+		t.Errorf("failure_reason was overwritten: got %q", got)
+	}
+	got, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatalf("read completion: %v", err)
+	}
+	if string(got) != string(seedCompletion) {
+		t.Errorf("completion.json was overwritten: got %q", got)
+	}
+}
+
+func TestEnsureFailureArtifacts_NoOpOnSuccess(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(101)
+	paths := runner.NewJobPaths(logDir, jobID)
+
+	ensureFailureArtifacts(logDir, jobID, runner.ExitInfo{ExitCode: 0}, nil)
+
+	if _, err := os.Stat(paths.FailureReason); !os.IsNotExist(err) {
+		t.Errorf("failure_reason should not exist on success, got err=%v", err)
+	}
+	if _, err := os.Stat(paths.Completion); !os.IsNotExist(err) {
+		t.Errorf("completion.json should not be synthesized on success, got err=%v", err)
 	}
 }

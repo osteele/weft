@@ -792,7 +792,14 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		// Show status with waiting info
 		if display.Blocked {
 			fmt.Printf("Status:      %s\n", display.Status)
-			fmt.Printf("Reason:      %s\n", display.Reason)
+			reasons := mergeBlockedReasons(display.Reason, job.PlacementReasons)
+			for i, reason := range reasons {
+				if i == 0 {
+					fmt.Printf("Reason:      %s\n", reason)
+				} else {
+					fmt.Printf("             %s\n", reason)
+				}
+			}
 		} else {
 			fmt.Printf("Status:      %s\n", job.EffectiveStatus())
 		}

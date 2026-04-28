@@ -440,7 +440,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 						excerpt = terminal.ReadCachedJobFailureExcerpt(j.ID)
 					}
 					if excerpt == "" {
-						excerpt = util.Truncate(strings.TrimSpace(strings.Join([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | ")), 180)
+						excerpt = util.Truncate(joinNonEmpty([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | "), 180)
 					}
 					if excerpt != "" {
 						fmt.Printf("             failure: %s\n", excerpt)
@@ -780,4 +780,17 @@ func execSSH(inst *cloud.Instance) error {
 		return fmt.Errorf("ssh not found: %w", err)
 	}
 	return syscall.Exec(sshPath, args, os.Environ())
+}
+
+// joinNonEmpty joins non-empty trimmed strings with sep. Empty inputs are
+// dropped so the output never contains adjacent separators with nothing
+// between them (e.g. "foo |  | bar").
+func joinNonEmpty(parts []string, sep string) string {
+	out := parts[:0:0]
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, sep)
 }

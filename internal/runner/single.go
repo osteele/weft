@@ -234,8 +234,15 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	proc, err := StartProcess(command, workingDir, envVars, paths.Log)
 	if err != nil {
 		slog.Warn("job start failed", "component", "runner", "job_id", cfg.JobID, "error", err)
+		ei := ExitInfo{ExitCode: 1}
+		now := time.Now().Unix()
+		phases.RunEnd = now
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
-		return ExitInfo{ExitCode: 1}, fmt.Errorf("start process: %w", err)
+		failureReason := fmt.Sprintf("start_process: %v", err)
+		WriteFailureReasonFile(paths, failureReason)
+		WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.RunStart, now, nil)
+		WritePhasesFile(paths, phases)
+		return ei, fmt.Errorf("start process: %w", err)
 	}
 
 	proc.WritePIDFiles(paths)

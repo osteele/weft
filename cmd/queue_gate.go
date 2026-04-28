@@ -50,6 +50,32 @@ func validatePinnedHostQueueGate(host, gpuClass string) error {
 	return fmt.Errorf("gpu gate: no GPU matching class %s", gpuClass)
 }
 
+// mergeBlockedReasons returns the live blocked reason followed by any
+// additional historical placement reasons, deduplicated and trimmed. A
+// previously-placed job can carry both a current block (e.g. waiting on a
+// producer) and a record of why its prior placement no longer applies (e.g.
+// "cloud instance N unavailable") — both are useful context.
+func mergeBlockedReasons(live string, placement []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(reason string) {
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return
+		}
+		if _, dup := seen[reason]; dup {
+			return
+		}
+		seen[reason] = struct{}{}
+		out = append(out, reason)
+	}
+	add(live)
+	for _, r := range placement {
+		add(r)
+	}
+	return out
+}
+
 func hydrateQueueBlockedReasons(jobs []*db.Job) {
 	queueblock.Apply(jobs, queueblock.Fetch(jobs, queueBlockedReasonTimeout))
 	database, err := db.OpenForReading()

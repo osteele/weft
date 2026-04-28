@@ -62,6 +62,30 @@ func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
 	}
 }
 
+func TestJoinNonEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{"all empty", []string{"", "", ""}, ""},
+		{"middle empty", []string{"a", "", "b"}, "a | b"},
+		{"trailing empty", []string{"a", "b", ""}, "a | b"},
+		{"leading empty", []string{"", "a", "b"}, "a | b"},
+		{"all populated", []string{"a", "b", "c"}, "a | b | c"},
+		{"whitespace treated as empty", []string{" ", "\t", "x"}, "x"},
+		{"trims each segment", []string{"  a  ", "b\n"}, "a | b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := joinNonEmpty(tc.in, " | ")
+			if got != tc.want {
+				t.Fatalf("joinNonEmpty(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInstanceInfoCommandAliasExists(t *testing.T) {
 	var found bool
 	for _, sub := range instanceCmd.Commands() {

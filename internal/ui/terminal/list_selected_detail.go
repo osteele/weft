@@ -235,14 +235,44 @@ func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool) []st
 	if req := formatResourceRequest(job); req != "" {
 		parts = append(parts, "wants "+req)
 	}
-	reasons := job.PlacementReasons
-	if cloudConfigured {
-		reasons = filterOutOnPremRejectionReasons(reasons)
-	}
+	// Surface every legitimate block reason. QueueBlockedReason is the live,
+	// hydrated reason (e.g. waiting on a producer); PlacementReasons records
+	// reasons attached at past placement attempts (e.g. instance reset). Both
+	// can apply at once — the producer wait blocks fresh placement while a
+	// prior placement constraint is still on file.
+	reasons := combinedBlockedReasons(job, cloudConfigured)
 	if len(reasons) > 0 {
 		parts = append(parts, "blocked: "+strings.Join(reasons, "; "))
 	}
 	return parts
+}
+
+func combinedBlockedReasons(job *db.Job, cloudConfigured bool) []string {
+	if job == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(reason string) {
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return
+		}
+		if _, dup := seen[reason]; dup {
+			return
+		}
+		seen[reason] = struct{}{}
+		out = append(out, reason)
+	}
+	add(job.QueueBlockedReason)
+	placement := job.PlacementReasons
+	if cloudConfigured {
+		placement = filterOutOnPremRejectionReasons(placement)
+	}
+	for _, r := range placement {
+		add(r)
+	}
+	return out
 }
 
 // filterOutOnPremRejectionReasons drops PlacementReasons that describe purely
