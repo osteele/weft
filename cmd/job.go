@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/osteele/weft/internal/ui/terminal"
@@ -842,6 +843,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			}
 		} else if job.GPUClass != "" {
 			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
+		}
+		if job.MaxComputeCap != "" && job.MaxComputeCap != placement.MaxComputeCapAny {
+			fmt.Printf("Arch cap:    sm_%s (excludes GPUs with higher compute capability)\n", job.MaxComputeCap)
 		}
 
 		// Show timing info

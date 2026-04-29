@@ -62,6 +62,7 @@ type Job struct {
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
 	GPUMemGB             *int   // GPU memory reservation in GB per device (nil = use default)
 	GPUMemMaxGB          *int   // GPU memory ceiling in GB (nil = no ceiling); prevents over-provisioning
+	MaxComputeCap        string // CUDA compute-capability cap: "" = unresolved, placement.MaxComputeCapAny = unbounded, "X.Y" = numeric
 	Metadata             *JobMetadata
 	EnvVars              []string
 	Tags                 []string
@@ -288,9 +289,9 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
 
-const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
+const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
@@ -402,6 +403,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		cpu_allotment INTEGER,
 		gpu_mem_gb INTEGER,
 		gpu_mem_max_gb INTEGER,
+		max_compute_cap TEXT,
 		env_vars TEXT,
 		tags TEXT,
 		dep_spec TEXT,
@@ -1049,7 +1051,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 10
+const currentSchemaVersion = 11
 
 var dbPath string
 var startupRepairFn = startupRepair
@@ -1764,6 +1766,10 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add GPU memory ceiling for over-provisioning prevention
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu_mem_max_gb INTEGER`); err != nil {
+		return err
+	}
+
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN max_compute_cap TEXT`); err != nil {
 		return err
 	}
 
@@ -3106,6 +3112,18 @@ func SetJobGPUMemMaxGB(db *sql.DB, jobID int64, gpuMemMaxGB *int) error {
 	return setJobNullableInt(db, jobID, "gpu_mem_max_gb", gpuMemMaxGB)
 }
 
+// SetJobMaxComputeCap stores the resolved CUDA compute-capability cap. The
+// empty string clears the column (NULL = unresolved); "any" marks the job as
+// explicitly unbounded; numeric strings ("9.0", "12.0") record the cap.
+func SetJobMaxComputeCap(db *sql.DB, jobID int64, cap string) error {
+	var v interface{}
+	if cap != "" {
+		v = cap
+	}
+	_, err := db.Exec(`UPDATE jobs SET max_compute_cap = ? WHERE id = ?`, v, jobID)
+	return err
+}
+
 // SetJobEnvVars updates the stored environment variables for a job.
 // The values are stored as a JSON array; passing nil or an empty slice clears the field.
 func SetJobEnvVars(db *sql.DB, jobID int64, envVars []string) error {
@@ -3641,6 +3659,7 @@ type jobScanFields struct {
 	cpuAllotment     sql.NullInt64
 	gpuMemGB         sql.NullInt64
 	gpuMemMaxGB      sql.NullInt64
+	maxComputeCap    sql.NullString
 	envVars          sql.NullString
 	tags             sql.NullString
 	depSpec          sql.NullString
@@ -3682,7 +3701,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 		&f.createdAt, &f.queuedAt, &f.startTime, &f.endTime, &f.exitCode,
 		&j.Status, &f.errorMsg, &f.backend, &f.remoteID, &f.remoteState,
 		&f.failureReason, &f.gpu, &f.gpuClass,
-		&f.cpuAllotment, &f.gpuMemGB, &f.gpuMemMaxGB,
+		&f.cpuAllotment, &f.gpuMemGB, &f.gpuMemMaxGB, &f.maxComputeCap,
 		&f.envVars, &f.tags, &f.depSpec,
 		&f.inputs, &f.observedInputs, &f.outputs, &f.outputDirs,
 		&f.produces, &f.needs, &f.project, &f.tombstoned,
@@ -3739,6 +3758,9 @@ func (f *jobScanFields) populateJob(j *Job) {
 	if f.gpuMemMaxGB.Valid {
 		val := int(f.gpuMemMaxGB.Int64)
 		j.GPUMemMaxGB = &val
+	}
+	if f.maxComputeCap.Valid {
+		j.MaxComputeCap = f.maxComputeCap.String
 	}
 	j.EnvVars = decodeEnvVars(f.envVars)
 	j.Tags = decodeTags(f.tags)

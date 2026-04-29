@@ -34,6 +34,13 @@ func RefreshProjectDerivedMetadata(database *sql.DB, jobID int64, workingDir, co
 		return fmt.Errorf("refresh job output dirs: %w", err)
 	}
 
+	// Invalidate the persisted arch cap so the next launch re-resolves it
+	// against current sources. Done here (rather than calling placement) to
+	// avoid an ops→placement→ops cycle via placement/metrics.go.
+	if err := db.SetJobMaxComputeCap(database, jobID, ""); err != nil {
+		return fmt.Errorf("clear max_compute_cap: %w", err)
+	}
+
 	return nil
 }
 

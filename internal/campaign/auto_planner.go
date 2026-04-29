@@ -105,7 +105,7 @@ func BuildAutoPlacementPlanWithOptions(
 	}
 
 	groups := GroupByAffinity(jobs, nil)
-	groups = SplitGroupsByImage(groups)
+	groups = SplitGroupsByImage(database, groups)
 	if len(groups) == 0 {
 		return plan, nil
 	}

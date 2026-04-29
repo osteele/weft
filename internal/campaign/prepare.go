@@ -15,7 +15,7 @@ import (
 func PrepareGroups(jobs []*db.Job, database *sql.DB, gpuFilter string, r2Client *r2.Client) []InstanceGroup {
 	groups := GroupByAffinity(jobs, dataloc.LookupCachedModelSize)
 	groups = FilterByGPUClass(groups, gpuFilter)
-	groups = SplitGroupsByImage(groups)
+	groups = SplitGroupsByImage(database, groups)
 	for i := range groups {
 		groups[i].DiskGB = EstimateGroupDisk(groups[i], database, r2Client)
 	}

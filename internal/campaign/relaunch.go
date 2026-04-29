@@ -287,7 +287,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	// unplaced jobs as queued for grouping so offer search and blocked-reason
 	// reporting still run for the pass.
 	groups := GroupByAffinity(relaunchGroupingJobs(eligible), nil)
-	groups = SplitGroupsByImage(groups)
+	groups = SplitGroupsByImage(cfg.Database, groups)
 	var r2Client *r2.Client
 	if cfg.R2Cfg.Bucket != "" && cfg.R2Cfg.AccessKeyID != "" {
 		var err error

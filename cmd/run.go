@@ -519,13 +519,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if resolvedGPUMemGB != nil {
 		placementConstraints.GPUMemGB = *resolvedGPUMemGB
 	}
-	archMax := ""
-	if scriptMeta != nil {
-		archMax = scriptMeta.GPUArchMax
-	}
-	if cap := placement.MaxComputeCapForJob(archMax, localDir); cap != "" {
-		placementConstraints.MaxComputeCap = cap
-		fmt.Fprintf(cmd.ErrOrStderr(), "Inferred GPU arch ceiling: compute cap <= %s (override with [tool.weft] gpu-arch-max = \"any\")\n", cap)
+	persistMaxComputeCap := placement.ResolveJobMaxComputeCapForPersistence(localDir, command)
+	if persistMaxComputeCap != "" && persistMaxComputeCap != placement.MaxComputeCapAny {
+		placementConstraints.MaxComputeCap = persistMaxComputeCap
 	}
 	// Tip placement toward producers' live rental instances so --needs
 	// consumers co-locate with their producers and can read outputs from
@@ -706,6 +702,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
 			slog.Warn("failed to save cli overrides", "error", err)
 		}
+		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
+			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
+		}
 
 		// Store placement telemetry if auto-placement was used
 		if placementResult != nil {
@@ -860,6 +859,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
 			slog.Warn("failed to save cli overrides", "error", err)
 		}
+		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
+			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
+		}
 		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
 			slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
 		} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
@@ -909,6 +911,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if err := db.SetJobGPUMemMaxGB(database, jobID, resolvedGPUMemMaxGB); err != nil {
 				return fmt.Errorf("set GPU memory ceiling: %w", err)
 			}
+		}
+		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
+			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
 		}
 		if projectName != "" {
 			if err := db.SetJobProject(database, jobID, projectName); err != nil {

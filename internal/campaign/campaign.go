@@ -2,6 +2,7 @@
 package campaign
 
 import (
+	"database/sql"
 	"log/slog"
 	"slices"
 	"sort"
@@ -475,7 +476,12 @@ func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
 // project config (.weft.toml [cloud] image). Compatible CUDA images with the
 // same version and OS but different variants (base/runtime/devel) are merged
 // using the most capable variant.
-func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
+//
+// `database` is used to lazily backfill jobs.max_compute_cap rows that are
+// NULL (legacy rows or post-refresh) so the resulting group's MaxComputeCap
+// reflects the current torch pin / script meta. Pass nil only in tests where
+// every job already has a non-NULL cap.
+func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGroup {
 	type imageGroup struct {
 		image      string
 		vastCapAdd []string
@@ -579,7 +585,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 				Image:         sub.image,
 				VastCapAdd:    sub.vastCapAdd,
 				Preemptible:   g.Preemptible,
-				MaxComputeCap: groupMaxComputeCap(sub.jobs),
+				MaxComputeCap: groupMaxComputeCap(database, sub.jobs),
 				Jobs:          sub.jobs,
 			})
 		}
@@ -603,48 +609,54 @@ func ResolveJobImage(localDir, command string) string {
 	return img
 }
 
-// ResolveJobMaxComputeCap returns the inferred CUDA compute-capability upper
-// bound for a job, combining its [tool.weft] gpu-arch-max override with the
-// project's torch pin. Returns "" when no bound applies.
-func ResolveJobMaxComputeCap(localDir, command string) string {
-	archMax := ""
-	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
-		slog.Warn("script metadata error in arch-max resolution", "component", "campaign", "error", err)
-	} else if meta != nil {
-		archMax = meta.GPUArchMax
-	}
-	return placement.MaxComputeCapForJob(archMax, localDir)
-}
-
 // groupMaxComputeCap reduces per-job arch caps into the most restrictive
-// (lowest) cap for a group. If any job has no inferred bound, the group has
-// no bound — we cannot constrain a job we know nothing about.
+// (lowest) cap for a group, reading jobs.max_compute_cap. Empty caps are
+// lazily resolved against the current torch pin and persisted back, so
+// legacy rows and post-refresh retries pick up a fresh value here rather
+// than requiring a separate refresh call.
 //
-// Multiple jobs from the same project share a cap (it depends on the
-// project's torch pin and per-script gpu-arch-max), so cache resolution by
-// (localDir, command) to avoid re-reading uv.lock and the .py file once per
-// job in a group of N.
-func groupMaxComputeCap(jobs []*db.Job) string {
+// Caps share by (localDir, command), so the resolveCache avoids re-reading
+// uv.lock per job in groups of identical scripts.
+func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 	type capKey struct{ dir, cmd string }
-	cache := map[capKey]string{}
-	resolve := func(dir, cmd string) string {
-		k := capKey{dir, cmd}
-		if v, ok := cache[k]; ok {
+	resolveCache := map[capKey]string{}
+	resolveAndPersist := func(job *db.Job) string {
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		k := capKey{localDir, job.Command}
+		if v, ok := resolveCache[k]; ok {
 			return v
 		}
-		v := ResolveJobMaxComputeCap(dir, cmd)
-		cache[k] = v
+		v := placement.ResolveJobMaxComputeCapForPersistence(localDir, job.Command)
+		resolveCache[k] = v
+		if v != "" && database != nil {
+			if err := db.SetJobMaxComputeCap(database, job.ID, v); err != nil {
+				slog.Warn("failed to persist resolved max_compute_cap",
+					"component", "campaign", "job_id", job.ID, "error", err)
+			} else {
+				job.MaxComputeCap = v
+			}
+		}
 		return v
 	}
+
 	minCap := ""
 	for _, job := range jobs {
-		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		cap := resolve(localDir, job.Command)
+		cap := job.MaxComputeCap
 		if cap == "" {
-			return ""
+			cap = resolveAndPersist(job)
 		}
-		if minCap == "" || placement.CompareComputeCap(cap, minCap) < 0 {
-			minCap = cap
+		switch {
+		case cap == "":
+			// Backfill failed (source unreadable). Don't constrain this job;
+			// the group's filter still reflects the resolved jobs.
+			slog.Warn("max_compute_cap unresolved at launch; arch filter not applied for job",
+				"component", "campaign", "job_id", job.ID)
+		case cap == placement.MaxComputeCapAny:
+			return "" // group is explicitly unbounded
+		default:
+			if minCap == "" || placement.CompareComputeCap(cap, minCap) < 0 {
+				minCap = cap
+			}
 		}
 	}
 	return minCap

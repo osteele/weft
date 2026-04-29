@@ -234,6 +234,51 @@ func MaxComputeCapForJob(archMax, dir string) string {
 	return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
 }
 
+// MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded"
+// (script set gpu-arch-max = "any", project has no torch pin, or override
+// resolves to no constraint). Distinct from the empty string, which means
+// "unresolved" — used by readers to decide whether to lazily backfill.
+const MaxComputeCapAny = "any"
+
+// ResolveMaxComputeCapForPersistence returns the three-state encoding stored
+// on jobs.max_compute_cap:
+//
+//	MaxComputeCapAny ("any")  explicitly unbounded
+//	"X.Y"                     concrete numeric cap (e.g. "10.0", "12.0")
+//	""                        torch was pinned but no cap could be derived
+//	                          (caller decides whether to warn or retry)
+//
+// Distinguishes "explicitly unbounded" from "unresolved" so readers can lazily
+// backfill empty caps without conflating them with intentional no-bound jobs.
+func ResolveMaxComputeCapForPersistence(archMax, dir string) string {
+	norm := strings.ToLower(strings.TrimSpace(archMax))
+	if norm == "any" {
+		return MaxComputeCapAny
+	}
+	if norm != "" {
+		if cap := MaxComputeCapForJob(archMax, ""); cap != "" {
+			return cap
+		}
+		return MaxComputeCapAny
+	}
+	pin := dataloc.ScanTorchPin(dir)
+	if pin == nil {
+		return MaxComputeCapAny
+	}
+	return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
+}
+
+// ResolveJobMaxComputeCapForPersistence reads the script's gpu-arch-max
+// override (if any) and returns the persistence-encoded cap. Used at submit,
+// and again as a lazy backfill on the launch path for legacy/refreshed rows.
+func ResolveJobMaxComputeCapForPersistence(localDir, command string) string {
+	archMax := ""
+	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
+		archMax = meta.GPUArchMax
+	}
+	return ResolveMaxComputeCapForPersistence(archMax, localDir)
+}
+
 // parseComputeCap parses "9.0", "10.0", "12.0" etc. into a float. Returns
 // (0, false) for empty or malformed input.
 func parseComputeCap(s string) (float64, bool) {

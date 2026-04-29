@@ -694,7 +694,7 @@ func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
 		t.Fatalf("write without_cap.py: %v", err)
 	}
 
-	groups := SplitGroupsByImage([]InstanceGroup{
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
 		{
 			GPUClass: "NVIDIA",
 			GPUMemGB: 24,
@@ -717,7 +717,7 @@ func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
 }
 
 func TestSplitGroupsByImage_AutoUpgradesDefaultImageForBlackwell(t *testing.T) {
-	groups := SplitGroupsByImage([]InstanceGroup{
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
 		{
 			GPUClass: "RTX-5090",
 			GPUMemGB: 20,
@@ -742,7 +742,7 @@ func TestSplitGroupsByImage_UpgradesExplicitOlderCUDAForBlackwell(t *testing.T) 
 		t.Fatalf("write .weft.toml: %v", err)
 	}
 
-	groups := SplitGroupsByImage([]InstanceGroup{
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
 		{
 			GPUClass: "RTX-5090",
 			GPUMemGB: 20,
@@ -767,7 +767,7 @@ func TestSplitGroupsByImage_LeavesExplicitNonCUDAImageUnchanged(t *testing.T) {
 		t.Fatalf("write .weft.toml: %v", err)
 	}
 
-	groups := SplitGroupsByImage([]InstanceGroup{
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
 		{
 			GPUClass: "RTX-5090",
 			GPUMemGB: 20,
@@ -792,7 +792,7 @@ func TestSplitGroupsByImage_RunpodRemapsExplicitPyTorchImage(t *testing.T) {
 		t.Fatalf("write .weft.toml: %v", err)
 	}
 
-	groups := SplitGroupsByImage([]InstanceGroup{
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
 		{
 			Provider: "runpod",
 			GPUClass: "RTX_4090",
@@ -818,7 +818,7 @@ func TestSplitGroupsByImage_RunpodKeepsRunpodImage(t *testing.T) {
 		t.Fatalf("write .weft.toml: %v", err)
 	}
 
-	groups := SplitGroupsByImage([]InstanceGroup{
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
 		{
 			Provider: "runpod",
 			GPUClass: "RTX_4090",
@@ -910,5 +910,41 @@ func TestSplitToParallel_EmptyInput(t *testing.T) {
 	result := SplitToParallel(nil)
 	if len(result) != 0 {
 		t.Errorf("expected 0 groups, got %d", len(result))
+	}
+}
+
+func TestGroupMaxComputeCap_ReducesMinAcrossPersistedCaps(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, MaxComputeCap: "10.0"},
+		{ID: 2, MaxComputeCap: "9.0"},
+		{ID: 3, MaxComputeCap: "12.0"},
+	}
+	got := groupMaxComputeCap(nil, jobs)
+	if got != "9.0" {
+		t.Errorf("groupMaxComputeCap = %q, want %q (min of {9.0, 10.0, 12.0})", got, "9.0")
+	}
+}
+
+func TestGroupMaxComputeCap_AnyMakesGroupUnbounded(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, MaxComputeCap: "9.0"},
+		{ID: 2, MaxComputeCap: "any"},
+	}
+	got := groupMaxComputeCap(nil, jobs)
+	if got != "" {
+		t.Errorf("groupMaxComputeCap with explicit \"any\" = %q, want \"\" (unbounded)", got)
+	}
+}
+
+func TestGroupMaxComputeCap_LazyBackfillFromMissingTorchPin(t *testing.T) {
+	// No torch pin at the working dir → backfill resolves to "any", which
+	// makes the group unbounded.
+	jobs := []*db.Job{
+		{ID: 1, MaxComputeCap: "10.0"},
+		{ID: 2, MaxComputeCap: "", WorkingDir: "/nonexistent/path"},
+	}
+	got := groupMaxComputeCap(nil, jobs)
+	if got != "" {
+		t.Errorf("groupMaxComputeCap = %q, want \"\" (job 2 backfills to \"any\" → group unbounded)", got)
 	}
 }

@@ -126,3 +126,25 @@ func TestMaxComputeCapForJob_Override(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveMaxComputeCapForPersistence(t *testing.T) {
+	// dir="" means ScanTorchPin returns nil — represents a project with no
+	// readable torch pin (pure CPU, missing source, etc.). The persisted-cap
+	// resolver should record "any" rather than "" so downstream readers can
+	// distinguish "explicitly unbounded" from "unresolved".
+	cases := []struct {
+		archMax string
+		want    string
+	}{
+		{"any", "any"},
+		{"hopper", "9.0"},
+		{"9.0", "9.0"},
+		{"", "any"}, // no override + no torch pin → explicit unbounded
+	}
+	for _, c := range cases {
+		got := ResolveMaxComputeCapForPersistence(c.archMax, "")
+		if got != c.want {
+			t.Errorf("ResolveMaxComputeCapForPersistence(%q, \"\") = %q, want %q", c.archMax, got, c.want)
+		}
+	}
+}
