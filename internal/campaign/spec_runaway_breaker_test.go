@@ -4,32 +4,18 @@
 package campaign
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestSpec_RunawayBreakerTrips_OnOrphanChurnWithNoProgress(t *testing.T) {
-	// Spec: breaker trips when zero completions AND orphan count >= limit.
-	database := db.SetupTestDB(t)
-
-	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
-	if err != nil {
-		t.Fatalf("CreateCampaign: %v", err)
-	}
-
-	// Create a job in the campaign scope.
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU: %v", err)
-	}
-
-	// Simulate orphaned attempts: create launches that failed, each with an
-	// orphaned attempt for our job.
-	for i := 0; i < 10; i++ {
+func seedOrphanedLaunches(t *testing.T, database *sql.DB, jobID int64, count int, campaignID *int64) {
+	t.Helper()
+	for i := 0; i < count; i++ {
 		launchID, err := db.CreateLaunch(database, &db.Launch{
-			CampaignID: &campaignID,
+			CampaignID: campaignID,
 			Status:     db.LaunchStatusPlanned,
 			Provider:   "vastai",
 			GPUSpec:    "RTX_4090",
@@ -46,7 +32,6 @@ func TestSpec_RunawayBreakerTrips_OnOrphanChurnWithNoProgress(t *testing.T) {
 		if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
 			t.Fatalf("SetJobLaunchID[%d]: %v", i, err)
 		}
-		// Mark the attempt as orphaned (instance failed before job ran).
 		if _, err := database.Exec(
 			`UPDATE job_attempts SET cloud_outcome = ?, end_time = ?
 			 WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
@@ -58,8 +43,25 @@ func TestSpec_RunawayBreakerTrips_OnOrphanChurnWithNoProgress(t *testing.T) {
 			t.Fatalf("fail launch[%d]: %v", i, err)
 		}
 	}
+}
 
-	// Re-read the job to get it in queued state for evaluation.
+func TestSpec_RunawayBreakerTrips_OnOrphanChurnWithNoProgress(t *testing.T) {
+	// Spec: breaker trips when zero completions AND orphan count >= limit.
+	database := db.SetupTestDB(t)
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	// Create a job in the campaign scope.
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	seedOrphanedLaunches(t, database, jobID, 10, &campaignID)
+
 	job, _ := db.GetJobByID(database, jobID)
 
 	cfg := RelaunchConfig{
@@ -398,5 +400,41 @@ func TestSpec_RunawayBreakerDisabled(t *testing.T) {
 	}
 	if tripped {
 		t.Fatal("breaker should not trip with nil policy")
+	}
+}
+
+func TestSpec_RunawayBreakerTrips_WithoutCampaignID(t *testing.T) {
+	// Breaker must trip even when launches have NULL campaign_id.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	seedOrphanedLaunches(t, database, jobID, 10, nil)
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			SpendNoProgressLimitCent: 500,
+		},
+	}
+
+	tripped, reason, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if !tripped {
+		t.Fatal("expected breaker to trip on 10 orphaned attempts even with NULL campaign_id")
+	}
+	if reason == "" {
+		t.Error("expected non-empty reason")
 	}
 }

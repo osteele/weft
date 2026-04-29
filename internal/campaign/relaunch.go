@@ -735,10 +735,9 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	if len(scopeJobIDs) == 0 {
 		return false, "", nil
 	}
+	// campaignID == 0 when launches lack a campaign linkage; the breaker
+	// still fires, scoped by job_id alone.
 	campaignID := inferScopeCampaignID(database, unplaced)
-	if campaignID == 0 {
-		return false, "", nil
-	}
 
 	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, cfg.ScopeProject)
 	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, cfg.ScopeProject)
@@ -904,6 +903,13 @@ func inferScopeCampaignID(database *sql.DB, jobs []*db.Job) int64 {
 	return 0
 }
 
+func campaignFilter(alias string, campaignID int64) (string, []any) {
+	if campaignID == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf(" AND %s.campaign_id = ?", alias), []any{campaignID}
+}
+
 func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, since int64, nowUnix int64) (runawayMetrics, error) {
 	if len(jobIDs) == 0 {
 		return runawayMetrics{}, nil
@@ -917,6 +923,10 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 	}
 	inClause := strings.Join(holders, ",")
 
+	countClause, countCampaignArgs := campaignFilter("l", campaignID)
+	countArgs := append([]any{db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned}, args...)
+	countArgs = append(countArgs, countCampaignArgs...)
+	countArgs = append(countArgs, since)
 	row := database.QueryRow(
 		fmt.Sprintf(`SELECT
 			COALESCE(SUM(CASE WHEN ja.cloud_outcome = ? THEN 1 ELSE 0 END), 0),
@@ -924,15 +934,18 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 		FROM job_attempts ja
 		JOIN launches l ON l.id = ja.launch_id
 		WHERE ja.launch_id IS NOT NULL
-		  AND ja.job_id IN (%s)
-		  AND l.campaign_id = ?
-		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, inClause),
-		append(append(append([]any{}, db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned), args...), campaignID, since)...,
+		  AND ja.job_id IN (%s)%s
+		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, inClause, countClause),
+		countArgs...,
 	)
 	if err := row.Scan(&m.CompletedCount, &m.OrphanedCount); err != nil {
 		return m, err
 	}
 
+	spendClause, spendCampaignArgs := campaignFilter("l2", campaignID)
+	spendArgs := append([]any{nowUnix}, args...)
+	spendArgs = append(spendArgs, spendCampaignArgs...)
+	spendArgs = append(spendArgs, since, db.LaunchStatusFailed, db.LaunchStatusCancelled)
 	spendRow := database.QueryRow(
 		fmt.Sprintf(`SELECT COALESCE(SUM(
 			CASE
@@ -950,12 +963,11 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 			FROM job_attempts ja
 			JOIN launches l2 ON l2.id = ja.launch_id
 			WHERE ja.launch_id IS NOT NULL
-			  AND ja.job_id IN (%s)
-			  AND l2.campaign_id = ?
+			  AND ja.job_id IN (%s)%s
 			  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?
 		) scoped ON scoped.launch_id = l.id
-		WHERE l.status IN (?, ?)`, inClause),
-		append(append(append([]any{nowUnix}, args...), campaignID, since), db.LaunchStatusFailed, db.LaunchStatusCancelled)...,
+		WHERE l.status IN (?, ?)`, inClause, spendClause),
+		spendArgs...,
 	)
 	if err := spendRow.Scan(&m.SpendCents); err != nil {
 		return m, err
@@ -978,7 +990,10 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 				ci, _ = db.GetLaunch(database, a.LaunchID)
 				launchCache[a.LaunchID] = ci
 			}
-			if ci == nil || ci.CampaignID == nil || *ci.CampaignID != campaignID {
+			if ci == nil {
+				continue
+			}
+			if campaignID != 0 && (ci.CampaignID == nil || *ci.CampaignID != campaignID) {
 				continue
 			}
 			if a.Outcome == db.AttemptOutcomeOrphaned {
