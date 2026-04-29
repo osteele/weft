@@ -969,6 +969,12 @@ func GetLatestAttemptID(db *sql.DB, jobID int64) (int64, error) {
 }
 
 // UpdateAttemptRunning marks the latest open attempt as running with a start time.
+//
+// On-prem callers invoke this optimistically before the remote start has
+// actually succeeded, and the failure path relies on pending_status being
+// preserved to drive retry — so this function deliberately does NOT touch
+// pending_status. See MarkQueuedJobRunning for the cloud-observed path that
+// clears satisfied intents.
 func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 	now := time.Now().Unix()
 	_, err := execer.Exec(`

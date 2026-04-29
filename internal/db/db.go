@@ -2588,9 +2588,34 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 // MarkQueuedJobRunning transitions a queued job to running without touching start_time.
 // Called from sync when detecting a job has started running remotely.
 // Updates last_synced_status since this is a sync operation.
-func MarkQueuedJobRunning(db *sql.DB, id int64) error {
-	warnOpenTransition(db, id, StatusRunning, false, status.SourceR2Phase)
-	return UpdateAttemptRunning(db, id)
+//
+// Because the remote agent has been observed running the attempt, any
+// non-terminal pending_status intent (queued, pending_placement, running,
+// starting) is now satisfied and is cleared atomically with the status flip.
+// Stop intents (canceled, killed, etc.) are preserved so they can still
+// propagate. Set by RequeueFreshAttemptByID; if not cleared,
+// EffectiveStatus() keeps reporting "queued" while the job is actually
+// running.
+func MarkQueuedJobRunning(database *sql.DB, id int64) error {
+	warnOpenTransition(database, id, StatusRunning, false, status.SourceR2Phase)
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := UpdateAttemptRunning(tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		UPDATE job_attempts
+		SET pending_status = NULL, pending_at = NULL
+		WHERE id = `+latestOpenAttemptSubquery+`
+		  AND pending_status IN (?, ?, ?, ?)`,
+		id, StatusQueued, StatusPendingPlacement, StatusRunning, StatusStarting,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)

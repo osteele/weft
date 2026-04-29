@@ -438,3 +438,70 @@ func TestTrigger_LaunchTerminal_UnblocksAssignJobHost(t *testing.T) {
 		t.Fatalf("AssignJobHost returned false after launch went terminal; trigger did not unblock placement")
 	}
 }
+
+// Regression: a cloud attempt that was created with pending_status='queued'
+// (the requeue intent set by RequeueFreshAttemptByID) and then is observed
+// running by the cloud sync path must have pending_status cleared. Otherwise
+// EffectiveStatus() keeps returning "queued" while the job is actually
+// running, which mis-buckets the job (and its launch siblings) as "Launching"
+// in the jobs TUI.
+func TestMarkQueuedJobRunning_ClearsSatisfiedPendingStatus(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	cases := []struct {
+		name        string
+		pending     string
+		wantCleared bool
+	}{
+		{"queued", StatusQueued, true},
+		{"pending_placement", StatusPendingPlacement, true},
+		{"running", StatusRunning, true},
+		{"starting", StatusStarting, true},
+		{"canceled (preserved)", StatusCanceled, false},
+		{"killed (preserved)", StatusKilled, false},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jobID := int64(9100 + i)
+			insertTestJob(t, database, jobID, "echo running-clears-pending", "/tmp", StatusQueued, withLaunch(launchID))
+			if err := SetAttemptPendingStatus(database, jobID, tc.pending); err != nil {
+				t.Fatalf("SetAttemptPendingStatus(%q): %v", tc.pending, err)
+			}
+
+			if err := MarkQueuedJobRunning(database, jobID); err != nil {
+				t.Fatalf("MarkQueuedJobRunning: %v", err)
+			}
+
+			var status string
+			var pending sql.NullString
+			var pendingAt sql.NullInt64
+			if err := database.QueryRow(
+				`SELECT status, pending_status, pending_at FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+				jobID,
+			).Scan(&status, &pending, &pendingAt); err != nil {
+				t.Fatalf("query attempt: %v", err)
+			}
+			if status != StatusRunning {
+				t.Fatalf("status = %q, want %q", status, StatusRunning)
+			}
+			if tc.wantCleared {
+				if pending.Valid {
+					t.Fatalf("pending_status = %q, want NULL (satisfied intent should be cleared)", pending.String)
+				}
+				if pendingAt.Valid {
+					t.Fatalf("pending_at = %d, want NULL", pendingAt.Int64)
+				}
+			} else {
+				if !pending.Valid || pending.String != tc.pending {
+					t.Fatalf("pending_status = %v, want %q (stop intent must be preserved)", pending, tc.pending)
+				}
+			}
+		})
+	}
+}
