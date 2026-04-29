@@ -354,3 +354,42 @@ func TestRelaunchGroupingJobsTreatsUnplacedPendingPlacementAsQueued(t *testing.T
 func testInt64Ptr(v int64) *int64 {
 	return &v
 }
+
+func TestBackoffRemaining(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name     string
+		count    int
+		hasEnd   bool
+		elapsed  time.Duration
+		wantZero bool
+		wantMin  time.Duration
+		wantMax  time.Duration
+	}{
+		{name: "no failures", count: 0, wantZero: true},
+		{name: "missing end time falls open", count: 3, wantZero: true},
+		{name: "within first window", count: 1, hasEnd: true, elapsed: 5 * time.Second, wantMin: 1, wantMax: 15 * time.Second},
+		{name: "past first window", count: 1, hasEnd: true, elapsed: 30 * time.Second, wantZero: true},
+		{name: "second window still pending", count: 2, hasEnd: true, elapsed: 20 * time.Second, wantMin: 1, wantMax: 30 * time.Second},
+		{name: "high count clamps to 2m schedule", count: 10, hasEnd: true, elapsed: 30 * time.Second, wantMin: 60 * time.Second, wantMax: 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var facts relaunchAttemptFacts
+			if tt.hasEnd {
+				end := now.Add(-tt.elapsed).Unix()
+				facts.LastAttemptEndTime = &end
+			}
+			got := backoffRemaining(facts, tt.count, now)
+			if tt.wantZero {
+				if got != 0 {
+					t.Fatalf("want 0, got %v", got)
+				}
+				return
+			}
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Fatalf("want %v..%v, got %v", tt.wantMin, tt.wantMax, got)
+			}
+		})
+	}
+}

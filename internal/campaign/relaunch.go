@@ -15,11 +15,17 @@ import (
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 // DefaultMaxCloudAttempts is the default maximum number of cloud launch
 // attempts per job before giving up.
 const DefaultMaxCloudAttempts = 3
+
+// backoffEventEmitted tracks the last attempt count for which a
+// relaunch.skipped.backoff event was recorded for each job, so the
+// per-pass autopilot loop emits at most one event per (job, count) pair.
+var backoffEventEmitted sync.Map
 
 // RelaunchConfig configures automatic relaunch of orphaned cloud jobs.
 type RelaunchConfig struct {
@@ -191,6 +197,30 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			result.Skipped++
 			recordJobSkipReason(result, j.ID, failedInstanceID, "max cloud attempts reached")
 			continue
+		}
+		if count > 0 {
+			if remaining := backoffRemaining(facts, count, time.Now()); remaining > 0 {
+				detail := fmt.Sprintf("backoff %s remaining (after %d failure(s))", remaining.Truncate(time.Second), count)
+				slog.Debug("job in backoff window, skipping",
+					"component", "relaunch",
+					"job_id", j.ID,
+					"remaining", remaining.Truncate(time.Second),
+					"attempts", count)
+				if prev, ok := backoffEventEmitted.Load(j.ID); !ok || prev.(int) != count {
+					_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+						EventKind:     db.EventRelaunchSkippedBackoff,
+						JobID:         j.ID,
+						GPUSpec:       j.GPUClass,
+						AttemptNumber: count,
+						Detail:        detail,
+					})
+					backoffEventEmitted.Store(j.ID, count)
+				}
+				result.Skipped++
+				recordJobSkipReason(result, j.ID, failedInstanceID, detail)
+				continue
+			}
+			backoffEventEmitted.Delete(j.ID)
 		}
 		if cfg.RetryBudget != nil && count > 0 {
 			budget := applyRetryBudgetMultiplier(*cfg.RetryBudget, count, budgetMultiplierForFailedInstance(cfg, failedInstanceID))
@@ -1038,6 +1068,23 @@ type relaunchAttemptFacts struct {
 	LastLaunch           *db.Launch
 	LastAttemptStartTime int64
 	LastAttemptEndTime   *int64
+}
+
+// backoffRemaining returns how long the caller must still wait before
+// re-launching this job, given count consecutive prior attempts. Zero means
+// the job is eligible. Returns zero if the last attempt's end time is unknown
+// (we can't measure elapsed time) — better to risk a redundant launch than
+// stall the job indefinitely.
+func backoffRemaining(facts relaunchAttemptFacts, count int, now time.Time) time.Duration {
+	if count <= 0 || facts.LastAttemptEndTime == nil || *facts.LastAttemptEndTime <= 0 {
+		return 0
+	}
+	delay := retrypolicy.BackoffDelayClamped(count - 1)
+	elapsed := now.Sub(time.Unix(*facts.LastAttemptEndTime, 0))
+	if elapsed >= delay {
+		return 0
+	}
+	return delay - elapsed
 }
 
 func attemptFactsForRelaunch(database *sql.DB, jobID int64) (relaunchAttemptFacts, error) {

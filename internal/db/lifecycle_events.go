@@ -24,6 +24,7 @@ const (
 	// R2 copy). Skipping pre-flight avoids a guaranteed-fail launch attempt
 	// against a fresh rental instance whose R2 lookup will 404.
 	EventRelaunchSkippedWaitingOnProducer = "relaunch.skipped.waiting_on_producer"
+	EventRelaunchSkippedBackoff           = "relaunch.skipped.backoff"
 	EventRelaunchPassSummary              = "relaunch.pass_summary"
 	EventRelaunchRunawayTripped           = "relaunch.runaway_tripped"
 	EventRelaunchRunawayBlocked           = "relaunch.runaway_blocked"
