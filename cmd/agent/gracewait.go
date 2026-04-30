@@ -272,6 +272,7 @@ func selfDestruct(opts selfDestructOpts) {
 		TerminationReason: opts.TerminationReason,
 		Phase:             opts.Phase,
 		JobID:             opts.JobID,
+		State:             instanceintent.StateOpen,
 		RequestedAtUnix:   time.Now().Unix(),
 	}
 
@@ -307,6 +308,7 @@ func writeTerminationIntent(bucket string, instanceID int64, marker instanceinte
 func executeSelfDestruct(bucket string, instanceID int64, selfDestructCmd string, marker *instanceintent.Marker) {
 	fmt.Printf("Executing self-destruct: %s\n", selfDestructCmd)
 	if marker != nil && marker.DestroyStartedAtUnix == 0 {
+		marker.State = instanceintent.StateDestroying
 		marker.DestroyStartedAtUnix = time.Now().Unix()
 		writeTerminationIntent(bucket, instanceID, *marker)
 	}
@@ -338,10 +340,15 @@ func executeSelfDestruct(bucket string, instanceID int64, selfDestructCmd string
 		fmt.Fprintf(os.Stderr, "%v; retrying in %s\n", err, delay)
 	}))
 	if err != nil {
+		if marker != nil {
+			marker.State = instanceintent.StateFailed
+			writeTerminationIntent(bucket, instanceID, *marker)
+		}
 		fmt.Fprintf(os.Stderr, "WARNING: self-destruct failed after 3 attempts, instance may still be running\n")
 		return
 	}
 	if marker != nil {
+		marker.State = instanceintent.StateSucceeded
 		marker.DestroySucceededAtUnix = time.Now().Unix()
 		marker.LastError = ""
 		writeTerminationIntent(bucket, instanceID, *marker)

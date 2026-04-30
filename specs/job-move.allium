@@ -262,6 +262,47 @@ rule CancelStalePlacementIntents {
       ensures: ResolvePlacementIntent(intent, canceled, "stale (auto-canceled)")
 }
 
+-- ==========================================================================
+-- TerminationIntent (sibling of Move/PlacementIntent, scoped to instances)
+-- ==========================================================================
+
+-- Records that a deliberate shutdown is in flight for a CloudInstance.
+-- Created when the orchestrator decides to terminate (cost cap reached,
+-- bootstrap timeout, user `weft instance terminate`, ballast/disk-full
+-- self-destruct, etc.); resolved when the provider confirms the
+-- instance is gone (or fails terminally after retries).
+--
+-- Implementation note: persisted as a JSON marker on
+-- launches.termination_intent (not a separate table), but with an
+-- explicit `state` field that is authoritative for the lifecycle phase.
+-- Older markers without `state` fall back to deriving phase from the
+-- destroy timestamps (see Marker.EffectiveState in
+-- internal/instanceintent).
+entity TerminationIntent {
+    instance: CloudInstance
+    terminal_status: String        -- where the launch should land
+                                   -- (failed | completed | canceled)
+    termination_reason: String?    -- short tag (cost_cap, disk_full, ...)
+    state: TerminationIntentState
+    requested_at: Timestamp
+    destroy_started_at: Timestamp?
+    destroy_succeeded_at: Timestamp?
+    destroy_attempts: Integer
+    last_error: String?
+}
+
+value TerminationIntentState = open | destroying | succeeded | failed
+
+invariant InstanceWithActiveTerminationIntentRejectsReuse {
+    -- The orchestrator must not place new jobs onto an instance whose
+    -- termination is in flight. Implemented at instanceAcceptsReuse via
+    -- Launch.HasActiveTerminationIntent (which delegates to
+    -- Marker.IsActive: state in {open, destroying}).
+    for inst in CloudInstance:
+        exists(TerminationIntent { instance = inst, state in {open, destroying} })
+        implies not InstanceAcceptsReuse(inst)
+}
+
 invariant SourceLaunchUnchangedWhileIntentOpen {
     -- Both target kinds now satisfy this property:
     --   - Move-to-existing uses SubmitJobsToInstanceForMove

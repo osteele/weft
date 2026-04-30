@@ -326,13 +326,18 @@ func sqlPlaceholders(n int) string {
 	return string(out)
 }
 
-// HasActiveTerminationIntent reports whether the instance has started a
-// terminal self-destruct flow that has not yet succeeded.
+// HasActiveTerminationIntent reports whether the instance has a
+// TerminationIntent in flight (state open or destroying). Delegates to
+// the marker's IsActive predicate, which encapsulates the lifecycle
+// state (and the back-compat fallback for markers written before the
+// explicit State field existed). See specs/job-move.allium
+// "TerminationIntent" — the model is mirrored on Launch via this
+// JSON-encoded marker.
 func (c *Launch) HasActiveTerminationIntent() bool {
-	if c == nil || c.TerminationIntent == nil {
+	if c == nil {
 		return false
 	}
-	return c.TerminationIntent.TerminalStatus != "" && c.TerminationIntent.DestroySucceededAtUnix == 0
+	return c.TerminationIntent.IsActive()
 }
 
 // EffectiveProviderID returns ProviderInstanceID, falling back to VastaiInstanceID for legacy records.

@@ -256,6 +256,7 @@ func terminateInstanceForFailure(bucket string, instanceID int64, selfDestructCm
 		TerminationReason: db.TerminationReasonDiskFull,
 		Phase:             phase,
 		JobID:             jobID,
+		State:             instanceintent.StateOpen,
 		RequestedAtUnix:   time.Now().Unix(),
 	}
 	writeTerminationIntent(bucket, instanceID, *marker)

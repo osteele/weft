@@ -476,6 +476,7 @@ func markTerminationIntentDestroyed(database *sql.DB, ci *db.Launch, confirmedAt
 		marker.DestroyStartedAtUnix = confirmedAt.Unix()
 	}
 	marker.DestroySucceededAtUnix = confirmedAt.Unix()
+	marker.State = instanceintent.StateSucceeded
 	if err := db.UpdateLaunchTerminationIntent(database, ci.ID, &marker); err != nil {
 		slog.Warn("failed to persist destroy success", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false
