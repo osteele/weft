@@ -3647,15 +3647,7 @@ func TestOpen_RunsMigrationsAfterSchemaVersionBump(t *testing.T) {
 	}
 	// Views referencing the column block DROP COLUMN; drop them first so the
 	// next Open's view-recreation step puts them back.
-	for _, v := range []string{
-		"launch_job_membership", "job_status", "job_run_training_examples",
-		"training_examples", "job_effective_state", "all_runs",
-		"cloud_instance_job_membership",
-	} {
-		if _, err := database.Exec(`DROP VIEW IF EXISTS ` + v); err != nil {
-			t.Fatalf("drop view %s: %v", v, err)
-		}
-	}
+	dropJobsViewsForTest(t, database)
 	if _, err := database.Exec(`ALTER TABLE jobs DROP COLUMN max_compute_cap`); err != nil {
 		t.Fatalf("drop column: %v", err)
 	}

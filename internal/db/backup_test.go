@@ -119,13 +119,7 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 		t.Fatalf("first Open: %v", err)
 	}
 	// Drop a column and roll user_version back to simulate "old DB".
-	for _, v := range []string{
-		"launch_job_membership", "job_status", "job_run_training_examples",
-		"training_examples", "job_effective_state", "all_runs",
-		"cloud_instance_job_membership",
-	} {
-		_, _ = database.Exec(`DROP VIEW IF EXISTS ` + v)
-	}
+	dropJobsViewsForTest(t, database)
 	if _, err := database.Exec(`ALTER TABLE jobs DROP COLUMN max_compute_cap`); err != nil {
 		t.Fatalf("drop column: %v", err)
 	}

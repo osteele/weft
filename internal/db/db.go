@@ -1103,8 +1103,22 @@ func Open() (*sql.DB, error) {
 }
 
 // OpenForReading tries Open() first; on any failure it falls back to
-// OpenReadOnly() so that read-only commands still work when the database file
-// is locked or read-only.
+// OpenReadOnly() so that read-only commands still work when the database
+// file is locked or read-only.
+//
+// After either path, the on-disk schema version (PRAGMA user_version) is
+// compared against this binary's currentSchemaVersion. A mismatch in
+// either direction is surfaced as ErrSchemaMismatch instead of returning
+// a stale or future-incompatible handle:
+//
+//   - If on-disk < binary: a migration is owed but did not run, typically
+//     because another process held the writer lock and Open()'s migration
+//     step was deferred to the read-only fallback. Without this guard,
+//     downstream queries would fail deep in execution with confusing
+//     "no such column" errors.
+//
+//   - If on-disk > binary: a newer weft has migrated the DB. Continuing
+//     would be unsafe; the user should upgrade.
 func OpenForReading() (*sql.DB, error) {
 	database, err := Open()
 	if err != nil {
@@ -1114,8 +1128,15 @@ func OpenForReading() (*sql.DB, error) {
 			slog.Warn("database not writable, opening read-only (startup repair deferred)", "error", err)
 		}
 		database, err = OpenReadOnly()
+		if err != nil {
+			return nil, err
+		}
 	}
-	return database, err
+	if verifyErr := verifySchemaVersion(database); verifyErr != nil {
+		database.Close()
+		return nil, verifyErr
+	}
+	return database, nil
 }
 
 // OpenReadOnly opens the database in read-only mode without running schema
