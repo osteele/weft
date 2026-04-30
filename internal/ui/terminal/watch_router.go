@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -9,12 +10,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	flashmsg "github.com/osteele/weft/internal/app/flash"
+	"github.com/osteele/weft/internal/banner"
+	"github.com/osteele/weft/internal/banner/monitor"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/vastai"
 )
 
 // switchToLaunchMsg is emitted by watchModel when the user presses 'l'.
@@ -44,6 +48,19 @@ type switchToAttemptsMsg struct {
 // presses esc/q to leave the drill-down.
 type switchBackFromAttemptsMsg struct{}
 
+// schemaRelaunchRequestedMsg is dispatched by the schema-drift monitor's
+// RelaunchSignal channel into the bubbletea program. The router responds
+// by setting pendingExec and returning tea.Quit; the runner then invokes
+// pendingExec after p.Run() returns, by which point bubbletea has restored
+// the terminal.
+type schemaRelaunchRequestedMsg struct{}
+
+// processStartTime is captured at package init so the schema-drift monitor
+// can compare it to the on-disk binary's mtime. A real Now() at the time
+// each TUI starts would be slightly more accurate but functionally
+// equivalent for the "is the binary newer than this process?" question.
+var processStartTime = time.Now()
+
 // launchPlanReadyMsg carries the prepared launch TUI model (or error).
 type launchPlanReadyMsg struct {
 	model *launchModel
@@ -71,12 +88,27 @@ type watchRouterModel struct {
 	listTitle     string        // list title
 	listSync      bool          // list sync mode
 	attemptsPrev  tea.Model     // caller to restore when leaving attempts drill-down
+
+	// Banner subsystem: surfaces schema drift, autopilot pause, and cloud
+	// health across whichever child model is active. Set up in start() and
+	// torn down in Stop(); nil-safe before start().
+	bannerBus      *banner.Bus
+	bannerView     *banner.View
+	bannerSub      <-chan banner.Event
+	bannerUnsub    func()
+	monitorCancel  context.CancelFunc
+	relaunchSignal chan struct{}
+	// pendingExec is set when the router has decided that bubbletea should
+	// quit and the binary should re-exec itself. The outer runner reads it
+	// after p.Run() returns and performs the exec there, so bubbletea has
+	// fully restored the terminal first.
+	pendingExec func() error
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, autoMode bool) watchRouterModel {
 	watch := newSystemWatchModel(database, cfg, flash)
 	watch.autoMode = autoMode
-	return watchRouterModel{
+	r := watchRouterModel{
 		active:    watch,
 		database:  database,
 		config:    cfg,
@@ -86,6 +118,63 @@ func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, aut
 		listTitle: "Jobs",
 		listSync:  true,
 	}
+	return r.startBanners()
+}
+
+// startBanners initializes the banner Bus, View, monitor goroutines, and
+// subscription channel. Idempotent: returns the model unchanged if banners
+// were already started (e.g. for cheap re-construction in tests).
+func (m watchRouterModel) startBanners() watchRouterModel {
+	if m.bannerBus != nil {
+		return m
+	}
+	m.bannerBus = banner.NewBus()
+	m.bannerView = banner.NewView(nil)
+	m.relaunchSignal = make(chan struct{}, 1)
+	sub, unsub := m.bannerBus.Subscribe()
+	m.bannerSub = sub
+	m.bannerUnsub = unsub
+
+	monCtx, cancel := context.WithCancel(context.Background())
+	m.monitorCancel = cancel
+
+	go monitor.WatchSchemaDrift(monCtx, monitor.SchemaDriftConfig{
+		Database:       m.database,
+		Bus:            m.bannerBus,
+		ProcessStart:   processStartTime,
+		RelaunchSignal: m.relaunchSignal,
+	})
+	go monitor.WatchAutopilotPaused(monCtx, monitor.AutopilotPausedConfig{
+		Database: m.database,
+		Bus:      m.bannerBus,
+	})
+
+	// Cloud-health monitor: only start probes for providers that are
+	// configured. R2 needs bucket+credentials; Vast.ai needs the CLI
+	// installed. Probing without configuration would just generate noise.
+	cloudCfg := monitor.CloudHealthConfig{Bus: m.bannerBus}
+	if cfg := m.config; cfg != nil && cfg.Vastai.R2.Bucket != "" {
+		if r2Client, err := buildR2Client(cfg); err == nil && r2Client != nil {
+			cloudCfg.R2 = r2Client
+		}
+	}
+	cloudCfg.Vastai = vastai.NewClient()
+	go monitor.WatchCloudHealth(monCtx, cloudCfg)
+
+	return m
+}
+
+// stopBanners stops the monitor goroutines and unsubscribes from the bus.
+// Safe to call multiple times.
+func (m *watchRouterModel) stopBanners() {
+	if m.monitorCancel != nil {
+		m.monitorCancel()
+		m.monitorCancel = nil
+	}
+	if m.bannerUnsub != nil {
+		m.bannerUnsub()
+		m.bannerUnsub = nil
+	}
 }
 
 func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client, autoMode bool, projectFilter string) watchRouterModel {
@@ -93,7 +182,7 @@ func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watc
 	watch.projectFilter = projectFilter
 	watch.unplacedJobs = filterInstanceModeUnplacedJobs(watch.unplacedJobs, projectFilter)
 	watch.autoMode = autoMode
-	return watchRouterModel{
+	r := watchRouterModel{
 		active:        watch,
 		database:      database,
 		config:        cfg,
@@ -106,12 +195,13 @@ func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watc
 		listTitle:     "Jobs",
 		listSync:      true,
 	}
+	return r.startBanners()
 }
 
 func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string, autoMode bool) watchRouterModel {
 	watch := newProjectWatchModel(database, cfg, recentWindow, syncEnabled, projectFilter)
 	watch.autoMode = autoMode
-	return watchRouterModel{
+	r := watchRouterModel{
 		active:        watch,
 		database:      database,
 		config:        cfg,
@@ -124,11 +214,12 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 		listTitle:     "Jobs",
 		listSync:      true,
 	}
+	return r.startBanners()
 }
 
 func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) watchRouterModel {
 	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
-	return watchRouterModel{
+	r := watchRouterModel{
 		active:    list,
 		database:  database,
 		config:    cfg,
@@ -138,10 +229,31 @@ func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string
 		listTitle: title,
 		listSync:  syncEnabled,
 	}
+	return r.startBanners()
 }
 
 func (m watchRouterModel) Init() tea.Cmd {
-	return m.active.Init()
+	cmds := []tea.Cmd{m.active.Init()}
+	if m.bannerSub != nil {
+		cmds = append(cmds, banner.SubscribeNext(m.bannerSub))
+	}
+	if m.relaunchSignal != nil {
+		cmds = append(cmds, waitForSchemaRelaunch(m.relaunchSignal))
+	}
+	return tea.Batch(cmds...)
+}
+
+// waitForSchemaRelaunch returns a tea.Cmd that blocks until the
+// schema-drift monitor signals a relaunch is warranted. Bubbletea runs
+// Cmds on background goroutines, so this doesn't stall the UI loop.
+func waitForSchemaRelaunch(signal <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		_, ok := <-signal
+		if !ok {
+			return nil
+		}
+		return schemaRelaunchRequestedMsg{}
+	}
 }
 
 func (m *watchRouterModel) cleanupActive() {
@@ -173,6 +285,23 @@ func (m *watchRouterModel) switchTo(model tea.Model) (watchRouterModel, tea.Cmd)
 
 func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case banner.TeaMsg:
+		if m.bannerView != nil {
+			m.bannerView.Apply(banner.Event(msg))
+		}
+		// Re-arm the subscription so the next event lands too. Without
+		// this the TUI would only receive the first banner event.
+		if m.bannerSub != nil {
+			return m, banner.SubscribeNext(m.bannerSub)
+		}
+		return m, nil
+
+	case schemaRelaunchRequestedMsg:
+		// The monitor decided the on-disk binary is newer; quit
+		// bubbletea so the terminal is restored, then exec.
+		m.pendingExec = monitor.ExecSelf
+		return m, tea.Quit
+
 	case tea.WindowSizeMsg:
 		m.windowSize = msg
 		updated, cmd := m.active.Update(msg)
@@ -255,7 +384,11 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m watchRouterModel) View() string {
-	return m.active.View()
+	body := m.active.View()
+	if m.bannerView == nil || !m.bannerView.HasAny() {
+		return body
+	}
+	return m.bannerView.Render() + "\n" + body
 }
 
 func (m watchRouterModel) buildJobsList(groupedByStatus bool) listTUIModel {

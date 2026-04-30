@@ -119,3 +119,30 @@ this aligns the internals to what users already see.
 on-prem hosts ever become first-class table-backed entities, and avoids
 collisions with Go's pervasive use of "instance" for type/struct instances
 when grepping.
+
+## Banner monitors (deferred)
+
+The `internal/banner/` system already surfaces schema drift, autopilot
+pause, R2 unreachable, and Vast.ai unreachable across the watch TUI
+(`RunWatchLoop`). Adding more producers and wiring more consumers is
+mechanical from there. Candidates, ordered by frequency I'd expect to hit:
+
+| Banner | Source | Notes |
+|--------|--------|-------|
+| Database opened read-only | When `db.OpenForReading` falls back | User is reading possibly-stale data; surface so display drift isn't a surprise. |
+| Grace-period instance expiring soon | Poll `cloud_instances.grace_deadline` | Banner at < 5 min remaining; users miss these. |
+| Background sync error streak | Track consecutive `cloud sync skipped` events | N≥3 in a row → banner. Catches network/VPN flaps that aren't a single-poll failure. |
+| Disk space low (backups dir, log cache) | `statfs` on `~/.config/weft/backups`, `~/.cache/weft/logs` | Threshold ~5 GB free or <5%. |
+| Long DB write lock held | Track time since last successful Open() with migrations | Banner if another process has held the writer > 30 s. |
+| Update available (binary) | Compare `os.Executable()` mtime to running PID's start | Distinct from schema-drift: binary updated but DB schema unchanged; offer relaunch. |
+
+Wiring sites still needed (one-time, ~40 lines each):
+
+- `RunWatchPlainLoop` — plain-mode watch entrypoints (job watch, project watch). Subscriber prints stderr line on first detection of each banner ID.
+- `RunProjectWatchTUI` — project-watch bubbletea program; same pattern as `watchRouterModel`.
+- `RunLaunchProgram` — launch-instance TUI.
+- `runAutopilotRunLoop` — daemon. On schema drift with newer binary, exit cleanly so launchd respawns; on stuck case, log a critical-level warning.
+
+The "rare TUI gets banner integration first time it's used" pattern is fine
+— banners are a net additive feature; entrypoints without integration are
+no worse than before.

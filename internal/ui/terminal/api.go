@@ -50,13 +50,24 @@ func RunWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
 	finalModel, err := p.Run()
 	restore()
 
+	var pendingExec func() error
 	if r, ok := finalModel.(watchRouterModel); ok {
 		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
 			w.syncWorker.Stop()
 		}
+		r.stopBanners()
+		pendingExec = r.pendingExec
 	}
 	if err != nil {
 		return fmt.Errorf("watch TUI error: %w", err)
+	}
+	// pendingExec is set by the schema-drift monitor when the on-disk
+	// binary is newer than this process. Run it now that bubbletea has
+	// restored the terminal.
+	if pendingExec != nil {
+		if execErr := pendingExec(); execErr != nil {
+			return fmt.Errorf("schema-drift relaunch: %w", execErr)
+		}
 	}
 	return nil
 }

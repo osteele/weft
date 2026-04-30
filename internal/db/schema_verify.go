@@ -69,3 +69,14 @@ func readUserVersion(database *sql.DB) (int, error) {
 	}
 	return v, nil
 }
+
+// ObservedSchemaVersions returns (currentSchemaVersion, on-disk user_version)
+// in one call. Used by schema-drift monitors to compare what the binary
+// expects against what the DB reports.
+func ObservedSchemaVersions(database *sql.DB) (current int, observed int, err error) {
+	observed, err = readUserVersion(database)
+	if err != nil {
+		return 0, 0, err
+	}
+	return currentSchemaVersion, observed, nil
+}
