@@ -60,3 +60,6 @@ _apalache-out/
 
 # Test project virtual environments
 testdata/campaign/*/.venv/
+
+# Working artifacts written by weft jobs / local notebooks
+/output/
