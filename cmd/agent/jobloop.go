@@ -89,9 +89,28 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	var result jobSequenceResult
 	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
 	gpuWarmedUp := false
+	canceledAttempts := map[int64]struct{}{}
+
+	drainCancels := func() {
+		canceled, err := drainGraceCancelAttemptRequests(cfg.R2Bucket, cfg.InstanceID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "drain cancel-attempts: %v\n", err)
+			return
+		}
+		for id := range canceled {
+			canceledAttempts[id] = struct{}{}
+		}
+	}
+	drainCancels()
 
 	for i := 0; i < len(jobs); i++ {
 		job := jobs[i]
+		drainCancels()
+		if _, canceled := canceledAttempts[job.RunID]; canceled {
+			fmt.Printf("--- Job %d (run %d) canceled by orchestrator; skipping ---\n", job.ID, job.RunID)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetailf("attempt %d canceled by orchestrator", job.RunID))
+			continue
+		}
 
 		// Benchmark barrier: wait for all background uploads/deletions
 		if slices.Contains(job.Tags, "benchmark") {

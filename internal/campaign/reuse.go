@@ -26,6 +26,7 @@ import (
 var (
 	sendGraceJobPayload      = controlplane.SendGraceJobPayload
 	sendGraceJobPayloadNoAck = controlplane.SendGraceJobPayloadNoAck
+	sendGraceCancelAttempts  = controlplane.SendGraceCancelAttempts
 	uploadSourceToR2         = weftsync.UploadSourceToR2ForInputs
 )
 
@@ -393,7 +394,14 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 
 	claimedJobs := make([]*db.Job, 0, len(jobs))
 	claimedJobIDs := make([]int64, 0, len(jobs))
+	// Per-source-launch attempt-ids that should be canceled on the source
+	// agent once the transfer succeeds. Populated only when transfer=true.
+	cancelByLaunch := map[int64][]int64{}
 	for _, job := range jobs {
+		var prior PriorAttempt
+		if transfer {
+			prior = capturePriorAttempt(database, job.ID)
+		}
 		claimedJob, err := claimJobForLaunchWithOpts(database, job.ID, instanceID, transfer)
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
@@ -404,6 +412,17 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		}
 		claimedJobs = append(claimedJobs, claimedJob)
 		claimedJobIDs = append(claimedJobIDs, claimedJob.ID)
+		if prior.LaunchID > 0 && prior.LaunchID != instanceID && prior.AttemptID > 0 {
+			cancelByLaunch[prior.LaunchID] = append(cancelByLaunch[prior.LaunchID], prior.AttemptID)
+		}
+	}
+	if r2Client != nil && len(cancelByLaunch) > 0 {
+		for launchID, ids := range cancelByLaunch {
+			if err := sendGraceCancelAttempts(ctx, r2Client, launchID, ids); err != nil {
+				slog.Warn("send cancel-attempts marker",
+					"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", err)
+			}
+		}
 	}
 
 	// Upload sources and build payload

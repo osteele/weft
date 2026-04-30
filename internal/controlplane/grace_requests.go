@@ -17,10 +17,20 @@ import (
 type GraceCommandKind string
 
 const (
-	GraceCommandJobs    GraceCommandKind = "jobs"
-	GraceCommandExtend  GraceCommandKind = "extend"
-	GraceCommandRelease GraceCommandKind = "release"
+	GraceCommandJobs           GraceCommandKind = "jobs"
+	GraceCommandExtend         GraceCommandKind = "extend"
+	GraceCommandRelease        GraceCommandKind = "release"
+	GraceCommandCancelAttempts GraceCommandKind = "cancel_attempts"
 )
+
+// GraceCancelAttemptsRequest tells the agent on `instanceID` to skip any
+// pending or running job whose attempt (run) id is in AttemptIDs. Used by
+// the move flow after a transfer-claim so the source instance drops the
+// superseded attempt rather than running it. See specs/job-move.allium
+// "AttemptCancelMarker".
+type GraceCancelAttemptsRequest struct {
+	AttemptIDs []int64 `json:"attempt_ids"`
+}
 
 type GraceCommandAck struct {
 	RequestID  string           `json:"request_id"`
@@ -108,6 +118,14 @@ func GraceCommandAcksPrefix(instanceID int64) string {
 	return fmt.Sprintf("grace/%d/acks/", instanceID)
 }
 
+func GraceCancelAttemptsPrefix(instanceID int64) string {
+	return fmt.Sprintf("grace/%d/cancel_attempts/", instanceID)
+}
+
+func GraceCancelAttemptsRequestKey(instanceID int64, requestID string) string {
+	return fmt.Sprintf("%s%s.json", GraceCancelAttemptsPrefix(instanceID), requestID)
+}
+
 func GraceCommandAckKey(instanceID int64, requestID string) string {
 	return fmt.Sprintf("%s%s.json", GraceCommandAcksPrefix(instanceID), requestID)
 }
@@ -135,6 +153,23 @@ func SendGraceJobPayloadNoAck(ctx context.Context, store GraceStore, instanceID 
 	}
 	if err := store.PutObject(ctx, GraceJobRequest(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
 		return fmt.Errorf("write jobs request: %w", err)
+	}
+	return nil
+}
+
+// SendGraceCancelAttempts writes a cancel-attempts request to R2 (no-ack:
+// the source agent processes it between jobs). Empty AttemptIDs is a no-op.
+func SendGraceCancelAttempts(ctx context.Context, store GraceStore, instanceID int64, attemptIDs []int64) error {
+	if len(attemptIDs) == 0 {
+		return nil
+	}
+	requestID := NewGraceRequestID(instanceID)
+	data, err := json.Marshal(GraceCancelAttemptsRequest{AttemptIDs: attemptIDs})
+	if err != nil {
+		return fmt.Errorf("encode cancel-attempts request: %w", err)
+	}
+	if err := store.PutObject(ctx, GraceCancelAttemptsRequestKey(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
+		return fmt.Errorf("write cancel-attempts request: %w", err)
 	}
 	return nil
 }

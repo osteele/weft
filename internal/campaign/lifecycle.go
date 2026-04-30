@@ -1362,7 +1362,12 @@ func LaunchInstance(
 	// Jobs that were claimed by another launch between ListUnplacedJobs and
 	// now are skipped rather than causing a hard failure.
 	var claimedJobs []*db.Job
+	cancelByLaunch := map[int64][]int64{}
 	for i, job := range group.Jobs {
+		var prior PriorAttempt
+		if opts.TransferClaim {
+			prior = capturePriorAttempt(database, job.ID)
+		}
 		updatedJob, err := claimJobForLaunchWithOpts(database, job.ID, instanceID, opts.TransferClaim)
 		if err != nil {
 			if errors.Is(err, db.ErrJobAlreadyClaimed) {
@@ -1383,6 +1388,17 @@ func LaunchInstance(
 			return instanceID, fmt.Errorf("set campaign_job_index for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		claimedJobs = append(claimedJobs, group.Jobs[i])
+		if prior.LaunchID > 0 && prior.LaunchID != instanceID && prior.AttemptID > 0 {
+			cancelByLaunch[prior.LaunchID] = append(cancelByLaunch[prior.LaunchID], prior.AttemptID)
+		}
+	}
+	if r2Assets.Client != nil && len(cancelByLaunch) > 0 {
+		for sourceID, ids := range cancelByLaunch {
+			if err := sendGraceCancelAttempts(ctx, r2Assets.Client, sourceID, ids); err != nil {
+				slog.Warn("send cancel-attempts marker",
+					"component", "launch", "source_launch_id", sourceID, "attempt_ids", ids, "error", err)
+			}
+		}
 	}
 
 	// If all jobs were claimed by other launches, clean up the empty launch.

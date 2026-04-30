@@ -718,3 +718,73 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 		t.Fatalf("after transfer: launch_id = %v, want %d", reloaded.LaunchID, dst)
 	}
 }
+
+func TestSubmitJobsToInstanceForMove_SendsCancelMarkerToSource(t *testing.T) {
+	// Stage 3: after a transfer-claim, the move-to-existing path writes a
+	// cancel-attempts marker to the source launch's R2 grace bucket so
+	// the source agent drops the superseded attempt rather than running
+	// it. See specs/job-move.allium "AttemptCancelMarker".
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch dst: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	// Capture the source attempt id so we can assert the marker carried it.
+	var srcAttemptID int64
+	if err := database.QueryRow(`SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL`, jobID).Scan(&srcAttemptID); err != nil {
+		t.Fatalf("source attempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+		sendGraceCancelAttempts = prevSendCancel
+	})
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
+		return "sources/x.tar.gz", nil
+	}
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) error {
+		return nil
+	}
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, attemptIDs []int64) error {
+		canceledByLaunch[instanceID] = append(canceledByLaunch[instanceID], attemptIDs...)
+		return nil
+	}
+
+	if err := SubmitJobsToInstanceForMove(context.Background(), database, &r2.Client{}, dst, []*db.Job{job}); err != nil {
+		t.Fatalf("SubmitJobsToInstanceForMove: %v", err)
+	}
+	got := canceledByLaunch[src]
+	if len(got) != 1 || got[0] != srcAttemptID {
+		t.Fatalf("cancel-attempts to source = %v, want [%d]", got, srcAttemptID)
+	}
+	if _, ok := canceledByLaunch[dst]; ok {
+		t.Errorf("cancel-attempts must not target the destination")
+	}
+}

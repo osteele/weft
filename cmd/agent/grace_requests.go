@@ -123,6 +123,33 @@ func applyGraceExtendRequests(bucket string, instanceID int64, deadline time.Tim
 	return deadline, nil
 }
 
+// drainGraceCancelAttemptRequests collects any pending cancel-attempts
+// requests, returning the union of all canceled attempt ids. Each request
+// is acked and deleted as it is consumed.
+func drainGraceCancelAttemptRequests(bucket string, instanceID int64) (map[int64]struct{}, error) {
+	requests, err := listGraceRequests(bucket, controlplane.GraceCancelAttemptsPrefix(instanceID))
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64]struct{}{}
+	for _, req := range requests {
+		var payload controlplane.GraceCancelAttemptsRequest
+		if err := json.Unmarshal([]byte(req.Body), &payload); err != nil {
+			ackGraceRequest(bucket, instanceID, req.RequestID, controlplane.GraceCommandCancelAttempts, false, fmt.Sprintf("invalid cancel-attempts payload: %v", err))
+			_ = graceR2Delete(bucket, req.Key)
+			continue
+		}
+		for _, id := range payload.AttemptIDs {
+			if id > 0 {
+				out[id] = struct{}{}
+			}
+		}
+		ackGraceRequest(bucket, instanceID, req.RequestID, controlplane.GraceCommandCancelAttempts, true, "received")
+		_ = graceR2Delete(bucket, req.Key)
+	}
+	return out, nil
+}
+
 func hasGraceReleaseRequest(bucket string, instanceID int64) (bool, error) {
 	requests, err := listGraceRequests(bucket, controlplane.GraceReleasePrefix(instanceID))
 	if err != nil {

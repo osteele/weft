@@ -231,3 +231,42 @@ func TestDrainGraceJobRequestsRejectsInvalidSourceUpdate(t *testing.T) {
 		}
 	}
 }
+
+func TestDrainGraceCancelAttemptRequestsAggregatesIDs(t *testing.T) {
+	instanceID := int64(99)
+	prefix := controlplane.GraceCancelAttemptsPrefix(instanceID)
+
+	payloads := []controlplane.GraceCancelAttemptsRequest{
+		{AttemptIDs: []int64{1001, 1002}},
+		{AttemptIDs: []int64{1003}},
+	}
+	objects := map[string]string{}
+	for i, payload := range payloads {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal %d: %v", i, err)
+		}
+		objects[path.Join(prefix, []string{"req-a", "req-b"}[i]+".json")] = string(data)
+	}
+
+	prevList, prevGet, prevPut, prevDelete := graceR2List, graceR2Get, graceR2Put, graceR2Delete
+	t.Cleanup(func() {
+		graceR2List, graceR2Get, graceR2Put, graceR2Delete = prevList, prevGet, prevPut, prevDelete
+	})
+	graceR2List = func(_ string, _ string) ([]string, error) {
+		return []string{"req-a.json", "req-b.json"}, nil
+	}
+	graceR2Get = func(_ string, key string) (string, error) { return objects[key], nil }
+	graceR2Put = func(_ string, _, _ string) error { return nil }
+	graceR2Delete = func(_ string, _ string) error { return nil }
+
+	got, err := drainGraceCancelAttemptRequests("test-bucket", instanceID)
+	if err != nil {
+		t.Fatalf("drainGraceCancelAttemptRequests: %v", err)
+	}
+	for _, want := range []int64{1001, 1002, 1003} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing canceled attempt id %d in %v", want, got)
+		}
+	}
+}

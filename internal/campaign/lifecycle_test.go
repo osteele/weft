@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -742,6 +744,17 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, Jobs: []*db.Job{job}}
 	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
 
+	// Stub the cancel-attempts sender so the test doesn't try to PutObject
+	// against an empty stub r2.Client. Verify that the source attempt id
+	// would be canceled on the source instance.
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() { sendGraceCancelAttempts = prevSendCancel })
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, attemptIDs []int64) error {
+		canceledByLaunch[instanceID] = append(canceledByLaunch[instanceID], attemptIDs...)
+		return nil
+	}
+
 	dst, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
 		LaunchOpts{TransferClaim: true},
@@ -782,5 +795,13 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "claimed by other launches") {
 		t.Fatalf("LaunchInstance without TransferClaim: err = %v, want all-claimed-by-others", err)
+	}
+
+	// The TransferClaim path must have queued a cancel-attempts marker
+	// against the source launch (so the source agent drops the
+	// superseded attempt rather than running it). The non-TransferClaim
+	// path must not.
+	if got := canceledByLaunch[src]; len(got) != 1 {
+		t.Errorf("cancel-attempts to source = %v, want exactly one entry from the TransferClaim path", canceledByLaunch)
 	}
 }

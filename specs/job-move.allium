@@ -324,19 +324,22 @@ invariant ResolvedIntentHasResolutionTime {
 --     launch failure before the instance is created, source is
 --     untouched.
 --
+-- AttemptCancelMarker (DONE): on a transfer-claim the orchestrator
+-- writes a `cancel_attempts` grace request to the source instance's
+-- R2 bucket carrying the (now superseded) source attempt id. The
+-- source agent drains these between jobs; the dispatcher consults the
+-- canceled set at the start of each iteration and skips matched
+-- attempts rather than running them. Closes the two-attempt overlap
+-- without a separate reconciler, because the source agent's queue
+-- file no longer wins races against the DB transition.
+--
 -- Outstanding refinements:
 --
---   - Two-attempt overlap reconciler. With both target kinds
---     transferring atomically, the source attempt is closed at
---     transfer-claim time. The source agent's R2 queue still contains
---     the job (we don't yet write an explicit cancel marker for queued
---     jobs). For move-to-existing the destination agent picks the job
---     up between jobs; for move-to-new the destination agent is fresh.
---     If both source and destination end up running the job (rare, since
---     move targets queued jobs), a reconciler should detect two
---     `running` attempts on different launches and kill the older
---     unless its exit is already 0. Spec rule
---     ObsoleteMoveOnSourceCompletion sketches this.
+--   - Two-attempt overlap *runtime* race. Cancel markers are
+--     best-effort; an agent that's already started a superseded job
+--     (rare for queued jobs but possible mid-launch) still completes.
+--     The reconciler sketched by ObsoleteMoveOnSourceCompletion is
+--     cheap insurance once observable cases exist.
 --
 --   - Caller-side ack-waiting on the running-instance grace path
 --     (SendGraceJobPayloadNoAck → ack-waiting) would let
