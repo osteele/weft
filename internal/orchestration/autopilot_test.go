@@ -501,3 +501,65 @@ func TestRunGroupedAutoPilotPass_ReuseFallbackExecutesAssignmentsWithoutLaunch(t
 		t.Fatalf("Launched = %d, want 0", result.Launched)
 	}
 }
+
+func TestMergeRelaunchReasonsIntoBlockedReasons_PrefersPerJobOverPerInstance(t *testing.T) {
+	// Three sibling jobs (PFT, ASIDE, AIR eval) all came from the same prior
+	// failed cloud instance, so they share one failedInstanceID. Each has its
+	// own waiting-on-producer reason; recordNotReplacedReason aggregated those
+	// under the single instance key as "multiple reasons (...)". The per-job
+	// JobReasons map carries the accurate per-job reason. The merge must
+	// surface each job's own reason rather than the aggregated one.
+	const failedInstanceID int64 = 9001
+	pftReason := `waiting for "output/exp_053_pft_d256/ise_masked_lossweighted.pt" from wj1602 (queued)`
+	asideReason := `waiting for "output/exp_053_aside/ise_masked_lossweighted.pt" from wj1603 (queued)`
+	airReason := `waiting for "output/exp_053_air/ise_masked_lossweighted.pt" from wj1604 (queued)`
+	combined := "multiple reasons (" + pftReason + "; " + asideReason + "; " + airReason + ")"
+
+	result := &campaign.RelaunchResult{
+		NotReplacedReasons: map[int64]string{failedInstanceID: combined},
+		JobReasons: map[int64]string{
+			1605: pftReason,
+			1606: asideReason,
+			1607: airReason,
+		},
+	}
+	failedInstanceByJob := map[int64]int64{
+		1605: failedInstanceID,
+		1606: failedInstanceID,
+		1607: failedInstanceID,
+	}
+
+	blockedReasons := map[int64]string{}
+	mergeRelaunchReasonsIntoBlockedReasons(blockedReasons, result, failedInstanceByJob)
+
+	for jobID, want := range map[int64]string{
+		1605: pftReason,
+		1606: asideReason,
+		1607: airReason,
+	} {
+		got := blockedReasons[jobID]
+		if got != want {
+			t.Errorf("blockedReasons[%d] = %q, want %q", jobID, got, want)
+		}
+		if strings.HasPrefix(got, "multiple reasons (") {
+			t.Errorf("blockedReasons[%d] should not be the aggregated string, got %q", jobID, got)
+		}
+	}
+}
+
+func TestMergeRelaunchReasonsIntoBlockedReasons_FallsBackToPerInstance(t *testing.T) {
+	// When a job has no per-job entry but its predecessor instance does, the
+	// per-instance reason fills in as a fallback.
+	result := &campaign.RelaunchResult{
+		NotReplacedReasons: map[int64]string{42: "no offers available"},
+		JobReasons:         map[int64]string{},
+	}
+	failedInstanceByJob := map[int64]int64{100: 42}
+
+	blockedReasons := map[int64]string{}
+	mergeRelaunchReasonsIntoBlockedReasons(blockedReasons, result, failedInstanceByJob)
+
+	if got, want := blockedReasons[100], "no offers available"; got != want {
+		t.Errorf("blockedReasons[100] = %q, want %q", got, want)
+	}
+}

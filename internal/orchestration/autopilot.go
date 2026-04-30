@@ -313,22 +313,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = result.BlockedReason
 		}
 	}
-	for jobID, failedID := range failedInstanceByJob {
-		if failedID == 0 {
-			continue
-		}
-		if reason, ok := result.NotReplacedReasons[failedID]; ok && strings.TrimSpace(reason) != "" {
-			blockedReasons[jobID] = reason
-		}
-	}
-	for jobID, reason := range result.JobReasons {
-		if strings.TrimSpace(reason) == "" {
-			continue
-		}
-		if _, exists := blockedReasons[jobID]; !exists {
-			blockedReasons[jobID] = reason
-		}
-	}
+	mergeRelaunchReasonsIntoBlockedReasons(blockedReasons, result, failedInstanceByJob)
 	// Use per-job queue-floor (QueuedAt/CreatedAt) rather than a single
 	// passStartedAt floor: skip events are often logged on a prior pass
 	// (e.g. retry-budget cooldown), but remain the authoritative reason
@@ -374,6 +359,40 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		LaunchedClass:  launchedClassFromResult(database, result.InstanceIDs),
 		BlockedReasons: blockedReasons,
 	}, nil
+}
+
+// mergeRelaunchReasonsIntoBlockedReasons populates blockedReasons from a
+// RelaunchResult. Per-job reasons (result.JobReasons) take precedence over
+// per-instance reasons (result.NotReplacedReasons), because the latter is
+// keyed by failed predecessor instance and aggregates reasons across every
+// sibling job that shared that instance — yielding a "multiple reasons (...)"
+// string that is incorrect for any individual job. The per-instance map is
+// retained as a fallback for jobs that lack a per-job reason entry.
+func mergeRelaunchReasonsIntoBlockedReasons(
+	blockedReasons map[int64]string,
+	result *campaign.RelaunchResult,
+	failedInstanceByJob map[int64]int64,
+) {
+	if blockedReasons == nil || result == nil {
+		return
+	}
+	for jobID, reason := range result.JobReasons {
+		if strings.TrimSpace(reason) == "" {
+			continue
+		}
+		blockedReasons[jobID] = reason
+	}
+	for jobID, failedID := range failedInstanceByJob {
+		if failedID == 0 {
+			continue
+		}
+		if _, exists := blockedReasons[jobID]; exists {
+			continue
+		}
+		if reason, ok := result.NotReplacedReasons[failedID]; ok && strings.TrimSpace(reason) != "" {
+			blockedReasons[jobID] = reason
+		}
+	}
 }
 
 func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom int) ([]campaign.LaunchGroup, []campaign.LaunchGroup, int) {
