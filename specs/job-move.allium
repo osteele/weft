@@ -293,6 +293,51 @@ entity TerminationIntent {
 
 value TerminationIntentState = open | destroying | succeeded | failed
 
+-- ==========================================================================
+-- InstanceReadiness (CloudInstance lifecycle)
+-- ==========================================================================
+
+-- A CloudInstance progresses through readiness phases between creation
+-- and the start of useful job execution. The phases are observable via
+-- two timestamps on the launch row: BootstrapDeadlineUnix (set once at
+-- LaunchInstance time) and AgentReadyAtUnix (set the first time the
+-- live-state sync sees bootstrap_stage = "ready" or any job has started
+-- running). Together they replace a previous reconciler that
+-- recomputed elapsed time from launched_at + adaptive timeout on every
+-- tick.
+--
+-- Reconciler use:
+--   - bootstrap stall fires when now > BootstrapDeadlineUnix and the
+--     instance is still in launching/running with no job progress.
+--   - the warn-only display fires inside the last bootstrapWarnTimeout
+--     window before the deadline.
+--
+-- The deferred speculative move-to-new "claim after agent ready" path
+-- (see specs/job-move.allium § future work) consumes IsAgentReady to
+-- decide when to confirm an open MoveIntent of kind=new without
+-- waiting on indirect signals.
+
+extend entity CloudInstance {
+    bootstrap_deadline: Timestamp?  -- set at LaunchInstance time
+    agent_ready_at: Timestamp?      -- first transition wins
+}
+
+invariant BootstrapDeadlineSetAtLaunch {
+    -- Every newly-created CloudInstance has its bootstrap deadline
+    -- stamped before the launching transition. (Backfilled for pre-#4
+    -- rows by a one-time migration.)
+    for inst in CloudInstance:
+        inst.created_at >= time(post_migration_baseline)
+        implies inst.bootstrap_deadline != null
+}
+
+invariant AgentReadyMonotonic {
+    -- AgentReadyAt is set at most once; it never moves once set.
+    for inst in CloudInstance:
+        inst.agent_ready_at != null
+        implies stable(inst.agent_ready_at)
+}
+
 invariant InstanceWithActiveTerminationIntentRejectsReuse {
     -- The orchestrator must not place new jobs onto an instance whose
     -- termination is in flight. Implemented at instanceAcceptsReuse via

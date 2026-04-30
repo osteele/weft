@@ -1357,6 +1357,12 @@ func LaunchInstance(
 	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusLaunching); err != nil {
 		return instanceID, fmt.Errorf("update instance status to launching: %w", err)
 	}
+	// Stamp the bootstrap deadline so the reconciler reads a single
+	// per-launch field instead of recomputing from launched_at +
+	// timeout. See specs/job-move.allium § InstanceReadiness.
+	if err := db.SetLaunchBootstrapDeadline(database, instanceID, time.Now().Add(BootstrapTerminateTimeout)); err != nil {
+		slog.Warn("set bootstrap deadline", "component", "launch", "instance_id", instanceID, "error", err)
+	}
 
 	// Associate jobs with cloud instance and record campaign position.
 	// Jobs that were claimed by another launch between ListUnplacedJobs and

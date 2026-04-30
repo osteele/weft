@@ -148,6 +148,18 @@ func SyncInstanceState(
 	}
 	wave2.Wait()
 
+	// First-ready signal: persist agent_ready_at_unix the first time
+	// either the bootstrap stage flips to "ready" or any job has started
+	// running on this launch. The DB update is idempotent (the IfUnset
+	// guard means subsequent calls are no-ops).
+	if ci != nil && ci.AgentReadyAtUnix == nil &&
+		(s.BootstrapStage == bootstrapStageReady || jobState.HasStartedJob) {
+		if err := db.SetLaunchAgentReadyAtIfUnset(database, instanceID, time.Now()); err == nil {
+			now := time.Now().Unix()
+			ci.AgentReadyAtUnix = &now
+		}
+	}
+
 	if phaseNonEmpty {
 		// Mark queued jobs as running if the R2 phase says they are,
 		// and re-associate orphaned jobs with this launch.

@@ -146,3 +146,55 @@ Wiring sites still needed (one-time, ~40 lines each):
 The "rare TUI gets banner integration first time it's used" pattern is fine
 — banners are a net additive feature; entrypoints without integration are
 no worse than before.
+
+## requested_status / pending_status / attempt-status three-way merge
+
+The `job_status` view derives `Job.status` from a three-way merge of:
+
+- `jobs.requested_status` — user-issued state transitions (cancel, kill,
+  requeue, draft) that have not yet propagated to the agent.
+- `job_attempts.pending_status` — the legacy "this attempt is being
+  worked on" sub-state. Most uses (placement-window) have moved to
+  `PlacementIntent`; the remaining cases are reconcile-driven mid-attempt
+  transitions.
+- `job_attempts.status` — the actual state of the latest open attempt.
+
+The merge logic in the view took a comment block to explain. With
+`PlacementIntent` extracted (see specs/job-move.allium), the surface area
+shrunk but did not collapse. Worth revisiting when the view's complexity
+becomes a concrete pain point. Candidate moves:
+
+- Promote `requested_status` to a `UserIntent` entity (kind = cancel /
+  kill / requeue / draft) so the merge becomes "open intent overrides
+  attempt status" instead of a column-comparison dance.
+- After enough soak time, drop `pending_placement` from the `Status`
+  enum entirely — `PlacementIntent` now carries that signal — and remove
+  the autopilot's pending_placement rescue branch + the
+  `is_unplaced_awaiting_placement` predicate's special-case for it.
+
+## InstanceAcceptsJobs unified predicate
+
+`instanceAcceptsReuse` (`internal/campaign/reuse.go`) ANDs three signals:
+
+- `HasActiveTerminationIntent` (the JSON marker — see specs/job-move
+  TerminationIntent)
+- `Cordoned` (a separate field on Launch)
+- `LaunchStatusGrace` with `GraceDeadline` not yet expired
+
+Today it returns `(bool, string)` with an ad-hoc reason string formatted
+per case. UI surfaces (`weft instance list`, the move picker, the watch
+TUI) reformat the string. Promoting to a typed result like:
+
+```go
+type InstanceBlocker int
+const (
+    InstanceBlockerNone InstanceBlocker = iota
+    InstanceBlockerTerminating
+    InstanceBlockerCordoned
+    InstanceBlockerGraceExpired
+    InstanceBlockerWrongStatus
+)
+```
+
+would let UI surfaces format consistently and let any future fourth
+shutdown signal slot in cleanly. Mechanical refactor; small surface.

@@ -384,22 +384,18 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 5. Bootstrap stall: no job progress after timeout. Fires during
-	// `running` (post-bootstrap wait) and `launching` once BootstrapOrigin
-	// is known. BootstrapOrigin prefers provider "running" time over
-	// LaunchedAt so time spent in provider "loading" doesn't count.
+	// 5. Bootstrap stall: no job progress past the per-launch deadline.
+	// Fires during `running` (post-bootstrap wait) and `launching`. The
+	// deadline is set once at LaunchInstance time and backfilled for
+	// pre-#4 rows (specs/job-move.allium § InstanceReadiness); the
+	// reconciler reads it directly rather than recomputing from
+	// BootstrapOrigin + an adaptive timeout.
 	bootstrapPhaseActive := ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching
-	if bootstrapOrigin := ci.BootstrapOrigin(); bootstrapPhaseActive && bootstrapOrigin != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
-		elapsed := p.Now.Sub(time.Unix(*bootstrapOrigin, 0))
-
-		warnTimeout := bootstrapWarnTimeout
-		termTimeout := BootstrapTerminateTimeout
-		if p.BootstrapSurvival != nil {
-			warnTimeout = p.BootstrapSurvival.WarnAfter
-			termTimeout = p.BootstrapSurvival.TerminateAfter
-		}
-
-		if elapsed >= warnTimeout {
+	if bootstrapPhaseActive && ci.BootstrapDeadlineUnix != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
+		deadline := time.Unix(*ci.BootstrapDeadlineUnix, 0)
+		remaining := deadline.Sub(p.Now)
+		warnRemaining := BootstrapTerminateTimeout - bootstrapWarnTimeout
+		if remaining <= warnRemaining {
 			// Check R2 completion marker only past the warn threshold,
 			// to avoid an R2 call on every reconciliation tick.
 			if hasR2CompletionMarker(p.R2Client, ci.ID) {
@@ -410,7 +406,8 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 					DestroyProvider: true,
 				}
 			}
-			if elapsed >= termTimeout {
+			if remaining <= 0 {
+				elapsed := BootstrapTerminateTimeout - remaining
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
@@ -421,7 +418,6 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
 				}
 			}
-			remaining := termTimeout - elapsed
 			return InstanceAction{
 				Kind:         ActionDisplayOnly,
 				StallMessage: fmt.Sprintf("bootstrap stalled — no activity (terminating in %s)", remaining.Truncate(time.Second)),

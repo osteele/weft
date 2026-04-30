@@ -19,6 +19,7 @@ import (
 const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 		max_spend_cents, max_time_seconds, actual_spend_cents,
 		created_at, ready_at, launched_at, ended_at,
+		bootstrap_deadline_unix, agent_ready_at_unix,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		inet_down_mbps, inet_up_mbps, cuda_version,
 		provider_instance_id, data_center,
@@ -94,6 +95,18 @@ type Launch struct {
 	ReadyAt            *int64 // cloud instance ready (before SSH setup)
 	LaunchedAt         *int64
 	EndedAt            *int64
+	// BootstrapDeadlineUnix is the absolute deadline by which the agent
+	// should have come up. Set by LaunchInstance from the configured
+	// bootstrap-terminate timeout; backfilled for pre-#4 rows by
+	// migration. The reconciler reads it directly to decide whether
+	// bootstrap has stalled.
+	BootstrapDeadlineUnix *int64
+	// AgentReadyAtUnix is set by the live-state sync the first time the
+	// agent's bootstrap_stage transitions to "ready" (or, equivalently,
+	// the first job starts running). It stays set across restarts and
+	// gives the move-to-new "claim after agent ready" path a concrete
+	// per-launch signal to consult.
+	AgentReadyAtUnix   *int64
 	DataCenter         string // data center / geolocation of the instance
 	InstanceRole       string // "worker" or "donor"
 	DonorInstanceID    *int64 // DB ID of the donor instance that seeded this worker (data locality)
@@ -647,6 +660,41 @@ func SetLaunchReadyAt(db *sql.DB, id int64) error {
 	now := time.Now().Unix()
 	_, err := db.Exec(`UPDATE launches SET ready_at = ? WHERE id = ?`, now, id)
 	return err
+}
+
+// SetLaunchBootstrapDeadline persists the absolute bootstrap deadline.
+// Called once at launch time.
+func SetLaunchBootstrapDeadline(db *sql.DB, id int64, deadline time.Time) error {
+	_, err := db.Exec(`UPDATE launches SET bootstrap_deadline_unix = ? WHERE id = ?`, deadline.Unix(), id)
+	return err
+}
+
+// SetLaunchAgentReadyAtIfUnset records the first time the agent reports
+// ready. Subsequent calls are no-ops (the first transition wins, same
+// pattern as SetLaunchProviderRunningAt).
+func SetLaunchAgentReadyAtIfUnset(db *sql.DB, id int64, t time.Time) error {
+	_, err := db.Exec(
+		`UPDATE launches SET agent_ready_at_unix = ? WHERE id = ? AND agent_ready_at_unix IS NULL`,
+		t.Unix(), id,
+	)
+	return err
+}
+
+// IsAgentReady reports whether the agent on this launch has signaled
+// readiness at least once. Used by the move-to-new speculative confirm
+// path to decide when it is safe to claim the job onto this instance.
+func (c *Launch) IsAgentReady() bool {
+	return c != nil && c.AgentReadyAtUnix != nil
+}
+
+// BootstrapDeadlineExceeded reports whether `now` is past the launch's
+// bootstrap deadline. False if the deadline is unset (defensive, but
+// after the backfill migration this should not happen for live rows).
+func (c *Launch) BootstrapDeadlineExceeded(now time.Time) bool {
+	if c == nil || c.BootstrapDeadlineUnix == nil {
+		return false
+	}
+	return now.Unix() > *c.BootstrapDeadlineUnix
 }
 
 // SetLaunchProviderRunningAt records when the cloud provider first reported the
@@ -1383,6 +1431,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var gpuSpec, gpuClass sql.NullString
 	var gpuMemGB, maxSpend, maxTime, actualSpend sql.NullInt64
 	var readyAt, launchedAt, endedAt sql.NullInt64
+	var bootstrapDeadline, agentReadyAt sql.NullInt64
 	var resolvedGPUName sql.NullString
 	var costPerHourCents, numGPUs sql.NullInt64
 	var dlPerf, reliability, inetDown, inetUp, cudaVersion sql.NullFloat64
@@ -1413,6 +1462,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
 		&maxSpend, &maxTime, &actualSpend,
 		&c.CreatedAt, &readyAt, &launchedAt, &endedAt,
+		&bootstrapDeadline, &agentReadyAt,
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
 		&inetDown, &inetUp, &cudaVersion,
 		&providerInstanceID, &dataCenter,
@@ -1461,6 +1511,12 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if endedAt.Valid {
 		c.EndedAt = &endedAt.Int64
+	}
+	if bootstrapDeadline.Valid {
+		c.BootstrapDeadlineUnix = &bootstrapDeadline.Int64
+	}
+	if agentReadyAt.Valid {
+		c.AgentReadyAtUnix = &agentReadyAt.Int64
 	}
 	if resolvedGPUName.Valid {
 		c.ResolvedGPUName = resolvedGPUName.String

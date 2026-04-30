@@ -1788,3 +1788,50 @@ func containsID(ids []int64, target int64) bool {
 func nowUnix() int64 {
 	return time.Now().Unix()
 }
+
+func TestLaunchBootstrapDeadlineAndAgentReady(t *testing.T) {
+	database := SetupTestDB(t)
+	id, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	deadline := time.Now().Add(20 * time.Minute)
+	if err := SetLaunchBootstrapDeadline(database, id, deadline); err != nil {
+		t.Fatalf("SetLaunchBootstrapDeadline: %v", err)
+	}
+	got, err := GetLaunch(database, id)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.BootstrapDeadlineUnix == nil || *got.BootstrapDeadlineUnix != deadline.Unix() {
+		t.Fatalf("BootstrapDeadlineUnix = %v, want %d", got.BootstrapDeadlineUnix, deadline.Unix())
+	}
+	if got.BootstrapDeadlineExceeded(time.Now()) {
+		t.Errorf("future deadline should not be exceeded")
+	}
+	if !got.BootstrapDeadlineExceeded(deadline.Add(time.Second)) {
+		t.Errorf("past deadline should be exceeded")
+	}
+	if got.IsAgentReady() {
+		t.Errorf("agent should not be ready before SetLaunchAgentReadyAtIfUnset")
+	}
+
+	first := time.Unix(1700000000, 0)
+	if err := SetLaunchAgentReadyAtIfUnset(database, id, first); err != nil {
+		t.Fatalf("SetLaunchAgentReadyAtIfUnset: %v", err)
+	}
+	got, _ = GetLaunch(database, id)
+	if !got.IsAgentReady() || *got.AgentReadyAtUnix != first.Unix() {
+		t.Fatalf("AgentReadyAtUnix = %v, want %d", got.AgentReadyAtUnix, first.Unix())
+	}
+
+	// Subsequent calls must not overwrite the first transition.
+	if err := SetLaunchAgentReadyAtIfUnset(database, id, first.Add(time.Hour)); err != nil {
+		t.Fatalf("second SetLaunchAgentReadyAtIfUnset: %v", err)
+	}
+	got, _ = GetLaunch(database, id)
+	if *got.AgentReadyAtUnix != first.Unix() {
+		t.Errorf("first transition should win: AgentReadyAtUnix = %d, want %d", *got.AgentReadyAtUnix, first.Unix())
+	}
+}

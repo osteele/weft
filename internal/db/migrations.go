@@ -99,6 +99,29 @@ var versionedMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		Description: "add launches.bootstrap_deadline_unix and launches.agent_ready_at_unix",
+		Apply: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE launches ADD COLUMN bootstrap_deadline_unix INTEGER`,
+				`ALTER TABLE launches ADD COLUMN agent_ready_at_unix INTEGER`,
+			} {
+				if err := addColumnIfMissing(db, stmt); err != nil {
+					return err
+				}
+			}
+			// Backfill bootstrap_deadline_unix for existing rows so the
+			// reconciler can read a single column unconditionally instead
+			// of falling back to an inline launched_at + timeout
+			// computation. 1200s = 20m matches campaign.BootstrapTerminateTimeout.
+			if _, err := db.Exec(`UPDATE launches
+				SET bootstrap_deadline_unix = COALESCE(launched_at, created_at) + 1200
+				WHERE bootstrap_deadline_unix IS NULL`); err != nil {
+				return err
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

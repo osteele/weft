@@ -108,12 +108,14 @@ func TestCheckInstance_GraceNotExpired(t *testing.T) {
 
 func TestCheckInstance_BootstrapStalled(t *testing.T) {
 	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
+	expiredDeadline := time.Now().Add(-5 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
-			ID:         1,
-			Status:     db.LaunchStatusRunning,
-			LaunchedAt: &launchedAt,
+			ID:                    1,
+			Status:                db.LaunchStatusRunning,
+			LaunchedAt:            &launchedAt,
+			BootstrapDeadlineUnix: &expiredDeadline,
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
 		Now:      time.Now(),
@@ -127,13 +129,17 @@ func TestCheckInstance_BootstrapStalled(t *testing.T) {
 }
 
 func TestCheckInstance_BootstrapWarnOnly(t *testing.T) {
+	// Deadline 4 minutes in the future = inside the warn window
+	// (BootstrapTerminateTimeout - bootstrapWarnTimeout = 10m).
 	launchedAt := time.Now().Add(-16 * time.Minute).Unix()
+	warnDeadline := time.Now().Add(4 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
-			ID:         1,
-			Status:     db.LaunchStatusRunning,
-			LaunchedAt: &launchedAt,
+			ID:                    1,
+			Status:                db.LaunchStatusRunning,
+			LaunchedAt:            &launchedAt,
+			BootstrapDeadlineUnix: &warnDeadline,
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
 		Now:      time.Now(),
@@ -146,95 +152,23 @@ func TestCheckInstance_BootstrapWarnOnly(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_AdaptiveBootstrapTimeout(t *testing.T) {
-	// With a custom 6-minute terminate timeout, an instance at 7 minutes
-	// should be terminated (even though it's under the default 20m).
-	launchedAt := time.Now().Add(-7 * time.Minute).Unix()
-	r := NewReconciler()
-	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.Launch{
-			ID:         1,
-			Status:     db.LaunchStatusRunning,
-			LaunchedAt: &launchedAt,
-		},
-		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
-		Now:      time.Now(),
-		BootstrapSurvival: &db.BootstrapSurvival{
-			WarnAfter:      4 * time.Minute,
-			TerminateAfter: 6 * time.Minute,
-		},
-	})
-	if action.Kind != ActionBootstrapStalled {
-		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
-	}
-	if !strings.Contains(action.StallMessage, "bootstrap timeout after") {
-		t.Errorf("StallMessage = %q, want 'bootstrap timeout after...'", action.StallMessage)
-	}
-}
-
-func TestCheckInstance_AdaptiveBootstrapWarn(t *testing.T) {
-	// With a custom 4-minute warn, 6-minute terminate: at 5 minutes,
-	// should warn but not terminate.
-	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
-	r := NewReconciler()
-	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.Launch{
-			ID:         1,
-			Status:     db.LaunchStatusRunning,
-			LaunchedAt: &launchedAt,
-		},
-		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
-		Now:      time.Now(),
-		BootstrapSurvival: &db.BootstrapSurvival{
-			WarnAfter:      4 * time.Minute,
-			TerminateAfter: 6 * time.Minute,
-		},
-	})
-	if action.Kind != ActionDisplayOnly {
-		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
-	}
-	if !strings.Contains(action.StallMessage, "terminating in") {
-		t.Errorf("StallMessage = %q, should contain remaining time", action.StallMessage)
-	}
-}
-
-func TestCheckInstance_BootstrapUsesProviderRunningAt(t *testing.T) {
-	// LaunchedAt is 25 minutes ago (would trigger timeout), but
-	// ProviderRunningAt is only 2 minutes ago (within threshold).
-	// Should NOT trigger bootstrap stall.
+func TestCheckInstance_BootstrapNoStallWithoutDeadline(t *testing.T) {
+	// Defensive: a launch without a deadline (legacy row that somehow
+	// escaped the backfill migration) is not stalled by the reconciler;
+	// other paths catch it (e.g. launching-phase catch-all).
 	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
-	providerRunningAt := time.Now().Add(-2 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
-			ID:                1,
-			Status:            db.LaunchStatusRunning,
-			LaunchedAt:        &launchedAt,
-			ProviderRunningAt: &providerRunningAt,
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
 		Now:      time.Now(),
 	})
 	if action.Kind == ActionBootstrapStalled {
-		t.Fatalf("should not trigger bootstrap stall when ProviderRunningAt is recent")
-	}
-}
-
-func TestCheckInstance_BootstrapFallsBackToLaunchedAt(t *testing.T) {
-	// When ProviderRunningAt is nil, should fall back to LaunchedAt.
-	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
-	r := NewReconciler()
-	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.Launch{
-			ID:         1,
-			Status:     db.LaunchStatusRunning,
-			LaunchedAt: &launchedAt,
-		},
-		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
-		Now:      time.Now(),
-	})
-	if action.Kind != ActionBootstrapStalled {
-		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
+		t.Fatalf("action.Kind = ActionBootstrapStalled, expected no stall when deadline column is unset")
 	}
 }
 

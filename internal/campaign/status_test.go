@@ -465,10 +465,15 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	// Set launched_at to 25 minutes ago (beyond terminate threshold) and provider_instance_id
+	// Set launched_at to 25 minutes ago and a bootstrap deadline 5 min
+	// in the past (beyond terminate threshold). With the deadline column
+	// as the single source of truth (specs/job-move.allium §
+	// InstanceReadiness), reconciler stalls fire when now > deadline.
 	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
-	_, err = database.Exec(`UPDATE launches SET launched_at = ?, provider_instance_id = ? WHERE id = ?`,
-		launchedAt, "test-123", instanceID)
+	expiredDeadline := time.Now().Add(-5 * time.Minute).Unix()
+	_, err = database.Exec(
+		`UPDATE launches SET launched_at = ?, provider_instance_id = ?, bootstrap_deadline_unix = ? WHERE id = ?`,
+		launchedAt, "test-123", expiredDeadline, instanceID)
 	if err != nil {
 		t.Fatalf("update launched_at: %v", err)
 	}
