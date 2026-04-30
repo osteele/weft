@@ -75,6 +75,30 @@ var versionedMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		Description: "add placement_intents table",
+		Apply: func(db *sql.DB) error {
+			stmts := []string{
+				`CREATE TABLE IF NOT EXISTS placement_intents (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES jobs(id),
+					operation TEXT NOT NULL,
+					state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','confirmed','canceled')),
+					created_at INTEGER NOT NULL,
+					resolved_at INTEGER,
+					resolution TEXT
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_placement_intents_job ON placement_intents(job_id)`,
+				`CREATE UNIQUE INDEX IF NOT EXISTS idx_placement_intents_open ON placement_intents(job_id) WHERE state = 'open'`,
+			}
+			for _, s := range stmts {
+				if _, err := db.Exec(s); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

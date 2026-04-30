@@ -633,3 +633,58 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenMoveIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenPlacementIntent(t *testing.T) {
+	// Regression: a job with an open PlacementIntent (e.g. inside an
+	// in-flight RelaunchOrphanedJobs or bulk move) is invisible to the
+	// autopilot's planner and relaunch scope. See specs/job-move.allium
+	// § AutopilotIgnoresMovingJobs (intent-inclusive).
+	database := db.SetupTestDB(t)
+
+	placing, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python a.py", "placing", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU placing: %v", err)
+	}
+	other, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python b.py", "other", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU other: %v", err)
+	}
+	if _, err := db.CreatePlacementIntent(database, placing, "test"); err != nil {
+		t.Fatalf("CreatePlacementIntent: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	var seenUnplaced []int64
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, unplaced []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		for _, j := range unplaced {
+			if j != nil {
+				seenUnplaced = append(seenUnplaced, j.ID)
+			}
+		}
+		return campaign.AutoPlacementPlan{}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	if _, err := RunGroupedAutoPilotPass(context.Background(), database, nil); err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+
+	for _, id := range seenUnplaced {
+		if id == placing {
+			t.Errorf("planner saw placing job %d in unplaced set", placing)
+		}
+	}
+	if len(seenUnplaced) == 0 || seenUnplaced[0] != other {
+		t.Errorf("planner saw %v, expected only [%d]", seenUnplaced, other)
+	}
+}

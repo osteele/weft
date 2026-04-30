@@ -206,12 +206,60 @@ invariant AtMostOneOpenIntentPerJob {
 
 invariant AutopilotIgnoresMovingJobs {
     -- The central correctness property. Without this, the autopilot races
-    -- the move flow's intermediate unplaced window and reuses some other
-    -- existing instance for the job — typically the original source.
-    -- Implemented by filtering autopilot.unplaced_jobs and rebalance
-    -- candidates by `not exists(MoveIntent { job = j, state = open })`.
+    -- in-flight placement / move work and double-handles the same job.
+    -- The exclusion is over the union of MoveIntent and PlacementIntent:
+    -- both kinds claim "this job is being handled — do not touch it"
+    -- from the autopilot's perspective. Implemented by filtering
+    -- autopilot.unplaced_jobs and rebalance candidates by
+    -- `not exists(MoveIntent { job = j, state = open })
+    --      and not exists(PlacementIntent { job = j, state = open })`.
     for j in autopilot.candidate_jobs:
         not exists(MoveIntent { job = j, state = open })
+        and not exists(PlacementIntent { job = j, state = open })
+}
+
+-- ==========================================================================
+-- PlacementIntent (sibling of MoveIntent)
+-- ==========================================================================
+
+-- Records that a programmatic placement attempt is in flight: the
+-- LaunchCampaign-driven initial placement, RelaunchOrphanedJobs after
+-- an instance failure, or a bulk move-to-new. Distinct from MoveIntent
+-- only in provenance — both serve the same "autopilot, hands off"
+-- function.
+--
+-- Replaces a prior pattern that flipped Job.pending_status to
+-- pending_placement at the start of an operation and restored it on
+-- defer; that pattern relied on a special-case in the autopilot
+-- ("rescue" pending_placement+unplaced jobs that got stranded by a
+-- crash). With explicit intents, the rescue branch is no longer needed
+-- to ensure progress: stranded intents are detected by their age and
+-- canceled via CancelStalePlacementIntents.
+entity PlacementIntent {
+    job: Job
+    operation: String           -- "auto_relaunch", "bulk_move", etc.
+    state: PlacementIntentState
+    created_at: Timestamp
+    resolved_at: Timestamp?
+    resolution: String?
+}
+
+value PlacementIntentState = open | confirmed | canceled
+
+invariant AtMostOnePlacementIntentOpenPerJob {
+    for job in jobs:
+        count(PlacementIntent { job = job, state = open }) <= 1
+}
+
+rule CancelStalePlacementIntents {
+    -- A placement that has been "open" longer than the configured
+    -- staleness window is presumed abandoned (process crashed before
+    -- closing it) and is auto-canceled. The job then becomes a normal
+    -- autopilot candidate again.
+    when: PeriodicReconcile()
+    for intent in PlacementIntent { state = open }:
+      requires: now - intent.created_at > config.placement_intent_stale_after
+      ensures: ResolvePlacementIntent(intent, canceled, "stale (auto-canceled)")
 }
 
 invariant SourceLaunchUnchangedWhileIntentOpen {

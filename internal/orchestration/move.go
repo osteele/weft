@@ -525,13 +525,14 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 			launchableIDs = append(launchableIDs, job.ID)
 		}
 	}
-	markedJobIDs, err := markJobsPendingPlacement(database, launchableIDs)
+	window, err := openPlacementWindow(database, launchableIDs, "bulk_move")
 	if err != nil {
 		return BulkResult{}, err
 	}
+	bulkSuccess := false
 	defer func() {
-		if restoreErr := restorePendingPlacementToQueued(database, markedJobIDs); restoreErr != nil {
-			slog.Warn("failed to normalize pending_placement jobs", "component", "move", "error", restoreErr)
+		if closeErr := closePlacementWindow(database, window, bulkSuccess); closeErr != nil {
+			slog.Warn("failed to close placement window", "component", "move", "error", closeErr)
 		}
 	}()
 
@@ -642,6 +643,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		}
 	}
 	logPhase("complete", moveStarted, fmt.Sprintf("instances=%d", len(result.InstanceIDs)), nil)
+	bulkSuccess = true
 	return BulkResult{InstanceIDs: result.InstanceIDs}, nil
 }
 

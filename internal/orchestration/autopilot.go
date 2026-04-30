@@ -47,6 +47,16 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		return nil, err
 	}
+	placingJobs, err := db.JobIDsWithOpenPlacementIntents(database)
+	if err != nil {
+		return nil, err
+	}
+	// Union: any job with an open intent (move or placement) is being
+	// handled by another path; the autopilot must not race it. See
+	// specs/job-move.allium § AutopilotIgnoresMovingJobs.
+	for jobID := range placingJobs {
+		movingJobs[jobID] = struct{}{}
+	}
 	unplaced := make([]*db.Job, 0, len(unplacedJobs))
 	for _, job := range unplacedJobs {
 		// IsUnplacedAwaitingPlacement (rather than IsUnplacedQueued) so jobs
@@ -55,9 +65,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if !job.IsUnplacedAwaitingPlacement() {
 			continue
 		}
-		// A job with an open MoveIntent is being deliberately moved by another
-		// path; treat it as already placed (autopilot would otherwise race the
-		// move and reuse some other instance — see specs/job-move.allium).
+		// A job with an open MoveIntent or PlacementIntent is already being
+		// handled by another path; treat it as placed for the autopilot's
+		// purposes. See specs/job-move.allium § AutopilotIgnoresMovingJobs.
 		if _, moving := movingJobs[job.ID]; moving {
 			continue
 		}
@@ -254,10 +264,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if job == nil || job.HasTag(db.TagInventory) {
 			continue
 		}
-		// Accept both queued and pending_placement unplaced rentals; the
-		// latter can get stuck when a prior reset leaves the attempt in
-		// pending_placement and the autopilot would otherwise never touch
-		// it — producing unplaced jobs with no blocked reason.
+		// Accept both queued and pending_placement unplaced rentals.
+		// pending_placement *with* an open PlacementIntent is being
+		// actively placed (excluded above); pending_placement *without*
+		// an intent is a stranded job from a crashed pre-intent path or
+		// a stale operation, and should fall through to be reported.
 		if es := job.EffectiveStatus(); es != db.StatusQueued && es != db.StatusPendingPlacement {
 			continue
 		}

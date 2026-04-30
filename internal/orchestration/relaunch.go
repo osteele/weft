@@ -25,13 +25,14 @@ func RelaunchOrphanedJobs(
 	restrictToReset bool,
 	includeFreshUnplaced bool,
 ) (*campaign.RelaunchResult, error) {
-	markedJobIDs, err := markJobsPendingPlacement(database, scopeJobIDs)
+	window, err := openPlacementWindow(database, scopeJobIDs, "auto_relaunch")
 	if err != nil {
 		return nil, err
 	}
+	success := false
 	defer func() {
-		if restoreErr := restorePendingPlacementToQueued(database, markedJobIDs); restoreErr != nil {
-			slog.Warn("failed to normalize pending_placement jobs", "component", "auto-relaunch", "error", restoreErr)
+		if closeErr := closePlacementWindow(database, window, success); closeErr != nil {
+			slog.Warn("failed to close placement window", "component", "auto-relaunch", "error", closeErr)
 		}
 	}()
 
@@ -92,8 +93,9 @@ func RelaunchOrphanedJobs(
 		return nil, err
 	}
 	if result == nil {
-		return &campaign.RelaunchResult{}, nil
+		result = &campaign.RelaunchResult{}
 	}
+	success = true
 	return result, nil
 }
 
