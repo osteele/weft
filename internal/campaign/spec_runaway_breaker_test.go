@@ -438,3 +438,57 @@ func TestSpec_RunawayBreakerTrips_WithoutCampaignID(t *testing.T) {
 		t.Error("expected non-empty reason")
 	}
 }
+
+func TestResetGlobalRunawayBreaker_ClearsTrippedBreaker(t *testing.T) {
+	// ResetGlobalRunawayBreaker should write a resume event with the
+	// project=<all> scope, clearing a previously tripped global breaker.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	// Trip the breaker without a campaign linkage (the case the new helper targets).
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchRunawayTripped,
+		Detail:    "project=<all>; test trip",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent (trip): %v", err)
+	}
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			SpendNoProgressLimitCent: 500,
+			ResumeGracePeriod:        time.Nanosecond, // skip the post-resume grace window
+		},
+	}
+
+	now := time.Now()
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, now)
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker (before reset): %v", err)
+	}
+	if !tripped {
+		t.Fatal("expected breaker tripped before reset")
+	}
+
+	if err := ResetGlobalRunawayBreaker(database, "test"); err != nil {
+		t.Fatalf("ResetGlobalRunawayBreaker: %v", err)
+	}
+
+	// Advance time past the grace window so the breaker is fully clear.
+	tripped, _, err = evaluateRunawayBreaker(database, cfg, []*db.Job{job}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker (after reset): %v", err)
+	}
+	if tripped {
+		t.Fatal("expected breaker cleared after ResetGlobalRunawayBreaker")
+	}
+}

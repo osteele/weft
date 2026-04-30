@@ -1033,9 +1033,18 @@ rule RunawayBreakerClears {
 
     @guidance
         -- Auto-clears when user retries a job in the affected scope.
-        -- Also clearable manually via `weft campaign safety resume`.
+        -- Manual clear paths:
+        --   - Per-campaign scope: `weft campaign safety resume --campaign N`
+        --   - Global scope (campaign_id=NULL, project=<all>):
+        --     `weft autopilot budget reset` or, in the TUI budget prompt
+        --     ($-key), Ctrl-R while on the daily-cap step.
+        -- The global path is required when the breaker trips on jobs that
+        -- aren't yet attached to any campaign — `weft campaign safety
+        -- resume` rejects --campaign 0 and cannot reach that scope.
         -- Recorded as lifecycle_event kind=relaunch.runaway_resumed.
-        -- Implementation: internal/campaign/relaunch.go ResumeRunawayBreakerForJob()
+        -- Implementation: internal/campaign/relaunch.go
+        -- ResumeRunawayBreakerForJob() (auto), ResetGlobalRunawayBreaker()
+        -- (manual global), cmd/campaign_safety.go (manual per-campaign).
 }
 
 -- --------------------------------------------------------------------------

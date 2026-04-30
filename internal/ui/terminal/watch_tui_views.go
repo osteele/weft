@@ -817,7 +817,7 @@ func (m watchModel) autoPilotStatusLine() string {
 		return ""
 	}
 	if m.autoRunRateInputActive {
-		return fmt.Sprintf("Run-rate target ($/hr): %s (Enter=save, Esc=cancel)", m.autoRunRateInputValue)
+		return autoBudgetPromptStatus(m.autoRunRateInputStep, m.autoRunRateInputValue)
 	}
 	if line := formatAgentBuildStatus(); line != "" {
 		return line
@@ -983,7 +983,7 @@ func (m watchModel) renderProjectHelpView() string {
 		"  r refresh",
 		"  l open launch planner",
 		"  A toggle auto-pilot",
-		"  $ set run-rate target ($/hr)",
+		"  $ set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)",
 		"",
 		"Help:",
 		"  ? toggle this help",
@@ -1030,7 +1030,7 @@ func (m watchModel) renderWatchHelpView() string {
 		"  r retry failed instances",
 		"  B double retry budget for selected failed instance and retry",
 		"  A toggle auto-pilot",
-		"  $ set run-rate target ($/hr)",
+		"  $ set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)",
 		"",
 		"Help:",
 		"  ? toggle this help",

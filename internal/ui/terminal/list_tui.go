@@ -70,6 +70,8 @@ type listTUIModel struct {
 	autoRunRateTargetCents     int
 	autoRunRateInputActive     bool
 	autoRunRateInputValue      string
+	autoRunRateInputStep       autoBudgetInputStep
+	autoDailyCapCents          int
 	autoNextPassAt             time.Time
 	autoLeaseOwner             string
 	autoLeaseScope             string
@@ -96,6 +98,13 @@ type listTUIModel struct {
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
 }
+
+type autoBudgetInputStep int
+
+const (
+	autoBudgetStepHourly autoBudgetInputStep = iota
+	autoBudgetStepDaily
+)
 
 type listJobsLoadedMsg struct {
 	jobs             []*db.Job
@@ -228,7 +237,8 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		autoMode:               groupedByStatus && autoMode,
 		autoLeaseOwner:         fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		autoLeaseScope:         buildListAutoLeaseScope(title),
-		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(),
+		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(cfg),
+		autoDailyCapCents:      loadAutoRunawaySpendDailyCapCents(cfg),
 		quickLaunchScope:       "list_quick_launch:" + buildListAutoLeaseScope(title),
 		focused:                true,
 		appConfig:              cfg,
@@ -1053,7 +1063,7 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return ""
 	}
 	if m.autoRunRateInputActive {
-		return fmt.Sprintf("Run-rate target ($/hr): %s (Enter=save, Esc=cancel)", m.autoRunRateInputValue)
+		return autoBudgetPromptStatus(m.autoRunRateInputStep, m.autoRunRateInputValue)
 	}
 	if line := formatAgentBuildStatus(); line != "" {
 		return line
@@ -1089,7 +1099,7 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 
 func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.autoRunRateInputActive {
-		return "Enter new run-rate target ($/hr): " + m.autoRunRateInputValue + "  Enter:save  Esc:cancel"
+		return autoBudgetPromptControls(m.autoRunRateInputStep, m.autoRunRateInputValue)
 	}
 	autoState := "OFF"
 	if m.autoMode {
@@ -1383,6 +1393,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m listTUIModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
 	m.autoRunRateInputActive = true
+	m.autoRunRateInputStep = autoBudgetStepHourly
 	if m.autoRunRateTargetCents <= 0 {
 		m.autoRunRateInputValue = ""
 	} else {
@@ -1396,25 +1407,73 @@ func (m listTUIModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.
 	case "esc":
 		m.autoRunRateInputActive = false
 		m.autoRunRateInputValue = ""
-		m.statusMessage = "Run-rate target unchanged"
+		switch m.autoRunRateInputStep {
+		case autoBudgetStepDaily:
+			m.statusMessage = "Daily cap unchanged"
+		default:
+			m.statusMessage = "Run-rate target unchanged"
+		}
+		m.autoRunRateInputStep = autoBudgetStepHourly
+		return m, nil
+	case "ctrl+r":
+		if m.autoRunRateInputStep == autoBudgetStepDaily {
+			if err := campaign.ResetGlobalRunawayBreaker(m.database, "TUI"); err != nil {
+				m.statusMessage = fmt.Sprintf("Reset breaker failed: %v", err)
+				return m, nil
+			}
+			m.statusMessage = "Daily-budget breaker reset"
+			m.autoRunRateInputActive = false
+			m.autoRunRateInputValue = ""
+			m.autoRunRateInputStep = autoBudgetStepHourly
+			m.clearAutoPilotPersistentState()
+			m.resumeAutoPilotNow()
+			if cmd := m.runAutoPilot(); cmd != nil {
+				return m, cmd
+			}
+			return m, nil
+		}
 		return m, nil
 	case "enter":
-		cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
-		if err != nil {
-			m.statusMessage = "Run-rate target: " + err.Error()
+		switch m.autoRunRateInputStep {
+		case autoBudgetStepHourly:
+			cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
+			if err != nil {
+				m.statusMessage = "Run-rate target: " + err.Error()
+				return m, nil
+			}
+			if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
+				m.statusMessage = fmt.Sprintf("Run-rate target save failed: %v", err)
+				return m, nil
+			}
+			m.autoRunRateTargetCents = cents
+			m.autoRunRateInputStep = autoBudgetStepDaily
+			if m.autoDailyCapCents <= 0 {
+				m.autoRunRateInputValue = ""
+			} else {
+				m.autoRunRateInputValue = fmt.Sprintf("%.2f", float64(m.autoDailyCapCents)/100)
+			}
+			m.statusMessage = fmt.Sprintf("Run-rate set to %s — now enter daily cap", formatAutoRunRateTarget(cents))
 			return m, nil
-		}
-		if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
-			m.statusMessage = fmt.Sprintf("Run-rate target save failed: %v", err)
+		case autoBudgetStepDaily:
+			cents, err := parseAutoDollarInput(m.autoRunRateInputValue, "daily cap")
+			if err != nil {
+				m.statusMessage = "Daily cap: " + err.Error()
+				return m, nil
+			}
+			if err := saveAutoRunawaySpendDailyCapCents(cents); err != nil {
+				m.statusMessage = fmt.Sprintf("Daily cap save failed: %v", err)
+				return m, nil
+			}
+			m.autoDailyCapCents = cents
+			m.autoRunRateInputActive = false
+			m.autoRunRateInputValue = ""
+			m.autoRunRateInputStep = autoBudgetStepHourly
+			m.statusMessage = "Daily cap set to " + formatAutoDailyCap(cents)
+			m.resumeAutoPilotNow()
+			if cmd := m.runAutoPilot(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
-		}
-		m.autoRunRateTargetCents = cents
-		m.autoRunRateInputActive = false
-		m.autoRunRateInputValue = ""
-		m.statusMessage = "Run-rate target set to " + formatAutoRunRateTarget(cents)
-		m.resumeAutoPilotNow()
-		if cmd := m.runAutoPilot(); cmd != nil {
-			return m, cmd
 		}
 		return m, nil
 	case "backspace", "ctrl+h":
@@ -1539,7 +1598,7 @@ func (m listTUIModel) renderListHelpView() string {
 			"",
 			"Grouped-only actions:",
 			"  A toggle auto-pilot",
-			"  $ set run-rate target ($/hr)",
+			"  $ set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)",
 			"  n launch a new instance for queued jobs",
 			"  k kill selected job",
 			"  u unplace selected queued job",

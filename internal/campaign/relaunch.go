@@ -686,6 +686,23 @@ func summarizeBudgetDetail(detail string) string {
 const runawayPausedReason = "paused: repeated launch failures without progress"
 const defaultResumeGracePeriod = 15 * time.Minute
 
+// ResetGlobalRunawayBreaker inserts a global resume event for the runaway
+// breaker (campaign_id=NULL, project=<all>). source is recorded in the
+// event detail (e.g. "CLI", "TUI") so operators can audit who cleared it.
+func ResetGlobalRunawayBreaker(database *sql.DB, source string) error {
+	if database == nil {
+		return fmt.Errorf("database is nil")
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "manual"
+	}
+	return db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchRunawayResumed,
+		Detail:    runawayScopeDetail("", "manual reset via "+source),
+	})
+}
+
 func runawayProjectLabel(project string) string {
 	project = strings.TrimSpace(project)
 	if project == "" {

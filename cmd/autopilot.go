@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
@@ -101,11 +102,35 @@ var autopilotResumeCmd = &cobra.Command{
 	RunE:  runAutopilotResume,
 }
 
+var autopilotBudgetCmd = &cobra.Command{
+	Use:   "budget",
+	Short: "Inspect and control the autopilot's spend budget",
+	Long: `Manage the daily-window spend cap that the runaway breaker uses
+to pause unattended relaunches when no jobs are completing.`,
+}
+
+var autopilotBudgetResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Clear the global runaway-breaker trip",
+	Long: `Insert a global resume event for the runaway breaker (campaign_id=NULL,
+project=<all>) so the autopilot stops blocking unplaced jobs after a
+no-progress spend trip.
+
+Use this when "weft jobs list" reports
+  blocked: paused: repeated launch failures without progress
+on jobs that aren't tied to a specific campaign. Per-campaign trips are
+cleared with "weft campaign safety resume --campaign <id>".`,
+	Args: cobra.NoArgs,
+	RunE: runAutopilotBudgetReset,
+}
+
 func init() {
 	rootCmd.AddCommand(autopilotCmd)
 	autopilotCmd.AddCommand(autopilotStatusCmd)
 	autopilotCmd.AddCommand(autopilotPauseCmd)
 	autopilotCmd.AddCommand(autopilotResumeCmd)
+	autopilotCmd.AddCommand(autopilotBudgetCmd)
+	autopilotBudgetCmd.AddCommand(autopilotBudgetResetCmd)
 
 	autopilotStatusCmd.Flags().BoolVar(&autopilotStatusJSON, "json", false, "Emit machine-readable JSON")
 	autopilotStatusCmd.Flags().BoolVar(&autopilotStatusQuiet, "quiet", false,
@@ -326,5 +351,20 @@ func runAutopilotResume(cmd *cobra.Command, args []string) error {
 	}
 	oplog.Log("autopilot.resume")
 	fmt.Println("Autopilot resumed.")
+	return nil
+}
+
+func runAutopilotBudgetReset(cmd *cobra.Command, args []string) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if err := campaign.ResetGlobalRunawayBreaker(database, "CLI"); err != nil {
+		return fmt.Errorf("record resume event: %w", err)
+	}
+	oplog.Log("autopilot.budget.reset")
+	fmt.Println("Runaway-breaker reset for global scope (campaign=<none>, project=<all>).")
 	return nil
 }

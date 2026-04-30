@@ -94,13 +94,23 @@ func SetConfigPathsForTesting(tomlPath, yamlPath string) func() {
 // SetAutoRunRateSoftTarget updates campaign.auto_run_rate_soft_target (USD/hour)
 // in the global TOML config. Values <= 0 disable the target.
 func SetAutoRunRateSoftTarget(usdPerHour float64) error {
-	normalized := usdPerHour
-	if normalized < 0 {
-		normalized = 0
+	return setCampaignUSDField("auto_run_rate_soft_target", usdPerHour)
+}
+
+// SetAutoRunawaySpendNoProgressLimit updates the daily-window spend cap
+// (USD) used by the runaway breaker. Values <= 0 disable the cap by writing
+// 0; the breaker code falls back to the compiled-in default in that case.
+func SetAutoRunawaySpendNoProgressLimit(usd float64) error {
+	return setCampaignUSDField("auto_runaway_spend_no_progress_limit", usd)
+}
+
+func setCampaignUSDField(key string, usd float64) error {
+	if usd < 0 {
+		usd = 0
 	}
-	normalized = math.Round(normalized*100) / 100
+	normalized := math.Round(usd*100) / 100
 	return UpdateGlobalTOML(func(tree *toml.Tree) error {
-		tree.SetPath([]string{"campaign", "auto_run_rate_soft_target"}, normalized)
+		tree.SetPath([]string{"campaign", key}, normalized)
 		return nil
 	})
 }

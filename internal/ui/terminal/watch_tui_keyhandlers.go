@@ -376,6 +376,7 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m watchModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
 	m.autoRunRateInputActive = true
+	m.autoRunRateInputStep = autoBudgetStepHourly
 	if m.autoRunRateTargetCents <= 0 {
 		m.autoRunRateInputValue = ""
 	} else {
@@ -389,25 +390,71 @@ func (m watchModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cm
 	case "esc":
 		m.autoRunRateInputActive = false
 		m.autoRunRateInputValue = ""
-		return m, m.flash.Set("Run-rate target unchanged", false)
-	case "enter":
-		cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
-		if err != nil {
-			return m, m.flash.Set("Run-rate target: "+err.Error(), true)
+		var label string
+		switch m.autoRunRateInputStep {
+		case autoBudgetStepDaily:
+			label = "Daily cap unchanged"
+		default:
+			label = "Run-rate target unchanged"
 		}
-		if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
-			return m, m.flash.Set(fmt.Sprintf("Run-rate target save failed: %v", err), true)
-		}
-		m.autoRunRateTargetCents = cents
-		m.autoRunRateInputActive = false
-		m.autoRunRateInputValue = ""
-		flashCmd := m.flash.Set("Run-rate target set to "+formatAutoRunRateTarget(cents), false)
-		if m.autoMode && len(m.unplacedJobs) > 0 {
-			if cmd := m.runAutoPilot(); cmd != nil {
-				return m, tea.Batch(flashCmd, cmd)
+		m.autoRunRateInputStep = autoBudgetStepHourly
+		return m, m.flash.Set(label, false)
+	case "ctrl+r":
+		if m.autoRunRateInputStep == autoBudgetStepDaily {
+			if err := campaign.ResetGlobalRunawayBreaker(m.database, "TUI"); err != nil {
+				return m, m.flash.Set(fmt.Sprintf("Reset breaker failed: %v", err), true)
 			}
+			m.autoRunRateInputActive = false
+			m.autoRunRateInputValue = ""
+			m.autoRunRateInputStep = autoBudgetStepHourly
+			flashCmd := m.flash.Set("Daily-budget breaker reset", false)
+			if m.autoMode && len(m.unplacedJobs) > 0 {
+				if cmd := m.runAutoPilot(); cmd != nil {
+					return m, tea.Batch(flashCmd, cmd)
+				}
+			}
+			return m, flashCmd
 		}
-		return m, flashCmd
+		return m, nil
+	case "enter":
+		switch m.autoRunRateInputStep {
+		case autoBudgetStepHourly:
+			cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
+			if err != nil {
+				return m, m.flash.Set("Run-rate target: "+err.Error(), true)
+			}
+			if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
+				return m, m.flash.Set(fmt.Sprintf("Run-rate target save failed: %v", err), true)
+			}
+			m.autoRunRateTargetCents = cents
+			m.autoRunRateInputStep = autoBudgetStepDaily
+			if m.autoDailyCapCents <= 0 {
+				m.autoRunRateInputValue = ""
+			} else {
+				m.autoRunRateInputValue = fmt.Sprintf("%.2f", float64(m.autoDailyCapCents)/100)
+			}
+			return m, m.flash.Set(fmt.Sprintf("Run-rate set to %s — now enter daily cap", formatAutoRunRateTarget(cents)), false)
+		case autoBudgetStepDaily:
+			cents, err := parseAutoDollarInput(m.autoRunRateInputValue, "daily cap")
+			if err != nil {
+				return m, m.flash.Set("Daily cap: "+err.Error(), true)
+			}
+			if err := saveAutoRunawaySpendDailyCapCents(cents); err != nil {
+				return m, m.flash.Set(fmt.Sprintf("Daily cap save failed: %v", err), true)
+			}
+			m.autoDailyCapCents = cents
+			m.autoRunRateInputActive = false
+			m.autoRunRateInputValue = ""
+			m.autoRunRateInputStep = autoBudgetStepHourly
+			flashCmd := m.flash.Set("Daily cap set to "+formatAutoDailyCap(cents), false)
+			if m.autoMode && len(m.unplacedJobs) > 0 {
+				if cmd := m.runAutoPilot(); cmd != nil {
+					return m, tea.Batch(flashCmd, cmd)
+				}
+			}
+			return m, flashCmd
+		}
+		return m, nil
 	case "backspace", "ctrl+h":
 		if len(m.autoRunRateInputValue) > 0 {
 			runes := []rune(m.autoRunRateInputValue)

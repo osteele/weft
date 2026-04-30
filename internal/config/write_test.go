@@ -102,3 +102,44 @@ runpod:
 		t.Fatalf("sync.exclude_dirs = %v", cfg.Sync.ExcludeDirs)
 	}
 }
+
+func TestSetAutoRunawaySpendNoProgressLimit(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	yamlPath := filepath.Join(dir, "config.yaml")
+
+	origPath := configPath
+	origLegacy := legacyConfigPath
+	configPath = tomlPath
+	legacyConfigPath = yamlPath
+	defer func() {
+		configPath = origPath
+		legacyConfigPath = origLegacy
+	}()
+
+	if err := SetAutoRunawaySpendNoProgressLimit(7.5); err != nil {
+		t.Fatalf("SetAutoRunawaySpendNoProgressLimit: %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Campaign.AutoRunawaySpendNoProgressLimit != 7.5 {
+		t.Fatalf("AutoRunawaySpendNoProgressLimit = %v, want 7.5", cfg.Campaign.AutoRunawaySpendNoProgressLimit)
+	}
+	if cfg.AutoRunawaySpendNoProgressLimitCents() != 750 {
+		t.Fatalf("cents = %d, want 750", cfg.AutoRunawaySpendNoProgressLimitCents())
+	}
+
+	// Negative clamps to 0; getter then falls back to compiled-in default.
+	if err := SetAutoRunawaySpendNoProgressLimit(-1); err != nil {
+		t.Fatalf("SetAutoRunawaySpendNoProgressLimit(-1): %v", err)
+	}
+	cfg2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg2.Campaign.AutoRunawaySpendNoProgressLimit != 0 {
+		t.Fatalf("after negative, value = %v, want 0", cfg2.Campaign.AutoRunawaySpendNoProgressLimit)
+	}
+}

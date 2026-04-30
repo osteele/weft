@@ -729,14 +729,28 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 		}
 	})
 
-	t.Run("run-rate target save", func(t *testing.T) {
+	t.Run("budget flow save", func(t *testing.T) {
+		// Two-step prompt: Enter on the hourly step advances; Enter on the
+		// daily step saves the daily cap and clears the cooldown.
 		m := makeModel()
 		m.autoRunRateInputActive = true
 		m.autoRunRateInputValue = "2.50"
-		next, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
+		afterHourly, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
+		afterHourlyModel := afterHourly.(listTUIModel)
+		if afterHourlyModel.autoRunRateInputStep != autoBudgetStepDaily {
+			t.Fatalf("expected step to advance to daily, got %v", afterHourlyModel.autoRunRateInputStep)
+		}
+		if !afterHourlyModel.autoRunRateInputActive {
+			t.Fatal("expected prompt still active after hourly step")
+		}
+		afterHourlyModel.autoRunRateInputValue = "off"
+		next, _ := afterHourlyModel.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
 		got := next.(listTUIModel)
+		if got.autoRunRateInputActive {
+			t.Fatal("expected prompt closed after daily step")
+		}
 		if !got.autoNextPassAt.IsZero() {
-			t.Fatalf("expected cooldown cleared after run-rate save, got %v", got.autoNextPassAt)
+			t.Fatalf("expected cooldown cleared after daily save, got %v", got.autoNextPassAt)
 		}
 	})
 }
