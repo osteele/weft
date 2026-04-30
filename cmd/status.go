@@ -660,6 +660,14 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	if reason := humanizeFailureReason(job.FailureReason); reason != "" {
 		fmt.Printf("Reason:   %s\n", reason)
 	}
+	if job.FailureReason == "killed_stdout_silence" {
+		fmt.Printf("Hint:     Emit a periodic progress line so the silence watchdog sees output.\n")
+		fmt.Printf("          Weft parses any of these formats and displays the parsed progress:\n")
+		fmt.Printf("            Progress: 42%%\n")
+		fmt.Printf("            Progress: 9/14\n")
+		fmt.Printf("            Progress: 9 of 14\n")
+		fmt.Printf("          You can also write checkpoints to the job's output dir so the run can be resumed.\n")
+	}
 
 	// Show remediation info for failed jobs
 	if job.ErrorDiagnosis != "" {
