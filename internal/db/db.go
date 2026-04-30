@@ -1048,10 +1048,8 @@ const (
 // statusNeedsRental is the legacy DB value for unplaced jobs. Migrated to StatusQueued with host="".
 const statusNeedsRental = "needs_rental"
 
-// currentSchemaVersion is bumped whenever initSchema changes.
-// If the DB already has this version (via PRAGMA user_version), initSchema
-// is skipped entirely — no write lock needed.
-const currentSchemaVersion = 11
+// currentSchemaVersion is defined in migrations.go (derived from
+// versionedMigrations).
 
 var dbPath string
 var startupRepairFn = startupRepair
@@ -2066,11 +2064,14 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Mark schema as current so subsequent opens skip migrations.
-	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
+	// Mark schema at baseSchemaVersion. The legacy code above brings any
+	// older DB up to this version. Anything beyond baseSchemaVersion is
+	// handled by versionedMigrations, which advances user_version
+	// incrementally as it runs.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", baseSchemaVersion)); err != nil {
 		return fmt.Errorf("set schema version: %w", err)
 	}
-	return nil
+	return runVersionedMigrations(db, baseSchemaVersion, versionedMigrations)
 }
 
 // dedupeArtifactsForUniqueIndexes removes duplicate artifact rows that would
