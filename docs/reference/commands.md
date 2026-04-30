@@ -226,6 +226,75 @@ weft data requests
 weft data requests --host cool100
 ```
 
+### weft db
+
+Manage the local jobs database (`~/.config/weft/jobs.db`): take consistent
+snapshots, prune old snapshots.
+
+#### Automatic pre-migration backups
+
+Whenever `weft` opens a database that needs a schema migration, it first
+writes a snapshot to `~/.config/weft/backups/jobs.db.pre-migration-v<N>-<timestamp>.db`
+using SQLite's `VACUUM INTO`. The previous on-disk schema version is encoded
+in the filename. The 3 most recent pre-migration backups are kept; older ones
+are pruned automatically. Skipped on first init (empty DB) and on read-only
+opens.
+
+If a migration corrupts state, recover by stopping all `weft` processes and
+copying the most recent pre-migration backup over `~/.config/weft/jobs.db`.
+
+#### `weft db snapshot`
+
+```bash
+weft db snapshot [--out PATH]
+```
+
+Take a consistent point-in-time snapshot of the database. The destination is a
+self-contained `.db` file (no `-wal`/`-shm` companions) that can be opened
+directly by `sqlite3` or by analysis tools.
+
+**Flags:**
+- `--out PATH` — destination file (default:
+  `~/.config/weft/backups/jobs.db.snapshot-<timestamp>.db`)
+
+**Examples:**
+```bash
+# Default path under ~/.config/weft/backups/
+weft db snapshot
+
+# Custom destination, e.g. for offline analysis
+weft db snapshot --out ~/Analysis/jobs-2026-04-30.db
+```
+
+For periodic backups, drive this from `launchd` or `cron` — weft does not
+ship a backup daemon. A daily snapshot via launchd is one plist.
+
+#### `weft db gc`
+
+```bash
+weft db gc [--keep N] [--apply]
+```
+
+Prune snapshots in `~/.config/weft/backups/`, keeping the N newest. Defaults
+to dry-run; pass `--apply` to delete. Considers all `.db` files in that
+directory, including pre-migration backups and manual snapshots.
+
+**Flags:**
+- `--keep N` — number of newest snapshots to keep (default: 10)
+- `--apply` — actually delete (without it, only previews)
+
+**Examples:**
+```bash
+# Preview what would be deleted (keep 10 newest)
+weft db gc
+
+# Keep only the 5 most recent and delete the rest
+weft db gc --keep 5 --apply
+
+# Delete every snapshot
+weft db gc --keep 0 --apply
+```
+
 ### weft artifact
 
 Track and retrieve job outputs through a durable local artifact store.

@@ -1155,6 +1155,15 @@ func initSchema(db *sql.DB) error {
 		return nil
 	}
 
+	// A migration is about to run. Snapshot the current DB so the user can
+	// roll back if a migration corrupts state. Skipped on first init (no
+	// existing data to lose) and on read-only opens (Open() returns the
+	// read-only error before reaching here, so initSchema is only entered on
+	// a writable handle, but the file may still be missing user_version).
+	if version > 0 {
+		backupBeforeMigration(db, version)
+	}
+
 	schema := createJobsTableSQL("jobs", true) + `;
 
 	CREATE TABLE IF NOT EXISTS processed_relay_requests (
