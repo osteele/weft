@@ -83,7 +83,7 @@ func TestBuildLocalPrunePlan_SelectsOnlyRestorableFiles(t *testing.T) {
 		t.Fatalf("UpsertArtifact: %v", err)
 	}
 
-	plan, err := buildLocalPrunePlan(database, scopeRoot, true, true, pruneTimeFilter{})
+	plan, err := buildLocalPrunePlan(database, scopeRoot, true, true, pruneTimeFilter{}, nil, nil)
 	if err != nil {
 		t.Fatalf("buildLocalPrunePlan: %v", err)
 	}
@@ -164,11 +164,134 @@ func TestBuildLocalPrunePlan_OlderThanFilter(t *testing.T) {
 		t.Fatalf("UpsertArtifact: %v", err)
 	}
 
-	plan, err := buildLocalPrunePlan(database, scopeRoot, true, false, pruneTimeFilter{olderThan: 24 * time.Hour})
+	plan, err := buildLocalPrunePlan(database, scopeRoot, true, false, pruneTimeFilter{olderThan: 24 * time.Hour}, nil, nil)
 	if err != nil {
 		t.Fatalf("buildLocalPrunePlan: %v", err)
 	}
 	if len(plan.Files) != 1 || plan.Files[0].RelPath != "output/old.txt" {
 		t.Fatalf("unexpected filtered files: %+v", plan.Files)
+	}
+}
+
+func TestFindProjectSubdirs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	parent := t.TempDir()
+	projectA := filepath.Join(parent, "alpha")
+	projectB := filepath.Join(parent, "beta")
+	deepProject := filepath.Join(parent, "gamma", "nested")
+	for _, d := range []string{projectA, projectB, deepProject} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// Each subdir has a job whose working_dir is that subdir.
+	if _, err := db.RecordQueued(database, "host-a", projectA, "echo a", "a"); err != nil {
+		t.Fatalf("RecordQueued alpha: %v", err)
+	}
+	if _, err := db.RecordQueued(database, "host-a", projectB, "echo b", "b"); err != nil {
+		t.Fatalf("RecordQueued beta: %v", err)
+	}
+	// gamma/nested also has a job; its first segment under parent is "gamma".
+	if _, err := db.RecordQueued(database, "host-a", deepProject, "echo g", "g"); err != nil {
+		t.Fatalf("RecordQueued gamma/nested: %v", err)
+	}
+
+	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+	if err != nil {
+		t.Fatalf("ListJobsByStatuses: %v", err)
+	}
+	subdirs, scopeIsProject := findProjectSubdirs(jobs, parent)
+	if scopeIsProject {
+		t.Fatalf("parent should not be a project; jobs only in subdirs")
+	}
+	want := []string{
+		filepath.Join(parent, "alpha"),
+		filepath.Join(parent, "beta"),
+		filepath.Join(parent, "gamma"),
+	}
+	if len(subdirs) != len(want) {
+		t.Fatalf("subdirs = %v, want %v", subdirs, want)
+	}
+	for i, w := range want {
+		if subdirs[i] != w {
+			t.Fatalf("subdirs[%d] = %q, want %q", i, subdirs[i], w)
+		}
+	}
+}
+
+func TestFindProjectSubdirs_ScopeIsProject(t *testing.T) {
+	database := db.SetupTestDB(t)
+	scope := t.TempDir()
+	child := filepath.Join(scope, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+	if _, err := db.RecordQueued(database, "host-a", scope, "echo s", "s"); err != nil {
+		t.Fatalf("RecordQueued scope: %v", err)
+	}
+	if _, err := db.RecordQueued(database, "host-a", child, "echo c", "c"); err != nil {
+		t.Fatalf("RecordQueued child: %v", err)
+	}
+
+	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+	if err != nil {
+		t.Fatalf("ListJobsByStatuses: %v", err)
+	}
+	subdirs, scopeIsProject := findProjectSubdirs(jobs, scope)
+	if !scopeIsProject {
+		t.Fatalf("scope should be detected as project")
+	}
+	want := []string{filepath.Join(scope, "child")}
+	if len(subdirs) != 1 || subdirs[0] != want[0] {
+		t.Fatalf("subdirs = %v, want %v", subdirs, want)
+	}
+}
+
+func TestResolvePruneScopes_AutoRecurses(t *testing.T) {
+	database := db.SetupTestDB(t)
+	parent := t.TempDir()
+	a := filepath.Join(parent, "alpha")
+	if err := os.MkdirAll(a, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := db.RecordQueued(database, "host-a", a, "echo a", "a"); err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+	if err != nil {
+		t.Fatalf("ListJobsByStatuses: %v", err)
+	}
+	scopes, err := resolvePruneScopes(jobs, parent, "auto")
+	if err != nil {
+		t.Fatalf("resolvePruneScopes: %v", err)
+	}
+	if len(scopes) != 1 || scopes[0] != a {
+		t.Fatalf("scopes = %v, want [%s]", scopes, a)
+	}
+}
+
+func TestResolvePruneScopes_OffStaysSingle(t *testing.T) {
+	database := db.SetupTestDB(t)
+	parent := t.TempDir()
+	a := filepath.Join(parent, "alpha")
+	if err := os.MkdirAll(a, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := db.RecordQueued(database, "host-a", a, "echo a", "a"); err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+	if err != nil {
+		t.Fatalf("ListJobsByStatuses: %v", err)
+	}
+	scopes, err := resolvePruneScopes(jobs, parent, "off")
+	if err != nil {
+		t.Fatalf("resolvePruneScopes: %v", err)
+	}
+	if len(scopes) != 1 || scopes[0] != parent {
+		t.Fatalf("scopes = %v, want [%s]", scopes, parent)
 	}
 }

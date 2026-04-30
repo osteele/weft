@@ -304,6 +304,40 @@ image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"  # Override default Docker image
 Use `weft artifact list <job-id>` to see discovered outputs and
 `weft artifact sync <job-id>` to pull them from the remote host on demand.
 
+#### Reclaiming local disk with `prune-local`
+
+`weft artifact prune-local` deletes local files that can be restored later
+from R2 or the local artifact store, freeing disk without losing anything
+recoverable. Defaults to dry-run; pass `--apply` to delete.
+
+**Flags:**
+- `--apply` — delete files (without it, only previews)
+- `--dir PATH` — directory scope (default: current directory)
+- `--older-than DURATION` — restrict to files older than e.g. `7d`, `48h`, `7`
+- `--since WHEN` — restrict to files modified since `YYYY-MM-DD`, RFC3339, or `"24h ago"`
+- `--include-outputs` / `--include-artifacts` — toggle categories (both on by default)
+- `--remove-empty-dirs` — clean up empty dirs after deletion
+- `--recursive auto|on|off` — recurse into project subdirectories. Default
+  `auto`: when `--dir` is itself a project (its path appears as a job's
+  working_dir), prune that project; otherwise prune each child directory that
+  has jobs. `on` always recurses; `off` always treats `--dir` as a single scope.
+
+**Examples:**
+```bash
+# Preview what would be deleted in the current project
+weft artifact prune-local --older-than 7d
+
+# Apply the deletions
+weft artifact prune-local --older-than 7d --apply
+
+# Sweep every project under ~/code in one command (auto-recursion)
+cd ~/code && weft artifact prune-local --apply
+```
+
+While scanning, a single-line progress indicator on stderr reports the current
+phase (loading jobs, scanning R2 outputs, walking output directories). It is
+cleared when the scan completes and is suppressed on non-TTY output.
+
 The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
 - Queue runner schedules queued jobs in FIFO order (subject to CPU allotments)

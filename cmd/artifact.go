@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
@@ -140,6 +141,7 @@ var (
 	pruneOutputs     bool
 	pruneArtifacts   bool
 	pruneRemoveEmpty bool
+	pruneRecursive   string
 )
 
 const defaultArtifactTimeout = 2 * time.Minute
@@ -170,6 +172,7 @@ func init() {
 	artifactPruneLocalCmd.Flags().BoolVar(&pruneOutputs, "include-outputs", true, "Consider convention output files (output/, outputs/)")
 	artifactPruneLocalCmd.Flags().BoolVar(&pruneArtifacts, "include-artifacts", true, "Consider artifact-backed file paths")
 	artifactPruneLocalCmd.Flags().BoolVar(&pruneRemoveEmpty, "remove-empty-dirs", false, "Remove empty directories after deleting files")
+	artifactPruneLocalCmd.Flags().StringVar(&pruneRecursive, "recursive", "auto", "Recurse into project subdirectories: auto (default; on when --dir isn't itself a project), on, off")
 }
 
 func addArtifactListFlags(cmd *cobra.Command) {
@@ -979,12 +982,51 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 	}
 	defer database.Close()
 
-	plan, err := buildLocalPrunePlan(database, scopeRoot, pruneOutputs, pruneArtifacts, filter)
+	progress := newStatusLine(cmd.ErrOrStderr())
+	defer progress.Clear()
+
+	progress.Update("Loading jobs...")
+	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+	if err != nil {
+		return fmt.Errorf("list jobs: %w", err)
+	}
+
+	scopes, err := resolvePruneScopes(jobs, scopeRoot, pruneRecursive)
 	if err != nil {
 		return err
 	}
 
 	effectiveDryRun := !pruneLocalApply || pruneLocalDryRun
+	totalDeleteFailures := 0
+	for i, scope := range scopes {
+		if len(scopes) > 1 {
+			if i > 0 {
+				fmt.Fprintln(cmd.OutOrStdout())
+			}
+			rel, _ := filepath.Rel(scopeRoot, scope)
+			if rel == "" || rel == "." {
+				rel = scope
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "== %s ==\n", rel)
+		}
+		failures, err := pruneOneScope(cmd, database, scope, filter, effectiveDryRun, progress, jobs)
+		if err != nil {
+			return err
+		}
+		totalDeleteFailures += failures
+	}
+	if totalDeleteFailures > 0 {
+		return fmt.Errorf("failed to delete %d file(s)", totalDeleteFailures)
+	}
+	return nil
+}
+
+func pruneOneScope(cmd *cobra.Command, database *sql.DB, scopeRoot string, filter pruneTimeFilter, effectiveDryRun bool, progress *statusLine, jobs []*db.Job) (int, error) {
+	plan, err := buildLocalPrunePlan(database, scopeRoot, pruneOutputs, pruneArtifacts, filter, progress, jobs)
+	if err != nil {
+		return 0, err
+	}
+	progress.Clear()
 
 	for _, warning := range plan.Warnings {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning)
@@ -993,7 +1035,7 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 	if len(plan.Files) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "No restorable local files matched in %s\n", plan.ScopeRoot)
 		printLocalPruneSummary(cmd, plan, effectiveDryRun, 0, 0)
-		return nil
+		return 0, nil
 	}
 
 	sort.Slice(plan.Files, func(i, j int) bool {
@@ -1039,10 +1081,105 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Deleted: %d file(s), reclaimed %s (%d bytes)\n", deletedFiles, humanizeBytes(deletedBytes), deletedBytes)
 		printLocalPruneSummary(cmd, plan, false, deletedFiles, deletedBytes)
 	}
-	if deleteFailures > 0 {
-		return fmt.Errorf("failed to delete %d file(s)", deleteFailures)
+	return deleteFailures, nil
+}
+
+// resolvePruneScopes returns the set of scope roots to prune. When recursive
+// mode is "auto" (default), it inspects the job list: if scopeRoot itself has
+// no associated jobs but its child directories do, the child project dirs are
+// returned instead. "on" forces child-only mode; "off" forces single-scope.
+func resolvePruneScopes(jobs []*db.Job, scopeRoot, mode string) ([]string, error) {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	switch mode {
+	case "", "auto", "on", "off":
+	default:
+		return nil, usageErrorf("--recursive must be one of: auto, on, off")
 	}
-	return nil
+	if mode == "off" {
+		return []string{scopeRoot}, nil
+	}
+	subdirs, scopeIsProject := findProjectSubdirs(jobs, scopeRoot)
+	if mode == "on" {
+		if len(subdirs) == 0 {
+			return []string{scopeRoot}, nil
+		}
+		return subdirs, nil
+	}
+	if scopeIsProject || len(subdirs) == 0 {
+		return []string{scopeRoot}, nil
+	}
+	return subdirs, nil
+}
+
+// findProjectSubdirs returns the immediate child directories of scopeRoot that
+// contain weft jobs (i.e. have been used as a job's working_dir, or contain a
+// directory that has). scopeIsProject is true if scopeRoot itself is a job
+// working_dir.
+func findProjectSubdirs(jobs []*db.Job, scopeRoot string) ([]string, bool) {
+	scopeIsProject := false
+	seen := map[string]struct{}{}
+	for _, job := range jobs {
+		local := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if local == "" {
+			continue
+		}
+		rel, err := filepath.Rel(scopeRoot, local)
+		if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+			continue
+		}
+		if rel == "." {
+			scopeIsProject = true
+			continue
+		}
+		first := strings.SplitN(rel, string(filepath.Separator), 2)[0]
+		if first == "" || first == "." {
+			continue
+		}
+		seen[filepath.Join(scopeRoot, first)] = struct{}{}
+	}
+	subdirs := make([]string, 0, len(seen))
+	for d := range seen {
+		subdirs = append(subdirs, d)
+	}
+	sort.Strings(subdirs)
+	return subdirs, scopeIsProject
+}
+
+// statusLine writes a single overwriting status line to the given writer when
+// it is a TTY. It is safe to call all methods on a nil receiver and on a
+// non-TTY writer; both no-op.
+type statusLine struct {
+	w       io.Writer
+	enabled bool
+	lastLen int
+}
+
+func newStatusLine(w io.Writer) *statusLine {
+	s := &statusLine{w: w}
+	if f, ok := w.(*os.File); ok {
+		s.enabled = term.IsTerminal(f.Fd())
+	}
+	return s
+}
+
+func (s *statusLine) Update(msg string) {
+	if s == nil || !s.enabled {
+		return
+	}
+	pad := ""
+	if len(msg) < s.lastLen {
+		pad = strings.Repeat(" ", s.lastLen-len(msg))
+	}
+	fmt.Fprintf(s.w, "\r%s%s", msg, pad)
+	s.lastLen = len(msg)
+}
+
+func (s *statusLine) Clear() {
+	if s == nil || !s.enabled || s.lastLen == 0 {
+		return
+	}
+	fmt.Fprintf(s.w, "\r%s\r", strings.Repeat(" ", s.lastLen))
+	s.lastLen = 0
 }
 
 func printLocalPruneSummary(cmd *cobra.Command, plan localPrunePlan, dryRun bool, effectiveFiles int, effectiveBytes int64) {
@@ -1179,13 +1316,16 @@ func parseOlderThanDuration(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool, includeArtifacts bool, filter pruneTimeFilter) (localPrunePlan, error) {
+func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool, includeArtifacts bool, filter pruneTimeFilter, progress *statusLine, jobs []*db.Job) (localPrunePlan, error) {
 	plan := localPrunePlan{ScopeRoot: scopeRoot}
 
 	project, _ := workdir.ResolveProjectName("", scopeRoot)
-	jobs, err := db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
-	if err != nil {
-		return plan, fmt.Errorf("list jobs: %w", err)
+	if jobs == nil {
+		var err error
+		jobs, err = db.ListJobsByStatuses(database, nil, "", "", 0, nil, "")
+		if err != nil {
+			return plan, fmt.Errorf("list jobs: %w", err)
+		}
 	}
 	scopeJobs := filterJobsForScope(jobs, scopeRoot, project)
 
@@ -1199,7 +1339,8 @@ func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool
 		if r2Client == nil {
 			plan.Warnings = append(plan.Warnings, "R2 not configured; cloud output discovery is limited to locally indexed entries")
 		}
-		for _, job := range scopeJobs {
+		for i, job := range scopeJobs {
+			progress.Update(fmt.Sprintf("Scanning R2 outputs for %s (%d/%d)...", filepath.Base(scopeRoot), i+1, len(scopeJobs)))
 			entries, err := listJobOutputAssets(database, job.ID)
 			if err == nil {
 				for _, entry := range entries {
@@ -1218,7 +1359,8 @@ func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool
 		}
 	}
 	if includeArtifacts {
-		for _, job := range scopeJobs {
+		for i, job := range scopeJobs {
+			progress.Update(fmt.Sprintf("Scanning artifacts for %s (%d/%d)...", filepath.Base(scopeRoot), i+1, len(scopeJobs)))
 			arts, err := db.ListArtifactsByJob(database, job.ID)
 			if err != nil {
 				continue
@@ -1231,6 +1373,7 @@ func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool
 		}
 	}
 
+	progress.Update(fmt.Sprintf("Walking %s...", filepath.Base(scopeRoot)))
 	candidates, err := collectLocalPruneCandidates(scopeRoot, includeArtifacts, restorable)
 	if err != nil {
 		return plan, err
