@@ -115,3 +115,63 @@ func TestJobsForGrouping_ClonesPendingPlacementAsQueued(t *testing.T) {
 		t.Fatalf("original effective status = %q, want %q", got, db.StatusPendingPlacement)
 	}
 }
+
+func TestTryRestoreJobToSource_RestoresWhenSourceAlive(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python a.py", "j", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	// Simulate the move's intermediate "unplace" step: the job loses its
+	// launch association. The intent retains the source.
+	if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("ResetJobToUnplaced: %v", err)
+	}
+
+	if !tryRestoreJobToSource(database, jobID, src) {
+		t.Fatal("tryRestoreJobToSource returned false; expected restore to succeed")
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != src {
+		t.Fatalf("after restore: launch_id = %v, want %d", job.LaunchID, src)
+	}
+}
+
+func TestTryRestoreJobToSource_DoesNotRestoreWhenSourceTerminal(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python a.py", "j", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	if tryRestoreJobToSource(database, jobID, src) {
+		t.Fatal("tryRestoreJobToSource returned true; expected no restore for failed source")
+	}
+}
+
+func TestTryRestoreJobToSource_NoSourceLaunchIDIsNoOp(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python a.py", "j", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if tryRestoreJobToSource(database, jobID, 0) {
+		t.Fatal("tryRestoreJobToSource returned true; expected no-op when source unknown")
+	}
+}

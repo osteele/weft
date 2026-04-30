@@ -281,6 +281,16 @@ var liveLaunchStatuses = []string{
 	LaunchStatusGrace,
 }
 
+// IsLiveLaunchStatus reports whether a launch is in one of liveLaunchStatuses.
+func IsLiveLaunchStatus(status string) bool {
+	for _, s := range liveLaunchStatuses {
+		if s == status {
+			return true
+		}
+	}
+	return false
+}
+
 // isActiveLaunchStatus reports whether a launch status represents an
 // actively-progressing instance that should claim its jobs. Unlike
 // liveLaunchStatuses this also includes Completed, since a completed launch
@@ -811,32 +821,47 @@ func parseLegacyLaunchHostInstanceID(host string) (int64, bool) {
 // SetJobLaunchID associates a job with a cloud instance by creating a new
 // attempt with launch_id set. The job must have an open queued attempt
 // (integrity violation otherwise). The open attempt is closed and a fresh
-// attempt is created with the instance assignment.
+// attempt is created with the instance assignment. Rejects with
+// ErrJobAlreadyClaimed if another active launch already owns the job; use
+// TransferJobLaunchID for a deliberate move that supersedes the prior owner.
 func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 	return RetryOnDatabaseLocked(context.Background(), "set job launch id", func() error {
-		return setJobLaunchIDOnce(database, jobID, instanceID)
+		return setJobLaunchIDOnce(database, jobID, instanceID, false)
 	})
 }
 
-func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64) error {
+// TransferJobLaunchID is like SetJobLaunchID but skips the
+// ErrJobAlreadyClaimed guard, allowing a move to supersede an active prior
+// owner. Intended only for deliberate moves under an open MoveIntent (see
+// specs/job-move.allium); the source attempt is closed and a fresh attempt
+// is created on the new instance, just like SetJobLaunchID.
+func TransferJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
+	return RetryOnDatabaseLocked(context.Background(), "transfer job launch id", func() error {
+		return setJobLaunchIDOnce(database, jobID, instanceID, true)
+	})
+}
+
+func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64, allowSupersede bool) error {
 	tx, err := database.Begin()
 	if err != nil {
 		return err
 	}
 
-	// Check if the job is already claimed by an active launch.
-	var currentLaunchID sql.NullInt64
-	_ = tx.QueryRow(`
-		SELECT launch_id FROM job_attempts
-		WHERE job_id = ? AND end_time IS NULL
-		ORDER BY attempt_number DESC LIMIT 1`, jobID,
-	).Scan(&currentLaunchID)
-	if currentLaunchID.Valid {
-		var launchStatus string
-		err = tx.QueryRow(`SELECT status FROM launches WHERE id = ?`, currentLaunchID.Int64).Scan(&launchStatus)
-		if err == nil && isActiveLaunchStatus(launchStatus) {
-			tx.Rollback()
-			return fmt.Errorf("job %d: %w", jobID, ErrJobAlreadyClaimed)
+	if !allowSupersede {
+		// Reject if the job is already claimed by an active launch.
+		var currentLaunchID sql.NullInt64
+		_ = tx.QueryRow(`
+			SELECT launch_id FROM job_attempts
+			WHERE job_id = ? AND end_time IS NULL
+			ORDER BY attempt_number DESC LIMIT 1`, jobID,
+		).Scan(&currentLaunchID)
+		if currentLaunchID.Valid {
+			var launchStatus string
+			err = tx.QueryRow(`SELECT status FROM launches WHERE id = ?`, currentLaunchID.Int64).Scan(&launchStatus)
+			if err == nil && isActiveLaunchStatus(launchStatus) {
+				tx.Rollback()
+				return fmt.Errorf("job %d: %w", jobID, ErrJobAlreadyClaimed)
+			}
 		}
 	}
 

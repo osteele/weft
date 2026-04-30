@@ -44,6 +44,37 @@ var versionedMigrations = []migration{
 	//         return addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN foo TEXT`)
 	//     },
 	// },
+	{
+		Description: "add move_intents table",
+		Apply: func(db *sql.DB) error {
+			stmts := []string{
+				`CREATE TABLE IF NOT EXISTS move_intents (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES jobs(id),
+					source_attempt_id INTEGER REFERENCES job_attempts(id),
+					source_launch_id INTEGER REFERENCES launches(id),
+					target_kind TEXT NOT NULL CHECK (target_kind IN ('existing','new')),
+					target_launch_id INTEGER REFERENCES launches(id),
+					target_offer_provider TEXT,
+					target_offer_id TEXT,
+					target_gpu_name TEXT,
+					state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','confirmed','canceled','obsoleted')),
+					created_at INTEGER NOT NULL,
+					resolved_at INTEGER,
+					resolution TEXT
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_move_intents_job ON move_intents(job_id)`,
+				`CREATE UNIQUE INDEX IF NOT EXISTS idx_move_intents_open ON move_intents(job_id) WHERE state = 'open'`,
+				`CREATE INDEX IF NOT EXISTS idx_move_intents_target_launch ON move_intents(target_launch_id) WHERE state = 'open'`,
+			}
+			for _, s := range stmts {
+				if _, err := db.Exec(s); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

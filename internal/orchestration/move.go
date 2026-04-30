@@ -140,19 +140,98 @@ func ExecuteOption(
 	if job == nil {
 		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
-	if err := unplaceIfNeeded(database, job); err != nil {
-		return "", fmt.Errorf("unplace: %w", err)
-	}
-	job, err = db.GetJobByID(database, jobID)
+
+	// Open a MoveIntent so the autopilot leaves this job alone for the
+	// duration of the move, and so a failure can be cleanly rolled back to
+	// the source. See specs/job-move.allium.
+	intent, err := openMoveIntent(database, job, opt)
 	if err != nil {
-		return "", fmt.Errorf("reload job %s: %w", ids.FormatJobID(jobID), err)
+		return "", err
 	}
 
+	var sourceLaunchID int64
+	if job.LaunchID != nil {
+		sourceLaunchID = *job.LaunchID
+	}
+
+	desc, err := executeMoveOption(ctx, database, r2Client, cfg, cloudClients, job, opt, intent)
+	if err != nil {
+		// Best-effort: re-attach to source if it's still alive. Otherwise
+		// the job is left unplaced and the autopilot may pick it up on its
+		// next pass (the only state where it should).
+		restored := tryRestoreJobToSource(database, job.ID, sourceLaunchID)
+		resolution := "move failed"
+		if restored {
+			resolution = "move failed; restored to source"
+		}
+		if rerr := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, resolution); rerr != nil {
+			slog.Warn("resolve move intent canceled", "component", "move", "intent_id", intent.ID, "error", rerr)
+		}
+		return "", err
+	}
+	if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, desc); err != nil {
+		slog.Warn("resolve move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
+	}
+	return desc, nil
+}
+
+// openMoveIntent records the move attempt before any source-mutating action
+// runs. Rejects a second move on a job that already has one in flight.
+func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, error) {
+	params := db.CreateMoveIntentParams{
+		JobID:          job.ID,
+		SourceLaunchID: job.LaunchID,
+		TargetGPUName:  opt.GPUName,
+	}
+	if opt.IsNew {
+		params.TargetKind = db.MoveTargetNew
+		if opt.Offer != nil {
+			params.TargetOfferProvider = string(opt.Offer.Provider)
+			params.TargetOfferID = opt.Offer.ProviderID
+		}
+	} else {
+		params.TargetKind = db.MoveTargetExisting
+		params.TargetLaunchID = &opt.InstanceID
+	}
+	intent, err := db.CreateMoveIntent(database, params)
+	if err != nil {
+		return nil, fmt.Errorf("open move intent: %w", err)
+	}
+	return intent, nil
+}
+
+func executeMoveOption(
+	ctx context.Context,
+	database *sql.DB,
+	r2Client *r2.Client,
+	cfg *config.Config,
+	cloudClients []cloud.Client,
+	job *db.Job,
+	opt Option,
+	intent *db.MoveIntent,
+) (string, error) {
 	if !opt.IsNew {
-		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, opt.InstanceID, []*db.Job{job}); err != nil {
+		// Move-to-existing supersedes the source claim atomically inside
+		// SubmitJobsToInstanceForMove (TransferJobLaunchID), so the source
+		// is never visibly unplaced. On failure the rollback inside the
+		// submit returns the job to unplaced; the outer cancel-intent path
+		// then restores to source if it is still alive.
+		if err := campaign.SubmitJobsToInstanceForMove(ctx, database, r2Client, opt.InstanceID, []*db.Job{job}); err != nil {
 			return "", fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(opt.InstanceID), err)
 		}
 		return fmt.Sprintf("instance %s", ids.FormatInstanceID(opt.InstanceID)), nil
+	}
+
+	// Move-to-new still routes through unplace + LaunchCampaign. The
+	// source-preservation refinement is tracked in specs/job-move.allium
+	// "Future work"; the current implementation relies on
+	// tryRestoreJobToSource on failure.
+	if err := unplaceIfNeeded(database, job); err != nil {
+		return "", fmt.Errorf("unplace: %w", err)
+	}
+	job, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		return "", fmt.Errorf("reload job %s: %w", ids.FormatJobID(job.ID), err)
 	}
 
 	if opt.Offer == nil {
@@ -212,9 +291,17 @@ func ExecuteOption(
 		launchOpts,
 		r2Cfg,
 		func(cloud.Provider) (cloud.CreateOpts, error) { return createOpts, nil },
-		func(campaign.LaunchEvent) {},
+		func(ev campaign.LaunchEvent) {
+			if ev.InstanceID > 0 && intent != nil {
+				_ = db.UpdateMoveIntentTargetLaunch(database, intent.ID, ev.InstanceID)
+			}
+		},
 		nil,
-		func(campaign.InstanceGroup, int64) {},
+		func(_ campaign.InstanceGroup, instanceID int64) {
+			if intent != nil {
+				_ = db.UpdateMoveIntentTargetLaunch(database, intent.ID, instanceID)
+			}
+		},
 	)
 	if err != nil {
 		return "", fmt.Errorf("launch: %w", err)
@@ -224,6 +311,28 @@ func ExecuteOption(
 		desc = fmt.Sprintf("new %s instance %s", opt.GPUName, ids.FormatInstanceID(result.InstanceIDs[0]))
 	}
 	return desc, nil
+}
+
+// tryRestoreJobToSource re-attaches the job to its source launch if that
+// instance is still alive. Returns true on a successful restore. Returns
+// false (and leaves the job unplaced) if the source is unknown, dead, or the
+// re-attach fails.
+func tryRestoreJobToSource(database *sql.DB, jobID, sourceLaunchID int64) bool {
+	if sourceLaunchID <= 0 {
+		return false
+	}
+	src, err := db.GetLaunch(database, sourceLaunchID)
+	if err != nil || src == nil || !db.IsLiveLaunchStatus(src.Status) {
+		return false
+	}
+	if err := db.SetJobLaunchID(database, jobID, sourceLaunchID); err != nil {
+		slog.Warn("restore job to source failed",
+			"component", "move", "job_id", jobID, "source_launch_id", sourceLaunchID, "error", err)
+		return false
+	}
+	oplog.LogJob("move.restored_to_source", jobID, "",
+		oplog.WithDetailf("source_launch_id=%d", sourceLaunchID))
+	return true
 }
 
 func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {

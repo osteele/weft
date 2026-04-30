@@ -35,6 +35,10 @@ type QueueRebalanceOptions struct {
 	Operation string
 	// R2Client optionally reuses a prebuilt client for apply mode.
 	R2Client *r2.Client
+	// MovingJobs, if non-nil, is used in lieu of querying the move_intents
+	// table. Callers that already loaded the open-intent set (e.g. the
+	// autopilot pass) thread it through to avoid repeating the query.
+	MovingJobs map[int64]struct{}
 }
 
 type QueueRebalanceMove struct {
@@ -82,6 +86,29 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 	}
 	if len(candidates) == 0 {
 		return QueueRebalanceResult{}, nil
+	}
+	movingJobs := opts.MovingJobs
+	if movingJobs == nil {
+		movingJobs, err = db.JobIDsWithOpenMoveIntents(database)
+		if err != nil {
+			return QueueRebalanceResult{}, err
+		}
+	}
+	if len(movingJobs) > 0 {
+		filtered := candidates[:0]
+		for _, job := range candidates {
+			if job == nil {
+				continue
+			}
+			if _, m := movingJobs[job.ID]; m {
+				continue
+			}
+			filtered = append(filtered, job)
+		}
+		candidates = filtered
+		if len(candidates) == 0 {
+			return QueueRebalanceResult{}, nil
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return queuedOrderLess(candidates[i], candidates[j])

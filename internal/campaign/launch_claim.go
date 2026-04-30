@@ -9,7 +9,24 @@ import (
 )
 
 func claimJobForLaunch(database *sql.DB, jobID, instanceID int64) (*db.Job, error) {
-	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+	return claimJobForLaunchWithOpts(database, jobID, instanceID, false)
+}
+
+// claimJobForLaunchTransfer is the move-path counterpart: the source's
+// prior claim is superseded rather than rejected with ErrJobAlreadyClaimed.
+// Only callers operating under an open MoveIntent should use this.
+func claimJobForLaunchTransfer(database *sql.DB, jobID, instanceID int64) (*db.Job, error) {
+	return claimJobForLaunchWithOpts(database, jobID, instanceID, true)
+}
+
+func claimJobForLaunchWithOpts(database *sql.DB, jobID, instanceID int64, transfer bool) (*db.Job, error) {
+	var err error
+	if transfer {
+		err = db.TransferJobLaunchID(database, jobID, instanceID)
+	} else {
+		err = db.SetJobLaunchID(database, jobID, instanceID)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("set launch_id for job %s: %w", ids.FormatJobID(jobID), err)
 	}
 	updatedJob, err := db.GetJobByID(database, jobID)

@@ -1,0 +1,294 @@
+-- allium: 3
+-- job-move.allium
+--
+-- Scope: Moving a queued job from one placement to another.
+--
+-- A "move" is what the user invokes by pressing `m` on a queued job in the
+-- jobs list TUI (or via `weft jobs move`). The destination is either an
+-- already-running cloud instance ("existing") or a freshly-launched
+-- instance ("new"). Includes the autopilot's required hands-off behavior
+-- while a move is in flight.
+--
+-- Excludes:
+--   - QueueRebalanceJob (campaign-lifecycle.allium): autopilot-driven cost
+--     re-balancing across already-running instances. Re-balance reads the
+--     same MoveIntent open-set to skip jobs the user is already moving, but
+--     does not itself open intents.
+--   - PlaceJob and ReuseAssignment (job-lifecycle.allium /
+--     campaign-lifecycle.allium): initial placement of an unplaced job.
+--   - Mid-execution attempts (running jobs are never moved by this spec).
+--
+-- Authoritative source for the design rationale; the design doc at
+-- docs/design/job-move-protocol.md is being absorbed into this spec and
+-- the implementation as the work progresses.
+
+-- ==========================================================================
+-- Model
+-- ==========================================================================
+
+-- A MoveIntent records a deliberate attempt to move a queued job. The source
+-- (its current placement, if any) remains authoritative until the intent is
+-- confirmed: the job's launch_id, attempts, and source-instance R2 queue are
+-- not modified by the move flow's intermediate steps. On confirmation the
+-- job is associated with the target and the source attempt is canceled. On
+-- cancellation the source is left intact (or restored, if it was modified
+-- as part of the existing-flow's intermediate work).
+--
+-- The intent serves three purposes simultaneously:
+--   (1) Mutex: at most one move per job at a time.
+--   (2) Autopilot exclusion: AutopilotIgnoresMovingJobs invariant.
+--   (3) Failure rollback: SourceLaunchID lets the canceled path try to
+--       restore the job to its prior home.
+
+entity MoveIntent {
+    job: Job
+    -- The job's last open attempt at the moment the intent was created.
+    -- Populated for audit / overlap-resolution; not required for the
+    -- model's correctness invariants.
+    source_attempt: JobAttempt?
+    -- Where the job was placed when the move started. Drives the
+    -- restore-to-source rollback on cancellation.
+    source_launch: CloudInstance?
+
+    target_kind: MoveTargetKind
+    -- Set immediately for `existing`. For `new`, populated once the cloud
+    -- launch has produced an instance row; remains null while the launch
+    -- is still in flight (provider call outstanding).
+    target_launch: CloudInstance?
+    -- Recorded for `new` so audit / re-try can show which offer was chosen.
+    -- Not used for matching.
+    target_offer_provider: String?
+    target_offer_id: String?
+    target_gpu_name: String?
+
+    state: MoveIntentState
+    created_at: Timestamp
+    resolved_at: Timestamp?
+    resolution: String?         -- short reason recorded at terminal state
+}
+
+value MoveTargetKind = existing | new
+
+-- State machine:
+--                ┌──────┐
+--   create  ───▶ │ open │ ───▶ confirmed         (success)
+--                └──┬───┘
+--                   │
+--          ┌────────┼─────────┐
+--      canceled            obsoleted
+--      (failure /         (source completed
+--       user cancel)       before confirm)
+--
+-- All non-`open` states are terminal.
+value MoveIntentState = open | confirmed | canceled | obsoleted
+
+-- ==========================================================================
+-- Rules
+-- ==========================================================================
+
+rule UserMovesQueuedJob {
+    when: UserPressesMoveAndSelectsTarget(job, target)
+    requires: job.status = queued
+    requires: not exists(MoveIntent { job = job, state = open })
+
+    ensures:
+        let intent = create MoveIntent {
+            job = job
+            source_attempt = job.latest_attempt
+            source_launch = job.cloud_instance
+            target_kind = target.kind
+            target_launch = if target.kind = existing then target.instance else null
+            target_offer_provider = target.offer_provider
+            target_offer_id = target.offer_id
+            target_gpu_name = target.gpu_name
+            state = open
+            created_at = now
+        }
+        ExecuteMoveOption(job, target, intent)
+}
+
+rule SecondMoveOnSameJobRejected {
+    when: UserPressesMoveAndSelectsTarget(job, target)
+    requires: exists(MoveIntent { job = job, state = open })
+
+    ensures:
+        ShowError("Move already in flight for job " + job.id)
+        -- No new intent created. The earlier intent runs to completion.
+}
+
+rule MoveTargetSameAsSourceRejected {
+    when: UserPressesMoveAndSelectsTarget(job, target)
+    requires: target.kind = existing
+              and target.instance = job.cloud_instance
+
+    ensures:
+        ShowError("Target is the current instance")
+        -- UI SHOULD not offer this option; rule is defense in depth.
+}
+
+rule MoveToNewLaunchAttachesIntent {
+    -- Once the cloud launch has produced an instance, link it to the
+    -- intent so the autopilot exclusion (which is keyed on JobID) is
+    -- joined by an instance reference for diagnostics, and so a future
+    -- reconciler can confirm-on-agent-ready by intent → target_launch.
+    when: LaunchCampaign(group, ...) returns instance_id
+          and exists(MoveIntent { job in group.jobs, state = open,
+                                  target_kind = new, target_launch = null })
+
+    for intent in MoveIntent { state = open, target_kind = new,
+                               target_launch = null,
+                               job in group.jobs }:
+      ensures:
+          UpdateMoveIntentTargetLaunch(intent, instance_id)
+}
+
+rule ConfirmMoveOnSuccess {
+    -- The destination has accepted the job. For `existing` targets the
+    -- destination's R2 grace ack constitutes acceptance (or the synchronous
+    -- `SubmitJobsToInstance` succeeded for grace instances; running
+    -- instances acknowledge between job executions). For `new` targets the
+    -- successful return of LaunchCampaign currently constitutes
+    -- acceptance — a later refinement (see "Future work" below) defers
+    -- confirmation until the agent on the new instance reports ready.
+    when: ExecuteMoveOption(job, target, intent) succeeds
+    requires: intent.state = open
+
+    ensures:
+        ResolveMoveIntent(intent, confirmed, "moved to " + describe(target))
+}
+
+rule CancelMoveOnFailure {
+    -- The move's intermediate steps (unplace, claim, R2 write, launch) all
+    -- failed. The source's authority must be restored if the source is
+    -- still alive; otherwise the job becomes legitimately unplaced and the
+    -- autopilot may pick it up on its next pass (the only state where it
+    -- is allowed to).
+    when: ExecuteMoveOption(job, target, intent) fails
+    requires: intent.state = open
+
+    ensures:
+        if intent.source_launch != null
+           and intent.source_launch.status in {launching, running, paused, grace}
+        then
+            RestoreJobToLaunch(job, intent.source_launch)
+            ResolveMoveIntent(intent, canceled, "move failed; restored to source")
+        else
+            -- Source is gone (or the job had no source). Job is left
+            -- unplaced; AutopilotIgnoresMovingJobs no longer applies once
+            -- the intent is canceled.
+            ResolveMoveIntent(intent, canceled, "move failed")
+}
+
+rule ObsoleteMoveOnSourceCompletion {
+    -- If the source attempt completes (any exit code) before the move is
+    -- confirmed, the move is obsoleted: the destination submission
+    -- (already written to R2 for `existing`, or in-flight for `new`)
+    -- should be canceled. Best-effort: if the destination has already
+    -- started running, accept the duplicate run and discard whichever
+    -- finishes second.
+    when: intent.source_attempt.end_time != null
+    requires: intent.state = open
+
+    ensures:
+        TryCancelDestinationSubmission(intent)
+        ResolveMoveIntent(intent, obsoleted, "source completed before confirmation")
+}
+
+-- ==========================================================================
+-- Invariants
+-- ==========================================================================
+
+invariant AtMostOneOpenIntentPerJob {
+    -- The mutex property. Enforced at intent creation time.
+    for job in jobs:
+        count(MoveIntent { job = job, state = open }) <= 1
+}
+
+invariant AutopilotIgnoresMovingJobs {
+    -- The central correctness property. Without this, the autopilot races
+    -- the move flow's intermediate unplaced window and reuses some other
+    -- existing instance for the job — typically the original source.
+    -- Implemented by filtering autopilot.unplaced_jobs and rebalance
+    -- candidates by `not exists(MoveIntent { job = j, state = open })`.
+    for j in autopilot.candidate_jobs:
+        not exists(MoveIntent { job = j, state = open })
+}
+
+invariant SourceLaunchUnchangedWhileIntentOpen {
+    -- Move-to-existing now satisfies this property: the source claim is
+    -- atomically superseded inside SubmitJobsToInstanceForMove
+    -- (TransferJobLaunchID), so Job.cloud_instance transitions
+    -- source → target in a single step rather than via an intermediate
+    -- "unplaced" state. Rollback on submit failure goes through
+    -- resetClaimedJobsToUnplaced; the outer cancel-intent path then
+    -- restores to source via RestoreJobToLaunch.
+    --
+    -- Move-to-new still has an unplace-then-launch intermediate window;
+    -- the rollback to source is the compensating action. The refinement
+    -- to make move-to-new genuinely speculative (skip-job-claim flag in
+    -- LaunchCampaign + agent-ready confirmation) is tracked in "Future
+    -- work" below. When that lands the invariant becomes hard for both
+    -- target kinds.
+    --
+    -- @guidance: Treat new mutations to Job.cloud_instance during an
+    -- open intent as a code smell; the long-term direction is to confine
+    -- all such mutations to the confirm path.
+    aspirational: true
+}
+
+invariant MoveTargetExistingHasInstance {
+    for intent in MoveIntent:
+        intent.target_kind = existing
+        implies intent.target_launch != null
+}
+
+invariant ResolvedIntentHasResolutionTime {
+    for intent in MoveIntent:
+        intent.state != open implies intent.resolved_at != null
+}
+
+-- ==========================================================================
+-- Cross-spec interactions
+-- ==========================================================================
+
+-- job-lifecycle.allium: AutoPilotPass MUST exclude jobs with open intents
+--   from its candidate set (already implemented at autopilot.go's unplaced
+--   filter and in the rentalScope construction).
+-- campaign-lifecycle.allium: QueueRebalanceJob MUST exclude jobs with open
+--   intents (implemented at rebalance.go's candidates filter).
+-- status-sync.allium: TUI views that display "moving..." status SHOULD
+--   read from MoveIntent.state, not infer move-in-progress from
+--   pending_placement (which is also used by initial placement).
+
+-- ==========================================================================
+-- Future work (tracked in docs/design/job-move-protocol.md until absorbed)
+-- ==========================================================================
+--
+-- Speculative second-placement model:
+--
+--   - Move-to-existing (DONE): SubmitJobsToInstanceForMove uses
+--     TransferJobLaunchID to atomically supersede the source claim, so
+--     Job.cloud_instance transitions source → target in one step. The
+--     two-attempt overlap window now is bounded by the time between
+--     transfer-claim and the source agent noticing (the source agent
+--     never receives an explicit cancel today; the queued attempt on
+--     source is just superseded in DB).
+--
+--   - Move-to-new (TODO): pass a "skip job claim" flag to LaunchCampaign
+--     so the instance is created with the agent payload but the source's
+--     Job.cloud_instance is unchanged; on agent first heartbeat, claim
+--     and cancel-source. Requires hooking into instance-ready state
+--     transition, plus a per-job cancel signal to the source agent (the
+--     source's R2 queue still contains the job after this lands; today
+--     that's also the case but unplace happens up front).
+--
+-- A future agent pickup-ack on the running-instance path
+-- (SendGraceJobPayloadNoAck → ack-waiting) would let move-to-existing
+-- claim *after* ack rather than at submit time, fully closing the
+-- two-attempt overlap window. The agent already writes a pickup ack in
+-- drainGraceJobRequests; only the caller side needs to wait.
+--
+-- Two-attempt overlap reconciler: once the speculative model lands, a
+-- safety reconciler scans for jobs with two `running` attempts on
+-- different launches and applies the OverlapResolution rule (kill older
+-- unless source already exited 0).

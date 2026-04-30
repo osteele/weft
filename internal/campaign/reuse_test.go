@@ -650,3 +650,71 @@ func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {
 		t.Fatalf("job B LaunchID = %v, want nil", *reloadedB.LaunchID)
 	}
 }
+
+func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
+	// Regression: the move-to-existing path skips the explicit "unplace
+	// source first" step. SubmitJobsToInstanceForMove must succeed even
+	// when the job is currently claimed by an active source launch — the
+	// transfer-claim atomically closes the source attempt and creates a
+	// new attempt on the destination. See specs/job-move.allium § move
+	// flow.
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch dst: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	// Plain SubmitJobsToInstance must reject because the source is active.
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+	})
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
+		return "sources/x.tar.gz", nil
+	}
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) error {
+		return nil
+	}
+
+	if err := SubmitJobsToInstance(context.Background(), database, nil, dst, []*db.Job{job}); err == nil {
+		t.Fatal("plain SubmitJobsToInstance should reject claim of job already on active source")
+	}
+
+	if err := SubmitJobsToInstanceForMove(context.Background(), database, nil, dst, []*db.Job{job}); err != nil {
+		t.Fatalf("SubmitJobsToInstanceForMove: %v", err)
+	}
+	reloaded, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload: %v", err)
+	}
+	if reloaded.LaunchID == nil || *reloaded.LaunchID != dst {
+		t.Fatalf("after transfer: launch_id = %v, want %d", reloaded.LaunchID, dst)
+	}
+}

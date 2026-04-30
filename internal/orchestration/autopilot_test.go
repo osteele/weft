@@ -563,3 +563,73 @@ func TestMergeRelaunchReasonsIntoBlockedReasons_FallsBackToPerInstance(t *testin
 		t.Errorf("blockedReasons[100] = %q, want %q", got, want)
 	}
 }
+
+func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenMoveIntent(t *testing.T) {
+	// Regression: when the user has manually moved a job, an open
+	// MoveIntent prevents the autopilot from racing the move flow and
+	// reusing some other existing instance for the same job. See
+	// specs/job-move.allium § AutopilotIgnoresMovingJobs.
+	database := db.SetupTestDB(t)
+
+	moving, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python a.py", "moving", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU moving: %v", err)
+	}
+	other, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python b.py", "other", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU other: %v", err)
+	}
+
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID: moving, TargetKind: db.MoveTargetExisting, TargetLaunchID: &target,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	var seenUnplaced []int64
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, unplaced []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		for _, j := range unplaced {
+			if j != nil {
+				seenUnplaced = append(seenUnplaced, j.ID)
+			}
+		}
+		return campaign.AutoPlacementPlan{}, nil
+	}
+
+	var relaunchScope []int64
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		relaunchScope = append([]int64(nil), scope...)
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	if _, err := RunGroupedAutoPilotPass(context.Background(), database, nil); err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+
+	for _, id := range seenUnplaced {
+		if id == moving {
+			t.Errorf("planner saw moving job %d in unplaced set", moving)
+		}
+	}
+	if len(seenUnplaced) == 0 || seenUnplaced[0] != other {
+		t.Errorf("planner saw %v, expected only [%d]", seenUnplaced, other)
+	}
+	for _, id := range relaunchScope {
+		if id == moving {
+			t.Errorf("relaunch scope included moving job %d", moving)
+		}
+	}
+}

@@ -356,8 +356,24 @@ type GracePayload struct {
 }
 
 // SubmitJobsToInstance submits one or more jobs to an existing cloud instance
-// via R2 grace protocol. Works for both grace and running instances.
+// via R2 grace protocol. Works for both grace and running instances. The
+// jobs must not be claimed by another active launch — see
+// SubmitJobsToInstanceForMove for the move-path variant that supersedes a
+// prior owner.
 func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
+	return submitJobsToInstanceImpl(ctx, database, r2Client, instanceID, jobs, false)
+}
+
+// SubmitJobsToInstanceForMove is the move-path counterpart of
+// SubmitJobsToInstance: the source's prior claim is superseded rather than
+// rejected. Caller MUST have an open MoveIntent — see
+// specs/job-move.allium § UserMovesQueuedJob. The autopilot exclusion
+// invariant relies on the intent being open before this is called.
+func SubmitJobsToInstanceForMove(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
+	return submitJobsToInstanceImpl(ctx, database, r2Client, instanceID, jobs, true)
+}
+
+func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job, transfer bool) error {
 	inst, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		return fmt.Errorf("get instance %s: %w", ids.FormatInstanceID(instanceID), err)
@@ -378,7 +394,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 	claimedJobs := make([]*db.Job, 0, len(jobs))
 	claimedJobIDs := make([]int64, 0, len(jobs))
 	for _, job := range jobs {
-		claimedJob, err := claimJobForLaunch(database, job.ID, instanceID)
+		claimedJob, err := claimJobForLaunchWithOpts(database, job.ID, instanceID, transfer)
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {

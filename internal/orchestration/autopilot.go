@@ -43,12 +43,22 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		return nil, err
 	}
+	movingJobs, err := db.JobIDsWithOpenMoveIntents(database)
+	if err != nil {
+		return nil, err
+	}
 	unplaced := make([]*db.Job, 0, len(unplacedJobs))
 	for _, job := range unplacedJobs {
 		// IsUnplacedAwaitingPlacement (rather than IsUnplacedQueued) so jobs
 		// stuck in pending_placement still get a blocked reason — see
 		// internal/orchestration/pending_placement.go.
 		if !job.IsUnplacedAwaitingPlacement() {
+			continue
+		}
+		// A job with an open MoveIntent is being deliberately moved by another
+		// path; treat it as already placed (autopilot would otherwise race the
+		// move and reuse some other instance — see specs/job-move.allium).
+		if _, moving := movingJobs[job.ID]; moving {
 			continue
 		}
 		if len(scoped) > 0 {
@@ -60,8 +70,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	if len(unplaced) == 0 {
 		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
-			Apply:     true,
-			Operation: "auto_pilot.rebalance",
+			Apply:      true,
+			Operation:  "auto_pilot.rebalance",
+			MovingJobs: movingJobs,
 		})
 		if err != nil {
 			return nil, err
@@ -215,9 +226,10 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 
 	rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
-		Apply:     true,
-		R2Client:  r2Client,
-		Operation: "auto_pilot.rebalance",
+		Apply:      true,
+		R2Client:   r2Client,
+		Operation:  "auto_pilot.rebalance",
+		MovingJobs: movingJobs,
 	})
 	if err != nil {
 		return nil, err
@@ -247,6 +259,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		// pending_placement and the autopilot would otherwise never touch
 		// it — producing unplaced jobs with no blocked reason.
 		if es := job.EffectiveStatus(); es != db.StatusQueued && es != db.StatusPendingPlacement {
+			continue
+		}
+		if _, moving := movingJobs[job.ID]; moving {
 			continue
 		}
 		if len(scoped) > 0 {
