@@ -1391,100 +1391,43 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m listTUIModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
-	m.autoRunRateInputActive = true
-	m.autoRunRateInputStep = autoBudgetStepHourly
-	if m.autoRunRateTargetCents <= 0 {
-		m.autoRunRateInputValue = ""
-	} else {
-		m.autoRunRateInputValue = fmt.Sprintf("%.2f", float64(m.autoRunRateTargetCents)/100)
+func (m listTUIModel) currentBudgetState() autoBudgetState {
+	return autoBudgetState{
+		Active:      m.autoRunRateInputActive,
+		Step:        m.autoRunRateInputStep,
+		Value:       m.autoRunRateInputValue,
+		HourlyCents: m.autoRunRateTargetCents,
+		DailyCents:  m.autoDailyCapCents,
 	}
+}
+
+func (m *listTUIModel) applyBudgetState(s autoBudgetState) {
+	m.autoRunRateInputActive = s.Active
+	m.autoRunRateInputStep = s.Step
+	m.autoRunRateInputValue = s.Value
+	m.autoRunRateTargetCents = s.HourlyCents
+	m.autoDailyCapCents = s.DailyCents
+}
+
+func (m listTUIModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
+	m.applyBudgetState(beginAutoBudget(m.autoRunRateTargetCents))
 	return m, nil
 }
 
 func (m listTUIModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.autoRunRateInputActive = false
-		m.autoRunRateInputValue = ""
-		switch m.autoRunRateInputStep {
-		case autoBudgetStepDaily:
-			m.statusMessage = "Daily cap unchanged"
-		default:
-			m.statusMessage = "Run-rate target unchanged"
-		}
-		m.autoRunRateInputStep = autoBudgetStepHourly
-		return m, nil
-	case "ctrl+r":
-		if m.autoRunRateInputStep == autoBudgetStepDaily {
-			if err := campaign.ResetGlobalRunawayBreaker(m.database, "TUI"); err != nil {
-				m.statusMessage = fmt.Sprintf("Reset breaker failed: %v", err)
-				return m, nil
-			}
-			m.statusMessage = "Daily-budget breaker reset"
-			m.autoRunRateInputActive = false
-			m.autoRunRateInputValue = ""
-			m.autoRunRateInputStep = autoBudgetStepHourly
-			m.clearAutoPilotPersistentState()
-			m.resumeAutoPilotNow()
-			if cmd := m.runAutoPilot(); cmd != nil {
-				return m, cmd
-			}
-			return m, nil
-		}
-		return m, nil
-	case "enter":
-		switch m.autoRunRateInputStep {
-		case autoBudgetStepHourly:
-			cents, err := parseAutoRunRateTargetInput(m.autoRunRateInputValue)
-			if err != nil {
-				m.statusMessage = "Run-rate target: " + err.Error()
-				return m, nil
-			}
-			if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
-				m.statusMessage = fmt.Sprintf("Run-rate target save failed: %v", err)
-				return m, nil
-			}
-			m.autoRunRateTargetCents = cents
-			m.autoRunRateInputStep = autoBudgetStepDaily
-			if m.autoDailyCapCents <= 0 {
-				m.autoRunRateInputValue = ""
-			} else {
-				m.autoRunRateInputValue = fmt.Sprintf("%.2f", float64(m.autoDailyCapCents)/100)
-			}
-			m.statusMessage = fmt.Sprintf("Run-rate set to %s — now enter daily cap", formatAutoRunRateTarget(cents))
-			return m, nil
-		case autoBudgetStepDaily:
-			cents, err := parseAutoDollarInput(m.autoRunRateInputValue, "daily cap")
-			if err != nil {
-				m.statusMessage = "Daily cap: " + err.Error()
-				return m, nil
-			}
-			if err := saveAutoRunawaySpendDailyCapCents(cents); err != nil {
-				m.statusMessage = fmt.Sprintf("Daily cap save failed: %v", err)
-				return m, nil
-			}
-			m.autoDailyCapCents = cents
-			m.autoRunRateInputActive = false
-			m.autoRunRateInputValue = ""
-			m.autoRunRateInputStep = autoBudgetStepHourly
-			m.statusMessage = "Daily cap set to " + formatAutoDailyCap(cents)
-			m.resumeAutoPilotNow()
-			if cmd := m.runAutoPilot(); cmd != nil {
-				return m, cmd
-			}
-			return m, nil
-		}
-		return m, nil
-	case "backspace", "ctrl+h":
-		if len(m.autoRunRateInputValue) > 0 {
-			runes := []rune(m.autoRunRateInputValue)
-			m.autoRunRateInputValue = string(runes[:len(runes)-1])
-		}
-		return m, nil
+	next, eff := handleAutoBudgetKey(m.currentBudgetState(), msg, m.database)
+	m.applyBudgetState(next)
+	if eff.StatusText != "" {
+		m.statusMessage = eff.StatusText
 	}
-	if len(msg.Runes) > 0 {
-		m.autoRunRateInputValue += string(msg.Runes)
+	if eff.BreakerReset {
+		m.clearAutoPilotPersistentState()
+	}
+	if eff.RetriggerPilot {
+		m.resumeAutoPilotNow()
+		if cmd := m.runAutoPilot(); cmd != nil {
+			return m, cmd
+		}
 	}
 	return m, nil
 }

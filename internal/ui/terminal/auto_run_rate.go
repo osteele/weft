@@ -1,10 +1,13 @@
 package terminal
 
 import (
+	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 )
 
@@ -112,4 +115,129 @@ func autoBudgetPromptLabelAndHints(step autoBudgetInputStep, sep string) (label,
 		return "Run-rate target ($/hr)",
 			"Enter" + sep + "next  Esc" + sep + "cancel"
 	}
+}
+
+// autoBudgetState is the input-prompt state machine shared by the list and
+// watch TUIs. The two TUIs translate effects into their own status surface
+// (statusMessage vs flash) and decide whether to retrigger the autopilot.
+type autoBudgetState struct {
+	Active      bool
+	Step        autoBudgetInputStep
+	Value       string
+	HourlyCents int
+	DailyCents  int
+}
+
+// autoBudgetEffect is what handleAutoBudgetKey reports back to the caller.
+// Status text (if any) should be displayed; RetriggerPilot signals that a
+// save or breaker reset just landed, so callers with an autopilot should
+// consider kicking it. BreakerReset is set on a successful Ctrl-R so the
+// caller can clear any persistent block-reason cache it maintains.
+type autoBudgetEffect struct {
+	StatusText     string
+	StatusIsError  bool
+	RetriggerPilot bool
+	BreakerReset   bool
+}
+
+// beginAutoBudget initializes the prompt at the hourly step, prefilled
+// with the current hourly target.
+func beginAutoBudget(hourlyCents int) autoBudgetState {
+	return autoBudgetState{
+		Active: true,
+		Step:   autoBudgetStepHourly,
+		Value:  formatCentsForInput(hourlyCents),
+	}
+}
+
+func formatCentsForInput(cents int) string {
+	if cents <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%.2f", float64(cents)/100)
+}
+
+// handleAutoBudgetKey advances the prompt's state machine in response to a
+// key. database is needed only when Ctrl-R fires on the daily step. On
+// success the helper has already persisted the new value (or inserted the
+// breaker-resume event); the caller only has to render the status text and
+// decide what to do with RetriggerPilot.
+func handleAutoBudgetKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (autoBudgetState, autoBudgetEffect) {
+	switch msg.String() {
+	case "esc":
+		text := "Run-rate target unchanged"
+		if s.Step == autoBudgetStepDaily {
+			text = "Daily cap unchanged"
+		}
+		s.Active = false
+		s.Value = ""
+		s.Step = autoBudgetStepHourly
+		return s, autoBudgetEffect{StatusText: text}
+
+	case "ctrl+r":
+		if s.Step != autoBudgetStepDaily {
+			return s, autoBudgetEffect{}
+		}
+		if err := campaign.ResetGlobalRunawayBreaker(database, "TUI"); err != nil {
+			return s, autoBudgetEffect{
+				StatusText:    fmt.Sprintf("Reset breaker failed: %v", err),
+				StatusIsError: true,
+			}
+		}
+		s.Active = false
+		s.Value = ""
+		s.Step = autoBudgetStepHourly
+		return s, autoBudgetEffect{
+			StatusText:     "Daily-budget breaker reset",
+			RetriggerPilot: true,
+			BreakerReset:   true,
+		}
+
+	case "enter":
+		switch s.Step {
+		case autoBudgetStepHourly:
+			cents, err := parseAutoRunRateTargetInput(s.Value)
+			if err != nil {
+				return s, autoBudgetEffect{StatusText: "Run-rate target: " + err.Error(), StatusIsError: true}
+			}
+			if err := saveAutoRunRateSoftTargetCentsPerHour(cents); err != nil {
+				return s, autoBudgetEffect{StatusText: fmt.Sprintf("Run-rate target save failed: %v", err), StatusIsError: true}
+			}
+			s.HourlyCents = cents
+			s.Step = autoBudgetStepDaily
+			s.Value = formatCentsForInput(s.DailyCents)
+			return s, autoBudgetEffect{
+				StatusText: fmt.Sprintf("Run-rate set to %s — now enter daily cap", formatAutoRunRateTarget(cents)),
+			}
+		case autoBudgetStepDaily:
+			cents, err := parseAutoDollarInput(s.Value, "daily cap")
+			if err != nil {
+				return s, autoBudgetEffect{StatusText: "Daily cap: " + err.Error(), StatusIsError: true}
+			}
+			if err := saveAutoRunawaySpendDailyCapCents(cents); err != nil {
+				return s, autoBudgetEffect{StatusText: fmt.Sprintf("Daily cap save failed: %v", err), StatusIsError: true}
+			}
+			s.DailyCents = cents
+			s.Active = false
+			s.Value = ""
+			s.Step = autoBudgetStepHourly
+			return s, autoBudgetEffect{
+				StatusText:     "Daily cap set to " + formatAutoDailyCap(cents),
+				RetriggerPilot: true,
+			}
+		}
+		return s, autoBudgetEffect{}
+
+	case "backspace", "ctrl+h":
+		if len(s.Value) > 0 {
+			runes := []rune(s.Value)
+			s.Value = string(runes[:len(runes)-1])
+		}
+		return s, autoBudgetEffect{}
+	}
+
+	if len(msg.Runes) > 0 {
+		s.Value += string(msg.Runes)
+	}
+	return s, autoBudgetEffect{}
 }
