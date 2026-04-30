@@ -215,25 +215,28 @@ invariant AutopilotIgnoresMovingJobs {
 }
 
 invariant SourceLaunchUnchangedWhileIntentOpen {
-    -- Move-to-existing now satisfies this property: the source claim is
-    -- atomically superseded inside SubmitJobsToInstanceForMove
-    -- (TransferJobLaunchID), so Job.cloud_instance transitions
-    -- source → target in a single step rather than via an intermediate
-    -- "unplaced" state. Rollback on submit failure goes through
-    -- resetClaimedJobsToUnplaced; the outer cancel-intent path then
-    -- restores to source via RestoreJobToLaunch.
+    -- Both target kinds now satisfy this property:
+    --   - Move-to-existing uses SubmitJobsToInstanceForMove
+    --     (TransferJobLaunchID at the DB layer) to atomically supersede
+    --     the source claim.
+    --   - Move-to-new passes LaunchOpts.TransferClaim=true to
+    --     LaunchCampaign so the same TransferJobLaunchID is used at
+    --     instance-creation time. If the cloud launch fails before the
+    --     instance is created, the source is untouched. If the launch
+    --     succeeds but the agent never comes up, the existing
+    --     reconcile.bootstrap_timeout path terminates the instance and
+    --     resets the job back to queued.
     --
-    -- Move-to-new still has an unplace-then-launch intermediate window;
-    -- the rollback to source is the compensating action. The refinement
-    -- to make move-to-new genuinely speculative (skip-job-claim flag in
-    -- LaunchCampaign + agent-ready confirmation) is tracked in "Future
-    -- work" below. When that lands the invariant becomes hard for both
-    -- target kinds.
+    -- Job.cloud_instance still transitions through "no instance" briefly
+    -- only in the rollback path (resetClaimedJobsToUnplaced after a
+    -- submit/launch failure), where the outer cancel-intent restore-to-
+    -- source path re-attaches the job to its prior home. The autopilot
+    -- exclusion via open intent covers that window.
     --
     -- @guidance: Treat new mutations to Job.cloud_instance during an
-    -- open intent as a code smell; the long-term direction is to confine
-    -- all such mutations to the confirm path.
-    aspirational: true
+    -- open intent as a code smell; restrict them to the confirm path or
+    -- to the existing rollback paths.
+    aspirational: false
 }
 
 invariant MoveTargetExistingHasInstance {
@@ -267,26 +270,31 @@ invariant ResolvedIntentHasResolutionTime {
 -- Speculative second-placement model:
 --
 --   - Move-to-existing (DONE): SubmitJobsToInstanceForMove uses
---     TransferJobLaunchID to atomically supersede the source claim, so
---     Job.cloud_instance transitions source → target in one step. The
---     two-attempt overlap window now is bounded by the time between
---     transfer-claim and the source agent noticing (the source agent
---     never receives an explicit cancel today; the queued attempt on
---     source is just superseded in DB).
+--     TransferJobLaunchID to atomically supersede the source claim.
+--   - Move-to-new (DONE): LaunchOpts.TransferClaim=true threads the
+--     same atomic-supersede semantics down through LaunchCampaign; on
+--     launch failure before the instance is created, source is
+--     untouched.
 --
---   - Move-to-new (TODO): pass a "skip job claim" flag to LaunchCampaign
---     so the instance is created with the agent payload but the source's
---     Job.cloud_instance is unchanged; on agent first heartbeat, claim
---     and cancel-source. Requires hooking into instance-ready state
---     transition, plus a per-job cancel signal to the source agent (the
---     source's R2 queue still contains the job after this lands; today
---     that's also the case but unplace happens up front).
+-- Outstanding refinements:
 --
--- A future agent pickup-ack on the running-instance path
--- (SendGraceJobPayloadNoAck → ack-waiting) would let move-to-existing
--- claim *after* ack rather than at submit time, fully closing the
--- two-attempt overlap window. The agent already writes a pickup ack in
--- drainGraceJobRequests; only the caller side needs to wait.
+--   - Two-attempt overlap reconciler. With both target kinds
+--     transferring atomically, the source attempt is closed at
+--     transfer-claim time. The source agent's R2 queue still contains
+--     the job (we don't yet write an explicit cancel marker for queued
+--     jobs). For move-to-existing the destination agent picks the job
+--     up between jobs; for move-to-new the destination agent is fresh.
+--     If both source and destination end up running the job (rare, since
+--     move targets queued jobs), a reconciler should detect two
+--     `running` attempts on different launches and kill the older
+--     unless its exit is already 0. Spec rule
+--     ObsoleteMoveOnSourceCompletion sketches this.
+--
+--   - Caller-side ack-waiting on the running-instance grace path
+--     (SendGraceJobPayloadNoAck → ack-waiting) would let
+--     move-to-existing claim *after* the destination agent's pickup ack
+--     rather than at submit time, narrowing the transfer-claim window.
+--     The agent already writes a pickup ack in drainGraceJobRequests.
 --
 -- Two-attempt overlap reconciler: once the speculative model lands, a
 -- safety reconciler scans for jobs with two `running` attempts on

@@ -705,3 +705,82 @@ func TestReplacementPriceAllowed(t *testing.T) {
 		t.Fatal("expected replacement above 25% premium to be rejected")
 	}
 }
+
+func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
+	// Regression: with LaunchOpts.TransferClaim=true (move-to-new path),
+	// the source's active claim is superseded rather than rejected with
+	// ErrJobAlreadyClaimed. See specs/job-move.allium "Future work".
+	database := setupTestDB(t)
+	defer database.Close()
+
+	src, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+
+	job := &db.Job{ID: 201, Status: db.StatusQueued, Command: "python train.py"}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', 'RTX_4090', 24, ?, 0)`,
+		job.ID, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, job.ID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+
+	stopAfterRegistration := errors.New("stop after registration")
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, stopAfterRegistration
+		},
+	}
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, Jobs: []*db.Job{job}}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+
+	dst, err := LaunchInstance(
+		mockClient, database, nil, group, offer,
+		LaunchOpts{TransferClaim: true},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	// TransferClaim must succeed at the claim step, so the error returned
+	// is the CreateInstance failure (proving control reached CreateInstance,
+	// i.e. past the claim). Without TransferClaim, the same setup yields
+	// "all jobs claimed by other launches" before CreateInstance is called.
+	if err == nil || !errors.Is(err, stopAfterRegistration) {
+		t.Fatalf("LaunchInstance with TransferClaim=true: err = %v, want stop-after-registration", err)
+	}
+	if dst == 0 || dst == src {
+		t.Fatalf("dst id = %d (src = %d)", dst, src)
+	}
+
+	// Re-attach to source (the failed launch's rollback orphaned it),
+	// then try the same launch without TransferClaim — the claim step
+	// must reject the still-active source claim before CreateInstance
+	// runs.
+	if err := db.SetJobLaunchID(database, job.ID, src); err != nil {
+		t.Fatalf("re-set source launch: %v", err)
+	}
+	_, err = LaunchInstance(
+		mockClient, database, nil, group, offer,
+		LaunchOpts{},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "claimed by other launches") {
+		t.Fatalf("LaunchInstance without TransferClaim: err = %v, want all-claimed-by-others", err)
+	}
+}

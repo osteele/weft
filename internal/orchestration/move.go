@@ -222,33 +222,16 @@ func executeMoveOption(
 		return fmt.Sprintf("instance %s", ids.FormatInstanceID(opt.InstanceID)), nil
 	}
 
-	// Move-to-new still routes through unplace + LaunchCampaign. The
-	// source-preservation refinement is tracked in specs/job-move.allium
-	// "Future work"; the current implementation relies on
-	// tryRestoreJobToSource on failure.
-	if err := unplaceIfNeeded(database, job); err != nil {
-		return "", fmt.Errorf("unplace: %w", err)
-	}
-	job, err := db.GetJobByID(database, job.ID)
-	if err != nil {
-		return "", fmt.Errorf("reload job %s: %w", ids.FormatJobID(job.ID), err)
-	}
-
+	// Move-to-new uses TransferClaim to atomically supersede the source
+	// claim *inside* LaunchCampaign — the prior unplace-then-launch
+	// sequence is gone. If the launch fails (no offer, provider error)
+	// before the instance is created, source is untouched. If the instance
+	// is created and the agent later stalls, the existing
+	// reconcile.bootstrap_timeout path terminates the instance and resets
+	// the job back to queued — at which point the autopilot can re-place.
 	if opt.Offer == nil {
 		return "", fmt.Errorf("new-instance option missing offer")
 	}
-	if err := db.SetPendingStatus(database, job.ID, db.StatusPendingPlacement); err != nil {
-		return "", fmt.Errorf("set job %s pending_placement: %w", ids.FormatJobID(job.ID), err)
-	}
-	markedJobIDs, err := markJobsPendingPlacement(database, []int64{job.ID})
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if restoreErr := restorePendingPlacementToQueued(database, markedJobIDs); restoreErr != nil {
-			slog.Warn("failed to normalize pending_placement jobs", "component", "move", "error", restoreErr)
-		}
-	}()
 
 	offer := *opt.Offer
 	group := campaign.InstanceGroup{GPUClass: job.GPUClass, Jobs: []*db.Job{job}}
@@ -267,6 +250,7 @@ func executeMoveOption(
 	launchOpts := campaign.LaunchOpts{
 		GracePeriodSeconds: int(gracePeriod.Seconds()),
 		Strategy:           opt.Strategy,
+		TransferClaim:      true,
 	}
 
 	var r2Cfg cloud.R2Config

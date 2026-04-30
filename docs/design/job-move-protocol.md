@@ -30,11 +30,17 @@ That spec defines:
 
 ## Status
 
-The intent table, autopilot/rebalance exclusion, and failure-path
-restore-to-source are in place. Today's `ExecuteOption` still mutates
-`Job.cloud_instance` mid-move (unplace then claim) and relies on
-`tryRestoreJobToSource` as the rollback. The next refinement (see the
-"Future work" section in `specs/job-move.allium`) makes the move flow
-genuinely speculative — no source mutation until the destination's
-agent acknowledges — at which point `SourceLaunchUnchangedWhileIntentOpen`
-becomes a hard invariant.
+Both target kinds now do the source → destination transition atomically
+via `db.TransferJobLaunchID`:
+
+- Move-to-existing → `campaign.SubmitJobsToInstanceForMove` (transfer at
+  R2-submit time).
+- Move-to-new → `campaign.LaunchOpts.TransferClaim=true` (transfer at
+  instance-creation time inside `LaunchCampaign`).
+
+The autopilot/rebalance exclusion and failure-path restore-to-source are
+in place. The aspirational invariant
+`SourceLaunchUnchangedWhileIntentOpen` is now hard for both target
+kinds. Outstanding work (see "Future work" in
+`specs/job-move.allium`): two-attempt overlap reconciler and caller-side
+ack-waiting on the running-instance grace path.

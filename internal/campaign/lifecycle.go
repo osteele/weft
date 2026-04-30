@@ -50,6 +50,10 @@ type LaunchOpts struct {
 	MinSurvival         float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
 	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
+	// TransferClaim, if true, supersedes any active source claim on the
+	// jobs being launched (TransferJobLaunchID rather than SetJobLaunchID).
+	// Caller MUST have an open MoveIntent — see specs/job-move.allium.
+	TransferClaim bool
 }
 
 func (opts LaunchOpts) ScoringProfile() bidding.ScoreProfile {
@@ -1359,7 +1363,7 @@ func LaunchInstance(
 	// now are skipped rather than causing a hard failure.
 	var claimedJobs []*db.Job
 	for i, job := range group.Jobs {
-		updatedJob, err := claimJobForLaunch(database, job.ID, instanceID)
+		updatedJob, err := claimJobForLaunchWithOpts(database, job.ID, instanceID, opts.TransferClaim)
 		if err != nil {
 			if errors.Is(err, db.ErrJobAlreadyClaimed) {
 				slog.Info("job claimed by another launch, skipping",
