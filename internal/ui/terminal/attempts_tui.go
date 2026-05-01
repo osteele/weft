@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 )
@@ -264,7 +265,9 @@ func attemptColumns() []attemptColumn {
 		{"#", 4, func(v attemptView, _ int64) string { return fmt.Sprintf("%d", v.attempt.AttemptNumber) }},
 		{"Status", 10, func(v attemptView, _ int64) string { return v.attempt.Status }},
 		{"Phase", 8, func(v attemptView, _ int64) string { return v.phase.Label() }},
-		{"Host", 22, func(v attemptView, _ int64) string { return attemptHostCell(v) }},
+		{"Provider", 8, func(v attemptView, _ int64) string { return attemptProviderCell(v) }},
+		{"Host", 10, func(v attemptView, _ int64) string { return attemptHostCell(v) }},
+		{"GPU", 18, func(v attemptView, _ int64) string { return attemptGPUCell(v) }},
 		{"When", 24, func(v attemptView, _ int64) string { return attemptWhenCell(v) }},
 		{"Duration", 10, func(v attemptView, now int64) string { return attemptDurationCell(v, now) }},
 		{"Exit", 5, func(v attemptView, _ int64) string {
@@ -318,16 +321,34 @@ func attemptStatusStyle(status string) lipgloss.Style {
 	}
 }
 
+func attemptProviderCell(v attemptView) string {
+	if v.launch != nil && v.launch.Provider != "" {
+		if name := cloud.Provider(v.launch.Provider).DisplayName(); name != "" {
+			return name
+		}
+		return v.launch.Provider
+	}
+	if v.attempt.Host != "" && !db.IsLaunchHost(v.attempt.Host) {
+		return "on-prem"
+	}
+	return "—"
+}
+
 func attemptHostCell(v attemptView) string {
 	if v.attempt.Host != "" && !db.IsLaunchHost(v.attempt.Host) {
 		return v.attempt.Host
 	}
 	if v.launch != nil {
-		label := ids.FormatInstanceID(v.launch.ID)
+		return ids.FormatInstanceID(v.launch.ID)
+	}
+	return "—"
+}
+
+func attemptGPUCell(v attemptView) string {
+	if v.launch != nil {
 		if gpu := v.launch.DisplayGPUBrief(); gpu != "" {
-			label = label + " " + gpu
+			return gpu
 		}
-		return label
 	}
 	return "—"
 }

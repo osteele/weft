@@ -134,6 +134,17 @@ var versionedMigrations = []migration{
 			return err
 		},
 	},
+	{
+		Description: "add cloud_instances view aliasing launches",
+		Apply: func(db *sql.DB) error {
+			// `launches` is the storage table; `cloud_instances` is the
+			// conceptual name used throughout the Go code (CloudInstance
+			// struct, jobs.cloud_instance_id FK). Expose a read-only view
+			// so ad-hoc SQL written against the conceptual name works.
+			_, err := db.Exec(`CREATE VIEW IF NOT EXISTS cloud_instances AS SELECT * FROM launches`)
+			return err
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
