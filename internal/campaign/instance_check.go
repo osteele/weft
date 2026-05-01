@@ -642,17 +642,49 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	if ci.LaunchedAt != nil && inst != nil && inst.Status != "" {
 		reason = db.TerminationReasonProviderFailure
 	}
-	reason = failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
+	reasonAfterR2 := failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
+	detail := buildProviderDeadDetail(ci, inst, reason, reasonAfterR2, now)
 
 	slog.Warn("provider dead: no completion marker or termination intent found, orphaning jobs",
-		"component", "reconcile", "instance", ci.ID, "reason", reason)
+		"component", "reconcile", "instance", ci.ID, "reason", reasonAfterR2, "detail", detail)
 	return InstanceAction{
 		Kind:              ActionProviderDead,
 		TerminalStatus:    db.LaunchStatusFailed,
-		TerminationReason: reason,
+		TerminationReason: reasonAfterR2,
+		StallMessage:      detail,
 		ResetJobs:         true,
 		AttemptOutcome:    db.AttemptOutcomeOrphaned,
 	}
+}
+
+// buildProviderDeadDetail summarises the evidence the classifier had at the
+// point where it marked an instance failed without a completion marker or
+// termination intent. Intended for the launches.termination_detail column
+// and operator-facing logs: the post-mortem otherwise has nothing to say
+// beyond "termination_reason=unknown".
+func buildProviderDeadDetail(ci *db.Launch, inst *cloud.Instance, baseReason, finalReason string, now time.Time) string {
+	parts := []string{"provider dead with no completion or intent marker"}
+	if inst == nil {
+		parts = append(parts, "provider returned no instance")
+	} else if inst.Status == "" {
+		parts = append(parts, "provider status empty")
+	} else {
+		parts = append(parts, fmt.Sprintf("provider status=%s", inst.Status))
+	}
+	if ci != nil && ci.LaunchedAt != nil {
+		parts = append(parts, fmt.Sprintf("launched %s ago", now.Sub(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second)))
+	}
+	if ci != nil && ci.AgentReadyAtUnix != nil {
+		parts = append(parts, fmt.Sprintf("agent ready %s ago", now.Sub(time.Unix(*ci.AgentReadyAtUnix, 0)).Truncate(time.Second)))
+	} else {
+		parts = append(parts, "agent never reported ready")
+	}
+	if finalReason != baseReason {
+		parts = append(parts, fmt.Sprintf("R2 marker refined reason %s→%s", baseReason, finalReason))
+	} else {
+		parts = append(parts, "no R2 disk-failure marker")
+	}
+	return strings.Join(parts, "; ")
 }
 
 // ExecuteAction performs the side effects described by an InstanceAction: destroying

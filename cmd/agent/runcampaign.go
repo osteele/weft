@@ -141,12 +141,20 @@ func runCampaign(args []string) {
 		_ = r2Put(r2Bucket, r2keys.InstanceAgentStartup(instanceIDInt), string(payload))
 	}()
 
-	// Start heartbeat reporter (writes host metrics to R2 every 30s)
-	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get)
+	// Start heartbeat reporter (writes host metrics to R2 every 30s, plus
+	// an immediate first heartbeat and one on every phase transition).
+	forceHeartbeat, stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get)
 	defer stopHeartbeat()
+	// onPhase wraps currentPhase.Set so each transition also forces an
+	// out-of-band heartbeat upload — a phase change is exactly when we
+	// most want fresh disk and metric state on R2.
+	onPhase := func(phase string) {
+		currentPhase.Set(phase)
+		forceHeartbeat()
+	}
 	stopOpslogReporter := startOpslogReporter(r2Bucket, instanceIDInt, logDir)
 	defer stopOpslogReporter()
-	stopDiskMonitor := startDiskMonitor(r2Bucket, instanceIDInt, diskPath, logDir, phaseKey, manifest.SelfDestructCmd, currentPhase.Get, currentPhase.Set)
+	stopDiskMonitor := startDiskMonitor(r2Bucket, instanceIDInt, diskPath, logDir, phaseKey, manifest.SelfDestructCmd, currentPhase.Get, onPhase)
 	defer stopDiskMonitor()
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
@@ -156,7 +164,7 @@ func runCampaign(args []string) {
 		LogDir:              logDir,
 		MaxTime:             maxTime,
 		StartTime:           startTime,
-		OnPhase:             currentPhase.Set,
+		OnPhase:             onPhase,
 		SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 		GPUWarmup:           manifest.GPUWarmup,
 		CostPerHourCents:    manifest.CostPerHourCents,
@@ -616,13 +624,51 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 
 // startHeartbeatReporter starts a goroutine that writes host-level metrics
 // to R2 every 30 seconds. getPhase returns the current instance phase string.
-// Returns a stop function.
-func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, getPhase func() string) func() {
+//
+// The first heartbeat is emitted synchronously before this function returns,
+// so the post-mortem can distinguish "instance died before agent_ready" from
+// "instance died during the first observable phase" — the 30-second tick
+// interval would otherwise leave a window in which an instance that fails
+// during early bootstrap (uv sync, model downloads, etc.) leaves no
+// heartbeat at all on R2.
+//
+// Returns a tuple of (force, stop): `force` triggers an immediate
+// out-of-band heartbeat (call this on phase transitions so phase changes
+// land on R2 within network-latency rather than within the 30-second
+// tick); `stop` halts the ticker.
+func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, getPhase func() string) (force func(), stop func()) {
+	heartbeatKey := r2keys.InstanceHeartbeat(instanceID)
+	emit := func() {
+		sample := collectHeartbeat(getPhase(), diskPath)
+		data, err := json.Marshal(sample)
+		if err != nil {
+			return
+		}
+		r2Put(r2Bucket, heartbeatKey, string(data))
+	}
+	return startHeartbeatReporterWithEmit(emit)
+}
+
+// startHeartbeatReporterWithEmit is the testable core of startHeartbeatReporter:
+// it runs the same first-pulse-then-tick loop while letting the test inject a
+// counter or buffer in place of the real R2 PUT.
+func startHeartbeatReporterWithEmit(emit func()) (force func(), stop func()) {
 	var once sync.Once
 	done := make(chan struct{})
-	stop := func() { once.Do(func() { close(done) }) }
+	stop = func() { once.Do(func() { close(done) }) }
 
-	heartbeatKey := r2keys.InstanceHeartbeat(instanceID)
+	// Synchronous first heartbeat: the cost (a single R2 PUT during
+	// startup) is negligible compared to the diagnostic value when an
+	// instance dies before the first ticker tick.
+	emit()
+
+	pulse := make(chan struct{}, 1)
+	force = func() {
+		select {
+		case pulse <- struct{}{}:
+		default:
+		}
+	}
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -633,17 +679,14 @@ func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, 
 			case <-done:
 				return
 			case <-ticker.C:
-				sample := collectHeartbeat(getPhase(), diskPath)
-				data, err := json.Marshal(sample)
-				if err != nil {
-					continue
-				}
-				r2Put(r2Bucket, heartbeatKey, string(data))
+				emit()
+			case <-pulse:
+				emit()
 			}
 		}
 	}()
 
-	return stop
+	return force, stop
 }
 
 // startOpslogReporter starts a goroutine that periodically uploads the agent

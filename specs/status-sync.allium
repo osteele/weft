@@ -596,6 +596,19 @@ rule AgentReportsHeartbeat {
         -- JSON with: timestamp, phase, GPU utilization, GPU memory,
         -- GPU temperature, host RSS, host total memory, disk free/total.
         -- Read by coordinator to detect stale/dead agents and disk full.
+        --
+        -- AgentHeartbeatTick fires:
+        --   1. Synchronously once at agent startup, before any other
+        --      observable phase begins (uv sync, model downloads,
+        --      user script). This bounds the post-mortem gap when an
+        --      instance dies during early bootstrap: without it, a
+        --      30-second tick interval can leave no heartbeat at all on
+        --      R2 and the failure classifier has nothing to work with.
+        --   2. On every instance phase transition (starting → setup →
+        --      running → uploading → finalizing). Phase changes are
+        --      exactly when fresh disk and metric state is most useful
+        --      to the post-mortem.
+        --   3. On the periodic 30-second tick during the run.
 }
 
 -- Agent writes per-job completion marker.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -94,5 +95,31 @@ func canProbeHostMemory() bool {
 		return len(out) > 0
 	default:
 		return false
+	}
+}
+
+func TestStartHeartbeatReporter_FirstEmitIsSynchronous(t *testing.T) {
+	var emits int32
+	emit := func() { atomic.AddInt32(&emits, 1) }
+
+	force, stop := startHeartbeatReporterWithEmit(emit)
+	defer stop()
+
+	// The first emit must have run before the function returned, so that an
+	// instance dying within the first 30s tick still leaves a heartbeat on R2.
+	if got := atomic.LoadInt32(&emits); got != 1 {
+		t.Fatalf("expected 1 synchronous emit before return, got %d", got)
+	}
+
+	force()
+	// Force is asynchronous; allow the goroutine a beat to drain the pulse.
+	for i := 0; i < 100; i++ {
+		if atomic.LoadInt32(&emits) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&emits); got < 2 {
+		t.Fatalf("expected force() to trigger an extra emit, got total %d", got)
 	}
 }

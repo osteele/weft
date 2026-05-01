@@ -1306,3 +1306,51 @@ func TestFormatActionDetail_OmitsEmptyFields(t *testing.T) {
 		t.Errorf("formatActionDetail missing launch_id: %s", got)
 	}
 }
+
+func TestBuildProviderDeadDetail_PopulatesEvidence(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	launched := now.Add(-3 * time.Minute).Unix()
+	ready := now.Add(-90 * time.Second).Unix()
+	ci := &db.Launch{
+		ID:               42,
+		LaunchedAt:       &launched,
+		AgentReadyAtUnix: &ready,
+	}
+	inst := &cloud.Instance{Status: "exited"}
+	got := buildProviderDeadDetail(ci, inst, db.TerminationReasonUnknown, db.TerminationReasonUnknown, now)
+	for _, want := range []string{
+		"provider dead with no completion or intent marker",
+		"provider status=exited",
+		"launched 3m0s ago",
+		"agent ready 1m30s ago",
+		"no R2 disk-failure marker",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("buildProviderDeadDetail missing %q\nfull: %s", want, got)
+		}
+	}
+}
+
+func TestBuildProviderDeadDetail_AgentNeverReady(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	launched := now.Add(-45 * time.Second).Unix()
+	ci := &db.Launch{ID: 7, LaunchedAt: &launched}
+	got := buildProviderDeadDetail(ci, nil, db.TerminationReasonUnknown, db.TerminationReasonUnknown, now)
+	for _, want := range []string{
+		"provider returned no instance",
+		"agent never reported ready",
+		"launched 45s ago",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("buildProviderDeadDetail missing %q\nfull: %s", want, got)
+		}
+	}
+}
+
+func TestBuildProviderDeadDetail_R2Refined(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	got := buildProviderDeadDetail(nil, nil, db.TerminationReasonUnknown, db.TerminationReasonDiskFull, now)
+	if !strings.Contains(got, "R2 marker refined reason unknown→disk_full") {
+		t.Errorf("expected R2 refinement note, got: %s", got)
+	}
+}
