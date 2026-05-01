@@ -19,7 +19,8 @@ type InstanceOutcome struct {
 	GPUMemGB          int // per-GPU memory; partitions same-family SKUs (e.g. 4090 24GB vs 48GB)
 	Reliability       float64
 	MachineID         string
-	EndedAtUnix       int64 // 0 if unknown; used by the recency-decay weighting
+	DataCenter        string // provider-reported region+country, e.g. "Sichuan, CN" or ", US" (region missing)
+	EndedAtUnix       int64  // 0 if unknown; used by the recency-decay weighting
 }
 
 // LoadInstanceOutcomes queries terminal cloud instances that have termination reasons.
@@ -28,7 +29,8 @@ type InstanceOutcome struct {
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
-		       COALESCE(machine_id, ''), COALESCE(ended_at, 0), COALESCE(gpu_mem_gb, 0)
+		       COALESCE(machine_id, ''), COALESCE(ended_at, 0), COALESCE(gpu_mem_gb, 0),
+		       COALESCE(data_center, '')
 		FROM launches
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
@@ -53,7 +55,7 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		var provider string
 		var costCents sql.NullInt64
 		var reliability sql.NullFloat64
-		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix, &o.GPUMemGB); err != nil {
+		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix, &o.GPUMemGB, &o.DataCenter); err != nil {
 			return nil, err
 		}
 		o.Provider = cloud.Provider(provider)
@@ -133,6 +135,8 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 		Global:           make(map[cloud.Provider]*SurvivalStats),
 		Groups:           make(map[string]*SurvivalStats),
 		MachineStats:     make(map[string]*SurvivalStats),
+		CountryStats:     make(map[string]*SurvivalStats),
+		RegionStats:      make(map[string]*SurvivalStats),
 		PricePercentiles: skuPrices,
 		PriorStrength:    defaultPriorStrength,
 	}
@@ -155,6 +159,12 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 
 		if o.MachineID != "" {
 			accumulateStats(model.MachineStats, machineKey(o.Provider, o.MachineID), survived, weight)
+		}
+		if o.DataCenter != "" {
+			accumulateStats(model.RegionStats, regionKey(o.Provider, o.DataCenter), survived, weight)
+		}
+		if country := parseCountryFromDataCenter(o.DataCenter); country != "" {
+			accumulateStats(model.CountryStats, countryKey(o.Provider, country), survived, weight)
 		}
 	}
 

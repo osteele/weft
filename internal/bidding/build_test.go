@@ -148,3 +148,91 @@ func TestBuildSurvivalModel_SeparatesVRAMVariants(t *testing.T) {
 		t.Errorf("VRAM variants should produce distinct posteriors; good=%.3f bad=%.3f", good, bad)
 	}
 }
+
+func TestBuildSurvivalModel_HierarchicalGeoPenalty(t *testing.T) {
+	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	endedAt := now.Add(-1 * time.Hour).Unix()
+	mk := func(reason, dc, machineID string) InstanceOutcome {
+		return InstanceOutcome{
+			Provider:          testProvider,
+			TerminationReason: reason,
+			CostPerHourCents:  100,
+			ResolvedGPUName:   "RTX 4090",
+			GPUMemGB:          24,
+			Reliability:       0.95,
+			DataCenter:        dc,
+			MachineID:         machineID,
+			EndedAtUnix:       endedAt,
+		}
+	}
+	var outcomes []InstanceOutcome
+	// Background: 30 successful runs in Texas, US (good country, good region).
+	for range 30 {
+		outcomes = append(outcomes, mk("completed", "Texas, US", "tx-1"))
+	}
+	// Bad region cluster: 15 failures all in Sichuan, CN, machine s1.
+	for range 15 {
+		outcomes = append(outcomes, mk("provider_failure", "Sichuan, CN", "s1"))
+	}
+	// Healthy machine in healthy country: 5 successes in Texas, US, machine tx-2.
+	for range 5 {
+		outcomes = append(outcomes, mk("completed", "Texas, US", "tx-2"))
+	}
+
+	model := BuildSurvivalModelAt(outcomes, now)
+
+	tx := cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, GPUMemGB: 24, Reliability: 0.95, DataCenter: "Texas, US", MachineID: "tx-2"}
+	sichuan := cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, GPUMemGB: 24, Reliability: 0.95, DataCenter: "Sichuan, CN", MachineID: "s1"}
+
+	txSurv := model.OfferSurvival(tx)
+	cnSurv := model.OfferSurvival(sichuan)
+
+	// The two offers share the same SKU bucket (RTX 4090 24GB at $1.00),
+	// so both get the same group-level posterior; the hierarchical
+	// adjustment is what should drive them apart.
+	if txSurv < 0.65 {
+		t.Errorf("good region/machine should look healthy after geo adjustment; got %.3f", txSurv)
+	}
+	if cnSurv > 0.4 {
+		t.Errorf("bad region/machine should look unhealthy after geo adjustment; got %.3f", cnSurv)
+	}
+	if txSurv-cnSurv < 0.4 {
+		t.Errorf("hierarchical penalty should produce distinct posteriors; tx=%.3f cn=%.3f", txSurv, cnSurv)
+	}
+}
+
+func TestBuildSurvivalModel_GeoCascadeAvoidsDoubleCount(t *testing.T) {
+	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	endedAt := now.Add(-1 * time.Hour).Unix()
+	mk := func(reason, dc, machineID string) InstanceOutcome {
+		return InstanceOutcome{
+			Provider: testProvider, TerminationReason: reason,
+			CostPerHourCents: 100, ResolvedGPUName: "RTX 4090",
+			GPUMemGB: 24, Reliability: 0.95,
+			DataCenter: dc, MachineID: machineID, EndedAtUnix: endedAt,
+		}
+	}
+	// All failures concentrated in one region on one machine. Both the
+	// region penalty and the machine penalty would individually attribute
+	// the badness; the cascade should count it once.
+	var outcomes []InstanceOutcome
+	for range 20 {
+		outcomes = append(outcomes, mk("completed", "Texas, US", "tx-1"))
+	}
+	for range 10 {
+		outcomes = append(outcomes, mk("provider_failure", "Bad Region, XX", "bad-1"))
+	}
+	model := BuildSurvivalModelAt(outcomes, now)
+
+	bad := cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, GPUMemGB: 24, Reliability: 0.95, DataCenter: "Bad Region, XX", MachineID: "bad-1"}
+	got := model.OfferSurvival(bad)
+
+	// A double-counting implementation (region penalty AND machine penalty
+	// both against global) would produce a value below ~0.05 (≈0.2 × 0.2).
+	// The cascade attributes the badness once, so the floor should be
+	// well above 0.05 — somewhere around the regional posterior itself
+	// (single ratio, not squared).
+	if got < 0.05 {
+		t.Errorf("cascade is double-counting the regional/machine signal; got %.3f", got)
+	}
+}

@@ -161,6 +161,8 @@ type SurvivalModel struct {
 	Global           map[cloud.Provider]*SurvivalStats
 	Groups           map[string]*SurvivalStats
 	MachineStats     map[string]*SurvivalStats
+	CountryStats     map[string]*SurvivalStats // keyed by provider|country (e.g. vastai|CN)
+	RegionStats      map[string]*SurvivalStats // keyed by provider|data_center (e.g. vastai|Sichuan, CN)
 	PricePercentiles map[string][]float64
 	PriorStrength    float64 // pseudo-observations from provider reliability
 }
@@ -218,6 +220,26 @@ func groupKey(provider cloud.Provider, sku GPUSKU, bucket PriceBucket) string {
 
 func machineKey(provider cloud.Provider, machineID string) string {
 	return string(provider) + providerKeySep + machineID
+}
+
+func countryKey(provider cloud.Provider, country string) string {
+	return string(provider) + providerKeySep + country
+}
+
+func regionKey(provider cloud.Provider, region string) string {
+	return string(provider) + providerKeySep + region
+}
+
+// parseCountryFromDataCenter extracts the trailing country code from a
+// vast.ai-style data_center string like "Sichuan, CN" or ", US". Returns
+// empty for unparseable values; the caller uses an empty country to skip
+// the country-level adjustment without polluting the country stats.
+func parseCountryFromDataCenter(dc string) string {
+	idx := strings.LastIndex(dc, ", ")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(dc[idx+2:])
 }
 
 func pricePercentileKey(provider cloud.Provider, sku GPUSKU) string {
@@ -568,14 +590,92 @@ func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string
 	return penalty
 }
 
-// OfferSurvival returns the survival probability for a specific offer,
-// incorporating per-machine penalty when available. All lookups are scoped
-// to the offer's provider.
+// OfferSurvival returns the survival probability for a specific offer.
+//
+// The result is the SKU-level Beta posterior (group survival) multiplied
+// by a single geographic adjustment chosen from the most specific level
+// that has signal: machine > region > country. The adjustment is the
+// posterior at that level divided by the next-coarser level's posterior
+// (the parent rate), clamped to ≤ 1.0.
+//
+// Choosing one level instead of stacking all three avoids double-counting
+// the same observations: in a perfectly nested hierarchy (every machine
+// belongs to one region, every region to one country), the same failures
+// that drag the country posterior down also drag the region and machine
+// posteriors down. Multiplying all three would compound the same evidence.
+//
+// Falling back through the levels means RunPod offers (no machine_id) get
+// a regional adjustment, vast.ai offers in newly-seen datacenters fall
+// back to the country adjustment, and offers in entirely-new countries
+// fall back to the SKU-only base.
 func (m *SurvivalModel) OfferSurvival(o cloud.Offer) float64 {
 	sku := offerSKU(o)
 	bucket := m.PriceBucketFor(o.Provider, sku, o.CostPerHour)
-	groupSurvival := m.SurvivalProbability(o.Provider, sku, bucket, o.Reliability)
-	return groupSurvival * m.MachinePenalty(o.Provider, o.MachineID)
+	base := m.SurvivalProbability(o.Provider, sku, bucket, o.Reliability)
+	return base * m.geoAdjustment(o)
+}
+
+// geoAdjustment selects the most specific (machine | region | country)
+// level that has observations and returns its conditional adjustment
+// against the next-coarser parent's posterior. Returns 1.0 when no
+// geographic signal is available at any level.
+func (m *SurvivalModel) geoAdjustment(o cloud.Offer) float64 {
+	globalRate := 0.95
+	if r, ok := m.globalRate(o.Provider); ok {
+		globalRate = r
+	}
+	country := parseCountryFromDataCenter(o.DataCenter)
+
+	// Walk the hierarchy from coarse to fine, tracking the rate at each
+	// level that has signal. The deepest level with signal is what gets
+	// applied; its parentRate is whatever rate held at the next-coarser
+	// level (data or, fallback, the global).
+	parentRate := globalRate
+	chosen := (*SurvivalStats)(nil)
+	chosenParent := globalRate
+
+	if country != "" {
+		if s, ok := m.CountryStats[countryKey(o.Provider, country)]; ok && s.WeightedTotal > 0 {
+			r := levelRate(s, parentRate)
+			chosen, chosenParent = s, parentRate
+			parentRate = r
+		}
+	}
+	if o.DataCenter != "" {
+		if s, ok := m.RegionStats[regionKey(o.Provider, o.DataCenter)]; ok && s.WeightedTotal > 0 {
+			r := levelRate(s, parentRate)
+			chosen, chosenParent = s, parentRate
+			parentRate = r
+		}
+	}
+	if o.MachineID != "" {
+		if s, ok := m.MachineStats[machineKey(o.Provider, o.MachineID)]; ok && s.WeightedTotal > 0 {
+			chosen, chosenParent = s, parentRate
+		}
+	}
+
+	if chosen == nil || chosenParent <= 0 {
+		return 1.0
+	}
+	posterior := levelRate(chosen, chosenParent)
+	adj := posterior / chosenParent
+	if adj > 1.0 {
+		adj = 1.0
+	}
+	return adj
+}
+
+// levelRate returns the Beta posterior survival rate for a single
+// geographic level, anchored to the parent rate as the prior centre.
+func levelRate(s *SurvivalStats, parentRate float64) float64 {
+	if parentRate <= 0 {
+		parentRate = 0.95
+	}
+	alpha0 := MachinePriorStrength * parentRate
+	beta0 := MachinePriorStrength * (1 - parentRate)
+	alpha := alpha0 + s.WeightedSurvived
+	beta := beta0 + (s.WeightedTotal - s.WeightedSurvived)
+	return alpha / (alpha + beta)
 }
 
 // offerSKU extracts the (family, VRAM) key for an offer. Falls back to
