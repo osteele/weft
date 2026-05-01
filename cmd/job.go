@@ -771,10 +771,8 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	var errorsList []string
-	for i, jobID := range jobIDs {
-		if len(jobIDs) > 1 && i > 0 {
-			fmt.Println("---")
-		}
+	printed := 0
+	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: get job: %v", ids.FormatJobID(jobID), err))
@@ -784,6 +782,10 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
+		if printed > 0 {
+			fmt.Println("---")
+		}
+		printed++
 		hydrateQueueBlockedReasons([]*db.Job{job})
 		display := queueblock.Display(job, nil)
 

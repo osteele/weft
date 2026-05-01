@@ -222,11 +222,8 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 	waitRequests := make([]jobStatusRequest, 0, len(jobIDs))
 	waitInputInvalid := false
 	singleJob := len(jobIDs) == 1 && !statusWait
-	for i, jobID := range jobIDs {
-		if i > 0 && !statusWait {
-			fmt.Println("---")
-		}
-
+	printed := 0
+	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Job %s: %v\n", ids.FormatJobID(jobID), err)
@@ -244,6 +241,10 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		if printed > 0 {
+			fmt.Println("---")
+		}
+		printed++
 		printSingleJobStatus(database, jobID, job, singleJob, needsSync || statusNoSync)
 	}
 
