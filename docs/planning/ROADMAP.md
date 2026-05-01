@@ -147,30 +147,17 @@ The "rare TUI gets banner integration first time it's used" pattern is fine
 — banners are a net additive feature; entrypoints without integration are
 no worse than before.
 
-## requested_status / pending_status / attempt-status three-way merge
+## UserIntent entity (replaces requested_status three-way merge)
 
-The `job_status` view derives `Job.status` from a three-way merge of:
+The `job_status` view derives `Job.status` from `jobs.requested_status`
+(user-issued state transitions: cancel, kill, requeue, draft) overlaying
+the latest attempt's status. Promoting `requested_status` to a
+`UserIntent` entity (kind = cancel | kill | requeue | draft) would make
+the merge "open intent overrides attempt status" instead of a column-
+comparison dance, matching the Move/Placement/Termination intent shape.
 
-- `jobs.requested_status` — user-issued state transitions (cancel, kill,
-  requeue, draft) that have not yet propagated to the agent.
-- `job_attempts.pending_status` — the legacy "this attempt is being
-  worked on" sub-state. Most uses (placement-window) have moved to
-  `PlacementIntent`; the remaining cases are reconcile-driven mid-attempt
-  transitions.
-- `job_attempts.status` — the actual state of the latest open attempt.
-
-The merge logic in the view took a comment block to explain. With
-`PlacementIntent` extracted (see specs/job-move.allium), the surface area
-shrunk but did not collapse. Worth revisiting when the view's complexity
-becomes a concrete pain point. Candidate moves:
-
-- Promote `requested_status` to a `UserIntent` entity (kind = cancel /
-  kill / requeue / draft) so the merge becomes "open intent overrides
-  attempt status" instead of a column-comparison dance.
-- After enough soak time, drop `pending_placement` from the `Status`
-  enum entirely — `PlacementIntent` now carries that signal — and remove
-  the autopilot's pending_placement rescue branch + the
-  `is_unplaced_awaiting_placement` predicate's special-case for it.
+Worth revisiting when the view's complexity becomes a concrete pain
+point. Mostly clarity, not behavior change.
 
 ## InstanceAcceptsJobs unified predicate
 

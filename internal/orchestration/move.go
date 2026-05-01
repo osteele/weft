@@ -500,12 +500,6 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 			}
 			continue
 		}
-		if err := db.SetPendingStatus(database, job.ID, db.StatusPendingPlacement); err != nil {
-			if cb.OnWarning != nil {
-				cb.OnWarning(fmt.Sprintf("Warning: set pending placement for job %s failed: %v", ids.FormatJobID(job.ID), err))
-			}
-			continue
-		}
 		unplaced++
 	}
 	logPhase("unplace_jobs", unplaceStarted, fmt.Sprintf("ok=%d total=%d", unplaced, len(jobs)), nil)

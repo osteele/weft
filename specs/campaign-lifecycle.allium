@@ -1084,11 +1084,8 @@ rule RunawayBreakerClears {
 -- to the user and re-evaluated on the next pass.
 --
 -- The unplaced_jobs input is defined by jobs.is_unplaced_awaiting_placement
--- (target_kind = unplaced AND status in {queued, pending_placement}),
--- NOT the narrower is_unplaced_queue. UI counters that gate a tick MUST
--- use the same predicate — otherwise a job left in pending_placement by
--- an interrupted relaunch is hidden from the count and the tick is
--- skipped, stalling the job indefinitely.
+-- (target_kind = unplaced AND status = queued AND no open MoveIntent or
+-- PlacementIntent — see specs/job-move.allium).
 
 rule AutoPilotPass {
     when: AutoPilotTick(unplaced_jobs)
@@ -1138,7 +1135,7 @@ rule QueueRebalanceJob {
     when: AutoPilotTick(_) or UserRequestsRebalance()
     requires: config.rebalance_enabled
 
-    for job in jobs where job.status in {queued, pending_placement}:
+    for job in jobs where job.status = queued:
       let src = job.assigned_instance
       requires: src is not None
       requires: not InstanceHasIdleSlotFor(src, job)
@@ -1168,7 +1165,7 @@ invariant RebalanceNeverPreemptsRunning {
     -- are not candidates for moving, and running slots on dst are not
     -- candidates for receiving.
     for move in QueueRebalanceMoves:
-        move.job.status in {queued, pending_placement}
+        move.job.status = queued
         and SlotWasIdle(move.dst, move.slot, move.decision_time)
 }
 

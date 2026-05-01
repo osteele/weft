@@ -264,12 +264,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if job == nil || job.HasTag(db.TagInventory) {
 			continue
 		}
-		// Accept both queued and pending_placement unplaced rentals.
-		// pending_placement *with* an open PlacementIntent is being
-		// actively placed (excluded above); pending_placement *without*
-		// an intent is a stranded job from a crashed pre-intent path or
-		// a stale operation, and should fall through to be reported.
-		if es := job.EffectiveStatus(); es != db.StatusQueued && es != db.StatusPendingPlacement {
+		if job.EffectiveStatus() != db.StatusQueued {
 			continue
 		}
 		if _, moving := movingJobs[job.ID]; moving {

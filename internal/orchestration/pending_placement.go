@@ -22,9 +22,12 @@ type PlacementWindow struct {
 	IntentIDs []int64
 }
 
-// openPlacementWindow flips the matched jobs to pending_placement and
-// records a PlacementIntent for each. operation is a short tag that ends
-// up in oplog and the placement_intents.operation column.
+// openPlacementWindow records a PlacementIntent for each matched job.
+// `operation` is a short tag that ends up in oplog and the
+// placement_intents.operation column. The autopilot's exclusion is keyed
+// on intent presence, so the window provides the "hands off this job"
+// guarantee without needing a corresponding pending_status flip on the
+// job_attempts row.
 func openPlacementWindow(database *sql.DB, jobIDs []int64, operation string) (PlacementWindow, error) {
 	w := PlacementWindow{}
 	if database == nil || len(jobIDs) == 0 {
@@ -35,11 +38,7 @@ func openPlacementWindow(database *sql.DB, jobIDs []int64, operation string) (Pl
 		if err != nil {
 			return w, fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
 		}
-		if job == nil {
-			continue
-		}
-		status := job.EffectiveStatus()
-		if status != db.StatusQueued && status != db.StatusPendingPlacement {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
 			continue
 		}
 		intent, err := db.CreatePlacementIntent(database, jobID, operation)
@@ -51,43 +50,29 @@ func openPlacementWindow(database *sql.DB, jobIDs []int64, operation string) (Pl
 			}
 			return w, fmt.Errorf("open placement intent for job %s: %w", ids.FormatJobID(jobID), err)
 		}
-		if err := db.SetPendingStatus(database, jobID, db.StatusPendingPlacement); err != nil {
-			_ = db.ResolvePlacementIntent(database, intent.ID, db.PlacementIntentStateCanceled, "set pending_placement failed")
-			return w, fmt.Errorf("set job %s pending_placement: %w", ids.FormatJobID(jobID), err)
-		}
 		w.JobIDs = append(w.JobIDs, jobID)
 		w.IntentIDs = append(w.IntentIDs, intent.ID)
 	}
 	return w, nil
 }
 
-// closePlacementWindow ends the window by restoring pending_placement to
-// queued (where still set) and resolving the matching intents. success
+// closePlacementWindow resolves the matching intents. `success`
 // determines the resolution state. Safe to call from a defer; subsequent
-// calls are no-ops (intent state guards both updates).
+// calls are no-ops (the intent's state predicate guards the update).
 func closePlacementWindow(database *sql.DB, w PlacementWindow, success bool) error {
 	if database == nil {
 		return nil
 	}
-	for i, jobID := range w.JobIDs {
-		job, err := db.GetJobByID(database, jobID)
-		if err != nil {
-			return fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
-		}
-		if job != nil && job.EffectiveStatus() == db.StatusPendingPlacement {
-			if err := db.SetPendingStatus(database, jobID, db.StatusQueued); err != nil {
-				return fmt.Errorf("set job %s queued: %w", ids.FormatJobID(jobID), err)
-			}
-		}
-		state := db.PlacementIntentStateConfirmed
-		resolution := "placement succeeded"
-		if !success {
-			state = db.PlacementIntentStateCanceled
-			resolution = "placement failed"
-		}
-		if err := db.ResolvePlacementIntent(database, w.IntentIDs[i], state, resolution); err != nil {
+	state := db.PlacementIntentStateConfirmed
+	resolution := "placement succeeded"
+	if !success {
+		state = db.PlacementIntentStateCanceled
+		resolution = "placement failed"
+	}
+	for _, intentID := range w.IntentIDs {
+		if err := db.ResolvePlacementIntent(database, intentID, state, resolution); err != nil {
 			slog.Warn("resolve placement intent",
-				"component", "placement", "intent_id", w.IntentIDs[i], "job_id", jobID, "error", err)
+				"component", "placement", "intent_id", intentID, "error", err)
 		}
 	}
 	return nil

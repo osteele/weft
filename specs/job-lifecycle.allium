@@ -131,26 +131,20 @@ entity Job {
     latest_attempt: attempts.max_by(a => a.attempt_number)
     is_placed: host != null
     is_terminal: status in {completed, failed, dead, killed, canceled, draft}
-    needs_placement: status = pending_placement
     -- queued+unplaced means no prospective assignment yet.
     is_unplaced_queue: status = queued and target_kind = unplaced
-    -- Broader predicate used by autopilot input and UI counters that gate
-    -- the autopilot. Includes pending_placement so jobs mid-relaunch (or
-    -- stuck in pending_placement after an interrupted pass) remain
-    -- visible to the planner instead of silently disappearing from the
-    -- unplaced count. UI counters MUST use this form, not is_unplaced_queue,
-    -- when deciding whether to run an autopilot pass.
+    -- Alias for UI counter use. The "in-flight placement" signal
+    -- distinct from "queued and idle" lives on PlacementIntent
+    -- (specs/job-move.allium § PlacementIntent), not on this predicate.
     is_unplaced_awaiting_placement:
-        target_kind = unplaced and status in {queued, pending_placement}
+        target_kind = unplaced and status = queued
     -- A job is "launching" when the instance or placement backing it is still
     -- provisioning, or when the instance is up but the agent has not yet
     -- dispatched this job. Paths reaching this state:
-    --   (a) pending_placement: pre-launch placement window (on-prem path,
+    --   (a) queued+unplaced with an open PlacementIntent (on-prem path,
     --       or cloud before a launch row is attached).
     --   (b) queued + rental_instance target whose CloudInstance status is
-    --       still planned or launching. Cloud jobs typically skip
-    --       pending_placement: once a launch is attached the job_status view
-    --       returns queued even while the instance is provisioning.
+    --       still planned or launching.
     --   (c) queued + rental_instance whose CloudInstance has reached running,
     --       but the agent has not yet dispatched any job (or the active job
     --       on the instance is this job). This covers the agent-startup
@@ -160,7 +154,7 @@ entity Job {
     --       status-sync/InstanceLiveState.active_job, populated by the
     --       agent's R2 progress writes.
     is_launching:
-        status = pending_placement
+        (status = queued and exists(PlacementIntent { job = this, state = open }))
         or (status = queued
             and target_kind = rental_instance
             and cloud_instance != null
@@ -286,7 +280,12 @@ value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
 
-value Status = draft | pending_placement | queued | starting | running
+-- The in-flight "this job is being placed" signal lives on
+-- PlacementIntent (specs/job-move.allium § PlacementIntent), not in
+-- this enum. The Go constant StatusPendingPlacement is still defined
+-- so existing comparisons against it compile and harmlessly never
+-- match.
+value Status = draft | queued | starting | running
              | paused | completed | failed | dead | killed | canceled
 
 -- Placement scoring result

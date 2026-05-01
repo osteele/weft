@@ -122,6 +122,18 @@ var versionedMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		Description: "retire job_attempts.pending_status='pending_placement'",
+		Apply: func(db *sql.DB) error {
+			// The in-flight placement signal lives on PlacementIntent
+			// (specs/job-move.allium); pending_status='pending_placement'
+			// is unused. Clear it on existing rows.
+			_, err := db.Exec(`UPDATE job_attempts
+				SET pending_status = NULL, pending_at = NULL
+				WHERE pending_status = 'pending_placement'`)
+			return err
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
