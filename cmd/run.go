@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
@@ -693,6 +694,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
 			return err
+		}
+
+		// Concentration check: when the user's constraints look likely
+		// to match a narrow slice of the offer pool, warn before the
+		// job is queued so they can broaden the constraint. Stays quiet
+		// on healthy pools and on cold starts. Best-effort — a query
+		// failure isn't worth blocking submission for.
+		if host == "" && gpuClass != "" {
+			vram := 0
+			if resolvedGPUMemGB != nil {
+				vram = *resolvedGPUMemGB
+			}
+			if w, err := bidding.CheckOfferConcentration(database, gpuClass, vram); err == nil && w.Message != "" {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w.Message)
+			}
 		}
 
 		jobID, err := ops.RecordQueuedJob(database, params)
