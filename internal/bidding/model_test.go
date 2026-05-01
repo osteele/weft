@@ -9,6 +9,20 @@ import (
 
 const testProvider cloud.Provider = "vastai"
 
+// stats is a test helper that constructs a SurvivalStats with both raw and
+// weighted counts set to the given values — equivalent to outcomes recorded
+// "now" with no decay yet applied. Tests built around the historical
+// (raw-counts-only) shape stay simple this way; the tiny number of tests
+// that explicitly exercise decay write SurvivalStats fields directly.
+func stats(survived, total int) *SurvivalStats {
+	return &SurvivalStats{
+		Survived:         survived,
+		Total:            total,
+		WeightedSurvived: float64(survived),
+		WeightedTotal:    float64(total),
+	}
+}
+
 func TestBuildSurvivalModel_NoData(t *testing.T) {
 	model := BuildSurvivalModel(nil)
 	if model != nil {
@@ -255,9 +269,9 @@ func TestColdStart_ReliabilityPrior(t *testing.T) {
 func TestHierarchicalShrinkage(t *testing.T) {
 	// Sparse group with 1 failure should not completely override global rate
 	model := &SurvivalModel{
-		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Global: map[cloud.Provider]*SurvivalStats{testProvider: stats(18, 20)},
 		Groups: map[string]*SurvivalStats{
-			groupKey(testProvider, "RTX_4090", PriceBucketLow): {Survived: 0, Total: 1},
+			groupKey(testProvider, "RTX_4090", PriceBucketLow): stats(0, 1),
 		},
 		PricePercentiles: map[string][]float64{},
 		PriorStrength:    10.0,
@@ -292,7 +306,7 @@ func TestExpectedWallclockTime(t *testing.T) {
 
 func TestBestOffer_FastStrategy_UsesNeutralRuntimeFallback(t *testing.T) {
 	model := &SurvivalModel{
-		Global:           map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Global:           map[cloud.Provider]*SurvivalStats{testProvider: stats(18, 20)},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
@@ -329,7 +343,7 @@ func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 
 func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 	model := &SurvivalModel{
-		Global:           map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Global:           map[cloud.Provider]*SurvivalStats{testProvider: stats(18, 20)},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
@@ -355,13 +369,13 @@ func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 
 func TestMachinePenalty_HighFailureRate(t *testing.T) {
 	model := &SurvivalModel{
-		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Global: map[cloud.Provider]*SurvivalStats{testProvider: stats(18, 20)},
 		Groups: make(map[string]*SurvivalStats),
 		MachineStats: map[string]*SurvivalStats{
-			machineKey(testProvider, "bad-machine"):    {Survived: 1, Total: 5}, // 20% survival
-			machineKey(testProvider, "good-machine"):   {Survived: 5, Total: 5}, // 100% survival
-			machineKey(testProvider, "lightly-failed"): {Survived: 0, Total: 1}, // single failure
-			machineKey(testProvider, "single-success"): {Survived: 1, Total: 1}, // single success
+			machineKey(testProvider, "bad-machine"):    stats(1, 5), // 20% survival
+			machineKey(testProvider, "good-machine"):   stats(5, 5), // 100% survival
+			machineKey(testProvider, "lightly-failed"): stats(0, 1), // single failure
+			machineKey(testProvider, "single-success"): stats(1, 1), // single success
 		},
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
@@ -401,10 +415,10 @@ func TestMachinePenalty_HighFailureRate(t *testing.T) {
 
 func TestOfferSurvival_IncorporatesMachinePenalty(t *testing.T) {
 	model := &SurvivalModel{
-		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Global: map[cloud.Provider]*SurvivalStats{testProvider: stats(18, 20)},
 		Groups: make(map[string]*SurvivalStats),
 		MachineStats: map[string]*SurvivalStats{
-			machineKey(testProvider, "bad-machine"): {Survived: 1, Total: 5},
+			machineKey(testProvider, "bad-machine"): stats(1, 5),
 		},
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
@@ -497,7 +511,7 @@ func TestFilterOffersBySurvival_NilModel(t *testing.T) {
 
 func TestFilterOffersBySurvival_DisabledByZero(t *testing.T) {
 	model := &SurvivalModel{
-		Global:           map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 1, Total: 10}},
+		Global:           map[cloud.Provider]*SurvivalStats{testProvider: stats(1, 10)},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,

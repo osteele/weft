@@ -2,7 +2,9 @@ package bidding
 
 import (
 	"database/sql"
+	"math"
 	"sort"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	jobdb "github.com/osteele/weft/internal/db"
@@ -16,6 +18,7 @@ type InstanceOutcome struct {
 	ResolvedGPUName   string
 	Reliability       float64
 	MachineID         string
+	EndedAtUnix       int64 // 0 if unknown; used by the recency-decay weighting
 }
 
 // LoadInstanceOutcomes queries terminal cloud instances that have termination reasons.
@@ -24,7 +27,7 @@ type InstanceOutcome struct {
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
-		       COALESCE(machine_id, '')
+		       COALESCE(machine_id, ''), COALESCE(ended_at, 0)
 		FROM launches
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
@@ -49,7 +52,7 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		var provider string
 		var costCents sql.NullInt64
 		var reliability sql.NullFloat64
-		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID); err != nil {
+		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix); err != nil {
 			return nil, err
 		}
 		o.Provider = cloud.Provider(provider)
@@ -64,15 +67,55 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	return outcomes, rows.Err()
 }
 
+// SurvivalDecayHalfLife controls how quickly old outcomes lose influence on
+// the posterior. An outcome ended `SurvivalDecayHalfLife` ago contributes
+// half as much weight as a fresh one; an outcome ended 2× this long ago
+// contributes a quarter; etc. The raw counts (Total/Survived) are unaffected
+// — they remain available for "minimum observations" thresholds and human
+// display — but the Beta-Binomial posterior is computed from the weighted
+// counts.
+//
+// Choosing 21 days: long enough that a steady stream of weekly campaigns
+// keeps every active (provider, family) cell well-anchored, short enough
+// that a stale exclusion (e.g. a provider outage from a month ago) decays
+// out within a few cycles.
+const SurvivalDecayHalfLife = 21 * 24 * time.Hour
+
+// outcomeWeight returns the time-decay weight for an outcome ended at
+// endedAt, evaluated at `now`. Outcomes with no ended_at recorded
+// (endedAt==0) get full weight 1.0 — undated outcomes are typically test
+// fixtures or pre-migration rows we want to keep counting.
+func outcomeWeight(endedAt int64, now time.Time) float64 {
+	if endedAt <= 0 {
+		return 1.0
+	}
+	age := now.Sub(time.Unix(endedAt, 0))
+	if age <= 0 {
+		return 1.0
+	}
+	halfLives := float64(age) / float64(SurvivalDecayHalfLife)
+	return math.Exp2(-halfLives)
+}
+
 // BuildSurvivalModel constructs a SurvivalModel from instance outcomes.
 // Returns nil if there are no outcomes. All keys are scoped per-provider so
 // outcomes from one provider do not influence posteriors for another.
+//
+// Outcomes are accumulated with both raw counts (for thresholds and
+// display) and time-decayed weights (for posterior math). The decay clock
+// runs against time.Now(); use BuildSurvivalModelAt for deterministic
+// tests.
 func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
+	return BuildSurvivalModelAt(outcomes, time.Now())
+}
+
+// BuildSurvivalModelAt is BuildSurvivalModel with the decay clock pinned to
+// `now` for deterministic tests.
+func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalModel {
 	if len(outcomes) == 0 {
 		return nil
 	}
 
-	// Collect prices per (provider, GPU family) for percentile computation.
 	familyPrices := make(map[string][]float64)
 	for _, o := range outcomes {
 		fam := NormalizeGPUFamily(o.ResolvedGPUName)
@@ -95,24 +138,22 @@ func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
 
 	for _, o := range outcomes {
 		survived := isSurvived(o.TerminationReason)
+		weight := outcomeWeight(o.EndedAtUnix, now)
 
 		gs, ok := model.Global[o.Provider]
 		if !ok {
 			gs = &SurvivalStats{}
 			model.Global[o.Provider] = gs
 		}
-		gs.Total++
-		if survived {
-			gs.Survived++
-		}
+		addOutcome(gs, survived, weight)
 
 		fam := NormalizeGPUFamily(o.ResolvedGPUName)
 		price := float64(o.CostPerHourCents) / 100.0
 		bucket := model.PriceBucketFor(o.Provider, fam, price)
-		accumulateStats(model.Groups, groupKey(o.Provider, fam, bucket), survived)
+		accumulateStats(model.Groups, groupKey(o.Provider, fam, bucket), survived, weight)
 
 		if o.MachineID != "" {
-			accumulateStats(model.MachineStats, machineKey(o.Provider, o.MachineID), survived)
+			accumulateStats(model.MachineStats, machineKey(o.Provider, o.MachineID), survived, weight)
 		}
 	}
 
@@ -121,15 +162,21 @@ func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
 
 const defaultPriorStrength = 10.0
 
-func accumulateStats(m map[string]*SurvivalStats, key string, survived bool) {
+func accumulateStats(m map[string]*SurvivalStats, key string, survived bool, weight float64) {
 	s, ok := m[key]
 	if !ok {
 		s = &SurvivalStats{}
 		m[key] = s
 	}
+	addOutcome(s, survived, weight)
+}
+
+func addOutcome(s *SurvivalStats, survived bool, weight float64) {
 	s.Total++
+	s.WeightedTotal += weight
 	if survived {
 		s.Survived++
+		s.WeightedSurvived += weight
 	}
 }
 

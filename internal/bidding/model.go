@@ -130,9 +130,22 @@ const (
 )
 
 // SurvivalStats tracks survived/total instances for a group.
+//
+// Survived/Total are raw counts, used for "do we have enough data" thresholds
+// (e.g. minGroupObs) and for human-facing display ("3/5 survived").
+//
+// WeightedSurvived/WeightedTotal apply exponential time decay so older
+// outcomes contribute less to the posterior — they are what the
+// Beta-Binomial math actually consumes. This lets a (provider, family) cell
+// recover from stale failures without manual intervention: if no new
+// observations arrive but old failures keep ageing, the weighted counts
+// shrink toward zero and the posterior drifts back toward the prior, so a
+// once-banned offer family becomes eligible to be probed again.
 type SurvivalStats struct {
-	Survived int
-	Total    int
+	Survived         int
+	Total            int
+	WeightedSurvived float64
+	WeightedTotal    float64
 }
 
 // SurvivalModel holds the Beta-Binomial survival model grouped by
@@ -223,10 +236,10 @@ func (m *SurvivalModel) IterateMachines() []MachineStat {
 
 func (m *SurvivalModel) globalRate(provider cloud.Provider) (rate float64, ok bool) {
 	gs, has := m.Global[provider]
-	if !has || gs.Total == 0 {
+	if !has || gs.WeightedTotal <= 0 {
 		return 0, false
 	}
-	return float64(gs.Survived) / float64(gs.Total), true
+	return gs.WeightedSurvived / gs.WeightedTotal, true
 }
 
 // SurvivalProbability returns the posterior mean survival probability for a
@@ -234,8 +247,10 @@ func (m *SurvivalModel) globalRate(provider cloud.Provider) (rate float64, ok bo
 //
 // Uses a hierarchical Beta-Binomial model:
 //   - Prior: Beta(alpha0, beta0) from provider reliability with PriorStrength pseudo-observations
-//   - Likelihood: Binomial(survived, total) from the (provider, family, bucket) group
-//   - When group has < minGroupObs observations, blends toward the per-provider global rate
+//   - Likelihood: Binomial(survived, total) from the (provider, family, bucket) group,
+//     weighted by recency (older outcomes contribute less; see SurvivalDecayHalfLife)
+//   - When the group has effectively few observations (weighted total < minGroupObs),
+//     blends toward the per-provider global rate
 func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily string, bucket PriceBucket, providerReliability float64) float64 {
 	if providerReliability <= 0 {
 		providerReliability = 0.95
@@ -248,7 +263,7 @@ func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily s
 	key := groupKey(provider, gpuFamily, bucket)
 	gs, ok := m.Groups[key]
 
-	if !ok || gs.Total < minGroupObs {
+	if !ok || gs.WeightedTotal < float64(minGroupObs) {
 		// Sparse group: blend toward the provider's global rate (not a
 		// cross-provider rate — RunPod and Vast have different baselines).
 		globalRate := 0.95
@@ -256,7 +271,7 @@ func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily s
 			globalRate = rate
 		}
 
-		if !ok || gs == nil || gs.Total == 0 {
+		if !ok || gs == nil || gs.WeightedTotal <= 0 {
 			// No group data: use prior blended with provider global
 			alpha := alpha0 + m.PriorStrength*globalRate
 			beta := beta0 + m.PriorStrength*(1-globalRate)
@@ -264,8 +279,8 @@ func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily s
 		}
 
 		// Some group data but sparse: shrink toward provider global
-		shrinkage := float64(gs.Total) / float64(minGroupObs)
-		groupRate := float64(gs.Survived) / float64(gs.Total)
+		shrinkage := gs.WeightedTotal / float64(minGroupObs)
+		groupRate := gs.WeightedSurvived / gs.WeightedTotal
 		blended := shrinkage*groupRate + (1-shrinkage)*globalRate
 
 		alpha := alpha0 + m.PriorStrength*blended
@@ -273,9 +288,9 @@ func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily s
 		return alpha / (alpha + beta)
 	}
 
-	// Sufficient group data: standard Beta posterior
-	alpha := alpha0 + float64(gs.Survived)
-	beta := beta0 + float64(gs.Total-gs.Survived)
+	// Sufficient group data: standard Beta posterior on weighted counts
+	alpha := alpha0 + gs.WeightedSurvived
+	beta := beta0 + (gs.WeightedTotal - gs.WeightedSurvived)
 	return alpha / (alpha + beta)
 }
 
@@ -477,7 +492,7 @@ func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string
 		return 1.0
 	}
 	ms, ok := m.MachineStats[machineKey(provider, machineID)]
-	if !ok || ms.Total == 0 {
+	if !ok || ms.WeightedTotal <= 0 {
 		return 1.0
 	}
 	globalRate := 0.95
@@ -488,12 +503,12 @@ func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string
 		return 1.0
 	}
 	// Beta(alpha0, beta0) prior centred on the provider's global rate, then
-	// updated with the observed (survived, failed) counts. The posterior
-	// mean is alpha / (alpha + beta).
+	// updated with the recency-weighted (survived, failed) counts. The
+	// posterior mean is alpha / (alpha + beta).
 	alpha0 := MachinePriorStrength * globalRate
 	beta0 := MachinePriorStrength * (1 - globalRate)
-	alpha := alpha0 + float64(ms.Survived)
-	beta := beta0 + float64(ms.Total-ms.Survived)
+	alpha := alpha0 + ms.WeightedSurvived
+	beta := beta0 + (ms.WeightedTotal - ms.WeightedSurvived)
 	posterior := alpha / (alpha + beta)
 	penalty := posterior / globalRate
 	if penalty > 1.0 {
