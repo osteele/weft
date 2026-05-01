@@ -492,3 +492,63 @@ func TestResetGlobalRunawayBreaker_ClearsTrippedBreaker(t *testing.T) {
 		t.Fatal("expected breaker cleared after ResetGlobalRunawayBreaker")
 	}
 }
+
+func TestResetGlobalRunawayBreaker_ClearsCampaignScopedTrip(t *testing.T) {
+	// A global resume must clear a trip that was originally recorded with
+	// a specific campaign_id. The runaway-breaker check infers the
+	// campaign from the unplaced jobs' launches, so a global reset that
+	// only writes a campaign_id=NULL resume previously failed to match,
+	// leaving the campaign-scoped trip in effect.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	const campaignID int64 = 42
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayTripped,
+		CampaignID: campaignID,
+		Detail:     "project=<all>; test trip",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent (trip): %v", err)
+	}
+
+	now := time.Now()
+	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, "")
+	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, "")
+	if !(trippedAt > resumedAt) {
+		t.Fatalf("expected trip > resume before reset, got tripped=%d resumed=%d", trippedAt, resumedAt)
+	}
+
+	if err := ResetGlobalRunawayBreaker(database, "test"); err != nil {
+		t.Fatalf("ResetGlobalRunawayBreaker: %v", err)
+	}
+
+	resumedAt = latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, campaignID, "")
+	trippedAt = latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, "")
+	if resumedAt < trippedAt {
+		t.Fatalf("expected global resume to override campaign-scoped trip, got tripped=%d resumed=%d", trippedAt, resumedAt)
+	}
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			SpendNoProgressLimitCent: 500,
+			ResumeGracePeriod:        time.Nanosecond,
+		},
+	}
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker (after reset): %v", err)
+	}
+	if tripped {
+		t.Fatal("expected breaker cleared by global reset even though trip was campaign-scoped")
+	}
+}

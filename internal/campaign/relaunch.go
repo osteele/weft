@@ -749,16 +749,26 @@ func runawayProjectFromDetail(detail string) string {
 	return value
 }
 
+// latestRunawayEventAt returns the most recent timestamp of a runaway
+// lifecycle event matching the given (campaign, project) scope. An event
+// counts as matching when its scope is either the same as the requested
+// scope or strictly broader: an event with no campaign linkage
+// (campaign_id = 0) overrides a campaign-scoped check, and a project of
+// "<all>" overrides a project-specific check. This is what makes a global
+// reset (e.g. `weft autopilot budget reset`) actually clear a
+// campaign-scoped trip.
 func latestRunawayEventAt(database *sql.DB, kind string, campaignID int64, project string) int64 {
 	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
-		Kind:       kind,
-		CampaignID: campaignID,
-		Limit:      500,
+		Kind:  kind,
+		Limit: 500,
 	})
 	if err != nil {
 		return 0
 	}
 	for _, e := range events {
+		if e.CampaignID != 0 && campaignID != 0 && e.CampaignID != campaignID {
+			continue
+		}
 		if eventMatchesRunawayProject(e, project) {
 			return e.OccurredAt
 		}
