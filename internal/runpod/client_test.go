@@ -299,6 +299,38 @@ func TestParseSSHInfoCommand(t *testing.T) {
 	})
 }
 
+func TestInjectNonInteractiveSSHOptions(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "typical runpodctl command",
+			in:   "ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+		},
+		{
+			name: "leading whitespace",
+			in:   "  ssh root@host",
+			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@host",
+		},
+		{
+			name: "non-ssh command left alone",
+			in:   "scp file root@host:/tmp/",
+			want: "scp file root@host:/tmp/",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := injectNonInteractiveSSHOptions(tc.in)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitForSSHCommand_RespectsContextDeadline(t *testing.T) {
 	const path = "/opt/homebrew/bin/runpodctl"
 	runner := &cliRunner{

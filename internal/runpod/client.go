@@ -456,6 +456,7 @@ func (c *CloudClient) BootstrapFromR2(ctx context.Context, podID, bucket, bootst
 	if err != nil {
 		return err
 	}
+	sshCmd = injectNonInteractiveSSHOptions(sshCmd)
 	remoteCmd := fmt.Sprintf(`set -euo pipefail; rclone cat "r2:%s/%s" > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`, bucket, bootstrapKey)
 	wrapped := fmt.Sprintf("%s %s", sshCmd, shellQuoteSingle(remoteCmd))
 	out, runErr := c.runLocalCommand(ctx, wrapped)
@@ -518,6 +519,24 @@ func (c *CloudClient) fetchSSHCommand(ctx context.Context, podID string) (string
 		return "", fmt.Errorf("runpodctl ssh info %s: %w", podID, err)
 	}
 	return parseSSHInfoCommand(out)
+}
+
+// injectNonInteractiveSSHOptions inserts options after the leading "ssh" token
+// that disable interactive host-key prompts and password fallbacks. Without
+// these, ssh opens /dev/tty directly when run from a TUI, corrupting the
+// display and blocking on input that never arrives. The runpodctl CLI returns
+// a bare ssh command that omits these options.
+func injectNonInteractiveSSHOptions(sshCmd string) string {
+	trimmed := strings.TrimSpace(sshCmd)
+	if !strings.HasPrefix(trimmed, "ssh ") && trimmed != "ssh" {
+		return sshCmd
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "ssh"))
+	opts := "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+	if rest == "" {
+		return "ssh " + opts
+	}
+	return "ssh " + opts + " " + rest
 }
 
 var sshCommandPattern = regexp.MustCompile(`(?m)(ssh\s+-[^\n]+|ssh\s+[^\n]+)$`)
