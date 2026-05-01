@@ -136,55 +136,134 @@ type SurvivalStats struct {
 }
 
 // SurvivalModel holds the Beta-Binomial survival model grouped by
-// (GPU family, price bucket), with optional per-machine penalty.
+// (provider, GPU family, price bucket), with optional per-machine penalty.
+//
+// Per-provider keying prevents cross-contamination: e.g., RunPod's managed
+// hosts have different reliability characteristics than Vast.ai marketplace
+// hosts, so a Vast outcome must not influence the posterior for a RunPod
+// offer of the same GPU family. Group keys, machine keys, price percentiles,
+// and the global blending rate are all scoped to one provider.
 type SurvivalModel struct {
-	GlobalSurvived   int
-	GlobalTotal      int
-	Groups           map[string]*SurvivalStats // key: "GPU_FAMILY:price_bucket"
-	MachineStats     map[string]*SurvivalStats // key: machine ID
-	PricePercentiles map[string][]float64      // GPU family → sorted prices seen
-	PriorStrength    float64                   // pseudo-observations from Vast.ai reliability
+	Global           map[cloud.Provider]*SurvivalStats
+	Groups           map[string]*SurvivalStats
+	MachineStats     map[string]*SurvivalStats
+	PricePercentiles map[string][]float64
+	PriorStrength    float64 // pseudo-observations from provider reliability
 }
 
-// groupKey returns the lookup key for a GPU family and price bucket.
-func groupKey(gpuFamily string, bucket PriceBucket) string {
-	return gpuFamily + ":" + string(bucket)
+const providerKeySep = "|"
+
+func groupKey(provider cloud.Provider, gpuFamily string, bucket PriceBucket) string {
+	return string(provider) + providerKeySep + gpuFamily + ":" + string(bucket)
+}
+
+func machineKey(provider cloud.Provider, machineID string) string {
+	return string(provider) + providerKeySep + machineID
+}
+
+func pricePercentileKey(provider cloud.Provider, gpuFamily string) string {
+	return string(provider) + providerKeySep + gpuFamily
+}
+
+// GroupStat is one row of group-level survival data, used by callers that
+// need to display or aggregate the model without parsing internal keys.
+type GroupStat struct {
+	Provider cloud.Provider
+	Family   string
+	Bucket   PriceBucket
+	*SurvivalStats
+}
+
+// MachineStat is one row of per-machine survival data.
+type MachineStat struct {
+	Provider cloud.Provider
+	ID       string
+	*SurvivalStats
+}
+
+// IterateGroups returns the model's group-level stats with keys decoded.
+func (m *SurvivalModel) IterateGroups() []GroupStat {
+	out := make([]GroupStat, 0, len(m.Groups))
+	for key, stats := range m.Groups {
+		barIdx := strings.Index(key, providerKeySep)
+		if barIdx < 0 {
+			continue
+		}
+		rest := key[barIdx+1:]
+		colonIdx := strings.LastIndex(rest, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		out = append(out, GroupStat{
+			Provider:      cloud.Provider(key[:barIdx]),
+			Family:        rest[:colonIdx],
+			Bucket:        PriceBucket(rest[colonIdx+1:]),
+			SurvivalStats: stats,
+		})
+	}
+	return out
+}
+
+// IterateMachines returns the model's per-machine stats with keys decoded.
+func (m *SurvivalModel) IterateMachines() []MachineStat {
+	out := make([]MachineStat, 0, len(m.MachineStats))
+	for key, stats := range m.MachineStats {
+		barIdx := strings.Index(key, providerKeySep)
+		if barIdx < 0 {
+			continue
+		}
+		out = append(out, MachineStat{
+			Provider:      cloud.Provider(key[:barIdx]),
+			ID:            key[barIdx+1:],
+			SurvivalStats: stats,
+		})
+	}
+	return out
+}
+
+func (m *SurvivalModel) globalRate(provider cloud.Provider) (rate float64, ok bool) {
+	gs, has := m.Global[provider]
+	if !has || gs.Total == 0 {
+		return 0, false
+	}
+	return float64(gs.Survived) / float64(gs.Total), true
 }
 
 // SurvivalProbability returns the posterior mean survival probability for a
-// given GPU family, price bucket, and Vast.ai reliability score.
+// given provider, GPU family, price bucket, and provider reliability score.
 //
 // Uses a hierarchical Beta-Binomial model:
-//   - Prior: Beta(alpha0, beta0) from Vast.ai reliability with PriorStrength pseudo-observations
-//   - Likelihood: Binomial(survived, total) from the group
-//   - When group has < minGroupObs observations, blends toward the global rate
-func (m *SurvivalModel) SurvivalProbability(gpuFamily string, bucket PriceBucket, vastaiReliability float64) float64 {
-	if vastaiReliability <= 0 {
-		vastaiReliability = 0.95
+//   - Prior: Beta(alpha0, beta0) from provider reliability with PriorStrength pseudo-observations
+//   - Likelihood: Binomial(survived, total) from the (provider, family, bucket) group
+//   - When group has < minGroupObs observations, blends toward the per-provider global rate
+func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily string, bucket PriceBucket, providerReliability float64) float64 {
+	if providerReliability <= 0 {
+		providerReliability = 0.95
 	}
 
-	// Informative prior from Vast.ai reliability
-	alpha0 := m.PriorStrength * vastaiReliability
-	beta0 := m.PriorStrength * (1 - vastaiReliability)
+	// Informative prior from provider reliability
+	alpha0 := m.PriorStrength * providerReliability
+	beta0 := m.PriorStrength * (1 - providerReliability)
 
-	key := groupKey(gpuFamily, bucket)
+	key := groupKey(provider, gpuFamily, bucket)
 	gs, ok := m.Groups[key]
 
 	if !ok || gs.Total < minGroupObs {
-		// Sparse group: blend toward global rate
-		globalRate := 0.95 // default if no global data
-		if m.GlobalTotal > 0 {
-			globalRate = float64(m.GlobalSurvived) / float64(m.GlobalTotal)
+		// Sparse group: blend toward the provider's global rate (not a
+		// cross-provider rate — RunPod and Vast have different baselines).
+		globalRate := 0.95
+		if rate, has := m.globalRate(provider); has {
+			globalRate = rate
 		}
 
 		if !ok || gs == nil || gs.Total == 0 {
-			// No group data: use prior blended with global
+			// No group data: use prior blended with provider global
 			alpha := alpha0 + m.PriorStrength*globalRate
 			beta := beta0 + m.PriorStrength*(1-globalRate)
 			return alpha / (alpha + beta)
 		}
 
-		// Some group data but sparse: shrink toward global
+		// Some group data but sparse: shrink toward provider global
 		shrinkage := float64(gs.Total) / float64(minGroupObs)
 		groupRate := float64(gs.Survived) / float64(gs.Total)
 		blended := shrinkage*groupRate + (1-shrinkage)*globalRate
@@ -220,9 +299,11 @@ func ExpectedCost(pricePerHour, jobDurationHrs, setupOverheadHrs, survivalProb f
 	return jobCost/survivalProb + retryCost
 }
 
-// PriceBucketFor classifies a price relative to historical percentiles for the GPU family.
-func (m *SurvivalModel) PriceBucketFor(gpuFamily string, pricePerHour float64) PriceBucket {
-	prices, ok := m.PricePercentiles[gpuFamily]
+// PriceBucketFor classifies a price relative to historical percentiles for the
+// (provider, GPU family) pair. Provider matters because RunPod and Vast have
+// different price ranges for the same GPU family.
+func (m *SurvivalModel) PriceBucketFor(provider cloud.Provider, gpuFamily string, pricePerHour float64) PriceBucket {
+	prices, ok := m.PricePercentiles[pricePercentileKey(provider, gpuFamily)]
 	if !ok || len(prices) == 0 {
 		return PriceBucketMedium
 	}
@@ -374,26 +455,28 @@ func MedianOfferDLPerf(offers []cloud.Offer) float64 {
 // penalty takes effect. Below this threshold, MachinePenalty returns 1.0.
 const MinMachineObs = 3
 
-// MachinePenalty returns a multiplicative penalty for a specific machine.
-// Returns 1.0 (no penalty) if the machine has fewer than minMachineObs observations
-// or if no machine stats are available.
-func (m *SurvivalModel) MachinePenalty(machineID string) float64 {
+// MachinePenalty returns a multiplicative penalty for a specific (provider, machine).
+// Returns 1.0 (no penalty) if the machine has fewer than MinMachineObs observations
+// or if no machine stats are available. Penalty is computed against the
+// provider's own global survival rate so a Vast machine isn't compared to
+// RunPod's baseline.
+func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string) float64 {
 	if m.MachineStats == nil || machineID == "" {
 		return 1.0
 	}
-	ms, ok := m.MachineStats[machineID]
+	ms, ok := m.MachineStats[machineKey(provider, machineID)]
 	if !ok || ms.Total < MinMachineObs {
 		return 1.0
 	}
 	machineRate := float64(ms.Survived) / float64(ms.Total)
 	globalRate := 0.95
-	if m.GlobalTotal > 0 {
-		globalRate = float64(m.GlobalSurvived) / float64(m.GlobalTotal)
+	if rate, has := m.globalRate(provider); has {
+		globalRate = rate
 	}
 	if globalRate <= 0 {
 		return 1.0
 	}
-	// Penalty is the ratio of machine survival to global survival,
+	// Penalty is the ratio of machine survival to provider global survival,
 	// clamped to [0, 1] so good machines don't get a bonus.
 	penalty := machineRate / globalRate
 	if penalty > 1.0 {
@@ -403,12 +486,13 @@ func (m *SurvivalModel) MachinePenalty(machineID string) float64 {
 }
 
 // OfferSurvival returns the survival probability for a specific offer,
-// incorporating per-machine penalty when available.
+// incorporating per-machine penalty when available. All lookups are scoped
+// to the offer's provider.
 func (m *SurvivalModel) OfferSurvival(o cloud.Offer) float64 {
 	gpuFamily := NormalizeGPUFamily(o.GPUName)
-	bucket := m.PriceBucketFor(gpuFamily, o.CostPerHour)
-	groupSurvival := m.SurvivalProbability(gpuFamily, bucket, o.Reliability)
-	return groupSurvival * m.MachinePenalty(o.MachineID)
+	bucket := m.PriceBucketFor(o.Provider, gpuFamily, o.CostPerHour)
+	groupSurvival := m.SurvivalProbability(o.Provider, gpuFamily, bucket, o.Reliability)
+	return groupSurvival * m.MachinePenalty(o.Provider, o.MachineID)
 }
 
 // RejectedGroup summarizes offers rejected by FilterOffersBySurvival.

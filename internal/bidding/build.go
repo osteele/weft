@@ -4,11 +4,13 @@ import (
 	"database/sql"
 	"sort"
 
+	"github.com/osteele/weft/internal/cloud"
 	jobdb "github.com/osteele/weft/internal/db"
 )
 
 // InstanceOutcome holds the data needed to build the survival model from one instance.
 type InstanceOutcome struct {
+	Provider          cloud.Provider
 	TerminationReason string
 	CostPerHourCents  int
 	ResolvedGPUName   string
@@ -17,15 +19,19 @@ type InstanceOutcome struct {
 }
 
 // LoadInstanceOutcomes queries terminal cloud instances that have termination reasons.
+// Rows missing a provider are skipped because survival statistics must be
+// scoped per-provider (RunPod and Vast have different reliability baselines).
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
-		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
+		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
 		       COALESCE(machine_id, '')
 		FROM launches
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
 		  AND termination_reason != ?
+		  AND provider IS NOT NULL
+		  AND provider != ''
 		  AND provider_instance_id IS NOT NULL
 		  AND provider_instance_id != ''
 		  AND resolved_gpu_name IS NOT NULL
@@ -40,11 +46,13 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	var outcomes []InstanceOutcome
 	for rows.Next() {
 		var o InstanceOutcome
+		var provider string
 		var costCents sql.NullInt64
 		var reliability sql.NullFloat64
-		if err := rows.Scan(&o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID); err != nil {
+		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID); err != nil {
 			return nil, err
 		}
+		o.Provider = cloud.Provider(provider)
 		if costCents.Valid {
 			o.CostPerHourCents = int(costCents.Int64)
 		}
@@ -57,50 +65,54 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 }
 
 // BuildSurvivalModel constructs a SurvivalModel from instance outcomes.
-// Returns nil if there are no outcomes.
+// Returns nil if there are no outcomes. All keys are scoped per-provider so
+// outcomes from one provider do not influence posteriors for another.
 func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
 	if len(outcomes) == 0 {
 		return nil
 	}
 
-	// Collect prices per GPU family for percentile computation
+	// Collect prices per (provider, GPU family) for percentile computation.
 	familyPrices := make(map[string][]float64)
 	for _, o := range outcomes {
 		fam := NormalizeGPUFamily(o.ResolvedGPUName)
 		price := float64(o.CostPerHourCents) / 100.0
-		familyPrices[fam] = append(familyPrices[fam], price)
+		k := pricePercentileKey(o.Provider, fam)
+		familyPrices[k] = append(familyPrices[k], price)
 	}
 
-	// Sort prices for percentile lookup
-	for fam := range familyPrices {
-		sort.Float64s(familyPrices[fam])
+	for k := range familyPrices {
+		sort.Float64s(familyPrices[k])
 	}
 
 	model := &SurvivalModel{
+		Global:           make(map[cloud.Provider]*SurvivalStats),
 		Groups:           make(map[string]*SurvivalStats),
 		MachineStats:     make(map[string]*SurvivalStats),
 		PricePercentiles: familyPrices,
 		PriorStrength:    defaultPriorStrength,
 	}
 
-	// Bucket instances and accumulate stats
 	for _, o := range outcomes {
 		survived := isSurvived(o.TerminationReason)
 
-		model.GlobalTotal++
+		gs, ok := model.Global[o.Provider]
+		if !ok {
+			gs = &SurvivalStats{}
+			model.Global[o.Provider] = gs
+		}
+		gs.Total++
 		if survived {
-			model.GlobalSurvived++
+			gs.Survived++
 		}
 
 		fam := NormalizeGPUFamily(o.ResolvedGPUName)
 		price := float64(o.CostPerHourCents) / 100.0
-		bucket := model.PriceBucketFor(fam, price)
-		key := groupKey(fam, bucket)
-
-		accumulateStats(model.Groups, key, survived)
+		bucket := model.PriceBucketFor(o.Provider, fam, price)
+		accumulateStats(model.Groups, groupKey(o.Provider, fam, bucket), survived)
 
 		if o.MachineID != "" {
-			accumulateStats(model.MachineStats, o.MachineID, survived)
+			accumulateStats(model.MachineStats, machineKey(o.Provider, o.MachineID), survived)
 		}
 	}
 

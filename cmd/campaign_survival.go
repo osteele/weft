@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -39,68 +38,50 @@ func runCampaignSurvival(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	type groupInfo struct {
-		family   string
-		bucket   bidding.PriceBucket
-		total    int
-		survived int
-	}
-	var groups []groupInfo
-	for key, stats := range model.Groups {
-		idx := strings.LastIndex(key, ":")
-		if idx < 0 {
-			continue
-		}
-		groups = append(groups, groupInfo{
-			family:   key[:idx],
-			bucket:   bidding.PriceBucket(key[idx+1:]),
-			total:    stats.Total,
-			survived: stats.Survived,
-		})
-	}
+	groups := model.IterateGroups()
 	sort.Slice(groups, func(i, j int) bool {
-		if groups[i].family != groups[j].family {
-			return groups[i].family < groups[j].family
+		if groups[i].Provider != groups[j].Provider {
+			return groups[i].Provider < groups[j].Provider
 		}
-		return groups[i].bucket < groups[j].bucket
+		if groups[i].Family != groups[j].Family {
+			return groups[i].Family < groups[j].Family
+		}
+		return groups[i].Bucket < groups[j].Bucket
 	})
 
 	const displayReliability = 0.9
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "GPU FAMILY\tBUCKET\tOBS\tSURVIVED\tPOSTERIOR\tSTATUS\n")
+	fmt.Fprintf(w, "PROVIDER\tGPU FAMILY\tBUCKET\tOBS\tSURVIVED\tPOSTERIOR\tSTATUS\n")
 	for _, g := range groups {
-		posterior := model.SurvivalProbability(g.family, g.bucket, displayReliability)
+		posterior := model.SurvivalProbability(g.Provider, g.Family, g.Bucket, displayReliability)
 		status := "ok"
 		if posterior < campaignSurvivalFloor {
 			status = fmt.Sprintf("BELOW FLOOR (%.0f%%)", campaignSurvivalFloor*100)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%.0f%%\t%s\n",
-			g.family, g.bucket, g.total, g.survived, posterior*100, status)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f%%\t%s\n",
+			g.Provider, g.Family, g.Bucket, g.Total, g.Survived, posterior*100, status)
 	}
 	w.Flush()
 
 	type machineInfo struct {
-		id       string
-		total    int
-		survived int
-		penalty  float64
+		stat    bidding.MachineStat
+		penalty float64
 	}
 	var badMachines []machineInfo
-	for id, stats := range model.MachineStats {
-		penalty := model.MachinePenalty(id)
+	for _, ms := range model.IterateMachines() {
+		penalty := model.MachinePenalty(ms.Provider, ms.ID)
 		if penalty < 1.0 {
-			badMachines = append(badMachines, machineInfo{
-				id: id, total: stats.Total, survived: stats.Survived, penalty: penalty,
-			})
+			badMachines = append(badMachines, machineInfo{stat: ms, penalty: penalty})
 		}
 	}
 	if len(badMachines) > 0 {
 		sort.Slice(badMachines, func(i, j int) bool { return badMachines[i].penalty < badMachines[j].penalty })
 		fmt.Printf("\nPer-machine penalties (%d+ observations, below-average survival):\n", bidding.MinMachineObs)
 		for _, m := range badMachines {
-			fmt.Printf("  machine %s: %d/%d survived (%.0f%%), penalty %.2f\n",
-				m.id, m.survived, m.total, 100*float64(m.survived)/float64(m.total), m.penalty)
+			fmt.Printf("  %s machine %s: %d/%d survived (%.0f%%), penalty %.2f\n",
+				m.stat.Provider, m.stat.ID, m.stat.Survived, m.stat.Total,
+				100*float64(m.stat.Survived)/float64(m.stat.Total), m.penalty)
 		}
 	}
 

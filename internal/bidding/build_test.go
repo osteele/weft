@@ -55,7 +55,8 @@ func TestLoadInstanceOutcomes_IncludesPreRunningFailuresWithProviderInstance(t *
 	if model == nil {
 		t.Fatal("BuildSurvivalModel returned nil")
 	}
-	if model.GlobalTotal != 1 || model.GlobalSurvived != 0 {
-		t.Fatalf("global survival = %d/%d, want 0/1", model.GlobalSurvived, model.GlobalTotal)
+	gs := model.Global["vastai"]
+	if gs == nil || gs.Total != 1 || gs.Survived != 0 {
+		t.Fatalf("vastai global survival = %+v, want {Survived:0 Total:1}", gs)
 	}
 }

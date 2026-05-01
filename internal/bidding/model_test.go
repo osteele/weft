@@ -7,6 +7,8 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 )
 
+const testProvider cloud.Provider = "vastai"
+
 func TestBuildSurvivalModel_NoData(t *testing.T) {
 	model := BuildSurvivalModel(nil)
 	if model != nil {
@@ -18,6 +20,7 @@ func TestBuildSurvivalModel_AllSurvived(t *testing.T) {
 	outcomes := make([]InstanceOutcome, 20)
 	for i := range outcomes {
 		outcomes[i] = InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: "completed",
 			CostPerHourCents:  100,
 			ResolvedGPUName:   "RTX 4090",
@@ -30,7 +33,7 @@ func TestBuildSurvivalModel_AllSurvived(t *testing.T) {
 		t.Fatal("expected non-nil model")
 	}
 
-	surv := model.SurvivalProbability("RTX_4090", PriceBucketMedium, 0.99)
+	surv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.99)
 	if surv < 0.9 {
 		t.Errorf("expected high survival for all-survived data, got %.3f", surv)
 	}
@@ -44,6 +47,7 @@ func TestBuildSurvivalModel_HalfFailed(t *testing.T) {
 			reason = "provider_failure"
 		}
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: reason,
 			CostPerHourCents:  100,
 			ResolvedGPUName:   "RTX 4090",
@@ -52,10 +56,48 @@ func TestBuildSurvivalModel_HalfFailed(t *testing.T) {
 	}
 
 	model := BuildSurvivalModel(outcomes)
-	surv := model.SurvivalProbability("RTX_4090", PriceBucketMedium, 0.99)
+	surv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.99)
 	// With 50% observed survival and a 0.99 prior, posterior should be between 0.4 and 0.8
 	if surv < 0.4 || surv > 0.8 {
 		t.Errorf("expected moderate survival for 50%% failed data, got %.3f", surv)
+	}
+}
+
+// TestBuildSurvivalModel_DoesNotCrossContaminateProviders verifies that
+// outcomes from one provider do not influence the posterior for a different
+// provider. RunPod's managed hosts and Vast.ai's marketplace hosts have
+// different reliability baselines; survival statistics must be scoped per
+// provider so a Vast offer's history doesn't bias a RunPod offer's score.
+func TestBuildSurvivalModel_DoesNotCrossContaminateProviders(t *testing.T) {
+	var outcomes []InstanceOutcome
+	// Vast: 20 A100 SXM4 outcomes, all failed.
+	for range 20 {
+		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          "vastai",
+			TerminationReason: "provider_failure",
+			CostPerHourCents:  100,
+			ResolvedGPUName:   "A100 SXM4",
+			Reliability:       0.95,
+		})
+	}
+	// RunPod: 0 outcomes (cold start).
+	model := BuildSurvivalModel(outcomes)
+
+	// Query via OfferSurvival so the bucket is derived from price percentiles
+	// the same way the planner derives it for a real offer.
+	vastSurv := model.OfferSurvival(cloud.Offer{Provider: "vastai", GPUName: "A100 SXM4", CostPerHour: 1.00, Reliability: 0.95})
+	runpodSurv := model.OfferSurvival(cloud.Offer{Provider: "runpod", GPUName: "A100 SXM4", CostPerHour: 1.00, Reliability: 0.95})
+
+	// Vast posterior should reflect the 20 failures and be well below the prior.
+	if vastSurv > 0.4 {
+		t.Errorf("vast posterior should be low after 20 failures, got %.3f", vastSurv)
+	}
+	// RunPod has no data; the prior alone should give ~0.95, well above vast.
+	if runpodSurv < 0.85 {
+		t.Errorf("runpod posterior should be near the 0.95 reliability prior, got %.3f", runpodSurv)
+	}
+	if runpodSurv-vastSurv < 0.5 {
+		t.Errorf("runpod (%.3f) and vast (%.3f) posteriors should differ substantially; cross-contamination suspected", runpodSurv, vastSurv)
 	}
 }
 
@@ -101,7 +143,7 @@ func TestNormalizeGPUFamily(t *testing.T) {
 func TestPriceBucketFor(t *testing.T) {
 	model := &SurvivalModel{
 		PricePercentiles: map[string][]float64{
-			"RTX_4090": {0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00},
+			pricePercentileKey(testProvider, "RTX_4090"): {0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00},
 		},
 	}
 
@@ -115,7 +157,7 @@ func TestPriceBucketFor(t *testing.T) {
 		{0.95, PriceBucketPremium},
 	}
 	for _, tt := range tests {
-		got := model.PriceBucketFor("RTX_4090", tt.price)
+		got := model.PriceBucketFor(testProvider, "RTX_4090", tt.price)
 		if got != tt.want {
 			t.Errorf("PriceBucketFor(RTX_4090, %.2f) = %s, want %s", tt.price, got, tt.want)
 		}
@@ -126,7 +168,7 @@ func TestPriceBucketFor_UnknownFamily(t *testing.T) {
 	model := &SurvivalModel{
 		PricePercentiles: map[string][]float64{},
 	}
-	got := model.PriceBucketFor("UNKNOWN", 0.50)
+	got := model.PriceBucketFor(testProvider, "UNKNOWN", 0.50)
 	if got != PriceBucketMedium {
 		t.Errorf("expected medium for unknown family, got %s", got)
 	}
@@ -134,8 +176,8 @@ func TestPriceBucketFor_UnknownFamily(t *testing.T) {
 
 func TestBestOffer_NilModel_FallsBackToCheapest(t *testing.T) {
 	offers := []cloud.Offer{
-		{ProviderID: "a", GPUName: "RTX 4090", CostPerHour: 1.00, Reliability: 0.99},
-		{ProviderID: "b", GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.80},
+		{ProviderID: "a", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, Reliability: 0.99},
+		{ProviderID: "b", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.80},
 	}
 
 	idx, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyCheap, 0)
@@ -154,6 +196,7 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 			reason = "completed"
 		}
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: reason,
 			CostPerHourCents:  30,
 			ResolvedGPUName:   "RTX 4090",
@@ -167,6 +210,7 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 			reason = "provider_failure"
 		}
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: reason,
 			CostPerHourCents:  80,
 			ResolvedGPUName:   "RTX 4090",
@@ -177,8 +221,8 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 	model := BuildSurvivalModel(outcomes)
 
 	offers := []cloud.Offer{
-		{ProviderID: "cheap", GPUName: "RTX 4090", CostPerHour: 0.30, Reliability: 0.80},
-		{ProviderID: "moderate", GPUName: "RTX 4090", CostPerHour: 0.80, Reliability: 0.99},
+		{ProviderID: "cheap", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.30, Reliability: 0.80},
+		{ProviderID: "moderate", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.80, Reliability: 0.99},
 	}
 
 	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap, 0)
@@ -190,16 +234,15 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 func TestColdStart_ReliabilityPrior(t *testing.T) {
 	// Model with no group data at all
 	model := &SurvivalModel{
-		GlobalSurvived:   0,
-		GlobalTotal:      0,
+		Global:           map[cloud.Provider]*SurvivalStats{},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
 	}
 
 	// High reliability prior should give high survival
-	highSurv := model.SurvivalProbability("RTX_4090", PriceBucketMedium, 0.99)
-	lowSurv := model.SurvivalProbability("RTX_4090", PriceBucketMedium, 0.50)
+	highSurv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.99)
+	lowSurv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.50)
 
 	if highSurv <= lowSurv {
 		t.Errorf("expected high reliability prior (%.3f) > low reliability prior (%.3f)", highSurv, lowSurv)
@@ -212,16 +255,15 @@ func TestColdStart_ReliabilityPrior(t *testing.T) {
 func TestHierarchicalShrinkage(t *testing.T) {
 	// Sparse group with 1 failure should not completely override global rate
 	model := &SurvivalModel{
-		GlobalSurvived: 18,
-		GlobalTotal:    20,
+		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
 		Groups: map[string]*SurvivalStats{
-			"RTX_4090:low": {Survived: 0, Total: 1},
+			groupKey(testProvider, "RTX_4090", PriceBucketLow): {Survived: 0, Total: 1},
 		},
 		PricePercentiles: map[string][]float64{},
 		PriorStrength:    10.0,
 	}
 
-	surv := model.SurvivalProbability("RTX_4090", PriceBucketLow, 0.95)
+	surv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketLow, 0.95)
 	// With 1 observation (failed) but strong global rate (90%), should shrink toward global
 	if surv < 0.5 {
 		t.Errorf("expected shrinkage toward global rate, but survival was too low: %.3f", surv)
@@ -250,16 +292,15 @@ func TestExpectedWallclockTime(t *testing.T) {
 
 func TestBestOffer_FastStrategy_UsesNeutralRuntimeFallback(t *testing.T) {
 	model := &SurvivalModel{
-		GlobalSurvived:   18,
-		GlobalTotal:      20,
+		Global:           map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
 	}
 
 	offers := []cloud.Offer{
-		{ProviderID: "cheap-slow", GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0, Reliability: 0.95},
-		{ProviderID: "expensive-fast", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0, Reliability: 0.95},
+		{ProviderID: "cheap-slow", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0, Reliability: 0.95},
+		{ProviderID: "expensive-fast", Provider: testProvider, GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0, Reliability: 0.95},
 	}
 
 	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast, 0)
@@ -276,8 +317,8 @@ func TestBestOffer_FastStrategy_UsesNeutralRuntimeFallback(t *testing.T) {
 
 func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 	offers := []cloud.Offer{
-		{ProviderID: "low-perf", GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0},
-		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
+		{ProviderID: "low-perf", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0},
+		{ProviderID: "high-perf", Provider: testProvider, GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
 	}
 
 	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFast, 0)
@@ -288,16 +329,15 @@ func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 
 func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 	model := &SurvivalModel{
-		GlobalSurvived:   18,
-		GlobalTotal:      20,
+		Global:           map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
 	}
 
 	offers := []cloud.Offer{
-		{ProviderID: "reliable-slow", GPUName: "RTX 4090", CostPerHour: 0.80, DLPerf: 5.0, Reliability: 0.99},
-		{ProviderID: "risky-fast", GPUName: "A100", CostPerHour: 0.30, DLPerf: 20.0, Reliability: 0.50},
+		{ProviderID: "reliable-slow", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.80, DLPerf: 5.0, Reliability: 0.99},
+		{ProviderID: "risky-fast", Provider: testProvider, GPUName: "A100", CostPerHour: 0.30, DLPerf: 20.0, Reliability: 0.50},
 	}
 
 	// Fastest uses happy-path time, so with equal runtime it can still pick the
@@ -315,22 +355,21 @@ func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 
 func TestMachinePenalty_HighFailureRate(t *testing.T) {
 	model := &SurvivalModel{
-		GlobalSurvived: 18,
-		GlobalTotal:    20,
-		Groups:         make(map[string]*SurvivalStats),
+		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Groups: make(map[string]*SurvivalStats),
 		MachineStats: map[string]*SurvivalStats{
-			"bad-machine":  {Survived: 1, Total: 5}, // 20% survival
-			"good-machine": {Survived: 5, Total: 5}, // 100% survival
-			"new-machine":  {Survived: 1, Total: 2}, // insufficient data
+			machineKey(testProvider, "bad-machine"):  {Survived: 1, Total: 5}, // 20% survival
+			machineKey(testProvider, "good-machine"): {Survived: 5, Total: 5}, // 100% survival
+			machineKey(testProvider, "new-machine"):  {Survived: 1, Total: 2}, // insufficient data
 		},
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
 	}
 
-	badPenalty := model.MachinePenalty("bad-machine")
-	goodPenalty := model.MachinePenalty("good-machine")
-	newPenalty := model.MachinePenalty("new-machine")
-	unknownPenalty := model.MachinePenalty("unknown")
+	badPenalty := model.MachinePenalty(testProvider, "bad-machine")
+	goodPenalty := model.MachinePenalty(testProvider, "good-machine")
+	newPenalty := model.MachinePenalty(testProvider, "new-machine")
+	unknownPenalty := model.MachinePenalty(testProvider, "unknown")
 
 	if badPenalty >= goodPenalty {
 		t.Errorf("bad machine penalty (%.3f) should be less than good machine penalty (%.3f)", badPenalty, goodPenalty)
@@ -351,18 +390,17 @@ func TestMachinePenalty_HighFailureRate(t *testing.T) {
 
 func TestOfferSurvival_IncorporatesMachinePenalty(t *testing.T) {
 	model := &SurvivalModel{
-		GlobalSurvived: 18,
-		GlobalTotal:    20,
-		Groups:         make(map[string]*SurvivalStats),
+		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
+		Groups: make(map[string]*SurvivalStats),
 		MachineStats: map[string]*SurvivalStats{
-			"bad-machine": {Survived: 1, Total: 5},
+			machineKey(testProvider, "bad-machine"): {Survived: 1, Total: 5},
 		},
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
 	}
 
-	normalOffer := cloud.Offer{GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.95}
-	badMachineOffer := cloud.Offer{GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.95, MachineID: "bad-machine"}
+	normalOffer := cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.95}
+	badMachineOffer := cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.95, MachineID: "bad-machine"}
 
 	normalSurv := model.OfferSurvival(normalOffer)
 	badSurv := model.OfferSurvival(badMachineOffer)
@@ -374,8 +412,8 @@ func TestOfferSurvival_IncorporatesMachinePenalty(t *testing.T) {
 
 func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 	offers := []cloud.Offer{
-		{ProviderID: "low-perf", GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0},
-		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
+		{ProviderID: "low-perf", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0},
+		{ProviderID: "high-perf", Provider: testProvider, GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
 	}
 
 	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
@@ -388,8 +426,8 @@ func TestBestOffer_FastestRejectsPathologicallyExpensive(t *testing.T) {
 	// A $1000/hr offer that's marginally faster should lose to a $1.50/hr
 	// offer, because the tiny cost weight still penalizes extreme prices.
 	offers := []cloud.Offer{
-		{ProviderID: "reasonable", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
-		{ProviderID: "pathological", GPUName: "H100", CostPerHour: 1000.0, DLPerf: 21.0},
+		{ProviderID: "reasonable", Provider: testProvider, GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
+		{ProviderID: "pathological", Provider: testProvider, GPUName: "H100", CostPerHour: 1000.0, DLPerf: 21.0},
 	}
 
 	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyFastest, 0)
@@ -402,8 +440,8 @@ func TestBestOffer_CheapBreaksTiesByTime(t *testing.T) {
 	// Two offers at the same price and runtime: cheap strategy should prefer the
 	// one with lower setup overhead due to the small time weight.
 	offers := []cloud.Offer{
-		{ProviderID: "slow", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 5.0},
-		{ProviderID: "fast", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 20.0},
+		{ProviderID: "slow", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 5.0},
+		{ProviderID: "fast", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 20.0},
 	}
 
 	setup := func(o cloud.Offer) float64 {
@@ -439,7 +477,7 @@ func TestStrategyWeights(t *testing.T) {
 }
 
 func TestFilterOffersBySurvival_NilModel(t *testing.T) {
-	offers := []cloud.Offer{{ProviderID: "a", GPUName: "RTX 4090"}}
+	offers := []cloud.Offer{{ProviderID: "a", Provider: testProvider, GPUName: "RTX 4090"}}
 	passed, rejected := FilterOffersBySurvival(nil, offers, 0.5)
 	if len(passed) != 1 || len(rejected) != 0 {
 		t.Errorf("nil model should pass all offers through")
@@ -448,13 +486,12 @@ func TestFilterOffersBySurvival_NilModel(t *testing.T) {
 
 func TestFilterOffersBySurvival_DisabledByZero(t *testing.T) {
 	model := &SurvivalModel{
-		GlobalSurvived:   1,
-		GlobalTotal:      10,
+		Global:           map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 1, Total: 10}},
 		Groups:           make(map[string]*SurvivalStats),
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
 	}
-	offers := []cloud.Offer{{ProviderID: "a", GPUName: "RTX 4090", Reliability: 0.5}}
+	offers := []cloud.Offer{{ProviderID: "a", Provider: testProvider, GPUName: "RTX 4090", Reliability: 0.5}}
 	passed, rejected := FilterOffersBySurvival(model, offers, 0)
 	if len(passed) != 1 || len(rejected) != 0 {
 		t.Errorf("minSurvival=0 should pass all offers through")
@@ -466,6 +503,7 @@ func TestFilterOffersBySurvival_FiltersLowSurvival(t *testing.T) {
 	var outcomes []InstanceOutcome
 	for range 10 {
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: "infra_failure",
 			CostPerHourCents:  7,
 			ResolvedGPUName:   "RTX 2080 Ti",
@@ -474,6 +512,7 @@ func TestFilterOffersBySurvival_FiltersLowSurvival(t *testing.T) {
 	}
 	for range 2 {
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: "completed",
 			CostPerHourCents:  7,
 			ResolvedGPUName:   "RTX 2080 Ti",
@@ -483,6 +522,7 @@ func TestFilterOffersBySurvival_FiltersLowSurvival(t *testing.T) {
 	// RTX 4090 has good survival
 	for range 10 {
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: "completed",
 			CostPerHourCents:  100,
 			ResolvedGPUName:   "RTX 4090",
@@ -493,8 +533,8 @@ func TestFilterOffersBySurvival_FiltersLowSurvival(t *testing.T) {
 	model := BuildSurvivalModel(outcomes)
 
 	offers := []cloud.Offer{
-		{ProviderID: "bad", GPUName: "RTX 2080 Ti", CostPerHour: 0.07, Reliability: 0.8},
-		{ProviderID: "good", GPUName: "RTX 4090", CostPerHour: 1.00, Reliability: 0.95},
+		{ProviderID: "bad", Provider: testProvider, GPUName: "RTX 2080 Ti", CostPerHour: 0.07, Reliability: 0.8},
+		{ProviderID: "good", Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, Reliability: 0.95},
 	}
 
 	passed, rejected := FilterOffersBySurvival(model, offers, 0.5)
@@ -515,6 +555,7 @@ func TestFilterOffersBySurvival_AllRejected(t *testing.T) {
 	var outcomes []InstanceOutcome
 	for range 10 {
 		outcomes = append(outcomes, InstanceOutcome{
+			Provider:          testProvider,
 			TerminationReason: "infra_failure",
 			CostPerHourCents:  50,
 			ResolvedGPUName:   "RTX 3060",
@@ -524,7 +565,7 @@ func TestFilterOffersBySurvival_AllRejected(t *testing.T) {
 	model := BuildSurvivalModel(outcomes)
 
 	offers := []cloud.Offer{
-		{ProviderID: "a", GPUName: "RTX 3060", CostPerHour: 0.50, Reliability: 0.5},
+		{ProviderID: "a", Provider: testProvider, GPUName: "RTX 3060", CostPerHour: 0.50, Reliability: 0.5},
 	}
 
 	passed, rejected := FilterOffersBySurvival(model, offers, 0.8)
@@ -552,8 +593,8 @@ func TestFilterOffersBySurvival_EmptyOffers(t *testing.T) {
 // maxGPUMemGB is ignored by the neutral-runtime fallback selector.
 func TestBestOffer_MaxGPUMemGB_NoLongerAffectsLegacyFallback(t *testing.T) {
 	offers := []cloud.Offer{
-		{ProviderID: "rtx3090", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
-		{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+		{ProviderID: "rtx3090", Provider: testProvider, GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+		{ProviderID: "h200", Provider: testProvider, GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
 	}
 
 	// Without ceiling: cheapest adequate offer wins because runtime ties.
@@ -574,8 +615,8 @@ func TestBestOffer_MaxGPUMemGB_NoLongerAffectsLegacyFallback(t *testing.T) {
 // effect on the neutral-runtime fallback scoring.
 func TestBestOffer_MaxGPUMemGB_Zero_NoEffect(t *testing.T) {
 	offers := []cloud.Offer{
-		{ProviderID: "cheap", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
-		{ProviderID: "fast", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+		{ProviderID: "cheap", Provider: testProvider, GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+		{ProviderID: "fast", Provider: testProvider, GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
 	}
 	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
 	if best.ProviderID != "cheap" {
