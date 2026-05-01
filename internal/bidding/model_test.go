@@ -358,9 +358,10 @@ func TestMachinePenalty_HighFailureRate(t *testing.T) {
 		Global: map[cloud.Provider]*SurvivalStats{testProvider: {Survived: 18, Total: 20}},
 		Groups: make(map[string]*SurvivalStats),
 		MachineStats: map[string]*SurvivalStats{
-			machineKey(testProvider, "bad-machine"):  {Survived: 1, Total: 5}, // 20% survival
-			machineKey(testProvider, "good-machine"): {Survived: 5, Total: 5}, // 100% survival
-			machineKey(testProvider, "new-machine"):  {Survived: 1, Total: 2}, // insufficient data
+			machineKey(testProvider, "bad-machine"):    {Survived: 1, Total: 5}, // 20% survival
+			machineKey(testProvider, "good-machine"):   {Survived: 5, Total: 5}, // 100% survival
+			machineKey(testProvider, "lightly-failed"): {Survived: 0, Total: 1}, // single failure
+			machineKey(testProvider, "single-success"): {Survived: 1, Total: 1}, // single success
 		},
 		PricePercentiles: make(map[string][]float64),
 		PriorStrength:    10.0,
@@ -368,7 +369,8 @@ func TestMachinePenalty_HighFailureRate(t *testing.T) {
 
 	badPenalty := model.MachinePenalty(testProvider, "bad-machine")
 	goodPenalty := model.MachinePenalty(testProvider, "good-machine")
-	newPenalty := model.MachinePenalty(testProvider, "new-machine")
+	lightPenalty := model.MachinePenalty(testProvider, "lightly-failed")
+	singleSuccess := model.MachinePenalty(testProvider, "single-success")
 	unknownPenalty := model.MachinePenalty(testProvider, "unknown")
 
 	if badPenalty >= goodPenalty {
@@ -377,14 +379,23 @@ func TestMachinePenalty_HighFailureRate(t *testing.T) {
 	if goodPenalty != 1.0 {
 		t.Errorf("good machine penalty should be capped at 1.0, got %.3f", goodPenalty)
 	}
-	if newPenalty != 1.0 {
-		t.Errorf("new machine (insufficient data) penalty should be 1.0, got %.3f", newPenalty)
+	if singleSuccess != 1.0 {
+		t.Errorf("single-success machine penalty should be capped at 1.0, got %.3f", singleSuccess)
 	}
 	if unknownPenalty != 1.0 {
 		t.Errorf("unknown machine penalty should be 1.0, got %.3f", unknownPenalty)
 	}
-	if badPenalty < 0.1 || badPenalty > 0.5 {
-		t.Errorf("bad machine (20%% survival vs 90%% global) should have penalty ~0.22, got %.3f", badPenalty)
+	// Single failure should already drop below 1.0 under the Beta prior.
+	if lightPenalty >= 1.0 {
+		t.Errorf("single-failure machine penalty should be < 1.0 under Beta prior, got %.3f", lightPenalty)
+	}
+	if lightPenalty <= badPenalty {
+		t.Errorf("single failure (%.3f) should still be less penalised than 1/5 (%.3f)", lightPenalty, badPenalty)
+	}
+	// 1/5 vs 90% global with prior strength 2: posterior ≈ (1.8+1)/(2+5) = 0.40,
+	// penalty ≈ 0.44. Allow a comfortable band around that.
+	if badPenalty < 0.3 || badPenalty > 0.6 {
+		t.Errorf("bad machine (20%% survival vs 90%% global) should have penalty ~0.44, got %.3f", badPenalty)
 	}
 }
 

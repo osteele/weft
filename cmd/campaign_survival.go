@@ -77,7 +77,7 @@ func runCampaignSurvival(cmd *cobra.Command, args []string) error {
 	}
 	if len(badMachines) > 0 {
 		sort.Slice(badMachines, func(i, j int) bool { return badMachines[i].penalty < badMachines[j].penalty })
-		fmt.Printf("\nPer-machine penalties (%d+ observations, below-average survival):\n", bidding.MinMachineObs)
+		fmt.Printf("\nPer-machine penalties (Beta posterior vs provider global, prior strength %.0f):\n", bidding.MachinePriorStrength)
 		for _, m := range badMachines {
 			fmt.Printf("  %s machine %s: %d/%d survived (%.0f%%), penalty %.2f\n",
 				m.stat.Provider, m.stat.ID, m.stat.Survived, m.stat.Total,

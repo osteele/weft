@@ -451,24 +451,35 @@ func MedianOfferDLPerf(offers []cloud.Offer) float64 {
 	return perfs[n/2]
 }
 
-// MinMachineObs is the minimum number of observations before per-machine
-// penalty takes effect. Below this threshold, MachinePenalty returns 1.0.
+// MinMachineObs is the display threshold for per-machine penalty reporting:
+// machines with fewer observations are hidden from `weft campaign survival`
+// even if their posterior penalty differs from 1.0. The penalty itself is
+// computed from any non-zero number of observations via a Beta posterior.
 const MinMachineObs = 3
 
+// MachinePriorStrength is the pseudo-observation count of the Beta prior
+// used by MachinePenalty. Smaller than the group prior (defaultPriorStrength)
+// so machine-level signal moves the posterior faster: with a single failure
+// observation, the penalty already drops noticeably below 1.0, and a
+// machine with 0/N successes is penalised more aggressively than the old
+// hard ratio could express without overconfidence.
+const MachinePriorStrength = 2.0
+
 // MachinePenalty returns a multiplicative penalty for a specific (provider, machine).
-// Returns 1.0 (no penalty) if the machine has fewer than MinMachineObs observations
-// or if no machine stats are available. Penalty is computed against the
-// provider's own global survival rate so a Vast machine isn't compared to
-// RunPod's baseline.
+// Returns 1.0 (no penalty) if the machine has no observations or if no
+// machine stats are available. With observations, the posterior survival
+// rate is computed under a Beta prior centred on the provider's global
+// survival rate (MachinePriorStrength pseudo-observations), then divided by
+// the global rate and clamped to [0, 1]. Per-provider scoping prevents a
+// Vast machine from being compared to RunPod's baseline.
 func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string) float64 {
 	if m.MachineStats == nil || machineID == "" {
 		return 1.0
 	}
 	ms, ok := m.MachineStats[machineKey(provider, machineID)]
-	if !ok || ms.Total < MinMachineObs {
+	if !ok || ms.Total == 0 {
 		return 1.0
 	}
-	machineRate := float64(ms.Survived) / float64(ms.Total)
 	globalRate := 0.95
 	if rate, has := m.globalRate(provider); has {
 		globalRate = rate
@@ -476,9 +487,15 @@ func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string
 	if globalRate <= 0 {
 		return 1.0
 	}
-	// Penalty is the ratio of machine survival to provider global survival,
-	// clamped to [0, 1] so good machines don't get a bonus.
-	penalty := machineRate / globalRate
+	// Beta(alpha0, beta0) prior centred on the provider's global rate, then
+	// updated with the observed (survived, failed) counts. The posterior
+	// mean is alpha / (alpha + beta).
+	alpha0 := MachinePriorStrength * globalRate
+	beta0 := MachinePriorStrength * (1 - globalRate)
+	alpha := alpha0 + float64(ms.Survived)
+	beta := beta0 + float64(ms.Total-ms.Survived)
+	posterior := alpha / (alpha + beta)
+	penalty := posterior / globalRate
 	if penalty > 1.0 {
 		penalty = 1.0
 	}
