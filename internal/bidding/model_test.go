@@ -47,7 +47,7 @@ func TestBuildSurvivalModel_AllSurvived(t *testing.T) {
 		t.Fatal("expected non-nil model")
 	}
 
-	surv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.99)
+	surv := model.SurvivalProbability(testProvider, GPUSKU{Family: "RTX_4090"}, PriceBucketMedium, 0.99)
 	if surv < 0.9 {
 		t.Errorf("expected high survival for all-survived data, got %.3f", surv)
 	}
@@ -70,7 +70,7 @@ func TestBuildSurvivalModel_HalfFailed(t *testing.T) {
 	}
 
 	model := BuildSurvivalModel(outcomes)
-	surv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.99)
+	surv := model.SurvivalProbability(testProvider, GPUSKU{Family: "RTX_4090"}, PriceBucketMedium, 0.99)
 	// With 50% observed survival and a 0.99 prior, posterior should be between 0.4 and 0.8
 	if surv < 0.4 || surv > 0.8 {
 		t.Errorf("expected moderate survival for 50%% failed data, got %.3f", surv)
@@ -157,7 +157,7 @@ func TestNormalizeGPUFamily(t *testing.T) {
 func TestPriceBucketFor(t *testing.T) {
 	model := &SurvivalModel{
 		PricePercentiles: map[string][]float64{
-			pricePercentileKey(testProvider, "RTX_4090"): {0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00},
+			pricePercentileKey(testProvider, GPUSKU{Family: "RTX_4090"}): {0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00},
 		},
 	}
 
@@ -171,7 +171,7 @@ func TestPriceBucketFor(t *testing.T) {
 		{0.95, PriceBucketPremium},
 	}
 	for _, tt := range tests {
-		got := model.PriceBucketFor(testProvider, "RTX_4090", tt.price)
+		got := model.PriceBucketFor(testProvider, GPUSKU{Family: "RTX_4090"}, tt.price)
 		if got != tt.want {
 			t.Errorf("PriceBucketFor(RTX_4090, %.2f) = %s, want %s", tt.price, got, tt.want)
 		}
@@ -182,7 +182,7 @@ func TestPriceBucketFor_UnknownFamily(t *testing.T) {
 	model := &SurvivalModel{
 		PricePercentiles: map[string][]float64{},
 	}
-	got := model.PriceBucketFor(testProvider, "UNKNOWN", 0.50)
+	got := model.PriceBucketFor(testProvider, GPUSKU{Family: "UNKNOWN"}, 0.50)
 	if got != PriceBucketMedium {
 		t.Errorf("expected medium for unknown family, got %s", got)
 	}
@@ -255,8 +255,8 @@ func TestColdStart_ReliabilityPrior(t *testing.T) {
 	}
 
 	// High reliability prior should give high survival
-	highSurv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.99)
-	lowSurv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketMedium, 0.50)
+	highSurv := model.SurvivalProbability(testProvider, GPUSKU{Family: "RTX_4090"}, PriceBucketMedium, 0.99)
+	lowSurv := model.SurvivalProbability(testProvider, GPUSKU{Family: "RTX_4090"}, PriceBucketMedium, 0.50)
 
 	if highSurv <= lowSurv {
 		t.Errorf("expected high reliability prior (%.3f) > low reliability prior (%.3f)", highSurv, lowSurv)
@@ -271,13 +271,13 @@ func TestHierarchicalShrinkage(t *testing.T) {
 	model := &SurvivalModel{
 		Global: map[cloud.Provider]*SurvivalStats{testProvider: stats(18, 20)},
 		Groups: map[string]*SurvivalStats{
-			groupKey(testProvider, "RTX_4090", PriceBucketLow): stats(0, 1),
+			groupKey(testProvider, GPUSKU{Family: "RTX_4090"}, PriceBucketLow): stats(0, 1),
 		},
 		PricePercentiles: map[string][]float64{},
 		PriorStrength:    10.0,
 	}
 
-	surv := model.SurvivalProbability(testProvider, "RTX_4090", PriceBucketLow, 0.95)
+	surv := model.SurvivalProbability(testProvider, GPUSKU{Family: "RTX_4090"}, PriceBucketLow, 0.95)
 	// With 1 observation (failed) but strong global rate (90%), should shrink toward global
 	if surv < 0.5 {
 		t.Errorf("expected shrinkage toward global rate, but survival was too low: %.3f", surv)

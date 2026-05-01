@@ -16,6 +16,7 @@ type InstanceOutcome struct {
 	TerminationReason string
 	CostPerHourCents  int
 	ResolvedGPUName   string
+	GPUMemGB          int // per-GPU memory; partitions same-family SKUs (e.g. 4090 24GB vs 48GB)
 	Reliability       float64
 	MachineID         string
 	EndedAtUnix       int64 // 0 if unknown; used by the recency-decay weighting
@@ -27,7 +28,7 @@ type InstanceOutcome struct {
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
-		       COALESCE(machine_id, ''), COALESCE(ended_at, 0)
+		       COALESCE(machine_id, ''), COALESCE(ended_at, 0), COALESCE(gpu_mem_gb, 0)
 		FROM launches
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
@@ -52,7 +53,7 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		var provider string
 		var costCents sql.NullInt64
 		var reliability sql.NullFloat64
-		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix); err != nil {
+		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix, &o.GPUMemGB); err != nil {
 			return nil, err
 		}
 		o.Provider = cloud.Provider(provider)
@@ -116,23 +117,23 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 		return nil
 	}
 
-	familyPrices := make(map[string][]float64)
+	skuPrices := make(map[string][]float64)
 	for _, o := range outcomes {
-		fam := NormalizeGPUFamily(o.ResolvedGPUName)
+		sku := skuFromOutcome(NormalizeGPUFamily(o.ResolvedGPUName), o.GPUMemGB)
 		price := float64(o.CostPerHourCents) / 100.0
-		k := pricePercentileKey(o.Provider, fam)
-		familyPrices[k] = append(familyPrices[k], price)
+		k := pricePercentileKey(o.Provider, sku)
+		skuPrices[k] = append(skuPrices[k], price)
 	}
 
-	for k := range familyPrices {
-		sort.Float64s(familyPrices[k])
+	for k := range skuPrices {
+		sort.Float64s(skuPrices[k])
 	}
 
 	model := &SurvivalModel{
 		Global:           make(map[cloud.Provider]*SurvivalStats),
 		Groups:           make(map[string]*SurvivalStats),
 		MachineStats:     make(map[string]*SurvivalStats),
-		PricePercentiles: familyPrices,
+		PricePercentiles: skuPrices,
 		PriorStrength:    defaultPriorStrength,
 	}
 
@@ -147,10 +148,10 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 		}
 		addOutcome(gs, survived, weight)
 
-		fam := NormalizeGPUFamily(o.ResolvedGPUName)
+		sku := skuFromOutcome(NormalizeGPUFamily(o.ResolvedGPUName), o.GPUMemGB)
 		price := float64(o.CostPerHourCents) / 100.0
-		bucket := model.PriceBucketFor(o.Provider, fam, price)
-		accumulateStats(model.Groups, groupKey(o.Provider, fam, bucket), survived, weight)
+		bucket := model.PriceBucketFor(o.Provider, sku, price)
+		accumulateStats(model.Groups, groupKey(o.Provider, sku, bucket), survived, weight)
 
 		if o.MachineID != "" {
 			accumulateStats(model.MachineStats, machineKey(o.Provider, o.MachineID), survived, weight)

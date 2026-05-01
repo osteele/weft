@@ -108,3 +108,43 @@ func TestBuildSurvivalModel_RecencyDecay(t *testing.T) {
 		t.Errorf("stale posterior (%.3f) should be higher than fresh posterior (%.3f) — decay not applied", staleSurv, freshSurv)
 	}
 }
+
+func TestBuildSurvivalModel_SeparatesVRAMVariants(t *testing.T) {
+	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	endedAt := now.Add(-1 * time.Hour).Unix()
+	mk := func(reason string, vram int) InstanceOutcome {
+		return InstanceOutcome{
+			Provider:          testProvider,
+			TerminationReason: reason,
+			CostPerHourCents:  100,
+			ResolvedGPUName:   "RTX 4090",
+			GPUMemGB:          vram,
+			Reliability:       0.95,
+			EndedAtUnix:       endedAt,
+		}
+	}
+	var outcomes []InstanceOutcome
+	// 4090 24GB: all survived (good SKU, plenty of supply)
+	for range 10 {
+		outcomes = append(outcomes, mk("completed", 24))
+	}
+	// 4090 48GB: all failed (rare SKU, concentrated geography)
+	for range 10 {
+		outcomes = append(outcomes, mk("provider_failure", 48))
+	}
+
+	model := BuildSurvivalModelAt(outcomes, now)
+
+	good := model.OfferSurvival(cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, GPUMemGB: 24, Reliability: 0.95})
+	bad := model.OfferSurvival(cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, GPUMemGB: 48, Reliability: 0.95})
+
+	if good < 0.85 {
+		t.Errorf("4090 24GB SKU should still look healthy after 10 successes; got %.3f", good)
+	}
+	if bad > 0.5 {
+		t.Errorf("4090 48GB SKU should look unhealthy after 10 failures; got %.3f", bad)
+	}
+	if good-bad < 0.4 {
+		t.Errorf("VRAM variants should produce distinct posteriors; good=%.3f bad=%.3f", good, bad)
+	}
+}

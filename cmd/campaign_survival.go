@@ -52,15 +52,19 @@ func runCampaignSurvival(cmd *cobra.Command, args []string) error {
 	const displayReliability = 0.9
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "PROVIDER\tGPU FAMILY\tBUCKET\tOBS\tSURVIVED\tPOSTERIOR\tSTATUS\n")
+	fmt.Fprintf(w, "PROVIDER\tGPU FAMILY\tVRAM\tBUCKET\tOBS\tSURVIVED\tPOSTERIOR\tSTATUS\n")
 	for _, g := range groups {
-		posterior := model.SurvivalProbability(g.Provider, g.Family, g.Bucket, displayReliability)
+		posterior := model.SurvivalProbability(g.Provider, g.SKU, g.Bucket, displayReliability)
 		status := "ok"
 		if posterior < campaignSurvivalFloor {
 			status = fmt.Sprintf("BELOW FLOOR (%.0f%%)", campaignSurvivalFloor*100)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%.0f%%\t%s\n",
-			g.Provider, g.Family, g.Bucket, g.Total, g.Survived, posterior*100, status)
+		vram := "?"
+		if g.SKU.VRAMGB > 0 {
+			vram = fmt.Sprintf("%dGB", g.SKU.VRAMGB)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%.0f%%\t%s\n",
+			g.Provider, g.Family, vram, g.Bucket, g.Total, g.Survived, posterior*100, status)
 	}
 	w.Flush()
 

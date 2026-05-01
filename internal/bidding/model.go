@@ -7,6 +7,7 @@ package bidding
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -166,23 +167,69 @@ type SurvivalModel struct {
 
 const providerKeySep = "|"
 
-func groupKey(provider cloud.Provider, gpuFamily string, bucket PriceBucket) string {
-	return string(provider) + providerKeySep + gpuFamily + ":" + string(bucket)
+// GPUSKU is the survival-model partitioning unit: a (family, VRAM) pair.
+// Different VRAM SKUs of the same family (e.g. RTX 4090 24GB vs 48GB) have
+// different production volumes, datacenter geographies, and reliability
+// profiles, so pooling their survival data hides real differences.
+//
+// VRAMGB == 0 marks "VRAM unknown" (legacy rows or test fixtures); these
+// land in their own SKU bucket so undated outcomes don't contaminate any
+// known-VRAM bucket.
+type GPUSKU struct {
+	Family string
+	VRAMGB int
+}
+
+func skuFromOutcome(family string, vramGB int) GPUSKU {
+	return GPUSKU{Family: family, VRAMGB: vramGB}
+}
+
+// String returns the SKU's stringified form used as a map key.
+// Format: "RTX_4090@24" or "RTX_4090@?" for unknown VRAM.
+func (s GPUSKU) String() string {
+	if s.VRAMGB <= 0 {
+		return s.Family + "@?"
+	}
+	return s.Family + "@" + strconv.Itoa(s.VRAMGB)
+}
+
+// parseSKU is the inverse of GPUSKU.String. Used by IterateGroups callers
+// that need to recover the family/VRAM split for display.
+func parseSKU(s string) GPUSKU {
+	at := strings.LastIndex(s, "@")
+	if at < 0 {
+		return GPUSKU{Family: s}
+	}
+	family := s[:at]
+	vramStr := s[at+1:]
+	if vramStr == "?" {
+		return GPUSKU{Family: family}
+	}
+	vram, err := strconv.Atoi(vramStr)
+	if err != nil {
+		return GPUSKU{Family: family}
+	}
+	return GPUSKU{Family: family, VRAMGB: vram}
+}
+
+func groupKey(provider cloud.Provider, sku GPUSKU, bucket PriceBucket) string {
+	return string(provider) + providerKeySep + sku.String() + ":" + string(bucket)
 }
 
 func machineKey(provider cloud.Provider, machineID string) string {
 	return string(provider) + providerKeySep + machineID
 }
 
-func pricePercentileKey(provider cloud.Provider, gpuFamily string) string {
-	return string(provider) + providerKeySep + gpuFamily
+func pricePercentileKey(provider cloud.Provider, sku GPUSKU) string {
+	return string(provider) + providerKeySep + sku.String()
 }
 
 // GroupStat is one row of group-level survival data, used by callers that
 // need to display or aggregate the model without parsing internal keys.
 type GroupStat struct {
 	Provider cloud.Provider
-	Family   string
+	Family   string // legacy: family alone, identical to SKU.Family
+	SKU      GPUSKU
 	Bucket   PriceBucket
 	*SurvivalStats
 }
@@ -207,9 +254,11 @@ func (m *SurvivalModel) IterateGroups() []GroupStat {
 		if colonIdx < 0 {
 			continue
 		}
+		sku := parseSKU(rest[:colonIdx])
 		out = append(out, GroupStat{
 			Provider:      cloud.Provider(key[:barIdx]),
-			Family:        rest[:colonIdx],
+			Family:        sku.Family,
+			SKU:           sku,
 			Bucket:        PriceBucket(rest[colonIdx+1:]),
 			SurvivalStats: stats,
 		})
@@ -251,7 +300,7 @@ func (m *SurvivalModel) globalRate(provider cloud.Provider) (rate float64, ok bo
 //     weighted by recency (older outcomes contribute less; see SurvivalDecayHalfLife)
 //   - When the group has effectively few observations (weighted total < minGroupObs),
 //     blends toward the per-provider global rate
-func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily string, bucket PriceBucket, providerReliability float64) float64 {
+func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, sku GPUSKU, bucket PriceBucket, providerReliability float64) float64 {
 	if providerReliability <= 0 {
 		providerReliability = 0.95
 	}
@@ -260,7 +309,7 @@ func (m *SurvivalModel) SurvivalProbability(provider cloud.Provider, gpuFamily s
 	alpha0 := m.PriorStrength * providerReliability
 	beta0 := m.PriorStrength * (1 - providerReliability)
 
-	key := groupKey(provider, gpuFamily, bucket)
+	key := groupKey(provider, sku, bucket)
 	gs, ok := m.Groups[key]
 
 	if !ok || gs.WeightedTotal < float64(minGroupObs) {
@@ -315,10 +364,12 @@ func ExpectedCost(pricePerHour, jobDurationHrs, setupOverheadHrs, survivalProb f
 }
 
 // PriceBucketFor classifies a price relative to historical percentiles for the
-// (provider, GPU family) pair. Provider matters because RunPod and Vast have
-// different price ranges for the same GPU family.
-func (m *SurvivalModel) PriceBucketFor(provider cloud.Provider, gpuFamily string, pricePerHour float64) PriceBucket {
-	prices, ok := m.PricePercentiles[pricePercentileKey(provider, gpuFamily)]
+// (provider, SKU) pair. Provider matters because RunPod and Vast have
+// different price ranges for the same GPU family; SKU matters because the
+// 24GB and 48GB variants of the same family run at very different price
+// points and shouldn't be pooled.
+func (m *SurvivalModel) PriceBucketFor(provider cloud.Provider, sku GPUSKU, pricePerHour float64) PriceBucket {
+	prices, ok := m.PricePercentiles[pricePercentileKey(provider, sku)]
 	if !ok || len(prices) == 0 {
 		return PriceBucketMedium
 	}
@@ -521,10 +572,20 @@ func (m *SurvivalModel) MachinePenalty(provider cloud.Provider, machineID string
 // incorporating per-machine penalty when available. All lookups are scoped
 // to the offer's provider.
 func (m *SurvivalModel) OfferSurvival(o cloud.Offer) float64 {
-	gpuFamily := NormalizeGPUFamily(o.GPUName)
-	bucket := m.PriceBucketFor(o.Provider, gpuFamily, o.CostPerHour)
-	groupSurvival := m.SurvivalProbability(o.Provider, gpuFamily, bucket, o.Reliability)
+	sku := offerSKU(o)
+	bucket := m.PriceBucketFor(o.Provider, sku, o.CostPerHour)
+	groupSurvival := m.SurvivalProbability(o.Provider, sku, bucket, o.Reliability)
 	return groupSurvival * m.MachinePenalty(o.Provider, o.MachineID)
+}
+
+// offerSKU extracts the (family, VRAM) key for an offer. Falls back to
+// VRAM=0 ("?" bucket) when GPUMemGB isn't reported by the provider, which
+// avoids contaminating known-VRAM cells with unknowns.
+func offerSKU(o cloud.Offer) GPUSKU {
+	return GPUSKU{
+		Family: NormalizeGPUFamily(o.GPUName),
+		VRAMGB: int(math.Round(o.GPUMemGB)),
+	}
 }
 
 // RejectedGroup summarizes offers rejected by FilterOffersBySurvival.
