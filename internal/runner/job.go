@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/session"
 )
 
 // ExitInfo captures detailed exit information from a process, including signal data.
@@ -157,18 +158,38 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 	}
 }
 
-// ArchiveExistingFiles renames existing job files with a timestamp suffix.
+// ArchiveExistingFiles renames existing job files with a sequence-number
+// suffix. The sequence is local to (jobID, this host) and corresponds to the
+// position of the prior on-host attempt — see session.ArchiveCommand for the
+// matching shell-side implementation.
 func ArchiveExistingFiles(logDir string, jobID int64) {
 	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json", "manifest_error"}
+	seq := nextArchiveSeq(logDir, jobID)
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
-		info, err := os.Stat(path)
-		if err != nil {
+		if _, err := os.Stat(path); err != nil {
 			continue
 		}
-		ts := info.ModTime().Format("20060102-150405")
-		newPath := filepath.Join(logDir, fmt.Sprintf("%d-%s.%s", jobID, ts, ext))
+		newPath := filepath.Join(logDir, fmt.Sprintf("%d-%d.%s", jobID, seq, ext))
 		os.Rename(path, newPath)
+	}
+}
+
+// nextArchiveSeq returns the smallest seq >= 1 such that no file
+// `<logDir>/<jobID>-<seq>.<ext>` exists for any of session.ArchiveAnchorExts.
+// Matches the shell behavior in session.ArchiveCommand by construction.
+func nextArchiveSeq(logDir string, jobID int64) int {
+	for seq := 1; ; seq++ {
+		taken := false
+		for _, ext := range session.ArchiveAnchorExts {
+			if _, err := os.Stat(filepath.Join(logDir, fmt.Sprintf("%d-%d.%s", jobID, seq, ext))); err == nil {
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			return seq
+		}
 	}
 }
 

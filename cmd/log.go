@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/status"
 	"github.com/spf13/cobra"
@@ -558,17 +559,12 @@ func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attempt
 		return true, fmt.Errorf("job %s has no recorded attempts", ids.FormatJobID(job.ID))
 	}
 
-	var target *db.JobAttempt
-	for i := range attempts {
-		if attempts[i].AttemptNumber == attemptNum {
-			target = &attempts[i]
-			break
-		}
-	}
-	if target == nil {
+	idx := indexOfAttempt(attempts, attemptNum)
+	if idx < 0 {
 		return true, fmt.Errorf("job %s has no attempt #%d (have %d attempts: 1..%d)",
 			ids.FormatJobID(job.ID), attemptNum, len(attempts), attempts[0].AttemptNumber)
 	}
+	target := &attempts[idx]
 
 	if target.LaunchID != nil {
 		if err := fetchAndDisplayLogFromR2(cmd, job, target.ID); err != nil {
@@ -577,10 +573,75 @@ func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attempt
 		return true, nil
 	}
 
-	if target.AttemptNumber != attempts[0].AttemptNumber {
-		return true, fmt.Errorf("attempt #%d log is not available: only the latest attempt's log is preserved on inventory hosts", attemptNum)
+	// On-prem attempt. Each archive on a host gets a sequence number 1..K
+	// (see session.ArchiveCommand), where K = (count of attempts on that host
+	// that have been superseded by a later on-host attempt). The latest
+	// on-host attempt — superseded or not — still holds the live <jobID>.log.
+	if target.Host == "" {
+		return true, fmt.Errorf("attempt #%d log is not on host (no placement recorded)", attemptNum)
 	}
-	return false, nil
+	hostAttempts := attemptsOnHost(attempts, target.Host)
+	pos := indexOfAttempt(hostAttempts, target.AttemptNumber)
+	if pos < 0 {
+		return true, fmt.Errorf("attempt #%d log is not on host %s", attemptNum, target.Host)
+	}
+	if pos == len(hostAttempts)-1 {
+		// Latest attempt to run on that host — its log is at the live path.
+		return false, nil
+	}
+	if err := runArchivedLogForAttempt(target, pos+1); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// attemptsOnHost returns attempts that ran on host, sorted oldest first.
+// db.ListAttempts returns newest-first, so we filter then reverse.
+func attemptsOnHost(attempts []db.JobAttempt, host string) []db.JobAttempt {
+	var out []db.JobAttempt
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].Host == host {
+			out = append(out, attempts[i])
+		}
+	}
+	return out
+}
+
+func indexOfAttempt(attempts []db.JobAttempt, attemptNumber int) int {
+	for i, a := range attempts {
+		if a.AttemptNumber == attemptNumber {
+			return i
+		}
+	}
+	return -1
+}
+
+func runArchivedLogForAttempt(target *db.JobAttempt, seq int) error {
+	host := target.Host
+	logFile := session.ArchivedFile(target.JobID, seq, "log")
+	remoteCmd := buildLogCommand(logFile, false)
+
+	var stdout, stderr string
+	var err error
+	if logTimeout > 0 {
+		stdout, stderr, err = ssh.RunWithTimeout(host, remoteCmd, logTimeout)
+	} else {
+		stdout, stderr, err = ssh.Run(host, remoteCmd)
+	}
+	if err != nil {
+		if strings.Contains(stderr, "No such file") || strings.Contains(stderr, "cannot open") {
+			return fmt.Errorf("archived log for attempt #%d not found on %s (expected %s)",
+				target.AttemptNumber, host, logFile)
+		}
+		if stderr != "" {
+			return fmt.Errorf("read archived log on %s: %s", host, stderr)
+		}
+		return fmt.Errorf("read archived log on %s: %w", host, err)
+	}
+
+	output := filterLogContent(stdout, logFrom, logTo, logLines, logGrep)
+	fmt.Print(processCarriageReturns(output))
+	return nil
 }
 
 // runLogFromR2 fetches log output from R2 for a cloud-based job.

@@ -171,7 +171,25 @@ func TestRunLogForAttempt_RejectsUnknownAttempt(t *testing.T) {
 	}
 }
 
-func TestRunLogForAttempt_OnPremNonLatestRejected(t *testing.T) {
+func TestAttemptsOnHostFiltersAndOrders(t *testing.T) {
+	attempts := []db.JobAttempt{
+		{AttemptNumber: 4, Host: "host-alpha"},
+		{AttemptNumber: 3, Host: "host-beta"},
+		{AttemptNumber: 2, Host: "host-alpha"},
+		{AttemptNumber: 1, Host: "host-alpha"},
+	}
+	got := attemptsOnHost(attempts, "host-alpha")
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	for i, want := range []int{1, 2, 4} {
+		if got[i].AttemptNumber != want {
+			t.Errorf("got[%d].AttemptNumber = %d, want %d", i, got[i].AttemptNumber, want)
+		}
+	}
+}
+
+func TestRunLogForAttempt_OnPremNotOnAnyHost(t *testing.T) {
 	resetLogModeState()
 	defer resetLogModeState()
 
@@ -180,14 +198,11 @@ func TestRunLogForAttempt_OnPremNonLatestRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	// Two on-prem attempts. The first is the historical one we'll request.
-	exit := 1
-	now := time.Now().Unix()
-	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exit, now); err != nil {
-		t.Fatalf("CloseAttempt #1: %v", err)
-	}
-	if _, err := db.CreateAttempt(database, jobID, "host-alpha", nil, db.StatusRunning); err != nil {
-		t.Fatalf("CreateAttempt #2: %v", err)
+	// Add a second attempt with no host (pending placement) — that is the
+	// attempt the reader will refuse to look up since there's no host to
+	// fetch from.
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
 	}
 
 	job, err := db.GetJobByID(database, jobID)
@@ -195,15 +210,41 @@ func TestRunLogForAttempt_OnPremNonLatestRejected(t *testing.T) {
 		t.Fatalf("GetJobByID: %v", err)
 	}
 
-	handled, err := runLogForAttempt(nil, database, job, 1)
+	handled, err := runLogForAttempt(nil, database, job, 2)
 	if !handled {
-		t.Fatal("runLogForAttempt(on-prem non-latest) returned handled=false, want true")
+		t.Fatal("runLogForAttempt returned handled=false, want true")
 	}
 	if err == nil {
-		t.Fatal("runLogForAttempt(on-prem non-latest) returned nil error, want failure")
+		t.Fatal("runLogForAttempt returned nil error, want 'not on host' failure")
 	}
-	if !strings.Contains(err.Error(), "only the latest attempt") {
-		t.Fatalf("error = %q, want on-prem-overwrite explanation", err)
+	if !strings.Contains(err.Error(), "no placement recorded") {
+		t.Fatalf("error = %q, want 'no placement recorded' explanation", err)
+	}
+}
+
+func TestRunLogForAttempt_OnPremLatestFallsThrough(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/p", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	// Single attempt on host-alpha is the latest; runLogForAttempt should
+	// signal handled=false so the caller falls through to the live-log path.
+	handled, err := runLogForAttempt(nil, database, job, 1)
+	if handled {
+		t.Fatalf("runLogForAttempt returned handled=true (err=%v), want false (fall-through)", err)
+	}
+	if err != nil {
+		t.Fatalf("runLogForAttempt returned err=%v on fall-through, want nil", err)
 	}
 }
 

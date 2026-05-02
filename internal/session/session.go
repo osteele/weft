@@ -91,26 +91,41 @@ func RusageFilePattern(jobID int64) string {
 	return fmt.Sprintf("%s/%d*.rusage", LogDir, jobID)
 }
 
-// ArchiveCommand returns a shell command that archives existing job files by renaming
-// them with their creation date. This should be run before starting a new job run.
-// Example: 123.log -> 123-20260104-095748.log
+// ArchiveAnchorExts are the extensions probed when looking for an archive
+// sequence number collision. A free seq is one for which none of these files
+// exist. Both the shell `ArchiveCommand` and Go `runner.nextArchiveSeq` use
+// this list, so they agree by construction.
+var ArchiveAnchorExts = []string{"log", "status", "completion.json"}
+
+// ArchiveCommand returns a shell command that archives existing job files by
+// renaming them with the next free sequence number. The sequence is local to
+// (jobID, this host); for each on-host attempt that gets superseded by a
+// later on-host attempt, the older files become <jobID>-N.<ext>.
+//
+// Example: 123.log -> 123-1.log (first relaunch), 123-2.log (second), …
 func ArchiveCommand(jobID int64) string {
-	// For each extension, check if file exists and rename it with its mtime
-	// Uses stat to get mtime: stat -c %Y on Linux, stat -f %m on macOS
+	var probes []string
+	for _, ext := range ArchiveAnchorExts {
+		probes = append(probes, fmt.Sprintf(`[ -e "%s/%d-$seq.%s" ]`, LogDir, jobID, ext))
+	}
 	return fmt.Sprintf(`
+		seq=1
+		while %s; do
+			seq=$((seq+1))
+		done
 		for ext in log status meta pid samples rusage timeseries.jsonl telemetry.jsonl kill_reason heartbeat completion.json; do
 			f="%s/%d.$ext"
 			if [ -f "$f" ]; then
-				mtime=$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)
-				if [ -n "$mtime" ]; then
-					ts=$(date -r "$mtime" "+%%Y%%m%%d-%%H%%M%%S" 2>/dev/null || date -d "@$mtime" "+%%Y%%m%%d-%%H%%M%%S" 2>/dev/null)
-					if [ -n "$ts" ]; then
-						mv "$f" "%s/%d-$ts.$ext"
-					fi
-				fi
+				mv "$f" "%s/%d-$seq.$ext"
 			fi
 		done
-	`, LogDir, jobID, LogDir, jobID)
+	`, strings.Join(probes, " || "), LogDir, jobID, LogDir, jobID)
+}
+
+// ArchivedFile returns the path to the seq-th archived job file for the given
+// extension (e.g., "log", "status").
+func ArchivedFile(jobID int64, seq int, ext string) string {
+	return fmt.Sprintf("%s/%d-%d.%s", LogDir, jobID, seq, ext)
 }
 
 // FileBasename returns the base filename for job files (without extension)

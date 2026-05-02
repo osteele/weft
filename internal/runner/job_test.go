@@ -35,6 +35,58 @@ func TestJobCompleted(t *testing.T) {
 	}
 }
 
+func TestNextArchiveSeqEmpty(t *testing.T) {
+	logDir := t.TempDir()
+	if got := nextArchiveSeq(logDir, 42); got != 1 {
+		t.Fatalf("nextArchiveSeq(empty) = %d, want 1", got)
+	}
+}
+
+func TestNextArchiveSeqSkipsTaken(t *testing.T) {
+	logDir := t.TempDir()
+	for _, ext := range []string{"log", "status"} {
+		if err := os.WriteFile(filepath.Join(logDir, "42-1."+ext), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42-3.completion.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := nextArchiveSeq(logDir, 42); got != 2 {
+		t.Fatalf("nextArchiveSeq with seq 1 and 3 taken = %d, want 2 (smallest free)", got)
+	}
+}
+
+func TestArchiveExistingFilesUsesSequenceSuffix(t *testing.T) {
+	logDir := t.TempDir()
+
+	primary := filepath.Join(logDir, "100.log")
+	if err := os.WriteFile(primary, []byte("first"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ArchiveExistingFiles(logDir, 100)
+	if _, err := os.Stat(primary); err == nil {
+		t.Fatal("primary log should be moved")
+	}
+	first := filepath.Join(logDir, "100-1.log")
+	if data, err := os.ReadFile(first); err != nil {
+		t.Fatalf("expected archived %s: %v", first, err)
+	} else if string(data) != "first" {
+		t.Fatalf("archived content = %q, want \"first\"", data)
+	}
+
+	if err := os.WriteFile(primary, []byte("second"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ArchiveExistingFiles(logDir, 100)
+	second := filepath.Join(logDir, "100-2.log")
+	if data, err := os.ReadFile(second); err != nil {
+		t.Fatalf("expected archived %s: %v", second, err)
+	} else if string(data) != "second" {
+		t.Fatalf("second archived content = %q, want \"second\"", data)
+	}
+}
+
 func TestCompletionRecordOutputUploadRoundTrip(t *testing.T) {
 	rec := CompletionRecord{
 		ExitCode:     0,
