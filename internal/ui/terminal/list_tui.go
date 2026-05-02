@@ -80,6 +80,7 @@ type listTUIModel struct {
 	showAutoPilotErrorDetails  bool
 	launchLiveByID             map[int64]*db.LaunchLiveState
 	launchStatusByID           map[int64]string
+	placingJobIDs              map[int64]struct{}
 	launchByID                 map[int64]*db.Launch
 	hostInfoByName             map[string]*db.CachedHostInfo
 	quickLaunching             bool
@@ -103,6 +104,7 @@ type listJobsLoadedMsg struct {
 	jobs             []*db.Job
 	launchLiveByID   map[int64]*db.LaunchLiveState
 	launchStatusByID map[int64]string
+	placingJobIDs    map[int64]struct{}
 	launchByID       map[int64]*db.Launch
 	hostInfoByName   map[string]*db.CachedHostInfo
 	autoPassPhase    autoPilotPhaseHint
@@ -459,6 +461,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.jobs = msg.jobs
 		m.launchLiveByID = msg.launchLiveByID
 		m.launchStatusByID = msg.launchStatusByID
+		m.placingJobIDs = msg.placingJobIDs
 		m.launchByID = msg.launchByID
 		m.hostInfoByName = msg.hostInfoByName
 		m.autoPassPhase = msg.autoPassPhase
@@ -1615,7 +1618,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		return
 	}
 	groupedJobs := m.groupedJobsWithAutoReasons()
-	m.groupedRows = buildGroupedStatusRows(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID)
+	m.groupedRows = buildGroupedStatusRowsAt(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID, m.placingJobIDs, time.Now())
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
 		if row.job != nil && !row.isHeader && !row.isBlocked {
@@ -1724,6 +1727,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			jobs:             jobs,
 			launchLiveByID:   launchLiveByID,
 			launchStatusByID: launchStatusByID,
+			placingJobIDs:    loadPlacingJobIDs(database),
 			launchByID:       launchByID,
 			hostInfoByName:   hostInfoByName,
 			autoPassPhase:    loadLatestAutoPilotPhase(database),

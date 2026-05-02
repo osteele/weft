@@ -94,6 +94,29 @@ func JobIDsWithOpenPlacementIntents(database *sql.DB) (map[int64]struct{}, error
 	return out, rows.Err()
 }
 
+// JobIDsWithOpenMoveOrPlacementIntents returns the union of job ids with an
+// open MoveIntent or PlacementIntent — the "autopilot, hands off" set. See
+// specs/job-move.allium § AutopilotIgnoresMovingJobs.
+func JobIDsWithOpenMoveOrPlacementIntents(database *sql.DB) (map[int64]struct{}, error) {
+	rows, err := database.Query(`
+		SELECT job_id FROM move_intents WHERE state = 'open'
+		UNION
+		SELECT job_id FROM placement_intents WHERE state = 'open'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]struct{}{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // ResolvePlacementIntent transitions an open intent to a terminal state.
 // No-op if the intent is already resolved.
 func ResolvePlacementIntent(database *sql.DB, intentID int64, state PlacementIntentState, resolution string) error {

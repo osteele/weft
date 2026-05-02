@@ -68,19 +68,12 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		return nil, err
 	}
-	movingJobs, err := db.JobIDsWithOpenMoveIntents(database)
-	if err != nil {
-		return nil, err
-	}
-	placingJobs, err := db.JobIDsWithOpenPlacementIntents(database)
-	if err != nil {
-		return nil, err
-	}
-	// Union: any job with an open intent (move or placement) is being
-	// handled by another path; the autopilot must not race it. See
+	// Any job with an open intent (move or placement) is being handled by
+	// another path; the autopilot must not race it. See
 	// specs/job-move.allium § AutopilotIgnoresMovingJobs.
-	for jobID := range placingJobs {
-		movingJobs[jobID] = struct{}{}
+	movingJobs, err := db.JobIDsWithOpenMoveOrPlacementIntents(database)
+	if err != nil {
+		return nil, err
 	}
 	unplaced := make([]*db.Job, 0, len(unplacedJobs))
 	for _, job := range unplacedJobs {

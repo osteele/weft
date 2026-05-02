@@ -583,6 +583,8 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		GracePeriodSeconds: 15 * 60,
 		Strategy:           bidding.StrategyCheap,
 		MinSurvival:        0.4,
+		// Rental-source claim is transferred atomically; see unplaceIfNeeded.
+		TransferClaim: true,
 	}
 	launchStarted := time.Now()
 	result, err := campaign.LaunchCampaign(
@@ -740,6 +742,13 @@ func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
 		return nil
 	}
 	if job.TargetKind() == db.JobTargetUnplaced {
+		return nil
+	}
+	// Rental-source jobs stay attached to source until LaunchCampaign with
+	// TransferClaim=true atomically supersedes the source claim at
+	// instance-creation time. See specs/job-move.allium §
+	// SourceLaunchUnchangedWhileIntentOpen.
+	if job.IsRentalJob() {
 		return nil
 	}
 	_, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast))

@@ -1,7 +1,9 @@
 package terminal
 
 import (
+	"database/sql"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +16,22 @@ import (
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/dashboard"
 )
+
+// loadPlacingJobIDs returns the union of jobs with an open MoveIntent or
+// PlacementIntent — the "autopilot, hands off" set the grouped UI surfaces
+// as "Placing". Returns nil on error or no DB; caller renders without the
+// bucket rather than failing.
+func loadPlacingJobIDs(database *sql.DB) map[int64]struct{} {
+	if database == nil {
+		return nil
+	}
+	out, err := db.JobIDsWithOpenMoveOrPlacementIntents(database)
+	if err != nil {
+		slog.Warn("load open intents", "component", "ui.list", "error", err)
+		return nil
+	}
+	return out
+}
 
 type groupedStatusSection struct {
 	title string
@@ -30,19 +48,19 @@ type groupedStatusRow struct {
 }
 
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, time.Now())
 }
 
-func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, now time.Time) string {
-	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, now)
+func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, now time.Time) string {
+	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, now)
 	if len(rows) == 0 {
 		return "None\n"
 	}
@@ -54,12 +72,13 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 }
 
 func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) []groupedStatusRow {
-	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, time.Now())
+	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, nil, time.Now())
 }
 
-func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, now time.Time) []groupedStatusRow {
+func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
 	paused := make([]*db.Job, 0)
+	placing := make([]*db.Job, 0)
 	launching := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
 	unplaced := make([]*db.Job, 0)
@@ -85,11 +104,13 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job, launchStatusByID, launchesWithActiveJob, now) {
+		switch groupedStatusBucket(job, launchStatusByID, launchesWithActiveJob, placingJobIDs, now) {
 		case "running":
 			running = append(running, job)
 		case "paused":
 			paused = append(paused, job)
+		case "placing":
+			placing = append(placing, job)
 		case "launching":
 			launching = append(launching, job)
 		case "queued":
@@ -105,7 +126,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		}
 	}
 
-	for _, s := range [][]*db.Job{running, paused, launching, queued, unplaced, completions, failures, killedCanceled} {
+	for _, s := range [][]*db.Job{running, paused, placing, launching, queued, unplaced, completions, failures, killedCanceled} {
 		sort.SliceStable(s, func(i, j int) bool { return s[i].ID < s[j].ID })
 	}
 
@@ -113,6 +134,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		{title: "Running", key: "running", jobs: running},
 		{title: "Paused", key: "paused", jobs: paused},
 		{title: "Queued", key: "queued", jobs: queued},
+		{title: "Placing", key: "placing", jobs: placing},
 		{title: "Launching", key: "launching", jobs: launching},
 		{title: "Unplaced", key: "unplaced", jobs: unplaced},
 		{title: "Completed", key: "completions", jobs: completions},
@@ -400,7 +422,7 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 	return "ETA " + remaining.FormatWithBounds()
 }
 
-func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, now time.Time) string {
+func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, placingJobIDs map[int64]struct{}, now time.Time) string {
 	status := job.EffectiveStatus()
 	// Launch-level pause overrides the job-status bucket for any non-terminal
 	// job: the job is not actually progressing while the rental is paused.
@@ -408,6 +430,15 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launche
 		switch status {
 		case db.StatusRunning, db.StatusStarting, db.StatusQueued, db.StatusPendingPlacement, db.StatusPaused:
 			return "paused"
+		}
+	}
+	// An open MoveIntent / PlacementIntent surfaces as Placing so the job
+	// does not flicker through Unplaced/Launching while the move runs.
+	// See specs/job-move.allium § AutopilotIgnoresMovingJobs.
+	if _, placing := placingJobIDs[job.ID]; placing {
+		switch status {
+		case db.StatusQueued, db.StatusPendingPlacement:
+			return "placing"
 		}
 	}
 	switch status {
@@ -519,7 +550,7 @@ func groupedStatusScopeLabel(job *db.Job) string {
 func countVisibleRunningJobs(jobs []*db.Job) int {
 	n := 0
 	for _, job := range jobs {
-		if job != nil && groupedStatusBucket(job, nil, nil, time.Now()) == "running" {
+		if job != nil && groupedStatusBucket(job, nil, nil, nil, time.Now()) == "running" {
 			n++
 		}
 	}

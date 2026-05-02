@@ -97,6 +97,43 @@ func TestUnplaceIfNeeded_AlreadyUnplaced(t *testing.T) {
 	}
 }
 
+func TestUnplaceIfNeeded_RentalSourceLeftAttached(t *testing.T) {
+	// Regression: bulk move-to-new must not detach rental-source jobs
+	// before LaunchCampaign supersedes the claim. See unplaceIfNeeded.
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "rental job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if !job.IsRentalJob() {
+		t.Fatalf("setup: IsRentalJob() = false, want true (LaunchID = %v)", job.LaunchID)
+	}
+
+	if err := unplaceIfNeeded(database, job); err != nil {
+		t.Fatalf("unplaceIfNeeded on rental job: %v", err)
+	}
+
+	after, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.LaunchID == nil || *after.LaunchID != src {
+		t.Fatalf("rental job lost its source claim: launch_id = %v, want %d", after.LaunchID, src)
+	}
+}
+
 func TestJobsForGrouping_ClonesPendingPlacementAsQueued(t *testing.T) {
 	pending := db.StatusPendingPlacement
 	original := &db.Job{ID: 1, Status: db.StatusQueued, PendingStatus: &pending}

@@ -103,7 +103,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, map[int64]*db.LaunchLiveState{
 		launchID: {LaunchID: launchID, JobProgressID: 42, JobProgressPct: 75},
-	}, nil, now)
+	}, nil, nil, now)
 
 	for _, want := range []string{
 		"- ☁ wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
@@ -130,7 +130,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	want := "- ☁ wj99 — proj python worker.py (rental)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -156,7 +156,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningDayScaleTimingShowsDayAndHour(
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	want := "— started 1d18h ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -176,7 +176,7 @@ func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMis
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	want := "-   wj53 — proj legacy completion — placed 5m ago — completed ok"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -196,7 +196,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	lineWant := "  -   wj50 — proj waiting — created 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
@@ -233,7 +233,7 @@ func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *test
 		mk(1383, "structural-probes EXP-085 c-command", reason3090),
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 
 	// Subheaders present with correct counts, in first-seen order.
 	ampereHead := "  blocked: " + reasonAmpere + " (2)"
@@ -287,7 +287,7 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngr
 			QueuedAt:    4_000,
 		},
 	}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 
 	headWant := "  blocked: " + reason + " (1)"
 	if !strings.Contains(out, headWant) {
@@ -332,7 +332,7 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedShowsCreatedNotQueuedAge(t *t
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	want := "-   wj1561 — proj blocked job — created 40m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -356,7 +356,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRet
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	want := "-   wj51 — proj retry me — retry pending 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -378,7 +378,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	want := "-   wj52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -404,6 +404,7 @@ func TestRenderJobListGroupedStatusPlainAt_ReclassifiesPendingPlacementWhenLaunc
 		0,
 		nil,
 		map[int64]string{launchID: db.LaunchStatusRunning},
+		nil,
 		now,
 	)
 	if !strings.Contains(out, "Queued (1):") {
@@ -439,7 +440,7 @@ func TestRenderJobListGroupedStatusPlainAt_AlignsTimingSuffixToRightEdge(t *test
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, now)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected section header + 2 rows, got:\n%s", out)
@@ -493,7 +494,7 @@ func TestRenderJobListGroupedStatusPlainAt_PendingPlacementWithoutLaunchIsUnplac
 					QueuedAt:      4_700,
 				},
 			}
-			out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+			out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 			if !strings.Contains(out, "Unplaced (1):") {
 				t.Fatalf("expected unplaced section, got:\n%s", out)
 			}
@@ -567,6 +568,7 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 				0,
 				tc.liveState,
 				map[int64]string{launchID: tc.launchStatus},
+				nil,
 				now,
 			)
 			if !strings.Contains(out, tc.wantSection) {
@@ -581,11 +583,59 @@ func TestRenderJobListGroupedStatusPlainAt_PausedJobBucketsToPausedSection(t *te
 	jobs := []*db.Job{
 		{ID: 81, Status: db.StatusPaused, Host: "cool30", Project: "proj", Description: "paused job"},
 	}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, now)
 	if !strings.Contains(out, "Paused (1):") {
 		t.Fatalf("expected Paused section, got:\n%s", out)
 	}
 	if strings.Contains(out, "Running (") {
 		t.Fatalf("did not expect Running section for paused job, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_OpenIntentBucketsToPlacing(t *testing.T) {
+	// A job with an open MoveIntent / PlacementIntent is mid-placement and
+	// should not flicker through Unplaced or Launching while the move runs.
+	now := time.Unix(5_000, 0)
+	srcLaunch := int64(7)
+	jobs := []*db.Job{
+		// Rental-source job, queued, open intent — bulk move-to-new in flight.
+		{ID: 1657, Status: db.StatusQueued, LaunchID: &srcLaunch, Project: "proj", Description: "rental move"},
+		// Inventory-source job, pending_placement, open intent — autopilot
+		// relaunch in flight.
+		{ID: 1664, Status: db.StatusPendingPlacement, Project: "proj", Description: "relaunch"},
+		// Control: queued job with no intent — must NOT render as Placing.
+		{ID: 1700, Status: db.StatusQueued, Host: "cool30", Project: "proj", Description: "ordinary queued"},
+	}
+	placing := map[int64]struct{}{1657: {}, 1664: {}}
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, now)
+	if !strings.Contains(out, "Placing (2):") {
+		t.Fatalf("expected Placing section with 2 jobs, got:\n%s", out)
+	}
+	if strings.Contains(out, "Unplaced (") {
+		t.Fatalf("did not expect Unplaced section for jobs with open intents, got:\n%s", out)
+	}
+	if strings.Contains(out, "Launching (") {
+		t.Fatalf("did not expect Launching section for jobs with open intents, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("expected ordinary queued job to remain in Queued section, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_OpenIntentDoesNotOverrideRunning(t *testing.T) {
+	// A stale intent on a job that has already started running must not
+	// drag it back to the Placing bucket.
+	now := time.Unix(5_000, 0)
+	launchID := int64(9)
+	jobs := []*db.Job{
+		{ID: 42, Status: db.StatusRunning, LaunchID: &launchID, Project: "proj", Command: "python a.py", StartTime: 4_400},
+	}
+	placing := map[int64]struct{}{42: {}}
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, now)
+	if !strings.Contains(out, "Running (1):") {
+		t.Fatalf("expected Running section, got:\n%s", out)
+	}
+	if strings.Contains(out, "Placing (") {
+		t.Fatalf("did not expect Placing section for running job, got:\n%s", out)
 	}
 }
