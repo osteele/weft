@@ -35,6 +35,15 @@ func setupBudgetTest(t *testing.T) *sql.DB {
 	return db.SetupTestDB(t)
 }
 
+func menuState(hourly, daily int) autoBudgetState {
+	return autoBudgetState{
+		Active:      true,
+		Phase:       autoBudgetPhaseMenu,
+		HourlyCents: hourly,
+		DailyCents:  daily,
+	}
+}
+
 func TestParseAutoDollarInput(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -77,17 +86,6 @@ func TestParseAutoDollarInput(t *testing.T) {
 	}
 }
 
-func TestAutoBudgetPromptStatus(t *testing.T) {
-	hourly := autoBudgetPromptStatus(autoBudgetStepHourly, "2.50")
-	if !strings.Contains(hourly, "$/hr") || !strings.Contains(hourly, "Enter=next") {
-		t.Errorf("hourly prompt missing expected fragments: %q", hourly)
-	}
-	daily := autoBudgetPromptStatus(autoBudgetStepDaily, "5.00")
-	if !strings.Contains(daily, "$/day") || !strings.Contains(daily, "Ctrl-R=reset breaker") {
-		t.Errorf("daily prompt missing expected fragments: %q", daily)
-	}
-}
-
 func TestFormatAutoDailyCap(t *testing.T) {
 	if got := formatAutoDailyCap(0); got != "off" {
 		t.Errorf("0 cents = %q, want off", got)
@@ -97,38 +95,82 @@ func TestFormatAutoDailyCap(t *testing.T) {
 	}
 }
 
-func TestBeginAutoBudget(t *testing.T) {
-	empty := beginAutoBudget(0)
-	if !empty.Active || empty.Step != autoBudgetStepHourly || empty.Value != "" {
-		t.Errorf("beginAutoBudget(0) = %+v, want active hourly with empty value", empty)
+func TestBeginAutoBudgetOpensOnMenu(t *testing.T) {
+	s := beginAutoBudget(250, 5000)
+	if !s.Active || s.Phase != autoBudgetPhaseMenu {
+		t.Errorf("beginAutoBudget should open on menu, got %+v", s)
 	}
-	prefilled := beginAutoBudget(250)
-	if prefilled.Value != "2.50" {
-		t.Errorf("beginAutoBudget(250).Value = %q, want \"2.50\"", prefilled.Value)
+	if s.HourlyCents != 250 || s.DailyCents != 5000 {
+		t.Errorf("beginAutoBudget didn't carry persisted values: %+v", s)
 	}
-}
-
-func TestHandleAutoBudgetKey_Esc(t *testing.T) {
-	database := setupBudgetTest(t)
-	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "1.23"}
-	next, eff := handleAutoBudgetKey(s, keyMsg("esc"), database)
-	if next.Active || next.Value != "" {
-		t.Errorf("esc on hourly: state = %+v, want closed/empty", next)
-	}
-	if eff.StatusText != "Run-rate target unchanged" {
-		t.Errorf("esc on hourly: status = %q", eff.StatusText)
-	}
-
-	s = autoBudgetState{Active: true, Step: autoBudgetStepDaily, Value: "5"}
-	_, eff = handleAutoBudgetKey(s, keyMsg("esc"), database)
-	if eff.StatusText != "Daily cap unchanged" {
-		t.Errorf("esc on daily: status = %q", eff.StatusText)
+	if s.Value != "" {
+		t.Errorf("menu phase should not have an editor value: %q", s.Value)
 	}
 }
 
-func TestHandleAutoBudgetKey_TypingAndBackspace(t *testing.T) {
+func TestRenderAutoBudgetPanelMenuShowsAllActions(t *testing.T) {
+	lines := renderAutoBudgetPanel(menuState(250, 5000))
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"h", "Hourly", "$2.50/hr", "d", "Daily", "$50.00/day", "r", "Reset", "Esc"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("menu missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+func TestHandleAutoBudgetKeyMenuRouting(t *testing.T) {
 	database := setupBudgetTest(t)
-	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "1.2"}
+
+	t.Run("h opens hourly editor", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, _ := handleAutoBudgetKey(s, keyMsg("h"), database)
+		if next.Phase != autoBudgetPhaseEditHourly {
+			t.Fatalf("phase = %v, want EditHourly", next.Phase)
+		}
+		if next.Value != "2.50" {
+			t.Errorf("editor should prefill with hourly value, got %q", next.Value)
+		}
+	})
+
+	t.Run("d opens daily editor", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, _ := handleAutoBudgetKey(s, keyMsg("d"), database)
+		if next.Phase != autoBudgetPhaseEditDaily {
+			t.Fatalf("phase = %v, want EditDaily", next.Phase)
+		}
+		if next.Value != "50.00" {
+			t.Errorf("editor should prefill with daily value, got %q", next.Value)
+		}
+	})
+
+	t.Run("r opens reset confirmation", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, _ := handleAutoBudgetKey(s, keyMsg("r"), database)
+		if next.Phase != autoBudgetPhaseConfirmReset {
+			t.Fatalf("phase = %v, want ConfirmReset", next.Phase)
+		}
+	})
+
+	t.Run("esc closes panel from menu", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, _ := handleAutoBudgetKey(s, keyMsg("esc"), database)
+		if next.Active {
+			t.Fatal("esc on menu should close the panel")
+		}
+	})
+
+	t.Run("q closes panel from menu", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, _ := handleAutoBudgetKey(s, keyMsg("q"), database)
+		if next.Active {
+			t.Fatal("q on menu should close the panel")
+		}
+	})
+}
+
+func TestHandleAutoBudgetEditorTypingAndBackspace(t *testing.T) {
+	database := setupBudgetTest(t)
+	s := autoBudgetState{Active: true, Phase: autoBudgetPhaseEditHourly, Value: "1.2"}
 
 	next, eff := handleAutoBudgetKey(s, keyMsg("5"), database)
 	if next.Value != "1.25" {
@@ -144,97 +186,116 @@ func TestHandleAutoBudgetKey_TypingAndBackspace(t *testing.T) {
 	}
 }
 
-func TestHandleAutoBudgetKey_HourlyEnterAdvances(t *testing.T) {
+func TestHandleAutoBudgetEditorEscReturnsToMenu(t *testing.T) {
 	database := setupBudgetTest(t)
-	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "2.50", DailyCents: 700}
-
-	next, eff := handleAutoBudgetKey(s, keyMsg("enter"), database)
-	if !next.Active || next.Step != autoBudgetStepDaily {
-		t.Fatalf("expected step to advance to daily, got %+v", next)
+	s := autoBudgetState{Active: true, Phase: autoBudgetPhaseEditHourly, Value: "9.99"}
+	next, eff := handleAutoBudgetKey(s, keyMsg("esc"), database)
+	if next.Phase != autoBudgetPhaseMenu {
+		t.Errorf("esc should return to menu, got phase %v", next.Phase)
 	}
-	if next.HourlyCents != 250 {
-		t.Errorf("HourlyCents = %d, want 250", next.HourlyCents)
+	if !next.Active {
+		t.Error("esc from editor should not close the panel")
 	}
-	if next.Value != "7.00" {
-		t.Errorf("Value should prefill from DailyCents, got %q", next.Value)
+	if next.Value != "" {
+		t.Errorf("editor value should be cleared on cancel, got %q", next.Value)
 	}
-	if !strings.Contains(eff.StatusText, "Run-rate set to $2.50/hr") {
-		t.Errorf("status = %q", eff.StatusText)
-	}
-	if eff.RetriggerPilot {
-		t.Error("hourly advance must not retrigger pilot")
+	if eff.StatusText != "" {
+		t.Errorf("cancel should produce no status text, got %q", eff.StatusText)
 	}
 }
 
-func TestHandleAutoBudgetKey_HourlyEnterParseError(t *testing.T) {
+func TestHandleAutoBudgetEditorEnterSavesAndReturnsToMenu(t *testing.T) {
 	database := setupBudgetTest(t)
-	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "abc"}
-
-	next, eff := handleAutoBudgetKey(s, keyMsg("enter"), database)
-	if next.Step != autoBudgetStepHourly || !next.Active {
-		t.Errorf("invalid hourly: state should be unchanged, got %+v", next)
+	s := autoBudgetState{
+		Active:      true,
+		Phase:       autoBudgetPhaseEditHourly,
+		Value:       "3.50",
+		HourlyCents: 250,
+		DailyCents:  5000,
 	}
-	if !eff.StatusIsError || !strings.Contains(eff.StatusText, "Run-rate target") {
+	next, eff := handleAutoBudgetKey(s, keyMsg("enter"), database)
+	if next.Phase != autoBudgetPhaseMenu {
+		t.Fatalf("after save expected menu phase, got %v", next.Phase)
+	}
+	if next.HourlyCents != 350 {
+		t.Errorf("hourly cents = %d, want 350", next.HourlyCents)
+	}
+	if next.DailyCents != 5000 {
+		t.Errorf("daily should be unchanged: %d", next.DailyCents)
+	}
+	if !eff.RetriggerPilot {
+		t.Error("save should retrigger pilot")
+	}
+	if !strings.Contains(eff.StatusText, "Hourly target set to $3.50/hr") {
+		t.Errorf("status = %q", eff.StatusText)
+	}
+}
+
+func TestHandleAutoBudgetEditorEnterParseError(t *testing.T) {
+	database := setupBudgetTest(t)
+	s := autoBudgetState{Active: true, Phase: autoBudgetPhaseEditHourly, Value: "abc"}
+	next, eff := handleAutoBudgetKey(s, keyMsg("enter"), database)
+	if next.Phase != autoBudgetPhaseEditHourly {
+		t.Errorf("invalid input should keep editor open, got phase %v", next.Phase)
+	}
+	if !eff.StatusIsError || !strings.Contains(eff.StatusText, "Hourly target") {
 		t.Errorf("expected error effect, got %+v", eff)
 	}
 }
 
-func TestHandleAutoBudgetKey_DailyEnterClosesAndRetriggers(t *testing.T) {
+func TestHandleAutoBudgetConfirmReset(t *testing.T) {
 	database := setupBudgetTest(t)
-	s := autoBudgetState{Active: true, Step: autoBudgetStepDaily, Value: "8.00", HourlyCents: 250}
 
-	next, eff := handleAutoBudgetKey(s, keyMsg("enter"), database)
-	if next.Active || next.Step != autoBudgetStepHourly {
-		t.Errorf("daily save: expected closed, got %+v", next)
-	}
-	if next.DailyCents != 800 {
-		t.Errorf("DailyCents = %d, want 800", next.DailyCents)
-	}
-	if !eff.RetriggerPilot {
-		t.Error("daily save should retrigger pilot")
-	}
-	if !strings.Contains(eff.StatusText, "Daily cap set to $8.00/day") {
-		t.Errorf("status = %q", eff.StatusText)
-	}
+	t.Run("y resets and returns to menu", func(t *testing.T) {
+		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset, HourlyCents: 250, DailyCents: 5000}
+		next, eff := handleAutoBudgetKey(s, keyMsg("y"), database)
+		if next.Phase != autoBudgetPhaseMenu {
+			t.Errorf("y should return to menu, got %v", next.Phase)
+		}
+		if !next.Active {
+			t.Error("y should not close the panel")
+		}
+		if !eff.BreakerReset || !eff.RetriggerPilot {
+			t.Errorf("expected BreakerReset+RetriggerPilot, got %+v", eff)
+		}
+		if eff.StatusText != "Runaway breaker reset" {
+			t.Errorf("status = %q", eff.StatusText)
+		}
+	})
+
+	t.Run("n returns to menu without resetting", func(t *testing.T) {
+		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset, HourlyCents: 250}
+		next, eff := handleAutoBudgetKey(s, keyMsg("n"), database)
+		if next.Phase != autoBudgetPhaseMenu {
+			t.Errorf("n should return to menu, got %v", next.Phase)
+		}
+		if eff.BreakerReset {
+			t.Error("n should not reset breaker")
+		}
+	})
+
+	t.Run("esc returns to menu", func(t *testing.T) {
+		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset}
+		next, _ := handleAutoBudgetKey(s, keyMsg("esc"), database)
+		if next.Phase != autoBudgetPhaseMenu {
+			t.Errorf("esc should return to menu, got %v", next.Phase)
+		}
+	})
 }
 
-func TestHandleAutoBudgetKey_FiltersStrayCharacters(t *testing.T) {
+func TestHandleAutoBudgetEditorFiltersStrayCharacters(t *testing.T) {
 	database := setupBudgetTest(t)
-	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "2.50"}
+	s := autoBudgetState{Active: true, Phase: autoBudgetPhaseEditHourly, Value: "2.50"}
 
-	// Pressing 'q' (a likely "quit" reflex) should be dropped, not appended.
+	// 'q' is dropped (it's a likely "quit" reflex, not a numeric input).
 	next, _ := handleAutoBudgetKey(s, keyMsg("q"), database)
 	if next.Value != "2.50" {
 		t.Errorf("'q' should be dropped, got value %q", next.Value)
 	}
 
-	// Letters that participate in "off"/"none"/"disable" are still accepted.
-	next, _ = handleAutoBudgetKey(autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: ""}, keyMsg("o"), database)
+	// 'o' is kept because it's part of "off".
+	next, _ = handleAutoBudgetKey(autoBudgetState{Active: true, Phase: autoBudgetPhaseEditHourly}, keyMsg("o"), database)
 	if next.Value != "o" {
-		t.Errorf("'o' should be accepted as part of 'off', got %q", next.Value)
-	}
-}
-
-func TestHandleAutoBudgetKey_CtrlR(t *testing.T) {
-	database := setupBudgetTest(t)
-
-	// Ctrl-R on hourly is a no-op.
-	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "1.00"}
-	next, eff := handleAutoBudgetKey(s, keyMsg("ctrl+r"), database)
-	if next != s || eff != (autoBudgetEffect{}) {
-		t.Errorf("Ctrl-R on hourly should be a no-op, got next=%+v eff=%+v", next, eff)
-	}
-
-	// On the daily step it closes the prompt, sets BreakerReset, and retriggers.
-	s = autoBudgetState{Active: true, Step: autoBudgetStepDaily, Value: "5.00"}
-	next, eff = handleAutoBudgetKey(s, keyMsg("ctrl+r"), database)
-	if next.Active {
-		t.Error("Ctrl-R on daily should close the prompt")
-	}
-	if !eff.BreakerReset || !eff.RetriggerPilot {
-		t.Errorf("expected BreakerReset+RetriggerPilot, got %+v", eff)
-	}
-	if eff.StatusText != "Daily-budget breaker reset" {
-		t.Errorf("status = %q", eff.StatusText)
+		t.Errorf("'o' should be accepted, got %q", next.Value)
 	}
 }

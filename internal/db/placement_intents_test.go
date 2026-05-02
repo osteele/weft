@@ -80,6 +80,97 @@ func TestJobIDsWithOpenPlacementIntents(t *testing.T) {
 	}
 }
 
+func TestPrunePlacementIntents(t *testing.T) {
+	t.Run("prunes stale intent on job whose only launch is terminal", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "j", "/tmp", StatusQueued)
+		// Create a terminal launch and link the job's attempt to it.
+		launchID, err := CreateLaunch(database, &Launch{Status: "failed", Provider: "vastai"})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts SET launch_id = ? WHERE job_id = ?`,
+			launchID, 100,
+		); err != nil {
+			t.Fatalf("link attempt: %v", err)
+		}
+		intent, err := CreatePlacementIntent(database, 100, "auto_relaunch")
+		if err != nil {
+			t.Fatalf("CreatePlacementIntent: %v", err)
+		}
+		// Backdate the intent past the protection window.
+		if _, err := database.Exec(
+			`UPDATE placement_intents SET created_at = ? WHERE id = ?`,
+			time.Now().Add(-time.Hour).Unix(), intent.ID,
+		); err != nil {
+			t.Fatalf("backdate: %v", err)
+		}
+
+		pruned, err := PrunePlacementIntents(database, time.Minute)
+		if err != nil {
+			t.Fatalf("PrunePlacementIntents: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0].JobID != 100 {
+			t.Fatalf("pruned = %+v, want one for job 100", pruned)
+		}
+		open, _ := JobIDsWithOpenPlacementIntents(database)
+		if _, ok := open[100]; ok {
+			t.Errorf("job 100's intent should have been canceled")
+		}
+	})
+
+	t.Run("protection window shields fresh intent even when no launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 200, "j", "/tmp", StatusQueued)
+		if _, err := CreatePlacementIntent(database, 200, "auto_relaunch"); err != nil {
+			t.Fatalf("CreatePlacementIntent: %v", err)
+		}
+
+		pruned, err := PrunePlacementIntents(database, 10*time.Minute)
+		if err != nil {
+			t.Fatalf("PrunePlacementIntents: %v", err)
+		}
+		if len(pruned) != 0 {
+			t.Fatalf("fresh intent should be protected, got %+v", pruned)
+		}
+	})
+
+	t.Run("keeps intent backed by non-terminal launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 300, "j", "/tmp", StatusQueued)
+		launchID, err := CreateLaunch(database, &Launch{Status: "running", Provider: "vastai"})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts SET launch_id = ? WHERE job_id = ?`,
+			launchID, 300,
+		); err != nil {
+			t.Fatalf("link attempt: %v", err)
+		}
+		intent, err := CreatePlacementIntent(database, 300, "auto_relaunch")
+		if err != nil {
+			t.Fatalf("CreatePlacementIntent: %v", err)
+		}
+		// Backdate so age alone wouldn't protect it.
+		if _, err := database.Exec(
+			`UPDATE placement_intents SET created_at = ? WHERE id = ?`,
+			time.Now().Add(-time.Hour).Unix(), intent.ID,
+		); err != nil {
+			t.Fatalf("backdate: %v", err)
+		}
+
+		pruned, err := PrunePlacementIntents(database, time.Minute)
+		if err != nil {
+			t.Fatalf("PrunePlacementIntents: %v", err)
+		}
+		if len(pruned) != 0 {
+			t.Fatalf("intent backed by running launch should not be pruned, got %+v", pruned)
+		}
+	})
+}
+
 func TestCancelStalePlacementIntents(t *testing.T) {
 	database := SetupTestDB(t)
 	insertTestJob(t, database, 100, "j1", "/tmp", StatusQueued)

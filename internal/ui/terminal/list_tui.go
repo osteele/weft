@@ -70,7 +70,7 @@ type listTUIModel struct {
 	autoRunRateTargetCents     int
 	autoRunRateInputActive     bool
 	autoRunRateInputValue      string
-	autoRunRateInputStep       autoBudgetInputStep
+	autoRunRateInputPhase      autoBudgetPhase
 	autoDailyCapCents          int
 	autoNextPassAt             time.Time
 	autoLeaseOwner             string
@@ -98,13 +98,6 @@ type listTUIModel struct {
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
 }
-
-type autoBudgetInputStep int
-
-const (
-	autoBudgetStepHourly autoBudgetInputStep = iota
-	autoBudgetStepDaily
-)
 
 type listJobsLoadedMsg struct {
 	jobs             []*db.Job
@@ -191,6 +184,7 @@ func renderSelectedRow(row string, width int) string {
 
 var (
 	listTUIFooterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	listTUIPromptStyle = lipgloss.NewStyle().Reverse(true).Bold(true)
 	listTUIEmptyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
 	graceAckKeyPattern = regexp.MustCompile(`grace/(\d+)/acks/`)
 )
@@ -943,6 +937,11 @@ func (m listTUIModel) groupedView() string {
 	if autoPilotLine != "" {
 		baseFooterLines++
 	}
+	var budgetPanelLines []string
+	if m.autoRunRateInputActive {
+		budgetPanelLines = renderAutoBudgetPanel(m.currentBudgetState())
+		baseFooterLines += len(budgetPanelLines)
+	}
 	availableForBodyAndDetails := max(0, m.height-1-baseFooterLines)
 	if len(errorDetailsLines) > 0 {
 		maxDetailLines := availableForBodyAndDetails
@@ -1002,6 +1001,10 @@ func (m listTUIModel) groupedView() string {
 	}
 	if autoPilotLine != "" {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(autoPilotLine, m.width)))
+		b.WriteString("\n")
+	}
+	for _, line := range budgetPanelLines {
+		b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
 	}
 	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(controlsLine, m.width)))
@@ -1101,7 +1104,10 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 
 func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.autoRunRateInputActive {
-		return autoBudgetPromptControls(m.autoRunRateInputStep, m.autoRunRateInputValue)
+		// While the budget panel is open, the panel itself shows the
+		// applicable keys; suppress the regular controls so they don't
+		// muddle the picture.
+		return ""
 	}
 	autoState := "OFF"
 	if m.autoMode {
@@ -1396,7 +1402,7 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m listTUIModel) currentBudgetState() autoBudgetState {
 	return autoBudgetState{
 		Active:      m.autoRunRateInputActive,
-		Step:        m.autoRunRateInputStep,
+		Phase:       m.autoRunRateInputPhase,
 		Value:       m.autoRunRateInputValue,
 		HourlyCents: m.autoRunRateTargetCents,
 		DailyCents:  m.autoDailyCapCents,
@@ -1405,14 +1411,14 @@ func (m listTUIModel) currentBudgetState() autoBudgetState {
 
 func (m *listTUIModel) applyBudgetState(s autoBudgetState) {
 	m.autoRunRateInputActive = s.Active
-	m.autoRunRateInputStep = s.Step
+	m.autoRunRateInputPhase = s.Phase
 	m.autoRunRateInputValue = s.Value
 	m.autoRunRateTargetCents = s.HourlyCents
 	m.autoDailyCapCents = s.DailyCents
 }
 
 func (m listTUIModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
-	m.applyBudgetState(beginAutoBudget(m.autoRunRateTargetCents))
+	m.applyBudgetState(beginAutoBudget(m.autoRunRateTargetCents, m.autoDailyCapCents))
 	return m, nil
 }
 

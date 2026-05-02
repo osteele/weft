@@ -135,7 +135,7 @@ type watchModel struct {
 	autoRunRateTargetCents  int
 	autoRunRateInputActive  bool
 	autoRunRateInputValue   string
-	autoRunRateInputStep    autoBudgetInputStep
+	autoRunRateInputPhase   autoBudgetPhase
 	autoDailyCapCents       int
 
 	// --- Move picker overlay ---

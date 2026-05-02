@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
@@ -28,6 +29,11 @@ var autoPilotBuildPlanWithOptions = buildAutoPlacementPlanWithOptions
 var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
 
+// placementIntentProtectionWindow shields freshly-opened intents from
+// auto-prune; it must exceed a healthy relaunch's offer-search →
+// instance-create window (a few seconds typically, up to ~90s under load).
+const placementIntentProtectionWindow = 5 * time.Minute
+
 func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (*GroupedAutoPilotResult, error) {
 	if database == nil {
 		return &GroupedAutoPilotResult{}, nil
@@ -37,6 +43,25 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if job != nil {
 			scoped[job.ID] = struct{}{}
 		}
+	}
+
+	// Sweep stale placement intents whose orchestrator died before
+	// resolving them; otherwise the leaked intent excludes its job from
+	// every future pass indefinitely.
+	if pruned, err := db.PrunePlacementIntents(database, placementIntentProtectionWindow); err != nil {
+		oplog.Log("auto_pilot.intents_prune_error", oplog.WithError(err))
+	} else if len(pruned) > 0 {
+		jobIDs := make([]int64, 0, len(pruned))
+		for _, pi := range pruned {
+			jobIDs = append(jobIDs, pi.JobID)
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: db.EventPlacementIntentPruned,
+				JobID:     pi.JobID,
+				Detail:    fmt.Sprintf("intent_id=%d operation=%s age=%s reason=stale", pi.ID, pi.Operation, time.Since(time.Unix(pi.CreatedAt, 0)).Round(time.Second)),
+			})
+		}
+		oplog.Log("auto_pilot.intents_pruned",
+			oplog.WithDetailf("count=%d job_ids=%v", len(pruned), jobIDs))
 	}
 
 	unplacedJobs, err := db.ListUnplacedJobs(database)

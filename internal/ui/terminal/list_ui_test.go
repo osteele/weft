@@ -332,6 +332,40 @@ func TestListTUIQuickLaunchInFlightProtectsStatusFromAutoPilotNoise(t *testing.T
 	}
 }
 
+func TestListTUIGroupedViewShowsBudgetPromptAfterDollarKey(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		width:           120,
+		height:          24,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, Description: "queued"},
+		},
+		autoRunRateTargetCents: 250,
+	}
+	m.rebuildGroupedRows()
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'$'}})
+	got := next.(listTUIModel)
+	if !got.autoRunRateInputActive {
+		t.Fatal("expected $ to activate the budget input")
+	}
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "Auto-pilot budget") {
+		t.Fatalf("expected budget panel header in view after $, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Hourly target") || !strings.Contains(out, "Daily cap") || !strings.Contains(out, "Reset runaway breaker") {
+		t.Fatalf("expected all menu actions visible at once, got:\n%s", out)
+	}
+	if !strings.Contains(out, "$2.50/hr") {
+		t.Fatalf("expected current hourly value in menu, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Esc") {
+		t.Fatalf("expected Esc close hint in view, got:\n%s", out)
+	}
+}
+
 func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
@@ -729,28 +763,23 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 		}
 	})
 
-	t.Run("budget flow save", func(t *testing.T) {
-		// Two-step prompt: Enter on the hourly step advances; Enter on the
-		// daily step saves the daily cap and clears the cooldown.
+	t.Run("budget editor save clears cooldown", func(t *testing.T) {
+		// Saving an edited value should retrigger the autopilot, which clears
+		// the cooldown timestamp. Drive the menu → editor → save flow.
 		m := makeModel()
 		m.autoRunRateInputActive = true
-		m.autoRunRateInputValue = "2.50"
-		afterHourly, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
-		afterHourlyModel := afterHourly.(listTUIModel)
-		if afterHourlyModel.autoRunRateInputStep != autoBudgetStepDaily {
-			t.Fatalf("expected step to advance to daily, got %v", afterHourlyModel.autoRunRateInputStep)
-		}
-		if !afterHourlyModel.autoRunRateInputActive {
-			t.Fatal("expected prompt still active after hourly step")
-		}
-		afterHourlyModel.autoRunRateInputValue = "off"
-		next, _ := afterHourlyModel.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
+		m.autoRunRateInputPhase = autoBudgetPhaseEditHourly
+		m.autoRunRateInputValue = "3.50"
+		next, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyEnter})
 		got := next.(listTUIModel)
-		if got.autoRunRateInputActive {
-			t.Fatal("expected prompt closed after daily step")
+		if got.autoRunRateInputPhase != autoBudgetPhaseMenu {
+			t.Fatalf("after save expected menu phase, got %v", got.autoRunRateInputPhase)
+		}
+		if !got.autoRunRateInputActive {
+			t.Fatal("save should not close the panel; should return to menu")
 		}
 		if !got.autoNextPassAt.IsZero() {
-			t.Fatalf("expected cooldown cleared after daily save, got %v", got.autoNextPassAt)
+			t.Fatalf("expected cooldown cleared after save, got %v", got.autoNextPassAt)
 		}
 	})
 }

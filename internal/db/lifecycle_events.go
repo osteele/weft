@@ -30,6 +30,12 @@ const (
 	EventRelaunchRunawayBlocked           = "relaunch.runaway_blocked"
 	EventRelaunchRunawayResumed           = "relaunch.runaway_resumed"
 
+	// EventPlacementIntentPruned records that the autopilot canceled a stale
+	// open placement intent (orchestrator died before resolving it). The
+	// detail field carries the intent id, originating operation, and the
+	// intent's age at prune time so leak patterns are diagnosable.
+	EventPlacementIntentPruned = "placement_intent.pruned"
+
 	// Reconciliation actions (from ExecuteAction / reconcileStaleHeartbeat)
 	EventReconcileBootstrapTimeout  = "reconcile.bootstrap_timeout"
 	EventReconcileGraceExpired      = "reconcile.grace_expired"

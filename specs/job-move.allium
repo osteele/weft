@@ -233,8 +233,9 @@ invariant AutopilotIgnoresMovingJobs {
 -- defer; that pattern relied on a special-case in the autopilot
 -- ("rescue" pending_placement+unplaced jobs that got stranded by a
 -- crash). With explicit intents, the rescue branch is no longer needed
--- to ensure progress: stranded intents are detected by their age and
--- canceled via CancelStalePlacementIntents.
+-- to ensure progress: stranded intents are pruned at the start of each
+-- autopilot pass via PruneStalePlacementIntentsAtPassStart, which
+-- combines a launch-state predicate with a protection window.
 entity PlacementIntent {
     job: Job
     operation: String           -- "auto_relaunch", "bulk_move", etc.
@@ -251,15 +252,36 @@ invariant AtMostOnePlacementIntentOpenPerJob {
         count(PlacementIntent { job = job, state = open }) <= 1
 }
 
-rule CancelStalePlacementIntents {
-    -- A placement that has been "open" longer than the configured
-    -- staleness window is presumed abandoned (process crashed before
-    -- closing it) and is auto-canceled. The job then becomes a normal
-    -- autopilot candidate again.
-    when: PeriodicReconcile()
+rule PruneStalePlacementIntentsAtPassStart {
+    -- At the start of every grouped autopilot pass — before reading the
+    -- open-intent set used to skip jobs from the planner — the autopilot
+    -- sweeps stranded PlacementIntent rows. An intent is pruned only when
+    -- BOTH predicates hold:
+    --
+    --   (1) Protection window: the intent is older than
+    --       config.placement_intent_protection_window. This is generously
+    --       above the legitimate offer-search → instance-create gap so an
+    --       in-flight relaunch is not canceled out from under itself if
+    --       the launch-state predicate is briefly wrong, or if a manual
+    --       `weft place` is racing without holding the autopilot lease.
+    --
+    --   (2) No non-terminal launch backing the job: the job's most recent
+    --       JobAttempt either has no launch_id, or points at a Launch
+    --       whose status is in {failed, canceled, completed}. This is the
+    --       primary correctness predicate; the window is defense in depth.
+    --
+    -- Each pruned intent emits a placement_intent.pruned lifecycle event
+    -- (intent id, originating operation, age) and the pass emits a single
+    -- auto_pilot.intents_pruned oplog summary event.
+    when: AutopilotPassStart()
     for intent in PlacementIntent { state = open }:
-      requires: now - intent.created_at > config.placement_intent_stale_after
-      ensures: ResolvePlacementIntent(intent, canceled, "stale (auto-canceled)")
+      requires: now - intent.created_at > config.placement_intent_protection_window
+                and (intent.job.latest_attempt.launch_id = null
+                     or intent.job.latest_attempt.launch.status in {failed, canceled, completed})
+      ensures:
+          ResolvePlacementIntent(intent, canceled,
+              "stale: no non-terminal launch (auto-pruned)")
+          EmitLifecycleEvent("placement_intent.pruned", intent)
 }
 
 -- ==========================================================================

@@ -377,7 +377,7 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m watchModel) currentBudgetState() autoBudgetState {
 	return autoBudgetState{
 		Active:      m.autoRunRateInputActive,
-		Step:        m.autoRunRateInputStep,
+		Phase:       m.autoRunRateInputPhase,
 		Value:       m.autoRunRateInputValue,
 		HourlyCents: m.autoRunRateTargetCents,
 		DailyCents:  m.autoDailyCapCents,
@@ -386,14 +386,14 @@ func (m watchModel) currentBudgetState() autoBudgetState {
 
 func (m *watchModel) applyBudgetState(s autoBudgetState) {
 	m.autoRunRateInputActive = s.Active
-	m.autoRunRateInputStep = s.Step
+	m.autoRunRateInputPhase = s.Phase
 	m.autoRunRateInputValue = s.Value
 	m.autoRunRateTargetCents = s.HourlyCents
 	m.autoDailyCapCents = s.DailyCents
 }
 
 func (m watchModel) beginAutoRunRateInput() (tea.Model, tea.Cmd) {
-	m.applyBudgetState(beginAutoBudget(m.autoRunRateTargetCents))
+	m.applyBudgetState(beginAutoBudget(m.autoRunRateTargetCents, m.autoDailyCapCents))
 	return m, nil
 }
 

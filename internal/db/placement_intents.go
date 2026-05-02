@@ -128,6 +128,67 @@ func CancelStalePlacementIntents(database *sql.DB, olderThan time.Duration) (int
 	return int(n), nil
 }
 
+// PrunedIntent describes a placement intent that PrunePlacementIntents
+// just resolved, suitable for logging or emitting lifecycle events.
+type PrunedIntent struct {
+	ID        int64
+	JobID     int64
+	Operation string
+	CreatedAt int64
+}
+
+// PlacementIntentResolutionStale is the resolution string written to
+// intents canceled by PrunePlacementIntents.
+const PlacementIntentResolutionStale = "stale: no non-terminal launch (auto-pruned)"
+
+// PrunePlacementIntents cancels open placement intents that have outlived
+// their orchestration window. An intent is pruned when both:
+//
+//  1. it is older than `protectionWindow` (so a freshly-opened intent in
+//     the offer-search → instance-create gap is not canceled out from
+//     under a healthy in-flight relaunch); and
+//  2. the job has no non-terminal cloud launch backing it — its most
+//     recent job_attempts row either has no launch_id, or points at a
+//     launch whose status is failed, canceled, or completed.
+//
+// Implemented as a single UPDATE … RETURNING so the read and write are
+// atomic, eliminating the SELECT/UPDATE race window.
+func PrunePlacementIntents(database *sql.DB, protectionWindow time.Duration) ([]PrunedIntent, error) {
+	if database == nil {
+		return nil, nil
+	}
+	now := time.Now().Unix()
+	cutoff := time.Now().Add(-protectionWindow).Unix()
+	const query = `
+		UPDATE placement_intents
+		   SET state = 'canceled', resolved_at = ?, resolution = ?
+		 WHERE state = 'open'
+		   AND created_at < ?
+		   AND NOT EXISTS (
+		         SELECT 1
+		           FROM job_attempts ja
+		           JOIN launches l ON l.id = ja.launch_id
+		          WHERE ja.job_id = placement_intents.job_id
+		            AND ja.id = (SELECT MAX(id) FROM job_attempts WHERE job_id = placement_intents.job_id)
+		            AND COALESCE(l.status, '') NOT IN ('failed','canceled','completed')
+		       )
+		RETURNING id, job_id, operation, created_at`
+	rows, err := database.Query(query, now, PlacementIntentResolutionStale, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("prune stale placement intents: %w", err)
+	}
+	defer rows.Close()
+	var pruned []PrunedIntent
+	for rows.Next() {
+		var pi PrunedIntent
+		if err := rows.Scan(&pi.ID, &pi.JobID, &pi.Operation, &pi.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan pruned placement intent: %w", err)
+		}
+		pruned = append(pruned, pi)
+	}
+	return pruned, rows.Err()
+}
+
 const placementIntentSelect = `SELECT id, job_id, operation, state, created_at, resolved_at, resolution FROM placement_intents`
 
 func scanPlacementIntent(s moveIntentScanner) (*PlacementIntent, error) {
