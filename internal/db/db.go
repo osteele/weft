@@ -5324,7 +5324,10 @@ func SaveCachedHostInfo(db *sql.DB, info *CachedHostInfo) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		info.Name, info.Arch, info.OSVersion, info.Model, info.CPUCount, info.CPUModel, info.CPUFreq, info.MemTotal, info.GPUsJSON, info.LastUpdated,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return UpsertInventoryExecutionTarget(db, info.Name)
 }
 
 // LoadCachedHostInfo retrieves cached host information by name

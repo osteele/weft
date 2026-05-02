@@ -506,6 +506,16 @@ func ShouldSpillToRental(onPrem, rental estimate.Estimate, tags []string) bool {
 func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics, cfg *config.Config) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
+	if cordoned, reason, err := db.IsInventoryExecutionTargetCordoned(database, host.Name); err == nil && cordoned {
+		s.Eligible = false
+		if reason != "" {
+			s.Reasons = append(s.Reasons, "target cordoned: "+reason)
+		} else {
+			s.Reasons = append(s.Reasons, "target cordoned")
+		}
+		return s
+	}
+
 	// Hard constraint: opt-in-only hosts are skipped by auto-placement.
 	// They remain usable via an explicit --host, which bypasses the scorer.
 	if cfg != nil && cfg.HostOptInOnly(host.Name) {

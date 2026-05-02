@@ -28,25 +28,25 @@ import (
 var instanceCmd = &cobra.Command{
 	Use:     "instance",
 	Aliases: []string{"instances"},
-	Short:   "Manage individual cloud GPU instances",
+	Short:   "Manage execution targets and cloud GPU instances",
 }
 
 var instanceListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all cloud instances",
+	Short: "List execution targets",
 	RunE:  runInstanceList,
 }
 
 var instanceStatusCmd = &cobra.Command{
 	Use:   "status <id> [id...]",
-	Short: "Show cloud instance status with uptime and cost",
+	Short: "Show execution target or cloud instance status",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runInstanceStatus,
 }
 
 var instanceInfoCmd = &cobra.Command{
 	Use:   "info <id> [id...]",
-	Short: "Show cloud instance status with uptime and cost",
+	Short: "Show execution target or cloud instance status",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runInstanceStatus,
 }
@@ -100,19 +100,19 @@ Unlike terminate, this does a clean shutdown with proper completion markers.`,
 var instanceCordonReason string
 
 var instanceCordonCmd = &cobra.Command{
-	Use:   "cordon <instance-id> [id...]",
-	Short: "Mark an instance so autopilot stops routing new jobs to it",
-	Long: `Cordon flags an instance as ineligible for reuse. The instance keeps
-running and any active job continues to completion, but the autopilot and
-explicit reuse paths will skip it when placing new jobs. Use 'uncordon' to
+	Use:   "cordon <instance-id|host> [id|host...]",
+	Short: "Mark an execution target so autopilot stops routing new jobs to it",
+	Long: `Cordon flags an execution target as ineligible for new placements. The
+target keeps running and any active job continues to completion, but autopilot
+and explicit reuse paths will skip it when placing new jobs. Use 'uncordon' to
 clear the flag.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runInstanceCordon,
 }
 
 var instanceUncordonCmd = &cobra.Command{
-	Use:   "uncordon <instance-id> [id...]",
-	Short: "Clear the cordon flag on an instance",
+	Use:   "uncordon <instance-id|host> [id|host...]",
+	Short: "Clear the cordon flag on an execution target",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runInstanceUncordon,
 }
@@ -193,74 +193,100 @@ func getGraceInstance(database *sql.DB, instanceID int64) (*db.Launch, error) {
 }
 
 func runInstanceList(cmd *cobra.Command, args []string) error {
-	database, err := db.OpenForReading()
+	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
-	instances, err := db.ListLaunches(database)
+	targets, err := db.ListExecutionTargets(database)
 	if err != nil {
-		return fmt.Errorf("list instances: %w", err)
+		return fmt.Errorf("list execution targets: %w", err)
 	}
-
-	if len(instances) == 0 {
-		fmt.Println("No cloud instances.")
+	if len(targets) == 0 {
+		fmt.Println("No execution targets.")
 		return nil
 	}
 
+	launches, _ := db.ListLaunches(database)
+	launchByID := make(map[int64]*db.Launch, len(launches))
+	for _, launch := range launches {
+		if launch != nil {
+			launchByID[launch.ID] = launch
+		}
+	}
 	jobCounts, _ := db.GetLaunchJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "ID\tCAMPAIGN\tSTATUS\tPROVIDER\tTYPE\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
+	fmt.Fprintf(w, "TARGET\tKIND\tSTATUS\tGPU\tJOBS\tCURRENT\tBACKING\tDEADLINE\tUPDATED\n")
 
-	for _, inst := range instances {
-		created := time.Unix(inst.CreatedAt, 0).Format("01/02 15:04")
-
-		costStr := "—"
-		if inst.ActualSpendCents > 0 {
-			costStr = fmt.Sprintf("$%.2f", float64(inst.ActualSpendCents)/100)
-		}
-
-		gpuSpec := inst.DisplayGPUBrief()
-		if gpuSpec == "" {
-			gpuSpec = "—"
-		}
-
-		providerInstID := inst.EffectiveProviderID()
-		if providerInstID == "" {
-			providerInstID = "—"
-		}
-
-		dc := inst.DataCenter
-		if dc == "" {
-			dc = "—"
-		}
-
-		campaignStr := "—"
-		if inst.CampaignID != nil {
-			campaignStr = fmt.Sprintf("%d", *inst.CampaignID)
-		}
-
-		typeStr := inst.InstanceType
-		if typeStr == "" {
-			typeStr = "—"
-		}
-
-		statusStr := inst.Status
-		if inst.Cordoned {
+	for _, target := range targets {
+		statusStr := string(target.Status)
+		if target.Cordoned {
 			statusStr += " [cordoned]"
 		}
+		gpuSpec := executionTargetGPU(target)
+		current := "—"
+		if target.CurrentJobID != nil {
+			current = ids.FormatJobID(*target.CurrentJobID)
+		}
+		backing := target.Host
+		jobs := target.QueueDepth
+		if target.LaunchID != nil {
+			launch := launchByID[*target.LaunchID]
+			backing = ids.FormatInstanceID(*target.LaunchID)
+			if launch != nil {
+				if providerID := launch.EffectiveProviderID(); providerID != "" {
+					backing += "/" + providerID
+				}
+			}
+			jobs = jobCounts[*target.LaunchID]
+		}
+		deadline := "—"
+		if target.DeadlineUnix != nil && *target.DeadlineUnix > 0 {
+			deadline = time.Unix(*target.DeadlineUnix, 0).Format("01/02 15:04")
+		}
+		updated := time.Unix(target.UpdatedAt, 0).Format("01/02 15:04")
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			ids.FormatInstanceID(inst.ID), campaignStr, statusStr, inst.Provider, typeStr, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			executionTargetDisplayID(target), target.Kind, statusStr, gpuSpec, jobs, current, backing, deadline, updated)
 	}
 	w.Flush()
 	return nil
 }
 
+func executionTargetDisplayID(target *db.ExecutionTarget) string {
+	if target == nil {
+		return "—"
+	}
+	if target.LaunchID != nil {
+		return ids.FormatInstanceID(*target.LaunchID)
+	}
+	return target.Host
+}
+
+func executionTargetGPU(target *db.ExecutionTarget) string {
+	if target == nil {
+		return "—"
+	}
+	if target.GPUClass == "" && target.GPUMemGB == 0 && target.NumGPUs == 0 {
+		return "—"
+	}
+	label := target.GPUClass
+	if label == "" {
+		label = "GPU"
+	}
+	if target.GPUMemGB > 0 {
+		label += fmt.Sprintf(" %dGB", target.GPUMemGB)
+	}
+	if target.NumGPUs > 1 {
+		label = fmt.Sprintf("%dx %s", target.NumGPUs, label)
+	}
+	return label
+}
+
 func runInstanceStatus(cmd *cobra.Command, args []string) error {
-	database, err := db.OpenForReading()
+	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -273,7 +299,10 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 
 		id, err := ids.ParseInstanceID(arg)
 		if err != nil {
-			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
+			if handled, hostErr := printInventoryTargetStatus(database, arg); handled || hostErr != nil {
+				return hostErr
+			}
+			return fmt.Errorf("invalid instance ID or host %q: %w", arg, err)
 		}
 
 		ci, err := db.GetLaunch(database, id)
@@ -461,6 +490,38 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+func printInventoryTargetStatus(database *sql.DB, host string) (bool, error) {
+	if strings.TrimSpace(host) == "" {
+		return false, nil
+	}
+	targets, err := db.ListExecutionTargets(database)
+	if err != nil {
+		return true, err
+	}
+	for _, target := range targets {
+		if target == nil || target.Kind != db.ExecutionTargetInventoryHost || target.Host != host {
+			continue
+		}
+		statusStr := string(target.Status)
+		if target.Cordoned {
+			statusStr += " [cordoned]"
+		}
+		fmt.Printf("Target %s — %s\n", target.Host, statusStr)
+		if target.CordonReason != "" {
+			fmt.Printf("  Cordon: %s\n", target.CordonReason)
+		}
+		if target.CurrentJobID != nil {
+			fmt.Printf("  Current job: %s\n", ids.FormatJobID(*target.CurrentJobID))
+		}
+		fmt.Printf("  Queue depth: %d\n", target.QueueDepth)
+		if target.LastObservedAt != nil {
+			fmt.Printf("  Last observed: %s\n", time.Unix(*target.LastObservedAt, 0).Format(time.RFC3339))
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // walkReplacementChain follows ReplacedInstanceID links to build a predecessor chain.
@@ -735,7 +796,19 @@ func setInstanceCordon(args []string, cordoned bool, reason string) error {
 	for _, arg := range args {
 		id, err := ids.ParseInstanceID(arg)
 		if err != nil {
-			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
+			if err := db.SetInventoryExecutionTargetCordoned(database, arg, cordoned, reason); err != nil {
+				return fmt.Errorf("set cordon on host %s: %w", arg, err)
+			}
+			if !cordoned {
+				fmt.Printf("Host %s uncordoned.\n", arg)
+				continue
+			}
+			suffix := ""
+			if reason != "" {
+				suffix = " (" + reason + ")"
+			}
+			fmt.Printf("Host %s cordoned%s. Autopilot will not route new jobs to it.\n", arg, suffix)
+			continue
 		}
 		err = db.SetLaunchCordoned(database, id, cordoned, reason)
 		if errors.Is(err, sql.ErrNoRows) {

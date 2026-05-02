@@ -451,7 +451,14 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		return result.LastInsertId()
+		id, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		if err := EnsureRentalExecutionTarget(db, id); err != nil {
+			return 0, err
+		}
+		return id, nil
 	})
 }
 
@@ -560,7 +567,7 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 	if len(terminationInfo) > 1 {
 		detail = terminationInfo[1]
 	}
-	return RetryOnDatabaseLocked(context.Background(), "update launch status", func() error {
+	err := RetryOnDatabaseLocked(context.Background(), "update launch status", func() error {
 		switch status {
 		case LaunchStatusRunning:
 			// COALESCE preserves launched_at on resume from paused/grace, so
@@ -592,6 +599,10 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 			return err
 		}
 	})
+	if err != nil {
+		return err
+	}
+	return EnsureRentalExecutionTarget(db, id)
 }
 
 // UpdateLaunchDockerImage sets the Docker image used for a launch.
@@ -639,7 +650,7 @@ func SetLaunchCordoned(db *sql.DB, id int64, cordoned bool, reason string) error
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return EnsureRentalExecutionTarget(db, id)
 }
 
 func UpdateLaunchTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
@@ -1152,6 +1163,14 @@ func CountJobsWaitingOnInstances(database *sql.DB) (int, error) {
 // Uses COALESCE(pending_status, status) so that a failed job with
 // pending_status='queued' (retry intent) is eligible for placement.
 func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
+	cordoned, _, err := IsInventoryExecutionTargetCordoned(database, host)
+	if err != nil {
+		return false, err
+	}
+	if cordoned {
+		return false, nil
+	}
+
 	// Check effective status and current host from job_status view
 	var effectiveStatus, currentHost string
 	if err := database.QueryRow(

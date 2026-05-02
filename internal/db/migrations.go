@@ -160,6 +160,15 @@ var versionedMigrations = []migration{
 			return err
 		},
 	},
+	{
+		Description: "add execution_targets table",
+		Apply: func(db *sql.DB) error {
+			if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN target_id INTEGER`); err != nil {
+				return err
+			}
+			return initExecutionTargetsSchema(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
