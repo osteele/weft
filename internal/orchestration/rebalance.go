@@ -56,6 +56,7 @@ type QueueRebalanceMove struct {
 	FromInstanceID int64
 	ToInstanceID   int64
 	CostRatio      float64
+	CostCeiling    float64
 	MeanDelta      float64
 	LowerDelta     float64
 	UpperDelta     float64
@@ -77,12 +78,13 @@ type rebalanceInstanceState struct {
 }
 
 type rebalanceJobPolicy struct {
-	enabled     bool
-	costCeiling float64
-	strategy    string
-	epsilon     float64
-	localDir    string
-	image       string
+	enabled       bool
+	costCeiling   float64
+	budgetCeiling float64
+	strategy      string
+	epsilon       float64
+	localDir      string
+	image         string
 }
 
 type rebalancePlan struct {
@@ -236,6 +238,7 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 			FromInstanceID: srcID,
 			ToInstanceID:   bestDst.launch.ID,
 			CostRatio:      ratio,
+			CostCeiling:    policy.budgetCeiling,
 			MeanDelta:      meanDelta,
 			LowerDelta:     lowerDelta,
 			UpperDelta:     upperDelta,
@@ -725,20 +728,25 @@ func pickBestRebalanceDestination(
 func resolveRebalancePolicy(job *db.Job, costCeilingOverride float64) rebalanceJobPolicy {
 	localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 	enabled := config.ProjectAutoPilotRebalanceEnabled(localDir)
-	ceiling := config.ProjectAutoPilotRebalanceCostCeiling(localDir)
+	projectCeiling := config.ProjectAutoPilotRebalanceCostCeiling(localDir)
+	ceiling := projectCeiling
 	if costCeilingOverride > 0 {
 		ceiling = costCeilingOverride
 	}
 	if ceiling <= 0 {
 		ceiling = defaultRebalanceCostCeiling
 	}
+	if projectCeiling <= 0 {
+		projectCeiling = defaultRebalanceCostCeiling
+	}
 	return rebalanceJobPolicy{
-		enabled:     enabled,
-		costCeiling: ceiling,
-		strategy:    config.ProjectAutoPilotRebalanceStrategy(localDir),
-		epsilon:     config.ProjectAutoPilotRebalanceScoreEpsilon(localDir),
-		localDir:    localDir,
-		image:       campaign.ResolveJobImage(localDir, job.Command),
+		enabled:       enabled,
+		costCeiling:   ceiling,
+		budgetCeiling: projectCeiling,
+		strategy:      config.ProjectAutoPilotRebalanceStrategy(localDir),
+		epsilon:       config.ProjectAutoPilotRebalanceScoreEpsilon(localDir),
+		localDir:      localDir,
+		image:         campaign.ResolveJobImage(localDir, job.Command),
 	}
 }
 
@@ -890,7 +898,7 @@ func describeRebalanceReason(src, dst *db.Launch, ratio, meanDelta float64, prof
 }
 
 func nearlyEqual(a, b float64) bool {
-	return math.Abs(a-b) <= 1e-6
+	return math.Abs(a-b) <= 1e-3
 }
 
 func logRebalanceDecision(move QueueRebalanceMove) {

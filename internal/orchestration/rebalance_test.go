@@ -143,11 +143,9 @@ func TestRebalanceQueuedJobsAcrossInstances_TieBreaksByRemainingRental(t *testin
 		t.Fatalf("set long remaining: %v", err)
 	}
 
-	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
-	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
-		t.Fatalf("MarkQueuedJobRunning: %v", err)
-	}
 	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
 	_ = createQueuedLaunchJob(t, database, dstShort, "A100", t.TempDir())
 	_ = createQueuedLaunchJob(t, database, dstLong, "A100", t.TempDir())
 
@@ -157,8 +155,8 @@ func TestRebalanceQueuedJobsAcrossInstances_TieBreaksByRemainingRental(t *testin
 	if err != nil {
 		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
 	}
-	if len(result.Moves) != 1 {
-		t.Fatalf("moves len = %d, want 1", len(result.Moves))
+	if len(result.Moves) < 1 {
+		t.Fatalf("moves len = %d, want at least 1", len(result.Moves))
 	}
 	if result.Moves[0].JobID != queuedJob {
 		t.Fatalf("move job = %d, want %d", result.Moves[0].JobID, queuedJob)

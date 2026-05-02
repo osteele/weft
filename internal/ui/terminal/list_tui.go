@@ -89,6 +89,7 @@ type listTUIModel struct {
 	quickLaunchDone            <-chan listQuickLaunchDoneMsg
 	quickLaunchStatusHoldUntil time.Time
 	movePicker                 movePickerModel
+	rebalancePreview           rebalancePreviewModel
 	showHelp                   bool
 	moveLookupPending          bool
 	moveLookupRequestID        int64
@@ -153,6 +154,17 @@ type listQuickLaunchDoneMsg struct {
 }
 type listQuickLaunchProgressMsg struct {
 	message string
+}
+
+type rebalancePreviewLoadedMsg struct {
+	moves []orchestration.QueueRebalanceMove
+	err   error
+}
+
+type rebalanceAppliedMsg struct {
+	count      int
+	overBudget int
+	err        error
 }
 
 type listMoveOptionsReadyMsg struct {
@@ -300,6 +312,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.rebalancePreview.active {
+			return m.handleRebalancePreviewKey(msg)
+		}
 		if m.movePicker.active {
 			return m.handleMovePickerKey(msg)
 		}
@@ -748,6 +763,42 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc)
 		return m, m.reloadJobs()
 
+	case rebalancePreviewLoadedMsg:
+		if !m.rebalancePreview.active || !m.rebalancePreview.loading {
+			return m, nil
+		}
+		m.rebalancePreview.loading = false
+		if msg.err != nil {
+			m.rebalancePreview.errMessage = msg.err.Error()
+			m.statusMessage = "Rebalance preview failed"
+			return m, nil
+		}
+		m.rebalancePreview.moves = msg.moves
+		m.rebalancePreview.cursor = 0
+		if len(msg.moves) == 0 {
+			m.statusMessage = "No rebalance moves found."
+		} else {
+			m.statusMessage = fmt.Sprintf("Previewing %d rebalance move(s); %d over budget", len(msg.moves), countOverBudgetRebalanceMoves(msg.moves))
+		}
+		return m, nil
+
+	case rebalanceAppliedMsg:
+		if !m.rebalancePreview.active || !m.rebalancePreview.applying {
+			return m, nil
+		}
+		m.rebalancePreview.reset()
+		m.resumeAutoPilotNow()
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Rebalance failed: %v", msg.err)
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Rebalanced %d job(s); %d over budget", msg.count, msg.overBudget)
+		cmds := []tea.Cmd{m.reloadJobs()}
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+
 	case listQuickLaunchProgressMsg:
 		if strings.TrimSpace(msg.message) != "" {
 			m.statusMessage = msg.message
@@ -823,6 +874,9 @@ func (m listTUIModel) waitForQuickLaunchDone() tea.Cmd {
 }
 
 func (m listTUIModel) View() string {
+	if m.rebalancePreview.active {
+		return m.rebalancePreview.View(m.width, m.height)
+	}
 	if m.movePicker.active {
 		return m.movePicker.View(m.width, m.height)
 	}
@@ -1127,6 +1181,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if hasQueued {
 		line += "  n:new instance"
 	}
+	line += "  R:rebalance"
 	if strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
 		if m.showAutoPilotErrorDetails {
 			line += "  e:hide error"
@@ -1222,6 +1277,40 @@ func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return moveExecuteDoneMsg{jobID: jobID, err: r2Err} }
 		}
 		return m, requestMoveExecute(m.ctx, m.database, r2Client, cfg, cloudClients, jobID, selected)
+	}
+	return m, nil
+}
+
+func (m listTUIModel) handleRebalancePreviewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "n", "q":
+		if m.rebalancePreview.applying {
+			return m, nil
+		}
+		m.rebalancePreview.reset()
+		m.resumeAutoPilotNow()
+		cmds := []tea.Cmd{}
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+	case "up", "k":
+		if !m.rebalancePreview.loading && !m.rebalancePreview.applying {
+			m.rebalancePreview.moveCursor(-1)
+		}
+		return m, nil
+	case "down", "j":
+		if !m.rebalancePreview.loading && !m.rebalancePreview.applying {
+			m.rebalancePreview.moveCursor(1)
+		}
+		return m, nil
+	case "y":
+		if m.rebalancePreview.loading || m.rebalancePreview.applying || len(m.rebalancePreview.moves) == 0 {
+			return m, nil
+		}
+		m.rebalancePreview.applying = true
+		m.statusMessage = "Applying rebalance moves..."
+		return m, requestRebalanceApply(m.database)
 	}
 	return m, nil
 }
@@ -1353,6 +1442,12 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.waitForQuickLaunchProgress(),
 			m.waitForQuickLaunchDone(),
 		)
+	case "R":
+		m.clearAutoPilotPersistentState()
+		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+		m.rebalancePreview = rebalancePreviewModel{active: true, loading: true}
+		m.statusMessage = "Planning rebalance moves..."
+		return m, requestRebalancePreview(m.database)
 	case "k":
 		job := m.selectedGroupedJob()
 		if job == nil {
@@ -1511,6 +1606,37 @@ func (m listTUIModel) requestGroupedMoveOptions(requestID int64, jobID int64) te
 	}
 }
 
+func requestRebalancePreview(database *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, orchestration.QueueRebalanceOptions{
+			Apply:               false,
+			CostCeilingOverride: 1e6,
+			Operation:           "tui.rebalance",
+		})
+		if err != nil {
+			return rebalancePreviewLoadedMsg{err: err}
+		}
+		return rebalancePreviewLoadedMsg{moves: result.Moves}
+	}
+}
+
+func requestRebalanceApply(database *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, orchestration.QueueRebalanceOptions{
+			Apply:               true,
+			CostCeilingOverride: 1e6,
+			Operation:           "tui.rebalance",
+		})
+		if err != nil {
+			return rebalanceAppliedMsg{err: err}
+		}
+		return rebalanceAppliedMsg{
+			count:      len(result.Moves),
+			overBudget: countOverBudgetRebalanceMoves(result.Moves),
+		}
+	}
+}
+
 func (m listTUIModel) footerText(rows int) string {
 	start := 0
 	end := 0
@@ -1554,6 +1680,7 @@ func (m listTUIModel) renderListHelpView() string {
 			"  A toggle auto-pilot",
 			"  $ set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)",
 			"  n launch a new instance for queued jobs",
+			"  R preview rebalance moves",
 			"  k kill selected job",
 			"  u unplace selected queued job",
 			"  p mark selected job as processed",
