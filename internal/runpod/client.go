@@ -98,17 +98,23 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 }
 
 func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
-	args, err := buildCreatePodArgs(offerID, opts)
-	if err != nil {
-		return nil, err
-	}
-
 	// Pod create can take longer than cliTimeout when runpod's API is slow;
 	// give it 2 minutes rather than 30 seconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	caps, err := c.capabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if opts.RegistryAuth != nil && opts.RunpodRegistryID == "" {
+		id, err := ensureRegistryAuth(ctx, opts.RegistryAuth)
+		if err != nil {
+			return nil, fmt.Errorf("runpod registry auth: %w", err)
+		}
+		opts.RunpodRegistryID = id
+	}
+	args, err := buildCreatePodArgs(offerID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -408,6 +414,9 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 	}
 	if opts.Label != "" {
 		args = append(args, "--name", opts.Label)
+	}
+	if opts.RunpodRegistryID != "" {
+		args = append(args, "--registry-auth-id", opts.RunpodRegistryID)
 	}
 	if len(opts.EnvVars) > 0 {
 		data, err := jsonMarshal(opts.EnvVars)

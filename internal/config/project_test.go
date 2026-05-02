@@ -145,6 +145,22 @@ func TestProjectExcludeDirs(t *testing.T) {
 	}
 }
 
+func TestProjectCloudRequirements(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgContent := "[cloud]\nmin_driver = \"535\"\nmin_cuda = \"12.9\"\nimage_pull_secret = \"ghcr.io\"\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".weft.toml"), []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	minDriver, minCUDA := ProjectCloudRequirements(tmpDir)
+	if minDriver != "535" || minCUDA != "12.9" {
+		t.Fatalf("ProjectCloudRequirements() = (%q, %q), want (535, 12.9)", minDriver, minCUDA)
+	}
+	if got := ProjectImagePullSecret(tmpDir); got != "ghcr.io" {
+		t.Fatalf("ProjectImagePullSecret() = %q, want ghcr.io", got)
+	}
+}
+
 func TestProjectOutputsConfig_EffectiveDirs(t *testing.T) {
 	t.Run("empty config returns defaults", func(t *testing.T) {
 		cfg := ProjectOutputsConfig{}

@@ -885,6 +885,9 @@ max_auto_sync_mb = 200
 
 [cloud]
 image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"  # Override default Docker image
+min_driver = "535"                              # Optional NVIDIA driver floor
+min_cuda = "12.9"                               # Optional CUDA compatibility floor
+image_pull_secret = "ghcr.io"                   # Optional [registry] key
 ```
 
 Project excludes are added on top of the global defaults. This is useful for
@@ -894,6 +897,21 @@ The `[cloud] image` setting overrides the global `vastai.default_image` for jobs
 from this project. When a campaign contains jobs from multiple projects with
 different images, weft automatically splits instance groups so each instance uses
 the correct image.
+
+For curated or private images, configure registry credentials in the app config:
+
+```toml
+[registry."ghcr.io"]
+username = "osteele"
+password_env = "WEFT_GHCR_TOKEN"
+runpod_auth_name = "weft-ghcr" # optional
+```
+
+Weft matches private image credentials by registry hostname unless
+`image_pull_secret` names a specific `[registry]` entry. It also reads
+`NVIDIA_REQUIRE_CUDA` from image metadata when available and applies driver/CUDA
+floors during cloud placement; explicit `min_driver` and `min_cuda` values are
+fallbacks or stricter overrides.
 
 To inspect what will actually be included, run:
 

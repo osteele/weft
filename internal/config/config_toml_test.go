@@ -209,6 +209,50 @@ li = "launch instances --yes"
 	}
 }
 
+func TestRegistryAuthForImage(t *testing.T) {
+	t.Setenv("WEFT_TEST_REGISTRY_PASSWORD", "secret-token")
+	cfg := &Config{
+		Registry: map[string]RegistryConfig{
+			"ghcr.io": {
+				Username:       "osteele",
+				PasswordEnv:    "WEFT_TEST_REGISTRY_PASSWORD",
+				RunpodAuthName: "weft-ghcr",
+			},
+		},
+	}
+
+	auth, err := cfg.RegistryAuthForImage("ghcr.io/org/image:tag", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth == nil {
+		t.Fatal("expected registry auth")
+	}
+	if auth.Host != "ghcr.io" || auth.Username != "osteele" || auth.Password != "secret-token" || auth.Name != "weft-ghcr" {
+		t.Fatalf("auth = %+v", auth)
+	}
+}
+
+func TestRegistryAuthForImage_NamedSecret(t *testing.T) {
+	t.Setenv("WEFT_TEST_REGISTRY_PASSWORD", "secret-token")
+	cfg := &Config{
+		Registry: map[string]RegistryConfig{
+			"nvcr": {
+				Username:    "$oauthtoken",
+				PasswordEnv: "WEFT_TEST_REGISTRY_PASSWORD",
+			},
+		},
+	}
+
+	auth, err := cfg.RegistryAuthForImage("nvcr.io/nvidia/pytorch:24.01-py3", "nvcr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth == nil || auth.Host != "nvcr" || auth.Name != "weft-nvcr" {
+		t.Fatalf("auth = %+v", auth)
+	}
+}
+
 func TestCampaignRetryLimitsDefaultsAndFallbacks(t *testing.T) {
 	cfg := DefaultConfig()
 	if got := cfg.RetryFirstTimeLimit(); got != 45*time.Minute {

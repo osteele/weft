@@ -368,6 +368,9 @@ exclude_dirs = ["data"]      # Additional project-specific source excludes
 
 [cloud]
 image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"  # Override default Docker image
+min_driver = "535"                              # Optional NVIDIA driver floor
+min_cuda = "12.9"                               # Optional CUDA compatibility floor
+image_pull_secret = "ghcr.io"                   # Optional [registry] key
 ```
 
 Use `weft artifact list <job-id>` to see discovered outputs and

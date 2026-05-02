@@ -109,6 +109,12 @@ func FormatOfferConstraints(c cloud.OfferConstraints) string {
 	if c.MinCPUCoresEffective > 0 {
 		parts = append(parts, fmt.Sprintf("cpu>=%d", c.MinCPUCoresEffective))
 	}
+	if c.MinDriverVersion > 0 {
+		parts = append(parts, fmt.Sprintf("driver>=%d", c.MinDriverVersion))
+	}
+	if c.MinCUDAVersion != "" {
+		parts = append(parts, fmt.Sprintf("cuda>=%s", c.MinCUDAVersion))
+	}
 	return strings.Join(parts, " ")
 }
 
@@ -152,10 +158,12 @@ func snapshotOnDemandRefCents(client cloud.Client, group InstanceGroup, chosen c
 
 func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud.OfferConstraints {
 	c := cloud.OfferConstraints{
-		GPUClass:       group.GPUClass,
-		MinGPUMemGB:    group.GPUMemGB,
-		MinDiskGB:      group.DiskGB,
-		MinReliability: minReliability,
+		GPUClass:         group.GPUClass,
+		MinGPUMemGB:      group.GPUMemGB,
+		MinDiskGB:        group.DiskGB,
+		MinReliability:   minReliability,
+		MinDriverVersion: group.MinDriverVersion,
+		MinCUDAVersion:   group.MinCUDAVersion,
 		// MaxGPUMemGB is intentionally NOT passed to the search filter.
 		// It is a scheduler-side planning hint, not a hard offer filter.
 	}

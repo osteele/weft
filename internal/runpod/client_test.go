@@ -87,7 +87,9 @@ func TestBuildCreatePodArgs_DefaultRunpodImageUsesOfficialTemplate(t *testing.T)
 func TestBuildCreatePodArgs_NonDefaultImageUsesImageFlag(t *testing.T) {
 	const image = "runpod/pytorch:stable"
 	args, err := buildCreatePodArgs("NVIDIA L4", cloud.CreateOpts{
-		Image: image,
+		Image:            image,
+		MinCUDAVersion:   "12.8",
+		RunpodRegistryID: "reg-123",
 	})
 	if err != nil {
 		t.Fatalf("buildCreatePodArgs: %v", err)
@@ -98,6 +100,12 @@ func TestBuildCreatePodArgs_NonDefaultImageUsesImageFlag(t *testing.T) {
 	}
 	if strings.Contains(got, "--template-id "+officialRunpodUbuntuTemplateID) {
 		t.Fatalf("args %q unexpectedly contain official template", got)
+	}
+	if strings.Contains(got, "--min-cuda-version") {
+		t.Fatalf("args %q unexpectedly contain unsupported min CUDA flag", got)
+	}
+	if !strings.Contains(got, "--registry-auth-id reg-123") {
+		t.Fatalf("args %q missing registry auth ID", got)
 	}
 }
 

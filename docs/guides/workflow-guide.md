@@ -121,6 +121,9 @@ Supported keys (all optional):
 | `tags`      | list of strings  | `--tag`             |
 | `interruptible` | bool        | `--tag interruptible` |
 | `image`     | string           | `.weft.toml [cloud] image` |
+| `min-driver` / `min_driver` | string or int | `.weft.toml [cloud] min_driver` |
+| `min-cuda` / `min_cuda` | string | `.weft.toml [cloud] min_cuda` |
+| `image-pull-secret` / `image_pull_secret` | string | `.weft.toml [cloud] image_pull_secret` |
 | `vast-cap-add` | list of strings | Vast.ai `--cap-add` (cloud instance launch) |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
 | `env`        | table of strings | `--env` (merged)           |
@@ -202,6 +205,25 @@ The `image` key specifies a Docker image for cloud execution. Image precedence
 PyTorch image > global default. Script metadata works with any command that
 references a `.py` file, including `uv run script.py`, `python script.py`, and
 compound commands like `pip install foo && python script.py`.
+
+For custom or vendor-curated images, weft reads OCI image metadata and applies
+NVIDIA `NVIDIA_REQUIRE_CUDA` constraints during cloud placement when it can
+fetch the image config. You can also declare explicit floors:
+
+```python
+# /// script
+# [tool.weft]
+# image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+# min-driver = "535"
+# min-cuda = "12.9"
+# image-pull-secret = "ghcr.io"
+# ///
+```
+
+`min-driver` filters Vast.ai offers by NVIDIA driver version. RunPod exposes a
+CUDA compatibility filter instead, so weft passes `min-cuda` to RunPod pod
+creation. `image-pull-secret` names a configured `[registry]` entry; if it is
+omitted, weft matches by the image registry hostname.
 
 The `vast-cap-add` key requests extra Linux capabilities on Vast.ai
 instances. Example:

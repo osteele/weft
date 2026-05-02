@@ -106,6 +106,7 @@ func BuildAutoPlacementPlanWithOptions(
 
 	groups := GroupByAffinity(jobs, nil)
 	groups = SplitGroupsByImage(database, groups)
+	groups = ApplyImageMetadataRequirements(cfg, groups)
 	if len(groups) == 0 {
 		return plan, nil
 	}

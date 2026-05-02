@@ -211,6 +211,13 @@ func TestBuildSearchFilter_CPUCores(t *testing.T) {
 	}
 }
 
+func TestBuildSearchFilter_MinDriverVersion(t *testing.T) {
+	filter, _ := buildSearchFilter(OfferConstraints{MinDriverVersion: 535})
+	if !strings.Contains(filter, "driver_version>=535") {
+		t.Errorf("filter %q missing driver_version>=535", filter)
+	}
+}
+
 func TestBuildSearchFilter_NoCPUCores(t *testing.T) {
 	filter, _ := buildSearchFilter(OfferConstraints{})
 	if strings.Contains(filter, "cpu_cores_effective") {
@@ -275,6 +282,21 @@ func TestBuildCreateArgs_OnDemandOmitsBid(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--bid_price") {
 		t.Errorf("on-demand create args %q must not include --bid_price", joined)
+	}
+}
+
+func TestBuildCreateArgs_RegistryLogin(t *testing.T) {
+	args := buildCreateArgs(12345, CreateOpts{
+		Image: "ghcr.io/org/image:tag",
+		RegistryAuth: &cloud.RegistryAuth{
+			Host:     "ghcr.io",
+			Username: "osteele",
+			Password: "secret",
+		},
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--login -u osteele -p secret ghcr.io") {
+		t.Fatalf("create args %q missing registry login", joined)
 	}
 }
 

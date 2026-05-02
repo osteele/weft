@@ -1265,6 +1265,26 @@ func configureBootstrapCreateOpts(client cloud.Client, createOpts *cloud.CreateO
 	return nil
 }
 
+func applyGroupCreateRequirements(createOpts *cloud.CreateOpts, group InstanceGroup) {
+	if group.MinCUDAVersion != "" {
+		createOpts.MinCUDAVersion = maxCUDAVersionString(createOpts.MinCUDAVersion, group.MinCUDAVersion)
+	}
+	if createOpts.RegistryAuth != nil || createOpts.Image == "" {
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Debug("load config for registry auth", "component", "launch", "error", err)
+		return
+	}
+	auth, err := cfg.RegistryAuthForImage(createOpts.Image, group.ImagePullSecret)
+	if err != nil {
+		slog.Warn("resolve registry auth", "component", "launch", "image", createOpts.Image, "error", err)
+		return
+	}
+	createOpts.RegistryAuth = auth
+}
+
 // R2Assets holds pre-staged R2 resources shared across instances in a campaign.
 type R2Assets struct {
 	Client       *r2.Client
@@ -1462,6 +1482,7 @@ func LaunchInstance(
 	if group.Image != "" {
 		createOpts.Image = group.Image
 	}
+	applyGroupCreateRequirements(&createOpts, group)
 	if client.Provider() == cloud.ProviderVastai && len(group.VastCapAdd) > 0 {
 		createOpts.CapAdd = append([]string(nil), group.VastCapAdd...)
 	}

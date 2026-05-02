@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/queueblock"
@@ -40,6 +41,7 @@ type RelaunchConfig struct {
 	MinSurvival           float64  // 0 to disable survival filtering
 	Strategy              bidding.SelectionStrategy
 	Database              *sql.DB
+	AppConfig             *config.Config
 	PredictorConfig       *predictor.Config
 	ResetJobs             map[int64]int64      // jobID → failed instanceID
 	RestrictToReset       bool                 // when true and ResetJobs is non-empty, only relaunch reset jobs
@@ -288,6 +290,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	// reporting still run for the pass.
 	groups := GroupByAffinity(relaunchGroupingJobs(eligible), nil)
 	groups = SplitGroupsByImage(cfg.Database, groups)
+	groups = ApplyImageMetadataRequirements(cfg.AppConfig, groups)
 	var r2Client *r2.Client
 	if cfg.R2Cfg.Bucket != "" && cfg.R2Cfg.AccessKeyID != "" {
 		var err error

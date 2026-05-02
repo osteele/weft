@@ -2,6 +2,8 @@
 // creating instances, and managing their lifecycle.
 package vastai
 
+import "github.com/osteele/weft/internal/cloud"
+
 // Offer represents a Vast.ai GPU rental offer from search results.
 type Offer struct {
 	ID                int     `json:"id"`
@@ -56,6 +58,7 @@ type OfferConstraints struct {
 	MaxGPUMemGB          int      // maximum per-GPU memory (0 = no ceiling)
 	MinDiskGB            int      // minimum disk space
 	MinReliability       float64  // minimum reliability score (0-1)
+	MinDriverVersion     int      // minimum NVIDIA driver major version
 	NumGPUs              int      // number of GPUs needed (default 1)
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores
@@ -76,4 +79,5 @@ type CreateOpts struct {
 	Label        string            // instance label visible in Vast.ai dashboard
 	InstanceType string            // "on-demand" or "interruptible"
 	MaxBidPrice  float64           // max bid/price for interruptible instances
+	RegistryAuth *cloud.RegistryAuth
 }

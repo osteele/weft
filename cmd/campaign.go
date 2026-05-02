@@ -237,7 +237,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	reportStartupPhase("Preparing rental GPU groups...")
-	groups := campaign.PrepareGroups(jobs, database, campaignLaunchGPU, r2Client)
+	groups := campaign.PrepareGroupsWithConfig(jobs, database, cfg, campaignLaunchGPU, r2Client)
 
 	if len(groups) == 0 {
 		if campaignLaunchGPU != "" {
@@ -420,7 +420,7 @@ func refreshLaunchGroupsWithOnPrem(database *sql.DB, cfg *config.Config, gpuFilt
 	if err != nil {
 		slog.Warn("failed to build R2 client for disk estimation", "error", err)
 	}
-	return campaign.PrepareGroups(jobs, database, gpuFilter, r2Client), nil
+	return campaign.PrepareGroupsWithConfig(jobs, database, cfg, gpuFilter, r2Client), nil
 }
 
 // prefilterOnPrem tries to place unplaced jobs on on-prem hosts before launching

@@ -135,6 +135,23 @@ import torch
 			want: &ScriptMeta{Image: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"},
 		},
 		{
+			name: "image requirements",
+			content: `# /// script
+# [tool.weft]
+# image = "ghcr.io/example/train:cuda129"
+# min-driver = "535"
+# min-cuda = "12.9"
+# image-pull-secret = "ghcr.io"
+# ///
+`,
+			want: &ScriptMeta{
+				Image:           "ghcr.io/example/train:cuda129",
+				MinDriver:       "535",
+				MinCUDA:         "12.9",
+				ImagePullSecret: "ghcr.io",
+			},
+		},
+		{
 			name: "image with gpu-mem",
 			content: `# /// script
 # [tool.weft]

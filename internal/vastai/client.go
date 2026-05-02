@@ -240,6 +240,10 @@ func buildCreateArgs(offerID int, opts CreateOpts) []string {
 	if opts.Label != "" {
 		args = append(args, "--label", opts.Label)
 	}
+	if opts.RegistryAuth != nil {
+		login := fmt.Sprintf("-u %s -p %s %s", opts.RegistryAuth.Username, opts.RegistryAuth.Password, opts.RegistryAuth.Host)
+		args = append(args, "--login", login)
+	}
 	if opts.InstanceType == cloud.InstanceTypeInterruptible && opts.MaxBidPrice > 0 {
 		args = append(args, "--bid_price", strconv.FormatFloat(opts.MaxBidPrice, 'f', 4, 64))
 	}
@@ -436,6 +440,9 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	}
 	if c.MinReliability > 0 {
 		parts = append(parts, fmt.Sprintf("reliability>=%g", c.MinReliability))
+	}
+	if c.MinDriverVersion > 0 {
+		parts = append(parts, fmt.Sprintf("driver_version>=%d", c.MinDriverVersion))
 	}
 	numGPUs := c.NumGPUs
 	if numGPUs == 0 {

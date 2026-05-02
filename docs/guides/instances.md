@@ -586,6 +586,39 @@ When a launch contains jobs from multiple projects with different images,
 weft automatically splits instances so each one uses the correct image.
 Jobs with no `[cloud] image` setting share the global default.
 
+Custom images can also declare explicit driver/CUDA requirements and private
+registry credentials:
+
+```toml
+[cloud]
+image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+min_driver = "535"
+min_cuda = "12.9"
+image_pull_secret = "ghcr.io"
+```
+
+Weft also attempts to read `NVIDIA_REQUIRE_CUDA` from the image's OCI config
+and derive the required NVIDIA driver and CUDA floors automatically. Explicit
+`min_driver` and `min_cuda` values are useful for private images, custom images
+that do not publish this metadata, or when you want a stricter floor.
+
+On Vast.ai, `min_driver` becomes a `driver_version>=...` offer filter and
+private registry credentials are passed with the provider login flag. On
+RunPod, `min_cuda` is passed as the pod CUDA compatibility floor and configured
+registry credentials are translated into a RunPod registry auth record.
+
+Private registry credentials live in `~/.config/weft/config.toml`:
+
+```toml
+[registry."ghcr.io"]
+username = "osteele"
+password_env = "WEFT_GHCR_TOKEN"
+runpod_auth_name = "weft-ghcr" # optional
+```
+
+Use `password_command = "gh auth token"` instead of `password_env` if the token
+should be fetched dynamically. Configure only one password source per registry.
+
 ### CUDA toolkit compatibility
 
 Weft automatically filters out GPU offers that require a newer CUDA toolkit

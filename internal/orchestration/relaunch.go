@@ -65,6 +65,7 @@ func RelaunchOrphanedJobs(
 		MinReliability:        &minReliability,
 		MinSurvival:           0.4,
 		Database:              database,
+		AppConfig:             cfg,
 		PredictorConfig:       &predCfg,
 		ResetJobs:             resetJobs,
 		RestrictToReset:       restrictToReset,

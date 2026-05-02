@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"sort"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
@@ -13,9 +14,14 @@ import (
 // groups by GPU affinity, filters by GPU class, splits by Docker image,
 // and estimates disk needs.
 func PrepareGroups(jobs []*db.Job, database *sql.DB, gpuFilter string, r2Client *r2.Client) []InstanceGroup {
+	return PrepareGroupsWithConfig(jobs, database, nil, gpuFilter, r2Client)
+}
+
+func PrepareGroupsWithConfig(jobs []*db.Job, database *sql.DB, cfg *config.Config, gpuFilter string, r2Client *r2.Client) []InstanceGroup {
 	groups := GroupByAffinity(jobs, dataloc.LookupCachedModelSize)
 	groups = FilterByGPUClass(groups, gpuFilter)
 	groups = SplitGroupsByImage(database, groups)
+	groups = ApplyImageMetadataRequirements(cfg, groups)
 	for i := range groups {
 		groups[i].DiskGB = EstimateGroupDisk(groups[i], database, r2Client)
 	}

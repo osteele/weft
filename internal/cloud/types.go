@@ -125,6 +125,8 @@ type OfferConstraints struct {
 	MaxGPUMemGB          int      // maximum per-GPU memory (0 = no ceiling)
 	MinDiskGB            int      // minimum disk space
 	MinReliability       float64  // minimum reliability score (0-1)
+	MinDriverVersion     int      // minimum NVIDIA driver major version (0 = no floor)
+	MinCUDAVersion       string   // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
 	NumGPUs              int      // number of GPUs needed (default 1)
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
@@ -137,17 +139,35 @@ var DefaultExcludeGeos []string
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {
-	Image        string            // Docker image
-	DiskGB       int               // disk space to request
-	GPUCount     int               // number of GPUs to request (provider-specific; defaults to 1)
-	SSHEnabled   bool              // enable SSH access
-	OnStartCmd   string            // command to run on instance start
-	EnvVars      map[string]string // environment variables passed via provider's env mechanism
-	CapAdd       []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)
-	TemplateID   string            // provider template ID for startup-managed images
-	Label        string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
-	InstanceType string            // desired rental type ("on-demand" or "interruptible"), when provider supports it
-	MaxBidPrice  float64           // max bid/price for interruptible rentals, when provider supports it
+	Image            string            // Docker image
+	DiskGB           int               // disk space to request
+	GPUCount         int               // number of GPUs to request (provider-specific; defaults to 1)
+	SSHEnabled       bool              // enable SSH access
+	OnStartCmd       string            // command to run on instance start
+	EnvVars          map[string]string // environment variables passed via provider's env mechanism
+	CapAdd           []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)
+	TemplateID       string            // provider template ID for startup-managed images
+	Label            string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
+	InstanceType     string            // desired rental type ("on-demand" or "interruptible"), when provider supports it
+	MaxBidPrice      float64           // max bid/price for interruptible rentals, when provider supports it
+	MinCUDAVersion   string            // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
+	RegistryAuth     *RegistryAuth     // credentials for pulling private images
+	RunpodRegistryID string            // resolved RunPod registry auth ID
+}
+
+// ImageRequirements describes Docker-image runtime constraints discovered from
+// image metadata or declared explicitly by the user.
+type ImageRequirements struct {
+	MinDriverVersion int
+	MinCUDAVersion   string
+}
+
+// RegistryAuth holds private Docker registry credentials.
+type RegistryAuth struct {
+	Host     string
+	Username string
+	Password string
+	Name     string
 }
 
 // R2Config holds Cloudflare R2 credentials for instance-side uploads.

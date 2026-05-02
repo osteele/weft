@@ -2,17 +2,20 @@
 package campaign
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/imagereq"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/workdir"
 )
@@ -35,14 +38,17 @@ func vramTierOf(memGB int) int {
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
-	GPUClass    string   // Normalized GPU class (uppercase), e.g. "H100"
-	Provider    string   // Requested provider ("vastai" or "runpod"), empty = any
-	GPUMemGB    int      // Supremum of GPU memory across all jobs in the group
-	MaxGPUMemGB int      // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
-	DiskGB      int      // Estimated disk space needed (0 = use default)
-	Image       string   // Per-project Docker image override ("" = use global default)
-	VastCapAdd  []string // Vast.ai-only --cap-add values (nil = none)
-	Preemptible bool     // all jobs in the group allow interruptible placement
+	GPUClass         string   // Normalized GPU class (uppercase), e.g. "H100"
+	Provider         string   // Requested provider ("vastai" or "runpod"), empty = any
+	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
+	MaxGPUMemGB      int      // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
+	DiskGB           int      // Estimated disk space needed (0 = use default)
+	Image            string   // Per-project Docker image override ("" = use global default)
+	MinDriverVersion int      // Minimum NVIDIA driver version required by the image
+	MinCUDAVersion   string   // Minimum provider CUDA compatibility required by the image
+	ImagePullSecret  string   // Registry config key for private image pulls
+	VastCapAdd       []string // Vast.ai-only --cap-add values (nil = none)
+	Preemptible      bool     // all jobs in the group allow interruptible placement
 	// MaxComputeCap is the most restrictive (lowest) CUDA compute-capability
 	// upper bound across the jobs in the group, expressed as a string like
 	// "9.0" or "12.0". Empty string means "no upper bound" (at least one job
@@ -50,6 +56,44 @@ type InstanceGroup struct {
 	// pin or set explicitly via [tool.weft] gpu-arch-max.
 	MaxComputeCap string
 	Jobs          []*db.Job
+}
+
+// ApplyImageMetadataRequirements augments groups with constraints declared by
+// their Docker image config. Explicit project/script requirements already on
+// the group are preserved and win when stricter.
+func ApplyImageMetadataRequirements(cfg *config.Config, groups []InstanceGroup) []InstanceGroup {
+	if cfg == nil {
+		return groups
+	}
+	for i := range groups {
+		image := strings.TrimSpace(groups[i].Image)
+		if image == "" || !shouldFetchImageRequirements(image) {
+			continue
+		}
+		auth, err := cfg.RegistryAuthForImage(image, groups[i].ImagePullSecret)
+		if err != nil {
+			slog.Warn("image registry auth unavailable", "component", "campaign", "image", image, "error", err)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		req, err := imagereq.Resolve(ctx, image, auth)
+		cancel()
+		if err != nil {
+			slog.Warn("image requirement resolution failed", "component", "campaign", "image", image, "error", err)
+			continue
+		}
+		groups[i].MinDriverVersion = maxInt(groups[i].MinDriverVersion, req.MinDriverVersion)
+		groups[i].MinCUDAVersion = maxCUDAVersionString(groups[i].MinCUDAVersion, req.MinCUDAVersion)
+	}
+	return groups
+}
+
+func shouldFetchImageRequirements(image string) bool {
+	repo := imageRepo(image)
+	if repo == "nvidia/cuda" || repo == "pytorch/pytorch" || strings.HasPrefix(repo, "runpod/") {
+		return false
+	}
+	return strings.TrimSpace(image) != ""
 }
 
 // ModelSizeFunc returns the cached size in bytes for a model ID (without the
@@ -483,9 +527,12 @@ func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
 // every job already has a non-NULL cap.
 func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGroup {
 	type imageGroup struct {
-		image      string
-		vastCapAdd []string
-		jobs       []*db.Job
+		image            string
+		minDriverVersion int
+		minCUDAVersion   string
+		imagePullSecret  string
+		vastCapAdd       []string
+		jobs             []*db.Job
 	}
 
 	// Pre-compute the auto-selected PyTorch image (constant across all jobs).
@@ -498,7 +545,7 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			img := ResolveJobImage(localDir, job.Command)
+			img, req, imagePullSecret := ResolveJobImageSettings(localDir, job.Command)
 			explicitImage := img != ""
 			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
 
@@ -564,6 +611,11 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 				supremum, ok := imageSupremum(subs[i].image, img)
 				if ok {
 					subs[i].image = supremum
+					subs[i].minDriverVersion = maxInt(subs[i].minDriverVersion, req.MinDriverVersion)
+					subs[i].minCUDAVersion = maxCUDAVersionString(subs[i].minCUDAVersion, req.MinCUDAVersion)
+					if subs[i].imagePullSecret == "" {
+						subs[i].imagePullSecret = imagePullSecret
+					}
 					subs[i].vastCapAdd = mergeVastCapAdd(subs[i].vastCapAdd, vastCapAdd)
 					subs[i].jobs = append(subs[i].jobs, job)
 					merged = true
@@ -571,22 +623,32 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 				}
 			}
 			if !merged {
-				subs = append(subs, imageGroup{image: img, vastCapAdd: vastCapAdd, jobs: []*db.Job{job}})
+				subs = append(subs, imageGroup{
+					image:            img,
+					minDriverVersion: req.MinDriverVersion,
+					minCUDAVersion:   req.MinCUDAVersion,
+					imagePullSecret:  imagePullSecret,
+					vastCapAdd:       vastCapAdd,
+					jobs:             []*db.Job{job},
+				})
 			}
 		}
 
 		for _, sub := range subs {
 			result = append(result, InstanceGroup{
-				GPUClass:      g.GPUClass,
-				Provider:      g.Provider,
-				GPUMemGB:      g.GPUMemGB,
-				MaxGPUMemGB:   g.MaxGPUMemGB,
-				DiskGB:        g.DiskGB,
-				Image:         sub.image,
-				VastCapAdd:    sub.vastCapAdd,
-				Preemptible:   g.Preemptible,
-				MaxComputeCap: groupMaxComputeCap(database, sub.jobs),
-				Jobs:          sub.jobs,
+				GPUClass:         g.GPUClass,
+				Provider:         g.Provider,
+				GPUMemGB:         g.GPUMemGB,
+				MaxGPUMemGB:      g.MaxGPUMemGB,
+				DiskGB:           g.DiskGB,
+				Image:            sub.image,
+				MinDriverVersion: sub.minDriverVersion,
+				MinCUDAVersion:   sub.minCUDAVersion,
+				ImagePullSecret:  sub.imagePullSecret,
+				VastCapAdd:       sub.vastCapAdd,
+				Preemptible:      g.Preemptible,
+				MaxComputeCap:    groupMaxComputeCap(database, sub.jobs),
+				Jobs:             sub.jobs,
 			})
 		}
 	}
@@ -598,15 +660,79 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 // [tool.weft] script metadata. Returns empty string if neither source specifies
 // an image.
 func ResolveJobImage(localDir, command string) string {
+	img, _, _ := ResolveJobImageSettings(localDir, command)
+	return img
+}
+
+// ResolveJobImageSettings returns the Docker image and explicit image
+// requirements from project config and PEP 723 metadata.
+func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequirements, string) {
 	img := config.ProjectCloudImage(localDir)
+	projectDriver, projectCUDA := config.ProjectCloudRequirements(localDir)
+	imagePullSecret := config.ProjectImagePullSecret(localDir)
+	req, err := imagereq.Explicit(projectDriver, projectCUDA)
+	if err != nil {
+		slog.Warn("project cloud image requirement error", "component", "campaign", "error", err)
+	}
 	if img == "" {
 		if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
 			slog.Warn("script metadata error in image resolution", "component", "campaign", "error", err)
-		} else if meta != nil && meta.Image != "" {
-			img = meta.Image
+		} else if meta != nil {
+			if meta.Image != "" {
+				img = meta.Image
+			}
+			if scriptReq, reqErr := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); reqErr != nil {
+				slog.Warn("script image requirement error", "component", "campaign", "error", reqErr)
+			} else {
+				req = imagereq.Merge(req, scriptReq)
+			}
+			if imagePullSecret == "" {
+				imagePullSecret = meta.ImagePullSecret
+			}
+		}
+	} else if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
+		slog.Warn("script metadata error in image requirement resolution", "component", "campaign", "error", err)
+	} else if meta != nil {
+		if scriptReq, reqErr := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); reqErr != nil {
+			slog.Warn("script image requirement error", "component", "campaign", "error", reqErr)
+		} else {
+			req = imagereq.Merge(req, scriptReq)
+		}
+		if imagePullSecret == "" {
+			imagePullSecret = meta.ImagePullSecret
 		}
 	}
-	return img
+	return img, req, imagePullSecret
+}
+
+func maxInt(a, b int) int {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+func maxCUDAVersionString(a, b string) string {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	af, aerr := strconv.ParseFloat(a, 64)
+	bf, berr := strconv.ParseFloat(b, 64)
+	if aerr != nil || berr != nil {
+		if b > a {
+			return b
+		}
+		return a
+	}
+	if bf > af {
+		return b
+	}
+	return a
 }
 
 // groupMaxComputeCap reduces per-job arch caps into the most restrictive

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -88,6 +89,9 @@ type Config struct {
 
 	// Runpod holds Runpod cloud GPU configuration
 	Runpod RunpodConfig `yaml:"runpod" toml:"runpod"`
+
+	// Registry holds private Docker registry credentials keyed by registry host.
+	Registry map[string]RegistryConfig `yaml:"registry" toml:"registry"`
 
 	// CoordinatorHost is the host where the coordinator daemon runs.
 	CoordinatorHost string `yaml:"coordinator_host" toml:"coordinator_host"`
@@ -260,6 +264,14 @@ type RunpodConfig struct {
 	MaxRuntime string `yaml:"max_runtime" toml:"max_runtime"`
 }
 
+// RegistryConfig configures credentials for a private Docker registry.
+type RegistryConfig struct {
+	Username        string `yaml:"username" toml:"username"`
+	PasswordEnv     string `yaml:"password_env" toml:"password_env"`
+	PasswordCommand string `yaml:"password_command" toml:"password_command"`
+	RunpodAuthName  string `yaml:"runpod_auth_name" toml:"runpod_auth_name"`
+}
+
 // BlockedPattern defines a substring that should not appear in job commands
 type BlockedPattern struct {
 	// Pattern is the substring to search for in commands
@@ -387,6 +399,86 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 	default:
 		return cloud.DefaultCreateOpts(""), nil
 	}
+}
+
+// RegistryAuthForImage returns private registry credentials for image. secret
+// optionally names a specific [registry] key; otherwise the image registry host
+// is used. Empty result means no matching registry config.
+func (c *Config) RegistryAuthForImage(image, secret string) (*cloud.RegistryAuth, error) {
+	if c == nil || len(c.Registry) == 0 {
+		return nil, nil
+	}
+	key := strings.TrimSpace(secret)
+	if key == "" {
+		key = imageRegistryHost(image)
+	}
+	if key == "" {
+		return nil, nil
+	}
+	reg, ok := c.Registry[key]
+	if !ok {
+		if secret != "" {
+			return nil, fmt.Errorf("registry %q is not configured", key)
+		}
+		return nil, nil
+	}
+	password, err := reg.password()
+	if err != nil {
+		return nil, fmt.Errorf("registry %q: %w", key, err)
+	}
+	username := strings.TrimSpace(reg.Username)
+	if username == "" {
+		return nil, fmt.Errorf("registry %q: username is required", key)
+	}
+	name := strings.TrimSpace(reg.RunpodAuthName)
+	if name == "" {
+		name = "weft-" + key
+	}
+	return &cloud.RegistryAuth{
+		Host:     key,
+		Username: username,
+		Password: password,
+		Name:     name,
+	}, nil
+}
+
+func (r RegistryConfig) password() (string, error) {
+	envName := strings.TrimSpace(r.PasswordEnv)
+	cmdText := strings.TrimSpace(r.PasswordCommand)
+	switch {
+	case envName != "" && cmdText != "":
+		return "", fmt.Errorf("configure only one of password_env or password_command")
+	case envName != "":
+		password := strings.TrimSpace(os.Getenv(envName))
+		if password == "" {
+			return "", fmt.Errorf("environment variable %s is empty", envName)
+		}
+		return password, nil
+	case cmdText != "":
+		out, err := exec.Command("/bin/sh", "-lc", cmdText).Output()
+		if err != nil {
+			return "", fmt.Errorf("password_command failed: %w", err)
+		}
+		password := strings.TrimSpace(string(out))
+		if password == "" {
+			return "", fmt.Errorf("password_command returned empty output")
+		}
+		return password, nil
+	default:
+		return "", fmt.Errorf("password_env or password_command is required")
+	}
+}
+
+func imageRegistryHost(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ""
+	}
+	first, _, _ := strings.Cut(image, "/")
+	if first == "" || (!strings.Contains(first, ".") && !strings.Contains(first, ":") && first != "localhost") {
+		return "docker.io"
+	}
+	return first
 }
 
 // IsAIEnabled returns whether AI description generation is enabled.

@@ -38,6 +38,7 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 		MaxGPUMemGB:          constraints.MaxGPUMemGB,
 		MinDiskGB:            constraints.MinDiskGB,
 		MinReliability:       constraints.MinReliability,
+		MinDriverVersion:     constraints.MinDriverVersion,
 		NumGPUs:              constraints.NumGPUs,
 		ExcludeGeos:          constraints.ExcludeGeos,
 		MinCPUCoresEffective: constraints.MinCPUCoresEffective,
@@ -69,6 +70,7 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		Label:        opts.Label,
 		InstanceType: opts.InstanceType,
 		MaxBidPrice:  opts.MaxBidPrice,
+		RegistryAuth: opts.RegistryAuth,
 	}
 	inst, err := c.inner.CreateInstance(id, vopts)
 	if err != nil {

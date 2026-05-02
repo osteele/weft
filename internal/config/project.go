@@ -31,6 +31,12 @@ type ProjectConfig struct {
 type ProjectCloudConfig struct {
 	// Image overrides the default Docker image for cloud instances.
 	Image string `yaml:"image" toml:"image"`
+	// MinDriver is the minimum NVIDIA driver version required by the image.
+	MinDriver string `yaml:"min_driver" toml:"min_driver"`
+	// MinCUDA is the minimum provider CUDA compatibility required by the image.
+	MinCUDA string `yaml:"min_cuda" toml:"min_cuda"`
+	// ImagePullSecret selects a configured registry credential for private images.
+	ImagePullSecret string `yaml:"image_pull_secret" toml:"image_pull_secret"`
 }
 
 // ProjectAutoPilotConfig holds per-project autopilot tuning.
@@ -189,6 +195,24 @@ func ProjectInputs(localDir string) []string {
 func ProjectCloudImage(localDir string) string {
 	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
 		return cfg.Cloud.Image
+	}
+	return ""
+}
+
+// ProjectCloudRequirements returns explicit cloud image requirements from the
+// project config at localDir.
+func ProjectCloudRequirements(localDir string) (minDriver, minCUDA string) {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Cloud.MinDriver, cfg.Cloud.MinCUDA
+	}
+	return "", ""
+}
+
+// ProjectImagePullSecret returns the registry credential key from the project
+// config at localDir.
+func ProjectImagePullSecret(localDir string) string {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Cloud.ImagePullSecret
 	}
 	return ""
 }
