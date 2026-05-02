@@ -150,6 +150,9 @@ func formatWatchInstanceBlockStructured(update campaign.InstanceUpdate, jobProgr
 			projectWidth, projectLabel,
 			desc,
 		), job.ID)
+		if reason := strings.TrimSpace(job.QueueBlockedReason); reason != "" && displayStatus == db.StatusQueued {
+			addLine("          " + watchDimStyle.Render(campaign.SanitizeBlockedReason(reason)))
+		}
 		if campaign.IsJobTerminal(displayStatuses[i]) && activePhaseJobID == job.ID &&
 			(activePhaseStatus == campaign.PhaseUploading || activePhaseStatus == campaign.PhaseFinalizing) {
 			if summary := formatUploadSummary(update.JobPhaseTimings[job.ID]); summary != "" {

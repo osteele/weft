@@ -210,6 +210,143 @@ func TestHydrateRelaunchBlockedReasons_KeepsFreshOfferError(t *testing.T) {
 	}
 }
 
+func TestHydrateCloudQueuedRetryBlockedReasons_SurfacesRunawayAfterOrphanedMove(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	sourceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	targetID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ?`,
+		db.StatusCanceled, int64(1000), db.AttemptOutcomeSuperseded, jobID); err != nil {
+		t.Fatalf("close initial attempt: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, end_time, cloud_outcome)
+		VALUES (?, 2, ?, ?, 1000, 1200, ?)`, jobID, sourceID, db.StatusQueued, db.AttemptOutcomeSuperseded); err != nil {
+		t.Fatalf("insert source attempt: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, end_time, cloud_outcome, predecessor_attempt_id)
+		VALUES (?, 3, ?, ?, 1200, 1300, ?, (SELECT id FROM job_attempts WHERE job_id = ? AND attempt_number = 2))`,
+		jobID, targetID, db.StatusCanceled, db.AttemptOutcomeOrphaned, jobID); err != nil {
+		t.Fatalf("insert orphaned target attempt: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, predecessor_attempt_id)
+		VALUES (?, 4, ?, ?, 1400, (SELECT id FROM job_attempts WHERE job_id = ? AND attempt_number = 3))`,
+		jobID, sourceID, db.StatusQueued, jobID); err != nil {
+		t.Fatalf("insert restored source attempt: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayBlocked,
+		OccurredAt: 1350,
+		Detail:     "project=<all>; paused: repeated launch failures without progress",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	HydrateCloudQueuedRetryBlockedReasons(database, []*db.Job{job})
+
+	want := "new-instance retry blocked: paused: repeated launch failures without progress"
+	if job.QueueBlockedReason != want {
+		t.Fatalf("QueueBlockedReason = %q, want %q", job.QueueBlockedReason, want)
+	}
+}
+
+func TestHydrateCloudQueuedRetryBlockedReasons_IgnoresNormalQueuedCloudJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayBlocked,
+		OccurredAt: time.Now().Unix(),
+		Detail:     "project=<all>; paused: repeated launch failures without progress",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	HydrateCloudQueuedRetryBlockedReasons(database, []*db.Job{job})
+
+	if job.QueueBlockedReason != "" {
+		t.Fatalf("QueueBlockedReason = %q, want empty", job.QueueBlockedReason)
+	}
+}
+
+func TestHydrateCloudQueuedRetryBlockedReasons_IgnoresFreshRetryLaunch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	failedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch failed: %v", err)
+	}
+	retryID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch retry: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ?`,
+		db.StatusCanceled, int64(1000), db.AttemptOutcomeSuperseded, jobID); err != nil {
+		t.Fatalf("close initial attempt: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, end_time, cloud_outcome)
+		VALUES (?, 2, ?, ?, 1000, 1300, ?)`, jobID, failedID, db.StatusCanceled, db.AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("insert orphaned attempt: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, predecessor_attempt_id)
+		VALUES (?, 3, ?, ?, 1400, (SELECT id FROM job_attempts WHERE job_id = ? AND attempt_number = 2))`,
+		jobID, retryID, db.StatusQueued, jobID); err != nil {
+		t.Fatalf("insert fresh retry attempt: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayBlocked,
+		OccurredAt: 1350,
+		Detail:     "project=<all>; paused: repeated launch failures without progress",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	HydrateCloudQueuedRetryBlockedReasons(database, []*db.Job{job})
+
+	if job.QueueBlockedReason != "" {
+		t.Fatalf("QueueBlockedReason = %q, want empty for fresh retry launch", job.QueueBlockedReason)
+	}
+}
+
 func TestHydrateInventoryDispatchBlockedReasons_AppliesLatestFailure(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")

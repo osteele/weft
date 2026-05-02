@@ -432,6 +432,7 @@ func (m *watchModel) addInstance(instanceID int64) tea.Cmd {
 	}
 	ci, _ := db.GetLaunch(m.database, instanceID)
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(m.database, instanceID)
+	orchestration.HydrateCloudQueuedRetryBlockedReasons(m.database, jobs)
 	outcomes, _ := db.GetAttemptOutcomesByLaunch(m.database, instanceID)
 	m.initInfo[instanceID] = initialInstanceInfo{ci: ci, jobs: jobs, outcomes: outcomes}
 	if m.campaignID == 0 {

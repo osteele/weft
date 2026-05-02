@@ -50,6 +50,7 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 		delete(m.preservedJobAttachment, msg.instanceID)
 	}
 	updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
+	orchestration.HydrateCloudQueuedRetryBlockedReasons(m.database, msg.update.Jobs)
 	m.updates[msg.instanceID] = msg.update
 
 	// Auto-relaunch on retryable infrastructure failure (instance-based modes)

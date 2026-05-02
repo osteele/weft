@@ -454,6 +454,7 @@ func refreshWatchInstancesFromDB(database *sql.DB, instanceIDs []int64, quitAfte
 				cloudInstances[id] = ci
 			}
 			if instanceJobs, err := db.GetLaunchJobsIncludingAttempts(database, id); err == nil && instanceJobs != nil {
+				orchestration.HydrateCloudQueuedRetryBlockedReasons(database, instanceJobs)
 				jobs[id] = instanceJobs
 			}
 			if instanceOutcomes, err := db.GetAttemptOutcomesByLaunch(database, id); err == nil {

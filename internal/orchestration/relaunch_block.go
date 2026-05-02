@@ -16,6 +16,7 @@ import (
 // state. Pairs the two existing hydration steps so callers only need one.
 func HydrateUnplacedBlockedReasons(database *sql.DB, jobs []*db.Job) {
 	HydrateRelaunchBlockedReasons(database, jobs)
+	HydrateCloudQueuedRetryBlockedReasons(database, jobs)
 	queueblock.HydrateWaitingOnProducerReasons(database, jobs)
 	HydrateInventoryDispatchBlockedReasons(database, jobs)
 }
@@ -193,6 +194,165 @@ func HydrateRelaunchBlockedReasons(database *sql.DB, jobs []*db.Job) {
 			job.QueueBlockedReason = reason
 		}
 	}
+}
+
+// HydrateCloudQueuedRetryBlockedReasons surfaces retry blockers for queued
+// cloud jobs that were restored to an existing launch after a no-start
+// new-instance attempt. These jobs are no longer unplaced, so the normal
+// unplaced blocked-reason hydration does not see them, but from the user's
+// perspective the manual "new instance" action is still blocked.
+func HydrateCloudQueuedRetryBlockedReasons(database *sql.DB, jobs []*db.Job) {
+	if database == nil || len(jobs) == 0 {
+		return
+	}
+	candidates := make(map[int64]*db.Job, len(jobs))
+	for _, job := range jobs {
+		if job == nil || strings.TrimSpace(job.QueueBlockedReason) != "" {
+			continue
+		}
+		if job.EffectiveStatus() != db.StatusQueued || job.TargetKind() != db.JobTargetRentalInstance {
+			continue
+		}
+		candidates[job.ID] = job
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	floorByJob := cloudQueuedRetryFloorByJob(database, candidates)
+	if len(floorByJob) == 0 {
+		return
+	}
+	reasons := RelaunchBlockedReasonsFromEventsWithFloor(database, floorByJob)
+	for jobID, reason := range relaunchRunawayBlockedReasonsWithFloor(database, floorByJob) {
+		if _, exists := reasons[jobID]; !exists {
+			reasons[jobID] = reason
+		}
+	}
+	if len(reasons) == 0 {
+		return
+	}
+	for jobID, reason := range reasons {
+		job := candidates[jobID]
+		if job == nil || strings.TrimSpace(job.QueueBlockedReason) != "" {
+			continue
+		}
+		if strings.TrimSpace(reason) != "" {
+			job.QueueBlockedReason = reason
+		}
+	}
+}
+
+func cloudQueuedRetryFloorByJob(database *sql.DB, candidates map[int64]*db.Job) map[int64]int64 {
+	floors := make(map[int64]int64)
+	if database == nil || len(candidates) == 0 {
+		return floors
+	}
+	jobIDs := make([]int64, 0, len(candidates))
+	for jobID := range candidates {
+		jobIDs = append(jobIDs, jobID)
+	}
+	placeholders := make([]string, 0, len(jobIDs))
+	args := make([]any, 0, len(jobIDs))
+	for _, jobID := range jobIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, jobID)
+	}
+	query := fmt.Sprintf(`SELECT cur.job_id,
+		       COALESCE(prev.end_time, cur.queued_at, 0)
+		  FROM job_attempts cur
+		  JOIN job_attempts prev ON prev.id = cur.predecessor_attempt_id
+		 WHERE cur.job_id IN (%s)
+		   AND cur.id = (SELECT MAX(id) FROM job_attempts WHERE job_id = cur.job_id)
+		   AND cur.status = ?
+		   AND cur.launch_id IS NOT NULL
+		   AND EXISTS (
+		         SELECT 1
+		           FROM job_attempts source
+		          WHERE source.job_id = cur.job_id
+		            AND source.launch_id = cur.launch_id
+		            AND source.id < prev.id
+		       )
+		   AND prev.cloud_outcome = ?`, strings.Join(placeholders, ","))
+	args = append(args, db.StatusQueued, db.AttemptOutcomeOrphaned)
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return floors
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jobID int64
+		var floor int64
+		if err := rows.Scan(&jobID, &floor); err != nil {
+			continue
+		}
+		if floor <= 0 {
+			if job := candidates[jobID]; job != nil {
+				floor = job.QueuedAt
+				if floor <= 0 {
+					floor = job.CreatedAt
+				}
+			}
+		}
+		floors[jobID] = floor
+	}
+	return floors
+}
+
+func relaunchRunawayBlockedReasonsWithFloor(database *sql.DB, floorByJob map[int64]int64) map[int64]string {
+	reasons := make(map[int64]string)
+	if database == nil || len(floorByJob) == 0 {
+		return reasons
+	}
+	minFloor := int64(0)
+	for _, floor := range floorByJob {
+		if floor <= 0 {
+			continue
+		}
+		if minFloor == 0 || floor < minFloor {
+			minFloor = floor
+		}
+	}
+	rows, err := database.Query(`SELECT occurred_at, COALESCE(detail, '')
+		FROM lifecycle_events
+		WHERE event_kind = ?
+		  AND (? = 0 OR occurred_at >= ?)
+		ORDER BY occurred_at DESC, id DESC`, db.EventRelaunchRunawayBlocked, minFloor, minFloor)
+	if err != nil {
+		return reasons
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var occurredAt int64
+		var detail string
+		if err := rows.Scan(&occurredAt, &detail); err != nil {
+			continue
+		}
+		reason := summarizeRunawayBlockedReason(detail)
+		for jobID, floor := range floorByJob {
+			if _, exists := reasons[jobID]; exists {
+				continue
+			}
+			if floor > 0 && occurredAt < floor {
+				continue
+			}
+			reasons[jobID] = reason
+		}
+		if len(reasons) == len(floorByJob) {
+			break
+		}
+	}
+	return reasons
+}
+
+func summarizeRunawayBlockedReason(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if idx := strings.Index(detail, ";"); idx >= 0 {
+		detail = strings.TrimSpace(detail[idx+1:])
+	}
+	if detail == "" {
+		detail = "paused: repeated launch failures without progress"
+	}
+	return "new-instance retry blocked: " + detail
 }
 
 func RelaunchBlockedReasonsFromEventsWithFloor(database *sql.DB, floorByJob map[int64]int64) map[int64]string {
