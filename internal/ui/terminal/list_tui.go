@@ -757,8 +757,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case moveExecuteDoneMsg:
 		if msg.err != nil {
+			if msg.action == moveExecuteActionLaunchNew {
+				m.statusMessage = fmt.Sprintf("Launch failed: %v", msg.err)
+				return m, nil
+			}
 			m.statusMessage = fmt.Sprintf("Move failed: %v", msg.err)
 			return m, nil
+		}
+		if msg.action == moveExecuteActionLaunchNew {
+			m.statusMessage = fmt.Sprintf("Launched new instance %s for job #%d", msg.targetDesc, msg.jobID)
+			return m, m.reloadJobs()
 		}
 		m.statusMessage = fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc)
 		return m, m.reloadJobs()
@@ -1175,7 +1183,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.selectedGroupedJob() != nil {
 		line += "  a:attempts  k:kill  u:unplace  p:processed"
 		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
-			line += "  m:move"
+			line += "  m:move  N:new for selected"
 		}
 	}
 	if hasQueued {
@@ -1442,6 +1450,8 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.waitForQuickLaunchProgress(),
 			m.waitForQuickLaunchDone(),
 		)
+	case "N":
+		return m.beginSelectedLaunchNew()
 	case "R":
 		m.clearAutoPilotPersistentState()
 		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
@@ -1495,6 +1505,55 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.requestGroupedMoveOptions(reqID, job.ID)
 	}
 	return m, nil
+}
+
+func (m listTUIModel) beginSelectedLaunchNew() (tea.Model, tea.Cmd) {
+	job := m.selectedGroupedJob()
+	if job == nil {
+		m.statusMessage = "Select a queued job row to launch"
+		return m, nil
+	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		m.statusMessage = "Can only launch queued jobs"
+		return m, nil
+	}
+	m.clearAutoPilotPersistentState()
+	m.autoInProgress = false
+	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+	m.statusMessage = fmt.Sprintf("Launching new instance for job #%d...", job.ID)
+	return m, m.requestSelectedLaunchNew(job.ID)
+}
+
+func (m listTUIModel) requestSelectedLaunchNew(jobID int64) tea.Cmd {
+	ctx := m.ctx
+	database := m.database
+	cfg := m.appConfig
+	cachedCloudClients := append([]cloud.Client(nil), m.cloudClients...)
+	return func() tea.Msg {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if cfg == nil {
+			var cfgErr error
+			cfg, cfgErr = config.Load()
+			if cfgErr != nil {
+				return moveExecuteDoneMsg{jobID: jobID, action: moveExecuteActionLaunchNew, err: fmt.Errorf("load config: %w", cfgErr)}
+			}
+		}
+		cloudClients := cachedCloudClients
+		if len(cloudClients) == 0 {
+			var clientsErr error
+			cloudClients, clientsErr = buildCloudClients(cfg)
+			if clientsErr != nil {
+				return moveExecuteDoneMsg{jobID: jobID, action: moveExecuteActionLaunchNew, err: fmt.Errorf("build cloud clients: %w", clientsErr)}
+			}
+		}
+		r2Client, r2Err := buildR2Client(cfg)
+		if r2Err != nil {
+			return moveExecuteDoneMsg{jobID: jobID, action: moveExecuteActionLaunchNew, err: fmt.Errorf("create R2 client: %w", r2Err)}
+		}
+		return requestLaunchNewForJob(ctx, database, r2Client, cfg, cloudClients, jobID)()
+	}
 }
 
 func (m listTUIModel) currentBudgetState() autoBudgetState {
@@ -1680,6 +1739,7 @@ func (m listTUIModel) renderListHelpView() string {
 			"  A toggle auto-pilot",
 			"  $ set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)",
 			"  n launch a new instance for queued jobs",
+			"  N launch a new instance for selected queued job",
 			"  R preview rebalance moves",
 			"  k kill selected job",
 			"  u unplace selected queued job",

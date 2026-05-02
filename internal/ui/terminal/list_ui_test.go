@@ -1001,9 +1001,99 @@ func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	m.rebuildGroupedRows()
 
 	line := m.groupedControlsText(true)
-	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "p:processed") || !strings.Contains(line, "m:move") {
+	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "p:processed") || !strings.Contains(line, "m:move") || !strings.Contains(line, "N:new for selected") {
 		t.Fatalf("controls line missing queued-job actions: %q", line)
 	}
+}
+
+func TestListTUIGroupedKeyNLaunchesSelectedQueuedJob(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 301, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	got := next.(listTUIModel)
+	if cmd == nil {
+		t.Fatal("expected launch command for selected queued job")
+	}
+	if got.statusMessage != "Launching new instance for job #301..." {
+		t.Fatalf("statusMessage = %q, want selected-job launch text", got.statusMessage)
+	}
+}
+
+func TestListTUIGroupedKeyNRequiresSelectedQueuedJob(t *testing.T) {
+	t.Run("no selection", func(t *testing.T) {
+		m := listTUIModel{groupedByStatus: true}
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+		got := next.(listTUIModel)
+		if cmd != nil {
+			t.Fatal("expected no command without selected job")
+		}
+		if got.statusMessage != "Select a queued job row to launch" {
+			t.Fatalf("statusMessage = %q, want selection error", got.statusMessage)
+		}
+	})
+
+	t.Run("non queued", func(t *testing.T) {
+		m := listTUIModel{
+			groupedByStatus: true,
+			width:           100,
+			height:          20,
+			jobs: []*db.Job{
+				{ID: 302, Host: "studio", Status: db.StatusRunning, Description: "running"},
+			},
+		}
+		m.rebuildGroupedRows()
+
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+		got := next.(listTUIModel)
+		if cmd != nil {
+			t.Fatal("expected no command for non-queued job")
+		}
+		if got.statusMessage != "Can only launch queued jobs" {
+			t.Fatalf("statusMessage = %q, want queued-only error", got.statusMessage)
+		}
+	})
+}
+
+func TestListTUIHandleLaunchNewDoneMessages(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		m := listTUIModel{}
+		next, cmd := m.Update(moveExecuteDoneMsg{
+			jobID:      303,
+			action:     moveExecuteActionLaunchNew,
+			targetDesc: "wi77",
+		})
+		got := next.(listTUIModel)
+		if cmd == nil {
+			t.Fatal("expected reload command after successful selected-job launch")
+		}
+		if got.statusMessage != "Launched new instance wi77 for job #303" {
+			t.Fatalf("statusMessage = %q, want launch success", got.statusMessage)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		m := listTUIModel{}
+		next, cmd := m.Update(moveExecuteDoneMsg{
+			jobID:  304,
+			action: moveExecuteActionLaunchNew,
+			err:    errors.New("no compatible new-instance offer found"),
+		})
+		got := next.(listTUIModel)
+		if cmd != nil {
+			t.Fatal("expected no reload command after failed selected-job launch")
+		}
+		if got.statusMessage != "Launch failed: no compatible new-instance offer found" {
+			t.Fatalf("statusMessage = %q, want launch failure", got.statusMessage)
+		}
+	})
 }
 
 func TestListTUIKeyV_TogglesBetweenGroupedAndUngrouped(t *testing.T) {
