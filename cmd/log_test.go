@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +93,7 @@ func resetLogModeState() {
 	logTimeout = 0
 	logSync = false
 	logNoSync = false
+	logAttempt = 0
 	logOps = false
 	logOpsJob = 0
 	logOpsHost = ""
@@ -136,6 +138,72 @@ func TestShouldUseCachedLogForJob_RejectsLegacyCacheForRunAwareJob(t *testing.T)
 	}
 	if shouldUseCachedLogForJob(job) {
 		t.Fatal("expected legacy cache to be rejected for run-aware job")
+	}
+}
+
+func TestRunLogForAttempt_RejectsUnknownAttempt(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/p", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "host-alpha", nil, db.StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	handled, err := runLogForAttempt(nil, database, job, 99)
+	if !handled {
+		t.Fatal("runLogForAttempt(unknown #) returned handled=false, want true")
+	}
+	if err == nil {
+		t.Fatal("runLogForAttempt(unknown #) returned nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "no attempt #99") {
+		t.Fatalf("error = %q, want it to mention missing attempt", err)
+	}
+}
+
+func TestRunLogForAttempt_OnPremNonLatestRejected(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/p", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	// Two on-prem attempts. The first is the historical one we'll request.
+	exit := 1
+	now := time.Now().Unix()
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exit, now); err != nil {
+		t.Fatalf("CloseAttempt #1: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "host-alpha", nil, db.StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt #2: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	handled, err := runLogForAttempt(nil, database, job, 1)
+	if !handled {
+		t.Fatal("runLogForAttempt(on-prem non-latest) returned handled=false, want true")
+	}
+	if err == nil {
+		t.Fatal("runLogForAttempt(on-prem non-latest) returned nil error, want failure")
+	}
+	if !strings.Contains(err.Error(), "only the latest attempt") {
+		t.Fatalf("error = %q, want on-prem-overwrite explanation", err)
 	}
 }
 

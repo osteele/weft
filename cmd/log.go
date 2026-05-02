@@ -46,6 +46,7 @@ Examples:
   weft log 25 --grep error        # Lines containing "error"
   weft log 25 -f --grep epoch     # Follow, filter for "epoch"
   weft log 25 -t 2m               # Use 2 minute SSH timeout (slow connections)
+  weft log 25 --attempt 1         # Show log from attempt #1 (cloud only for non-latest)
 
 Operations Log (forensic debugging):
   weft log --ops                    # Show recent operations
@@ -76,6 +77,7 @@ var (
 	logGrep    string
 	logFull    bool
 	logTimeout time.Duration
+	logAttempt int
 
 	// Sync flags
 	logSync   bool
@@ -113,6 +115,7 @@ func addLogFlags(cmd *cobra.Command) {
 	cmd.Flags().DurationVarP(&logTimeout, "timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
 	cmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
 	cmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
+	cmd.Flags().IntVar(&logAttempt, "attempt", 0, "Show log from a specific attempt number (default: latest). See `weft job info` for the attempt list.")
 
 	// Operations log flags
 	cmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
@@ -241,6 +244,15 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		!cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail") {
 		logFrom = 1
 		logFull = true
+	}
+
+	if logAttempt > 0 {
+		handled, err := runLogForAttempt(cmd, database, job, logAttempt)
+		if handled {
+			return err
+		}
+		// Fall through: the requested attempt is the latest on-prem attempt,
+		// whose log lives at the normal path.
 	}
 
 	// Queued and unplaced: the job has not begun running. Report this clearly
@@ -524,6 +536,51 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 	output := filterLogContent(out, logFrom, logTo, logLines, logGrep)
 	fmt.Print(processCarriageReturns(output))
 	return nil
+}
+
+// runLogForAttempt fetches the log for a specific historical attempt. Returns
+// (handled, err): handled=true means the request was fully serviced (or
+// rejected); handled=false means the caller should fall through to the normal
+// latest-attempt log path.
+//
+// Only the latest attempt's log is preserved on inventory hosts — earlier
+// attempts are overwritten by relaunch — so non-latest on-prem attempts
+// return an explanatory error rather than silently showing the wrong log.
+func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attemptNum int) (handled bool, err error) {
+	if logFollow {
+		return true, fmt.Errorf("--attempt cannot be combined with --follow")
+	}
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return true, fmt.Errorf("list attempts: %w", err)
+	}
+	if len(attempts) == 0 {
+		return true, fmt.Errorf("job %s has no recorded attempts", ids.FormatJobID(job.ID))
+	}
+
+	var target *db.JobAttempt
+	for i := range attempts {
+		if attempts[i].AttemptNumber == attemptNum {
+			target = &attempts[i]
+			break
+		}
+	}
+	if target == nil {
+		return true, fmt.Errorf("job %s has no attempt #%d (have %d attempts: 1..%d)",
+			ids.FormatJobID(job.ID), attemptNum, len(attempts), attempts[0].AttemptNumber)
+	}
+
+	if target.LaunchID != nil {
+		if err := fetchAndDisplayLogFromR2(cmd, job, target.ID); err != nil {
+			return true, fmt.Errorf("fetch log for attempt #%d: %w", attemptNum, err)
+		}
+		return true, nil
+	}
+
+	if target.AttemptNumber != attempts[0].AttemptNumber {
+		return true, fmt.Errorf("attempt #%d log is not available: only the latest attempt's log is preserved on inventory hosts", attemptNum)
+	}
+	return false, nil
 }
 
 // runLogFromR2 fetches log output from R2 for a cloud-based job.

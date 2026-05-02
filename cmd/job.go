@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
@@ -903,6 +905,8 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
 		}
 
+		printAttemptsSection(cmd, database, job)
+
 		// Resource usage
 		if job.Metadata != nil && job.Metadata.Resource != nil {
 			r := job.Metadata.Resource
@@ -957,6 +961,100 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 
 func formatUnixTime(t int64) string {
 	return fmt.Sprintf("%s", time.Unix(t, 0).Format("2006-01-02 15:04:05"))
+}
+
+// printAttemptsSection prints a per-attempt history table for jobs with
+// multiple attempts.
+func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: list attempts: %v\n", err)
+		return
+	}
+	if len(attempts) < 2 {
+		return
+	}
+	now := time.Now().Unix()
+	fmt.Println()
+	fmt.Printf("Attempts:    %d\n", len(attempts))
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "  #\tWhen\tTarget\tStatus\tExit\tDuration\tOutcome")
+	for _, a := range attempts {
+		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			a.AttemptNumber,
+			attemptWhen(a),
+			attemptTarget(a),
+			dashIfEmpty(a.Status),
+			attemptExit(a),
+			attemptDuration(a, now),
+			attemptOutcome(a),
+		)
+	}
+	tw.Flush()
+}
+
+func attemptWhen(a db.JobAttempt) string {
+	switch {
+	case a.StartTime != nil:
+		return formatUnixTime(*a.StartTime)
+	case a.QueuedAt != nil:
+		return formatUnixTime(*a.QueuedAt)
+	}
+	return "-"
+}
+
+func attemptTarget(a db.JobAttempt) string {
+	if a.LaunchID != nil {
+		return ids.FormatInstanceID(*a.LaunchID)
+	}
+	return dashIfEmpty(a.Host)
+}
+
+func attemptExit(a db.JobAttempt) string {
+	if a.ExitCode == nil {
+		return "-"
+	}
+	return strconv.Itoa(*a.ExitCode)
+}
+
+// attemptDuration returns elapsed wall time. In-flight attempts (started but
+// not ended) report time since start so info doesn't show a misleading dash
+// for the row that is currently consuming time/cost.
+func attemptDuration(a db.JobAttempt, now int64) string {
+	if a.StartTime == nil {
+		return "-"
+	}
+	end := now
+	if a.EndTime != nil {
+		end = *a.EndTime
+	}
+	d := end - *a.StartTime
+	if d < 0 {
+		return "-"
+	}
+	return db.FormatDuration(d)
+}
+
+// attemptOutcome surfaces the most informative outcome label, falling back
+// from cloud_outcome → failure_reason → error_message when the more
+// structured fields are absent (typical for on-prem failed attempts).
+func attemptOutcome(a db.JobAttempt) string {
+	switch {
+	case a.CloudOutcome != "":
+		return a.CloudOutcome
+	case a.FailureReason != "":
+		return a.FailureReason
+	case a.ErrorMessage != "":
+		return a.ErrorMessage
+	}
+	return "-"
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func formatMemoryKB(kb int64) string {
