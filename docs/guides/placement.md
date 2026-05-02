@@ -1,0 +1,165 @@
+# Placement
+
+Weft placement decides where a job should run when you omit the host:
+
+```bash
+weft run --gpu a100 --input hf:meta-llama/Llama-3-8B 'python train.py'
+```
+
+The placement engine uses hard constraints first, then ranks eligible
+destinations by estimated completion time, data locality, queue state, and the
+active autopilot strategy.
+
+## When Placement Engages
+
+Automatic placement engages when a job has no explicit host. These forms use
+placement:
+
+```bash
+weft run 'python train.py'
+weft run --gpu ampere+ 'python train.py'
+weft run --tag rental --gpu a100 'python train.py'
+```
+
+These forms bypass placement and target the named host directly:
+
+```bash
+weft run cool30 'python train.py'
+weft run --host cool30 'python train.py'
+```
+
+When placement is active, Weft considers destinations in this order:
+
+1. Inventory hosts, using current GPU utilization, queue depth, memory, and
+   data locality.
+2. Existing cloud instances, with grace-period instances preferred because
+   they can be reused before more rental time is purchased.
+3. New cloud instances, scored by the active strategy profile and provider
+   offers.
+
+If no inventory host fits, a rental-eligible job can remain queued as
+unplaced until the autopilot or a manual launch assigns it to an instance.
+
+## Steering Placement
+
+Use `--gpu`, `--gpu-class`, and `--gpu-mem` to describe required hardware:
+
+```bash
+weft run --gpu nvidia 'python train.py'
+weft run --gpu 'nvidia>=24GB' 'python train.py'
+weft run --gpu ampere+ 'python train.py'
+weft run --gpu-class a100 --gpu-mem 60 'python train.py'
+```
+
+GPU class matching supports exact models (`a100`, `rtx3090`), generations
+(`ampere`), minimum generations (`ampere+`), and families (`nvidia`, `apple`).
+Bare RTX model numbers such as `3090` are normalized to `rtx3090`.
+
+Use `--input` to declare data the job needs:
+
+```bash
+weft run \
+  --gpu a100 \
+  --input hf:meta-llama/Llama-3-8B \
+  --input hf-dataset:allenai/c4 \
+  'python train.py'
+```
+
+Hugging Face inputs influence score reasons and placement ranking. A host that
+already has the asset local avoids transfer time and ranks better. `local:`
+inputs are synced before execution but are not scored as reusable data assets.
+
+Use tags when you need to change the placement domain:
+
+| Tag | Effect |
+| --- | --- |
+| `rental` | Skip inventory placement and send the job toward rental GPU workflows. Alias: `cloud`. |
+| `inventory` | Keep the job on inventory hosts only; do not launch it on rental GPUs. Alias: `on-prem`. |
+| `provider:<name>` | Pin rental placement to a provider such as `provider:vastai` or `provider:runpod`. |
+| `interruptible` | Allow interruptible cloud offers for this job. Alias: `preemptible`. |
+
+`rental` and `inventory` are mutually exclusive. A provider tag also skips
+local placement because it names a rental provider directly.
+
+## Reserved Tags
+
+Most tags are ordinary labels for grouping jobs. These tags have scheduler or
+runner behavior:
+
+| Tag | Behavior |
+| --- | --- |
+| `processed` | Marks a job as processed; filtered by `--processed` / `--unprocessed` on `weft jobs list`. Set with `weft mark-processed`. |
+| `exclusive` | Requires the host to be idle while the job runs. |
+| `benchmark` | Requires an idle host and enables benchmark protections. Auto-placement skips hosts marked `shared = true`, but an explicit host still runs there. |
+| `compute-intensive` | Declares that the job saturates the GPU regardless of co-tenants. This skips the queue-contention penalty in run-time estimation and adds a placement bonus proportional to free CPU capacity. |
+| `rental` | Bind the job to cloud rental placement. Alias: `cloud`. |
+| `inventory` | Bind the job to on-prem inventory placement. Alias: `on-prem`. |
+| `interruptible` | Mark the job as safe for interruptible / spot cloud offers. Alias: `preemptible`. |
+| `provider:<name>` | Pin rental placement to a specific cloud provider. |
+
+Benchmark jobs normally avoid shared inventory hosts. Adding `inventory`
+keeps the job on inventory hosts and allows benchmark placement on hosts marked
+`shared = true`.
+
+## Reading Score Reasons
+
+Use `--dry-run` to inspect placement without creating a job:
+
+```bash
+weft run --dry-run --gpu ampere+ --input hf:meta-llama/Llama-3-8B 'python train.py'
+```
+
+Placement reasons are short fragments attached to each candidate. Common
+fragments include:
+
+| Reason | Meaning |
+| --- | --- |
+| `has NVIDIA A100 GPU` | The host passed the GPU class constraint. |
+| `no GPU with >=24GB` | The host failed the GPU memory constraint. |
+| `no ampere+ GPU` | The host failed the GPU class or generation constraint. |
+| `host is opt-in only (specify with --host)` | The host is excluded from automatic placement unless explicitly named. |
+| `shared host excluded for benchmark auto-placement` | A benchmark job skipped a shared host. |
+| `3/3 inputs local` | All declared data assets are already present on the host. |
+| `~20m transfer for 1 missing inputs (learned, n=4)` | Weft estimated transfer time from observed or static bandwidth. |
+| `2 jobs queued (~60m drain)` | Queue depth contributes estimated wait time. |
+| `25% contention overhead` | Current GPU occupancy inflated the run-time estimate. |
+| `GPU perf 1.4x` | Host performance metadata improved the estimate. |
+| `est. ~45m total (30m queue + 0m transfer + 15m run)` | The final completion estimate used for ranking. |
+
+If no inventory host matches, unplaced job output groups the strongest
+rejection reasons, for example:
+
+```text
+no local host matched gpu=ampere+, inputs=1
+3 hosts: no ampere+ GPU
+1 host: host is opt-in only (specify with --host)
+```
+
+For unplaced rental jobs, use the autopilot diagnostics:
+
+```bash
+weft autopilot status
+weft autopilot blocked
+```
+
+See [Autopilot](autopilot.md) for blocked reasons, runaway-breaker trips,
+pause/resume, and unattended auto-launch behavior.
+
+## Strategy
+
+Autopilot uses the campaign objective to choose between eligible cloud offers:
+
+```toml
+[campaign]
+auto_objective = "cost_first" # cost_first | balanced | time_first
+```
+
+`cost_first` is the default. `balanced` gives cost and completion time similar
+weight, and `time_first` spends more readily to reduce completion time.
+
+## Ground Truth
+
+This guide is the operator view. The formal placement model lives in
+[`specs/inventory-placement.allium`](../../specs/inventory-placement.allium).
+Design rationale belongs in
+[`docs/design/placement-and-auto-mode.md`](../design/placement-and-auto-mode.md).

@@ -971,11 +971,9 @@ Log files are stored on remote hosts at `~/.cache/weft/logs/{id}-{timestamp}.log
 
 The database is automatically created on first use and updated when checking job status.
 
-**Reserved placement tags:**
-- `rental`: Skip local placement and push the job toward rental GPU workflows
-- `inventory`: Keep the job on inventory hosts only; do not launch on rental GPUs. Inventory-tagged benchmark jobs may still use hosts marked `shared = true`.
-- `benchmark`: Require an idle host for placement and runtime checks. Auto-placement skips hosts marked `shared = true`, but `weft run <host> --tag benchmark ...` still targets that host directly. On cloud instances, benchmark jobs also enable a benchmark barrier (waits for prior uploads to complete) and advanced GPU telemetry; see the telemetry section above.
-- Legacy aliases `cloud` and `on-prem` are still accepted on input for compatibility
+Reserved scheduler tags such as `rental`, `inventory`, `benchmark`, and
+`interruptible` steer placement. See the
+[Placement guide](docs/guides/placement.md#reserved-tags) for the catalog.
 
 ## Manual Monitoring
 

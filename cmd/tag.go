@@ -15,7 +15,32 @@ var tagCmd = &cobra.Command{
 	Short: "Manage job tags",
 	Long: `Manage job tags stored in the local database.
 
-Tags are free-form labels that help group jobs and track processing state.`,
+Tags are free-form labels that help group jobs and track processing state.
+Most tags are user-defined, but the following have special meaning to the
+scheduler and runner:
+
+  processed         Marks a job as processed; filtered by --processed /
+                    --unprocessed on 'weft jobs list'. Set with
+                    'weft mark-processed'.
+  benchmark         Treat the job as a benchmark: requires an idle host,
+                    enables strict GPU isolation, optional GPU warmup, and
+                    blocks combination with 'interruptible'.
+  exclusive         Requires the host to be idle while the job runs (like
+                    'benchmark', without the timing-protection requirements).
+  compute-intensive Job saturates the GPU regardless of co-tenants. Skips the
+                    queue-contention penalty in run-time estimation and adds a
+                    placement bonus proportional to the host's free CPU
+                    capacity (cores × cpu_factor × idle fraction).
+  rental            Bind the job to a cloud rental instance (alias: 'cloud').
+  inventory         Bind the job to an on-prem inventory host (alias:
+                    'on-prem').
+  interruptible     Job is preemptible / safe to run on spot instances
+                    (alias: 'preemptible').
+  provider:<name>   Pin to a specific cloud provider, e.g. 'provider:vastai'
+                    or 'provider:runpod'.
+
+Legacy aliases ('cloud', 'on-prem', 'preemptible') are accepted on input and
+canonicalized to the names above.`,
 }
 
 var tagAddCmd = &cobra.Command{

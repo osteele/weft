@@ -739,6 +739,11 @@ laptop$ weft run atlas \
 The queue runner waits until all other jobs finish, runs the exclusive job alone,
 then resumes normal scheduling.
 
+`exclusive` and `benchmark` are part of the broader catalog of tags the
+scheduler treats specially. See the
+[Placement guide § Reserved tags](placement.md#reserved-tags) for the full
+list and effects.
+
 For reproducible benchmarking, the `benchmark` tag goes further — it waits for
 the whole system (CPU, RAM, GPU, VRAM) to be idle before starting:
 

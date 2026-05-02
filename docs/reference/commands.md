@@ -25,7 +25,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated). Reserved tags: `exclusive` makes the job run alone; `benchmark` is like `exclusive` but also waits for system-wide idle and skips hosts marked `shared = true` during auto-placement; `rental` skips local placement and sends the job toward rental-GPU workflows; `inventory` blocks rental placement, keeps the job on inventory hosts only, and allows benchmark jobs to use shared inventory hosts; `interruptible` allows interruptible cloud offers for that job (`preemptible` is accepted as a synonym). Legacy aliases `cloud` and `on-prem` are accepted for compatibility.
+- `--tag TAG`: Tag to attach to the job (can be repeated). Most tags are user-defined; reserved scheduler tags such as `rental`, `inventory`, `benchmark`, `exclusive`, `interruptible`, and `compute-intensive` are described in the [Placement guide](../guides/placement.md#reserved-tags).
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -653,9 +653,11 @@ weft job tag rm wj42 exp-012
 weft job tag add wj42 wj43 wj44 rental    # tag multiple jobs at once
 ```
 
-Reserved placement tags use the preferred names `rental` and `inventory`.
-Legacy aliases `cloud` and `on-prem` are accepted on input and mapped to the
-preferred names in CLI/TUI output.
+Most tags are user-defined. For the catalog of tags the scheduler and runner
+treat specially (`rental`, `inventory`, `benchmark`, `exclusive`,
+`interruptible`, `compute-intensive`, `provider:<name>`) and the legacy
+aliases `cloud`, `on-prem`, `preemptible`, see the
+[Placement guide § Reserved tags](../guides/placement.md#reserved-tags).
 
 ### weft job mark-processed / mark-unprocessed
 
