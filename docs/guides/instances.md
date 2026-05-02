@@ -429,7 +429,7 @@ The grace period is tracked in the database (`grace_period_seconds`,
 `grace_started_at`, `grace_deadline`) and the instance status changes to
 `grace` during the wait.
 
-## TUI rental menu (single job)
+## Watch TUI single-job launch
 
 For launching a single job without the batch flow, use the TUI:
 
@@ -440,6 +440,14 @@ For launching a single job without the batch flow, use the TUI:
 
 This launches a single instance for that job (recorded as a one-instance
 campaign).
+
+In the watch TUI, queued jobs that are already attached to a cloud instance
+also have two move paths:
+
+- `m`: deliberative move. Opens the picker with existing destinations and new
+  cloud offers, showing cheap/fast/fastest choices and prices.
+- `N`: atomic launch. Launches a new instance immediately with the fast
+  strategy, without opening the picker or asking for confirmation.
 
 ## How it works
 

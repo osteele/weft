@@ -141,6 +141,72 @@ func ExecuteOption(
 		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 
+	return executeWithIntent(ctx, database, r2Client, cfg, cloudClients, job, opt)
+}
+
+// LaunchNewForJob picks an offer using the given strategy and launches a new
+// instance for the job, transferring the source claim atomically. This is the
+// atomic new-instance path used by the TUI's N keybinding: no picker.
+func LaunchNewForJob(
+	ctx context.Context,
+	database *sql.DB,
+	r2Client *r2.Client,
+	cfg *config.Config,
+	cloudClients []cloud.Client,
+	jobID int64,
+	strategy bidding.SelectionStrategy,
+) (string, error) {
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return "", fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
+	}
+	if job == nil {
+		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		return "", fmt.Errorf("can only launch queued jobs (job %s has status: %s)", ids.FormatJobID(jobID), job.EffectiveStatus())
+	}
+
+	provider, _ := db.RequestedProvider(job.Tags)
+	group := campaign.InstanceGroup{
+		GPUClass: job.GPUClass,
+		Provider: provider,
+		Jobs:     []*db.Job{job},
+	}
+	if job.GPUMemGB != nil {
+		group.GPUMemGB = *job.GPUMemGB
+	}
+
+	rawOffers := campaign.FetchGroupRawOffers(cloudClients, []campaign.InstanceGroup{group}, cfg.CampaignReliability())
+	if len(rawOffers) > 0 && rawOffers[0].Err != nil {
+		return "", rawOffers[0].Err
+	}
+	ranked := campaign.RankGroupOffers(rawOffers, nil, 1.0, nil, strategy, 0)
+	if len(ranked) == 0 || ranked[0].Offer == nil {
+		return "", fmt.Errorf("no compatible new-instance offer found")
+	}
+
+	offer := ranked[0].Offer
+	return executeWithIntent(ctx, database, r2Client, cfg, cloudClients, job, Option{
+		IsNew:       true,
+		Offer:       offer,
+		Strategy:    strategy,
+		GPUName:     offer.GPUName,
+		CostPerHour: offer.CostPerHour,
+	})
+}
+
+var executeMoveOptionForMove = executeMoveOption
+
+func executeWithIntent(
+	ctx context.Context,
+	database *sql.DB,
+	r2Client *r2.Client,
+	cfg *config.Config,
+	cloudClients []cloud.Client,
+	job *db.Job,
+	opt Option,
+) (string, error) {
 	// Open a MoveIntent so the autopilot leaves this job alone for the
 	// duration of the move, and so a failure can be cleanly rolled back to
 	// the source. See specs/job-move.allium.
@@ -154,7 +220,7 @@ func ExecuteOption(
 		sourceLaunchID = *job.LaunchID
 	}
 
-	desc, err := executeMoveOption(ctx, database, r2Client, cfg, cloudClients, job, opt, intent)
+	desc, err := executeMoveOptionForMove(ctx, database, r2Client, cfg, cloudClients, job, opt, intent)
 	if err != nil {
 		// Best-effort: re-attach to source if it's still alive. Otherwise
 		// the job is left unplaced and the autopilot may pick it up on its

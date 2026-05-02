@@ -184,10 +184,18 @@ type moveOptionsReadyMsg struct {
 	err     error
 }
 
+type moveExecuteAction string
+
+const (
+	moveExecuteActionMove      moveExecuteAction = "move"
+	moveExecuteActionLaunchNew moveExecuteAction = "launch_new"
+)
+
 // moveExecuteDoneMsg carries the result of a move-to-existing or move-to-new execution.
 type moveExecuteDoneMsg struct {
 	jobID      int64
 	targetDesc string // e.g. "instance #17" or "new RTX 4090 instance"
+	action     moveExecuteAction
 	err        error
 }
 

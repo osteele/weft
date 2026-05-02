@@ -221,6 +221,16 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.database, m.appConfig, m.cloudClients,
 			job, capacities, queuedCounts, sourceInstanceID,
 		))
+	case "N":
+		job := m.selectedCloudJob()
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			return m, nil
+		}
+		m.clearAutoPilotPersistentState()
+		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Launching new instance for job #%d...", job.ID), false)
+		return m, tea.Batch(flashCmd, requestLaunchNewForJob(
+			m.ctx, m.database, m.r2Client, m.appConfig, m.cloudClients, job.ID,
+		))
 	case "a":
 		if job := m.selectedAnyJob(); job != nil {
 			return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }

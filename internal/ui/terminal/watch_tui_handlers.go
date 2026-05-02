@@ -205,9 +205,16 @@ func (m watchModel) handleMoveOptionsReady(msg moveOptionsReadyMsg) (tea.Model, 
 
 func (m watchModel) handleMoveExecuteDone(msg moveExecuteDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		if msg.action == moveExecuteActionLaunchNew {
+			return m, m.flash.Set(fmt.Sprintf("Launch failed: %v", msg.err), true)
+		}
 		return m, m.flash.Set(fmt.Sprintf("Move failed: %v", msg.err), true)
 	}
-	flashCmd := m.flash.Set(fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc), false)
+	message := fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc)
+	if msg.action == moveExecuteActionLaunchNew {
+		message = fmt.Sprintf("Launched new instance %s for job #%d", msg.targetDesc, msg.jobID)
+	}
+	flashCmd := m.flash.Set(message, false)
 	if m.mode == watchModeSystem {
 		m.refreshing = true
 		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig, m.cloudInstances))

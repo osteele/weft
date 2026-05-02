@@ -1,10 +1,18 @@
 package orchestration
 
 import (
+	"context"
+	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 func TestBuildMoveGroupProgressLabels_UsesOrdinalAndAnchorJobID(t *testing.T) {
@@ -210,5 +218,151 @@ func TestTryRestoreJobToSource_NoSourceLaunchIDIsNoOp(t *testing.T) {
 	}
 	if tryRestoreJobToSource(database, jobID, 0) {
 		t.Fatal("tryRestoreJobToSource returned true; expected no-op when source unknown")
+	}
+}
+
+func TestLaunchNewForJob_SelectsRankedOfferAndPassesStrategy(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "launch now", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "nvidia"); err != nil {
+		t.Fatalf("SetJobGPUClass: %v", err)
+	}
+
+	var gotOpt Option
+	restore := stubExecuteMoveOptionForMove(t, func(
+		_ context.Context,
+		_ *sql.DB,
+		_ *r2.Client,
+		_ *config.Config,
+		_ []cloud.Client,
+		_ *db.Job,
+		opt Option,
+		_ *db.MoveIntent,
+	) (string, error) {
+		gotOpt = opt
+		return "new RTX 3090 instance wi77", nil
+	})
+	defer restore()
+
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			if constraints.GPUClass != "nvidia" {
+				t.Fatalf("GPUClass constraint = %q, want nvidia", constraints.GPUClass)
+			}
+			return []cloud.Offer{
+				{ProviderID: "expensive", Provider: cloud.ProviderVastai, GPUName: "A100", GPUMemGB: 40, CostPerHour: 2.00},
+				{ProviderID: "cheap", Provider: cloud.ProviderVastai, GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.20},
+			}, nil
+		},
+	}
+
+	desc, err := LaunchNewForJob(context.Background(), database, nil, nil, []cloud.Client{client}, jobID, bidding.StrategyFast)
+	if err != nil {
+		t.Fatalf("LaunchNewForJob: %v", err)
+	}
+	if desc == "" {
+		t.Fatal("desc is empty")
+	}
+	if gotOpt.Strategy != bidding.StrategyFast {
+		t.Fatalf("strategy = %q, want %q", gotOpt.Strategy, bidding.StrategyFast)
+	}
+	if gotOpt.Offer == nil || gotOpt.Offer.ProviderID != "cheap" {
+		t.Fatalf("selected offer = %#v, want provider_id cheap", gotOpt.Offer)
+	}
+}
+
+func TestLaunchNewForJob_NoOffers(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "launch now", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	client := &cloud.MockClient{
+		ProviderVal:      cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) { return nil, nil },
+	}
+	_, err = LaunchNewForJob(context.Background(), database, nil, nil, []cloud.Client{client}, jobID, bidding.StrategyFast)
+	if err == nil || !strings.Contains(err.Error(), "no compatible new-instance offer") {
+		t.Fatalf("LaunchNewForJob err = %v, want no-offer error", err)
+	}
+}
+
+func TestLaunchNewForJob_JobNotFound(t *testing.T) {
+	database := db.SetupTestDB(t)
+	_, err := LaunchNewForJob(context.Background(), database, nil, nil, nil, 999, bidding.StrategyFast)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("LaunchNewForJob err = %v, want not found", err)
+	}
+}
+
+func TestLaunchNewForJob_JobNotQueued(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "launch now", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetRequestedStatus(database, jobID, db.StatusKilled); err != nil {
+		t.Fatalf("SetRequestedStatus: %v", err)
+	}
+
+	_, err = LaunchNewForJob(context.Background(), database, nil, nil, nil, jobID, bidding.StrategyFast)
+	if err == nil || !strings.Contains(err.Error(), "can only launch queued jobs") {
+		t.Fatalf("LaunchNewForJob err = %v, want status error", err)
+	}
+}
+
+func TestLaunchNewForJob_ExecuteFailureResolvesIntentCanceled(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "launch now", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	execErr := errors.New("provider rejected")
+	restore := stubExecuteMoveOptionForMove(t, func(
+		context.Context,
+		*sql.DB,
+		*r2.Client,
+		*config.Config,
+		[]cloud.Client,
+		*db.Job,
+		Option,
+		*db.MoveIntent,
+	) (string, error) {
+		return "", execErr
+	})
+	defer restore()
+
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{ProviderID: "offer", Provider: cloud.ProviderVastai, GPUName: "A100", GPUMemGB: 40, CostPerHour: 1}}, nil
+		},
+	}
+
+	_, err = LaunchNewForJob(context.Background(), database, nil, nil, []cloud.Client{client}, jobID, bidding.StrategyFast)
+	if !errors.Is(err, execErr) {
+		t.Fatalf("LaunchNewForJob err = %v, want %v", err, execErr)
+	}
+	var state string
+	if err := database.QueryRow(`SELECT state FROM move_intents WHERE job_id = ?`, jobID).Scan(&state); err != nil {
+		t.Fatalf("query move intent state: %v", err)
+	}
+	if db.MoveIntentState(state) != db.MoveIntentStateCanceled {
+		t.Fatalf("move intent state = %q, want %q", state, db.MoveIntentStateCanceled)
+	}
+}
+
+func stubExecuteMoveOptionForMove(t *testing.T, fn func(context.Context, *sql.DB, *r2.Client, *config.Config, []cloud.Client, *db.Job, Option, *db.MoveIntent) (string, error)) func() {
+	t.Helper()
+	previous := executeMoveOptionForMove
+	executeMoveOptionForMove = fn
+	return func() {
+		executeMoveOptionForMove = previous
 	}
 }

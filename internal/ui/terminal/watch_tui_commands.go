@@ -13,6 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -810,4 +811,33 @@ func requestMoveExecute(
 		}
 		return moveExecuteDoneMsg{jobID: jobID, targetDesc: targetDesc}
 	}
+}
+
+func requestLaunchNewForJob(
+	ctx context.Context,
+	database *sql.DB,
+	r2Client *r2.Client,
+	cfg *config.Config,
+	cloudClients []cloud.Client,
+	jobID int64,
+) tea.Cmd {
+	return func() tea.Msg {
+		targetDesc, execErr := orchestration.LaunchNewForJob(
+			ctx, database, r2Client, cfg, cloudClients, jobID, bidding.StrategyFast,
+		)
+		if execErr != nil {
+			return moveExecuteDoneMsg{jobID: jobID, action: moveExecuteActionLaunchNew, err: execErr}
+		}
+		return moveExecuteDoneMsg{jobID: jobID, action: moveExecuteActionLaunchNew, targetDesc: launchInstanceIDFromDesc(targetDesc)}
+	}
+}
+
+func launchInstanceIDFromDesc(desc string) string {
+	for _, token := range strings.Fields(desc) {
+		clean := strings.Trim(token, ",.;:()[]")
+		if id, err := ids.ParseInstanceID(clean); err == nil && id > 0 {
+			return ids.FormatInstanceID(id)
+		}
+	}
+	return desc
 }
