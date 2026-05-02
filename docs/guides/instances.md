@@ -300,11 +300,23 @@ auto_runaway_orphan_churn_limit = 8
 auto_runaway_spend_no_progress_limit = 5.0
 ```
 
-If the breaker trips, auto-relaunch is blocked until you manually resume:
+If the breaker trips, auto-relaunch is blocked until you manually resume.
+For a per-campaign trip:
 
 ```bash
 weft campaign safety resume --campaign <campaign-id> [--project <project-name>]
 ```
+
+For a global trip (or to inspect what's currently tripped):
+
+```bash
+weft autopilot blocked              # list tripped scopes + affected jobs + metrics
+weft autopilot blocked --unblock    # list and reset in one shot
+weft autopilot budget reset         # reset only
+```
+
+`weft info wj<N>` also surfaces the trip inline on any paused job. See the
+[Autopilot guide](autopilot.md) for the full inspection and reset workflow.
 
 ## Managing instances
 

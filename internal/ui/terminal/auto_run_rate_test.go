@@ -198,6 +198,23 @@ func TestHandleAutoBudgetKey_DailyEnterClosesAndRetriggers(t *testing.T) {
 	}
 }
 
+func TestHandleAutoBudgetKey_FiltersStrayCharacters(t *testing.T) {
+	database := setupBudgetTest(t)
+	s := autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: "2.50"}
+
+	// Pressing 'q' (a likely "quit" reflex) should be dropped, not appended.
+	next, _ := handleAutoBudgetKey(s, keyMsg("q"), database)
+	if next.Value != "2.50" {
+		t.Errorf("'q' should be dropped, got value %q", next.Value)
+	}
+
+	// Letters that participate in "off"/"none"/"disable" are still accepted.
+	next, _ = handleAutoBudgetKey(autoBudgetState{Active: true, Step: autoBudgetStepHourly, Value: ""}, keyMsg("o"), database)
+	if next.Value != "o" {
+		t.Errorf("'o' should be accepted as part of 'off', got %q", next.Value)
+	}
+}
+
 func TestHandleAutoBudgetKey_CtrlR(t *testing.T) {
 	database := setupBudgetTest(t)
 

@@ -103,7 +103,10 @@ func autoBudgetPromptStatus(step autoBudgetInputStep, value string) string {
 
 func autoBudgetPromptControls(step autoBudgetInputStep, value string) string {
 	label, hints := autoBudgetPromptLabelAndHints(step, ":")
-	return label + ": " + value + "  " + hints
+	// Trailing block makes the input cursor visible so the user can tell
+	// the prompt is consuming keys (otherwise an unchanging "2.50" can
+	// look frozen when the value happens to start prefilled).
+	return label + ": " + value + "▏  " + hints
 }
 
 func autoBudgetPromptLabelAndHints(step autoBudgetInputStep, sep string) (label, hints string) {
@@ -236,8 +239,30 @@ func handleAutoBudgetKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (a
 		return s, autoBudgetEffect{}
 	}
 
-	if len(msg.Runes) > 0 {
-		s.Value += string(msg.Runes)
+	for _, r := range msg.Runes {
+		if isAutoBudgetInputRune(r) {
+			s.Value += string(r)
+		}
 	}
 	return s, autoBudgetEffect{}
+}
+
+// isAutoBudgetInputRune accepts characters that can plausibly appear in a
+// dollar-amount input: digits, ".", "$", and the lowercase letters that
+// spell "off"/"none"/"disable". Anything else (including arrow-key escape
+// sequences and stray "q" presses meant as "quit") is dropped, so the
+// input value reflects the user's intent rather than every keystroke that
+// landed while the prompt was open.
+func isAutoBudgetInputRune(r rune) bool {
+	switch {
+	case r >= '0' && r <= '9':
+		return true
+	case r == '.' || r == '$':
+		return true
+	}
+	switch r {
+	case 'o', 'f', 'n', 'e', 'd', 'i', 's', 'a', 'b', 'l':
+		return true
+	}
+	return false
 }

@@ -124,13 +124,43 @@ cleared with "weft campaign safety resume --campaign <id>".`,
 	RunE: runAutopilotBudgetReset,
 }
 
+var (
+	autopilotBlockedJSON    bool
+	autopilotBlockedUnblock bool
+)
+
+var autopilotBlockedCmd = &cobra.Command{
+	Use:   "blocked",
+	Short: "Show currently-tripped runaway-breaker scopes and the jobs they're holding",
+	Long: `List every runaway-breaker scope whose latest trip event has not been
+cleared by a later resume event, with the trip metrics (chain length,
+orphaned-attempt count, spend, window) and the queued jobs that share
+the scope.
+
+This is the focused diagnostic for "why is wj_X paused?". The trip
+metrics tell you which threshold fired, which is the difference between
+"three failures in a row, just unlucky" and "no completions in 24
+hours, something is structurally wrong".
+
+Use --unblock to clear all global trips and resume the autopilot in one
+shot. Per-campaign trips are cleared with their campaign-scoped resume
+flow; this CLI only manages the global scope (campaign=<none>,
+project=<all>).`,
+	Args: cobra.NoArgs,
+	RunE: runAutopilotBlocked,
+}
+
 func init() {
 	rootCmd.AddCommand(autopilotCmd)
 	autopilotCmd.AddCommand(autopilotStatusCmd)
 	autopilotCmd.AddCommand(autopilotPauseCmd)
 	autopilotCmd.AddCommand(autopilotResumeCmd)
 	autopilotCmd.AddCommand(autopilotBudgetCmd)
+	autopilotCmd.AddCommand(autopilotBlockedCmd)
 	autopilotBudgetCmd.AddCommand(autopilotBudgetResetCmd)
+
+	autopilotBlockedCmd.Flags().BoolVar(&autopilotBlockedJSON, "json", false, "Emit machine-readable JSON")
+	autopilotBlockedCmd.Flags().BoolVar(&autopilotBlockedUnblock, "unblock", false, "Clear the global runaway-breaker trip after listing")
 
 	autopilotStatusCmd.Flags().BoolVar(&autopilotStatusJSON, "json", false, "Emit machine-readable JSON")
 	autopilotStatusCmd.Flags().BoolVar(&autopilotStatusQuiet, "quiet", false,
@@ -366,5 +396,101 @@ func runAutopilotBudgetReset(cmd *cobra.Command, args []string) error {
 	}
 	oplog.Log("autopilot.budget.reset")
 	fmt.Println("Runaway-breaker reset for global scope (campaign=<none>, project=<all>).")
+	return nil
+}
+
+// blockedScopeView is the JSON shape for `weft autopilot blocked --json`.
+// Stable contract: ops scripts may parse this to alert on long-tripped
+// scopes or to enumerate affected jobs.
+type blockedScopeView struct {
+	Scope      string   `json:"scope"`
+	CampaignID int64    `json:"campaign_id,omitempty"`
+	Project    string   `json:"project"`
+	TrippedAt  string   `json:"tripped_at"`
+	AgeSeconds int64    `json:"age_seconds"`
+	Chain      int      `json:"chain"`
+	Orphaned   int      `json:"orphaned"`
+	SpendCents int      `json:"spend_cents"`
+	Window     string   `json:"window"`
+	Jobs       []string `json:"jobs,omitempty"`
+}
+
+func runAutopilotBlocked(cmd *cobra.Command, args []string) error {
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	infos, err := campaign.LookupActiveRunawayBreakers(database)
+	if err != nil {
+		return err
+	}
+
+	views := make([]blockedScopeView, 0, len(infos))
+	for _, info := range infos {
+		jobIDs, err := campaign.JobsBlockedByBreaker(database, info)
+		if err != nil {
+			return err
+		}
+		jobLabels := make([]string, 0, len(jobIDs))
+		for _, id := range jobIDs {
+			jobLabels = append(jobLabels, fmt.Sprintf("wj%d", id))
+		}
+		views = append(views, blockedScopeView{
+			Scope:      info.ScopeLabel(),
+			CampaignID: info.CampaignID,
+			Project:    info.Project,
+			TrippedAt:  info.TrippedAt.Format(time.RFC3339),
+			AgeSeconds: int64(time.Since(info.TrippedAt).Seconds()),
+			Chain:      info.Chain,
+			Orphaned:   info.Orphaned,
+			SpendCents: info.SpendCents,
+			Window:     info.Window.String(),
+			Jobs:       jobLabels,
+		})
+	}
+
+	if autopilotBlockedJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(map[string]any{"scopes": views}); err != nil {
+			return err
+		}
+	} else if len(views) == 0 {
+		fmt.Println("No active runaway-breaker trips.")
+	} else {
+		for _, v := range views {
+			age := time.Duration(v.AgeSeconds) * time.Second
+			fmt.Printf("%s\n", v.Scope)
+			fmt.Printf("  tripped %s ago (%s)\n", age.Truncate(time.Second), v.TrippedAt)
+			fmt.Printf("  metrics: chain=%d orphaned=%d spend=$%.2f window=%s\n",
+				v.Chain, v.Orphaned, float64(v.SpendCents)/100.0, v.Window)
+			if len(v.Jobs) > 0 {
+				fmt.Printf("  jobs (%d): %s\n", len(v.Jobs), strings.Join(v.Jobs, ", "))
+			} else {
+				fmt.Printf("  jobs: (none currently queued in scope)\n")
+			}
+			fmt.Println()
+		}
+		if !autopilotBlockedUnblock {
+			fmt.Println("Reset with: weft autopilot budget reset")
+			fmt.Println("Or rerun:   weft autopilot blocked --unblock")
+		}
+	}
+
+	if autopilotBlockedUnblock {
+		// Open writable DB handle; the read-only one above can't insert events.
+		dbw, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("open database for unblock: %w", err)
+		}
+		defer dbw.Close()
+		if err := campaign.ResetGlobalRunawayBreaker(dbw, "CLI"); err != nil {
+			return fmt.Errorf("reset breaker: %w", err)
+		}
+		oplog.Log("autopilot.blocked.unblock")
+		fmt.Println("Runaway-breaker reset for global scope (campaign=<none>, project=<all>).")
+	}
 	return nil
 }

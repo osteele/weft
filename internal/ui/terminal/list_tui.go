@@ -1063,7 +1063,9 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return ""
 	}
 	if m.autoRunRateInputActive {
-		return autoBudgetPromptStatus(m.autoRunRateInputStep, m.autoRunRateInputValue)
+		// Prompt is rendered in the controls line; keep this line empty
+		// so the prompt does not appear twice in slightly different forms.
+		return ""
 	}
 	if line := formatAgentBuildStatus(); line != "" {
 		return line

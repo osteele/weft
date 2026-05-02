@@ -8,6 +8,7 @@ detail quickly.
 - [Workflow Guide](guides/workflow-guide.md) for common end-to-end usage
 - [Cloud GPU Instances](guides/instances.md) for rental GPU workflows (launching, monitoring, grace periods, configuration)
 - [Campaigns](guides/campaigns.md) for the batching concept that groups instances launched together
+- [Autopilot](guides/autopilot.md) for inspecting and unblocking the auto-placement / auto-launch engine
 - [Network Resilience](guides/network-resilience.md) for disconnected/offline behavior
 - [Debugging](guides/debugging.md) for operational troubleshooting
 

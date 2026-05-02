@@ -806,6 +806,19 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("Status:      %s\n", job.EffectiveStatus())
 		}
+		// If the autopilot has paused this job's scope via the runaway
+		// breaker, surface the trip details here. The canned blocked
+		// reason ("paused: repeated launch failures without progress")
+		// gives no actionable info; the structured trip metrics tell
+		// the operator which threshold actually fired.
+		if job.EffectiveStatus() == "queued" {
+			if info, err := campaign.LookupRunawayBreakerForJob(database, job); err == nil && info != nil {
+				age := time.Since(info.TrippedAt).Truncate(time.Second)
+				fmt.Printf("Blocked by:  runaway-breaker (%s), tripped %s ago\n", info.ScopeLabel(), age)
+				fmt.Printf("             %s\n", info.MetricsLine())
+				fmt.Printf("             reset: weft autopilot blocked --unblock\n")
+			}
+		}
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
 		fmt.Printf("Command:     %s\n", job.Command)
