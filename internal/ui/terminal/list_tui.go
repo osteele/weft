@@ -447,6 +447,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.adjustOffset()
 		return m, nil
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.FocusMsg:
 		m.focused = true
 		return m, nil
@@ -1252,6 +1255,111 @@ func (m listTUIModel) selectedGroupedJob() *db.Job {
 		return nil
 	}
 	return m.groupedRows[row].job
+}
+
+func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.autoRunRateInputActive {
+		return m, nil
+	}
+	if m.groupedByStatus {
+		m.selectGroupedMouseRow(msg.Y)
+		return m, nil
+	}
+	m.selectFlatMouseRow(msg.Y)
+	return m, nil
+}
+
+func (m *listTUIModel) selectFlatMouseRow(y int) {
+	if y < 2 {
+		return
+	}
+	row := y - 2
+	if row >= m.flatBodyRows() {
+		return
+	}
+	idx := m.offset + row
+	if idx < 0 || idx >= len(m.jobs) {
+		return
+	}
+	m.cursor = idx
+	m.clampCursor()
+	m.adjustOffset()
+}
+
+func (m listTUIModel) flatBodyRows() int {
+	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
+	selectedDetailLines := m.selectedJobDetailLines()
+	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
+	return max(0, m.height-2-1-footerBlockLines)
+}
+
+func (m *listTUIModel) selectGroupedMouseRow(y int) {
+	if y < 1 {
+		return
+	}
+	visibleRows := m.groupedViewportRows()
+	bodyRow := y - 1
+	if bodyRow < 0 || bodyRow >= len(visibleRows) {
+		return
+	}
+	rowIdx := visibleRows[bodyRow].rowIdx
+	if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+		return
+	}
+	row := m.groupedRows[rowIdx]
+	if row.job == nil || row.isHeader || row.isBlocked {
+		return
+	}
+	for i, selectableRow := range m.groupedSelectableRows {
+		if selectableRow == rowIdx {
+			m.cursor = i
+			m.clampGroupedCursor()
+			return
+		}
+	}
+}
+
+func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
+	rows := m.groupedRows
+	if len(rows) == 0 {
+		rows = []groupedStatusRow{{text: "None"}}
+	}
+
+	groupedJobs := m.groupedJobsWithAutoReasons()
+	statusLine := m.groupedStatusText()
+	visibleRunning := countVisibleRunningJobs(groupedJobs)
+	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning, m.autoRunRateTargetCents)
+	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
+	errorDetailsLines := m.groupedErrorDetailsLines()
+	selectedDetailLines := m.selectedJobDetailLines()
+	baseFooterLines := 2
+	if statusLine != "" {
+		baseFooterLines++
+	}
+	baseFooterLines += len(sharedStatusLines)
+	baseFooterLines += len(selectedDetailLines)
+	if autoPilotLine != "" {
+		baseFooterLines++
+	}
+	if m.autoRunRateInputActive {
+		baseFooterLines += len(renderAutoBudgetPanel(m.currentBudgetState()))
+	}
+	availableForBodyAndDetails := max(0, m.height-1-baseFooterLines)
+	if len(errorDetailsLines) > 0 {
+		maxDetailLines := availableForBodyAndDetails
+		if len(rows) > 0 && maxDetailLines > 0 {
+			maxDetailLines--
+		}
+		if len(errorDetailsLines) > maxDetailLines {
+			errorDetailsLines = truncateErrorDetailsLines(errorDetailsLines, maxDetailLines)
+		}
+	}
+	footerLines := baseFooterLines + len(errorDetailsLines)
+	maxBodyLines := max(0, m.height-1-footerLines)
+	return selectGroupedRowsForViewport(rows, maxBodyLines)
 }
 
 func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -1125,6 +1125,160 @@ func TestListTUIKeyV_TogglesBetweenGroupedAndUngrouped(t *testing.T) {
 	}
 }
 
+func TestListTUIMouseClickSelectsFlatJobRow(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 101, Status: db.StatusRunning, Description: "first"},
+		{ID: 102, Status: db.StatusQueued, Description: "second"},
+		{ID: 103, Status: db.StatusQueued, Description: "third"},
+	}
+	m := listTUIModel{
+		title:  "Jobs",
+		jobs:   jobs,
+		layout: newJobListLayout(100, jobs, nil, false),
+		cursor: 0,
+		width:  100,
+		height: 12,
+	}
+
+	next, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      3,
+	})
+	got := next.(listTUIModel)
+	if got.cursor != 1 {
+		t.Fatalf("cursor = %d, want 1", got.cursor)
+	}
+	if job := got.currentSelectedJob(); job == nil || job.ID != 102 {
+		t.Fatalf("selected job = %+v, want wj102", job)
+	}
+}
+
+func TestListTUIMouseClickIgnoresFlatFooter(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 101, Status: db.StatusRunning, Description: "first"},
+		{ID: 102, Status: db.StatusQueued, Description: "second"},
+	}
+	m := listTUIModel{
+		title:  "Jobs",
+		jobs:   jobs,
+		layout: newJobListLayout(100, jobs, nil, false),
+		cursor: 0,
+		width:  100,
+		height: 8,
+	}
+
+	next, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      7,
+	})
+	got := next.(listTUIModel)
+	if got.cursor != 0 {
+		t.Fatalf("cursor = %d, want unchanged 0", got.cursor)
+	}
+}
+
+func TestListTUIMouseClickSelectsGroupedJobRow(t *testing.T) {
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusRunning, Description: "running"},
+			{ID: 102, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	m.rebuildGroupedRows()
+	clickY := groupedClickYForJob(t, m, 102)
+
+	next, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      clickY,
+	})
+	got := next.(listTUIModel)
+	if job := got.selectedGroupedJob(); job == nil || job.ID != 102 {
+		t.Fatalf("selected grouped job = %+v, want wj102", job)
+	}
+}
+
+func TestListTUIMouseClickIgnoresGroupedHeaderAndFooter(t *testing.T) {
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusRunning, Description: "running"},
+			{ID: 102, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	m.rebuildGroupedRows()
+	m.cursor = 1
+
+	next, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      1,
+	})
+	got := next.(listTUIModel)
+	if got.cursor != 1 {
+		t.Fatalf("header click cursor = %d, want unchanged 1", got.cursor)
+	}
+
+	next, _ = got.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      19,
+	})
+	got = next.(listTUIModel)
+	if got.cursor != 1 {
+		t.Fatalf("footer click cursor = %d, want unchanged 1", got.cursor)
+	}
+}
+
+func TestListTUIMouseClickSelectsGroupedJobAfterBlockedReason(t *testing.T) {
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusQueued, Description: "blocked", QueueBlockedReason: "waiting for sibling"},
+			{ID: 102, Status: db.StatusQueued, Description: "plain"},
+		},
+	}
+	m.rebuildGroupedRows()
+	clickY := groupedClickYForJob(t, m, 102)
+
+	next, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      clickY,
+	})
+	got := next.(listTUIModel)
+	if job := got.selectedGroupedJob(); job == nil || job.ID != 102 {
+		t.Fatalf("selected grouped job = %+v, want wj102", job)
+	}
+}
+
+func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {
+	t.Helper()
+	for i, row := range m.groupedViewportRows() {
+		if row.rowIdx < 0 || row.rowIdx >= len(m.groupedRows) {
+			continue
+		}
+		job := m.groupedRows[row.rowIdx].job
+		if job != nil && job.ID == jobID {
+			return i + 1
+		}
+	}
+	t.Fatalf("job %d was not visible in grouped viewport rows: %+v", jobID, m.groupedViewportRows())
+	return 0
+}
+
 func TestListTUIFlatViewMarksSelectedRowWhenHostMatesActive(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 101, Host: "cool30", Status: db.StatusRunning, Description: "selected"},
