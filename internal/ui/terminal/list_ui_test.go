@@ -1125,6 +1125,80 @@ func TestListTUIKeyV_TogglesBetweenGroupedAndUngrouped(t *testing.T) {
 	}
 }
 
+func TestListTUIFlatViewMarksSelectedRowWhenHostMatesActive(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 101, Host: "cool30", Status: db.StatusRunning, Description: "selected"},
+		{ID: 102, Host: "cool30", Status: db.StatusQueued, Description: "mate"},
+		{ID: 103, Host: "cool100", Status: db.StatusQueued, Description: "other"},
+	}
+	m := listTUIModel{
+		title:  "Jobs",
+		jobs:   jobs,
+		layout: newJobListLayout(100, jobs, nil, false),
+		cursor: 0,
+		width:  100,
+		height: 12,
+	}
+
+	out := stripANSI(m.View())
+	lines := strings.Split(out, "\n")
+	selectedLine := lineContaining(t, lines, "wj101")
+	mateLine := lineContaining(t, lines, "wj102")
+	otherLine := lineContaining(t, lines, "wj103")
+
+	if !strings.HasPrefix(selectedLine, hostMateMarker) {
+		t.Fatalf("selected row should show host-mate marker when mates are active, got: %q", selectedLine)
+	}
+	if !strings.HasPrefix(mateLine, hostMateMarker) {
+		t.Fatalf("mate row should show host-mate marker, got: %q", mateLine)
+	}
+	if strings.HasPrefix(otherLine, hostMateMarker) {
+		t.Fatalf("unrelated row should not show host-mate marker, got: %q", otherLine)
+	}
+}
+
+func TestListTUIGroupedViewMarksSelectedRowWhenHostMatesActive(t *testing.T) {
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 101, Host: "cool30", Status: db.StatusRunning, Description: "selected"},
+			{ID: 102, Host: "cool30", Status: db.StatusQueued, Description: "mate"},
+			{ID: 103, Host: "cool100", Status: db.StatusQueued, Description: "other"},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	lines := strings.Split(out, "\n")
+	selectedLine := lineContaining(t, lines, "wj101")
+	mateLine := lineContaining(t, lines, "wj102")
+	otherLine := lineContaining(t, lines, "wj103")
+
+	if !strings.HasPrefix(selectedLine, hostMateMarker) {
+		t.Fatalf("selected row should show host-mate marker when mates are active, got: %q", selectedLine)
+	}
+	if !strings.HasPrefix(mateLine, hostMateMarker) {
+		t.Fatalf("mate row should show host-mate marker, got: %q", mateLine)
+	}
+	if strings.HasPrefix(otherLine, hostMateMarker) {
+		t.Fatalf("unrelated row should not show host-mate marker, got: %q", otherLine)
+	}
+}
+
+func lineContaining(t *testing.T, lines []string, needle string) string {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	t.Fatalf("missing line containing %q in:\n%s", needle, strings.Join(lines, "\n"))
+	return ""
+}
+
 func TestListTUIKeyI_RequestsSwitchToSystemWatch(t *testing.T) {
 	m := listTUIModel{groupedByStatus: true}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})

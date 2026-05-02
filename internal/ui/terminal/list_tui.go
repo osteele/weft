@@ -937,7 +937,7 @@ func (m listTUIModel) View() string {
 				continue
 			}
 			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), rowWidth)
-			if matesActive && mateRows[idx] {
+			if matesActive && (idx == m.cursor || mateRows[idx]) {
 				row = applyHostMateMarker(row)
 			}
 			if idx == m.cursor {
@@ -1035,6 +1035,9 @@ func (m listTUIModel) groupedView() string {
 			}
 		}
 		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
+			if matesActive {
+				line = applyHostMateMarker(line)
+			}
 			line = renderSelectedRow(line, m.width)
 		}
 		b.WriteString(line)
