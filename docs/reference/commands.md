@@ -658,6 +658,9 @@ treat specially (`rental`, `inventory`, `benchmark`, `exclusive`,
 `interruptible`, `compute-intensive`, `provider:<name>`) and the legacy
 aliases `cloud`, `on-prem`, `preemptible`, see the
 [Placement guide § Reserved tags](../guides/placement.md#reserved-tags).
+`compute-intensive` also affects rental policy: existing rentals must meet the
+`WEFT_COMPUTE_CPU_CORES` effective-CPU floor, and automatic new rentals need at
+least a 30-minute estimated completion-time advantage over on-prem placement.
 
 ### weft job mark-processed / mark-unprocessed
 

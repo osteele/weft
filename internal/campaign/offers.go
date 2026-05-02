@@ -160,12 +160,18 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		// It is a scheduler-side planning hint, not a hard offer filter.
 	}
 	if group.HasComputeIntensiveJob() {
-		c.MinCPUCoresEffective = intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", 16)
+		c.MinCPUCoresEffective = computeCPUCoresFloor()
 	}
 	if group.HasPreemptibleJob() {
 		c.InstanceType = cloud.InstanceTypeInterruptible
 	}
 	return c
+}
+
+const defaultComputeCPUCores = 16
+
+func computeCPUCoresFloor() int {
+	return intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", defaultComputeCPUCores)
 }
 
 func intFromEnvOrDefault(key string, defaultVal int) int {
@@ -862,6 +868,9 @@ func BuildReuseCandidate(jobs []*db.Job, instances []InstanceCapacity) *Grouping
 			CostPerHour: 0, // already paying for it
 			DLPerf:      inst.DLPerf,
 			Reliability: inst.Reliability,
+			CPUCores:    inst.CPUCores,
+			CPUName:     inst.CPUName,
+			RAMGB:       inst.RAMGB,
 		}
 		groups = append(groups, group)
 		raw = append(raw, GroupRawOffers{

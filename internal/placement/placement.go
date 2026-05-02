@@ -33,6 +33,8 @@ var ErrNoEligibleHost = errors.New("no eligible host found")
 var loadHosts = inventory.LoadHosts
 var collectMetrics = CollectMetrics
 
+const computeIntensiveRentalSpillMargin = 30 * time.Minute
+
 // LoadHostNames returns the names of all inventory hosts.
 func LoadHostNames() ([]string, error) {
 	hosts, err := loadHosts()
@@ -477,7 +479,7 @@ func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPre
 	// Compare on-prem completion time against rental estimate.
 	if result.CompletionEst.Mean > 0 && !db.HasInventoryTag(constraints.Tags) {
 		rentalEst := EstimateRentalCompletion(database, constraints, predict)
-		if rentalEst != nil && rentalEst.Total.Mean > 0 && rentalEst.Total.Mean < result.CompletionEst.Mean {
+		if rentalEst != nil && ShouldSpillToRental(result.CompletionEst, rentalEst.Total, constraints.Tags) {
 			slog.Info("rental faster than on-prem, spilling to rental",
 				"host", result.Host,
 				"onprem_min", fmt.Sprintf("%.0f", result.CompletionEst.Mean.Minutes()),
@@ -489,6 +491,16 @@ func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPre
 		}
 	}
 	return result, nil
+}
+
+func ShouldSpillToRental(onPrem, rental estimate.Estimate, tags []string) bool {
+	if onPrem.Mean <= 0 || rental.Mean <= 0 {
+		return false
+	}
+	if hasComputeIntensiveTag(tags) {
+		return onPrem.Mean-rental.Mean >= computeIntensiveRentalSpillMargin
+	}
+	return rental.Mean < onPrem.Mean
 }
 
 func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics, cfg *config.Config) Score {

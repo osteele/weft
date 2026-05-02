@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -145,6 +147,81 @@ func TestMatchJobToInstance_GraceDeadline(t *testing.T) {
 	got, _ = MatchJobToInstance(job, cap)
 	if !got {
 		t.Error("expected compatible with running instance")
+	}
+}
+
+func TestMatchJobToInstance_ComputeIntensiveCPUFloor(t *testing.T) {
+	t.Setenv("WEFT_COMPUTE_CPU_CORES", "16")
+
+	job := &db.Job{Tags: []string{db.TagComputeIntensive}}
+	tests := []struct {
+		name  string
+		cores int
+		want  bool
+		part  string
+	}{
+		{"meets floor", 16, true, ""},
+		{"below floor", 8, false, "CPU cores insufficient"},
+		{"unknown", 0, false, "CPU cores unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, reason := MatchJobToInstance(job, InstanceCapacity{
+				Instance:   &db.Launch{CPUCores: tt.cores, GPUMemGB: 80},
+				DiskFreeGB: 100,
+			})
+			if got != tt.want {
+				t.Fatalf("MatchJobToInstance = %t, want %t (reason %q)", got, tt.want, reason)
+			}
+			if tt.part != "" && !strings.Contains(reason, tt.part) {
+				t.Fatalf("reason = %q, want containing %q", reason, tt.part)
+			}
+		})
+	}
+}
+
+func TestMatchJobToInstance_ComputeIntensiveCPUFloorEnvOverride(t *testing.T) {
+	t.Setenv("WEFT_COMPUTE_CPU_CORES", "24")
+
+	job := &db.Job{Tags: []string{db.TagComputeIntensive}}
+	got, reason := MatchJobToInstance(job, InstanceCapacity{
+		Instance:   &db.Launch{CPUCores: 16, GPUMemGB: 80},
+		DiskFreeGB: 100,
+	})
+	if got {
+		t.Fatalf("MatchJobToInstance = true, want false below env floor")
+	}
+	if !strings.Contains(reason, "need=24") {
+		t.Fatalf("reason = %q, want env floor", reason)
+	}
+}
+
+func TestReuseSource_PreservesComputeIntensiveTags(t *testing.T) {
+	t.Setenv("WEFT_COMPUTE_CPU_CORES", "16")
+	database := db.SetupTestDB(t)
+
+	_, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "A100",
+		GPUMemGB:        80,
+		ResolvedGPUName: "A100",
+		CPUCores:        8,
+		DiskGB:          100,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	src := &ReuseSource{}
+	candidates, err := src.Collect(database, placement.Constraints{
+		GPUClass: "A100",
+		Tags:     []string{db.TagComputeIntensive},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %d, want 0 below CPU floor", len(candidates))
 	}
 }
 

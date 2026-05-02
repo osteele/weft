@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -113,6 +114,21 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, err
+	}
+	unplaced, prePlaced := placeComputeIntensiveOnPremBeforeRental(database, cfg, unplaced)
+	if len(unplaced) == 0 {
+		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+			Apply:      true,
+			Operation:  "auto_pilot.rebalance",
+			MovingJobs: movingJobs,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &GroupedAutoPilotResult{
+			Placed:     prePlaced,
+			Rebalanced: len(rebalanceResult.Moves),
+		}, nil
 	}
 	r2Client, _ := BuildR2Client(cfg)
 
@@ -238,9 +254,15 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
-	placed := 0
+	placed := prePlaced
 	for _, assignment := range plan.ReuseAssignments {
 		if assignment.Job == nil || assignment.Instance.Instance == nil {
+			continue
+		}
+		if ok, reason := campaign.MatchJobToInstanceWithUV(assignment.Job, assignment.Instance, r2Client); !ok {
+			blockedReasons[assignment.Job.ID] = reason
+			oplog.LogJob("auto_pilot.reuse_skipped", assignment.Job.ID, "",
+				oplog.WithDetailf("instance=%d reason=%s", assignment.Instance.Instance.ID, reason))
 			continue
 		}
 		if err := autoPilotSubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
@@ -398,6 +420,45 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		LaunchedClass:  launchedClassFromResult(database, result.InstanceIDs),
 		BlockedReasons: blockedReasons,
 	}, nil
+}
+
+func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+	if database == nil || len(jobs) == 0 {
+		return jobs, 0
+	}
+	remaining := make([]*db.Job, 0, len(jobs))
+	placed := 0
+	for _, job := range jobs {
+		if job == nil || !job.HasTag(db.TagComputeIntensive) {
+			remaining = append(remaining, job)
+			continue
+		}
+		constraints := placement.ConstraintsFromJob(job)
+		if db.HasRentalTag(constraints.Tags) || constraints.Provider != "" {
+			remaining = append(remaining, job)
+			continue
+		}
+		predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
+		onPrem, err := placement.PlaceOnPrem(database, constraints, predict)
+		if err != nil || onPrem == nil || onPrem.Host == "" {
+			remaining = append(remaining, job)
+			continue
+		}
+		rental := placement.EstimateRentalCompletion(database, constraints, predict)
+		if rental != nil && placement.ShouldSpillToRental(onPrem.CompletionEst, rental.Total, constraints.Tags) {
+			remaining = append(remaining, job)
+			continue
+		}
+		assigned, err := db.AssignJobHost(database, job.ID, onPrem.Host)
+		if err != nil || !assigned {
+			remaining = append(remaining, job)
+			continue
+		}
+		placed++
+		oplog.LogJob("auto_pilot.compute_intensive_onprem", job.ID, onPrem.Host,
+			oplog.WithDetailf("onprem_min=%.0f", onPrem.CompletionEst.Mean.Minutes()))
+	}
+	return remaining, placed
 }
 
 // mergeRelaunchReasonsIntoBlockedReasons populates blockedReasons from a

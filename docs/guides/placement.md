@@ -91,7 +91,7 @@ runner behavior:
 | `processed` | Marks a job as processed; filtered by `--processed` / `--unprocessed` on `weft jobs list`. Set with `weft mark-processed`. |
 | `exclusive` | Requires the host to be idle while the job runs. |
 | `benchmark` | Requires an idle host and enables benchmark protections. Auto-placement skips hosts marked `shared = true`, but an explicit host still runs there. |
-| `compute-intensive` | Declares that the job saturates the GPU regardless of co-tenants. This skips the queue-contention penalty in run-time estimation and adds a placement bonus proportional to free CPU capacity. |
+| `compute-intensive` | Declares that the job saturates the GPU regardless of co-tenants and needs substantial CPU alongside the GPU. This skips the queue-contention penalty in run-time estimation, adds a placement bonus proportional to free CPU capacity, requires rental instances to expose at least `WEFT_COMPUTE_CPU_CORES` effective CPU cores (default `16`), and prefers on-prem placement unless a rental is estimated at least 30 minutes faster. |
 | `rental` | Bind the job to cloud rental placement. Alias: `cloud`. |
 | `inventory` | Bind the job to on-prem inventory placement. Alias: `on-prem`. |
 | `interruptible` | Mark the job as safe for interruptible / spot cloud offers. Alias: `preemptible`. |
@@ -100,6 +100,11 @@ runner behavior:
 Benchmark jobs normally avoid shared inventory hosts. Adding `inventory`
 keeps the job on inventory hosts and allows benchmark placement on hosts marked
 `shared = true`.
+
+Compute-intensive jobs can still run on rentals, but both new offers and
+already-running instances must meet the CPU floor. Existing rental instances
+with unknown CPU metadata are skipped for compute-intensive reuse and rebalance.
+Set `WEFT_COMPUTE_CPU_CORES` to raise or lower the default 16-core floor.
 
 ## Reading Score Reasons
 

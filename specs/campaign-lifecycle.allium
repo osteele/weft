@@ -1095,6 +1095,15 @@ rule AutoPilotPass {
     let planner_made_decisions = plan.launch_job_ids.any()
                                  or plan.blocked_reasons.any()
 
+    for job in unplaced_jobs where job.tags contains "compute-intensive"
+                          and not job.tags contains "rental"
+                          and job.provider = null:
+        if OnPremPlacement(job) != null
+           and not RentalEstimate(job).completion_time
+                   <= OnPremPlacement(job).completion_time - 30.minutes:
+            ensures: AssignJobHost(job, OnPremPlacement(job).host)
+            ensures: job.id not in plan.launch_job_ids
+
     ensures:
         for job in unplaced_jobs where job.id in plan.launch_job_ids:
             LaunchInstance(job.campaign, [job], job.gpu_spec, job.launch_options)
@@ -1112,9 +1121,31 @@ rule AutoPilotPass {
         -- When the run-rate soft target would be exceeded, autopilot now keeps a
         -- subset of launch groups that fit remaining headroom instead of blocking
         -- the entire launch plan.
+        -- Compute-intensive jobs prefer on-prem placement unless a rental
+        -- estimate is at least 30 minutes faster. Explicit rental/provider
+        -- jobs still skip this on-prem preference.
         -- A job appearing in blocked_reasons is surfaced to the user
         -- (e.g. "waiting for donor", "no matching offers") and retried
         -- on the next autopilot tick, not this one.
+}
+
+rule ExistingInstanceComputeCPUFloor {
+    when: ReuseExistingInstance(job, instance)
+       or QueueRebalanceTarget(job, instance)
+       or AutoPilotReuseAssignment(job, instance)
+    requires: job.tags contains "compute-intensive"
+
+    let floor = EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
+
+    requires: instance.cpu_cores_effective is known
+    requires: instance.cpu_cores_effective >= floor
+
+    @guidance
+        -- This mirrors cloud offer search's cpu_cores_effective floor.
+        -- Existing rentals with unknown CPU metadata are not eligible for
+        -- compute-intensive reuse or rebalance destinations.
+        -- Implementation: internal/campaign/reuse.go MatchJobToInstance,
+        -- plus the direct reuse guard in internal/orchestration/autopilot.go.
 }
 
 -- ==========================================================================
@@ -1165,6 +1196,8 @@ rule QueueRebalanceJob {
       let dst = BestRebalanceTarget(job, plan, profile, exclude=src)
       requires: dst is not None
       requires: InstanceSatisfiesJob(dst, job)
+      requires: job.tags contains "compute-intensive" implies
+                dst.cpu_cores_effective >= EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
       requires: ImagesCompatible(JobImage(job), dst.image)
       requires: dst.cost_per_hour <= config.rebalance_cost_ceiling
                                      * src.cost_per_hour

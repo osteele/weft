@@ -23,6 +23,7 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 	job := &db.Job{
 		GPUClass: constraints.GPUClass,
 		Inputs:   constraints.Inputs,
+		Tags:     constraints.Tags,
 	}
 	if constraints.GPUMemGB > 0 {
 		v := constraints.GPUMemGB

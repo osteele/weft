@@ -22,6 +22,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		bootstrap_deadline_unix, agent_ready_at_unix,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		inet_down_mbps, inet_up_mbps, cuda_version,
+		cpu_cores_effective, cpu_name, ram_gb,
 		provider_instance_id, data_center,
 		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, replaced_instance_id,
 		grace_period_seconds, grace_started_at, grace_deadline,
@@ -142,6 +143,9 @@ type Launch struct {
 	InetDownMbps     float64
 	InetUpMbps       float64
 	CUDAVersion      float64
+	CPUCores         int
+	CPUName          string
+	RAMGB            int
 
 	// Provider machine identifier (for reliability tracking)
 	MachineID string
@@ -432,13 +436,15 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			 max_spend_cents, max_time_seconds, created_at,
 			 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 			 inet_down_mbps, inet_up_mbps, cuda_version,
+			 cpu_cores_effective, cpu_name, ram_gb,
 			 disk_gb, provisioned_inputs, machine_id, docker_image,
 			 instance_type, max_bid_price_cents, on_demand_ref_cents)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 			c.MaxSpendCents, c.MaxTimeSeconds, now,
 			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
 			c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
+			c.CPUCores, c.CPUName, c.RAMGB,
 			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
 			instanceType, maxBidPriceCents, onDemandRefCents,
 		)
@@ -729,7 +735,9 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 	_, err := database.Exec(
 		`UPDATE launches
 		 SET resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
-		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?, disk_gb = ?, gpu_mem_gb = ?
+		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?,
+		     cpu_cores_effective = ?, cpu_name = ?, ram_gb = ?,
+		     disk_gb = ?, gpu_mem_gb = ?
 		 WHERE id = ?`,
 		offer.GPUName,
 		int(offer.CostPerHour*100),
@@ -739,8 +747,33 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 		offer.DownloadBandwidth,
 		offer.UploadBandwidth,
 		offer.CUDAVersion,
+		offer.CPUCores,
+		offer.CPUName,
+		offer.RAMGB,
 		int(offer.DiskSpaceGB),
 		int(math.Round(offer.GPUMemGB)),
+		id,
+	)
+	return err
+}
+
+// UpdateLaunchInstanceMetadata refreshes provider readback fields that are not
+// always present in the offer row.
+func UpdateLaunchInstanceMetadata(database *sql.DB, id int64, inst *cloud.Instance) error {
+	if inst == nil {
+		return nil
+	}
+	_, err := database.Exec(
+		`UPDATE launches
+		 SET cpu_cores_effective = CASE WHEN ? > 0 THEN ? ELSE cpu_cores_effective END,
+		     cpu_name = CASE WHEN ? != '' THEN ? ELSE cpu_name END,
+		     ram_gb = CASE WHEN ? > 0 THEN ? ELSE ram_gb END,
+		     disk_gb = CASE WHEN ? > 0 THEN CAST(? AS INTEGER) ELSE disk_gb END
+		 WHERE id = ?`,
+		inst.CPUCores, inst.CPUCores,
+		inst.CPUName, inst.CPUName,
+		inst.RAMGB, inst.RAMGB,
+		inst.DiskGB, inst.DiskGB,
 		id,
 	)
 	return err
@@ -1435,6 +1468,8 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var resolvedGPUName sql.NullString
 	var costPerHourCents, numGPUs sql.NullInt64
 	var dlPerf, reliability, inetDown, inetUp, cudaVersion sql.NullFloat64
+	var cpuCores, ramGB sql.NullInt64
+	var cpuName sql.NullString
 	var providerInstanceID, dataCenter sql.NullString
 	var instanceRole sql.NullString
 	var donorInstanceID sql.NullInt64
@@ -1465,6 +1500,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&bootstrapDeadline, &agentReadyAt,
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
 		&inetDown, &inetUp, &cudaVersion,
+		&cpuCores, &cpuName, &ramGB,
 		&providerInstanceID, &dataCenter,
 		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs, &replacedInstanceID,
 		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
@@ -1541,6 +1577,15 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if cudaVersion.Valid {
 		c.CUDAVersion = cudaVersion.Float64
+	}
+	if cpuCores.Valid {
+		c.CPUCores = int(cpuCores.Int64)
+	}
+	if cpuName.Valid {
+		c.CPUName = cpuName.String
+	}
+	if ramGB.Valid {
+		c.RAMGB = int(ramGB.Int64)
 	}
 	if providerInstanceID.Valid {
 		c.ProviderInstanceID = providerInstanceID.String

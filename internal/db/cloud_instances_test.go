@@ -446,6 +446,35 @@ func TestCreateLaunch_RentalTypeMetadata_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreateLaunch_CPUMetadataRoundTrip(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+		CPUCores: 24,
+		CPUName:  "AMD EPYC 7763",
+		RAMGB:    128,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	got, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.CPUCores != 24 {
+		t.Fatalf("CPUCores = %d, want 24", got.CPUCores)
+	}
+	if got.CPUName != "AMD EPYC 7763" {
+		t.Fatalf("CPUName = %q, want AMD EPYC 7763", got.CPUName)
+	}
+	if got.RAMGB != 128 {
+		t.Fatalf("RAMGB = %d, want 128", got.RAMGB)
+	}
+}
+
 func TestGetLaunchJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T) {
 	database := setupTestDB(t)
 

@@ -135,6 +135,21 @@ var versionedMigrations = []migration{
 		},
 	},
 	{
+		Description: "add launch CPU metadata",
+		Apply: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE launches ADD COLUMN cpu_cores_effective INTEGER`,
+				`ALTER TABLE launches ADD COLUMN cpu_name TEXT`,
+				`ALTER TABLE launches ADD COLUMN ram_gb INTEGER`,
+			} {
+				if err := addColumnIfMissing(db, stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
+	{
 		Description: "add cloud_instances view aliasing launches",
 		Apply: func(db *sql.DB) error {
 			// `launches` is the storage table; `cloud_instances` is the

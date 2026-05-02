@@ -62,6 +62,79 @@ func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T)
 	}
 }
 
+func TestRunGroupedAutoPilotPass_SkipsComputeIntensiveReuseBelowCPUFloor(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "cpu-heavy", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{db.TagComputeIntensive}); err != nil {
+		t.Fatalf("SetJobTags: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUClass:         "A100",
+		GPUMemGB:         80,
+		ResolvedGPUName:  "A100",
+		CPUCores:         8,
+		CostPerHourCents: 100,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			ReuseAssignments: []campaign.ReuseAssignment{{
+				Job: job,
+				Instance: campaign.InstanceCapacity{
+					Instance:   inst,
+					DiskFreeGB: 100,
+				},
+			}},
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+	submitCalls := 0
+	autoPilotSubmitJobsToInstance = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ int64, _ []*db.Job) error {
+		submitCalls++
+		return nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if submitCalls != 0 {
+		t.Fatalf("submit calls = %d, want 0", submitCalls)
+	}
+	if result.BlockedReasons[jobID] == "" || !strings.Contains(result.BlockedReasons[jobID], "CPU cores insufficient") {
+		t.Fatalf("blocked reason = %q, want CPU floor reason", result.BlockedReasons[jobID])
+	}
+}
+
 func TestRunGroupedAutoPilotPass_FallbackRelaunchesWhenPlannerReturnsNoDecisions(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -158,6 +158,16 @@ func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
 
+	if job.HasTag(db.TagComputeIntensive) {
+		floor := computeCPUCoresFloor()
+		if inst.CPUCores <= 0 {
+			return false, "CPU cores unknown for compute-intensive"
+		}
+		if inst.CPUCores < floor {
+			return false, fmt.Sprintf("CPU cores insufficient for compute-intensive: need=%d instance=%d", floor, inst.CPUCores)
+		}
+	}
+
 	// GPU class check (normalized aliases + Vast class mapping semantics)
 	if !gpuClassCompatible(job.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
 		return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", job.GPUClass, inst.GPUClass)

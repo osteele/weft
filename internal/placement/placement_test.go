@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	dbpkg "github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/transferbw"
 	_ "modernc.org/sqlite"
@@ -1660,6 +1661,22 @@ func TestComputeIntensiveTag_ReasonIncluded(t *testing.T) {
 	}
 	if !hasReason {
 		t.Errorf("expected compute-intensive reason, got: %v", alpha.Reasons)
+	}
+}
+
+func TestShouldSpillToRental_ComputeIntensiveRequiresThirtyMinuteMargin(t *testing.T) {
+	onPrem := estimate.Constant(60 * time.Minute)
+	nearRental := estimate.Constant(35 * time.Minute)
+	farRental := estimate.Constant(30 * time.Minute)
+
+	if ShouldSpillToRental(onPrem, nearRental, []string{dbpkg.TagComputeIntensive}) {
+		t.Fatalf("compute-intensive should not spill for a 25m rental advantage")
+	}
+	if !ShouldSpillToRental(onPrem, farRental, []string{dbpkg.TagComputeIntensive}) {
+		t.Fatalf("compute-intensive should spill for a 30m rental advantage")
+	}
+	if !ShouldSpillToRental(onPrem, nearRental, nil) {
+		t.Fatalf("normal jobs should spill when rental is faster")
 	}
 }
 

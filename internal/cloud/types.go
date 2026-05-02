@@ -66,6 +66,9 @@ type Offer struct {
 	DataCenter        string  // e.g., "US-East"
 	CUDAVersion       float64 // max supported CUDA version
 	DiskSpaceGB       float64 // GB available
+	CPUCores          int     // effective CPU cores granted
+	CPUName           string  // CPU model name
+	RAMGB             int     // total system RAM in GB
 	DownloadBandwidth float64 // Mbps
 	UploadBandwidth   float64 // Mbps
 	Verified          bool

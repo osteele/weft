@@ -412,6 +412,11 @@ rule PlaceWithFallback {
         -- Jobs explicitly tagged `inventory` skip this rule and stay
         -- on-prem regardless of estimate. Jobs tagged `rental` skip
         -- on-prem entirely.
+        -- For jobs tagged `compute-intensive`, should_spill_to_rental is
+        -- true only when rental completion is at least 30 minutes faster
+        -- than on-prem completion. Existing rental targets also need
+        -- cpu_cores_effective >= WEFT_COMPUTE_CPU_CORES (default 16);
+        -- unknown CPU metadata is treated as ineligible.
 }
 
 -- =========================================================================

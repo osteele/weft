@@ -295,7 +295,7 @@ const jobTableColumns = `id, working_dir, command, description, generated_descri
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
-const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, docker_image, provider_running_at, instance_type, max_bid_price_cents, on_demand_ref_cents`
+const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, cpu_cores_effective, cpu_name, ram_gb, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, docker_image, provider_running_at, instance_type, max_bid_price_cents, on_demand_ref_cents`
 
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
@@ -451,6 +451,9 @@ func createLaunchesTableSQL(table string, ifNotExists bool) string {
 		inet_down_mbps REAL,
 		inet_up_mbps REAL,
 		cuda_version REAL,
+		cpu_cores_effective INTEGER,
+		cpu_name TEXT,
+		ram_gb INTEGER,
 		provider_instance_id TEXT,
 		data_center TEXT,
 		instance_role TEXT DEFAULT 'worker',
@@ -1988,6 +1991,15 @@ func initSchema(db *sql.DB) error {
 	// Migration: add docker_image to launches (for correlating provider loading duration against image type).
 	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN docker_image TEXT`); err != nil {
 		return err
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE launches ADD COLUMN cpu_cores_effective INTEGER`,
+		`ALTER TABLE launches ADD COLUMN cpu_name TEXT`,
+		`ALTER TABLE launches ADD COLUMN ram_gb INTEGER`,
+	} {
+		if err := addColumnIfMissing(db, stmt); err != nil {
+			return err
+		}
 	}
 
 	// Migration: clean up hostless "queued" attempts and set requested_status

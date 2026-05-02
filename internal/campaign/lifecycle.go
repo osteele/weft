@@ -1318,6 +1318,9 @@ func LaunchInstance(
 		InetDownMbps:      offer.DownloadBandwidth,
 		InetUpMbps:        offer.UploadBandwidth,
 		CUDAVersion:       offer.CUDAVersion,
+		CPUCores:          offer.CPUCores,
+		CPUName:           offer.CPUName,
+		RAMGB:             offer.RAMGB,
 		DiskGB:            int(offer.DiskSpaceGB),
 		ProvisionedInputs: group.AllInputs(),
 		MachineID:         offer.MachineID,
@@ -1592,6 +1595,9 @@ func LaunchInstance(
 			),
 		)
 	} else {
+		if err := db.UpdateLaunchInstanceMetadata(database, instanceID, readback); err != nil {
+			slog.Debug("record provider instance metadata failed", "launch_id", instanceID, "error", err)
+		}
 		oplog.Log(oplog.OpLaunchLaunchReadback, oplog.WithDetailf(
 			"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f status=%s ssh_host=%s ssh_port=%d",
 			instanceID,

@@ -171,6 +171,13 @@ rebalance_score_epsilon = 0.01       # require 1% relative improvement
 savings, but still considers queue drain time. `weft rebalance --strategy ...`
 uses the same choices for manual dry-runs or `--yes` applies.
 
+Jobs tagged `compute-intensive` are conservative about cloud reuse and new
+rentals. Autopilot only routes them to an existing rental when the instance has
+at least `WEFT_COMPUTE_CPU_CORES` effective CPU cores, default `16`; unknown
+CPU metadata is treated as not eligible. For new rentals, autopilot prefers an
+eligible on-prem host unless the rental estimate completes at least 30 minutes
+sooner.
+
 ## Concurrency
 
 The autopilot enforces a single-runner-at-a-time rule via the

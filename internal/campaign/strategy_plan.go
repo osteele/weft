@@ -1689,6 +1689,12 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if group.GPUMemGB > 0 && inst.GPUMemGB > 0 && group.GPUMemGB > inst.GPUMemGB {
 		return false
 	}
+	if group.HasComputeIntensiveJob() {
+		floor := computeCPUCoresFloor()
+		if inst.CPUCores <= 0 || inst.CPUCores < floor {
+			return false
+		}
+	}
 	return true
 }
 
@@ -2021,6 +2027,9 @@ func reuseSyntheticOffer(cap InstanceCapacity) cloud.Offer {
 		CostPerHour:       costPerHour,
 		DLPerf:            inst.DLPerf,
 		Reliability:       inst.Reliability,
+		CPUCores:          inst.CPUCores,
+		CPUName:           inst.CPUName,
+		RAMGB:             inst.RAMGB,
 		DownloadBandwidth: inst.InetDownMbps,
 		UploadBandwidth:   inst.InetUpMbps,
 		DataCenter:        inst.DataCenter,
