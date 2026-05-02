@@ -312,19 +312,46 @@ func relaunchRunawayBlockedReasonsWithFloor(database *sql.DB, floorByJob map[int
 			minFloor = floor
 		}
 	}
-	rows, err := database.Query(`SELECT occurred_at, COALESCE(detail, '')
+	rows, err := database.Query(`SELECT occurred_at, event_kind, COALESCE(campaign_id, 0), COALESCE(detail, '')
 		FROM lifecycle_events
-		WHERE event_kind = ?
+		WHERE event_kind IN (?, ?)
 		  AND (? = 0 OR occurred_at >= ?)
-		ORDER BY occurred_at DESC, id DESC`, db.EventRelaunchRunawayBlocked, minFloor, minFloor)
+		ORDER BY occurred_at DESC, id DESC`, db.EventRelaunchRunawayBlocked, db.EventRelaunchRunawayResumed, minFloor, minFloor)
 	if err != nil {
 		return reasons
 	}
 	defer rows.Close()
+	type runawayScopeKey struct {
+		campaignID int64
+		project    string
+	}
+	latestResumeByScope := map[runawayScopeKey]int64{}
 	for rows.Next() {
-		var occurredAt int64
-		var detail string
-		if err := rows.Scan(&occurredAt, &detail); err != nil {
+		var (
+			occurredAt int64
+			eventKind  string
+			campaignID int64
+			detail     string
+		)
+		if err := rows.Scan(&occurredAt, &eventKind, &campaignID, &detail); err != nil {
+			continue
+		}
+		scope := runawayScopeKey{
+			campaignID: campaignID,
+			project:    runawayProjectLabelFromDetail(detail),
+		}
+		if eventKind == db.EventRelaunchRunawayResumed {
+			if occurredAt > latestResumeByScope[scope] {
+				latestResumeByScope[scope] = occurredAt
+			}
+			continue
+		}
+		globalResumeAt := latestResumeByScope[runawayScopeKey{project: "<all>"}]
+		scopeResumeAt := latestResumeByScope[scope]
+		if globalResumeAt > scopeResumeAt {
+			scopeResumeAt = globalResumeAt
+		}
+		if occurredAt <= scopeResumeAt {
 			continue
 		}
 		reason := summarizeRunawayBlockedReason(detail)
@@ -342,6 +369,24 @@ func relaunchRunawayBlockedReasonsWithFloor(database *sql.DB, floorByJob map[int
 		}
 	}
 	return reasons
+}
+
+func runawayProjectLabelFromDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	const key = "project="
+	start := strings.Index(detail, key)
+	if start < 0 {
+		return "<all>"
+	}
+	value := detail[start+len(key):]
+	if end := strings.Index(value, ";"); end >= 0 {
+		value = value[:end]
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "<all>"
+	}
+	return value
 }
 
 func summarizeRunawayBlockedReason(detail string) string {
