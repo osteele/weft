@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	toml "github.com/pelletier/go-toml"
 	"gopkg.in/yaml.v3"
@@ -40,11 +41,19 @@ type ProjectAutoPilotConfig struct {
 	// RebalanceCostCeiling caps destination/source cost ratio for re-balance.
 	// Zero or negative uses default 1.10.
 	RebalanceCostCeiling float64 `yaml:"rebalance_cost_ceiling" toml:"rebalance_cost_ceiling"`
+	// RebalanceStrategy selects the score profile for re-balance.
+	// Valid values: cheap, balanced, fast. Empty defaults to fast.
+	RebalanceStrategy string `yaml:"rebalance_strategy" toml:"rebalance_strategy"`
+	// RebalanceScoreEpsilon is the relative improvement threshold for moves.
+	// Zero or negative uses default 0.01.
+	RebalanceScoreEpsilon float64 `yaml:"rebalance_score_epsilon" toml:"rebalance_score_epsilon"`
 }
 
 const (
 	defaultRebalanceEnabled     = true
 	defaultRebalanceCostCeiling = 1.10
+	defaultRebalanceStrategy    = "fast"
+	defaultRebalanceEpsilon     = 0.01
 )
 
 // ProjectOutputsConfig holds output collection settings for convention-based output discovery.
@@ -202,6 +211,29 @@ func ProjectAutoPilotRebalanceCostCeiling(localDir string) float64 {
 		}
 	}
 	return defaultRebalanceCostCeiling
+}
+
+// ProjectAutoPilotRebalanceStrategy returns the configured re-balance strategy
+// for the project at localDir. Defaults to "fast" when unset or invalid.
+func ProjectAutoPilotRebalanceStrategy(localDir string) string {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		switch strategy := strings.ToLower(strings.TrimSpace(cfg.AutoPilot.RebalanceStrategy)); strategy {
+		case "cheap", "balanced", "fast":
+			return strategy
+		}
+	}
+	return defaultRebalanceStrategy
+}
+
+// ProjectAutoPilotRebalanceScoreEpsilon returns the relative improvement
+// threshold for accepting a queue re-balance move. Defaults to 0.01.
+func ProjectAutoPilotRebalanceScoreEpsilon(localDir string) float64 {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		if v := cfg.AutoPilot.RebalanceScoreEpsilon; v > 0 {
+			return v
+		}
+	}
+	return defaultRebalanceEpsilon
 }
 
 // loadProjectConfigOrWarn loads the project config, logging a warning on error.

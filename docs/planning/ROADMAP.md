@@ -159,6 +159,43 @@ comparison dance, matching the Move/Placement/Termination intent shape.
 Worth revisiting when the view's complexity becomes a concrete pain
 point. Mostly clarity, not behavior change.
 
+## Rebalance: variance-aware and regret-minimizing objectives
+
+The initial rebalance redesign (see `specs/campaign-lifecycle.allium`
+QueueRebalanceJob) accepts moves that improve a scalarized
+`Cost·$ + Time·hr` score using **mean** runtime predictions from
+`predictor.ResolvePredictBatch`. Two follow-ups are deferred behind an
+empirical trigger.
+
+**Promotion criterion.** V1 logs the lower- and upper-bound Δscore
+alongside the mean Δscore for every accepted/rejected move (cheap —
+three score evaluations, not 100). If the bounds straddle zero on a
+material fraction of decisions, mean-only is making coin-flip calls and
+the variance-aware version moves up. If they don't, these stay
+deferred indefinitely.
+
+- **Monte Carlo over predictor variance.** The predictor returns
+  Mean/Lower/Upper per job. Sample N ≈ 100 runtime draws from the
+  implied distribution (PERT or triangular) and accept moves whose
+  *expected* score improvement clears the threshold. ~10× v1's per-pass
+  compute (still single-digit ms). Same code path — replace `Mean`
+  with sampled values. Needs deterministic seeding (job IDs or pass
+  count) so consecutive `weft rebalance` runs agree, and a fallback for
+  jobs without a predictor result (`DefaultJobDuration`'s 4× spread
+  produces noise, not signal).
+
+- **Expected-regret minimization.** Strict regret-minimizing objective:
+  for each candidate move sample joint runtimes, compute makespan with
+  and without the move, and take the mean of
+  `max(0, makespan_before − makespan_after)` minus the symmetric loss.
+  Accept only when expected improvement is positive. Conceptually
+  cleaner; harder to debug ("why didn't this move?") and shares MC
+  infrastructure with the variance-aware version. Worth doing only if
+  MC-mean rebalance proves systematically wrong.
+
+True online regret minimization (Thompson sampling, posterior updates
+from realized outcomes) is a larger build-out and not on this list.
+
 ## InstanceAcceptsJobs unified predicate
 
 `instanceAcceptsReuse` (`internal/campaign/reuse.go`) ANDs three signals:

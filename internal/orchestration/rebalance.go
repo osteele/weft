@@ -9,12 +9,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/workdir"
 )
@@ -23,8 +26,15 @@ const (
 	defaultRebalanceCostCeiling = 1.10
 )
 
+var estimateRebalanceDurationsDetailed = estimate.EstimateJobDurationsDetailed
+
 type QueueRebalanceOptions struct {
 	Apply bool
+	// Strategy selects the score profile: cheap, balanced, or fast.
+	// Empty uses the first enabled candidate project's config, then "fast".
+	Strategy string
+	// ScoreEpsilon overrides the relative score improvement threshold when > 0.
+	ScoreEpsilon float64
 	// CostCeilingOverride applies to all candidates when > 0.
 	CostCeilingOverride float64
 	// Restrict source/destination instances when non-empty.
@@ -46,6 +56,10 @@ type QueueRebalanceMove struct {
 	FromInstanceID int64
 	ToInstanceID   int64
 	CostRatio      float64
+	MeanDelta      float64
+	LowerDelta     float64
+	UpperDelta     float64
+	ProfileID      string
 	Reason         string
 }
 
@@ -54,19 +68,36 @@ type QueueRebalanceResult struct {
 }
 
 type rebalanceInstanceState struct {
-	launch    *db.Launch
-	capacity  campaign.InstanceCapacity
-	running   int
-	queued    []*db.Job
-	queuedIdx map[int64]int
+	launch      *db.Launch
+	capacity    campaign.InstanceCapacity
+	running     int
+	runningJobs []*db.Job
+	queued      []*db.Job
+	queuedIdx   map[int64]int
 }
 
 type rebalanceJobPolicy struct {
 	enabled     bool
 	costCeiling float64
+	strategy    string
+	epsilon     float64
 	localDir    string
 	image       string
 }
+
+type rebalancePlan struct {
+	instances map[int64]*rebalanceInstanceState
+}
+
+type runtimeBook map[int64]estimate.DurationPrediction
+
+type durationPoint int
+
+const (
+	durationPointMean durationPoint = iota
+	durationPointLower
+	durationPointUpper
+)
 
 func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, opts QueueRebalanceOptions) (QueueRebalanceResult, error) {
 	if database == nil {
@@ -79,6 +110,7 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 	if len(instanceState) == 0 {
 		return QueueRebalanceResult{}, nil
 	}
+	plan := &rebalancePlan{instances: instanceState}
 
 	candidates, err := listRebalanceCandidates(database, opts.JobScope)
 	if err != nil {
@@ -115,20 +147,30 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 	})
 
 	policies := make(map[int64]rebalanceJobPolicy, len(candidates))
+	selectedStrategy := strings.TrimSpace(opts.Strategy)
+	scoreEpsilon := opts.ScoreEpsilon
 	for _, job := range candidates {
 		if job == nil {
 			continue
 		}
-		policies[job.ID] = resolveRebalancePolicy(job, opts.CostCeilingOverride)
-	}
-
-	jobLocation := make(map[int64]int64, len(candidates))
-	for _, job := range candidates {
-		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-			continue
+		policy := resolveRebalancePolicy(job, opts.CostCeilingOverride)
+		policies[job.ID] = policy
+		if selectedStrategy == "" && policy.enabled {
+			selectedStrategy = policy.strategy
 		}
-		jobLocation[job.ID] = *job.LaunchID
+		if scoreEpsilon <= 0 && policy.enabled {
+			scoreEpsilon = policy.epsilon
+		}
 	}
+	if selectedStrategy == "" {
+		selectedStrategy = "fast"
+	}
+	if scoreEpsilon <= 0 {
+		scoreEpsilon = 0.01
+	}
+	profile := bidding.ScoreProfileForRebalanceStrategy(selectedStrategy)
+	runtimes := loadRuntimePredictions(database, plan.allJobs())
+	baseMean, baseLower, baseUpper := plan.score(profile, runtimes)
 
 	var r2Client *r2.Client
 	if opts.Apply {
@@ -159,12 +201,11 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		if status != db.StatusQueued && status != db.StatusPendingPlacement {
 			continue
 		}
-		srcID, ok := jobLocation[job.ID]
+		srcState, srcID, ok := plan.instanceForJob(job.ID)
 		if !ok || srcID <= 0 {
 			continue
 		}
-		srcState, ok := instanceState[srcID]
-		if !ok || srcState == nil {
+		if srcState == nil {
 			continue
 		}
 		if len(opts.InstanceScope) > 0 {
@@ -172,12 +213,7 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 				continue
 			}
 		}
-		srcIdx, found := srcState.queuedIdx[job.ID]
-		if !found || srcIdx < 0 {
-			continue
-		}
-		// Source has an idle slot for this job now; no move needed.
-		if sourceHasIdleSlotForJob(srcState, srcIdx) {
+		if _, found := srcState.queuedIdx[job.ID]; !found {
 			continue
 		}
 
@@ -185,18 +221,28 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		if !policy.enabled {
 			continue
 		}
-		bestDst, ratio, ok := pickBestRebalanceDestination(job, policy, srcID, instanceState, opts.InstanceScope)
+		bestDst, ratio, bestMean, bestLower, bestUpper, ok := pickBestRebalanceDestination(
+			job, policy, srcID, plan, profile, runtimes, baseMean, scoreEpsilon, opts.InstanceScope,
+		)
 		if !ok || bestDst == nil {
 			continue
 		}
+		meanDelta := bestMean - baseMean
+		lowerDelta := bestLower - baseLower
+		upperDelta := bestUpper - baseUpper
 
 		move := QueueRebalanceMove{
 			JobID:          job.ID,
 			FromInstanceID: srcID,
 			ToInstanceID:   bestDst.launch.ID,
 			CostRatio:      ratio,
-			Reason:         describeRebalanceReason(srcState.launch, bestDst.launch, ratio),
+			MeanDelta:      meanDelta,
+			LowerDelta:     lowerDelta,
+			UpperDelta:     upperDelta,
+			ProfileID:      profile.ID,
+			Reason:         describeRebalanceReason(srcState.launch, bestDst.launch, ratio, meanDelta, profile.ID),
 		}
+		logRebalanceDecision(move)
 
 		if opts.Apply {
 			if err := applyRebalanceMove(ctx, database, r2Client, move); err != nil {
@@ -207,16 +253,22 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 			if op == "" {
 				op = "rebalance"
 			}
-			oplog.Log(op, oplog.WithDetailf("moved=1 src=%s dst=%s ratio=%.2f",
+			oplog.Log(op, oplog.WithDetailf(
+				"moved=1 src=%s dst=%s ratio=%.2f profile_id=%s mean_delta=%.6f lower_delta=%.6f upper_delta=%.6f",
 				ids.FormatInstanceID(move.FromInstanceID),
 				ids.FormatInstanceID(move.ToInstanceID),
-				move.CostRatio))
+				move.CostRatio,
+				move.ProfileID,
+				move.MeanDelta,
+				move.LowerDelta,
+				move.UpperDelta,
+			))
 		}
 
 		result.Moves = append(result.Moves, move)
 		alreadyMoved[job.ID] = struct{}{}
-		rebalanceStateAfterMove(srcState, bestDst, job.ID)
-		jobLocation[job.ID] = move.ToInstanceID
+		plan = plan.withMove(job, srcID, move.ToInstanceID)
+		baseMean, baseLower, baseUpper = bestMean, bestLower, bestUpper
 	}
 
 	if opts.Apply && len(result.Moves) > 0 {
@@ -249,18 +301,22 @@ func buildRebalanceInstanceState(database *sql.DB) (map[int64]*rebalanceInstance
 			continue
 		}
 		state := &rebalanceInstanceState{
-			launch:    launch,
-			capacity:  cap,
-			running:   running,
-			queued:    make([]*db.Job, 0),
-			queuedIdx: map[int64]int{},
+			launch:      launch,
+			capacity:    cap,
+			running:     running,
+			runningJobs: make([]*db.Job, 0, running),
+			queued:      make([]*db.Job, 0),
+			queuedIdx:   map[int64]int{},
 		}
 		for _, job := range jobs {
 			if job == nil {
 				continue
 			}
 			status := job.EffectiveStatus()
-			if status == db.StatusQueued || status == db.StatusPendingPlacement {
+			switch status {
+			case db.StatusRunning, db.StatusStarting:
+				state.runningJobs = append(state.runningJobs, job)
+			case db.StatusQueued, db.StatusPendingPlacement:
 				state.queued = append(state.queued, job)
 			}
 		}
@@ -324,28 +380,6 @@ func queuedOrderKey(job *db.Job) int64 {
 	return job.ID
 }
 
-func sourceHasIdleSlotForJob(src *rebalanceInstanceState, srcQueueIndex int) bool {
-	if src == nil {
-		return false
-	}
-	slots := instanceSlots(src.launch)
-	if slots <= 0 {
-		return false
-	}
-	return src.running+srcQueueIndex < slots
-}
-
-func destinationHasIdleSlot(dst *rebalanceInstanceState) bool {
-	if dst == nil {
-		return false
-	}
-	slots := instanceSlots(dst.launch)
-	if slots <= 0 {
-		return false
-	}
-	return dst.running+len(dst.queued) < slots
-}
-
 func instanceSlots(launch *db.Launch) int {
 	if launch == nil || launch.NumGPUs <= 0 {
 		return 1
@@ -353,28 +387,285 @@ func instanceSlots(launch *db.Launch) int {
 	return launch.NumGPUs
 }
 
+func (p *rebalancePlan) allJobs() []*db.Job {
+	if p == nil {
+		return nil
+	}
+	seen := map[int64]struct{}{}
+	out := make([]*db.Job, 0)
+	for _, state := range p.instances {
+		if state == nil {
+			continue
+		}
+		for _, job := range state.runningJobs {
+			if job == nil {
+				continue
+			}
+			if _, ok := seen[job.ID]; ok {
+				continue
+			}
+			seen[job.ID] = struct{}{}
+			out = append(out, job)
+		}
+		for _, job := range state.queued {
+			if job == nil {
+				continue
+			}
+			if _, ok := seen[job.ID]; ok {
+				continue
+			}
+			seen[job.ID] = struct{}{}
+			out = append(out, job)
+		}
+	}
+	return out
+}
+
+func (p *rebalancePlan) instanceForJob(jobID int64) (*rebalanceInstanceState, int64, bool) {
+	if p == nil {
+		return nil, 0, false
+	}
+	for id, state := range p.instances {
+		if state == nil {
+			continue
+		}
+		if _, ok := state.queuedIdx[jobID]; ok {
+			return state, id, true
+		}
+	}
+	return nil, 0, false
+}
+
+func (p *rebalancePlan) withMove(job *db.Job, srcID, dstID int64) *rebalancePlan {
+	next := p.clone()
+	if next == nil {
+		return &rebalancePlan{instances: map[int64]*rebalanceInstanceState{}}
+	}
+	if src := next.instances[srcID]; src != nil {
+		src.removeQueuedJob(job.ID)
+	}
+	if dst := next.instances[dstID]; dst != nil {
+		dst.appendQueuedJob(job)
+	}
+	return next
+}
+
+func (p *rebalancePlan) clone() *rebalancePlan {
+	if p == nil {
+		return nil
+	}
+	out := &rebalancePlan{instances: make(map[int64]*rebalanceInstanceState, len(p.instances))}
+	for id, state := range p.instances {
+		out.instances[id] = state.clone()
+	}
+	return out
+}
+
+func (s *rebalanceInstanceState) clone() *rebalanceInstanceState {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	out.runningJobs = append([]*db.Job(nil), s.runningJobs...)
+	out.queued = append([]*db.Job(nil), s.queued...)
+	out.reindexQueued()
+	return &out
+}
+
+func (p *rebalancePlan) score(profile bidding.ScoreProfile, runtimes runtimeBook) (mean, lower, upper float64) {
+	return p.scorePoint(profile, runtimes, durationPointMean),
+		p.scorePoint(profile, runtimes, durationPointLower),
+		p.scorePoint(profile, runtimes, durationPointUpper)
+}
+
+func (p *rebalancePlan) scorePoint(profile bidding.ScoreProfile, runtimes runtimeBook, point durationPoint) float64 {
+	weights := profile.Weights()
+	totalCost, makespan := p.costAndMakespan(runtimes, point)
+	return weights.Cost*totalCost + weights.Time*makespan
+}
+
+func (p *rebalancePlan) costAndMakespan(runtimes runtimeBook, point durationPoint) (totalCost, makespan float64) {
+	if p == nil {
+		return 0, 0
+	}
+	for _, state := range p.instances {
+		if state == nil || state.launch == nil {
+			continue
+		}
+		costPerHour := float64(state.launch.CostPerHourCents) / 100.0
+		drain := instanceQueueDrainHours(state, runtimes, point)
+		totalCost += costPerHour * drain
+		if drain > makespan {
+			makespan = drain
+		}
+	}
+	return totalCost, makespan
+}
+
+func instanceQueueDrainHours(state *rebalanceInstanceState, runtimes runtimeBook, point durationPoint) float64 {
+	if state == nil {
+		return 0
+	}
+	slots := instanceSlots(state.launch)
+	slotTimes := make([]float64, slots)
+	for idx, job := range state.runningJobs {
+		remaining := predictionDurationHours(job, runtimes, point, true)
+		if idx < len(slotTimes) {
+			slotTimes[idx] = remaining
+		} else {
+			slotTimes = append(slotTimes, remaining)
+		}
+	}
+	for _, job := range state.queued {
+		idx := firstFreeSlot(slotTimes)
+		slotTimes[idx] += predictionDurationHours(job, runtimes, point, false)
+	}
+	return maxFloat64(slotTimes)
+}
+
+func firstFreeSlot(slotTimes []float64) int {
+	best := 0
+	for idx := 1; idx < len(slotTimes); idx++ {
+		if slotTimes[idx] < slotTimes[best] {
+			best = idx
+		}
+	}
+	return best
+}
+
+func maxFloat64(values []float64) float64 {
+	out := 0.0
+	for _, v := range values {
+		if v > out {
+			out = v
+		}
+	}
+	return out
+}
+
+func predictionDurationHours(job *db.Job, runtimes runtimeBook, point durationPoint, running bool) float64 {
+	d := predictionDuration(job, runtimes, point)
+	if running {
+		elapsed := runningElapsed(job)
+		d -= elapsed
+		if d < time.Minute {
+			d = time.Minute
+		}
+	}
+	if d <= 0 {
+		d = estimate.DefaultJobDuration.Mean
+	}
+	return d.Hours()
+}
+
+func predictionDuration(job *db.Job, runtimes runtimeBook, point durationPoint) time.Duration {
+	pred := estimate.DurationPrediction{Estimate: estimate.DefaultJobDuration}
+	if job != nil && runtimes != nil {
+		if found, ok := runtimes[job.ID]; ok {
+			pred = found
+		}
+	}
+	switch point {
+	case durationPointLower:
+		if pred.Estimate.Lower > 0 {
+			return pred.Estimate.Lower
+		}
+	case durationPointUpper:
+		if pred.Estimate.Upper > 0 {
+			return pred.Estimate.Upper
+		}
+	}
+	if pred.Estimate.Mean > 0 {
+		return pred.Estimate.Mean
+	}
+	return estimate.DefaultJobDuration.Mean
+}
+
+func runningElapsed(job *db.Job) time.Duration {
+	if job == nil || job.StartTime <= 0 {
+		return 0
+	}
+	elapsed := time.Since(time.Unix(job.StartTime, 0))
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
+func loadRuntimePredictions(database *sql.DB, jobs []*db.Job) runtimeBook {
+	out := make(runtimeBook, len(jobs))
+	if len(jobs) == 0 {
+		return out
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return out
+	}
+	predCfg := buildPredictorConfig(cfg)
+	batch := make([]predictor.BatchJob, 0, len(jobs))
+	seen := map[int64]struct{}{}
+	for _, job := range jobs {
+		if job == nil || job.ID == 0 {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		batch = append(batch, predictor.BatchJob{
+			ID:       job.ID,
+			Command:  job.Command,
+			Host:     job.Host,
+			Project:  job.Project,
+			GPUClass: job.GPUClass,
+		})
+	}
+	predictions := estimateRebalanceDurationsDetailed(&predCfg, batch)
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if predictions != nil {
+			if pred, ok := predictions[job.ID]; ok {
+				out[job.ID] = pred
+				continue
+			}
+		}
+		out[job.ID] = estimate.DurationPrediction{Estimate: estimate.DefaultJobDuration}
+	}
+	return out
+}
+
 func pickBestRebalanceDestination(
 	job *db.Job,
 	policy rebalanceJobPolicy,
 	srcID int64,
-	states map[int64]*rebalanceInstanceState,
+	plan *rebalancePlan,
+	profile bidding.ScoreProfile,
+	runtimes runtimeBook,
+	baseScore float64,
+	epsilon float64,
 	instanceScope map[int64]struct{},
-) (*rebalanceInstanceState, float64, bool) {
+) (*rebalanceInstanceState, float64, float64, float64, float64, bool) {
 	if job == nil {
-		return nil, 0, false
+		return nil, 0, 0, 0, 0, false
 	}
-	src := states[srcID]
+	src := plan.instances[srcID]
 	if src == nil || src.launch == nil {
-		return nil, 0, false
+		return nil, 0, 0, 0, 0, false
 	}
 	srcCost := src.launch.CostPerHourCents
 	if srcCost < 0 {
-		return nil, 0, false
+		return nil, 0, 0, 0, 0, false
 	}
 
 	var best *rebalanceInstanceState
 	bestRatio := 0.0
-	for id, dst := range states {
+	bestMean := baseScore
+	bestLower := 0.0
+	bestUpper := 0.0
+	baseCost, baseMakespan := plan.costAndMakespan(runtimes, durationPointMean)
+	for id, dst := range plan.instances {
 		if id == srcID || dst == nil || dst.launch == nil {
 			continue
 		}
@@ -382,9 +673,6 @@ func pickBestRebalanceDestination(
 			if _, ok := instanceScope[id]; !ok {
 				continue
 			}
-		}
-		if !destinationHasIdleSlot(dst) {
-			continue
 		}
 		ok, _ := campaign.MatchJobToInstance(job, dst.capacity)
 		if !ok {
@@ -397,23 +685,41 @@ func pickBestRebalanceDestination(
 		if !ratioOK {
 			continue
 		}
-		if best == nil {
-			best = dst
-			bestRatio = ratio
+		candidate := plan.withMove(job, srcID, id)
+		mean, lower, upper := candidate.score(profile, runtimes)
+		candidateCost, candidateMakespan := candidate.costAndMakespan(runtimes, durationPointMean)
+		scalarImproves := mean < baseScore*(1-epsilon)
+		makespanImprovesWithoutCostIncrease := candidateCost <= baseCost*(1+1e-9) &&
+			candidateMakespan < baseMakespan*(1-epsilon)
+		if !scalarImproves && !makespanImprovesWithoutCostIncrease {
 			continue
 		}
-		if dst.launch.CostPerHourCents < best.launch.CostPerHourCents {
+		if best == nil || mean < bestMean {
 			best = dst
 			bestRatio = ratio
+			bestMean = mean
+			bestLower = lower
+			bestUpper = upper
 			continue
 		}
-		if dst.launch.CostPerHourCents == best.launch.CostPerHourCents &&
+		if nearlyEqual(mean, bestMean) && dst.launch.CostPerHourCents < best.launch.CostPerHourCents {
+			best = dst
+			bestRatio = ratio
+			bestMean = mean
+			bestLower = lower
+			bestUpper = upper
+			continue
+		}
+		if nearlyEqual(mean, bestMean) && dst.launch.CostPerHourCents == best.launch.CostPerHourCents &&
 			remainingRentalSeconds(dst.launch) > remainingRentalSeconds(best.launch) {
 			best = dst
 			bestRatio = ratio
+			bestMean = mean
+			bestLower = lower
+			bestUpper = upper
 		}
 	}
-	return best, bestRatio, best != nil
+	return best, bestRatio, bestMean, bestLower, bestUpper, best != nil
 }
 
 func resolveRebalancePolicy(job *db.Job, costCeilingOverride float64) rebalanceJobPolicy {
@@ -429,6 +735,8 @@ func resolveRebalancePolicy(job *db.Job, costCeilingOverride float64) rebalanceJ
 	return rebalanceJobPolicy{
 		enabled:     enabled,
 		costCeiling: ceiling,
+		strategy:    config.ProjectAutoPilotRebalanceStrategy(localDir),
+		epsilon:     config.ProjectAutoPilotRebalanceScoreEpsilon(localDir),
 		localDir:    localDir,
 		image:       campaign.ResolveJobImage(localDir, job.Command),
 	}
@@ -470,15 +778,6 @@ func remainingRentalSeconds(launch *db.Launch) int64 {
 		return 0
 	}
 	return remain
-}
-
-func rebalanceStateAfterMove(src, dst *rebalanceInstanceState, jobID int64) {
-	if src != nil {
-		src.removeQueuedJob(jobID)
-	}
-	if dst != nil {
-		dst.appendQueuedJob(&db.Job{ID: jobID})
-	}
 }
 
 func (s *rebalanceInstanceState) removeQueuedJob(jobID int64) {
@@ -569,8 +868,11 @@ func rebalancePlacementReason(move QueueRebalanceMove) string {
 	)
 }
 
-func describeRebalanceReason(src, dst *db.Launch, ratio float64) string {
-	parts := []string{"dst idle"}
+func describeRebalanceReason(src, dst *db.Launch, ratio, meanDelta float64, profileID string) string {
+	parts := []string{fmt.Sprintf("score %.3f", meanDelta)}
+	if profileID != "" {
+		parts = append(parts, "profile "+profileID)
+	}
 	if src != nil && dst != nil && strings.EqualFold(strings.TrimSpace(src.GPUClass), strings.TrimSpace(dst.GPUClass)) {
 		parts = append(parts, "same class")
 	} else {
@@ -585,6 +887,24 @@ func describeRebalanceReason(src, dst *db.Launch, ratio float64) string {
 		parts = append(parts, "same $")
 	}
 	return strings.Join(parts, ", ")
+}
+
+func nearlyEqual(a, b float64) bool {
+	return math.Abs(a-b) <= 1e-6
+}
+
+func logRebalanceDecision(move QueueRebalanceMove) {
+	oplog.Log("rebalance.decision", oplog.WithDetailf(
+		"job=%s src=%s dst=%s ratio=%.2f profile_id=%s mean_delta=%.6f lower_delta=%.6f upper_delta=%.6f",
+		ids.FormatJobID(move.JobID),
+		ids.FormatInstanceID(move.FromInstanceID),
+		ids.FormatInstanceID(move.ToInstanceID),
+		move.CostRatio,
+		move.ProfileID,
+		move.MeanDelta,
+		move.LowerDelta,
+		move.UpperDelta,
+	))
 }
 
 func countActiveRunningJobs(jobs []*db.Job) int {

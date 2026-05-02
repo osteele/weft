@@ -114,6 +114,25 @@ func ParetoSamplingProfiles() []ScoreProfile {
 	}
 }
 
+// ScoreProfileForRebalanceStrategy returns the score profile used by queue
+// rebalancing. The "balanced" midpoint intentionally maps to tradeoff-1.
+func ScoreProfileForRebalanceStrategy(name string) ScoreProfile {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case string(StrategyCheap):
+		return StrategyCheap.Profile()
+	case "balanced":
+		return ScoreProfile{
+			ID:               "tradeoff-1",
+			Weights_:         StrategyWeights{Cost: 1.0, Time: 1.0},
+			UseHappyPathTime: false,
+		}
+	case string(StrategyFast), "":
+		return StrategyFast.Profile()
+	default:
+		return StrategyFast.Profile()
+	}
+}
+
 var strategyWeights = map[SelectionStrategy]StrategyWeights{
 	StrategyCheap:   {Cost: 1.0, Time: 0.01},
 	StrategyFast:    {Cost: 0.1, Time: 1.0},

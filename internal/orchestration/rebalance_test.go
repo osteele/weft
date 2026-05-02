@@ -9,9 +9,27 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/predictor"
 )
 
+func withDefaultRebalanceDurations(t *testing.T) {
+	t.Helper()
+	orig := estimateRebalanceDurationsDetailed
+	estimateRebalanceDurationsDetailed = func(_ *predictor.Config, batchJobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
+		out := make(map[int64]estimate.DurationPrediction, len(batchJobs))
+		for _, job := range batchJobs {
+			out[job.ID] = estimate.DurationPrediction{Estimate: estimate.DefaultJobDuration}
+		}
+		return out
+	}
+	t.Cleanup(func() {
+		estimateRebalanceDurationsDetailed = orig
+	})
+}
+
 func TestRebalanceQueuedJobsAcrossInstances_MovesWhenSourceBlocked(t *testing.T) {
+	withDefaultRebalanceDurations(t)
 	database := db.SetupTestDB(t)
 	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
 	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
@@ -42,9 +60,13 @@ func TestRebalanceQueuedJobsAcrossInstances_MovesWhenSourceBlocked(t *testing.T)
 	if move.FromInstanceID != srcID || move.ToInstanceID != dstID {
 		t.Fatalf("move src/dst = %d->%d, want %d->%d", move.FromInstanceID, move.ToInstanceID, srcID, dstID)
 	}
+	if move.ProfileID != "fast" {
+		t.Fatalf("default profile = %q, want fast", move.ProfileID)
+	}
 }
 
-func TestRebalanceQueuedJobsAcrossInstances_NoMoveWhenSourceHasIdleSlot(t *testing.T) {
+func TestRebalanceQueuedJobsAcrossInstances_MovesWhenScoreImprovesWithSourceIdleSlot(t *testing.T) {
+	withDefaultRebalanceDurations(t)
 	database := db.SetupTestDB(t)
 	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
 	dstID := createRebalanceLaunch(t, database, "A100", 80, 90, 2, "")
@@ -54,6 +76,7 @@ func TestRebalanceQueuedJobsAcrossInstances_NoMoveWhenSourceHasIdleSlot(t *testi
 		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
 	_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
 	_ = createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
 
 	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
@@ -62,12 +85,13 @@ func TestRebalanceQueuedJobsAcrossInstances_NoMoveWhenSourceHasIdleSlot(t *testi
 	if err != nil {
 		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
 	}
-	if len(result.Moves) != 0 {
-		t.Fatalf("moves len = %d, want 0", len(result.Moves))
+	if len(result.Moves) != 1 {
+		t.Fatalf("moves len = %d, want 1", len(result.Moves))
 	}
 }
 
 func TestRebalanceQueuedJobsAcrossInstances_RespectsCostCeiling(t *testing.T) {
+	withDefaultRebalanceDurations(t)
 	database := db.SetupTestDB(t)
 	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
 	dstID := createRebalanceLaunch(t, database, "A100", 80, 120, 2, "")
@@ -105,6 +129,7 @@ func TestRebalanceQueuedJobsAcrossInstances_RespectsCostCeiling(t *testing.T) {
 }
 
 func TestRebalanceQueuedJobsAcrossInstances_TieBreaksByRemainingRental(t *testing.T) {
+	withDefaultRebalanceDurations(t)
 	database := db.SetupTestDB(t)
 	now := time.Now().Unix()
 	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
@@ -143,8 +168,95 @@ func TestRebalanceQueuedJobsAcrossInstances_TieBreaksByRemainingRental(t *testin
 	}
 }
 
+func TestRebalanceQueuedJobsAcrossInstances_BalancesSevenVsOneUnderStrategies(t *testing.T) {
+	cases := []struct {
+		strategy string
+		profile  string
+	}{
+		{strategy: "cheap", profile: "cheap"},
+		{strategy: "balanced", profile: "tradeoff-1"},
+		{strategy: "fast", profile: "fast"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.strategy, func(t *testing.T) {
+			withDefaultRebalanceDurations(t)
+			database := db.SetupTestDB(t)
+			srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+			dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+
+			srcRun := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+			if err := db.MarkQueuedJobRunning(database, srcRun); err != nil {
+				t.Fatalf("MarkQueuedJobRunning(src): %v", err)
+			}
+			dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+			if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+				t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+			}
+			for i := 0; i < 7; i++ {
+				_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+			}
+			_ = createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+
+			result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+				Apply:    false,
+				Strategy: tc.strategy,
+			})
+			if err != nil {
+				t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+			}
+			if len(result.Moves) < 2 {
+				t.Fatalf("moves len = %d, want multiple moves for strategy %s", len(result.Moves), tc.strategy)
+			}
+			for _, move := range result.Moves {
+				if move.FromInstanceID != srcID || move.ToInstanceID != dstID {
+					t.Fatalf("move src/dst = %d->%d, want %d->%d", move.FromInstanceID, move.ToInstanceID, srcID, dstID)
+				}
+				if move.ProfileID != tc.profile {
+					t.Fatalf("move profile = %q, want %q", move.ProfileID, tc.profile)
+				}
+			}
+		})
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_UsesMultiSlotDrainModel(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	for i := 0; i < 2; i++ {
+		jobID := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+		if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning(src): %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		jobID := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+		if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+		}
+	}
+	for i := 0; i < 7; i++ {
+		_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	}
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply: false,
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) < 1 {
+		t.Fatalf("moves len = %d, want multi-slot balancing moves", len(result.Moves))
+	}
+}
+
 func createRebalanceLaunch(t *testing.T, database *sql.DB, gpuClass string, gpuMemGB int, costCents int, numGPUs int, dockerImage string) int64 {
 	t.Helper()
+	if dockerImage == "" {
+		dockerImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
+	}
 	id, err := db.CreateLaunch(database, &db.Launch{
 		Status:           db.LaunchStatusRunning,
 		Provider:         "vastai",
@@ -175,6 +287,9 @@ func createQueuedLaunchJob(t *testing.T, database *sql.DB, launchID int64, gpuCl
 	}
 	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, gpuClass); err != nil {
+		t.Fatalf("SetJobGPUClass: %v", err)
 	}
 	return jobID
 }

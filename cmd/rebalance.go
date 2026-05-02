@@ -1,15 +1,19 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +21,7 @@ var (
 	rebalanceMaxIncrease float64
 	rebalanceInstances   string
 	rebalanceJobs        string
+	rebalanceStrategy    string
 	rebalanceYes         bool
 )
 
@@ -36,6 +41,7 @@ func init() {
 	rebalanceCmd.Flags().Float64Var(&rebalanceMaxIncrease, "max-increase", 0, "Maximum dst/src cost ratio (e.g. 1.10)")
 	rebalanceCmd.Flags().StringVar(&rebalanceInstances, "instances", "", "Comma-separated instance IDs to scope (e.g. wi101,wi102)")
 	rebalanceCmd.Flags().StringVar(&rebalanceJobs, "jobs", "", "Job IDs/ranges to scope (e.g. wj10,wj12:wj15)")
+	rebalanceCmd.Flags().StringVar(&rebalanceStrategy, "strategy", "", "Rebalance strategy: cheap, balanced, or fast")
 	rebalanceCmd.Flags().BoolVarP(&rebalanceYes, "yes", "y", false, "Apply moves (default is dry-run)")
 	rootCmd.AddCommand(rebalanceCmd)
 }
@@ -55,9 +61,14 @@ func runRebalance(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	strategy, err := resolveRebalanceStrategy(cmd)
+	if err != nil {
+		return err
+	}
 
 	result, err := orchestration.RebalanceQueuedJobsAcrossInstances(cmd.Context(), database, orchestration.QueueRebalanceOptions{
 		Apply:               rebalanceYes,
+		Strategy:            strategy,
 		CostCeilingOverride: rebalanceMaxIncrease,
 		InstanceScope:       instanceScope,
 		JobScope:            jobScope,
@@ -86,6 +97,59 @@ func runRebalance(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Applied %d rebalance move(s).\n", len(result.Moves))
 	}
 	return nil
+}
+
+func resolveRebalanceStrategy(cmd *cobra.Command) (string, error) {
+	if strings.TrimSpace(rebalanceStrategy) != "" {
+		return normalizeRebalanceStrategy(rebalanceStrategy)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get current directory: %w", err)
+	}
+	defaultStrategy := config.ProjectAutoPilotRebalanceStrategy(workdir.ResolveLocal(cwd))
+	if stdinIsTerminal() {
+		return promptRebalanceStrategy(cmd.InOrStdin(), cmd.OutOrStdout(), defaultStrategy)
+	}
+	return defaultStrategy, nil
+}
+
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func promptRebalanceStrategy(in io.Reader, out io.Writer, defaultStrategy string) (string, error) {
+	defaultStrategy, err := normalizeRebalanceStrategy(defaultStrategy)
+	if err != nil {
+		defaultStrategy = "fast"
+	}
+	fmt.Fprintln(out, "Rebalance strategy:")
+	fmt.Fprintln(out, "  cheap     minimize rental cost")
+	fmt.Fprintln(out, "  balanced  cost/time midpoint")
+	fmt.Fprintln(out, "  fast      prefer shorter makespan")
+	fmt.Fprintf(out, "Choose strategy [cheap/balanced/fast] (default %s): ", defaultStrategy)
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && strings.TrimSpace(line) == "" {
+		return defaultStrategy, nil
+	}
+	raw := strings.TrimSpace(line)
+	if raw == "" {
+		return defaultStrategy, nil
+	}
+	return normalizeRebalanceStrategy(raw)
+}
+
+func normalizeRebalanceStrategy(raw string) (string, error) {
+	switch strategy := strings.ToLower(strings.TrimSpace(raw)); strategy {
+	case "cheap", "balanced", "fast":
+		return strategy, nil
+	default:
+		return "", usageErrorf("invalid --strategy %q (want cheap, balanced, or fast)", raw)
+	}
 }
 
 func parseRebalanceInstanceScope(raw string) (map[int64]struct{}, error) {

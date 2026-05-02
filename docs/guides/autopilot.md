@@ -152,6 +152,25 @@ is one JSON pass record with `outcome`, `placed`, `rebalanced`,
 done), `idle` (nothing to do), `blocked` (work waiting but breaker
 tripped), `error`, `paused`, `busy` (another runner holds the slot).
 
+## Rebalancing queued work
+
+The autopilot can move queued jobs between already-running cloud instances
+when the move improves the projected queue drain score without exceeding the
+cost ceiling. Configure the behavior in `.weft.toml`:
+
+```toml
+[autopilot]
+rebalance_enabled = true
+rebalance_cost_ceiling = 1.10
+rebalance_strategy = "fast"          # cheap | balanced | fast
+rebalance_score_epsilon = 0.01       # require 1% relative improvement
+```
+
+`fast` is the default and weighs time heavily while keeping some cost pressure.
+`balanced` uses equal cost and time weights. `cheap` mostly prefers dollar
+savings, but still considers queue drain time. `weft rebalance --strategy ...`
+uses the same choices for manual dry-runs or `--yes` applies.
+
 ## Concurrency
 
 The autopilot enforces a single-runner-at-a-time rule via the

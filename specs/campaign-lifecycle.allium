@@ -1120,38 +1120,71 @@ rule AutoPilotPass {
 -- ==========================================================================
 -- Queue re-balance across existing instances
 -- ==========================================================================
-
--- After placement decisions, pending jobs may migrate to an already-running
--- instance that is cheaper (or at most ceiling × current cost) and has an
--- idle slot, so they start sooner without exceeding the cost envelope.
--- Running jobs are never moved.
+--
+-- Queue re-balance moves queued (never running) jobs between already-running
+-- instances to minimize a scalarized cost+time objective over the predicted
+-- queue-drain plan. The objective and weights mirror campaign placement
+-- (see internal/bidding/model.go ScoreProfile) so users see one consistent
+-- exchange rate between dollars and wall-clock hours.
+--
+-- A move is accepted iff it lowers
+--
+--     Score(plan) = Cost · TotalRentalCost($)
+--                 + Time · GlobalMakespan(hours)
+--
+-- by at least ε under the chosen ScoreProfile, after enforcing a hard cost-
+-- ceiling guard, capacity match, and image compatibility.
+--
+-- TotalRentalCost is the sum across all instances of (instance.$/hr ·
+-- instance.queue_drain_hours). GlobalMakespan is the maximum across all
+-- instances of instance.queue_drain_hours. Per-instance queue-drain hours
+-- are estimated using mean runtime predictions from
+-- predictor.ResolvePredictBatch (DefaultJobDuration fallback when absent),
+-- accounting for slot count = launch.NumGPUs. Running jobs contribute their
+-- remaining predicted time (clamped to a small positive minimum).
 
 config {
     rebalance_cost_ceiling: Decimal = 1.10    -- upper bound on dst/src $/hr
     rebalance_enabled: Bool = true
+    rebalance_strategy: String = "fast"       -- "cheap" | "balanced" | "fast"
+    rebalance_score_epsilon: Decimal = 0.01   -- relative improvement threshold
 }
 
 rule QueueRebalanceJob {
     when: AutoPilotTick(_) or UserRequestsRebalance()
     requires: config.rebalance_enabled
 
-    for job in jobs where job.status = queued:
+    let profile = ScoreProfileForStrategy(config.rebalance_strategy)
+    let plan = CurrentQueuePlan()    -- per-instance running + queued
+
+    for job in jobs where job.status = queued
+                  ordered by queue_position:
       let src = job.assigned_instance
       requires: src is not None
-      requires: not InstanceHasIdleSlotFor(src, job)
 
-      let dst = BestRebalanceTarget(job, exclude=src)
+      let dst = BestRebalanceTarget(job, plan, profile, exclude=src)
       requires: dst is not None
-      requires: InstanceHasIdleSlotFor(dst, job)
       requires: InstanceSatisfiesJob(dst, job)
+      requires: ImagesCompatible(JobImage(job), dst.image)
       requires: dst.cost_per_hour <= config.rebalance_cost_ceiling
                                      * src.cost_per_hour
+
+      let plan_after = ApplyMove(plan, job, src, dst)
+      requires: ScoreUnder(plan_after, profile)
+              < ScoreUnder(plan, profile)
+                * (1 - config.rebalance_score_epsilon)
 
       ensures: ReassignJobToInstance(job, dst)
       ensures: AppendPlacementReason(job,
                  "rebalanced from " + src.id + " → " + dst.id
-                 + " (cost ratio " + (dst.cost_per_hour
-                                      / src.cost_per_hour) + ")")
+                 + " (Δscore " + (ScoreUnder(plan_after, profile)
+                                  - ScoreUnder(plan, profile))
+                 + " under " + profile.id + ")")
+      ensures: LogRebalanceDecision(job, src, dst, profile,
+                 mean_delta=ScoreDelta(plan, plan_after, profile, mean=true),
+                 lower_delta=ScoreDelta(plan, plan_after, profile, point=lower),
+                 upper_delta=ScoreDelta(plan, plan_after, profile, point=upper))
+      then: plan := plan_after
 }
 
 invariant RebalanceRespectsCostCeiling {
@@ -1161,18 +1194,29 @@ invariant RebalanceRespectsCostCeiling {
 }
 
 invariant RebalanceNeverPreemptsRunning {
-    -- A re-balance target slot must be idle at decision time. Running jobs
-    -- are not candidates for moving, and running slots on dst are not
-    -- candidates for receiving.
+    -- Running jobs are not candidates for moving. (The earlier "dst slot must
+    -- be idle at decision time" half is removed: rebalance now extends the
+    -- destination's queue when doing so improves the global score.)
     for move in QueueRebalanceMoves:
         move.job.status = queued
-        and SlotWasIdle(move.dst, move.slot, move.decision_time)
 }
 
-invariant RebalanceOnlyWhenSourceBlocked {
-    -- Don't move a job that could just start on its current instance.
+invariant RebalanceImprovesScore {
+    -- Every accepted move strictly improves the scalarized score under the
+    -- chosen profile, by at least the configured relative epsilon.
     for move in QueueRebalanceMoves:
-        not InstanceHasIdleSlotFor(move.src, move.job, move.decision_time)
+        ScoreUnder(move.plan_after, move.profile)
+            < ScoreUnder(move.plan_before, move.profile)
+              * (1 - config.rebalance_score_epsilon)
+}
+
+invariant RebalanceLogsDeltaBounds {
+    -- Empirical trigger for promoting MC-variance rebalance from the roadmap:
+    -- every decision logs lower/upper Δscore bounds alongside the mean. If
+    -- the bounds straddle zero on a material fraction of decisions, mean-only
+    -- is making coin-flip calls and variance-aware rebalance moves up.
+    for move in QueueRebalanceMoves:
+        move.log_record contains {mean_delta, lower_delta, upper_delta}
 }
 
 rule InstanceReuseSkipsCordoned {
