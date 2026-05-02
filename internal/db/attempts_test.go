@@ -102,6 +102,93 @@ func TestSetAttemptLaunch_NormalizesPendingPlacement(t *testing.T) {
 	}
 }
 
+func TestPlacementDisplayQueuedAt_RestoredAfterNoStartMoveUsesSourceTime(t *testing.T) {
+	database := setupTestDB(t)
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	jobID := int64(2101)
+	insertTestJob(t, database, jobID, "echo test", "/tmp", StatusQueued)
+
+	if err := SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	sourceQueuedAt := int64(1_000)
+	var sourceAttemptID int64
+	if err := database.QueryRow(`SELECT id FROM job_attempts WHERE job_id = ? AND launch_id = ?`, jobID, src).Scan(&sourceAttemptID); err != nil {
+		t.Fatalf("source attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE id = ?`, sourceQueuedAt, sourceAttemptID); err != nil {
+		t.Fatalf("set source queued_at: %v", err)
+	}
+
+	if err := TransferJobLaunchID(database, jobID, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+	var targetAttemptID int64
+	if err := database.QueryRow(`SELECT id FROM job_attempts WHERE job_id = ? AND launch_id = ?`, jobID, dst).Scan(&targetAttemptID); err != nil {
+		t.Fatalf("target attempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE id = ?`,
+		StatusCanceled, int64(2_000), AttemptOutcomeOrphaned, targetAttemptID,
+	); err != nil {
+		t.Fatalf("mark target orphaned: %v", err)
+	}
+
+	if err := SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("restore SetJobLaunchID source: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`, int64(3_000), jobID, src); err != nil {
+		t.Fatalf("set restored queued_at: %v", err)
+	}
+
+	got, err := PlacementDisplayQueuedAt(database, []int64{jobID})
+	if err != nil {
+		t.Fatalf("PlacementDisplayQueuedAt: %v", err)
+	}
+	if got[jobID] != sourceQueuedAt {
+		t.Fatalf("display queued_at = %d, want original source %d", got[jobID], sourceQueuedAt)
+	}
+}
+
+func TestPlacementDisplayQueuedAt_RealMoveUsesLatestTime(t *testing.T) {
+	database := setupTestDB(t)
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	jobID := int64(2102)
+	insertTestJob(t, database, jobID, "echo test", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	if err := TransferJobLaunchID(database, jobID, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+	latestQueuedAt := int64(4_000)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`, latestQueuedAt, jobID, dst); err != nil {
+		t.Fatalf("set latest queued_at: %v", err)
+	}
+
+	got, err := PlacementDisplayQueuedAt(database, []int64{jobID})
+	if err != nil {
+		t.Fatalf("PlacementDisplayQueuedAt: %v", err)
+	}
+	if got[jobID] != latestQueuedAt {
+		t.Fatalf("display queued_at = %d, want latest %d", got[jobID], latestQueuedAt)
+	}
+}
+
 func TestNormalizePendingPlacementForLaunch_SkipsCompletedNonOrphaned(t *testing.T) {
 	database := setupTestDB(t)
 

@@ -48,19 +48,19 @@ type groupedStatusRow struct {
 }
 
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, time.Now())
 }
 
-func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, now time.Time) string {
-	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, now)
+func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, now time.Time) string {
+	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, placementQueuedAtByJob, now)
 	if len(rows) == 0 {
 		return "None\n"
 	}
@@ -72,10 +72,10 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 }
 
 func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) []groupedStatusRow {
-	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, nil, time.Now())
+	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, time.Now())
 }
 
-func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, now time.Time) []groupedStatusRow {
+func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
 	paused := make([]*db.Job, 0)
 	placing := make([]*db.Job, 0)
@@ -156,10 +156,10 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 			section:  section.key,
 		})
 		if section.key == "unplaced" || section.key == "queued" {
-			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, launchLiveByID, now)
+			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now)
 		} else {
 			for _, job := range section.jobs {
-				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, now, false)
+				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now, false)
 			}
 		}
 		rows = append(rows, groupedStatusRow{text: ""})
@@ -192,6 +192,7 @@ func appendBlockedGroupedJobRows(
 	section groupedStatusSection,
 	projectWidth, width int,
 	launchLiveByID map[int64]*db.LaunchLiveState,
+	placementQueuedAtByJob map[int64]int64,
 	now time.Time,
 ) []groupedStatusRow {
 	order := make([]string, 0, len(section.jobs))
@@ -214,11 +215,11 @@ func appendBlockedGroupedJobRows(
 			section:   section.key,
 		})
 		for _, job := range jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, now, true)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now, true)
 		}
 	}
 	for _, job := range buckets[""] {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, now, false)
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now, false)
 	}
 	return rows
 }
@@ -239,6 +240,7 @@ func appendGroupedStatusJobRow(
 	section groupedStatusSection,
 	projectWidth, width int,
 	launchLiveByID map[int64]*db.LaunchLiveState,
+	placementQueuedAtByJob map[int64]int64,
 	now time.Time,
 	indented bool,
 ) []groupedStatusRow {
@@ -252,7 +254,7 @@ func appendGroupedStatusJobRow(
 	if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
 		suffixParts = append(suffixParts, etaText)
 	}
-	if timing := groupedStatusTimingSuffix(job, section.key, now); timing != "" {
+	if timing := groupedStatusTimingSuffix(job, section.key, placementQueuedAtByJob, now); timing != "" {
 		suffixParts = append(suffixParts, timing)
 	}
 	if outcome := groupedStatusOutcomeSuffix(job, section.title); outcome != "" {
@@ -358,7 +360,7 @@ func groupedStatusProgressSuffix(job *db.Job, sectionKey string, launchLiveByID 
 	}
 }
 
-func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) string {
+func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAtByJob map[int64]int64, now time.Time) string {
 	if job == nil {
 		return ""
 	}
@@ -398,6 +400,9 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, now time.Time) st
 		label = "created"
 	} else {
 		placedAt = job.QueuedAt
+		if displayAt, ok := placementQueuedAtByJob[job.ID]; ok && displayAt > 0 {
+			placedAt = displayAt
+		}
 		if placedAt == 0 {
 			placedAt = job.CreatedAt
 		}

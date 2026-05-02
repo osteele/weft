@@ -81,6 +81,7 @@ type listTUIModel struct {
 	launchLiveByID             map[int64]*db.LaunchLiveState
 	launchStatusByID           map[int64]string
 	placingJobIDs              map[int64]struct{}
+	placementQueuedAtByJob     map[int64]int64
 	launchByID                 map[int64]*db.Launch
 	hostInfoByName             map[string]*db.CachedHostInfo
 	quickLaunching             bool
@@ -102,14 +103,15 @@ type listTUIModel struct {
 }
 
 type listJobsLoadedMsg struct {
-	jobs             []*db.Job
-	launchLiveByID   map[int64]*db.LaunchLiveState
-	launchStatusByID map[int64]string
-	placingJobIDs    map[int64]struct{}
-	launchByID       map[int64]*db.Launch
-	hostInfoByName   map[string]*db.CachedHostInfo
-	autoPassPhase    autoPilotPhaseHint
-	err              error
+	jobs                   []*db.Job
+	launchLiveByID         map[int64]*db.LaunchLiveState
+	launchStatusByID       map[int64]string
+	placingJobIDs          map[int64]struct{}
+	placementQueuedAtByJob map[int64]int64
+	launchByID             map[int64]*db.Launch
+	hostInfoByName         map[string]*db.CachedHostInfo
+	autoPassPhase          autoPilotPhaseHint
+	err                    error
 }
 
 type listSyncFinishedMsg struct {
@@ -477,6 +479,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchLiveByID = msg.launchLiveByID
 		m.launchStatusByID = msg.launchStatusByID
 		m.placingJobIDs = msg.placingJobIDs
+		m.placementQueuedAtByJob = msg.placementQueuedAtByJob
 		m.launchByID = msg.launchByID
 		m.hostInfoByName = msg.hostInfoByName
 		m.autoPassPhase = msg.autoPassPhase
@@ -1808,7 +1811,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		return
 	}
 	groupedJobs := m.groupedJobsWithAutoReasons()
-	m.groupedRows = buildGroupedStatusRowsAt(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID, m.placingJobIDs, time.Now())
+	m.groupedRows = buildGroupedStatusRowsAt(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID, m.placingJobIDs, m.placementQueuedAtByJob, time.Now())
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
 		if row.job != nil && !row.isHeader && !row.isBlocked {
@@ -1912,17 +1915,35 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if launchErr != nil {
 			launchByID = map[int64]*db.Launch{}
 		}
+		placementQueuedAtByJob, placementErr := db.PlacementDisplayQueuedAt(database, queuedRentalJobIDs(jobs))
+		if placementErr != nil {
+			placementQueuedAtByJob = map[int64]int64{}
+		}
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		return listJobsLoadedMsg{
-			jobs:             jobs,
-			launchLiveByID:   launchLiveByID,
-			launchStatusByID: launchStatusByID,
-			placingJobIDs:    loadPlacingJobIDs(database),
-			launchByID:       launchByID,
-			hostInfoByName:   hostInfoByName,
-			autoPassPhase:    loadLatestAutoPilotPhase(database),
+			jobs:                   jobs,
+			launchLiveByID:         launchLiveByID,
+			launchStatusByID:       launchStatusByID,
+			placingJobIDs:          loadPlacingJobIDs(database),
+			placementQueuedAtByJob: placementQueuedAtByJob,
+			launchByID:             launchByID,
+			hostInfoByName:         hostInfoByName,
+			autoPassPhase:          loadLatestAutoPilotPhase(database),
 		}
 	}
+}
+
+func queuedRentalJobIDs(jobs []*db.Job) []int64 {
+	ids := make([]int64, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		if job.EffectiveStatus() == db.StatusQueued {
+			ids = append(ids, job.ID)
+		}
+	}
+	return ids
 }
 
 // loadInventoryHostInfo returns CachedHostInfo keyed by host name, filtered

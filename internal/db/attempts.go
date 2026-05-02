@@ -899,6 +899,110 @@ func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID 
 	return attemptID, nil
 }
 
+type placementDisplayAttempt struct {
+	id            int64
+	jobID         int64
+	launchID      sql.NullInt64
+	status        string
+	queuedAt      sql.NullInt64
+	startTime     sql.NullInt64
+	endTime       sql.NullInt64
+	cloudOutcome  sql.NullString
+	predecessorID sql.NullInt64
+}
+
+// PlacementDisplayQueuedAt returns display-only placement timestamps for queued
+// cloud jobs. If a failed no-start move briefly created an attempt on another
+// launch and the job was restored to the same source launch, this preserves the
+// original source queued_at so the UI does not show the restore as a fresh
+// placement.
+func PlacementDisplayQueuedAt(database *sql.DB, jobIDs []int64) (map[int64]int64, error) {
+	if database == nil || len(jobIDs) == 0 {
+		return map[int64]int64{}, nil
+	}
+	args := make([]any, 0, len(jobIDs))
+	for _, id := range jobIDs {
+		if id > 0 {
+			args = append(args, id)
+		}
+	}
+	if len(args) == 0 {
+		return map[int64]int64{}, nil
+	}
+	query := `SELECT id, job_id, launch_id, status, queued_at, start_time, end_time, cloud_outcome, predecessor_attempt_id
+		FROM job_attempts
+		WHERE job_id IN (` + sqlPlaceholders(len(args)) + `)
+		ORDER BY job_id ASC, attempt_number ASC`
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byID := make(map[int64]placementDisplayAttempt)
+	latestByJob := make(map[int64]placementDisplayAttempt)
+	for rows.Next() {
+		var a placementDisplayAttempt
+		if err := rows.Scan(&a.id, &a.jobID, &a.launchID, &a.status, &a.queuedAt, &a.startTime, &a.endTime, &a.cloudOutcome, &a.predecessorID); err != nil {
+			return nil, err
+		}
+		byID[a.id] = a
+		latestByJob[a.jobID] = a
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make(map[int64]int64, len(latestByJob))
+	for jobID, latest := range latestByJob {
+		if !latest.launchID.Valid || !latest.queuedAt.Valid || latest.queuedAt.Int64 <= 0 {
+			continue
+		}
+		displayAt := latest.queuedAt.Int64
+		launchID := latest.launchID.Int64
+		for cur := latest; cur.predecessorID.Valid; {
+			pred, ok := byID[cur.predecessorID.Int64]
+			if !ok {
+				break
+			}
+			if pred.launchID.Valid && pred.launchID.Int64 == launchID {
+				if pred.startTime.Valid && pred.startTime.Int64 > 0 {
+					break
+				}
+				if pred.queuedAt.Valid && pred.queuedAt.Int64 > 0 {
+					displayAt = pred.queuedAt.Int64
+				}
+				cur = pred
+				continue
+			}
+			if !isNoStartCloudDetour(pred) {
+				break
+			}
+			cur = pred
+		}
+		out[jobID] = displayAt
+	}
+	return out, nil
+}
+
+func isNoStartCloudDetour(a placementDisplayAttempt) bool {
+	if !a.launchID.Valid || a.launchID.Int64 <= 0 {
+		return false
+	}
+	if a.startTime.Valid && a.startTime.Int64 > 0 {
+		return false
+	}
+	if !a.endTime.Valid || a.endTime.Int64 <= 0 {
+		return false
+	}
+	switch a.cloudOutcome.String {
+	case AttemptOutcomeOrphaned, AttemptOutcomeFailed, AttemptOutcomeCancelled:
+		return true
+	default:
+		return a.status == StatusCanceled || a.status == StatusFailed || a.status == StatusDead
+	}
+}
+
 // carryForwardDependencyMetadata copies dependency metadata from the previous
 // attempt to a new attempt. This preserves cloud dependency semantics
 // (CloudNeeds/CloudAfter) across attempt rollovers (launch assignment, retry,
