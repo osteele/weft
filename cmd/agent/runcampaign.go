@@ -162,6 +162,7 @@ func runCampaign(args []string) {
 		InstanceID:          instanceIDInt,
 		PhaseKey:            phaseKey,
 		LogDir:              logDir,
+		DiskPath:            diskPath,
 		MaxTime:             maxTime,
 		StartTime:           startTime,
 		OnPhase:             onPhase,

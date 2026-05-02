@@ -24,6 +24,7 @@ type jobSequenceConfig struct {
 	InstanceID          int64
 	PhaseKey            string
 	LogDir              string
+	DiskPath            string
 	MaxTime             time.Duration // 0 = no limit
 	StartTime           time.Time     // for time budget accounting
 	OnPhase             func(string)  // update current phase string (for heartbeat)
@@ -266,18 +267,23 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			oplog.Init(filepath.Join(cfg.LogDir, agentOpslogFile), 0)
 		}
 
+		// Update phase so TUI shows "uploading" during background uploads
+		uploadingPhase := fmt.Sprintf("uploading:%d", job.ID)
+
 		// === Background post-job work (uploads + workdir cleanup) ===
 		bgm.StartPostJobWork(postJobWork{
 			r2Bucket:          cfg.R2Bucket,
+			instanceID:        cfg.InstanceID,
 			jobID:             job.ID,
 			runID:             job.RunID,
+			exitCode:          exitCode,
 			workDir:           runner.ExpandTilde(workDir),
 			logSnapshot:       logSnapshot,
+			diskPath:          cfg.DiskPath,
+			phase:             uploadingPhase,
 			uploadStartedUnix: uploadStartedUnix,
 		})
 
-		// Update phase so TUI shows "uploading" during background uploads
-		uploadingPhase := fmt.Sprintf("uploading:%d", job.ID)
 		if cfg.OnPhase != nil {
 			cfg.OnPhase(uploadingPhase)
 		}

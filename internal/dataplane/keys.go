@@ -139,10 +139,18 @@ func JobAttemptLiveTelemetry(jobID, runID int64) string {
 	return fmt.Sprintf("%s/telemetry.jsonl", JobRunPrefix(jobID, runID))
 }
 
+func JobAttemptMaintenance(jobID, runID int64) string {
+	return JobAttemptResultsPrefix(jobID, runID) + "maintenance.json"
+}
+
 // Instance artifact keys
 
 func InstanceOpslog(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/opslog.jsonl", instanceID)
+}
+
+func InstanceMaintenance(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/maintenance.json", instanceID)
 }
 
 // Bootstrap assets

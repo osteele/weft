@@ -79,6 +79,9 @@ func JobAttemptLiveTimeseries(jobID, runID int64) string {
 func JobAttemptLiveTelemetry(jobID, runID int64) string {
 	return dataplane.JobAttemptLiveTelemetry(jobID, runID)
 }
+func JobAttemptMaintenance(jobID, runID int64) string {
+	return dataplane.JobAttemptMaintenance(jobID, runID)
+}
 
 func GracePrefix(instanceID int64) string  { return controlplane.GracePrefix(instanceID) }
 func GraceStatus(instanceID int64) string  { return controlplane.GraceStatus(instanceID) }
@@ -96,6 +99,9 @@ func InstanceAgentStartup(instanceID int64) string {
 	return controlplane.InstanceAgentStartup(instanceID)
 }
 func InstanceOpslog(instanceID int64) string { return dataplane.InstanceOpslog(instanceID) }
+func InstanceMaintenance(instanceID int64) string {
+	return dataplane.InstanceMaintenance(instanceID)
+}
 func InstanceDiskFailure(instanceID int64) string {
 	return controlplane.InstanceDiskFailure(instanceID)
 }

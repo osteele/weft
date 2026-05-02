@@ -1,15 +1,23 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
+
+const staleLogSnapshotAge = 6 * time.Hour
 
 // bgWorkManager manages background post-job goroutines (uploads) and tracks
 // the set of workdirs touched during a campaign for end-of-campaign cleanup.
@@ -38,11 +46,28 @@ type bgWorkError struct {
 // postJobWork describes the background work to do after a job completes.
 type postJobWork struct {
 	r2Bucket          string
+	instanceID        int64
 	jobID             int64
 	runID             int64
+	exitCode          int
 	workDir           string // job's working directory (resolved absolute path)
 	logSnapshot       string // temp dir containing log snapshot
+	diskPath          string
+	phase             string
 	uploadStartedUnix int64
+}
+
+type maintenanceReport struct {
+	Ts                          int64           `json:"ts"`
+	JobID                       int64           `json:"job_id"`
+	RunID                       int64           `json:"run_id,omitempty"`
+	ExitCode                    int             `json:"exit_code"`
+	Phase                       string          `json:"phase,omitempty"`
+	Heartbeat                   HeartbeatSample `json:"heartbeat"`
+	WorkdirBytes                int64           `json:"workdir_bytes,omitempty"`
+	LogSnapshotBytes            int64           `json:"log_snapshot_bytes,omitempty"`
+	PrunedStaleLogSnapshots     int             `json:"pruned_stale_log_snapshots,omitempty"`
+	PrunedStaleLogSnapshotBytes int64           `json:"pruned_stale_log_snapshot_bytes,omitempty"`
 }
 
 func newBGWorkManager(jobs []cloud.AgentJob, skipDeletion bool) *bgWorkManager {
@@ -106,6 +131,17 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 		_ = patchPhaseUploadWindow(pw.logSnapshot, pw.jobID, pw.uploadStartedUnix, uploadEndedUnix)
 
 		reuploadCompletion(pw.r2Bucket, pw.jobID, pw.runID, pw.logSnapshot)
+		repairR2Markers(pw)
+		report, err := collectMaintenanceReport(pw)
+		if err != nil {
+			m.recordError(pw.jobID, "collect-maintenance", err)
+		}
+		uploadMaintenanceReport(pw.r2Bucket, pw.instanceID, report)
+		if report.PrunedStaleLogSnapshots > 0 {
+			slog.Debug("pruned stale log snapshots",
+				"count", report.PrunedStaleLogSnapshots,
+				"bytes", report.PrunedStaleLogSnapshotBytes)
+		}
 		os.RemoveAll(pw.logSnapshot)
 	}()
 }
@@ -164,4 +200,103 @@ func reuploadCompletion(bucket string, jobID, runID int64, snapshotDir string) {
 	}
 	key := r2keys.JobAttemptResultsPrefix(jobID, runID) + fmt.Sprintf("%d.completion.json", jobID)
 	r2Put(bucket, key, string(data))
+}
+
+func repairR2Markers(pw postJobWork) {
+	if pw.r2Bucket == "" {
+		return
+	}
+	_ = r2Put(pw.r2Bucket, r2keys.JobAttemptComplete(pw.jobID, pw.runID), fmt.Sprintf("%d", pw.exitCode))
+	_ = r2Delete(pw.r2Bucket, r2keys.JobAttemptProgress(pw.jobID, pw.runID))
+	_ = r2Delete(pw.r2Bucket, r2keys.JobAttemptLiveTimeseries(pw.jobID, pw.runID))
+	_ = r2Delete(pw.r2Bucket, r2keys.JobAttemptLiveTelemetry(pw.jobID, pw.runID))
+}
+
+func collectMaintenanceReport(pw postJobWork) (maintenanceReport, error) {
+	report := maintenanceReport{
+		Ts:        time.Now().Unix(),
+		JobID:     pw.jobID,
+		RunID:     pw.runID,
+		ExitCode:  pw.exitCode,
+		Phase:     pw.phase,
+		Heartbeat: collectHeartbeat(pw.phase, pw.diskPath),
+	}
+	if pw.workDir != "" {
+		report.WorkdirBytes = measureLocalTree(pw.workDir)
+	}
+	if pw.logSnapshot != "" {
+		report.LogSnapshotBytes = measureLocalTree(pw.logSnapshot)
+	}
+	pruned, bytes, err := pruneStaleLogSnapshots(pw.logSnapshot, time.Now())
+	report.PrunedStaleLogSnapshots = pruned
+	report.PrunedStaleLogSnapshotBytes = bytes
+	return report, err
+}
+
+func uploadMaintenanceReport(bucket string, instanceID int64, report maintenanceReport) {
+	if bucket == "" {
+		return
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		return
+	}
+	if report.JobID > 0 {
+		_ = r2Put(bucket, r2keys.JobAttemptMaintenance(report.JobID, report.RunID), string(data))
+	}
+	if instanceID > 0 {
+		_ = r2Put(bucket, r2keys.InstanceMaintenance(instanceID), string(data))
+	}
+}
+
+func pruneStaleLogSnapshots(current string, now time.Time) (int, int64, error) {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return 0, 0, err
+	}
+	current = filepath.Clean(current)
+	var pruned int
+	var bytes int64
+	var errs []error
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "weft-logs-job-") {
+			continue
+		}
+		path := filepath.Join(os.TempDir(), entry.Name())
+		if filepath.Clean(path) == current {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if now.Sub(info.ModTime()) < staleLogSnapshotAge {
+			continue
+		}
+		size := measureLocalTree(path)
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		pruned++
+		bytes += size
+	}
+	return pruned, bytes, errors.Join(errs...)
+}
+
+func measureLocalTree(root string) int64 {
+	var bytes int64
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		bytes += info.Size()
+		return nil
+	})
+	return bytes
 }

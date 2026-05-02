@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,6 +123,84 @@ func TestBGWorkManager_BarrierLogsErrors(t *testing.T) {
 	m.mu.Unlock()
 	if remaining != 0 {
 		t.Errorf("errors after barrier = %d, want 0", remaining)
+	}
+}
+
+func TestCollectMaintenanceReportSamplesHostAndMeasuresTrees(t *testing.T) {
+	workDir := t.TempDir()
+	logSnapshot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "model.bin"), []byte("12345"), 0o644); err != nil {
+		t.Fatalf("write workdir file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logSnapshot, "wj42.log"), []byte("log"), 0o644); err != nil {
+		t.Fatalf("write log snapshot file: %v", err)
+	}
+
+	report, err := collectMaintenanceReport(postJobWork{
+		jobID:       42,
+		runID:       7,
+		exitCode:    0,
+		workDir:     workDir,
+		logSnapshot: logSnapshot,
+		diskPath:    workDir,
+		phase:       "uploading:42",
+	})
+	if err != nil {
+		t.Fatalf("collectMaintenanceReport: %v", err)
+	}
+	if report.JobID != 42 || report.RunID != 7 || report.ExitCode != 0 {
+		t.Fatalf("unexpected report identity: %+v", report)
+	}
+	if report.Phase != "uploading:42" || report.Heartbeat.Phase != "uploading:42" {
+		t.Fatalf("phase not propagated: %+v", report)
+	}
+	if report.WorkdirBytes != 5 {
+		t.Fatalf("workdir bytes = %d, want 5", report.WorkdirBytes)
+	}
+	if report.LogSnapshotBytes != 3 {
+		t.Fatalf("log snapshot bytes = %d, want 3", report.LogSnapshotBytes)
+	}
+	if report.Ts == 0 {
+		t.Fatal("expected timestamp")
+	}
+}
+
+func TestPruneStaleLogSnapshots(t *testing.T) {
+	oldSnapshot := filepath.Join(os.TempDir(), "weft-logs-job-test-old")
+	currentSnapshot := filepath.Join(os.TempDir(), "weft-logs-job-test-current")
+	t.Cleanup(func() {
+		os.RemoveAll(oldSnapshot)
+		os.RemoveAll(currentSnapshot)
+	})
+	if err := os.MkdirAll(oldSnapshot, 0o755); err != nil {
+		t.Fatalf("mkdir old snapshot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldSnapshot, "old.log"), []byte("old-data"), 0o644); err != nil {
+		t.Fatalf("write old snapshot: %v", err)
+	}
+	if err := os.MkdirAll(currentSnapshot, 0o755); err != nil {
+		t.Fatalf("mkdir current snapshot: %v", err)
+	}
+	oldTime := time.Now().Add(-staleLogSnapshotAge - time.Hour)
+	if err := os.Chtimes(oldSnapshot, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes old snapshot: %v", err)
+	}
+
+	pruned, bytes, err := pruneStaleLogSnapshots(currentSnapshot, time.Now())
+	if err != nil {
+		t.Fatalf("pruneStaleLogSnapshots: %v", err)
+	}
+	if pruned < 1 {
+		t.Fatalf("pruned = %d, want at least 1", pruned)
+	}
+	if bytes < int64(len("old-data")) {
+		t.Fatalf("bytes = %d, want at least old-data size", bytes)
+	}
+	if _, err := os.Stat(oldSnapshot); !os.IsNotExist(err) {
+		t.Fatalf("old snapshot still exists: %v", err)
+	}
+	if _, err := os.Stat(currentSnapshot); err != nil {
+		t.Fatalf("current snapshot should be preserved: %v", err)
 	}
 }
 
