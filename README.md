@@ -49,9 +49,15 @@ Remote Hosts (titan, atlas)
 - **Graceful degradation**: When the coordinator is unreachable, the CLI falls
   back to local placement scoring and direct SSH dispatch
 - **Cloud GPU bursting**: When local GPUs are busy or no host matches,
-  `weft place` (alias: `weft campaign launch`) batch-provisions Vast.ai instances,
-  runs jobs, and tears down on completion. Failed jobs enter a grace period for
+  `weft instance launch` provisions Vast.ai or RunPod instances, runs jobs,
+  and tears down on completion. Failed jobs enter a grace period for
   resubmission
+- **Autopilot**: An auto-mode runs continuously across the open TUIs (and on
+  demand via `weft autopilot run`), placing unplaced jobs, launching cloud
+  instances, and relaunching orphans. A runaway breaker pauses unattended
+  relaunches when a scope churns without progress; inspect with
+  `weft autopilot blocked` and reset with
+  `weft autopilot blocked --unblock`
 - **Auto-relaunch on instance failure**: When a cloud instance fails or hits an
   infrastructure error, `weft instance watch` automatically relaunches orphaned
   jobs on a new instance (up to 3 attempts per job), bounded by configurable
@@ -59,9 +65,10 @@ Remote Hosts (titan, atlas)
 - **Stall detection**: Adaptive timeouts detect stuck instances (bootstrap stall,
   setup phase stall) using survival analysis on historical durations — thresholds
   are learned per command and workspace, with automatic fallback
-- **Campaign management**: Launch, watch, and terminate batches of cloud
-  instances from the CLI or TUI. `weft instance watch` streams live status,
-  cost, and per-job progress until all instances finish
+- **Instance management**: Launch, watch, and terminate cloud instances from
+  the CLI or TUI. `weft instance watch` streams live status, cost, and per-job
+  progress until all instances finish. *Campaigns* are the batch record that
+  groups instances launched together (used for bulk listing and termination)
 - **System watch**: `weft watch` shows all active cloud instances, on-prem jobs,
   and unplaced jobs in a simplified TUI or periodic plain-text summary
 - **Progress tracking**: Automatic parsing of `Progress:` lines, tqdm bars,
@@ -72,7 +79,8 @@ Remote Hosts (titan, atlas)
 
 #### Placement Planner
 
-`weft place` (alias: `weft campaign launch`) opens an interactive planner:
+`weft instance launch` (deprecated aliases: `weft place`,
+`weft campaign launch`) opens an interactive planner:
 
 ```
 Rental GPU jobs (12 jobs, 3 GPU groups)
@@ -140,20 +148,20 @@ The system watch shows:
 Press `l` in the watch TUI to jump into the cloud launch planner.
 
 Post-launch scope behavior:
-- `weft place` (or `weft launch instances` / `weft instance launch` /
-  legacy `weft campaign launch`) watches the just-launched campaign's
-  instances (including relaunch replacements) and shows all unplaced jobs.
-- `weft launch project` (or `weft project launch`) watches project-scoped
-  instances (including relaunch replacements) and filters unplaced jobs to
-  that project.
+- `weft instance launch` (deprecated aliases: `weft place`,
+  `weft campaign launch`) watches the just-launched batch's instances
+  (including relaunch replacements) and shows all unplaced jobs.
+- `weft project launch` (alias: `weft launch project`) watches
+  project-scoped instances (including relaunch replacements) and filters
+  unplaced jobs to that project.
 
 #### Placement and instance commands
 
 The primary command for launching cloud instances for unplaced jobs is
-`weft place`:
+`weft instance launch`:
 
 ```bash
-weft place [job-id...] [--all|--project NAME] \
+weft instance launch [job-id...] [--all|--project NAME] \
   [--dry-run|--yes|--watch|--no-watch|--plain|--tui] \
   [--strategy cheap|fast|fastest] [--max-spend USD] [--max-time DURATION] \
   [--grace-period DURATION]
@@ -162,8 +170,8 @@ weft instance list [--plain|--tui]
 weft instance ssh <instance-id>
 ```
 
-A "campaign" is the batch record grouping the instances launched together; you
-can also inspect or tear one down directly:
+A *campaign* is the batch record that groups the instances launched together,
+useful for bulk inspection and termination:
 
 ```bash
 weft campaign list [--plain|--tui]
@@ -171,9 +179,9 @@ weft campaign show <campaign-id>
 weft campaign terminate <campaign-id>
 ```
 
-Legacy aliases: `weft campaign launch` is equivalent to `weft place`, and
-`weft campaign watch` is equivalent to `weft instance watch`. New workflows
-should prefer the `place` / `instance` forms.
+Deprecated aliases for `weft instance launch`: `weft place`,
+`weft campaign launch`. `weft campaign watch` is also equivalent to
+`weft instance watch`. New workflows should prefer the `instance` forms.
 
 #### Project Commands
 
@@ -246,6 +254,8 @@ For task-oriented docs and deeper design notes, start with
 [docs/README.md](docs/README.md).
 
 - **User guides**: [Workflow Guide](docs/guides/workflow-guide.md),
+  [Cloud GPU Instances](docs/guides/instances.md),
+  [Autopilot](docs/guides/autopilot.md),
   [Campaigns](docs/guides/campaigns.md),
   [Network Resilience](docs/guides/network-resilience.md),
   [Debugging](docs/guides/debugging.md)
@@ -282,6 +292,27 @@ Job IDs are shown as `wj<id>` in CLI output. Commands accept both `wj42` and `42
 For shell syntax, queue operations, job control, artifact commands, and advanced flags, use the dedicated reference above.
 
 ## Terminal UI
+
+Weft has a family of focused TUIs in addition to the full-screen `weft tui`
+described below. Pick the one whose scope matches what you need to watch:
+
+| Command                                | Scope                                                                                              |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `weft tui`                             | Full-screen Jobs/Hosts split view (the all-purpose TUI; see below)                                 |
+| `weft watch`                           | System-wide: every active cloud instance, on-prem jobs, unplaced jobs                              |
+| `weft instance watch [id]`             | A single launch batch's instances (live cost, phase, per-job progress)                             |
+| `weft project watch [name]`            | The current project's instances + unplaced jobs                                                    |
+| `weft list jobs --group-by status`     | Grouped jobs list (status sections, optional `--unprocessed`/`--wait`)                             |
+
+Several of these TUIs run an **autopilot** that auto-places, auto-launches,
+and relaunches jobs in the background. While auto-mode is on, press `$` to
+open the run-rate / daily-cap prompt, then `Enter` to advance to the daily
+step, then `Ctrl-R` to reset the runaway breaker. From the CLI, use
+`weft autopilot blocked` to see currently-paused scopes and
+`weft autopilot blocked --unblock` to clear the breaker. See
+[docs/guides/autopilot.md](docs/guides/autopilot.md).
+
+### `weft tui` — full-screen Jobs/Hosts view
 
 Launch the interactive terminal UI with `weft tui` (or `weft tui --mouse` for
 clickable rows).
@@ -437,7 +468,7 @@ weft coordinator install
 weft coordinator uninstall
 ```
 
-### Autopilot Status & Pause
+### Autopilot Status, Pause, and Blocked Scopes
 
 The TUIs (list, watch) drive an autopilot that auto-places, auto-launches, and
 auto-relaunches jobs. The CLI exposes a singleton state row so other terminals
@@ -457,6 +488,21 @@ Pause is sticky across restarts — every autopilot runner (TUIs, future
 coordinator daemon) skips its work while paused. Use it before launching
 instances or restarting orphaned jobs by hand from another terminal to avoid
 racing the autopilot.
+
+When the autopilot reports jobs blocked by `paused: repeated launch failures
+without progress`, the runaway breaker has tripped. Inspect the trip metrics
+(chain length, orphaned-attempt count, spend, window) and the affected jobs:
+
+```bash
+weft autopilot blocked              # list tripped scopes + jobs + metrics
+weft autopilot blocked --json       # machine-readable
+weft autopilot blocked --unblock    # list and reset the global breaker in one shot
+weft autopilot budget reset         # reset only
+```
+
+`weft info wj<N>` also surfaces the trip inline on any paused job. See
+[docs/guides/autopilot.md](docs/guides/autopilot.md) for the full
+inspection-and-reset workflow.
 
 ### Placement Scoring
 
@@ -585,8 +631,9 @@ historical data. These estimates feed into placement as:
 
 ### Cost-Optimal Cloud Bidding
 
-The `weft place` command (alias: `weft campaign launch`) selects cloud
-instances using one of three strategies (`--strategy`):
+The `weft instance launch` command (deprecated aliases: `weft place`,
+`weft campaign launch`) selects cloud instances using one of three
+strategies (`--strategy`):
 
 - **cheap** (default): Minimizes expected dollar cost including retry risk from
   instance failure, using the Beta-Binomial survival model.
@@ -594,11 +641,16 @@ instances using one of three strategies (`--strategy`):
   probability.
 - **fastest**: Picks the highest raw DLPerf, ignoring the survival model entirely.
 
-A Beta-Binomial survival model learns price-reliability curves from campaign
+A Beta-Binomial survival model learns price-reliability curves from launch
 history — cheaper instances fail more often, so the `cheap` and `fast`
 strategies balance their objective against the probability of completion.
-The model also tracks per-machine reliability: physical machines with a history
-of failures are penalized, steering jobs toward more reliable hardware.
+The model partitions same-family GPUs by VRAM (so a 4090 24GB and a 4090
+48GB are scored separately), tracks per-machine reliability (physical
+machines with a history of failures are penalized), and applies a
+hierarchical geographic adjustment (country → region → machine). All
+counts are exponentially decayed by recency so a stale exclusion from a
+transient outage decays out within a few cycles instead of being a
+permanent ban.
 
 Offers with survival probability below a configurable floor (`--min-survival`,
 default 40%) are rejected entirely — GPU classes or machines that consistently
@@ -611,19 +663,19 @@ Press `s` in the TUI to cycle between strategies.
 
 ```bash
 # Launch with automatic instance selection (default: cheap)
-weft place
+weft instance launch
 
 # Launch with fastest strategy
-weft place --strategy fastest
+weft instance launch --strategy fastest
 
 # Disable survival floor (allow all offers)
-weft place --min-survival 0
+weft instance launch --min-survival 0
 
 # Show the survival model
 weft campaign survival
 
 # Dry-run to see the cost plan
-weft place --dry-run
+weft instance launch --dry-run
 ```
 
 ### Transfer Bandwidth Learning
