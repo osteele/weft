@@ -123,3 +123,24 @@ func TestStartHeartbeatReporter_FirstEmitIsSynchronous(t *testing.T) {
 		t.Fatalf("expected force() to trigger an extra emit, got total %d", got)
 	}
 }
+
+func TestStartHeartbeatReporter_EmitPanicDoesNotStopReporter(t *testing.T) {
+	var calls int32
+	emit := func() {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			panic("boom")
+		}
+	}
+
+	force, stop := startHeartbeatReporterWithEmit(emit)
+	defer stop()
+	force()
+
+	for i := 0; i < 100; i++ {
+		if atomic.LoadInt32(&calls) >= 2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected reporter to continue after panic, got %d calls", atomic.LoadInt32(&calls))
+}

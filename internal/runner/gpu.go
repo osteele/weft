@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -8,11 +9,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
 )
+
+const nvidiaSmiTimeout = 5 * time.Second
 
 // GPUInfo describes a single GPU device.
 type GPUInfo struct {
@@ -77,10 +81,15 @@ func (inv *GPUInventory) queryNvidiaSmiCached(queryFlag string, fieldCount int) 
 
 // execNvidiaSmi runs nvidia-smi and parses the output (no LookPath check).
 func execNvidiaSmi(queryFlag string, fieldCount int) [][]string {
-	out, err := exec.Command("nvidia-smi",
+	ctx, cancel := context.WithTimeout(context.Background(), nvidiaSmiTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nvidia-smi",
 		queryFlag,
 		"--format=csv,noheader,nounits").Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			slog.Warn("nvidia-smi query timed out", "component", "gpu", "timeout", nvidiaSmiTimeout)
+		}
 		return nil
 	}
 	return parseNvidiaSmiOutput(string(out), fieldCount)

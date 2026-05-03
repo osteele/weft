@@ -645,7 +645,7 @@ func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, 
 		if err != nil {
 			return
 		}
-		r2Put(r2Bucket, heartbeatKey, string(data))
+		_ = r2Put(r2Bucket, heartbeatKey, string(data))
 	}
 	return startHeartbeatReporterWithEmit(emit)
 }
@@ -657,11 +657,19 @@ func startHeartbeatReporterWithEmit(emit func()) (force func(), stop func()) {
 	var once sync.Once
 	done := make(chan struct{})
 	stop = func() { once.Do(func() { close(done) }) }
+	safeEmit := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				oplog.Log(oplog.OpAgentHeartbeat, oplog.WithDetailf("panic: %v", r))
+			}
+		}()
+		emit()
+	}
 
 	// Synchronous first heartbeat: the cost (a single R2 PUT during
 	// startup) is negligible compared to the diagnostic value when an
 	// instance dies before the first ticker tick.
-	emit()
+	safeEmit()
 
 	pulse := make(chan struct{}, 1)
 	force = func() {
@@ -680,9 +688,9 @@ func startHeartbeatReporterWithEmit(emit func()) (force func(), stop func()) {
 			case <-done:
 				return
 			case <-ticker.C:
-				emit()
+				safeEmit()
 			case <-pulse:
-				emit()
+				safeEmit()
 			}
 		}
 	}()
