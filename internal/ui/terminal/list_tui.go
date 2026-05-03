@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
@@ -510,10 +511,11 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.runAutoPilot()
 
 	case listSyncFinishedMsg:
+		warnings := persistentListSyncWarnings(msg.warnings)
 		if !msg.full {
-			if len(msg.warnings) > 0 {
+			if len(warnings) > 0 {
 				if !m.quickLaunchStatusProtected() {
-					m.statusMessage = strings.Join(msg.warnings, " | ")
+					m.statusMessage = strings.Join(warnings, " | ")
 				}
 			} else {
 				if !m.quickLaunchStatusProtected() {
@@ -524,9 +526,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		delete(m.pendingSyncHosts, backgroundSyncKey)
-		if len(msg.warnings) > 0 {
+		if len(warnings) > 0 {
 			if !m.quickLaunchStatusProtected() {
-				m.statusMessage = strings.Join(msg.warnings, " | ")
+				m.statusMessage = strings.Join(warnings, " | ")
 			}
 		} else if len(m.jobs) == 0 {
 			if !m.quickLaunchStatusProtected() {
@@ -2521,6 +2523,20 @@ func groupedStatusUnprocessedView(title string) bool {
 		}
 	}
 	return false
+}
+
+func persistentListSyncWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		if degraded.IsCloudSyncTimeoutWarning(warning) {
+			continue
+		}
+		out = append(out, warning)
+	}
+	return out
 }
 
 func excludeJobsWithStatus(jobs []*db.Job, status string) []*db.Job {

@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/degraded"
 )
 
 func TestRenderJobListPlainTruncatesToWidth(t *testing.T) {
@@ -502,6 +503,42 @@ func TestListTUIRefreshKeySetsRefreshingStatusAndReturnsCommand(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected refresh key to return a refresh command")
+	}
+}
+
+func TestListTUISyncFinishedDoesNotPersistCloudTimeoutWarning(t *testing.T) {
+	m := listTUIModel{
+		jobs: []*db.Job{
+			{ID: 733, Status: db.StatusQueued, Description: "retry pending", Project: "proj"},
+		},
+		pendingSyncHosts: map[string]struct{}{backgroundSyncKey: {}},
+	}
+
+	next, _ := m.Update(listSyncFinishedMsg{
+		full:     true,
+		warnings: []string{degraded.CloudSyncTimedOutWaitingForDB("1m0s")},
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "" {
+		t.Fatalf("statusMessage = %q, want cloud timeout warning cleared", got.statusMessage)
+	}
+}
+
+func TestListTUISyncFinishedKeepsNonCloudTimeoutWarnings(t *testing.T) {
+	m := listTUIModel{
+		jobs: []*db.Job{
+			{ID: 733, Status: db.StatusQueued, Description: "retry pending", Project: "proj"},
+		},
+		pendingSyncHosts: map[string]struct{}{backgroundSyncKey: {}},
+	}
+
+	next, _ := m.Update(listSyncFinishedMsg{
+		full:     true,
+		warnings: []string{degraded.CloudSyncTimedOutWaitingForDB("1m0s"), "R2 storage unreachable"},
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "R2 storage unreachable" {
+		t.Fatalf("statusMessage = %q, want non-timeout warning", got.statusMessage)
 	}
 }
 
