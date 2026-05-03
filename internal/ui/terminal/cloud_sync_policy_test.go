@@ -31,15 +31,17 @@ func TestSyncCloudStateForTUI_ReusesReconciler(t *testing.T) {
 	})
 
 	var seen []*campaign.Reconciler
-	deps.SyncCloudStateWithTimeout = func(_ *config.Config, _ *sql.DB, r *campaign.Reconciler, _ time.Duration, _ bool) (CloudSyncResult, bool) {
+	var syncResults []bool
+	deps.SyncCloudStateWithTimeoutAndResults = func(_ *config.Config, _ *sql.DB, r *campaign.Reconciler, _ time.Duration, _ bool, sr bool) (CloudSyncResult, bool) {
 		seen = append(seen, r)
+		syncResults = append(syncResults, sr)
 		return CloudSyncResult{}, true
 	}
 
 	if warnings := syncCloudStateForTUI(database, false); len(warnings) != 0 {
 		t.Fatalf("unexpected warnings on first sync: %v", warnings)
 	}
-	if warnings := syncCloudStateForTUI(database, false); len(warnings) != 0 {
+	if warnings := syncCloudStateForTUI(database, true); len(warnings) != 0 {
 		t.Fatalf("unexpected warnings on second sync: %v", warnings)
 	}
 
@@ -52,9 +54,12 @@ func TestSyncCloudStateForTUI_ReusesReconciler(t *testing.T) {
 	if seen[0] != seen[1] {
 		t.Fatal("expected syncCloudStateForTUI to reuse reconciler across calls")
 	}
+	if len(syncResults) != 2 || syncResults[0] || !syncResults[1] {
+		t.Fatalf("syncResults flags = %v, want [false true]", syncResults)
+	}
 }
 
-func TestSyncCloudDatabaseOnlyForTUI_ReusesReconciler(t *testing.T) {
+func TestSyncCloudDatabaseOnlyForTUI_DoesNotRunCloudClients(t *testing.T) {
 	database := db.SetupTestDB(t)
 	resetCloudSyncSingletonsForTest()
 
@@ -64,9 +69,8 @@ func TestSyncCloudDatabaseOnlyForTUI_ReusesReconciler(t *testing.T) {
 		resetCloudSyncSingletonsForTest()
 	})
 
-	var seen []*campaign.Reconciler
-	deps.SyncCloudStateWithClients = func(_ *config.Config, _ *sql.DB, r *campaign.Reconciler, _ []cloud.Client, _ *r2.Client, _ bool) CloudSyncResult {
-		seen = append(seen, r)
+	deps.SyncCloudStateWithClients = func(_ *config.Config, _ *sql.DB, _ *campaign.Reconciler, _ []cloud.Client, _ *r2.Client, _ bool) CloudSyncResult {
+		t.Fatal("database-only TUI sync should not run cloud/R2 sync")
 		return CloudSyncResult{}
 	}
 
@@ -75,15 +79,5 @@ func TestSyncCloudDatabaseOnlyForTUI_ReusesReconciler(t *testing.T) {
 	}
 	if warnings := syncCloudDatabaseOnlyForTUI(database, 2*time.Second); len(warnings) != 0 {
 		t.Fatalf("unexpected warnings on second sync: %v", warnings)
-	}
-
-	if len(seen) != 2 {
-		t.Fatalf("sync calls = %d, want 2", len(seen))
-	}
-	if seen[0] == nil || seen[1] == nil {
-		t.Fatal("reconciler should never be nil")
-	}
-	if seen[0] != seen[1] {
-		t.Fatal("expected syncCloudDatabaseOnlyForTUI to reuse reconciler across calls")
 	}
 }

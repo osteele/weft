@@ -37,6 +37,7 @@ func init() {
 		SyncRentalJobsStatus:                              syncRentalJobsStatus,
 		SyncCloudState:                                    terminalSyncCloudState,
 		SyncCloudStateWithTimeout:                         terminalSyncCloudStateWithTimeout,
+		SyncCloudStateWithTimeoutAndResults:               terminalSyncCloudStateWithTimeoutAndResults,
 		SyncCloudStateWithClients:                         terminalSyncCloudStateWithClients,
 		TerminateInstancesParallel:                        orchestration.TerminateInstancesParallel,
 		PrintWatchExitReport:                              printWatchExitReport,
@@ -50,6 +51,11 @@ func terminalSyncCloudState(cfg *config.Config, database *sql.DB, reconciler *ca
 
 func terminalSyncCloudStateWithTimeout(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool) (terminal.CloudSyncResult, bool) {
 	result, completed := syncCloudStateWithTimeout(cfg, database, reconciler, timeout, verbose)
+	return terminal.CloudSyncResult(result), completed
+}
+
+func terminalSyncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (terminal.CloudSyncResult, bool) {
+	result, completed := syncCloudStateWithTimeoutAndResults(cfg, database, reconciler, timeout, verbose, syncResults)
 	return terminal.CloudSyncResult(result), completed
 }
 

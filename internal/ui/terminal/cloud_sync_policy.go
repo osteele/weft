@@ -48,7 +48,8 @@ func syncCloudStateForTUI(database *sql.DB, full bool) []string {
 	}()
 
 	cfg, _ := config.Load()
-	if _, completed := syncCloudStateWithTimeout(cfg, database, tuiCloudReconciler(), timeout, false); !completed {
+	syncResults := full
+	if _, completed := syncCloudStateWithTimeoutAndResults(cfg, database, tuiCloudReconciler(), timeout, false, syncResults); !completed {
 		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
 	}
 	return nil
@@ -105,7 +106,11 @@ func tuiCloudReconciler() *campaign.Reconciler {
 func syncCloudDatabaseOnlyForTUI(database *sql.DB, timeout time.Duration) []string {
 	done := make(chan struct{}, 1)
 	go func() {
-		_ = syncCloudStateWithClients(nil, database, tuiCloudReconciler(), nil, nil, false)
+		if _, err := db.ResetJobsOnTerminalLaunches(database); err != nil {
+			done <- struct{}{}
+			return
+		}
+		_, _ = campaign.ReconcileCampaigns(database)
 		done <- struct{}{}
 	}()
 
@@ -120,4 +125,11 @@ func syncCloudDatabaseOnlyForTUI(database *sql.DB, timeout time.Duration) []stri
 	case <-time.After(timeout):
 		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
 	}
+}
+
+func syncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (CloudSyncResult, bool) {
+	if deps.SyncCloudStateWithTimeoutAndResults != nil {
+		return deps.SyncCloudStateWithTimeoutAndResults(cfg, database, reconciler, timeout, verbose, syncResults)
+	}
+	return syncCloudStateWithTimeout(cfg, database, reconciler, timeout, verbose)
 }

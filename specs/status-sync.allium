@@ -519,8 +519,11 @@ rule ParallelCloudSyncPhases {
         -- two goroutines joined by sync.WaitGroup. The serial path
         -- dominated by two sequential R2 list operations becomes
         -- max(A, B) + ReconcileCampaigns.
-        -- Phase B is gated on opts.SyncResults; read-oriented CLI
-        -- commands like `weft job list` currently skip it.
+        -- Phase B is gated on opts.SyncResults. TUI fast cloud refreshes
+        -- MUST skip it so the 10s UI budget is spent on provider/instance
+        -- reconciliation rather than the heavier R2 jobs/ prefix scan.
+        -- The normal/full cloud sync path MAY enable Phase B with the
+        -- longer cloud timeout.
 }
 
 -- Sync individual job completions from R2 .complete markers.
@@ -802,6 +805,10 @@ rule TUIPeriodicSync {
         -- Cloud reconcile calls cloudsync.SyncState → ReconcileLaunches
         -- which reads R2 markers and provider API. Side effects include
         -- marking queued jobs as running (MarkQueuedJobRunning).
+        -- Fast TUI cloud refreshes use the 10s cloud timeout and run
+        -- instance/provider reconciliation only. Full TUI cloud refreshes
+        -- use the 60s cloud timeout and may additionally sync R2 job
+        -- result markers.
         --
         -- The worker sends a result to the TUI when Updated > 0
         -- (including both instance-level reconciliation AND job status
@@ -1062,9 +1069,9 @@ rule CloudSyncLease {
         -- TTL: 180 seconds
         -- Owner: "{hostname}:{pid}:{nanotime}" for TUI, "coordinator-cloud"
         --   for the coordinator daemon.
-        -- DB-only fallback runs syncCloudStateWithClients with nil clients,
-        --   applying only local DB repairs (orphaned job resets, campaign
-        --   status reconciliation) without R2 or provider API calls.
+        -- DB-only fallback applies only local DB repairs (orphaned job
+        --   resets, campaign status reconciliation) without R2 or provider
+        --   API calls.
 }
 
 -- Per-host sync leases: prevent redundant SSH probes across processes.

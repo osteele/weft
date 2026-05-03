@@ -37,10 +37,14 @@ func syncCloudState(cfg *config.Config, database *sql.DB, reconciler *campaign.R
 // if it does not complete within timeout. The sync may continue in the
 // background and still update the database later.
 func syncCloudStateWithTimeout(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool) (cloudSyncResult, bool) {
+	return syncCloudStateWithTimeoutAndResults(cfg, database, reconciler, timeout, verbose, true)
+}
+
+func syncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (cloudSyncResult, bool) {
 	res := syncorch.SyncCloud(cfg, database, syncorch.CloudSyncOptions{
 		Verbose:     verbose,
 		Reconciler:  reconciler,
-		SyncResults: true,
+		SyncResults: syncResults,
 		Timeout:     timeout,
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}, res.Completed
