@@ -301,14 +301,16 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				providerErr = fmt.Errorf("provider instance %s missing from %s batch list", providerID, providerKey)
 			}
 		} else {
-			// Batch fetch failed for this provider — fall back to individual call
+			// Batch fetch failed for this provider — fall back to individual call.
+			// Symmetric with the batch path above: if the instance isn't in the
+			// provider's list (ErrInstanceNotFound), keep providerErr non-nil so
+			// CheckInstance skips the provider_dead path this pass. Hysteresis on
+			// repeated misses still eventually catches genuinely destroyed
+			// instances; collapsing not-found to nil here previously let a single
+			// transient list-incomplete response start the dead-confirm timer.
 			inst, providerErr = client.ShowInstance(providerID)
-			if providerErr != nil {
-				if errors.Is(providerErr, cloud.ErrInstanceNotFound) {
-					providerErr = nil
-				} else {
-					slog.Warn("ShowInstance failed; continuing with provider_err fallback", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", providerErr)
-				}
+			if providerErr != nil && !errors.Is(providerErr, cloud.ErrInstanceNotFound) {
+				slog.Warn("ShowInstance failed; continuing with provider_err fallback", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", providerErr)
 			}
 		}
 	}

@@ -530,6 +530,16 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		slog.Debug("reconcile: entering provider_dead path", "component", "reconcile", "instance", ci.ID, "inst", instDescr, "ci_status", ci.Status)
 		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now)
 	}
+	// Definitive live signal: provider returned a non-terminal instance. Reset
+	// any in-flight dead-confirm timer so the hysteresis requires a fresh
+	// stretch of dead observations rather than inheriting an old one. Without
+	// this, an instance that flickers (alive, dead, alive, dead) over
+	// confirmTime would be marked dead on the second dead observation.
+	if p.ProviderErr == nil && p.ProviderInst != nil && !isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
+		r.mu.Lock()
+		delete(r.firstDeadAt, ci.ID)
+		r.mu.Unlock()
+	}
 
 	// 8. Stale heartbeat (display-only warning — the reconciler's probe logic is separate)
 	if p.HeartbeatAge > heartbeatStaleThreshold && ci.Status == db.LaunchStatusRunning {
