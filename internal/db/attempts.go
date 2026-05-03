@@ -510,6 +510,7 @@ func createJobStatusView(db *sql.DB) error {
 			j.description,
 			j.generated_description,
 			j.generation_hash,
+			COALESCE(j.priority, 0) AS priority,
 			j.created_at,
 			la.queued_at,
 			la.start_time,

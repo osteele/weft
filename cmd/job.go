@@ -94,6 +94,19 @@ Examples:
 	RunE: runStatus,
 }
 
+var jobPriorityClear bool
+
+var jobPriorityCmd = &cobra.Command{
+	Use:   "priority <job-id>...",
+	Short: "Mark queued jobs as priority",
+	Long: `Mark jobs as priority for queue ordering and cloud placement.
+
+Priority jobs are placed before unprioritized jobs. Use --clear to return
+jobs to normal priority.`,
+	Args: usageArgs(cobra.MinimumNArgs(1)),
+	RunE: runJobPriority,
+}
+
 // Job describe subcommand
 var jobDescribeCmd = &cobra.Command{
 	Use:   "describe <job-id>",
@@ -361,6 +374,8 @@ func init() {
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
 	jobCmd.AddCommand(jobInfoCmd)
+	jobPriorityCmd.Flags().BoolVar(&jobPriorityClear, "clear", false, "Clear priority instead of setting it")
+	jobCmd.AddCommand(jobPriorityCmd)
 	jobCmd.AddCommand(jobCancelCmd)
 	jobCmd.AddCommand(jobPauseCmd)
 	jobCmd.AddCommand(jobResumeCmd)
@@ -425,6 +440,51 @@ func init() {
 
 func runJobMove(cmd *cobra.Command, args []string) error {
 	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveNoTUI)
+}
+
+func runJobPriority(cmd *cobra.Command, args []string) error {
+	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
+	if err != nil {
+		return err
+	}
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	level := 1
+	if jobPriorityClear {
+		level = 0
+	}
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
+		}
+		if job == nil {
+			return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+		}
+		if err := db.SetJobPriority(database, jobID, level); err != nil {
+			return fmt.Errorf("set priority for %s: %w", ids.FormatJobID(jobID), err)
+		}
+		if level > 0 && job.EffectiveStatus() == db.StatusQueued {
+			if job.HasInventoryHost() {
+				_ = db.SetQueuedAtBefore(database, jobID, job.Host)
+				if result, moveErr := ops.RequestQueuePriority(database, job, ops.DefaultOptions()); moveErr == nil && !result.Deferred {
+					_ = syncHostAfterQueueChange(database, job.Host)
+				}
+			} else if job.Host != "" {
+				_ = db.SetQueuedAtBefore(database, jobID, job.Host)
+			}
+		}
+		action := "priority"
+		if level == 0 {
+			action = "normal priority"
+		}
+		fmt.Printf("Job %s set to %s\n", ids.FormatJobID(jobID), action)
+	}
+	return nil
 }
 
 func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {
@@ -807,6 +867,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			fmt.Printf("Status:      %s\n", job.EffectiveStatus())
+		}
+		if job.Priority > 0 {
+			fmt.Printf("Priority:    %d\n", job.Priority)
 		}
 		// If the autopilot has paused this job's scope via the runaway
 		// breaker, surface the trip details here. The canned blocked

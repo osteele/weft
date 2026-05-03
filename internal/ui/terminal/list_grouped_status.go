@@ -532,6 +532,9 @@ var (
 
 func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
 	id := ids.FormatJobID(job.ID)
+	if job.Priority > 0 {
+		return "!", id
+	}
 	if job.IsRentalJob() {
 		return rentalGlyphCloud, rentalIDStyle.Render(id)
 	}

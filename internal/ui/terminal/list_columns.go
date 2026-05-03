@@ -110,6 +110,21 @@ func allColumnDefs() []columnDef {
 			},
 		},
 		{
+			key: "priority", title: "PRI", width: 3,
+			value: func(job *db.Job) string {
+				if job.Priority <= 0 {
+					return ""
+				}
+				return fmt.Sprintf("%d", job.Priority)
+			},
+			jsonValue: func(job *db.Job) any {
+				if job.Priority <= 0 {
+					return nil
+				}
+				return job.Priority
+			},
+		},
+		{
 			key: "tags", title: "TAGS", width: 20,
 			value: func(job *db.Job) string {
 				return strings.Join(job.DisplayTags(), ",")
@@ -138,7 +153,7 @@ func columnDefMap() map[string]columnDef {
 
 // defaultTableColumnKeys returns the column keys used in the default table
 // layout at the widest terminal width (>= 96).
-var defaultTableColumnKeys = []string{"check", "id", "host", "status", "started", "project", "dir", "description"}
+var defaultTableColumnKeys = []string{"check", "id", "priority", "host", "status", "started", "project", "dir", "description"}
 
 // defaultJSONColumnKeys returns the column keys used in JSON output by default.
 var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu"}

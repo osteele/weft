@@ -140,6 +140,7 @@ func GroupByAffinity(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
 	affinityGroups := affinityGroupUnconstrained(floatable, sizeFunc)
 	groups = append(groups, affinityGroups...)
 
+	sortJobsWithinGroups(groups)
 	sortGroups(groups)
 	return groups
 }
@@ -383,6 +384,11 @@ func sharedInputScore(groupIDs, jobIDs map[string]struct{}, sizeFunc ModelSizeFu
 
 func sortGroups(groups []InstanceGroup) {
 	sort.Slice(groups, func(i, j int) bool {
+		aPriority := maxGroupPriority(groups[i])
+		bPriority := maxGroupPriority(groups[j])
+		if aPriority != bPriority {
+			return aPriority > bPriority
+		}
 		if groups[i].GPUMemGB != groups[j].GPUMemGB {
 			return groups[i].GPUMemGB > groups[j].GPUMemGB
 		}
@@ -391,6 +397,24 @@ func sortGroups(groups []InstanceGroup) {
 		}
 		return groups[i].GPUClass < groups[j].GPUClass
 	})
+}
+
+func sortJobsWithinGroups(groups []InstanceGroup) {
+	for i := range groups {
+		sort.SliceStable(groups[i].Jobs, func(a, b int) bool {
+			return db.SchedulingLess(groups[i].Jobs[a], groups[i].Jobs[b])
+		})
+	}
+}
+
+func maxGroupPriority(group InstanceGroup) int {
+	maxPriority := 0
+	for _, job := range group.Jobs {
+		if job != nil && job.Priority > maxPriority {
+			maxPriority = job.Priority
+		}
+	}
+	return maxPriority
 }
 
 // MergeCompatibleGroups combines instance groups that have compatible GPU

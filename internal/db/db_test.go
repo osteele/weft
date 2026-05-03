@@ -1073,6 +1073,41 @@ func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	}
 }
 
+func TestJobPriorityPersistsAndOrdersQueuedJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	normalID, err := RecordQueued(database, "host-beta", "/tmp/project", "python normal.py", "normal")
+	if err != nil {
+		t.Fatalf("record normal: %v", err)
+	}
+	priorityID, err := RecordQueued(database, "host-beta", "/tmp/project", "python priority.py", "priority")
+	if err != nil {
+		t.Fatalf("record priority: %v", err)
+	}
+	if err := SetJobPriority(database, priorityID, 1); err != nil {
+		t.Fatalf("SetJobPriority: %v", err)
+	}
+
+	job, err := GetJobByID(database, priorityID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Priority != 1 {
+		t.Fatalf("Priority = %d, want 1", job.Priority)
+	}
+
+	jobs, err := ListQueued(database, "host-beta")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("queued jobs = %d, want 2", len(jobs))
+	}
+	if jobs[0].ID != priorityID || jobs[1].ID != normalID {
+		t.Fatalf("queued order = [%d %d], want [%d %d]", jobs[0].ID, jobs[1].ID, priorityID, normalID)
+	}
+}
+
 func TestMoveQueuedJobToUnplacedKeepsInventoryTag(t *testing.T) {
 	database := SetupTestDB(t)
 

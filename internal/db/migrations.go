@@ -169,6 +169,12 @@ var versionedMigrations = []migration{
 			return initExecutionTargetsSchema(db)
 		},
 	},
+	{
+		Description: "add jobs.priority column",
+		Apply: func(db *sql.DB) error {
+			return addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

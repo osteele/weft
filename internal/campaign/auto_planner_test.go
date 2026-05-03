@@ -98,6 +98,26 @@ func TestBuildLaunchGroups_SkipsReusedJobsAndCostsPerGroup(t *testing.T) {
 	}
 }
 
+func TestBuildLaunchGroups_OrdersPriorityJobsFirst(t *testing.T) {
+	candidate := &CandidateResult{
+		Groups: []InstanceGroup{
+			{Jobs: []*db.Job{{ID: 101}, {ID: 102, Priority: 1}}},
+		},
+		Offers: []GroupOffer{{Offer: &cloud.Offer{CostPerHour: 0.99}}},
+	}
+
+	groups := buildLaunchGroups(candidate, nil)
+	if len(groups) != 1 {
+		t.Fatalf("launch groups len = %d, want 1", len(groups))
+	}
+	if got, want := groups[0].JobIDs, []int64{102, 101}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("group job ids = %v, want %v", got, want)
+	}
+	if groups[0].Priority != 1 {
+		t.Fatalf("group priority = %d, want 1", groups[0].Priority)
+	}
+}
+
 func TestApplyGroupOffer_MappedStatsDoNotRegressToProviderEmpty(t *testing.T) {
 	split := []InstanceGroup{
 		{

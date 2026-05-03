@@ -359,15 +359,7 @@ func listRebalanceCandidates(database *sql.DB, jobScope map[int64]struct{}) ([]*
 }
 
 func queuedOrderLess(a, b *db.Job) bool {
-	if a == nil || b == nil {
-		return a != nil
-	}
-	aOrder := queuedOrderKey(a)
-	bOrder := queuedOrderKey(b)
-	if aOrder != bOrder {
-		return aOrder < bOrder
-	}
-	return a.ID < b.ID
+	return db.SchedulingLess(a, b)
 }
 
 func queuedOrderKey(job *db.Job) int64 {

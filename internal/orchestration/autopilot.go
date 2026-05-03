@@ -503,6 +503,9 @@ func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom in
 	sort.SliceStable(sorted, func(i, j int) bool {
 		a := sorted[i]
 		b := sorted[j]
+		if maxLaunchGroupPriority(a) != maxLaunchGroupPriority(b) {
+			return maxLaunchGroupPriority(a) > maxLaunchGroupPriority(b)
+		}
 		ratioA := launchGroupValue(a)
 		ratioB := launchGroupValue(b)
 		if ratioA != ratioB {
@@ -537,12 +540,17 @@ func applyAcceptedLaunchGroups(plan *campaign.AutoPlacementPlan, groups []campai
 	plan.LaunchRateCentsPerHour = 0
 	for _, group := range groups {
 		plan.LaunchRateCentsPerHour += group.CostPerHourCents
-		plan.LaunchJobIDs = append(plan.LaunchJobIDs, group.JobIDs...)
-		for _, jobID := range group.JobIDs {
+		jobIDs := append([]int64(nil), group.JobIDs...)
+		sort.Slice(jobIDs, func(i, j int) bool { return jobIDs[i] < jobIDs[j] })
+		plan.LaunchJobIDs = append(plan.LaunchJobIDs, jobIDs...)
+		for _, jobID := range jobIDs {
 			delete(blockedReasons, jobID)
 		}
 	}
-	sort.Slice(plan.LaunchJobIDs, func(i, j int) bool { return plan.LaunchJobIDs[i] < plan.LaunchJobIDs[j] })
+}
+
+func maxLaunchGroupPriority(group campaign.LaunchGroup) int {
+	return group.Priority
 }
 
 func cheapestLaunchGroupCost(groups []campaign.LaunchGroup) int {

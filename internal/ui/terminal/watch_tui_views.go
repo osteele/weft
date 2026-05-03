@@ -1026,7 +1026,7 @@ func (m watchModel) renderWatchHelpView() string {
 		"  t terminate selected cloud instance",
 		"  s submit selected unplaced job",
 		"  m move selected queued cloud job",
-		"  N launch new instance now (fast strategy)",
+		"  N launch new instance now (fastest strategy)",
 		"  l open launch planner",
 		"  J open ungrouped jobs list",
 		"  U open grouped jobs list",

@@ -96,7 +96,7 @@ func RunQuickLaunch(
 			byID[job.ID] = job
 		}
 	}
-	launchJobID := minLaunchJobID(plan.LaunchJobIDs)
+	launchJobID := plan.LaunchJobIDs[0]
 	launchJob := byID[launchJobID]
 	if launchJob == nil {
 		return QuickLaunchResult{}, fmt.Errorf("launch job %s not found in current scope", ids.FormatJobID(launchJobID))
@@ -234,19 +234,6 @@ func listScopedLaunchableJobs(database *sql.DB, scoped map[int64]struct{}) ([]*d
 	return out, nil
 }
 
-func minLaunchJobID(idsList []int64) int64 {
-	if len(idsList) == 0 {
-		return 0
-	}
-	minID := idsList[0]
-	for _, id := range idsList[1:] {
-		if id < minID {
-			minID = id
-		}
-	}
-	return minID
-}
-
 type queueETAState struct {
 	AvailByInstance  map[int64][]time.Duration
 	QueuedByInstance map[int64]int
@@ -295,7 +282,9 @@ func rebalanceQueuedJobsToLaunchedInstance(
 	if len(candidates) == 0 {
 		return 0, "", nil
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return db.SchedulingLess(candidates[i], candidates[j])
+	})
 
 	state := buildQueueETAState(scopedQueued, time.Now())
 	currentMean := meanQueuedCompletionETA(state)

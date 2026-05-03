@@ -824,7 +824,7 @@ func requestLaunchNewForJob(
 ) tea.Cmd {
 	return func() tea.Msg {
 		targetDesc, execErr := orchestration.LaunchNewForJob(
-			ctx, database, r2Client, cfg, cloudClients, jobID, bidding.StrategyFast,
+			ctx, database, r2Client, cfg, cloudClients, jobID, bidding.StrategyFastest,
 		)
 		if execErr != nil {
 			return moveExecuteDoneMsg{jobID: jobID, action: moveExecuteActionLaunchNew, err: execErr}

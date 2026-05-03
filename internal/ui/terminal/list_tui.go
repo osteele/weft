@@ -1194,6 +1194,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
 			line += "  m:move  N:new for selected"
 		}
+		line += "  P:priority"
 	}
 	if hasQueued {
 		line += "  n:new instance"
@@ -1566,6 +1567,29 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		)
 	case "N":
 		return m.beginSelectedLaunchNew()
+	case "P":
+		job := m.selectedGroupedJob()
+		if job == nil {
+			return m, nil
+		}
+		nextPriority := 1
+		if job.Priority > 0 {
+			nextPriority = 0
+		}
+		if err := db.SetJobPriority(m.database, job.ID, nextPriority); err != nil {
+			m.statusMessage = fmt.Sprintf("Failed to update priority for job #%d: %v", job.ID, err)
+			return m, nil
+		}
+		job.Priority = nextPriority
+		if nextPriority > 0 && job.EffectiveStatus() == db.StatusQueued && job.Host != "" {
+			_ = db.SetQueuedAtBefore(m.database, job.ID, job.Host)
+		}
+		if nextPriority > 0 {
+			m.statusMessage = fmt.Sprintf("Job #%d marked priority", job.ID)
+		} else {
+			m.statusMessage = fmt.Sprintf("Job #%d priority cleared", job.ID)
+		}
+		return m, m.reloadJobs()
 	case "R":
 		m.clearAutoPilotPersistentState()
 		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
@@ -1825,7 +1849,7 @@ func (m listTUIModel) footerText(rows int) string {
 	if m.statusMessage != "" {
 		state += "  " + m.statusMessage
 	}
-	state += "  up/down move  space/b page  g/G top/bottom  v:toggle  i:instances  ? help  q quit"
+	state += "  up/down move  space/b page  g/G top/bottom  P:priority  v:toggle  i:instances  ? help  q quit"
 	return state
 }
 
@@ -1854,6 +1878,7 @@ func (m listTUIModel) renderListHelpView() string {
 			"  $ set run-rate + daily cap (H/D clear; r resets breaker)",
 			"  n launch a new instance for queued jobs",
 			"  N launch a new instance for selected queued job",
+			"  P toggle selected job priority",
 			"  R preview rebalance moves",
 			"  k kill selected job",
 			"  u unplace selected queued job",

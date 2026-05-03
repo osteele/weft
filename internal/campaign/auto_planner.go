@@ -31,6 +31,7 @@ type LaunchGroup struct {
 	JobIDs           []int64
 	CostPerHourCents int
 	Offer            *cloud.Offer
+	Priority         int
 }
 
 // AutoPlannerProfile returns the cost/time profile for unattended auto mode.
@@ -162,7 +163,7 @@ func BuildAutoPlacementPlanWithOptions(
 		plan.LaunchJobIDs = append(plan.LaunchJobIDs, group.JobIDs...)
 	}
 
-	sort.Slice(plan.LaunchJobIDs, func(i, j int) bool { return plan.LaunchJobIDs[i] < plan.LaunchJobIDs[j] })
+	sortLaunchJobIDsByScheduling(plan.LaunchJobIDs, jobs)
 	return plan, nil
 }
 
@@ -192,14 +193,42 @@ func buildLaunchGroups(candidate *CandidateResult, reused map[int64]struct{}) []
 		if len(jobIDs) == 0 {
 			continue
 		}
-		sort.Slice(jobIDs, func(i, j int) bool { return jobIDs[i] < jobIDs[j] })
+		sort.SliceStable(jobIDs, func(i, j int) bool {
+			return db.SchedulingLess(jobByID(group.Jobs, jobIDs[i]), jobByID(group.Jobs, jobIDs[j]))
+		})
 		launchGroups = append(launchGroups, LaunchGroup{
 			JobIDs:           jobIDs,
 			CostPerHourCents: int(math.Round(groupOffer.Offer.CostPerHour * 100)),
 			Offer:            groupOffer.Offer,
+			Priority:         maxJobPriority(group.Jobs),
 		})
 	}
 	return launchGroups
+}
+
+func maxJobPriority(jobs []*db.Job) int {
+	maxPriority := 0
+	for _, job := range jobs {
+		if job != nil && job.Priority > maxPriority {
+			maxPriority = job.Priority
+		}
+	}
+	return maxPriority
+}
+
+func sortLaunchJobIDsByScheduling(jobIDs []int64, jobs []*db.Job) {
+	sort.SliceStable(jobIDs, func(i, j int) bool {
+		return db.SchedulingLess(jobByID(jobs, jobIDs[i]), jobByID(jobs, jobIDs[j]))
+	})
+}
+
+func jobByID(jobs []*db.Job, id int64) *db.Job {
+	for _, job := range jobs {
+		if job != nil && job.ID == id {
+			return job
+		}
+	}
+	return &db.Job{ID: id}
 }
 
 func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}, minReliability float64) {

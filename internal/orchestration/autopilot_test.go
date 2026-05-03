@@ -231,6 +231,24 @@ func TestSelectLaunchGroupsWithinHeadroom_NoneFit(t *testing.T) {
 	}
 }
 
+func TestSelectLaunchGroupsWithinHeadroom_PrefersPriorityGroup(t *testing.T) {
+	groups := []campaign.LaunchGroup{
+		{JobIDs: []int64{1}, CostPerHourCents: 100, Priority: 0},
+		{JobIDs: []int64{2}, CostPerHourCents: 100, Priority: 1},
+	}
+
+	accepted, rejected, used := selectLaunchGroupsWithinHeadroom(groups, 100)
+	if used != 100 {
+		t.Fatalf("used = %d, want 100", used)
+	}
+	if len(accepted) != 1 || accepted[0].JobIDs[0] != 2 {
+		t.Fatalf("accepted = %+v, want priority job 2", accepted)
+	}
+	if len(rejected) != 1 || rejected[0].JobIDs[0] != 1 {
+		t.Fatalf("rejected = %+v, want normal job 1", rejected)
+	}
+}
+
 func TestApplyAcceptedLaunchGroups_UpdatesLegacyLaunchFields(t *testing.T) {
 	plan := campaign.AutoPlacementPlan{
 		LaunchJobIDs: []int64{1, 2, 3},

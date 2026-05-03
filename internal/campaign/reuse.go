@@ -397,9 +397,9 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		Sources: []controlplane.SourceUpdate{},
 	}
 
-	// Sort jobs by ID so the agent executes them in submission order
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].ID < jobs[j].ID
+	// Sort jobs by scheduling intent so the agent executes priority jobs first.
+	sort.SliceStable(jobs, func(i, j int) bool {
+		return db.SchedulingLess(jobs[i], jobs[j])
 	})
 
 	claimedJobs := make([]*db.Job, 0, len(jobs))

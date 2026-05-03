@@ -58,6 +58,9 @@ func renderJobFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) str
 		return ""
 	}
 	parts := []string{"Job: " + ids.FormatJobID(job.ID)}
+	if job.Priority > 0 {
+		parts = append(parts, fmt.Sprintf("priority %d", job.Priority))
+	}
 	parts = appendJobStatusParts(parts, job, now)
 	if job.TargetKind() == db.JobTargetUnplaced {
 		parts = appendUnplacedParts(parts, job, ctx.cloudConfigured)

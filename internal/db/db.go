@@ -74,6 +74,7 @@ type Job struct {
 	Produces             []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
 	Needs                []string // Artifact specs this job needs (e.g., "output/model.pt:100")
 	Project              string   // Basename of working directory (stored at creation time)
+	Priority             int      // Scheduling priority; 0 is normal, higher values run first
 	CreatedAt            int64    // When the job was created/queued (0 for legacy jobs)
 	QueuedAt             int64    // When job was added to remote queue (for queue ordering)
 	StartTime            int64
@@ -289,9 +290,9 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
 
-const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
+const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, priority, created_at, backend, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
@@ -395,6 +396,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		description TEXT,
 		generated_description TEXT,
 		generation_hash TEXT,
+		priority INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER,
 		backend TEXT DEFAULT 'queue-runner',
 		queue_name TEXT,
@@ -1215,6 +1217,7 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE jobs ADD COLUMN tags TEXT`,
 		`ALTER TABLE jobs ADD COLUMN generated_description TEXT`,
 		`ALTER TABLE jobs ADD COLUMN generation_hash TEXT`,
+		`ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if err := addColumnIfMissing(db, stmt); err != nil {
 			return err
@@ -2946,6 +2949,26 @@ func SetQueuedAtBefore(db *sql.DB, jobID int64, host string) error {
 	return err
 }
 
+// SetJobPriority updates the durable scheduling priority for a job.
+func SetJobPriority(db *sql.DB, jobID int64, priority int) error {
+	if priority < 0 {
+		return fmt.Errorf("priority must be non-negative")
+	}
+	_, err := db.Exec(`UPDATE jobs SET priority = ? WHERE id = ?`, priority, jobID)
+	return err
+}
+
+// SchedulingLess orders jobs by user scheduling intent, then job ID.
+func SchedulingLess(a, b *Job) bool {
+	if a == nil || b == nil {
+		return a != nil
+	}
+	if a.Priority != b.Priority {
+		return a.Priority > b.Priority
+	}
+	return a.ID < b.ID
+}
+
 // IsTerminalStatus returns true if the status represents a terminal state.
 func IsTerminalStatus(s string) bool {
 	return status.IsTerminal(s)
@@ -3551,7 +3574,7 @@ func ReplaceDepSpecID(spec string, oldID, newID int64) (string, bool) {
 
 // ListQueued returns queued jobs for a host.
 func ListQueued(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY priority DESC, id ASC`, jobSelectColumns)
 	return queryJobs(db, query, StatusQueued, host)
 }
 
@@ -3713,6 +3736,7 @@ type jobScanFields struct {
 	produces         sql.NullString
 	needs            sql.NullString
 	project          sql.NullString
+	priority         sql.NullInt64
 	createdAt        sql.NullInt64
 	queuedAt         sql.NullInt64
 	startTime        sql.NullInt64
@@ -3741,7 +3765,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 	return []any{
 		&j.ID, &j.Host, &f.sessionName, &j.WorkingDir, &j.Command,
 		&f.desc, &f.generatedDesc, &f.generationHash,
-		&f.createdAt, &f.queuedAt, &f.startTime, &f.endTime, &f.exitCode,
+		&f.priority, &f.createdAt, &f.queuedAt, &f.startTime, &f.endTime, &f.exitCode,
 		&j.Status, &f.errorMsg, &f.backend, &f.remoteID, &f.remoteState,
 		&f.failureReason, &f.gpu, &f.gpuClass,
 		&f.cpuAllotment, &f.gpuMemGB, &f.gpuMemMaxGB, &f.maxComputeCap,
@@ -3818,6 +3842,9 @@ func (f *jobScanFields) populateJob(j *Job) {
 	j.Needs = decodeStringSlice(f.needs)
 	if f.project.Valid {
 		j.Project = f.project.String
+	}
+	if f.priority.Valid {
+		j.Priority = int(f.priority.Int64)
 	}
 	if f.createdAt.Valid {
 		j.CreatedAt = f.createdAt.Int64
