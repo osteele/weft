@@ -278,9 +278,11 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	}
 
 	// 4a. Provider status unavailable timeout: if polling repeatedly fails and
-	// no job/phase progress is visible, fail closed instead of wedging forever.
+	// either no progress is visible or the running agent heartbeat has gone
+	// stale, fail closed instead of wedging forever.
 	if p.ProviderInst == nil && p.ProviderErr != nil && (ci.Status == db.LaunchStatusLaunching || ci.Status == db.LaunchStatusRunning) &&
-		!p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
+		((!p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady) ||
+			(ci.Status == db.LaunchStatusRunning && p.HeartbeatAge > heartbeatStaleThreshold)) {
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
 			if age > maxProviderStatusUnavailableTime {

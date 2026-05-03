@@ -698,6 +698,51 @@ func TestCheckInstance_ProviderStatusUnavailableWaitsBeforeTimeout(t *testing.T)
 	}
 }
 
+func TestCheckInstance_ProviderStatusUnavailableStaleRunningJobTimesOut(t *testing.T) {
+	launchedAt := time.Now().Add(-26 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderErr:   fmt.Errorf("provider instance test-123 missing from batch list"),
+		InstancePhase: "running:531",
+		HeartbeatAge:  4 * time.Minute,
+		JobState:      JobState{HasStartedJob: true},
+		Now:           time.Now(),
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs to be true")
+	}
+}
+
+func TestCheckInstance_ProviderStatusUnavailableFreshRunningJobWaits(t *testing.T) {
+	launchedAt := time.Now().Add(-26 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderErr:   fmt.Errorf("provider instance test-123 missing from batch list"),
+		InstancePhase: "running:531",
+		HeartbeatAge:  30 * time.Second,
+		JobState:      JobState{HasStartedJob: true},
+		Now:           time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("action.Kind = %d, want ActionNone (%d)", action.Kind, ActionNone)
+	}
+}
+
 func TestCheckInstance_PauseTolerant_RecentPause_Pause(t *testing.T) {
 	// Running launch whose provider instance just transitioned to stopped:
 	// flip the launch to paused.
@@ -1168,7 +1213,7 @@ func TestCheckInstance_RunningStall_MissingPhaseChangedAtUsesHeartbeatAge(t *tes
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderErr:   fmt.Errorf("provider instance missing from batch list"),
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "running:531",
 		HeartbeatAge:  65 * time.Minute,
 		JobState:      JobState{HasStartedJob: true},
