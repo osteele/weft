@@ -1014,6 +1014,17 @@ rule RunawayBreakerTrips {
     --    - Max trailing orphaned chain >= chain_no_progress_limit
     --    - Total orphaned attempts >= orphan_churn_limit
     --    - Total spend >= spend_no_progress_limit_cents
+    --
+    -- Orphan and chain tallies EXCLUDE attempts whose launch ended for an
+    -- infrastructure-side reason (provider_failure, infra_failure,
+    -- bootstrap_timeout, phase_stall, preempted) — Vast.ai flakiness alone
+    -- must not trip the breaker. Spend is NOT filtered (infra failures
+    -- still cost money) and remains the cost backstop. An infra-side orphan
+    -- in the middle of a chain is neutral: it doesn't extend the chain but
+    -- doesn't break it either, so two real orphans bracketing infra noise
+    -- still count as a chain of two. Unknown / empty termination_reason is
+    -- NOT treated as infra — unattributed failures still count, otherwise
+    -- the breaker has a hole.
 
     let scope = instance.campaign.id ++ ":" ++ instance.project
     let window = config.runaway_lookback_window
@@ -1021,8 +1032,8 @@ rule RunawayBreakerTrips {
                        + config.runaway_resume_grace_period
     let accounting_window = max(now - window, resume_floor)
     let completions = count completed jobs in scope after accounting_window
-    let chain = max trailing orphaned attempt chain in scope after accounting_window
-    let orphans = count orphaned attempts in scope after accounting_window
+    let chain = max trailing non-infra orphaned attempt chain in scope after accounting_window
+    let orphans = count non-infra orphaned attempts in scope after accounting_window
     let spend = sum actual_spend_cents in scope after accounting_window
 
     if completions = 0
@@ -1039,7 +1050,10 @@ rule RunawayBreakerTrips {
         -- next accounting window, so a reset gives fresh launches a real
         -- chance before the breaker can trip again.
         -- Recorded as lifecycle_event kind=relaunch.runaway_tripped.
-        -- Implementation: internal/campaign/relaunch.go evaluateRunawayBreaker()
+        -- Implementation: internal/campaign/relaunch.go evaluateRunawayBreaker(),
+        -- queryRunawayMetrics(); infra-reason set in
+        -- internal/db/cloud_instances.go IsInfrastructureTermination /
+        -- InfrastructureTerminationReasons.
 }
 
 rule RunawayBreakerClears {

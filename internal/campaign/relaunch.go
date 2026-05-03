@@ -995,19 +995,35 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 	}
 	inClause := strings.Join(holders, ",")
 
+	infraReasons := db.InfrastructureTerminationReasons()
+	infraPlaceholders := strings.Repeat("?,", len(infraReasons))
+	infraPlaceholders = strings.TrimRight(infraPlaceholders, ",")
+	infraArgs := make([]any, 0, len(infraReasons))
+	for _, r := range infraReasons {
+		infraArgs = append(infraArgs, r)
+	}
+
 	countClause, countCampaignArgs := campaignFilter("l", campaignID)
-	countArgs := append([]any{db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned}, args...)
+	// Completed counts every cloud_outcome=completed attempt; orphaned counts
+	// only orphans whose launch wasn't an infrastructure-side failure
+	// (provider/infra/bootstrap-timeout/phase-stall/preempted), so Vast.ai
+	// flakiness doesn't trip the breaker. Spend remains the cost backstop.
+	countArgs := append([]any{db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned}, infraArgs...)
+	countArgs = append(countArgs, args...)
 	countArgs = append(countArgs, countCampaignArgs...)
 	countArgs = append(countArgs, since)
 	row := database.QueryRow(
 		fmt.Sprintf(`SELECT
 			COALESCE(SUM(CASE WHEN ja.cloud_outcome = ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN ja.cloud_outcome = ? THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE
+				WHEN ja.cloud_outcome = ?
+				 AND COALESCE(l.termination_reason, '') NOT IN (%s)
+				THEN 1 ELSE 0 END), 0)
 		FROM job_attempts ja
 		JOIN launches l ON l.id = ja.launch_id
 		WHERE ja.launch_id IS NOT NULL
 		  AND ja.job_id IN (%s)%s
-		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, inClause, countClause),
+		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, infraPlaceholders, inClause, countClause),
 		countArgs...,
 	)
 	if err := row.Scan(&m.CompletedCount, &m.OrphanedCount); err != nil {
@@ -1069,6 +1085,13 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 				continue
 			}
 			if a.Outcome == db.AttemptOutcomeOrphaned {
+				// Infra-side failures are neutral: they don't extend the
+				// chain (Vast flakiness shouldn't trip the breaker) but
+				// also don't break it (an infra failure between two real
+				// orphans still indicates a stuck job).
+				if db.IsInfrastructureTermination(ci.TerminationReason) {
+					continue
+				}
 				trailing++
 				continue
 			}

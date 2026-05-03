@@ -78,6 +78,37 @@ func IsRetryableTermination(ci *Launch) bool {
 	}
 }
 
+// IsInfrastructureTermination reports whether a failed cloud instance ended
+// for an infrastructure-side reason that should NOT count against the
+// runaway breaker's orphan-churn or no-progress-chain tallies. Tighter than
+// IsRetryableTermination: Unknown and empty reasons are excluded so the
+// breaker still trips on unexplained failures.
+func IsInfrastructureTermination(reason string) bool {
+	switch reason {
+	case TerminationReasonProviderFailure,
+		TerminationReasonInfraFailure,
+		TerminationReasonBootstrapTimeout,
+		TerminationReasonPhaseStall,
+		TerminationReasonPreempted:
+		return true
+	default:
+		return false
+	}
+}
+
+// InfrastructureTerminationReasons returns the termination_reason values that
+// IsInfrastructureTermination treats as infrastructure-side, suitable for
+// constructing SQL `NOT IN (...)` filters with sqlPlaceholders.
+func InfrastructureTerminationReasons() []string {
+	return []string{
+		TerminationReasonProviderFailure,
+		TerminationReasonInfraFailure,
+		TerminationReasonBootstrapTimeout,
+		TerminationReasonPhaseStall,
+		TerminationReasonPreempted,
+	}
+}
+
 // Launch represents a single cloud GPU deployment (e.g. one Vast.ai instance).
 type Launch struct {
 	ID                 int64

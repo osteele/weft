@@ -13,6 +13,13 @@ import (
 
 func seedOrphanedLaunches(t *testing.T, database *sql.DB, jobID int64, count int, campaignID *int64) {
 	t.Helper()
+	// Job-failure (non-infra) so the breaker counts these orphans. Use
+	// seedOrphanedLaunchesWithReason for tests that care which reason.
+	seedOrphanedLaunchesWithReason(t, database, jobID, count, campaignID, db.TerminationReasonJobFailure)
+}
+
+func seedOrphanedLaunchesWithReason(t *testing.T, database *sql.DB, jobID int64, count int, campaignID *int64, reason string) {
+	t.Helper()
 	for i := 0; i < count; i++ {
 		launchID, err := db.CreateLaunch(database, &db.Launch{
 			CampaignID: campaignID,
@@ -39,7 +46,7 @@ func seedOrphanedLaunches(t *testing.T, database *sql.DB, jobID int64, count int
 		); err != nil {
 			t.Fatalf("mark orphaned[%d]: %v", i, err)
 		}
-		if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+		if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusFailed, reason); err != nil {
 			t.Fatalf("fail launch[%d]: %v", i, err)
 		}
 	}
@@ -611,5 +618,109 @@ func TestResetGlobalRunawayBreaker_ClearsCampaignScopedTrip(t *testing.T) {
 	}
 	if tripped {
 		t.Fatal("expected breaker cleared by global reset even though trip was campaign-scoped")
+	}
+}
+
+func TestSpec_RunawayBreakerDoesNotTrip_OnInfraOnlyOrphans(t *testing.T) {
+	// Spec: orphan attempts whose launch terminated for an infrastructure
+	// reason (provider_failure, infra_failure, bootstrap_timeout,
+	// phase_stall, preempted) are excluded from the orphan-churn and
+	// trailing-chain tallies. Vast.ai flakiness alone must not trip.
+	database := db.SetupTestDB(t)
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	// 12 infra-side orphans — would have tripped the orphan-churn limit
+	// (8) under the old behavior.
+	seedOrphanedLaunchesWithReason(t, database, jobID, 12, &campaignID, db.TerminationReasonProviderFailure)
+	job, _ := db.GetJobByID(database, jobID)
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			SpendNoProgressLimitCent: 1_000_000, // out of reach so spend can't trip
+		},
+	}
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if tripped {
+		t.Fatal("expected breaker NOT to trip when all orphans are infra-side")
+	}
+}
+
+func TestSpec_RunawayBreakerTrips_OnUnknownTerminationReason(t *testing.T) {
+	// Spec: empty / unknown termination_reason is NOT treated as infra —
+	// otherwise the breaker has a hole for unattributed failures.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	seedOrphanedLaunchesWithReason(t, database, jobID, 10, nil, db.TerminationReasonUnknown)
+	job, _ := db.GetJobByID(database, jobID)
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			SpendNoProgressLimitCent: 1_000_000,
+		},
+	}
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if !tripped {
+		t.Fatal("expected breaker to trip on 10 unknown-reason orphans")
+	}
+}
+
+func TestSpec_RunawayBreakerTrips_OnMixedOrphans(t *testing.T) {
+	// 5 job-failure orphans + 10 infra orphans: the infra ones don't count,
+	// 5 < orphan limit (8) and < chain limit (3 trips at chain >= 3 but
+	// the longest non-infra trailing chain is 5), so the chain trips here.
+	// The point is to verify mixed sequences classify correctly.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	seedOrphanedLaunchesWithReason(t, database, jobID, 10, nil, db.TerminationReasonProviderFailure)
+	seedOrphanedLaunchesWithReason(t, database, jobID, 5, nil, db.TerminationReasonJobFailure)
+	job, _ := db.GetJobByID(database, jobID)
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			SpendNoProgressLimitCent: 1_000_000,
+		},
+	}
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if !tripped {
+		t.Fatal("expected breaker to trip: 5 non-infra orphans form a chain >= 3")
 	}
 }
