@@ -131,6 +131,7 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 	{
 		sem := make(chan struct{}, syncJobMarkerParallel)
 		var mu sync.Mutex
+		var eligibilityWarnings sync.Map
 		var wg sync.WaitGroup
 
 		for _, jobIDStr := range markers.Started {
@@ -149,7 +150,9 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 
 				runID, ok, err := JobEligibleForStartedMarker(database, jobID)
 				if err != nil {
-					slog.Warn("failed to check started-marker eligibility", "component", "sync", "job_id", jobID, "error", err)
+					if _, loaded := eligibilityWarnings.LoadOrStore(err.Error(), struct{}{}); !loaded {
+						slog.Warn("failed to check started-marker eligibility", "component", "sync", "job_id", jobID, "error", err, "note", "further warnings with the same error are suppressed")
+					}
 					return
 				}
 				if !ok {
