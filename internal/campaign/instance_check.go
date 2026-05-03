@@ -155,6 +155,7 @@ type CheckInstanceParams struct {
 	InstancePhase  string // reconciled display/check phase
 	BootstrapStage string // from R2
 	HeartbeatAge   time.Duration
+	Heartbeat      *HeartbeatSample
 	Now            time.Time
 
 	// TerminationIntent from R2 or DB (pre-fetched by caller)
@@ -256,6 +257,25 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	if p.TerminationIntent != nil {
 		if action := r.checkTerminationIntent(ci, p.ProviderInst, p.TerminationIntent, p.PauseTolerant); action.Kind != ActionNone {
 			return action
+		}
+	}
+
+	// 3a. The heartbeat sidecar is alive, but it reports that the campaign
+	// agent process has exited. Treat this as a genuine agent death instead of
+	// waiting for the heartbeat object to go stale.
+	if ci.Status == db.LaunchStatusRunning && p.Heartbeat != nil && p.Heartbeat.AgentAlive != nil && !*p.Heartbeat.AgentAlive {
+		stallMessage := "campaign agent exited while instance was still running — terminating instance"
+		if p.Heartbeat.AgentFatal != "" {
+			stallMessage = "campaign agent panicked: " + p.Heartbeat.AgentFatal + " — terminating instance"
+		}
+		return InstanceAction{
+			Kind:              ActionRunningStalled,
+			TerminalStatus:    db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonInfraFailure,
+			StallMessage:      stallMessage,
+			DestroyProvider:   true,
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeOrphaned,
 		}
 	}
 

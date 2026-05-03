@@ -28,6 +28,7 @@ type RunawayBreakerInfo struct {
 	TrippedAt  time.Time     // when the trip event was recorded
 	Chain      int           // longest trailing-orphaned chain at trip time
 	Orphaned   int           // total orphaned attempts in window at trip time
+	InfraFails int           // total infra-side failures in window at trip time
 	SpendCents int           // dollars spent without progress, in cents
 	Window     time.Duration // policy window used at trip time
 	RawDetail  string        // verbatim lifecycle_events.detail (for debugging)
@@ -39,6 +40,10 @@ func (i RunawayBreakerInfo) MetricsLine() string {
 	w := i.Window.String()
 	if i.Window <= 0 {
 		w = "?"
+	}
+	if i.InfraFails > 0 {
+		return fmt.Sprintf("chain=%d orphaned=%d infra_failures=%d spend=$%.2f window=%s",
+			i.Chain, i.Orphaned, i.InfraFails, float64(i.SpendCents)/100.0, w)
 	}
 	return fmt.Sprintf("chain=%d orphaned=%d spend=$%.2f window=%s",
 		i.Chain, i.Orphaned, float64(i.SpendCents)/100.0, w)
@@ -248,6 +253,11 @@ func parseRunawayMetrics(detail string, info *RunawayBreakerInfo) {
 			info.Orphaned = v
 		}
 	}
+	if m := infraFailuresRegexp.FindStringSubmatch(detail); len(m) == 2 {
+		if v, err := strconv.Atoi(m[1]); err == nil {
+			info.InfraFails = v
+		}
+	}
 	if m := spendRegexp.FindStringSubmatch(detail); len(m) == 2 {
 		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
 			info.SpendCents = int(v*100 + 0.5)
@@ -261,8 +271,9 @@ func parseRunawayMetrics(detail string, info *RunawayBreakerInfo) {
 }
 
 var (
-	chainRegexp    = regexp.MustCompile(`chain=(\d+)`)
-	orphanedRegexp = regexp.MustCompile(`orphaned=(\d+)`)
-	spendRegexp    = regexp.MustCompile(`spend=\$([\d.]+)`)
-	windowRegexp   = regexp.MustCompile(`window=([0-9smhd]+)`)
+	chainRegexp         = regexp.MustCompile(`chain=(\d+)`)
+	orphanedRegexp      = regexp.MustCompile(`orphaned=(\d+)`)
+	infraFailuresRegexp = regexp.MustCompile(`infra_failures=(\d+)`)
+	spendRegexp         = regexp.MustCompile(`spend=\$([\d.]+)`)
+	windowRegexp        = regexp.MustCompile(`window=([0-9smhd]+)`)
 )

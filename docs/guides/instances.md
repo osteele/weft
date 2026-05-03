@@ -292,6 +292,7 @@ Default thresholds:
 - `auto_runaway_window = "24h"`
 - `auto_runaway_chain_no_progress_limit = 3`
 - `auto_runaway_orphan_churn_limit = 8`
+- `auto_runaway_infra_failure_limit = 5`
 - `auto_runaway_spend_no_progress_limit = 5.0`
 
 Configuration (`~/.config/weft/config.toml`):
@@ -302,6 +303,7 @@ auto_runaway_enabled = true
 auto_runaway_window = "24h"
 auto_runaway_chain_no_progress_limit = 3
 auto_runaway_orphan_churn_limit = 8
+auto_runaway_infra_failure_limit = 5
 auto_runaway_spend_no_progress_limit = 5.0
 ```
 

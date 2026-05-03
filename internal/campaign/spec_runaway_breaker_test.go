@@ -660,6 +660,46 @@ func TestSpec_RunawayBreakerDoesNotTrip_OnInfraOnlyOrphans(t *testing.T) {
 	}
 }
 
+func TestSpec_RunawayBreakerTrips_OnInfraFailureChurn(t *testing.T) {
+	// Spec: infra-side failures remain excluded from the job-failure orphan
+	// count, but repeated infra failures with no completions trip a separate
+	// guard so autopilot cannot retry provider/bootstrap failures indefinitely.
+	database := db.SetupTestDB(t)
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	seedOrphanedLaunchesWithReason(t, database, jobID, 6, &campaignID, db.TerminationReasonBootstrapTimeout)
+	job, _ := db.GetJobByID(database, jobID)
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         8,
+			InfraFailureLimit:        5,
+			SpendNoProgressLimitCent: 1_000_000,
+		},
+	}
+	tripped, reason, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if !tripped {
+		t.Fatal("expected infra failure guard to trip")
+	}
+	if reason != "paused: repeated infrastructure failures without progress" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
 func TestSpec_RunawayBreakerTrips_OnUnknownTerminationReason(t *testing.T) {
 	// Spec: empty / unknown termination_reason is NOT treated as infra —
 	// otherwise the breaker has a hole for unattributed failures.

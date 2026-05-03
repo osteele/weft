@@ -262,6 +262,7 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		InstancePhase:     s.InstancePhase,
 		BootstrapStage:    s.BootstrapStage,
 		HeartbeatAge:      s.HeartbeatAge,
+		Heartbeat:         s.Heartbeat,
 		Now:               now,
 		TerminationIntent: s.TerminationIntent,
 		PhaseChangedAt:    s.PhaseChangedAt,

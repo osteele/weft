@@ -144,3 +144,20 @@ func TestStartHeartbeatReporter_EmitPanicDoesNotStopReporter(t *testing.T) {
 	}
 	t.Fatalf("expected reporter to continue after panic, got %d calls", atomic.LoadInt32(&calls))
 }
+
+func TestParseHeartbeatSidecarArgs(t *testing.T) {
+	args, err := parseHeartbeatSidecarArgs([]string{
+		"--r2-bucket=bucket",
+		"--instance-id=42",
+		"--disk-path=/mnt",
+		"--phase-file=/tmp/phase",
+		"--fatal-file=/tmp/fatal",
+		"--parent-pid=123",
+	})
+	if err != nil {
+		t.Fatalf("parseHeartbeatSidecarArgs: %v", err)
+	}
+	if args.R2Bucket != "bucket" || args.InstanceID != 42 || args.DiskPath != "/mnt" || args.PhaseFile != "/tmp/phase" || args.FatalFile != "/tmp/fatal" || args.ParentPID != 123 {
+		t.Fatalf("parsed args = %+v", args)
+	}
+}

@@ -19,6 +19,9 @@ type HeartbeatSample struct {
 	HostMemTotalKB int64  `json:"host_mem_total_kb"`
 	DiskFreeBytes  int64  `json:"disk_free_bytes"`
 	DiskTotalBytes int64  `json:"disk_total_bytes"`
+	AgentPID       int    `json:"agent_pid,omitempty"`
+	AgentAlive     *bool  `json:"agent_alive,omitempty"`
+	AgentFatal     string `json:"agent_fatal,omitempty"`
 }
 
 // collectHeartbeat gathers host-level metrics and returns a HeartbeatSample.
@@ -39,6 +42,12 @@ func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 		DiskFreeBytes:  diskTotal - diskUsed,
 		DiskTotalBytes: diskTotal,
 	}
+}
+
+func withAgentLiveness(sample HeartbeatSample, pid int, alive bool) HeartbeatSample {
+	sample.AgentPID = pid
+	sample.AgentAlive = &alive
+	return sample
 }
 
 func probeDiskUsageAtPath(path string) (used, total int64) {

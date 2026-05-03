@@ -23,13 +23,13 @@ func setupInventoryR2(r *runner.Runner, r2Bucket string) {
 
 	r.OnJobStart = func(jobID int64, logPath string) func() {
 		// Write .started marker asynchronously to avoid blocking job startup
-		go func() {
+		fatalAgentGo("inventory-started-marker", func() {
 			ts := fmt.Sprintf("%d", time.Now().Unix())
 			if err := r2Put(r2Bucket, r2keys.JobStarted(jobID), ts); err != nil {
 				oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
 					oplog.WithDetail("inventory .started"), oplog.WithError(err))
 			}
-		}()
+		})
 		// Start live log uploader (reuse existing; runID=0 for inventory jobs)
 		return startLogUploader(r2Bucket, jobID, 0, logPath)
 	}

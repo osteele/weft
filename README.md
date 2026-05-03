@@ -490,8 +490,10 @@ instances or restarting orphaned jobs by hand from another terminal to avoid
 racing the autopilot.
 
 When the autopilot reports jobs blocked by `paused: repeated launch failures
-without progress`, the runaway breaker has tripped. Inspect the trip metrics
-(chain length, orphaned-attempt count, spend, window) and the affected jobs:
+without progress` or `paused: repeated infrastructure failures without
+progress`, the runaway breaker has tripped. Inspect the trip metrics
+(chain length, orphaned-attempt count, infrastructure failure count, spend,
+window) and the affected jobs:
 
 ```bash
 weft autopilot blocked              # list tripped scopes + jobs + metrics

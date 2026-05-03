@@ -30,7 +30,7 @@ func startLogUploader(bucket string, jobID, runID int64, logPath string) func() 
 		<-stopped
 	}
 
-	go func() {
+	fatalAgentGo("live-log-uploader", func() {
 		defer close(stopped)
 		ticker := time.NewTicker(liveLogUploadInterval)
 		defer ticker.Stop()
@@ -43,7 +43,7 @@ func startLogUploader(bucket string, jobID, runID int64, logPath string) func() 
 				uploadLiveLog(bucket, jobID, runID, logPath, state)
 			}
 		}
-	}()
+	})
 
 	return stop
 }

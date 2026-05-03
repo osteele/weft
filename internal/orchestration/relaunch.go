@@ -79,6 +79,7 @@ func RelaunchOrphanedJobs(
 			Window:                   cfg.AutoRunawayWindow(),
 			ChainNoProgressLimit:     cfg.AutoRunawayChainNoProgressLimit(),
 			OrphanChurnLimit:         cfg.AutoRunawayOrphanChurnLimit(),
+			InfraFailureLimit:        cfg.AutoRunawayInfraFailureLimit(),
 			SpendNoProgressLimitCent: cfg.AutoRunawaySpendNoProgressLimitCents(),
 		},
 		RetryBudgetMultiplierByFailedInstance: retryBudgetMultiplierByFailedInstance,

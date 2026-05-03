@@ -117,6 +117,10 @@ func runCampaign(args []string) {
 	var currentPhase syncString
 	currentPhase.Set("starting")
 	diskPath := campaignDiskPath(manifest.Jobs)
+	phaseFile := filepath.Join(logDir, "instance-phase.txt")
+	fatalFile := filepath.Join(logDir, "agent-fatal.txt")
+	setAgentFatalFile(fatalFile)
+	writeLocalPhaseFile(phaseFile, currentPhase.Get())
 
 	startTime := time.Now()
 	anyFailed := false
@@ -136,13 +140,15 @@ func runCampaign(args []string) {
 	}
 
 	// Upload agent startup timestamp to R2 for boot timing analysis
-	go func() {
+	fatalAgentGo("agent-startup-upload", func() {
 		payload, _ := json.Marshal(map[string]int64{"agent_start_unix": startTime.Unix()})
 		_ = r2Put(r2Bucket, r2keys.InstanceAgentStartup(instanceIDInt), string(payload))
-	}()
+	})
 
 	// Start heartbeat reporter (writes host metrics to R2 every 30s, plus
 	// an immediate first heartbeat and one on every phase transition).
+	stopHeartbeatSidecar := startHeartbeatSidecarProcess(r2Bucket, instanceIDInt, diskPath, phaseFile, fatalFile)
+	defer stopHeartbeatSidecar()
 	forceHeartbeat, stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get)
 	defer stopHeartbeat()
 	// onPhase wraps currentPhase.Set so each transition also forces an
@@ -150,6 +156,7 @@ func runCampaign(args []string) {
 	// most want fresh disk and metric state on R2.
 	onPhase := func(phase string) {
 		currentPhase.Set(phase)
+		writeLocalPhaseFile(phaseFile, phase)
 		forceHeartbeat()
 	}
 	stopOpslogReporter := startOpslogReporter(r2Bucket, instanceIDInt, logDir)
@@ -537,7 +544,7 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 	done := make(chan struct{})
 	stop := func() { once.Do(func() { close(done) }) }
 
-	go func() {
+	fatalAgentGo("kill-poller", func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
@@ -572,7 +579,7 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 				return
 			}
 		}
-	}()
+	})
 
 	return stop
 }
@@ -584,7 +591,7 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 	done := make(chan struct{})
 	stop := func() { once.Do(func() { close(done) }) }
 
-	go func() {
+	fatalAgentGo("progress-reporter", func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		tracker := progress.NewPhaseTracker()
@@ -618,7 +625,7 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 				}
 			}
 		}
-	}()
+	})
 
 	return stop
 }
@@ -679,7 +686,7 @@ func startHeartbeatReporterWithEmit(emit func()) (force func(), stop func()) {
 		}
 	}
 
-	go func() {
+	fatalAgentGo("heartbeat-reporter", func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -693,7 +700,7 @@ func startHeartbeatReporterWithEmit(emit func()) (force func(), stop func()) {
 				safeEmit()
 			}
 		}
-	}()
+	})
 
 	return force, stop
 }
@@ -709,7 +716,7 @@ func startOpslogReporter(bucket string, instanceID int64, logDir string) func() 
 		<-stopped
 	}
 
-	go func() {
+	fatalAgentGo("opslog-reporter", func() {
 		defer close(stopped)
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -722,7 +729,7 @@ func startOpslogReporter(bucket string, instanceID int64, logDir string) func() 
 				uploadOpslog(bucket, instanceID, logDir)
 			}
 		}
-	}()
+	})
 
 	return stop
 }
@@ -756,7 +763,7 @@ func startOutputUploader(bucket string, jobID, runID int64, workDir string) func
 		_ = uploadArtifactManifestEntries(bucket, jobID, runID, workDir)
 	}
 
-	go func() {
+	fatalAgentGo("output-uploader", func() {
 		defer close(stopped)
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -769,7 +776,7 @@ func startOutputUploader(bucket string, jobID, runID int64, workDir string) func
 				upload()
 			}
 		}
-	}()
+	})
 
 	return stop
 }
@@ -811,7 +818,7 @@ func startFileUploader(bucket string, jobID int64, filePath, key, detail string)
 			oplog.WithDetail(detail), oplog.WithDuration(time.Since(start)))
 	}
 
-	go func() {
+	fatalAgentGo("file-uploader", func() {
 		defer close(stopped)
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -825,7 +832,7 @@ func startFileUploader(bucket string, jobID int64, filePath, key, detail string)
 				upload()
 			}
 		}
-	}()
+	})
 
 	return stop
 }

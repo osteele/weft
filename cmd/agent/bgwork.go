@@ -101,7 +101,7 @@ func (m *bgWorkManager) RegisterNewJobs(jobs []cloud.AgentJob) {
 // result uploads, completion patching, and workdir cleanup.
 func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 	m.wg.Add(1)
-	go func() {
+	fatalAgentGo("post-job-work", func() {
 		defer m.wg.Done()
 
 		uploadResult := uploadOutputDirs(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir)
@@ -143,7 +143,7 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 				"bytes", report.PrunedStaleLogSnapshotBytes)
 		}
 		os.RemoveAll(pw.logSnapshot)
-	}()
+	})
 }
 
 // Barrier blocks until all background work completes, then logs any errors.

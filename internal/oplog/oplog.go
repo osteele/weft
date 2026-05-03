@@ -41,6 +41,7 @@ const (
 	OpAgentStop       = "agent.stop"
 	OpAgentVersion    = "agent.version"
 	OpAgentHeartbeat  = "agent.heartbeat"
+	OpAgentPanic      = "agent.panic"
 
 	// Coordinator operations
 	OpCoordinatorStart    = "coordinator.start"

@@ -1255,6 +1255,39 @@ func TestCheckInstance_RunningStall_FreshHeartbeatNoAction(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_AgentExitedHeartbeatTerminates(t *testing.T) {
+	launchedAt := time.Now().Add(-10 * time.Minute).Unix()
+	agentAlive := false
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase: "running:531",
+		Heartbeat:     &HeartbeatSample{Ts: time.Now().Unix(), Phase: "running:531", AgentPID: 1234, AgentAlive: &agentAlive},
+		HeartbeatAge:  30 * time.Second,
+		JobState:      JobState{HasStartedJob: true},
+		Now:           time.Now(),
+	})
+	if action.Kind != ActionRunningStalled {
+		t.Fatalf("action.Kind = %d, want ActionRunningStalled (%d)", action.Kind, ActionRunningStalled)
+	}
+	if action.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Fatalf("termination reason = %q, want %q", action.TerminationReason, db.TerminationReasonInfraFailure)
+	}
+	if !action.DestroyProvider || !action.ResetJobs {
+		t.Fatal("expected agent-exited heartbeat to destroy provider and reset jobs")
+	}
+}
+
 func TestCheckInstance_RunningStall_ZeroHeartbeatAgeNoAction(t *testing.T) {
 	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
 	phaseStart := time.Now().Add(-35 * time.Minute)

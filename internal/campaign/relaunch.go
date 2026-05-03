@@ -76,6 +76,7 @@ type RunawayPolicy struct {
 	Window                   time.Duration
 	ChainNoProgressLimit     int
 	OrphanChurnLimit         int
+	InfraFailureLimit        int
 	SpendNoProgressLimitCent int
 	ResumeGracePeriod        time.Duration // skip breaker check for this long after a resume
 }
@@ -842,26 +843,51 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 		return false, "", err
 	}
 	noProgress := metrics.CompletedCount == 0
+	infraLimitHit := cfg.RunawayPolicy.InfraFailureLimit > 0 &&
+		metrics.InfraFailureCount >= cfg.RunawayPolicy.InfraFailureLimit
 	limitHit := metrics.MaxTrailingOrphaned >= cfg.RunawayPolicy.ChainNoProgressLimit ||
 		metrics.OrphanedCount >= cfg.RunawayPolicy.OrphanChurnLimit ||
-		metrics.SpendCents >= cfg.RunawayPolicy.SpendNoProgressLimitCent
+		metrics.SpendCents >= cfg.RunawayPolicy.SpendNoProgressLimitCent ||
+		infraLimitHit
 	if !noProgress || !limitHit {
 		return false, "", nil
 	}
-	detail := fmt.Sprintf(
-		"no-progress runaway: chain=%d orphaned=%d spend=$%.2f window=%s",
-		metrics.MaxTrailingOrphaned,
-		metrics.OrphanedCount,
-		float64(metrics.SpendCents)/100.0,
-		cfg.RunawayPolicy.Window.String(),
-	)
+	detail := runawayTripDetail(metrics, cfg.RunawayPolicy)
 	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 		EventKind:  db.EventRelaunchRunawayTripped,
 		CampaignID: campaignID,
 		Detail:     runawayScopeDetail(cfg.ScopeProject, detail),
 	})
-	reason := "paused: repeated launch failures without progress"
+	reason := runawayPausedReason
+	if infraLimitHit {
+		reason = "paused: repeated infrastructure failures without progress"
+	}
 	return true, reason, nil
+}
+
+func runawayTripDetail(metrics runawayMetrics, policy *RunawayPolicy) string {
+	if policy != nil && policy.InfraFailureLimit > 0 && metrics.InfraFailureCount >= policy.InfraFailureLimit {
+		return fmt.Sprintf(
+			"infra runaway: infra_failures=%d limit=%d chain=%d orphaned=%d spend=$%.2f window=%s",
+			metrics.InfraFailureCount,
+			policy.InfraFailureLimit,
+			metrics.MaxTrailingOrphaned,
+			metrics.OrphanedCount,
+			float64(metrics.SpendCents)/100.0,
+			policy.Window.String(),
+		)
+	}
+	window := ""
+	if policy != nil {
+		window = policy.Window.String()
+	}
+	return fmt.Sprintf(
+		"no-progress runaway: chain=%d orphaned=%d spend=$%.2f window=%s",
+		metrics.MaxTrailingOrphaned,
+		metrics.OrphanedCount,
+		float64(metrics.SpendCents)/100.0,
+		window,
+	)
 }
 
 // ResumeRunawayBreakerForJob clears the runaway breaker for the scope
@@ -957,6 +983,7 @@ func latestRunawayPausedAt(database *sql.DB, campaignID int64, project string) (
 type runawayMetrics struct {
 	CompletedCount      int
 	OrphanedCount       int
+	InfraFailureCount   int
 	SpendCents          int
 	MaxTrailingOrphaned int
 }
@@ -1006,9 +1033,12 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 	countClause, countCampaignArgs := campaignFilter("l", campaignID)
 	// Completed counts every cloud_outcome=completed attempt; orphaned counts
 	// only orphans whose launch wasn't an infrastructure-side failure
-	// (provider/infra/bootstrap-timeout/phase-stall/preempted), so Vast.ai
-	// flakiness doesn't trip the breaker. Spend remains the cost backstop.
+	// (provider/infra/bootstrap-timeout/phase-stall/preempted). Infra failures
+	// are counted separately so provider/bootstrap loops can trip their own
+	// guard without being treated as job-code failures.
 	countArgs := append([]any{db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned}, infraArgs...)
+	countArgs = append(countArgs, db.AttemptOutcomeOrphaned)
+	countArgs = append(countArgs, infraArgs...)
 	countArgs = append(countArgs, args...)
 	countArgs = append(countArgs, countCampaignArgs...)
 	countArgs = append(countArgs, since)
@@ -1018,15 +1048,19 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 			COALESCE(SUM(CASE
 				WHEN ja.cloud_outcome = ?
 				 AND COALESCE(l.termination_reason, '') NOT IN (%s)
+				THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE
+				WHEN ja.cloud_outcome = ?
+				 AND COALESCE(l.termination_reason, '') IN (%s)
 				THEN 1 ELSE 0 END), 0)
 		FROM job_attempts ja
 		JOIN launches l ON l.id = ja.launch_id
 		WHERE ja.launch_id IS NOT NULL
 		  AND ja.job_id IN (%s)%s
-		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, infraPlaceholders, inClause, countClause),
+		  AND COALESCE(ja.end_time, ja.start_time, 0) >= ?`, infraPlaceholders, infraPlaceholders, inClause, countClause),
 		countArgs...,
 	)
-	if err := row.Scan(&m.CompletedCount, &m.OrphanedCount); err != nil {
+	if err := row.Scan(&m.CompletedCount, &m.OrphanedCount, &m.InfraFailureCount); err != nil {
 		return m, err
 	}
 

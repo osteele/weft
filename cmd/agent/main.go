@@ -59,6 +59,12 @@ func main() {
 		return
 	}
 
+	// Handle heartbeat-sidecar subcommand
+	if len(os.Args) > 1 && os.Args[1] == "heartbeat-sidecar" {
+		runHeartbeatSidecar(os.Args[2:])
+		return
+	}
+
 	// Handle batch-status subcommand
 	if len(os.Args) > 1 && os.Args[1] == "batch-status" {
 		jobIDs, err := parseBatchStatusArgs(os.Args[2:])

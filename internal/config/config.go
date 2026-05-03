@@ -196,6 +196,8 @@ type CampaignConfig struct {
 	AutoRunawayChainNoProgressLimit int `yaml:"auto_runaway_chain_no_progress_limit" toml:"auto_runaway_chain_no_progress_limit"`
 	// AutoRunawayOrphanChurnLimit is the max orphaned attempts in window before trip.
 	AutoRunawayOrphanChurnLimit int `yaml:"auto_runaway_orphan_churn_limit" toml:"auto_runaway_orphan_churn_limit"`
+	// AutoRunawayInfraFailureLimit is the max infra-side launch failures in window before trip.
+	AutoRunawayInfraFailureLimit int `yaml:"auto_runaway_infra_failure_limit" toml:"auto_runaway_infra_failure_limit"`
 	// AutoRunawaySpendNoProgressLimit is the max spend (USD) in-window with no completions.
 	AutoRunawaySpendNoProgressLimit float64 `yaml:"auto_runaway_spend_no_progress_limit" toml:"auto_runaway_spend_no_progress_limit"`
 
@@ -731,6 +733,7 @@ const (
 	defaultAutoRunawayWindow     = 24 * time.Hour
 	defaultAutoRunawayChain      = 3
 	defaultAutoRunawayOrphans    = 8
+	defaultAutoRunawayInfraFails = 5
 	defaultAutoRunawaySpendUSD   = 5.00
 	defaultAutoObjective         = "cost_first"
 	defaultOpportunityCostWeight = 1.0
@@ -831,6 +834,14 @@ func (c *Config) AutoRunawayOrphanChurnLimit() int {
 		return defaultAutoRunawayOrphans
 	}
 	return c.Campaign.AutoRunawayOrphanChurnLimit
+}
+
+// AutoRunawayInfraFailureLimit returns the infra-side launch failure threshold.
+func (c *Config) AutoRunawayInfraFailureLimit() int {
+	if c == nil || c.Campaign.AutoRunawayInfraFailureLimit <= 0 {
+		return defaultAutoRunawayInfraFails
+	}
+	return c.Campaign.AutoRunawayInfraFailureLimit
 }
 
 // AutoRunawaySpendNoProgressLimitCents returns the spend threshold in cents.

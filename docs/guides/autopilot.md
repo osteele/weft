@@ -38,13 +38,15 @@ restart and reboot do not clear it. Always remember to resume.
 ## Why is a job paused? — the runaway breaker
 
 When the autopilot keeps placing jobs that fail without progress, it trips
-the **runaway breaker** to stop spending. While the breaker is tripped, any
-job in the affected scope reports
+the **runaway breaker** to stop spending. This includes repeated job-level
+orphans and repeated infrastructure-side launch failures such as provider
+status loss, bootstrap timeouts, and stale agent heartbeats. While the
+breaker is tripped, any job in the affected scope reports
 
     blocked: paused: repeated launch failures without progress
 
-That string is the same regardless of which threshold actually fired. The
-focused diagnostic is:
+Infrastructure-only trips may instead report `paused: repeated infrastructure
+failures without progress`. The focused diagnostic is:
 
 ```bash
 weft autopilot blocked

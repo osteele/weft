@@ -63,7 +63,7 @@ func startDiskMonitor(r2Bucket string, instanceID int64, diskPath, logDir, phase
 		<-stopped
 	}
 
-	go func() {
+	fatalAgentGo("disk-monitor", func() {
 		defer close(stopped)
 		defer os.Remove(ballastPath)
 
@@ -83,7 +83,7 @@ func startDiskMonitor(r2Bucket string, instanceID int64, diskPath, logDir, phase
 				return
 			}
 		}
-	}()
+	})
 
 	return stop
 }
