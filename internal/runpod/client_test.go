@@ -316,12 +316,22 @@ func TestInjectNonInteractiveSSHOptions(t *testing.T) {
 		{
 			name: "typical runpodctl command",
 			in:   "ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4",
-			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
 		},
 		{
 			name: "leading whitespace",
 			in:   "  ssh root@host",
-			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@host",
+			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes root@host",
+		},
+		{
+			name: "does not duplicate existing identities option",
+			in:   "ssh -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+		},
+		{
+			name: "recognizes split option form",
+			in:   "ssh -o IdentitiesOnly=yes -o BatchMode=yes -i /tmp/runpod_key root@host",
+			want: "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o BatchMode=yes -i /tmp/runpod_key root@host",
 		},
 		{
 			name: "non-ssh command left alone",

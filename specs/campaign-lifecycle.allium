@@ -514,6 +514,15 @@ rule BeginLaunching {
         -- debug output so failed-bootstrap investigations can see what
         -- was actually requested of the provider.
         -- Implementation: RunPod CLI adapter (internal/runpod/cli.go).
+        --
+        -- RunPod SSH bootstrap MUST execute the ssh command returned by
+        -- `runpodctl ssh info` with non-interactive options and
+        -- IdentitiesOnly=yes. The returned command may include a generated
+        -- `-i` identity file; local ssh-agent keys MUST NOT be enumerated
+        -- ahead of that identity, because servers can disconnect with
+        -- "Too many authentication failures" before the RunPod key is tried.
+        -- Implementation: internal/runpod/client.go
+        -- (injectNonInteractiveSSHOptions).
 
         -- Provider credentials fall back to the provider's standard
         -- config file. Agent launchers (coordinator daemon, autopilot

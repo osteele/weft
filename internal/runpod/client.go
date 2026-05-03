@@ -531,21 +531,69 @@ func (c *CloudClient) fetchSSHCommand(ctx context.Context, podID string) (string
 }
 
 // injectNonInteractiveSSHOptions inserts options after the leading "ssh" token
-// that disable interactive host-key prompts and password fallbacks. Without
-// these, ssh opens /dev/tty directly when run from a TUI, corrupting the
-// display and blocking on input that never arrives. The runpodctl CLI returns
-// a bare ssh command that omits these options.
+// that disable interactive host-key prompts, password fallbacks, and agent key
+// enumeration. Without the noninteractive options, ssh opens /dev/tty directly
+// when run from a TUI, corrupting the display and blocking on input that never
+// arrives. Without IdentitiesOnly, users with many local keys can exhaust the
+// server's authentication attempts before ssh reaches RunPod's generated key.
 func injectNonInteractiveSSHOptions(sshCmd string) string {
 	trimmed := strings.TrimSpace(sshCmd)
 	if !strings.HasPrefix(trimmed, "ssh ") && trimmed != "ssh" {
 		return sshCmd
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "ssh"))
-	opts := "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-	if rest == "" {
-		return "ssh " + opts
+	opts := []string{
+		"-o BatchMode=yes",
+		"-o StrictHostKeyChecking=no",
+		"-o UserKnownHostsFile=/dev/null",
+		"-o LogLevel=ERROR",
+		"-o IdentitiesOnly=yes",
 	}
-	return "ssh " + opts + " " + rest
+	missing := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		name := sshOptionName(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(opt, "-o ")), "-o"))
+		if hasSSHOption(rest, name) {
+			continue
+		}
+		missing = append(missing, opt)
+	}
+	rest = strings.TrimSpace(strings.Join(append(missing, rest), " "))
+	if rest == "" {
+		return "ssh"
+	}
+	return "ssh " + rest
+}
+
+func hasSSHOption(sshArgs, optionName string) bool {
+	if strings.TrimSpace(sshArgs) == "" {
+		return false
+	}
+	optionName = strings.ToLower(strings.TrimSpace(optionName))
+	fields := strings.Fields(sshArgs)
+	for i := 0; i < len(fields); i++ {
+		field := fields[i]
+		if field == "-o" && i+1 < len(fields) {
+			if sshOptionName(fields[i+1]) == optionName {
+				return true
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(field, "-o") && len(field) > len("-o") {
+			if sshOptionName(strings.TrimPrefix(field, "-o")) == optionName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sshOptionName(opt string) string {
+	opt = strings.TrimSpace(opt)
+	if before, _, ok := strings.Cut(opt, "="); ok {
+		opt = before
+	}
+	return strings.ToLower(strings.TrimSpace(opt))
 }
 
 var sshCommandPattern = regexp.MustCompile(`(?m)(ssh\s+-[^\n]+|ssh\s+[^\n]+)$`)
