@@ -105,6 +105,7 @@ const (
 	autoBudgetPhaseEditHourly
 	autoBudgetPhaseEditDaily
 	autoBudgetPhaseConfirmReset
+	autoBudgetPhaseNotice
 )
 
 // autoBudgetState is the budget panel's UI state, shared by the list and
@@ -155,7 +156,7 @@ func formatCentsForInput(cents int) string {
 //
 // Esc backs out one level: from an editor or confirmation it returns to
 // the menu; from the menu it closes the panel. Saves persist the new value
-// and return to the menu so the user can keep adjusting other settings.
+// and close the panel. Clear actions show a notice that closes on Enter or Esc.
 func handleAutoBudgetKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (autoBudgetState, autoBudgetEffect) {
 	switch s.Phase {
 	case autoBudgetPhaseMenu:
@@ -164,6 +165,8 @@ func handleAutoBudgetKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (a
 		return handleAutoBudgetEditKey(s, msg)
 	case autoBudgetPhaseConfirmReset:
 		return handleAutoBudgetConfirmKey(s, msg, database)
+	case autoBudgetPhaseNotice:
+		return handleAutoBudgetNoticeKey(s, msg)
 	}
 	return s, autoBudgetEffect{}
 }
@@ -183,6 +186,22 @@ func handleAutoBudgetMenuKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState
 		s.Phase = autoBudgetPhaseEditDaily
 		s.Value = formatCentsForInput(s.DailyCents)
 		return s, autoBudgetEffect{}
+	case "H":
+		if err := saveAutoRunRateSoftTargetCentsPerHour(0); err != nil {
+			return s, autoBudgetEffect{StatusText: fmt.Sprintf("Hourly target clear failed: %v", err), StatusIsError: true}
+		}
+		s.HourlyCents = 0
+		s.Phase = autoBudgetPhaseNotice
+		s.Value = "Hourly target cleared"
+		return s, autoBudgetEffect{StatusText: s.Value, RetriggerPilot: true}
+	case "D":
+		if err := saveAutoRunawaySpendDailyCapCents(0); err != nil {
+			return s, autoBudgetEffect{StatusText: fmt.Sprintf("Daily cap clear failed: %v", err), StatusIsError: true}
+		}
+		s.DailyCents = 0
+		s.Phase = autoBudgetPhaseNotice
+		s.Value = "Daily cap cleared"
+		return s, autoBudgetEffect{StatusText: s.Value, RetriggerPilot: true}
 	case "r":
 		s.Phase = autoBudgetPhaseConfirmReset
 		s.Value = ""
@@ -244,6 +263,7 @@ func handleAutoBudgetEditKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState
 		if err != nil {
 			return s, autoBudgetEffect{StatusText: fmt.Sprintf("%s save failed: %v", ops.label, err), StatusIsError: true}
 		}
+		s.Active = false
 		s.Phase = autoBudgetPhaseMenu
 		s.Value = ""
 		return s, autoBudgetEffect{
@@ -277,12 +297,24 @@ func handleAutoBudgetConfirmKey(s autoBudgetState, msg tea.KeyMsg, database *sql
 				StatusIsError: true,
 			}
 		}
-		s.Phase = autoBudgetPhaseMenu
+		s.Phase = autoBudgetPhaseNotice
+		s.Value = "Runaway breaker reset"
 		return s, autoBudgetEffect{
 			StatusText:     "Runaway breaker reset",
 			RetriggerPilot: true,
 			BreakerReset:   true,
 		}
+	}
+	return s, autoBudgetEffect{}
+}
+
+func handleAutoBudgetNoticeKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState, autoBudgetEffect) {
+	switch msg.String() {
+	case "enter", "esc", "q":
+		s.Active = false
+		s.Phase = autoBudgetPhaseMenu
+		s.Value = ""
+		return s, autoBudgetEffect{}
 	}
 	return s, autoBudgetEffect{}
 }
@@ -315,7 +347,9 @@ func renderAutoBudgetPanel(s autoBudgetState) []string {
 		return []string{
 			"── Auto-pilot budget ──",
 			fmt.Sprintf("  h   Hourly target  %s", formatAutoRunRateTarget(s.HourlyCents)),
+			"  H   Clear hourly target",
 			fmt.Sprintf("  d   Daily cap      %s", formatAutoDailyCap(s.DailyCents)),
+			"  D   Clear daily cap",
 			"  r   Reset runaway breaker",
 			"  Esc close",
 		}
@@ -331,6 +365,16 @@ func renderAutoBudgetPanel(s autoBudgetState) []string {
 			"  Clears the global runaway-breaker trip,",
 			"  unblocking jobs paused for repeated failures.",
 			"  y: confirm    n / Esc: back",
+		}
+	case autoBudgetPhaseNotice:
+		msg := strings.TrimSpace(s.Value)
+		if msg == "" {
+			msg = "Updated"
+		}
+		return []string{
+			"── Auto-pilot budget ──",
+			"  " + msg + ".",
+			"  Enter / Esc: return",
 		}
 	}
 	return nil

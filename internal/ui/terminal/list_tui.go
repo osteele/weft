@@ -1851,7 +1851,7 @@ func (m listTUIModel) renderListHelpView() string {
 			"",
 			"Grouped-only actions:",
 			"  A toggle auto-pilot",
-			"  $ set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)",
+			"  $ set run-rate + daily cap (H/D clear; r resets breaker)",
 			"  n launch a new instance for queued jobs",
 			"  N launch a new instance for selected queued job",
 			"  R preview rebalance moves",

@@ -775,8 +775,8 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 		if got.autoRunRateInputPhase != autoBudgetPhaseMenu {
 			t.Fatalf("after save expected menu phase, got %v", got.autoRunRateInputPhase)
 		}
-		if !got.autoRunRateInputActive {
-			t.Fatal("save should not close the panel; should return to menu")
+		if got.autoRunRateInputActive {
+			t.Fatal("save should close the panel")
 		}
 		if !got.autoNextPassAt.IsZero() {
 			t.Fatalf("expected cooldown cleared after save, got %v", got.autoNextPassAt)

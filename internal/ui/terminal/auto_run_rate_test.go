@@ -111,7 +111,7 @@ func TestBeginAutoBudgetOpensOnMenu(t *testing.T) {
 func TestRenderAutoBudgetPanelMenuShowsAllActions(t *testing.T) {
 	lines := renderAutoBudgetPanel(menuState(250, 5000))
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"h", "Hourly", "$2.50/hr", "d", "Daily", "$50.00/day", "r", "Reset", "Esc"} {
+	for _, want := range []string{"h", "Hourly", "$2.50/hr", "H", "Clear hourly", "d", "Daily", "$50.00/day", "D", "Clear daily", "r", "Reset", "Esc"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("menu missing %q in:\n%s", want, joined)
 		}
@@ -148,6 +148,34 @@ func TestHandleAutoBudgetKeyMenuRouting(t *testing.T) {
 		next, _ := handleAutoBudgetKey(s, keyMsg("r"), database)
 		if next.Phase != autoBudgetPhaseConfirmReset {
 			t.Fatalf("phase = %v, want ConfirmReset", next.Phase)
+		}
+	})
+
+	t.Run("H clears hourly target and shows notice", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, eff := handleAutoBudgetKey(s, keyMsg("H"), database)
+		if next.Phase != autoBudgetPhaseNotice {
+			t.Fatalf("phase = %v, want Notice", next.Phase)
+		}
+		if next.HourlyCents != 0 || next.DailyCents != 5000 {
+			t.Fatalf("state = %+v, want hourly cleared only", next)
+		}
+		if !eff.RetriggerPilot || eff.StatusText != "Hourly target cleared" {
+			t.Fatalf("effect = %+v", eff)
+		}
+	})
+
+	t.Run("D clears daily cap and shows notice", func(t *testing.T) {
+		s := menuState(250, 5000)
+		next, eff := handleAutoBudgetKey(s, keyMsg("D"), database)
+		if next.Phase != autoBudgetPhaseNotice {
+			t.Fatalf("phase = %v, want Notice", next.Phase)
+		}
+		if next.HourlyCents != 250 || next.DailyCents != 0 {
+			t.Fatalf("state = %+v, want daily cleared only", next)
+		}
+		if !eff.RetriggerPilot || eff.StatusText != "Daily cap cleared" {
+			t.Fatalf("effect = %+v", eff)
 		}
 	})
 
@@ -204,7 +232,7 @@ func TestHandleAutoBudgetEditorEscReturnsToMenu(t *testing.T) {
 	}
 }
 
-func TestHandleAutoBudgetEditorEnterSavesAndReturnsToMenu(t *testing.T) {
+func TestHandleAutoBudgetEditorEnterSavesAndClosesPanel(t *testing.T) {
 	database := setupBudgetTest(t)
 	s := autoBudgetState{
 		Active:      true,
@@ -216,6 +244,9 @@ func TestHandleAutoBudgetEditorEnterSavesAndReturnsToMenu(t *testing.T) {
 	next, eff := handleAutoBudgetKey(s, keyMsg("enter"), database)
 	if next.Phase != autoBudgetPhaseMenu {
 		t.Fatalf("after save expected menu phase, got %v", next.Phase)
+	}
+	if next.Active {
+		t.Fatal("save should close the panel")
 	}
 	if next.HourlyCents != 350 {
 		t.Errorf("hourly cents = %d, want 350", next.HourlyCents)
@@ -246,14 +277,14 @@ func TestHandleAutoBudgetEditorEnterParseError(t *testing.T) {
 func TestHandleAutoBudgetConfirmReset(t *testing.T) {
 	database := setupBudgetTest(t)
 
-	t.Run("y resets and returns to menu", func(t *testing.T) {
+	t.Run("y resets and shows notice", func(t *testing.T) {
 		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset, HourlyCents: 250, DailyCents: 5000}
 		next, eff := handleAutoBudgetKey(s, keyMsg("y"), database)
-		if next.Phase != autoBudgetPhaseMenu {
-			t.Errorf("y should return to menu, got %v", next.Phase)
+		if next.Phase != autoBudgetPhaseNotice {
+			t.Errorf("y should show notice, got %v", next.Phase)
 		}
 		if !next.Active {
-			t.Error("y should not close the panel")
+			t.Error("notice should keep the panel open")
 		}
 		if !eff.BreakerReset || !eff.RetriggerPilot {
 			t.Errorf("expected BreakerReset+RetriggerPilot, got %+v", eff)
@@ -281,6 +312,22 @@ func TestHandleAutoBudgetConfirmReset(t *testing.T) {
 			t.Errorf("esc should return to menu, got %v", next.Phase)
 		}
 	})
+}
+
+func TestHandleAutoBudgetNoticeClosesOnEnterOrEsc(t *testing.T) {
+	database := setupBudgetTest(t)
+	for _, key := range []string{"enter", "esc"} {
+		t.Run(key, func(t *testing.T) {
+			s := autoBudgetState{Active: true, Phase: autoBudgetPhaseNotice, Value: "Daily cap cleared"}
+			next, _ := handleAutoBudgetKey(s, keyMsg(key), database)
+			if next.Active {
+				t.Fatalf("%s should close notice", key)
+			}
+			if next.Phase != autoBudgetPhaseMenu || next.Value != "" {
+				t.Fatalf("state after %s = %+v", key, next)
+			}
+		})
+	}
 }
 
 func TestHandleAutoBudgetEditorFiltersStrayCharacters(t *testing.T) {

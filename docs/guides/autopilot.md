@@ -130,12 +130,15 @@ In any TUI with auto-mode enabled (`weft list`, `weft watch`, `weft project
 watch`):
 
 1. Press `$` to open the run-rate / daily-cap prompt.
-2. Press `Enter` to advance from the hourly step to the daily step.
-3. Press `Ctrl-R` to fire the reset.
+2. Press `h` or `d` to edit the hourly target or daily cap. `Enter` saves and
+   returns to the main screen.
+3. Press `H` or `D` to clear the hourly target or daily cap. `Enter` or `Esc`
+   closes the confirmation.
+4. Press `r` to reset the runaway breaker.
 
 This calls `campaign.ResetGlobalRunawayBreaker(db, "TUI")` and re-triggers
 an autopilot pass immediately. The footer hint reminds you of the binding:
-`set run-rate + daily cap (Enter steps; Ctrl-R resets breaker)`.
+`set run-rate + daily cap (H/D clear; r resets breaker)`.
 
 ## Running autopilot without a TUI
 
