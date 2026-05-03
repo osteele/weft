@@ -1725,6 +1725,8 @@ func (m listTUIModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.
 	}
 	if eff.BreakerReset {
 		m.clearAutoPilotPersistentState()
+		m.autoBlockReasons = nil
+		m.rebuildGroupedRows()
 	}
 	if eff.RetriggerPilot {
 		m.resumeAutoPilotNow()

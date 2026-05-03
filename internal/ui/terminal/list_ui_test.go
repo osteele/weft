@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
@@ -782,6 +783,52 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 			t.Fatalf("expected cooldown cleared after save, got %v", got.autoNextPassAt)
 		}
 	})
+}
+
+func TestListTUIRunawayResetClearsCachedBlockedRows(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobs := []*db.Job{
+		{ID: 10, Status: db.StatusQueued, Description: "retry job"},
+	}
+	m := listTUIModel{
+		groupedByStatus:        true,
+		groupedUnprocessedView: true,
+		autoMode:               true,
+		database:               database,
+		jobs:                   jobs,
+		width:                  120,
+		height:                 40,
+		autoBlockReasons: map[int64]string{
+			10: "paused: repeated launch failures without progress",
+		},
+		autoPersistentBlocked:  "paused: repeated launch failures without progress",
+		autoPersistentBlockedN: 1,
+		autoRunRateInputActive: true,
+		autoRunRateInputPhase:  autoBudgetPhaseConfirmReset,
+	}
+	m.rebuildGroupedRows()
+
+	next, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	got := next.(listTUIModel)
+
+	if len(got.autoBlockReasons) != 0 {
+		t.Fatalf("autoBlockReasons = %v, want cleared", got.autoBlockReasons)
+	}
+	if got.autoPersistentBlocked != "" || got.autoPersistentBlockedN != 0 {
+		t.Fatalf("persistent blocked = %q/%d, want cleared", got.autoPersistentBlocked, got.autoPersistentBlockedN)
+	}
+	infos, err := campaign.LookupActiveRunawayBreakers(database)
+	if err != nil {
+		t.Fatalf("runaway infos: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("active runaway breaker infos = %v, want none", infos)
+	}
+	for _, row := range got.groupedRows {
+		if strings.Contains(row.text, "paused: repeated launch failures") {
+			t.Fatalf("stale blocked reason survived in row %q", row.text)
+		}
+	}
 }
 
 func TestListTUIAutoPilotFailureRebuildsGroupedRowsWithBlockReasons(t *testing.T) {

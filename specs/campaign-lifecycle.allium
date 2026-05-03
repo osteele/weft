@@ -1059,9 +1059,14 @@ rule RunawayBreakerClears {
         -- aren't yet attached to any campaign — `weft campaign safety
         -- resume` rejects --campaign 0 and cannot reach that scope.
         -- Recorded as lifecycle_event kind=relaunch.runaway_resumed.
+        -- TUI reset paths MUST also clear in-memory blocked-reason caches
+        -- immediately, so rows no longer render stale
+        -- "paused: repeated launch failures without progress" blockers
+        -- while waiting for the next autopilot pass.
         -- Implementation: internal/campaign/relaunch.go
         -- ResumeRunawayBreakerForJob() (auto), ResetGlobalRunawayBreaker()
-        -- (manual global), cmd/campaign_safety.go (manual per-campaign).
+        -- (manual global), cmd/campaign_safety.go (manual per-campaign),
+        -- internal/ui/terminal/list_tui.go (TUI cache clearing).
 }
 
 -- --------------------------------------------------------------------------
