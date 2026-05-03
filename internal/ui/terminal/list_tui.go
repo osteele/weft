@@ -36,6 +36,11 @@ const listAutoLeaseTTL = 30 * time.Second
 // startup / tick cloud sync, which is not tied to a specific host.
 const backgroundSyncKey = ""
 
+var (
+	runRateHeadroomExhaustedRE = regexp.MustCompile(`^run-rate headroom exhausted \([^)]*this group needs \$([0-9]+(?:\.[0-9]{1,2})?)/hr\)$`)
+	runRateNoSubsetRE          = regexp.MustCompile(`^run-rate target exceeded .*cheapest group \$([0-9]+(?:\.[0-9]{1,2})?)/hr\)$`)
+)
+
 type listTUIModel struct {
 	database                   *sql.DB
 	args                       []string
@@ -2427,11 +2432,59 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 			visibleUnplaced[job.ID] = struct{}{}
 		}
 	}
-	for jobID := range m.autoBlockReasons {
+	headroom, hasRunRateHeadroom := m.currentRunRateHeadroomCents()
+	changed := false
+	for jobID, reason := range m.autoBlockReasons {
 		if _, ok := visibleUnplaced[jobID]; !ok {
 			delete(m.autoBlockReasons, jobID)
+			changed = true
+			continue
+		}
+		if hasRunRateHeadroom && staleRunRateBlockReason(reason, headroom) {
+			delete(m.autoBlockReasons, jobID)
+			changed = true
 		}
 	}
+	if changed {
+		m.autoPersistentBlocked = ""
+		m.autoPersistentBlockedN = 0
+		if summary := autoPilotBlockSummary(m.autoBlockReasons); summary != "" {
+			m.autoPersistentBlocked = summary
+			m.autoPersistentBlockedN = len(m.autoBlockReasons)
+		}
+	}
+}
+
+func (m listTUIModel) currentRunRateHeadroomCents() (int, bool) {
+	if m.database == nil || m.autoRunRateTargetCents <= 0 {
+		return 0, false
+	}
+	current, err := db.SumActiveLaunchCostPerHourCents(m.database)
+	if err != nil {
+		return 0, false
+	}
+	return max(0, m.autoRunRateTargetCents-current), true
+}
+
+func staleRunRateBlockReason(reason string, headroomCents int) bool {
+	needed, ok := parseRunRateBlockedNeedCents(reason)
+	return ok && needed > 0 && headroomCents >= needed
+}
+
+func parseRunRateBlockedNeedCents(reason string) (int, bool) {
+	reason = strings.TrimSpace(reason)
+	for _, re := range []*regexp.Regexp{runRateHeadroomExhaustedRE, runRateNoSubsetRE} {
+		matches := re.FindStringSubmatch(reason)
+		if len(matches) != 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(matches[1], 64)
+		if err != nil {
+			return 0, false
+		}
+		return int(value*100 + 0.5), true
+	}
+	return 0, false
 }
 
 func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {

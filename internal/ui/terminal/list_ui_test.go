@@ -186,6 +186,63 @@ func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T
 	}
 }
 
+func TestListTUIPruneAutoBlockReasonsDropsStaleRunRateHeadroom(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		CostPerHourCents: 60,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	m := listTUIModel{
+		database:               database,
+		autoRunRateTargetCents: 350,
+		autoPersistentBlocked:  "run-rate headroom exhausted ($1.51/hr free, this group needs $2.29/hr)",
+		autoPersistentBlockedN: 1,
+		autoBlockReasons: map[int64]string{
+			1: "run-rate headroom exhausted ($1.51/hr free, this group needs $2.29/hr)",
+		},
+		jobs: []*db.Job{{ID: 1, Status: db.StatusQueued}},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	if len(m.autoBlockReasons) != 0 {
+		t.Fatalf("autoBlockReasons = %v, want stale run-rate reason pruned", m.autoBlockReasons)
+	}
+	if m.autoPersistentBlocked != "" || m.autoPersistentBlockedN != 0 {
+		t.Fatalf("persistent blocked = %q/%d, want cleared", m.autoPersistentBlocked, m.autoPersistentBlockedN)
+	}
+}
+
+func TestListTUIPruneAutoBlockReasonsKeepsCurrentRunRateHeadroom(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		CostPerHourCents: 199,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	reason := "run-rate headroom exhausted ($1.51/hr free, this group needs $2.29/hr)"
+	m := listTUIModel{
+		database:               database,
+		autoRunRateTargetCents: 350,
+		autoPersistentBlocked:  reason,
+		autoPersistentBlockedN: 1,
+		autoBlockReasons:       map[int64]string{1: reason},
+		jobs:                   []*db.Job{{ID: 1, Status: db.StatusQueued}},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	if got := m.autoBlockReasons[1]; got != reason {
+		t.Fatalf("autoBlockReasons[1] = %q, want %q", got, reason)
+	}
+	if m.autoPersistentBlocked == "" || m.autoPersistentBlockedN != 1 {
+		t.Fatalf("persistent blocked = %q/%d, want preserved", m.autoPersistentBlocked, m.autoPersistentBlockedN)
+	}
+}
+
 func TestGroupedJobsWithAutoReasonsOnlyAppliesToUnplacedQueuedJobs(t *testing.T) {
 	unplaced := &db.Job{ID: 10, Status: db.StatusQueued}
 	placed := &db.Job{ID: 11, Status: db.StatusQueued, Host: "cool30"}
