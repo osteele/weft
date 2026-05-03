@@ -532,6 +532,144 @@ func GetLaunchByProviderID(database *sql.DB, providerID string) (*Launch, error)
 	return c, err
 }
 
+// ListRecentFailedCloudLaunches returns failed launches whose ended_at is at
+// or after sinceUnix, ordered by ended_at descending. Used by the grouped
+// jobs list TUI to surface a "Recent launch failures" bucket.
+func ListRecentFailedCloudLaunches(database *sql.DB, sinceUnix int64) ([]*Launch, error) {
+	rows, err := database.Query(
+		`SELECT `+launchSelectColumns+`
+		   FROM launches
+		  WHERE status = ?
+		    AND ended_at IS NOT NULL
+		    AND ended_at >= ?
+		  ORDER BY ended_at DESC`,
+		LaunchStatusFailed, sinceUnix,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Launch
+	for rows.Next() {
+		c, err := scanLaunchFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// LaunchSuccessorsRecovered returns the subset of the given failed-launch IDs
+// that have a successor launch (replaced_instance_id = id) currently in a
+// non-failed live state or already completed. Used to dim recovered failures
+// in the grouped jobs list TUI.
+func LaunchSuccessorsRecovered(database *sql.DB, failedIDs []int64) (map[int64]bool, error) {
+	out := make(map[int64]bool, len(failedIDs))
+	if len(failedIDs) == 0 {
+		return out, nil
+	}
+	seen := make(map[int64]struct{}, len(failedIDs))
+	placeholders := make([]string, 0, len(failedIDs))
+	args := make([]any, 0, len(failedIDs)+4)
+	for _, id := range failedIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	if len(placeholders) == 0 {
+		return out, nil
+	}
+	args = append(args,
+		LaunchStatusRunning, LaunchStatusCompleted,
+		LaunchStatusPaused, LaunchStatusGrace,
+	)
+	rows, err := database.Query(
+		`SELECT DISTINCT replaced_instance_id
+		   FROM launches
+		  WHERE replaced_instance_id IN (`+strings.Join(placeholders, ",")+`)
+		    AND status IN (?,?,?,?)`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id sql.NullInt64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id.Valid {
+			out[id.Int64] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+// ProjectsByLaunchIDs returns one project name per launch (the most recent
+// non-empty project across the launch's job_attempts). Empty values and
+// missing launches are omitted.
+func ProjectsByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(launchIDs))
+	if len(launchIDs) == 0 {
+		return out, nil
+	}
+	seen := make(map[int64]struct{}, len(launchIDs))
+	placeholders := make([]string, 0, len(launchIDs))
+	args := make([]any, 0, len(launchIDs))
+	for _, id := range launchIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	if len(placeholders) == 0 {
+		return out, nil
+	}
+	rows, err := database.Query(
+		`SELECT ja.launch_id, COALESCE(j.project, '')
+		   FROM job_attempts ja
+		   JOIN jobs j ON j.id = ja.job_id
+		  WHERE ja.launch_id IN (`+strings.Join(placeholders, ",")+`)
+		  ORDER BY ja.launch_id, ja.id DESC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			launchID int64
+			project  string
+		)
+		if err := rows.Scan(&launchID, &project); err != nil {
+			return nil, err
+		}
+		project = strings.TrimSpace(project)
+		if project == "" {
+			continue
+		}
+		if _, ok := out[launchID]; ok {
+			continue
+		}
+		out[launchID] = project
+	}
+	return out, rows.Err()
+}
+
 // ListLaunches returns all cloud instances ordered by creation time descending.
 func ListLaunches(db *sql.DB) ([]*Launch, error) {
 	rows, err := db.Query(
@@ -1250,15 +1388,23 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	}
 
 	jobIDs := make([]int64, 0, len(jobs))
-	placeholders := make([]string, 0, len(jobs))
 	for _, job := range jobs {
 		jobIDs = append(jobIDs, job.ID)
-		placeholders = append(placeholders, "?")
 	}
-	jobFilter := strings.Join(placeholders, ", ")
 
 	now := time.Now().Unix()
+	unplacedJobIDs := make([]int64, 0, len(jobIDs))
+	restoredJobIDs := make([]int64, 0)
 	for _, jobID := range jobIDs {
+		restored, err := restoreNoStartMoveToSourceTx(tx, jobID, instanceID, now, outcome)
+		if err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("restore failed move target for job %d: %w", jobID, err)
+		}
+		if restored {
+			restoredJobIDs = append(restoredJobIDs, jobID)
+			continue
+		}
 		if err := closeAttemptsAndRequeueWithOutcome(tx, jobID, now, outcome); err != nil {
 			tx.Rollback()
 			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
@@ -1273,31 +1419,121 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 				return 0, fmt.Errorf("clear start_time for orphaned job %d: %w", jobID, err)
 			}
 		}
+		unplacedJobIDs = append(unplacedJobIDs, jobID)
 	}
 
-	placementArgs := make([]any, 0, len(jobIDs)+1)
-	placementArgs = append(placementArgs, placementReasons)
-	for _, jobID := range jobIDs {
-		placementArgs = append(placementArgs, jobID)
+	var n int64
+	if len(unplacedJobIDs) > 0 {
+		placementArgs := make([]any, 0, len(unplacedJobIDs)+1)
+		placementArgs = append(placementArgs, placementReasons)
+		placementPlaceholders := make([]string, 0, len(unplacedJobIDs))
+		for _, jobID := range unplacedJobIDs {
+			placementArgs = append(placementArgs, jobID)
+			placementPlaceholders = append(placementPlaceholders, "?")
+		}
+		result, err := tx.Exec(
+			fmt.Sprintf(`UPDATE jobs SET placement_reasons = ? WHERE id IN (%s)`, strings.Join(placementPlaceholders, ", ")),
+			placementArgs...,
+		)
+		if err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		n, err = result.RowsAffected()
+		if err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 	}
-	result, err := tx.Exec(
-		fmt.Sprintf(`UPDATE jobs SET placement_reasons = ? WHERE id IN (%s)`, jobFilter),
-		placementArgs...,
-	)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		tx.Rollback()
-		return 0, err
+	for _, jobID := range restoredJobIDs {
+		if _, err := tx.Exec(
+			`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
+			encodeStringSlice([]string{fmt.Sprintf("move target instance %d failed before start; job restored to source queue", instanceID)}),
+			jobID,
+		); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		n++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return n, nil
+}
+
+func restoreNoStartMoveToSourceTx(tx *sql.Tx, jobID, targetLaunchID, now int64, outcome string) (bool, error) {
+	var (
+		intentID       int64
+		sourceLaunchID int64
+		sourceStatus   string
+		targetStarted  sql.NullInt64
+	)
+	err := tx.QueryRow(`
+		SELECT mi.id, mi.source_launch_id, COALESCE(src.status, ''), target.start_time
+		  FROM move_intents mi
+		  JOIN launches src ON src.id = mi.source_launch_id
+		  JOIN job_attempts target
+		    ON target.job_id = mi.job_id
+		   AND target.launch_id = mi.target_launch_id
+		   AND target.end_time IS NULL
+		 WHERE mi.job_id = ?
+		   AND mi.target_launch_id = ?
+		   AND mi.target_kind = ?
+		   AND mi.state = ?
+		 ORDER BY mi.created_at DESC
+		 LIMIT 1`,
+		jobID, targetLaunchID, string(MoveTargetNew), string(MoveIntentStateOpen),
+	).Scan(&intentID, &sourceLaunchID, &sourceStatus, &targetStarted)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if sourceLaunchID <= 0 || !IsLiveLaunchStatus(sourceStatus) {
+		return false, nil
+	}
+	if targetStarted.Valid && targetStarted.Int64 > 0 {
+		return false, nil
+	}
+
+	var predecessorID sql.NullInt64
+	_ = tx.QueryRow(
+		`SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&predecessorID)
+
+	if err := closeAttemptsAndRequeueWithOutcome(tx, jobID, now, outcome); err != nil {
+		return false, err
+	}
+	newAttemptID, err := createAttemptTx(tx, jobID, "", &sourceLaunchID, StatusQueued)
+	if err != nil {
+		return false, err
+	}
+	if predecessorID.Valid {
+		if _, err := tx.Exec(
+			`UPDATE job_attempts SET predecessor_attempt_id = ? WHERE id = ?`,
+			predecessorID.Int64, newAttemptID,
+		); err != nil {
+			return false, fmt.Errorf("link predecessor attempt %d -> %d: %w", predecessorID.Int64, newAttemptID, err)
+		}
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET requested_status = NULL WHERE id = ?`, jobID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE move_intents
+		    SET state = ?, resolved_at = ?, resolution = ?
+		  WHERE id = ?
+		    AND state = ?`,
+		string(MoveIntentStateCanceled), now, "move target failed before start; restored to source",
+		intentID, string(MoveIntentStateOpen),
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func launchResetPlacementReasons(ci *Launch, outcome string) []string {

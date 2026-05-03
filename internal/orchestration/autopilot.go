@@ -255,25 +255,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 
 	placed := prePlaced
-	for _, assignment := range plan.ReuseAssignments {
-		if assignment.Job == nil || assignment.Instance.Instance == nil {
-			continue
-		}
-		if ok, reason := campaign.MatchJobToInstanceWithUV(assignment.Job, assignment.Instance, r2Client); !ok {
-			blockedReasons[assignment.Job.ID] = reason
-			oplog.LogJob("auto_pilot.reuse_skipped", assignment.Job.ID, "",
-				oplog.WithDetailf("instance=%d reason=%s", assignment.Instance.Instance.ID, reason))
-			continue
-		}
-		if err := autoPilotSubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
-			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
-				oplog.WithError(err),
-				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
-			blockedReasons[assignment.Job.ID] = fmt.Sprintf("reuse instance %d failed: %s", assignment.Instance.Instance.ID, summarizeAutoPilotError(err))
-			continue
-		}
-		placed++
-	}
+	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, blockedReasons)
 
 	rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 		Apply:      true,
@@ -369,9 +351,34 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			BlockedReasons: blockedReasons,
 		}, nil
 	}
+	placedAfterLaunchBlock := map[int64]struct{}{}
 	if result.BlockedReason != "" {
 		for _, jobID := range rentalScope {
 			blockedReasons[jobID] = result.BlockedReason
+		}
+		if len(capacities) > 0 {
+			fallbackJobs := jobsByIDInOrder(remainingByID, rentalScope)
+			retryOptions := campaign.AutoPlannerOptions(cfg)
+			retryOptions.PreferReuse = true
+			retryPlan, retryErr := autoPilotBuildPlanWithOptions(database, cfg, fallbackJobs, capacities, retryOptions)
+			if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
+				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, blockedReasons)
+				if fallbackPlaced > 0 {
+					placed += fallbackPlaced
+					for _, assignment := range retryPlan.ReuseAssignments {
+						if assignment.Job != nil {
+							delete(blockedReasons, assignment.Job.ID)
+							placedAfterLaunchBlock[assignment.Job.ID] = struct{}{}
+						}
+					}
+					oplog.Log("auto_pilot.reuse_after_launch_block",
+						oplog.WithDetailf("placed=%d launch_scope=%d reason=%q", fallbackPlaced, len(rentalScope), result.BlockedReason))
+				}
+			} else if retryErr != nil {
+				oplog.Log("auto_pilot.reuse_after_launch_block_error",
+					oplog.WithError(retryErr),
+					oplog.WithDetailf("launch_scope=%d", len(rentalScope)))
+			}
 		}
 	}
 	mergeRelaunchReasonsIntoBlockedReasons(blockedReasons, result, failedInstanceByJob)
@@ -407,6 +414,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	if len(result.InstanceIDs) == 0 {
 		for _, jobID := range rentalScope {
+			if _, placed := placedAfterLaunchBlock[jobID]; placed {
+				continue
+			}
 			if _, exists := blockedReasons[jobID]; !exists {
 				blockedReasons[jobID] = "no offers available"
 			}
@@ -459,6 +469,40 @@ func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Confi
 			oplog.WithDetailf("onprem_min=%.0f", onPrem.CompletionEst.Mean.Minutes()))
 	}
 	return remaining, placed
+}
+
+func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment, blockedReasons map[int64]string) int {
+	placed := 0
+	for _, assignment := range assignments {
+		if assignment.Job == nil || assignment.Instance.Instance == nil {
+			continue
+		}
+		if ok, reason := campaign.MatchJobToInstanceWithUV(assignment.Job, assignment.Instance, r2Client); !ok {
+			blockedReasons[assignment.Job.ID] = reason
+			oplog.LogJob("auto_pilot.reuse_skipped", assignment.Job.ID, "",
+				oplog.WithDetailf("instance=%d reason=%s", assignment.Instance.Instance.ID, reason))
+			continue
+		}
+		if err := autoPilotSubmitJobsToInstance(ctx, database, r2Client, assignment.Instance.Instance.ID, []*db.Job{assignment.Job}); err != nil {
+			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
+				oplog.WithError(err),
+				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
+			blockedReasons[assignment.Job.ID] = fmt.Sprintf("reuse instance %d failed: %s", assignment.Instance.Instance.ID, summarizeAutoPilotError(err))
+			continue
+		}
+		placed++
+	}
+	return placed
+}
+
+func jobsByIDInOrder(jobs map[int64]*db.Job, ids []int64) []*db.Job {
+	out := make([]*db.Job, 0, len(ids))
+	for _, id := range ids {
+		if job := jobs[id]; job != nil {
+			out = append(out, job)
+		}
+	}
+	return out
 }
 
 // mergeRelaunchReasonsIntoBlockedReasons populates blockedReasons from a

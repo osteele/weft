@@ -175,6 +175,12 @@ var versionedMigrations = []migration{
 			return addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`)
 		},
 	},
+	{
+		Description: "recreate job_status view with priority",
+		Apply: func(db *sql.DB) error {
+			return createJobStatusView(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

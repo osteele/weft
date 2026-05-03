@@ -725,6 +725,94 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenMoveIntent(t *testing.T) {
 	}
 }
 
+func TestRunGroupedAutoPilotPass_ReusesExistingInstanceWhenLaunchBlocked(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "reuse fallback", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUClass: "A100",
+		GPUMemGB: 80,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	instance, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalBuildPlanWithOptions := autoPilotBuildPlanWithOptions
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotBuildPlanWithOptions = originalBuildPlanWithOptions
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchJobIDs:   []int64{jobID},
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		if len(scope) != 1 || scope[0] != jobID {
+			t.Fatalf("relaunch scope = %v, want [%d]", scope, jobID)
+		}
+		return &campaign.RelaunchResult{BlockedReason: "paused: repeated launch failures without progress"}, nil
+	}
+	autoPilotBuildPlanWithOptions = func(_ *sql.DB, _ *config.Config, jobs []*db.Job, _ []campaign.InstanceCapacity, options campaign.PlanOptions) (campaign.AutoPlacementPlan, error) {
+		if !options.PreferReuse {
+			t.Fatal("fallback planner did not set PreferReuse")
+		}
+		if len(jobs) != 1 || jobs[0].ID != jobID {
+			t.Fatalf("fallback jobs = %v, want job %d", jobs, jobID)
+		}
+		return campaign.AutoPlacementPlan{
+			ReuseAssignments: []campaign.ReuseAssignment{{
+				Job: jobs[0],
+				Instance: campaign.InstanceCapacity{
+					Instance: instance,
+				},
+			}},
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+	submitted := false
+	autoPilotSubmitJobsToInstance = func(_ context.Context, _ *sql.DB, _ *r2.Client, gotInstanceID int64, jobs []*db.Job) error {
+		submitted = true
+		if gotInstanceID != instanceID {
+			t.Fatalf("submit instance = %d, want %d", gotInstanceID, instanceID)
+		}
+		if len(jobs) != 1 || jobs[0].ID != jobID {
+			t.Fatalf("submitted jobs = %v, want job %d", jobs, jobID)
+		}
+		return nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if !submitted {
+		t.Fatal("expected job to be submitted to reusable instance")
+	}
+	if result.Placed != 1 {
+		t.Fatalf("Placed = %d, want 1", result.Placed)
+	}
+	if reason := result.BlockedReasons[jobID]; reason != "" {
+		t.Fatalf("blocked reason for reused job = %q, want empty", reason)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenPlacementIntent(t *testing.T) {
 	// Regression: a job with an open PlacementIntent (e.g. inside an
 	// in-flight RelaunchOrphanedJobs or bulk move) is invisible to the

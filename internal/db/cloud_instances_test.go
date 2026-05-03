@@ -1040,6 +1040,159 @@ func TestResetLaunchJobs_DoesNotRewriteCompletedAttempts(t *testing.T) {
 	}
 }
 
+func TestResetLaunchJobs_RestoresOpenNoStartMoveTargetToLiveSource(t *testing.T) {
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	insertTestJob(t, database, 1201, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 1201, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          1201,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &dst,
+		TargetGPUName:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := TransferJobLaunchID(database, 1201, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+
+	n, err := ResetLaunchJobs(database, dst, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+
+	job, err := GetJobByID(database, 1201)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.LaunchID == nil || *job.LaunchID != src {
+		t.Fatalf("job launch_id = %v, want source %d", job.LaunchID, src)
+	}
+	gotIntent, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateCanceled {
+		t.Fatalf("move intent state = %q, want %q", gotIntent.State, MoveIntentStateCanceled)
+	}
+	outcomes, err := GetAttemptOutcomesByLaunch(database, dst)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByLaunch: %v", err)
+	}
+	if outcomes[1201] != AttemptOutcomeOrphaned {
+		t.Fatalf("target attempt outcome = %q, want %q", outcomes[1201], AttemptOutcomeOrphaned)
+	}
+}
+
+func TestResetLaunchJobs_DoesNotRestoreConfirmedNoStartMoveTarget(t *testing.T) {
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	insertTestJob(t, database, 1203, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 1203, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          1203,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &dst,
+		TargetGPUName:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := TransferJobLaunchID(database, 1203, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+	if err := ResolveMoveIntent(database, intent.ID, MoveIntentStateConfirmed, "new A100 instance"); err != nil {
+		t.Fatalf("ResolveMoveIntent confirmed: %v", err)
+	}
+
+	if _, err := ResetLaunchJobs(database, dst, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+	job, err := GetJobByID(database, 1203)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch_id = %v, want unplaced so autopilot can resubmit to live capacity", job.LaunchID)
+	}
+}
+
+func TestResetLaunchJobs_DoesNotRestoreMoveTargetAfterJobStarted(t *testing.T) {
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	insertTestJob(t, database, 1202, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 1202, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	if _, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          1202,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &dst,
+		TargetGPUName:  "A100",
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := TransferJobLaunchID(database, 1202, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		time.Now().Unix(), 1202, dst,
+	); err != nil {
+		t.Fatalf("set start_time: %v", err)
+	}
+
+	if _, err := ResetLaunchJobs(database, dst, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+	job, err := GetJobByID(database, 1202)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch_id = %v, want unplaced after started target failed", job.LaunchID)
+	}
+}
+
 func TestResetLaunchJobs_ArchivesPreviousRun(t *testing.T) {
 	t.Skip("job_runs archival removed")
 }
