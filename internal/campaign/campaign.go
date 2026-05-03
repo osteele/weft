@@ -164,6 +164,9 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 			if !strings.EqualFold(groups[i].Provider, provider) {
 				continue
 			}
+			if vramTierOf(groups[i].GPUMemGB) != vramTierOf(mem) {
+				continue
+			}
 			supremum, ok := gpuClassSupremum(groups[i].GPUClass, job.GPUClass)
 			if !ok {
 				continue

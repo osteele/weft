@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,24 +24,25 @@ func TestGroupByGPUSupremum(t *testing.T) {
 
 	groups := GroupByGPUSupremum(jobs)
 
-	// Unconstrained job (ID=4) now forms its own group instead of merging
-	// into the H100 group. We get 3 groups: H100, A100, unconstrained.
-	if len(groups) != 3 {
-		t.Fatalf("expected 3 groups, got %d", len(groups))
+	// Unconstrained job (ID=4) forms its own group, and pinned GPU jobs in
+	// different VRAM tiers stay separate so smaller jobs are not blocked by a
+	// larger tier's capacity.
+	if len(groups) != 4 {
+		t.Fatalf("expected 4 groups, got %d", len(groups))
 	}
 
-	// Groups sorted by descending memory: H100 group (80GB) first
+	// Groups sorted by descending memory: H100 80GB group first.
 	if groups[0].GPUMemGB != 80 {
 		t.Errorf("first group should have 80GB, got %d", groups[0].GPUMemGB)
 	}
 	if groups[0].GPUClass != "H100" {
 		t.Errorf("first group should be H100, got %s", groups[0].GPUClass)
 	}
-	if len(groups[0].Jobs) != 3 {
-		t.Errorf("H100 group should have 3 jobs, got %d", len(groups[0].Jobs))
+	if len(groups[0].Jobs) != 2 {
+		t.Errorf("H100 80GB group should have 2 jobs, got %d", len(groups[0].Jobs))
 	}
 
-	// A100 group
+	// A100 40GB group.
 	if groups[1].GPUClass != "A100" {
 		t.Errorf("second group should be A100, got %s", groups[1].GPUClass)
 	}
@@ -48,15 +50,23 @@ func TestGroupByGPUSupremum(t *testing.T) {
 		t.Errorf("second group should have 40GB, got %d", groups[1].GPUMemGB)
 	}
 
-	// Unconstrained group
-	if groups[2].GPUClass != "" {
-		t.Errorf("third group should be unconstrained, got %s", groups[2].GPUClass)
+	// H100 40GB group.
+	if groups[2].GPUClass != "H100" {
+		t.Errorf("third group should be H100, got %s", groups[2].GPUClass)
 	}
-	if groups[2].GPUMemGB != 24 {
-		t.Errorf("third group should have 24GB, got %d", groups[2].GPUMemGB)
+	if groups[2].GPUMemGB != 40 {
+		t.Errorf("third group should have 40GB, got %d", groups[2].GPUMemGB)
 	}
-	if len(groups[2].Jobs) != 1 {
-		t.Errorf("unconstrained group should have 1 job, got %d", len(groups[2].Jobs))
+
+	// Unconstrained group.
+	if groups[3].GPUClass != "" {
+		t.Errorf("fourth group should be unconstrained, got %s", groups[3].GPUClass)
+	}
+	if groups[3].GPUMemGB != 24 {
+		t.Errorf("fourth group should have 24GB, got %d", groups[3].GPUMemGB)
+	}
+	if len(groups[3].Jobs) != 1 {
+		t.Errorf("unconstrained group should have 1 job, got %d", len(groups[3].Jobs))
 	}
 }
 
@@ -550,6 +560,43 @@ func TestGroupByAffinity_SeparatesMemoryTiers(t *testing.T) {
 	}
 }
 
+func TestGroupByAffinity_PinnedGPUSeparatesMemoryTiers(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1714, Status: db.StatusQueued, GPUClass: "a100", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3.1-8B"}},
+		{ID: 1715, Status: db.StatusQueued, GPUClass: "a100", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3.1-8B"}},
+		{ID: 1716, Status: db.StatusQueued, GPUClass: "a100", GPUMemGB: intPtr(82),
+			Inputs: []string{"hf:meta-llama/Llama-3.1-8B"}},
+		{ID: 1718, Status: db.StatusQueued, GPUClass: "a100", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3.1-8B"}},
+	}
+
+	groups := GroupByAffinity(jobs, nil)
+
+	var group20, group82 *InstanceGroup
+	for i := range groups {
+		switch groups[i].GPUMemGB {
+		case 20:
+			group20 = &groups[i]
+		case 82:
+			group82 = &groups[i]
+		}
+	}
+	if group20 == nil {
+		t.Fatalf("missing A100 20GB group; got groups: %v", groupSummaries(groups))
+	}
+	if group82 == nil {
+		t.Fatalf("missing A100 82GB group; got groups: %v", groupSummaries(groups))
+	}
+	if got := jobIDs(group20.Jobs); !sameInt64s(got, []int64{1714, 1715, 1718}) {
+		t.Fatalf("A100 20GB group jobs = %v, want [1714 1715 1718]", got)
+	}
+	if got := jobIDs(group82.Jobs); !sameInt64s(got, []int64{1716}) {
+		t.Fatalf("A100 82GB group jobs = %v, want [1716]", got)
+	}
+}
+
 // TestGroupByAffinity_Job545Through549 reproduces the actual job scenario:
 // job 545 (gpu_mem=20) and jobs 546-549 (gpu_mem=8) all have gpu_class=nvidia
 // and share inputs hf:gpt2 + hf-dataset:wikitext. They should form 2 groups
@@ -630,6 +677,26 @@ func jobIDs(jobs []*db.Job) []int64 {
 		ids[i] = j.ID
 	}
 	return ids
+}
+
+func sameInt64s(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func groupSummaries(groups []InstanceGroup) []string {
+	summaries := make([]string, 0, len(groups))
+	for _, group := range groups {
+		summaries = append(summaries, fmt.Sprintf("%s >=%dGB jobs=%v", group.GPUClass, group.GPUMemGB, jobIDs(group.Jobs)))
+	}
+	return summaries
 }
 
 func TestVramTierOf(t *testing.T) {
