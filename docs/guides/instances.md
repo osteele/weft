@@ -334,6 +334,20 @@ weft instance ssh <instance-id>         # SSH into running instance
 If the instance is still provisioning, the command waits until the Vast.ai
 instance ID is available, then connects.
 
+For unattended operation, configure a dedicated cloud SSH key that does not
+require 1Password, Touch ID, or another interactive approval:
+
+```toml
+[cloud.ssh]
+identity_file = "~/.ssh/weft_cloud_ed25519"
+public_key_file = "~/.ssh/weft_cloud_ed25519.pub"
+```
+
+With this set, Weft adds `BatchMode=yes`, `IdentitiesOnly=yes`, and
+`-i <identity_file>` to cloud SSH commands. New Vast.ai instances get the
+public key attached during launch; RunPod registers the public key before pod
+creation.
+
 ### Terminating
 
 ```bash
@@ -536,6 +550,10 @@ retry_first_time_limit = "45m" # first retry tier
 retry_first_cost_limit = 1.0   # USD
 retry_next_time_limit = "45m"  # second+ retry tiers
 retry_next_cost_limit = 0.25   # USD
+
+[cloud.ssh]
+identity_file = "~/.ssh/weft_cloud_ed25519"
+public_key_file = "~/.ssh/weft_cloud_ed25519.pub"
 
 [vastai.r2]
 bucket = "my-results-bucket"

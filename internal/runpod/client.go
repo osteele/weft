@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -114,6 +115,11 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		}
 		opts.RunpodRegistryID = id
 	}
+	if opts.SSHPublicKeyFile != "" {
+		if err := ensureSSHKey(ctx, c.runner, caps.path, opts.SSHPublicKeyFile); err != nil {
+			return nil, fmt.Errorf("runpod ssh key: %w", err)
+		}
+	}
 	args, err := buildCreatePodArgs(offerID, opts)
 	if err != nil {
 		return nil, err
@@ -136,6 +142,38 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		Provider:   cloud.ProviderRunpod,
 		Status:     cloud.ProviderStatusCreating,
 	}, nil
+}
+
+func ensureSSHKey(ctx context.Context, runner *cliRunner, cliPath, publicKeyFile string) error {
+	keyBytes, err := os.ReadFile(publicKeyFile)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", publicKeyFile, err)
+	}
+	key := strings.TrimSpace(string(keyBytes))
+	if key == "" {
+		return fmt.Errorf("%s is empty", publicKeyFile)
+	}
+	out, err := runner.runOutput(ctx, cliPath, "ssh", "list-keys")
+	if err != nil {
+		return fmt.Errorf("list keys: %w", err)
+	}
+	var payload struct {
+		Keys []struct {
+			Key string `json:"key"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return fmt.Errorf("parse keys: %w", err)
+	}
+	for _, existing := range payload.Keys {
+		if strings.TrimSpace(existing.Key) == key {
+			return nil
+		}
+	}
+	if _, err := runner.runOutput(ctx, cliPath, "ssh", "add-key", "--key-file", publicKeyFile); err != nil {
+		return fmt.Errorf("add key: %w", err)
+	}
+	return nil
 }
 
 func (c *CloudClient) CreateInstanceWithProgress(offerID string, opts cloud.CreateOpts, progress cloud.ProgressFunc) (*cloud.Instance, error) {
@@ -558,6 +596,9 @@ func injectNonInteractiveSSHOptions(sshCmd string) string {
 		missing = append(missing, opt)
 	}
 	rest = strings.TrimSpace(strings.Join(append(missing, rest), " "))
+	if identity := cloud.SSHIdentityFile(); identity != "" && !hasSSHIdentityFile(rest) {
+		rest = strings.TrimSpace("-i " + shellQuoteSingle(identity) + " " + rest)
+	}
 	if rest == "" {
 		return "ssh"
 	}
@@ -583,6 +624,25 @@ func hasSSHOption(sshArgs, optionName string) bool {
 			if sshOptionName(strings.TrimPrefix(field, "-o")) == optionName {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func hasSSHIdentityFile(sshArgs string) bool {
+	fields := strings.Fields(sshArgs)
+	for i, field := range fields {
+		if field == "-i" && i+1 < len(fields) {
+			return true
+		}
+		if strings.HasPrefix(field, "-i") && len(field) > len("-i") {
+			return true
+		}
+		if field == "-o" && i+1 < len(fields) && sshOptionName(fields[i+1]) == "identityfile" {
+			return true
+		}
+		if strings.HasPrefix(field, "-o") && sshOptionName(strings.TrimPrefix(field, "-o")) == "identityfile" {
+			return true
 		}
 	}
 	return false

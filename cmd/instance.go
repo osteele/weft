@@ -841,13 +841,8 @@ func markReleasedInstanceFailed(database *sql.DB, instanceID int64) error {
 }
 
 func execSSH(inst *cloud.Instance) error {
-	args := []string{
-		"ssh",
-		"-p", fmt.Sprintf("%d", inst.SSHPort),
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		fmt.Sprintf("root@%s", inst.SSHHost),
-	}
+	args := append([]string{"ssh"}, cloud.InstanceSSHArgs(inst)...)
+	args = append(args, cloud.InstanceSSHTarget(inst))
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		return fmt.Errorf("ssh not found: %w", err)

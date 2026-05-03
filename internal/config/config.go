@@ -78,6 +78,9 @@ type Config struct {
 	// SSH connection settings
 	SSH SSHConfig `yaml:"ssh" toml:"ssh"`
 
+	// Cloud holds cloud-provider shared configuration.
+	Cloud CloudConfig `yaml:"cloud" toml:"cloud"`
+
 	// Hosts holds per-host configuration overrides.
 	Hosts map[string]HostConfig `yaml:"hosts" toml:"hosts"`
 
@@ -301,6 +304,40 @@ type SSHConfig struct {
 	ConnectTimeout int `yaml:"connect_timeout" toml:"connect_timeout"`
 }
 
+// CloudConfig holds settings shared across cloud providers.
+type CloudConfig struct {
+	SSH CloudSSHConfig `yaml:"ssh" toml:"ssh"`
+}
+
+// CloudSSHConfig holds cloud-rental SSH identity settings.
+type CloudSSHConfig struct {
+	IdentityFile  string `yaml:"identity_file" toml:"identity_file"`
+	PublicKeyFile string `yaml:"public_key_file" toml:"public_key_file"`
+}
+
+// ExpandedIdentityFile returns the configured cloud SSH private key path.
+func (c *CloudSSHConfig) ExpandedIdentityFile() string {
+	if c == nil {
+		return ""
+	}
+	return expandUserPath(c.IdentityFile)
+}
+
+// ExpandedPublicKeyFile returns the configured cloud SSH public key path.
+func (c *CloudSSHConfig) ExpandedPublicKeyFile() string {
+	if c == nil {
+		return ""
+	}
+	if strings.TrimSpace(c.PublicKeyFile) != "" {
+		return expandUserPath(c.PublicKeyFile)
+	}
+	identity := c.ExpandedIdentityFile()
+	if identity == "" {
+		return ""
+	}
+	return identity + ".pub"
+}
+
 // HostConfig holds per-host configuration.
 type HostConfig struct {
 	// Static inventory fields. A host listed under [hosts.<name>] is part of
@@ -377,6 +414,12 @@ func defaultAutomapDirs() []string {
 
 // CloudCreateOpts returns provider-appropriate instance creation defaults.
 func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, error) {
+	sshIdentity := ""
+	sshPublicKey := ""
+	if c != nil {
+		sshIdentity = c.Cloud.SSH.ExpandedIdentityFile()
+		sshPublicKey = c.Cloud.SSH.ExpandedPublicKeyFile()
+	}
 	switch provider {
 	case cloud.ProviderRunpod:
 		image := cloud.DefaultRunpodImage
@@ -387,17 +430,26 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 			}
 		}
 		return cloud.CreateOpts{
-			Image:      image,
-			DiskGB:     50,
-			SSHEnabled: true,
+			Image:            image,
+			DiskGB:           50,
+			SSHEnabled:       true,
+			SSHIdentityFile:  sshIdentity,
+			SSHPublicKeyFile: sshPublicKey,
 		}, nil
 	case cloud.ProviderVastai:
-		if c == nil {
-			return cloud.DefaultCreateOpts(""), nil
+		image := ""
+		if c != nil {
+			image = c.Vastai.DefaultImage
 		}
-		return cloud.DefaultCreateOpts(c.Vastai.DefaultImage), nil
+		opts := cloud.DefaultCreateOpts(image)
+		opts.SSHIdentityFile = sshIdentity
+		opts.SSHPublicKeyFile = sshPublicKey
+		return opts, nil
 	default:
-		return cloud.DefaultCreateOpts(""), nil
+		opts := cloud.DefaultCreateOpts("")
+		opts.SSHIdentityFile = sshIdentity
+		opts.SSHPublicKeyFile = sshPublicKey
+		return opts, nil
 	}
 }
 
@@ -570,6 +622,9 @@ func ConfigPath() string {
 // TOML is preferred; YAML remains as a legacy fallback.
 func Load() (*Config, error) {
 	cfg := DefaultConfig()
+	defer func() {
+		cloud.SetSSHIdentityFile(cfg.Cloud.SSH.ExpandedIdentityFile())
+	}()
 
 	path := configPath
 	if path == "" {
@@ -602,6 +657,28 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func expandUserPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+	}
+	return path
 }
 
 // AutomapDirs returns the list of local directory prefixes that should be

@@ -6,10 +6,31 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/retry"
 )
+
+var sshIdentity struct {
+	mu   sync.RWMutex
+	file string
+}
+
+// SetSSHIdentityFile configures the private key used for cloud SSH.
+func SetSSHIdentityFile(path string) {
+	sshIdentity.mu.Lock()
+	defer sshIdentity.mu.Unlock()
+	sshIdentity.file = strings.TrimSpace(path)
+}
+
+// SSHIdentityFile returns the configured cloud SSH private key path.
+func SSHIdentityFile() string {
+	sshIdentity.mu.RLock()
+	defer sshIdentity.mu.RUnlock()
+	return sshIdentity.file
+}
 
 // SSHRun executes a command on a remote host via SSH.
 func SSHRun(target string, sshOpts []string, command string) (string, error) {
@@ -23,12 +44,18 @@ func SSHRun(target string, sshOpts []string, command string) (string, error) {
 // InstanceSSHArgs returns the SSH arguments needed to connect to a cloud instance
 // (port, host key checks disabled, log level). Does not include the target or command.
 func InstanceSSHArgs(inst *Instance) []string {
-	return []string{
+	args := []string{
 		"-p", fmt.Sprintf("%d", inst.SSHPort),
+		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
+		"-o", "IdentitiesOnly=yes",
 	}
+	if identity := SSHIdentityFile(); identity != "" {
+		args = append(args, "-i", identity)
+	}
+	return args
 }
 
 // InstanceSSHTarget returns the SSH target string (user@host) for a cloud instance.
@@ -61,4 +88,23 @@ func SSHRunWithRetry(target string, sshOpts []string, command string, timeout ti
 			slog.Debug("SSH connection failed, retrying", "component", "cloud", "retry_in", delay)
 		}),
 	)
+}
+
+// CommandString returns a shell-ready command string for display.
+func CommandString(argv []string) string {
+	parts := make([]string, len(argv))
+	for i, arg := range argv {
+		parts[i] = shellQuote(arg)
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.ContainsAny(s, " \t\n\"'`$\\~") {
+		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+	}
+	return s
 }

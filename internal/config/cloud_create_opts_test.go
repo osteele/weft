@@ -23,6 +23,22 @@ func TestCloudCreateOpts_RunpodDefaults(t *testing.T) {
 	}
 }
 
+func TestCloudCreateOpts_IncludesCloudSSHIdentity(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Cloud.SSH.IdentityFile = "~/.ssh/weft_cloud_ed25519"
+
+	opts, err := cfg.CloudCreateOpts(cloud.ProviderVastai)
+	if err != nil {
+		t.Fatalf("CloudCreateOpts: %v", err)
+	}
+	if opts.SSHIdentityFile == "" {
+		t.Fatal("SSHIdentityFile is empty")
+	}
+	if opts.SSHPublicKeyFile != opts.SSHIdentityFile+".pub" {
+		t.Fatalf("SSHPublicKeyFile = %q, want %q", opts.SSHPublicKeyFile, opts.SSHIdentityFile+".pub")
+	}
+}
+
 func TestCloudCreateOpts_RunpodIgnoresIncompatibleConfiguredImage(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Runpod.DefaultImage = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"

@@ -176,8 +176,9 @@ func FormatEstDuration(d time.Duration, hasPrediction bool) string {
 
 // FormatSSHCommand returns the SSH command string for a cloud instance.
 func FormatSSHCommand(inst *cloud.Instance) string {
-	return fmt.Sprintf("ssh -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@%s",
-		inst.SSHPort, inst.SSHHost)
+	args := append([]string{"ssh"}, cloud.InstanceSSHArgs(inst)...)
+	args = append(args, cloud.InstanceSSHTarget(inst))
+	return cloud.CommandString(args)
 }
 
 // FormatJobIDs returns a truncated list of job IDs for display.

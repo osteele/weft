@@ -143,6 +143,8 @@ type CreateOpts struct {
 	DiskGB           int               // disk space to request
 	GPUCount         int               // number of GPUs to request (provider-specific; defaults to 1)
 	SSHEnabled       bool              // enable SSH access
+	SSHIdentityFile  string            // private key file for non-interactive SSH
+	SSHPublicKeyFile string            // public key file to register/attach with providers
 	OnStartCmd       string            // command to run on instance start
 	EnvVars          map[string]string // environment variables passed via provider's env mechanism
 	CapAdd           []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)

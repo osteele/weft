@@ -9,6 +9,7 @@ type MockClient struct {
 	AvailableFunc            func() error
 	SearchOffersFunc         func(OfferConstraints) ([]Offer, error)
 	CreateInstanceFunc       func(int, CreateOpts) (*Instance, error)
+	AttachSSHFunc            func(int, string) error
 	ShowInstanceFunc         func(int) (*Instance, error)
 	ListAllInstancesFunc     func() ([]Instance, error)
 	WaitReadyFunc            func(int, time.Duration) (*Instance, error)
@@ -38,6 +39,13 @@ func (m *MockClient) CreateInstance(offerID int, opts CreateOpts) (*Instance, er
 		return m.CreateInstanceFunc(offerID, opts)
 	}
 	return nil, nil
+}
+
+func (m *MockClient) AttachSSH(instanceID int, publicKeyFile string) error {
+	if m.AttachSSHFunc != nil {
+		return m.AttachSSHFunc(instanceID, publicKeyFile)
+	}
+	return nil
 }
 
 func (m *MockClient) ShowInstance(instanceID int) (*Instance, error) {

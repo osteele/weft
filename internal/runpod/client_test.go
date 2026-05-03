@@ -308,6 +308,8 @@ func TestParseSSHInfoCommand(t *testing.T) {
 }
 
 func TestInjectNonInteractiveSSHOptions(t *testing.T) {
+	t.Cleanup(func() { cloud.SetSSHIdentityFile("") })
+	cloud.SetSSHIdentityFile("")
 	cases := []struct {
 		name string
 		in   string
@@ -346,6 +348,17 @@ func TestInjectNonInteractiveSSHOptions(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInjectNonInteractiveSSHOptions_UsesConfiguredIdentity(t *testing.T) {
+	t.Cleanup(func() { cloud.SetSSHIdentityFile("") })
+	cloud.SetSSHIdentityFile("/tmp/weft_cloud_ed25519")
+
+	got := injectNonInteractiveSSHOptions("ssh root@host")
+	want := "ssh -i '/tmp/weft_cloud_ed25519' -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes root@host"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

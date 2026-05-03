@@ -70,14 +70,15 @@ const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {
-	Image        string            // Docker image (e.g., "nvidia/cuda:12.2-devel-ubuntu22.04")
-	DiskGB       int               // disk space to request
-	SSHEnabled   bool              // enable SSH access
-	OnStartCmd   string            // command to run on instance start
-	EnvVars      map[string]string // environment variables passed via --env flag
-	CapAdd       []string          // extra Linux capabilities passed via --cap-add
-	Label        string            // instance label visible in Vast.ai dashboard
-	InstanceType string            // "on-demand" or "interruptible"
-	MaxBidPrice  float64           // max bid/price for interruptible instances
-	RegistryAuth *cloud.RegistryAuth
+	Image         string            // Docker image (e.g., "nvidia/cuda:12.2-devel-ubuntu22.04")
+	DiskGB        int               // disk space to request
+	SSHEnabled    bool              // enable SSH access
+	OnStartCmd    string            // command to run on instance start
+	EnvVars       map[string]string // environment variables passed via --env flag
+	CapAdd        []string          // extra Linux capabilities passed via --cap-add
+	Label         string            // instance label visible in Vast.ai dashboard
+	InstanceType  string            // "on-demand" or "interruptible"
+	MaxBidPrice   float64           // max bid/price for interruptible instances
+	RegistryAuth  *cloud.RegistryAuth
+	PublicKeyFile string // SSH public key to attach to the created instance
 }

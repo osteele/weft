@@ -61,16 +61,17 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		return nil, fmt.Errorf("parse vastai offer ID %q: %w", offerID, err)
 	}
 	vopts := CreateOpts{
-		Image:        opts.Image,
-		DiskGB:       opts.DiskGB,
-		SSHEnabled:   opts.SSHEnabled,
-		OnStartCmd:   opts.OnStartCmd,
-		EnvVars:      opts.EnvVars,
-		CapAdd:       opts.CapAdd,
-		Label:        opts.Label,
-		InstanceType: opts.InstanceType,
-		MaxBidPrice:  opts.MaxBidPrice,
-		RegistryAuth: opts.RegistryAuth,
+		Image:         opts.Image,
+		DiskGB:        opts.DiskGB,
+		SSHEnabled:    opts.SSHEnabled,
+		OnStartCmd:    opts.OnStartCmd,
+		EnvVars:       opts.EnvVars,
+		CapAdd:        opts.CapAdd,
+		Label:         opts.Label,
+		InstanceType:  opts.InstanceType,
+		MaxBidPrice:   opts.MaxBidPrice,
+		RegistryAuth:  opts.RegistryAuth,
+		PublicKeyFile: opts.SSHPublicKeyFile,
 	}
 	inst, err := c.inner.CreateInstance(id, vopts)
 	if err != nil {

@@ -816,6 +816,30 @@ Environment variables override the config file:
 
 Increasing `connect_timeout` also extends the session ready timeout (connect timeout + 5s).
 
+### Cloud SSH Identity
+
+For unattended cloud runs, use a dedicated SSH key that does not require
+1Password, Touch ID, or another interactive approval:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/weft_cloud_ed25519 -N "" -C "weft cloud automation"
+vastai create ssh-key ~/.ssh/weft_cloud_ed25519.pub -y
+runpodctl ssh add-key --key-file ~/.ssh/weft_cloud_ed25519.pub
+```
+
+Then configure Weft to use it for cloud SSH:
+
+```toml
+# ~/.config/weft/config.toml
+[cloud.ssh]
+identity_file = "~/.ssh/weft_cloud_ed25519"
+public_key_file = "~/.ssh/weft_cloud_ed25519.pub"
+```
+
+Weft adds `BatchMode=yes`, `IdentitiesOnly=yes`, and `-i <identity_file>` to
+cloud SSH commands, attaches the public key to new Vast.ai instances, and
+registers it with RunPod before pod creation.
+
 ### Per-Host Overrides
 
 Use the `hosts` table in `~/.config/weft/config.toml` for per-host overrides:

@@ -31,6 +31,7 @@ type VastaiClient interface {
 	Available() error
 	SearchOffers(constraints OfferConstraints) ([]Offer, error)
 	CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
+	AttachSSH(instanceID int, publicKeyFile string) error
 	ShowInstance(instanceID int) (*Instance, error)
 	ListAllInstances() ([]Instance, error)
 	WaitReady(instanceID int, timeout time.Duration) (*Instance, error)
@@ -217,7 +218,28 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		return nil, fmt.Errorf("create instance failed: %w: %s", cloud.ErrProviderRejected, reason)
 	}
 
+	if opts.PublicKeyFile != "" {
+		if err := c.AttachSSH(resp.NewContract, opts.PublicKeyFile); err != nil {
+			slog.Warn("failed to attach SSH key, destroying instance", "component", "vastai", "instance", resp.NewContract, "key", opts.PublicKeyFile, "error", err)
+			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
+				slog.Warn("failed to destroy instance after SSH key attach failure", "component", "vastai", "instance", resp.NewContract, "error", destroyErr)
+			}
+			return nil, fmt.Errorf("attach SSH key to instance %d: %w", resp.NewContract, err)
+		}
+	}
+
 	return &Instance{ID: resp.NewContract}, nil
+}
+
+// AttachSSH attaches an SSH public key to an instance.
+func (c *Client) AttachSSH(instanceID int, publicKeyFile string) error {
+	if strings.TrimSpace(publicKeyFile) == "" {
+		return nil
+	}
+	if _, err := c.run("attach", "ssh", strconv.Itoa(instanceID), publicKeyFile); err != nil {
+		return fmt.Errorf("attach ssh: %w", err)
+	}
+	return nil
 }
 
 func buildCreateArgs(offerID int, opts CreateOpts) []string {
