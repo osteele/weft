@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
+	"github.com/osteele/weft/internal/secrets"
 )
 
 func (m Model) renderWithModal(background, message string) string {
@@ -893,7 +894,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	envVars := job.ParseExportVars()
 	if len(envVars) > 0 {
 		b.WriteString(labelStyle.Render("Env"))
-		b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
+		b.WriteString(valueStyle.Render(strings.Join(secrets.RedactEnvVars(envVars), ", ")))
 		b.WriteString("\n")
 	}
 

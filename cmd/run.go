@@ -96,6 +96,9 @@ var (
 	runNeeds        []string
 	runDryRun       bool
 	runNoSync       bool
+	runHFToken      bool
+	runHFTokenFrom  string
+	runSecretVars   []string
 
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
@@ -146,6 +149,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
+	addSecretEnvFlags(runCmd, &runHFToken, &runHFTokenFrom, &runSecretVars)
 	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
@@ -410,6 +414,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Warning: dropping %s — also declared as hf-dataset. Use hf-dataset:<id> for HF datasets.\n",
 			strings.Join(removed, ", "))
+	}
+	runEnvVars, err = applySecretEnv(runEnvVars, runInputs, runHFToken, runHFTokenFrom, runSecretVars)
+	if err != nil {
+		return err
 	}
 
 	// Print recommendations for common patterns
@@ -812,7 +820,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(w, "  Description: %s\n", runDescription)
 		}
 		if len(runEnvVars) > 0 {
-			fmt.Fprintf(w, "  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+			fmt.Fprintf(w, "  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
 		}
 
 		// Push the job to the remote host before waiting/following.
@@ -1014,7 +1022,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Description: %s\n", runDescription)
 		}
 		if len(runEnvVars) > 0 {
-			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
 		}
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
 

@@ -579,6 +579,18 @@ known error patterns and, when possible, fixes the issue and retries.
 Jobs are retried at most once to prevent loops. Diagnoses are stored in the
 database (`error_diagnosis` column) for inspection.
 
+For private Hugging Face inputs, store the token once and let weft attach it by
+reference:
+
+```bash
+weft secret set hf "$HF_TOKEN"
+weft run --hf-token --input hf:meta-llama/Llama-3-8B "python train.py"
+```
+
+On macOS, secrets are stored in the Keychain. Other platforms use
+`~/.config/weft/secrets.json` with owner-only permissions. Jobs store
+`secret:<name>` references and weft resolves them only when launching a job.
+
 To enable the coding agent for code fixes, add to `~/.config/weft/config.toml`:
 
 ```yaml

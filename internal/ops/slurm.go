@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -26,7 +27,10 @@ func submitSlurmJob(database *sql.DB, job *db.Job, timeout time.Duration) (strin
 		timeout = 30 * time.Second
 	}
 
-	envVars := artifacts.MergeEnvVars(job.EnvVars, job.ID)
+	envVars, err := secrets.ResolveEnvVars(artifacts.MergeEnvVars(job.EnvVars, job.ID))
+	if err != nil {
+		return "", "", err
+	}
 	script := buildSlurmScript(job, envVars)
 	wrap := fmt.Sprintf("bash -lc %s", shellQuote(script))
 

@@ -217,6 +217,11 @@ account for pause time separately.
 | `WEFT_INSTANCE_TYPE` | `on-demand` / `interruptible` (rental only) |
 | `WEFT_RESUMED` | `1` if the agent's container has restarted on the same disk (typical Vast.ai pause/resume); unset on first boot |
 
+User-supplied secret env vars are resolved before the job is sent to the
+instance. Store `hf` with `weft secret set hf "$HF_TOKEN"` and use
+`--hf-token` or declare an `hf:` / `hf-dataset:` input to attach
+`HF_TOKEN=secret:hf` without writing the token into the job database.
+
 Use `WEFT_RESUMED` to fork checkpoint-loading vs cold-start logic in jobs
 that may run on interruptible instances.
 

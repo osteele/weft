@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -44,6 +45,11 @@ func newCloudAgentJob(job *db.Job, remoteDir string) (cloud.AgentJob, error) {
 		return cloud.AgentJob{}, fmt.Errorf("job %s missing non-zero latest_run_id", ids.FormatJobID(job.ID))
 	}
 	agentJob := newAgentJob(job, remoteDir)
+	env, err := secrets.ResolveEnvVars(agentJob.Env)
+	if err != nil {
+		return cloud.AgentJob{}, err
+	}
+	agentJob.Env = env
 	if agentJob.RunID <= 0 {
 		return cloud.AgentJob{}, fmt.Errorf("job %s produced invalid run_id=%d", ids.FormatJobID(job.ID), agentJob.RunID)
 	}

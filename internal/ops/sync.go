@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/opscore"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/remote"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -408,6 +409,10 @@ func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (SyncResult, error) {
 
 // startJobFromRecord starts a job using the data stored in the job record.
 func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) error {
+	resolvedEnv, err := secrets.ResolveEnvVars(envVars)
+	if err != nil {
+		return err
+	}
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 	if tmuxSession == "" {
 		tmuxSession = session.TmuxSessionName(job.ID)
@@ -444,7 +449,7 @@ func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) er
 		LogFile:    logFile,
 		StatusFile: statusFile,
 		PidFile:    pidFile,
-		EnvVars:    envVars,
+		EnvVars:    resolvedEnv,
 	})
 
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)

@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuefile"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -116,6 +117,10 @@ func startJobDirectly(database *sql.DB, job *db.Job, entry *queuefile.Entry) (bo
 		envVars = entry.EnvVars
 	} else {
 		envVars = job.EnvVars
+	}
+	envVars, err = secrets.ResolveEnvVars(envVars)
+	if err != nil {
+		return false, err
 	}
 
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{

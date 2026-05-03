@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -60,6 +61,10 @@ func (h *SSHHost) IsJobCurrent(jobID int64) (bool, error) {
 
 // AppendToQueue adds a job to the queue's command log.
 func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
+	resolvedEnv, err := secrets.ResolveEnvVars(entry.EnvVars)
+	if err != nil {
+		return err
+	}
 	cmd := queueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        "add",
@@ -69,7 +74,7 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 			Cmd:        entry.Command,
 			Desc:       entry.Description,
 			SourceSHA:  entry.SourceSHA256,
-			Env:        entry.EnvVars,
+			Env:        resolvedEnv,
 			Deps:       entry.DepSpec,
 			CPU:        entry.CPUAllotment,
 			GPU:        entry.GPU,

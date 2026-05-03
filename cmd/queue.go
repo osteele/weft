@@ -195,6 +195,9 @@ var (
 	queueDescription    string
 	queueProject        string
 	queueEnvVars        []string
+	queueHFToken        bool
+	queueHFTokenFrom    string
+	queueSecretVars     []string
 	queueTags           []string
 	queueAfter          int64
 	queueAfterAny       int64
@@ -285,6 +288,7 @@ func init() {
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
+	addSecretEnvFlags(queueAddCmd, &queueHFToken, &queueHFTokenFrom, &queueSecretVars)
 	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
@@ -349,6 +353,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	if newInputs := filterNew(queueInputs, projectInputs); len(newInputs) > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
+	}
+	queueEnvVars, err = applySecretEnv(queueEnvVars, queueInputs, queueHFToken, queueHFTokenFrom, queueSecretVars)
+	if err != nil {
+		return err
 	}
 
 	database, err := db.Open()
@@ -467,7 +475,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Description: %s\n", queueDescription)
 		}
 		if len(queueEnvVars) > 0 {
-			fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(queueEnvVars))
 		}
 		if len(queueTags) > 0 {
 			fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
@@ -507,7 +515,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Description: %s\n", queueDescription)
 	}
 	if len(queueEnvVars) > 0 {
-		fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+		fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(queueEnvVars))
 	}
 	if len(queueTags) > 0 {
 		fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
@@ -980,7 +988,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if len(newEnv) == 0 {
 			updates = append(updates, "env vars cleared")
 		} else {
-			updates = append(updates, fmt.Sprintf("env vars: %s", strings.Join(newEnv, ", ")))
+			updates = append(updates, fmt.Sprintf("env vars: %s", formatEnvVarsForDisplay(newEnv)))
 		}
 	}
 

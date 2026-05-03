@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -74,6 +75,11 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry 
 }
 
 func writeQueueJobFile(host string, entry QueueEntry, timeout time.Duration) error {
+	resolvedEnv, err := secrets.ResolveEnvVars(entry.EnvVars)
+	if err != nil {
+		return err
+	}
+	entry.EnvVars = resolvedEnv
 	job := CommandJob{
 		ID:       entry.JobID,
 		Dir:      entry.WorkingDir,

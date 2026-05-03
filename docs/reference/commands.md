@@ -1048,6 +1048,25 @@ weft run -e BATCH_SIZE=32 -e LR=0.001 titan "python train.py"
 weft queue add -e TMPDIR=/mnt/data/tmp titan "python train.py"
 ```
 
+Secret values can be stored locally and attached by reference so tokens are not
+written into job rows or command output:
+
+```bash
+weft secret set hf "$HF_TOKEN"
+weft run --hf-token --input hf:meta-llama/Llama-3-8B "python train.py"
+weft run --hf-token-from env:HF_TOKEN --input hf-dataset:org/private-data "python train.py"
+weft run --secret WANDB_API_KEY=env:WANDB_API_KEY "python train.py"
+```
+
+On macOS, weft stores secrets in the Keychain. On other platforms it uses
+`~/.config/weft/secrets.json` with owner-only permissions. Job definitions keep
+references such as `HF_TOKEN=secret:hf`; weft resolves them when launching the
+job and redacts secret-looking env vars in status output.
+
+When an `hf:` or `hf-dataset:` input is declared and the `hf` secret exists,
+weft automatically attaches `HF_TOKEN=secret:hf` unless `HF_TOKEN` is already
+set with `--env` or `--secret`.
+
 **Automatic environment file loading**:
 
 The queue runner automatically loads environment files from the job's working directory before executing the command. Files are loaded in this order (later files override earlier ones):
@@ -1057,6 +1076,29 @@ The queue runner automatically loads environment files from the job's working di
 3. `.envrc` - loaded without auto-export (for direnv compatibility)
 
 The job log will show "Loading .env" etc. when these files are found and sourced.
+
+### weft secret
+
+Store and manage local secret values used by job environment variables.
+
+```bash
+weft secret set <name> [value]
+weft secret list
+weft secret remove <name>
+```
+
+`weft secret set` also accepts piped input:
+
+```bash
+printf '%s' "$HF_TOKEN" | weft secret set hf
+```
+
+Use `secret:<name>` in env vars when you need to attach a stored secret
+manually:
+
+```bash
+weft run -e HF_TOKEN=secret:hf "python train.py"
+```
 
 ### weft cleanup
 

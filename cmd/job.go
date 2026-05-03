@@ -887,6 +887,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
 		fmt.Printf("Command:     %s\n", job.Command)
+		if len(job.EnvVars) > 0 {
+			fmt.Printf("Env Vars:    %s\n", formatEnvVarsForDisplay(job.EnvVars))
+		}
 		if tags := job.DisplayTags(); len(tags) > 0 {
 			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
 		}

@@ -610,7 +610,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		fmt.Printf("  Description: %s\n", job.Description)
 	}
 	if len(job.EnvVars) > 0 {
-		fmt.Printf("  Env vars: %s\n", strings.Join(job.EnvVars, ", "))
+		fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(job.EnvVars))
 	}
 	return nil
 }

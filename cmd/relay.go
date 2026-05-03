@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/secrets"
 )
 
 func loadCoordinatorRelay() (*config.Config, *coordinatorrelay.Client, error) {
@@ -39,6 +40,10 @@ func relaySubmitJob(database *sql.DB, cfg *config.Config, client *coordinatorrel
 	if staged != nil {
 		defer func() { _ = removeStageRoot(staged.Root) }()
 	}
+	launchEnv, err := secrets.ResolveEnvVars(params.EnvVars)
+	if err != nil {
+		return 0, nil, err
+	}
 
 	req := &coordinatorrelay.Request{
 		Op:    coordinatorrelay.OpSubmitJob,
@@ -49,7 +54,7 @@ func relaySubmitJob(database *sql.DB, cfg *config.Config, client *coordinatorrel
 			Command:     params.Command,
 			Description: params.Description,
 			Project:     params.Project,
-			EnvVars:     params.EnvVars,
+			EnvVars:     launchEnv,
 			Tags:        params.Tags,
 			GPU:         params.GPU,
 			GPUClass:    params.GPUClass,
@@ -82,6 +87,15 @@ func relayUpdateJob(cfg *config.Config, client *coordinatorrelay.Client, job *db
 		Op:     coordinatorrelay.OpUpdateQueued,
 		JobID:  job.ID,
 		Update: payload,
+	}
+	if payload != nil && len(payload.EnvVars) > 0 {
+		launchEnv, err := secrets.ResolveEnvVars(payload.EnvVars)
+		if err != nil {
+			return nil, err
+		}
+		copyPayload := *payload
+		copyPayload.EnvVars = launchEnv
+		req.Update = &copyPayload
 	}
 	if staged != nil {
 		req.Source = staged.Ref
