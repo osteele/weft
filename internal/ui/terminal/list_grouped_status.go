@@ -47,20 +47,38 @@ type groupedStatusRow struct {
 	section   string
 }
 
+// recentLaunchFailures feeds the "Recent launch failures" section. recoveredIDs
+// holds the subset of items whose successor is alive — those rows render dim.
+type recentLaunchFailures struct {
+	items             []*db.Launch
+	recoveredIDs      map[int64]bool
+	projectByLaunchID map[int64]string
+	windowSince       time.Time
+}
+
+const (
+	recentFailedLaunchMaxRows = 6
+	launchFailuresSectionKey  = "launch_failures"
+)
+
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLiveState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, nil, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, nil, nil, nil, nil, time.Now())
 }
 
 func renderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) string {
-	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, time.Now())
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, nil, time.Now())
 }
 
-func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, now time.Time) string {
-	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, placementQueuedAtByJob, now)
+func renderJobListGroupedStatusPlainWithLaunchFailures(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, failures *recentLaunchFailures) string {
+	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, failures, time.Now())
+}
+
+func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, launchFailures *recentLaunchFailures, now time.Time) string {
+	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, placementQueuedAtByJob, launchFailures, now)
 	if len(rows) == 0 {
 		return "None\n"
 	}
@@ -72,10 +90,10 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 }
 
 func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string) []groupedStatusRow {
-	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, time.Now())
+	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, nil, time.Now())
 }
 
-func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, now time.Time) []groupedStatusRow {
+func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, launchFailures *recentLaunchFailures, now time.Time) []groupedStatusRow {
 	running := make([]*db.Job, 0)
 	paused := make([]*db.Job, 0)
 	placing := make([]*db.Job, 0)
@@ -83,7 +101,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 	queued := make([]*db.Job, 0)
 	unplaced := make([]*db.Job, 0)
 	completions := make([]*db.Job, 0)
-	failures := make([]*db.Job, 0)
+	failedJobs := make([]*db.Job, 0)
 	killedCanceled := make([]*db.Job, 0)
 
 	// Launch-active set is derived from actual job statuses rather than
@@ -120,13 +138,13 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		case "completions":
 			completions = append(completions, job)
 		case "failures":
-			failures = append(failures, job)
+			failedJobs = append(failedJobs, job)
 		case "killed_canceled":
 			killedCanceled = append(killedCanceled, job)
 		}
 	}
 
-	for _, s := range [][]*db.Job{running, paused, placing, launching, queued, unplaced, completions, failures, killedCanceled} {
+	for _, s := range [][]*db.Job{running, paused, placing, launching, queued, unplaced, completions, failedJobs, killedCanceled} {
 		sort.SliceStable(s, func(i, j int) bool { return s[i].ID < s[j].ID })
 	}
 
@@ -138,7 +156,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		{title: "Launching", key: "launching", jobs: launching},
 		{title: "Unplaced", key: "unplaced", jobs: unplaced},
 		{title: "Completed", key: "completions", jobs: completions},
-		{title: "Failed", key: "failures", jobs: failures},
+		{title: "Failed", key: "failures", jobs: failedJobs},
 		{title: "Killed/Canceled", key: "killed_canceled", jobs: killedCanceled},
 	}
 
@@ -164,6 +182,8 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		}
 		rows = append(rows, groupedStatusRow{text: ""})
 	}
+
+	rows = appendRecentFailedLaunchRows(rows, launchFailures, projectWidth, width, now)
 
 	if len(rows) == 0 {
 		return nil
@@ -587,4 +607,162 @@ func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
 		return ""
 	}
 	return strings.TrimSpace(launchStatusByID[*job.LaunchID])
+}
+
+// Failures whose successor is alive render dim so they recede without
+// being hidden — the count in the section header stays honest.
+var failureDimStyle = lipgloss.NewStyle().Faint(true)
+
+func appendRecentFailedLaunchRows(
+	rows []groupedStatusRow,
+	failures *recentLaunchFailures,
+	projectWidth, width int,
+	now time.Time,
+) []groupedStatusRow {
+	if failures == nil || len(failures.items) == 0 {
+		return rows
+	}
+
+	total := len(failures.items)
+	windowText := ""
+	if !failures.windowSince.IsZero() {
+		windowText = " in last " + formatProjectRecentWindow(now.Sub(failures.windowSince))
+	}
+	headerText := fmt.Sprintf("Recent launch failures (%d%s", total, windowText)
+	if recovered := len(failures.recoveredIDs); recovered > 0 {
+		headerText += fmt.Sprintf(", %d already replaced", recovered)
+	}
+	headerText += "):"
+	rows = append(rows, groupedStatusRow{
+		text:     headerText,
+		isHeader: true,
+		section:  launchFailuresSectionKey,
+	})
+
+	type bucket struct {
+		reason string
+		items  []*db.Launch
+	}
+	bucketIdx := make(map[string]int)
+	buckets := make([]bucket, 0, 4)
+	for _, f := range failures.items {
+		if f == nil {
+			continue
+		}
+		reason := strings.TrimSpace(db.HumanizeTerminationReason(f.TerminationReason))
+		if reason == "" {
+			reason = "unknown"
+		}
+		if i, ok := bucketIdx[reason]; ok {
+			buckets[i].items = append(buckets[i].items, f)
+			continue
+		}
+		bucketIdx[reason] = len(buckets)
+		buckets = append(buckets, bucket{reason: reason, items: []*db.Launch{f}})
+	}
+	sort.SliceStable(buckets, func(i, j int) bool {
+		if len(buckets[i].items) != len(buckets[j].items) {
+			return len(buckets[i].items) > len(buckets[j].items)
+		}
+		return buckets[i].reason < buckets[j].reason
+	})
+
+	emitted := 0
+emit:
+	for _, b := range buckets {
+		rows = append(rows, groupedStatusRow{
+			text:      fmt.Sprintf("  reason: %s (%d)", b.reason, len(b.items)),
+			isBlocked: true,
+			section:   launchFailuresSectionKey,
+		})
+		for _, item := range b.items {
+			if emitted >= recentFailedLaunchMaxRows {
+				break emit
+			}
+			rows = append(rows, groupedStatusRow{
+				text:    formatLaunchFailureRow(item, failures, projectWidth, width, now),
+				section: launchFailuresSectionKey,
+			})
+			emitted++
+		}
+	}
+
+	if total > emitted {
+		rows = append(rows, groupedStatusRow{
+			text:    fmt.Sprintf("  + %d more (weft instance list --status failed)", total-emitted),
+			section: launchFailuresSectionKey,
+		})
+	}
+	rows = append(rows, groupedStatusRow{text: ""})
+	return rows
+}
+
+func formatLaunchFailureRow(
+	f *db.Launch,
+	failures *recentLaunchFailures,
+	projectWidth, width int,
+	now time.Time,
+) string {
+	instanceID := ids.FormatInstanceID(f.ID)
+	idStyled := rentalIDStyle.Render(instanceID)
+
+	project := ""
+	if failures.projectByLaunchID != nil {
+		project = strings.TrimSpace(failures.projectByLaunchID[f.ID])
+	}
+	if project == "" {
+		project = "—"
+	}
+	projectCol := formatProjectColumn(project, projectWidth)
+
+	gpuBrief := strings.TrimSpace(f.DisplayGPUBrief())
+	costPart := ""
+	if f.CostPerHourCents > 0 {
+		costPart = fmt.Sprintf(" @ $%.2f/hr", float64(f.CostPerHourCents)/100)
+	}
+	hardware := strings.TrimSpace(gpuBrief + costPart)
+
+	detail := strings.TrimSpace(f.TerminationDetail)
+	if detail == "" {
+		detail = strings.TrimSpace(db.HumanizeTerminationReason(f.TerminationReason))
+	}
+
+	suffixParts := make([]string, 0, 2)
+	if detail != "" {
+		suffixParts = append(suffixParts, detail)
+	}
+	if f.EndedAt != nil && *f.EndedAt > 0 {
+		suffixParts = append(suffixParts, "failed "+shortRelativeTime(now.Unix()-*f.EndedAt))
+	}
+	suffix := ""
+	if len(suffixParts) > 0 {
+		suffix = " — " + strings.Join(suffixParts, " — ")
+	}
+
+	prefix := fmt.Sprintf("    - %s %s — %s ", rentalGlyphCloud, idStyled, projectCol)
+	desc := hardware
+	line := prefix + desc + suffix
+
+	if width > 0 {
+		prefixWidth := lipgloss.Width(prefix)
+		suffixWidth := lipgloss.Width(suffix)
+		descWidth := width - prefixWidth - suffixWidth
+		if descWidth < 0 {
+			descWidth = 0
+		}
+		desc = truncateDisplayWidth(desc, descWidth)
+		line = prefix + desc
+		if suffix != "" {
+			padding := descWidth - lipgloss.Width(desc)
+			if padding < 0 {
+				padding = 0
+			}
+			line += strings.Repeat(" ", padding) + suffix
+		}
+	}
+
+	if failures.recoveredIDs[f.ID] {
+		line = failureDimStyle.Render(line)
+	}
+	return line
 }

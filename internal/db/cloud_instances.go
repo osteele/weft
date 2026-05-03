@@ -570,7 +570,6 @@ func LaunchSuccessorsRecovered(database *sql.DB, failedIDs []int64) (map[int64]b
 		return out, nil
 	}
 	seen := make(map[int64]struct{}, len(failedIDs))
-	placeholders := make([]string, 0, len(failedIDs))
 	args := make([]any, 0, len(failedIDs)+4)
 	for _, id := range failedIDs {
 		if id <= 0 {
@@ -580,12 +579,12 @@ func LaunchSuccessorsRecovered(database *sql.DB, failedIDs []int64) (map[int64]b
 			continue
 		}
 		seen[id] = struct{}{}
-		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	if len(placeholders) == 0 {
+	if len(args) == 0 {
 		return out, nil
 	}
+	idCount := len(args)
 	args = append(args,
 		LaunchStatusRunning, LaunchStatusCompleted,
 		LaunchStatusPaused, LaunchStatusGrace,
@@ -593,8 +592,8 @@ func LaunchSuccessorsRecovered(database *sql.DB, failedIDs []int64) (map[int64]b
 	rows, err := database.Query(
 		`SELECT DISTINCT replaced_instance_id
 		   FROM launches
-		  WHERE replaced_instance_id IN (`+strings.Join(placeholders, ",")+`)
-		    AND status IN (?,?,?,?)`,
+		  WHERE replaced_instance_id IN (`+sqlPlaceholders(idCount)+`)
+		    AND status IN (?, ?, ?, ?)`,
 		args...,
 	)
 	if err != nil {
@@ -622,7 +621,6 @@ func ProjectsByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]string,
 		return out, nil
 	}
 	seen := make(map[int64]struct{}, len(launchIDs))
-	placeholders := make([]string, 0, len(launchIDs))
 	args := make([]any, 0, len(launchIDs))
 	for _, id := range launchIDs {
 		if id <= 0 {
@@ -632,17 +630,16 @@ func ProjectsByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]string,
 			continue
 		}
 		seen[id] = struct{}{}
-		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	if len(placeholders) == 0 {
+	if len(args) == 0 {
 		return out, nil
 	}
 	rows, err := database.Query(
 		`SELECT ja.launch_id, COALESCE(j.project, '')
 		   FROM job_attempts ja
 		   JOIN jobs j ON j.id = ja.job_id
-		  WHERE ja.launch_id IN (`+strings.Join(placeholders, ",")+`)
+		  WHERE ja.launch_id IN (`+sqlPlaceholders(len(args))+`)
 		  ORDER BY ja.launch_id, ja.id DESC`,
 		args...,
 	)

@@ -423,5 +423,8 @@ func formatProjectRecentWindow(d time.Duration) string {
 	if d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
 	return d.String()
 }

@@ -103,7 +103,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, map[int64]*db.LaunchLiveState{
 		launchID: {LaunchID: launchID, JobProgressID: 42, JobProgressPct: 75},
-	}, nil, nil, nil, now)
+	}, nil, nil, nil, nil, now)
 
 	for _, want := range []string{
 		"- ☁ wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
@@ -130,7 +130,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	want := "- ☁ wj99 — proj python worker.py (rental)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -156,7 +156,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningDayScaleTimingShowsDayAndHour(
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	want := "— started 1d18h ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -176,7 +176,7 @@ func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMis
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	want := "-   wj53 — proj legacy completion — placed 5m ago — completed ok"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -197,7 +197,7 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedUsesHydratedPlacementTime(t *te
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, map[int64]int64{1693: 4_000}, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, map[int64]int64{1693: 4_000}, nil, now)
 	want := "- ☁ wj1693 — proj restored move (rental) — placed 16m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -217,7 +217,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	lineWant := "  -   wj50 — proj waiting — created 5m ago"
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
@@ -254,7 +254,7 @@ func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *test
 		mk(1383, "structural-probes EXP-085 c-command", reason3090),
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 
 	// Subheaders present with correct counts, in first-seen order.
 	ampereHead := "  blocked: " + reasonAmpere + " (2)"
@@ -308,7 +308,7 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngr
 			QueuedAt:    4_000,
 		},
 	}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 
 	headWant := "  blocked: " + reason + " (1)"
 	if !strings.Contains(out, headWant) {
@@ -353,7 +353,7 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedShowsCreatedNotQueuedAge(t *t
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	want := "-   wj1561 — proj blocked job — created 40m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -377,7 +377,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRet
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	want := "-   wj51 — proj retry me — retry pending 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -399,7 +399,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	want := "-   wj52 — proj retry blocked — retry rejected 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
@@ -425,6 +425,7 @@ func TestRenderJobListGroupedStatusPlainAt_ReclassifiesPendingPlacementWhenLaunc
 		0,
 		nil,
 		map[int64]string{launchID: db.LaunchStatusRunning},
+		nil,
 		nil,
 		nil,
 		now,
@@ -462,7 +463,7 @@ func TestRenderJobListGroupedStatusPlainAt_AlignsTimingSuffixToRightEdge(t *test
 		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, nil, nil, now)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected section header + 2 rows, got:\n%s", out)
@@ -516,7 +517,7 @@ func TestRenderJobListGroupedStatusPlainAt_PendingPlacementWithoutLaunchIsUnplac
 					QueuedAt:      4_700,
 				},
 			}
-			out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+			out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 			if !strings.Contains(out, "Unplaced (1):") {
 				t.Fatalf("expected unplaced section, got:\n%s", out)
 			}
@@ -592,6 +593,7 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 				map[int64]string{launchID: tc.launchStatus},
 				nil,
 				nil,
+				nil,
 				now,
 			)
 			if !strings.Contains(out, tc.wantSection) {
@@ -606,7 +608,7 @@ func TestRenderJobListGroupedStatusPlainAt_PausedJobBucketsToPausedSection(t *te
 	jobs := []*db.Job{
 		{ID: 81, Status: db.StatusPaused, Host: "cool30", Project: "proj", Description: "paused job"},
 	}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	if !strings.Contains(out, "Paused (1):") {
 		t.Fatalf("expected Paused section, got:\n%s", out)
 	}
@@ -630,7 +632,7 @@ func TestRenderJobListGroupedStatusPlainAt_OpenIntentBucketsToPlacing(t *testing
 		{ID: 1700, Status: db.StatusQueued, Host: "cool30", Project: "proj", Description: "ordinary queued"},
 	}
 	placing := map[int64]struct{}{1657: {}, 1664: {}}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, nil, nil, now)
 	if !strings.Contains(out, "Placing (2):") {
 		t.Fatalf("expected Placing section with 2 jobs, got:\n%s", out)
 	}
@@ -654,11 +656,109 @@ func TestRenderJobListGroupedStatusPlainAt_OpenIntentDoesNotOverrideRunning(t *t
 		{ID: 42, Status: db.StatusRunning, LaunchID: &launchID, Project: "proj", Command: "python a.py", StartTime: 4_400},
 	}
 	placing := map[int64]struct{}{42: {}}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, nil, nil, now)
 	if !strings.Contains(out, "Running (1):") {
 		t.Fatalf("expected Running section, got:\n%s", out)
 	}
 	if strings.Contains(out, "Placing (") {
 		t.Fatalf("did not expect Placing section for running job, got:\n%s", out)
+	}
+}
+
+func TestAppendRecentFailedLaunchRows_NilOrEmptyEmitsNothing(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	if got := appendRecentFailedLaunchRows(nil, nil, 0, 0, now); got != nil {
+		t.Fatalf("nil failures should produce no rows, got %d", len(got))
+	}
+	empty := &recentLaunchFailures{items: nil, windowSince: time.Unix(9_000, 0)}
+	if got := appendRecentFailedLaunchRows(nil, empty, 0, 0, now); got != nil {
+		t.Fatalf("empty items should produce no rows, got %d", len(got))
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_RecentLaunchFailuresSection(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentLaunchFailures{
+		items: []*db.Launch{
+			{
+				ID:                100,
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonProviderFailure,
+				TerminationDetail: "container exit 1",
+				EndedAt:           testInt64Ptr(9_400),
+				ResolvedGPUName:   "RTX 4090",
+				CostPerHourCents:  42,
+			},
+			{
+				ID:                101,
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonProviderFailure,
+				TerminationDetail: "ssh handshake refused",
+				EndedAt:           testInt64Ptr(9_500),
+			},
+			{
+				ID:                102,
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonBootstrapTimeout,
+				TerminationDetail: "agent never reached ready",
+				EndedAt:           testInt64Ptr(9_600),
+			},
+		},
+		recoveredIDs: map[int64]bool{
+			101: true,
+		},
+		projectByLaunchID: map[int64]string{
+			100: "augur",
+			101: "augur",
+			102: "augur",
+		},
+		windowSince: now.Add(-30 * time.Minute),
+	}
+
+	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
+
+	for _, want := range []string{
+		"Recent launch failures (3 in last 30m, 1 already replaced):",
+		"reason: provider-side failure (2)",
+		"reason: bootstrap timeout (1)",
+		"container exit 1",
+		"agent never reached ready",
+	} {
+		if !strings.Contains(stripANSI(out), want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+
+	// Recovered failure (id 101) renders dim — verify by checking the
+	// styled output retains an ANSI faint sequence for that line.
+	if !strings.Contains(out, "ssh handshake refused") {
+		t.Fatalf("missing recovered failure detail in output:\n%s", out)
+	}
+}
+
+func TestAppendRecentFailedLaunchRows_OverflowAddsMoreLine(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	items := make([]*db.Launch, 0, 10)
+	for i := 0; i < 10; i++ {
+		items = append(items, &db.Launch{
+			ID:                int64(200 + i),
+			Status:            db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonProviderFailure,
+			TerminationDetail: "boom",
+			EndedAt:           testInt64Ptr(9_500 + int64(i)),
+		})
+	}
+	failures := &recentLaunchFailures{
+		items:       items,
+		windowSince: now.Add(-30 * time.Minute),
+	}
+
+	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
+	stripped := stripANSI(out)
+	if !strings.Contains(stripped, "+ 4 more (weft instance list --status failed)") {
+		t.Fatalf("missing overflow line in output:\n%s", out)
+	}
+	if !strings.Contains(stripped, "Recent launch failures (10 in last 30m):") {
+		t.Fatalf("expected total of 10 in header, got:\n%s", out)
 	}
 }
