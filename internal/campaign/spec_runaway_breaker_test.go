@@ -366,6 +366,67 @@ func TestSpec_RunawayBreakerGracePeriod_SkipsCheckAfterResume(t *testing.T) {
 	}
 }
 
+func TestSpec_RunawayBreakerIgnoresGracePeriodFailuresAfterResume(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	resumedAt := time.Now().Unix()
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventRelaunchRunawayResumed,
+		OccurredAt: resumedAt,
+		Detail:     "project=<all>; manual reset via test",
+	}); err != nil {
+		t.Fatalf("insert resumed: %v", err)
+	}
+
+	graceAttemptAt := resumedAt + int64((5 * time.Minute).Seconds())
+	for i := 0; i < 5; i++ {
+		launchID, err := db.CreateLaunch(database, &db.Launch{
+			Status:   db.LaunchStatusFailed,
+			Provider: "vastai",
+			GPUSpec:  "RTX_4090",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch[%d]: %v", i, err)
+		}
+		if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+			t.Fatalf("SetJobLaunchID[%d]: %v", i, err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts SET queued_at = ?, cloud_outcome = ?, end_time = ?
+			 WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+			graceAttemptAt, db.AttemptOutcomeOrphaned, graceAttemptAt, jobID, launchID,
+		); err != nil {
+			t.Fatalf("mark orphaned[%d]: %v", i, err)
+		}
+	}
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     3,
+			OrphanChurnLimit:         3,
+			SpendNoProgressLimitCent: 500,
+			ResumeGracePeriod:        15 * time.Minute,
+		},
+	}
+
+	tripped, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Unix(resumedAt, 0).Add(16*time.Minute))
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if tripped {
+		t.Fatal("breaker should ignore orphaned attempts that happened during reset grace")
+	}
+}
+
 func TestSpec_RunawayBreakerDisabled(t *testing.T) {
 	// Spec: RunawayBreakerTrips requires config.runaway_enabled.
 	database := db.SetupTestDB(t)

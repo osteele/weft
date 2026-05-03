@@ -271,6 +271,7 @@ config {
     runaway_chain_no_progress_limit: Integer = 3
     runaway_orphan_churn_limit: Integer = 8
     runaway_spend_no_progress_limit_cents: Integer = 500
+    runaway_resume_grace_period: Duration = 15.minutes
 }
 
 -- ==========================================================================
@@ -783,13 +784,14 @@ rule ProviderInstanceDied {
     ensures: instance.ended_at = now
 
     @guidance
-        -- A provider "not found" result for a specific instance ID (HTTP 404
-        -- or equivalent) is a terminal signal: the ProviderInstance has been
-        -- destroyed out from under us. Reconcile MUST map this to
-        -- termination_reason = provider_failure and mark the Instance failed,
-        -- rather than retrying the lookup or treating it as transient.
-        -- Implementation: internal/campaign/lifecycle.go reconcile path;
-        -- per-instance ShowInstance in internal/runpod/client.go.
+        -- A concrete terminal provider status (exited, destroyed, error,
+        -- dead) is terminal. A missing row from a provider-wide batch list is
+        -- NOT a terminal signal by itself; reconcile treats it as provider
+        -- status unavailable and waits for the pre-running/status-unavailable
+        -- timeout before failing. This prevents a transient stale provider
+        -- list from failing new launches before the bootstrap deadline.
+        -- Implementation: internal/campaign/reconcile.go and
+        -- internal/campaign/instance_check.go.
 }
 
 rule ProviderInstancePaused {
@@ -1006,10 +1008,13 @@ rule RunawayBreakerTrips {
 
     let scope = instance.campaign.id ++ ":" ++ instance.project
     let window = config.runaway_lookback_window
-    let completions = count completed jobs in scope within window
-    let chain = max trailing orphaned attempt chain in scope within window
-    let orphans = count orphaned attempts in scope within window
-    let spend = sum actual_spend_cents in scope within window
+    let resume_floor = latest RunawayBreakerResumed(scope)
+                       + config.runaway_resume_grace_period
+    let accounting_window = max(now - window, resume_floor)
+    let completions = count completed jobs in scope after accounting_window
+    let chain = max trailing orphaned attempt chain in scope after accounting_window
+    let orphans = count orphaned attempts in scope after accounting_window
+    let spend = sum actual_spend_cents in scope after accounting_window
 
     if completions = 0
        and (chain >= config.runaway_chain_no_progress_limit
@@ -1021,6 +1026,9 @@ rule RunawayBreakerTrips {
     @guidance
         -- Scoped per campaign+project. The breaker prevents new instance
         -- launches but does not terminate running instances.
+        -- Failures during the manual-reset grace period are ignored for the
+        -- next accounting window, so a reset gives fresh launches a real
+        -- chance before the breaker can trip again.
         -- Recorded as lifecycle_event kind=relaunch.runaway_tripped.
         -- Implementation: internal/campaign/relaunch.go evaluateRunawayBreaker()
 }

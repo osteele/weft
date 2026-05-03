@@ -297,8 +297,9 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		if byProvider, ok := providerInstances[providerKey]; ok {
 			if cached, found := byProvider[providerID]; found {
 				inst = cached
+			} else {
+				providerErr = fmt.Errorf("provider instance %s missing from %s batch list", providerID, providerKey)
 			}
-			// Not in batch results → instance is gone from provider
 		} else {
 			// Batch fetch failed for this provider — fall back to individual call
 			inst, providerErr = client.ShowInstance(providerID)

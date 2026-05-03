@@ -651,6 +651,10 @@ rule BatchFetchProviderState {
         -- Calls ListAllInstances() once per provider instead of N
         -- individual ShowInstance() calls. Reduces transient errors.
         -- Falls back to individual ShowInstance() if batch fails.
+        -- If the batch call succeeds but a known provider instance ID is
+        -- absent from that list, reconcile treats the observation as provider
+        -- status unavailable, not as provider-dead, until the normal
+        -- unavailable-status timeout is exceeded.
 }
 
 -- Record provider status transitions for historical tracking.

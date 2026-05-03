@@ -629,6 +629,25 @@ func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_ProviderStatusUnavailableWaitsBeforeTimeout(t *testing.T) {
+	launchedAt := time.Now().Add(-3 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderErr: fmt.Errorf("provider instance test-123 missing from batch list"),
+		JobState:    JobState{},
+		Now:         time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("action.Kind = %d, want ActionNone (%d)", action.Kind, ActionNone)
+	}
+}
+
 func TestCheckInstance_PauseTolerant_RecentPause_Pause(t *testing.T) {
 	// Running launch whose provider instance just transitioned to stopped:
 	// flip the launch to paused.

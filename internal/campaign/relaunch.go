@@ -822,8 +822,11 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	}
 
 	since := now.Add(-cfg.RunawayPolicy.Window).Unix()
-	if resumedAt > since {
-		since = resumedAt
+	if resumedAt > 0 {
+		graceFloor := time.Unix(resumedAt, 0).Add(gracePeriod).Unix()
+		if graceFloor > since {
+			since = graceFloor
+		}
 	}
 	metrics, err := queryRunawayMetrics(database, campaignID, scopeJobIDs, since, now.Unix())
 	if err != nil {

@@ -1100,6 +1100,58 @@ func TestReconcileLaunches_BatchFetch_UsesListAllInstances(t *testing.T) {
 	}
 }
 
+func TestReconcileLaunches_BatchFetchMissDoesNotMarkRecentLaunchDead(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	now := time.Now().Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:    db.LaunchStatusRunning,
+		Provider:  "vastai",
+		GPUSpec:   "RTX_4090",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "missing-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, now, instanceID); err != nil {
+		t.Fatalf("set launched at: %v", err)
+	}
+
+	var showCalls int
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{}, nil
+		},
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			showCalls++
+			return nil, cloud.ErrInstanceNotFound
+		},
+	}
+
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Errorf("reconciled = %d, want 0", result.Reconciled)
+	}
+	if showCalls != 0 {
+		t.Errorf("ShowInstance called %d times, want 0 (batch miss should not fall back per instance)", showCalls)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Fatalf("launch status = %q, want %q", launch.Status, db.LaunchStatusRunning)
+	}
+}
+
 func TestReconcileCampaigns_MixedTerminalInstancesBecomeFailed(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
