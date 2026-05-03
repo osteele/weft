@@ -1224,6 +1224,9 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		job = m.jobs[m.cursor]
 	}
 	if job == nil {
+		if m.groupedByStatus {
+			return renderSelectedLaunchDetail(m.selectedGroupedLaunch(), m.width, time.Now())
+		}
 		return nil
 	}
 	return renderSelectedJobDetail(job, selectedJobContext{
@@ -1260,6 +1263,14 @@ func (m listTUIModel) selectedGroupedJob() *db.Job {
 		return nil
 	}
 	return m.groupedRows[row].job
+}
+
+func (m listTUIModel) selectedGroupedLaunch() *db.Launch {
+	row := m.selectedGroupedRow()
+	if row < 0 || row >= len(m.groupedRows) {
+		return nil
+	}
+	return m.groupedRows[row].launch
 }
 
 func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -1315,7 +1326,7 @@ func (m *listTUIModel) selectGroupedMouseRow(y int) {
 		return
 	}
 	row := m.groupedRows[rowIdx]
-	if row.job == nil || row.isHeader || row.isBlocked {
+	if (row.job == nil && row.launch == nil) || row.isHeader || row.isBlocked {
 		return
 	}
 	for i, selectableRow := range m.groupedSelectableRows {
@@ -1953,7 +1964,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 	m.groupedRows = buildGroupedStatusRowsAt(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID, m.placingJobIDs, m.placementQueuedAtByJob, m.recentLaunchFailures, time.Now())
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
-		if row.job != nil && !row.isHeader && !row.isBlocked {
+		if (row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked {
 			m.groupedSelectableRows = append(m.groupedSelectableRows, i)
 		}
 	}

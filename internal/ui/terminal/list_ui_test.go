@@ -506,6 +506,90 @@ func TestListTUIGroupedViewShowsSelectedJobDetail(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedViewSelectsRecentLaunchFailure(t *testing.T) {
+	now := time.Now()
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           140,
+		height:          20,
+		title:           "Jobs",
+		recentLaunchFailures: &recentLaunchFailures{
+			items: []*db.Launch{
+				{
+					ID:                 77,
+					Status:             db.LaunchStatusFailed,
+					Provider:           "vastai",
+					ProviderInstanceID: "provider-77",
+					TerminationReason:  db.TerminationReasonInfraFailure,
+					TerminationDetail:  "provider reported container exited before bootstrap completed with code 137",
+					EndedAt:            testInt64Ptr(now.Add(-2 * time.Minute).Unix()),
+					ResolvedGPUName:    "RTX 4090",
+					GPUMemGB:           24,
+					CostPerHourCents:   120,
+				},
+			},
+			windowSince: now.Add(-30 * time.Minute),
+		},
+	}
+	m.rebuildGroupedRows()
+
+	if len(m.groupedSelectableRows) != 1 {
+		t.Fatalf("selectable rows = %d, want 1", len(m.groupedSelectableRows))
+	}
+	if launch := m.selectedGroupedLaunch(); launch == nil || launch.ID != 77 {
+		t.Fatalf("selected launch = %+v, want wi77", launch)
+	}
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"Instance: wi77",
+		"terminated (infrastructure failure)",
+		"provider id provider-77",
+		"Failure: infrastructure failure: provider reported container exited before bootstrap",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in grouped view output, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
+	now := time.Now()
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusRunning, Description: "running"},
+		},
+		recentLaunchFailures: &recentLaunchFailures{
+			items: []*db.Launch{
+				{
+					ID:                88,
+					Status:            db.LaunchStatusFailed,
+					Provider:          "vastai",
+					TerminationReason: db.TerminationReasonBootstrapTimeout,
+					TerminationDetail: "agent never became ready",
+					EndedAt:           testInt64Ptr(now.Add(-time.Minute).Unix()),
+				},
+			},
+			windowSince: now.Add(-30 * time.Minute),
+		},
+	}
+	m.rebuildGroupedRows()
+	clickY := groupedClickYForLaunch(t, m, 88)
+
+	next, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      clickY,
+	})
+	got := next.(listTUIModel)
+	if launch := got.selectedGroupedLaunch(); launch == nil || launch.ID != 88 {
+		t.Fatalf("selected launch = %+v, want wi88", launch)
+	}
+}
+
 func TestListTUIUngroupedViewShowsSelectedJobDetail(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: false,
@@ -1323,6 +1407,21 @@ func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {
 		}
 	}
 	t.Fatalf("job %d was not visible in grouped viewport rows: %+v", jobID, m.groupedViewportRows())
+	return 0
+}
+
+func groupedClickYForLaunch(t *testing.T, m listTUIModel, launchID int64) int {
+	t.Helper()
+	for i, row := range m.groupedViewportRows() {
+		if row.rowIdx < 0 || row.rowIdx >= len(m.groupedRows) {
+			continue
+		}
+		launch := m.groupedRows[row.rowIdx].launch
+		if launch != nil && launch.ID == launchID {
+			return i + 1
+		}
+	}
+	t.Fatalf("launch %d was not visible in grouped viewport rows: %+v", launchID, m.groupedViewportRows())
 	return 0
 }
 

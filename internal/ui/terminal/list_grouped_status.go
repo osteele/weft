@@ -44,6 +44,7 @@ type groupedStatusRow struct {
 	isHeader  bool
 	isBlocked bool
 	job       *db.Job
+	launch    *db.Launch
 	section   string
 }
 
@@ -681,6 +682,7 @@ emit:
 			}
 			rows = append(rows, groupedStatusRow{
 				text:    formatLaunchFailureRow(item, failures, projectWidth, width, now),
+				launch:  item,
 				section: launchFailuresSectionKey,
 			})
 			emitted++

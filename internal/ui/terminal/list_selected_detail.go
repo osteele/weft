@@ -7,6 +7,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
@@ -49,6 +51,99 @@ func renderSelectedJobDetail(job *db.Job, ctx selectedJobContext, now time.Time)
 	}
 	if s := renderHostFooterLine(job, ctx, now); s != "" {
 		lines = append(lines, s)
+	}
+	return lines
+}
+
+func renderSelectedLaunchDetail(launch *db.Launch, width int, now time.Time) []string {
+	if launch == nil {
+		return nil
+	}
+	status := campaign.DisplayInstanceStatus(launch)
+	if reason := campaign.DisplayTerminationReason(launch); reason != "" {
+		status += " (" + reason + ")"
+	}
+	head := "Instance: " + ids.FormatInstanceID(launch.ID)
+	if provider := cloud.Provider(launch.Provider).DisplayName(); provider != "" {
+		head += " @ " + provider
+	}
+	parts := []string{head}
+	if status != "" {
+		parts = append(parts, status)
+	}
+	if providerID := strings.TrimSpace(launch.EffectiveProviderID()); providerID != "" {
+		parts = append(parts, "provider id "+providerID)
+	}
+	if brief := launch.DisplayGPUBrief(); brief != "" {
+		parts = append(parts, brief)
+	}
+	obs := observeLaunch(launch, nil, now)
+	if obs.Rate != nil {
+		parts = append(parts, fmt.Sprintf("$%.2f/hr", *obs.Rate))
+	}
+	if obs.Uptime != nil {
+		parts = append(parts, "uptime "+estimate.FormatDurationShort(*obs.Uptime))
+	}
+	if obs.Cost != nil {
+		parts = append(parts, fmt.Sprintf("$%.2f", *obs.Cost))
+	}
+
+	lines := []string{strings.Join(parts, " · ")}
+	if detail := selectedLaunchFailureDetail(launch); detail != "" {
+		lines = append(lines, wrapFooterDetailLine("Failure: ", detail, width)...)
+	}
+	return lines
+}
+
+func selectedLaunchFailureDetail(launch *db.Launch) string {
+	if launch == nil {
+		return ""
+	}
+	reason := strings.TrimSpace(db.HumanizeTerminationReason(launch.TerminationReason))
+	detail := strings.TrimSpace(launch.TerminationDetail)
+	switch {
+	case reason != "" && detail != "" && reason != detail:
+		return reason + ": " + detail
+	case detail != "":
+		return detail
+	case reason != "":
+		return reason
+	default:
+		return strings.TrimSpace(launch.Status)
+	}
+}
+
+func wrapFooterDetailLine(prefix, detail string, width int) []string {
+	if detail == "" {
+		return nil
+	}
+	firstPrefix := prefix
+	nextPrefix := strings.Repeat(" ", utf8.RuneCountInString(prefix))
+	if width <= lipgloss.Width(firstPrefix)+8 {
+		return []string{firstPrefix + detail}
+	}
+	var lines []string
+	currentPrefix := firstPrefix
+	current := currentPrefix
+	for _, word := range strings.Fields(detail) {
+		candidate := current
+		if candidate != currentPrefix {
+			candidate += " "
+		}
+		candidate += word
+		if lipgloss.Width(candidate) > width && current != currentPrefix {
+			lines = append(lines, current)
+			currentPrefix = nextPrefix
+			current = currentPrefix + word
+			continue
+		}
+		current = candidate
+	}
+	if current != currentPrefix {
+		lines = append(lines, current)
+	}
+	if len(lines) == 0 {
+		return []string{firstPrefix + detail}
 	}
 	return lines
 }
