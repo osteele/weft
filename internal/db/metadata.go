@@ -16,12 +16,13 @@ type JobMetadata struct {
 	Disk         *JobDiskMetadata       `json:"disk,omitempty"`
 }
 
-// JobDiskMetadata stores user-supplied or derived disk requirements for
-// rental placement. DiskGB is a total instance disk floor; RuntimeDiskGB is
-// extra scratch/cache headroom beyond declared inputs and base overhead.
+// JobDiskMetadata stores disk requirements for rental placement. DiskGB is a
+// total instance disk floor; RuntimeDiskGB is explicit scratch/cache headroom
+// beyond declared inputs and base overhead.
 type JobDiskMetadata struct {
-	DiskGB                 int `json:"disk_gb,omitempty"`
-	RuntimeDiskGB          int `json:"runtime_disk_gb,omitempty"`
+	DiskGB        int `json:"disk_gb,omitempty"`
+	RuntimeDiskGB int `json:"runtime_disk_gb,omitempty"`
+	// EstimatedRuntimeDiskGB is kept for compatibility with older job rows.
 	EstimatedRuntimeDiskGB int `json:"estimated_runtime_disk_gb,omitempty"`
 }
 

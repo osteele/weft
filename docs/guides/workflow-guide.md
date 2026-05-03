@@ -76,9 +76,10 @@ laptop$ weft run \
   'uv sync --project scripts/vllm-profiling && python scripts/profile.py'
 ```
 
-Use `--disk N` when you want to force the total rental disk floor. Weft also
-adds conservative runtime headroom automatically for common `uv`/pip/CUDA/vLLM
-command shapes and reuses prior observed disk peaks when available.
+Use `--disk N` when you want to force the total rental disk floor. Weft sizes
+declared inputs, cached uv-lock estimates, Docker image overhead, and prior
+observed disk peaks when available, but runtime setup caches are explicit:
+add `--runtime-disk` when command startup needs extra scratch space.
 
 ### Declaring outputs
 

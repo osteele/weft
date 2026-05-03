@@ -598,8 +598,9 @@ inputs:
 weft run --input hf:org/model --runtime-disk 24 "uv sync --project scripts/vllm-profiling && python bench.py"
 ```
 
-Use `--disk <gb>` to force the total rental disk floor. Weft also estimates
-runtime cache/build headroom for common `uv`, pip, CUDA, and vLLM commands.
+Use `--disk <gb>` to force the total rental disk floor. Weft does not infer
+setup-cache footprint from command text; add `--runtime-disk` when that
+headroom is needed.
 
 To enable the coding agent for code fixes, add to `~/.config/weft/config.toml`:
 

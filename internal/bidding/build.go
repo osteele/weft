@@ -171,7 +171,7 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 	return model
 }
 
-const defaultPriorStrength = 10.0
+const defaultPriorStrength = 3.0
 
 func accumulateStats(m map[string]*SurvivalStats, key string, survived bool, weight float64) {
 	s, ok := m[key]

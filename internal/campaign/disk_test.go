@@ -36,11 +36,10 @@ func TestEstimateGroupDisk_MinFloor(t *testing.T) {
 	}
 }
 
-func TestEstimateRuntimeDiskGB_CommandHeuristics(t *testing.T) {
+func TestEstimateRuntimeDiskGB_DoesNotInferFromCommand(t *testing.T) {
 	job := &db.Job{ID: 1, Command: "uv sync --project scripts/vllm-profiling && python bench.py"}
-	disk := EstimateRuntimeDiskGB(job)
-	if disk < uvRuntimeDiskGB+vllmRuntimeDiskGB {
-		t.Fatalf("runtime disk = %d, want at least uv+vllm headroom", disk)
+	if disk := EstimateRuntimeDiskGB(job); disk != 0 {
+		t.Fatalf("runtime disk = %d, want 0 without explicit override", disk)
 	}
 }
 
@@ -69,6 +68,26 @@ func TestEstimateGroupDisk_HonorsDiskFloor(t *testing.T) {
 	}
 	if disk := EstimateGroupDisk(group, nil, nil); disk != 96 {
 		t.Fatalf("disk = %d, want explicit floor 96", disk)
+	}
+}
+
+func TestEstimateGroupDisk_UsesExplicitRuntimeDiskHeadroom(t *testing.T) {
+	group := InstanceGroup{
+		Jobs: []*db.Job{{
+			ID:      1,
+			Command: "uv sync --project scripts/vllm-profiling && python bench.py",
+			Metadata: &db.JobMetadata{
+				Disk: &db.JobDiskMetadata{RuntimeDiskGB: 12},
+			},
+		}},
+	}
+	if disk := EstimateGroupDisk(group, nil, nil); disk != DefaultMinDiskGB {
+		t.Fatalf("disk = %d, want floor %d; explicit runtime headroom should not exceed floor here", disk, DefaultMinDiskGB)
+	}
+
+	group.Jobs[0].Metadata.Disk.RuntimeDiskGB = 96
+	if disk := EstimateGroupDisk(group, nil, nil); disk != 105 {
+		t.Fatalf("disk = %d, want 105 (base non-CUDA overhead plus explicit runtime headroom)", disk)
 	}
 }
 

@@ -406,10 +406,10 @@ func TestMachinePenalty_HighFailureRate(t *testing.T) {
 	if lightPenalty <= badPenalty {
 		t.Errorf("single failure (%.3f) should still be less penalised than 1/5 (%.3f)", lightPenalty, badPenalty)
 	}
-	// 1/5 vs 90% global with prior strength 2: posterior ≈ (1.8+1)/(2+5) = 0.40,
-	// penalty ≈ 0.44. Allow a comfortable band around that.
-	if badPenalty < 0.3 || badPenalty > 0.6 {
-		t.Errorf("bad machine (20%% survival vs 90%% global) should have penalty ~0.44, got %.3f", badPenalty)
+	// 1/5 vs 90% global with a weak machine prior gives a penalty around
+	// 0.35. Allow a comfortable band around that.
+	if badPenalty < 0.25 || badPenalty > 0.5 {
+		t.Errorf("bad machine (20%% survival vs 90%% global) should have penalty around 0.35, got %.3f", badPenalty)
 	}
 }
 

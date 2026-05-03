@@ -86,8 +86,8 @@ func TestBuildSurvivalModel_RecencyDecay(t *testing.T) {
 	stale := BuildSurvivalModelAt(outcomes, now)
 	staleSurv := stale.OfferSurvival(cloud.Offer{Provider: testProvider, GPUName: "RTX 4090", CostPerHour: 1.00, Reliability: 0.95})
 
-	// Without decay, 14 failures and a 0.95 prior give ~38% (below the 40%
-	// default floor — wj1238's exact situation). With decay applied at ~4
+	// Without decay, 14 failures and a 0.95 prior are far below the 40%
+	// default floor. With decay applied at ~4
 	// half-lives, the weighted total shrinks to ~14/16 = 0.88 observations,
 	// the global rate reverts toward the reliability prior, and the
 	// posterior recovers above the floor — i.e. the offer becomes eligible
@@ -106,6 +106,43 @@ func TestBuildSurvivalModel_RecencyDecay(t *testing.T) {
 	}
 	if !(freshSurv < staleSurv) {
 		t.Errorf("stale posterior (%.3f) should be higher than fresh posterior (%.3f) — decay not applied", staleSurv, freshSurv)
+	}
+}
+
+func TestBuildSurvivalModel_Bad4090VRAMBucketFallsBelowDefaultFloor(t *testing.T) {
+	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	endedAt := now.Add(-1 * time.Hour).Unix()
+	mk := func(reason string) InstanceOutcome {
+		return InstanceOutcome{
+			Provider:          testProvider,
+			TerminationReason: reason,
+			CostPerHourCents:  52,
+			ResolvedGPUName:   "RTX 4090",
+			GPUMemGB:          48,
+			Reliability:       0.95,
+			EndedAtUnix:       endedAt,
+		}
+	}
+
+	var outcomes []InstanceOutcome
+	for range 15 {
+		outcomes = append(outcomes, mk("completed"))
+	}
+	for range 29 {
+		outcomes = append(outcomes, mk("infra_failure"))
+	}
+
+	model := BuildSurvivalModelAt(outcomes, now)
+	surv := model.OfferSurvival(cloud.Offer{
+		Provider:    testProvider,
+		GPUName:     "RTX 4090",
+		GPUMemGB:    48,
+		CostPerHour: 0.52,
+		Reliability: 0.95,
+	})
+
+	if surv >= 0.40 {
+		t.Fatalf("48GB 4090 bucket survival = %.3f, want below default 40%% floor", surv)
 	}
 }
 

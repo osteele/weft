@@ -1057,9 +1057,10 @@ weft queue add --runtime-disk 16 titan "uv run python train.py"
 `--disk` sets the total rental instance disk floor. `--runtime-disk` adds
 scratch/cache headroom for runtime setup that is not represented by declared
 inputs, such as `uv sync`, pip wheels, CUDA wheels, vLLM, and build temp dirs.
-When no explicit runtime disk is set, weft adds conservative headroom from the
-command shape and project metadata, and combines it with HF input sizes,
-cached uv-lock estimates, Docker image overhead, and prior observed disk usage.
+Runtime setup headroom is explicit; command text does not automatically add a
+runtime cache estimate. Weft combines explicit disk settings with HF input
+sizes, cached uv-lock estimates, Docker image overhead, and prior observed disk
+usage.
 
 Secret values can be stored locally and attached by reference so tokens are not
 written into job rows or command output:

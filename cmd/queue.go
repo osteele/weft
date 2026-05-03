@@ -378,7 +378,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueWait && queueDraft {
 		return fmt.Errorf("--wait cannot be combined with --draft")
 	}
-	diskMeta := buildDiskMetadata(queueDiskGB, queueRuntimeDiskGB, projectName, workingDir, command)
+	diskMeta := buildDiskMetadata(queueDiskGB, queueRuntimeDiskGB)
 
 	var deps []queueDependency
 	var cloudAfter []db.JobDependencyRef

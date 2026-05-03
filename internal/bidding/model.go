@@ -565,12 +565,10 @@ func MedianOfferDLPerf(offers []cloud.Offer) float64 {
 const MinMachineObs = 3
 
 // MachinePriorStrength is the pseudo-observation count of the Beta prior
-// used by MachinePenalty. Smaller than the group prior (defaultPriorStrength)
-// so machine-level signal moves the posterior faster: with a single failure
-// observation, the penalty already drops noticeably below 1.0, and a
-// machine with 0/N successes is penalised more aggressively than the old
-// hard ratio could express without overconfidence.
-const MachinePriorStrength = 2.0
+// used by MachinePenalty and the geographic cascade. It is deliberately small
+// so fresh machine/region failures move the posterior quickly; cloud hardware
+// failures are often machine-local and repeated retries are expensive.
+const MachinePriorStrength = 1.0
 
 // MachinePenalty returns a multiplicative penalty for a specific (provider, machine).
 // Returns 1.0 (no penalty) if the machine has no observations or if no

@@ -82,7 +82,8 @@ var cudaPackages = []string{
 
 // EstimateGroupDisk computes the required disk space in GB for an instance group
 // based on the deduplicated HF input footprint, deduplicated uv sync footprint,
-// and fixed project/runtime overhead. Returns at least DefaultMinDiskGB.
+// explicit runtime headroom, and fixed project overhead. Returns at least
+// DefaultMinDiskGB.
 func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client) int {
 	// Compute input-based estimate (always, as a floor)
 	allInputs := group.AllInputs()

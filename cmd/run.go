@@ -535,7 +535,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		gpuMemCfg = nil // Skip predictor shell-out; use explicit value or fallback.
 	}
 	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(gpuMemCfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict, host, projectName, command, oomFloor)
-	diskMeta := buildDiskMetadata(runDiskGB, runRuntimeDiskGB, projectName, workingDir, command)
+	diskMeta := buildDiskMetadata(runDiskGB, runRuntimeDiskGB)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
