@@ -58,32 +58,40 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		}
 		return "no offers from providers"
 	}
+	found := offerCount(s.RawCount) + " found"
 	switch {
 	case s.AfterVRAM == 0:
-		return fmt.Sprintf("%d offers found, all filtered by VRAM requirement", s.RawCount)
+		return fmt.Sprintf("%s, all filtered by VRAM requirement", found)
 	case s.AfterCUDA == 0:
 		if s.CUDAMinRequired > 0 && s.CUDAImageVersion > 0 {
 			if s.CUDAExampleGPU != "" && s.CUDAImage != "" {
-				return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility (image=%s CUDA %.1f; requires >=%.1f, e.g. %s)", s.RawCount, s.AfterVRAM, s.CUDAImage, s.CUDAImageVersion, s.CUDAMinRequired, s.CUDAExampleGPU)
+				return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility (image=%s CUDA %.1f; requires >=%.1f, e.g. %s)", found, offerCount(s.AfterVRAM), s.CUDAImage, s.CUDAImageVersion, s.CUDAMinRequired, s.CUDAExampleGPU)
 			}
-			return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", s.RawCount, s.AfterVRAM, s.CUDAImageVersion, s.CUDAMinRequired)
+			return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", found, offerCount(s.AfterVRAM), s.CUDAImageVersion, s.CUDAMinRequired)
 		}
-		return fmt.Sprintf("%d offers found, %d passed VRAM but all filtered by CUDA compatibility", s.RawCount, s.AfterVRAM)
+		return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility", found, offerCount(s.AfterVRAM))
 	case s.TorchArchMaxCap != "" && s.AfterTorchArch == 0:
 		if s.TorchArchExampleGPU != "" && s.TorchArchExampleCap != "" {
-			return fmt.Sprintf("%d offers found, %d passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s; e.g. %s sm_%s)", s.RawCount, s.AfterCUDA, s.TorchArchMaxCap, s.TorchArchExampleGPU, s.TorchArchExampleCap)
+			return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s; e.g. %s sm_%s)", found, offerCount(s.AfterCUDA), s.TorchArchMaxCap, s.TorchArchExampleGPU, s.TorchArchExampleCap)
 		}
-		return fmt.Sprintf("%d offers found, %d passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s)", s.RawCount, s.AfterCUDA, s.TorchArchMaxCap)
+		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s)", found, offerCount(s.AfterCUDA), s.TorchArchMaxCap)
 	case s.AfterSurvival == 0:
 		passed := s.AfterCUDA
 		if s.TorchArchMaxCap != "" {
 			passed = s.AfterTorchArch
 		}
-		return fmt.Sprintf("%d offers found, %d passed filters but none met survival threshold", s.RawCount, passed)
+		return fmt.Sprintf("%s, %s passed filters but none met survival threshold", found, offerCount(passed))
 	default:
 		// Defensive: all stages passed but no offer was selected.
-		return fmt.Sprintf("%d offers found, none met all criteria", s.RawCount)
+		return fmt.Sprintf("%s, none met all criteria", found)
 	}
+}
+
+func offerCount(n int) string {
+	if n == 1 {
+		return "1 offer"
+	}
+	return fmt.Sprintf("%d offers", n)
 }
 
 // FormatOfferConstraints renders an OfferConstraints as a compact human string

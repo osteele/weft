@@ -882,8 +882,15 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		want string
 	}{
 		{"vram", OfferFilterStats{RawCount: 12}, "12 offers found, all filtered by VRAM requirement"},
-		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 passed VRAM but all filtered by CUDA compatibility"},
-		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 passed filters but none met survival threshold"},
+		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 offers passed VRAM but all filtered by CUDA compatibility"},
+		{"torch arch", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMaxCap: "sm_89"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
+		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 offers passed filters but none met survival threshold"},
+		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
+		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
+		{"singular cuda", OfferFilterStats{RawCount: 1, AfterVRAM: 1}, "1 offer found, 1 offer passed VRAM but all filtered by CUDA compatibility"},
+		{"singular torch arch", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, TorchArchMaxCap: "sm_89"}, "1 offer found, 1 offer passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
+		{"singular survival", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1}, "1 offer found, 1 offer passed filters but none met survival threshold"},
+		{"singular defensive fallback", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, AfterSurvival: 1}, "1 offer found, none met all criteria"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -221,7 +221,7 @@ func (m attemptsListModel) View() string {
 }
 
 func (m attemptsListModel) renderHeader() string {
-	title := tuiTitleStyle.Render(fmt.Sprintf("Attempts for job #%d", m.jobID))
+	title := tuiTitleStyle.Render(fmt.Sprintf("Attempts for job %s", ids.FormatJobID(m.jobID)))
 	if m.job == nil {
 		return title
 	}
