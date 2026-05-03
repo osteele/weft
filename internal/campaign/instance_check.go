@@ -388,13 +388,29 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// Fires during `running` (post-bootstrap wait) and `launching`. The
 	// deadline is set once at LaunchInstance time and backfilled for
 	// pre-#4 rows (specs/job-move.allium § InstanceReadiness); the
-	// reconciler reads it directly rather than recomputing from
-	// BootstrapOrigin + an adaptive timeout.
+	// reconciler also honors later adaptive survival thresholds so already
+	// running launches are not killed by an older, shorter stamped deadline.
 	bootstrapPhaseActive := ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching
 	if bootstrapPhaseActive && ci.BootstrapDeadlineUnix != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		deadline := time.Unix(*ci.BootstrapDeadlineUnix, 0)
+		warnTimeout := bootstrapWarnTimeout
+		termTimeout := BootstrapTerminateTimeout
+		if p.BootstrapSurvival != nil {
+			if p.BootstrapSurvival.WarnAfter > 0 {
+				warnTimeout = p.BootstrapSurvival.WarnAfter
+			}
+			if p.BootstrapSurvival.TerminateAfter > 0 {
+				termTimeout = p.BootstrapSurvival.TerminateAfter
+			}
+			if originUnix := ci.BootstrapOrigin(); originUnix != nil {
+				learnedDeadline := time.Unix(*originUnix, 0).Add(termTimeout)
+				if learnedDeadline.After(deadline) {
+					deadline = learnedDeadline
+				}
+			}
+		}
 		remaining := deadline.Sub(p.Now)
-		warnRemaining := BootstrapTerminateTimeout - bootstrapWarnTimeout
+		warnRemaining := termTimeout - warnTimeout
 		if remaining <= warnRemaining {
 			// Check R2 completion marker only past the warn threshold,
 			// to avoid an R2 call on every reconciliation tick.
@@ -407,7 +423,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				}
 			}
 			if remaining <= 0 {
-				elapsed := BootstrapTerminateTimeout - remaining
+				elapsed := termTimeout - remaining
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,

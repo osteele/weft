@@ -152,6 +152,56 @@ func TestCheckInstance_BootstrapWarnOnly(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_BootstrapSurvivalExtendsExistingDeadline(t *testing.T) {
+	now := time.Unix(100000, 0)
+	launchedAt := now.Add(-25 * time.Minute).Unix()
+	expiredDeadline := now.Add(-5 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                    1,
+			Status:                db.LaunchStatusRunning,
+			LaunchedAt:            &launchedAt,
+			BootstrapDeadlineUnix: &expiredDeadline,
+		},
+		BootstrapSurvival: &db.BootstrapSurvival{
+			SampleSize:     50,
+			WarnAfter:      20 * time.Minute,
+			TerminateAfter: 30 * time.Minute,
+		},
+		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:      now,
+	})
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
+	}
+}
+
+func TestCheckInstance_BootstrapSurvivalTerminatesAfterLearnedDeadline(t *testing.T) {
+	now := time.Unix(100000, 0)
+	launchedAt := now.Add(-31 * time.Minute).Unix()
+	expiredDeadline := now.Add(-11 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                    1,
+			Status:                db.LaunchStatusRunning,
+			LaunchedAt:            &launchedAt,
+			BootstrapDeadlineUnix: &expiredDeadline,
+		},
+		BootstrapSurvival: &db.BootstrapSurvival{
+			SampleSize:     50,
+			WarnAfter:      20 * time.Minute,
+			TerminateAfter: 30 * time.Minute,
+		},
+		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:      now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
+	}
+}
+
 func TestCheckInstance_BootstrapNoStallWithoutDeadline(t *testing.T) {
 	// Defensive: a launch without a deadline (legacy row that somehow
 	// escaped the backfill migration) is not stalled by the reconciler;

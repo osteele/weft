@@ -1381,9 +1381,16 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("update instance status to launching: %w", err)
 	}
 	// Stamp the bootstrap deadline so the reconciler reads a single
-	// per-launch field instead of recomputing from launched_at +
-	// timeout. See specs/job-move.allium § InstanceReadiness.
-	if err := db.SetLaunchBootstrapDeadline(database, instanceID, time.Now().Add(BootstrapTerminateTimeout)); err != nil {
+	// per-launch field. Prefer the learned provider-specific bootstrap
+	// threshold when enough history exists.
+	bootstrapTimeout := BootstrapTerminateTimeout
+	provider := string(client.Provider())
+	if survival, err := db.ComputeBootstrapSurvival(database, provider); err != nil {
+		slog.Debug("compute bootstrap survival deadline", "component", "launch", "provider", client.Provider(), "error", err)
+	} else if survival != nil && survival.TerminateAfter > 0 {
+		bootstrapTimeout = survival.TerminateAfter
+	}
+	if err := db.SetLaunchBootstrapDeadline(database, instanceID, time.Now().Add(bootstrapTimeout)); err != nil {
 		slog.Warn("set bootstrap deadline", "component", "launch", "instance_id", instanceID, "error", err)
 	}
 
