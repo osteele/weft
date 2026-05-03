@@ -471,10 +471,13 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// 5c. Running phase stall: heartbeat stale while in running phase.
 	// A running job with a dead agent (stale heartbeat) should be terminated.
 	// This does NOT check GPU utilization — jobs may legitimately not use the GPU.
-	if ci.Status == db.LaunchStatusRunning && p.PhaseChangedAt != nil && p.HeartbeatAge > heartbeatStaleThreshold {
+	if ci.Status == db.LaunchStatusRunning && p.HeartbeatAge > heartbeatStaleThreshold {
 		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
 		if verb == PhaseRunning {
-			phaseAge := p.Now.Sub(*p.PhaseChangedAt)
+			phaseAge := p.HeartbeatAge
+			if p.PhaseChangedAt != nil {
+				phaseAge = p.Now.Sub(*p.PhaseChangedAt)
+			}
 			if phaseAge >= runningStaleTerminate {
 				return InstanceAction{
 					Kind:              ActionRunningStalled,

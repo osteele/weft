@@ -1104,6 +1104,34 @@ func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_RunningStall_MissingPhaseChangedAtUsesHeartbeatAge(t *testing.T) {
+	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderErr:   fmt.Errorf("provider instance missing from batch list"),
+		InstancePhase: "running:531",
+		HeartbeatAge:  35 * time.Minute,
+		JobState:      JobState{HasStartedJob: true},
+		Now:           time.Now(),
+	})
+	if action.Kind != ActionRunningStalled {
+		t.Fatalf("action.Kind = %d, want ActionRunningStalled (%d)", action.Kind, ActionRunningStalled)
+	}
+	if !action.ResetJobs {
+		t.Fatal("expected ResetJobs = true")
+	}
+}
+
 func TestCheckInstance_RunningStall_FreshHeartbeatNoAction(t *testing.T) {
 	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
 	phaseStart := time.Now().Add(-35 * time.Minute) // past terminate threshold
