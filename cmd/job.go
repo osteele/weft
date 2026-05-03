@@ -967,6 +967,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
 			fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
 		}
+		if progress := jobProgressSummary(database, job); progress != "" {
+			fmt.Printf("Progress:    %s\n", progress)
+		}
 
 		printAttemptsSection(cmd, database, job)
 
@@ -1034,12 +1037,21 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: list attempts: %v\n", err)
 		return
 	}
-	if len(attempts) < 2 {
+	if len(attempts) == 0 {
 		return
 	}
 	now := time.Now().Unix()
 	fmt.Println()
 	fmt.Printf("Attempts:    %d\n", len(attempts))
+	if latest := attempts[0]; latest.StartTime != nil {
+		fmt.Printf("Latest:      #%d started %s on %s\n", latest.AttemptNumber, formatUnixTime(*latest.StartTime), attemptTarget(latest))
+	}
+	if previous := previousInstanceList(attempts); previous != "" {
+		fmt.Printf("Previous:    %s\n", previous)
+	}
+	if len(attempts) < 2 {
+		return
+	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  #\tWhen\tTarget\tStatus\tExit\tDuration\tOutcome")
 	for _, a := range attempts {
@@ -1054,6 +1066,22 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 		)
 	}
 	tw.Flush()
+}
+
+func previousInstanceList(attempts []db.JobAttempt) string {
+	var out []string
+	seen := map[int64]struct{}{}
+	for i, a := range attempts {
+		if i == 0 || a.LaunchID == nil {
+			continue
+		}
+		if _, ok := seen[*a.LaunchID]; ok {
+			continue
+		}
+		seen[*a.LaunchID] = struct{}{}
+		out = append(out, ids.FormatInstanceID(*a.LaunchID))
+	}
+	return strings.Join(out, ", ")
 }
 
 func attemptWhen(a db.JobAttempt) string {

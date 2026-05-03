@@ -774,6 +774,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if cfg.ShowRentalHints {
 				printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints, placementResult)
 			}
+			printSubmissionPreview(cmd.OutOrStdout(), placementResult)
 			return nil
 		}
 
@@ -803,6 +804,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Fprintln(w)
 		}
+		printSubmissionPreview(w, placementResult)
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
 		fmt.Fprintf(w, "  Command: %s\n", command)
@@ -1044,6 +1046,18 @@ func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Con
 		fmt.Fprintf(w, "Job #%d accepted (needs rental host)\n", jobID)
 	}
 	fmt.Fprintf(w, "Use 'weft instance launch' to launch on a rental GPU.\n")
+}
+
+func printSubmissionPreview(w io.Writer, result *placement.PlacementResult) {
+	if result == nil || result.CompletionEst.Mean <= 0 {
+		return
+	}
+	est := result.CompletionEst.Mean
+	fmt.Fprintf(w, "  Wall-clock preview: ~%.0fm", est.Minutes())
+	if est >= 30*time.Minute {
+		fmt.Fprintf(w, " (long startup/run; ensure the job emits Progress: lines or checkpoints before watchdog/grace limits)")
+	}
+	fmt.Fprintln(w)
 }
 
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.

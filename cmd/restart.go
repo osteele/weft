@@ -30,7 +30,9 @@ Examples:
   weft restart 42
   weft retry 42
   weft restart 42 43 44
-  weft retry --unplaced`,
+  weft retry --unplaced
+  weft retry 42 --from-scratch
+  weft retry 42 --checkpointed`,
 	Args: usageArgs(cobra.ArbitraryArgs),
 	RunE: runRestart,
 }
@@ -42,6 +44,8 @@ var (
 	restartGPUMem       int
 	restartGPUMemStrict bool
 	restartUnplaced     bool
+	restartFromScratch  bool
+	restartCheckpointed bool
 )
 
 type restartOverrides struct {
@@ -114,6 +118,9 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
+	command.Flags().BoolVar(&restartFromScratch, "from-scratch", false, "Force a fresh attempt and ignore checkpoint/resume assumptions")
+	command.Flags().BoolVar(&restartCheckpointed, "checkpointed", false, "Retry expecting the command to resume from existing checkpoints")
+	command.MarkFlagsMutuallyExclusive("from-scratch", "checkpointed")
 }
 
 func resolveRestartTargetJobIDs(database *sql.DB, args []string) ([]int64, error) {
@@ -145,6 +152,9 @@ func resolveRestartTargetJobIDs(database *sql.DB, args []string) ([]int64, error
 
 func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	var out restartOverrides
+	if restartFromScratch && restartCheckpointed {
+		return out, fmt.Errorf("--from-scratch and --checkpointed are mutually exclusive")
+	}
 	gpuValue := restartGPU
 	gpuClassValue := restartGPUClass
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
@@ -443,7 +453,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return fmt.Errorf("count cloud attempts: %w", err)
 		}
 		hasCloudRetryHistory := cloudAttemptCount > 0
-		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory
+		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory || restartFromScratch
 		if !shouldForceFreshAttempt && len(updates) == 0 {
 			fmt.Printf("Job %s is already queued (no changes)\n", ids.FormatJobID(jobID))
 			tryResumeRunawayBreaker(database, job)
@@ -474,6 +484,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			fmt.Printf("Restarted queued job %s (fresh retry attempt)\n", ids.FormatJobID(jobID))
 			fmt.Printf("  Retry budget reset\n")
 			fmt.Printf("  Source metadata refreshed; changed sources will be re-synced on dispatch\n")
+			printRestartModeLine()
 			for _, update := range updates {
 				fmt.Printf("  %s\n", update)
 			}
@@ -522,6 +533,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued (cloud instance no longer available)\n", ids.FormatJobID(jobID))
 		fmt.Printf("  Use 'weft launch instances' to run on a new instance\n")
+		printRestartModeLine()
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}
@@ -540,6 +552,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued (unplaced job)\n", ids.FormatJobID(jobID))
+		printRestartModeLine()
 		tryResumeRunawayBreaker(database, job)
 		return nil
 	}
@@ -570,6 +583,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		fmt.Printf("Restarted job %s via coordinator relay\n", ids.FormatJobID(jobID))
 		fmt.Printf("  Status: %s → queued\n", oldStatus)
+		printRestartModeLine()
 		if ack != nil && ack.Message != "" {
 			fmt.Printf("  relay: %s\n", ack.Message)
 		}
@@ -588,6 +602,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 
 	fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), job.Host)
 	fmt.Printf("  Status: %s → queued\n", oldStatus)
+	printRestartModeLine()
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)
 	}
@@ -598,6 +613,15 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		fmt.Printf("  Env vars: %s\n", strings.Join(job.EnvVars, ", "))
 	}
 	return nil
+}
+
+func printRestartModeLine() {
+	switch {
+	case restartFromScratch:
+		fmt.Printf("  Mode: from scratch\n")
+	case restartCheckpointed:
+		fmt.Printf("  Mode: checkpointed\n")
+	}
 }
 
 func tryResumeRunawayBreaker(database *sql.DB, job *db.Job) {

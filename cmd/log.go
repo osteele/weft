@@ -1073,6 +1073,10 @@ func processCarriageReturns(content string) string {
 
 // printPostLogDiagnostics shows diagnosis info after log output for failed jobs.
 func printPostLogDiagnostics(job *db.Job) {
+	if progress := jobProgressSummary(nil, job); progress != "" {
+		fmt.Println()
+		fmt.Printf("--- progress: %s ---\n", progress)
+	}
 	if job.ErrorDiagnosis == "" {
 		return
 	}

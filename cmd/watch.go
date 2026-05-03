@@ -3,11 +3,14 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -93,6 +96,9 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer database.Close()
+		if watchOneShotSummary() {
+			return printWatchJobSummary(database, jobIDs)
+		}
 		return terminal.WatchJobsPlain(database, jobIDs, watchPlainOptions())
 	}
 
@@ -117,6 +123,34 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 		return runWatchLoop(database, cfg, watchAuto)
 	}
 	return terminal.WatchAllPlain(database, cfg, watchPlainOptions())
+}
+
+func watchOneShotSummary() bool {
+	return !watchFollow && !watchTransitionsOnly && !watchJSONLines && !watchUntilAnyTerminal && !watchTUI
+}
+
+func printWatchJobSummary(database *sql.DB, jobIDs []int64) error {
+	jobs, missing, err := listJobsByID(database, jobIDs)
+	if err != nil {
+		return err
+	}
+	for _, id := range missing {
+		fmt.Printf("Job %s: not found\n", ids.FormatJobID(id))
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	applyAttemptOutcomeOverrides(database, jobs)
+	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
+	if err := terminal.WriteListPlainOutput(terminal.RenderJobListPlainWithOptions(jobs, terminal.ListOutputWidth(), []string{"id", "host", "status", "started", "project", "description"}, false)); err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if progress := jobProgressSummary(database, job); progress != "" {
+			fmt.Printf("%s progress: %s\n", ids.FormatJobID(job.ID), progress)
+		}
+	}
+	return nil
 }
 
 func runWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {

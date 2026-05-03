@@ -339,6 +339,9 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	hydrateQueueBlockedReasons([]*db.Job{job})
 
 	printJobStatus(job, exitOnComplete)
+	if progress := jobProgressSummary(database, job); progress != "" {
+		fmt.Printf("Progress: %s\n", progress)
+	}
 }
 
 var errWaitTimeout = errors.New("wait timeout")
@@ -667,7 +670,6 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		duration := time.Now().Unix() - job.StartTime
 		fmt.Printf("Running:  %s\n", db.FormatDuration(duration))
 	}
-
 	if effectiveStatus == db.StatusKilled {
 		fmt.Printf("Exit:     killed\n")
 	}
