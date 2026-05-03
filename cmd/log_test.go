@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -28,6 +29,28 @@ func TestJobLogArgsAllowOpsModeWithoutJobID(t *testing.T) {
 	logOps = true
 	if err := jobLogCmd.Args(jobLogCmd, nil); err != nil {
 		t.Fatalf("jobLogCmd.Args returned %v, want nil", err)
+	}
+}
+
+func TestRunLogForJob_QueuedPlacedJobHasNoLogsYet(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "rental:17", "/tmp/p", "echo hi", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "log"}
+	addLogFlags(cmd)
+	out := captureStdout(t, func() {
+		if err := runLogForJob(cmd, database, jobID); err != nil {
+			t.Fatalf("runLogForJob: %v", err)
+		}
+	})
+	if !strings.Contains(out, "has not started yet; no logs are available") {
+		t.Fatalf("output = %q, want queued no-log message", out)
 	}
 }
 

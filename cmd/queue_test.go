@@ -319,6 +319,38 @@ func TestRunEditClearsTags(t *testing.T) {
 	}
 }
 
+func TestRunEditUpdatesGPUMem(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("gpu-mem", "48"); err != nil {
+		t.Fatalf("set gpu-mem flag: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "GPU memory: 48 GB") {
+		t.Fatalf("output missing gpu mem update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 48 {
+		t.Fatalf("GPUMemGB = %v, want 48", job.GPUMemGB)
+	}
+}
+
 func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -357,6 +389,8 @@ func resetEditState() {
 	editStatus = ""
 	editRetry = false
 	editGPUClass = ""
+	editGPUMem = 0
+	editProvider = ""
 	editInputs = nil
 	editClearInputs = false
 }

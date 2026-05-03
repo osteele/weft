@@ -56,6 +56,8 @@ var (
 	listFailed      bool
 	listStatus      string
 	listHost        string
+	listSince       string
+	listActive      bool
 	listAllHosts    bool
 	listSearch      string
 	listLimit       int
@@ -91,6 +93,8 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listFailed, "failed", false, "Show only failed jobs (failed, dead, or completed with non-zero exit code)")
 	cmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, paused, starting, pending_placement, completed, queued, dead, failed, processed, unprocessed)")
 	cmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
+	cmd.Flags().StringVar(&listSince, "since", "", "Show jobs changed since cutoff (YYYY-MM-DD, RFC3339, or duration like \"24h\"/\"7d\")")
+	cmd.Flags().BoolVar(&listActive, "active", false, "Show only non-terminal jobs")
 	cmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
 	cmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	cmd.Flags().StringVar(&listSearch, "filter", "", "Search by description or command (alias for --search)")
@@ -221,7 +225,12 @@ func printWarnings(warnings []string) {
 }
 
 func writeWarnings(w io.Writer, warnings []string) {
+	seen := make(map[string]struct{}, len(warnings))
 	for _, msg := range warnings {
+		if _, ok := seen[msg]; ok {
+			continue
+		}
+		seen[msg] = struct{}{}
 		fmt.Fprintln(w, msg)
 	}
 }
@@ -289,6 +298,10 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", formatJobIDList(missingIDs))
 		}
 		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter, failedOnly, wantRental, wantInventory)
+		jobs, err = applyPostListFilters(jobs)
+		if err != nil {
+			return nil, err
+		}
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -314,7 +327,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" || wantRental || wantInventory {
+		if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" || wantRental || wantInventory || listSince != "" || listActive {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
@@ -329,6 +342,10 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		jobs = db.FilterJobsByProject(jobs, listProject)
 		jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
+		jobs, err = applyPostListFilters(jobs)
+		if err != nil {
+			return nil, err
+		}
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -340,9 +357,12 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	if listAll {
 		maxAgeDays = 0
 	}
+	if listSince != "" {
+		maxAgeDays = 0
+	}
 
 	queryLimit := listLimit
-	if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || listProject != "" || wantRental || wantInventory {
+	if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || listProject != "" || wantRental || wantInventory || listSince != "" || listActive {
 		queryLimit = 0
 	}
 	jobs, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
@@ -355,11 +375,75 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 	jobs = db.FilterJobsByProject(jobs, listProject)
 	jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
+	jobs, err = applyPostListFilters(jobs)
+	if err != nil {
+		return nil, err
+	}
 	if listLimit > 0 && len(jobs) > listLimit {
 		jobs = jobs[:listLimit]
 	}
 
 	return jobs, nil
+}
+
+func applyPostListFilters(jobs []*db.Job) ([]*db.Job, error) {
+	var err error
+	if listSince != "" {
+		var cutoff time.Time
+		cutoff, err = parseSinceCutoff(listSince, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		jobs = filterJobsSince(jobs, cutoff)
+	}
+	if listActive {
+		jobs = filterActiveJobs(jobs)
+	}
+	return jobs, nil
+}
+
+func filterJobsSince(jobs []*db.Job, cutoff time.Time) []*db.Job {
+	cutoffUnix := cutoff.Unix()
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if latestJobTimestamp(job) >= cutoffUnix {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+func latestJobTimestamp(job *db.Job) int64 {
+	latest := job.CreatedAt
+	if job.QueuedAt > latest {
+		latest = job.QueuedAt
+	}
+	if job.StartTime > latest {
+		latest = job.StartTime
+	}
+	if job.EndTime != nil && *job.EndTime > latest {
+		latest = *job.EndTime
+	}
+	return latest
+}
+
+func filterActiveJobs(jobs []*db.Job) []*db.Job {
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.Tombstoned {
+			continue
+		}
+		switch job.EffectiveStatus() {
+		case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
+			continue
+		default:
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
 }
 
 func listFilters() (statusFilter, processedFilter string, failedOnly bool, err error) {
@@ -733,6 +817,12 @@ func buildListTitle(args []string) string {
 	}
 	if listSearch != "" {
 		parts = append(parts, "search="+listSearch)
+	}
+	if listSince != "" {
+		parts = append(parts, "since="+listSince)
+	}
+	if listActive {
+		parts = append(parts, "active")
 	}
 	return strings.Join(parts, " • ")
 }

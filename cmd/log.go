@@ -256,22 +256,18 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		// whose log lives at the normal path.
 	}
 
-	// Queued and unplaced: the job has not begun running. Report this clearly
-	// before routing to cloud or on-prem log lookups, even if prior launch
-	// attempts left logs in R2 — the user is asking about the current run.
-	if job.IsUnplacedQueued() {
-		return fmt.Errorf("job %s has not started running yet", ids.FormatJobID(job.ID))
+	// Queued jobs have not begun the current attempt. Report this clearly
+	// before routing to cloud or on-prem log lookups, even if placement or
+	// prior launch attempts left R2 metadata behind.
+	if job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0 {
+		fmt.Printf("Job %s has not started yet; no logs are available.\n", ids.FormatJobID(job.ID))
+		return nil
 	}
 
 	// Cloud jobs (including unplaced jobs with prior cloud attempts): SSH for
 	// running, R2/cache for historical logs.
 	if shouldUseCloudLogs(database, job) {
 		return runLogForCloudJob(cmd, database, job)
-	}
-
-	// Queued jobs on inventory hosts haven't run yet.
-	if job.Status == db.StatusQueued && job.Host == "" {
-		return fmt.Errorf("job %s has not started running yet", ids.FormatJobID(job.ID))
 	}
 
 	follow := logFollow

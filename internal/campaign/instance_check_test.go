@@ -1039,8 +1039,8 @@ func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
 }
 
 func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
-	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-35 * time.Minute)
+	launchedAt := time.Now().Add(-90 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-65 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -1075,8 +1075,8 @@ func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 }
 
 func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
-	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-15 * time.Minute) // past warn threshold, before terminate
+	launchedAt := time.Now().Add(-45 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-25 * time.Minute) // past warn threshold, before terminate
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -1120,7 +1120,7 @@ func TestCheckInstance_RunningStall_MissingPhaseChangedAtUsesHeartbeatAge(t *tes
 		},
 		ProviderErr:   fmt.Errorf("provider instance missing from batch list"),
 		InstancePhase: "running:531",
-		HeartbeatAge:  35 * time.Minute,
+		HeartbeatAge:  65 * time.Minute,
 		JobState:      JobState{HasStartedJob: true},
 		Now:           time.Now(),
 	})

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -153,6 +154,55 @@ func TestFilterJobsByHostFlag_NoHostFlagReturnsInput(t *testing.T) {
 	filtered := filterJobsByHostFlag(jobs)
 	if len(filtered) != len(jobs) {
 		t.Fatalf("expected unfiltered jobs, got %d", len(filtered))
+	}
+}
+
+func TestFilterJobsSinceUsesLatestLifecycleTimestamp(t *testing.T) {
+	cutoff := time.Unix(1_000, 0)
+	end := int64(1_100)
+	jobs := []*db.Job{
+		{ID: 1, CreatedAt: 900, StartTime: 950},
+		{ID: 2, CreatedAt: 800, EndTime: &end},
+		{ID: 3, CreatedAt: 700, QueuedAt: 1_001},
+	}
+
+	filtered := filterJobsSince(jobs, cutoff)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 jobs since cutoff, got %d", len(filtered))
+	}
+	if filtered[0].ID != 2 || filtered[1].ID != 3 {
+		t.Fatalf("unexpected filtered jobs: %+v", filtered)
+	}
+}
+
+func TestFilterActiveJobsExcludesTerminalStatuses(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued},
+		{ID: 2, Status: db.StatusRunning, Host: "cool30"},
+		{ID: 3, Status: db.StatusCompleted},
+		{ID: 4, Status: db.StatusFailed},
+		{ID: 5, Status: db.StatusCanceled},
+	}
+
+	filtered := filterActiveJobs(jobs)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 active jobs, got %d", len(filtered))
+	}
+	if filtered[0].ID != 1 || filtered[1].ID != 2 {
+		t.Fatalf("unexpected active jobs: %+v", filtered)
+	}
+}
+
+func TestWriteWarningsDeduplicatesMessages(t *testing.T) {
+	var b strings.Builder
+	writeWarnings(&b, []string{"Warning: R2 storage unreachable", "Warning: R2 storage unreachable", "Warning: host slow"})
+
+	out := b.String()
+	if strings.Count(out, "Warning: R2 storage unreachable") != 1 {
+		t.Fatalf("expected R2 warning once, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Warning: host slow") {
+		t.Fatalf("missing distinct warning, got:\n%s", out)
 	}
 }
 

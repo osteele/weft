@@ -29,7 +29,7 @@ func TestFilterJobsByFailureState(t *testing.T) {
 
 func TestProjectCommandsExposeSharedListFlags(t *testing.T) {
 	for _, cmd := range []*cobra.Command{jobListCmd, projectJobsCmd} {
-		for _, name := range []string{"failed", "processed", "unprocessed", "rental", "inventory", "cloud"} {
+		for _, name := range []string{"failed", "processed", "unprocessed", "rental", "inventory", "cloud", "since", "active"} {
 			if flag := cmd.Flags().Lookup(name); flag == nil {
 				t.Fatalf("%s missing flag %q", cmd.Name(), name)
 			}

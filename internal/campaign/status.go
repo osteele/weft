@@ -47,8 +47,8 @@ const heartbeatStaleThreshold = 3 * time.Minute
 // jobs where the agent has died but the provider still reports "running".
 // NOT based on GPU utilization — jobs may legitimately not use the GPU.
 const (
-	runningStaleWarn      = 10 * time.Minute
-	runningStaleTerminate = 30 * time.Minute
+	runningStaleWarn      = 20 * time.Minute
+	runningStaleTerminate = 60 * time.Minute
 )
 
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.

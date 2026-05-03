@@ -216,6 +216,7 @@ var (
 	editStatus          string
 	editRetry           bool
 	editGPUClass        string
+	editGPUMem          int
 	editProvider        string
 	editInputs          []string
 	editClearInputs     bool
@@ -824,13 +825,14 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
 	tagsChanged := cmd.Flags().Changed("tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
+	gpuMemChanged := cmd.Flags().Changed("gpu-mem")
 	providerChanged := cmd.Flags().Changed("provider")
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || providerChanged || inputsChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || providerChanged || inputsChanged
 	fieldChanged = fieldChanged || tagsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--provider/--input or dependency flags")
+		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--gpu-mem/--provider/--input or dependency flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
@@ -1043,6 +1045,21 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "GPU class cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("GPU class: %s", editGPUClass))
+		}
+	}
+	if gpuMemChanged {
+		var gpuMem *int
+		if editGPUMem > 0 {
+			gpuMem = &editGPUMem
+		}
+		if err := db.SetJobGPUMemGB(database, jobID, gpuMem); err != nil {
+			return fmt.Errorf("update GPU memory: %w", err)
+		}
+		job.GPUMemGB = gpuMem
+		if gpuMem == nil {
+			updates = append(updates, "GPU memory cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("GPU memory: %d GB", *gpuMem))
 		}
 	}
 	if providerChanged {
@@ -1402,6 +1419,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	cmd.Flags().IntVar(&editGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (0 clears)")
 	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
