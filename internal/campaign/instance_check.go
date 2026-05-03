@@ -283,7 +283,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		!p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
-			if age > maxPreRunningStatusTime {
+			if age > maxProviderStatusUnavailableTime {
 				return InstanceAction{
 					Kind:              ActionEmptyStatusTimeout,
 					TerminalStatus:    db.LaunchStatusFailed,

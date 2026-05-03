@@ -608,7 +608,7 @@ func TestCheckInstance_LoadingStatusUsesCreatedAtFallback(t *testing.T) {
 }
 
 func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
-	launchedAt := time.Now().Add(-7 * time.Minute).Unix()
+	launchedAt := time.Now().Add(-26 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
@@ -630,7 +630,7 @@ func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
 }
 
 func TestCheckInstance_ProviderStatusUnavailableWaitsBeforeTimeout(t *testing.T) {
-	launchedAt := time.Now().Add(-3 * time.Minute).Unix()
+	launchedAt := time.Now().Add(-7 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{

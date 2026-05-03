@@ -779,6 +779,13 @@ const maxEmptyStatusTime = 1 * time.Minute
 // "loading", etc.) beyond this threshold are terminated as infra failures.
 const maxPreRunningStatusTime = 5 * time.Minute
 
+// maxProviderStatusUnavailableTime is the maximum time to wait when provider
+// status polling fails or omits a known launch before any job/phase progress is
+// visible. Use the broader launch safety-net deadline because this path has no
+// positive provider status signal; short provider/API gaps should not fail new
+// launches faster than the normal bootstrap/launching watchdogs.
+const maxProviderStatusUnavailableTime = launchingPhaseTimeout
+
 // stalePauseTimeout is the maximum time an interruptible instance may sit in
 // provider "stopped" state before we give up waiting for the provider to
 // resume it and relaunch the jobs on a fresh offer. Chosen generously so a
