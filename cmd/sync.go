@@ -283,9 +283,7 @@ func reportHostSyncWarnings(host string, result ops.HostSyncResult) {
 }
 
 func emitWarnings(warnings []string) {
-	for _, warning := range warnings {
-		fmt.Fprintln(os.Stderr, warning)
-	}
+	writeWarnings(os.Stderr, warnings)
 }
 
 func reportQueueChangeSyncFailure(host string, err error) {

@@ -43,6 +43,26 @@ func TestResolveIDTargetKind(t *testing.T) {
 	}
 }
 
+func TestResolveStatusIDTargetKindDefaultsBareNumericsToJobs(t *testing.T) {
+	got, err := resolveStatusIDTargetKind([]string{"1706", "1707"})
+	if err != nil {
+		t.Fatalf("resolveStatusIDTargetKind error = %v", err)
+	}
+	if got != idTargetJob {
+		t.Fatalf("resolveStatusIDTargetKind = %v, want %v", got, idTargetJob)
+	}
+}
+
+func TestResolveStatusIDTargetKindKeepsExplicitInstanceRoute(t *testing.T) {
+	got, err := resolveStatusIDTargetKind([]string{"wi1706", "1707"})
+	if err != nil {
+		t.Fatalf("resolveStatusIDTargetKind error = %v", err)
+	}
+	if got != idTargetInstance {
+		t.Fatalf("resolveStatusIDTargetKind = %v, want %v", got, idTargetInstance)
+	}
+}
+
 func TestRunInfoRoutesToInstanceStatus(t *testing.T) {
 	origInst := runInstanceStatusFromInfoFunc
 	origJob := runJobInfoFromInfoFunc

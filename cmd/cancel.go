@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 
 	"github.com/osteele/weft/internal/db"
@@ -70,6 +71,9 @@ func runCancelWithParser(cmd *cobra.Command, args []string, parser func([]string
 		if message == "" {
 			message = fmt.Sprintf("Job %s canceled", ids.FormatJobID(jobID))
 		}
+		if verified, status, verifyErr := cancelDurablyVisible(database, jobID); verifyErr == nil && !verified {
+			message = fmt.Sprintf("Cancel requested for job %s (current status: %s; waiting for sync confirmation)", ids.FormatJobID(jobID), status)
+		}
 		fmt.Println(message)
 		cancelled++
 	}
@@ -85,4 +89,16 @@ func runCancelWithParser(cmd *cobra.Command, args []string, parser func([]string
 	}
 
 	return nil
+}
+
+func cancelDurablyVisible(database *sql.DB, jobID int64) (bool, string, error) {
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return false, "", err
+	}
+	if job == nil {
+		return false, "", nil
+	}
+	status := job.EffectiveStatus()
+	return status == db.StatusCanceled, status, nil
 }

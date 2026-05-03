@@ -77,7 +77,7 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			slog.Warn("cloud sync skipped", "component", "sync", "reason", "R2 storage unreachable")
+			slog.Debug("cloud sync skipped", "component", "sync", "reason", "R2 storage unreachable")
 		} else if verbose {
 			slog.Warn("R2 list failed", "component", "sync", "error", err)
 		}

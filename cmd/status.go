@@ -54,7 +54,7 @@ Job/instance IDs can be specified with prefixes:
   - Instance ID: wi42
   - Mixed with inferred type: wj42 43 or wi42 43
 
-Bare numeric IDs are ambiguous at the top level and return an error.
+Bare numeric IDs are treated as job IDs. Prefix instance IDs with wi.
 
 When targeting jobs, IDs can be specified individually or as ranges:
   - Single ID: 42
@@ -106,7 +106,7 @@ func addStatusFlags(cmd *cobra.Command) {
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 && isTopLevelStatusCommand(cmd) {
-		kind, err := resolveIDTargetKind(args)
+		kind, err := resolveStatusIDTargetKind(args)
 		if err != nil {
 			return err
 		}
@@ -116,6 +116,26 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return runJobStatus(cmd, args)
+}
+
+func resolveStatusIDTargetKind(args []string) (idTargetKind, error) {
+	kind, err := resolveIDTargetKind(args)
+	if err == nil {
+		return kind, nil
+	}
+	if canParseJobIDArgs(args) {
+		return idTargetJob, nil
+	}
+	return kind, err
+}
+
+func canParseJobIDArgs(args []string) bool {
+	for _, arg := range args {
+		if _, err := parseJobIDArg(arg); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func isTopLevelStatusCommand(cmd *cobra.Command) bool {
