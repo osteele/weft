@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -488,6 +489,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				recordGroupReasons(result, cfg.ResetJobs, group, reason)
 				return
 			}
+			// Open placement intents for this group's jobs immediately before
+			// LaunchInstance, so the autopilot/UI sees them as Placing only
+			// during the actual launch attempt. Skipped groups (no offers,
+			// no client, etc.) never open intents and remain Unplaced with
+			// their existing block reason.
+			intentIDs := openRelaunchIntents(cfg.Database, group.Jobs)
 			instanceID, err := LaunchInstance(
 				client, cfg.Database, campaignID, group, offer,
 				cfg.LaunchOpts, cfg.R2Cfg, createOpts,
@@ -496,6 +503,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
+				closeRelaunchIntents(cfg.Database, intentIDs, false, "launch failed: "+err.Error())
 				slog.Warn("launch failed for group", "component", "relaunch", "gpu_spec", group.GPUSpec(), "error", err)
 				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 					EventKind: db.EventRelaunchLaunchFailed,
@@ -507,6 +515,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				recordGroupReasons(result, cfg.ResetJobs, group, "launch failed: "+err.Error())
 				return
 			}
+			closeRelaunchIntents(cfg.Database, intentIDs, true, "placement succeeded")
 			if hasPredecessor {
 				if setErr := db.SetLaunchReplacedID(cfg.Database, instanceID, predecessorID); setErr != nil {
 					slog.Warn("failed to set replaced_instance_id", "component", "relaunch", "instance", instanceID, "error", setErr)
@@ -1285,4 +1294,51 @@ func exceedsRetryBudget(budget RetryBudget, attemptCount int, elapsed time.Durat
 			tier, float64(spendCents)/100.0, float64(limitCost)/100.0)
 	}
 	return false, ""
+}
+
+// openRelaunchIntents creates an open auto_relaunch placement intent for each
+// job in the group. Jobs that already have an open intent (from another path)
+// are silently skipped — those are being placed elsewhere and we should not
+// overwrite that intent's resolution. Returns the IDs of the intents this
+// call created so closeRelaunchIntents can resolve them.
+func openRelaunchIntents(database *sql.DB, jobs []*db.Job) []int64 {
+	if database == nil || len(jobs) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(jobs))
+	for _, j := range jobs {
+		if j == nil || j.ID <= 0 {
+			continue
+		}
+		intent, err := db.CreatePlacementIntent(database, j.ID, "auto_relaunch")
+		if err != nil {
+			if errors.Is(err, db.ErrPlacementIntentAlreadyOpen) {
+				continue
+			}
+			slog.Warn("open auto_relaunch placement intent",
+				"component", "relaunch", "job_id", j.ID, "error", err)
+			continue
+		}
+		out = append(out, intent.ID)
+	}
+	return out
+}
+
+// closeRelaunchIntents resolves the intents opened by openRelaunchIntents.
+// success=true → confirmed; success=false → canceled. resolution is the
+// human-readable explanation persisted on the intent row.
+func closeRelaunchIntents(database *sql.DB, intentIDs []int64, success bool, resolution string) {
+	if database == nil || len(intentIDs) == 0 {
+		return
+	}
+	state := db.PlacementIntentStateConfirmed
+	if !success {
+		state = db.PlacementIntentStateCanceled
+	}
+	for _, id := range intentIDs {
+		if err := db.ResolvePlacementIntent(database, id, state, resolution); err != nil {
+			slog.Warn("resolve auto_relaunch placement intent",
+				"component", "relaunch", "intent_id", id, "error", err)
+		}
+	}
 }

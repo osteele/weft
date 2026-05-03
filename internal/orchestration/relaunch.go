@@ -25,16 +25,11 @@ func RelaunchOrphanedJobs(
 	restrictToReset bool,
 	includeFreshUnplaced bool,
 ) (*campaign.RelaunchResult, error) {
-	window, err := openPlacementWindow(database, scopeJobIDs, "auto_relaunch")
-	if err != nil {
-		return nil, err
-	}
-	success := false
-	defer func() {
-		if closeErr := closePlacementWindow(database, window, success); closeErr != nil {
-			slog.Warn("failed to close placement window", "component", "auto-relaunch", "error", closeErr)
-		}
-	}()
+	// Placement intents are now created per-group inside campaign.RelaunchOrphanedJobs,
+	// scoped to jobs that are about to actually launch. Opening them upfront for the
+	// entire scope misled the UI: skipped jobs (no offers, budget exhausted, etc.)
+	// would briefly appear as "Placing" before being marked `confirmed: placement
+	// succeeded` even though no launch happened.
 
 	resetJobs, err := db.ResetJobsOnTerminalLaunches(database)
 	if err != nil {
@@ -96,7 +91,6 @@ func RelaunchOrphanedJobs(
 	if result == nil {
 		result = &campaign.RelaunchResult{}
 	}
-	success = true
 	return result, nil
 }
 
