@@ -112,6 +112,7 @@ type queueJobOptions struct {
 	Needs        []string // Artifact specs this job needs
 	CloudAfter   []db.JobDependencyRef
 	CloudNeeds   []string
+	Disk         *db.JobDiskMetadata
 }
 
 type queueDependency struct {
@@ -210,6 +211,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Produces:    opts.Produces,
 		Needs:       opts.Needs,
 		Metadata:    buildCloudDependencyMetadata(opts.CloudAfter, opts.CloudNeeds),
+		Disk:        opts.Disk,
 	}
 
 	jobID, err := ops.RecordQueuedJob(database, params)

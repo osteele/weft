@@ -59,6 +59,16 @@ import torch
 			want: &ScriptMeta{GPUMemGB: 8, GPUMemStrict: boolPtr(true)},
 		},
 		{
+			name: "disk settings",
+			content: `# /// script
+# [tool.weft]
+# disk = "120GB"
+# runtime-disk = 24
+# ///
+`,
+			want: &ScriptMeta{DiskGB: 120, RuntimeDiskGB: 24},
+		},
+		{
 			name:    "no metadata block",
 			content: `import torch\nprint("hello")\n`,
 			want:    nil,
@@ -392,6 +402,12 @@ import torch
 			}
 			if got.GPUMemGB != tt.want.GPUMemGB {
 				t.Errorf("GPUMemGB: got %d, want %d", got.GPUMemGB, tt.want.GPUMemGB)
+			}
+			if got.DiskGB != tt.want.DiskGB {
+				t.Errorf("DiskGB: got %d, want %d", got.DiskGB, tt.want.DiskGB)
+			}
+			if got.RuntimeDiskGB != tt.want.RuntimeDiskGB {
+				t.Errorf("RuntimeDiskGB: got %d, want %d", got.RuntimeDiskGB, tt.want.RuntimeDiskGB)
 			}
 			if !equalBoolPtr(got.GPUMemStrict, tt.want.GPUMemStrict) {
 				t.Errorf("GPUMemStrict: got %v, want %v", got.GPUMemStrict, tt.want.GPUMemStrict)

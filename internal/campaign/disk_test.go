@@ -36,6 +36,42 @@ func TestEstimateGroupDisk_MinFloor(t *testing.T) {
 	}
 }
 
+func TestEstimateRuntimeDiskGB_CommandHeuristics(t *testing.T) {
+	job := &db.Job{ID: 1, Command: "uv sync --project scripts/vllm-profiling && python bench.py"}
+	disk := EstimateRuntimeDiskGB(job)
+	if disk < uvRuntimeDiskGB+vllmRuntimeDiskGB {
+		t.Fatalf("runtime disk = %d, want at least uv+vllm headroom", disk)
+	}
+}
+
+func TestEstimateRuntimeDiskGB_UserOverride(t *testing.T) {
+	job := &db.Job{
+		ID:      1,
+		Command: "uv sync --project scripts/vllm-profiling",
+		Metadata: &db.JobMetadata{
+			Disk: &db.JobDiskMetadata{RuntimeDiskGB: 42},
+		},
+	}
+	if disk := EstimateRuntimeDiskGB(job); disk != 42 {
+		t.Fatalf("runtime disk = %d, want override 42", disk)
+	}
+}
+
+func TestEstimateGroupDisk_HonorsDiskFloor(t *testing.T) {
+	group := InstanceGroup{
+		Jobs: []*db.Job{{
+			ID:      1,
+			Command: "echo test",
+			Metadata: &db.JobMetadata{
+				Disk: &db.JobDiskMetadata{DiskGB: 96},
+			},
+		}},
+	}
+	if disk := EstimateGroupDisk(group, nil, nil); disk != 96 {
+		t.Fatalf("disk = %d, want explicit floor 96", disk)
+	}
+}
+
 func TestEstimateGroupDisk_UsesCachedUVManifestUnion(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -13,6 +13,16 @@ type JobMetadata struct {
 	Resource     *ResourceUsage         `json:"resource,omitempty"`
 	Telemetry    *JobTelemetrySummary   `json:"telemetry,omitempty"`
 	Dependencies *JobDependencyMetadata `json:"dependencies,omitempty"`
+	Disk         *JobDiskMetadata       `json:"disk,omitempty"`
+}
+
+// JobDiskMetadata stores user-supplied or derived disk requirements for
+// rental placement. DiskGB is a total instance disk floor; RuntimeDiskGB is
+// extra scratch/cache headroom beyond declared inputs and base overhead.
+type JobDiskMetadata struct {
+	DiskGB                 int `json:"disk_gb,omitempty"`
+	RuntimeDiskGB          int `json:"runtime_disk_gb,omitempty"`
+	EstimatedRuntimeDiskGB int `json:"estimated_runtime_disk_gb,omitempty"`
 }
 
 // JobDependencyMetadata stores dependency semantics that cannot be encoded as

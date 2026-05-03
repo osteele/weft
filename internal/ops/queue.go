@@ -86,6 +86,7 @@ type QueueJobParams struct {
 	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
 	Produces     []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
 	Needs        []string // Artifact specs this job needs (e.g., "output/model.pt:100")
+	Disk         *db.JobDiskMetadata
 	// Metadata is persisted to job_attempts.job_metadata as part of the same
 	// RecordQueuedJob call. Writing metadata inside RecordQueuedJob (rather
 	// than the caller doing a follow-up SetJobMetadata) avoids a race where a
@@ -238,8 +239,9 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 			return 0, fmt.Errorf("record needs: %w", err)
 		}
 	}
-	if params.Metadata != nil {
-		if err := db.SetJobMetadata(database, jobID, params.Metadata); err != nil {
+	metadata := mergeJobMetadata(params.Metadata, params.Disk)
+	if metadata != nil {
+		if err := db.SetJobMetadata(database, jobID, metadata); err != nil {
 			if !explicitID {
 				db.DeleteJob(database, jobID)
 			}
@@ -248,6 +250,19 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 	}
 
 	return jobID, nil
+}
+
+func mergeJobMetadata(meta *db.JobMetadata, disk *db.JobDiskMetadata) *db.JobMetadata {
+	if meta == nil && disk == nil {
+		return nil
+	}
+	if meta == nil {
+		meta = &db.JobMetadata{}
+	}
+	if disk != nil {
+		meta.Disk = disk
+	}
+	return meta
 }
 
 // QueueJob creates a job record and adds it to the remote queue.

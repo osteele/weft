@@ -71,34 +71,36 @@ Examples:
 }
 
 var (
-	runHost         string
-	runDir          string
-	runDescription  string
-	runProject      string
-	runDraft        bool
-	runFollow       bool
-	runWait         bool
-	runNoWait       bool // explicit no-op flag for tooling compatibility
-	runKillJobID    int64
-	runFrom         int64
-	runEnvVars      []string
-	runTags         []string
-	runAfter        int64
-	runAfterAny     int64
-	runGPU          string
-	runGPUMem       int
-	runGPUMemStrict bool
-	runGPUClass     string
-	runProvider     string
-	runInputs       []string
-	runOutputs      []string
-	runProduces     []string
-	runNeeds        []string
-	runDryRun       bool
-	runNoSync       bool
-	runHFToken      bool
-	runHFTokenFrom  string
-	runSecretVars   []string
+	runHost          string
+	runDir           string
+	runDescription   string
+	runProject       string
+	runDraft         bool
+	runFollow        bool
+	runWait          bool
+	runNoWait        bool // explicit no-op flag for tooling compatibility
+	runKillJobID     int64
+	runFrom          int64
+	runEnvVars       []string
+	runTags          []string
+	runAfter         int64
+	runAfterAny      int64
+	runGPU           string
+	runGPUMem        int
+	runGPUMemStrict  bool
+	runDiskGB        int
+	runRuntimeDiskGB int
+	runGPUClass      string
+	runProvider      string
+	runInputs        []string
+	runOutputs       []string
+	runProduces      []string
+	runNeeds         []string
+	runDryRun        bool
+	runNoSync        bool
+	runHFToken       bool
+	runHFTokenFrom   string
+	runSecretVars    []string
 
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
@@ -157,6 +159,8 @@ func init() {
 	runCmd.Flags().StringVar(&runGPU, "gpu", "", "GPU constraint: class, generation, or family (e.g., a100, ampere+, nvidia); append >=NGB for memory (e.g., nvidia>=24GB)")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().BoolVar(&runGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
+	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
+	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "Cloud provider for rental placement (vastai or runpod)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
@@ -236,6 +240,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runGPUMem == 0 && fromJob.GPUMemGB != nil {
 			runGPUMem = *fromJob.GPUMemGB
+		}
+		if fromJob.Metadata != nil && fromJob.Metadata.Disk != nil {
+			if runDiskGB == 0 {
+				runDiskGB = fromJob.Metadata.Disk.DiskGB
+			}
+			if runRuntimeDiskGB == 0 {
+				runRuntimeDiskGB = fromJob.Metadata.Disk.RuntimeDiskGB
+			}
 		}
 		if len(runEnvVars) == 0 {
 			runEnvVars = append([]string(nil), fromJob.EnvVars...)
@@ -369,6 +381,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("gpu-mem-strict") && meta.GPUMemStrict != nil {
 			runGPUMemStrict = *meta.GPUMemStrict
 			applied = append(applied, fmt.Sprintf("gpu-mem-strict=%t", runGPUMemStrict))
+		}
+		if !cmd.Flags().Changed("disk") && runDiskGB == 0 && meta.DiskGB > 0 {
+			runDiskGB = meta.DiskGB
+			applied = append(applied, fmt.Sprintf("disk=%dGB", meta.DiskGB))
+		}
+		if !cmd.Flags().Changed("runtime-disk") && runRuntimeDiskGB == 0 && meta.RuntimeDiskGB > 0 {
+			runRuntimeDiskGB = meta.RuntimeDiskGB
+			applied = append(applied, fmt.Sprintf("runtime-disk=%dGB", meta.RuntimeDiskGB))
 		}
 		if len(meta.Inputs) > 0 {
 			runInputs = mergeDedup(runInputs, meta.Inputs)
@@ -515,6 +535,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		gpuMemCfg = nil // Skip predictor shell-out; use explicit value or fallback.
 	}
 	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(gpuMemCfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict, host, projectName, command, oomFloor)
+	diskMeta := buildDiskMetadata(runDiskGB, runRuntimeDiskGB, projectName, workingDir, command)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
@@ -619,6 +640,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       resolvedNeeds,
+			Disk:        diskMeta,
 		}
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
 		if err != nil {
@@ -698,6 +720,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       resolvedNeeds,
+			Disk:        diskMeta,
 		}
 
 		if err := validatePinnedHostQueueGate(host, gpuClass); err != nil {
@@ -822,6 +845,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if len(runEnvVars) > 0 {
 			fmt.Fprintf(w, "  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
 		}
+		printDiskPreview(w, diskMeta)
 
 		// Push the job to the remote host before waiting/following.
 		deferred := !syncHostQuietly(database, host, runNoSync)
@@ -878,6 +902,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       resolvedNeeds,
+			Disk:        diskMeta,
 		})
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
@@ -949,6 +974,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := persistDraftArtifactFields(database, jobID, runInputs, runOutputs, outputDirs, runProduces, resolvedNeeds); err != nil {
 			return err
 		}
+		if diskMeta != nil {
+			if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Disk: diskMeta}); err != nil {
+				return fmt.Errorf("set disk metadata: %w", err)
+			}
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -1010,6 +1040,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Needs:        resolvedNeeds,
 			CloudAfter:   cloudAfter,
 			GPUMemStrict: true, // GPUMemGB is already resolved above; avoid re-applying headroom.
+			Disk:         diskMeta,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -1024,6 +1055,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if len(runEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
 		}
+		printDiskPreview(os.Stdout, diskMeta)
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
 
 		syncAndReportOffline(database, host, runNoSync)
@@ -1066,6 +1098,24 @@ func printSubmissionPreview(w io.Writer, result *placement.PlacementResult) {
 		fmt.Fprintf(w, " (long startup/run; ensure the job emits Progress: lines or checkpoints before watchdog/grace limits)")
 	}
 	fmt.Fprintln(w)
+}
+
+func printDiskPreview(w io.Writer, disk *db.JobDiskMetadata) {
+	if disk == nil {
+		return
+	}
+	if disk.DiskGB > 0 {
+		fmt.Fprintf(w, "  Disk floor: %dGB\n", disk.DiskGB)
+	}
+	runtimeGB := disk.RuntimeDiskGB
+	label := "Runtime disk"
+	if runtimeGB == 0 {
+		runtimeGB = disk.EstimatedRuntimeDiskGB
+		label = "Runtime disk est."
+	}
+	if runtimeGB > 0 {
+		fmt.Fprintf(w, "  %s: %dGB\n", label, runtimeGB)
+	}
 }
 
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.

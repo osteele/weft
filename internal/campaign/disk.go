@@ -114,6 +114,7 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	inputDiskGB := int(math.Ceil(float64(hfBytes+unresolvedFallbackBytes) / 1e9 * HFCacheMultiplier))
 	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
 	inputDiskGB += overhead
+	inputDiskGB += groupRuntimeDiskGB(group)
 
 	// Use the larger of history-based and input-based estimates.
 	// History may underestimate if prior runs failed before completing.
@@ -123,7 +124,10 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	}
 
 	if diskGB < DefaultMinDiskGB {
-		return DefaultMinDiskGB
+		diskGB = DefaultMinDiskGB
+	}
+	if floor := groupDiskFloorGB(group); floor > diskGB {
+		diskGB = floor
 	}
 	return diskGB
 }

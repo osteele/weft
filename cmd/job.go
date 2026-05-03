@@ -890,6 +890,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if len(job.EnvVars) > 0 {
 			fmt.Printf("Env Vars:    %s\n", formatEnvVarsForDisplay(job.EnvVars))
 		}
+		if job.Metadata != nil {
+			printDiskPreview(os.Stdout, job.Metadata.Disk)
+		}
 		if tags := job.DisplayTags(); len(tags) > 0 {
 			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
 		}

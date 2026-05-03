@@ -65,6 +65,21 @@ This matters because weft uses input declarations to:
 - **Score host placement** based on data locality
 - **Pre-stage data** to avoid download delays during job execution
 
+For runtime setup that is not an input asset, such as `uv sync`, pip wheel
+caches, CUDA wheels, vLLM, or temporary build trees, add explicit scratch
+headroom:
+
+```
+laptop$ weft run \
+  --input hf:meta-llama/Llama-3.1-8B \
+  --runtime-disk 24 \
+  'uv sync --project scripts/vllm-profiling && python scripts/profile.py'
+```
+
+Use `--disk N` when you want to force the total rental disk floor. Weft also
+adds conservative runtime headroom automatically for common `uv`/pip/CUDA/vLLM
+command shapes and reuses prior observed disk peaks when available.
+
 ### Declaring outputs
 
 Use `--output` to declare what a job produces. This lets downstream jobs find
@@ -115,6 +130,8 @@ Supported keys (all optional):
 | `gpu-class` | string           | `--gpu-class`       |
 | `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
 | `gpu-mem-strict` | bool       | `--gpu-mem-strict`  |
+| `disk` / `disk-gb` | int or `"NGB"` | `--disk`      |
+| `runtime-disk` / `runtime-disk-gb` | int or `"NGB"` | `--runtime-disk` |
 | `gpu-arch-max`   | string      | *(no CLI flag — overrides auto-inferred GPU arch upper bound; see below)* |
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |

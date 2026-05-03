@@ -13,10 +13,12 @@ import (
 // ScriptMeta holds weft resource requirements parsed from a PEP 723
 // inline metadata block ([tool.weft] table).
 type ScriptMeta struct {
-	GPU          string // GPU constraint (e.g., "nvidia", "ampere+", "a100")
-	GPUClass     string // GPU class/generation
-	GPUMemGB     int    // Requested GPU memory in GB (headroom may be applied by CLI)
-	GPUMemStrict *bool  // Exact gpu-mem matching (no headroom), when explicitly set
+	GPU           string // GPU constraint (e.g., "nvidia", "ampere+", "a100")
+	GPUClass      string // GPU class/generation
+	GPUMemGB      int    // Requested GPU memory in GB (headroom may be applied by CLI)
+	GPUMemStrict  *bool  // Exact gpu-mem matching (no headroom), when explicitly set
+	DiskGB        int    // Total rental disk floor in GB
+	RuntimeDiskGB int    // Extra scratch/cache disk headroom in GB
 	// GPUArchMax bounds the GPU's CUDA compute capability from above. Accepted
 	// values: a numeric cap ("9.0", "12.0"), a generation name ("ampere",
 	// "hopper", "blackwell"), or "any" to disable inferred filtering. Empty
@@ -39,6 +41,7 @@ type ScriptMeta struct {
 
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
+		m.DiskGB == 0 && m.RuntimeDiskGB == 0 &&
 		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
 		m.MinDriver == "" && m.MinCUDA == "" && m.ImagePullSecret == "" &&
@@ -80,6 +83,8 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			if v, ok := wt.Get("gpu-mem-strict").(bool); ok {
 				meta.GPUMemStrict = &v
 			}
+			meta.DiskGB = parseDiskGB(firstPresent(wt, "disk", "disk-gb", "disk_gb"))
+			meta.RuntimeDiskGB = parseDiskGB(firstPresent(wt, "runtime-disk", "runtime-disk-gb", "runtime_disk_gb"))
 			if v, ok := wt.Get("gpu-arch-max").(string); ok {
 				meta.GPUArchMax = v
 			}
@@ -146,6 +151,15 @@ func firstStringValue(tree *toml.Tree, keys ...string) string {
 	return ""
 }
 
+func firstPresent(tree *toml.Tree, keys ...string) interface{} {
+	for _, key := range keys {
+		if v := tree.Get(key); v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
 // ScanScriptMeta extracts PEP 723 [tool.weft] metadata from the first Python
 // script referenced in a shell command. Returns nil if no script is found or
 // the script has no weft metadata.
@@ -209,6 +223,12 @@ func extractPEP723Block(content string) string {
 // parseGPUMem interprets a gpu-mem value as an integer GB count.
 // Accepts int64 or string formats like "40", "40GB", ">=80GB".
 func parseGPUMem(v interface{}) int {
+	return parseDiskGB(v)
+}
+
+// parseDiskGB interprets a disk size as an integer GB count.
+// Accepts int64 or string formats like "80", "80GB", ">=80GB".
+func parseDiskGB(v interface{}) int {
 	switch val := v.(type) {
 	case int64:
 		return int(val)

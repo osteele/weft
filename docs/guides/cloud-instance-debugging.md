@@ -184,10 +184,13 @@ weft campaign safety resume --campaign <campaign-id> [--project <project-name>]
 ### Disk full during execution
 
 The instance ran out of disk. This usually means undeclared HF model
-dependencies inflated actual disk usage beyond the estimate.
+dependencies or runtime setup caches inflated actual disk usage beyond the
+estimate.
 
 **Action:** Ensure all HF models are declared with `--input hf:<model-id>`.
-See `docs/guides/workflow-guide.md` § "Declaring data dependencies".
+For setup-heavy jobs, add `--runtime-disk <gb>` for wheel/cache/build headroom
+or `--disk <gb>` for a total rental disk floor. See
+`docs/guides/workflow-guide.md` § "Declaring data dependencies".
 
 ### Bootstrap stalled
 

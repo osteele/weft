@@ -198,6 +198,8 @@ var (
 	queueHFToken        bool
 	queueHFTokenFrom    string
 	queueSecretVars     []string
+	queueDiskGB         int
+	queueRuntimeDiskGB  int
 	queueTags           []string
 	queueAfter          int64
 	queueAfterAny       int64
@@ -289,6 +291,8 @@ func init() {
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	addSecretEnvFlags(queueAddCmd, &queueHFToken, &queueHFTokenFrom, &queueSecretVars)
+	queueAddCmd.Flags().IntVar(&queueDiskGB, "disk", 0, "Rental instance disk floor in GB")
+	queueAddCmd.Flags().IntVar(&queueRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
@@ -374,6 +378,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueWait && queueDraft {
 		return fmt.Errorf("--wait cannot be combined with --draft")
 	}
+	diskMeta := buildDiskMetadata(queueDiskGB, queueRuntimeDiskGB, projectName, workingDir, command)
 
 	var deps []queueDependency
 	var cloudAfter []db.JobDependencyRef
@@ -457,15 +462,16 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record draft output dirs: %w", err)
 			}
 		}
-		if len(cloudAfter) > 0 {
-			meta := &db.JobMetadata{
-				Dependencies: &db.JobDependencyMetadata{
+		if len(cloudAfter) > 0 || diskMeta != nil {
+			meta := &db.JobMetadata{Disk: diskMeta}
+			if len(cloudAfter) > 0 {
+				meta.Dependencies = &db.JobDependencyMetadata{
 					CloudAfter: append([]db.JobDependencyRef(nil), cloudAfter...),
-				},
+				}
 			}
 			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
 				db.DeleteJob(database, jobID)
-				return fmt.Errorf("record draft cloud dependencies: %w", err)
+				return fmt.Errorf("record draft metadata: %w", err)
 			}
 		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
@@ -477,6 +483,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		if len(queueEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(queueEnvVars))
 		}
+		printDiskPreview(os.Stdout, diskMeta)
 		if len(queueTags) > 0 {
 			fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 		}
@@ -502,6 +509,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		Inputs:       queueInputs,
 		OutputDirs:   outputDirs,
 		CloudAfter:   cloudAfter,
+		Disk:         diskMeta,
 	})
 	if err != nil {
 		return err
@@ -517,6 +525,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if len(queueEnvVars) > 0 {
 		fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(queueEnvVars))
 	}
+	printDiskPreview(os.Stdout, diskMeta)
 	if len(queueTags) > 0 {
 		fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 	}
