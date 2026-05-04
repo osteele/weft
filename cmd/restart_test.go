@@ -846,6 +846,57 @@ print("train")
 	}
 }
 
+func TestRestartQueuedJob_PersistsRetryGPUClassOverride(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# gpu-class = "4090"
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "4090"); err != nil {
+		t.Fatalf("set gpu class: %v", err)
+	}
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{
+		GPUClass: "4090",
+	}); err != nil {
+		t.Fatalf("set cli overrides: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{GPUClass: "ampere+", HasAny: true}); err != nil {
+		t.Fatalf("restartJob with override failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after override: %v", err)
+	}
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("GPUClass = %q, want ampere+ after retry override", job.GPUClass)
+	}
+	if job.CLIResourceOverrides == nil || job.CLIResourceOverrides.GPUClass != "ampere+" {
+		t.Fatalf("CLI GPUClass override = %+v, want ampere+", job.CLIResourceOverrides)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob without override failed: %v", err)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after second retry: %v", err)
+	}
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("GPUClass = %q, want ampere+ after later retry", job.GPUClass)
+	}
+}
+
 // TestRestartQueuedJob_NoScriptMetaLeavesFieldsAlone verifies that when the
 // script has no PEP 723 block, retry does not clear existing resource fields.
 // Protects against regressions where legacy jobs with pinned host/class get

@@ -351,6 +351,49 @@ func TestRunEditUpdatesGPUMem(t *testing.T) {
 	}
 }
 
+func TestRunEditUpdatesGPUClassOverride(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "4090"); err != nil {
+		t.Fatalf("set initial gpu class: %v", err)
+	}
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{
+		GPUClass: "4090",
+	}); err != nil {
+		t.Fatalf("set cli overrides: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("gpu-class", "ampere+"); err != nil {
+		t.Fatalf("set gpu-class flag: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "GPU class: ampere+") {
+		t.Fatalf("output missing gpu class update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("GPUClass = %q, want ampere+", job.GPUClass)
+	}
+	if job.CLIResourceOverrides == nil || job.CLIResourceOverrides.GPUClass != "ampere+" {
+		t.Fatalf("CLI GPUClass override = %+v, want ampere+", job.CLIResourceOverrides)
+	}
+}
+
 func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 	database := db.SetupTestDB(t)
 

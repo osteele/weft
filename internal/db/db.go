@@ -86,7 +86,7 @@ type Job struct {
 	ErrorDiagnosis       string                // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
 	RetryCount           int                   // Number of auto-remediation retries attempted
 	PlacementMeta        *PlacementMeta        // Placement telemetry (predictions, scores)
-	CLIResourceOverrides *CLIResourceOverrides // Original CLI flag intent from submission, replayed on retry
+	CLIResourceOverrides *CLIResourceOverrides // Current explicit CLI resource intent, replayed on retry
 	PlacementReasons     []string              // Why the job is currently unplaced
 	LaunchID             *int64                // Cloud instance ID if this job is part of a cloud instance
 	CampaignJobIndex     *int                  // Position within a cloud campaign sequence, if assigned
@@ -265,14 +265,15 @@ func (j *Job) UsesPreemptiblePlacement() bool {
 	return j.HasTag(TagPreemptible)
 }
 
-// CLIResourceOverrides records the resource-related CLI flags the user passed
-// at job submission (original intent). Only fields the user explicitly set
-// are populated. On retry, these are re-applied on top of the current script
+// CLIResourceOverrides records explicit resource choices from submission or
+// later edit/retry commands. Only fields the user explicitly set are
+// populated. On retry, these are re-applied on top of the current script
 // metadata to produce effective values — matching the merge `weft run`
 // performs for a fresh submission.
 //
-// Values are stored *pre-headroom* (raw CLI intent); headroom is applied
-// when the merge is evaluated.
+// Submission-time gpu-mem is stored pre-headroom so the retry merge can match
+// a fresh `weft run`. Later edit/retry commands store the effective
+// reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
 	GPU          string `json:"gpu,omitempty"`
 	GPUClass     string `json:"gpu_class,omitempty"`

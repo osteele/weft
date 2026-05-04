@@ -181,6 +181,13 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("update GPU field: %w", err)
 		}
 		job.GPU = gpuValue
+		if err := db.SetJobGPUClass(database, jobID, ""); err != nil {
+			return fmt.Errorf("clear GPU class: %w", err)
+		}
+		job.GPUClass = ""
+		if err := setJobCLIGPUOverride(database, job, gpuValue); err != nil {
+			return fmt.Errorf("update GPU override: %w", err)
+		}
 
 		// Also update the command to include CUDA_VISIBLE_DEVICES for backwards compatibility
 		newCommand := updateCudaVisibleDevices(job.Command, gpuValue)
@@ -204,6 +211,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			job.GPU = ""
 		}
 		job.GPUClass = gpuClassValue
+		if err := setJobCLIGPUClassOverride(database, job, gpuClassValue); err != nil {
+			return fmt.Errorf("update GPU class override: %w", err)
+		}
 		updates = append(updates, fmt.Sprintf("gpu-class: %s", gpuClassValue))
 	}
 
@@ -218,6 +228,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("update GPU memory: %w", err)
 		}
 		job.GPUMemGB = memPtr
+		if err := setJobCLIGPUMemOverride(database, job, memPtr); err != nil {
+			return fmt.Errorf("update GPU memory override: %w", err)
+		}
 		if memPtr != nil {
 			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB", mem))
 		} else {

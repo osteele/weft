@@ -994,6 +994,15 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("update gpu from env: %w", err)
 		}
 		job.GPU = gpu
+		if gpu != "" {
+			if err := db.SetJobGPUClass(database, jobID, ""); err != nil {
+				return fmt.Errorf("clear GPU class from env: %w", err)
+			}
+			job.GPUClass = ""
+		}
+		if err := setJobCLIGPUOverride(database, job, gpu); err != nil {
+			return fmt.Errorf("update GPU override from env: %w", err)
+		}
 		if len(newEnv) == 0 {
 			updates = append(updates, "env vars cleared")
 		} else {
@@ -1038,6 +1047,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("update GPU class: %w", err)
 		}
 		job.GPUClass = editGPUClass
+		if err := setJobCLIGPUClassOverride(database, job, editGPUClass); err != nil {
+			return fmt.Errorf("update GPU class override: %w", err)
+		}
 		// Clear GPU device pin when setting a class, so the scheduler picks the best device
 		if editGPUClass != "" && !envChanged {
 			if err := db.SetJobGPU(database, jobID, ""); err != nil {
@@ -1073,6 +1085,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("update GPU memory: %w", err)
 		}
 		job.GPUMemGB = gpuMem
+		if err := setJobCLIGPUMemOverride(database, job, gpuMem); err != nil {
+			return fmt.Errorf("update GPU memory override: %w", err)
+		}
 		if gpuMem == nil {
 			updates = append(updates, "GPU memory cleared")
 		} else {

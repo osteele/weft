@@ -225,6 +225,15 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 			return nil, fmt.Errorf("update gpu: %w", err)
 		}
 		job.GPU = overrides.GPU
+		if job.GPUClass != "" {
+			if err := db.SetJobGPUClass(database, job.ID, ""); err != nil {
+				return nil, fmt.Errorf("clear gpu-class: %w", err)
+			}
+			job.GPUClass = ""
+		}
+		if err := setJobCLIGPUOverride(database, job, overrides.GPU); err != nil {
+			return nil, fmt.Errorf("update gpu override: %w", err)
+		}
 		updates = append(updates, fmt.Sprintf("gpu: %s", overrides.GPU))
 	}
 	if overrides.GPUClass != "" {
@@ -238,6 +247,9 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 			job.GPU = ""
 		}
 		job.GPUClass = overrides.GPUClass
+		if err := setJobCLIGPUClassOverride(database, job, overrides.GPUClass); err != nil {
+			return nil, fmt.Errorf("update gpu-class override: %w", err)
+		}
 		updates = append(updates, fmt.Sprintf("gpu-class: %s", overrides.GPUClass))
 	}
 	if overrides.HasGPUMem {
@@ -245,10 +257,18 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 			return nil, fmt.Errorf("update gpu-mem: %w", err)
 		}
 		job.GPUMemGB = overrides.GPUMemGB
+		if err := setJobCLIGPUMemOverride(database, job, overrides.GPUMemGB); err != nil {
+			return nil, fmt.Errorf("update gpu-mem override: %w", err)
+		}
 		if overrides.GPUMemGB == nil {
 			updates = append(updates, "gpu-mem: cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB", *overrides.GPUMemGB))
+		}
+	}
+	if overrides.HasGPUMemStrict && !overrides.HasGPUMem {
+		if err := setJobCLIGPUMemStrictOverride(database, job, overrides.GPUMemStrict); err != nil {
+			return nil, fmt.Errorf("update gpu-mem-strict override: %w", err)
 		}
 	}
 	if overrides.HasProvider {
