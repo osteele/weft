@@ -222,6 +222,90 @@ func TestCheckInstance_BootstrapNoStallWithoutDeadline(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_IdleAfterReadyTimeout_Terminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-1 * time.Hour).Unix()
+	readyAt := now.Add(-20 * time.Minute).Unix() // past idleAfterReadyTimeout
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:               1,
+			Status:           db.LaunchStatusRunning,
+			LaunchedAt:       &launchedAt,
+			AgentReadyAtUnix: &readyAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		BootstrapStage: bootstrapStageReady,
+		JobState:       JobState{HasStartedJob: false},
+		InstancePhase:  "",
+		HeartbeatAge:   30 * time.Second, // fresh sidecar heartbeat
+		Now:            now,
+	})
+	if action.Kind != ActionIdleAfterReadyTimeout {
+		t.Fatalf("action.Kind = %s, want ActionIdleAfterReadyTimeout", action.Kind)
+	}
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
+	}
+	if action.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonInfraFailure)
+	}
+	if !action.DestroyProvider {
+		t.Errorf("DestroyProvider = false, want true")
+	}
+	if !action.ResetJobs {
+		t.Errorf("ResetJobs = false, want true")
+	}
+}
+
+func TestCheckInstance_IdleAfterReadyTimeout_NotYetExpired(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-15 * time.Minute).Unix()
+	readyAt := now.Add(-5 * time.Minute).Unix() // before idleAfterReadyTimeout
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:               1,
+			Status:           db.LaunchStatusRunning,
+			LaunchedAt:       &launchedAt,
+			AgentReadyAtUnix: &readyAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		BootstrapStage: bootstrapStageReady,
+		JobState:       JobState{HasStartedJob: false},
+		Now:            now,
+	})
+	if action.Kind == ActionIdleAfterReadyTimeout {
+		t.Fatalf("action.Kind = ActionIdleAfterReadyTimeout, expected no termination before timeout")
+	}
+}
+
+func TestCheckInstance_IdleAfterReadyTimeout_SkippedWhenJobStarted(t *testing.T) {
+	// agent_ready_at is also stamped when a job starts; once a job has
+	// actually started, the running-phase watchdogs cover the instance and
+	// this check must not fire even past the idle timeout.
+	now := time.Now()
+	launchedAt := now.Add(-1 * time.Hour).Unix()
+	readyAt := now.Add(-30 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:               1,
+			Status:           db.LaunchStatusRunning,
+			LaunchedAt:       &launchedAt,
+			AgentReadyAtUnix: &readyAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		JobState:      JobState{HasStartedJob: true},
+		InstancePhase: "running:42",
+		HeartbeatAge:  30 * time.Second,
+		Now:           now,
+	})
+	if action.Kind == ActionIdleAfterReadyTimeout {
+		t.Fatalf("action.Kind = ActionIdleAfterReadyTimeout, must not fire when a job has started")
+	}
+}
+
 func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 	r := NewReconciler()
 	latestEnd := time.Now().Add(-3 * time.Minute).Unix()

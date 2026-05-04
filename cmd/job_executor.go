@@ -325,38 +325,6 @@ func resolveDependencyForTarget(database *sql.DB, depID int64, host string, allo
 	return &queueDependency{JobID: depID, AllowFailure: allowFailure}, nil, nil
 }
 
-// collectPreferredInstanceIDs inspects the consumer's --needs specs and
-// returns the set of rental instance IDs currently hosting any named
-// producer. Used as a soft placement tip so the consumer can co-locate with
-// its producer (see internal/placement.Constraints.PreferredInstanceIDs).
-// Best-effort: ignores unknown specs and DB lookup errors.
-func collectPreferredInstanceIDs(database *sql.DB, needs []string) []int64 {
-	if len(needs) == 0 {
-		return nil
-	}
-	seen := make(map[int64]bool)
-	var out []int64
-	for _, spec := range needs {
-		parsed, err := runner.ParseNeedsSpec(spec)
-		if err != nil {
-			continue
-		}
-		job, err := db.GetJobByID(database, parsed.Version)
-		if err != nil || job == nil {
-			continue
-		}
-		if job.LaunchID == nil || *job.LaunchID <= 0 {
-			continue
-		}
-		if seen[*job.LaunchID] {
-			continue
-		}
-		seen[*job.LaunchID] = true
-		out = append(out, *job.LaunchID)
-	}
-	return out
-}
-
 // resolveArtifactNeedsPlacement validates `--needs` specs and applies on-prem
 // host pinning. All specs are returned in a single slice, stored on jobs.needs
 // and later re-classified at placement/launch time (see

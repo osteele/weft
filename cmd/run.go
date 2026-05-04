@@ -557,7 +557,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// consumers co-locate with their producers and can read outputs from
 	// the shared workdir (the classifier in internal/campaign/
 	// needs_classify.go does the actual routing at launch time).
-	placementConstraints.PreferredInstanceIDs = collectPreferredInstanceIDs(database, resolvedNeeds)
+	placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
 
 	// Build predictor closure if configured
 	predict := placement.BuildJobPredictorFromConfig(cfg, placementConstraints)

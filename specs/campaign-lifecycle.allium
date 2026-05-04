@@ -248,6 +248,9 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
+    -- Maximum time an instance may sit with agent_ready_at set but no job
+    -- yet started and no phase reported. See IdleAfterReadyTimeout.
+    idle_after_ready_timeout: Duration = 15.minutes
     -- Maximum time a launch may sit in the paused state (provider "stopped")
     -- before we give up waiting for a provider resume and relaunch the jobs
     -- on a fresh offer. Applies to per-instance preemption AND account-wide
@@ -770,6 +773,36 @@ rule SetupStall {
         -- with no progress (adaptive threshold per command).
 }
 
+rule IdleAfterReadyTimeout {
+    when: instance: Instance.agent_ready_at + config.idle_after_ready_timeout <= now
+    requires: instance.status = running
+    requires: instance.agent_ready_at != null
+    requires: no job started on instance
+    requires: instance.phase = empty
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Closes a watchdog dead-zone introduced once an agent reports
+        -- ready: BootstrapTimeout's guard `bootstrap_stage != ready` goes
+        -- false, the heartbeat sidecar keeps the heartbeat fresh
+        -- independent of agent goroutine progress, and no job-phase
+        -- watchdog applies because no phase ever started. Without this
+        -- rule, an agent that reaches ready but cannot drain the queue
+        -- (R2 read failure, internal hang, supervisor deadlock) burns
+        -- cost indefinitely while looking healthy from the outside.
+        -- The agent's only post-ready job is to start picking up queued
+        -- work, so this window is short (config.idle_after_ready_timeout,
+        -- default 15m).
+        -- Reason is infra_failure (retryable) so jobs reset to unplaced
+        -- and RelaunchAfterInfraFailure picks them up on a fresh offer.
+        -- Implementation: internal/campaign/instance_check.go §5a
+        -- (ActionIdleAfterReadyTimeout); threshold in
+        -- internal/campaign/reconcile.go idleAfterReadyTimeout.
+}
+
 rule HeartbeatStale {
     when: HeartbeatStale(instance)
     requires: instance.status = running
@@ -986,8 +1019,9 @@ rule CampaignFailed {
 --   1. Offer-time filters — config.offer_min_reliability plus the
 --      SurvivalModel / MachinePenalty score used by FilterOffersBySurvival.
 --   2. Per-instance kill rules (see §Failure and termination rules) —
---      LaunchingPhaseTimeout, BootstrapTimeout, SetupStall, HeartbeatStale,
---      ProviderInstanceDied, DiskFullDetected, GraceExpired.
+--      LaunchingPhaseTimeout, BootstrapTimeout, IdleAfterReadyTimeout,
+--      SetupStall, HeartbeatStale, ProviderInstanceDied, DiskFullDetected,
+--      GraceExpired.
 --   3. Adaptive phase thresholds — BootstrapSurvival / SetupSurvival
 --      override the static bootstrap_/setup_ defaults when sample size is
 --      sufficient; refreshed every config.survival_cache_ttl.
@@ -1045,14 +1079,20 @@ rule RunawayBreakerTrips {
 
     @guidance
         -- Scoped per campaign+project. The breaker prevents new instance
-        -- launches but does not terminate running instances.
+        -- launches but does not terminate running instances. It also does
+        -- NOT block placement of unplaced jobs onto already-running
+        -- instances via cloud-reuse: that path bypasses provider offer
+        -- search and so cannot contribute to the churn the breaker exists
+        -- to stop. RelaunchAfterInfraFailure performs a reuse pass before
+        -- evaluating the breaker so consumers of running producers can
+        -- still co-locate while the breaker is tripped.
         -- Failures during the manual-reset grace period are ignored for the
         -- next accounting window, so a reset gives fresh launches a real
         -- chance before the breaker can trip again.
         -- Recorded as lifecycle_event kind=relaunch.runaway_tripped.
         -- Implementation: internal/campaign/relaunch.go evaluateRunawayBreaker(),
-        -- queryRunawayMetrics(); infra-reason set in
-        -- internal/db/cloud_instances.go IsInfrastructureTermination /
+        -- queryRunawayMetrics(), tryPlaceOntoExistingInstances(); infra-reason
+        -- set in internal/db/cloud_instances.go IsInfrastructureTermination /
         -- InfrastructureTerminationReasons.
 }
 

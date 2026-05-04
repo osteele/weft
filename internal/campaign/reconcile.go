@@ -792,6 +792,17 @@ const maxProviderStatusUnavailableTime = launchingPhaseTimeout
 // short outbid window does not churn launches.
 const stalePauseTimeout = 6 * time.Hour
 
+// idleAfterReadyTimeout is the maximum time an instance may sit in `running`
+// state with the agent reporting "ready" but never starting a job. The
+// bootstrap-stall watchdog stops applying once bootstrap_stage flips to
+// "ready" (see instance_check.go rule 5); without this check, an agent that
+// reaches ready but fails to drain the queue (R2 read failure, sidecar-only
+// liveness, internal hang) creates a watchdog dead-zone where the heartbeat
+// keeps the instance "alive" indefinitely while doing zero work. The agent's
+// only post-ready job is to pick up queued work, so this window can be
+// short.
+const idleAfterReadyTimeout = 15 * time.Minute
+
 // recordProviderStatusTransition detects when a provider instance's status
 // changes and records the transition in the DB. The DB write is performed
 // outside the lock to avoid holding it during I/O.

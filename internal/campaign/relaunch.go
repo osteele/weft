@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,10 +15,12 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/retrypolicy"
+	"github.com/osteele/weft/internal/runner"
 )
 
 // DefaultMaxCloudAttempts is the default maximum number of cloud launch
@@ -167,6 +170,16 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		BudgetBlocked:      map[int64]bool{},
 		JobReasons:         map[int64]string{},
 	}
+
+	// Reuse pass: place unplaced jobs onto already-running cloud instances
+	// when a compatible host exists. The runaway breaker only gates *new*
+	// instance creation (which is the source of churn the breaker exists to
+	// stop), so this pass runs unconditionally — a tripped breaker must not
+	// strand jobs whose --needs producer is already running on a paid-up
+	// instance. After this pass, `unplaced` retains only jobs that still
+	// require a fresh instance.
+	unplaced = tryPlaceOntoExistingInstances(cfg, unplaced)
+
 	if cfg.RunawayPolicy != nil && cfg.RunawayPolicy.Enabled {
 		if blocked, reason, err := evaluateRunawayBreaker(cfg.Database, cfg, unplaced, time.Now()); err != nil {
 			slog.Warn("runaway breaker evaluation failed", "component", "relaunch", "error", err)
@@ -1377,6 +1390,110 @@ func openRelaunchIntents(database *sql.DB, jobs []*db.Job) []int64 {
 			continue
 		}
 		out = append(out, intent.ID)
+	}
+	return out
+}
+
+// tryPlaceOntoExistingInstances attempts to place each unplaced cloud job
+// onto an already-running cloud instance via ReuseSource scoring. Returns
+// the subset of jobs that could not be placed (those still need a fresh
+// instance). Runs ahead of the runaway-breaker check so that consumers of
+// running producers ride the producer's instance even when the breaker
+// has paused new launches.
+func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job) []*db.Job {
+	if cfg.Database == nil || len(jobs) == 0 {
+		return jobs
+	}
+	if cfg.R2Cfg.Bucket == "" || cfg.R2Cfg.AccessKeyID == "" {
+		return jobs
+	}
+	r2Client, err := r2.New(r2.Config{
+		AccountID:       cfg.R2Cfg.AccountID,
+		AccessKeyID:     cfg.R2Cfg.AccessKeyID,
+		SecretAccessKey: cfg.R2Cfg.SecretAccessKey,
+		Bucket:          cfg.R2Cfg.Bucket,
+	})
+	if err != nil {
+		slog.Debug("reuse pass: r2 client unavailable", "component", "relaunch", "error", err)
+		return jobs
+	}
+
+	sources := []placement.CandidateSource{&ReuseSource{}}
+	remaining := make([]*db.Job, 0, len(jobs))
+	ctx := context.Background()
+	for _, j := range jobs {
+		if j == nil || j.HasTag(db.TagInventory) {
+			remaining = append(remaining, j)
+			continue
+		}
+		if j.LaunchID != nil && *j.LaunchID != 0 {
+			continue // already placed
+		}
+		constraints := placement.ConstraintsFromJob(j)
+		// Bias scoring toward the live instance hosting any --needs producer
+		// so consumers co-locate with their producers (zero-wait estimate
+		// in reuse_source.go). cmd/run.go does this at submit time; the
+		// daemon-side relaunch path needs the same hint.
+		constraints.PreferredInstanceIDs = PreferredInstanceIDsFromNeeds(cfg.Database, j.Needs)
+
+		plan, err := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: constraints,
+			Sources:     sources,
+			Database:    cfg.Database,
+		})
+		if err != nil || plan == nil || plan.Unplaced {
+			remaining = append(remaining, j)
+			continue
+		}
+		pick := plan.Fast
+		if pick == nil {
+			pick = plan.Cheap
+		}
+		if pick == nil || pick.Kind != placement.CandidateCloudReuse || pick.Reuse == nil {
+			remaining = append(remaining, j)
+			continue
+		}
+		instanceID := pick.Reuse.InstanceID
+		if err := SubmitJobsToInstance(ctx, cfg.Database, r2Client, instanceID, []*db.Job{j}); err != nil {
+			slog.Warn("reuse pass submit failed",
+				"component", "relaunch", "job_id", j.ID, "instance", instanceID, "error", err)
+			remaining = append(remaining, j)
+			continue
+		}
+		slog.Info("reuse pass placed job onto existing instance",
+			"component", "relaunch", "job_id", j.ID, "instance", instanceID)
+	}
+	return remaining
+}
+
+// PreferredInstanceIDsFromNeeds returns the set of live rental instance IDs
+// hosting any --needs producer of the consumer job, used as a soft placement
+// tip so consumers co-locate with their producers
+// (see internal/placement.Constraints.PreferredInstanceIDs). Best-effort:
+// skips malformed specs, missing producers, and on-prem producers.
+func PreferredInstanceIDsFromNeeds(database *sql.DB, needs []string) []int64 {
+	if database == nil || len(needs) == 0 {
+		return nil
+	}
+	seen := make(map[int64]bool)
+	var out []int64
+	for _, spec := range needs {
+		parsed, err := runner.ParseNeedsSpec(spec)
+		if err != nil {
+			continue
+		}
+		producer, err := db.GetJobByID(database, parsed.Version)
+		if err != nil || producer == nil {
+			continue
+		}
+		if producer.LaunchID == nil || *producer.LaunchID == 0 {
+			continue
+		}
+		if seen[*producer.LaunchID] {
+			continue
+		}
+		seen[*producer.LaunchID] = true
+		out = append(out, *producer.LaunchID)
 	}
 	return out
 }

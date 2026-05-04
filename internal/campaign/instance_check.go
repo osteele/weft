@@ -20,20 +20,21 @@ import (
 type InstanceActionKind int
 
 const (
-	ActionNone               InstanceActionKind = iota
-	ActionDisplayOnly                           // stall message only, no state change
-	ActionGraceExpired                          // grace deadline passed -> destroy + fail
-	ActionDonorComplete                         // donor ready marker -> destroy + complete
-	ActionTerminationIntent                     // R2 intent -> destroy + mark terminal
-	ActionEmptyStatusTimeout                    // stuck with no provider status -> fail
-	ActionBootstrapStalled                      // no bootstrap progress -> fail
-	ActionBootstrapComplete                     // bootstrap stalled but R2 completion marker found -> complete
-	ActionProviderDead                          // provider says dead (with hysteresis) -> fail/complete
-	ActionSelfDestructFailed                    // jobs terminal, instance lingering -> finalize launch + destroy
-	ActionSetupStalled                          // setup phase unchanged too long -> fail
-	ActionRunningStalled                        // running phase + stale heartbeat too long -> fail
-	ActionPause                                 // provider stopped instance (preempted / account pause) -> launch=paused
-	ActionResume                                // previously paused launch resumed by provider -> launch=running
+	ActionNone                  InstanceActionKind = iota
+	ActionDisplayOnly                              // stall message only, no state change
+	ActionGraceExpired                             // grace deadline passed -> destroy + fail
+	ActionDonorComplete                            // donor ready marker -> destroy + complete
+	ActionTerminationIntent                        // R2 intent -> destroy + mark terminal
+	ActionEmptyStatusTimeout                       // stuck with no provider status -> fail
+	ActionBootstrapStalled                         // no bootstrap progress -> fail
+	ActionBootstrapComplete                        // bootstrap stalled but R2 completion marker found -> complete
+	ActionProviderDead                             // provider says dead (with hysteresis) -> fail/complete
+	ActionSelfDestructFailed                       // jobs terminal, instance lingering -> finalize launch + destroy
+	ActionSetupStalled                             // setup phase unchanged too long -> fail
+	ActionRunningStalled                           // running phase + stale heartbeat too long -> fail
+	ActionIdleAfterReadyTimeout                    // agent reached ready but never started a job -> fail
+	ActionPause                                    // provider stopped instance (preempted / account pause) -> launch=paused
+	ActionResume                                   // previously paused launch resumed by provider -> launch=running
 )
 
 // graceShutdownTimeout is how long after the grace deadline the coordinator
@@ -463,6 +464,24 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
+	// 5a. Idle after agent_ready: ready but no job ever started — see
+	// idleAfterReadyTimeout doc for the watchdog dead-zone this closes.
+	if ci.Status == db.LaunchStatusRunning && ci.AgentReadyAtUnix != nil &&
+		!p.JobState.HasStartedJob && p.InstancePhase == "" {
+		readyAge := p.Now.Sub(time.Unix(*ci.AgentReadyAtUnix, 0))
+		if readyAge >= idleAfterReadyTimeout {
+			return InstanceAction{
+				Kind:              ActionIdleAfterReadyTimeout,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("agent reached ready %s ago but never started a job — terminating instance, jobs reset to queued", readyAge.Truncate(time.Second)),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
+		}
+	}
+
 	// 5b. Setup phase stall: instance in setup/warmup phase for too long.
 	// Running is DB-authoritative via phase reconciliation, so setup checks
 	// only apply when reconciled phase is still setup/warmup.
@@ -838,6 +857,8 @@ func (k InstanceActionKind) String() string {
 		return "setup_stalled"
 	case ActionRunningStalled:
 		return "running_stalled"
+	case ActionIdleAfterReadyTimeout:
+		return "idle_after_ready_timeout"
 	case ActionProviderDead:
 		return "provider_dead"
 	case ActionSelfDestructFailed:
