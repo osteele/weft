@@ -2,15 +2,19 @@ package cloud
 
 // AgentJob describes a job for the campaign manifest, used by weft-agent run-campaign.
 type AgentJob struct {
-	ID         int64           `json:"id"`
-	RunID      int64           `json:"run_id,omitempty"`
-	Command    string          `json:"cmd"`
-	Dir        string          `json:"dir,omitempty"`
-	Tags       []string        `json:"tags,omitempty"`
-	UsesGPU    bool            `json:"uses_gpu,omitempty"`
-	OutputDirs []string        `json:"output_dirs,omitempty"`
-	Produces   []string        `json:"produces,omitempty"`
-	Needs      []string        `json:"needs,omitempty"`
+	ID         int64    `json:"id"`
+	RunID      int64    `json:"run_id,omitempty"`
+	Command    string   `json:"cmd"`
+	Dir        string   `json:"dir,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	UsesGPU    bool     `json:"uses_gpu,omitempty"`
+	OutputDirs []string `json:"output_dirs,omitempty"`
+	Produces   []string `json:"produces,omitempty"`
+	Needs      []string `json:"needs,omitempty"`
+	// Inputs are the declared input refs (e.g. "hf:Qwen/Qwen2.5-7B").
+	// Used by the agent to identify which HF cache entries belong to the
+	// current workload vs. stale assets from prior reuse.
+	Inputs     []string        `json:"inputs,omitempty"`
 	CloudNeeds []CloudNeed     `json:"cloud_needs,omitempty"`
 	CloudAfter []CloudAfterRef `json:"cloud_after,omitempty"`
 	Env        []string        `json:"env,omitempty"`
@@ -48,4 +52,9 @@ type CampaignManifest struct {
 	// them to job processes via WEFT_PROVIDER / WEFT_INSTANCE_TYPE.
 	Provider     string `json:"provider,omitempty"`
 	InstanceType string `json:"instance_type,omitempty"`
+	// RequestedDiskGB is the container disk weft asked the provider to
+	// allocate. The agent probes the actual mounted disk at startup and
+	// fails fast (infra_failure) if the provider silently delivered
+	// substantially less.
+	RequestedDiskGB int `json:"requested_disk_gb,omitempty"`
 }

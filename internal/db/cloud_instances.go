@@ -162,7 +162,7 @@ type Launch struct {
 	ResultsVerified *bool
 
 	// Instance capacity (for reuse matching)
-	DiskGB            int      // Actual disk space from offer (may exceed requested)
+	DiskGB            int      // Container disk allocation requested at create (max of createOpts.DiskGB and group estimate); not the host machine's total disk.
 	ProvisionedInputs []string // Input refs provisioned at launch (e.g., "hf:meta-llama/Llama-3-8B")
 
 	// Offer metadata (captured at launch)

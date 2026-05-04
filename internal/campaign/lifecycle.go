@@ -1320,6 +1320,17 @@ func LaunchInstance(
 
 	ctx := context.Background()
 
+	// The container's disk allocation is what the provider grants on create
+	// (createOpts.DiskGB), bumped up to the group's estimated need if larger.
+	// This is what we record on the launch row — not offer.DiskSpaceGB, which
+	// is the host machine's total disk and unrelated to what this container
+	// actually has. Disk-full diagnostics, relaunch sizing, and offer
+	// re-filtering all need the container value.
+	requestedDiskGB := createOpts.DiskGB
+	if group.DiskGB > 0 && group.DiskGB > requestedDiskGB {
+		requestedDiskGB = group.DiskGB
+	}
+
 	// Create cloud instance record with offer metadata
 	instance := &db.Launch{
 		CampaignID:        campaignID,
@@ -1341,7 +1352,7 @@ func LaunchInstance(
 		CPUCores:          offer.CPUCores,
 		CPUName:           offer.CPUName,
 		RAMGB:             offer.RAMGB,
-		DiskGB:            int(offer.DiskSpaceGB),
+		DiskGB:            requestedDiskGB,
 		ProvisionedInputs: group.AllInputs(),
 		MachineID:         offer.MachineID,
 		InstanceType:      cloud.InstanceTypeOnDemand,
@@ -1477,10 +1488,7 @@ func LaunchInstance(
 		return agentJobs[i].ID < agentJobs[j].ID
 	})
 
-	// Override disk size if the group has a computed estimate
-	if group.DiskGB > 0 && group.DiskGB > createOpts.DiskGB {
-		createOpts.DiskGB = group.DiskGB
-	}
+	createOpts.DiskGB = requestedDiskGB
 	if group.HasPreemptibleJob() {
 		createOpts.InstanceType = cloud.InstanceTypeInterruptible
 	}
@@ -1695,6 +1703,7 @@ func LaunchInstance(
 		CostPerHourCents:    int(offer.CostPerHour * 100),
 		Provider:            string(client.Provider()),
 		InstanceType:        instance.InstanceType,
+		RequestedDiskGB:     requestedDiskGB,
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {

@@ -53,7 +53,7 @@ were omitted.
 |--------|---------|------------|
 | `completed` | All jobs finished successfully | No |
 | `provider_failure` | Provider-side instance termination | Yes |
-| `infra_failure` | Instance never became ready, bootstrap stalled, or provider died | Yes |
+| `infra_failure` | Instance never became ready, bootstrap stalled, provider died, or provider delivered less disk than weft requested (phase `infra-failure:disk-cap`) | Yes |
 | `job_failure` | A job exited with a non-zero code | No |
 | `disk_full` | Ran out of disk space during execution | No |
 | `canceled` | User canceled the instance | No |
@@ -125,14 +125,57 @@ parsing approach instead.
 
 ### 5. Check R2 for agent artifacts
 
-The agent uploads status markers and logs to R2:
+The agent uploads status markers, logs, and per-sample telemetry to R2.
+Per-job telemetry (CPU, RSS, GPU, **disk free/total**, GPU temp) is captured
+on every sample tick and stored on R2; it is not imported into the local
+DB. Fetch it from R2 when you need to investigate a specific run.
+
+**Per-instance keys** (replace `<id>` with the launch ID):
+
+```
+instance/<id>/disk-failure.json     # ENOSPC report (df, top dirs, HF cache)
+instance/<id>/agent-startup.json    # bootstrap context
+instance/<id>/heartbeat             # last-seen timestamp
+instance/<id>/maintenance.json      # provider maintenance signals
+instance/<id>/opslog.jsonl          # agent operations log
+instance/<id>/phase                 # current lifecycle phase
+instance/<id>/termination-intent.json
+```
+
+**Per-job-run keys** (replace `<job>` and `<run>`):
+
+```
+jobs/<job>/runs/<run>/results/<job>.timeseries.jsonl   # per-sample (~5 MB per long run)
+jobs/<job>/runs/<run>/results/<job>.telemetry.jsonl    # finer-grained
+jobs/<job>/runs/<run>/results/<job>.log                # stdout/stderr
+jobs/<job>/runs/<run>/live-log/part-NNNNNN.log         # live tail
+```
+
+**Fetching:**
 
 ```bash
-# List grace-period control files
-rclone ls <r2-remote>:weft-results/grace/<provider_id>/
+# Pretty-print the disk-failure report (when termination_reason=disk_full).
+weft instance disk-report <id>
 
-# Check campaign manifest
-rclone cat <r2-remote>:weft-results/campaigns/<instance_id>/manifest.json
+# Per-job timeseries summary (peak disk used, RSS, GPU mem/util, etc.).
+weft job timeseries <job-id>            # high-water-marks summary
+weft job timeseries <job-id> --raw      # full JSONL stream
+weft job timeseries <job-id> --run <id> # specific attempt
+
+# Stream raw telemetry for a specific job run via rclone if you prefer.
+rclone cat <r2-remote>:weft-results/jobs/<job>/runs/<run>/results/<job>.timeseries.jsonl
+```
+
+The `disk-failure.json` report is the most direct evidence for `disk_full`
+investigations: it includes `df -h` output, top-level directory sizes
+(`huggingface`, `uv_cache`, `workspace`), and a per-asset HF cache inventory.
+Cross-check the recorded `df` total against `launches.disk_gb` to detect
+silent provider-side disk caps.
+
+**List grace-period control files:**
+
+```bash
+rclone ls <r2-remote>:weft-results/grace/<provider_id>/
 ```
 
 ## Common failure patterns
@@ -191,6 +234,38 @@ estimate.
 For setup-heavy jobs, add `--runtime-disk <gb>` for wheel/cache/build headroom
 or `--disk <gb>` for a total rental disk floor. See
 `docs/guides/workflow-guide.md` § "Declaring data dependencies".
+
+Run `weft instance disk-report <id>` to see the agent's snapshot at failure
+(df, top directories, HF cache breakdown). Cross-check the recorded
+`recorded_disk` (what weft requested) against the `df` total — if they
+disagree, the provider silently delivered a smaller disk than requested
+and the failure is closer to `infra_failure` than over-provisioning. New
+instances catch this proactively at boot via the disk-cap probe; pre-fix
+runs need this manual check.
+
+### Provider delivered less disk than requested (`infra_failure:disk-cap`)
+
+At agent startup, weft probes `df` against the disk it asked the provider
+to allocate (recorded as `launches.disk_gb`). If the actual mounted disk
+is below 85% of the request, the agent uploads
+`instance/<id>/disk-cap-failure.json` to R2, marks the instance
+`infra_failure`, and self-destructs immediately rather than running for
+hours and hitting ENOSPC.
+
+This catches Vast.ai (and similar) silently capping `--disk N` requests on
+multi-tenant hosts where another container occupies most of the host disk.
+
+**Action:** Check the disk-cap-failure report:
+
+```bash
+rclone cat <r2-remote>:weft-results/instance/<id>/disk-cap-failure.json
+```
+
+The report shows `requested_disk_gb` vs `actual_total_bytes` and `df -h`.
+If a specific machine repeatedly under-delivers, blacklist it via the
+provider's machine-id allowlist or constrain to offers with more
+host-disk headroom (`--disk` filters offers by `disk_space`, but the
+container slice is a separate negotiation).
 
 ### Bootstrap stalled
 

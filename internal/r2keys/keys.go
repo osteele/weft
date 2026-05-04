@@ -106,6 +106,10 @@ func InstanceDiskFailure(instanceID int64) string {
 	return controlplane.InstanceDiskFailure(instanceID)
 }
 
+func InstanceDiskCapFailure(instanceID int64) string {
+	return controlplane.InstanceDiskCapFailure(instanceID)
+}
+
 func InstanceTerminationIntent(instanceID int64) string {
 	return controlplane.InstanceTerminationIntent(instanceID)
 }

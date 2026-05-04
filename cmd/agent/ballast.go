@@ -251,13 +251,18 @@ func commandOutput(timeout time.Duration, name string, args ...string) (string, 
 }
 
 func terminateInstanceForFailure(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64) {
+	terminateInstanceWithReason(bucket, instanceID, selfDestructCmd, phase, jobID, db.TerminationReasonDiskFull, "")
+}
+
+func terminateInstanceWithReason(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64, reason, lastError string) {
 	marker := &instanceintent.Marker{
 		TerminalStatus:    db.LaunchStatusFailed,
-		TerminationReason: db.TerminationReasonDiskFull,
+		TerminationReason: reason,
 		Phase:             phase,
 		JobID:             jobID,
 		State:             instanceintent.StateOpen,
 		RequestedAtUnix:   time.Now().Unix(),
+		LastError:         lastError,
 	}
 	writeTerminationIntent(bucket, instanceID, *marker)
 	executeSelfDestruct(bucket, instanceID, selfDestructCmd, marker)

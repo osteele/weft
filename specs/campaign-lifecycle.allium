@@ -150,6 +150,13 @@ entity Instance {
     replaced_instance: Instance?        -- failed instance this one replaces
 
     -- Capacity
+    -- disk_gb is the container disk weft requested for this instance
+    -- (max of the per-instance request and the launch group's request),
+    -- NOT the host machine's total disk advertised on the offer. Disk-full
+    -- retry logic and offer re-filtering compare against this requested
+    -- container disk; recording the host machine total here would cause
+    -- consumers to overestimate capacity and retry on equally-undersized
+    -- offers.
     disk_gb: Integer
     provisioned_inputs: List<String>    -- e.g. "hf:meta-llama/Llama-3-8B"
 
@@ -447,7 +454,7 @@ rule LaunchInstance {
         actual_spend_cents: 0,
         instance_role: options.role,
         donor_instance: options.donor,
-        disk_gb: options.offer.disk_gb,
+        disk_gb: options.requested_disk_gb,   -- requested container disk, not offer.disk_gb
         provisioned_inputs: options.inputs,
         grace_period_seconds: options.grace_period_seconds,
         status: planned,
@@ -551,6 +558,96 @@ rule InstanceStartsRunning {
 
     ensures: instance.status = running
     ensures: instance.launched_at = now
+}
+
+-- ==========================================================================
+-- Agent startup probes
+-- ==========================================================================
+--
+-- Before the agent picks up any job from the manifest, it runs two
+-- pre-flight probes against the container's local environment. Both
+-- probes operate on data shipped in the agent startup manifest written
+-- at LaunchInstance step 5 (see BeginLaunching guidance).
+--
+-- The manifest carries:
+--   * requested_disk_gb: the container disk weft asked the provider for
+--     (matches Instance.disk_gb). Zero means "skip the disk-cap probe" —
+--     used by older coordinators and the local backend that don't
+--     populate this field.
+--   * for each job, an `inputs` list of declared asset refs (the union
+--     across all jobs in the manifest is the instance's allowed asset
+--     set).
+--
+-- The probes run in this order on every agent boot, including reuse
+-- bookings on a recycled rental:
+--
+--   1. HFCacheHygiene  — frees disk left by prior tenants.
+--   2. DiskCapProbe    — verifies the provider didn't silently undersize
+--                        the container disk.
+--
+-- Hygiene runs first so its freed space is reflected in the disk-cap
+-- measurement.
+
+rule HFCacheHygiene {
+    when: AgentBoots(instance)
+
+    -- The agent walks ~/.cache/huggingface/hub/ and removes any
+    -- models--* / datasets--* directory whose corresponding asset ref
+    -- (hf:<id> or hf-dataset:<id>) is not present in the union of
+    -- declared inputs across all jobs in the current startup manifest.
+    -- Directories left over from a previous tenant on a reused
+    -- instance are reclaimed; declared inputs (including assets that
+    -- were pre-staged onto the instance) are preserved.
+
+    ensures: for dir in hf_hub_dirs(instance):
+        asset_ref_for(dir) not in manifest_declared_inputs(instance)
+            implies dir.deleted
+
+    @guidance
+        -- Runs unconditionally at agent startup, before any job dispatch
+        -- and before DiskCapProbe. The deletion is best-effort: a
+        -- failure to remove a directory is logged but does not fail the
+        -- agent or the instance. Asset-ref derivation reverses the
+        -- ScanHFCache mapping in inventory-placement.allium
+        -- (models--ns--name -> hf:ns/name, datasets--ns--name ->
+        -- hf-dataset:ns/name). Implementation: cmd/agent (HF cache
+        -- hygiene at boot).
+}
+
+rule DiskCapProbe {
+    when: AgentBoots(instance)
+    requires: manifest.requested_disk_gb > 0   -- skipped on older coordinators
+
+    -- The agent runs `df` on the container disk and compares the total
+    -- capacity to the manifest's requested_disk_gb. If actual total is
+    -- less than 85% of requested, the provider has silently capped the
+    -- disk (observed on Vast.ai). The agent records the failure and
+    -- self-destructs before running any job.
+
+    let actual_gb = container_disk_total_gb(instance)
+    let cap_threshold = manifest.requested_disk_gb * 0.85
+
+    if actual_gb < cap_threshold:
+        ensures: R2DiskCapFailureUploaded(instance)
+            -- written to R2 at instance/<id>/disk-cap-failure.json,
+            -- carrying requested_disk_gb, actual_gb, mount, and a
+            -- short diagnostic trail
+        ensures: instance.status = failed
+        ensures: instance.termination_reason = infra_failure
+        ensures: instance.termination_detail = "infra-failure:disk-cap"
+        ensures: instance.ended_at = now
+        ensures: AgentSelfDestructs(instance)
+
+    @guidance
+        -- Reason is infra_failure (retryable) so RelaunchAfterInfraFailure
+        -- picks the jobs up on a fresh offer. The disk-cap-failure.json
+        -- payload at instance/<id>/disk-cap-failure.json is the source
+        -- for `weft instance disk-report <id>`. The 85% threshold
+        -- tolerates filesystem overhead and reserved blocks while
+        -- catching the "asked for 200GB, got 50GB" class of provider
+        -- bug. Implementation: cmd/agent disk-cap probe;
+        -- internal/cloud/manifest.go CampaignManifest.RequestedDiskGB
+        -- and AgentJob.Inputs are the manifest fields consumed here.
 }
 
 -- ==========================================================================
