@@ -637,6 +637,40 @@ func TestComputeJobState_DeadAndKilledAreTerminal(t *testing.T) {
 	}
 }
 
+// Regression for wi2317: a job canceled at the job level before any
+// execution started must NOT count as "started on instance". Otherwise
+// rule 4a (provider-status-unavailable) and rule 5a (idle-after-ready)
+// silently skip the watchdog and the launch wedges in `running` after
+// the provider has destroyed its container.
+func TestComputeJobState_CanceledBeforeStartIsNotStarted(t *testing.T) {
+	jobs := []*db.Job{{
+		ID:        1733,
+		Status:    db.StatusCanceled,
+		StartTime: 0,
+		EndTime:   nil,
+	}}
+	state := ComputeJobState(jobs, nil)
+	if state.HasStartedJob {
+		t.Fatal("HasStartedJob = true, want false (canceled with no start_time/end_time)")
+	}
+}
+
+// A canceled job that did record a start_time must still count as
+// started — the cancel happened mid-run. Distinguishes this case from
+// the regression above.
+func TestComputeJobState_CanceledAfterStartIsStarted(t *testing.T) {
+	start := time.Now().Add(-5 * time.Minute).Unix()
+	jobs := []*db.Job{{
+		ID:        1733,
+		Status:    db.StatusCanceled,
+		StartTime: start,
+	}}
+	state := ComputeJobState(jobs, nil)
+	if !state.HasStartedJob {
+		t.Fatal("HasStartedJob = false, want true (canceled after start_time was set)")
+	}
+}
+
 func TestCheckInstance_NilCI(t *testing.T) {
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{Now: time.Now()})

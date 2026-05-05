@@ -423,6 +423,41 @@ rule ApplyPendingToRemote {
     ensures: job.latest_attempt.last_synced_status = target_status
 }
 
+-- Stamp the attempt's status and last_synced_status in a single write.
+-- When the new status is terminal (completed, failed, dead, killed,
+-- canceled), end_time is stamped in the same statement if it was not
+-- already set. This preserves the TerminalJobsHaveEndTime invariant
+-- (jobs/job-lifecycle.allium) for ALL terminal transitions, including
+-- the user-cancel path that goes through this writer rather than the
+-- normal RemoteJobCompleted exit-code path.
+rule StampAttemptStatus {
+    when: AttemptStatusUpdateRequested(attempt, new_status)
+
+    ensures: attempt.status = new_status
+    ensures: attempt.last_synced_status = new_status
+    if new_status in {completed, failed, dead, killed, canceled}
+       and (attempt.end_time = null or attempt.end_time = 0):
+        ensures: attempt.end_time = now
+
+    @guidance
+        -- Implementation: internal/db/attempts.go
+        -- UpdateAttemptStatusAndLastSynced. The end_time CASE expression
+        -- ("end_time = CASE WHEN end_time IS NULL OR end_time = 0 THEN ?
+        -- ELSE end_time END") preserves an already-set end_time so the
+        -- recorded execution boundary is not overwritten by the cancel
+        -- timestamp.
+        --
+        -- Regression wi2317 (2026-05): prior to this writer behavior, a
+        -- user-initiated cloud cancel produced status='canceled' with
+        -- end_time=NULL. The reconciler's job-started predicate
+        -- (campaign-lifecycle.allium § Instance.has_started_job) treated
+        -- that row as "still in flight", silencing the
+        -- IdleAfterReadyTimeout (5a) and ProviderStatusUnavailableTimeout
+        -- (4a) watchdogs on the surrounding instance. Both watchdogs are
+        -- gated on `not has_started_job`, and that gate must reflect
+        -- direct execution evidence (start_time / end_time), not status.
+}
+
 -- ==========================================================================
 -- Cloud R2 sync
 -- ==========================================================================

@@ -181,6 +181,19 @@ var versionedMigrations = []migration{
 			return createJobStatusView(db)
 		},
 	},
+	{
+		// Repair historical rows that violate TerminalJobsHaveEndTime
+		// (specs/job-lifecycle.allium). Writers are fixed; this is one-off.
+		Description: "stamp end_time on terminal-status attempts that are missing it",
+		Apply: func(db *sql.DB) error {
+			_, err := db.Exec(`
+				UPDATE job_attempts
+				   SET end_time = COALESCE(start_time, queued_at, strftime('%s','now'))
+				 WHERE (end_time IS NULL OR end_time = 0)
+				   AND status IN ('canceled','failed','dead','killed','completed')`)
+			return err
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

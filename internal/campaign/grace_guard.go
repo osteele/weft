@@ -13,7 +13,7 @@ func hasActiveLaunchJobs(jobs []*db.Job, outcomes map[int64]string) bool {
 		if outcomes != nil {
 			displayStatus = AttemptDisplayStatus(j, outcomes)
 		}
-		if jobStartedOnInstance(j, displayStatus) && !IsJobTerminal(displayStatus) {
+		if jobStartedOnInstance(j) && !IsJobTerminal(displayStatus) {
 			return true
 		}
 	}

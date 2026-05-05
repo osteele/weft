@@ -189,6 +189,19 @@ entity Instance {
     grace_remaining: if grace_deadline != null then grace_deadline - now else null
     bootstrap_origin: provider_running_at ?? launched_at
     pause_tolerant: jobs.any(j => "interruptible" in j.tags)
+    -- True when at least one job on this instance has direct evidence of
+    -- having executed: a non-zero start_time, or an end_time set even
+    -- without a recorded start_time (rare pre-start crash that still
+    -- stamped an end). Status alone is NOT a reliable proxy: a job can
+    -- reach a terminal status (e.g. canceled) at the job level before any
+    -- execution begins — retry budget exhausted, attempt superseded, user
+    -- cancel before bootstrap completed. Treating those as "started"
+    -- silently disables the no-progress watchdogs (IdleAfterReadyTimeout
+    -- and the provider-status-unavailable check) and lets a wedged
+    -- instance burn cost indefinitely. Regression: wi2317 (2026-05).
+    has_started_job: jobs.any(j =>
+        (j.latest_attempt.start_time != null and j.latest_attempt.start_time > 0)
+        or (j.latest_attempt.end_time != null and j.latest_attempt.end_time > 0))
     is_retryable: termination_reason in {provider_failure, infra_failure,
                                           bootstrap_timeout, phase_stall,
                                           preempted, unknown}
@@ -255,6 +268,10 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
+    -- Maximum time the provider's status endpoint may keep returning no
+    -- row (or errors) for an instance we believe is alive before we fail
+    -- closed. See ProviderStatusUnavailableTimeout.
+    provider_status_unavailable_timeout: Duration = 15.minutes
     -- Maximum time an instance may sit with agent_ready_at set but no job
     -- yet started and no phase reported. See IdleAfterReadyTimeout.
     idle_after_ready_timeout: Duration = 15.minutes
@@ -874,7 +891,7 @@ rule IdleAfterReadyTimeout {
     when: instance: Instance.agent_ready_at + config.idle_after_ready_timeout <= now
     requires: instance.status = running
     requires: instance.agent_ready_at != null
-    requires: no job started on instance
+    requires: not instance.has_started_job
     requires: instance.phase = empty
 
     ensures: instance.status = failed
@@ -898,6 +915,37 @@ rule IdleAfterReadyTimeout {
         -- Implementation: internal/campaign/instance_check.go §5a
         -- (ActionIdleAfterReadyTimeout); threshold in
         -- internal/campaign/reconcile.go idleAfterReadyTimeout.
+}
+
+rule ProviderStatusUnavailableTimeout {
+    when: ProviderStatusUnavailable(instance) for >= config.provider_status_unavailable_timeout
+    requires: instance.status in {launching, running}
+    requires: not instance.has_started_job
+                or (instance.status = running
+                    and HeartbeatAge(instance) > config.heartbeat_stale_threshold)
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Watchdog for the case where the provider stops returning a
+        -- status row for an instance we still believe is alive. Without
+        -- direct execution evidence (has_started_job) or a fresh agent
+        -- heartbeat, we have no way to distinguish "agent is fine, the
+        -- provider's list endpoint is stale" from "container is gone".
+        -- Fail closed once the gap exceeds the timeout so jobs reset and
+        -- RelaunchAfterInfraFailure picks them up on a fresh offer.
+        --
+        -- The has_started_job gate must use direct execution evidence
+        -- (start_time / end_time), NOT a status-derived proxy. A job
+        -- canceled at the job level before it ever ran would otherwise
+        -- silence this watchdog, leaving the instance wedged in `running`
+        -- after the provider has destroyed its container (regression
+        -- wi2317).
+        --
+        -- Implementation: internal/campaign/instance_check.go §4a
+        -- (ActionEmptyStatusTimeout); threshold maxProviderStatusUnavailableTime.
 }
 
 rule HeartbeatStale {

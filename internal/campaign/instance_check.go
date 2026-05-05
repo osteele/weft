@@ -81,7 +81,7 @@ func ComputeJobState(jobs []*db.Job, outcomes map[int64]string) JobState {
 	}
 	for _, j := range jobs {
 		displayStatus := AttemptDisplayStatus(j, outcomes)
-		if jobStartedOnInstance(j, displayStatus) {
+		if jobStartedOnInstance(j) {
 			s.HasStartedJob = true
 		}
 		if !IsJobTerminal(displayStatus) {
@@ -109,7 +109,11 @@ func ComputeJobState(jobs []*db.Job, outcomes map[int64]string) JobState {
 	return s
 }
 
-func jobStartedOnInstance(j *db.Job, displayStatus string) bool {
+// jobStartedOnInstance reports whether the job actually executed. Direct
+// evidence only — start_time or end_time. Status is not a proxy: jobs can
+// reach terminal status (e.g. canceled) without ever running, and counting
+// those as "started" silences the no-progress watchdogs (4a/5a).
+func jobStartedOnInstance(j *db.Job) bool {
 	if j == nil {
 		return false
 	}
@@ -119,12 +123,7 @@ func jobStartedOnInstance(j *db.Job, displayStatus string) bool {
 	if j.EndTime != nil && *j.EndTime > 0 {
 		return true
 	}
-	switch displayStatus {
-	case db.StatusQueued, db.StatusDraft:
-		return false
-	default:
-		return true
-	}
+	return false
 }
 
 func (s JobState) TerminalLaunchStatus() (status string, reason string, ok bool) {

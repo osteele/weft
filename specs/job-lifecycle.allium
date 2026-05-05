@@ -943,8 +943,12 @@ rule SyncReconcile {
 -- ==========================================================================
 
 invariant TerminalJobsHaveEndTime {
+    -- Every attempt in a terminal status has end_time set to a positive
+    -- unix timestamp. This applies to ALL terminal statuses including
+    -- canceled — a "terminal but open" row (status=canceled, end_time=NULL)
+    -- is an invariant violation.
     for job in Jobs:
-        if job.status in {completed, failed, dead, killed}:
+        if job.status in {completed, failed, dead, killed, canceled}:
             job.latest_attempt.end_time != null
             job.latest_attempt.end_time > 0
 
@@ -958,6 +962,17 @@ invariant TerminalJobsHaveEndTime {
         -- fixes historical rows. Any code path that writes end_time
         -- must ensure it is either NULL (not yet ended) or a positive
         -- unix timestamp.
+        --
+        -- Regression wi2317 (2026-05): the user-cancel writer
+        -- (UpdateAttemptStatusAndLastSynced in status-sync) wrote
+        -- status='canceled' without stamping end_time. The reconciler
+        -- treated that "terminal but open" attempt as still in flight,
+        -- which silenced rule IdleAfterReadyTimeout and rule
+        -- ProviderStatusUnavailableTimeout (both gated on
+        -- not has_started_job) on the surrounding instance. The fix:
+        -- every writer that transitions an attempt to a terminal status
+        -- MUST stamp end_time in the same statement. See StampAttemptStatus
+        -- in specs/status-sync.allium.
 }
 
 invariant AttemptNumbersAreSequential {

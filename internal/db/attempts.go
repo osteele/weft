@@ -1293,9 +1293,22 @@ func UpdateAttemptLastSyncedStatus(db *sql.DB, jobID int64, status string) error
 	return err
 }
 
-// UpdateAttemptStatusAndLastSynced updates both status and last_synced_status
-// on the latest open attempt.
+// UpdateAttemptStatusAndLastSynced updates status and last_synced_status on
+// the latest open attempt. Terminal transitions also stamp end_time if
+// missing, preserving the TerminalJobsHaveEndTime invariant — see
+// StampAttemptStatus in specs/status-sync.allium.
 func UpdateAttemptStatusAndLastSynced(execer dbExecer, jobID int64, status string) error {
+	if IsTerminalStatus(status) {
+		now := time.Now().Unix()
+		_, err := execer.Exec(`
+			UPDATE job_attempts
+			SET status = ?, last_synced_status = ?,
+			    end_time = CASE WHEN end_time IS NULL OR end_time = 0 THEN ? ELSE end_time END
+			WHERE id = `+latestOpenAttemptSubquery,
+			status, status, now, jobID,
+		)
+		return err
+	}
 	_, err := execer.Exec(`
 		UPDATE job_attempts SET status = ?, last_synced_status = ?
 		WHERE id = `+latestOpenAttemptSubquery,
