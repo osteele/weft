@@ -1,61 +1,98 @@
 # Comparison to SLURM
 
-This document compares `weft` to SLURM (Simple Linux Utility for Resource Management), a widely-used HPC cluster workload manager.
+This document compares `weft` to SLURM (Simple Linux Utility for Resource
+Management), a widely used HPC cluster workload manager.
 
 ## TL;DR
 
-**weft** is designed for individual researchers managing jobs on a few personal machines from a laptop. **SLURM** is designed for shared HPC clusters with multiple users, centralized resource management, and complex job dependencies.
+**weft** is designed for researchers who run jobs across a mix of unmanaged lab
+machines and short-term rentals from heterogeneous, failure-prone GPU markets
+such as Vast.ai and RunPod. It treats SSH reachability, laptop disconnection,
+cloud bootstrap failures, preemptions, stale rentals, and uneven machine quality
+as normal operating conditions.
+
+**SLURM** is designed for centrally administered HPC clusters with managed
+nodes, a persistent controller, shared policy, multi-user accounting, and strong
+resource enforcement.
 
 Use **weft** when:
-- You have a few personal machines (like titan, atlas, studio)
-- You SSH from a laptop that sleeps/travels
-- You want simple job tracking without cluster infrastructure
-- You need jobs to keep running when your laptop is off
+
+- Your capacity is a changing mix of lab machines, borrowed cluster boxes, and
+  temporary rental GPUs
+- Machines are not uniformly administered and may only share SSH access, a
+  project checkout, and a few conventions
+- You want placement across known hosts, existing cloud instances, and new
+  rentals
+- You need data-locality-aware placement, runtime estimates, rental setup-cost
+  estimates, and survival-risk-adjusted cloud offer selection
+- You want jobs to keep running when your laptop sleeps, VPN drops, or the
+  coordinator is temporarily unreachable
+- You need automatic relaunch, stall detection, and runaway protection for
+  unreliable rental instances
 
 Use **SLURM** when:
-- Shared cluster with multiple users
-- Need automatic resource allocation across many nodes
-- Want job arrays for parameter sweeps
-- Need accounting/quotas
-- Jobs span multiple nodes (MPI)
 
-**Hybrid**: weft has an experimental SLURM backend that can act as a frontend for SLURM clusters, though this has not been tested recently.
+- You operate or use a shared managed cluster
+- You need enforced CPU, memory, GPU, and wall-time reservations
+- You need job arrays, partitions, QoS, fairshare, accounting, or quotas
+- Jobs span multiple nodes with MPI or other tightly coupled distributed runtime
+- The cluster has administrators who can maintain controllers, node daemons,
+  shared storage, and policy
+
+**Hybrid**: weft has an experimental SLURM backend that can act as a frontend for
+SLURM clusters, though this path has not been tested recently. In that mode,
+SLURM remains the real scheduler and weft adds its job tracking and workflow
+surface above it.
 
 ## Architecture Comparison
 
 ### Fundamental Design
 
 | Aspect | weft | SLURM |
-|--------|-------------|-------|
-| **Architecture** | Decentralized, SSH-based | Centralized cluster management |
-| **Controller** | Autonomous queue runner per host | `slurmctld` daemon + `slurmd` on each node |
-| **Database** | SQLite on client laptop | Cluster-wide state database |
-| **Communication** | Pull model: client queries hosts | Push model: nodes report to controller |
-| **Client Requirements** | SSH access only | Must connect to cluster network |
-| **Daemon Installation** | None (queue runner auto-deployed) | Requires daemons on all nodes |
-| **SLURM Integration** | Optional: can submit via sbatch | N/A |
+|--------|------|-------|
+| **Architecture** | Federated SSH/coordinator model for unmanaged hosts and cloud rentals | Centralized cluster management |
+| **Capacity model** | Inventory hosts, existing cloud instances, and new rental offers | Fixed managed nodes grouped into partitions |
+| **Controller** | Optional coordinator plus CLI fallback; edge runners/agents keep jobs moving | `slurmctld` controller plus `slurmd` on each node |
+| **Database** | SQLite on the client/coordinator, remote queue state, and cloud live-state markers | Cluster-wide controller/accounting state |
+| **Communication** | SSH, provider APIs, and R2/live-state sync where needed | Nodes continuously report to controller |
+| **Failure model** | Unreliable hosts and rentals are expected; retry, relaunch, survival scoring, and deferred operations are part of the workflow | Nodes are managed by the cluster; failures are handled inside an administrative domain |
+| **Client requirements** | SSH/provider credentials; coordinator is useful but optional | Access to the SLURM login/controller network |
+| **Daemon installation** | Queue runner or agent is deployed as needed per host/instance | Daemons must be installed and configured on all nodes |
+| **Resource enforcement** | Cooperative placement and queue-runner concurrency; no cgroup reservation | Scheduler-enforced CPU, GPU, memory, and wall-time limits |
+| **SLURM integration** | Optional `sbatch`/`squeue`/`scancel` backend | Native |
 
-### Key Architectural Difference: Occasionally-Connected Operation
+### Key Architectural Difference: Hybrid Edge/Cloud Operation
 
-The fundamental difference is where job execution authority lives:
+The core difference is where authority and failure recovery live.
 
-**weft** — Queue runner lives on each remote host:
-```
-Laptop (may disconnect)
+**weft** keeps execution authority near the machines that run the jobs:
+
+```text
+Laptop CLI/TUI
    │
-   ├──SSH──> Host 1: queue-runner (autonomous) → tmux sessions
-   ├──SSH──> Host 2: queue-runner (autonomous) → tmux sessions
-   └──SSH──> Host 3: queue-runner (autonomous) → tmux sessions
+   ├──intent──> Coordinator (when reachable)
+   │              ├── scores lab hosts
+   │              ├── reuses existing rentals
+   │              ├── launches Vast.ai/RunPod rentals
+   │              └── records placement reasons
+   │
+   └──fallback──> Direct SSH placement/dispatch
 
-When laptop disconnects:
-   - Queue runners continue processing jobs independently
-   - Jobs complete, new queued jobs start automatically
-   - Dependencies are resolved on-host without the laptop
-   - Laptop syncs state when it reconnects
+Lab host or rental instance
+   ├── queue runner / weft agent
+   ├── tmux or agent-managed job process
+   ├── local logs and status
+   └── cloud live-state / result sync when applicable
 ```
 
-**SLURM** — Centralized controller manages all nodes:
-```
+When the laptop or coordinator disconnects, already-dispatched jobs keep
+running. Deferred operations replay when contact returns. Rental launches can be
+watched, diagnosed, retried, and replaced without assuming the original instance
+will survive.
+
+**SLURM** centralizes scheduling in the cluster controller:
+
+```text
                     ┌─ Node 1 (slurmd) ─┐
 slurmctld ◄────────►│  Node 2 (slurmd)  │◄──── constant communication
 (controller)        │  Node 3 (slurmd)  │
@@ -63,124 +100,186 @@ slurmctld ◄────────►│  Node 2 (slurmd)  │◄────
         ▲
         │
    Login Node (sbatch, squeue, scancel)
-        │
-   Must be reachable to submit/monitor jobs
 ```
 
-**Why this matters:**
-
-- **weft**: Your laptop can sleep, lose network, or be off entirely. The remote queue runners are self-sufficient — they read from the queue file, resolve dependencies, start jobs, handle completions, and log everything locally. When you reconnect, your laptop just syncs state.
-
-- **SLURM**: The controller (`slurmctld`) must be reachable for job submission (`sbatch`), status queries (`squeue`), and cancellation (`scancel`). The controller is the single source of truth and orchestrates all job scheduling.
+SLURM is stronger when a managed cluster exists: the controller owns global
+policy, resource reservation, accounting, fairshare, partitions, and node state.
+weft is stronger when the "cluster" is a changing set of machines that were not
+designed to be one administered system.
 
 ## Feature Comparison
 
-### 1. Resource Management
+### 1. Resource and Placement Model
 
 **weft:**
-- GPU constraint flags: `--gpu`, `--gpu-class`, `--gpu-mem` for declaring requirements
-- Automatic placement scoring when host is omitted: Monte Carlo simulation over queue wait + runtime prediction, data locality (`--input hf:<model>`), and queue depth
-- Per-job CPU allotments control concurrency (queue runner keeps total CPU under a target cap)
-- `exclusive` tag for jobs needing sole access to a host's resources
-- `benchmark` tag waits for system-wide idle (CPU, RAM, GPU, VRAM below thresholds)
+
+- Jobs may omit a host; the coordinator or local fallback scores eligible
+  inventory hosts, existing cloud instances, and possible new rental instances
+- Placement uses GPU constraints (`--gpu`, `--gpu-class`, `--gpu-mem`), CPU
+  allotment, queue depth, live utilization, data locality, transfer estimates,
+  setup cost, and runtime prediction
+- Reserved tags steer placement: `rental`, `inventory`, `provider:<name>`,
+  `interruptible`, `compute-intensive`, `exclusive`, and `benchmark`
+- Data-locality inputs such as `--input hf:<model>` reward hosts that already
+  have the model cached and can trigger pre-staging before dispatch
+- `exclusive` and `benchmark` cover isolation cases on unmanaged machines, but
+  they are cooperative conventions rather than enforced reservations
 
 **SLURM:**
+
 ```bash
 sbatch --gres=gpu:a100:2 --mem=64G --cpus-per-task=16 job.sh
 ```
-- Automatic allocation based on declared requirements
-- Tracks available resources across the entire cluster
-- Queues jobs until matching resources are available
-- GPU/CPU/memory reservation with cgroups enforcement
 
-### 2. Scheduling
+- Allocates managed cluster resources from declared requirements
+- Tracks node, CPU, GPU, memory, and partition state centrally
+- Enforces reservations with scheduler policy and cgroups
+- Queues work until matching resources are available
+
+### 2. Cloud Offer Selection and Survival Estimation
 
 **weft:**
-- FIFO queue per host with concurrent job execution
-- CPU allotment system: each job declares expected CPU usage; the runner starts multiple jobs until the host utilization target is reached
-- Learned CPU history (exponential moving average) for accurate allotment estimates
-- `exclusive` and `benchmark` tags for isolation when needed
-- No priority system, fairshare, or backfill scheduling
+
+- Directly provisions Vast.ai and RunPod instances for jobs that should spill to
+  rental capacity
+- Compares local queue wait against cloud setup time, data transfer time, rental
+  rate, and predicted runtime
+- Uses a Beta-Binomial survival model for cloud offers, grouped by provider/GPU
+  family/price bucket with provider reliability and global backstops
+- Applies machine-level penalties when provider metadata exposes a physical
+  machine identifier with enough history
+- Rejects offers below a configurable survival floor by default and exposes
+  `weft campaign survival` for inspection
+- Models expected rental cost under retries, not just nominal hourly price
+- Detects bootstrap/setup stalls from historical duration distributions and can
+  relaunch orphaned jobs on replacement instances
 
 **SLURM:**
-- Sophisticated scheduling algorithms
-- Priority queues with configurable weights
-- Fairshare policies (ensure equitable resource distribution)
-- Backfill scheduling (runs small jobs while waiting for large job resources)
-- QoS (Quality of Service) with limits and priorities
 
-### 3. Multi-Host Jobs
+- Does not select public marketplace offers
+- Does not model rental survival probability or machine-specific marketplace
+  reliability
+- Cloud bursting is possible through separate products or site-specific
+  integrations, but it is outside core SLURM behavior
+
+### 3. Scheduling and Autopilot
 
 **weft:**
-- Each job runs on exactly one host
-- No way to span multiple machines
+
+- Per-host queue runners start jobs cooperatively based on FIFO order, CPU
+  allotment, and isolation tags
+- Autopilot can place unplaced jobs, launch cloud instances, reuse existing
+  rentals, relaunch orphans, and rebalance queued work between rentals
+- A singleton autopilot state prevents multiple TUI/CLI runners from racing
+- Pause/resume and blocked-state commands make unattended automation explicit
+- A runaway breaker pauses repeated relaunch failures for a scope instead of
+  churning through rental attempts
+- No fairshare, QoS, priority weights, or backfill scheduler
+
+**SLURM:**
+
+- Mature centralized scheduling with priority policies, fairshare, QoS, backfill,
+  reservations, limits, and partitions
+- Better fit for shared cluster governance and predictable resource policy
+- Does not natively manage ad hoc rental lifecycle or laptop-disconnected edge
+  queues
+
+### 4. Failure Recovery and Lifecycle Management
+
+**weft:**
+
+- Cloud launch records track provider, offer, instance, interruptible/preemptible
+  status, relaunch chains, termination reasons, and live bootstrap state
+- `weft instance watch` and autopilot can keep instances alive for debugging,
+  relaunch replacement instances, and reconnect orphaned jobs
+- Bootstrap phases, setup stalls, agent readiness, and cloud live state are shown
+  in the TUI and stored for later analysis
+- Deferred kill, move, and queue edits can replay when hosts return
+- Job moves include safeguards so autopilot does not place a job while a move is
+  in progress
+
+**SLURM:**
+
+- Handles managed node drain/down/requeue workflows inside the cluster
+- Provides strong admin tools for node health, reservations, and job requeue
+  policy
+- Assumes the cluster owns the machines; it is not designed around replacing
+  unreliable marketplace instances per job campaign
+
+### 5. Multi-Host Jobs
+
+**weft:**
+
+- Each job runs on exactly one host or cloud instance
 - No MPI integration
+- No topology-aware multi-node allocation
 
 **SLURM:**
+
 ```bash
 sbatch --nodes=4 --ntasks-per-node=8 mpi_job.sh
 ```
-- Allocate jobs across multiple nodes
-- Integrated with MPI, OpenMPI
-- Network topology awareness
-- InfiniBand support
 
-### 4. Job Dependencies & Workflows
+- Allocates jobs across multiple nodes
+- Integrates with MPI/OpenMPI and cluster interconnects
+- Can account for partitions, reservations, topology, and node constraints
+
+### 6. Job Dependencies and Workflows
 
 **weft:**
+
 ```bash
 # Run after job 42 completes successfully
-weft run --after 42 titan 'python analyze.py'
+weft run --after 42 'python analyze.py'
 
 # Run regardless of job 42's exit code
-weft run --after-any 42 titan 'python cleanup.py'
+weft run --after-any 42 'python cleanup.py'
 
 # YAML plans for multi-job workflows
 weft plan run workflow.yaml
 ```
-- `--after` (success required) and `--after-any` (any completion) dependency flags
-- YAML plan files with `parallel` and `series` blocks for multi-job workflows
-- Dependencies resolved on-host by the queue runner (no laptop needed)
-- No job arrays
+
+- `--after` and `--after-any` dependency flags
+- YAML plan files with `parallel` and `series` blocks
+- Rental dependencies act as placement gates; downstream jobs wait before cloud
+  selection
+- No native job arrays
 
 **SLURM:**
+
 ```bash
-# Job 2 runs after job 1 completes successfully
 sbatch --dependency=afterok:12345 job2.sh
-
-# Job arrays for parameter sweeps (100 jobs, max 10 concurrent)
 sbatch --array=1-100%10 sweep.sh
-
-# Complex dependency graphs
-sbatch --dependency=afterok:12345:12346,afterany:12347 job.sh
 ```
-- Complex dependency graphs with multiple dependency types
-- Job arrays for parameter sweeps
-- Workflow management (singleton, afternotok, etc.)
 
-### 5. Multi-User Support & Accounting
+- Rich dependency types
+- Job arrays for parameter sweeps
+- Mature ecosystem integration with workflow managers
+
+### 7. Multi-User Support and Accounting
 
 **weft:**
-- Single user
-- No resource limits or quotas
-- No accounting
-- No isolation between users
+
+- Optimized for one researcher or a small trusted lab workflow
+- No fairshare, quotas, account hierarchy, chargeback, or user isolation
+- Shared-host flags can avoid placing jobs on multi-tenant machines, but this is
+  not a substitute for cluster policy
 
 **SLURM:**
-- Multi-user with cgroups isolation
-- Per-user/group quotas
-- Detailed accounting (CPU hours, GPU hours, billing)
-- `sacct` for usage reports
-- Fair-share scheduling ensures equitable access
-- Association-based limits (users, groups, accounts)
 
-### 6. Job Control
+- Multi-user accounting with `sacct`
+- Fairshare and association-based limits
+- Per-user/group/account quotas
+- Enforced isolation and cluster governance
+
+### 8. Job Control
 
 | Feature | weft | SLURM |
-|---------|-------------|-------|
-| **Submit job** | `weft run <host> <cmd>` | `sbatch script.sh` |
-| **Queue job** | `weft queue add <host> <cmd>` | `sbatch script.sh` |
-| **Interactive job** | `ssh <host>` | `srun --pty bash` |
+|---------|------|-------|
+| **Submit job** | `weft run <cmd>` or `weft run <host> <cmd>` | `sbatch script.sh` |
+| **Automatic placement** | Omit host; coordinator/fallback scores targets | Scheduler allocates nodes from requested resources |
+| **Force rental** | `weft run --tag rental --gpu a100 <cmd>` | Site-specific cloud integration |
+| **Interactive work** | `ssh <host>` or connect to instance | `srun --pty bash` |
 | **Job array** | Not supported | `--array=1-100` |
 | **Kill job** | `weft kill <id>` | `scancel <jobid>` |
 | **Pause/resume** | `weft pause/resume <id>` | `scontrol hold/release` |
@@ -188,177 +287,206 @@ sbatch --dependency=afterok:12345:12346,afterany:12347 job.sh
 | **Job history** | `weft job list` | `sacct` |
 | **Dependencies** | `--after <id>`, `--after-any <id>` | `--dependency=afterok:<id>` |
 | **Modify queued job** | `weft queue edit <id>` | `scontrol update job` |
+| **Move queued job** | `weft job move <id> <target>` | Requeue/update within scheduler policy |
 | **Reorder queue** | `weft queue front <id>` | Priority/QoS |
-| **Job plans** | `weft plan run <file>` | Not built-in (workflow managers) |
+| **Job plans** | `weft plan run <file>` | External workflow managers |
+| **Cloud lifecycle** | `weft instance launch/watch/status/ssh` | Outside core SLURM |
+| **Autopilot** | `weft autopilot run/status/pause/blocked` | Scheduler policy, not rental lifecycle automation |
 
-### 7. Resource Visibility
+### 9. Resource Visibility
 
 **weft:**
-- TUI with split-screen job list and detail pane
-- Web UI for browser-based monitoring (`weft web`)
+
+- Grouped TUI for jobs, unplaced work, launching instances, running jobs, and
+  completions
+- Web dashboard for cluster view, coordinator status, GPU utilization, placement
+  decisions, and job details
 - Real-time CPU/GPU stats for running jobs
-- Progress tracking (parses `Progress: N%` or `Progress: N/M` from logs)
-- Per-job resource usage sampling
-- Host info and load commands
-- AI-generated job descriptions (via ollama)
+- Progress tracking from job logs (`Progress: N%`, `Progress: N/M`, tqdm-style
+  output, and related formats)
+- Per-job resource sampling, cloud launch state, bootstrap state, relaunch
+  history, and placement reasons
+- AI-generated job descriptions and failure diagnostics where configured
 
 **SLURM:**
-```bash
-sinfo              # Cluster-wide resource view
-squeue             # All queued/running jobs
-sstat <jobid>      # Real-time resource usage
-sacct <jobid>      # Historical resource usage
-```
-- Unified cluster view
-- Real-time resource tracking
-- Historical usage analysis
 
-### 8. Environment & Modules
+```bash
+sinfo
+squeue
+sstat <jobid>
+sacct <jobid>
+```
+
+- Unified cluster-wide resource view
+- Real-time and historical resource tracking
+- Mature accounting and reporting for managed clusters
+
+### 10. Environment and Modules
 
 **weft:**
-- User manages environment setup
-- Command runs in user's shell
-- Environment variables can be passed per job
-- No module system integration
+
+- Commands run in the user's shell on the selected machine or in the cloud
+  bootstrap environment
+- Environment variables and working directories can be specified per job
+- Project sync, declared inputs, artifact needs, and bootstrap scripts handle much
+  of the cross-machine setup burden
+- No cluster module system or enforced environment policy
 
 **SLURM:**
-- Integrated with environment modules
-- `#SBATCH --export=ALL` controls environment
-- Can load specific module versions
-- Reproducible environments
 
-### 9. SLURM Backend
+- Commonly integrated with environment modules
+- `#SBATCH --export=ALL` and site policy control environment propagation
+- Better fit for centrally maintained software stacks
 
-weft includes an experimental SLURM backend that can submit jobs to SLURM clusters:
+### 11. SLURM Backend
+
+weft includes an experimental SLURM backend:
 
 ```bash
-# If the remote host has SLURM, weft automatically uses sbatch
+# If the remote host has SLURM, weft can submit through sbatch
 weft run slurm-host 'python train.py'
 ```
 
-- Auto-detects SLURM availability on remote hosts
-- Submits via `sbatch`, tracks via `squeue`/`sacct`, cancels via `scancel`
-- Maps SLURM states to weft status codes
-- Provides the same offline queueing and TUI on top of SLURM infrastructure
+- Detects SLURM availability on remote hosts
+- Submits via `sbatch`, tracks via `squeue`/`sacct`, and cancels via `scancel`
+- Maps SLURM states into weft status codes
+- Can provide weft's job tracking and UI surface above a SLURM cluster
 
-> **Note**: The SLURM backend has not been tested recently and may need updates. The core SSH/tmux-based queue system is the primary and well-tested path.
-
-This means weft is not strictly an alternative to SLURM — it can also be a more ergonomic frontend for it.
+> **Note**: The SLURM backend has not been tested recently and may need updates.
+> The SSH/tmux/agent path and cloud-rental path are the primary weft workflows.
 
 ## What weft Does Better
 
-### 1. Works from Disconnected Laptop
+### 1. Works Across Unmanaged and Rental Capacity
 
 **weft:**
-- Queue jobs while laptop is on Wi-Fi
-- Jobs continue running when laptop sleeps
-- Dependencies resolve on-host without the laptop
-- Check status when laptop wakes up
-- Offline log cache for viewing completed job output without SSH
+
+- Handles lab machines that were not installed as one managed cluster
+- Treats rental GPUs as disposable capacity that may fail during provisioning,
+  setup, or execution
+- Can choose among inventory hosts, active cloud instances, and fresh rental
+  offers for the same job
+- Keeps enough metadata to explain placement, relaunch, and survival decisions
 
 **SLURM:**
-- Requires connection to cluster network
-- Can't submit jobs when disconnected
-- Typically requires VPN for remote access
 
-### 2. Zero Infrastructure Setup
+- Best when the machines are administered as one cluster
+- Does not natively reason about public marketplace offer quality or per-machine
+  rental survival
+
+### 2. Works from a Disconnected Laptop
 
 **weft:**
-- Install single binary on laptop
-- Just needs SSH keys
-- Queue runner script auto-deployed to remote hosts
-- Works with any Linux/macOS machine you have SSH access to
+
+- Queue jobs while on intermittent Wi-Fi or VPN
+- Jobs continue running when the laptop sleeps
+- Dependencies and queue execution continue at the edge after dispatch
+- Status, logs, and deferred operations sync when connectivity returns
 
 **SLURM:**
-- Install and configure `slurmctld` (controller)
-- Install `slurmd` on every compute node
-- Configure shared filesystem (typically NFS)
-- Set up accounting database
-- Configure network, partitions, etc.
 
-### 3. Offline Queueing
+- Submission and control require access to the SLURM cluster
+- Login/controller access is usually gated by VPN or cluster network policy
+
+### 3. Zero Cluster Infrastructure
 
 **weft:**
+
+- Install one CLI binary locally
+- Use SSH keys and provider credentials
+- Deploys queue runners/agents as needed
+- Works on ordinary Linux/macOS machines with minimal assumptions
+
+**SLURM:**
+
+- Requires controller and node daemon installation
+- Usually needs shared storage, accounting, partitions, limits, and cluster
+  administration
+
+### 4. Risk-Aware Cloud Bursting
+
+**weft:**
+
 ```bash
-# Host is unreachable right now — no problem
-weft run titan 'python train.py'
-# Job recorded locally, synced when host comes back
-```
-- All operations (run, kill, queue edits) work offline
-- Deferred operations replay automatically on reconnect
-
-**SLURM:**
-- Controller must be reachable to submit jobs
-- Nodes must be online (or in known state)
-
-### 4. Simplicity
-
-**weft:**
-- Simple mental model: SSH + tmux + SQLite
-- Easy to debug (SSH to host, check queue files)
-- Minimal abstraction
-- Perfect for 2-5 machines
-
-**SLURM:**
-- Complex configuration
-- Many moving parts (controller, daemons, accounting DB)
-- Harder to debug
-- Overkill for small setups
-
-### 5. Personal Workflow Features
-
-**weft:**
-- TUI and web UI optimized for personal job tracking
-- Slack notifications to your personal workspace
-- AI-generated job descriptions
-- Progress bar parsing from job output
-- Job plans (YAML) for orchestrating multi-step workflows
-- Pause/resume running jobs
-
-**SLURM:**
-- Designed for shared clusters
-- Multi-user features add complexity
-- Centralized job history
-- No built-in progress parsing or AI features
-
-### 10. Cloud GPU Bursting
-
-**weft:**
-```bash
-# Launch cloud instances for jobs that can't run locally
+weft run --tag rental --gpu a100 'python train.py'
 weft instance launch
 weft instance watch <id>
+weft campaign survival
 ```
-- Provisions Vast.ai/RunPod instances when local capacity is insufficient
-- Cost-aware placement: compares queue wait on local hosts vs. setup + rental cost on cloud
-- Grace period: failed cloud jobs keep the instance alive for resubmission or debugging
-- Disk estimation from declared `--input hf:<model>` dependencies
-- Per-model download time factored into placement scoring
+
+- Provisions Vast.ai/RunPod instances when local capacity is insufficient or too
+  slow
+- Scores offers by expected completion and cost under setup, transfer, runtime,
+  and survival risk
+- Suppresses low-survival offers by default
+- Automatically relaunches jobs after infrastructure failures within configured
+  guardrails
 
 **SLURM:**
-- Manages fixed clusters only; no built-in cloud burst support
-- Third-party integrations (e.g., Elastic SLURM on AWS) exist but are operationally heavy
+
+- Can be paired with external cloud-bursting systems, but this is an operational
+  layer around SLURM rather than core scheduler behavior
+
+### 5. Personal Research Workflow Features
+
+**weft:**
+
+- TUI and web UI optimized for one researcher's active queue
+- Job log progress parsing
+- Slack notifications to a personal workspace
+- YAML job plans for small workflows
+- Per-job notes, descriptions, tags, and local history
+
+**SLURM:**
+
+- Designed for shared cluster policy and accounting
+- Relies on external tools for many personal workflow features
 
 ## Remaining Gaps
 
-Features SLURM has that weft does not yet support:
+Features SLURM has that weft does not support or does not attempt to replace:
 
 ### Job Arrays
 
 ```bash
-# SLURM: Submit 100 jobs for hyperparameter sweep
 sbatch --array=1-100%10 sweep.sh
 ```
 
-weft has no equivalent. Parameter sweeps currently require submitting individual jobs or using YAML plan files with explicit entries.
+weft has no native equivalent. Parameter sweeps currently require submitting
+individual jobs, using scripts, or writing YAML plan files with explicit entries.
+
+### Enforced Resource Isolation
+
+weft's placement and concurrency controls are cooperative. SLURM can enforce CPU,
+GPU, memory, wall-time, and account limits through scheduler policy and cgroups.
+
+### Multi-Node and MPI Workloads
+
+weft places one job on one host or instance. SLURM is the right tool for
+multi-node jobs, MPI, topology-aware allocation, and tightly coupled distributed
+runtime.
+
+### Shared-Cluster Governance
+
+weft does not provide fairshare, QoS, quotas, chargeback, account hierarchies, or
+cluster-wide administrative policy. SLURM's complexity buys real capability here.
 
 ## Conclusion
 
-**weft** and **SLURM** serve different use cases:
+`weft` and SLURM serve different centers of gravity:
 
-- **weft**: Personal job management, works from laptop, zero infrastructure, experimental SLURM backend
-- **SLURM**: Enterprise HPC, shared resources, multi-user accounting, multi-node jobs
+- **weft**: Hybrid personal/lab/cloud job management across unmanaged machines
+  and unreliable short-term rentals, with placement, survival estimation,
+  relaunch, and disconnected operation built in
+- **SLURM**: Managed multi-user HPC scheduling with strong policy, accounting,
+  resource enforcement, and multi-node support
 
-For individual researchers with a few machines, `weft` provides job dependencies, concurrent scheduling, progress tracking, and a TUI/web interface — all with much lower complexity than SLURM. For large shared clusters, SLURM's centralized architecture and multi-user features are essential.
+For researchers stitching together lab machines and opportunistic rental GPUs,
+weft provides a practical scheduler and control surface without turning those
+machines into a formal cluster. For a centrally managed shared cluster, SLURM's
+controller, policy, and enforcement model are the right foundation.
 
-When a SLURM cluster is available, weft can in principle sit on top of it via its experimental SLURM backend, adding offline queueing and its own monitoring interface while delegating actual scheduling to SLURM. This backend has not been tested recently and may need updates.
+When a SLURM cluster is available, weft can in principle sit above it via the
+experimental backend, adding its tracking and UI while delegating scheduling to
+SLURM. That backend should be treated as secondary until it is refreshed and
+tested again.

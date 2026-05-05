@@ -10,12 +10,6 @@ import (
 	jobdb "github.com/osteele/weft/internal/db"
 )
 
-// providerStatusUnavailableDetailPrefix matches termination_detail rows
-// produced by the retired rule 4a watchdog (see
-// internal/campaign/instance_check.go). Used to exclude those false-kill
-// outcomes from the survival model — see LoadInstanceOutcomes.
-const providerStatusUnavailableDetailPrefix = "provider status unavailable"
-
 // InstanceOutcome holds the data needed to build the survival model from one instance.
 type InstanceOutcome struct {
 	Provider          cloud.Provider
@@ -33,15 +27,6 @@ type InstanceOutcome struct {
 // Rows missing a provider are skipped because survival statistics must be
 // scoped per-provider (RunPod and Vast have different reliability baselines).
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
-	// Exclude false-kill outcomes from the survival model. The
-	// "provider status unavailable" termination_detail was produced by
-	// rule 4a (now retired) when an instance was missing from Vast's
-	// batch list — a signal we now know was unreliable enough to kill
-	// healthy rentals during transient API gaps. Counting those as
-	// failures poisons the per-machine/region/provider Beta priors.
-	// New stale-agent kills go through ActionEmptyStatusTimeout with
-	// a different termination_detail ("agent heartbeat stale ..."), so
-	// they still count.
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
 		       COALESCE(machine_id, ''), COALESCE(ended_at, 0), COALESCE(gpu_mem_gb, 0),
@@ -57,9 +42,8 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		  AND provider_instance_id != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
-		  AND COALESCE(termination_detail, '') NOT LIKE ?
 		ORDER BY id
-	`, jobdb.TerminationReasonCancelled, providerStatusUnavailableDetailPrefix+"%")
+	`, jobdb.TerminationReasonCancelled)
 	if err != nil {
 		return nil, err
 	}
