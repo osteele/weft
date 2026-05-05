@@ -113,6 +113,26 @@ lint:
 # Check: format, lint, test
 check: format lint test
 
+# Build and push the cloud bootstrap base image (rclone+uv+apt deps pre-baked)
+# to ghcr.io. Requires Docker daemon running and `docker login ghcr.io` for
+# the push. Tag defaults to the current jj commit short hash plus :latest.
+build-cloud-base-image tag="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! docker version --format '{{{{.Server.Version}}}}' >/dev/null 2>&1; then
+        echo "Docker daemon not reachable. Start Docker Desktop and retry." >&2
+        exit 1
+    fi
+    IMAGE="ghcr.io/osteele/weft-cloud-base:{{ tag }}"
+    echo "==> Building $IMAGE for linux/amd64..."
+    docker buildx build --platform linux/amd64 --push \
+        -t "$IMAGE" \
+        -f deploy/cloud-base.Dockerfile .
+    echo "==> Pushed $IMAGE"
+    echo
+    echo "Set [vastai] default_image in ~/.config/weft/config.toml to use it:"
+    echo "    default_image = \"$IMAGE\""
+
 # Build agent binaries into internal/agentdeploy/binaries/
 build-agents:
     #!/usr/bin/env bash

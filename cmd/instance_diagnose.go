@@ -39,6 +39,7 @@ type instanceDiagnoseReport struct {
 	LivePhaseRaw      string
 	LivePhase         string
 	LivePhaseChanged  *time.Time
+	BootstrapStage    string
 	Obs               terminal.CloudInstanceObservability
 	Diagnosis         instanceDiagnosis
 	Timeline          []timelineEntry
@@ -136,12 +137,18 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		}
 	}
 	livePhaseRaw := ""
+	bootstrapStage := ""
 	if r2Client, err := newR2ClientFromConfig(); err == nil && r2Client != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if data, getErr := r2Client.GetObject(ctx, r2keys.InstancePhase(inst.ID)); getErr == nil {
 			livePhaseRaw = strings.TrimSpace(string(data))
 		}
 		cancel()
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+		if data, getErr := r2Client.GetObject(ctx2, r2keys.BootstrapStage(inst.ID)); getErr == nil {
+			bootstrapStage = strings.TrimSpace(string(data))
+		}
+		cancel2()
 	}
 
 	report := &instanceDiagnoseReport{
@@ -155,6 +162,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		LivePhaseRaw:      livePhaseRaw,
 		LivePhase:         livePhase,
 		LivePhaseChanged:  livePhaseChanged,
+		BootstrapStage:    bootstrapStage,
 		Obs:               obs,
 		Diagnosis:         diagnosis,
 		Timeline:          timeline,
@@ -274,6 +282,20 @@ func formatGPUMetrics(t *db.JobPhaseTimings) string {
 	return strings.Join(parts, ", ")
 }
 
+// formatBootstrapSection renders the bootstrap-stage block. An empty
+// stage on a launched instance signals OnStart died before downloading
+// bootstrap.sh — see docs/guides/cloud-instance-debugging.md.
+func formatBootstrapSection(stage string, launched bool) string {
+	switch {
+	case stage != "":
+		return fmt.Sprintf("\nBootstrap:\n  Last stage: %s\n", stage)
+	case launched:
+		return "\nBootstrap:\n  Last stage: (no marker on R2 — bootstrap.sh likely never ran; OnStart aborted before downloading it)\n"
+	default:
+		return ""
+	}
+}
+
 func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 	var b strings.Builder
 	inst := report.Instance
@@ -314,6 +336,8 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 			fmt.Fprintf(&b, "  Raw R2:     %s (%s)\n", campaign.InstancePhaseLabel(report.LivePhaseRaw), report.LivePhaseRaw)
 		}
 	}
+
+	b.WriteString(formatBootstrapSection(report.BootstrapStage, inst.LaunchedAt != nil))
 
 	// Section 2: Root cause
 	b.WriteString("\n")

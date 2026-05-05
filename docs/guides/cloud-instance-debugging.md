@@ -276,6 +276,38 @@ rclone configuration problems.
 **Action:** Check if the agent binary was stale (`just build` rebuilds
 agents). Check R2 for bootstrap script artifacts.
 
+### OnStart died before bootstrap.sh ran (`infra_failure`, no R2 markers)
+
+Symptom: launch hits `empty_status_timeout` after 25 minutes; R2 has only
+`instance/<id>/agent-version` (written by the coordinator at create time)
+and **no** `bootstrap/<id>/stage` marker. The agent never wrote anything.
+
+This means Vast's `--onstart-cmd` chain failed before reaching
+`bash /tmp/bootstrap.sh`. The chain installs apt packages and downloads
+uv + rclone via `curl`. Any one of those failing — DNS hiccup on
+`archive.ubuntu.com`, `astral.sh`, or `rclone.org`, or a transient apt
+mirror outage — used to abort the chain via `set -e`. Vast then destroyed
+the rental and weft only noticed at the watchdog.
+
+Mitigation in `internal/cloud/types.go:DefaultOnStartCmd`: each install
+step is now skipped when the binary is already on `PATH`, and otherwise
+retried up to three times with backoff. Pre-baked images
+(`deploy/cloud-base.Dockerfile`) make every step a no-op once published.
+Hard requirement: `rclone` must end up installed; if all retries fail
+the command exits non-zero and the rental is reaped immediately rather
+than wedging.
+
+To diagnose a future occurrence:
+
+```bash
+# Was bootstrap.sh reached at all?
+rclone cat <r2-remote>:weft-results/bootstrap/<id>/stage
+
+# Empty/missing → OnStart failed before downloading bootstrap.sh.
+# Anything else → bootstrap.sh started; the value names the last stage
+# completed (e.g. agent_installed, sources_extracted, deps_installing).
+```
+
 ### First worker registration stalled
 
 The campaign was created, but no worker launch row was registered

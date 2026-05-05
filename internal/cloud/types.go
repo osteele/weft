@@ -191,8 +191,27 @@ const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 const DefaultRunpodImage = "runpod/base:1.0.2-ubuntu2204"
 
 // DefaultOnStartCmd installs dependencies, uv, and rclone on fresh instances.
-// The runtime CUDA images lack unzip (needed by rclone installer) and build tools.
-const DefaultOnStartCmd = "apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev && curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash"
+//
+// Each step skips if already on PATH, else retries up to 3x with 10s
+// backoff. Without retries a single DNS/apt hiccup forfeits the rental:
+// the OnStart shell exits non-zero, Vast destroys the container, and
+// weft only notices via the empty_status_timeout watchdog (~25min).
+//
+// rclone is the hard dependency (bootstrap stage markers depend on it).
+// The package list must stay in sync with deploy/cloud-base.Dockerfile,
+// which pre-bakes the same dependencies so the `command -v` checks
+// short-circuit.
+const DefaultOnStartCmd = `set +e
+if ! (command -v unzip >/dev/null && command -v gcc >/dev/null); then
+  for i in 1 2 3; do apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev && break; sleep 10; done
+fi
+if ! command -v uv >/dev/null; then
+  for i in 1 2 3; do curl -fsSL https://astral.sh/uv/install.sh | sh && break; sleep 10; done
+fi
+if ! command -v rclone >/dev/null; then
+  for i in 1 2 3; do curl -fsSL https://rclone.org/install.sh | bash && break; sleep 10; done
+fi
+command -v rclone >/dev/null || { echo 'rclone install failed after retries' >&2; exit 1; }`
 
 // R2BootstrapKeyEnvVar is the env var a template-managed startup command reads
 // to locate the instance-specific bootstrap script in R2.
