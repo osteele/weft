@@ -36,6 +36,12 @@ func runHeartbeatSidecar(args []string) {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 	emit := func(agentAlive bool) {
+		// Push the minimal liveness ping FIRST so a hang in sample
+		// collection (e.g. nvidia-smi blocked) does not silence the
+		// only signal the reconciler trusts. The full heartbeat below
+		// is best-effort.
+		_ = r2Put(parsed.R2Bucket, r2keys.InstanceLastSeen(parsed.InstanceID),
+			strconv.FormatInt(time.Now().Unix(), 10))
 		sample := collectHeartbeat(readLocalPhaseFile(parsed.PhaseFile), parsed.DiskPath)
 		if parsed.ParentPID > 0 {
 			sample = withAgentLiveness(sample, parsed.ParentPID, agentAlive)

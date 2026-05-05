@@ -635,6 +635,14 @@ rule AgentReportsHeartbeat {
         -- GPU temperature, host RSS, host total memory, disk free/total.
         -- Read by coordinator to detect stale/dead agents and disk full.
         --
+        -- A separate, sample-free liveness key is written before any
+        -- expensive sample collection on each tick:
+        --   instance/<instanceID>/last-seen — plain epoch seconds.
+        -- The reconciler treats time-since-liveness as
+        -- min(time-since-heartbeat, time-since-last-seen) so a hang in
+        -- nvidia-smi or another metric probe does not silence the
+        -- watchdog.
+        --
         -- AgentHeartbeatTick fires:
         --   1. Synchronously once at agent startup, before any other
         --      observable phase begins (uv sync, model downloads,

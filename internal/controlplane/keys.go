@@ -124,6 +124,15 @@ func InstanceHeartbeat(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/heartbeat", instanceID)
 }
 
+// InstanceLastSeen is a minimal liveness ping written by the heartbeat
+// sidecar before any expensive metric collection. It exists so a hung
+// nvidia-smi or other sample-collection blockage does not silence our
+// only liveness signal — the sidecar can still push a fresh timestamp
+// even if the full heartbeat sample never assembles.
+func InstanceLastSeen(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/last-seen", instanceID)
+}
+
 func InstanceAgentStartup(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/agent-startup.json", instanceID)
 }

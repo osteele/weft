@@ -562,7 +562,11 @@ func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) (value 
 }
 
 // fetchHeartbeat reads the heartbeat JSON from R2 and returns the parsed sample
-// and time since last heartbeat. Returns (nil, 0) if no heartbeat is available.
+// and time since last liveness signal. Returns (nil, 0) if no heartbeat is
+// available. Liveness age is min(time-since-heartbeat, time-since-last-seen):
+// the dedicated last-seen key is written by the sidecar before any sample
+// collection, so it stays fresh even if nvidia-smi or another metric probe
+// hangs.
 func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
 	data := fetchR2Marker(ctx, r2Client, r2keys.InstanceHeartbeat(instanceID))
 	if data == "" {
@@ -573,6 +577,13 @@ func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) 
 		return nil, 0
 	}
 	age := time.Since(time.Unix(sample.Ts, 0))
+	if lastSeen := fetchR2Marker(ctx, r2Client, r2keys.InstanceLastSeen(instanceID)); lastSeen != "" {
+		if ts, err := strconv.ParseInt(lastSeen, 10, 64); err == nil && ts > 0 {
+			if alt := time.Since(time.Unix(ts, 0)); alt < age {
+				age = alt
+			}
+		}
+	}
 	return &sample, age
 }
 

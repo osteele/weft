@@ -121,6 +121,20 @@ func runCampaign(args []string) {
 	fatalFile := filepath.Join(logDir, "agent-fatal.txt")
 	setAgentFatalFile(fatalFile)
 	writeLocalPhaseFile(phaseFile, currentPhase.Get())
+	// Capture panics in the main goroutine: silent agent death produces no
+	// signal beyond a heartbeat gap, leaving the reconciler unable to
+	// distinguish "agent crashed" from "container/network blackholed". The
+	// fatal file is read by the sidecar on its next tick and propagates as
+	// agent_fatal in the heartbeat sample.
+	defer func() {
+		if r := recover(); r != nil {
+			detail := fmt.Sprintf("runCampaign main panic: %v", r)
+			oplog.Log(oplog.OpAgentPanic, oplog.WithDetail(detail))
+			fmt.Fprintln(os.Stderr, detail)
+			writeAgentFatal(detail)
+			panic(r)
+		}
+	}()
 
 	startTime := time.Now()
 	anyFailed := false
