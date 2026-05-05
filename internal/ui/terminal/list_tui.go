@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -90,6 +91,10 @@ type listTUIModel struct {
 	placingJobIDs              map[int64]struct{}
 	placementQueuedAtByJob     map[int64]int64
 	launchByID                 map[int64]*db.Launch
+	launchBootstrapP50         time.Duration
+	launchBootstrapSamples     int
+	launchSpinner              spinner.Model
+	launchSpinnerRunning       bool
 	recentLaunchFailures       *recentLaunchFailures
 	hostInfoByName             map[string]*db.CachedHostInfo
 	quickLaunching             bool
@@ -117,6 +122,8 @@ type listJobsLoadedMsg struct {
 	placingJobIDs          map[int64]struct{}
 	placementQueuedAtByJob map[int64]int64
 	launchByID             map[int64]*db.Launch
+	launchBootstrapP50     time.Duration
+	launchBootstrapSamples int
 	recentLaunchFailures   *recentLaunchFailures
 	hostInfoByName         map[string]*db.CachedHostInfo
 	autoPassPhase          autoPilotPhaseHint
@@ -239,6 +246,8 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		sw = hostsync.New(database, cloudClients, r2Client, cfg)
 		sw.Start()
 	}
+	s := spinner.New()
+	s.Spinner = spinner.Dot
 
 	model := listTUIModel{
 		database:               database,
@@ -262,6 +271,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		focused:                true,
 		appConfig:              cfg,
 		cloudClients:           cloudClients,
+		launchSpinner:          s,
 	}
 	model.rebuildGroupedRows()
 	if syncEnabled {
@@ -307,6 +317,10 @@ func (m listTUIModel) Init() tea.Cmd {
 	}
 	if cmd := m.runAutoPilot(); cmd != nil {
 		cmds = append(cmds, cmd)
+	}
+	if m.hasActiveLaunchingSpinner() {
+		m.launchSpinnerRunning = true
+		cmds = append(cmds, m.launchSpinner.Tick)
 	}
 	return tea.Batch(cmds...)
 }
@@ -467,6 +481,17 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focused = false
 		return m, nil
 
+	case spinner.TickMsg:
+		if !m.hasActiveLaunchingSpinner() {
+			m.launchSpinnerRunning = false
+			return m, nil
+		}
+		m.launchSpinnerRunning = true
+		var cmd tea.Cmd
+		m.launchSpinner, cmd = m.launchSpinner.Update(msg)
+		m.rebuildGroupedRows()
+		return m, cmd
+
 	case aiAssistSyncStartMsg:
 		return m.applyAIAssistSyncStart(msg)
 
@@ -493,6 +518,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.placingJobIDs = msg.placingJobIDs
 		m.placementQueuedAtByJob = msg.placementQueuedAtByJob
 		m.launchByID = msg.launchByID
+		m.launchBootstrapP50 = msg.launchBootstrapP50
+		m.launchBootstrapSamples = msg.launchBootstrapSamples
 		m.recentLaunchFailures = msg.recentLaunchFailures
 		m.hostInfoByName = msg.hostInfoByName
 		m.autoPassPhase = msg.autoPassPhase
@@ -508,7 +535,15 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.jobs) > 0 && strings.HasPrefix(m.statusMessage, "No jobs") {
 			m.statusMessage = ""
 		}
-		return m, m.runAutoPilot()
+		cmds := []tea.Cmd{}
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if m.hasActiveLaunchingSpinner() && !m.launchSpinnerRunning {
+			m.launchSpinnerRunning = true
+			cmds = append(cmds, m.launchSpinner.Tick)
+		}
+		return m, tea.Batch(cmds...)
 
 	case listSyncFinishedMsg:
 		warnings := persistentListSyncWarnings(msg.warnings)
@@ -1968,7 +2003,20 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		return
 	}
 	groupedJobs := m.groupedJobsWithAutoReasons()
-	m.groupedRows = buildGroupedStatusRowsAt(groupedJobs, m.width, m.launchLiveByID, m.launchStatusByID, m.placingJobIDs, m.placementQueuedAtByJob, m.recentLaunchFailures, time.Now())
+	m.groupedRows = buildGroupedStatusRowsWithOptions(groupedJobs, m.width, groupedStatusRenderOptions{
+		launchLiveByID:         m.launchLiveByID,
+		launchStatusByID:       m.launchStatusByID,
+		placingJobIDs:          m.placingJobIDs,
+		placementQueuedAtByJob: m.placementQueuedAtByJob,
+		launchFailures:         m.recentLaunchFailures,
+		launchByID:             m.launchByID,
+		now:                    time.Now(),
+		launchSpinner:          m.launchSpinner.View(),
+		launchingETA: groupedStatusLaunchingETA{
+			p50:     m.launchBootstrapP50,
+			samples: m.launchBootstrapSamples,
+		},
+	})
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
 		if (row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked {
@@ -1976,6 +2024,37 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		}
 	}
 	m.clampGroupedCursor()
+}
+
+func (m listTUIModel) hasActiveLaunchingSpinner() bool {
+	if !m.groupedByStatus {
+		return false
+	}
+	for _, job := range m.groupedJobsWithAutoReasons() {
+		if groupedStatusBucket(job, m.launchStatusByID, m.launchesWithActiveJob(), m.placingJobIDs, time.Now()) != "launching" {
+			continue
+		}
+		live := launchLiveStateForLaunchingJob(job, m.launchLiveByID)
+		if live != nil && strings.EqualFold(strings.TrimSpace(live.BootstrapStage), "ready") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (m listTUIModel) launchesWithActiveJob() map[int64]bool {
+	out := make(map[int64]bool)
+	for _, job := range m.groupedJobsWithAutoReasons() {
+		if job == nil || job.LaunchID == nil {
+			continue
+		}
+		switch job.EffectiveStatus() {
+		case db.StatusRunning, db.StatusStarting:
+			out[*job.LaunchID] = true
+		}
+	}
+	return out
 }
 
 func (m *listTUIModel) clampCursor() {
@@ -2072,6 +2151,11 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if launchErr != nil {
 			launchByID = map[int64]*db.Launch{}
 		}
+		bootstrapP50, bootstrapSamples, bootstrapErr := db.TotalBootstrapPercentile(database, 0.5)
+		if bootstrapErr != nil {
+			bootstrapP50 = 0
+			bootstrapSamples = 0
+		}
 		placementQueuedAtByJob, placementErr := db.PlacementDisplayQueuedAt(database, queuedRentalJobIDs(jobs))
 		if placementErr != nil {
 			placementQueuedAtByJob = map[int64]int64{}
@@ -2084,6 +2168,8 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			placingJobIDs:          loadPlacingJobIDs(database),
 			placementQueuedAtByJob: placementQueuedAtByJob,
 			launchByID:             launchByID,
+			launchBootstrapP50:     bootstrapP50,
+			launchBootstrapSamples: bootstrapSamples,
 			recentLaunchFailures:   loadRecentLaunchFailures(database, recentLaunchFailureWindow, time.Now()),
 			hostInfoByName:         hostInfoByName,
 			autoPassPhase:          loadLatestAutoPilotPhase(database),

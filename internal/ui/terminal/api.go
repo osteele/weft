@@ -178,7 +178,14 @@ func RenderJobListGroupedStatusPlainWithLaunchFailures(
 	launchStatusByID map[int64]string,
 ) string {
 	failures := loadRecentLaunchFailures(database, recentLaunchFailureWindow, time.Now())
-	return renderJobListGroupedStatusPlainWithLaunchFailures(jobs, width, launchLiveByID, launchStatusByID, failures)
+	launchByID, _ := db.GetLaunchesByIDs(database, groupedStatusLaunchIDs(jobs))
+	return renderJobListGroupedStatusPlainWithOptions(jobs, width, groupedStatusRenderOptions{
+		launchLiveByID:   launchLiveByID,
+		launchStatusByID: launchStatusByID,
+		launchFailures:   failures,
+		launchByID:       launchByID,
+		now:              time.Now(),
+	})
 }
 
 func ResolveColumns(keys []string, defaultKeys []string) ([]ColumnDef, error) {

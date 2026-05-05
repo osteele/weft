@@ -48,6 +48,23 @@ type groupedStatusRow struct {
 	section   string
 }
 
+type groupedStatusRenderOptions struct {
+	launchLiveByID         map[int64]*db.LaunchLiveState
+	launchStatusByID       map[int64]string
+	placingJobIDs          map[int64]struct{}
+	placementQueuedAtByJob map[int64]int64
+	launchFailures         *recentLaunchFailures
+	launchByID             map[int64]*db.Launch
+	now                    time.Time
+	launchSpinner          string
+	launchingETA           groupedStatusLaunchingETA
+}
+
+type groupedStatusLaunchingETA struct {
+	p50     time.Duration
+	samples int
+}
+
 // recentLaunchFailures feeds the "Recent launch failures" section. recoveredIDs
 // holds the subset of items whose successor is alive — those rows render dim.
 type recentLaunchFailures struct {
@@ -78,6 +95,18 @@ func renderJobListGroupedStatusPlainWithLaunchFailures(jobs []*db.Job, width int
 	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, failures, time.Now())
 }
 
+func renderJobListGroupedStatusPlainWithOptions(jobs []*db.Job, width int, opts groupedStatusRenderOptions) string {
+	rows := buildGroupedStatusRowsWithOptions(jobs, width, opts)
+	if len(rows) == 0 {
+		return "None\n"
+	}
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, row.text)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, launchFailures *recentLaunchFailures, now time.Time) string {
 	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, placementQueuedAtByJob, launchFailures, now)
 	if len(rows) == 0 {
@@ -94,7 +123,39 @@ func buildGroupedStatusRows(jobs []*db.Job, width int, launchLiveByID map[int64]
 	return buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, nil, time.Now())
 }
 
+func groupedStatusLaunchIDs(jobs []*db.Job) []int64 {
+	launchIDs := make([]int64, 0, len(jobs))
+	seen := make(map[int64]struct{}, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		if _, ok := seen[*job.LaunchID]; ok {
+			continue
+		}
+		seen[*job.LaunchID] = struct{}{}
+		launchIDs = append(launchIDs, *job.LaunchID)
+	}
+	return launchIDs
+}
+
 func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, launchFailures *recentLaunchFailures, now time.Time) []groupedStatusRow {
+	return buildGroupedStatusRowsWithOptions(jobs, width, groupedStatusRenderOptions{
+		launchLiveByID:         launchLiveByID,
+		launchStatusByID:       launchStatusByID,
+		placingJobIDs:          placingJobIDs,
+		placementQueuedAtByJob: placementQueuedAtByJob,
+		launchFailures:         launchFailures,
+		now:                    now,
+	})
+}
+
+func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedStatusRenderOptions) []groupedStatusRow {
+	now := opts.now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	opts.now = now
 	running := make([]*db.Job, 0)
 	paused := make([]*db.Job, 0)
 	placing := make([]*db.Job, 0)
@@ -123,7 +184,7 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job, launchStatusByID, launchesWithActiveJob, placingJobIDs, now) {
+		switch groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, opts.placingJobIDs, now) {
 		case "running":
 			running = append(running, job)
 		case "paused":
@@ -175,16 +236,18 @@ func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int6
 			section:  section.key,
 		})
 		if section.key == "unplaced" || section.key == "queued" {
-			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now)
+			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, now)
+		} else if section.key == "launching" {
+			rows = appendLaunchingGroupedJobRows(rows, section, projectWidth, width, opts)
 		} else {
 			for _, job := range section.jobs {
-				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now, false)
+				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false)
 			}
 		}
 		rows = append(rows, groupedStatusRow{text: ""})
 	}
 
-	rows = appendRecentFailedLaunchRows(rows, launchFailures, projectWidth, width, now)
+	rows = appendRecentFailedLaunchRows(rows, opts.launchFailures, projectWidth, width, now)
 
 	if len(rows) == 0 {
 		return nil
@@ -236,13 +299,113 @@ func appendBlockedGroupedJobRows(
 			section:   section.key,
 		})
 		for _, job := range jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now, true)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true)
 		}
 	}
 	for _, job := range buckets[""] {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, now, false)
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false)
 	}
 	return rows
+}
+
+type launchingJobBucket struct {
+	key      string
+	launchID int64
+	launch   *db.Launch
+	jobs     []*db.Job
+}
+
+func appendLaunchingGroupedJobRows(
+	rows []groupedStatusRow,
+	section groupedStatusSection,
+	projectWidth, width int,
+	opts groupedStatusRenderOptions,
+) []groupedStatusRow {
+	buckets := make(map[int64]*launchingJobBucket)
+	order := make([]int64, 0)
+	ungrouped := make([]*db.Job, 0)
+	for _, job := range section.jobs {
+		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			ungrouped = append(ungrouped, job)
+			continue
+		}
+		launchID := *job.LaunchID
+		bucket := buckets[launchID]
+		if bucket == nil {
+			bucket = &launchingJobBucket{
+				key:      fmt.Sprintf("launch:%d", launchID),
+				launchID: launchID,
+				launch:   opts.launchByID[launchID],
+			}
+			buckets[launchID] = bucket
+			order = append(order, launchID)
+		}
+		bucket.jobs = append(bucket.jobs, job)
+	}
+
+	sort.SliceStable(order, func(i, j int) bool {
+		left := buckets[order[i]]
+		right := buckets[order[j]]
+		leftCreated := launchingBucketCreatedAt(left)
+		rightCreated := launchingBucketCreatedAt(right)
+		if leftCreated != rightCreated {
+			return leftCreated < rightCreated
+		}
+		return left.launchID < right.launchID
+	})
+
+	for _, launchID := range order {
+		bucket := buckets[launchID]
+		sort.SliceStable(bucket.jobs, func(i, j int) bool { return bucket.jobs[i].ID < bucket.jobs[j].ID })
+		if len(bucket.jobs) == 1 {
+			rows = appendGroupedStatusJobRow(rows, bucket.jobs[0], section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false)
+			continue
+		}
+		rows = append(rows, launchingInstanceHeaderRow(bucket, section.key, width, opts))
+		for _, job := range bucket.jobs {
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, "", groupedStatusLaunchingETA{}, true)
+		}
+	}
+	for _, job := range ungrouped {
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false)
+	}
+	return rows
+}
+
+func launchingBucketCreatedAt(bucket *launchingJobBucket) int64 {
+	if bucket == nil {
+		return 0
+	}
+	if bucket.launch != nil && bucket.launch.CreatedAt > 0 {
+		return bucket.launch.CreatedAt
+	}
+	for _, job := range bucket.jobs {
+		if job != nil && job.QueuedAt > 0 {
+			return job.QueuedAt
+		}
+	}
+	return 0
+}
+
+func launchingInstanceHeaderRow(bucket *launchingJobBucket, sectionKey string, width int, opts groupedStatusRenderOptions) groupedStatusRow {
+	parts := groupedStatusLaunchingSuffixParts(bucket.jobs[0], opts.launchLiveByID, opts.launchByID, opts.now, opts.launchingETA)
+	label := ids.FormatInstanceID(bucket.launchID)
+	if glyph := groupedStatusLaunchingGlyph(bucket.jobs[0], opts.launchLiveByID, opts.launchSpinner); glyph != "" {
+		label = glyph + " " + label
+	}
+	text := fmt.Sprintf("  %s", label)
+	if len(parts) > 0 {
+		text += " — " + strings.Join(parts, " · ")
+	}
+	text += fmt.Sprintf(" (%d jobs)", len(bucket.jobs))
+	if width > 0 {
+		text = truncateDisplayWidth(text, width)
+	}
+	return groupedStatusRow{
+		text:    text,
+		launch:  bucket.launch,
+		section: sectionKey,
+	}
 }
 
 func groupedStatusBlockedReason(job *db.Job, sectionKey string) string {
@@ -262,28 +425,39 @@ func appendGroupedStatusJobRow(
 	projectWidth, width int,
 	launchLiveByID map[int64]*db.LaunchLiveState,
 	placementQueuedAtByJob map[int64]int64,
+	launchByID map[int64]*db.Launch,
 	now time.Time,
+	launchSpinner string,
+	launchingETA groupedStatusLaunchingETA,
 	indented bool,
 ) []groupedStatusRow {
 	project, desc := groupedStatusJobParts(job)
 	projectCol := formatProjectColumn(project, projectWidth)
 
 	var suffixParts []string
-	if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
-		suffixParts = append(suffixParts, progressText)
-	}
-	if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
-		suffixParts = append(suffixParts, etaText)
-	}
-	if timing := groupedStatusTimingSuffix(job, section.key, placementQueuedAtByJob, now); timing != "" {
-		suffixParts = append(suffixParts, timing)
-	}
-	if outcome := groupedStatusOutcomeSuffix(job, section.title); outcome != "" {
-		suffixParts = append(suffixParts, outcome)
+	suffixJoin := " — "
+	if section.key == "launching" && indented {
+		suffixParts = nil
+	} else if section.key == "launching" {
+		suffixParts = groupedStatusLaunchingSuffixParts(job, launchLiveByID, launchByID, now, launchingETA)
+		suffixJoin = " · "
+	} else {
+		if progressText := groupedStatusProgressSuffix(job, section.key, launchLiveByID); progressText != "" {
+			suffixParts = append(suffixParts, progressText)
+		}
+		if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
+			suffixParts = append(suffixParts, etaText)
+		}
+		if timing := groupedStatusTimingSuffix(job, section.key, placementQueuedAtByJob, now); timing != "" {
+			suffixParts = append(suffixParts, timing)
+		}
+		if outcome := groupedStatusOutcomeSuffix(job, section.title); outcome != "" {
+			suffixParts = append(suffixParts, outcome)
+		}
 	}
 	suffix := ""
 	if len(suffixParts) > 0 {
-		suffix = " — " + strings.Join(suffixParts, " — ")
+		suffix = " — " + strings.Join(suffixParts, suffixJoin)
 	}
 
 	indent := ""
@@ -291,6 +465,11 @@ func appendGroupedStatusJobRow(
 		indent = "  "
 	}
 	glyph, jobID := groupedStatusPlacementMarker(job)
+	if section.key == "launching" {
+		if launchGlyph := groupedStatusLaunchingGlyph(job, launchLiveByID, launchSpinner); launchGlyph != "" {
+			glyph = launchGlyph
+		}
+	}
 	prefix := fmt.Sprintf("%s- %s %s — %s ", indent, glyph, jobID, projectCol)
 	line := prefix + desc + suffix
 	if width > 0 {
@@ -379,6 +558,120 @@ func groupedStatusProgressSuffix(job *db.Job, sectionKey string, launchLiveByID 
 	default:
 		return ""
 	}
+}
+
+func groupedStatusLaunchingSuffixParts(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, launchByID map[int64]*db.Launch, now time.Time, eta groupedStatusLaunchingETA) []string {
+	if job == nil {
+		return nil
+	}
+	launch := launchForJob(job, launchByID)
+	live := launchLiveStateForLaunchingJob(job, launchLiveByID)
+	parts := []string{groupedStatusLaunchingPhase(live)}
+	if elapsed := groupedStatusLaunchingElapsed(job, launch, now); elapsed != "" {
+		parts = append(parts, elapsed)
+	}
+	if etaText := groupedStatusLaunchingETAText(launch, now, eta); etaText != "" {
+		parts = append(parts, etaText)
+	}
+	return parts
+}
+
+func groupedStatusLaunchingPhase(live *db.LaunchLiveState) string {
+	if live == nil {
+		return "provisioning"
+	}
+	stage := strings.TrimSpace(live.BootstrapStage)
+	if stage != "" {
+		return groupedStatusBootstrapStageLabel(stage)
+	}
+	phase := strings.TrimSpace(live.InstancePhase)
+	if strings.EqualFold(phase, "created") {
+		return "provisioned, awaiting boot"
+	}
+	if phase == "" {
+		return "provisioning"
+	}
+	return normalizeLaunchingStageLabel(phase)
+}
+
+func groupedStatusBootstrapStageLabel(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "image_pull", "image_pulling":
+		return "image pulling"
+	case "deps_install", "deps_installing":
+		return "deps installing"
+	case "agent_starting":
+		return "agent starting"
+	case "ready":
+		return "agent ready"
+	default:
+		return normalizeLaunchingStageLabel(stage)
+	}
+}
+
+func normalizeLaunchingStageLabel(stage string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(stage)), "_", " ")
+}
+
+func groupedStatusLaunchingElapsed(job *db.Job, launch *db.Launch, now time.Time) string {
+	createdAt := int64(0)
+	if launch != nil && launch.CreatedAt > 0 {
+		createdAt = launch.CreatedAt
+	} else if job != nil && job.QueuedAt > 0 {
+		createdAt = job.QueuedAt
+	}
+	if createdAt <= 0 {
+		return ""
+	}
+	return shortRelativeTime(now.Unix() - createdAt)
+}
+
+func groupedStatusLaunchingETAText(launch *db.Launch, now time.Time, eta groupedStatusLaunchingETA) string {
+	if launch == nil || launch.CreatedAt <= 0 || eta.samples < 5 || eta.p50 <= 0 {
+		return ""
+	}
+	elapsed := now.Sub(time.Unix(launch.CreatedAt, 0))
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	if elapsed > eta.p50+eta.p50/2 {
+		return "overdue"
+	}
+	remaining := eta.p50 - elapsed
+	if remaining < 0 {
+		remaining = 0
+	}
+	return "~" + groupedStatusDurationText(remaining) + " remaining"
+}
+
+func groupedStatusLaunchingGlyph(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState, spinner string) string {
+	if spinner == "" {
+		return ""
+	}
+	live := launchLiveStateForLaunchingJob(job, launchLiveByID)
+	if live != nil && strings.EqualFold(strings.TrimSpace(live.BootstrapStage), "ready") {
+		return "✓"
+	}
+	return spinner
+}
+
+func groupedStatusDurationText(d time.Duration) string {
+	text := shortRelativeTime(int64(d.Seconds()))
+	return strings.TrimSuffix(text, " ago")
+}
+
+func launchForJob(job *db.Job, launchByID map[int64]*db.Launch) *db.Launch {
+	if job == nil || job.LaunchID == nil || launchByID == nil {
+		return nil
+	}
+	return launchByID[*job.LaunchID]
+}
+
+func launchLiveStateForLaunchingJob(job *db.Job, launchLiveByID map[int64]*db.LaunchLiveState) *db.LaunchLiveState {
+	if job == nil || job.LaunchID == nil || launchLiveByID == nil {
+		return nil
+	}
+	return launchLiveByID[*job.LaunchID]
 }
 
 func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAtByJob map[int64]int64, now time.Time) string {

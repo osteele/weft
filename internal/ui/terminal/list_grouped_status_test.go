@@ -603,6 +603,89 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_LaunchingShowsPhaseAndElapsed(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2329)
+	jobs := []*db.Job{
+		{
+			ID:          1725,
+			Status:      db.StatusQueued,
+			LaunchID:    &launchID,
+			Project:     "proj",
+			Description: "launching job",
+			QueuedAt:    4_800,
+		},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: 4_700}},
+		now:              now,
+	})
+	want := "- ☁ wj1725 — proj launching job (rental) — deps installing · 5m ago"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+	if strings.Contains(out, "instance wi2329 starting") {
+		t.Fatalf("old launching suffix still rendered:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingGroupsMultiJobInstance(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2329)
+	jobs := []*db.Job{
+		{ID: 1734, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "second"},
+		{ID: 1725, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "first"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "image_pull"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: 4_866}},
+		now:              now,
+		launchSpinner:    "⠹",
+		launchingETA: groupedStatusLaunchingETA{
+			p50:     5 * time.Minute,
+			samples: 5,
+		},
+	})
+	for _, want := range []string{
+		"  ⠹ wi2329 — image pulling · 2m ago · ~2m remaining (2 jobs)",
+		"  - ☁ wj1725 — proj first (rental)",
+		"  - ☁ wj1734 — proj second (rental)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "wj1725") > strings.Index(out, "wj1734") {
+		t.Fatalf("jobs not sorted by ID in launch bucket:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndOverdue(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2332)
+	jobs := []*db.Job{
+		{ID: 1749, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "ready job"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "ready"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: 4_000}},
+		now:              now,
+		launchSpinner:    "⠸",
+		launchingETA: groupedStatusLaunchingETA{
+			p50:     10 * time.Minute,
+			samples: 8,
+		},
+	})
+	want := "- ✓ wj1749 — proj ready job (rental) — agent ready · 16m ago · overdue"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_PausedJobBucketsToPausedSection(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{

@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -11,6 +12,55 @@ import (
 // for estimating remaining time given that a bootstrap has already taken some
 // known elapsed time.
 type BootstrapDurations []time.Duration
+
+// TotalBootstrapPercentile returns a percentile over successful total bootstrap
+// durations, measured from launch creation to the first wrapper start.
+func TotalBootstrapPercentile(database *sql.DB, p float64) (time.Duration, int, error) {
+	if database == nil {
+		return 0, 0, nil
+	}
+	if p < 0 || p > 1 {
+		return 0, 0, fmt.Errorf("percentile must be between 0 and 1")
+	}
+	rows, err := database.Query(`
+		WITH first_attempt AS (
+			SELECT ja.launch_id, MIN(jpt.wrapper_start) AS wrapper_start
+			FROM job_attempts ja
+			JOIN job_phase_timings jpt ON jpt.job_id = ja.job_id
+			WHERE ja.launch_id IS NOT NULL
+			  AND jpt.wrapper_start IS NOT NULL
+			GROUP BY ja.launch_id
+		)
+		SELECT fa.wrapper_start - l.created_at AS duration_secs
+		FROM launches l
+		JOIN first_attempt fa ON fa.launch_id = l.id
+		WHERE l.created_at > 0
+		  AND fa.wrapper_start > l.created_at
+		  AND (fa.wrapper_start - l.created_at) BETWEEN 1 AND ?
+	`, bootstrapSurvivalConfig.MaxTimeSecs)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+
+	var durations []int
+	for rows.Next() {
+		var secs int
+		if err := rows.Scan(&secs); err != nil {
+			return 0, 0, err
+		}
+		durations = append(durations, secs)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	if len(durations) == 0 {
+		return 0, 0, nil
+	}
+	sort.Ints(durations)
+	idx := int(p * float64(len(durations)-1))
+	return time.Duration(durations[idx]) * time.Second, len(durations), nil
+}
 
 // ConditionalMedian returns the estimated remaining bootstrap time given that
 // the bootstrap has already taken `elapsed`. It filters to instances that took

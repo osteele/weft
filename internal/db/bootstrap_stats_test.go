@@ -58,6 +58,52 @@ func TestComputeBootstrapSurvival_Empty(t *testing.T) {
 	}
 }
 
+func TestTotalBootstrapPercentile(t *testing.T) {
+	database := setupBootstrapTestDB(t)
+	defer database.Close()
+
+	base := int64(1000000)
+	for i, duration := range []int64{60, 120, 180, 240, 300} {
+		launchID := int64(i + 1)
+		insertBootstrapLaunch(t, database, launchID, "vastai", base, base+duration+10, "completed")
+		insertBootstrapJob(t, database, launchID*10, launchID, base+duration)
+	}
+
+	got, samples, err := TotalBootstrapPercentile(database, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if samples != 5 {
+		t.Fatalf("samples = %d, want 5", samples)
+	}
+	if got != 180*time.Second {
+		t.Fatalf("p50 = %v, want 3m", got)
+	}
+}
+
+func TestTotalBootstrapPercentileIgnoresFailuresAndInvalidDurations(t *testing.T) {
+	database := setupBootstrapTestDB(t)
+	defer database.Close()
+
+	base := int64(1000000)
+	insertBootstrapLaunch(t, database, 1, "vastai", base, base+100, "completed")
+	insertBootstrapJob(t, database, 10, 1, base+90)
+	insertBootstrapLaunch(t, database, 2, "vastai", base, base+200, "failed")
+	insertBootstrapLaunch(t, database, 3, "vastai", base, base+300, "completed")
+	insertBootstrapJob(t, database, 30, 3, base-10)
+
+	got, samples, err := TotalBootstrapPercentile(database, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if samples != 1 {
+		t.Fatalf("samples = %d, want 1", samples)
+	}
+	if got != 90*time.Second {
+		t.Fatalf("p50 = %v, want 90s", got)
+	}
+}
+
 func TestComputeBootstrapSurvival_InsufficientData(t *testing.T) {
 	database := setupBootstrapTestDB(t)
 	defer database.Close()
