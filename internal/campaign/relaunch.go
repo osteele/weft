@@ -61,6 +61,11 @@ type RelaunchConfig struct {
 	// IncludeFreshUnplaced allows relaunching scoped unplaced jobs even when
 	// they have no prior cloud attempts and no rental tag.
 	IncludeFreshUnplaced bool
+	// BypassRunawayBreaker skips the runaway-breaker trip check for this
+	// pass. Used by MaybeLaunchAutoProbe to fire a single probe launch
+	// even when the breaker is tripped. Should not be set for normal
+	// relaunch traffic.
+	BypassRunawayBreaker bool
 }
 
 // RetryBudget defines hard retry-stop limits by retry tier.
@@ -82,6 +87,13 @@ type RunawayPolicy struct {
 	InfraFailureLimit        int
 	SpendNoProgressLimitCent int
 	ResumeGracePeriod        time.Duration // skip breaker check for this long after a resume
+	// AutoProbeInterval controls how often the autopilot launches a single
+	// probe instance while the breaker is tripped. 0 disables auto-probing.
+	// On success the breaker auto-resumes; on failure it stays tripped and
+	// the next probe waits another interval. Bounds: probe cost = ~$0.05
+	// per attempt; default interval is 1h so worst-case sustained cost
+	// during an outage is ~$1.20/day.
+	AutoProbeInterval time.Duration
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
@@ -180,7 +192,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	// require a fresh instance.
 	unplaced = tryPlaceOntoExistingInstances(cfg, unplaced)
 
-	if cfg.RunawayPolicy != nil && cfg.RunawayPolicy.Enabled {
+	if cfg.RunawayPolicy != nil && cfg.RunawayPolicy.Enabled && !cfg.BypassRunawayBreaker {
 		if blocked, reason, err := evaluateRunawayBreaker(cfg.Database, cfg, unplaced, time.Now()); err != nil {
 			slog.Warn("runaway breaker evaluation failed", "component", "relaunch", "error", err)
 		} else if blocked {
@@ -1515,4 +1527,191 @@ func closeRelaunchIntents(database *sql.DB, intentIDs []int64, success bool, res
 				"component", "relaunch", "intent_id", id, "error", err)
 		}
 	}
+}
+
+// DefaultAutoProbeInterval is how long we wait between probe launches
+// while the runaway breaker is tripped. ~1h matches the bimodal failure
+// pattern (good-day vs bad-day) without burning more than ~$1.20/day in
+// probe cost during sustained outages (assuming ~$0.05 per probe).
+const DefaultAutoProbeInterval = 1 * time.Hour
+
+// MaybeAutoResumeBreaker checks whether a previously-launched auto-probe
+// has completed successfully; if so, resets the runaway breaker. Safe to
+// call on every autopilot pass — most calls are no-ops because either no
+// probe is in flight or the most recent probe has not yet terminated.
+//
+// Detection: the most recent EventRelaunchAutoProbeLaunched event has a
+// detail line with launch_id=N. If that launch is now `completed`, the
+// probe succeeded and we resume; if it's `failed`, we leave the breaker
+// tripped and let MaybeLaunchAutoProbe schedule the next probe after the
+// configured interval.
+func MaybeAutoResumeBreaker(database *sql.DB) error {
+	if database == nil {
+		return nil
+	}
+	probeLaunchID, err := latestAutoProbeLaunchID(database)
+	if err != nil || probeLaunchID == 0 {
+		return err
+	}
+	launch, err := db.GetLaunch(database, probeLaunchID)
+	if err != nil || launch == nil {
+		return err
+	}
+	if launch.Status != db.LaunchStatusCompleted {
+		return nil
+	}
+	// Only reset if breaker is actually tripped (avoid spurious resume
+	// events when the breaker was already cleared by a manual reset).
+	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, 0, "")
+	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, 0, "")
+	if trippedAt <= resumedAt {
+		return nil
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchAutoProbeResumed,
+		LaunchID:  probeLaunchID,
+		Detail:    runawayScopeDetail("", fmt.Sprintf("auto-resume after probe launch %d completed", probeLaunchID)),
+	}); err != nil {
+		slog.Warn("write auto-probe-resumed event", "component", "relaunch", "error", err)
+	}
+	return ResetGlobalRunawayBreaker(database, "auto-probe")
+}
+
+// MaybeLaunchAutoProbe launches a single probe instance when:
+//   - the runaway breaker is currently tripped,
+//   - auto-probe is enabled in the policy (interval > 0),
+//   - the last probe (or trip, if no probe yet) was longer ago than the
+//     interval, and
+//   - there is at least one eligible unplaced job in scope.
+//
+// The probe takes the cheapest eligible job and routes it through the
+// normal relaunch path with BypassRunawayBreaker=true. On success the
+// reconciler will mark the launch completed and the next call to
+// MaybeAutoResumeBreaker will lift the breaker.
+//
+// Returns the probe launch ID (0 if no probe was launched) and any error.
+func MaybeLaunchAutoProbe(cfg RelaunchConfig) (int64, error) {
+	if cfg.RunawayPolicy == nil || cfg.Database == nil {
+		return 0, nil
+	}
+	interval := cfg.RunawayPolicy.AutoProbeInterval
+	if interval <= 0 {
+		return 0, nil
+	}
+	now := time.Now()
+
+	trippedAt := latestRunawayEventAt(cfg.Database, db.EventRelaunchRunawayTripped, 0, "")
+	resumedAt := latestRunawayEventAt(cfg.Database, db.EventRelaunchRunawayResumed, 0, "")
+	if trippedAt <= resumedAt {
+		// Breaker is not tripped; nothing to probe.
+		return 0, nil
+	}
+
+	lastProbe := latestRunawayEventAt(cfg.Database, db.EventRelaunchAutoProbeLaunched, 0, "")
+	gateAt := trippedAt
+	if lastProbe > gateAt {
+		gateAt = lastProbe
+	}
+	if now.Sub(time.Unix(gateAt, 0)) < interval {
+		return 0, nil
+	}
+
+	probeJob, err := pickAutoProbeJob(cfg)
+	if err != nil || probeJob == nil {
+		return 0, err
+	}
+
+	probeCfg := cfg
+	probeCfg.ScopeJobIDs = []int64{probeJob.ID}
+	probeCfg.IncludeFreshUnplaced = true
+	probeCfg.BypassRunawayBreaker = true
+	probeCfg.RestrictToReset = false
+
+	slog.Info("launching auto-probe",
+		"component", "relaunch", "job_id", probeJob.ID,
+		"interval", interval, "since_gate", now.Sub(time.Unix(gateAt, 0)).Truncate(time.Second))
+
+	result, err := RelaunchOrphanedJobs(probeCfg)
+	if err != nil {
+		return 0, fmt.Errorf("auto-probe relaunch: %w", err)
+	}
+	if result == nil || len(result.InstanceIDs) == 0 {
+		return 0, nil
+	}
+	probeLaunchID := result.InstanceIDs[0]
+	_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchAutoProbeLaunched,
+		LaunchID:  probeLaunchID,
+		Detail:    runawayScopeDetail(cfg.ScopeProject, fmt.Sprintf("launch_id=%d job_id=%d interval=%s", probeLaunchID, probeJob.ID, interval)),
+	})
+	return probeLaunchID, nil
+}
+
+// latestAutoProbeLaunchID returns the launch_id of the most recent
+// auto-probe event (0 if none).
+func latestAutoProbeLaunchID(database *sql.DB) (int64, error) {
+	row := database.QueryRow(
+		`SELECT launch_id FROM lifecycle_events
+		 WHERE event_kind = ? AND launch_id IS NOT NULL
+		 ORDER BY occurred_at DESC LIMIT 1`,
+		db.EventRelaunchAutoProbeLaunched,
+	)
+	var id sql.NullInt64
+	if err := row.Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if !id.Valid {
+		return 0, nil
+	}
+	return id.Int64, nil
+}
+
+// pickAutoProbeJob returns one cheap eligible unplaced job for use as a
+// probe. Cheapness proxy: lowest GPU memory requirement, breaking ties
+// by job ID. Returns (nil, nil) if no eligible job.
+func pickAutoProbeJob(cfg RelaunchConfig) (*db.Job, error) {
+	if cfg.Database == nil {
+		return nil, nil
+	}
+	jobs, err := db.ListUnplacedJobs(cfg.Database)
+	if err != nil {
+		return nil, err
+	}
+	scope := make(map[int64]bool, len(cfg.ScopeJobIDs))
+	for _, id := range cfg.ScopeJobIDs {
+		scope[id] = true
+	}
+	var picked *db.Job
+	for _, j := range jobs {
+		if j == nil || j.HasTag(db.TagInventory) {
+			continue
+		}
+		if len(scope) > 0 && !scope[j.ID] {
+			continue
+		}
+		if cfg.ScopeProject != "" && j.Project != cfg.ScopeProject {
+			continue
+		}
+		if picked == nil || autoProbeJobLess(j, picked) {
+			picked = j
+		}
+	}
+	return picked, nil
+}
+
+func autoProbeJobLess(a, b *db.Job) bool {
+	am, bm := 0, 0
+	if a.GPUMemGB != nil {
+		am = *a.GPUMemGB
+	}
+	if b.GPUMemGB != nil {
+		bm = *b.GPUMemGB
+	}
+	if am != bm {
+		return am < bm
+	}
+	return a.ID < b.ID
 }

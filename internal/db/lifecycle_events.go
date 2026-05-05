@@ -29,6 +29,14 @@ const (
 	EventRelaunchRunawayTripped           = "relaunch.runaway_tripped"
 	EventRelaunchRunawayBlocked           = "relaunch.runaway_blocked"
 	EventRelaunchRunawayResumed           = "relaunch.runaway_resumed"
+	// EventRelaunchAutoProbeLaunched is emitted when the autopilot fires
+	// a single probe launch while the runaway breaker is tripped. Detail
+	// includes the probe launch_id so the auto-resume check can find it.
+	EventRelaunchAutoProbeLaunched = "relaunch.auto_probe_launched"
+	// EventRelaunchAutoProbeResumed is emitted when an auto-probe
+	// instance completed successfully and the autopilot reset the
+	// breaker as a result. Distinguishes auto-resume from manual reset.
+	EventRelaunchAutoProbeResumed = "relaunch.auto_probe_resumed"
 
 	// EventPlacementIntentPruned records that the autopilot canceled a stale
 	// open placement intent (orchestrator died before resolving it). The

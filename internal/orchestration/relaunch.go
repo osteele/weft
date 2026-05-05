@@ -81,8 +81,16 @@ func RelaunchOrphanedJobs(
 			OrphanChurnLimit:         cfg.AutoRunawayOrphanChurnLimit(),
 			InfraFailureLimit:        cfg.AutoRunawayInfraFailureLimit(),
 			SpendNoProgressLimitCent: cfg.AutoRunawaySpendNoProgressLimitCents(),
+			AutoProbeInterval:        campaign.DefaultAutoProbeInterval,
 		},
 		RetryBudgetMultiplierByFailedInstance: retryBudgetMultiplierByFailedInstance,
+	}
+
+	// Auto-resume the breaker if a previously-launched probe completed
+	// successfully. Cheap (one DB lookup, sometimes one launch fetch);
+	// safe to run before every relaunch attempt.
+	if err := campaign.MaybeAutoResumeBreaker(database); err != nil {
+		slog.Warn("auto-probe resume check failed", "component", "auto-relaunch", "error", err)
 	}
 
 	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
@@ -91,6 +99,17 @@ func RelaunchOrphanedJobs(
 	}
 	if result == nil {
 		result = &campaign.RelaunchResult{}
+	}
+
+	// If the breaker just blocked this pass, schedule the next probe.
+	// MaybeLaunchAutoProbe is rate-limited internally so it won't fire
+	// more often than AutoProbeInterval.
+	if result.BlockedReason != "" {
+		if probeID, err := campaign.MaybeLaunchAutoProbe(relaunchCfg); err != nil {
+			slog.Warn("auto-probe launch failed", "component", "auto-relaunch", "error", err)
+		} else if probeID > 0 {
+			slog.Info("auto-probe launched", "component", "auto-relaunch", "launch_id", probeID)
+		}
 	}
 	return result, nil
 }

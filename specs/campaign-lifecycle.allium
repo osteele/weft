@@ -299,6 +299,7 @@ config {
     runaway_orphan_churn_limit: Integer = 8
     runaway_spend_no_progress_limit_cents: Integer = 500
     runaway_resume_grace_period: Duration = 15.minutes
+    runaway_auto_probe_interval: Duration = 1.hour
 }
 
 -- ==========================================================================
@@ -1242,12 +1243,24 @@ rule RunawayBreakerTrips {
 }
 
 rule RunawayBreakerClears {
-    when: UserRetry(job)
-    requires: RunawayBreakerIsTripped(job.scope)
+    when: UserRetry(job) or AutoProbeCompleted(instance)
+    requires: RunawayBreakerIsTripped(scope)
 
-    ensures: RunawayBreakerResumed(job.scope)
+    ensures: RunawayBreakerResumed(scope)
 
     @guidance
+        -- Auto-clears when user retries a job in the affected scope, or
+        -- when an auto-probe instance reaches status=completed. While the
+        -- breaker is tripped and config.runaway_auto_probe_interval > 0,
+        -- the autopilot launches one probe instance per interval (default
+        -- 1 hour): a single cheap eligible unplaced job, scoped to one
+        -- launch, bypassing the breaker check. Probe success resets the
+        -- breaker and emits relaunch.auto_probe_resumed alongside the
+        -- usual relaunch.runaway_resumed event. Probe failure or an
+        -- in-flight probe leaves the breaker tripped; the next probe
+        -- cannot fire until the interval has elapsed since the last
+        -- relaunch.auto_probe_launched event, bounding probe spend during
+        -- sustained outages.
         -- Auto-clears when user retries a job in the affected scope.
         -- Manual clear paths:
         --   - Per-campaign scope: `weft campaign safety resume --campaign N`
@@ -1257,15 +1270,19 @@ rule RunawayBreakerClears {
         -- The global path is required when the breaker trips on jobs that
         -- aren't yet attached to any campaign — `weft campaign safety
         -- resume` rejects --campaign 0 and cannot reach that scope.
-        -- Recorded as lifecycle_event kind=relaunch.runaway_resumed.
+        -- Recorded as lifecycle_event kind=relaunch.runaway_resumed
+        -- (plus relaunch.auto_probe_resumed when triggered by a probe;
+        -- probe launches emit relaunch.auto_probe_launched).
         -- TUI reset paths MUST also clear in-memory blocked-reason caches
         -- immediately, so rows no longer render stale
         -- "paused: repeated launch failures without progress" blockers
         -- while waiting for the next autopilot pass.
         -- Implementation: internal/campaign/relaunch.go
         -- ResumeRunawayBreakerForJob() (auto), ResetGlobalRunawayBreaker()
-        -- (manual global), cmd/campaign_safety.go (manual per-campaign),
-        -- internal/ui/terminal/list_tui.go (TUI cache clearing).
+        -- (manual global), MaybeLaunchAutoProbe() and
+        -- maybeAutoResumeFromProbe() (auto probe), cmd/campaign_safety.go
+        -- (manual per-campaign), internal/ui/terminal/list_tui.go (TUI
+        -- cache clearing).
 }
 
 -- --------------------------------------------------------------------------
