@@ -297,25 +297,34 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 4a. Provider status unavailable timeout: if polling repeatedly fails and
-	// either no progress is visible or the running agent heartbeat has gone
-	// stale, fail closed instead of wedging forever.
-	if p.ProviderInst == nil && p.ProviderErr != nil && (ci.Status == db.LaunchStatusLaunching || ci.Status == db.LaunchStatusRunning) &&
-		((!p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady) ||
-			(ci.Status == db.LaunchStatusRunning && p.HeartbeatAge > heartbeatStaleThreshold)) {
-		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
-			age := p.Now.Sub(*lifecycleStart)
-			if age > maxProviderStatusUnavailableTime {
-				return InstanceAction{
-					Kind:              ActionEmptyStatusTimeout,
-					TerminalStatus:    db.LaunchStatusFailed,
-					TerminationReason: db.TerminationReasonInfraFailure,
-					StallMessage:      fmt.Sprintf("provider status unavailable for %s — terminating", age.Truncate(time.Second)),
-					DestroyProvider:   true,
-					ResetJobs:         true,
-					AttemptOutcome:    db.AttemptOutcomeOrphaned,
-				}
-			}
+	// 4a. Stale-agent watchdog. Heartbeat-first liveness: an agent that
+	// reached ready and then stopped writing heartbeats is functionally
+	// dead regardless of what the provider's list endpoint says.
+	//
+	// Why we no longer gate on provider list: Vast.ai's list endpoint
+	// reports both false negatives (omits live instances during
+	// transient API gaps — observed killing wi2329/2331/2332 on
+	// 2026-05-05) and stale positives (keeps reporting destroyed
+	// instances briefly). Treating "missing from list" as evidence of
+	// death cost us 25 minutes per false-kill and poisoned survival
+	// stats. Heartbeat presence/absence in R2, controlled directly by
+	// the agent, is a strictly stronger signal.
+	//
+	// Cases not covered here:
+	//   - Bootstrap-never-completed (no agent_ready_at_unix ever set):
+	//     caught by the bootstrap-deadline watchdog (rule 5).
+	//   - Provider explicitly reports terminal status (exited, destroyed,
+	//     etc.): caught by rule 7 (provider_dead with hysteresis).
+	if ci.Status == db.LaunchStatusRunning && ci.AgentReadyAtUnix != nil &&
+		p.HeartbeatAge > heartbeatStaleThreshold {
+		return InstanceAction{
+			Kind:              ActionEmptyStatusTimeout,
+			TerminalStatus:    db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonInfraFailure,
+			StallMessage:      fmt.Sprintf("agent heartbeat stale for %s — terminating", p.HeartbeatAge.Truncate(time.Second)),
+			DestroyProvider:   true,
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeOrphaned,
 		}
 	}
 

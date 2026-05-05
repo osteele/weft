@@ -775,7 +775,14 @@ func TestCheckInstance_LoadingStatusUsesCreatedAtFallback(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
+// TestCheckInstance_NoAgentReadyDoesNotKill verifies the post-refactor
+// behavior: when an instance has never reached agent_ready and the
+// provider list is unavailable, the missing-from-list 25m watchdog is
+// no longer the kill path. Such instances are now caught by the
+// bootstrap_timeout (rule 5) instead. Vast's list-absence is too
+// unreliable to use as a kill signal on its own (it produced 25-minute
+// false-kill windows on healthy rentals).
+func TestCheckInstance_NoAgentReadyDoesNotKill(t *testing.T) {
 	launchedAt := time.Now().Add(-26 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
@@ -789,11 +796,8 @@ func TestCheckInstance_ProviderStatusUnavailableTimesOut(t *testing.T) {
 		JobState:    JobState{},
 		Now:         time.Now(),
 	})
-	if action.Kind != ActionEmptyStatusTimeout {
-		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
-	}
-	if !action.ResetJobs {
-		t.Error("expected ResetJobs to be true")
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("provider absence alone should no longer kill; got ActionEmptyStatusTimeout")
 	}
 }
 
@@ -816,38 +820,50 @@ func TestCheckInstance_ProviderStatusUnavailableWaitsBeforeTimeout(t *testing.T)
 	}
 }
 
-func TestCheckInstance_ProviderStatusUnavailableStaleRunningJobTimesOut(t *testing.T) {
-	launchedAt := time.Now().Add(-26 * time.Minute).Unix()
+// TestCheckInstance_StaleAgentHeartbeatTimesOutFast verifies the
+// heartbeat-first kill path: an agent that reached ready and then
+// stopped writing heartbeats is killed promptly, regardless of what
+// the provider list says. No 25-minute lifecycle gate.
+func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
+	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
+	agentReady := time.Now().Add(-4 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
 			ID:                 1,
 			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReady,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderErr:   fmt.Errorf("provider instance test-123 missing from batch list"),
+		// Provider returns "alive" — we still kill on stale heartbeat.
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "running:531",
 		HeartbeatAge:  4 * time.Minute,
 		JobState:      JobState{HasStartedJob: true},
 		Now:           time.Now(),
 	})
 	if action.Kind != ActionEmptyStatusTimeout {
-		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d) — stale heartbeat should fire watchdog", action.Kind, ActionEmptyStatusTimeout)
 	}
 	if !action.ResetJobs {
 		t.Error("expected ResetJobs to be true")
 	}
 }
 
-func TestCheckInstance_ProviderStatusUnavailableFreshRunningJobWaits(t *testing.T) {
+// TestCheckInstance_FreshHeartbeatLeavesAlone verifies that a fresh
+// heartbeat keeps the instance running even if the provider list is
+// noisy.
+func TestCheckInstance_FreshHeartbeatLeavesAlone(t *testing.T) {
 	launchedAt := time.Now().Add(-26 * time.Minute).Unix()
+	agentReady := time.Now().Add(-25 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
 			ID:                 1,
 			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReady,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderErr:   fmt.Errorf("provider instance test-123 missing from batch list"),
@@ -856,8 +872,8 @@ func TestCheckInstance_ProviderStatusUnavailableFreshRunningJobWaits(t *testing.
 		JobState:      JobState{HasStartedJob: true},
 		Now:           time.Now(),
 	})
-	if action.Kind != ActionNone {
-		t.Fatalf("action.Kind = %d, want ActionNone (%d)", action.Kind, ActionNone)
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("fresh heartbeat should keep instance alive even if provider list misses it")
 	}
 }
 

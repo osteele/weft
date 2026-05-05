@@ -294,23 +294,30 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 	if providerID != "" && client != nil {
 		providerKey := ci.Provider
-		if byProvider, ok := providerInstances[providerKey]; ok {
-			if cached, found := byProvider[providerID]; found {
-				inst = cached
-			} else {
-				providerErr = fmt.Errorf("provider instance %s missing from %s batch list", providerID, providerKey)
-			}
-		} else {
-			// Batch fetch failed for this provider — fall back to individual call.
-			// Symmetric with the batch path above: if the instance isn't in the
-			// provider's list (ErrInstanceNotFound), keep providerErr non-nil so
-			// CheckInstance skips the provider_dead path this pass. Hysteresis on
-			// repeated misses still eventually catches genuinely destroyed
-			// instances; collapsing not-found to nil here previously let a single
-			// transient list-incomplete response start the dead-confirm timer.
-			inst, providerErr = client.ShowInstance(providerID)
-			if providerErr != nil && !errors.Is(providerErr, cloud.ErrInstanceNotFound) {
-				slog.Warn("ShowInstance failed; continuing with provider_err fallback", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", providerErr)
+		if batched, ok := providerInstances[providerKey]; ok {
+			inst = batched[providerID]
+		}
+		// Confirm batch misses via per-instance lookup. Vast.ai's list
+		// endpoint omits live instances during transient API gaps;
+		// trusting batch absence killed healthy rentals at the 25-min
+		// watchdog. ShowInstance is authoritative.
+		if inst == nil {
+			showInst, showErr := client.ShowInstance(providerID)
+			switch {
+			case showErr == nil && showInst != nil:
+				inst = showInst
+			case errors.Is(showErr, cloud.ErrInstanceNotFound):
+				providerErr = fmt.Errorf("provider instance %s not found", providerID)
+			case showErr != nil:
+				// Transient ShowInstance failure. Keep providerErr non-nil so
+				// the dead-confirm path stays gated on hysteresis rather than
+				// firing on a single API blip.
+				providerErr = showErr
+				slog.Warn("ShowInstance failed; continuing with provider_err fallback",
+					"component", "reconcile", "provider", providerID, "instance", ci.ID, "error", showErr)
+			default:
+				// (nil, nil) — shouldn't happen with conforming providers.
+				providerErr = fmt.Errorf("provider instance %s lookup returned no data", providerID)
 			}
 		}
 	}

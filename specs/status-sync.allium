@@ -452,10 +452,10 @@ rule StampAttemptStatus {
         -- end_time=NULL. The reconciler's job-started predicate
         -- (campaign-lifecycle.allium § Instance.has_started_job) treated
         -- that row as "still in flight", silencing the
-        -- IdleAfterReadyTimeout (5a) and ProviderStatusUnavailableTimeout
-        -- (4a) watchdogs on the surrounding instance. Both watchdogs are
-        -- gated on `not has_started_job`, and that gate must reflect
-        -- direct execution evidence (start_time / end_time), not status.
+        -- IdleAfterReadyTimeout (5a) watchdog on the surrounding
+        -- instance. The watchdog is gated on `not has_started_job`,
+        -- and that gate must reflect direct execution evidence
+        -- (start_time / end_time), not status.
 }
 
 -- ==========================================================================

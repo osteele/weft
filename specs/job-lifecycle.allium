@@ -967,8 +967,7 @@ invariant TerminalJobsHaveEndTime {
         -- (UpdateAttemptStatusAndLastSynced in status-sync) wrote
         -- status='canceled' without stamping end_time. The reconciler
         -- treated that "terminal but open" attempt as still in flight,
-        -- which silenced rule IdleAfterReadyTimeout and rule
-        -- ProviderStatusUnavailableTimeout (both gated on
+        -- which silenced rule IdleAfterReadyTimeout (gated on
         -- not has_started_job) on the surrounding instance. The fix:
         -- every writer that transitions an attempt to a terminal status
         -- MUST stamp end_time in the same statement. See StampAttemptStatus

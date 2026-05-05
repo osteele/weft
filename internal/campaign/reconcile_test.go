@@ -1100,7 +1100,15 @@ func TestReconcileLaunches_BatchFetch_UsesListAllInstances(t *testing.T) {
 	}
 }
 
-func TestReconcileLaunches_BatchFetchMissDoesNotMarkRecentLaunchDead(t *testing.T) {
+// TestReconcileLaunches_BatchFetchMissCallsShowInstance verifies the
+// authoritative-confirmation behavior: when an instance is absent from
+// the batch list, the reconciler MUST call ShowInstance to confirm
+// before treating the absence as evidence. Vast's batch endpoint omits
+// live instances during transient API gaps; without ShowInstance,
+// transient absence kills healthy rentals (regression: 2026-05-05
+// wi2329/2331/2332). The instance must still NOT be killed in a single
+// pass — dead-confirm hysteresis spans multiple consecutive misses.
+func TestReconcileLaunches_BatchFetchMissCallsShowInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
@@ -1133,22 +1141,70 @@ func TestReconcileLaunches_BatchFetchMissDoesNotMarkRecentLaunchDead(t *testing.
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
-	if err != nil {
+	if _, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if result.Reconciled != 0 {
-		t.Errorf("reconciled = %d, want 0", result.Reconciled)
-	}
-	if showCalls != 0 {
-		t.Errorf("ShowInstance called %d times, want 0 (batch miss should not fall back per instance)", showCalls)
+	if showCalls == 0 {
+		t.Errorf("ShowInstance called %d times, want >= 1 (batch miss must be confirmed per-instance)", showCalls)
 	}
 	launch, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get launch: %v", err)
 	}
 	if launch.Status != db.LaunchStatusRunning {
-		t.Fatalf("launch status = %q, want %q", launch.Status, db.LaunchStatusRunning)
+		t.Fatalf("launch status = %q, want %q (single-pass miss should not kill)", launch.Status, db.LaunchStatusRunning)
+	}
+}
+
+// TestReconcileLaunches_BatchFetchMissShowAlive verifies that when
+// ShowInstance returns alive after a batch miss, the reconciler trusts
+// it and the instance keeps running. Closes the false-kill path that
+// motivated the heartbeat-first refactor.
+func TestReconcileLaunches_BatchFetchMissShowAlive(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	now := time.Now().Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:    db.LaunchStatusRunning,
+		Provider:  "vastai",
+		GPUSpec:   "RTX_4090",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "alive-456"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, now, instanceID); err != nil {
+		t.Fatalf("set launched at: %v", err)
+	}
+
+	var showCalls int
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{}, nil
+		},
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			showCalls++
+			return &cloud.Instance{ProviderID: id, Provider: cloud.ProviderVastai, Status: cloud.ProviderStatusRunning}, nil
+		},
+	}
+
+	if _, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if showCalls == 0 {
+		t.Errorf("ShowInstance called %d times, want >= 1", showCalls)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Fatalf("launch status = %q, want %q (ShowInstance reported alive)", launch.Status, db.LaunchStatusRunning)
 	}
 }
 

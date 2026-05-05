@@ -268,10 +268,6 @@ config {
     setup_stall_timeout: Duration = 25.minutes
     heartbeat_stale_threshold: Duration = 3.minutes
     running_stall_timeout: Duration = 30.minutes
-    -- Maximum time the provider's status endpoint may keep returning no
-    -- row (or errors) for an instance we believe is alive before we fail
-    -- closed. See ProviderStatusUnavailableTimeout.
-    provider_status_unavailable_timeout: Duration = 15.minutes
     -- Maximum time an instance may sit with agent_ready_at set but no job
     -- yet started and no phase reported. See IdleAfterReadyTimeout.
     idle_after_ready_timeout: Duration = 15.minutes
@@ -918,35 +914,45 @@ rule IdleAfterReadyTimeout {
         -- internal/campaign/reconcile.go idleAfterReadyTimeout.
 }
 
-rule ProviderStatusUnavailableTimeout {
-    when: ProviderStatusUnavailable(instance) for >= config.provider_status_unavailable_timeout
-    requires: instance.status in {launching, running}
-    requires: not instance.has_started_job
-                or (instance.status = running
-                    and HeartbeatAge(instance) > config.heartbeat_stale_threshold)
+rule HeartbeatStaleAfterReady {
+    when: instance: Instance.status = running
+            and instance.agent_ready_at != null
+            and HeartbeatAge(instance) > config.heartbeat_stale_threshold
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
     ensures: instance.ended_at = now
 
     @guidance
-        -- Watchdog for the case where the provider stops returning a
-        -- status row for an instance we still believe is alive. Without
-        -- direct execution evidence (has_started_job) or a fresh agent
-        -- heartbeat, we have no way to distinguish "agent is fine, the
-        -- provider's list endpoint is stale" from "container is gone".
-        -- Fail closed once the gap exceeds the timeout so jobs reset and
-        -- RelaunchAfterInfraFailure picks them up on a fresh offer.
+        -- Heartbeat-first liveness watchdog. Once an agent has reached
+        -- ready (agent_ready_at set), its R2 heartbeat is the primary
+        -- liveness signal. A stale heartbeat after the agent ever showed
+        -- liveness means the container is functionally dead, regardless
+        -- of what the provider's bulk list endpoint reports.
         --
-        -- The has_started_job gate must use direct execution evidence
-        -- (start_time / end_time), NOT a status-derived proxy. A job
-        -- canceled at the job level before it ever ran would otherwise
-        -- silence this watchdog, leaving the instance wedged in `running`
-        -- after the provider has destroyed its container (regression
-        -- wi2317).
+        -- Provider list absence is NOT a kill signal. Vast.ai's list
+        -- endpoint exhibits both false negatives (omitting live
+        -- instances during transient API gaps) and stale positives
+        -- (continuing to report destroyed instances briefly). Treating
+        -- "missing from list" as evidence of death produced 25-minute
+        -- false-kill windows on healthy instances and corrupted survival
+        -- statistics. Heartbeat presence in R2 — written directly by
+        -- the agent — is a strictly stronger signal.
+        --
+        -- ShowInstance fallback: when the bulk list omits an instance,
+        -- the reconciler issues a per-instance ShowInstance lookup
+        -- before treating the instance as missing. Only an explicit
+        -- per-ID terminal status (see ProviderInstanceDied) is treated
+        -- as provider-confirmed death.
+        --
+        -- Cases not covered by this rule:
+        --   - Bootstrap never completes (agent_ready_at never set):
+        --     handled by the bootstrap-deadline watchdog.
+        --   - Provider explicitly reports terminal status: handled by
+        --     ProviderInstanceDied with hysteresis.
         --
         -- Implementation: internal/campaign/instance_check.go §4a
-        -- (ActionEmptyStatusTimeout); threshold maxProviderStatusUnavailableTime.
+        -- (ActionEmptyStatusTimeout).
 }
 
 rule HeartbeatStale {
@@ -973,11 +979,14 @@ rule ProviderInstanceDied {
 
     @guidance
         -- A concrete terminal provider status (exited, destroyed, error,
-        -- dead) is terminal. A missing row from a provider-wide batch list is
-        -- NOT a terminal signal by itself; reconcile treats it as provider
-        -- status unavailable and waits for the pre-running/status-unavailable
-        -- timeout before failing. This prevents a transient stale provider
-        -- list from failing new launches before the bootstrap deadline.
+        -- dead) reported for a specific instance is terminal. A missing
+        -- row from a provider-wide batch list is NOT a terminal signal:
+        -- the bulk list endpoint may transiently omit live instances.
+        -- When the batch lookup misses an instance, reconcile falls back
+        -- to a per-instance ShowInstance call to confirm; only an
+        -- explicit per-ID terminal status (or per-ID not-found) is
+        -- treated as provider-confirmed death. Liveness is otherwise
+        -- driven by HeartbeatStaleAfterReady, not by list absence.
         -- Implementation: internal/campaign/reconcile.go and
         -- internal/campaign/instance_check.go.
 }
