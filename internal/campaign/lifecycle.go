@@ -1519,6 +1519,16 @@ func LaunchInstance(
 		"R2_ENDPOINT":          r2Assets.Client.Endpoint(),
 		"R2_BUCKET":            r2Cfg.Bucket,
 	}
+	// OnStart probe: a presigned PUT URL the container hits before any
+	// rclone/apt setup. If this object appears in R2, we know the
+	// container ran OnStart and had outbound network. If it doesn't, the
+	// container either never ran OnStart or has no outbound at all —
+	// disambiguates two failure modes that look identical otherwise.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 5*time.Second)
+	if probeURL, err := r2Assets.Client.PresignPutURL(probeCtx, r2keys.InstanceOnStartProbe(instanceID), 6*time.Hour); err == nil {
+		envVars[cloud.OnStartProbeURLEnvVar] = probeURL
+	}
+	cancelProbe()
 	// Pass Vast.ai API key for self-destruct (read from local config)
 	if apiKey := vastai.ReadAPIKey(); apiKey != "" {
 		envVars["VASTAI_API_KEY"] = apiKey

@@ -136,6 +136,16 @@ func InstanceDiskCapFailure(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/disk-cap-failure.json", instanceID)
 }
 
+// InstanceOnStartProbe is written by the very first line of OnStart via a
+// presigned PUT URL. Its presence proves the container ran OnStart and had
+// outbound network at all — independent of whether rclone is installed,
+// configured, or working. Used to disambiguate "OnStart never ran" from
+// "OnStart ran but rclone failed" when an instance dies with no other
+// markers in R2.
+func InstanceOnStartProbe(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/onstart-probe", instanceID)
+}
+
 func InstanceTerminationIntent(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/termination-intent.json", instanceID)
 }

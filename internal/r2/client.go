@@ -421,6 +421,24 @@ func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, cont
 	return nil
 }
 
+// PresignPutURL returns a presigned URL that can PUT to the given key for
+// up to ttl. Used by the OnStart probe so the container can write a marker
+// without rclone or aws-cli — just `curl -X PUT --upload-file -`.
+func (c *Client) PresignPutURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	if c == nil || c.s3 == nil {
+		return "", fmt.Errorf("r2 client not configured")
+	}
+	presignClient := s3.NewPresignClient(c.s3)
+	req, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", fmt.Errorf("presign put %s: %w", key, err)
+	}
+	return req.URL, nil
+}
+
 // ObjectExists checks whether an object exists at the given key.
 func (c *Client) ObjectExists(ctx context.Context, key string) (bool, error) {
 	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{

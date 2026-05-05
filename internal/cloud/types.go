@@ -190,20 +190,29 @@ const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 // It includes RunPod's init/SSH stack used by weft's SSH bootstrap path.
 const DefaultRunpodImage = "runpod/base:1.0.2-ubuntu2204"
 
-// DefaultOnStartCmd installs dependencies, uv, and rclone on fresh instances.
-//
 // Each step skips if already on PATH, else retries up to 3x with 10s
 // backoff. Without retries a single DNS/apt hiccup forfeits the rental:
 // the OnStart shell exits non-zero, Vast destroys the container, and
 // weft only notices via the empty_status_timeout watchdog (~25min).
+//
+// Before installing anything, fire a best-effort probe to the presigned
+// R2 URL in $WEFT_PROBE_URL. Its presence on R2 proves OnStart actually
+// executed and had outbound network — when a launch dies with no other
+// R2 markers, this discriminates "OnStart never ran" (provider/host
+// issue) from "OnStart ran but rclone/apt failed" (retried below).
 //
 // rclone is the hard dependency (bootstrap stage markers depend on it).
 // The package list must stay in sync with deploy/cloud-base.Dockerfile,
 // which pre-bakes the same dependencies so the `command -v` checks
 // short-circuit.
 const DefaultOnStartCmd = `set +e
-if ! (command -v unzip >/dev/null && command -v gcc >/dev/null); then
-  for i in 1 2 3; do apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev && break; sleep 10; done
+if [ -n "${WEFT_PROBE_URL:-}" ]; then
+  probe_body="onstart-started $(date -u +%FT%TZ)"
+  (command -v curl >/dev/null && curl -fsS -m 10 -X PUT --data "$probe_body" "${WEFT_PROBE_URL}" >/dev/null 2>&1) || \
+    (command -v wget >/dev/null && wget -q --method=PUT --body-data="$probe_body" -O /dev/null "${WEFT_PROBE_URL}") || true
+fi
+if ! (command -v unzip >/dev/null && command -v gcc >/dev/null && command -v curl >/dev/null); then
+  for i in 1 2 3; do apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev curl && break; sleep 10; done
 fi
 if ! command -v uv >/dev/null; then
   for i in 1 2 3; do curl -fsSL https://astral.sh/uv/install.sh | sh && break; sleep 10; done
@@ -216,6 +225,11 @@ command -v rclone >/dev/null || { echo 'rclone install failed after retries' >&2
 // R2BootstrapKeyEnvVar is the env var a template-managed startup command reads
 // to locate the instance-specific bootstrap script in R2.
 const R2BootstrapKeyEnvVar = "WEFT_BOOTSTRAP_KEY"
+
+// OnStartProbeURLEnvVar carries a presigned PUT URL that OnStart hits
+// before any setup, to prove the container actually ran OnStart with
+// outbound network. The literal name is also embedded in DefaultOnStartCmd.
+const OnStartProbeURLEnvVar = "WEFT_PROBE_URL"
 
 // DefaultCreateOpts returns standard instance creation options.
 // If image is empty, DefaultImage is used.

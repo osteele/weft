@@ -40,6 +40,7 @@ type instanceDiagnoseReport struct {
 	LivePhase         string
 	LivePhaseChanged  *time.Time
 	BootstrapStage    string
+	OnStartProbe      string // body of instance/<id>/onstart-probe — present iff OnStart actually ran
 	Obs               terminal.CloudInstanceObservability
 	Diagnosis         instanceDiagnosis
 	Timeline          []timelineEntry
@@ -138,17 +139,19 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 	}
 	livePhaseRaw := ""
 	bootstrapStage := ""
+	onStartProbe := ""
 	if r2Client, err := newR2ClientFromConfig(); err == nil && r2Client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if data, getErr := r2Client.GetObject(ctx, r2keys.InstancePhase(inst.ID)); getErr == nil {
-			livePhaseRaw = strings.TrimSpace(string(data))
+		fetch := func(key string) string {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if data, err := r2Client.GetObject(ctx, key); err == nil {
+				return strings.TrimSpace(string(data))
+			}
+			return ""
 		}
-		cancel()
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-		if data, getErr := r2Client.GetObject(ctx2, r2keys.BootstrapStage(inst.ID)); getErr == nil {
-			bootstrapStage = strings.TrimSpace(string(data))
-		}
-		cancel2()
+		livePhaseRaw = fetch(r2keys.InstancePhase(inst.ID))
+		bootstrapStage = fetch(r2keys.BootstrapStage(inst.ID))
+		onStartProbe = fetch(r2keys.InstanceOnStartProbe(inst.ID))
 	}
 
 	report := &instanceDiagnoseReport{
@@ -163,6 +166,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		LivePhase:         livePhase,
 		LivePhaseChanged:  livePhaseChanged,
 		BootstrapStage:    bootstrapStage,
+		OnStartProbe:      onStartProbe,
 		Obs:               obs,
 		Diagnosis:         diagnosis,
 		Timeline:          timeline,
@@ -282,18 +286,34 @@ func formatGPUMetrics(t *db.JobPhaseTimings) string {
 	return strings.Join(parts, ", ")
 }
 
-// formatBootstrapSection renders the bootstrap-stage block. An empty
-// stage on a launched instance signals OnStart died before downloading
-// bootstrap.sh — see docs/guides/cloud-instance-debugging.md.
-func formatBootstrapSection(stage string, launched bool) string {
-	switch {
-	case stage != "":
-		return fmt.Sprintf("\nBootstrap:\n  Last stage: %s\n", stage)
-	case launched:
-		return "\nBootstrap:\n  Last stage: (no marker on R2 — bootstrap.sh likely never ran; OnStart aborted before downloading it)\n"
-	default:
+// formatBootstrapSection renders the bootstrap-stage block. The OnStart
+// probe and bootstrap stage together disambiguate failure modes:
+//   - probe + stage    → bootstrap.sh ran and reached `stage`
+//   - probe, no stage  → OnStart ran with network, but rclone setup or
+//     bootstrap.sh download failed
+//   - no probe, no stage → OnStart never executed, or container had no
+//     outbound network (provider/host issue)
+//
+// See docs/guides/cloud-instance-debugging.md.
+func formatBootstrapSection(stage, probe string, launched bool) string {
+	if stage != "" {
+		out := fmt.Sprintf("\nBootstrap:\n  Last stage:    %s\n", stage)
+		if probe != "" {
+			out += fmt.Sprintf("  OnStart probe: %s\n", probe)
+		}
+		return out
+	}
+	if !launched {
 		return ""
 	}
+	if probe != "" {
+		return "\nBootstrap:\n" +
+			"  Last stage:    (none — bootstrap.sh did not write a marker)\n" +
+			fmt.Sprintf("  OnStart probe: %s (OnStart ran; rclone setup or bootstrap.sh download failed)\n", probe)
+	}
+	return "\nBootstrap:\n" +
+		"  Last stage:    (no marker on R2 — bootstrap.sh likely never ran)\n" +
+		"  OnStart probe: (none — container probably never executed OnStart, or had no outbound network)\n"
 }
 
 func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
@@ -337,7 +357,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 		}
 	}
 
-	b.WriteString(formatBootstrapSection(report.BootstrapStage, inst.LaunchedAt != nil))
+	b.WriteString(formatBootstrapSection(report.BootstrapStage, report.OnStartProbe, inst.LaunchedAt != nil))
 
 	// Section 2: Root cause
 	b.WriteString("\n")
