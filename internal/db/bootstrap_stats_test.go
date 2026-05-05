@@ -104,6 +104,37 @@ func TestTotalBootstrapPercentileIgnoresFailuresAndInvalidDurations(t *testing.T
 	}
 }
 
+func TestBootstrapStagePercentile(t *testing.T) {
+	database := setupBootstrapTestDB(t)
+	defer database.Close()
+
+	base := int64(1000000)
+	for i, duration := range []int64{30, 60, 90, 120, 150} {
+		launchID := int64(i + 1)
+		_, err := database.Exec(
+			`INSERT INTO bootstrap_transitions (launch_id, stage, entered_at) VALUES (?, ?, ?), (?, ?, ?)`,
+			launchID, "deps_installing", base, launchID, "agent_starting", base+duration,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, samples, oldest, err := BootstrapStagePercentile(database, "deps_installing", 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if samples != 5 {
+		t.Fatalf("samples = %d, want 5", samples)
+	}
+	if oldest != base {
+		t.Fatalf("oldest = %d, want %d", oldest, base)
+	}
+	if got != 90*time.Second {
+		t.Fatalf("p50 = %v, want 90s", got)
+	}
+}
+
 func TestComputeBootstrapSurvival_InsufficientData(t *testing.T) {
 	database := setupBootstrapTestDB(t)
 	defer database.Close()

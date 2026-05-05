@@ -93,6 +93,8 @@ type listTUIModel struct {
 	launchByID                 map[int64]*db.Launch
 	launchBootstrapP50         time.Duration
 	launchBootstrapSamples     int
+	launchStageETAByName       map[string]groupedStatusLaunchingStageETA
+	launchStageEnteredAtByID   map[int64]int64
 	launchSpinner              spinner.Model
 	launchSpinnerRunning       bool
 	recentLaunchFailures       *recentLaunchFailures
@@ -116,18 +118,20 @@ type listTUIModel struct {
 }
 
 type listJobsLoadedMsg struct {
-	jobs                   []*db.Job
-	launchLiveByID         map[int64]*db.LaunchLiveState
-	launchStatusByID       map[int64]string
-	placingJobIDs          map[int64]struct{}
-	placementQueuedAtByJob map[int64]int64
-	launchByID             map[int64]*db.Launch
-	launchBootstrapP50     time.Duration
-	launchBootstrapSamples int
-	recentLaunchFailures   *recentLaunchFailures
-	hostInfoByName         map[string]*db.CachedHostInfo
-	autoPassPhase          autoPilotPhaseHint
-	err                    error
+	jobs                     []*db.Job
+	launchLiveByID           map[int64]*db.LaunchLiveState
+	launchStatusByID         map[int64]string
+	placingJobIDs            map[int64]struct{}
+	placementQueuedAtByJob   map[int64]int64
+	launchByID               map[int64]*db.Launch
+	launchBootstrapP50       time.Duration
+	launchBootstrapSamples   int
+	launchStageETAByName     map[string]groupedStatusLaunchingStageETA
+	launchStageEnteredAtByID map[int64]int64
+	recentLaunchFailures     *recentLaunchFailures
+	hostInfoByName           map[string]*db.CachedHostInfo
+	autoPassPhase            autoPilotPhaseHint
+	err                      error
 }
 
 type listSyncFinishedMsg struct {
@@ -520,6 +524,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchByID = msg.launchByID
 		m.launchBootstrapP50 = msg.launchBootstrapP50
 		m.launchBootstrapSamples = msg.launchBootstrapSamples
+		m.launchStageETAByName = msg.launchStageETAByName
+		m.launchStageEnteredAtByID = msg.launchStageEnteredAtByID
 		m.recentLaunchFailures = msg.recentLaunchFailures
 		m.hostInfoByName = msg.hostInfoByName
 		m.autoPassPhase = msg.autoPassPhase
@@ -2013,8 +2019,10 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		now:                    time.Now(),
 		launchSpinner:          m.launchSpinner.View(),
 		launchingETA: groupedStatusLaunchingETA{
-			p50:     m.launchBootstrapP50,
-			samples: m.launchBootstrapSamples,
+			totalP50:               m.launchBootstrapP50,
+			totalSamples:           m.launchBootstrapSamples,
+			stageByName:            m.launchStageETAByName,
+			stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
 		},
 	})
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
@@ -2156,28 +2164,70 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			bootstrapP50 = 0
 			bootstrapSamples = 0
 		}
+		stageETAByName, stageEnteredAtByID := loadLaunchingStageETA(database, jobs, launchLiveByID)
 		placementQueuedAtByJob, placementErr := db.PlacementDisplayQueuedAt(database, queuedRentalJobIDs(jobs))
 		if placementErr != nil {
 			placementQueuedAtByJob = map[int64]int64{}
 		}
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		return listJobsLoadedMsg{
-			jobs:                   jobs,
-			launchLiveByID:         launchLiveByID,
-			launchStatusByID:       launchStatusByID,
-			placingJobIDs:          loadPlacingJobIDs(database),
-			placementQueuedAtByJob: placementQueuedAtByJob,
-			launchByID:             launchByID,
-			launchBootstrapP50:     bootstrapP50,
-			launchBootstrapSamples: bootstrapSamples,
-			recentLaunchFailures:   loadRecentLaunchFailures(database, recentLaunchFailureWindow, time.Now()),
-			hostInfoByName:         hostInfoByName,
-			autoPassPhase:          loadLatestAutoPilotPhase(database),
+			jobs:                     jobs,
+			launchLiveByID:           launchLiveByID,
+			launchStatusByID:         launchStatusByID,
+			placingJobIDs:            loadPlacingJobIDs(database),
+			placementQueuedAtByJob:   placementQueuedAtByJob,
+			launchByID:               launchByID,
+			launchBootstrapP50:       bootstrapP50,
+			launchBootstrapSamples:   bootstrapSamples,
+			launchStageETAByName:     stageETAByName,
+			launchStageEnteredAtByID: stageEnteredAtByID,
+			recentLaunchFailures:     loadRecentLaunchFailures(database, recentLaunchFailureWindow, time.Now()),
+			hostInfoByName:           hostInfoByName,
+			autoPassPhase:            loadLatestAutoPilotPhase(database),
 		}
 	}
 }
 
 const recentLaunchFailureWindow = 30 * time.Minute
+
+func loadLaunchingStageETA(database *sql.DB, jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) (map[string]groupedStatusLaunchingStageETA, map[int64]int64) {
+	stageByName := make(map[string]groupedStatusLaunchingStageETA)
+	enteredAtByLaunch := make(map[int64]int64)
+	if database == nil || len(jobs) == 0 {
+		return stageByName, enteredAtByLaunch
+	}
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		live := launchLiveStateForLaunchingJob(job, launchLiveByID)
+		if live == nil {
+			continue
+		}
+		stage := strings.TrimSpace(live.BootstrapStage)
+		if stage == "" {
+			continue
+		}
+		if _, ok := stageByName[stage]; !ok {
+			p50, samples, oldest, err := db.BootstrapStagePercentile(database, stage, 0.5)
+			if err == nil {
+				stageByName[stage] = groupedStatusLaunchingStageETA{
+					p50:     p50,
+					samples: samples,
+					oldest:  oldest,
+				}
+			}
+		}
+		if _, ok := enteredAtByLaunch[*job.LaunchID]; ok {
+			continue
+		}
+		enteredAt, err := db.LatestBootstrapStageEnteredAt(database, *job.LaunchID, stage)
+		if err == nil && enteredAt > 0 {
+			enteredAtByLaunch[*job.LaunchID] = enteredAt
+		}
+	}
+	return stageByName, enteredAtByLaunch
+}
 
 func loadRecentLaunchFailures(database *sql.DB, window time.Duration, now time.Time) *recentLaunchFailures {
 	if database == nil || window <= 0 {

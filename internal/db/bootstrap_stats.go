@@ -13,6 +13,37 @@ import (
 // known elapsed time.
 type BootstrapDurations []time.Duration
 
+const bootstrapStageStatsMinSpan = 14 * 24 * time.Hour
+
+// BootstrapStageStatsMinSpan is the required age of per-stage transition
+// history before UI ETA estimates prefer per-stage samples over total
+// bootstrap samples.
+func BootstrapStageStatsMinSpan() time.Duration {
+	return bootstrapStageStatsMinSpan
+}
+
+// initBootstrapTransitionsSchema creates the append-only stage transition log.
+func initBootstrapTransitionsSchema(database *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS bootstrap_transitions (
+			launch_id INTEGER NOT NULL REFERENCES launches(id),
+			stage TEXT NOT NULL,
+			entered_at INTEGER NOT NULL,
+			PRIMARY KEY (launch_id, stage, entered_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bootstrap_transitions_stage_entered
+			ON bootstrap_transitions(stage, entered_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_bootstrap_transitions_launch_entered
+			ON bootstrap_transitions(launch_id, entered_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := database.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TotalBootstrapPercentile returns a percentile over successful total bootstrap
 // durations, measured from launch creation to the first wrapper start.
 func TotalBootstrapPercentile(database *sql.DB, p float64) (time.Duration, int, error) {
@@ -60,6 +91,86 @@ func TotalBootstrapPercentile(database *sql.DB, p float64) (time.Duration, int, 
 	sort.Ints(durations)
 	idx := int(p * float64(len(durations)-1))
 	return time.Duration(durations[idx]) * time.Second, len(durations), nil
+}
+
+// BootstrapStagePercentile returns a percentile over completed durations spent
+// in a bootstrap stage, plus sample count and the oldest sample timestamp.
+func BootstrapStagePercentile(database *sql.DB, stage string, p float64) (time.Duration, int, int64, error) {
+	if database == nil {
+		return 0, 0, 0, nil
+	}
+	if p < 0 || p > 1 {
+		return 0, 0, 0, fmt.Errorf("percentile must be between 0 and 1")
+	}
+	rows, err := database.Query(`
+		WITH ordered AS (
+			SELECT
+				bt.launch_id,
+				bt.stage,
+				bt.entered_at,
+				LEAD(bt.entered_at) OVER (
+					PARTITION BY bt.launch_id
+					ORDER BY bt.entered_at
+				) AS next_entered_at
+			FROM bootstrap_transitions bt
+		)
+		SELECT entered_at, next_entered_at - entered_at AS duration_secs
+		FROM ordered
+		WHERE stage = ?
+		  AND next_entered_at IS NOT NULL
+		  AND next_entered_at > entered_at
+		  AND (next_entered_at - entered_at) BETWEEN 1 AND ?
+	`, stage, bootstrapSurvivalConfig.MaxTimeSecs)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer rows.Close()
+
+	var durations []int
+	oldest := int64(0)
+	for rows.Next() {
+		var enteredAt int64
+		var secs int
+		if err := rows.Scan(&enteredAt, &secs); err != nil {
+			return 0, 0, 0, err
+		}
+		if oldest == 0 || enteredAt < oldest {
+			oldest = enteredAt
+		}
+		durations = append(durations, secs)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, 0, err
+	}
+	if len(durations) == 0 {
+		return 0, 0, 0, nil
+	}
+	sort.Ints(durations)
+	idx := int(p * float64(len(durations)-1))
+	return time.Duration(durations[idx]) * time.Second, len(durations), oldest, nil
+}
+
+// LatestBootstrapStageEnteredAt returns the most recent time a launch entered
+// the specified stage.
+func LatestBootstrapStageEnteredAt(database *sql.DB, launchID int64, stage string) (int64, error) {
+	if database == nil || launchID <= 0 || stage == "" {
+		return 0, nil
+	}
+	var enteredAt int64
+	err := database.QueryRow(`
+		SELECT entered_at
+		FROM bootstrap_transitions
+		WHERE launch_id = ? AND stage = ?
+		ORDER BY entered_at DESC
+		LIMIT 1
+	`, launchID, stage).Scan(&enteredAt)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return enteredAt, nil
 }
 
 // ConditionalMedian returns the estimated remaining bootstrap time given that

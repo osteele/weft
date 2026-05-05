@@ -2510,12 +2510,14 @@ func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) (*int64, err
 	now := time.Now().Unix()
 
 	// Detect phase change to auto-set PhaseChangedAt.
+	var oldPhase, oldBootstrap sql.NullString
 	if state.PhaseChangedAt == nil {
-		var oldPhase sql.NullString
-		_ = database.QueryRow(`SELECT instance_phase FROM launch_live_state WHERE launch_id = ?`, state.LaunchID).Scan(&oldPhase)
+		_ = database.QueryRow(`SELECT instance_phase, bootstrap_stage FROM launch_live_state WHERE launch_id = ?`, state.LaunchID).Scan(&oldPhase, &oldBootstrap)
 		if state.InstancePhase != oldPhase.String {
 			state.PhaseChangedAt = &now
 		}
+	} else {
+		_ = database.QueryRow(`SELECT bootstrap_stage FROM launch_live_state WHERE launch_id = ?`, state.LaunchID).Scan(&oldBootstrap)
 	}
 
 	_, err := database.Exec(`INSERT INTO launch_live_state
@@ -2536,7 +2538,34 @@ func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) (*int64, err
 		state.JobProgressPhase,
 		state.AgentVersion, state.PhaseChangedAt, now,
 	)
-	return state.PhaseChangedAt, err
+	if err != nil {
+		return state.PhaseChangedAt, err
+	}
+	if shouldRecordBootstrapTransition(oldBootstrap, state.BootstrapStage) {
+		if err := recordBootstrapTransition(database, state.LaunchID, state.BootstrapStage, now); err != nil {
+			return state.PhaseChangedAt, err
+		}
+	}
+	return state.PhaseChangedAt, nil
+}
+
+func shouldRecordBootstrapTransition(oldStage sql.NullString, newStage string) bool {
+	newStage = strings.TrimSpace(newStage)
+	if newStage == "" {
+		return false
+	}
+	return !oldStage.Valid || strings.TrimSpace(oldStage.String) != newStage
+}
+
+func recordBootstrapTransition(database *sql.DB, launchID int64, stage string, enteredAt int64) error {
+	_, err := database.Exec(`
+		INSERT OR IGNORE INTO bootstrap_transitions (launch_id, stage, entered_at)
+		VALUES (?, ?, ?)`,
+		launchID,
+		strings.TrimSpace(stage),
+		enteredAt,
+	)
+	return err
 }
 
 // nullableProgressPct returns nil if pct is -1 (unavailable), otherwise the value.

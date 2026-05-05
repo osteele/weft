@@ -288,6 +288,12 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			mean_gpu_util INTEGER,
 			peak_gpu_util INTEGER
 		)`,
+		`CREATE TABLE bootstrap_transitions (
+			launch_id INTEGER NOT NULL,
+			stage TEXT NOT NULL,
+			entered_at INTEGER NOT NULL,
+			PRIMARY KEY (launch_id, stage, entered_at)
+		)`,
 	} {
 		if _, err := database.Exec(ddl); err != nil {
 			t.Fatal(err)

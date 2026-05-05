@@ -61,8 +61,16 @@ type groupedStatusRenderOptions struct {
 }
 
 type groupedStatusLaunchingETA struct {
+	totalP50               time.Duration
+	totalSamples           int
+	stageByName            map[string]groupedStatusLaunchingStageETA
+	stageEnteredAtByLaunch map[int64]int64
+}
+
+type groupedStatusLaunchingStageETA struct {
 	p50     time.Duration
 	samples int
+	oldest  int64
 }
 
 // recentLaunchFailures feeds the "Recent launch failures" section. recoveredIDs
@@ -570,7 +578,7 @@ func groupedStatusLaunchingSuffixParts(job *db.Job, launchLiveByID map[int64]*db
 	if elapsed := groupedStatusLaunchingElapsed(job, launch, now); elapsed != "" {
 		parts = append(parts, elapsed)
 	}
-	if etaText := groupedStatusLaunchingETAText(launch, now, eta); etaText != "" {
+	if etaText := groupedStatusLaunchingETAText(launch, live, now, eta); etaText != "" {
 		parts = append(parts, etaText)
 	}
 	return parts
@@ -626,18 +634,42 @@ func groupedStatusLaunchingElapsed(job *db.Job, launch *db.Launch, now time.Time
 	return shortRelativeTime(now.Unix() - createdAt)
 }
 
-func groupedStatusLaunchingETAText(launch *db.Launch, now time.Time, eta groupedStatusLaunchingETA) string {
-	if launch == nil || launch.CreatedAt <= 0 || eta.samples < 5 || eta.p50 <= 0 {
+func groupedStatusLaunchingETAText(launch *db.Launch, live *db.LaunchLiveState, now time.Time, eta groupedStatusLaunchingETA) string {
+	stageETA, stageEnteredAt := groupedStatusLaunchingStageETAForLaunch(launch, live, now, eta)
+	if stageETA.samples >= 5 && stageETA.p50 > 0 && stageEnteredAt > 0 && now.Sub(time.Unix(stageETA.oldest, 0)) >= db.BootstrapStageStatsMinSpan() {
+		elapsed := now.Sub(time.Unix(stageEnteredAt, 0))
+		return groupedStatusRemainingText(elapsed, stageETA.p50)
+	}
+	if launch == nil || launch.CreatedAt <= 0 || eta.totalSamples < 5 || eta.totalP50 <= 0 {
 		return ""
 	}
 	elapsed := now.Sub(time.Unix(launch.CreatedAt, 0))
+	return groupedStatusRemainingText(elapsed, eta.totalP50)
+}
+
+func groupedStatusLaunchingStageETAForLaunch(launch *db.Launch, live *db.LaunchLiveState, now time.Time, eta groupedStatusLaunchingETA) (groupedStatusLaunchingStageETA, int64) {
+	if launch == nil || live == nil || eta.stageByName == nil || eta.stageEnteredAtByLaunch == nil {
+		return groupedStatusLaunchingStageETA{}, 0
+	}
+	stage := strings.TrimSpace(live.BootstrapStage)
+	if stage == "" {
+		return groupedStatusLaunchingStageETA{}, 0
+	}
+	enteredAt := eta.stageEnteredAtByLaunch[launch.ID]
+	if enteredAt <= 0 {
+		return groupedStatusLaunchingStageETA{}, 0
+	}
+	return eta.stageByName[stage], enteredAt
+}
+
+func groupedStatusRemainingText(elapsed time.Duration, p50 time.Duration) string {
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	if elapsed > eta.p50+eta.p50/2 {
+	if elapsed > p50+p50/2 {
 		return "overdue"
 	}
-	remaining := eta.p50 - elapsed
+	remaining := p50 - elapsed
 	if remaining < 0 {
 		remaining = 0
 	}

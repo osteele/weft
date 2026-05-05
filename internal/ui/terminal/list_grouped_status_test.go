@@ -645,8 +645,8 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingGroupsMultiJobInstance(t *te
 		now:              now,
 		launchSpinner:    "⠹",
 		launchingETA: groupedStatusLaunchingETA{
-			p50:     5 * time.Minute,
-			samples: 5,
+			totalP50:     5 * time.Minute,
+			totalSamples: 5,
 		},
 	})
 	for _, want := range []string{
@@ -676,13 +676,46 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndOverdue(t *
 		now:              now,
 		launchSpinner:    "⠸",
 		launchingETA: groupedStatusLaunchingETA{
-			p50:     10 * time.Minute,
-			samples: 8,
+			totalP50:     10 * time.Minute,
+			totalSamples: 8,
 		},
 	})
 	want := "- ✓ wj1749 — proj ready job (rental) — agent ready · 16m ago · overdue"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingPrefersMatureStageETA(t *testing.T) {
+	now := time.Unix(5_000_000, 0)
+	launchID := int64(2340)
+	jobs := []*db.Job{
+		{ID: 1750, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "stage eta"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: now.Add(-9 * time.Minute).Unix()}},
+		now:              now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50:     10 * time.Minute,
+			totalSamples: 8,
+			stageByName: map[string]groupedStatusLaunchingStageETA{
+				"deps_installing": {
+					p50:     2 * time.Minute,
+					samples: 6,
+					oldest:  now.Add(-15 * 24 * time.Hour).Unix(),
+				},
+			},
+			stageEnteredAtByLaunch: map[int64]int64{launchID: now.Add(-30 * time.Second).Unix()},
+		},
+	})
+	want := "~1m remaining"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing stage ETA %q in output:\n%s", want, out)
+	}
+	if strings.Contains(out, "overdue") {
+		t.Fatalf("used total-bootstrap ETA instead of mature stage ETA:\n%s", out)
 	}
 }
 

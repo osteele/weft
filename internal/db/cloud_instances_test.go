@@ -1700,6 +1700,46 @@ func TestLaunchLiveState(t *testing.T) {
 
 }
 
+func TestLaunchLiveStateBootstrapTransitions(t *testing.T) {
+	database := setupTestDB(t)
+
+	ci := &Launch{Status: LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX3090"}
+	launchID, err := CreateLaunch(database, ci)
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	state := LaunchLiveState{
+		LaunchID:       launchID,
+		BootstrapStage: "deps_installing",
+	}
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("UpsertLaunchLiveState duplicate: %v", err)
+	}
+	state.BootstrapStage = "agent_starting"
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("UpsertLaunchLiveState changed: %v", err)
+	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM bootstrap_transitions WHERE launch_id = ?`, launchID).Scan(&count); err != nil {
+		t.Fatalf("count transitions: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("transition count = %d, want 2", count)
+	}
+	enteredAt, err := LatestBootstrapStageEnteredAt(database, launchID, "agent_starting")
+	if err != nil {
+		t.Fatalf("LatestBootstrapStageEnteredAt: %v", err)
+	}
+	if enteredAt <= 0 {
+		t.Fatal("agent_starting entered_at was not recorded")
+	}
+}
+
 func TestLaunchLiveStateDestroyingOrphansQueuedAttempts(t *testing.T) {
 	database := setupTestDB(t)
 

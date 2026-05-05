@@ -194,6 +194,12 @@ var versionedMigrations = []migration{
 			return err
 		},
 	},
+	{
+		Description: "add bootstrap_transitions table",
+		Apply: func(db *sql.DB) error {
+			return initBootstrapTransitionsSchema(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
