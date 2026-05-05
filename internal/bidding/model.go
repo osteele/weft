@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
@@ -184,7 +185,21 @@ type SurvivalModel struct {
 	RegionStats      map[string]*SurvivalStats // keyed by provider|data_center (e.g. vastai|Sichuan, CN)
 	PricePercentiles map[string][]float64
 	PriorStrength    float64 // pseudo-observations from provider reliability
+
+	// RecentTotal/RecentSurvived count outcomes that ended within
+	// HealthWindow of the model build time. The Beta-prior shrinkage in
+	// the per-machine/region survival logic is too slow to react to a
+	// sudden mass-failure window (e.g. provider control-plane glitch,
+	// network change). RecentGlobalRate exposes a short-window signal so
+	// the offer filter can raise its survival floor temporarily during
+	// the bad-day window and relax it once outcomes recover.
+	RecentTotal    int
+	RecentSurvived int
 }
+
+// HealthWindow is the lookback used by RecentGlobalRate for the
+// short-window mass-failure detector.
+const HealthWindow = 1 * time.Hour
 
 const providerKeySep = "|"
 
@@ -711,6 +726,46 @@ type RejectedGroup struct {
 	Count        int
 	SurvivalProb float64 // minimum survival probability seen in the group
 }
+
+// HealthFloor returns baseline raised to healthBadFloor when the last
+// HealthWindow of outcomes shows a recent success rate below
+// healthBadCutoff with at least healthMinSamples observations; otherwise
+// returns baseline unchanged. Lets the offer filter tighten during
+// transient mass-failure windows the long-history priors are too slow
+// to react to.
+func (m *SurvivalModel) HealthFloor(baseline float64) float64 {
+	if m == nil || m.RecentTotal < healthMinSamples {
+		return baseline
+	}
+	rate := float64(m.RecentSurvived) / float64(m.RecentTotal)
+	if rate >= healthBadCutoff {
+		return baseline
+	}
+	if baseline > healthBadFloor {
+		return baseline
+	}
+	return healthBadFloor
+}
+
+// HealthRecent returns (rate, samples) for the last HealthWindow of
+// outcomes. Useful for status displays and tests.
+func (m *SurvivalModel) HealthRecent() (rate float64, samples int) {
+	if m == nil || m.RecentTotal == 0 {
+		return 0, 0
+	}
+	return float64(m.RecentSurvived) / float64(m.RecentTotal), m.RecentTotal
+}
+
+const (
+	// healthMinSamples is the minimum number of outcomes in HealthWindow
+	// before HealthFloor adjusts the floor — avoids reacting to noise.
+	healthMinSamples = 5
+	// healthBadCutoff is the recent-success-rate threshold below which we
+	// consider the provider in a bad-day window.
+	healthBadCutoff = 0.30
+	// healthBadFloor is the survival floor applied during bad-day windows.
+	healthBadFloor = 0.70
+)
 
 // FilterOffersBySurvival removes offers whose survival probability is below
 // minSurvival. Returns the passing offers and a summary of rejected groups.

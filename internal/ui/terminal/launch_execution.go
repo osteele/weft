@@ -47,6 +47,9 @@ func prepareLaunchExecutionPlan(
 		return plan, providerErr
 	}
 
+	// HealthFloor temporarily raises minSurvival during bad-day windows.
+	effectiveMinSurvival := survivalModel.HealthFloor(minSurvival)
+
 	plans, _ := campaign.BuildProfilePlansWithProgress(
 		database,
 		clients,
@@ -57,7 +60,7 @@ func prepareLaunchExecutionPlan(
 		survivalModel,
 		[]bidding.ScoreProfile{profile},
 		minReliability,
-		minSurvival,
+		effectiveMinSurvival,
 		onProgress,
 	)
 	strategyPlan, ok := plans[profile.ID]

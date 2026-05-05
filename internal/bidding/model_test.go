@@ -3,6 +3,7 @@ package bidding
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
@@ -27,6 +28,75 @@ func TestBuildSurvivalModel_NoData(t *testing.T) {
 	model := BuildSurvivalModel(nil)
 	if model != nil {
 		t.Fatal("expected nil model for no data")
+	}
+}
+
+// TestHealthFloor_RaisedDuringBadDay verifies that a recent burst of failures
+// within HealthWindow raises the survival floor, regardless of the long-term
+// per-machine/region statistics that the Beta priors are tracking.
+func TestHealthFloor_RaisedDuringBadDay(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-15 * time.Minute).Unix()
+	old := now.Add(-30 * 24 * time.Hour).Unix()
+
+	var outcomes []InstanceOutcome
+	// Decent long-term history.
+	for range 20 {
+		outcomes = append(outcomes, InstanceOutcome{
+			Provider: testProvider, TerminationReason: "completed",
+			ResolvedGPUName: "RTX 4090", Reliability: 0.99, EndedAtUnix: old,
+		})
+	}
+	// Mass failure in the last hour.
+	for range 10 {
+		outcomes = append(outcomes, InstanceOutcome{
+			Provider: testProvider, TerminationReason: "infra_failure",
+			ResolvedGPUName: "RTX 4090", Reliability: 0.99, EndedAtUnix: recent,
+		})
+	}
+	model := BuildSurvivalModelAt(outcomes, now)
+	if model == nil {
+		t.Fatal("nil model")
+	}
+	rate, n := model.HealthRecent()
+	if n != 10 || rate != 0 {
+		t.Fatalf("recent rate (%v, %d), want (0, 10)", rate, n)
+	}
+	if floor := model.HealthFloor(0.4); floor < 0.7 {
+		t.Errorf("HealthFloor(0.4) during bad-day = %v, want >= 0.7", floor)
+	}
+}
+
+// TestHealthFloor_LowSampleNoChange verifies the floor is not raised when
+// recent sample size is below healthMinSamples — avoids reacting to noise
+// from small windows.
+func TestHealthFloor_LowSampleNoChange(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-10 * time.Minute).Unix()
+	outcomes := []InstanceOutcome{
+		{Provider: testProvider, TerminationReason: "infra_failure", EndedAtUnix: recent},
+		{Provider: testProvider, TerminationReason: "infra_failure", EndedAtUnix: recent},
+	}
+	model := BuildSurvivalModelAt(outcomes, now)
+	if floor := model.HealthFloor(0.4); floor != 0.4 {
+		t.Errorf("HealthFloor(0.4) with only 2 recent samples = %v, want 0.4 (unchanged)", floor)
+	}
+}
+
+// TestHealthFloor_HealthyRecentLeavesFloor verifies that a healthy recent
+// window leaves the baseline floor alone.
+func TestHealthFloor_HealthyRecentLeavesFloor(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-15 * time.Minute).Unix()
+	var outcomes []InstanceOutcome
+	for range 10 {
+		outcomes = append(outcomes, InstanceOutcome{
+			Provider: testProvider, TerminationReason: "completed", EndedAtUnix: recent,
+		})
+	}
+	model := BuildSurvivalModelAt(outcomes, now)
+	if floor := model.HealthFloor(0.4); floor != 0.4 {
+		t.Errorf("HealthFloor(0.4) with healthy recent = %v, want 0.4", floor)
 	}
 }
 

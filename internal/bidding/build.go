@@ -141,9 +141,21 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 		PriorStrength:    defaultPriorStrength,
 	}
 
+	healthCutoff := now.Add(-HealthWindow).Unix()
+
 	for _, o := range outcomes {
 		survived := isSurvived(o.TerminationReason)
 		weight := outcomeWeight(o.EndedAtUnix, now)
+
+		// Recent counts use unweighted samples — the Beta priors handle
+		// long-history shrinkage; this signal exists specifically to
+		// catch what those priors are too slow to see.
+		if o.EndedAtUnix > 0 && o.EndedAtUnix >= healthCutoff {
+			model.RecentTotal++
+			if survived {
+				model.RecentSurvived++
+			}
+		}
 
 		gs, ok := model.Global[o.Provider]
 		if !ok {

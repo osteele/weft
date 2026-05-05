@@ -46,11 +46,20 @@ func SSHRun(target string, sshOpts []string, command string) (string, error) {
 func InstanceSSHArgs(inst *Instance) []string {
 	args := []string{
 		"-p", fmt.Sprintf("%d", inst.SSHPort),
+		// Pass -F /dev/null so the user's ~/.ssh/config doesn't smuggle in
+		// extra IdentityFile entries (a Host ssh*.vast.ai stanza is common
+		// and would override IdentitiesOnly=yes by adding the user's
+		// hardware-backed key, prompting for interactive auth instead of
+		// using the dedicated weft cloud key).
+		"-F", "/dev/null",
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-o", "IdentitiesOnly=yes",
+		// Belt-and-braces: also disable any running ssh-agent so we
+		// don't fall back to whatever keys it's offering.
+		"-o", "IdentityAgent=none",
 	}
 	if identity := SSHIdentityFile(); identity != "" {
 		args = append(args, "-i", identity)
