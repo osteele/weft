@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/spf13/cobra"
@@ -90,6 +91,17 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	// Cloud sync runs as part of every pass: without it, R2 .complete and
+	// .started markers accumulate but never propagate into job_attempts,
+	// so the autopilot makes placement decisions on stale state and
+	// reuses already-running jobs (creating supersede thrashing). The TUI
+	// runners call SyncCloud on their own ticker; the headless runner
+	// must do it itself.
+	cfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: load config for cloud sync: %v\n", cfgErr)
+	}
+
 	label := autopilotRunLabel
 	if label == "" {
 		label = fmt.Sprintf("autopilot-run/%d", os.Getpid())
@@ -118,6 +130,13 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 				return nil
 			}
 			continue
+		}
+
+		// Sync first so the pass sees fresh job_attempts state. Bounded
+		// timeout: if sync exceeds it, sync continues in the background
+		// while the pass proceeds with the partially-synced view.
+		if cfg != nil {
+			syncCloudStateWithTimeout(cfg, database, nil, NormalCloudSyncTimeout, false)
 		}
 
 		started := time.Now()
