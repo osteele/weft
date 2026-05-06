@@ -912,6 +912,10 @@ selects one anchor job, adds compatible queued jobs that fit the same launch
 group, launches a single instance with that complete job list, and waits for
 `agent_ready` before confirming the move intents.
 
+By default, Weft previews the selected anchor, job list, and offer, then asks
+for confirmation. Use `--yes` for non-interactive launch or `--dry-run` to
+preview without launching.
+
 **Flags:**
 - `--jobs IDS`: Comma-separated job IDs/ranges to consider
 - `--project NAME`: Restrict queued jobs to a project
@@ -924,6 +928,7 @@ group, launches a single instance with that complete job list, and waits for
 
 **Examples:**
 ```bash
+weft instance new
 weft instance new --yes
 weft instance new --project myproj --yes
 weft instance new wj42 wj43 --dry-run

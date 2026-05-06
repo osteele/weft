@@ -19,20 +19,21 @@ import (
 )
 
 type NewInstanceOptions struct {
-	JobScope      map[int64]struct{}
-	Project       string
-	Strategy      bidding.SelectionStrategy
-	MinSurvival   float64
-	DryRun        bool
-	WaitReady     bool
-	ReadyTimeout  time.Duration
-	SyncInterval  time.Duration
-	OnStatus      func(string)
-	OnEvent       func(campaign.LaunchEvent)
-	OnCampaign    func(campaignID int64)
-	Clients       []cloud.Client
-	R2Client      *r2.Client
-	CreateOptions func(cloud.Provider) (cloud.CreateOpts, error)
+	JobScope            map[int64]struct{}
+	Project             string
+	Strategy            bidding.SelectionStrategy
+	MinSurvival         float64
+	DryRun              bool
+	WaitReady           bool
+	ReadyTimeout        time.Duration
+	SyncInterval        time.Duration
+	OnStatus            func(string)
+	OnEvent             func(campaign.LaunchEvent)
+	OnCampaign          func(campaignID int64)
+	ConfirmBeforeLaunch func(NewInstanceResult) (bool, error)
+	Clients             []cloud.Client
+	R2Client            *r2.Client
+	CreateOptions       func(cloud.Provider) (cloud.CreateOpts, error)
 }
 
 type NewInstanceResult struct {
@@ -42,6 +43,7 @@ type NewInstanceResult struct {
 	IntentIDs   []int64
 	Offer       *cloud.Offer
 	DryRun      bool
+	Canceled    bool
 	Warning     string
 }
 
@@ -115,6 +117,16 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 	}
 	if opts.DryRun {
 		return result, nil
+	}
+	if opts.ConfirmBeforeLaunch != nil {
+		confirmed, err := opts.ConfirmBeforeLaunch(result)
+		if err != nil {
+			return NewInstanceResult{}, err
+		}
+		if !confirmed {
+			result.Canceled = true
+			return result, nil
+		}
 	}
 
 	intents, err := openNewInstanceMoveIntents(database, group.Jobs, &offer)

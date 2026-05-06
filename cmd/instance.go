@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -161,7 +162,11 @@ new instance with the full initial job list. Source claims are transferred by
 the launch path and the command waits for agent_ready before confirming the
 move intents.
 
+Without --yes or --dry-run, the command previews the selected launch group and
+asks for confirmation before it creates move intents or launches an instance.
+
 Examples:
+  weft instance new
   weft instance new --yes
   weft instance new --project myproj --yes
   weft instance new wj42 wj43 --dry-run`,
@@ -216,9 +221,6 @@ func runInstanceNew(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !instanceNewDryRun && !instanceNewYes {
-		return usageErrorf("pass --yes to launch a new instance, or --dry-run to preview")
-	}
 
 	database, err := db.Open()
 	if err != nil {
@@ -248,6 +250,12 @@ func runInstanceNew(cmd *cobra.Command, args []string) error {
 		},
 		OnCampaign: func(campaignID int64) {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Campaign %d: launching one instance...\n", campaignID)
+		},
+		ConfirmBeforeLaunch: func(res orchestration.NewInstanceResult) (bool, error) {
+			if instanceNewDryRun || instanceNewYes {
+				return true, nil
+			}
+			return confirmInstanceNewLaunch(cmd.InOrStdin(), cmd.OutOrStdout(), res)
 		},
 	})
 	if err != nil {
@@ -314,11 +322,11 @@ func formatInstanceNewLaunchEvent(event campaign.LaunchEvent) string {
 
 func printInstanceNewResult(out io.Writer, res orchestration.NewInstanceResult) {
 	if res.DryRun {
-		fmt.Fprintf(out, "Would launch one instance for anchor %s with %d job(s): %s\n",
-			ids.FormatJobID(res.AnchorJobID), len(res.JobIDs), ids.FormatJobIDListCompact(res.JobIDs))
-		if res.Offer != nil {
-			fmt.Fprintf(out, "Offer: %s %s $%.2f/hr\n", res.Offer.Provider, res.Offer.GPUName, res.Offer.CostPerHour)
-		}
+		printInstanceNewPreview(out, res, "Would launch")
+		return
+	}
+	if res.Canceled {
+		fmt.Fprintln(out, "Canceled.")
 		return
 	}
 	for _, instanceID := range res.InstanceIDs {
@@ -327,6 +335,25 @@ func printInstanceNewResult(out io.Writer, res orchestration.NewInstanceResult) 
 	fmt.Fprintf(out, "Initial jobs: %s\n", ids.FormatJobIDListCompact(res.JobIDs))
 	if res.Warning != "" {
 		fmt.Fprintf(out, "Warning: %s\n", res.Warning)
+	}
+}
+
+func confirmInstanceNewLaunch(in io.Reader, out io.Writer, res orchestration.NewInstanceResult) (bool, error) {
+	printInstanceNewPreview(out, res, "Selected")
+	fmt.Fprint(out, "Launch this instance? [y/N] ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
+}
+
+func printInstanceNewPreview(out io.Writer, res orchestration.NewInstanceResult, verb string) {
+	fmt.Fprintf(out, "%s one instance for anchor %s with %d job(s): %s\n",
+		verb, ids.FormatJobID(res.AnchorJobID), len(res.JobIDs), ids.FormatJobIDListCompact(res.JobIDs))
+	if res.Offer != nil {
+		fmt.Fprintf(out, "Offer: %s %s $%.2f/hr\n", res.Offer.Provider, res.Offer.GPUName, res.Offer.CostPerHour)
 	}
 }
 

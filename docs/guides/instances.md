@@ -476,10 +476,14 @@ also have two move paths:
 For the same workflow from a script or shell, use:
 
 ```bash
+weft instance new
 weft instance new --yes
 weft instance new --project myproj --yes
 weft new instance wj42:wj45 --dry-run
 ```
+
+Without `--yes`, the shell command previews the selected launch group and asks
+for confirmation before creating move intents or launching.
 
 `weft place` / `weft instance launch` starts instances for unplaced queued
 jobs. `weft instance new` is for scaling out an existing queued cloud backlog:

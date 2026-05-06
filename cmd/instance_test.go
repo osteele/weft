@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
@@ -126,5 +130,38 @@ func TestNewInstanceVerbAliasExists(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("project") == nil {
 		t.Fatal("new instance alias missing --project")
+	}
+}
+
+func TestConfirmInstanceNewLaunch(t *testing.T) {
+	res := orchestration.NewInstanceResult{
+		AnchorJobID: 42,
+		JobIDs:      []int64{42, 43},
+		Offer: &cloud.Offer{
+			Provider:    cloud.ProviderVastai,
+			GPUName:     "RTX 4090",
+			CostPerHour: 0.95,
+		},
+	}
+
+	var out bytes.Buffer
+	ok, err := confirmInstanceNewLaunch(strings.NewReader("yes\n"), &out, res)
+	if err != nil {
+		t.Fatalf("confirmInstanceNewLaunch: %v", err)
+	}
+	if !ok {
+		t.Fatal("confirmation should accept yes")
+	}
+	if !strings.Contains(out.String(), "Selected one instance for anchor wj42 with 2 job(s): wj42:wj43") {
+		t.Fatalf("confirmation preview missing job summary: %q", out.String())
+	}
+
+	out.Reset()
+	ok, err = confirmInstanceNewLaunch(strings.NewReader("\n"), &out, res)
+	if err != nil {
+		t.Fatalf("confirmInstanceNewLaunch: %v", err)
+	}
+	if ok {
+		t.Fatal("empty confirmation should decline")
 	}
 }
