@@ -96,15 +96,14 @@ func formatAutoRunRateTarget(cents int) string {
 	return fmt.Sprintf("$%.2f/hr", float64(cents)/100)
 }
 
-// autoBudgetPhase is the panel's mode: top-level menu or a single-field
-// editor / confirmation.
+// autoBudgetPhase is the panel's mode: top-level menu, a single-field
+// editor, or a closing notice.
 type autoBudgetPhase int
 
 const (
 	autoBudgetPhaseMenu autoBudgetPhase = iota
 	autoBudgetPhaseEditHourly
 	autoBudgetPhaseEditDaily
-	autoBudgetPhaseConfirmReset
 	autoBudgetPhaseNotice
 )
 
@@ -152,26 +151,25 @@ func formatCentsForInput(cents int) string {
 }
 
 // handleAutoBudgetKey advances the panel's state machine in response to a
-// key. The database is needed when the breaker reset is confirmed.
+// key. The database is needed when the breaker reset is invoked from the
+// menu.
 //
-// Esc backs out one level: from an editor or confirmation it returns to
-// the menu; from the menu it closes the panel. Saves persist the new value
-// and close the panel. Clear actions show a notice that closes on Enter or Esc.
+// Esc backs out one level: from an editor it returns to the menu; from
+// the menu it closes the panel. Saves persist the new value and close the
+// panel. Clear actions show a notice that closes on Enter or Esc.
 func handleAutoBudgetKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (autoBudgetState, autoBudgetEffect) {
 	switch s.Phase {
 	case autoBudgetPhaseMenu:
-		return handleAutoBudgetMenuKey(s, msg)
+		return handleAutoBudgetMenuKey(s, msg, database)
 	case autoBudgetPhaseEditHourly, autoBudgetPhaseEditDaily:
 		return handleAutoBudgetEditKey(s, msg)
-	case autoBudgetPhaseConfirmReset:
-		return handleAutoBudgetConfirmKey(s, msg, database)
 	case autoBudgetPhaseNotice:
 		return handleAutoBudgetNoticeKey(s, msg)
 	}
 	return s, autoBudgetEffect{}
 }
 
-func handleAutoBudgetMenuKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState, autoBudgetEffect) {
+func handleAutoBudgetMenuKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (autoBudgetState, autoBudgetEffect) {
 	switch msg.String() {
 	case "esc", "q":
 		s.Active = false
@@ -203,9 +201,20 @@ func handleAutoBudgetMenuKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState
 		s.Value = "Daily cap cleared"
 		return s, autoBudgetEffect{StatusText: s.Value, RetriggerPilot: true}
 	case "r":
-		s.Phase = autoBudgetPhaseConfirmReset
+		if err := campaign.ResetGlobalRunawayBreaker(database, "TUI"); err != nil {
+			return s, autoBudgetEffect{
+				StatusText:    fmt.Sprintf("Reset breaker failed: %v", err),
+				StatusIsError: true,
+			}
+		}
+		s.Active = false
+		s.Phase = autoBudgetPhaseMenu
 		s.Value = ""
-		return s, autoBudgetEffect{}
+		return s, autoBudgetEffect{
+			StatusText:     "Runaway breaker reset",
+			RetriggerPilot: true,
+			BreakerReset:   true,
+		}
 	}
 	return s, autoBudgetEffect{}
 }
@@ -285,29 +294,6 @@ func handleAutoBudgetEditKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState
 	return s, autoBudgetEffect{}
 }
 
-func handleAutoBudgetConfirmKey(s autoBudgetState, msg tea.KeyMsg, database *sql.DB) (autoBudgetState, autoBudgetEffect) {
-	switch msg.String() {
-	case "esc", "n", "q":
-		s.Phase = autoBudgetPhaseMenu
-		return s, autoBudgetEffect{}
-	case "y", "enter":
-		if err := campaign.ResetGlobalRunawayBreaker(database, "TUI"); err != nil {
-			return s, autoBudgetEffect{
-				StatusText:    fmt.Sprintf("Reset breaker failed: %v", err),
-				StatusIsError: true,
-			}
-		}
-		s.Phase = autoBudgetPhaseNotice
-		s.Value = "Runaway breaker reset"
-		return s, autoBudgetEffect{
-			StatusText:     "Runaway breaker reset",
-			RetriggerPilot: true,
-			BreakerReset:   true,
-		}
-	}
-	return s, autoBudgetEffect{}
-}
-
 func handleAutoBudgetNoticeKey(s autoBudgetState, msg tea.KeyMsg) (autoBudgetState, autoBudgetEffect) {
 	switch msg.String() {
 	case "enter", "esc", "q":
@@ -358,13 +344,6 @@ func renderAutoBudgetPanel(s autoBudgetState) []string {
 			editOpsByPhase[s.Phase].panelHeader,
 			"  " + s.Value + "▏",
 			"  Enter: save   Esc: back",
-		}
-	case autoBudgetPhaseConfirmReset:
-		return []string{
-			"── Reset runaway breaker? ──",
-			"  Clears the global runaway-breaker trip,",
-			"  unblocking jobs paused for repeated failures.",
-			"  y: confirm    n / Esc: back",
 		}
 	case autoBudgetPhaseNotice:
 		msg := strings.TrimSpace(s.Value)

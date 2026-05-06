@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
@@ -143,11 +144,27 @@ func TestHandleAutoBudgetKeyMenuRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("r opens reset confirmation", func(t *testing.T) {
+	t.Run("r resets breaker and closes panel", func(t *testing.T) {
 		s := menuState(250, 5000)
-		next, _ := handleAutoBudgetKey(s, keyMsg("r"), database)
-		if next.Phase != autoBudgetPhaseConfirmReset {
-			t.Fatalf("phase = %v, want ConfirmReset", next.Phase)
+		next, eff := handleAutoBudgetKey(s, keyMsg("r"), database)
+		if next.Active {
+			t.Fatal("r should close the panel")
+		}
+		if next.Phase != autoBudgetPhaseMenu {
+			t.Fatalf("phase = %v, want Menu", next.Phase)
+		}
+		if !eff.BreakerReset || !eff.RetriggerPilot {
+			t.Errorf("expected BreakerReset+RetriggerPilot, got %+v", eff)
+		}
+		if eff.StatusText != "Runaway breaker reset" {
+			t.Errorf("status = %q", eff.StatusText)
+		}
+		infos, err := campaign.LookupActiveRunawayBreakers(database)
+		if err != nil {
+			t.Fatalf("lookup runaway breakers: %v", err)
+		}
+		if len(infos) != 0 {
+			t.Fatalf("active runaway breakers = %v, want none", infos)
 		}
 	})
 
@@ -272,46 +289,6 @@ func TestHandleAutoBudgetEditorEnterParseError(t *testing.T) {
 	if !eff.StatusIsError || !strings.Contains(eff.StatusText, "Hourly target") {
 		t.Errorf("expected error effect, got %+v", eff)
 	}
-}
-
-func TestHandleAutoBudgetConfirmReset(t *testing.T) {
-	database := setupBudgetTest(t)
-
-	t.Run("y resets and shows notice", func(t *testing.T) {
-		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset, HourlyCents: 250, DailyCents: 5000}
-		next, eff := handleAutoBudgetKey(s, keyMsg("y"), database)
-		if next.Phase != autoBudgetPhaseNotice {
-			t.Errorf("y should show notice, got %v", next.Phase)
-		}
-		if !next.Active {
-			t.Error("notice should keep the panel open")
-		}
-		if !eff.BreakerReset || !eff.RetriggerPilot {
-			t.Errorf("expected BreakerReset+RetriggerPilot, got %+v", eff)
-		}
-		if eff.StatusText != "Runaway breaker reset" {
-			t.Errorf("status = %q", eff.StatusText)
-		}
-	})
-
-	t.Run("n returns to menu without resetting", func(t *testing.T) {
-		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset, HourlyCents: 250}
-		next, eff := handleAutoBudgetKey(s, keyMsg("n"), database)
-		if next.Phase != autoBudgetPhaseMenu {
-			t.Errorf("n should return to menu, got %v", next.Phase)
-		}
-		if eff.BreakerReset {
-			t.Error("n should not reset breaker")
-		}
-	})
-
-	t.Run("esc returns to menu", func(t *testing.T) {
-		s := autoBudgetState{Active: true, Phase: autoBudgetPhaseConfirmReset}
-		next, _ := handleAutoBudgetKey(s, keyMsg("esc"), database)
-		if next.Phase != autoBudgetPhaseMenu {
-			t.Errorf("esc should return to menu, got %v", next.Phase)
-		}
-	})
 }
 
 func TestHandleAutoBudgetNoticeClosesOnEnterOrEsc(t *testing.T) {

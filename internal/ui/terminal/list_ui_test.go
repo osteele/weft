@@ -982,11 +982,11 @@ func TestListTUIRunawayResetClearsCachedBlockedRows(t *testing.T) {
 		autoPersistentBlocked:  "paused: repeated launch failures without progress",
 		autoPersistentBlockedN: 1,
 		autoRunRateInputActive: true,
-		autoRunRateInputPhase:  autoBudgetPhaseConfirmReset,
+		autoRunRateInputPhase:  autoBudgetPhaseMenu,
 	}
 	m.rebuildGroupedRows()
 
-	next, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next, _ := m.handleAutoRunRateInputKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	got := next.(listTUIModel)
 
 	if len(got.autoBlockReasons) != 0 {
