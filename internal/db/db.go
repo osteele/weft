@@ -297,7 +297,12 @@ const jobTableColumns = `id, working_dir, command, description, generated_descri
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
-const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, cpu_cores_effective, cpu_name, ram_gb, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, docker_image, provider_running_at, instance_type, max_bid_price_cents, on_demand_ref_cents`
+// launchTableColumns must list every column on the launches table — it
+// is consumed by both ends of the rebuild SQL (`INSERT INTO launches_new
+// (...) SELECT ... FROM launches`). Keep in sync with
+// createLaunchesTableSQL and any ALTER TABLE migration that adds a
+// column. TestLaunchSchemaCompleteness asserts the two stay aligned.
+const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, cpu_cores_effective, cpu_name, ram_gb, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, replaced_instance_id, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, termination_detail, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, docker_image, provider_running_at, oplog_synced_at, oplog_not_found, oplog_timeout, instance_type, max_bid_price_cents, on_demand_ref_cents, cordoned, cordon_reason, cordoned_at, bootstrap_deadline_unix, agent_ready_at_unix, target_id, hedge_cohort_id`
 
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
@@ -483,6 +488,20 @@ func createLaunchesTableSQL(table string, ifNotExists bool) string {
 		results_verified INTEGER,
 		machine_id TEXT DEFAULT '',
 		docker_image TEXT,
+		provider_running_at INTEGER,
+		oplog_synced_at INTEGER,
+		oplog_not_found INTEGER DEFAULT 0,
+		oplog_timeout INTEGER DEFAULT 0,
+		instance_type TEXT,
+		max_bid_price_cents INTEGER,
+		on_demand_ref_cents INTEGER,
+		cordoned INTEGER DEFAULT 0,
+		cordon_reason TEXT,
+		cordoned_at INTEGER,
+		bootstrap_deadline_unix INTEGER,
+		agent_ready_at_unix INTEGER,
+		target_id INTEGER,
+		hedge_cohort_id INTEGER,
 		CONSTRAINT launches_termination_reason_check CHECK (%s),
 		CONSTRAINT launches_status_check CHECK (%s)
 	)`, ifClause, table,

@@ -3792,3 +3792,43 @@ func TestStripCheckConstraint(t *testing.T) {
 		})
 	}
 }
+
+// TestLaunchSchemaCompleteness asserts that createLaunchesTableSQL and
+// launchTableColumns enumerate the same set of columns as the actual
+// table — once. Catches the class of bug where an ALTER TABLE migration
+// adds a column but neither source-of-truth function gets updated, so
+// the rebuild path silently breaks (`INSERT INTO launches_new ... SELECT
+// FROM launches` errors with "no such column" when invoked).
+func TestLaunchSchemaCompleteness(t *testing.T) {
+	database := setupTestDB(t)
+
+	rows, err := database.Query(`SELECT name FROM pragma_table_info('launches')`)
+	if err != nil {
+		t.Fatalf("pragma_table_info: %v", err)
+	}
+	defer rows.Close()
+	actual := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		actual[name] = true
+	}
+
+	declared := map[string]bool{}
+	for _, c := range strings.Split(launchTableColumns, ",") {
+		declared[strings.TrimSpace(c)] = true
+	}
+
+	for col := range actual {
+		if !declared[col] {
+			t.Errorf("launches table column %q is missing from launchTableColumns", col)
+		}
+	}
+	for col := range declared {
+		if !actual[col] {
+			t.Errorf("launchTableColumns lists column %q that does not exist on the launches table", col)
+		}
+	}
+}
