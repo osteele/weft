@@ -233,6 +233,12 @@ var versionedMigrations = []migration{
 			return err
 		},
 	},
+	{
+		Description: "rebuild launches.termination_reason CHECK with weft_bug accepted",
+		Apply: func(db *sql.DB) error {
+			return ensureLaunchesTableConstraints(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

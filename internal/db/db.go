@@ -821,13 +821,9 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// The termination_reason CHECK is intentionally absent post-drop;
-	// don't try to recreate it. The status CHECK alone can still be
-	// missing; that path is unchanged.
-	if !hasTerminationReasonConstraint && hasStatusConstraint {
-		return nil
-	}
-	// Also check that the constraint includes values added after initial schema.
+	// Also check that the constraint includes values added after initial
+	// schema. Each value is checked independently so adding a new one
+	// (e.g. weft_bug in v26) automatically triggers the rebuild path.
 	hasBootstrapTimeout, err := tableSchemaContains(db, "launches", TerminationReasonBootstrapTimeout)
 	if err != nil {
 		return err
@@ -836,8 +832,21 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	if hasStatusConstraint && hasTerminationReasonConstraint && hasBootstrapTimeout && hasProviderFailure {
+	hasWeftBug, err := tableSchemaContains(db, "launches", TerminationReasonWeftBug)
+	if err != nil {
+		return err
+	}
+	if hasStatusConstraint && hasTerminationReasonConstraint && hasBootstrapTimeout && hasProviderFailure && hasWeftBug {
 		return nil
+	}
+	// Drop dependent views before the rebuild — DROP TABLE launches
+	// invalidates any view that references it. We recreate the views
+	// at the end of this function so callers don't have to know which
+	// init step normally owns recreation.
+	for _, v := range []string{"launch_job_membership", "job_status", "job_run_training_examples", "training_examples", "job_effective_state", "all_runs", "cloud_instances"} {
+		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + v); err != nil {
+			return fmt.Errorf("drop view %s: %w", v, err)
+		}
 	}
 	// Migrate "preempted" → "provider_failure" during the copy (the old CHECK
 	// constraint blocks UPDATE, so we transform during INSERT).
@@ -845,13 +854,31 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 		"termination_reason",
 		`CASE WHEN termination_reason = 'preempted' THEN 'provider_failure' ELSE termination_reason END`,
 		1)
-	return rebuildTable(
+	if err := rebuildTable(
 		db,
 		createLaunchesTableSQL("launches_new", false),
 		fmt.Sprintf(`INSERT INTO launches_new (%s) SELECT %s FROM launches`, launchTableColumns, selectCols),
 		`DROP TABLE launches`,
 		`ALTER TABLE launches_new RENAME TO launches`,
-	)
+	); err != nil {
+		return err
+	}
+	// Recreate the views dropped above. createJobStateViews handles
+	// launch_job_membership; the per-attempt views need their own
+	// dedicated builders. Order matters: createJobStateViews ->
+	// createJobStatusView -> createTrainingExamplesView mirrors the
+	// dependency chain (launch_job_membership and job_status are
+	// referenced by training_examples).
+	if err := createJobStateViews(db); err != nil {
+		return fmt.Errorf("recreate launch_job_membership: %w", err)
+	}
+	if err := createJobStatusView(db); err != nil {
+		return fmt.Errorf("recreate job_status: %w", err)
+	}
+	if err := createTrainingExamplesView(db); err != nil {
+		return fmt.Errorf("recreate training_examples: %w", err)
+	}
+	return nil
 }
 
 // dropLaunchesTerminationReasonCheck removes the launches_termination_reason_check
