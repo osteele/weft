@@ -246,15 +246,29 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 	return updated
 }
 
-func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
-	return currentStatus == db.StatusQueued && !launchID.Valid
+// AllowCompletedMarkerFallback reports whether a sync may use AnyCompletedKey
+// to recover when the marker isn't found at the current latest_run_id.
+//
+// This fires in two cases:
+//   - Queued jobs with no launch_id (legacy fallback for orphaned R2 markers).
+//   - Terminal jobs that need backfill: cleanupStaleAttempts may have advanced
+//     latest_run_id past the run_id where the agent uploaded the marker, so we
+//     must look across all run_ids to recover authoritative timestamps.
+func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, needsBackfill bool) bool {
+	if currentStatus == db.StatusQueued && !launchID.Valid {
+		return true
+	}
+	if db.IsTerminalStatus(currentStatus) && needsBackfill {
+		return true
+	}
+	return false
 }
 
 func ShouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
 	if db.IsTerminalStatus(currentStatus) && needsBackfill {
 		return false
 	}
-	return source == "results"
+	return source == campaign.SourceResults
 }
 
 type completedMarkerResult struct {
@@ -306,7 +320,7 @@ func syncOneCompletedJobMarker(
 		runID = latestRunID.Int64
 	}
 	if !markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, runID)) {
-		if !AllowCompletedMarkerFallback(currentStatus, launchID) {
+		if !AllowCompletedMarkerFallback(currentStatus, launchID, needsBackfill) {
 			return completedMarkerResult{}
 		}
 		if altKey, ok := markers.AnyCompletedKey(jobID); ok {
@@ -323,12 +337,12 @@ func syncOneCompletedJobMarker(
 		startTimeUnix int64
 		endTimeUnix   int64
 		failureReason string
-		source        = "results"
+		source        = campaign.SourceResults
 		tmpDir        string
 		haveResults   bool
 	)
 
-	markerData, markerErr := r2Client.GetObject(ctx, completeKey)
+	markerData, markerLastModified, markerErr := r2Client.GetObjectWithMeta(ctx, completeKey)
 	if markerErr != nil {
 		return completedMarkerResult{}
 	}
@@ -346,7 +360,7 @@ func syncOneCompletedJobMarker(
 	if exitCode == nil {
 		if code, parseErr := strconv.Atoi(strings.TrimSpace(string(markerData))); parseErr == nil {
 			exitCode = &code
-			source = "marker-fallback"
+			source = campaign.SourceMarkerFallback
 			slog.Debug("using exit code from .complete marker (results not yet available)",
 				"component", "sync", "job_id", jobID, "run_id", runID, "reason", "marker_only_backfill")
 		} else {
@@ -361,7 +375,7 @@ func syncOneCompletedJobMarker(
 		}
 	}
 
-	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason)
+	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified)
 	if err != nil {
 		slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
 		os.RemoveAll(tmpDir)
@@ -407,7 +421,7 @@ func syncOneCompletedJobMarker(
 		fmt.Printf("  cloud job %s: %s (exit %d)\n", ids.FormatJobID(jobID), statusLabel, *exitCode)
 	}
 
-	if source == "results" {
+	if source == campaign.SourceResults {
 		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
 		_ = r2Client.DeletePrefix(ctx, resultPrefix)
 	}

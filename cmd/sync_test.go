@@ -107,7 +107,7 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
-	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "")
+	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "", time.Time{})
 	if err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestRecordCloudJobCompletion_UpdatesClosedAttempt(t *testing.T) {
 	}
 
 	// RecordCloudJobCompletion should update the latest attempt (the new empty one)
-	if _, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, ""); err != nil {
+	if _, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "", time.Time{}); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestRecordCloudJobCompletion_InfersLaunchID(t *testing.T) {
 	}
 
 	// Complete jobA — should infer launch from jobB's sibling relationship.
-	returnedID, err := db.RecordCloudJobCompletion(database, jobA, 0, 200, 300, "")
+	returnedID, err := db.RecordCloudJobCompletion(database, jobA, 0, 200, 300, "", time.Time{})
 	if err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestAllowCompletedMarkerFallback_AllowsQueuedUnplacedPlaceholder(t *testing
 	if currentLaunchID.Valid {
 		t.Fatalf("launch_id = %v, want NULL", currentLaunchID)
 	}
-	if !allowCompletedMarkerFallback(status, currentLaunchID) {
+	if !allowCompletedMarkerFallback(status, currentLaunchID, false) {
 		t.Fatal("allowCompletedMarkerFallback = false, want true")
 	}
 }
@@ -435,8 +435,28 @@ func TestAllowCompletedMarkerFallback_BlocksRelaunchedJob(t *testing.T) {
 	if !currentLaunchID.Valid || currentLaunchID.Int64 != replacementLaunchID {
 		t.Fatalf("launch_id = %v, want %d", currentLaunchID, replacementLaunchID)
 	}
-	if allowCompletedMarkerFallback(status, currentLaunchID) {
+	if allowCompletedMarkerFallback(status, currentLaunchID, false) {
 		t.Fatal("allowCompletedMarkerFallback = true, want false")
+	}
+}
+
+// TestAllowCompletedMarkerFallback_AllowsTerminalBackfill verifies that
+// terminal jobs needing backfill can use AnyCompletedKey to find a marker at
+// an older run_id (the case where cleanupStaleAttempts advanced
+// latest_run_id past the run that actually completed).
+func TestAllowCompletedMarkerFallback_AllowsTerminalBackfill(t *testing.T) {
+	launchID := sql.NullInt64{Int64: 42, Valid: true}
+	if !allowCompletedMarkerFallback(db.StatusCompleted, launchID, true) {
+		t.Fatal("allowCompletedMarkerFallback(completed, launched, needsBackfill=true) = false, want true")
+	}
+	if !allowCompletedMarkerFallback(db.StatusFailed, launchID, true) {
+		t.Fatal("allowCompletedMarkerFallback(failed, launched, needsBackfill=true) = false, want true")
+	}
+	if allowCompletedMarkerFallback(db.StatusCompleted, launchID, false) {
+		t.Fatal("allowCompletedMarkerFallback(completed, launched, needsBackfill=false) = true, want false")
+	}
+	if allowCompletedMarkerFallback(db.StatusRunning, launchID, true) {
+		t.Fatal("allowCompletedMarkerFallback(running, launched, true) = true, want false (non-terminal)")
 	}
 }
 

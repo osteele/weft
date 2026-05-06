@@ -15,6 +15,15 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 )
 
+// Sync source labels reported in completion logs and used to gate post-sync
+// cleanup (R2 .processed marker writes). SourceResults means the completion
+// JSON was successfully ingested; SourceMarkerFallback means only the
+// .complete marker's exit code was usable.
+const (
+	SourceResults        = "results"
+	SourceMarkerFallback = "marker-fallback"
+)
+
 // CheckAndSyncJobComplete checks whether R2 has a .complete marker for a
 // specific job and, if so, records the completion in the DB. This provides a
 // fast path for job completion during watch: instead of waiting for the full
@@ -39,6 +48,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	).Scan(&currentStatus, &latestRunID); err != nil {
 		return false
 	}
+	terminalBackfill := false
 	if db.IsTerminalStatus(currentStatus) {
 		needsBackfill, err := db.NeedsCloudCompletionBackfill(database, jobID)
 		if err != nil {
@@ -51,6 +61,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 				"component", "reconcile", "job_id", jobID, "reason", "terminal_complete_skip")
 			return false
 		}
+		terminalBackfill = true
 		slog.Debug("attempting completion backfill for terminal job",
 			"component", "reconcile", "job_id", jobID, "reason", "terminal_incomplete_backfill")
 	}
@@ -60,11 +71,29 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 		runID = latestRunID.Int64
 	}
 
-	// Check for .complete marker
+	// Check for .complete marker at the latest_run_id; on miss, when the job
+	// is terminal and needs backfill, scan the job's prefix for any other
+	// run_id that has a marker (cleanupStaleAttempts may have advanced
+	// latest_run_id past the run that actually wrote the marker).
 	completeKey := r2keys.JobAttemptComplete(jobID, runID)
-	markerData, markerErr := r2c.GetObject(ctx, completeKey)
+	markerData, markerLastModified, markerErr := r2c.GetObjectWithMeta(ctx, completeKey)
 	if markerErr != nil || len(markerData) == 0 {
-		return false
+		if !terminalBackfill {
+			return false
+		}
+		altRunID, ok := findAnyCompletedRunID(ctx, r2c, jobID)
+		if !ok {
+			return false
+		}
+		runID = altRunID
+		completeKey = r2keys.JobAttemptComplete(jobID, runID)
+		markerData, markerLastModified, markerErr = r2c.GetObjectWithMeta(ctx, completeKey)
+		if markerErr != nil || len(markerData) == 0 {
+			return false
+		}
+		slog.Debug("recovered completion marker at older run_id",
+			"component", "reconcile", "job_id", jobID, "run_id", runID,
+			"reason", "run_id_mismatch_backfill")
 	}
 
 	// Download results to parse exit code and times
@@ -72,7 +101,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	var exitCode *int
 	var startTimeUnix, endTimeUnix int64
 	var failureReason string
-	source := "results"
+	source := SourceResults
 
 	if tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-complete-%d-*", jobID)); err == nil {
 		defer os.RemoveAll(tmpDir)
@@ -89,7 +118,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	if exitCode == nil {
 		if code, parseErr := strconv.Atoi(strings.TrimSpace(string(markerData))); parseErr == nil {
 			exitCode = &code
-			source = "marker-fallback"
+			source = SourceMarkerFallback
 			slog.Debug("using exit code from .complete marker (results not yet available)",
 				"component", "reconcile", "job_id", jobID, "run_id", runID, "exit_code", code)
 		} else {
@@ -107,7 +136,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 		}
 	}
 
-	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason)
+	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified)
 	if err != nil {
 		slog.Warn("failed to record completion for job",
 			"component", "reconcile", "job_id", jobID, "source", source, "error", err)
@@ -131,6 +160,23 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	slog.Debug("synced job completion", "component", "reconcile", "job_id", jobID,
 		"exit_code", *exitCode, "source", source)
 	return true
+}
+
+// findAnyCompletedRunID scans R2 for any .complete marker under jobs/<jobID>/
+// and returns the run_id of an arbitrary one. Used when the marker is missing
+// at the DB's latest_run_id (e.g. after cleanupStaleAttempts advanced the
+// run_id past the run that actually completed). Returns (0, false) if none.
+func findAnyCompletedRunID(ctx context.Context, r2c *r2.Client, jobID int64) (int64, bool) {
+	prefix := r2keys.JobPrefix(jobID) + "/"
+	markers, err := r2c.ListJobMarkers(ctx, prefix)
+	if err != nil || markers == nil {
+		return 0, false
+	}
+	key, ok := markers.AnyCompletedKey(jobID)
+	if !ok {
+		return 0, false
+	}
+	return r2keys.ExtractRunID(key), true
 }
 
 // FinalizeStuckJobsWithR2Check finds non-terminal jobs on completed launches

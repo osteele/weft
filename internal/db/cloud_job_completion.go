@@ -11,7 +11,18 @@ import (
 // RecordCloudJobCompletion updates the job attempt in the DB with the given
 // exit code, times, and failure reason. Returns the cloud instance ID if the
 // job was assigned to one.
-func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string) (int64, error) {
+//
+// markerLastModified is the LastModified timestamp of the R2 .complete marker
+// (zero time if unavailable). It is used as a fallback for end_time when the
+// completion JSON is missing — the marker is uploaded by the agent immediately
+// after the job exits, so its LastModified is within ~1s of the true end time.
+//
+// When neither endTimeUnix nor markerLastModified yields a real timestamp, the
+// row is left with NULL end_time and last_synced_status is cleared so that
+// NeedsCloudCompletionBackfill keeps returning true and a later sync that
+// finds the JSON will overwrite the placeholder values. This avoids silently
+// substituting wall-clock sync time as a completion timestamp.
+func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string, markerLastModified time.Time) (int64, error) {
 	targetStatus := StatusCompleted
 	outcome := AttemptOutcomeCompleted
 	if exitCode != 0 {
@@ -22,10 +33,35 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		return 0, err
 	}
 
-	// Treat 0 as "unknown" — fall back to current time so downstream code
-	// (CloseLaunchAttempts, ComputeJobState) doesn't confuse 0 with NULL.
-	if endTimeUnix == 0 {
-		endTimeUnix = time.Now().Unix()
+	// endTimeUnix == 0 means the completion JSON wasn't ingested. Prefer the
+	// marker's LastModified (close to true end time); leave NULL otherwise so
+	// the row remains backfill-eligible.
+	var endTimeArg any
+	authoritativeTimes := endTimeUnix != 0
+	switch {
+	case endTimeUnix != 0:
+		endTimeArg = endTimeUnix
+	case !markerLastModified.IsZero():
+		endTimeArg = markerLastModified.Unix()
+	default:
+		endTimeArg = nil
+	}
+
+	var startTimeArg any
+	if startTimeUnix != 0 {
+		startTimeArg = startTimeUnix
+	} else {
+		startTimeArg = nil
+	}
+
+	// last_synced_status: only mark fully synced when we have authoritative
+	// times from the completion JSON. On the marker-only path, leave it NULL
+	// so backfill stays armed for a later sync that finds the JSON.
+	var lastSyncedStatusArg any
+	if authoritativeTimes {
+		lastSyncedStatusArg = targetStatus
+	} else {
+		lastSyncedStatusArg = nil
 	}
 
 	var cloudInstanceID sql.NullInt64
@@ -43,7 +79,7 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
 		     cloud_outcome = ?
 		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
-		targetStatus, exitCode, startTimeUnix, endTimeUnix, targetStatus, failureReason, outcome, jobID,
+		targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, jobID,
 	); err != nil {
 		return 0, err
 	}
@@ -114,6 +150,13 @@ func NeedsCloudCompletionBackfill(database *sql.DB, jobID int64) (bool, error) {
 		if !endTime.Valid || !startTime.Valid || !exitCode.Valid {
 			return true, nil
 		}
+		// Treat 0 as "unknown" symmetrically with NULL: an authoritative
+		// completion JSON always carries non-zero start_time, so a stored 0
+		// indicates the marker-only fallback path and remains eligible for
+		// backfill.
+		if startTime.Int64 == 0 || endTime.Int64 == 0 {
+			return true, nil
+		}
 		// last_synced_status should reflect the terminal state once cloud
 		// completion data was applied.
 		if !lastSyncedStatus.Valid || lastSyncedStatus.String != status.String {
@@ -122,6 +165,72 @@ func NeedsCloudCompletionBackfill(database *sql.DB, jobID int64) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// PoisonedCloudAttempt identifies a terminal cloud attempt whose start_time
+// is 0 — the signature of an earlier marker-only sync that fabricated end_time
+// = wall-clock time instead of using the agent's authoritative completion JSON.
+type PoisonedCloudAttempt struct {
+	JobID     int64
+	AttemptID int64
+}
+
+// FindPoisonedCloudCompletions returns the latest attempt for every terminal
+// cloud job whose start_time is 0 and end_time is set. These rows need
+// last_synced_status cleared so a later sync can rewrite the timestamps from
+// R2 (NeedsCloudCompletionBackfill already treats start_time=0 as needing
+// backfill, but the cleared last_synced_status documents the intent).
+func FindPoisonedCloudCompletions(database *sql.DB) ([]PoisonedCloudAttempt, error) {
+	rows, err := database.Query(`
+		SELECT ja.job_id, ja.id
+		FROM job_attempts ja
+		WHERE ja.id = (SELECT MAX(ja2.id) FROM job_attempts ja2 WHERE ja2.job_id = ja.job_id)
+		  AND ja.launch_id IS NOT NULL
+		  AND ja.status IN (?, ?, ?, ?)
+		  AND ja.start_time = 0
+		  AND ja.end_time IS NOT NULL`,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query poisoned cloud completions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PoisonedCloudAttempt
+	for rows.Next() {
+		var p PoisonedCloudAttempt
+		if err := rows.Scan(&p.JobID, &p.AttemptID); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RearmPoisonedCloudCompletions clears last_synced_status on every row matched
+// by FindPoisonedCloudCompletions in a single statement. Returns rows affected.
+func RearmPoisonedCloudCompletions(database *sql.DB) (int64, error) {
+	res, err := database.Exec(`
+		UPDATE job_attempts
+		SET last_synced_status = NULL
+		WHERE id IN (
+			SELECT ja.id FROM job_attempts ja
+			WHERE ja.id = (SELECT MAX(ja2.id) FROM job_attempts ja2 WHERE ja2.job_id = ja.job_id)
+			  AND ja.launch_id IS NOT NULL
+			  AND ja.status IN (?, ?, ?, ?)
+			  AND ja.start_time = 0
+			  AND ja.end_time IS NOT NULL
+		)`,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("rearm poisoned cloud completions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // StuckJob represents a job with non-terminal status on a completed launch.

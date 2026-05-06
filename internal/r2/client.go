@@ -323,6 +323,31 @@ func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
 	return io.ReadAll(resp)
 }
 
+// GetObjectWithMeta retrieves both the body and the object's LastModified
+// timestamp. Used by completion sync to recover an authoritative end_time when
+// the agent's completion JSON is missing — the marker's R2 LastModified is the
+// closest proxy to the true completion time (uploaded by the agent immediately
+// after the job exits).
+func (c *Client) GetObjectWithMeta(ctx context.Context, key string) ([]byte, time.Time, error) {
+	resp, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("get object %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	var lm time.Time
+	if resp.LastModified != nil {
+		lm = *resp.LastModified
+	}
+	return body, lm, nil
+}
+
 // PutMarker writes an empty object as a marker key.
 func (c *Client) PutMarker(ctx context.Context, key string) error {
 	return c.PutObject(ctx, key, strings.NewReader(""), "application/octet-stream")

@@ -944,24 +944,41 @@ rule SyncReconcile {
 
 invariant TerminalJobsHaveEndTime {
     -- Every attempt in a terminal status has end_time set to a positive
-    -- unix timestamp. This applies to ALL terminal statuses including
-    -- canceled — a "terminal but open" row (status=canceled, end_time=NULL)
-    -- is an invariant violation.
+    -- unix timestamp, OR is a cloud row pending completion backfill
+    -- (last_synced_status = NULL). The pending-backfill carve-out covers
+    -- the case where R2 yielded a .complete marker but no readable
+    -- completion JSON: rather than fabricate a wall-clock end_time, the
+    -- writer leaves end_time NULL and a later sync rewrites it from the
+    -- agent's authoritative timestamps. A "terminal but open" row with
+    -- last_synced_status already set to status is still an invariant
+    -- violation.
     for job in Jobs:
         if job.status in {completed, failed, dead, killed, canceled}:
-            job.latest_attempt.end_time != null
-            job.latest_attempt.end_time > 0
+            (job.latest_attempt.end_time != null and
+             job.latest_attempt.end_time > 0)
+            or
+            (job.latest_attempt.launch_id != null and
+             job.latest_attempt.last_synced_status = null)
 
     @guidance
         -- end_time = 0 is INVALID and must not be written. It breaks:
         --   - CloseLaunchAttempts (WHERE end_time IS NULL misses 0)
         --   - ComputeJobState (LatestJobEnd > 0 treats 0 as "no end")
         --   - Self-destruct detection (requires LatestJobEnd > 0)
-        -- RecordCloudJobCompletion normalizes 0 → time.Now() as a
-        -- safety net. The startup repair repairAttemptEndTimeZero
-        -- fixes historical rows. Any code path that writes end_time
-        -- must ensure it is either NULL (not yet ended) or a positive
+        -- The startup repair repairAttemptEndTimeZero fixes historical
+        -- rows that were written as 0 by previous code. Any code path
+        -- that writes end_time must ensure it is either NULL (not yet
+        -- ended, OR cloud terminal pending backfill) or a positive
         -- unix timestamp.
+        --
+        -- RecordCloudJobCompletion (cloud terminal writer) prefers the
+        -- agent's authoritative end_time from <jobID>.completion.json,
+        -- falls back to the .complete marker's R2 LastModified when the
+        -- JSON is missing, and only as a last resort leaves end_time
+        -- NULL with last_synced_status cleared so a later sync can
+        -- rewrite it. It does NOT silently substitute wall-clock sync
+        -- time; doing so would obscure the true completion time and
+        -- silence the backfill path.
         --
         -- Regression wi2317 (2026-05): the user-cancel writer
         -- (UpdateAttemptStatusAndLastSynced in status-sync) wrote

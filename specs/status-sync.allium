@@ -565,9 +565,10 @@ rule ParallelCloudSyncPhases {
 rule SyncJobCompletionsFromR2 {
     when: JobCompletionSyncRequested(instance)
 
-    for job in instance.jobs where not job.is_terminal:
+    for job in instance.jobs where (not job.is_terminal) or job.needs_completion_backfill:
         let run_id = job.latest_attempt.id
-        let r2_complete = R2JobCompleteMarker(job, run_id)
+        let r2_complete = R2JobCompleteMarker(job, run_id) ??
+                          R2JobCompleteMarkerAnyRun(job)
         if r2_complete != null:
             if r2_complete.exit_code = 0:
                 ensures: job.status = completed
@@ -582,11 +583,22 @@ rule SyncJobCompletionsFromR2 {
         -- moving to next job. Read by reconciler each pass to keep
         -- DB in sync without waiting for terminal instance action.
         --
-        -- The run_id used to construct the R2 key comes from
-        -- job.latest_attempt.id (the job_attempts row). Both the
-        -- agent and sync must use the same run_id. This is guaranteed
-        -- by claimJobForLaunch creating the attempt before building
+        -- Run-id resolution proceeds in two steps. Normally the run_id
+        -- used to construct the R2 key comes from job.latest_attempt.id
+        -- (the job_attempts row); the agent and sync agree on this id
+        -- because claimJobForLaunch creates the attempt before building
         -- the agent payload. See R2RunIDFromDB invariant.
+        --
+        -- When the marker is absent at the latest run_id, sync may fall
+        -- back to scanning the job's R2 prefix for any completed run.
+        -- The fallback fires in two cases:
+        --   1. Queued jobs with no launch_id (legacy orphaned markers).
+        --   2. Terminal jobs that need completion backfill, i.e.
+        --      latest_attempt.last_synced_status is NULL or != status.
+        --      cleanupStaleAttempts can advance latest_run_id past the
+        --      run that actually wrote the marker; the fallback recovers
+        --      the authoritative completion JSON in that case.
+        -- See AllowCompletedMarkerFallback in cmd/sync.go.
 }
 
 -- ==========================================================================
@@ -773,6 +785,19 @@ rule AuthoritativeR2Completion {
         -- terminal states. The agent on the remote host has direct
         -- knowledge of actual job outcome, making it authoritative.
         -- This uses the Authoritative flag in the transition table.
+        --
+        -- Timestamp resolution for end_time/start_time:
+        --   1. Prefer the agent's <jobID>.completion.json (authoritative).
+        --   2. If JSON is missing, fall back to the .complete marker's
+        --      R2 LastModified for end_time (within ~1s of true end).
+        --   3. Only when no marker LastModified is available either,
+        --      leave end_time NULL and clear last_synced_status so the
+        --      row remains backfill-eligible.
+        -- last_synced_status is set to the terminal status only when
+        -- (1) succeeded — i.e. authoritative times were ingested. The
+        -- marker-only path (2) and (3) MUST leave last_synced_status
+        -- NULL so a later sync that finds the JSON can rewrite the row.
+        -- Wall-clock sync time MUST NOT be substituted as end_time.
 }
 
 -- ==========================================================================

@@ -370,8 +370,8 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 	return summaries
 }
 
-func allowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64) bool {
-	return syncorch.AllowCompletedMarkerFallback(currentStatus, launchID)
+func allowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, needsBackfill bool) bool {
+	return syncorch.AllowCompletedMarkerFallback(currentStatus, launchID, needsBackfill)
 }
 
 func shouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
