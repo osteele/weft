@@ -30,13 +30,19 @@ var (
 // direct process control. Pool-based callers use Execute instead.
 func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
 	args := append([]string{}, extraArgs...)
-	args = append(args, host, remoteCmd)
+	args = append(args, identityArgs(host)...)
+	args = append(args, hostTarget(host), remoteCmd)
 	return exec.Command("ssh", args...)
 }
 
-// scpCommand creates an exec.Cmd for SCP.
+// scpCommand creates an exec.Cmd for SCP. Identity flags are injected
+// up-front so per-host weft auth applies; per-call -q comes after.
+// scp targets are file paths (host:path), constructed by callers, so
+// hostTarget is not applied here — callers wanting user@host:path
+// must build that themselves (see pool's session-bound code).
 func scpCommand(host string, args ...string) *exec.Cmd {
-	fullArgs := append([]string{"-q"}, args...)
+	fullArgs := append([]string{"-q"}, identityArgs(host)...)
+	fullArgs = append(fullArgs, args...)
 	return exec.Command("scp", fullArgs...)
 }
 

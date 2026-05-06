@@ -433,6 +433,13 @@ type HostConfig struct {
 	// OptInOnly excludes the host from auto-placement; it is only used when
 	// explicitly selected via --host.
 	OptInOnly bool `yaml:"opt_in_only" toml:"opt_in_only"`
+
+	// SSHUser is the remote user weft connects as for this host. Empty
+	// leaves it to ssh's default (typically the local username), which
+	// is fine when ~/.ssh/config does the right thing. Set this when
+	// you want weft to connect as a service user (e.g., "agent") that
+	// is distinct from the user you use for interactive `ssh <host>`.
+	SSHUser string `yaml:"ssh_user" toml:"ssh_user"`
 }
 
 // HostGPUConfig describes a homogeneous GPU group for a host.

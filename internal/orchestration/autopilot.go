@@ -29,6 +29,7 @@ var autoPilotBuildPlanWithOptions = buildAutoPlacementPlanWithOptions
 
 var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
+var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
 
 // placementIntentProtectionWindow shields freshly-opened intents from
 // auto-prune; it must exceed a healthy relaunch's offer-search →
@@ -115,7 +116,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		return nil, err
 	}
-	unplaced, prePlaced := placeComputeIntensiveOnPremBeforeRental(database, cfg, unplaced)
+	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
 	if len(unplaced) == 0 {
 		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,

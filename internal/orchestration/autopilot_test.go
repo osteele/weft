@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -63,6 +64,11 @@ func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T)
 }
 
 func TestRunGroupedAutoPilotPass_SkipsComputeIntensiveReuseBelowCPUFloor(t *testing.T) {
+	// Hermetic inventory so this test doesn't depend on the developer's
+	// ~/.config/weft/hosts/*.yaml. Without this, when a developer has
+	// real on-prem hosts visible (no opt_in_only), placeComputeIntensiveOnPremBeforeRental
+	// short-circuits the auto-planner mocks under test.
+	inventory.UseTestHosts(t)
 	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "cpu-heavy", "A100")
@@ -96,11 +102,20 @@ func TestRunGroupedAutoPilotPass_SkipsComputeIntensiveReuseBelowCPUFloor(t *test
 	originalBuildPlan := autoPilotBuildPlan
 	originalRelaunch := autoPilotRelaunch
 	originalSubmit := autoPilotSubmitJobsToInstance
+	originalPlace := autoPilotPlaceComputeIntensive
 	t.Cleanup(func() {
 		autoPilotBuildPlan = originalBuildPlan
 		autoPilotRelaunch = originalRelaunch
 		autoPilotSubmitJobsToInstance = originalSubmit
+		autoPilotPlaceComputeIntensive = originalPlace
 	})
+	// Stub the on-prem pre-pass so the test's compute-intensive job
+	// reaches the auto-planner mock under test rather than being
+	// placed on a hermetic test host (host-alpha has 64 cores and
+	// would pass the CPU floor).
+	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+		return jobs, 0
+	}
 
 	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
 		return campaign.AutoPlacementPlan{

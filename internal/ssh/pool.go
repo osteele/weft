@@ -30,6 +30,13 @@ var (
 	defaultReadyTimeout = 15 * time.Second
 	defaultPool         *SessionPool
 	poolOnce            sync.Once
+
+	// sshIdentityFile is the cloud.ssh.identity_file path, used by
+	// identityArgs for hosts with ssh_user overrides.
+	sshIdentityFile string
+	// sshUserByHost is hosts.<name>.ssh_user overrides; empty entries
+	// fall back to ssh defaults so ~/.ssh/config keeps driving auth.
+	sshUserByHost map[string]string
 )
 
 func init() {
@@ -45,6 +52,13 @@ func init() {
 		if n := cfg.SSH.ConnectTimeout; n > 0 {
 			defaultConnTimeout = n
 			defaultReadyTimeout = time.Duration(n+5) * time.Second
+		}
+		sshIdentityFile = cfg.Cloud.SSH.ExpandedIdentityFile()
+		sshUserByHost = make(map[string]string, len(cfg.Hosts))
+		for name, hc := range cfg.Hosts {
+			if hc.SSHUser != "" {
+				sshUserByHost[name] = hc.SSHUser
+			}
 		}
 	}
 
@@ -65,6 +79,37 @@ func init() {
 			defaultReadyTimeout = time.Duration(n+5) * time.Second
 		}
 	}
+}
+
+// identityArgs returns the SSH flags that force weft's identity file
+// when the host has an explicit ssh_user override. Applied only for
+// hosts with ssh_user set; hosts without it pass through to ssh
+// defaults (which honor ~/.ssh/config). We deliberately do NOT use
+// `-F /dev/null` — that would also strip HostName aliasing from the
+// user's config, breaking hosts whose canonical address only resolves
+// via an alias (observed: studio). IdentitiesOnly=yes + IdentityAgent=none
+// + -i are sufficient to pin our key without losing alias resolution.
+func identityArgs(host string) []string {
+	if sshIdentityFile == "" || sshUserByHost[host] == "" {
+		return nil
+	}
+	return []string{
+		"-o", "IdentityAgent=none",
+		"-o", "IdentitiesOnly=yes",
+		"-i", sshIdentityFile,
+	}
+}
+
+// hostTarget renders the SSH target with an optional per-host user
+// override. With no override the host name passes through unchanged
+// (ssh resolves user via ~/.ssh/config or local username). When
+// hosts.<name>.ssh_user is set in config, the target becomes
+// "user@host" so weft connects as the configured service user.
+func hostTarget(host string) string {
+	if user := sshUserByHost[host]; user != "" {
+		return user + "@" + host
+	}
+	return host
 }
 
 // SetMinConnectTimeout raises the SSH connect timeout to at least the given
@@ -308,7 +353,8 @@ func (hp *hostPool) newSession() (*Session, error) {
 		"ServerAliveInterval=15",
 		"ServerAliveCountMax=3",
 	)
-	sshArgs = append(sshArgs, hp.host, remoteCmd)
+	sshArgs = append(sshArgs, identityArgs(hp.host)...)
+	sshArgs = append(sshArgs, hostTarget(hp.host), remoteCmd)
 	cmd := execCommand("ssh", sshArgs...)
 
 	stdinPipe, err := cmd.StdinPipe()
