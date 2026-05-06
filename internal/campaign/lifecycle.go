@@ -1547,6 +1547,9 @@ func LaunchInstance(
 	if probeURL, err := r2Assets.Client.PresignPutURL(probeCtx, r2keys.InstanceOnStartProbe(instanceID), 6*time.Hour); err == nil {
 		envVars[cloud.OnStartProbeURLEnvVar] = probeURL
 	}
+	if stageURL, err := r2Assets.Client.PresignPutURL(probeCtx, r2keys.InstanceOnStartStage(instanceID), 6*time.Hour); err == nil {
+		envVars[cloud.OnStartStageURLEnvVar] = stageURL
+	}
 	cancelProbe()
 	// Pass Vast.ai API key for self-destruct (read from local config)
 	if apiKey := vastai.ReadAPIKey(); apiKey != "" {

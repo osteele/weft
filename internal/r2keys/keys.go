@@ -116,6 +116,10 @@ func InstanceOnStartProbe(instanceID int64) string {
 	return controlplane.InstanceOnStartProbe(instanceID)
 }
 
+func InstanceOnStartStage(instanceID int64) string {
+	return controlplane.InstanceOnStartStage(instanceID)
+}
+
 func InstanceTerminationIntent(instanceID int64) string {
 	return controlplane.InstanceTerminationIntent(instanceID)
 }

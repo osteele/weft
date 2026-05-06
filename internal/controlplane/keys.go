@@ -159,6 +159,16 @@ func InstanceOnStartProbe(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/onstart-probe", instanceID)
 }
 
+// InstanceOnStartStage is overwritten by OnStart at each major step
+// (apt-ok, uv-ok, rclone-ok, onstart-deps-ready, etc). Last-write-wins
+// semantics turn the R2 object into a "last successful step" marker: when
+// the chain dies between probe and bootstrap.sh, the surviving value names
+// the boundary. Use it to tell apt-failed from rclone-install-failed
+// without log access to the container.
+func InstanceOnStartStage(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/onstart-stage", instanceID)
+}
+
 func InstanceTerminationIntent(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/termination-intent.json", instanceID)
 }

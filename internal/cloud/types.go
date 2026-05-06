@@ -206,21 +206,41 @@ const DefaultRunpodImage = "runpod/base:1.0.2-ubuntu2204"
 // which pre-bakes the same dependencies so the `command -v` checks
 // short-circuit.
 const DefaultOnStartCmd = `set +e
+_weft_stage() {
+  [ -z "${WEFT_STAGE_URL:-}" ] && return 0
+  body="$1 $(date -u +%FT%TZ)"
+  (command -v curl >/dev/null && curl -fsS -m 10 -X PUT --data "$body" "${WEFT_STAGE_URL}" >/dev/null 2>&1) || \
+    (command -v wget >/dev/null && wget -q --method=PUT --body-data="$body" -O /dev/null "${WEFT_STAGE_URL}") || true
+}
 if [ -n "${WEFT_PROBE_URL:-}" ]; then
   probe_body="onstart-started $(date -u +%FT%TZ)"
   (command -v curl >/dev/null && curl -fsS -m 10 -X PUT --data "$probe_body" "${WEFT_PROBE_URL}" >/dev/null 2>&1) || \
     (command -v wget >/dev/null && wget -q --method=PUT --body-data="$probe_body" -O /dev/null "${WEFT_PROBE_URL}") || true
 fi
+_weft_stage onstart-started
 if ! (command -v unzip >/dev/null && command -v gcc >/dev/null && command -v curl >/dev/null); then
+  _weft_stage apt-installing
   for i in 1 2 3; do apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev curl && break; sleep 10; done
+  command -v curl >/dev/null && _weft_stage apt-ok || _weft_stage apt-failed
+else
+  _weft_stage apt-skipped
 fi
 if ! command -v uv >/dev/null; then
+  _weft_stage uv-installing
   for i in 1 2 3; do curl -fsSL https://astral.sh/uv/install.sh | sh && break; sleep 10; done
+  command -v uv >/dev/null && _weft_stage uv-ok || _weft_stage uv-failed
+else
+  _weft_stage uv-skipped
 fi
 if ! command -v rclone >/dev/null; then
+  _weft_stage rclone-installing
   for i in 1 2 3; do curl -fsSL https://rclone.org/install.sh | bash && break; sleep 10; done
+  command -v rclone >/dev/null && _weft_stage rclone-ok || _weft_stage rclone-failed
+else
+  _weft_stage rclone-skipped
 fi
-command -v rclone >/dev/null || { echo 'rclone install failed after retries' >&2; exit 1; }`
+command -v rclone >/dev/null || { _weft_stage rclone-missing-exit; echo 'rclone install failed after retries' >&2; exit 1; }
+_weft_stage onstart-deps-ready`
 
 // R2BootstrapKeyEnvVar is the env var a template-managed startup command reads
 // to locate the instance-specific bootstrap script in R2.
@@ -230,6 +250,14 @@ const R2BootstrapKeyEnvVar = "WEFT_BOOTSTRAP_KEY"
 // before any setup, to prove the container actually ran OnStart with
 // outbound network. The literal name is also embedded in DefaultOnStartCmd.
 const OnStartProbeURLEnvVar = "WEFT_PROBE_URL"
+
+// OnStartStageURLEnvVar carries a presigned PUT URL that the OnStart shell
+// overwrites at each major step (apt, uv, rclone, deps-ready). The R2
+// object becomes a "last successful step" marker: when the chain dies
+// silently, R2 shows the last stage that ran instead of just nothing.
+// Each successful step writes a new last-write-wins value, so the surviving
+// content names the boundary where OnStart stopped.
+const OnStartStageURLEnvVar = "WEFT_STAGE_URL"
 
 // DefaultCreateOpts returns standard instance creation options.
 // If image is empty, DefaultImage is used.

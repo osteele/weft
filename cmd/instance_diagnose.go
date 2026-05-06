@@ -41,6 +41,7 @@ type instanceDiagnoseReport struct {
 	LivePhaseChanged  *time.Time
 	BootstrapStage    string
 	OnStartProbe      string // body of instance/<id>/onstart-probe — present iff OnStart actually ran
+	OnStartStage      string // body of instance/<id>/onstart-stage — last successful OnStart step name
 	Obs               terminal.CloudInstanceObservability
 	Diagnosis         instanceDiagnosis
 	Timeline          []timelineEntry
@@ -140,6 +141,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 	livePhaseRaw := ""
 	bootstrapStage := ""
 	onStartProbe := ""
+	onStartStage := ""
 	if r2Client, err := newR2ClientFromConfig(); err == nil && r2Client != nil {
 		fetch := func(key string) string {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -152,6 +154,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		livePhaseRaw = fetch(r2keys.InstancePhase(inst.ID))
 		bootstrapStage = fetch(r2keys.BootstrapStage(inst.ID))
 		onStartProbe = fetch(r2keys.InstanceOnStartProbe(inst.ID))
+		onStartStage = fetch(r2keys.InstanceOnStartStage(inst.ID))
 	}
 
 	report := &instanceDiagnoseReport{
@@ -167,6 +170,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		LivePhaseChanged:  livePhaseChanged,
 		BootstrapStage:    bootstrapStage,
 		OnStartProbe:      onStartProbe,
+		OnStartStage:      onStartStage,
 		Obs:               obs,
 		Diagnosis:         diagnosis,
 		Timeline:          timeline,
@@ -287,19 +291,23 @@ func formatGPUMetrics(t *db.JobPhaseTimings) string {
 }
 
 // formatBootstrapSection renders the bootstrap-stage block. The OnStart
-// probe and bootstrap stage together disambiguate failure modes:
-//   - probe + stage    → bootstrap.sh ran and reached `stage`
-//   - probe, no stage  → OnStart ran with network, but rclone setup or
-//     bootstrap.sh download failed
-//   - no probe, no stage → OnStart never executed, or container had no
-//     outbound network (provider/host issue)
+// probe, OnStart stage, and bootstrap stage together disambiguate failure
+// modes:
+//   - bootstrap stage set         → bootstrap.sh ran and reached `stage`
+//   - probe, onstart-stage, none  → OnStart's chain died at `onstart-stage`
+//     (e.g. apt-installing, rclone-installing) — surfaces which install step failed
+//   - probe, no stages            → OnStart ran but never wrote a stage marker
+//   - no probe, no stages         → OnStart never executed, or no outbound network
 //
 // See docs/guides/cloud-instance-debugging.md.
-func formatBootstrapSection(stage, probe string, launched bool) string {
+func formatBootstrapSection(stage, probe, onstartStage string, launched bool) string {
 	if stage != "" {
 		out := fmt.Sprintf("\nBootstrap:\n  Last stage:    %s\n", stage)
 		if probe != "" {
 			out += fmt.Sprintf("  OnStart probe: %s\n", probe)
+		}
+		if onstartStage != "" {
+			out += fmt.Sprintf("  OnStart stage: %s\n", onstartStage)
 		}
 		return out
 	}
@@ -307,9 +315,13 @@ func formatBootstrapSection(stage, probe string, launched bool) string {
 		return ""
 	}
 	if probe != "" {
-		return "\nBootstrap:\n" +
+		out := "\nBootstrap:\n" +
 			"  Last stage:    (none — bootstrap.sh did not write a marker)\n" +
 			fmt.Sprintf("  OnStart probe: %s (OnStart ran; rclone setup or bootstrap.sh download failed)\n", probe)
+		if onstartStage != "" {
+			out += fmt.Sprintf("  OnStart stage: %s (last successful step before chain died)\n", onstartStage)
+		}
+		return out
 	}
 	return "\nBootstrap:\n" +
 		"  Last stage:    (no marker on R2 — bootstrap.sh likely never ran)\n" +
@@ -357,7 +369,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 		}
 	}
 
-	b.WriteString(formatBootstrapSection(report.BootstrapStage, report.OnStartProbe, inst.LaunchedAt != nil))
+	b.WriteString(formatBootstrapSection(report.BootstrapStage, report.OnStartProbe, report.OnStartStage, inst.LaunchedAt != nil))
 
 	// Section 2: Root cause
 	b.WriteString("\n")
