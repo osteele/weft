@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/ui/dashboard"
@@ -102,6 +103,13 @@ func BuildStatusLine(s *Snapshot, budgetCentsPerHour int, unprocessed Unprocesse
 func (sl StatusLine) HeaderLines(width int) []string {
 	tsPrefix := sl.Now.Local().Format("15:04:05") + " | "
 	indent := strings.Repeat(" ", len(tsPrefix))
+	bodyWidth := 0
+	if width > 0 {
+		bodyWidth = width - runewidth.StringWidth(indent)
+		if bodyWidth < 1 {
+			bodyWidth = 1
+		}
+	}
 
 	// Top row: instances + run rate (+ budget) | autopilot
 	var topParts []string
@@ -129,40 +137,128 @@ func (sl StatusLine) HeaderLines(width int) []string {
 	}
 	topParts = append(topParts, "autopilot:"+apState)
 	top := tsPrefix + strings.Join(topParts, " | ")
+	lines := []string{fitDisplayWidth(top, width)}
 
 	// Second row: jobs counters + projects
 	jobParts, noAttributionJobParts := sl.jobSegments()
 	row2 := strings.Join(jobParts, " | ")
-	if width > 0 && len(indent)+len(row2)+projectSuffixLen(sl.Projects) > width {
+	if width > 0 && runewidth.StringWidth(indent)+runewidth.StringWidth(row2) > width {
 		row2 = strings.Join(noAttributionJobParts, " | ")
 	}
 	if len(jobParts) == 0 && len(sl.Projects) == 0 {
-		return []string{top}
+		return lines
 	}
+	projectLines := []string{}
 	if len(sl.Projects) > 0 {
-		// Width budget for the project list = available width minus indent
-		// minus what jobParts already occupies plus the " | " separator.
-		used := len(indent) + len(row2)
-		if row2 != "" {
-			used += len(" | ")
+		inlineBudget := 0
+		if width > 0 {
+			inlineBudget = bodyWidth - runewidth.StringWidth(row2)
+			if row2 != "" {
+				inlineBudget -= len(" | ")
+			}
 		}
-		budget := width - used
-		if width <= 0 {
-			budget = 0 // disabled
+		if inline, ok := renderProjectsInline(sl.Projects, inlineBudget); ok {
+			if row2 != "" {
+				row2 += " | "
+			}
+			row2 += inline
+		} else {
+			row2 = strings.Join(noAttributionJobParts, " | ")
+			projectLines = renderProjectLines(sl.Projects, bodyWidth)
 		}
-		if row2 != "" {
-			row2 += " | "
-		}
-		row2 += renderProjects(sl.Projects, budget)
 	}
-	return []string{top, indent + row2}
+	if row2 != "" {
+		lines = append(lines, indent+fitDisplayWidth(row2, bodyWidth))
+	}
+	for _, line := range projectLines {
+		lines = append(lines, indent+fitDisplayWidth(line, bodyWidth))
+	}
+	return lines
 }
 
-func projectSuffixLen(projects []string) int {
-	if len(projects) == 0 {
-		return 0
+const minInlineProjectWidth = 16
+
+func renderProjectsInline(projects []string, budget int) (string, bool) {
+	if budget <= 0 {
+		return "", false
 	}
-	return len(" | ") + len(strings.Join(projects, " "))
+	projects = compactSortedProjects(projects)
+	if len(projects) == 0 {
+		return "", false
+	}
+	full := strings.Join(projects, " ")
+	if runewidth.StringWidth(full) <= budget {
+		return full, true
+	}
+	for cap := 20; cap >= minInlineProjectWidth; cap -= 2 {
+		parts := make([]string, 0, len(projects))
+		for _, project := range projects {
+			parts = append(parts, dashboard.AbbreviateProject(project, cap))
+		}
+		joined := strings.Join(parts, " ")
+		if runewidth.StringWidth(joined) <= budget {
+			return joined, true
+		}
+	}
+	return "", false
+}
+
+func renderProjectLines(projects []string, width int) []string {
+	projects = compactSortedProjects(projects)
+	if len(projects) == 0 {
+		return nil
+	}
+	if width <= 0 {
+		return []string{strings.Join(projects, " ")}
+	}
+	lines := make([]string, 0, len(projects))
+	current := ""
+	currentWidth := 0
+	for _, project := range projects {
+		part := project
+		if runewidth.StringWidth(part) > width {
+			part = fitDisplayWidth(dashboard.AbbreviateProject(part, width), width)
+		}
+		partWidth := runewidth.StringWidth(part)
+		if current == "" {
+			current = part
+			currentWidth = partWidth
+			continue
+		}
+		if currentWidth+1+partWidth <= width {
+			current += " " + part
+			currentWidth += 1 + partWidth
+			continue
+		}
+		lines = append(lines, current)
+		current = part
+		currentWidth = partWidth
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func fitDisplayWidth(s string, width int) string {
+	if width <= 0 || runewidth.StringWidth(s) <= width {
+		return s
+	}
+	if width <= 1 {
+		return "…"
+	}
+	var b strings.Builder
+	currentWidth := 0
+	for _, r := range s {
+		runeWidth := runewidth.RuneWidth(r)
+		if currentWidth+runeWidth+1 > width {
+			break
+		}
+		b.WriteRune(r)
+		currentWidth += runeWidth
+	}
+	b.WriteString("…")
+	return b.String()
 }
 
 func (sl StatusLine) jobSegments() ([]string, []string) {
@@ -236,47 +332,6 @@ func pluralizeJobs(count int) string {
 		return "1 job"
 	}
 	return fmt.Sprintf("%d jobs", count)
-}
-
-// renderProjects fits as many project names as possible into budget,
-// abbreviating individual names via dashboard.AbbreviateProject if the
-// full set doesn't fit. budget <= 0 disables truncation (return all
-// full names).
-func renderProjects(projects []string, budget int) string {
-	if budget <= 0 {
-		return strings.Join(projects, " ")
-	}
-	full := strings.Join(projects, " ")
-	if len(full) <= budget {
-		return full
-	}
-	// Try increasingly aggressive abbreviation.
-	for cap := 18; cap >= 4; cap -= 2 {
-		var parts []string
-		for _, p := range projects {
-			parts = append(parts, dashboard.AbbreviateProject(p, cap))
-		}
-		joined := strings.Join(parts, " ")
-		if len(joined) <= budget {
-			return joined
-		}
-	}
-	// Last resort: drop trailing names with an ellipsis marker.
-	out := []string{}
-	used := 0
-	for _, p := range projects {
-		ab := dashboard.AbbreviateProject(p, 4)
-		add := len(ab)
-		if len(out) > 0 {
-			add++
-		}
-		if used+add+2 > budget { // +2 for trailing " …"
-			break
-		}
-		out = append(out, ab)
-		used += add
-	}
-	return strings.Join(out, " ") + " …"
 }
 
 // Equal reports whether two status lines are observationally identical.

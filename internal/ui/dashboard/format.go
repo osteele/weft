@@ -620,8 +620,8 @@ func wrapText(text string, width int) string {
 }
 
 // AbbreviateProject shortens a hyphenated project name to fit within maxWidth.
-// It iteratively shortens the longest segment first, preserving shorter segments,
-// then falls back to initials, then truncates.
+// It shortens the longest segment first, using readable stems before falling
+// back to initials and truncation.
 func AbbreviateProject(name string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
@@ -636,35 +636,20 @@ func AbbreviateProject(name string, maxWidth int) string {
 		return truncate(name, maxWidth)
 	}
 
-	// Shorten the longest segment first, one char at a time
-	lens := make([]int, len(parts))
-	for i, p := range parts {
-		lens[i] = len(p)
-	}
-	hyphens := len(parts) - 1
-	for sumInts(lens)+hyphens > maxWidth {
-		// Find last segment with max length (last wins ties,
-		// so earlier segments are preserved first)
-		maxIdx := 0
-		for i := 1; i < len(lens); i++ {
-			if lens[i] >= lens[maxIdx] {
-				maxIdx = i
-			}
-		}
-		if lens[maxIdx] <= 1 {
+	segments := append([]string(nil), parts...)
+	for joinedProjectLen(segments) > maxWidth {
+		maxIdx := longestProjectSegmentIndex(segments)
+		if len(segments[maxIdx]) <= 1 {
 			break
 		}
-		lens[maxIdx]--
+		next := abbreviateProjectSegment(parts[maxIdx], len(segments[maxIdx])-1)
+		if next == "" || next == segments[maxIdx] {
+			next = segments[maxIdx][:len(segments[maxIdx])-1]
+		}
+		segments[maxIdx] = next
 	}
 
-	var b strings.Builder
-	for i, p := range parts {
-		if i > 0 {
-			b.WriteByte('-')
-		}
-		b.WriteString(p[:lens[i]])
-	}
-	candidate := b.String()
+	candidate := strings.Join(segments, "-")
 	if len(candidate) <= maxWidth {
 		return candidate
 	}
@@ -679,12 +664,72 @@ func AbbreviateProject(name string, maxWidth int) string {
 	return truncate(initials, maxWidth)
 }
 
-func sumInts(a []int) int {
-	s := 0
-	for _, v := range a {
-		s += v
+var projectSegmentAbbreviations = map[string][]string{
+	"attention":   {"attent", "attn"},
+	"encoder":     {"enc"},
+	"injection":   {"inject", "inj"},
+	"performance": {"perf", "per"},
+	"probes":      {"prob"},
+	"structural":  {"struct"},
+	"structure":   {"struct"},
+	"structures":  {"struct"},
+}
+
+func abbreviateProjectSegment(segment string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
 	}
-	return s
+	if len(segment) <= maxLen {
+		return segment
+	}
+	lower := strings.ToLower(segment)
+	if candidates, ok := projectSegmentAbbreviations[lower]; ok {
+		for _, candidate := range candidates {
+			if len(candidate) <= maxLen {
+				return candidate
+			}
+		}
+	}
+	if strings.HasSuffix(lower, "tion") && maxLen >= 5 {
+		stem := trimTrailingVowel(segment[:len(segment)-len("ion")])
+		if len(stem) <= maxLen {
+			return stem
+		}
+	}
+	return trimTrailingVowel(segment[:maxLen])
+}
+
+func trimTrailingVowel(s string) string {
+	if len(s) <= 3 {
+		return s
+	}
+	switch s[len(s)-1] {
+	case 'a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U':
+		return s[:len(s)-1]
+	default:
+		return s
+	}
+}
+
+func longestProjectSegmentIndex(segments []string) int {
+	maxIdx := 0
+	for i := 1; i < len(segments); i++ {
+		if len(segments[i]) >= len(segments[maxIdx]) {
+			maxIdx = i
+		}
+	}
+	return maxIdx
+}
+
+func joinedProjectLen(segments []string) int {
+	if len(segments) == 0 {
+		return 0
+	}
+	total := len(segments) - 1
+	for _, segment := range segments {
+		total += len(segment)
+	}
+	return total
 }
 
 func initialString(parts []string) string {

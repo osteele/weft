@@ -90,7 +90,7 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 		Instances: make(map[int64]InstanceView),
 	}
 
-	jobs, err := db.ListJobsByStatuses(database, activeJobStatuses, "", opts.Project, 0, nil, "")
+	jobs, err := db.ListJobsByStatuses(database, activeJobStatuses, "", opts.Project, 0, nil, "unprocessed")
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}

@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // Session is the in-memory state of a single `weft narrate` invocation.
@@ -143,21 +145,50 @@ func wrapOne(line, indent string, width int) string {
 	var sb strings.Builder
 	sb.WriteString(indent)
 	col := 0
-	for i, w := range words {
-		if i > 0 {
-			if col+1+len(w) > width {
+	for _, word := range words {
+		for _, segment := range splitTokenByDisplayWidth(word, width) {
+			segmentWidth := runewidth.StringWidth(segment)
+			if col == 0 {
+				sb.WriteString(segment)
+				col = segmentWidth
+				continue
+			}
+			if col+1+segmentWidth > width {
 				sb.WriteString("\n")
 				sb.WriteString(indent)
-				col = 0
+				sb.WriteString(segment)
+				col = segmentWidth
 			} else {
 				sb.WriteString(" ")
-				col++
+				sb.WriteString(segment)
+				col += 1 + segmentWidth
 			}
 		}
-		sb.WriteString(w)
-		col += len(w)
 	}
 	return sb.String()
+}
+
+func splitTokenByDisplayWidth(token string, width int) []string {
+	if width <= 0 || runewidth.StringWidth(token) <= width {
+		return []string{token}
+	}
+	parts := make([]string, 0, runewidth.StringWidth(token)/width+1)
+	var b strings.Builder
+	currentWidth := 0
+	for _, r := range token {
+		runeWidth := runewidth.RuneWidth(r)
+		if currentWidth+runeWidth > width && b.Len() > 0 {
+			parts = append(parts, b.String())
+			b.Reset()
+			currentWidth = 0
+		}
+		b.WriteRune(r)
+		currentWidth += runeWidth
+	}
+	if b.Len() > 0 {
+		parts = append(parts, b.String())
+	}
+	return parts
 }
 
 // EmitDebug writes a debug payload to the configured debug sink (stderr by

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestDiffSnapshots_FirstTickIsAllAdds(t *testing.T) {
@@ -239,6 +241,33 @@ func TestFormatSnapshot_OmitsStalePlacementReasonsForPlacedQueuedJobs(t *testing
 	}
 }
 
+func TestBuildSnapshotExcludesProcessedJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	unprocessedID, err := db.RecordQueued(database, "", "/tmp/unprocessed", "echo ok", "unprocessed")
+	if err != nil {
+		t.Fatalf("record unprocessed: %v", err)
+	}
+	processedID, err := db.RecordQueued(database, "", "/tmp/processed", "echo ok", "processed")
+	if err != nil {
+		t.Fatalf("record processed: %v", err)
+	}
+	if err := db.AddJobTag(database, processedID, db.ProcessedTag); err != nil {
+		t.Fatalf("tag processed: %v", err)
+	}
+
+	snap, err := BuildSnapshot(database, SnapshotOptions{})
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if _, ok := snap.Jobs[unprocessedID]; !ok {
+		t.Fatalf("unprocessed job %d missing from snapshot: %#v", unprocessedID, snap.Jobs)
+	}
+	if _, ok := snap.Jobs[processedID]; ok {
+		t.Fatalf("processed job %d leaked into snapshot: %#v", processedID, snap.Jobs)
+	}
+}
+
 func TestFormatDelta_IncludesTerminatedInstanceAndPreviousInstance(t *testing.T) {
 	launchID := int64(2418)
 	delta := Delta{
@@ -386,7 +415,39 @@ func TestStatusLineHeaderDropsUnprocessedProjectParensBeforeActiveProjects(t *te
 	if !strings.Contains(line, "3 jobs running | 5 completed | 2 failed") {
 		t.Fatalf("load-bearing counts missing:\n%s", line)
 	}
-	if !strings.Contains(line, "remote-jobs") {
-		t.Fatalf("active project list should remain after dropping parens:\n%s", line)
+	if !strings.Contains(strings.Join(lines, " "), "remote-jobs") {
+		t.Fatalf("active project list should remain after dropping parens:\n%v", lines)
+	}
+}
+
+func TestStatusLineHeaderMovesProjectListToNextLineBeforeOverCompacting(t *testing.T) {
+	sl := StatusLine{
+		Now:               time.Unix(1700000000, 0).UTC(),
+		QueuedJobs:        24,
+		UnprocessedFailed: 9,
+		Projects:          []string{"llm-performance-mode", "markov-attention", "role-encoder-injection", "structural-probes"},
+		AutopilotState:    "running",
+	}
+
+	lines := sl.HeaderLines(80)
+	if len(lines) < 3 {
+		t.Fatalf("expected project list on a separate line, got %v", lines)
+	}
+	if !strings.Contains(lines[1], "24 jobs queued | 9 failed") {
+		t.Fatalf("job counters missing from second line: %q", lines[1])
+	}
+	if strings.Contains(lines[1], "llm-") || strings.Contains(lines[1], "markov") || strings.Contains(lines[1], "struct") {
+		t.Fatalf("project list should not be forced inline with job counters: %q", lines[1])
+	}
+	joinedProjects := strings.Join(lines[2:], " ")
+	for _, want := range []string{"llm-performance-mode", "markov-attention", "role-encoder-injection", "structural-probes"} {
+		if !strings.Contains(joinedProjects, want) {
+			t.Fatalf("project %q missing from separate project lines: %v", want, lines)
+		}
+	}
+	for _, line := range lines {
+		if len(line) > 80 {
+			t.Fatalf("line width = %d, want <= 80: %q", len(line), line)
+		}
 	}
 }

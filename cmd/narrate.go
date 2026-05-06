@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/narrate"
@@ -59,6 +60,9 @@ func init() {
 }
 
 func resolveTerminalWidth() int {
+	if cols, _, err := term.GetSize(os.Stdout.Fd()); err == nil && cols > 20 {
+		return cols
+	}
 	if cols := os.Getenv("COLUMNS"); cols != "" {
 		if n, err := strconv.Atoi(cols); err == nil && n > 20 {
 			return n
@@ -217,6 +221,7 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 		return fmt.Errorf("count unprocessed: %w", err)
 	}
 	statusLine := narrate.BuildStatusLine(snap, r.budgetCents, unprocessed)
+	r.width = resolveTerminalWidth()
 
 	if delta.Empty() && !narrateOnceFlag && r.session.Prev() != nil {
 		statusChanged := r.session.UpdateStatus(statusLine)

@@ -23,7 +23,7 @@ func TestAbbreviateProject(t *testing.T) {
 
 		// Progressive shortening of 2-segment name
 		{"2seg fits", "markov-attention", 16, "markov-attention"},
-		{"2seg width 9", "markov-attention", 9, "mark-atte"},
+		{"2seg width 9", "markov-attention", 9, "mark-attn"},
 		{"2seg width 7", "markov-attention", 7, "mar-att"},
 		{"2seg width 3", "markov-attention", 3, "m-a"},
 		{"2seg width 2", "markov-attention", 2, "ma"},
@@ -42,6 +42,32 @@ func TestAbbreviateProject(t *testing.T) {
 		{"empty string", "", 10, ""},
 		{"maxWidth 0", "test", 0, ""},
 		{"maxWidth 1", "adaptive-storage", 1, "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AbbreviateProject(tt.input, tt.maxWidth)
+			if got != tt.want {
+				t.Errorf("AbbreviateProject(%q, %d) = %q, want %q", tt.input, tt.maxWidth, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAbbreviateProjectPrefersReadableStems(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxWidth int
+		want     string
+	}{
+		{"llm performance long", "llm-performance-mode", 13, "llm-perf-mode"},
+		{"llm performance short", "llm-performance-mode", 10, "llm-per-mo"},
+		{"markov attention long", "markov-attention", 13, "markov-attent"},
+		{"markov attention short", "markov-attention", 9, "mark-attn"},
+		{"role encoder injection long", "role-encoder-injection", 15, "role-enc-inject"},
+		{"role encoder injection short", "role-encoder-injection", 12, "role-enc-inj"},
+		{"structural probes long", "structural-probes", 13, "struct-probes"},
+		{"structural probes short", "structural-probes", 11, "struct-prob"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

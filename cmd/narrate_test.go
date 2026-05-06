@@ -46,6 +46,34 @@ func TestLoadUnprocessedCountsIncludesTerminalProjects(t *testing.T) {
 		t.Fatalf("close failed augur: %v", err)
 	}
 
+	processedFailed, err := db.RecordQueued(database, "cool30", "/tmp/processed", "false", "processed failed")
+	if err != nil {
+		t.Fatalf("record processed failed: %v", err)
+	}
+	if err := db.SetJobProject(database, processedFailed, "processed-project"); err != nil {
+		t.Fatalf("set processed failed project: %v", err)
+	}
+	if err := db.CloseAttempt(database, processedFailed, db.StatusFailed, &exitOne, now); err != nil {
+		t.Fatalf("close processed failed: %v", err)
+	}
+	if err := db.AddJobTag(database, processedFailed, db.ProcessedTag); err != nil {
+		t.Fatalf("tag processed failed: %v", err)
+	}
+
+	processedCompleted, err := db.RecordQueued(database, "cool30", "/tmp/processed", "echo ok", "processed completed")
+	if err != nil {
+		t.Fatalf("record processed completed: %v", err)
+	}
+	if err := db.SetJobProject(database, processedCompleted, "processed-project"); err != nil {
+		t.Fatalf("set processed completed project: %v", err)
+	}
+	if err := db.CloseAttempt(database, processedCompleted, db.StatusCompleted, &exitZero, now); err != nil {
+		t.Fatalf("close processed completed: %v", err)
+	}
+	if err := db.AddJobTag(database, processedCompleted, db.ProcessedTag); err != nil {
+		t.Fatalf("tag processed completed: %v", err)
+	}
+
 	counts, err := loadUnprocessedCounts(database, "")
 	if err != nil {
 		t.Fatalf("loadUnprocessedCounts: %v", err)
