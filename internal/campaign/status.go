@@ -33,6 +33,18 @@ const (
 	// cancellation fires first; this is the safety net. Matches
 	// config.launching_phase_timeout in campaign-lifecycle.allium.
 	launchingPhaseTimeout = 12 * time.Minute
+
+	// dudVastTimeout is how long after Vast reports `running` we wait
+	// for the OnStart first-line probe to land in R2 before declaring
+	// a "dud" — Vast says the container is running, but no agent
+	// activity ever appears. The bimodal distribution of probe arrival
+	// times observed 2026-05-06 (probe within ~60s OR never) makes
+	// this a sharp signal: anything past several minutes is a host-
+	// level binary failure, not slow image pull. Set generously enough
+	// to cover legitimate cold-image pulls (typically 1–3 min) but
+	// well below the adaptive bootstrap deadline (often 1h+) so dud
+	// rentals are reclaimed before they bleed budget.
+	dudVastTimeout = 8 * time.Minute
 )
 
 // Setup phase stall defaults (used when no survival data is available).

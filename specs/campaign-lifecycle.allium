@@ -280,6 +280,16 @@ config {
     heartbeat_stale_threshold_early_life: Duration = 8.minutes
     heartbeat_early_life_window: Duration = 15.minutes
     running_stall_timeout: Duration = 30.minutes
+
+    -- Dud-Vast detection. When Vast reports the rental as `running` but
+    -- no OnStart probe has appeared in R2 after this many minutes, the
+    -- container never actually started. Catches host-level binary
+    -- failures (zombie offer, wedged docker daemon, image-pull block)
+    -- well before the adaptive bootstrap deadline (often 90 min+) would.
+    -- Bimodal observed distribution: probes either land within ~60s or
+    -- never; an 8-minute window covers cold-image pulls without false-
+    -- killing slow-but-progressing launches.
+    dud_vast_timeout: Duration = 8.minutes
     -- Maximum time an instance may sit with agent_ready_at set but no job
     -- yet started and no phase reported. See IdleAfterReadyTimeout.
     idle_after_ready_timeout: Duration = 15.minutes
@@ -983,6 +993,44 @@ rule IdleAfterReadyTimeout {
         -- Implementation: internal/campaign/instance_check.go §5a
         -- (ActionIdleAfterReadyTimeout); threshold in
         -- internal/campaign/reconcile.go idleAfterReadyTimeout.
+}
+
+rule DudVastDetection {
+    when: instance: Instance.status = running
+            and instance.launched_at != null
+            and instance.agent_ready_at = null
+            and not OnStartProbeWritten(instance)
+            and now - instance.launched_at >= config.dud_vast_timeout
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Dud-Vast: the provider reports the rental as running but the
+        -- container never started. Without this rule we wait the full
+        -- adaptive bootstrap deadline (often 90 min+) on launches that
+        -- were structurally never going to start.
+        --
+        -- The OnStart script's first line writes a presigned-URL probe
+        -- to instance/<id>/onstart-probe. If that probe never lands,
+        -- OnStart never executed, which means either the host docker
+        -- daemon failed to actually start the container, the image
+        -- pull was blocked, or the offer was a zombie. The bimodal
+        -- distribution of probe arrival times (within ~60s OR never)
+        -- means an 8-minute window catches dud rentals without false-
+        -- killing slow-but-progressing legitimate ones.
+        --
+        -- Reason is infra_failure (retryable): the orphaned jobs reset
+        -- to unplaced and RelaunchAfterInfraFailure picks them up on a
+        -- fresh offer (preferably on a different host, since the
+        -- survival model now records the failed machine_id).
+        --
+        -- Implementation: internal/campaign/instance_check.go §4d
+        -- (ActionEmptyStatusTimeout with "dud Vast" stall message).
+        -- The reconciler pre-fetches OnStartProbePresent only when
+        -- LaunchedAt != nil and AgentReadyAtUnix == nil — the dud
+        -- window — to keep healthy-fleet reconcile passes cheap.
 }
 
 rule HeartbeatStaleAfterReady {

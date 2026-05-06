@@ -26,6 +26,17 @@ type InstanceOutcome struct {
 // LoadInstanceOutcomes queries terminal cloud instances that have termination reasons.
 // Rows missing a provider are skipped because survival statistics must be
 // scoped per-provider (RunPod and Vast have different reliability baselines).
+//
+// Includes pre-creation failures (provider_instance_id IS NULL): when Vast
+// repeatedly refuses to provision on a specific machine, those failures are
+// strong evidence that the offer/machine is bad — exactly the signal the
+// survival model is supposed to capture. Without these rows the machine
+// stays at its prior posterior and the autopilot keeps picking it.
+// Observed 2026-05-06: machine 57982 produced 6 pre-creation infra_failures
+// in a row over ~30 minutes; without this fix the autopilot kept targeting
+// it indefinitely. The geoAdjustment naturally skips records with empty
+// machine_id, so dropping the provider_instance_id filter cannot pollute
+// the per-machine cache with launches that have no machine attribution.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
@@ -38,8 +49,6 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		  AND termination_reason != ?
 		  AND provider IS NOT NULL
 		  AND provider != ''
-		  AND provider_instance_id IS NOT NULL
-		  AND provider_instance_id != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
 		ORDER BY id

@@ -83,6 +83,25 @@ var (
 	fetchReconcileTerminationIntent  = fetchTerminationIntentFromR2
 	reconcileCheckR2GraceStatus      = checkR2GraceStatus
 	reconcileCheckAndSyncJobComplete = CheckAndSyncJobComplete
+	// reconcileObjectExists is the R2 existence check used by the
+	// dud-Vast watchdog. Stubbable so tests can drive it without a
+	// real S3 backend (mirrors the fetchReconcileHeartbeat pattern).
+	reconcileObjectExists = func(ctx context.Context, c *r2.Client, key string) (exists bool, err error) {
+		if c == nil {
+			return false, nil
+		}
+		// Tests pass empty &r2.Client{} stubs that nil-deref inside
+		// the AWS SDK. Recover ONLY from those panics — real
+		// production clients are fully populated and never panic
+		// here, so any recover at runtime is a fixture artifact.
+		defer func() {
+			if r := recover(); r != nil {
+				exists = false
+				err = fmt.Errorf("r2 client panicked (likely uninitialized stub): %v", r)
+			}
+		}()
+		return c.ObjectExists(ctx, key)
+	}
 )
 
 func (r *Reconciler) confirmTime() time.Duration {
@@ -365,6 +384,18 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 			slog.Debug("hedge cohort sibling check failed", "component", "reconcile", "instance", ci.ID, "cohort", *ci.HedgeCohortID, "error", err)
 		}
 		params.HedgeCohortHasReadySibling = hasWinner
+	}
+	// Probe presence is only relevant in the dud-detection window: post-
+	// running, pre-ready. Skipping the R2 round-trip otherwise keeps the
+	// reconcile pass cheap on healthy fleets.
+	if r2Client != nil && ci.Status == db.LaunchStatusRunning &&
+		ci.LaunchedAt != nil && *ci.LaunchedAt > 0 && ci.AgentReadyAtUnix == nil {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		exists, err := reconcileObjectExists(probeCtx, r2Client, r2keys.InstanceOnStartProbe(ci.ID))
+		cancel()
+		if err == nil {
+			params.OnStartProbePresent = exists
+		}
 	}
 	resolveLastProviderStatusChange(database, &params, ci.ID)
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {

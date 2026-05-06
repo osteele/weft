@@ -190,6 +190,14 @@ type CheckInstanceParams struct {
 	// launch's hedge cohort has reached agent_ready. Pre-computed by the
 	// caller because CheckInstance must stay pure (no DB handle).
 	HedgeCohortHasReadySibling bool
+
+	// OnStartProbePresent is true when the OnStart script's first-line
+	// probe (a curl PUT to the presigned URL) has landed in R2. The
+	// probe is the earliest evidence the container actually executed
+	// OnStart with outbound network. Used by the dud-Vast watchdog
+	// (rule 4d) to distinguish "Vast says running but container never
+	// started" from "container running, OnStart in flight".
+	OnStartProbePresent bool
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -447,6 +455,37 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				TerminalStatus:    db.LaunchStatusFailed,
 				TerminationReason: db.TerminationReasonInfraFailure,
 				StallMessage:      fmt.Sprintf("launching phase exceeded %s with no provider progress — terminating", launchingPhaseTimeout),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
+		}
+	}
+
+	// 4d. Dud-Vast detection. Vast reports the rental as `running`
+	// (LaunchedAt is set), but no agent activity has appeared in R2
+	// after dudVastTimeout: no OnStart probe, no heartbeat, no phase,
+	// no bootstrap stage. This is a host-level binary failure
+	// signature (zombie offer, wedged docker daemon, image-pull block)
+	// and would otherwise wait the full adaptive bootstrap deadline
+	// (often 90+ min). The full conjunction is intentional: any single
+	// signal of life means a downstream rule (heartbeat-stale,
+	// bootstrap-stalled) is the right adjudicator.
+	// See campaign-lifecycle.allium § DudVastDetection.
+	if ci.Status == db.LaunchStatusRunning &&
+		ci.LaunchedAt != nil && *ci.LaunchedAt > 0 &&
+		ci.AgentReadyAtUnix == nil &&
+		!p.OnStartProbePresent &&
+		p.HeartbeatAge == 0 &&
+		p.InstancePhase == "" &&
+		p.BootstrapStage == "" {
+		runningAt := time.Unix(*ci.LaunchedAt, 0)
+		if p.Now.Sub(runningAt) >= dudVastTimeout {
+			return InstanceAction{
+				Kind:              ActionEmptyStatusTimeout,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("dud Vast: %s post-running with no agent activity — terminating instance, jobs reset to queued", p.Now.Sub(runningAt).Truncate(time.Second)),
 				DestroyProvider:   true,
 				ResetJobs:         true,
 				AttemptOutcome:    db.AttemptOutcomeOrphaned,

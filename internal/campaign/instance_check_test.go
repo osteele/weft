@@ -117,8 +117,13 @@ func TestCheckInstance_BootstrapStalled(t *testing.T) {
 			LaunchedAt:            &launchedAt,
 			BootstrapDeadlineUnix: &expiredDeadline,
 		},
-		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
-		Now:      time.Now(),
+		// OnStart probe landed and bootstrap stage progressed, but
+		// then stalled — exactly the scenario rule 5 owns. (The
+		// dud-Vast watchdog short-circuits when there is no probe
+		// AND no other agent signal.)
+		OnStartProbePresent: true,
+		JobState:            JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:                 time.Now(),
 	})
 	if action.Kind != ActionBootstrapStalled {
 		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
@@ -141,8 +146,9 @@ func TestCheckInstance_BootstrapWarnOnly(t *testing.T) {
 			LaunchedAt:            &launchedAt,
 			BootstrapDeadlineUnix: &warnDeadline,
 		},
-		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
-		Now:      time.Now(),
+		OnStartProbePresent: true,
+		JobState:            JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:                 time.Now(),
 	})
 	if action.Kind != ActionDisplayOnly {
 		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
@@ -164,6 +170,7 @@ func TestCheckInstance_BootstrapSurvivalExtendsExistingDeadline(t *testing.T) {
 			LaunchedAt:            &launchedAt,
 			BootstrapDeadlineUnix: &expiredDeadline,
 		},
+		OnStartProbePresent: true,
 		BootstrapSurvival: &db.BootstrapSurvival{
 			SampleSize:     50,
 			WarnAfter:      20 * time.Minute,
@@ -189,6 +196,7 @@ func TestCheckInstance_BootstrapSurvivalTerminatesAfterLearnedDeadline(t *testin
 			LaunchedAt:            &launchedAt,
 			BootstrapDeadlineUnix: &expiredDeadline,
 		},
+		OnStartProbePresent: true,
 		BootstrapSurvival: &db.BootstrapSurvival{
 			SampleSize:     50,
 			WarnAfter:      20 * time.Minute,
@@ -796,9 +804,13 @@ func TestCheckInstance_NoAgentReadyDoesNotKill(t *testing.T) {
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderErr: fmt.Errorf("provider API timeout"),
-		JobState:    JobState{},
-		Now:         time.Now(),
+		// Probe landed: this test is about provider-API
+		// flakiness, not dud-Vast. Without the probe flag set, the
+		// dud watchdog would also fire here.
+		OnStartProbePresent: true,
+		ProviderErr:         fmt.Errorf("provider API timeout"),
+		JobState:            JobState{},
+		Now:                 time.Now(),
 	})
 	if action.Kind == ActionEmptyStatusTimeout {
 		t.Fatalf("provider absence alone should no longer kill; got ActionEmptyStatusTimeout")
@@ -854,6 +866,84 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 	if !action.ResetJobs {
 		t.Error("expected ResetJobs to be true")
+	}
+}
+
+// TestCheckInstance_DudVast_KillsWhenNoProbeAfterTimeout verifies the
+// dud-Vast watchdog: status=running for ≥dudVastTimeout with no
+// OnStart probe in R2 means the container never started, even though
+// Vast says it is. The OnStart probe arrival distribution is bimodal
+// (within ~60s OR never), so the timeout doesn't false-kill slow-but-
+// progressing launches; it cuts a binary host-level failure short
+// well below the adaptive bootstrap deadline (often 90+ min).
+func TestCheckInstance_DudVast_KillsWhenNoProbeAfterTimeout(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-dudVastTimeout - time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-dud",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: false,
+		Now:                 now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "dud Vast") {
+		t.Errorf("StallMessage = %q, want it to mention 'dud Vast'", action.StallMessage)
+	}
+	if !action.ResetJobs {
+		t.Error("ResetJobs should be true so orphaned jobs requeue")
+	}
+}
+
+// TestCheckInstance_DudVast_QuietBeforeTimeout: pre-timeout window
+// with no probe yet should leave the launch alone.
+func TestCheckInstance_DudVast_QuietBeforeTimeout(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-dudVastTimeout / 2).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-young",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: false,
+		Now:                 now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud Vast") {
+		t.Fatalf("dud watchdog fired early: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_DudVast_QuietWhenProbeLanded verifies the probe-
+// present case bypasses the watchdog: OnStart did execute and we
+// trust the bootstrap-deadline machinery for any later stall.
+func TestCheckInstance_DudVast_QuietWhenProbeLanded(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-pulled",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: true,
+		Now:                 now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud Vast") {
+		t.Fatalf("dud watchdog fired despite probe present: %q", action.StallMessage)
 	}
 }
 
@@ -1762,6 +1852,9 @@ func TestCheckInstance_PreviouslyRunning_FreshDeadlineForNonRunning(t *testing.T
 			CreatedAt:          launchedAt,
 			LaunchedAt:         &launchedAt,
 		},
+		// OnStart already ran (instance was running for most of the
+		// 30 min), so the dud-Vast watchdog is not the rule under test.
+		OnStartProbePresent:        true,
 		ProviderInst:               &cloud.Instance{Status: cloud.ProviderStatusLoading},
 		LastProviderStatusChangeAt: &lastChange,
 		Now:                        now,
