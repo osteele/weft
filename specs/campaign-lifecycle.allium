@@ -281,7 +281,16 @@ config {
     -- bootstrap_origin has been recorded yet. See LaunchingPhaseTimeout.
     -- MUST exceed any provider-internal bootstrap context timeout so the
     -- launching goroutine's own cancellation normally fires first.
-    launching_phase_timeout: Duration = 25.minutes
+    --
+    -- Calibration: ~1500 historical launches show pre-running
+    -- provisioning is bimodal (fast-or-never) — p99 ≤ 2 min, observed
+    -- max 6.2 min, zero launches ever exceeded 10 min from create to
+    -- status=running at the provider. 12 min gives ~2× margin over the
+    -- worst case while recovering budget on dud rentals 13 min faster.
+    -- An adaptive threshold here would converge near p99 (~2 min) and
+    -- start false-killing the rare 3-4 min legitimate launches; the
+    -- bimodal distribution makes a fixed cutoff strictly better.
+    launching_phase_timeout: Duration = 12.minutes
     self_destruct_linger_threshold: Duration = 2.minutes
     self_destruct_unknown_end_fallback: Duration = 3.minutes
     self_destruct_retries: Integer = 3

@@ -851,6 +851,76 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 }
 
+// TestCheckInstance_LaunchingPhaseTimeout verifies that an instance stuck
+// in `launching` (provider never reported status=running, so no
+// BootstrapOrigin) is killed once launchingPhaseTimeout elapses since
+// CreatedAt — and not before. Calibration: ~1500 historical launches
+// show pre-running provisioning is fast-or-never, with observed max
+// 6.2 min and p99 ≤ 2 min, so 12 min has ~2× margin over the worst
+// recorded case.
+func TestCheckInstance_LaunchingPhaseTimeout(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name       string
+		age        time.Duration
+		expectKill bool
+	}{
+		{"under threshold", launchingPhaseTimeout - time.Minute, false},
+		{"at threshold", launchingPhaseTimeout, true},
+		{"over threshold", launchingPhaseTimeout + 5*time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			created := now.Add(-tc.age).Unix()
+			r := NewReconciler()
+			action := r.CheckInstance(CheckInstanceParams{
+				CI: &db.Launch{
+					ID:                 1,
+					Status:             db.LaunchStatusLaunching,
+					CreatedAt:          created,
+					ProviderInstanceID: "test-123",
+				},
+				// ProviderInst nil simulates the real failure mode wi2350
+				// hit: Vast neither in the batch list nor returning a
+				// ShowInstance hit. With a non-nil ProviderInst the
+				// empty-status rule 4 fires first.
+				ProviderInst: nil,
+				Now:          now,
+			})
+			killed := action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "launching phase exceeded")
+			if killed != tc.expectKill {
+				t.Fatalf("age=%s killed_by_4c=%v, want killed_by_4c=%v (action=%d, msg=%q)",
+					tc.age, killed, tc.expectKill, action.Kind, action.StallMessage)
+			}
+		})
+	}
+}
+
+// TestCheckInstance_LaunchingPhaseTimeoutInertOnceRunning verifies that
+// rule 4c is inert once the provider has reported status=running
+// (LaunchedAt is stamped, BootstrapOrigin is non-nil) — the adaptive
+// bootstrap watchdog should take over from there.
+func TestCheckInstance_LaunchingPhaseTimeoutInertOnceRunning(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-30 * time.Minute).Unix()
+	launchedAt := now.Add(-29 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusLaunching,
+			CreatedAt:          created,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		Now:          now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "launching phase exceeded") {
+		t.Fatalf("rule 4c should not fire once LaunchedAt is set (BootstrapOrigin non-nil); got: %q", action.StallMessage)
+	}
+}
+
 // TestCheckInstance_StaleHeartbeatYieldsToPaused verifies that the
 // stale-heartbeat watchdog defers to the paused-provider rule: a
 // paused container stops writing heartbeats, so without this carve-out
