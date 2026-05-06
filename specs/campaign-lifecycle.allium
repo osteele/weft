@@ -266,7 +266,19 @@ config {
     bootstrap_timeout: Duration = 20.minutes
     setup_stall_warn: Duration = 15.minutes
     setup_stall_timeout: Duration = 25.minutes
-    heartbeat_stale_threshold: Duration = 3.minutes
+    -- Steady-state heartbeat staleness threshold. Raised from 3.minutes
+    -- after observing setup-phase silences (high-RSS uv-sync /
+    -- multi-GB HF download work) on instances that produced
+    -- continuous heartbeats once they reached steady-state GPU work.
+    -- Agents observed silent past 5 minutes have not been seen to
+    -- recover in our data, so further extension would just delay
+    -- declaring known-dead rentals.
+    heartbeat_stale_threshold: Duration = 5.minutes
+    -- Lenient threshold applied within heartbeat_early_life_window of
+    -- agent_ready_at, when memory pressure from initial setup is most
+    -- likely to stall the sidecar's R2 PUTs.
+    heartbeat_stale_threshold_early_life: Duration = 8.minutes
+    heartbeat_early_life_window: Duration = 15.minutes
     running_stall_timeout: Duration = 30.minutes
     -- Maximum time an instance may sit with agent_ready_at set but no job
     -- yet started and no phase reported. See IdleAfterReadyTimeout.

@@ -41,8 +41,36 @@ const (
 	defaultSetupStallTerminate = 25 * time.Minute
 )
 
-// Heartbeat staleness threshold: warn if heartbeat is older than this.
-const heartbeatStaleThreshold = 3 * time.Minute
+// Heartbeat staleness thresholds. The base value is the steady-state
+// kill threshold; a longer early-life value covers the heavier I/O of
+// initial setup (multi-GB HF model downloads, uv sync writes, container
+// memory pressure) which has been observed to stall the sidecar's R2
+// PUTs even when the container is alive.
+//
+// Calibration: agents that go silent past 5 minutes have not been
+// observed to recover in our data. The early-life carve-out is bounded
+// by heartbeatEarlyLifeWindow after agent_ready_at — past that window
+// the agent is post-first-job setup and heartbeats reliably during
+// steady-state GPU work.
+const (
+	heartbeatStaleThreshold          = 5 * time.Minute
+	heartbeatStaleThresholdEarlyLife = 8 * time.Minute
+	heartbeatEarlyLifeWindow         = 15 * time.Minute
+)
+
+// effectiveHeartbeatStaleThreshold returns the kill threshold for an
+// agent given how recently it reached "ready". Within
+// heartbeatEarlyLifeWindow of agent_ready_at_unix the threshold is
+// lenient; after, it tightens to the steady-state value.
+func effectiveHeartbeatStaleThreshold(agentReadyAtUnix *int64, now time.Time) time.Duration {
+	if agentReadyAtUnix == nil || *agentReadyAtUnix <= 0 {
+		return heartbeatStaleThreshold
+	}
+	if now.Sub(time.Unix(*agentReadyAtUnix, 0)) < heartbeatEarlyLifeWindow {
+		return heartbeatStaleThresholdEarlyLife
+	}
+	return heartbeatStaleThreshold
+}
 
 // Running-phase stall thresholds: trigger when heartbeat is stale AND
 // the running phase has been unchanged for this long. This catches hung

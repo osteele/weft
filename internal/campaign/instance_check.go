@@ -320,7 +320,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	//   - Provider explicitly reports terminal status (exited, destroyed,
 	//     etc.): caught by rule 7 (provider_dead with hysteresis).
 	if ci.Status == db.LaunchStatusRunning && ci.AgentReadyAtUnix != nil &&
-		p.HeartbeatAge > heartbeatStaleThreshold {
+		p.HeartbeatAge > effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, p.Now) {
 		// Yield to rule 4a-pause when the provider has paused the
 		// instance: a paused container stops writing heartbeats, so
 		// without this check the stale-agent watchdog would always
@@ -549,7 +549,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// 5c. Running phase stall: heartbeat stale while in running phase.
 	// A running job with a dead agent (stale heartbeat) should be terminated.
 	// This does NOT check GPU utilization — jobs may legitimately not use the GPU.
-	if ci.Status == db.LaunchStatusRunning && p.HeartbeatAge > heartbeatStaleThreshold {
+	if ci.Status == db.LaunchStatusRunning && p.HeartbeatAge > effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, p.Now) {
 		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
 		if verb == PhaseRunning {
 			phaseAge := p.HeartbeatAge
@@ -623,7 +623,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	}
 
 	// 8. Stale heartbeat (display-only warning — the reconciler's probe logic is separate)
-	if p.HeartbeatAge > heartbeatStaleThreshold && ci.Status == db.LaunchStatusRunning {
+	if p.HeartbeatAge > effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, p.Now) && ci.Status == db.LaunchStatusRunning {
 		return InstanceAction{
 			Kind:         ActionDisplayOnly,
 			StallMessage: "heartbeat stale",

@@ -148,7 +148,9 @@ config {
     r2_marker_timeout: Duration = 3.seconds
 
     -- Heartbeat and stall thresholds
-    heartbeat_stale_threshold: Duration = 3.minutes
+    heartbeat_stale_threshold: Duration = 5.minutes
+    heartbeat_stale_threshold_early_life: Duration = 8.minutes
+    heartbeat_early_life_window: Duration = 15.minutes
     running_stall_timeout: Duration = 30.minutes
 
     -- Reconcile safety-net window

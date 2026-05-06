@@ -829,8 +829,10 @@ func TestCheckInstance_ProviderStatusUnavailableWaitsBeforeTimeout(t *testing.T)
 // stopped writing heartbeats is killed promptly, regardless of what
 // the provider list says. No 25-minute lifecycle gate.
 func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
-	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
-	agentReady := time.Now().Add(-4 * time.Minute).Unix()
+	// Agent is past the early-life window so the steady-state threshold
+	// applies; heartbeat age exceeds it.
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	agentReady := time.Now().Add(-25 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
@@ -843,7 +845,7 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 		// Provider returns "alive" — we still kill on stale heartbeat.
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "running:531",
-		HeartbeatAge:  4 * time.Minute,
+		HeartbeatAge:  heartbeatStaleThreshold + time.Minute,
 		JobState:      JobState{HasStartedJob: true},
 		Now:           time.Now(),
 	})
@@ -852,6 +854,44 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 	if !action.ResetJobs {
 		t.Error("expected ResetJobs to be true")
+	}
+}
+
+// TestEffectiveHeartbeatStaleThreshold_EarlyLifeIsLenient locks in
+// the lenient threshold during the first heartbeatEarlyLifeWindow
+// after agent_ready_at — a window calibrated to cover the
+// memory-intensive uv-sync + HF-download burst right after the
+// agent pulls its first job. Once past that window, threshold
+// tightens to the steady-state value where the sidecar should
+// heartbeat reliably.
+func TestEffectiveHeartbeatStaleThreshold_EarlyLifeIsLenient(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name     string
+		readyAge time.Duration
+		readyAt  *int64
+		want     time.Duration
+	}{
+		{"no agent_ready_at", 0, nil, heartbeatStaleThreshold},
+		{"early-life: just reached ready", 30 * time.Second, nil, heartbeatStaleThresholdEarlyLife},
+		{"early-life: at boundary", heartbeatEarlyLifeWindow - time.Second, nil, heartbeatStaleThresholdEarlyLife},
+		{"steady-state: past window", heartbeatEarlyLifeWindow + time.Minute, nil, heartbeatStaleThreshold},
+		{"steady-state: long-running", time.Hour, nil, heartbeatStaleThreshold},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var ready *int64
+			if tc.readyAge > 0 {
+				ts := now.Add(-tc.readyAge).Unix()
+				ready = &ts
+			} else {
+				ready = tc.readyAt
+			}
+			got := effectiveHeartbeatStaleThreshold(ready, now)
+			if got != tc.want {
+				t.Fatalf("readyAge=%s threshold=%s, want %s", tc.readyAge, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1168,7 +1208,7 @@ func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		HeartbeatAge: 5 * time.Minute,
+		HeartbeatAge: heartbeatStaleThreshold + time.Minute,
 		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, LatestJobEnd: recentEnd},
 		Now:          time.Now(),
 	})
