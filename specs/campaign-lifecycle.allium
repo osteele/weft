@@ -1471,7 +1471,7 @@ rule AutoPilotPass {
     let planner_made_decisions = plan.launch_job_ids.any()
                                  or plan.blocked_reasons.any()
 
-    for job in unplaced_jobs where job.tags contains "compute-intensive"
+    for job in unplaced_jobs where job.tags contains "cpu-intensive"
                           and not job.tags contains "rental"
                           and job.provider = null:
         if OnPremPlacement(job) != null
@@ -1505,11 +1505,11 @@ rule AutoPilotPass {
         -- on the next autopilot tick, not this one.
 }
 
-rule ExistingInstanceComputeCPUFloor {
+rule ExistingInstanceCPUFloor {
     when: ReuseExistingInstance(job, instance)
        or QueueRebalanceTarget(job, instance)
        or AutoPilotReuseAssignment(job, instance)
-    requires: job.tags contains "compute-intensive"
+    requires: job.tags contains "cpu-intensive"
 
     let floor = EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
 
@@ -1519,7 +1519,9 @@ rule ExistingInstanceComputeCPUFloor {
     @guidance
         -- This mirrors cloud offer search's cpu_cores_effective floor.
         -- Existing rentals with unknown CPU metadata are not eligible for
-        -- compute-intensive reuse or rebalance destinations.
+        -- cpu-intensive reuse or rebalance destinations. The legacy alias
+        -- `compute-intensive` is accepted on input and canonicalized to
+        -- `cpu-intensive` via db.CanonicalizeTag.
         -- Implementation: internal/campaign/reuse.go MatchJobToInstance,
         -- plus the direct reuse guard in internal/orchestration/autopilot.go.
 }
@@ -1572,7 +1574,7 @@ rule QueueRebalanceJob {
       let dst = BestRebalanceTarget(job, plan, profile, exclude=src)
       requires: dst is not None
       requires: InstanceSatisfiesJob(dst, job)
-      requires: job.tags contains "compute-intensive" implies
+      requires: job.tags contains "cpu-intensive" implies
                 dst.cpu_cores_effective >= EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
       requires: ImagesCompatible(JobImage(job), dst.image)
       requires: dst.cost_per_hour <= config.rebalance_cost_ceiling

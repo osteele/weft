@@ -1009,27 +1009,29 @@ func repairLiveCloudAssignments(db *sql.DB) error {
 
 // Special job tags that affect scheduling and execution behavior.
 const (
-	ProcessedTag        = "processed"
-	TagExclusive        = "exclusive"
-	TagBenchmark        = "benchmark"
-	TagRental           = "rental"
-	TagInventory        = "inventory"
-	TagInterruptible    = "interruptible"
-	TagComputeIntensive = "compute-intensive"
-	TagProviderPrefix   = "provider:"
-	TagProviderVastai   = "provider:vastai"
-	TagProviderRunpod   = "provider:runpod"
+	ProcessedTag      = "processed"
+	TagExclusive      = "exclusive"
+	TagBenchmark      = "benchmark"
+	TagRental         = "rental"
+	TagInventory      = "inventory"
+	TagInterruptible  = "interruptible"
+	TagCPUIntensive   = "cpu-intensive"
+	TagProviderPrefix = "provider:"
+	TagProviderVastai = "provider:vastai"
+	TagProviderRunpod = "provider:runpod"
 
 	// Legacy tag aliases accepted on input and in existing database rows.
-	TagCloudLegacy       = "cloud"
-	TagOnPremLegacy      = "on-prem"
-	TagPreemptibleLegacy = "preemptible"
+	TagCloudLegacy            = "cloud"
+	TagOnPremLegacy           = "on-prem"
+	TagPreemptibleLegacy      = "preemptible"
+	TagComputeIntensiveLegacy = "compute-intensive"
 
 	// Deprecated aliases kept for internal compatibility while the codebase
 	// moves to the preferred rental/inventory terminology.
-	TagCloud       = TagRental
-	TagOnPrem      = TagInventory
-	TagPreemptible = TagInterruptible
+	TagCloud            = TagRental
+	TagOnPrem           = TagInventory
+	TagPreemptible      = TagInterruptible
+	TagComputeIntensive = TagCPUIntensive
 )
 
 const BackendQueueRunner = "queue-runner"
@@ -4077,6 +4079,8 @@ func CanonicalizeTag(tag string) string {
 		return TagInventory
 	case TagPreemptibleLegacy:
 		return TagInterruptible
+	case TagComputeIntensiveLegacy:
+		return TagCPUIntensive
 	default:
 		return tag
 	}

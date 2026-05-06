@@ -158,13 +158,13 @@ func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
 
-	if job.HasTag(db.TagComputeIntensive) {
+	if job.HasTag(db.TagCPUIntensive) {
 		floor := computeCPUCoresFloor()
 		if inst.CPUCores <= 0 {
-			return false, "CPU cores unknown for compute-intensive"
+			return false, "CPU cores unknown for cpu-intensive"
 		}
 		if inst.CPUCores < floor {
-			return false, fmt.Sprintf("CPU cores insufficient for compute-intensive: need=%d instance=%d", floor, inst.CPUCores)
+			return false, fmt.Sprintf("CPU cores insufficient for cpu-intensive: need=%d instance=%d", floor, inst.CPUCores)
 		}
 	}
 

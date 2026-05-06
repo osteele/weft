@@ -27,10 +27,10 @@ scheduler and runner:
                     blocks combination with 'interruptible'.
   exclusive         Requires the host to be idle while the job runs (like
                     'benchmark', without the timing-protection requirements).
-  compute-intensive Job saturates the GPU regardless of co-tenants. Skips the
-                    queue-contention penalty in run-time estimation and adds a
-                    placement bonus proportional to the host's free CPU
-                    capacity (cores × cpu_factor × idle fraction).
+  cpu-intensive     CPU-heavy job. Skips the queue-contention penalty in
+                    run-time estimation and adds a placement bonus
+                    proportional to the host's free CPU capacity (cores ×
+                    cpu_factor × idle fraction).
   rental            Bind the job to a cloud rental instance (alias: 'cloud').
   inventory         Bind the job to an on-prem inventory host (alias:
                     'on-prem').
@@ -39,8 +39,8 @@ scheduler and runner:
   provider:<name>   Pin to a specific cloud provider, e.g. 'provider:vastai'
                     or 'provider:runpod'.
 
-Legacy aliases ('cloud', 'on-prem', 'preemptible') are accepted on input and
-canonicalized to the names above.`,
+Legacy aliases ('cloud', 'on-prem', 'preemptible', 'compute-intensive') are
+accepted on input and canonicalized to the names above.`,
 }
 
 var tagAddCmd = &cobra.Command{

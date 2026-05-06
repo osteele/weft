@@ -25,7 +25,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated). Most tags are user-defined; reserved scheduler tags such as `rental`, `inventory`, `benchmark`, `exclusive`, `interruptible`, and `compute-intensive` are described in the [Placement guide](../guides/placement.md#reserved-tags).
+- `--tag TAG`: Tag to attach to the job (can be repeated). Most tags are user-defined; reserved scheduler tags such as `rental`, `inventory`, `benchmark`, `exclusive`, `interruptible`, and `cpu-intensive` are described in the [Placement guide](../guides/placement.md#reserved-tags).
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -658,10 +658,10 @@ weft job tag add wj42 wj43 wj44 rental    # tag multiple jobs at once
 
 Most tags are user-defined. For the catalog of tags the scheduler and runner
 treat specially (`rental`, `inventory`, `benchmark`, `exclusive`,
-`interruptible`, `compute-intensive`, `provider:<name>`) and the legacy
-aliases `cloud`, `on-prem`, `preemptible`, see the
+`interruptible`, `cpu-intensive`, `provider:<name>`) and the legacy
+aliases `cloud`, `on-prem`, `preemptible`, `compute-intensive`, see the
 [Placement guide § Reserved tags](../guides/placement.md#reserved-tags).
-`compute-intensive` also affects rental policy: existing rentals must meet the
+`cpu-intensive` also affects rental policy: existing rentals must meet the
 `WEFT_COMPUTE_CPU_CORES` effective-CPU floor, and automatic new rentals need at
 least a 30-minute estimated completion-time advantage over on-prem placement.
 

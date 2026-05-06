@@ -1585,7 +1585,7 @@ func TestComputeIntensiveTag_PrefersMoreCores(t *testing.T) {
 	for _, s := range []Score{alpha, beta, gamma} {
 		hasReason := false
 		for _, r := range s.Reasons {
-			if strings.Contains(r, "compute-intensive") {
+			if strings.Contains(r, "cpu-intensive") {
 				hasReason = true
 				break
 			}
@@ -1622,7 +1622,7 @@ func TestComputeIntensiveTag_WithMetrics_PrefersIdleCores(t *testing.T) {
 	// host-gamma should show higher effective cores due to being idle.
 	hasAlphaCI := false
 	for _, r := range alpha.Reasons {
-		if strings.Contains(r, "compute-intensive") && strings.Contains(r, "idle") {
+		if strings.Contains(r, "cpu-intensive") && strings.Contains(r, "idle") {
 			hasAlphaCI = true
 		}
 	}
@@ -1632,7 +1632,7 @@ func TestComputeIntensiveTag_WithMetrics_PrefersIdleCores(t *testing.T) {
 
 	hasGammaCI := false
 	for _, r := range gamma.Reasons {
-		if strings.Contains(r, "compute-intensive") {
+		if strings.Contains(r, "cpu-intensive") {
 			hasGammaCI = true
 		}
 	}
@@ -1654,7 +1654,7 @@ func TestComputeIntensiveTag_ReasonIncluded(t *testing.T) {
 	alpha := findScore(scores, "host-alpha")
 	hasReason := false
 	for _, r := range alpha.Reasons {
-		if strings.Contains(r, "compute-intensive") {
+		if strings.Contains(r, "cpu-intensive") {
 			hasReason = true
 			break
 		}

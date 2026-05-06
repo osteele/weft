@@ -119,7 +119,7 @@ designed to be one administered system.
   allotment, queue depth, live utilization, data locality, transfer estimates,
   setup cost, and runtime prediction
 - Reserved tags steer placement: `rental`, `inventory`, `provider:<name>`,
-  `interruptible`, `compute-intensive`, `exclusive`, and `benchmark`
+  `interruptible`, `cpu-intensive`, `exclusive`, and `benchmark`
 - Data-locality inputs such as `--input hf:<model>` reward hosts that already
   have the model cached and can trigger pre-staging before dispatch
 - `exclusive` and `benchmark` cover isolation cases on unmanaged machines, but

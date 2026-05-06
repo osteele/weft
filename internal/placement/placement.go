@@ -1199,13 +1199,13 @@ func applyComputeIntensiveScoring(s *Score, host inventory.HostSpec, metrics *Ho
 		bonus := math.Min(effective/100.0*5.0, 5.0)
 		s.Total += bonus
 		s.Reasons = append(s.Reasons,
-			fmt.Sprintf("compute-intensive: %.0f effective cores (%.0f × %.0f%% idle, +%.1f)",
+			fmt.Sprintf("cpu-intensive: %.0f effective cores (%.0f × %.0f%% idle, +%.1f)",
 				effective, capacity, idleFraction*100, bonus))
 	} else {
 		bonus := math.Min(capacity/100.0*5.0, 5.0)
 		s.Total += bonus
 		s.Reasons = append(s.Reasons,
-			fmt.Sprintf("compute-intensive: %.0f capacity (%.0f cores × %.2fx, +%.1f)",
+			fmt.Sprintf("cpu-intensive: %.0f capacity (%.0f cores × %.2fx, +%.1f)",
 				capacity, float64(host.CPUCores), host.CPUPerformance(), bonus))
 	}
 }
