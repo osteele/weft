@@ -620,11 +620,14 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 			}
 
 			// RunPod SSH bootstrap requires runpod/* images with init/sshd.
+			// The remap is automatic and benign — log at debug since it
+			// fires every pass for every torch-based job heading to runpod
+			// and produces no actionable signal.
 			if strings.EqualFold(g.Provider, string(cloud.ProviderRunpod)) {
 				originalImage := img
 				img = normalizeRunpodGroupImage(img)
 				if originalImage != "" && originalImage != img {
-					slog.Warn("remapped image to RunPod-compatible image",
+					slog.Debug("remapped image to RunPod-compatible image",
 						"component", "campaign",
 						"job_id", job.ID,
 						"provider", g.Provider,

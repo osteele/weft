@@ -686,7 +686,7 @@ func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var timeoutCount, errorCount int
+	var timeoutIDs, errorIDs []int64
 
 	for _, instanceID := range ids {
 		sem <- struct{}{}
@@ -704,20 +704,20 @@ func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 				mu.Lock()
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					_ = db.MarkOpslogTimeout(database, id)
-					timeoutCount++
+					timeoutIDs = append(timeoutIDs, id)
 				} else {
-					errorCount++
+					errorIDs = append(errorIDs, id)
 				}
 				mu.Unlock()
 			}
 		}(instanceID)
 	}
 	wg.Wait()
-	if timeoutCount > 0 {
-		slog.Warn("opslog sync timed out", "component", "sync", "count", timeoutCount)
+	if len(timeoutIDs) > 0 {
+		slog.Warn("opslog sync timed out", "component", "sync", "count", len(timeoutIDs), "instances", timeoutIDs)
 	}
-	if errorCount > 0 {
-		slog.Warn("opslog sync errors", "component", "sync", "count", errorCount)
+	if len(errorIDs) > 0 {
+		slog.Warn("opslog sync errors", "component", "sync", "count", len(errorIDs), "instances", errorIDs)
 	}
 	return nil
 }
