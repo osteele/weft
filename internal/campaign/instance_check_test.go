@@ -584,11 +584,13 @@ func TestCheckInstance_ProviderDead_SkipsGraceInstances(t *testing.T) {
 }
 
 func TestComputeJobState_HistoricalOrphanedAttemptCountsAsStartedAndTerminal(t *testing.T) {
+	start := time.Now().Add(-3 * time.Minute).Unix()
 	end := time.Now().Add(-2 * time.Minute).Unix()
 	jobs := []*db.Job{{
-		ID:      88,
-		Status:  db.StatusQueued,
-		EndTime: &end,
+		ID:        88,
+		Status:    db.StatusQueued,
+		StartTime: start,
+		EndTime:   &end,
 	}}
 	state := ComputeJobState(jobs, map[int64]string{88: db.AttemptOutcomeOrphaned})
 	if !state.HasStartedJob {
@@ -606,11 +608,13 @@ func TestComputeJobState_HistoricalOrphanedAttemptCountsAsStartedAndTerminal(t *
 }
 
 func TestComputeJobState_MixedFailedAndOrphanedUsesJobFailure(t *testing.T) {
+	startA := time.Now().Add(-3 * time.Minute).Unix()
 	endA := time.Now().Add(-2 * time.Minute).Unix()
+	startB := time.Now().Add(-2 * time.Minute).Unix()
 	endB := time.Now().Add(-90 * time.Second).Unix()
 	jobs := []*db.Job{
-		{ID: 88, Status: db.StatusQueued, EndTime: &endA},
-		{ID: 89, Status: db.StatusQueued, EndTime: &endB},
+		{ID: 88, Status: db.StatusQueued, StartTime: startA, EndTime: &endA},
+		{ID: 89, Status: db.StatusQueued, StartTime: startB, EndTime: &endB},
 	}
 	state := ComputeJobState(jobs, map[int64]string{
 		88: db.AttemptOutcomeOrphaned,
@@ -848,6 +852,31 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 	if !action.ResetJobs {
 		t.Error("expected ResetJobs to be true")
+	}
+}
+
+// TestJobStartedOnInstance_EndTimeAloneNotSufficient locks in that
+// jobStartedOnInstance does NOT treat end_time alone as evidence of
+// execution. The supersede paths (tryPlaceOntoExistingInstances on
+// dep-blocked or producer-missing jobs) stamp end_time on canceled
+// attempts that the agent never saw; if those counted as "started",
+// HasStartedJob would silence the bootstrap-stall and idle-after-ready
+// watchdogs forever. wi2349 hit this with 360+ canceled-with-end_time
+// attempts on wj1756 — instance ran 95 min past its 1h32m bootstrap
+// deadline without rule 5 firing.
+func TestJobStartedOnInstance_EndTimeAloneNotSufficient(t *testing.T) {
+	end := int64(1000)
+	canceled := &db.Job{ID: 1, StartTime: 0, EndTime: &end}
+	if jobStartedOnInstance(canceled) {
+		t.Fatal("end_time set without start_time must not signal a run; that is how supersede chains thrash")
+	}
+	started := &db.Job{ID: 2, StartTime: 100, EndTime: &end}
+	if !jobStartedOnInstance(started) {
+		t.Fatal("start_time set must signal a run")
+	}
+	queued := &db.Job{ID: 3}
+	if jobStartedOnInstance(queued) {
+		t.Fatal("a queued job with no times must not signal a run")
 	}
 }
 
