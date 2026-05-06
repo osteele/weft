@@ -382,6 +382,42 @@ func SearchBestOfferForGroup(
 	return SearchBestOfferForGroupWithProfile(clients, group, survivalModel, jobDurationHrs, setupOverhead, excludeOfferIDs, strategy.Profile(), minReliability, minSurvival)
 }
 
+// SearchTopKOffersForGroup returns up to k distinct offers for the
+// given group, ranked by the same scoring as SearchBestOfferForGroup.
+// The initial exclude set is honored as the seed; each picked offer is
+// added to it before the next call. The result may have fewer than k
+// entries when the provider lacks enough qualifying offers.
+func SearchTopKOffersForGroup(
+	clients []cloud.Client,
+	group InstanceGroup,
+	k int,
+	survivalModel *bidding.SurvivalModel,
+	jobDurationHrs float64,
+	setupOverhead bidding.OfferSetupFunc,
+	excludeOfferIDs map[string]struct{},
+	strategy bidding.SelectionStrategy,
+	minReliability float64,
+	minSurvival float64,
+) []GroupOffer {
+	if k <= 0 {
+		return nil
+	}
+	exclude := map[string]struct{}{}
+	for id := range excludeOfferIDs {
+		exclude[id] = struct{}{}
+	}
+	results := make([]GroupOffer, 0, k)
+	for i := 0; i < k; i++ {
+		gOffer := SearchBestOfferForGroup(clients, group, survivalModel, jobDurationHrs, setupOverhead, exclude, strategy, minReliability, minSurvival)
+		if gOffer.Err != nil || gOffer.Offer == nil {
+			break
+		}
+		results = append(results, gOffer)
+		exclude[gOffer.Offer.Key()] = struct{}{}
+	}
+	return results
+}
+
 func SearchBestOfferForGroupWithProfile(
 	clients []cloud.Client,
 	group InstanceGroup,

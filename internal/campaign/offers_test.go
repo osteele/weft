@@ -198,6 +198,60 @@ func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
 	}
 }
 
+func TestSearchTopKOffersForGroup_DistinctOffers(t *testing.T) {
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{ProviderID: "1", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.30, Reliability: 0.99, MachineID: "m1"},
+				{ProviderID: "2", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.35, Reliability: 0.99, MachineID: "m2"},
+				{ProviderID: "3", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.40, Reliability: 0.99, MachineID: "m3"},
+			}, nil
+		},
+	}
+	results := SearchTopKOffersForGroup(
+		[]cloud.Client{mockClient},
+		InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, DiskGB: 80},
+		3,
+		nil, 1.0, bidding.ConstantSetup(0.5), nil,
+		bidding.StrategyCheap, 0.95, 0,
+	)
+	if len(results) != 3 {
+		t.Fatalf("got %d offers, want 3", len(results))
+	}
+	seen := map[string]bool{}
+	for i, r := range results {
+		if r.Offer == nil {
+			t.Fatalf("offer %d is nil", i)
+		}
+		if seen[r.Offer.ProviderID] {
+			t.Fatalf("duplicate offer %q at position %d", r.Offer.ProviderID, i)
+		}
+		seen[r.Offer.ProviderID] = true
+	}
+}
+
+func TestSearchTopKOffersForGroup_ReturnsFewerWhenInventoryShort(t *testing.T) {
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{ProviderID: "1", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.30, Reliability: 0.99},
+			}, nil
+		},
+	}
+	results := SearchTopKOffersForGroup(
+		[]cloud.Client{mockClient},
+		InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, DiskGB: 80},
+		3,
+		nil, 1.0, bidding.ConstantSetup(0.5), nil,
+		bidding.StrategyCheap, 0.95, 0,
+	)
+	if len(results) != 1 {
+		t.Fatalf("got %d offers, want 1 (only one available)", len(results))
+	}
+}
+
 func TestSearchBestOfferForGroup_ProviderFilter(t *testing.T) {
 	vastClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,

@@ -557,11 +557,88 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				JobCount:  len(group.Jobs),
 			})
 			result.InstanceIDs = append(result.InstanceIDs, instanceID)
+			launchHedgeProbes(cfg, campaignID, group, offer, *r2Assets, instanceID, &mu, result)
 		}(group, offer, client, predecessorID, hasPredecessor)
 	}
 	wg.Wait()
 
 	return result, nil
+}
+
+// launchHedgeProbes spawns probe instances for the primary's hedge
+// cohort. Probe launches run in a background goroutine and tolerate
+// individual failures — they're fire-and-forget; the cull rule
+// enforces single-survivor.
+func launchHedgeProbes(cfg RelaunchConfig, campaignID *int64, group InstanceGroup, primaryOffer cloud.Offer, r2Assets R2Assets, primaryInstanceID int64, mu *sync.Mutex, result *RelaunchResult) {
+	if cfg.AppConfig == nil {
+		return
+	}
+	hedge := cfg.AppConfig.Campaign.Hedge
+	if !hedge.Enabled || hedge.Count <= 1 {
+		return
+	}
+	if hedge.MaxCostPerHour > 0 && primaryOffer.CostPerHour > hedge.MaxCostPerHour {
+		return
+	}
+	if err := db.SetLaunchHedgeCohort(cfg.Database, primaryInstanceID, primaryInstanceID); err != nil {
+		slog.Warn("set hedge cohort id on primary", "component", "relaunch", "instance", primaryInstanceID, "error", err)
+		return
+	}
+
+	probeCount := hedge.Count - 1
+	go func() {
+		var setupOverhead bidding.OfferSetupFunc
+		if cfg.SetupFactory != nil {
+			setupOverhead = cfg.SetupFactory(group)
+		}
+		offers := SearchTopKOffersForGroup(
+			cfg.Clients, group, probeCount, cfg.SurvivalModel, 0, setupOverhead,
+			map[string]struct{}{primaryOffer.Key(): {}},
+			cfg.Strategy, cfg.AppConfig.CampaignReliability(), cfg.MinSurvival,
+		)
+		for _, gOffer := range offers {
+			probeOffer := *gOffer.Offer
+			if hedge.MaxCostPerHour > 0 && probeOffer.CostPerHour > hedge.MaxCostPerHour {
+				return
+			}
+			probeClient, probeCreateOpts, targetErr := resolveHedgeProbeLaunchTarget(cfg, probeOffer)
+			if targetErr != nil {
+				slog.Warn("hedge probe launch target unavailable", "component", "relaunch", "primary", primaryInstanceID, "provider", probeOffer.Provider, "error", targetErr)
+				continue
+			}
+			probeOpts := cfg.LaunchOpts
+			probeOpts.HedgeProbe = true
+			probeOpts.HedgeCohortID = primaryInstanceID
+			probeID, err := LaunchInstance(probeClient, cfg.Database, campaignID, group, probeOffer, probeOpts, cfg.R2Cfg, probeCreateOpts, r2Assets, nil, nil, nil)
+			if err != nil {
+				slog.Warn("hedge probe launch failed", "component", "relaunch", "primary", primaryInstanceID, "error", err)
+				continue
+			}
+			slog.Info("hedge probe launched", "component", "relaunch", "primary", primaryInstanceID, "probe", probeID, "machine", probeOffer.MachineID)
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchLaunchSuccess,
+				LaunchID:  probeID,
+				GPUSpec:   group.GPUSpec(),
+				JobCount:  0,
+				Detail:    fmt.Sprintf("hedge probe of primary=%d", primaryInstanceID),
+			})
+			mu.Lock()
+			result.InstanceIDs = append(result.InstanceIDs, probeID)
+			mu.Unlock()
+		}
+	}()
+}
+
+func resolveHedgeProbeLaunchTarget(cfg RelaunchConfig, offer cloud.Offer) (cloud.Client, cloud.CreateOpts, error) {
+	client := clientForProvider(cfg.Clients, offer.Provider)
+	if client == nil {
+		return nil, cloud.CreateOpts{}, fmt.Errorf("no cloud client configured for provider %q", offer.Provider)
+	}
+	createOpts, err := resolveRelaunchCreateOpts(cfg, offer.Provider)
+	if err != nil {
+		return nil, cloud.CreateOpts{}, err
+	}
+	return client, createOpts, nil
 }
 
 func resolveRelaunchCreateOpts(cfg RelaunchConfig, provider cloud.Provider) (cloud.CreateOpts, error) {

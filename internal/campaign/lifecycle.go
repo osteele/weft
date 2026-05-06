@@ -54,6 +54,15 @@ type LaunchOpts struct {
 	// jobs being launched (TransferJobLaunchID rather than SetJobLaunchID).
 	// Caller MUST have an open MoveIntent — see specs/job-move.allium.
 	TransferClaim bool
+
+	// HedgeProbe marks this launch as a hedge-cohort probe: jobs are
+	// not claimed, and the probe races siblings to agent_ready. See
+	// campaign-lifecycle.allium § HedgeCohortCull.
+	HedgeProbe bool
+	// HedgeCohortID sets launches.hedge_cohort_id at registration.
+	// Probes pass the primary's launch id; the primary sets its own
+	// id via SetLaunchHedgeCohort after registration.
+	HedgeCohortID int64
 }
 
 func (opts LaunchOpts) ScoringProfile() bidding.ScoreProfile {
@@ -1405,6 +1414,15 @@ func LaunchInstance(
 		slog.Warn("set bootstrap deadline", "component", "launch", "instance_id", instanceID, "error", err)
 	}
 
+	if opts.HedgeProbe {
+		if opts.HedgeCohortID > 0 {
+			if err := db.SetLaunchHedgeCohort(database, instanceID, opts.HedgeCohortID); err != nil {
+				slog.Warn("set hedge cohort id", "component", "launch", "instance", instanceID, "cohort", opts.HedgeCohortID, "error", err)
+			}
+		}
+		group.Jobs = nil
+	}
+
 	// Associate jobs with cloud instance and record campaign position.
 	// Jobs that were claimed by another launch between ListUnplacedJobs and
 	// now are skipped rather than causing a hard failure.
@@ -1449,7 +1467,8 @@ func LaunchInstance(
 	}
 
 	// If all jobs were claimed by other launches, clean up the empty launch.
-	if len(claimedJobs) == 0 {
+	// Hedge probes are exempt: they intentionally launch with no jobs.
+	if len(claimedJobs) == 0 && !opts.HedgeProbe {
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled,
 			db.TerminationReasonCancelled, "all jobs claimed by other launches")
 		return instanceID, fmt.Errorf("launch %d: all %d jobs claimed by other launches", instanceID, len(group.Jobs))

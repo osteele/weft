@@ -308,8 +308,10 @@ config {
     -- instances on distinct offers per group; once any of them reaches
     -- agent_ready, the others are culled. Trades a small extra spend
     -- on probe launches for far higher launch survival on flaky
-    -- provider classes. Phase 1 implements the cull rule; Phase 2
-    -- wires the launch-path expansion that creates the cohort.
+    -- provider classes. The relaunch loop spawns probes alongside the
+    -- primary; the cull rule (HedgeCohortCull) enforces single-survivor.
+    -- See SearchTopKOffersForGroup, launchHedgeProbes, and
+    -- LaunchOpts.HedgeProbe for the launch-path wiring.
     hedge_enabled: Boolean = false
     hedge_count: Integer = 3
     hedge_max_cost_per_hour: Number = 0.25

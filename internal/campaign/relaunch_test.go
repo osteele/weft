@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -108,6 +109,28 @@ func TestLaunchElapsedAndSpendCents(t *testing.T) {
 	_, cents = launchElapsedAndSpendCents(ci, time.Now())
 	if cents != 77 {
 		t.Fatalf("actual spend should win, got %d", cents)
+	}
+}
+
+func TestResolveHedgeProbeLaunchTargetUsesProbeOfferProvider(t *testing.T) {
+	vastClient := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+	runpodClient := &cloud.MockClient{ProviderVal: cloud.ProviderRunpod}
+	cfg := RelaunchConfig{
+		Clients: []cloud.Client{vastClient, runpodClient},
+		CreateOptsForProvider: func(provider cloud.Provider) (cloud.CreateOpts, error) {
+			return cloud.CreateOpts{Image: string(provider) + "-image"}, nil
+		},
+	}
+
+	client, createOpts, err := resolveHedgeProbeLaunchTarget(cfg, cloud.Offer{Provider: cloud.ProviderRunpod})
+	if err != nil {
+		t.Fatalf("resolveHedgeProbeLaunchTarget: %v", err)
+	}
+	if client != runpodClient {
+		t.Fatalf("client provider = %s, want %s", client.Provider(), cloud.ProviderRunpod)
+	}
+	if createOpts.Image != "runpod-image" {
+		t.Fatalf("create opts image = %q, want runpod-image", createOpts.Image)
 	}
 }
 

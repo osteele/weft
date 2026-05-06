@@ -250,7 +250,9 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 
 	// 1a. Hedge-cohort cull: a non-survivor probe is terminated once a
 	// sibling reaches agent_ready. Gate on AgentReadyAtUnix == nil so
-	// the survivor itself is never the one culled.
+	// the survivor itself is never the one culled. ResetJobs orphans
+	// any jobs the loser was holding so the next reuse pass migrates
+	// them onto the surviving probe.
 	// See campaign-lifecycle.allium § HedgeCohortCull.
 	if ci.HedgeCohortID != nil && ci.AgentReadyAtUnix == nil &&
 		(ci.Status == db.LaunchStatusLaunching || ci.Status == db.LaunchStatusRunning) &&
@@ -261,6 +263,8 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			TerminationReason: db.TerminationReasonCancelled,
 			StallMessage:      "hedge cohort sibling reached ready first — culling",
 			DestroyProvider:   true,
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeCancelled,
 		}
 	}
 

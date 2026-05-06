@@ -10,10 +10,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/artifacts"
@@ -195,6 +197,42 @@ func runCampaign(args []string) {
 	// hitting ENOSPC mid-job.
 	if checkDiskCap(r2Bucket, instanceIDInt, manifest.RequestedDiskGB, diskPath, manifest.SelfDestructCmd) {
 		return
+	}
+
+	// Hedge probe: launched with no jobs. Idle and poll R2 for jobs
+	// migrated by a later reuse pass — without this branch the agent
+	// would exit immediately and self-destruct.
+	if len(manifest.Jobs) == 0 {
+		onPhase("ready")
+		probeSig := make(chan os.Signal, 1)
+		signal.Notify(probeSig, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(probeSig)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-probeSig:
+				return
+			case <-ticker.C:
+				newJobs := checkForNewJobs(r2Bucket, instanceIDInt, onPhase)
+				if len(newJobs) == 0 {
+					continue
+				}
+				_ = runJobSequence(newJobs, jobSequenceConfig{
+					R2Bucket:            r2Bucket,
+					InstanceID:          instanceIDInt,
+					PhaseKey:            phaseKey,
+					LogDir:              logDir,
+					DiskPath:            diskPath,
+					MaxTime:             maxTime,
+					StartTime:           startTime,
+					OnPhase:             onPhase,
+					SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
+					GPUWarmup:           manifest.GPUWarmup,
+				})
+				return
+			}
+		}
 	}
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
