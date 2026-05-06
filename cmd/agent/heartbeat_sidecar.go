@@ -15,6 +15,7 @@ import (
 )
 
 const heartbeatSidecarInterval = 30 * time.Second
+const agentDiedDmesgLines = 50
 
 type heartbeatSidecarArgs struct {
 	R2Bucket   string
@@ -23,6 +24,37 @@ type heartbeatSidecarArgs struct {
 	PhaseFile  string
 	FatalFile  string
 	ParentPID  int
+}
+
+type agentDiedMarker struct {
+	Ts        int64  `json:"ts"`
+	Phase     string `json:"phase"`
+	DmesgTail string `json:"dmesg_tail,omitempty"`
+}
+
+type sidecarR2Status struct {
+	failuresConsecutive int
+	lastError           string
+}
+
+func (s *sidecarR2Status) put(bucket, key, content string) error {
+	err := r2Put(bucket, key, content)
+	if err != nil {
+		s.failuresConsecutive++
+		s.lastError = err.Error()
+		return err
+	}
+	s.failuresConsecutive = 0
+	return nil
+}
+
+func (s *sidecarR2Status) clearReportedError() {
+	s.lastError = ""
+}
+
+func (s sidecarR2Status) apply(sample *HeartbeatSample) {
+	sample.R2PutFailuresConsecutive = s.failuresConsecutive
+	sample.R2PutLastError = s.lastError
 }
 
 func runHeartbeatSidecar(args []string) {
@@ -35,23 +67,30 @@ func runHeartbeatSidecar(args []string) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	var r2Status sidecarR2Status
+	agentDiedWritten := false
+
 	emit := func(agentAlive bool) {
 		// Push the minimal liveness ping FIRST so a hang in sample
 		// collection (e.g. nvidia-smi blocked) does not silence the
 		// only signal the reconciler trusts. The full heartbeat below
 		// is best-effort.
-		_ = r2Put(parsed.R2Bucket, r2keys.InstanceLastSeen(parsed.InstanceID),
+		r2Status.put(parsed.R2Bucket, r2keys.InstanceLastSeen(parsed.InstanceID),
 			strconv.FormatInt(time.Now().Unix(), 10))
-		sample := collectHeartbeat(readLocalPhaseFile(parsed.PhaseFile), parsed.DiskPath)
+		phase := readLocalPhaseFile(parsed.PhaseFile)
+		sample := collectHeartbeat(phase, parsed.DiskPath)
 		if parsed.ParentPID > 0 {
 			sample = withAgentLiveness(sample, parsed.ParentPID, agentAlive)
 		}
 		sample.AgentFatal = readLocalTextFile(parsed.FatalFile)
+		r2Status.apply(&sample)
 		data, err := json.Marshal(sample)
 		if err != nil {
 			return
 		}
-		_ = r2Put(parsed.R2Bucket, r2keys.InstanceHeartbeat(parsed.InstanceID), string(data))
+		if err := r2Status.put(parsed.R2Bucket, r2keys.InstanceHeartbeat(parsed.InstanceID), string(data)); err == nil {
+			r2Status.clearReportedError()
+		}
 	}
 
 	emit(parentProcessAlive(parsed.ParentPID))
@@ -64,12 +103,51 @@ func runHeartbeatSidecar(args []string) {
 			return
 		case <-ticker.C:
 			alive := parentProcessAlive(parsed.ParentPID)
+			if !alive && !agentDiedWritten {
+				writeAgentDiedMarker(parsed, &r2Status)
+				agentDiedWritten = true
+			}
 			emit(alive)
 			if !alive {
 				return
 			}
 		}
 	}
+}
+
+func writeAgentDiedMarker(parsed heartbeatSidecarArgs, r2Status *sidecarR2Status) {
+	marker := agentDiedMarker{
+		Ts:        time.Now().Unix(),
+		Phase:     readLocalPhaseFile(parsed.PhaseFile),
+		DmesgTail: readDmesgTail(agentDiedDmesgLines),
+	}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return
+	}
+	r2Status.put(parsed.R2Bucket, r2keys.InstanceAgentDied(parsed.InstanceID), string(data))
+}
+
+func readDmesgTail(maxLines int) string {
+	out, err := exec.Command("dmesg", "--time-format=iso").Output()
+	if err != nil {
+		out, err = exec.Command("dmesg").Output()
+		if err != nil {
+			return ""
+		}
+	}
+	return lastNonEmptyLines(string(out), maxLines)
+}
+
+func lastNonEmptyLines(text string, maxLines int) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	if maxLines <= 0 || len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func parseHeartbeatSidecarArgs(args []string) (heartbeatSidecarArgs, error) {

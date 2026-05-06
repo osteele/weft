@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,16 +47,20 @@ func TestCollectHeartbeat(t *testing.T) {
 
 func TestHeartbeatSampleJSON(t *testing.T) {
 	sample := HeartbeatSample{
-		Ts:             1710000000,
-		Phase:          "running:149",
-		GPUUtilPct:     85,
-		GPUMemUsedMiB:  18200,
-		GPUMemTotalMiB: 24576,
-		GPUTempC:       72,
-		HostRSSKB:      12000000,
-		HostMemTotalKB: 64000000,
-		DiskFreeBytes:  45000000000,
-		DiskTotalBytes: 200000000000,
+		Ts:                       1710000000,
+		Phase:                    "running:149",
+		GPUUtilPct:               85,
+		GPUMemUsedMiB:            18200,
+		GPUMemTotalMiB:           24576,
+		GPUTempC:                 72,
+		HostRSSKB:                12000000,
+		HostMemTotalKB:           64000000,
+		MemAvailableKB:           52000000,
+		DiskFreeBytes:            45000000000,
+		DiskTotalBytes:           200000000000,
+		OOMScoreAdj:              500,
+		R2PutFailuresConsecutive: 3,
+		R2PutLastError:           "network unreachable",
 	}
 
 	data, err := json.Marshal(sample)
@@ -75,7 +80,7 @@ func TestHeartbeatSampleJSON(t *testing.T) {
 	// Verify JSON field names
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	for _, key := range []string{"ts", "phase", "gpu_util_pct", "gpu_mem_used_mib", "gpu_temp_c", "disk_free_bytes"} {
+	for _, key := range []string{"ts", "phase", "gpu_util_pct", "gpu_mem_used_mib", "gpu_temp_c", "disk_free_bytes", "mem_available_kb", "oom_score_adj", "r2_put_failures_consecutive", "r2_put_last_error"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("JSON missing expected key %q", key)
 		}
@@ -159,5 +164,30 @@ func TestParseHeartbeatSidecarArgs(t *testing.T) {
 	}
 	if args.R2Bucket != "bucket" || args.InstanceID != 42 || args.DiskPath != "/mnt" || args.PhaseFile != "/tmp/phase" || args.FatalFile != "/tmp/fatal" || args.ParentPID != 123 {
 		t.Fatalf("parsed args = %+v", args)
+	}
+}
+
+func TestLastNonEmptyLines(t *testing.T) {
+	got := lastNonEmptyLines("one\ntwo\nthree\nfour\n", 2)
+	if got != "three\nfour" {
+		t.Fatalf("lastNonEmptyLines = %q", got)
+	}
+	if got := lastNonEmptyLines("one\n", 50); got != "one" {
+		t.Fatalf("lastNonEmptyLines short = %q", got)
+	}
+	if got := lastNonEmptyLines("", 50); got != "" {
+		t.Fatalf("lastNonEmptyLines empty = %q", got)
+	}
+}
+
+func TestSidecarR2StatusApply(t *testing.T) {
+	status := sidecarR2Status{failuresConsecutive: 2, lastError: "rclone: timeout"}
+	var sample HeartbeatSample
+	status.apply(&sample)
+	if sample.R2PutFailuresConsecutive != 2 {
+		t.Fatalf("failures = %d, want 2", sample.R2PutFailuresConsecutive)
+	}
+	if !strings.Contains(sample.R2PutLastError, "timeout") {
+		t.Fatalf("last error = %q, want timeout", sample.R2PutLastError)
 	}
 }

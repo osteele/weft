@@ -50,6 +50,7 @@ type RunningJobState struct {
 	// High-water marks (updated during sampling)
 	PeakHostMemRatio float64          `json:"peak_host_mem_ratio,omitempty"`
 	PeakRSSFromTS    int64            `json:"peak_rss_from_ts,omitempty"`
+	FinalRSSKB       int64            `json:"final_rss_kb,omitempty"`
 	PeakMemPressure  MemPressureLevel `json:"peak_mem_pressure,omitempty"`
 
 	// Heartbeat / liveness (updated during sampling)

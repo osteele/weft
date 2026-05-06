@@ -124,6 +124,10 @@ func InstanceHeartbeat(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/heartbeat", instanceID)
 }
 
+func InstanceAgentDied(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/agent-died.json", instanceID)
+}
+
 // InstanceLastSeen is a minimal liveness ping written by the heartbeat
 // sidecar before any expensive metric collection. It exists so a hung
 // nvidia-smi or other sample-collection blockage does not silence our

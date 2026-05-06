@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,29 @@ func TestRunSingleJob_EchoHello(t *testing.T) {
 	}
 	if got := string(logData); !strings.Contains(got, "hello") {
 		t.Errorf("log does not contain 'hello': %s", got)
+	}
+}
+
+func TestWriteCompletionRecordIncludesFinalRSS(t *testing.T) {
+	logDir := t.TempDir()
+	paths := NewJobPaths(logDir, 77)
+	err := WriteCompletionRecord(paths, ExitInfo{ExitCode: 0}, RunningJobState{
+		FinalRSSKB:    12345,
+		PeakRSSFromTS: 20000,
+	}, "", "", 100, 130, nil)
+	if err != nil {
+		t.Fatalf("WriteCompletionRecord: %v", err)
+	}
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatalf("read completion: %v", err)
+	}
+	var rec CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("unmarshal completion: %v", err)
+	}
+	if rec.FinalRSSKB != 12345 {
+		t.Fatalf("final_rss_kb = %d, want 12345", rec.FinalRSSKB)
 	}
 }
 

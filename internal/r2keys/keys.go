@@ -95,6 +95,7 @@ func InstanceAgentVersion(instanceID int64) string {
 }
 func InstancePhase(instanceID int64) string     { return controlplane.InstancePhase(instanceID) }
 func InstanceHeartbeat(instanceID int64) string { return controlplane.InstanceHeartbeat(instanceID) }
+func InstanceAgentDied(instanceID int64) string { return controlplane.InstanceAgentDied(instanceID) }
 func InstanceLastSeen(instanceID int64) string  { return controlplane.InstanceLastSeen(instanceID) }
 func InstanceAgentStartup(instanceID int64) string {
 	return controlplane.InstanceAgentStartup(instanceID)

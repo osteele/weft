@@ -77,6 +77,7 @@ func SampleJob(pid, pgid int, cpuCount int, paths JobPaths, rs *RunningJobState,
 	if currentRSS > rs.PeakRSSFromTS {
 		rs.PeakRSSFromTS = currentRSS
 	}
+	rs.FinalRSSKB = currentRSS
 
 	rs.LastHeartbeat = now.Unix()
 	rs.LastSample = now.Unix()

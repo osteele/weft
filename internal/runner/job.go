@@ -451,6 +451,7 @@ type CompletionRecord struct {
 	CoreDump         bool                `json:"core_dump,omitempty"`
 	WallTimeSecs     int64               `json:"wall_time_secs"`
 	PeakRSSKB        int64               `json:"peak_rss_kb,omitempty"`
+	FinalRSSKB       int64               `json:"final_rss_kb,omitempty"`
 	MaxGPUMemMiB     int                 `json:"max_gpu_mem_mib,omitempty"`
 	PeakHostMemRatio float64             `json:"peak_host_mem_ratio,omitempty"`
 	PeakMemPressure  MemPressureLevel    `json:"peak_mem_pressure,omitempty"`
@@ -526,6 +527,7 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 		CoreDump:         ei.CoreDump,
 		WallTimeSecs:     endTime - startTime,
 		PeakRSSKB:        peakRSS,
+		FinalRSSKB:       rs.FinalRSSKB,
 		MaxGPUMemMiB:     rs.RusageMaxGPU,
 		PeakHostMemRatio: rs.PeakHostMemRatio,
 		PeakMemPressure:  rs.PeakMemPressure,

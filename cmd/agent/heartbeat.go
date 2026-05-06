@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -9,25 +12,29 @@ import (
 
 // HeartbeatSample is the JSON payload written to the instance heartbeat R2 key.
 type HeartbeatSample struct {
-	Ts             int64  `json:"ts"`
-	Phase          string `json:"phase"`
-	GPUUtilPct     int    `json:"gpu_util_pct"`
-	GPUMemUsedMiB  int    `json:"gpu_mem_used_mib"`
-	GPUMemTotalMiB int    `json:"gpu_mem_total_mib"`
-	GPUTempC       int    `json:"gpu_temp_c"`
-	HostRSSKB      int64  `json:"host_rss_kb"`
-	HostMemTotalKB int64  `json:"host_mem_total_kb"`
-	DiskFreeBytes  int64  `json:"disk_free_bytes"`
-	DiskTotalBytes int64  `json:"disk_total_bytes"`
-	AgentPID       int    `json:"agent_pid,omitempty"`
-	AgentAlive     *bool  `json:"agent_alive,omitempty"`
-	AgentFatal     string `json:"agent_fatal,omitempty"`
+	Ts                       int64  `json:"ts"`
+	Phase                    string `json:"phase"`
+	GPUUtilPct               int    `json:"gpu_util_pct"`
+	GPUMemUsedMiB            int    `json:"gpu_mem_used_mib"`
+	GPUMemTotalMiB           int    `json:"gpu_mem_total_mib"`
+	GPUTempC                 int    `json:"gpu_temp_c"`
+	HostRSSKB                int64  `json:"host_rss_kb"`
+	HostMemTotalKB           int64  `json:"host_mem_total_kb"`
+	MemAvailableKB           int64  `json:"mem_available_kb"`
+	DiskFreeBytes            int64  `json:"disk_free_bytes"`
+	DiskTotalBytes           int64  `json:"disk_total_bytes"`
+	AgentPID                 int    `json:"agent_pid,omitempty"`
+	AgentAlive               *bool  `json:"agent_alive,omitempty"`
+	AgentFatal               string `json:"agent_fatal,omitempty"`
+	OOMScoreAdj              int    `json:"oom_score_adj"`
+	R2PutFailuresConsecutive int    `json:"r2_put_failures_consecutive,omitempty"`
+	R2PutLastError           string `json:"r2_put_last_error,omitempty"`
 }
 
 // collectHeartbeat gathers host-level metrics and returns a HeartbeatSample.
 func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 	gpu := runner.HostGPUMetrics()
-	memTotal, memUsed := runner.HostMemoryKB()
+	memTotal, memUsed, memAvailable := runner.HostMemoryStatsKB()
 	diskUsed, diskTotal := probeDiskUsageAtPath(diskPath)
 
 	return HeartbeatSample{
@@ -39,6 +46,7 @@ func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 		GPUTempC:       gpu.TempC,
 		HostRSSKB:      memUsed,
 		HostMemTotalKB: memTotal,
+		MemAvailableKB: memAvailable,
 		DiskFreeBytes:  diskTotal - diskUsed,
 		DiskTotalBytes: diskTotal,
 	}
@@ -47,7 +55,23 @@ func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 func withAgentLiveness(sample HeartbeatSample, pid int, alive bool) HeartbeatSample {
 	sample.AgentPID = pid
 	sample.AgentAlive = &alive
+	sample.OOMScoreAdj = readOOMScoreAdj(pid)
 	return sample
+}
+
+func readOOMScoreAdj(pid int) int {
+	if pid <= 0 {
+		return 0
+	}
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/oom_score_adj")
+	if err != nil {
+		return 0
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func probeDiskUsageAtPath(path string) (used, total int64) {

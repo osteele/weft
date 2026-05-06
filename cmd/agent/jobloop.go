@@ -91,6 +91,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
 	gpuWarmedUp := false
 	canceledAttempts := map[int64]struct{}{}
+	var lastPostJobID int64
 
 	drainCancels := func() {
 		canceled, err := drainGraceCancelAttemptRequests(cfg.R2Bucket, cfg.InstanceID)
@@ -116,6 +117,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// Benchmark barrier: wait for all background uploads/deletions
 		if slices.Contains(job.Tags, "benchmark") {
 			bgm.Barrier()
+			if lastPostJobID > 0 {
+				setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
+			}
 		}
 
 		// GPU warmup (opt-in via config): prime system-level CUDA caches
@@ -234,12 +238,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
 
 		// === Synchronous post-job work ===
-		finalizePhase := fmt.Sprintf("finalizing:%d", job.ID)
-		if cfg.OnPhase != nil {
-			cfg.OnPhase(finalizePhase)
-		}
-		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(finalizePhase))
-		writePhase(cfg.R2Bucket, cfg.PhaseKey, finalizePhase)
+		cleanupPhase := fmt.Sprintf("post_job_cleanup:%d", job.ID)
+		setSequencePhase(cfg, cleanupPhase, job.ID)
 
 		uploadStartedUnix := time.Now().Unix()
 		if err := patchPhaseUploadWindow(cfg.LogDir, job.ID, uploadStartedUnix, 0); err != nil {
@@ -288,8 +288,10 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			cfg.OnPhase(uploadingPhase)
 		}
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
+		lastPostJobID = job.ID
 
 		// Check for newly submitted jobs via R2 (between-job reuse)
+		setSequencePhase(cfg, "ready_for_next_job", job.ID)
 		if newJobs := checkForNewJobs(cfg.R2Bucket, cfg.InstanceID, func(phase string) {
 			if cfg.OnPhase != nil {
 				cfg.OnPhase(phase)
@@ -306,8 +308,19 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	// Cleanup is intentionally deferred to here (after the new-job pickup
 	// loop has exited) to avoid racing with checkForNewJobs.
 	bgm.Barrier()
+	if lastPostJobID > 0 {
+		setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
+	}
 	bgm.CleanupWorkdirs()
 	return result
+}
+
+func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {
+	if cfg.OnPhase != nil {
+		cfg.OnPhase(phase)
+	}
+	oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(jobID), oplog.WithDetail(phase))
+	writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
 }
 
 func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, jobMaxTime time.Duration) runner.SingleJobConfig {

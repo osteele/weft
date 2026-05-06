@@ -144,10 +144,17 @@ func ProcIOBytes(pid int) (readBytes, writeBytes uint64) {
 // On Linux reads /proc/meminfo; on macOS uses sysctl + vm_stat.
 // Returns (0, 0) if unable to determine.
 func HostMemoryKB() (totalKB, usedKB int64) {
+	totalKB, usedKB, _ = HostMemoryStatsKB()
+	return totalKB, usedKB
+}
+
+// HostMemoryStatsKB returns (totalKB, usedKB, availableKB) for system memory.
+// availableKB is populated from /proc/meminfo MemAvailable on Linux.
+func HostMemoryStatsKB() (totalKB, usedKB, availableKB int64) {
 	if runtime.GOOS == "linux" {
 		data, err := os.ReadFile("/proc/meminfo")
 		if err != nil {
-			return 0, 0
+			return 0, 0, 0
 		}
 		var memTotal, memAvailable int64
 		for _, line := range strings.Split(string(data), "\n") {
@@ -163,14 +170,14 @@ func HostMemoryKB() (totalKB, usedKB int64) {
 			}
 		}
 		if memTotal > 0 {
-			return memTotal, memTotal - memAvailable
+			return memTotal, memTotal - memAvailable, memAvailable
 		}
-		return 0, 0
+		return 0, 0, 0
 	}
 	if runtime.GOOS == "darwin" {
 		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
 		if err != nil {
-			return 0, 0
+			return 0, 0, 0
 		}
 		memBytes, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 		totalKB = memBytes / 1024
@@ -178,7 +185,7 @@ func HostMemoryKB() (totalKB, usedKB int64) {
 		// vm_stat reports pages; page size is typically 16384 on Apple Silicon, 4096 on Intel
 		vmOut, err := exec.Command("vm_stat").Output()
 		if err != nil {
-			return totalKB, 0
+			return totalKB, 0, 0
 		}
 		var pageSize int64 = 16384
 		var pagesActive, pagesWired, pagesCompressed int64
@@ -208,9 +215,9 @@ func HostMemoryKB() (totalKB, usedKB int64) {
 			}
 		}
 		usedKB = (pagesActive + pagesWired + pagesCompressed) * pageSize / 1024
-		return totalKB, usedKB
+		return totalKB, usedKB, 0
 	}
-	return 0, 0
+	return 0, 0, 0
 }
 
 // MemPressureLevel represents system memory pressure.

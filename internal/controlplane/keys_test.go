@@ -33,3 +33,9 @@ func TestCoordinatorRelayKeys(t *testing.T) {
 		t.Fatalf("CoordinatorRelayAckPrefix = %q", got)
 	}
 }
+
+func TestInstanceObservabilityKeys(t *testing.T) {
+	if got := InstanceAgentDied(42); got != "instance/42/agent-died.json" {
+		t.Fatalf("InstanceAgentDied = %q", got)
+	}
+}
