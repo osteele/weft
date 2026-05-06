@@ -390,8 +390,18 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "TARGET\tKIND\tSTATUS\tGPU\tJOBS\tCURRENT\tBACKING\tDEADLINE\tUPDATED\n")
 
+	now := time.Now()
 	for _, target := range targets {
 		statusStr := string(target.Status)
+		if target.Status == db.ExecutionTargetRunning && target.LaunchID != nil {
+			if launch := launchByID[*target.LaunchID]; launch != nil && !launch.IsAgentReady() {
+				if launch.BootstrapDeadlineExceeded(now) {
+					statusStr = "no-agent"
+				} else {
+					statusStr = "bootstrapping"
+				}
+			}
+		}
 		if target.Cordoned {
 			statusStr += " [cordoned]"
 		}

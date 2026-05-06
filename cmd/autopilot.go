@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/spf13/cobra"
@@ -190,7 +191,23 @@ type autopilotStateView struct {
 	LastPassDurationMS int64              `json:"last_pass_duration_ms,omitempty"`
 	LastPassSummary    string             `json:"last_pass_summary,omitempty"`
 	LastPassError      string             `json:"last_pass_error,omitempty"`
+	OrphanStreaks      []orphanStreakView `json:"orphan_streaks,omitempty"`
 }
+
+// orphanStreakView reports a job stuck in a launch-orphan loop. Surfaces the
+// case where every recent rental for a given job died before the agent ever
+// reported (dud-Vast, runpod ssh-not-ready, etc) so the user notices the
+// money/time burn even though the runaway breaker doesn't trip on orphans.
+type orphanStreakView struct {
+	JobID       string `json:"job_id"`
+	OrphanCount int    `json:"orphan_count"`
+	Project     string `json:"project,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// orphanStreakThreshold is the minimum number of orphan attempts (since the
+// last non-orphan outcome) before a job appears in autopilot status warnings.
+const orphanStreakThreshold = 5
 
 func buildAutopilotStateView(state *db.AutopilotState) autopilotStateView {
 	now := time.Now()
@@ -270,6 +287,16 @@ func runAutopilotStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load autopilot state: %w", err)
 	}
 	view := buildAutopilotStateView(state)
+	if streaks, err := db.JobsWithOrphanStreaks(database, orphanStreakThreshold); err == nil {
+		for _, s := range streaks {
+			view.OrphanStreaks = append(view.OrphanStreaks, orphanStreakView{
+				JobID:       ids.FormatJobID(s.JobID),
+				OrphanCount: s.OrphanCount,
+				Project:     s.Project,
+				Description: s.Description,
+			})
+		}
+	}
 
 	if autopilotStatusQuiet {
 		exitCode := autopilotStateExitCode(view)
@@ -328,6 +355,19 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 		}
 		if view.LastPassError != "" {
 			fmt.Fprintf(&b, " [last error: %s]", view.LastPassError)
+		}
+	}
+	for _, s := range view.OrphanStreaks {
+		desc := s.Description
+		if len(desc) > 60 {
+			desc = desc[:57] + "..."
+		}
+		fmt.Fprintf(&b, "\n  warning: %s stuck in launch-orphan loop — %d consecutive orphans", s.JobID, s.OrphanCount)
+		if s.Project != "" {
+			fmt.Fprintf(&b, " (%s)", s.Project)
+		}
+		if desc != "" {
+			fmt.Fprintf(&b, ": %s", desc)
 		}
 	}
 	return b.String()

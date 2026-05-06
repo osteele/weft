@@ -2057,3 +2057,77 @@ func TestLaunchBootstrapDeadlineAndAgentReady(t *testing.T) {
 		t.Errorf("first transition should win: AgentReadyAtUnix = %d, want %d", *got.AgentReadyAtUnix, first.Unix())
 	}
 }
+
+func TestJobsWithOrphanStreaks(t *testing.T) {
+	database := setupTestDB(t)
+
+	addOrphan := func(jobID int64, attempt int) {
+		t.Helper()
+		launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if _, err := database.Exec(
+			`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, cloud_outcome, queued_at, end_time)
+			 VALUES (?, ?, '', ?, ?, ?, strftime('%s','now'), strftime('%s','now'))`,
+			jobID, attempt, launchID, StatusCanceled, AttemptOutcomeOrphaned,
+		); err != nil {
+			t.Fatalf("insert orphan: %v", err)
+		}
+	}
+	addCompleted := func(jobID int64, attempt int) {
+		t.Helper()
+		launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusCompleted, Provider: "vastai"})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		if _, err := database.Exec(
+			`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, cloud_outcome, queued_at, end_time)
+			 VALUES (?, ?, '', ?, ?, ?, strftime('%s','now'), strftime('%s','now'))`,
+			jobID, attempt, launchID, StatusCompleted, AttemptOutcomeCompleted,
+		); err != nil {
+			t.Fatalf("insert completed: %v", err)
+		}
+	}
+
+	// Job A: 3 orphans at tail, queued — should appear (streak=3).
+	// Set requested_status='queued' so job_status reports queued even though
+	// every closed attempt is an orphan; this mirrors production state after
+	// ResetOrphanedCloudJobs has cycled the job back to unplaced.
+	insertTestJob(t, database, 5001, "loop", "/tmp", StatusQueued)
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = 'queued' WHERE id = 5001`); err != nil {
+		t.Fatalf("set requested_status: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		addOrphan(5001, 100+i)
+	}
+
+	// Job B: 4 orphans but status completed — terminal, excluded.
+	insertTestJob(t, database, 5002, "done", "/tmp", StatusCompleted)
+	for i := 0; i < 4; i++ {
+		addOrphan(5002, 200+i)
+	}
+
+	// Job C: 5 orphans then a completed attempt at tail — streak broken.
+	insertTestJob(t, database, 5003, "recovered", "/tmp", StatusQueued)
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = 'queued' WHERE id = 5003`); err != nil {
+		t.Fatalf("set requested_status: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		addOrphan(5003, 300+i)
+	}
+	addCompleted(5003, 350)
+
+	streaks, err := JobsWithOrphanStreaks(database, 3)
+	if err != nil {
+		t.Fatalf("JobsWithOrphanStreaks: %v", err)
+	}
+	var st string
+	_ = database.QueryRow(`SELECT status FROM job_status WHERE id = 5001`).Scan(&st)
+	if len(streaks) != 1 {
+		t.Fatalf("len=%d, want 1; got %+v (job_status[5001]=%q)", len(streaks), streaks, st)
+	}
+	if streaks[0].JobID != 5001 || streaks[0].OrphanCount != 3 {
+		t.Fatalf("got %+v, want job_id=5001 count=3", streaks[0])
+	}
+}

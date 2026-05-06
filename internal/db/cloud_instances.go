@@ -2326,6 +2326,82 @@ func GetLatestAttemptOutcome(database *sql.DB, jobID int64) string {
 	return outcome.String
 }
 
+// JobOrphanStreak describes a job whose most recent cloud attempt was
+// orphaned and whose overall orphan count meets or exceeds a caller-supplied
+// threshold. Used to surface stuck-in-launch-loop jobs that the per-campaign
+// runaway breaker doesn't catch (orphans are excluded from the retry budget
+// by design, but a long unbroken streak still signals trouble).
+type JobOrphanStreak struct {
+	JobID       int64
+	OrphanCount int
+	Description string
+	Project     string
+}
+
+// JobsWithOrphanStreaks returns currently-active jobs (queued or running)
+// whose tail of recent non-superseded cloud attempts is at least `threshold`
+// orphans long. Tombstoned and terminal jobs are excluded so historical
+// detritus doesn't pollute the warning list.
+func JobsWithOrphanStreaks(database *sql.DB, threshold int) ([]JobOrphanStreak, error) {
+	if threshold < 1 {
+		threshold = 1
+	}
+	// SQLite-portable consecutive-tail count: rank attempts newest-first,
+	// then for each job take the rn of the FIRST non-orphan (or one past the
+	// last attempt if all are orphans). The streak length is that rn minus
+	// one.
+	rows, err := database.Query(
+		`WITH ranked AS (
+			SELECT job_id, cloud_outcome,
+			       ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY attempt_number DESC, id DESC) AS rn
+			FROM job_attempts
+			WHERE COALESCE(cloud_outcome, '') != ?
+		),
+		first_non_orphan AS (
+			SELECT job_id, MIN(rn) AS rn FROM ranked
+			WHERE COALESCE(cloud_outcome, '') != ?
+			GROUP BY job_id
+		),
+		max_rn AS (
+			SELECT job_id, MAX(rn) + 1 AS rn FROM ranked GROUP BY job_id
+		),
+		streaks AS (
+			SELECT m.job_id,
+			       COALESCE(f.rn, m.rn) - 1 AS streak
+			  FROM max_rn m
+			  LEFT JOIN first_non_orphan f USING (job_id)
+		)
+		SELECT j.id,
+		       COALESCE(j.description, ''),
+		       COALESCE(j.project, ''),
+		       s.streak
+		  FROM jobs j
+		  JOIN streaks s ON s.job_id = j.id
+		  JOIN job_status js ON js.id = j.id
+		 WHERE COALESCE(j.tombstoned, 0) = 0
+		   AND js.status IN (?, ?)
+		   AND s.streak >= ?
+		 ORDER BY s.streak DESC, j.id ASC`,
+		AttemptOutcomeSuperseded,
+		AttemptOutcomeOrphaned,
+		StatusQueued, StatusRunning,
+		threshold,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []JobOrphanStreak
+	for rows.Next() {
+		var s JobOrphanStreak
+		if err := rows.Scan(&s.JobID, &s.Description, &s.Project, &s.OrphanCount); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // SetLaunchGracePeriod stores the configured grace period for a cloud instance.
 func SetLaunchGracePeriod(db *sql.DB, id int64, seconds int) error {
 	_, err := db.Exec(`UPDATE launches SET grace_period_seconds = ? WHERE id = ?`, seconds, id)
