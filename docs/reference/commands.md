@@ -983,6 +983,26 @@ See [Cloud GPU Instances](../guides/instances.md) for lifecycle, grace
 periods, interruptible jobs, and survival-based offer selection, and
 [Campaigns](../guides/campaigns.md) for the batching concept.
 
+### weft narrate
+
+Stream a human-readable LLM-generated narration of job, instance, campaign,
+and autopilot transitions. Uses the Anthropic API (requires
+`ANTHROPIC_API_KEY`). Commentary, not authoritative status.
+
+```bash
+weft narrate                          # poll every 30s; narrate transitions to stdout
+weft narrate --tick 10s               # tighter cadence
+weft narrate --once                   # single description of current state
+weft narrate --project myproj         # scope to one project
+weft narrate --debug                  # write deltas + cache stats to stderr
+```
+
+Ticks with no transitions are skipped — no API call, no output. Silence
+between paragraphs means the DB hasn't changed.
+
+See [Activity Narration](../guides/narrate.md) for the full reference,
+including caching/cost shape and configuration knobs.
+
 ### weft job start
 
 Start a queued job immediately, bypassing its queue order. The job is removed

@@ -314,6 +314,54 @@ type AIConfig struct {
 	// Model specifies the ollama model to use for description generation
 	// Default: "llama3.2"
 	Model string `yaml:"model" toml:"model"`
+
+	// Narrate configures `weft narrate` (Anthropic-backed activity narration).
+	Narrate NarrateConfig `yaml:"narrate" toml:"narrate"`
+}
+
+// NarrateConfig configures `weft narrate`.
+type NarrateConfig struct {
+	// Model is the Anthropic model ID (default: claude-sonnet-4-20250514).
+	Model string `yaml:"model" toml:"model"`
+	// TickSeconds is the polling interval in seconds (default: 30).
+	TickSeconds int `yaml:"tick_seconds" toml:"tick_seconds"`
+	// MaxOutputTokens caps the model's reply size per tick (default: 600).
+	MaxOutputTokens int `yaml:"max_output_tokens" toml:"max_output_tokens"`
+	// CompactionThresholdTokens is the accumulated-recap token count that triggers compaction (default: 15000).
+	CompactionThresholdTokens int `yaml:"compaction_threshold_tokens" toml:"compaction_threshold_tokens"`
+}
+
+// NarrateModel returns the configured Anthropic model ID, or the built-in default.
+func (c *Config) NarrateModel() string {
+	if c != nil && strings.TrimSpace(c.AI.Narrate.Model) != "" {
+		return strings.TrimSpace(c.AI.Narrate.Model)
+	}
+	return "claude-sonnet-4-20250514"
+}
+
+// NarrateTickInterval returns the configured tick interval, or 30s.
+func (c *Config) NarrateTickInterval() time.Duration {
+	if c != nil && c.AI.Narrate.TickSeconds > 0 {
+		return time.Duration(c.AI.Narrate.TickSeconds) * time.Second
+	}
+	return 30 * time.Second
+}
+
+// NarrateMaxOutputTokens returns the configured per-tick output cap, or 600.
+func (c *Config) NarrateMaxOutputTokens() int {
+	if c != nil && c.AI.Narrate.MaxOutputTokens > 0 {
+		return c.AI.Narrate.MaxOutputTokens
+	}
+	return 600
+}
+
+// NarrateCompactionThreshold returns the recap-token count that triggers
+// compaction, or 15000.
+func (c *Config) NarrateCompactionThreshold() int {
+	if c != nil && c.AI.Narrate.CompactionThresholdTokens > 0 {
+		return c.AI.Narrate.CompactionThresholdTokens
+	}
+	return 15000
 }
 
 // SSHConfig holds SSH connection pool settings.

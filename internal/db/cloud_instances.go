@@ -706,6 +706,31 @@ func ProjectsByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]string,
 	return out, rows.Err()
 }
 
+// ListNonTerminalLaunches returns launches whose status is not in the
+// terminal set (completed/failed/canceled), ordered by creation time
+// descending. Equivalent to filtering ListLaunches by !IsTerminal(), but
+// keeps the per-tick read cost bounded as the launches table grows.
+func ListNonTerminalLaunches(database *sql.DB) ([]*Launch, error) {
+	rows, err := database.Query(
+		`SELECT `+launchSelectColumns+` FROM launches WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
+		LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var instances []*Launch
+	for rows.Next() {
+		c, err := scanLaunchFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, c)
+	}
+	return instances, rows.Err()
+}
+
 // ListLaunches returns all cloud instances ordered by creation time descending.
 func ListLaunches(db *sql.DB) ([]*Launch, error) {
 	rows, err := db.Query(

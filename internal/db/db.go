@@ -3676,6 +3676,41 @@ func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 	return scanJob(row)
 }
 
+// GetJobsByIDs retrieves multiple jobs in a single query. Missing IDs are
+// silently skipped (no error). Duplicate IDs are deduplicated.
+func GetJobsByIDs(database *sql.DB, ids []int64) (map[int64]*Job, error) {
+	out := make(map[int64]*Job, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	placeholders := make([]string, 0, len(ids))
+	args := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	if len(placeholders) == 0 {
+		return out, nil
+	}
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE id IN (%s)`, jobSelectColumns, strings.Join(placeholders, ","))
+	jobs, err := queryJobs(database, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	for _, j := range jobs {
+		out[j.ID] = j
+	}
+	return out, nil
+}
+
 // GetRunningJobsByHost retrieves all running jobs for a specific host
 func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status IN (?, ?) ORDER BY start_time DESC`, jobSelectColumns)

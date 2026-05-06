@@ -10,6 +10,7 @@ detail quickly.
 - [Campaigns](guides/campaigns.md) for the batching concept that groups instances launched together
 - [Placement](guides/placement.md) for automatic host selection, reserved placement tags, and score reasons
 - [Autopilot](guides/autopilot.md) for inspecting and unblocking the auto-placement / auto-launch engine
+- [Activity Narration](guides/narrate.md) for `weft narrate` — LLM-streamed commentary on job and instance transitions
 - [Network Resilience](guides/network-resilience.md) for disconnected/offline behavior
 - [Debugging](guides/debugging.md) for operational troubleshooting
 
