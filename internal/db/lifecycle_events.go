@@ -60,6 +60,7 @@ const (
 	EventReconcileRunningStall      = "reconcile.running_stall"
 	EventReconcileProviderPaused    = "reconcile.provider_paused"
 	EventReconcileProviderResumed   = "reconcile.provider_resumed"
+	EventReconcileHedgeCull         = "reconcile.hedge_cull"
 
 	// Queue dispatch (host-sync push of queued jobs to remote queue runner).
 	// EventQueueDispatchFailed records a per-job failure during

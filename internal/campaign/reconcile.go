@@ -357,6 +357,15 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	params.ProviderErr = providerErr
 	params.SetupSurvival = setupSurvival
 	params.PauseTolerant = hasPreemptibleJobs(jobs)
+	if ci.HedgeCohortID != nil && ci.AgentReadyAtUnix == nil {
+		// Gated on AgentReadyAtUnix == nil so the survivor — which by
+		// definition has it set — never queries for its own cull.
+		hasWinner, err := db.HedgeCohortHasReadySibling(database, *ci.HedgeCohortID, ci.ID)
+		if err != nil {
+			slog.Debug("hedge cohort sibling check failed", "component", "reconcile", "instance", ci.ID, "cohort", *ci.HedgeCohortID, "error", err)
+		}
+		params.HedgeCohortHasReadySibling = hasWinner
+	}
 	resolveLastProviderStatusChange(database, &params, ci.ID)
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival

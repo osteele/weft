@@ -200,6 +200,16 @@ var versionedMigrations = []migration{
 			return initBootstrapTransitionsSchema(db)
 		},
 	},
+	{
+		Description: "add launches.hedge_cohort_id column",
+		Apply: func(db *sql.DB) error {
+			if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN hedge_cohort_id INTEGER`); err != nil {
+				return err
+			}
+			_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_launches_hedge_cohort ON launches(hedge_cohort_id) WHERE hedge_cohort_id IS NOT NULL`)
+			return err
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

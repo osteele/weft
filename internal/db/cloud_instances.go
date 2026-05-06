@@ -33,7 +33,8 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		machine_id, docker_image,
 		provider_running_at,
 		instance_type, max_bid_price_cents, on_demand_ref_cents,
-		cordoned, cordon_reason, cordoned_at`
+		cordoned, cordon_reason, cordoned_at,
+		hedge_cohort_id`
 
 // Launch status constants (same values used for both Launch and Campaign).
 const (
@@ -145,6 +146,13 @@ type Launch struct {
 	SeedDownloadSecs   *int   // on donor: total download duration (HF + uv)
 	SeedCopySecs       *int   // on worker: copy-from-donor duration
 	ReplacedInstanceID *int64 // DB ID of the failed instance this one replaces (relaunch chain)
+	// HedgeCohortID, when non-nil, is the launch ID of the primary in a
+	// hedged-launch cohort. All members of a cohort (primary + probes)
+	// share the same value, which by convention is the primary's own
+	// launch_id. Probes have no claimed jobs at launch time. Once any
+	// cohort member reaches agent_ready, the others are culled. See
+	// campaign-lifecycle.allium § HedgeCohortCull.
+	HedgeCohortID *int64
 
 	// Grace period (failure-tolerant rental sessions)
 	GracePeriodSeconds int    // configured grace period duration (0 = disabled)
@@ -1775,6 +1783,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var cordoned sql.NullInt64
 	var cordonReason sql.NullString
 	var cordonedAt sql.NullInt64
+	var hedgeCohortID sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -1795,6 +1804,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&providerRunningAt,
 		&instanceType, &maxBidPriceCents, &onDemandRefCents,
 		&cordoned, &cordonReason, &cordonedAt,
+		&hedgeCohortID,
 	)
 	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
@@ -1956,7 +1966,31 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	if cordonedAt.Valid {
 		c.CordonedAt = &cordonedAt.Int64
 	}
+	if hedgeCohortID.Valid {
+		c.HedgeCohortID = &hedgeCohortID.Int64
+	}
 	return &c, nil
+}
+
+// SetLaunchHedgeCohort sets the hedge_cohort_id of a launch. The
+// primary uses its own id as the cohort id; probes share that value.
+func SetLaunchHedgeCohort(database *sql.DB, launchID int64, cohortID int64) error {
+	_, err := database.Exec(`UPDATE launches SET hedge_cohort_id = ? WHERE id = ?`, cohortID, launchID)
+	return err
+}
+
+// HedgeCohortHasReadySibling returns true if any launch with the given
+// cohort id (other than excludeLaunchID) has a non-NULL agent_ready_at_unix.
+func HedgeCohortHasReadySibling(database *sql.DB, cohortID, excludeLaunchID int64) (bool, error) {
+	var exists int
+	err := database.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM launches WHERE hedge_cohort_id = ? AND id != ? AND agent_ready_at_unix IS NOT NULL)`,
+		cohortID, excludeLaunchID,
+	).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 // Job cloud attempt outcome constants.

@@ -303,6 +303,17 @@ config {
     -- start false-killing the rare 3-4 min legitimate launches; the
     -- bimodal distribution makes a fixed cutoff strictly better.
     launching_phase_timeout: Duration = 12.minutes
+
+    -- Hedge configuration. When enabled, the autopilot launches `count`
+    -- instances on distinct offers per group; once any of them reaches
+    -- agent_ready, the others are culled. Trades a small extra spend
+    -- on probe launches for far higher launch survival on flaky
+    -- provider classes. Phase 1 implements the cull rule; Phase 2
+    -- wires the launch-path expansion that creates the cohort.
+    hedge_enabled: Boolean = false
+    hedge_count: Integer = 3
+    hedge_max_cost_per_hour: Number = 0.25
+
     self_destruct_linger_threshold: Duration = 2.minutes
     self_destruct_unknown_end_fallback: Duration = 3.minutes
     self_destruct_retries: Integer = 3
@@ -903,6 +914,43 @@ rule SetupStall {
     @guidance
         -- Triggered when setup phase exceeds config.setup_stall_timeout
         -- with no progress (adaptive threshold per command).
+}
+
+rule HedgeCohortCull {
+    when: instance: Instance.hedge_cohort_id != null
+            and instance.agent_ready_at = null
+            and instance.status in {launching, running}
+            and exists sibling: Instance where
+                sibling.hedge_cohort_id = instance.hedge_cohort_id
+                and sibling.id != instance.id
+                and sibling.agent_ready_at != null
+
+    ensures: instance.status = canceled
+    ensures: instance.termination_reason = canceled
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Hedge cohort: when the autopilot launches `config.hedge_count`
+        -- instances in parallel for a single group, the first to reach
+        -- agent_ready is the survivor and the rest are culled. Cull is
+        -- strictly preferable to letting losers run to their bootstrap
+        -- deadline because:
+        --   - Probe instances have no claimed jobs, so culling reclaims
+        --     no work.
+        --   - Each minute a loser stays alive burns cost without
+        --     contributing to throughput.
+        --   - Survivor has already proven the hardware class works for
+        --     this campaign; we don't need redundant evidence.
+        --
+        -- The rule is gated on agent_ready_at = null so the survivor
+        -- (which by definition has agent_ready_at != null) is never
+        -- the one culled. Status is set to canceled rather than failed
+        -- because losing a hedged race is not an infrastructure failure.
+        -- Implementation: internal/campaign/instance_check.go §1a
+        -- (ActionHedgeCull). The pre-computed
+        -- HedgeCohortHasReadySibling field on CheckInstanceParams
+        -- avoids a per-rule DB query inside the pure-decision
+        -- CheckInstance.
 }
 
 rule IdleAfterReadyTimeout {

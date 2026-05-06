@@ -214,6 +214,26 @@ type CampaignConfig struct {
 	// AutoRunRateSoftTarget is the unattended autopilot launch-rate target in
 	// dollars per hour. 0 disables the target.
 	AutoRunRateSoftTarget float64 `yaml:"auto_run_rate_soft_target" toml:"auto_run_rate_soft_target"`
+
+	// Hedge configures hedged launches: launching multiple instances on
+	// distinct offers in parallel and culling losers once one survives the
+	// early-mortality window. See campaign-lifecycle.allium § HedgeCohort.
+	Hedge HedgeConfig `yaml:"hedge" toml:"hedge"`
+}
+
+// HedgeConfig controls hedged-launch behavior. Hedging trades a small
+// extra spend on probe instances for far higher launch survival on
+// flaky provider classes.
+type HedgeConfig struct {
+	// Enabled turns on hedged launches. Default: false.
+	Enabled bool `yaml:"enabled" toml:"enabled"`
+	// Count is the total number of instances launched per group when
+	// hedging applies (primary + probes). Must be >= 2 to have effect.
+	Count int `yaml:"count" toml:"count"`
+	// MaxCostPerHour gates hedging on offer cost: hedge only when each
+	// offer's hourly cost is at or below this dollar value. 0 disables
+	// the gate (hedge any offer).
+	MaxCostPerHour float64 `yaml:"max_cost_per_hour" toml:"max_cost_per_hour"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.

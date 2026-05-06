@@ -857,6 +857,72 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_HedgeCull_FiresWhenSiblingIsReady(t *testing.T) {
+	cohort := int64(42)
+	now := time.Now()
+	r := NewReconciler()
+	for _, st := range []string{db.LaunchStatusLaunching, db.LaunchStatusRunning} {
+		t.Run(st, func(t *testing.T) {
+			action := r.CheckInstance(CheckInstanceParams{
+				CI: &db.Launch{
+					ID:                 1,
+					Status:             st,
+					CreatedAt:          now.Add(-2 * time.Minute).Unix(),
+					ProviderInstanceID: "test-loser",
+					HedgeCohortID:      &cohort,
+				},
+				HedgeCohortHasReadySibling: true,
+				Now:                        now,
+			})
+			if action.Kind != ActionHedgeCull {
+				t.Fatalf("status=%s: action.Kind = %d, want ActionHedgeCull", st, action.Kind)
+			}
+			if action.TerminalStatus != db.LaunchStatusCancelled {
+				t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusCancelled)
+			}
+			if !action.DestroyProvider {
+				t.Error("DestroyProvider should be true")
+			}
+		})
+	}
+}
+
+func TestCheckInstance_HedgeCull_DoesNotCullSurvivor(t *testing.T) {
+	cohort := int64(42)
+	ready := time.Now().Add(-30 * time.Second).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			AgentReadyAtUnix:   &ready,
+			ProviderInstanceID: "test-winner",
+			HedgeCohortID:      &cohort,
+		},
+		HedgeCohortHasReadySibling: true,
+		Now:                        time.Now(),
+	})
+	if action.Kind == ActionHedgeCull {
+		t.Fatal("survivor must never be culled even if HedgeCohortHasReadySibling is true")
+	}
+}
+
+func TestCheckInstance_HedgeCull_NoCohortNoOp(t *testing.T) {
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusLaunching,
+			ProviderInstanceID: "test-non-hedge",
+		},
+		HedgeCohortHasReadySibling: true,
+		Now:                        time.Now(),
+	})
+	if action.Kind == ActionHedgeCull {
+		t.Fatal("non-hedge launch must never be culled")
+	}
+}
+
 // TestEffectiveHeartbeatStaleThreshold_EarlyLifeIsLenient locks in
 // the lenient threshold during the first heartbeatEarlyLifeWindow
 // after agent_ready_at — a window calibrated to cover the

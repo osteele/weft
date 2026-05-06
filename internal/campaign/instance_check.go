@@ -35,6 +35,7 @@ const (
 	ActionIdleAfterReadyTimeout                    // agent reached ready but never started a job -> fail
 	ActionPause                                    // provider stopped instance (preempted / account pause) -> launch=paused
 	ActionResume                                   // previously paused launch resumed by provider -> launch=running
+	ActionHedgeCull                                // hedge cohort sibling reached ready first -> destroy this loser
 )
 
 // graceShutdownTimeout is how long after the grace deadline the coordinator
@@ -184,6 +185,11 @@ type CheckInstanceParams struct {
 	// SetupSurvival holds adaptive setup-phase thresholds from historical
 	// survival analysis. Nil means use package defaults.
 	SetupSurvival *db.SetupSurvival
+
+	// HedgeCohortHasReadySibling reports whether another launch in this
+	// launch's hedge cohort has reached agent_ready. Pre-computed by the
+	// caller because CheckInstance must stay pure (no DB handle).
+	HedgeCohortHasReadySibling bool
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -239,6 +245,22 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				Kind:         ActionDisplayOnly,
 				StallMessage: "grace period expired — waiting for agent shutdown",
 			}
+		}
+	}
+
+	// 1a. Hedge-cohort cull: a non-survivor probe is terminated once a
+	// sibling reaches agent_ready. Gate on AgentReadyAtUnix == nil so
+	// the survivor itself is never the one culled.
+	// See campaign-lifecycle.allium § HedgeCohortCull.
+	if ci.HedgeCohortID != nil && ci.AgentReadyAtUnix == nil &&
+		(ci.Status == db.LaunchStatusLaunching || ci.Status == db.LaunchStatusRunning) &&
+		p.HedgeCohortHasReadySibling {
+		return InstanceAction{
+			Kind:              ActionHedgeCull,
+			TerminalStatus:    db.LaunchStatusCancelled,
+			TerminationReason: db.TerminationReasonCancelled,
+			StallMessage:      "hedge cohort sibling reached ready first — culling",
+			DestroyProvider:   true,
 		}
 	}
 
@@ -888,6 +910,8 @@ func (k InstanceActionKind) String() string {
 		return "pause"
 	case ActionResume:
 		return "resume"
+	case ActionHedgeCull:
+		return "hedge_cull"
 	default:
 		return fmt.Sprintf("kind_%d", int(k))
 	}
@@ -944,6 +968,8 @@ func actionEventKind(kind InstanceActionKind) string {
 		return db.EventReconcileProviderPaused
 	case ActionResume:
 		return db.EventReconcileProviderResumed
+	case ActionHedgeCull:
+		return db.EventReconcileHedgeCull
 	default:
 		return ""
 	}
