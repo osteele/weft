@@ -46,13 +46,13 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
-		  AND termination_reason != ?
+		  AND termination_reason NOT IN (?, ?)
 		  AND provider IS NOT NULL
 		  AND provider != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
 		ORDER BY id
-	`, jobdb.TerminationReasonCancelled)
+	`, jobdb.TerminationReasonCancelled, jobdb.TerminationReasonWeftBug)
 	if err != nil {
 		return nil, err
 	}

@@ -3731,3 +3731,64 @@ func TestOpen_RunsMigrationsAfterSchemaVersionBump(t *testing.T) {
 		t.Fatalf("max_compute_cap missing after Open() of v%d DB; did you forget to bump currentSchemaVersion?", currentSchemaVersion-1)
 	}
 }
+
+func TestStripCheckConstraint(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		changed bool
+	}{
+		{
+			name: "removes constraint with nested parens (the regex trap)",
+			in: `CREATE TABLE foo (
+    id INTEGER,
+    val TEXT,
+    CONSTRAINT foo_val_check CHECK (val IS NULL OR val IN ('a','b','c')),
+    CONSTRAINT foo_status_check CHECK (status IN ('x','y'))
+)`,
+			want: `CREATE TABLE foo (
+    id INTEGER,
+    val TEXT,
+    CONSTRAINT foo_status_check CHECK (status IN ('x','y'))
+)`,
+			changed: true,
+		},
+		{
+			name: "removes last constraint without orphaning preceding comma",
+			in: `CREATE TABLE foo (
+    id INTEGER,
+    CONSTRAINT foo_status_check CHECK (status IN ('x','y')),
+    CONSTRAINT foo_val_check CHECK (val IN ('a','b'))
+)`,
+			want: `CREATE TABLE foo (
+    id INTEGER,
+    CONSTRAINT foo_status_check CHECK (status IN ('x','y'))
+)`,
+			changed: true,
+		},
+		{
+			name: "missing constraint is no-op",
+			in: `CREATE TABLE foo (
+    id INTEGER,
+    CONSTRAINT foo_status_check CHECK (status IN ('x','y'))
+)`,
+			want: `CREATE TABLE foo (
+    id INTEGER,
+    CONSTRAINT foo_status_check CHECK (status IN ('x','y'))
+)`,
+			changed: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := stripCheckConstraint(tc.in, "foo_val_check")
+			if ok != tc.changed {
+				t.Errorf("changed = %v, want %v", ok, tc.changed)
+			}
+			if got != tc.want {
+				t.Errorf("got:\n%s\nwant:\n%s", got, tc.want)
+			}
+		})
+	}
+}

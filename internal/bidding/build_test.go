@@ -42,12 +42,26 @@ func TestLoadInstanceOutcomes_IncludesPreRunningFailuresWithProviderInstance(t *
 		t.Fatalf("UpdateLaunchStatus(cancelled): %v", err)
 	}
 
+	weftBugID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+		Status:           jobdb.LaunchStatusLaunching,
+		Provider:         "vastai",
+		ResolvedGPUName:  "RTX 4090",
+		CostPerHourCents: 100,
+		Reliability:      0.9,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(weft_bug): %v", err)
+	}
+	if err := jobdb.UpdateLaunchStatus(database, weftBugID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonWeftBug); err != nil {
+		t.Fatalf("UpdateLaunchStatus(weft_bug): %v", err)
+	}
+
 	outcomes, err := LoadInstanceOutcomes(database)
 	if err != nil {
 		t.Fatalf("LoadInstanceOutcomes: %v", err)
 	}
 	if len(outcomes) != 1 {
-		t.Fatalf("LoadInstanceOutcomes returned %d outcomes, want 1", len(outcomes))
+		t.Fatalf("LoadInstanceOutcomes returned %d outcomes, want 1 (cancelled and weft_bug must both be excluded)", len(outcomes))
 	}
 	if outcomes[0].TerminationReason != jobdb.TerminationReasonProviderFailure {
 		t.Fatalf("TerminationReason = %q, want %q", outcomes[0].TerminationReason, jobdb.TerminationReasonProviderFailure)

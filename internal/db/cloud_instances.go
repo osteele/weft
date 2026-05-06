@@ -60,6 +60,11 @@ const (
 	TerminationReasonPhaseStall       = "phase_stall"
 	TerminationReasonPreempted        = "preempted"
 	TerminationReasonUnknown          = "unknown"
+	// TerminationReasonWeftBug labels failures attributable to a
+	// weft-side defect rather than the machine, network, or provider.
+	// Excluded from the survival model so a class of self-inflicted
+	// failures doesn't poison machine-level priors.
+	TerminationReasonWeftBug = "weft_bug"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be

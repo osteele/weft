@@ -355,6 +355,12 @@ func campaignStatusValues() []string {
 	}
 }
 
+// terminationReasonValues lists the constants Go code may write to
+// launches.termination_reason. Used by validateEnumAndRelationshipConstraints
+// to surface stray DB values introduced outside Go (manual SQL, old
+// binaries) — not enforced as a SQL CHECK constraint, which was retired
+// in v24 because schema-rebuild-to-extend-enum is fragile (see
+// dropLaunchesTerminationReasonCheck).
 func terminationReasonValues() []string {
 	return []string{
 		TerminationReasonCompleted,
@@ -367,6 +373,7 @@ func terminationReasonValues() []string {
 		TerminationReasonPreempted,
 		TerminationReasonCancelled,
 		TerminationReasonUnknown,
+		TerminationReasonWeftBug,
 	}
 }
 
@@ -795,6 +802,12 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	// The termination_reason CHECK is intentionally absent post-drop;
+	// don't try to recreate it. The status CHECK alone can still be
+	// missing; that path is unchanged.
+	if !hasTerminationReasonConstraint && hasStatusConstraint {
+		return nil
+	}
 	// Also check that the constraint includes values added after initial schema.
 	hasBootstrapTimeout, err := tableSchemaContains(db, "launches", TerminationReasonBootstrapTimeout)
 	if err != nil {
@@ -820,6 +833,112 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 		`DROP TABLE launches`,
 		`ALTER TABLE launches_new RENAME TO launches`,
 	)
+}
+
+// dropLaunchesTerminationReasonCheck removes the launches_termination_reason_check
+// CHECK constraint by patching sqlite_master.sql in place. Avoids a full
+// table rebuild — the rebuild path (createLaunchesTableSQL) is missing
+// columns added by later ALTER TABLE migrations and silently breaks on
+// real production schemas. Application code is the source of truth for
+// allowed termination_reason values.
+//
+// Idempotent: returns nil if the constraint is already absent.
+func dropLaunchesTerminationReasonCheck(db *sql.DB) error {
+	var sqlText string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='launches'`).Scan(&sqlText); err != nil {
+		return fmt.Errorf("read launches schema: %w", err)
+	}
+	patched, ok := stripCheckConstraint(sqlText, "launches_termination_reason_check")
+	if !ok {
+		return nil // already gone
+	}
+	if _, err := db.Exec(`PRAGMA writable_schema = ON`); err != nil {
+		return fmt.Errorf("enable writable_schema: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE sqlite_master SET sql = ? WHERE type='table' AND name='launches'`, patched); err != nil {
+		_, _ = db.Exec(`PRAGMA writable_schema = OFF`)
+		return fmt.Errorf("patch launches schema: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA writable_schema = OFF`); err != nil {
+		return fmt.Errorf("disable writable_schema: %w", err)
+	}
+	var integrity string
+	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		return fmt.Errorf("post-patch integrity_check: %w", err)
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("post-patch integrity_check: %s", integrity)
+	}
+	return nil
+}
+
+// stripCheckConstraint removes a single named CHECK constraint from a
+// CREATE TABLE statement. Walks parens manually because the CHECK body
+// contains its own parens (`CHECK (col IN (...))`) that defeat
+// regex-based extraction. Returns the patched SQL and whether anything
+// was changed.
+func stripCheckConstraint(createSQL, constraintName string) (string, bool) {
+	needle := "CONSTRAINT " + constraintName
+	idx := strings.Index(createSQL, needle)
+	if idx < 0 {
+		return createSQL, false
+	}
+	// Find balanced end of the CHECK ( ... ) that follows.
+	parenStart := strings.Index(createSQL[idx:], "(")
+	if parenStart < 0 {
+		return createSQL, false
+	}
+	parenStart += idx
+	depth := 0
+	end := -1
+	for i := parenStart; i < len(createSQL); i++ {
+		switch createSQL[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				end = i
+			}
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 {
+		return createSQL, false
+	}
+	// Extend forward over a trailing `,` (so we don't leave a dangling
+	// separator before the next constraint), or backward over the
+	// preceding `,` if we're the last constraint. Either way, pull idx
+	// back to the start of the line so we don't leave a blank line.
+	cutEnd := end + 1
+	for cutEnd < len(createSQL) && createSQL[cutEnd] == ' ' {
+		cutEnd++
+	}
+	if cutEnd < len(createSQL) && createSQL[cutEnd] == ',' {
+		cutEnd++
+	} else {
+		// Last constraint: consume the preceding `,` so the prior
+		// constraint isn't left with an orphan separator.
+		for idx > 0 && (createSQL[idx-1] == ' ' || createSQL[idx-1] == '\n' || createSQL[idx-1] == '\t') {
+			idx--
+		}
+		if idx > 0 && createSQL[idx-1] == ',' {
+			idx--
+		}
+		return createSQL[:idx] + createSQL[cutEnd:], true
+	}
+	// Trailing-comma path: pull idx back over indentation, and the `\n`
+	// that started the line, so the constraint's whole line goes away
+	// without leaving a blank gap.
+	for idx > 0 && (createSQL[idx-1] == ' ' || createSQL[idx-1] == '\t') {
+		idx--
+	}
+	if idx > 0 && createSQL[idx-1] == '\n' {
+		idx--
+	}
+	return createSQL[:idx] + createSQL[cutEnd:], true
 }
 
 func ensureCampaignsTableConstraints(db *sql.DB) error {

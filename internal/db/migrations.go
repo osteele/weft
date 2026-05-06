@@ -210,6 +210,29 @@ var versionedMigrations = []migration{
 			return err
 		},
 	},
+	{
+		Description: "drop launches.termination_reason CHECK constraint",
+		Apply: func(db *sql.DB) error {
+			return dropLaunchesTerminationReasonCheck(db)
+		},
+	},
+	{
+		Description: "relabel infra_failure rows on terminal-at-create campaigns to weft_bug",
+		Apply: func(db *sql.DB) error {
+			_, err := db.Exec(`
+				UPDATE launches
+				   SET termination_reason = 'weft_bug'
+				 WHERE id IN (
+					SELECT l.id FROM launches l
+					  JOIN campaigns c ON c.id = l.campaign_id
+					 WHERE c.status IN ('failed','canceled','completed')
+					   AND c.ended_at IS NOT NULL
+					   AND c.ended_at < l.created_at
+					   AND l.termination_reason = 'infra_failure'
+				 )`)
+			return err
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
