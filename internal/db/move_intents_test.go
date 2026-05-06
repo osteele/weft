@@ -210,6 +210,45 @@ func TestUpdateMoveIntentTargetLaunch(t *testing.T) {
 	}
 }
 
+func TestConfirmOpenMoveIntentsForTargetLaunch(t *testing.T) {
+	database := SetupTestDB(t)
+	insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+	insertTestJob(t, database, 200, "echo hi", "/tmp", StatusQueued)
+	target := mustCreateLaunch(t, database)
+	other := mustCreateLaunch(t, database)
+
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID: 100, TargetKind: MoveTargetNew, TargetLaunchID: &target,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent target: %v", err)
+	}
+	otherIntent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID: 200, TargetKind: MoveTargetNew, TargetLaunchID: &other,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent other: %v", err)
+	}
+
+	if err := ConfirmOpenMoveIntentsForTargetLaunch(database, target, "agent ready"); err != nil {
+		t.Fatalf("ConfirmOpenMoveIntentsForTargetLaunch: %v", err)
+	}
+	got, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent target: %v", err)
+	}
+	if got.State != MoveIntentStateConfirmed || got.Resolution != "agent ready" {
+		t.Fatalf("target intent = (%s, %q), want confirmed agent ready", got.State, got.Resolution)
+	}
+	gotOther, err := GetMoveIntent(database, otherIntent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent other: %v", err)
+	}
+	if gotOther.State != MoveIntentStateOpen {
+		t.Fatalf("other intent state = %s, want open", gotOther.State)
+	}
+}
+
 func TestJobIDsWithOpenMoveIntents(t *testing.T) {
 	database := SetupTestDB(t)
 	insertTestJob(t, database, 100, "j1", "/tmp", StatusQueued)

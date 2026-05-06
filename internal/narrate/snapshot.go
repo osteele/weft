@@ -192,15 +192,16 @@ func truncateCommand(cmd string) string {
 
 // Delta describes transitions between two snapshots.
 type Delta struct {
-	JobAdded     []JobView
-	JobChanged   []JobChange
-	JobRemoved   []int64   // raw IDs of jobs no longer in the active set
-	JobFinished  []JobView // resolved terminal jobs (status, project, exit code populated)
-	InstAdded    []InstanceView
-	InstChanged  []InstanceChange
-	InstRemoved  []int64
-	AutopilotOld AutopilotView
-	AutopilotNew AutopilotView
+	JobAdded       []JobView
+	JobChanged     []JobChange
+	JobRemoved     []int64   // raw IDs of jobs no longer in the active set
+	JobFinished    []JobView // resolved terminal jobs (status, project, exit code populated)
+	InstAdded      []InstanceView
+	InstChanged    []InstanceChange
+	InstRemoved    []int64        // raw IDs of instances no longer in the active set
+	InstTerminated []InstanceView // resolved terminal instances (TerminationReason/Detail populated)
+	AutopilotOld   AutopilotView
+	AutopilotNew   AutopilotView
 }
 
 type JobChange struct {
@@ -216,8 +217,31 @@ type InstanceChange struct {
 // Empty reports whether the delta has nothing worth narrating.
 func (d Delta) Empty() bool {
 	return len(d.JobAdded) == 0 && len(d.JobChanged) == 0 && len(d.JobRemoved) == 0 && len(d.JobFinished) == 0 &&
-		len(d.InstAdded) == 0 && len(d.InstChanged) == 0 && len(d.InstRemoved) == 0 &&
+		len(d.InstAdded) == 0 && len(d.InstChanged) == 0 && len(d.InstRemoved) == 0 && len(d.InstTerminated) == 0 &&
 		d.AutopilotOld.State == d.AutopilotNew.State
+}
+
+// ResolveRemovedInstances replaces the raw InstRemoved id list with
+// resolved InstanceView entries (InstTerminated) by querying the DB. This
+// surfaces termination_reason and termination_detail to the model so the
+// causal link between an instance failure and a job requeue is explicit
+// rather than something the model has to guess from sibling jobs'
+// placement_blocked_reasons.
+func (d *Delta) ResolveRemovedInstances(database *sql.DB) error {
+	if len(d.InstRemoved) == 0 {
+		return nil
+	}
+	launches, err := db.GetLaunchesByIDs(database, d.InstRemoved)
+	if err != nil {
+		return err
+	}
+	for _, id := range d.InstRemoved {
+		if l, ok := launches[id]; ok {
+			d.InstTerminated = append(d.InstTerminated, instanceToView(l))
+		}
+	}
+	d.InstRemoved = nil
+	return nil
 }
 
 // ResolveRemovedJobs replaces the raw JobRemoved id list with resolved

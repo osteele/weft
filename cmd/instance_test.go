@@ -100,3 +100,31 @@ func TestInstanceInfoCommandAliasExists(t *testing.T) {
 		t.Fatal("instance info command not found")
 	}
 }
+
+func TestInstanceNewCommandExists(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"instance", "new", "--help"})
+	if err != nil {
+		t.Fatalf("find instance new: %v", err)
+	}
+	if cmd == nil || cmd.Name() != "new" {
+		t.Fatalf("command = %v, want instance new", cmd)
+	}
+	for _, flag := range []string{"jobs", "project", "strategy", "min-survival", "dry-run", "yes", "wait", "timeout"} {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Fatalf("instance new missing --%s", flag)
+		}
+	}
+}
+
+func TestNewInstanceVerbAliasExists(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"new", "instance", "--help"})
+	if err != nil {
+		t.Fatalf("find new instance: %v", err)
+	}
+	if cmd == nil || cmd.Name() != "instance" {
+		t.Fatalf("command = %v, want new instance alias", cmd)
+	}
+	if cmd.Flags().Lookup("project") == nil {
+		t.Fatal("new instance alias missing --project")
+	}
+}

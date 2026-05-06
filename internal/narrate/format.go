@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+type formattedJobOut struct {
+	ID                 int64    `json:"id"`
+	Status             string   `json:"status"`
+	Host               string   `json:"host,omitempty"`
+	Project            string   `json:"project,omitempty"`
+	LaunchID           *int64   `json:"instance_id,omitempty"`
+	Tags               string   `json:"tags,omitempty"`
+	Command            string   `json:"command,omitempty"`
+	AgeSeconds         int64    `json:"age_seconds,omitempty"`
+	ExitCode           *int     `json:"exit_code,omitempty"`
+	PlacementReasons   []string `json:"placement_blocked_reasons,omitempty"`
+	QueueBlockedReason string   `json:"queue_blocked_reason,omitempty"`
+	FailureReason      string   `json:"failure_reason,omitempty"`
+	ErrorMessage       string   `json:"error_message,omitempty"`
+}
+
 // FormatSnapshot renders a snapshot as compact JSON for the model. We keep
 // it deterministic (sorted maps via json.Marshal of structs with maps is not
 // guaranteed stable, so we project to slices) and trimmed.
@@ -27,40 +43,31 @@ func FormatSnapshot(s *Snapshot) string {
 		Cordoned          bool    `json:"cordoned,omitempty"`
 		TerminationReason string  `json:"termination_reason,omitempty"`
 	}
-	type jobOut struct {
-		ID                 int64    `json:"id"`
-		Status             string   `json:"status"`
-		Host               string   `json:"host,omitempty"`
-		Project            string   `json:"project,omitempty"`
-		LaunchID           *int64   `json:"instance_id,omitempty"`
-		Tags               string   `json:"tags,omitempty"`
-		Command            string   `json:"command,omitempty"`
-		AgeSeconds         int64    `json:"age_seconds,omitempty"`
-		ExitCode           *int     `json:"exit_code,omitempty"`
-		PlacementReasons   []string `json:"placement_blocked_reasons,omitempty"`
-		QueueBlockedReason string   `json:"queue_blocked_reason,omitempty"`
-		FailureReason      string   `json:"failure_reason,omitempty"`
-		ErrorMessage       string   `json:"error_message,omitempty"`
+	type autopilotOut struct {
+		State        string `json:"state,omitempty"`
+		Paused       bool   `json:"paused,omitempty"`
+		PausedReason string `json:"paused_reason,omitempty"`
+		LastError    string `json:"last_error,omitempty"`
 	}
 	now := s.Time
 	if now.IsZero() {
 		now = time.Now()
 	}
 	out := struct {
-		At        string    `json:"at"`
-		Autopilot any       `json:"autopilot"`
-		Instances []instOut `json:"instances,omitempty"`
-		Jobs      []jobOut  `json:"jobs,omitempty"`
+		At        string            `json:"at"`
+		Autopilot *autopilotOut     `json:"autopilot,omitempty"`
+		Instances []instOut         `json:"instances,omitempty"`
+		Jobs      []formattedJobOut `json:"jobs,omitempty"`
 	}{
 		At: now.Format(time.RFC3339),
-		Autopilot: map[string]any{
-			"state":         s.Autopilot.State,
-			"paused":        s.Autopilot.Paused,
-			"paused_reason": s.Autopilot.PausedReason,
-			"pass_age_s":    s.Autopilot.PassAgeSeconds,
-			"last_summary":  s.Autopilot.LastSummary,
-			"last_error":    s.Autopilot.LastError,
-		},
+	}
+	if autopilotNeedsSnapshotContext(s.Autopilot) {
+		out.Autopilot = &autopilotOut{
+			State:        s.Autopilot.State,
+			Paused:       s.Autopilot.Paused,
+			PausedReason: s.Autopilot.PausedReason,
+			LastError:    s.Autopilot.LastError,
+		}
 	}
 	for _, inst := range orderedInstances(s.Instances) {
 		out.Instances = append(out.Instances, instOut{
@@ -78,21 +85,7 @@ func FormatSnapshot(s *Snapshot) string {
 		})
 	}
 	for _, j := range orderedJobs(s.Jobs) {
-		out.Jobs = append(out.Jobs, jobOut{
-			ID:                 j.ID,
-			Status:             j.Status,
-			Host:               j.Host,
-			Project:            j.Project,
-			LaunchID:           j.LaunchID,
-			Tags:               strings.Join(j.Tags, ","),
-			Command:            j.Command,
-			AgeSeconds:         ageSeconds(j.StartTime, now),
-			ExitCode:           j.ExitCode,
-			PlacementReasons:   j.PlacementReasons,
-			QueueBlockedReason: j.QueueBlockedReason,
-			FailureReason:      j.FailureReason,
-			ErrorMessage:       j.ErrorMessage,
-		})
+		out.Jobs = append(out.Jobs, jobToOut(j, now))
 	}
 	b, _ := json.Marshal(out)
 	return string(b)
@@ -101,12 +94,14 @@ func FormatSnapshot(s *Snapshot) string {
 // FormatDelta renders the transitions since the previous tick.
 func FormatDelta(d Delta) string {
 	type jobChange struct {
-		ID   int64  `json:"id"`
-		From string `json:"from"`
-		To   string `json:"to"`
-		Host string `json:"host,omitempty"`
-		Exit *int   `json:"exit_code,omitempty"`
-		Note string `json:"note,omitempty"`
+		ID           int64  `json:"id"`
+		Project      string `json:"project,omitempty"`
+		From         string `json:"from"`
+		To           string `json:"to"`
+		Host         string `json:"host,omitempty"`
+		Exit         *int   `json:"exit_code,omitempty"`
+		PrevLaunchID *int64 `json:"prev_instance_id,omitempty"`
+		Note         string `json:"note,omitempty"`
 	}
 	type instChange struct {
 		ID                int64  `json:"id"`
@@ -114,6 +109,14 @@ func FormatDelta(d Delta) string {
 		To                string `json:"to"`
 		TerminationReason string `json:"termination_reason,omitempty"`
 		Note              string `json:"note,omitempty"`
+	}
+	type instTermOut struct {
+		ID                int64  `json:"id"`
+		FromStatus        string `json:"from"`
+		TerminationReason string `json:"termination_reason,omitempty"`
+		TerminationDetail string `json:"termination_detail,omitempty"`
+		Provider          string `json:"provider,omitempty"`
+		GPU               string `json:"gpu,omitempty"`
 	}
 	type finishedOut struct {
 		ID            int64  `json:"id"`
@@ -124,16 +127,30 @@ func FormatDelta(d Delta) string {
 		ErrorMessage  string `json:"error_message,omitempty"`
 	}
 	out := struct {
-		JobsAdded     []JobView      `json:"jobs_added,omitempty"`
-		JobsChanged   []jobChange    `json:"jobs_changed,omitempty"`
-		JobsFinished  []finishedOut  `json:"jobs_finished,omitempty"`
-		InstAdded     []InstanceView `json:"instances_added,omitempty"`
-		InstChanged   []instChange   `json:"instances_changed,omitempty"`
-		AutopilotFrom string         `json:"autopilot_from,omitempty"`
-		AutopilotTo   string         `json:"autopilot_to,omitempty"`
+		JobsAdded      []formattedJobOut `json:"jobs_added,omitempty"`
+		JobsChanged    []jobChange       `json:"jobs_changed,omitempty"`
+		JobsFinished   []finishedOut     `json:"jobs_finished,omitempty"`
+		InstAdded      []InstanceView    `json:"instances_added,omitempty"`
+		InstChanged    []instChange      `json:"instances_changed,omitempty"`
+		InstTerminated []instTermOut     `json:"instances_terminated,omitempty"`
+		AutopilotFrom  string            `json:"autopilot_from,omitempty"`
+		AutopilotTo    string            `json:"autopilot_to,omitempty"`
 	}{
-		JobsAdded: d.JobAdded,
 		InstAdded: d.InstAdded,
+	}
+	now := time.Now()
+	for _, j := range d.JobAdded {
+		out.JobsAdded = append(out.JobsAdded, jobToOut(j, now))
+	}
+	for _, inst := range d.InstTerminated {
+		out.InstTerminated = append(out.InstTerminated, instTermOut{
+			ID:                inst.ID,
+			FromStatus:        inst.Status,
+			TerminationReason: inst.TerminationReason,
+			TerminationDetail: inst.TerminationDetail,
+			Provider:          inst.Provider,
+			GPU:               inst.GPUSpec,
+		})
 	}
 	for _, j := range d.JobFinished {
 		out.JobsFinished = append(out.JobsFinished, finishedOut{
@@ -146,7 +163,21 @@ func FormatDelta(d Delta) string {
 		})
 	}
 	for _, c := range d.JobChanged {
-		jc := jobChange{ID: c.After.ID, From: c.Before.Status, To: c.After.Status, Host: c.After.Host, Exit: c.After.ExitCode}
+		jc := jobChange{
+			ID:      c.After.ID,
+			Project: c.After.Project,
+			From:    c.Before.Status,
+			To:      c.After.Status,
+			Host:    c.After.Host,
+			Exit:    c.After.ExitCode,
+		}
+		// Surface the instance the job was on before the transition. When
+		// after.LaunchID is nil (job got requeued), the model can correlate
+		// against instances_terminated for the causal link.
+		if c.Before.LaunchID != nil && (c.After.LaunchID == nil || *c.Before.LaunchID != *c.After.LaunchID) {
+			id := *c.Before.LaunchID
+			jc.PrevLaunchID = &id
+		}
 		if c.Before.Host != c.After.Host {
 			jc.Note = "host changed: " + c.Before.Host + " -> " + c.After.Host
 		}
@@ -169,6 +200,38 @@ func FormatDelta(d Delta) string {
 	}
 	b, _ := json.Marshal(out)
 	return string(b)
+}
+
+func autopilotNeedsSnapshotContext(v AutopilotView) bool {
+	return v.Paused || v.State == "paused" || v.State == "stale" || strings.TrimSpace(v.LastError) != ""
+}
+
+func jobToOut(j JobView, now time.Time) formattedJobOut {
+	out := formattedJobOut{
+		ID:                 j.ID,
+		Status:             j.Status,
+		Host:               j.Host,
+		Project:            j.Project,
+		LaunchID:           j.LaunchID,
+		Tags:               strings.Join(j.Tags, ","),
+		Command:            j.Command,
+		AgeSeconds:         ageSeconds(j.StartTime, now),
+		ExitCode:           j.ExitCode,
+		QueueBlockedReason: j.QueueBlockedReason,
+		FailureReason:      j.FailureReason,
+		ErrorMessage:       j.ErrorMessage,
+	}
+	if jobPlacementReasonsAreCurrent(j) {
+		out.PlacementReasons = j.PlacementReasons
+	}
+	return out
+}
+
+func jobPlacementReasonsAreCurrent(j JobView) bool {
+	if len(j.PlacementReasons) == 0 {
+		return false
+	}
+	return j.Status == "pending_placement" || (j.Status == "queued" && j.Host == "" && j.LaunchID == nil)
 }
 
 // FormatPriorRecap concatenates accumulated recaps into one text block.

@@ -469,6 +469,26 @@ also have two move paths:
   cloud offers, showing cheap/fast/fastest choices and prices.
 - `N`: atomic launch. Launches a new instance immediately with the fast
   strategy, without opening the picker or asking for confirmation.
+- `n` in the unprocessed-jobs TUI (`weft uj`): launches one new instance with
+  a compatible initial job list, using the same move-intent path as
+  `weft instance new`.
+
+For the same workflow from a script or shell, use:
+
+```bash
+weft instance new --yes
+weft instance new --project myproj --yes
+weft new instance wj42:wj45 --dry-run
+```
+
+`weft place` / `weft instance launch` starts instances for unplaced queued
+jobs. `weft instance new` is for scaling out an existing queued cloud backlog:
+it chooses an anchor job, adds compatible queued jobs from the selected scope,
+and launches one instance with the complete initial queue. The command opens
+move intents before launch so autopilot and manual rebalance do not race the
+in-flight transfer. If the provider launch fails before an instance is created,
+source queues are left untouched; after instance creation, normal cloud
+reconciliation owns success or rollback.
 
 ## How it works
 

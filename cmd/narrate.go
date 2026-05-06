@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -206,6 +208,9 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 	if err := delta.ResolveRemovedJobs(r.database); err != nil {
 		return fmt.Errorf("resolve removed jobs: %w", err)
 	}
+	if err := delta.ResolveRemovedInstances(r.database); err != nil {
+		return fmt.Errorf("resolve removed instances: %w", err)
+	}
 
 	unprocessed, err := loadUnprocessedCounts(r.database, r.opts.Project)
 	if err != nil {
@@ -270,13 +275,32 @@ func loadUnprocessedCounts(database *sql.DB, project string) (narrate.Unprocesse
 		jobs = db.FilterJobsByProject(jobs, project)
 	}
 	var counts narrate.UnprocessedCounts
+	completedProjects := map[string]struct{}{}
+	failedProjects := map[string]struct{}{}
 	for _, j := range jobs {
 		switch j.Status {
 		case status.Completed:
 			counts.Completed++
+			if p := strings.TrimSpace(j.Project); p != "" {
+				completedProjects[p] = struct{}{}
+			}
 		case status.Failed, status.Dead, status.Killed, status.Canceled:
 			counts.Failed++
+			if p := strings.TrimSpace(j.Project); p != "" {
+				failedProjects[p] = struct{}{}
+			}
 		}
 	}
+	counts.CompletedProjects = sortedMapKeys(completedProjects)
+	counts.FailedProjects = sortedMapKeys(failedProjects)
 	return counts, nil
+}
+
+func sortedMapKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -37,6 +37,11 @@ via `db.TransferJobLaunchID`:
   R2-submit time).
 - Move-to-new → `campaign.LaunchOpts.TransferClaim=true` (transfer at
   instance-creation time inside `LaunchCampaign`).
+- Scale-out launch (`weft instance new` and the `weft uj` `n` binding) first
+  computes the full initial job list, opens move intents, and then launches one
+  `LaunchCampaign` group with `TransferClaim=true`. It does not create an
+  empty instance and submit extra jobs afterward; the new agent receives the
+  complete initial queue during bootstrap.
 
 The autopilot/rebalance exclusion and failure-path restore-to-source are
 in place. The aspirational invariant

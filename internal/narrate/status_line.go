@@ -30,14 +30,18 @@ type StatusLine struct {
 	AutopilotState       string
 	UnprocessedCompleted int // unprocessed jobs in terminal "completed" state
 	UnprocessedFailed    int // unprocessed jobs in failed/dead/killed/canceled
+	CompletedProjects    []string
+	FailedProjects       []string
 }
 
 // UnprocessedCounts collects unprocessed terminal-job counts for the
 // status line. Caller may compute these from any source; narrate.go
 // queries the DB.
 type UnprocessedCounts struct {
-	Completed int
-	Failed    int
+	Completed         int
+	Failed            int
+	CompletedProjects []string
+	FailedProjects    []string
 }
 
 // BuildStatusLine summarizes a snapshot. budgetCentsPerHour is the
@@ -49,6 +53,8 @@ func BuildStatusLine(s *Snapshot, budgetCentsPerHour int, unprocessed Unprocesse
 		AutopilotState:       s.Autopilot.State,
 		UnprocessedCompleted: unprocessed.Completed,
 		UnprocessedFailed:    unprocessed.Failed,
+		CompletedProjects:    append([]string(nil), unprocessed.CompletedProjects...),
+		FailedProjects:       append([]string(nil), unprocessed.FailedProjects...),
 	}
 	if budgetCentsPerHour > 0 {
 		sl.BudgetUSDPerHour = float64(budgetCentsPerHour) / 100.0
@@ -84,6 +90,8 @@ func BuildStatusLine(s *Snapshot, budgetCentsPerHour int, unprocessed Unprocesse
 		sl.Projects = append(sl.Projects, p)
 	}
 	sort.Strings(sl.Projects)
+	sort.Strings(sl.CompletedProjects)
+	sort.Strings(sl.FailedProjects)
 	return sl
 }
 
@@ -123,29 +131,14 @@ func (sl StatusLine) HeaderLines(width int) []string {
 	top := tsPrefix + strings.Join(topParts, " | ")
 
 	// Second row: jobs counters + projects
-	var jobParts []string
-	if sl.RunningJobs > 0 {
-		jobParts = append(jobParts, fmt.Sprintf("%d running", sl.RunningJobs))
-	}
-	if sl.StartingJobs > 0 {
-		jobParts = append(jobParts, fmt.Sprintf("%d starting", sl.StartingJobs))
-	}
-	if sl.QueuedJobs > 0 {
-		jobParts = append(jobParts, fmt.Sprintf("%d queued", sl.QueuedJobs))
-	}
-	if sl.PendingPlacement > 0 {
-		jobParts = append(jobParts, fmt.Sprintf("%d pending-placement", sl.PendingPlacement))
-	}
-	if sl.UnprocessedCompleted > 0 {
-		jobParts = append(jobParts, fmt.Sprintf("%d unprocessed completed", sl.UnprocessedCompleted))
-	}
-	if sl.UnprocessedFailed > 0 {
-		jobParts = append(jobParts, fmt.Sprintf("%d unprocessed failed", sl.UnprocessedFailed))
+	jobParts, noAttributionJobParts := sl.jobSegments()
+	row2 := strings.Join(jobParts, " | ")
+	if width > 0 && len(indent)+len(row2)+projectSuffixLen(sl.Projects) > width {
+		row2 = strings.Join(noAttributionJobParts, " | ")
 	}
 	if len(jobParts) == 0 && len(sl.Projects) == 0 {
 		return []string{top}
 	}
-	row2 := strings.Join(jobParts, " | ")
 	if len(sl.Projects) > 0 {
 		// Width budget for the project list = available width minus indent
 		// minus what jobParts already occupies plus the " | " separator.
@@ -163,6 +156,86 @@ func (sl StatusLine) HeaderLines(width int) []string {
 		row2 += renderProjects(sl.Projects, budget)
 	}
 	return []string{top, indent + row2}
+}
+
+func projectSuffixLen(projects []string) int {
+	if len(projects) == 0 {
+		return 0
+	}
+	return len(" | ") + len(strings.Join(projects, " "))
+}
+
+func (sl StatusLine) jobSegments() ([]string, []string) {
+	var withProjects []string
+	var withoutProjects []string
+	hasJobNoun := false
+	if sl.RunningJobs > 0 {
+		withProjects, hasJobNoun = appendJobStateSegment(withProjects, hasJobNoun, sl.RunningJobs, "running", nil)
+		withoutProjects = append(withoutProjects, withProjects[len(withProjects)-1])
+	}
+	if sl.StartingJobs > 0 {
+		withProjects, hasJobNoun = appendJobStateSegment(withProjects, hasJobNoun, sl.StartingJobs, "starting", nil)
+		withoutProjects = append(withoutProjects, withProjects[len(withProjects)-1])
+	}
+	if sl.QueuedJobs > 0 {
+		withProjects, hasJobNoun = appendJobStateSegment(withProjects, hasJobNoun, sl.QueuedJobs, "queued", nil)
+		withoutProjects = append(withoutProjects, withProjects[len(withProjects)-1])
+	}
+	if sl.PendingPlacement > 0 {
+		withProjects, hasJobNoun = appendJobStateSegment(withProjects, hasJobNoun, sl.PendingPlacement, "pending-placement", nil)
+		withoutProjects = append(withoutProjects, withProjects[len(withProjects)-1])
+	}
+	if sl.UnprocessedCompleted > 0 {
+		withProjects, hasJobNoun = appendJobStateSegment(withProjects, hasJobNoun, sl.UnprocessedCompleted, "completed", sl.CompletedProjects)
+		withoutProjects, _ = appendJobStateSegment(withoutProjects, len(withoutProjects) > 0, sl.UnprocessedCompleted, "completed", nil)
+	}
+	if sl.UnprocessedFailed > 0 {
+		withProjects, hasJobNoun = appendJobStateSegment(withProjects, hasJobNoun, sl.UnprocessedFailed, "failed", sl.FailedProjects)
+		withoutProjects, _ = appendJobStateSegment(withoutProjects, len(withoutProjects) > 0, sl.UnprocessedFailed, "failed", nil)
+	}
+	return withProjects, withoutProjects
+}
+
+func appendJobStateSegment(parts []string, hasJobNoun bool, count int, state string, projects []string) ([]string, bool) {
+	if count <= 0 {
+		return parts, hasJobNoun
+	}
+	suffix := formatProjectSuffix(projects)
+	if !hasJobNoun {
+		return append(parts, fmt.Sprintf("%s %s%s", pluralizeJobs(count), state, suffix)), true
+	}
+	return append(parts, fmt.Sprintf("%d %s%s", count, state, suffix)), true
+}
+
+func formatProjectSuffix(projects []string) string {
+	projects = compactSortedProjects(projects)
+	if len(projects) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(projects, ", ") + ")"
+}
+
+func compactSortedProjects(projects []string) []string {
+	set := map[string]struct{}{}
+	for _, project := range projects {
+		project = strings.TrimSpace(project)
+		if project != "" {
+			set[project] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for project := range set {
+		out = append(out, project)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func pluralizeJobs(count int) string {
+	if count == 1 {
+		return "1 job"
+	}
+	return fmt.Sprintf("%d jobs", count)
 }
 
 // renderProjects fits as many project names as possible into budget,
@@ -218,7 +291,9 @@ func (sl StatusLine) Equal(other StatusLine) bool {
 		sl.LaunchingInst != other.LaunchingInst ||
 		sl.AutopilotState != other.AutopilotState ||
 		sl.UnprocessedCompleted != other.UnprocessedCompleted ||
-		sl.UnprocessedFailed != other.UnprocessedFailed {
+		sl.UnprocessedFailed != other.UnprocessedFailed ||
+		!equalStringSlices(sl.CompletedProjects, other.CompletedProjects) ||
+		!equalStringSlices(sl.FailedProjects, other.FailedProjects) {
 		return false
 	}
 	if int(sl.RunRateUSDPerHour*100) != int(other.RunRateUSDPerHour*100) {
@@ -232,6 +307,18 @@ func (sl StatusLine) Equal(other StatusLine) bool {
 	}
 	for i, p := range sl.Projects {
 		if other.Projects[i] != p {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

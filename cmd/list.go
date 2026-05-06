@@ -298,7 +298,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 			return nil, err
 		}
 		if len(missingIDs) > 0 {
-			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", formatJobIDList(missingIDs))
+			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", ids.FormatJobIDListCompact(missingIDs))
 		}
 		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter, failedOnly, wantRental, wantInventory)
 		jobs, err = applyPostListFilters(jobs)

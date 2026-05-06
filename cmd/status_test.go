@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 func TestIsWaitTerminalStatus(t *testing.T) {
@@ -78,9 +79,9 @@ func TestFormatJobIDList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatJobIDList(tt.ids)
+			got := ids.FormatJobIDListCompact(tt.ids)
 			if got != tt.want {
-				t.Errorf("formatJobIDList(%v) = %q, want %q", tt.ids, got, tt.want)
+				t.Errorf("FormatJobIDListCompact(%v) = %q, want %q", tt.ids, got, tt.want)
 			}
 		})
 	}

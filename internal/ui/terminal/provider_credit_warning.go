@@ -285,6 +285,14 @@ func fetchSharedTUIStatusWithCount(database *sql.DB) (string, int, int) {
 	if err != nil {
 		return "", 0, 0
 	}
+	queuedJobs, err := countQueuedJobsInDB(database)
+	if err != nil {
+		return "", 0, 0
+	}
+	unprocessedCompleted, unprocessedFailed, err := countUnprocessedTerminalJobs(database)
+	if err != nil {
+		return "", 0, 0
+	}
 	launches, err := dbpkg.ListRunningLaunches(database)
 	if err != nil {
 		return "", 0, 0
@@ -312,11 +320,42 @@ func fetchSharedTUIStatusWithCount(database *sql.DB) (string, int, int) {
 		burnCentsPerHour += l.CostPerHourCents
 	}
 
-	status := fmt.Sprintf("%s running  ·  %s", pluralize(runningJobs, "job", "jobs"), pluralize(totalInstances, "instance", "instances"))
+	jobStatus := formatSharedJobStatus(runningJobs, queuedJobs, unprocessedCompleted, unprocessedFailed)
+	status := fmt.Sprintf("%s  ·  %s", jobStatus, pluralize(totalInstances, "instance", "instances"))
 	if startingInstances > 0 {
-		status = fmt.Sprintf("%s running  ·  %s (%d up, %d starting)", pluralize(runningJobs, "job", "jobs"), pluralize(totalInstances, "instance", "instances"), runningInstances, startingInstances)
+		status = fmt.Sprintf("%s  ·  %s (%d up, %d starting)", jobStatus, pluralize(totalInstances, "instance", "instances"), runningInstances, startingInstances)
 	}
 	return status, runningJobs, burnCentsPerHour
+}
+
+func formatSharedJobStatus(running, queued, unprocessedCompleted, unprocessedFailed int) string {
+	parts := []string{}
+	hasJobNoun := false
+	if running > 0 {
+		parts, hasJobNoun = appendSharedJobSegment(parts, hasJobNoun, running, "running")
+	}
+	if queued > 0 {
+		parts, hasJobNoun = appendSharedJobSegment(parts, hasJobNoun, queued, "queued")
+	}
+	if running == 0 && queued == 0 {
+		if unprocessedCompleted > 0 {
+			parts, hasJobNoun = appendSharedJobSegment(parts, hasJobNoun, unprocessedCompleted, "completed")
+		}
+		if unprocessedFailed > 0 {
+			parts, hasJobNoun = appendSharedJobSegment(parts, hasJobNoun, unprocessedFailed, "failed")
+		}
+	}
+	if len(parts) == 0 {
+		return "0 jobs running"
+	}
+	return strings.Join(parts, " | ")
+}
+
+func appendSharedJobSegment(parts []string, hasJobNoun bool, count int, state string) ([]string, bool) {
+	if !hasJobNoun {
+		return append(parts, pluralize(count, "job", "jobs")+" "+state), true
+	}
+	return append(parts, fmt.Sprintf("%d %s", count, state)), true
 }
 
 func countRunningJobsInDB(database *sql.DB) (int, error) {
@@ -334,4 +373,38 @@ func countRunningJobsInDB(database *sql.DB) (int, error) {
 		return 0, err
 	}
 	return running, nil
+}
+
+func countQueuedJobsInDB(database *sql.DB) (int, error) {
+	var queued int
+	err := database.QueryRow(`
+		SELECT COUNT(*)
+		FROM job_status
+		WHERE tombstoned = 0
+		  AND status IN (?, ?)`,
+		dbpkg.StatusQueued, dbpkg.StatusPendingPlacement,
+	).Scan(&queued)
+	if err != nil {
+		return 0, err
+	}
+	return queued, nil
+}
+
+func countUnprocessedTerminalJobs(database *sql.DB) (completed, failed int, err error) {
+	jobs, err := dbpkg.ListUnprocessedJobs(database)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		switch job.EffectiveStatus() {
+		case dbpkg.StatusCompleted:
+			completed++
+		case dbpkg.StatusFailed, dbpkg.StatusDead, dbpkg.StatusKilled, dbpkg.StatusCanceled:
+			failed++
+		}
+	}
+	return completed, failed, nil
 }

@@ -176,6 +176,12 @@ rebalance_score_epsilon = 0.01       # require 1% relative improvement
 savings, but still considers queue drain time. `weft rebalance --strategy ...`
 uses the same choices for manual dry-runs or `--yes` applies.
 
+Manual scale-out uses the same hands-off coordination. `weft instance new`
+launches one additional instance with a precomputed initial job list and opens
+move intents for those jobs before launch, so autopilot and manual rebalance do
+not also try to place them while the new instance is bootstrapping. The `n`
+binding in `weft uj` uses the same orchestration path.
+
 Jobs tagged `cpu-intensive` (deprecated alias: `compute-intensive`) are
 conservative about cloud reuse and new rentals. Autopilot only routes them to
 an existing rental when the instance has at least `WEFT_COMPUTE_CPU_CORES`

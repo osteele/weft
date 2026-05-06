@@ -321,3 +321,29 @@ func TestSharedTUIStatusSingularises(t *testing.T) {
 		t.Errorf("plural form at count=1, got: %s", status)
 	}
 }
+
+func TestFormatSharedJobStatusGrammar(t *testing.T) {
+	cases := []struct {
+		name                 string
+		running              int
+		queued               int
+		unprocessedCompleted int
+		unprocessedFailed    int
+		want                 string
+	}{
+		{"running and queued", 2, 30, 0, 0, "2 jobs running | 30 queued"},
+		{"single running", 1, 0, 0, 0, "1 job running"},
+		{"queued first", 0, 30, 0, 0, "30 jobs queued"},
+		{"completed first", 0, 0, 3, 0, "3 jobs completed"},
+		{"single failed first", 0, 0, 0, 1, "1 job failed"},
+		{"completed and failed", 0, 0, 2, 1, "2 jobs completed | 1 failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatSharedJobStatus(tc.running, tc.queued, tc.unprocessedCompleted, tc.unprocessedFailed)
+			if got != tc.want {
+				t.Fatalf("formatSharedJobStatus() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

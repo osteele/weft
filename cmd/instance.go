@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -136,6 +138,37 @@ var instanceLaunchCmd = &cobra.Command{
 	RunE:    runCampaignLaunch,
 }
 
+var (
+	instanceNewJobs        string
+	instanceNewProject     string
+	instanceNewStrategy    string
+	instanceNewMinSurvival float64
+	instanceNewDryRun      bool
+	instanceNewYes         bool
+	instanceNewWait        bool
+	instanceNewTimeout     time.Duration
+)
+
+var instanceNewCmd = &cobra.Command{
+	Use:   "new [job-id]...",
+	Short: "Launch one new instance and rebalance queued jobs onto it",
+	Long: `Launch one new cloud instance for queued work, then start that instance
+with the selected launch group.
+
+The command chooses an anchor queued job, adds compatible queued jobs from the
+same scope, opens move intents so autopilot stays hands-off, and launches the
+new instance with the full initial job list. Source claims are transferred by
+the launch path and the command waits for agent_ready before confirming the
+move intents.
+
+Examples:
+  weft instance new --yes
+  weft instance new --project myproj --yes
+  weft instance new wj42 wj43 --dry-run`,
+	Args: usageArgs(cobra.ArbitraryArgs),
+	RunE: runInstanceNew,
+}
+
 func init() {
 	rootCmd.AddCommand(instanceCmd)
 	instanceCmd.AddCommand(instanceListCmd)
@@ -150,6 +183,7 @@ func init() {
 	instanceCmd.AddCommand(instanceUncordonCmd)
 	instanceCmd.AddCommand(instanceWatchCmd)
 	instanceCmd.AddCommand(instanceLaunchCmd)
+	instanceCmd.AddCommand(instanceNewCmd)
 	instanceCmd.AddCommand(instanceDiagnoseCmd)
 	instanceCmd.AddCommand(instanceDiskReportCmd)
 
@@ -159,6 +193,141 @@ func init() {
 
 	configureWatchFlags(instanceWatchCmd)
 	addCampaignLaunchFlags(instanceLaunchCmd)
+	addInstanceNewFlags(instanceNewCmd)
+}
+
+func addInstanceNewFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&instanceNewJobs, "jobs", "", "Comma-separated job IDs/ranges to consider")
+	cmd.Flags().StringVar(&instanceNewProject, "project", "", "Restrict queued jobs to a project")
+	cmd.Flags().StringVar(&instanceNewStrategy, "strategy", "fastest", "Offer selection strategy: cheap, fast, or fastest")
+	cmd.Flags().Float64Var(&instanceNewMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped")
+	cmd.Flags().BoolVar(&instanceNewDryRun, "dry-run", false, "Print the selected launch group without launching")
+	cmd.Flags().BoolVarP(&instanceNewYes, "yes", "y", false, "Run without interactive confirmation")
+	cmd.Flags().BoolVar(&instanceNewWait, "wait", true, "Wait for agent_ready before confirming move intents")
+	cmd.Flags().DurationVar(&instanceNewTimeout, "timeout", 20*time.Minute, "Maximum time to wait for agent_ready")
+}
+
+func runInstanceNew(cmd *cobra.Command, args []string) error {
+	jobScope, err := parseInstanceNewJobScope(args, instanceNewJobs)
+	if err != nil {
+		return err
+	}
+	strategy, err := parseInstanceNewStrategy(instanceNewStrategy)
+	if err != nil {
+		return err
+	}
+	if !instanceNewDryRun && !instanceNewYes {
+		return usageErrorf("pass --yes to launch a new instance, or --dry-run to preview")
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	res, err := orchestration.LaunchNewInstanceWithRebalance(cmd.Context(), database, cfg, orchestration.NewInstanceOptions{
+		JobScope:     jobScope,
+		Project:      instanceNewProject,
+		Strategy:     strategy,
+		MinSurvival:  instanceNewMinSurvival,
+		DryRun:       instanceNewDryRun,
+		WaitReady:    instanceNewWait,
+		ReadyTimeout: instanceNewTimeout,
+		OnStatus: func(message string) {
+			fmt.Fprintln(cmd.ErrOrStderr(), message)
+		},
+		OnEvent: func(event campaign.LaunchEvent) {
+			if line := formatInstanceNewLaunchEvent(event); line != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), line)
+			}
+		},
+		OnCampaign: func(campaignID int64) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Campaign %d: launching one instance...\n", campaignID)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	printInstanceNewResult(cmd.OutOrStdout(), res)
+	return nil
+}
+
+func parseInstanceNewJobScope(args []string, jobsFlag string) (map[int64]struct{}, error) {
+	if len(args) > 0 && strings.TrimSpace(jobsFlag) != "" {
+		return nil, usageErrorf("pass job IDs positionally or via --jobs, not both")
+	}
+	var raw []string
+	if strings.TrimSpace(jobsFlag) != "" {
+		raw = []string{jobsFlag}
+	} else {
+		raw = args
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	jobIDs, err := ParseJobIDs(raw)
+	if err != nil {
+		return nil, err
+	}
+	scope := make(map[int64]struct{}, len(jobIDs))
+	for _, jobID := range jobIDs {
+		scope[jobID] = struct{}{}
+	}
+	return scope, nil
+}
+
+func parseInstanceNewStrategy(raw string) (bidding.SelectionStrategy, error) {
+	switch strategy := bidding.SelectionStrategy(strings.ToLower(strings.TrimSpace(raw))); strategy {
+	case "", bidding.StrategyFastest:
+		return bidding.StrategyFastest, nil
+	case bidding.StrategyFast:
+		return bidding.StrategyFast, nil
+	case bidding.StrategyCheap:
+		return bidding.StrategyCheap, nil
+	default:
+		return "", usageErrorf("invalid --strategy %q (want cheap, fast, or fastest)", raw)
+	}
+}
+
+func formatInstanceNewLaunchEvent(event campaign.LaunchEvent) string {
+	switch event.Kind {
+	case campaign.LaunchEventCampaignStatus:
+		if strings.TrimSpace(event.Phase) != "" {
+			return "  " + strings.TrimSpace(event.Phase)
+		}
+	case campaign.LaunchEventGroupAssets:
+		return fmt.Sprintf("  %s: staging (%d/%d assets ready)", event.Group.GPUSpec(), event.AssetsReady, event.AssetsTotal)
+	case campaign.LaunchEventGroupRetry:
+		return fmt.Sprintf("  %s: retrying with replacement offer (attempt %d/%d)", event.Group.GPUSpec(), event.RetryAttempt, event.RetryMax)
+	case campaign.LaunchEventGroupPhase:
+		if strings.TrimSpace(event.Phase) != "" {
+			return fmt.Sprintf("  %s: %s", event.Group.GPUSpec(), strings.TrimSpace(event.Phase))
+		}
+	}
+	return ""
+}
+
+func printInstanceNewResult(out io.Writer, res orchestration.NewInstanceResult) {
+	if res.DryRun {
+		fmt.Fprintf(out, "Would launch one instance for anchor %s with %d job(s): %s\n",
+			ids.FormatJobID(res.AnchorJobID), len(res.JobIDs), ids.FormatJobIDListCompact(res.JobIDs))
+		if res.Offer != nil {
+			fmt.Fprintf(out, "Offer: %s %s $%.2f/hr\n", res.Offer.Provider, res.Offer.GPUName, res.Offer.CostPerHour)
+		}
+		return
+	}
+	for _, instanceID := range res.InstanceIDs {
+		fmt.Fprintf(out, "Launched instance %s\n", ids.FormatInstanceID(instanceID))
+	}
+	fmt.Fprintf(out, "Initial jobs: %s\n", ids.FormatJobIDListCompact(res.JobIDs))
+	if res.Warning != "" {
+		fmt.Fprintf(out, "Warning: %s\n", res.Warning)
+	}
 }
 
 // newR2ClientFromConfig loads config and creates an R2 client.

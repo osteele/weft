@@ -946,6 +946,7 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 		// Saving an edited value should retrigger the autopilot, which clears
 		// the cooldown timestamp. Drive the menu → editor → save flow.
 		m := makeModel()
+		m.database = setupBudgetTest(t)
 		m.autoRunRateInputActive = true
 		m.autoRunRateInputPhase = autoBudgetPhaseEditHourly
 		m.autoRunRateInputValue = "3.50"

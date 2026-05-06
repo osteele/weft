@@ -893,6 +893,43 @@ weft job move --project myproj --to new
 weft job move --from wi872 --to wi900
 ```
 
+### weft instance new
+
+Launch one new cloud instance and start it with a balanced initial queue of
+compatible queued jobs. Unlike `weft instance launch` / `weft place`, this can
+include jobs that are already queued on existing cloud instances. Weft opens
+move intents before launch so autopilot leaves those jobs alone while the new
+instance proves it has accepted the work.
+
+```bash
+weft instance new [job-id]... [flags]
+weft new instance [job-id]... [flags]   # Verb-noun alias
+```
+
+Without arguments, all eligible queued rental jobs are considered. Use
+positional job IDs, `--jobs`, or `--project` to narrow the scope. The command
+selects one anchor job, adds compatible queued jobs that fit the same launch
+group, launches a single instance with that complete job list, and waits for
+`agent_ready` before confirming the move intents.
+
+**Flags:**
+- `--jobs IDS`: Comma-separated job IDs/ranges to consider
+- `--project NAME`: Restrict queued jobs to a project
+- `--strategy cheap|fast|fastest`: Offer selection strategy (default: `fastest`)
+- `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`)
+- `--dry-run`: Preview the selected anchor, job list, and offer without launching
+- `--yes`: Launch without interactive confirmation
+- `--wait`: Wait for `agent_ready` before confirming move intents (default: true)
+- `--timeout DURATION`: Maximum `agent_ready` wait (default: `20m`)
+
+**Examples:**
+```bash
+weft instance new --yes
+weft instance new --project myproj --yes
+weft instance new wj42 wj43 --dry-run
+weft new instance --jobs wj42:wj45 --yes
+```
+
 ### weft start instance
 
 Launch cloud instances for queued unplaced jobs. This is the primary command

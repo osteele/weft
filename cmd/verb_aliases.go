@@ -44,6 +44,13 @@ var launchCmd = &cobra.Command{
 	Short: "Launch campaigns, instances, or project jobs",
 }
 
+// --- new ---
+
+var newCmd = &cobra.Command{
+	Use:   "new <instance>",
+	Short: "Create new resources",
+}
+
 // --- terminate ---
 
 var terminateCmd = &cobra.Command{
@@ -98,6 +105,12 @@ func init() {
 	addCampaignLaunchFlags(launchCampaignCmd)
 	addCampaignLaunchFlags(launchInstanceCmd)
 	addCampaignLaunchFlags(launchProjectCmd)
+
+	// new
+	newInstanceCmd := withPluralAlias(verbAlias("instance [job-id]...", instanceNewCmd))
+	rootCmd.AddCommand(newCmd)
+	newCmd.AddCommand(newInstanceCmd)
+	addInstanceNewFlags(newInstanceCmd)
 
 	// list (add noun subcommands to existing listCmd)
 	listJobsCmd := verbAlias("jobs [job-id]...", jobListCmd)

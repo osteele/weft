@@ -2543,21 +2543,70 @@ func runQuickLaunchWithProgress(
 	jobs []*db.Job,
 	progress chan<- listQuickLaunchProgressMsg,
 ) listQuickLaunchDoneMsg {
-	res, err := orchestration.RunQuickLaunch(ctx, database, scopeOwner, scope, jobs, func(message string) {
-		select {
-		case progress <- listQuickLaunchProgressMsg{message: message}:
-		default:
+	if scopeOwner != "" && scope != "" {
+		acquired, err := db.AcquireAutoLease(database, scope, scopeOwner, listAutoLeaseTTL)
+		if err != nil {
+			return listQuickLaunchDoneMsg{err: err}
 		}
+		if !acquired {
+			return listQuickLaunchDoneMsg{err: fmt.Errorf("another TUI is launching for this scope")}
+		}
+		defer db.ReleaseAutoLease(database, scope, scopeOwner)
+	}
+	jobScope := make(map[int64]struct{}, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.ID > 0 {
+			jobScope[job.ID] = struct{}{}
+		}
+	}
+	res, err := orchestration.LaunchNewInstanceWithRebalance(ctx, database, nil, orchestration.NewInstanceOptions{
+		JobScope:    jobScope,
+		Strategy:    "fastest",
+		MinSurvival: 0.4,
+		WaitReady:   true,
+		OnStatus: func(message string) {
+			select {
+			case progress <- listQuickLaunchProgressMsg{message: message}:
+			default:
+			}
+		},
+		OnEvent: func(event campaign.LaunchEvent) {
+			if line := formatQuickLaunchEventLine(event); line != "" {
+				select {
+				case progress <- listQuickLaunchProgressMsg{message: line}:
+				default:
+				}
+			}
+		},
 	})
 	if err != nil {
 		return listQuickLaunchDoneMsg{err: err}
 	}
-	return listQuickLaunchDoneMsg{
-		instanceIDs:  res.InstanceIDs,
-		movedJobs:    res.MovedJobs,
-		warning:      res.Warning,
-		runningJobID: res.RunningJobID,
+	movedJobs := len(res.JobIDs) - 1
+	if movedJobs < 0 {
+		movedJobs = 0
 	}
+	return listQuickLaunchDoneMsg{
+		instanceIDs: res.InstanceIDs,
+		movedJobs:   movedJobs,
+		warning:     res.Warning,
+	}
+}
+
+func formatQuickLaunchEventLine(event campaign.LaunchEvent) string {
+	switch event.Kind {
+	case campaign.LaunchEventCampaignStatus:
+		return strings.TrimSpace(event.Phase)
+	case campaign.LaunchEventGroupAssets:
+		return fmt.Sprintf("%s: staging (%d/%d assets ready)", event.Group.GPUSpec(), event.AssetsReady, event.AssetsTotal)
+	case campaign.LaunchEventGroupRetry:
+		return fmt.Sprintf("%s: retrying with replacement offer (attempt %d/%d)", event.Group.GPUSpec(), event.RetryAttempt, event.RetryMax)
+	case campaign.LaunchEventGroupPhase:
+		if strings.TrimSpace(event.Phase) != "" {
+			return fmt.Sprintf("%s: %s", event.Group.GPUSpec(), strings.TrimSpace(event.Phase))
+		}
+	}
+	return ""
 }
 
 func (m *listTUIModel) pruneAutoBlockReasons() {

@@ -529,11 +529,11 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 		}
 
 		if timeout > 0 && time.Now().After(deadline) {
-			ids := make([]int64, 0, len(pending))
+			pendingIDs := make([]int64, 0, len(pending))
 			for id := range pending {
-				ids = append(ids, id)
+				pendingIDs = append(pendingIDs, id)
 			}
-			return final, fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, formatJobIDList(ids))
+			return final, fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
 		}
 
 		<-ticker.C
@@ -556,10 +556,6 @@ func allJobsSucceeded(requests []jobStatusRequest, final map[int64]*db.Job) bool
 		}
 	}
 	return true
-}
-
-func formatJobIDList(jobIDs []int64) string {
-	return ids.FormatJobIDListCompact(jobIDs)
 }
 
 func mapKeys(m map[string]struct{}) []string {

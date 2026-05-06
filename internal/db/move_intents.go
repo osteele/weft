@@ -187,6 +187,26 @@ func ResolveMoveIntent(database *sql.DB, intentID int64, state MoveIntentState, 
 	return err
 }
 
+// ConfirmOpenMoveIntentsForTargetLaunch confirms any open move intents that
+// target a launch once that launch has accepted its initial job queue.
+func ConfirmOpenMoveIntentsForTargetLaunch(database *sql.DB, launchID int64, resolution string) error {
+	if launchID <= 0 {
+		return nil
+	}
+	if strings.TrimSpace(resolution) == "" {
+		resolution = fmt.Sprintf("target launch %d accepted jobs", launchID)
+	}
+	now := time.Now().Unix()
+	_, err := database.Exec(
+		`UPDATE move_intents
+		    SET state = ?, resolved_at = ?, resolution = ?
+		  WHERE target_launch_id = ?
+		    AND state = ?`,
+		string(MoveIntentStateConfirmed), now, resolution, launchID, string(MoveIntentStateOpen),
+	)
+	return err
+}
+
 const moveIntentSelect = `SELECT
 	id, job_id, source_attempt_id, source_launch_id,
 	target_kind, target_launch_id, target_offer_provider, target_offer_id, target_gpu_name,

@@ -157,6 +157,7 @@ func SyncInstanceState(
 		if err := db.SetLaunchAgentReadyAtIfUnset(database, instanceID, time.Now()); err == nil {
 			now := time.Now().Unix()
 			ci.AgentReadyAtUnix = &now
+			_ = db.ConfirmOpenMoveIntentsForTargetLaunch(database, instanceID, "target agent_ready")
 		}
 	}
 
