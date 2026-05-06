@@ -858,9 +858,16 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		// Show full job details
 		fmt.Printf("Job ID:      %s\n", ids.FormatJobID(job.ID))
 		fmt.Printf("Host:        %s\n", job.TargetDisplay())
-		// Show status with waiting info
+		// Show status with waiting info. Tombstoned annotation comes
+		// inline so the operator notices it before reading further —
+		// otherwise a tombstoned job looks identical to an active queued
+		// one and the autopilot's "ignored" decision is invisible.
+		tombstone := ""
+		if job.Tombstoned {
+			tombstone = " [tombstoned, ignored by autopilot]"
+		}
 		if display.Blocked {
-			fmt.Printf("Status:      %s\n", display.Status)
+			fmt.Printf("Status:      %s%s\n", display.Status, tombstone)
 			reasons := mergeBlockedReasons(display.Reason, job.PlacementReasons)
 			for i, reason := range reasons {
 				if i == 0 {
@@ -870,7 +877,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			fmt.Printf("Status:      %s\n", job.EffectiveStatus())
+			fmt.Printf("Status:      %s%s\n", job.EffectiveStatus(), tombstone)
 		}
 		if job.Priority > 0 {
 			fmt.Printf("Priority:    %d\n", job.Priority)
