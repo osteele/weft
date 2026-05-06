@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +96,16 @@ type RunawayPolicy struct {
 	// per attempt; default interval is 1h so worst-case sustained cost
 	// during an outage is ~$1.20/day.
 	AutoProbeInterval time.Duration
+	// AutoProbeIntervalAfterRecentSuccess shortens the auto-probe cadence
+	// when the breaker re-trips shortly after a successful auto-resume:
+	// recent success is evidence the provider is partially working, so
+	// we should retry sooner than the cold-start cadence. Activates when
+	// the most recent EventRelaunchAutoProbeResumed is within
+	// AutoProbeRecentSuccessWindow of now. 0 falls back to AutoProbeInterval.
+	AutoProbeIntervalAfterRecentSuccess time.Duration
+	// AutoProbeRecentSuccessWindow is the lookback for treating a prior
+	// auto-resume as "recent." 0 disables the tight-cadence path.
+	AutoProbeRecentSuccessWindow time.Duration
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
@@ -196,8 +208,16 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		if blocked, reason, err := evaluateRunawayBreaker(cfg.Database, cfg, unplaced, time.Now()); err != nil {
 			slog.Warn("runaway breaker evaluation failed", "component", "relaunch", "error", err)
 		} else if blocked {
-			result.BlockedReason = reason
-			return result, nil
+			// Provider-pinned jobs bypass a global trip when their provider
+			// has zero failures on the trip — a Vast outage shouldn't pause RunPod.
+			survivors := unplacedForHealthyProviders(cfg.Database, unplaced)
+			if len(survivors) == 0 {
+				result.BlockedReason = reason
+				return result, nil
+			}
+			slog.Info("runaway tripped but routing survivors via healthy providers",
+				"component", "relaunch", "tripped_reason", reason, "survivor_jobs", len(survivors))
+			unplaced = survivors
 		}
 	}
 	var eligible []*db.Job
@@ -944,6 +964,11 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	if err != nil {
 		return false, "", err
 	}
+	if providers, perr := failingProvidersInWindow(database, scopeJobIDs, since); perr == nil {
+		metrics.FailingProviders = providers
+	} else {
+		slog.Debug("failing providers query failed", "component", "relaunch", "error", perr)
+	}
 	noProgress := metrics.CompletedCount == 0
 	infraLimitHit := cfg.RunawayPolicy.InfraFailureLimit > 0 &&
 		metrics.InfraFailureCount >= cfg.RunawayPolicy.InfraFailureLimit
@@ -968,28 +993,50 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 }
 
 func runawayTripDetail(metrics runawayMetrics, policy *RunawayPolicy) string {
+	suffix := formatFailingProvidersSuffix(metrics.FailingProviders)
+	window := ""
+	if policy != nil {
+		window = policy.Window.String()
+	}
 	if policy != nil && policy.InfraFailureLimit > 0 && metrics.InfraFailureCount >= policy.InfraFailureLimit {
 		return fmt.Sprintf(
-			"infra runaway: infra_failures=%d limit=%d chain=%d orphaned=%d spend=$%.2f window=%s",
+			"infra runaway: infra_failures=%d limit=%d chain=%d orphaned=%d spend=$%.2f window=%s%s",
 			metrics.InfraFailureCount,
 			policy.InfraFailureLimit,
 			metrics.MaxTrailingOrphaned,
 			metrics.OrphanedCount,
 			float64(metrics.SpendCents)/100.0,
-			policy.Window.String(),
+			window,
+			suffix,
 		)
 	}
-	window := ""
-	if policy != nil {
-		window = policy.Window.String()
-	}
 	return fmt.Sprintf(
-		"no-progress runaway: chain=%d orphaned=%d spend=$%.2f window=%s",
+		"no-progress runaway: chain=%d orphaned=%d spend=$%.2f window=%s%s",
 		metrics.MaxTrailingOrphaned,
 		metrics.OrphanedCount,
 		float64(metrics.SpendCents)/100.0,
 		window,
+		suffix,
 	)
+}
+
+// formatFailingProvidersSuffix produces "; providers=p1:n1,p2:n2"
+// (deterministic order) for embedding in a trip detail. Empty when
+// no providers contributed failures (degenerate case).
+func formatFailingProvidersSuffix(providers map[string]int) string {
+	if len(providers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(providers))
+	for k := range providers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s:%d", k, providers[k]))
+	}
+	return "; providers=" + strings.Join(parts, ",")
 }
 
 // ResumeRunawayBreakerForJob clears the runaway breaker for the scope
@@ -1088,6 +1135,127 @@ type runawayMetrics struct {
 	InfraFailureCount   int
 	SpendCents          int
 	MaxTrailingOrphaned int
+	// FailingProviders maps provider name to the count of failures it
+	// contributed in the breaker window. Recorded on trip so the
+	// relaunch loop can route around dead providers without blocking
+	// launches on healthy ones (a Vast outage shouldn't pause RunPod).
+	FailingProviders map[string]int
+}
+
+// failingProvidersInWindow returns the per-provider count of orphan +
+// infra-failure attempts in the window. Exposed publicly so trip-time
+// detail recording and post-trip provider-bypass logic share the same
+// query.
+func failingProvidersInWindow(database *sql.DB, jobIDs []int64, since int64) (map[string]int, error) {
+	if len(jobIDs) == 0 {
+		return nil, nil
+	}
+	holders := make([]string, 0, len(jobIDs))
+	args := make([]any, 0, len(jobIDs)+1)
+	for _, id := range jobIDs {
+		holders = append(holders, "?")
+		args = append(args, id)
+	}
+	args = append(args, since)
+	rows, err := database.Query(fmt.Sprintf(`
+		SELECT COALESCE(l.provider, '') AS prov, COUNT(*)
+		  FROM job_attempts ja
+		  JOIN launches l ON l.id = ja.launch_id
+		 WHERE ja.launch_id IS NOT NULL
+		   AND ja.cloud_outcome IN ('orphaned', 'failed')
+		   AND ja.job_id IN (%s)
+		   AND COALESCE(ja.end_time, ja.start_time, 0) >= ?
+		 GROUP BY prov`, strings.Join(holders, ",")), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var prov string
+		var n int
+		if err := rows.Scan(&prov, &n); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(prov) == "" {
+			continue
+		}
+		out[prov] = n
+	}
+	return out, rows.Err()
+}
+
+// providersFromTripDetail extracts the per-provider failure counts
+// embedded in a runaway-tripped event detail.
+// Format: "...; providers=vastai:7,runpod:0".
+func providersFromTripDetail(detail string) map[string]int {
+	out := map[string]int{}
+	const marker = "providers="
+	idx := strings.Index(detail, marker)
+	if idx < 0 {
+		return out
+	}
+	chunk := detail[idx+len(marker):]
+	if end := strings.IndexByte(chunk, ';'); end >= 0 {
+		chunk = chunk[:end]
+	}
+	for _, pair := range strings.Split(chunk, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			continue
+		}
+		out[strings.TrimSpace(parts[0])] = n
+	}
+	return out
+}
+
+// unplacedForHealthyProviders returns the subset of `jobs` whose
+// pinned provider has zero failures on the most recent runaway trip.
+// Jobs without a provider tag stay blocked: they could land on the
+// failing provider. Older trips lacking provider stats block all
+// providers (conservative).
+func unplacedForHealthyProviders(database *sql.DB, jobs []*db.Job) []*db.Job {
+	if database == nil || len(jobs) == 0 {
+		return nil
+	}
+	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, 0, "")
+	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, 0, "")
+	if trippedAt <= resumedAt {
+		return jobs
+	}
+	tripped, err := db.LatestLifecycleEvent(database, db.LifecycleEventFilter{
+		Kind: db.EventRelaunchRunawayTripped,
+	})
+	if err != nil || tripped == nil {
+		return nil
+	}
+	providers := providersFromTripDetail(tripped.Detail)
+	if len(providers) == 0 {
+		return nil
+	}
+	out := make([]*db.Job, 0, len(jobs))
+	for _, j := range jobs {
+		if j == nil {
+			continue
+		}
+		provider, ok := db.RequestedProvider(j.Tags)
+		if !ok {
+			continue
+		}
+		if providers[provider] > 0 {
+			continue
+		}
+		out = append(out, j)
+	}
+	return out
 }
 
 func inferScopeCampaignID(database *sql.DB, jobs []*db.Job) int64 {
@@ -1620,16 +1788,15 @@ func closeRelaunchIntents(database *sql.DB, intentIDs []int64, success bool, res
 // probe cost during sustained outages (assuming ~$0.05 per probe).
 const DefaultAutoProbeInterval = 1 * time.Hour
 
-// MaybeAutoResumeBreaker checks whether a previously-launched auto-probe
-// has completed successfully; if so, resets the runaway breaker. Safe to
-// call on every autopilot pass — most calls are no-ops because either no
-// probe is in flight or the most recent probe has not yet terminated.
-//
-// Detection: the most recent EventRelaunchAutoProbeLaunched event has a
-// detail line with launch_id=N. If that launch is now `completed`, the
-// probe succeeded and we resume; if it's `failed`, we leave the breaker
-// tripped and let MaybeLaunchAutoProbe schedule the next probe after the
-// configured interval.
+const DefaultAutoProbeIntervalAfterRecentSuccess = 15 * time.Minute
+const DefaultAutoProbeRecentSuccessWindow = 6 * time.Hour
+
+// MaybeAutoResumeBreaker resets the runaway breaker when the most recent
+// auto-probe launch produced evidence of provider health: either the
+// launch completed cleanly, or any of its job_attempts reached
+// status='completed'. The job-completion fallback matters because the
+// agent can go silent during finalization, ending the launch in `failed`
+// even after a job ran to exit 0.
 func MaybeAutoResumeBreaker(database *sql.DB) error {
 	if database == nil {
 		return nil
@@ -1642,7 +1809,18 @@ func MaybeAutoResumeBreaker(database *sql.DB) error {
 	if err != nil || launch == nil {
 		return err
 	}
-	if launch.Status != db.LaunchStatusCompleted {
+	healthy := launch.Status == db.LaunchStatusCompleted
+	if !healthy {
+		var completedJobs int
+		if err := database.QueryRow(
+			`SELECT COUNT(*) FROM job_attempts WHERE launch_id = ? AND status = 'completed'`,
+			probeLaunchID,
+		).Scan(&completedJobs); err != nil {
+			return err
+		}
+		healthy = completedJobs > 0
+	}
+	if !healthy {
 		return nil
 	}
 	// Only reset if breaker is actually tripped (avoid spurious resume
@@ -1655,7 +1833,7 @@ func MaybeAutoResumeBreaker(database *sql.DB) error {
 	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 		EventKind: db.EventRelaunchAutoProbeResumed,
 		LaunchID:  probeLaunchID,
-		Detail:    runawayScopeDetail("", fmt.Sprintf("auto-resume after probe launch %d completed", probeLaunchID)),
+		Detail:    runawayScopeDetail("", fmt.Sprintf("auto-resume after probe launch %d delivered job throughput", probeLaunchID)),
 	}); err != nil {
 		slog.Warn("write auto-probe-resumed event", "component", "relaunch", "error", err)
 	}
@@ -1690,6 +1868,16 @@ func MaybeLaunchAutoProbe(cfg RelaunchConfig) (int64, error) {
 	if trippedAt <= resumedAt {
 		// Breaker is not tripped; nothing to probe.
 		return 0, nil
+	}
+
+	// Recent successful auto-resume → flaky provider, not cold outage:
+	// shorten cadence so we don't miss the next working window.
+	if cfg.RunawayPolicy.AutoProbeIntervalAfterRecentSuccess > 0 &&
+		cfg.RunawayPolicy.AutoProbeRecentSuccessWindow > 0 {
+		lastResumed := latestRunawayEventAt(cfg.Database, db.EventRelaunchAutoProbeResumed, 0, "")
+		if lastResumed > 0 && now.Sub(time.Unix(lastResumed, 0)) <= cfg.RunawayPolicy.AutoProbeRecentSuccessWindow {
+			interval = cfg.RunawayPolicy.AutoProbeIntervalAfterRecentSuccess
+		}
 	}
 
 	lastProbe := latestRunawayEventAt(cfg.Database, db.EventRelaunchAutoProbeLaunched, 0, "")

@@ -75,6 +75,83 @@ func TestMaybeAutoResumeBreaker_ResumesAfterProbeCompletes(t *testing.T) {
 	}
 }
 
+// A completed job_attempt under a failed launch should still resume the
+// breaker — agent silence during finalization can fail the launch after
+// a job exited 0.
+func TestMaybeAutoResumeBreaker_ResumesWhenProbeJobCompleted(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchRunawayTripped,
+		Detail:    "project=<all>; test trip",
+	}); err != nil {
+		t.Fatalf("trip event: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", "/tmp/x", "echo ok", "probe job")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, status, launch_id, queued_at, start_time, end_time)
+		 VALUES (?, 1, 'completed', ?, strftime('%s','now')-30, strftime('%s','now')-25, strftime('%s','now')-5)`,
+		jobID, launchID,
+	); err != nil {
+		t.Fatalf("insert attempt: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchAutoProbeLaunched,
+		LaunchID:  launchID,
+		Detail:    fmt.Sprintf("launch_id=%d", launchID),
+	}); err != nil {
+		t.Fatalf("probe-launched event: %v", err)
+	}
+	if err := MaybeAutoResumeBreaker(database); err != nil {
+		t.Fatalf("MaybeAutoResumeBreaker: %v", err)
+	}
+	var resumes int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM lifecycle_events WHERE event_kind = ?`,
+		db.EventRelaunchRunawayResumed,
+	).Scan(&resumes); err != nil {
+		t.Fatalf("count resume events: %v", err)
+	}
+	if resumes != 1 {
+		t.Fatalf("expected 1 runaway_resumed event after probe-job completion (launch was failed), got %d", resumes)
+	}
+}
+
+func TestProvidersFromTripDetail(t *testing.T) {
+	cases := []struct {
+		name   string
+		detail string
+		want   map[string]int
+	}{
+		{"empty", "no providers here", map[string]int{}},
+		{"single", "...; providers=vastai:7", map[string]int{"vastai": 7}},
+		{"multi", "...; providers=runpod:0,vastai:5", map[string]int{"runpod": 0, "vastai": 5}},
+		{"trailing-semi", "x; providers=vastai:3; window=24h", map[string]int{"vastai": 3}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providersFromTripDetail(tc.detail)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("got[%q] = %d, want %d", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
 // TestMaybeAutoResumeBreaker_NoOpWhileProbeRunning: probe in flight
 // (running, not completed) leaves the breaker tripped.
 func TestMaybeAutoResumeBreaker_NoOpWhileProbeRunning(t *testing.T) {
