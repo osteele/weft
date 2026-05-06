@@ -918,6 +918,8 @@ rule HeartbeatStaleAfterReady {
     when: instance: Instance.status = running
             and instance.agent_ready_at != null
             and HeartbeatAge(instance) > config.heartbeat_stale_threshold
+            and not (instance.provider_instance != null
+                     and instance.provider_instance.status in {stopped, offline})
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
@@ -929,6 +931,14 @@ rule HeartbeatStaleAfterReady {
         -- liveness signal. A stale heartbeat after the agent ever showed
         -- liveness means the container is functionally dead, regardless
         -- of what the provider's bulk list endpoint reports.
+        --
+        -- Yields to ProviderInstancePaused when the provider reports
+        -- stopped/offline: a paused container stops writing heartbeats,
+        -- so without this carve-out the stale-agent watchdog would
+        -- always fire first and we'd destroy paused-but-recoverable
+        -- instances. on-demand instances can be paused too (credit low,
+        -- host maintenance, abuse review), so the gate is not limited
+        -- to interruptible types.
         --
         -- Provider list absence is NOT a kill signal. Vast.ai's list
         -- endpoint exhibits both false negatives (omitting live

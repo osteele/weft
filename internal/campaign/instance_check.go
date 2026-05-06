@@ -317,14 +317,23 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	//     etc.): caught by rule 7 (provider_dead with hysteresis).
 	if ci.Status == db.LaunchStatusRunning && ci.AgentReadyAtUnix != nil &&
 		p.HeartbeatAge > heartbeatStaleThreshold {
-		return InstanceAction{
-			Kind:              ActionEmptyStatusTimeout,
-			TerminalStatus:    db.LaunchStatusFailed,
-			TerminationReason: db.TerminationReasonInfraFailure,
-			StallMessage:      fmt.Sprintf("agent heartbeat stale for %s — terminating", p.HeartbeatAge.Truncate(time.Second)),
-			DestroyProvider:   true,
-			ResetJobs:         true,
-			AttemptOutcome:    db.AttemptOutcomeOrphaned,
+		// Yield to rule 4a-pause when the provider has paused the
+		// instance: a paused container stops writing heartbeats, so
+		// without this check the stale-agent watchdog would always
+		// fire first and we'd destroy paused-but-recoverable
+		// instances. on-demand instances can also be paused (credit
+		// low, host maintenance, abuse review), so this gate is not
+		// limited to interruptible types.
+		if p.ProviderInst == nil || !isPausedProviderStatus(p.ProviderInst.Status) {
+			return InstanceAction{
+				Kind:              ActionEmptyStatusTimeout,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("agent heartbeat stale for %s — terminating", p.HeartbeatAge.Truncate(time.Second)),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
 		}
 	}
 

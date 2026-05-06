@@ -851,6 +851,42 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 }
 
+// TestCheckInstance_StaleHeartbeatYieldsToPaused verifies that the
+// stale-heartbeat watchdog defers to the paused-provider rule: a
+// paused container stops writing heartbeats, so without this carve-out
+// rule 4a would always fire first and we'd destroy paused-but-
+// recoverable instances.
+func TestCheckInstance_StaleHeartbeatYieldsToPaused(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	agentReady := time.Now().Add(-25 * time.Minute).Unix()
+	for _, status := range []string{cloud.ProviderStatusStopped, cloud.ProviderStatusOffline} {
+		t.Run(status, func(t *testing.T) {
+			r := NewReconciler()
+			action := r.CheckInstance(CheckInstanceParams{
+				CI: &db.Launch{
+					ID:                 1,
+					Status:             db.LaunchStatusRunning,
+					LaunchedAt:         &launchedAt,
+					AgentReadyAtUnix:   &agentReady,
+					CreatedAt:          launchedAt,
+					ProviderInstanceID: "test-123",
+				},
+				ProviderInst:  &cloud.Instance{Status: status},
+				HeartbeatAge:  10 * time.Minute,
+				JobState:      JobState{HasStartedJob: true},
+				PauseTolerant: true,
+				Now:           time.Now(),
+			})
+			if action.Kind == ActionEmptyStatusTimeout {
+				t.Fatalf("provider status %q with stale heartbeat: rule 4a fired (terminating) instead of yielding to rule 4a-pause", status)
+			}
+			if action.Kind != ActionPause {
+				t.Fatalf("provider status %q: action.Kind = %d, want ActionPause", status, action.Kind)
+			}
+		})
+	}
+}
+
 // TestCheckInstance_FreshHeartbeatLeavesAlone verifies that a fresh
 // heartbeat keeps the instance running even if the provider list is
 // noisy.
