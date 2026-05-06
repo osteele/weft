@@ -861,34 +861,6 @@ func startFileUploader(bucket string, jobID int64, filePath, key, detail string)
 		<-stopped
 	}
 
-	upload := func() {
-		info, err := os.Stat(filePath)
-		if err != nil || info.Size() == 0 {
-			return
-		}
-
-		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		cmd := exec.CommandContext(ctx, "rclone", "copyto",
-			filePath, fmt.Sprintf("r2:%s/%s", bucket, key))
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		err = cmd.Run()
-		cancel()
-		if err != nil {
-			errDetail := fmt.Sprintf("%s size=%d", detail, info.Size())
-			if s := strings.TrimSpace(stderr.String()); s != "" {
-				errDetail += " stderr=" + s
-			}
-			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-				oplog.WithDetail(errDetail), oplog.WithError(err),
-				oplog.WithDuration(time.Since(start)))
-			return
-		}
-		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-			oplog.WithDetail(detail), oplog.WithDuration(time.Since(start)))
-	}
-
 	fatalAgentGo("file-uploader", func() {
 		defer close(stopped)
 		ticker := time.NewTicker(60 * time.Second)
@@ -897,15 +869,44 @@ func startFileUploader(bucket string, jobID int64, filePath, key, detail string)
 		for {
 			select {
 			case <-done:
-				upload()
+				uploadLiveFileSnapshot(bucket, jobID, filePath, key, detail)
 				return
 			case <-ticker.C:
-				upload()
+				uploadLiveFileSnapshot(bucket, jobID, filePath, key, detail)
 			}
 		}
 	})
 
 	return stop
+}
+
+func uploadLiveFileSnapshot(bucket string, jobID int64, filePath, key, detail string) {
+	data, err := os.ReadFile(filePath)
+	if err != nil || len(data) == 0 {
+		return
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	cmd := exec.CommandContext(ctx, "rclone", "rcat", fmt.Sprintf("r2:%s/%s", bucket, key))
+	cmd.Stdin = bytes.NewReader(data)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	cancel()
+	if err != nil {
+		errDetail := fmt.Sprintf("%s size=%d", detail, len(data))
+		if s := strings.TrimSpace(stderr.String()); s != "" {
+			errDetail += " stderr=" + s
+		}
+		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+			oplog.WithDetail(errDetail), oplog.WithError(err),
+			oplog.WithDuration(time.Since(start)))
+		return
+	}
+	oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+		oplog.WithDetail(fmt.Sprintf("%s size=%d snapshot=true", detail, len(data))),
+		oplog.WithDuration(time.Since(start)))
 }
 
 // syncString is a mutex-protected string for sharing phase state between goroutines.

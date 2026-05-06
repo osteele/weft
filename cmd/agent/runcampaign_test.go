@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,6 +32,58 @@ func TestRcloneTimeoutForBytes(t *testing.T) {
 				t.Errorf("rcloneTimeoutForBytes(%d) = %v; must exceed 5m for large files", tt.bytes, got)
 			}
 		})
+	}
+}
+
+func TestUploadLiveFileSnapshotUsesRcatFromSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "telemetry.jsonl")
+	want := "{\"event\":\"tick\"}\n"
+	if err := os.WriteFile(sourcePath, []byte(want), 0o644); err != nil {
+		t.Fatalf("write live file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake rclone bin dir: %v", err)
+	}
+	capturePath := filepath.Join(dir, "capture")
+	argsPath := filepath.Join(dir, "args")
+	rcloneScript := `#!/bin/sh
+printf '%s\n' "$*" > "$RCLONE_ARGS"
+if [ "$1" != "rcat" ]; then
+  echo "unexpected rclone command: $*" >&2
+  exit 1
+fi
+if [ "$2" != "r2:test-bucket/live/key.jsonl" ]; then
+  echo "unexpected rclone target: $2" >&2
+  exit 1
+fi
+cat > "$RCLONE_CAPTURE"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "rclone"), []byte(rcloneScript), 0o755); err != nil {
+		t.Fatalf("write fake rclone: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("RCLONE_ARGS", argsPath)
+	t.Setenv("RCLONE_CAPTURE", capturePath)
+
+	uploadLiveFileSnapshot("test-bucket", 123, sourcePath, "live/key.jsonl", "live telemetry")
+
+	got, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read captured rclone stdin: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("uploaded stdin = %q, want %q", got, want)
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read captured rclone args: %v", err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "rcat r2:test-bucket/live/key.jsonl" {
+		t.Fatalf("rclone args = %q, want rcat target", got)
 	}
 }
 
