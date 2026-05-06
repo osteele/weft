@@ -88,9 +88,47 @@ func TestResolveSpecs_ReturnsErrorWhenMissing(t *testing.T) {
 	prev := r2resolve.ObjectExistsFunc
 	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
 	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, _ string) (bool, error) { return false, nil }
+	prevList := r2resolve.ListRunIDsFunc
+	t.Cleanup(func() { r2resolve.ListRunIDsFunc = prevList })
+	r2resolve.ListRunIDsFunc = func(_ context.Context, _ *r2.Client, _ int64) ([]int64, error) { return nil, nil }
 
 	_, err = ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
 	if err == nil {
 		t.Fatal("expected missing artifact error")
+	}
+}
+
+func TestResolveSpecs_FallbackFindsArtifactUnderHistoricalRun(t *testing.T) {
+	database := db.SetupTestDB(t)
+	producerID, err := db.RecordQueued(database, "", "/tmp/project", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+
+	relPath := "output/model.pt"
+	spec := fmt.Sprintf("%s:%d", relPath, producerID)
+	const historicalRunID int64 = 22095
+	wantKey := r2keys.JobAttemptArtifactFilesPrefix(producerID, historicalRunID) + artifacts.LocalRelativePath(relPath)
+
+	prev := r2resolve.ObjectExistsFunc
+	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
+		return key == wantKey, nil
+	}
+	prevList := r2resolve.ListRunIDsFunc
+	t.Cleanup(func() { r2resolve.ListRunIDsFunc = prevList })
+	r2resolve.ListRunIDsFunc = func(_ context.Context, _ *r2.Client, jobID int64) ([]int64, error) {
+		if jobID != producerID {
+			return nil, nil
+		}
+		return []int64{historicalRunID}, nil
+	}
+
+	got, err := ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
+	if err != nil {
+		t.Fatalf("ResolveSpecs: %v", err)
+	}
+	if len(got) != 1 || got[0].R2Key != wantKey {
+		t.Fatalf("resolved = %+v, want r2_key=%q (run_id-mismatch fallback)", got, wantKey)
 	}
 }
