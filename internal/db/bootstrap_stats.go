@@ -173,6 +173,26 @@ func LatestBootstrapStageEnteredAt(database *sql.DB, launchID int64, stage strin
 	return enteredAt, nil
 }
 
+// HasBootstrapTransitions reports whether any bootstrap stage has been recorded
+// for a launch.
+func HasBootstrapTransitions(database *sql.DB, launchID int64) (bool, error) {
+	if database == nil || launchID <= 0 {
+		return false, nil
+	}
+	var exists int
+	err := database.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1
+			FROM bootstrap_transitions
+			WHERE launch_id = ?
+		)
+	`, launchID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists != 0, nil
+}
+
 // ConditionalMedian returns the estimated remaining bootstrap time given that
 // the bootstrap has already taken `elapsed`. It filters to instances that took
 // at least `elapsed`, computes their median total duration, and subtracts

@@ -869,14 +869,14 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 	}
 }
 
-// TestCheckInstance_DudVast_KillsWhenNoProbeAfterTimeout verifies the
-// dud-Vast watchdog: status=running for ≥dudVastTimeout with no
+// TestCheckInstance_DudProvider_KillsWhenNoProbeAfterTimeout verifies the
+// dud-provider watchdog: status=running for ≥dudVastTimeout with no
 // OnStart probe in R2 means the container never started, even though
-// Vast says it is. The OnStart probe arrival distribution is bimodal
+// the provider says it is. The OnStart probe arrival distribution is bimodal
 // (within ~60s OR never), so the timeout doesn't false-kill slow-but-
 // progressing launches; it cuts a binary host-level failure short
 // well below the adaptive bootstrap deadline (often 90+ min).
-func TestCheckInstance_DudVast_KillsWhenNoProbeAfterTimeout(t *testing.T) {
+func TestCheckInstance_DudProvider_KillsWhenNoProbeAfterTimeout(t *testing.T) {
 	now := time.Now()
 	launchedAt := now.Add(-dudVastTimeout - time.Minute).Unix()
 	r := NewReconciler()
@@ -894,17 +894,17 @@ func TestCheckInstance_DudVast_KillsWhenNoProbeAfterTimeout(t *testing.T) {
 	if action.Kind != ActionEmptyStatusTimeout {
 		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%q)", action.Kind, action.StallMessage)
 	}
-	if !strings.Contains(action.StallMessage, "dud Vast") {
-		t.Errorf("StallMessage = %q, want it to mention 'dud Vast'", action.StallMessage)
+	if !strings.Contains(action.StallMessage, "dud provider") {
+		t.Errorf("StallMessage = %q, want it to mention 'dud provider'", action.StallMessage)
 	}
 	if !action.ResetJobs {
 		t.Error("ResetJobs should be true so orphaned jobs requeue")
 	}
 }
 
-// TestCheckInstance_DudVast_QuietBeforeTimeout: pre-timeout window
+// TestCheckInstance_DudProvider_QuietBeforeTimeout: pre-timeout window
 // with no probe yet should leave the launch alone.
-func TestCheckInstance_DudVast_QuietBeforeTimeout(t *testing.T) {
+func TestCheckInstance_DudProvider_QuietBeforeTimeout(t *testing.T) {
 	now := time.Now()
 	launchedAt := now.Add(-dudVastTimeout / 2).Unix()
 	r := NewReconciler()
@@ -919,15 +919,15 @@ func TestCheckInstance_DudVast_QuietBeforeTimeout(t *testing.T) {
 		OnStartProbePresent: false,
 		Now:                 now,
 	})
-	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud Vast") {
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
 		t.Fatalf("dud watchdog fired early: %q", action.StallMessage)
 	}
 }
 
-// TestCheckInstance_DudVast_QuietWhenProbeLanded verifies the probe-
+// TestCheckInstance_DudProvider_QuietWhenProbeLanded verifies the probe-
 // present case bypasses the watchdog: OnStart did execute and we
 // trust the bootstrap-deadline machinery for any later stall.
-func TestCheckInstance_DudVast_QuietWhenProbeLanded(t *testing.T) {
+func TestCheckInstance_DudProvider_QuietWhenProbeLanded(t *testing.T) {
 	now := time.Now()
 	launchedAt := now.Add(-30 * time.Minute).Unix()
 	r := NewReconciler()
@@ -942,8 +942,29 @@ func TestCheckInstance_DudVast_QuietWhenProbeLanded(t *testing.T) {
 		OnStartProbePresent: true,
 		Now:                 now,
 	})
-	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud Vast") {
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
 		t.Fatalf("dud watchdog fired despite probe present: %q", action.StallMessage)
+	}
+}
+
+func TestCheckInstance_DudProvider_QuietWhenBootstrapActivitySeen(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-progress",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   false,
+		BootstrapActivitySeen: true,
+		Now:                   now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
+		t.Fatalf("dud watchdog fired despite historical bootstrap activity: %q", action.StallMessage)
 	}
 }
 

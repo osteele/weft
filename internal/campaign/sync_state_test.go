@@ -370,3 +370,234 @@ func TestSyncInstanceState_ReconcilesDisplayPhaseFromDBAndR2(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncInstanceState_ExtendsBootstrapDeadlineFromFirstStage(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "runpod",
+		GPUSpec:  "RTX_A6000",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	pastDeadline := time.Now().Add(-time.Minute)
+	if err := db.SetLaunchBootstrapDeadline(database, instanceID, pastDeadline); err != nil {
+		t.Fatalf("set bootstrap deadline: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "agent_starting" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	before := time.Now()
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if synced.BootstrapStage != "agent_starting" {
+		t.Fatalf("BootstrapStage = %q, want agent_starting", synced.BootstrapStage)
+	}
+	if ci.BootstrapDeadlineUnix == nil {
+		t.Fatal("BootstrapDeadlineUnix is nil")
+	}
+	if got := time.Unix(*ci.BootstrapDeadlineUnix, 0); got.Before(before.Add(10 * time.Minute)) {
+		t.Fatalf("BootstrapDeadlineUnix = %s, want deadline extended from first stage", got)
+	}
+
+	stored, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if stored.BootstrapDeadlineUnix == nil || *stored.BootstrapDeadlineUnix != *ci.BootstrapDeadlineUnix {
+		t.Fatalf("stored deadline = %v, want %v", stored.BootstrapDeadlineUnix, ci.BootstrapDeadlineUnix)
+	}
+}
+
+func TestSyncInstanceState_DoesNotExtendBootstrapDeadlineAfterStageAlreadySeen(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "runpod",
+		GPUSpec:  "RTX_A6000",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	pastDeadline := time.Now().Add(-time.Minute)
+	if err := db.SetLaunchBootstrapDeadline(database, instanceID, pastDeadline); err != nil {
+		t.Fatalf("set bootstrap deadline: %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:       instanceID,
+		BootstrapStage: "agent_starting",
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "agent_starting" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if ci.BootstrapDeadlineUnix == nil || *ci.BootstrapDeadlineUnix != pastDeadline.Unix() {
+		t.Fatalf("BootstrapDeadlineUnix = %v, want unchanged %d", ci.BootstrapDeadlineUnix, pastDeadline.Unix())
+	}
+}
+
+func TestSyncInstanceState_ExtendsBootstrapDeadlineFromLaterStageProgress(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "runpod",
+		GPUSpec:  "RTX_A6000",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:       instanceID,
+		BootstrapStage: "agent_starting",
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+	pastDeadline := time.Now().Add(-time.Minute)
+	if err := db.SetLaunchBootstrapDeadline(database, instanceID, pastDeadline); err != nil {
+		t.Fatalf("set bootstrap deadline: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "sources_extracted" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	before := time.Now()
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if synced.BootstrapStage != "sources_extracted" {
+		t.Fatalf("BootstrapStage = %q, want sources_extracted", synced.BootstrapStage)
+	}
+	if ci.BootstrapDeadlineUnix == nil {
+		t.Fatal("BootstrapDeadlineUnix is nil")
+	}
+	if got := time.Unix(*ci.BootstrapDeadlineUnix, 0); got.Before(before.Add(10 * time.Minute)) {
+		t.Fatalf("BootstrapDeadlineUnix = %s, want deadline extended from later bootstrap progress", got)
+	}
+}
+
+func TestSyncInstanceState_RemembersBootstrapActivityAcrossEmptyFetch(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "runpod",
+		GPUSpec:  "RTX_A6000",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:       instanceID,
+		BootstrapStage: "sources_extracting:0/1",
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if synced.BootstrapStage != "" {
+		t.Fatalf("BootstrapStage = %q, want empty current fetch", synced.BootstrapStage)
+	}
+	if !synced.BootstrapActivitySeen {
+		t.Fatal("BootstrapActivitySeen = false, want true from prior cached stage")
+	}
+	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+	if !params.BootstrapActivitySeen {
+		t.Fatal("CheckParams BootstrapActivitySeen = false, want true")
+	}
+}

@@ -2188,7 +2188,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 	}
 }
 
-const recentLaunchFailureWindow = 30 * time.Minute
+const recentLaunchFailureWindow = 24 * time.Hour
 
 func loadLaunchingStageETA(database *sql.DB, jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) (map[string]groupedStatusLaunchingStageETA, map[int64]int64) {
 	stageByName := make(map[string]groupedStatusLaunchingStageETA)

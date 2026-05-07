@@ -194,10 +194,16 @@ type CheckInstanceParams struct {
 	// OnStartProbePresent is true when the OnStart script's first-line
 	// probe (a curl PUT to the presigned URL) has landed in R2. The
 	// probe is the earliest evidence the container actually executed
-	// OnStart with outbound network. Used by the dud-Vast watchdog
-	// (rule 4d) to distinguish "Vast says running but container never
+	// OnStart with outbound network. Used by the dud-provider watchdog
+	// (rule 4d) to distinguish "provider says running but container never
 	// started" from "container running, OnStart in flight".
 	OnStartProbePresent bool
+
+	// BootstrapActivitySeen is true when current or historical bootstrap
+	// stage data exists for the launch. It protects the dud-provider
+	// watchdog from false-firing on transient empty R2 reads after
+	// bootstrap has already shown progress.
+	BootstrapActivitySeen bool
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -337,16 +343,8 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 
 	// 4a. Stale-agent watchdog. Heartbeat-first liveness: an agent that
 	// reached ready and then stopped writing heartbeats is functionally
-	// dead regardless of what the provider's list endpoint says.
-	//
-	// Why we no longer gate on provider list: Vast.ai's list endpoint
-	// reports both false negatives (omits live instances during
-	// transient API gaps — observed killing wi2329/2331/2332 on
-	// 2026-05-05) and stale positives (keeps reporting destroyed
-	// instances briefly). Treating "missing from list" as evidence of
-	// death cost us 25 minutes per false-kill and poisoned survival
-	// stats. Heartbeat presence/absence in R2, controlled directly by
-	// the agent, is a strictly stronger signal.
+	// dead. Provider liveness is handled by separate rules because provider
+	// list results can be stale or temporarily incomplete.
 	//
 	// Cases not covered here:
 	//   - Bootstrap-never-completed (no agent_ready_at_unix ever set):
@@ -462,10 +460,10 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 4d. Dud-Vast detection. Vast reports the rental as `running`
+	// 4d. Dud-provider detection. The provider reports the rental as `running`
 	// (LaunchedAt is set), but no agent activity has appeared in R2
 	// after dudVastTimeout: no OnStart probe, no heartbeat, no phase,
-	// no bootstrap stage. This is a host-level binary failure
+	// no current or historical bootstrap stage. This is a host-level binary failure
 	// signature (zombie offer, wedged docker daemon, image-pull block)
 	// and would otherwise wait the full adaptive bootstrap deadline
 	// (often 90+ min). The full conjunction is intentional: any single
@@ -476,6 +474,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		ci.LaunchedAt != nil && *ci.LaunchedAt > 0 &&
 		ci.AgentReadyAtUnix == nil &&
 		!p.OnStartProbePresent &&
+		!p.BootstrapActivitySeen &&
 		p.HeartbeatAge == 0 &&
 		p.InstancePhase == "" &&
 		p.BootstrapStage == "" {
@@ -485,7 +484,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.LaunchStatusFailed,
 				TerminationReason: db.TerminationReasonInfraFailure,
-				StallMessage:      fmt.Sprintf("dud Vast: %s post-running with no agent activity — terminating instance, jobs reset to queued", p.Now.Sub(runningAt).Truncate(time.Second)),
+				StallMessage:      fmt.Sprintf("dud provider: %s post-running with no agent activity — terminating instance, jobs reset to queued", p.Now.Sub(runningAt).Truncate(time.Second)),
 				DestroyProvider:   true,
 				ResetJobs:         true,
 				AttemptOutcome:    db.AttemptOutcomeOrphaned,

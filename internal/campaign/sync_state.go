@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,18 +28,19 @@ var (
 // SyncedState holds the observation state collected from R2 and the provider,
 // persisted to launch_live_state, and returned for immediate use.
 type SyncedState struct {
-	RawInstancePhase  string
-	InstancePhase     string
-	BootstrapStage    string
-	HeartbeatAge      time.Duration
-	Heartbeat         *HeartbeatSample
-	JobProgress       int // 0-100, or -1 if unavailable
-	JobProgressID     int64
-	JobProgressPhase  int // 1-based phase number (0 = unknown)
-	TerminationIntent *instanceintent.Marker
-	AgentVersion      string
-	PhaseChangedAt    *time.Time
-	JobsUpdated       int // count of job status transitions (e.g. queued→running)
+	RawInstancePhase      string
+	InstancePhase         string
+	BootstrapStage        string
+	HeartbeatAge          time.Duration
+	Heartbeat             *HeartbeatSample
+	JobProgress           int // 0-100, or -1 if unavailable
+	JobProgressID         int64
+	JobProgressPhase      int // 1-based phase number (0 = unknown)
+	TerminationIntent     *instanceintent.Marker
+	AgentVersion          string
+	PhaseChangedAt        *time.Time
+	BootstrapActivitySeen bool
+	JobsUpdated           int // count of job status transitions (e.g. queued→running)
 }
 
 // SyncInstanceStateOpts configures optional behaviors for SyncInstanceState.
@@ -233,6 +235,21 @@ func SyncInstanceState(
 		}
 		hbTS = s.Heartbeat.Ts
 	}
+	previousBootstrapStage := ""
+	live, err := db.GetLaunchLiveState(database, ci.ID)
+	if err != nil {
+		slog.Warn("read launch live state", "component", "sync", "instance", instanceID, "error", err)
+	} else if live != nil {
+		previousBootstrapStage = strings.TrimSpace(live.BootstrapStage)
+	}
+	s.BootstrapActivitySeen = previousBootstrapStage != "" || strings.TrimSpace(s.BootstrapStage) != ""
+	if !s.BootstrapActivitySeen {
+		seen, err := db.HasBootstrapTransitions(database, ci.ID)
+		if err != nil {
+			slog.Warn("check bootstrap transitions", "component", "sync", "instance", instanceID, "error", err)
+		}
+		s.BootstrapActivitySeen = seen
+	}
 	phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
 		LaunchID:         instanceID,
 		InstancePhase:    s.InstancePhase,
@@ -248,8 +265,45 @@ func SyncInstanceState(
 		t := time.Unix(*phaseChangedAt, 0)
 		s.PhaseChangedAt = &t
 	}
+	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
 
 	return s
+}
+
+func extendBootstrapDeadlineFromProgress(database *sql.DB, ci *db.Launch, stage string, previousStage string) {
+	stage = strings.TrimSpace(stage)
+	if database == nil || ci == nil || ci.ID <= 0 || stage == "" || stage == bootstrapStageReady || ci.AgentReadyAtUnix != nil {
+		return
+	}
+	if stage == strings.TrimSpace(previousStage) {
+		return
+	}
+	stageEnteredAt, err := db.LatestBootstrapStageEnteredAt(database, ci.ID, stage)
+	if err != nil {
+		slog.Warn("read latest bootstrap stage transition", "component", "sync", "instance", ci.ID, "stage", stage, "error", err)
+		return
+	}
+	if stageEnteredAt <= 0 {
+		return
+	}
+
+	timeout := BootstrapTerminateTimeout
+	if survival, err := db.ComputeBootstrapSurvival(database, ci.Provider); err != nil {
+		slog.Debug("compute bootstrap survival deadline", "component", "sync", "instance", ci.ID, "provider", ci.Provider, "error", err)
+	} else if survival != nil && survival.TerminateAfter > 0 {
+		timeout = survival.TerminateAfter
+	}
+
+	deadline := time.Unix(stageEnteredAt, 0).Add(timeout)
+	if ci.BootstrapDeadlineUnix != nil && *ci.BootstrapDeadlineUnix >= deadline.Unix() {
+		return
+	}
+	if err := db.SetLaunchBootstrapDeadline(database, ci.ID, deadline); err != nil {
+		slog.Warn("extend bootstrap deadline", "component", "sync", "instance", ci.ID, "stage", stage, "error", err)
+		return
+	}
+	deadlineUnix := deadline.Unix()
+	ci.BootstrapDeadlineUnix = &deadlineUnix
 }
 
 // CheckParams builds CheckInstanceParams from synced state and caller-provided context.
@@ -257,15 +311,16 @@ func SyncInstanceState(
 // and SetupSurvival on the returned params.
 func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState JobState, now time.Time) CheckInstanceParams {
 	return CheckInstanceParams{
-		CI:                ci,
-		R2Client:          r2Client,
-		JobState:          jobState,
-		InstancePhase:     s.InstancePhase,
-		BootstrapStage:    s.BootstrapStage,
-		HeartbeatAge:      s.HeartbeatAge,
-		Heartbeat:         s.Heartbeat,
-		Now:               now,
-		TerminationIntent: s.TerminationIntent,
-		PhaseChangedAt:    s.PhaseChangedAt,
+		CI:                    ci,
+		R2Client:              r2Client,
+		JobState:              jobState,
+		InstancePhase:         s.InstancePhase,
+		BootstrapStage:        s.BootstrapStage,
+		HeartbeatAge:          s.HeartbeatAge,
+		Heartbeat:             s.Heartbeat,
+		Now:                   now,
+		TerminationIntent:     s.TerminationIntent,
+		PhaseChangedAt:        s.PhaseChangedAt,
+		BootstrapActivitySeen: s.BootstrapActivitySeen,
 	}
 }
