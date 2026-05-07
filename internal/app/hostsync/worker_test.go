@@ -42,6 +42,39 @@ func TestGetHostSyncRateUsesEffectiveStatus(t *testing.T) {
 	}
 }
 
+func TestGetHostSyncModePromotesUnsyncedQueuedInventoryJob(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Host: "test-host", Status: db.StatusQueued},
+	}
+
+	if got := GetHostSyncMode(jobs); got != ops.SyncModeFull {
+		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeFull)
+	}
+}
+
+func TestGetHostSyncModeKeepsStatusForAlreadyDispatchedQueuedJob(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Host: "test-host", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued},
+	}
+
+	if got := GetHostSyncMode(jobs); got != ops.SyncModeStatus {
+		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeStatus)
+	}
+}
+
+func TestGetHostSyncModeIgnoresJobsThatCannotBeDispatched(t *testing.T) {
+	pending := db.StatusCanceled
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued},
+		{ID: 2, Host: "vastai:123", Status: db.StatusQueued},
+		{ID: 3, Host: "test-host", Status: db.StatusQueued, PendingStatus: &pending},
+	}
+
+	if got := GetHostSyncMode(jobs); got != ops.SyncModeStatus {
+		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeStatus)
+	}
+}
+
 func TestBuildWarning(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -622,3 +622,22 @@ func GetHostSyncRate(jobs []*db.Job) SyncRate {
 	}
 	return RateIdle
 }
+
+// GetHostSyncMode returns the least expensive sync mode that can make progress
+// for the host jobs currently visible to a UI.
+func GetHostSyncMode(jobs []*db.Job) ops.SyncMode {
+	for _, job := range jobs {
+		if needsQueuedDispatchSync(job) {
+			return ops.SyncModeFull
+		}
+	}
+	return ops.SyncModeStatus
+}
+
+func needsQueuedDispatchSync(job *db.Job) bool {
+	return job != nil &&
+		job.HasInventoryHost() &&
+		job.Status == db.StatusQueued &&
+		job.PendingStatus == nil &&
+		job.LastSyncedStatus != db.StatusQueued
+}

@@ -36,6 +36,10 @@ func GetHostSyncRate(jobs []*db.Job) SyncRate {
 	return hostsync.GetHostSyncRate(jobs)
 }
 
+func GetHostSyncMode(jobs []*db.Job) ops.SyncMode {
+	return hostsync.GetHostSyncMode(jobs)
+}
+
 func buildSyncWarning(result ops.HostSyncResult) string {
 	return hostsync.BuildWarning(result)
 }
@@ -63,7 +67,7 @@ func (m *Model) requestSyncsForActiveHosts() {
 		m.syncWorker.Request(SyncRequest{
 			Host: host,
 			Rate: rate,
-			Mode: ops.SyncModeStatus,
+			Mode: GetHostSyncMode(jobs),
 		})
 	}
 

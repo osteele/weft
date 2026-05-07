@@ -304,6 +304,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		sw.Request(hostsync.Request{
 			Host: host.Name,
 			Rate: hostsync.GetHostSyncRate(host.Jobs),
+			Mode: hostsync.GetHostSyncMode(host.Jobs),
 		})
 	}
 

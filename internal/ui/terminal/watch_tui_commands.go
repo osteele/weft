@@ -385,6 +385,7 @@ func (m watchModel) requestOnPremSyncs() {
 		m.syncWorker.Request(hostsync.Request{
 			Host: host,
 			Rate: hostsync.GetHostSyncRate(hostJobs),
+			Mode: hostsync.GetHostSyncMode(hostJobs),
 		})
 	}
 }
@@ -701,6 +702,7 @@ func (m watchModel) requestProjectActiveSyncs() {
 		m.syncWorker.Request(hostsync.Request{
 			Host: host,
 			Rate: hostsync.GetHostSyncRate(jobs),
+			Mode: hostsync.GetHostSyncMode(jobs),
 		})
 	}
 }

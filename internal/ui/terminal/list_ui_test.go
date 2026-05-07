@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/ops"
 )
 
 func TestRenderJobListPlainTruncatesToWidth(t *testing.T) {
@@ -138,6 +139,26 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 	if got.jobs[0].ID != 2 {
 		t.Fatalf("first job ID = %d, want 2", got.jobs[0].ID)
+	}
+}
+
+func TestListHostSyncRequestPromotesUnsyncedQueuedInventoryJobs(t *testing.T) {
+	req := listHostSyncRequest("cool30", []*db.Job{
+		{ID: 1811, Host: "cool30", Status: db.StatusQueued},
+	})
+
+	if req.Mode != ops.SyncModeFull {
+		t.Fatalf("request mode = %q, want %q", req.Mode, ops.SyncModeFull)
+	}
+}
+
+func TestListHostSyncRequestKeepsStatusModeForDispatchedQueuedJobs(t *testing.T) {
+	req := listHostSyncRequest("cool30", []*db.Job{
+		{ID: 1811, Host: "cool30", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued},
+	})
+
+	if req.Mode != ops.SyncModeStatus {
+		t.Fatalf("request mode = %q, want %q", req.Mode, ops.SyncModeStatus)
 	}
 }
 

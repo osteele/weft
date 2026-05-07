@@ -605,6 +605,7 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 		m.syncWorker.Request(hostsync.Request{
 			Host: host.Name,
 			Rate: hostsync.GetHostSyncRate(host.Jobs),
+			Mode: hostsync.GetHostSyncMode(host.Jobs),
 		})
 	}
 	m.clampCursor()

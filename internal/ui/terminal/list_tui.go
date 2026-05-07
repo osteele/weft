@@ -2371,10 +2371,15 @@ func (m listTUIModel) requestActiveSyncs() {
 	}
 	for host, jobs := range hosts {
 		m.pendingSyncHosts[host] = struct{}{}
-		m.syncWorker.Request(hostsync.Request{
-			Host: host,
-			Rate: hostsync.GetHostSyncRate(jobs),
-		})
+		m.syncWorker.Request(listHostSyncRequest(host, jobs))
+	}
+}
+
+func listHostSyncRequest(host string, jobs []*db.Job) hostsync.Request {
+	return hostsync.Request{
+		Host: host,
+		Rate: hostsync.GetHostSyncRate(jobs),
+		Mode: hostsync.GetHostSyncMode(jobs),
 	}
 }
 
