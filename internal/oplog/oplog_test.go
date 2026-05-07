@@ -245,3 +245,46 @@ func TestNoopLoggerBeforeInit(t *testing.T) {
 	// Close should also be safe
 	Close()
 }
+
+func TestAppendSyncedInstanceLog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const id = int64(7100)
+
+	// First write: file should not exist yet.
+	if size, err := SyncedInstanceLogSize(id); err != nil || size != 0 {
+		t.Fatalf("initial size = (%d, %v), want (0, nil)", size, err)
+	}
+
+	// Append once.
+	size, err := AppendSyncedInstanceLog(id, []byte("first\n"))
+	if err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if size != int64(len("first\n")) {
+		t.Errorf("after first append size=%d, want %d", size, len("first\n"))
+	}
+
+	// Append again — should be additive, not a rewrite.
+	size, err = AppendSyncedInstanceLog(id, []byte("second\n"))
+	if err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	want := int64(len("first\nsecond\n"))
+	if size != want {
+		t.Errorf("after second append size=%d, want %d", size, want)
+	}
+
+	// Empty append: no error, size unchanged.
+	size, err = AppendSyncedInstanceLog(id, nil)
+	if err != nil {
+		t.Fatalf("empty append: %v", err)
+	}
+	if size != want {
+		t.Errorf("after empty append size=%d, want %d", size, want)
+	}
+
+	// SyncedInstanceLogSize should match.
+	if got, err := SyncedInstanceLogSize(id); err != nil || got != want {
+		t.Errorf("SyncedInstanceLogSize = (%d, %v), want (%d, nil)", got, err, want)
+	}
+}

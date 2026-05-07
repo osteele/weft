@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 )
 
 // Client wraps an S3-compatible client configured for Cloudflare R2.
@@ -321,6 +322,54 @@ func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
 	}
 	defer resp.Close()
 	return io.ReadAll(resp)
+}
+
+// GetObjectRange retrieves bytes from `fromOffset` to the end of the
+// object via an HTTP Range request. Used by the opslog sync to pull only
+// the new tail of an append-only JSONL — the alternative (refetching the
+// whole file every pass for an active rental) consistently exceeded the
+// 10s per-object timeout for long-running instances and failed every
+// pass with no data exchanged.
+//
+// fromOffset must be non-negative. If fromOffset == size, R2 returns
+// 416 InvalidRange (treated as ErrRangeNotSatisfiable so callers can
+// short-circuit). If fromOffset > size (cache survived a server-side
+// rewrite), the same error fires; callers should fall back to
+// GetObject for a full refresh.
+func (c *Client) GetObjectRange(ctx context.Context, key string, fromOffset int64) ([]byte, error) {
+	if fromOffset < 0 {
+		return nil, fmt.Errorf("get object range %s: negative offset %d", key, fromOffset)
+	}
+	rangeHeader := fmt.Sprintf("bytes=%d-", fromOffset)
+	resp, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(rangeHeader),
+	})
+	if err != nil {
+		if isS3InvalidRange(err) {
+			return nil, ErrRangeNotSatisfiable
+		}
+		return nil, fmt.Errorf("get object range %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+// ErrRangeNotSatisfiable signals that the requested byte range starts at
+// or past the end of the object. Used by GetObjectRange so callers can
+// distinguish "no new bytes" from network errors.
+var ErrRangeNotSatisfiable = errors.New("requested byte range not satisfiable")
+
+func isS3InvalidRange(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "InvalidRange", "RequestedRangeNotSatisfiable":
+			return true
+		}
+	}
+	return false
 }
 
 // GetObjectWithMeta retrieves both the body and the object's LastModified

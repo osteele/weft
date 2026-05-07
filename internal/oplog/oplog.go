@@ -405,12 +405,53 @@ func SyncedInstanceLogPath(instanceID int64) string {
 	return filepath.Join(SyncedInstanceLogDir(), fmt.Sprintf("%d.jsonl", instanceID))
 }
 
-// WriteSyncedInstanceLog stores a cached copy of an instance ops log.
+// WriteSyncedInstanceLog stores a cached copy of an instance ops log,
+// overwriting any existing file. Used for the initial sync and any
+// fall-back when the server-side log was rewritten.
 func WriteSyncedInstanceLog(instanceID int64, data []byte) error {
 	if err := os.MkdirAll(SyncedInstanceLogDir(), 0755); err != nil {
 		return fmt.Errorf("create synced ops log dir: %w", err)
 	}
 	return os.WriteFile(SyncedInstanceLogPath(instanceID), data, 0644)
+}
+
+// AppendSyncedInstanceLog appends bytes to the cached opslog. Returns
+// the cache file's size after the append (used by the caller as the
+// next byte offset for the following sync). Creates the file if it
+// doesn't exist yet.
+func AppendSyncedInstanceLog(instanceID int64, data []byte) (int64, error) {
+	if err := os.MkdirAll(SyncedInstanceLogDir(), 0755); err != nil {
+		return 0, fmt.Errorf("create synced ops log dir: %w", err)
+	}
+	path := SyncedInstanceLogPath(instanceID)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return 0, fmt.Errorf("open synced ops log %s: %w", path, err)
+	}
+	defer f.Close()
+	if len(data) > 0 {
+		if _, err := f.Write(data); err != nil {
+			return 0, fmt.Errorf("append synced ops log: %w", err)
+		}
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat synced ops log: %w", err)
+	}
+	return info.Size(), nil
+}
+
+// SyncedInstanceLogSize returns the byte length of the cached opslog,
+// or (0, nil) if the file doesn't exist yet.
+func SyncedInstanceLogSize(instanceID int64) (int64, error) {
+	info, err := os.Stat(SyncedInstanceLogPath(instanceID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 // ListSyncedInstanceLogPaths returns cached instance ops log paths.

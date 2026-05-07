@@ -735,9 +735,41 @@ func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceI
 	if r2Client == nil || instanceID <= 0 {
 		return opslogNotFound, nil
 	}
+	key := r2keys.InstanceOpslog(instanceID)
+	cacheSize, _ := oplog.SyncedInstanceLogSize(instanceID)
+	if cacheSize > 0 {
+		// Incremental: pull only the bytes appended since the last sync.
+		// For active rentals the full opslog grows continuously past
+		// what fits in the per-fetch budget; the delta is small.
+		reqCtx, cancel := context.WithTimeout(ctx, opslogRequestTimeout)
+		data, err := r2Client.GetObjectRange(reqCtx, key, cacheSize)
+		cancel()
+		switch {
+		case err == nil:
+			if _, appendErr := oplog.AppendSyncedInstanceLog(instanceID, data); appendErr != nil {
+				return opslogError, fmt.Errorf("append cached ops log: %w", appendErr)
+			}
+			return opslogSynced, nil
+		case errors.Is(err, r2.ErrRangeNotSatisfiable):
+			// 416 happens when offset == size (no new bytes) and when
+			// offset > size (server log truncated/rewritten). The
+			// no-new-bytes case is the steady state for an active
+			// rental and dominates by orders of magnitude — short-
+			// circuit it. The truncation case leaves the cache stale
+			// until the next non-empty append catches us up; we
+			// accept that for the active loop and let the periodic
+			// terminal-launch fetch (which always full-GETs) repair
+			// stale caches when the launch ends.
+			return opslogSynced, nil
+		case r2.IsNotFound(err):
+			return opslogNotFound, nil
+		default:
+			return opslogError, fmt.Errorf("get instance ops log range: %w", err)
+		}
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, opslogRequestTimeout)
 	defer cancel()
-	data, err := r2Client.GetObject(reqCtx, r2keys.InstanceOpslog(instanceID))
+	data, err := r2Client.GetObject(reqCtx, key)
 	if err != nil {
 		if r2.IsNotFound(err) {
 			return opslogNotFound, nil
