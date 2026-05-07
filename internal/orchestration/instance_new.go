@@ -318,7 +318,7 @@ func waitForLaunchedInstanceReady(
 					return instanceID, nil
 				}
 				if campaign.IsInstanceTerminal(launch.Status) {
-					return 0, fmt.Errorf("instance %s ended before agent_ready (%s)", ids.FormatInstanceID(instanceID), launch.Status)
+					return 0, newInstanceEndedBeforeReadyError(instanceID, launch)
 				}
 			}
 		}
@@ -341,6 +341,22 @@ func waitForLaunchedInstanceReady(
 		case <-ticker.C:
 		}
 	}
+}
+
+func newInstanceEndedBeforeReadyError(instanceID int64, launch *db.Launch) error {
+	status := ""
+	if launch != nil {
+		status = launch.Status
+	}
+	base := fmt.Sprintf("instance %s ended before agent_ready (%s)", ids.FormatInstanceID(instanceID), status)
+	if launch == nil {
+		return fmt.Errorf("%s", base)
+	}
+	detail := strings.TrimSpace(launch.DisplayTerminationReason())
+	if detail == "" || detail == status {
+		return fmt.Errorf("%s", base)
+	}
+	return fmt.Errorf("%s: %s", base, detail)
 }
 
 func clientsAsAny(clients []cloud.Client) []any {
