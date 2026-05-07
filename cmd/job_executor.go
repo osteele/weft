@@ -191,6 +191,9 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if opts.GPUMemMaxGB != nil {
 		gpuMemMaxGB = opts.GPUMemMaxGB
 	}
+	if err := validatePinnedHostQueueGate(opts.Host, opts.GPUClass, gpuMemGB); err != nil {
+		return nil, err
+	}
 
 	params := ops.QueueJobParams{
 		Host:        opts.Host,

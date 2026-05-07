@@ -147,6 +147,35 @@ func TestScoreHosts_GPUMemory(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_GPUClassAndMemoryMustMatchSameDevice(t *testing.T) {
+	db := setupTestDB(t)
+	hosts := []inventory.HostSpec{
+		{
+			Name: "split-host",
+			GPUs: []inventory.GPUSpec{
+				{Name: "A100 16GB", Class: "a100", Memory: "16GB", Indices: []int{0}},
+				{Name: "RTX 3090", Class: "rtx3090", Memory: "24GB", Indices: []int{1}},
+			},
+		},
+		{
+			Name: "matching-host",
+			GPUs: []inventory.GPUSpec{
+				{Name: "A100 80GB", Class: "a100", Memory: "80GB", Indices: []int{0}},
+			},
+		},
+	}
+
+	scores := ScoreHostListWithMetrics(db, hosts, Constraints{GPUClass: "a100", GPUMemGB: 24}, nil)
+	split := findScore(scores, "split-host")
+	if split.Eligible {
+		t.Fatalf("split-host should be ineligible when class and memory match different GPUs; reasons=%v", split.Reasons)
+	}
+	matching := findScore(scores, "matching-host")
+	if !matching.Eligible {
+		t.Fatalf("matching-host should be eligible, reasons=%v", matching.Reasons)
+	}
+}
+
 func TestScoreHosts_GPUMemOnly_UsesGPUScoring(t *testing.T) {
 	db := setupTestDB(t)
 	// When only GPUMemGB is set (no GPUClass), scoring should use GPU performance
@@ -420,6 +449,10 @@ func TestParseMemGB(t *testing.T) {
 		{"24GB", 24},
 		{"11GB", 11},
 		{"96GB", 96},
+		{"24576MiB", 24},
+		{"16384MiB", 16},
+		{"49152MB", 49},
+		{"24.5GB", 24},
 		{"0GB", 0},
 	}
 	for _, tt := range tests {

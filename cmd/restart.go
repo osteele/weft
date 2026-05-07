@@ -464,7 +464,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err != nil {
 			return err
 		}
-		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass); err != nil {
+		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass, job.GPUMemGB); err != nil {
 			return err
 		}
 		queuedEnded := job.EndTime != nil && *job.EndTime > 0
@@ -531,7 +531,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if err != nil {
 		return err
 	}
-	if err := validatePinnedHostQueueGate(job.Host, job.GPUClass); err != nil {
+	if err := validatePinnedHostQueueGate(job.Host, job.GPUClass, job.GPUMemGB); err != nil {
 		return err
 	}
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 )
 
 func mustCreateLaunch(t *testing.T, database *sql.DB) int64 {
@@ -286,4 +287,116 @@ func TestJobIDsWithOpenMoveIntents(t *testing.T) {
 	if _, ok := got[300]; ok {
 		t.Errorf("job 300 should not be in open set")
 	}
+}
+
+func TestPruneMoveIntents(t *testing.T) {
+	t.Run("stale new target without launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:      100,
+			TargetKind: MoveTargetNew,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-10*time.Minute).Unix(), intent.ID); err != nil {
+			t.Fatalf("age intent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0].ID != intent.ID {
+			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+		}
+		got, err := GetMoveIntent(database, intent.ID)
+		if err != nil {
+			t.Fatalf("GetMoveIntent: %v", err)
+		}
+		if got.State != MoveIntentStateCanceled || got.Resolution != MoveIntentResolutionStale {
+			t.Fatalf("intent = (%s, %q), want canceled stale", got.State, got.Resolution)
+		}
+	})
+
+	t.Run("keeps fresh unlaunched move", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:      100,
+			TargetKind: MoveTargetNew,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 0 {
+			t.Fatalf("pruned = %+v, want none", pruned)
+		}
+		got, err := GetMoveIntent(database, intent.ID)
+		if err != nil {
+			t.Fatalf("GetMoveIntent: %v", err)
+		}
+		if got.State != MoveIntentStateOpen {
+			t.Fatalf("state = %s, want open", got.State)
+		}
+	})
+
+	t.Run("keeps live target launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+		target := mustCreateLaunch(t, database)
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:          100,
+			TargetKind:     MoveTargetNew,
+			TargetLaunchID: &target,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-10*time.Minute).Unix(), intent.ID); err != nil {
+			t.Fatalf("age intent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 0 {
+			t.Fatalf("pruned = %+v, want none", pruned)
+		}
+	})
+
+	t.Run("prunes terminal target launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+		target, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:          100,
+			TargetKind:     MoveTargetNew,
+			TargetLaunchID: &target,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-10*time.Minute).Unix(), intent.ID); err != nil {
+			t.Fatalf("age intent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0].ID != intent.ID {
+			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+		}
+	})
 }

@@ -17,7 +17,7 @@ func TestValidatePinnedHostQueueGateRejectsDeterministicMismatch(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	err := validatePinnedHostQueueGate("cool30", "ampere+")
+	err := validatePinnedHostQueueGate("cool30", "ampere+", nil)
 	if err == nil {
 		t.Fatal("expected deterministic mismatch to be rejected")
 	}
@@ -32,7 +32,7 @@ func TestValidatePinnedHostQueueGateAllowsUnknownHostData(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	if err := validatePinnedHostQueueGate("cool30", "ampere+"); err != nil {
+	if err := validatePinnedHostQueueGate("cool30", "ampere+", nil); err != nil {
 		t.Fatalf("expected unknown host GPU data to pass, got %v", err)
 	}
 }
@@ -48,7 +48,28 @@ func TestValidatePinnedHostQueueGateAllowsMatchingHost(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	if err := validatePinnedHostQueueGate("cool30", "ampere+"); err != nil {
+	if err := validatePinnedHostQueueGate("cool30", "ampere+", nil); err != nil {
 		t.Fatalf("expected matching host to pass, got %v", err)
+	}
+}
+
+func TestValidatePinnedHostQueueGateRejectsInsufficientMemory(t *testing.T) {
+	restore := inventory.SetHosts([]inventory.HostSpec{
+		{
+			Name: "cool30",
+			GPUs: []inventory.GPUSpec{
+				{Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24576MiB", Indices: []int{0}},
+			},
+		},
+	})
+	t.Cleanup(restore)
+
+	mem := 26
+	err := validatePinnedHostQueueGate("cool30", "nvidia", &mem)
+	if err == nil {
+		t.Fatal("expected insufficient memory to be rejected")
+	}
+	if got, want := err.Error(), "gpu gate: no GPU with >=26GB"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }

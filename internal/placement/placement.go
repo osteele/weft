@@ -534,51 +534,16 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		return s
 	}
 
-	// Hard constraint: GPU class (supports exact model, generation, or minimum generation)
 	var gc GPUConstraint
 	if c.NeedsGPU() || c.MaxComputeCap != "" || c.MinComputeCap != "" {
 		gc = ParseGPUConstraint(c.GPUClass)
-		var matchedName string
-		for _, gpu := range host.GPUs {
-			if gc.MatchesGPU(gpu.Class) {
-				matchedName = gpu.Name
-				break
-			}
-		}
-		if matchedName == "" {
+		eligible, reasons := CheckHostGPUConstraints(host, c)
+		if !eligible {
 			s.Eligible = false
-			s.Reasons = append(s.Reasons, fmt.Sprintf("no %s GPU", c.GPUClass))
+			s.Reasons = append(s.Reasons, reasons...)
 			return s
 		}
-		s.Reasons = append(s.Reasons, fmt.Sprintf("has %s GPU", matchedName))
-	}
-
-	// Hard constraint: GPU compute capability upper bound (from torch pin /
-	// gpu-arch-max). A host is eligible if at least one of its GPUs has a
-	// known cap at or below the bound. GPUs with unknown caps are accepted
-	// (we cannot prove they violate).
-	if c.MaxComputeCap != "" && !hostHasGPUWithinCap(host, c.MaxComputeCap) {
-		s.Eligible = false
-		s.Reasons = append(s.Reasons, fmt.Sprintf("no GPU with compute cap <= %s", c.MaxComputeCap))
-		return s
-	}
-
-	// Hard constraint: GPU memory
-	if c.GPUMemGB > 0 {
-		found := false
-		for _, gpu := range host.GPUs {
-			memGB := inventory.ParseMemGB(gpu.Memory)
-			if memGB >= c.GPUMemGB {
-				found = true
-				break
-			}
-		}
-		if !found {
-			s.Eligible = false
-			s.Reasons = append(s.Reasons, fmt.Sprintf("no GPU with >=%dGB", c.GPUMemGB))
-			return s
-		}
-		s.Reasons = append(s.Reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
+		s.Reasons = append(s.Reasons, reasons...)
 	}
 
 	// Hard constraint: benchmark jobs require an idle host

@@ -14,12 +14,20 @@ import (
 
 const queueBlockedReasonTimeout = 5 * time.Second
 
-// validatePinnedHostQueueGate rejects queue submissions that are deterministically
-// impossible for a pinned inventory host using local inventory data only.
-func validatePinnedHostQueueGate(host, gpuClass string) error {
+// validatePinnedHostQueueGate rejects queue submissions that are
+// deterministically impossible for a pinned inventory host using local
+// inventory data only.
+func validatePinnedHostQueueGate(host, gpuClass string, gpuMemGB *int) error {
 	host = strings.TrimSpace(host)
 	gpuClass = strings.TrimSpace(gpuClass)
-	if host == "" || gpuClass == "" || db.IsLaunchHost(host) {
+	if host == "" || db.IsLaunchHost(host) {
+		return nil
+	}
+	requiredMemGB := 0
+	if gpuMemGB != nil {
+		requiredMemGB = *gpuMemGB
+	}
+	if gpuClass == "" && requiredMemGB <= 0 {
 		return nil
 	}
 
@@ -28,26 +36,27 @@ func validatePinnedHostQueueGate(host, gpuClass string) error {
 		return nil
 	}
 
-	constraint := placement.ParseGPUConstraint(gpuClass)
-	checkedAny := false
+	knownClass := gpuClass == ""
+	knownMem := requiredMemGB <= 0
 	for _, gpu := range spec.GPUs {
-		if gpu.Class != "" {
-			checkedAny = true
-			if constraint.MatchesGPU(gpu.Class) {
-				return nil
-			}
-		}
-		if gpu.Name != "" {
-			checkedAny = true
-			if constraint.MatchesGPUFullName(gpu.Name) {
-				return nil
-			}
-		}
+		knownClass = knownClass || gpu.Class != "" || gpu.Name != ""
+		knownMem = knownMem || inventory.ParseMemGB(gpu.Memory) > 0
 	}
-	if !checkedAny {
+	if !knownClass || !knownMem {
 		return nil
 	}
-	return fmt.Errorf("gpu gate: no GPU matching class %s", gpuClass)
+
+	constraints := placement.Constraints{
+		GPUClass: gpuClass,
+		GPUMemGB: requiredMemGB,
+	}
+	if ok, reasons := placement.CheckHostGPUConstraints(*spec, constraints); !ok {
+		if len(reasons) == 1 && gpuClass != "" && reasons[0] == fmt.Sprintf("no %s GPU", gpuClass) {
+			return fmt.Errorf("gpu gate: no GPU matching class %s", gpuClass)
+		}
+		return fmt.Errorf("gpu gate: %s", strings.Join(reasons, "; "))
+	}
+	return nil
 }
 
 // mergeBlockedReasons returns the live blocked reason followed by any

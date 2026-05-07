@@ -3,10 +3,12 @@ package inventory
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -241,13 +243,41 @@ func HostMaxGPUMemoryGB(name string) int {
 	return maxMem
 }
 
-// ParseMemGB extracts an integer GB value from a string like "24GB", "80gb", or "80".
+// ParseMemGB extracts an integer GiB/GB value from strings like "24GB",
+// "80gb", "24576MiB", or "80".
 func ParseMemGB(s string) int {
 	s = strings.ToLower(strings.TrimSpace(s))
-	s = strings.TrimSuffix(s, "gb")
-	var n int
-	fmt.Sscanf(s, "%d", &n)
-	return n
+	if s == "" {
+		return 0
+	}
+
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if (c < '0' || c > '9') && c != '.' {
+			break
+		}
+		i++
+	}
+	if i == 0 {
+		return 0
+	}
+	value, err := strconv.ParseFloat(s[:i], 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+
+	unit := strings.TrimSpace(s[i:])
+	switch unit {
+	case "", "g", "gb", "gib":
+		return int(math.Floor(value))
+	case "m", "mb":
+		return int(math.Floor(value / 1000))
+	case "mi", "mib":
+		return int(math.Floor(value / 1024))
+	default:
+		return 0
+	}
 }
 
 // FindHost looks up a host by name from the runtime inventory.

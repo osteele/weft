@@ -2325,6 +2325,9 @@ func startupRepair(db *sql.DB) error {
 	if _, err := NormalizeStalePendingPlacementNoLaunch(db); err != nil {
 		return err
 	}
+	if _, err := PruneMoveIntents(db, 5*time.Minute); err != nil {
+		return err
+	}
 
 	// Create/recreate the job_status view (joins jobs with latest attempt)
 	if err := createJobStatusView(db); err != nil {
