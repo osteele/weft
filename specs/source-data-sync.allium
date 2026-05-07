@@ -598,6 +598,13 @@ rule OnPremStagingFromR2 {
         -- The atomic-rename pattern (scp to <path>.weft-staging then mv) keeps
         -- a killed transfer from being mistaken for a complete one on the
         -- next sync cycle.
+        --
+        -- Per-(host, marker) DB lease (`needs-stage:<host>:<markerName>`,
+        -- 15m TTL) gates each transfer so that overlapping callers
+        -- (autopilot tick + list-TUI + watch-TUI) cannot spawn concurrent
+        -- scp's into the same `.weft-staging` destination. Without it, a
+        -- 500MB-class artifact has been observed accumulating three
+        -- simultaneous half-finished uploads that stomped each other.
 }
 
 -- Design intent: HF models and datasets declared on a cloud-bound job are

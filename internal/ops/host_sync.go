@@ -891,11 +891,29 @@ func stageArtifactNeedsForHost(database *sql.DB, host string, jobs []*db.Job, ti
 		if len(todo) == 0 {
 			continue
 		}
-		if err := stageMissingNeeds(job, todo, state, timeout, getR2Client); err != nil {
+		if err := stageMissingNeeds(database, job, todo, state, timeout, getR2Client); err != nil {
 			failed[job.ID] = err
 		}
 	}
 	return
+}
+
+// needsStageLeaseTTL is the time the per-(host, artifact) DB lease is
+// held during a staging transfer. Long enough that a 1 GB artifact at
+// ~1 MB/s still fits, short enough that a wedged caller doesn't hold
+// the lock forever.
+const needsStageLeaseTTL = 15 * time.Minute
+
+func needsStageLeaseScope(host, markerName string) string {
+	return fmt.Sprintf("needs-stage:%s:%s", host, markerName)
+}
+
+func needsStageLeaseOwner() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s:pid=%d", host, os.Getpid())
 }
 
 // stageMissingNeeds executes the R2-download + scp + marker-write for the
@@ -903,20 +921,52 @@ func stageArtifactNeedsForHost(database *sql.DB, host string, jobs []*db.Job, ti
 // covers all of the job's needs and carries the file/staging sizes the probe
 // already collected, so the size-match optimization (skip transfer when the
 // on-host bytes already match R2) costs no extra SSH round-trips.
-func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteNeedState, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
-	r2Client, err := getR2Client()
-	if err != nil {
-		return err
-	}
-	if r2Client == nil || !r2Client.IsConfigured() {
-		return fmt.Errorf("R2 is not configured")
-	}
-
-	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-needs-%d-*", job.ID))
-	if err != nil {
-		return fmt.Errorf("create temp dir for needs staging: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
+//
+// Per-need DB lease (`needs-stage:<host>:<markerName>`) prevents duplicate
+// concurrent transfers of the same artifact to the same host. Without it,
+// a TUI tick + autopilot tick + manual sync that overlap in time each
+// spawn their own scp into the same `.weft-staging` destination —
+// observed wj1811 in production: three concurrent 498 MB scp's, all
+// stuck, none making progress because they were stomping each other.
+// The TTL is generous (15m) so transfers larger than the typical link
+// speed × 15m don't accidentally double-spawn after lease expiry.
+func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state map[string]remoteNeedState, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
+	// Lazy-init the R2 client and tmp dir: only pay the cost when at
+	// least one need actually transfers (lease acquired + bytes
+	// missing). All-skipped passes — every need locked by a peer
+	// process, or every need already on-host — should be free.
+	var (
+		r2Client    *r2.Client
+		tmpDir      string
+		tmpDirErr   error
+		ensureSetup = func() error {
+			if r2Client != nil && tmpDir != "" {
+				return nil
+			}
+			if tmpDirErr != nil {
+				return tmpDirErr
+			}
+			c, err := getR2Client()
+			if err != nil {
+				return err
+			}
+			if c == nil || !c.IsConfigured() {
+				return fmt.Errorf("R2 is not configured")
+			}
+			d, err := os.MkdirTemp("", fmt.Sprintf("weft-needs-%d-*", job.ID))
+			if err != nil {
+				tmpDirErr = fmt.Errorf("create temp dir for needs staging: %w", err)
+				return tmpDirErr
+			}
+			r2Client, tmpDir = c, d
+			return nil
+		}
+	)
+	defer func() {
+		if tmpDir != "" {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
 
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 		oplog.WithDetailf("artifact needs staging start (%d artifact%s)", len(todo), pluralize(len(todo))))
@@ -924,8 +974,37 @@ func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteN
 		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 			oplog.WithDetailf("artifact needs staging attempt: %s", n.spec))
 
+		leaseScope := needsStageLeaseScope(job.Host, n.markerName)
+		acquired, leaseErr := db.AcquireAutoLease(database, leaseScope, needsStageLeaseOwner(), needsStageLeaseTTL)
+		if leaseErr != nil {
+			return fmt.Errorf("%q: acquire staging lease: %w", n.spec, leaseErr)
+		}
+		if !acquired {
+			oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+				oplog.WithDetailf("artifact needs staging skipped (in flight): %s", n.spec))
+			continue
+		}
+		needLeaseReleased := false
+		releaseLease := func() {
+			if needLeaseReleased {
+				return
+			}
+			needLeaseReleased = true
+			_ = db.ReleaseAutoLease(database, leaseScope, needsStageLeaseOwner())
+		}
+		// Defer-and-loop: release on every exit path through the
+		// per-need iteration. Inline error returns also release.
+
+		// We have the lease and at least one byte of work to consider —
+		// initialize the R2 client and tmp dir on first use.
+		if err := ensureSetup(); err != nil {
+			releaseLease()
+			return fmt.Errorf("%q: %w", n.spec, err)
+		}
+
 		key, err := r2resolve.NeedR2Key(context.Background(), r2Client, n.producerID, n.latestRun, n.path)
 		if err != nil {
+			releaseLease()
 			return fmt.Errorf("%q: %w", n.spec, err)
 		}
 		stagingPath := n.remotePath + ".weft-staging"
@@ -943,6 +1022,7 @@ func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteN
 			expected, err := r2Client.ObjectSize(ctx, key)
 			cancel()
 			if err != nil {
+				releaseLease()
 				return fmt.Errorf("get expected size for %q: %w", n.spec, err)
 			}
 			switch {
@@ -957,25 +1037,31 @@ func stageMissingNeeds(job *db.Job, todo []pendingNeed, state map[string]remoteN
 		if needsTransfer {
 			localPath := filepath.Join(tmpDir, filepath.FromSlash(strings.TrimPrefix(n.path, "/")))
 			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+				releaseLease()
 				return fmt.Errorf("prepare local staging path for %q: %w", n.spec, err)
 			}
 			if _, err := r2Client.DownloadObjectToFileWithIdleTimeout(context.Background(), key, localPath, 5*time.Minute); err != nil {
+				releaseLease()
 				return fmt.Errorf("download %s for %q: %w", key, n.spec, err)
 			}
 			if err := ensureRemoteParentDir(job.Host, n.remotePath, timeout); err != nil {
+				releaseLease()
 				return fmt.Errorf("create remote dir for %q: %w", n.spec, err)
 			}
 			// scp to a sibling staging path then mv into place: guards against
 			// a killed scp leaving a truncated file at the final path that a
 			// future probe would mistake for a complete transfer.
 			if err := ssh.CopyTo(localPath, job.Host, stagingPath); err != nil {
+				releaseLease()
 				return fmt.Errorf("copy %q to %s:%s: %w", n.spec, job.Host, stagingPath, err)
 			}
 			mvStaging = true
 		}
 		if err := finalizeRemoteNeed(job.Host, mvStaging, stagingPath, n.remotePath, n.markerName, timeout); err != nil {
+			releaseLease()
 			return fmt.Errorf("finalize %q: %w", n.spec, err)
 		}
+		releaseLease()
 		oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 			oplog.WithDetailf("artifact needs staging success: %s", n.spec))
 	}

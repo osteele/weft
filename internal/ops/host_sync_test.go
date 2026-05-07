@@ -471,3 +471,56 @@ func TestHFInputStageTimeout(t *testing.T) {
 		t.Fatalf("hfInputStageTimeout(15m) = %s, want %s", got, longTimeout)
 	}
 }
+
+// TestStageMissingNeeds_LeaseSkipsConcurrentDuplicate verifies that when a
+// staging lease for the same (host, artifact) is already held, a second
+// caller skips the transfer instead of spawning a duplicate scp. This is
+// the regression for the wj1811 case: three concurrent 498 MB scp's
+// stomping the same .weft-staging destination.
+func TestStageMissingNeeds_LeaseSkipsConcurrentDuplicate(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	producerID, err := db.RecordQueued(database, "", "/tmp", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp", "consume", "consumer")
+	if err != nil {
+		t.Fatalf("record consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, consumerID, []string{fmt.Sprintf("output/big.pt:%d", producerID)}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("get consumer: %v", err)
+	}
+
+	pending, err := collectPendingNeeds(database, consumer)
+	if err != nil {
+		t.Fatalf("collectPendingNeeds: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending need, got %d", len(pending))
+	}
+
+	// Pre-acquire the lease as if another caller is already mid-transfer.
+	scope := needsStageLeaseScope("host-alpha", pending[0].markerName)
+	acquired, err := db.AcquireAutoLease(database, scope, "other-caller", needsStageLeaseTTL)
+	if err != nil || !acquired {
+		t.Fatalf("seed lease: acquired=%v err=%v", acquired, err)
+	}
+
+	// getR2Client must NOT be called when the transfer is skipped.
+	getR2 := func() (*r2.Client, error) {
+		t.Fatal("getR2Client should not be called when lease is held by another caller")
+		return nil, nil
+	}
+
+	probeState := map[string]remoteNeedState{
+		pending[0].markerName: {markerExists: false, fileSize: -1, stagingSize: -1},
+	}
+	if err := stageMissingNeeds(database, consumer, pending, probeState, time.Second, getR2); err != nil {
+		t.Fatalf("stageMissingNeeds: %v", err)
+	}
+}
