@@ -1944,3 +1944,27 @@ func TestScoreHosts_MaxComputeCap_Ampere(t *testing.T) {
 		t.Errorf("host-gamma should be eligible (unknown cap)")
 	}
 }
+
+func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
+	// Bound at sm_7.5: host-alpha eligible via A100/2080Ti; host-beta eligible
+	// via 3090; host-gamma eligible because unknown caps are not rejected.
+	db := setupTestDB(t)
+	scores := scoreTestHosts(db, Constraints{MinComputeCap: "7.5"})
+	for _, s := range scores {
+		if !s.Eligible {
+			t.Errorf("host %s should be eligible at min cap 7.5: %v", s.Host, s.Reasons)
+		}
+	}
+
+	v100Host := inventory.HostSpec{
+		Name: "v100-host",
+		GPUs: []inventory.GPUSpec{{Name: "Tesla V100", Class: "v100", Memory: "32GB"}},
+	}
+	ok, reasons := CheckHostGPUConstraints(v100Host, Constraints{GPUClass: "nvidia", GPUMemGB: 24, MinComputeCap: "7.5"})
+	if ok {
+		t.Fatalf("V100 host should be ineligible for min cap 7.5")
+	}
+	if got := strings.Join(reasons, "; "); !strings.Contains(got, "compute cap >= 7.5") {
+		t.Fatalf("reasons = %v, want min cap detail", reasons)
+	}
+}

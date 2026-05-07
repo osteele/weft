@@ -553,6 +553,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if persistMaxComputeCap != "" && persistMaxComputeCap != placement.MaxComputeCapAny {
 		placementConstraints.MaxComputeCap = persistMaxComputeCap
 	}
+	placementConstraints.MinComputeCap = placement.MinComputeCapForJob(localDir)
 	// Tip placement toward producers' live rental instances so --needs
 	// consumers co-locate with their producers and can read outputs from
 	// the shared workdir (the classifier in internal/campaign/

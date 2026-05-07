@@ -35,7 +35,7 @@ type OfferFilterStats struct {
 	RawCount       int // offers returned by provider search
 	AfterVRAM      int // remaining after VRAM requirement filter
 	AfterCUDA      int // remaining after CUDA compatibility filter
-	AfterTorchArch int // remaining after torch arch upper-bound filter
+	AfterTorchArch int // remaining after torch arch compute-cap filter
 	AfterSurvival  int // remaining after survival probability filter
 	// CUDA filter diagnostics (set when CUDA filtering removed offers).
 	CUDAImage        string
@@ -43,6 +43,7 @@ type OfferFilterStats struct {
 	CUDAMinRequired  float64
 	CUDAExampleGPU   string
 	// Torch arch filter diagnostics (set when arch filtering removed offers).
+	TorchArchMinCap     string
 	TorchArchMaxCap     string
 	TorchArchExampleCap string
 	TorchArchExampleGPU string
@@ -70,20 +71,34 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 			return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", found, offerCount(s.AfterVRAM), s.CUDAImageVersion, s.CUDAMinRequired)
 		}
 		return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility", found, offerCount(s.AfterVRAM))
-	case s.TorchArchMaxCap != "" && s.AfterTorchArch == 0:
+	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
+		bounds := formatTorchArchBounds(s.TorchArchMinCap, s.TorchArchMaxCap)
 		if s.TorchArchExampleGPU != "" && s.TorchArchExampleCap != "" {
-			return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s; e.g. %s sm_%s)", found, offerCount(s.AfterCUDA), s.TorchArchMaxCap, s.TorchArchExampleGPU, s.TorchArchExampleCap)
+			return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s (e.g. %s sm_%s)", found, offerCount(s.AfterCUDA), bounds, s.TorchArchExampleGPU, s.TorchArchExampleCap)
 		}
-		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=%s)", found, offerCount(s.AfterCUDA), s.TorchArchMaxCap)
+		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s", found, offerCount(s.AfterCUDA), bounds)
 	case s.AfterSurvival == 0:
 		passed := s.AfterCUDA
-		if s.TorchArchMaxCap != "" {
+		if s.TorchArchMinCap != "" || s.TorchArchMaxCap != "" {
 			passed = s.AfterTorchArch
 		}
 		return fmt.Sprintf("%s, %s passed filters but none met survival threshold", found, offerCount(passed))
 	default:
 		// Defensive: all stages passed but no offer was selected.
 		return fmt.Sprintf("%s, none met all criteria", found)
+	}
+}
+
+func formatTorchArchBounds(minCap, maxCap string) string {
+	switch {
+	case minCap != "" && maxCap != "":
+		return fmt.Sprintf("bounds (min cap=%s max cap=%s)", minCap, maxCap)
+	case minCap != "":
+		return fmt.Sprintf("lower bound (min cap=%s)", minCap)
+	case maxCap != "":
+		return fmt.Sprintf("upper bound (max cap=%s)", maxCap)
+	default:
+		return "bounds"
 	}
 }
 
@@ -238,12 +253,13 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 	return compatible, filtered, imageCUDA, maxRequired, exampleGPU, image
 }
 
-// filterOffersByTorchArch removes offers whose GPU compute capability exceeds
-// the upper bound implied by the group's torch pin (or explicit gpu-arch-max).
+// filterOffersByTorchArch removes offers whose GPU compute capability is
+// outside the bounds implied by the group's torch pin (or explicit
+// gpu-arch-max).
 // Returns the surviving offers, the count filtered, and one example GPU+cap
 // for diagnostics.
-func filterOffersByTorchArch(offers []cloud.Offer, maxCap string) ([]cloud.Offer, int, string, string) {
-	if maxCap == "" {
+func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]cloud.Offer, int, string, string) {
+	if minCap == "" && maxCap == "" {
 		return offers, 0, "", ""
 	}
 	compatible := make([]cloud.Offer, 0, len(offers))
@@ -255,7 +271,15 @@ func filterOffersByTorchArch(offers []cloud.Offer, maxCap string) ([]cloud.Offer
 			compatible = append(compatible, o)
 			continue
 		}
-		if placement.CompareComputeCap(gpuCap, maxCap) > 0 {
+		if maxCap != "" && placement.CompareComputeCap(gpuCap, maxCap) > 0 {
+			filtered++
+			if exampleGPU == "" {
+				exampleGPU = o.GPUName
+				exampleCap = gpuCap
+			}
+			continue
+		}
+		if minCap != "" && placement.CompareComputeCap(gpuCap, minCap) < 0 {
 			filtered++
 			if exampleGPU == "" {
 				exampleGPU = o.GPUName
@@ -266,8 +290,8 @@ func filterOffersByTorchArch(offers []cloud.Offer, maxCap string) ([]cloud.Offer
 		compatible = append(compatible, o)
 	}
 	if filtered > 0 {
-		slog.Debug("filtered offers by torch arch upper bound",
-			"max_cap", maxCap, "filtered", filtered,
+		slog.Debug("filtered offers by torch arch bounds",
+			"min_cap", minCap, "max_cap", maxCap, "filtered", filtered,
 			"remaining", len(compatible), "example_gpu", exampleGPU)
 	}
 	return compatible, filtered, exampleGPU, exampleCap
@@ -332,10 +356,11 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		result.FilterStats = stats
 		return result
 	}
-	if group.MaxComputeCap != "" {
-		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MaxComputeCap)
+	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
+		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
+		stats.TorchArchMinCap = group.MinComputeCap
+		stats.TorchArchMaxCap = group.MaxComputeCap
 		if archFiltered > 0 {
-			stats.TorchArchMaxCap = group.MaxComputeCap
 			stats.TorchArchExampleGPU = exampleGPU
 			stats.TorchArchExampleCap = exampleCap
 		}

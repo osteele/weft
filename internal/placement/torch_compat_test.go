@@ -13,19 +13,23 @@ func TestTorchMaxComputeCap(t *testing.T) {
 		{"2.0.1", "cu118", "9.0"},
 		{"2.3.1", "cu121", "9.0"},
 		{"2.4.1", "cu121", "9.0"},
-		// 2.5: sm_100 added on cu124+
+		// 2.5: cu124 remains Hopper-bound; cu126 admits sm_100.
 		{"2.5.0", "cu118", "9.0"},
 		{"2.5.0", "cu121", "9.0"},
-		{"2.5.1", "cu124", "10.0"},
+		{"2.5.1", "cu124", "9.0"},
+		{"2.5.1", "cu126", "10.0"},
 		// 2.6: sm_120 added on cu128
-		{"2.6.0", "cu124", "10.0"},
+		{"2.6.0", "cu124", "9.0"},
+		{"2.6.0", "cu126", "10.0"},
 		{"2.6.0", "cu128", "12.0"},
 		// 2.7+
 		{"2.7.0", "cu126", "12.0"},
 		{"2.7.0", "cu128", "12.0"},
 		// CPU-only or unknown variant
 		{"2.4.0", "cpu", ""},
-		{"2.4.0", "", ""},
+		{"2.4.0", "", "9.0"},
+		{"2.6.0", "", "9.0"},
+		{"2.7.0", "", "12.0"},
 		// Malformed version
 		{"", "cu121", ""},
 		{"abc", "cu121", ""},
@@ -36,6 +40,26 @@ func TestTorchMaxComputeCap(t *testing.T) {
 		got := TorchMaxComputeCap(c.version, c.cuda)
 		if got != c.want {
 			t.Errorf("TorchMaxComputeCap(%q, %q) = %q, want %q", c.version, c.cuda, got, c.want)
+		}
+	}
+}
+
+func TestTorchMinComputeCap(t *testing.T) {
+	cases := []struct {
+		version string
+		cuda    string
+		want    string
+	}{
+		{"2.7.0", "cu126", ""},
+		{"2.7.0", "cu128", "7.5"},
+		{"2.8.0", "", "7.5"},
+		{"2.8.0", "cpu", ""},
+		{"", "cu128", ""},
+	}
+	for _, c := range cases {
+		got := TorchMinComputeCap(c.version, c.cuda)
+		if got != c.want {
+			t.Errorf("TorchMinComputeCap(%q, %q) = %q, want %q", c.version, c.cuda, got, c.want)
 		}
 	}
 }
@@ -53,6 +77,7 @@ func TestComputeCapForGPU(t *testing.T) {
 		{"B200", "10.0"},
 		{"NVIDIA B200", "10.0"},
 		{"RTX PRO 4500 Blackwell", "12.0"},
+		{"RTX PRO 6000 WS", "12.0"},
 		{"RTX 5090", "12.0"},
 		{"unknown-gpu-name", ""},
 		{"", ""},

@@ -56,6 +56,37 @@ version = "12.8.90"
 	}
 }
 
+func TestScanTorchPin_UVLockNvidiaCUDADeps(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "uv.lock"), `
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.4.5.8"
+
+[[package]]
+name = "nvidia-cusparse-cu12"
+version = "12.3.1.170"
+`)
+	pin := ScanTorchPin(dir)
+	if pin == nil {
+		t.Fatalf("expected pin, got nil")
+	}
+	if pin.Version != "2.6.0" {
+		t.Errorf("Version = %q", pin.Version)
+	}
+	if pin.CudaVariant != "cu124" {
+		t.Errorf("CudaVariant = %q, want cu124", pin.CudaVariant)
+	}
+	if got := TorchMaxComputeCap(pin.Version, pin.CudaVariant); got != "9.0" {
+		t.Errorf("TorchMaxComputeCap(%q, %q) = %q, want 9.0", pin.Version, pin.CudaVariant, got)
+	}
+}
+
 func TestScanTorchPin_PyprojectFallback(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "pyproject.toml"), `

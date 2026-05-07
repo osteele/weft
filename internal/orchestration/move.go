@@ -82,9 +82,11 @@ func BuildOptions(
 	if len(cloudClients) > 0 {
 		provider, _ := db.RequestedProvider(job.Tags)
 		group := campaign.InstanceGroup{
-			GPUClass: job.GPUClass,
-			Provider: provider,
-			Jobs:     []*db.Job{job},
+			GPUClass:      job.GPUClass,
+			Provider:      provider,
+			MaxComputeCap: campaign.GroupMaxComputeCap(nil, []*db.Job{job}),
+			MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
+			Jobs:          []*db.Job{job},
 		}
 		if job.GPUMemGB != nil {
 			group.GPUMemGB = *job.GPUMemGB
@@ -169,9 +171,11 @@ func LaunchNewForJob(
 
 	provider, _ := db.RequestedProvider(job.Tags)
 	group := campaign.InstanceGroup{
-		GPUClass: job.GPUClass,
-		Provider: provider,
-		Jobs:     []*db.Job{job},
+		GPUClass:      job.GPUClass,
+		Provider:      provider,
+		MaxComputeCap: campaign.GroupMaxComputeCap(database, []*db.Job{job}),
+		MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
+		Jobs:          []*db.Job{job},
 	}
 	if job.GPUMemGB != nil {
 		group.GPUMemGB = *job.GPUMemGB
@@ -300,7 +304,12 @@ func executeMoveOption(
 	}
 
 	offer := *opt.Offer
-	group := campaign.InstanceGroup{GPUClass: job.GPUClass, Jobs: []*db.Job{job}}
+	group := campaign.InstanceGroup{
+		GPUClass:      job.GPUClass,
+		MaxComputeCap: campaign.GroupMaxComputeCap(database, []*db.Job{job}),
+		MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
+		Jobs:          []*db.Job{job},
+	}
 	if job.GPUMemGB != nil {
 		group.GPUMemGB = *job.GPUMemGB
 	}

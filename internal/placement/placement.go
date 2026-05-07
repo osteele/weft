@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/transferbw"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // ErrNoReachableHost is returned when all eligible hosts are unreachable.
@@ -73,6 +74,12 @@ type Constraints struct {
 	// pyproject.toml via dataloc.ScanTorchPin and TorchMaxComputeCap, or
 	// supplied explicitly via [tool.weft] gpu-arch-max.
 	MaxComputeCap string
+
+	// MinComputeCap is the lowest CUDA compute capability the job's
+	// installed PyTorch wheel can target ("7.5", "8.0", ...). Empty string
+	// disables this filter. Inferred from the project's uv.lock or
+	// pyproject.toml.
+	MinComputeCap string
 }
 
 // ConstraintsFromJob builds Constraints from a db.Job's fields.
@@ -89,6 +96,9 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 	}
 	if j.GPUMemGB != nil {
 		c.GPUMemGB = *j.GPUMemGB
+	}
+	if localDir := workdir.ResolveLocal(j.EffectiveWorkingDir()); localDir != "" {
+		c.MinComputeCap = MinComputeCapForJob(localDir)
 	}
 	return c
 }
@@ -526,7 +536,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 
 	// Hard constraint: GPU class (supports exact model, generation, or minimum generation)
 	var gc GPUConstraint
-	if c.GPUClass != "" {
+	if c.NeedsGPU() || c.MaxComputeCap != "" || c.MinComputeCap != "" {
 		gc = ParseGPUConstraint(c.GPUClass)
 		var matchedName string
 		for _, gpu := range host.GPUs {
@@ -726,6 +736,96 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	}
 
 	return s
+}
+
+// CheckHostGPUConstraints applies the shared hard GPU resource constraints to
+// a single host. A host is eligible only if one physical GPU satisfies the
+// requested class, memory floor, and compute-capability ceiling.
+func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
+	if !c.NeedsGPU() && c.MaxComputeCap == "" && c.MinComputeCap == "" {
+		return true, nil
+	}
+	if len(host.GPUs) == 0 {
+		return false, []string{"no GPUs"}
+	}
+
+	gc := ParseGPUConstraint(c.GPUClass)
+	classMatched := c.GPUClass == ""
+	memMatched := c.GPUMemGB <= 0
+	capMatched := c.MaxComputeCap == ""
+	minCapMatched := c.MinComputeCap == ""
+	for _, gpu := range host.GPUs {
+		if c.GPUClass != "" && (gc.MatchesGPU(gpu.Class) || gc.MatchesGPUFullName(gpu.Name)) {
+			classMatched = true
+		}
+		memGB := inventory.ParseMemGB(gpu.Memory)
+		if c.GPUMemGB > 0 && memGB >= c.GPUMemGB {
+			memMatched = true
+		}
+		gpuCap := ComputeCapForGPU(gpu.Class)
+		if gpuCap == "" {
+			gpuCap = ComputeCapForGPU(gpu.Name)
+		}
+		if c.MaxComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MaxComputeCap) <= 0) {
+			capMatched = true
+		}
+		if c.MinComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MinComputeCap) >= 0) {
+			minCapMatched = true
+		}
+
+		if gpuMatchesConstraints(gpu, gc, c, memGB, gpuCap) {
+			reasons := []string{fmt.Sprintf("has %s GPU", displayGPUName(gpu))}
+			if c.GPUMemGB > 0 {
+				reasons = append(reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
+			}
+			return true, reasons
+		}
+	}
+
+	switch {
+	case c.GPUClass != "" && !classMatched:
+		return false, []string{fmt.Sprintf("no %s GPU", c.GPUClass)}
+	case c.GPUMemGB > 0 && !memMatched:
+		return false, []string{fmt.Sprintf("no GPU with >=%dGB", c.GPUMemGB)}
+	case c.MaxComputeCap != "" && !capMatched:
+		return false, []string{fmt.Sprintf("no GPU with compute cap <= %s", c.MaxComputeCap)}
+	case c.MinComputeCap != "" && !minCapMatched:
+		return false, []string{fmt.Sprintf("no GPU with compute cap >= %s", c.MinComputeCap)}
+	case c.GPUClass != "" && c.GPUMemGB > 0:
+		return false, []string{fmt.Sprintf("no %s GPU with >=%dGB", c.GPUClass, c.GPUMemGB)}
+	case c.GPUClass != "" && c.MaxComputeCap != "":
+		return false, []string{fmt.Sprintf("no %s GPU with compute cap <= %s", c.GPUClass, c.MaxComputeCap)}
+	case c.GPUMemGB > 0 && c.MaxComputeCap != "":
+		return false, []string{fmt.Sprintf("no GPU with >=%dGB and compute cap <= %s", c.GPUMemGB, c.MaxComputeCap)}
+	default:
+		return false, []string{"no GPU matching constraints"}
+	}
+}
+
+func gpuMatchesConstraints(gpu inventory.GPUSpec, gc GPUConstraint, c Constraints, memGB int, gpuCap string) bool {
+	if c.GPUClass != "" && !(gc.MatchesGPU(gpu.Class) || gc.MatchesGPUFullName(gpu.Name)) {
+		return false
+	}
+	if c.GPUMemGB > 0 && memGB < c.GPUMemGB {
+		return false
+	}
+	if c.MaxComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MaxComputeCap) > 0 {
+		return false
+	}
+	if c.MinComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MinComputeCap) < 0 {
+		return false
+	}
+	return true
+}
+
+func displayGPUName(gpu inventory.GPUSpec) string {
+	if gpu.Name != "" {
+		return gpu.Name
+	}
+	if gpu.Class != "" {
+		return gpu.Class
+	}
+	return "matching"
 }
 
 // applyDurationScoring adds a relative bonus to hosts with duration predictions.
@@ -999,6 +1099,12 @@ func DescribeConstraints(c Constraints) string {
 	}
 	if c.GPUMemGB > 0 {
 		parts = append(parts, fmt.Sprintf("gpu-mem>=%dGB", c.GPUMemGB))
+	}
+	if c.MinComputeCap != "" {
+		parts = append(parts, fmt.Sprintf("compute-cap>=%s", c.MinComputeCap))
+	}
+	if c.MaxComputeCap != "" {
+		parts = append(parts, fmt.Sprintf("compute-cap<=%s", c.MaxComputeCap))
 	}
 	if len(c.Inputs) > 0 {
 		parts = append(parts, fmt.Sprintf("%d inputs", len(c.Inputs)))

@@ -25,43 +25,14 @@ import (
 // or nightly wheels are out of scope; users override via [tool.weft]
 // gpu-arch-max = "any" or an explicit cap.
 func TorchMaxComputeCap(version, cudaVariant string) string {
-	maj, min, ok := parseTorchMajMin(version)
-	if !ok {
-		return ""
-	}
-	cu := strings.ToLower(strings.TrimSpace(cudaVariant))
-	if cu == "cpu" || cu == "" {
-		// Without CUDA we can't constrain; leave caller to apply other filters.
-		return ""
-	}
-	switch {
-	case maj < 2:
-		return "8.0" // Ampere — pre-2.0 wheels predate Hopper
-	case maj == 2 && min <= 4:
-		return "9.0" // Hopper; no Blackwell support before 2.5
-	case maj == 2 && min == 5:
-		// 2.5 added datacenter Blackwell (sm_100) on cu124+ wheels.
-		if cu == "cu124" || cu == "cu126" || cu == "cu128" {
-			return "10.0"
-		}
-		return "9.0"
-	case maj == 2 && min == 6:
-		// 2.6 broadened sm_100 coverage; consumer/PRO Blackwell (sm_120) on cu128.
-		if cu == "cu128" {
-			return "12.0"
-		}
-		return "10.0"
-	case maj == 2 && min >= 7:
-		// 2.7+ ships sm_120 on cu126/cu128 wheels.
-		if cu == "cu126" || cu == "cu128" {
-			return "12.0"
-		}
-		return "10.0"
-	case maj >= 3:
-		// Future-proof default; conservative — caller can override.
-		return "12.0"
-	}
-	return ""
+	return dataloc.TorchMaxComputeCap(version, cudaVariant)
+}
+
+// TorchMinComputeCap returns the lowest CUDA compute capability supported by
+// prebuilt PyTorch wheels for (version, cudaVariant). Empty string means no
+// inferred lower bound.
+func TorchMinComputeCap(version, cudaVariant string) string {
+	return dataloc.TorchMinComputeCap(version, cudaVariant)
 }
 
 // modelComputeCap maps normalized GPU model fragments to compute capability.
@@ -81,6 +52,9 @@ var modelComputeCap = map[string]string{
 	"b200":  "10.0",
 	"b300":  "10.0",
 	"gb200": "10.0",
+	// Workstation / consumer Blackwell (sm_120). Some providers omit the
+	// word "Blackwell" and report names like "RTX PRO 6000 WS".
+	"rtxpro6000": "12.0",
 }
 
 // generationDefaultComputeCap is the cap to assume for a GPU when only its
@@ -234,11 +208,19 @@ func MaxComputeCapForJob(archMax, dir string) string {
 	return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
 }
 
-// MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded"
-// (script set gpu-arch-max = "any", project has no torch pin, or override
-// resolves to no constraint). Distinct from the empty string, which means
-// "unresolved" — used by readers to decide whether to lazily backfill.
-const MaxComputeCapAny = "any"
+// MinComputeCapForJob resolves the GPU compute-capability lower bound for a
+// job whose source lives in dir. It is inferred from the project's torch pin;
+// explicit gpu-arch-max metadata only controls the upper bound.
+func MinComputeCapForJob(dir string) string {
+	pin := dataloc.ScanTorchPin(dir)
+	if pin == nil {
+		return ""
+	}
+	return TorchMinComputeCap(pin.Version, pin.CudaVariant)
+}
+
+// MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded".
+const MaxComputeCapAny = dataloc.MaxComputeCapAny
 
 // ResolveMaxComputeCapForPersistence returns the three-state encoding stored
 // on jobs.max_compute_cap:
@@ -251,21 +233,7 @@ const MaxComputeCapAny = "any"
 // Distinguishes "explicitly unbounded" from "unresolved" so readers can lazily
 // backfill empty caps without conflating them with intentional no-bound jobs.
 func ResolveMaxComputeCapForPersistence(archMax, dir string) string {
-	norm := strings.ToLower(strings.TrimSpace(archMax))
-	if norm == "any" {
-		return MaxComputeCapAny
-	}
-	if norm != "" {
-		if cap := MaxComputeCapForJob(archMax, ""); cap != "" {
-			return cap
-		}
-		return MaxComputeCapAny
-	}
-	pin := dataloc.ScanTorchPin(dir)
-	if pin == nil {
-		return MaxComputeCapAny
-	}
-	return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
+	return dataloc.ResolveTorchMaxComputeCapForPersistence(archMax, dir)
 }
 
 // ResolveJobMaxComputeCapForPersistence reads the script's gpu-arch-max
@@ -291,33 +259,4 @@ func parseComputeCap(s string) (float64, bool) {
 		return 0, false
 	}
 	return f, true
-}
-
-// parseTorchMajMin parses a torch version like "2.4.1" or "2.6.0+cu128" into
-// integer major and minor components. Returns ok=false if it can't.
-func parseTorchMajMin(version string) (maj, min int, ok bool) {
-	v := strings.TrimSpace(version)
-	if v == "" {
-		return 0, 0, false
-	}
-	// Strip local-version suffix ("2.6.0+cu128" -> "2.6.0").
-	if idx := strings.Index(v, "+"); idx >= 0 {
-		v = v[:idx]
-	}
-	// Strip pre-release tags (".dev0", "rc1") for our needs.
-	for _, sep := range []string{"a", "b", "rc", ".dev", "-"} {
-		if idx := strings.Index(v, sep); idx >= 0 {
-			v = v[:idx]
-		}
-	}
-	parts := strings.Split(v, ".")
-	if len(parts) < 2 {
-		return 0, 0, false
-	}
-	majN, err1 := strconv.Atoi(parts[0])
-	minN, err2 := strconv.Atoi(parts[1])
-	if err1 != nil || err2 != nil {
-		return 0, 0, false
-	}
-	return majN, minN, true
 }

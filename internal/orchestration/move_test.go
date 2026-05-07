@@ -85,6 +85,54 @@ func TestRefreshLaunchableJobs_AcceptsPendingPlacement(t *testing.T) {
 	}
 }
 
+func TestBuildOptions_NewOffersRespectJobMaxComputeCap(t *testing.T) {
+	job := &db.Job{
+		ID:            1838,
+		Status:        db.StatusQueued,
+		GPUClass:      "NVIDIA",
+		MaxComputeCap: "9.0",
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(c cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{
+					ProviderID:  "blackwell",
+					Provider:    cloud.ProviderVastai,
+					GPUName:     "RTX PRO 6000 WS",
+					CostPerHour: 0.10,
+				},
+				{
+					ProviderID:  "ampere",
+					Provider:    cloud.ProviderVastai,
+					GPUName:     "RTX A6000",
+					CostPerHour: 0.20,
+				},
+			}, nil
+		},
+	}
+
+	options, err := BuildOptions([]cloud.Client{client}, job, nil, nil, 0, 0)
+	if err != nil {
+		t.Fatalf("BuildOptions: %v", err)
+	}
+	foundA6000 := false
+	for _, opt := range options {
+		if !opt.IsNew {
+			continue
+		}
+		if opt.GPUName == "RTX PRO 6000 WS" {
+			t.Fatalf("incompatible Blackwell offer was returned: %+v", opt)
+		}
+		if opt.GPUName == "RTX A6000" {
+			foundA6000 = true
+		}
+	}
+	if !foundA6000 {
+		t.Fatalf("expected compatible RTX A6000 option, got %+v", options)
+	}
+}
+
 func TestUnplaceIfNeeded_AlreadyUnplaced(t *testing.T) {
 	database := db.SetupTestDB(t)
 

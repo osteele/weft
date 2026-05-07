@@ -55,6 +55,10 @@ type InstanceGroup struct {
 	// in the group has no inferred limit). Inferred from each job's torch
 	// pin or set explicitly via [tool.weft] gpu-arch-max.
 	MaxComputeCap string
+	// MinComputeCap is the most restrictive (highest) CUDA compute-capability
+	// lower bound across the jobs in the group. Empty string means "no lower
+	// bound".
+	MinComputeCap string
 	Jobs          []*db.Job
 }
 
@@ -420,6 +424,29 @@ func maxGroupPriority(group InstanceGroup) int {
 	return maxPriority
 }
 
+func mergeMaxComputeCap(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	if placement.CompareComputeCap(a, b) <= 0 {
+		return a
+	}
+	return b
+}
+
+func mergeMinComputeCap(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	if placement.CompareComputeCap(a, b) >= 0 {
+		return a
+	}
+	return b
+}
+
 // MergeCompatibleGroups combines instance groups that have compatible GPU
 // constraints and Docker images into fewer, larger groups. This amortizes
 // instance launch overhead and rental minimums when jobs have no data affinity.
@@ -460,20 +487,24 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			if g.DiskGB > merged[i].DiskGB {
 				merged[i].DiskGB = g.DiskGB
 			}
+			merged[i].MaxComputeCap = mergeMaxComputeCap(merged[i].MaxComputeCap, g.MaxComputeCap)
+			merged[i].MinComputeCap = mergeMinComputeCap(merged[i].MinComputeCap, g.MinComputeCap)
 			found = true
 			break
 		}
 		if !found {
 			// Copy the group to avoid mutating the original
 			merged = append(merged, InstanceGroup{
-				GPUClass:    g.GPUClass,
-				Provider:    g.Provider,
-				GPUMemGB:    g.GPUMemGB,
-				MaxGPUMemGB: g.MaxGPUMemGB,
-				DiskGB:      g.DiskGB,
-				Image:       g.Image,
-				Preemptible: g.Preemptible,
-				Jobs:        append([]*db.Job(nil), g.Jobs...),
+				GPUClass:      g.GPUClass,
+				Provider:      g.Provider,
+				GPUMemGB:      g.GPUMemGB,
+				MaxGPUMemGB:   g.MaxGPUMemGB,
+				DiskGB:        g.DiskGB,
+				Image:         g.Image,
+				Preemptible:   g.Preemptible,
+				MaxComputeCap: g.MaxComputeCap,
+				MinComputeCap: g.MinComputeCap,
+				Jobs:          append([]*db.Job(nil), g.Jobs...),
 			})
 		}
 	}
@@ -491,14 +522,16 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 	for _, g := range groups {
 		if len(g.Jobs) <= 1 {
 			result = append(result, InstanceGroup{
-				GPUClass:    g.GPUClass,
-				Provider:    g.Provider,
-				GPUMemGB:    g.GPUMemGB,
-				MaxGPUMemGB: g.MaxGPUMemGB,
-				DiskGB:      g.DiskGB,
-				Image:       g.Image,
-				Preemptible: g.Preemptible,
-				Jobs:        append([]*db.Job(nil), g.Jobs...),
+				GPUClass:      g.GPUClass,
+				Provider:      g.Provider,
+				GPUMemGB:      g.GPUMemGB,
+				MaxGPUMemGB:   g.MaxGPUMemGB,
+				DiskGB:        g.DiskGB,
+				Image:         g.Image,
+				Preemptible:   g.Preemptible,
+				MaxComputeCap: g.MaxComputeCap,
+				MinComputeCap: g.MinComputeCap,
+				Jobs:          append([]*db.Job(nil), g.Jobs...),
 			})
 			continue
 		}
@@ -512,14 +545,16 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 				memMax = vramTierOf(mem)
 			}
 			result = append(result, InstanceGroup{
-				GPUClass:    g.GPUClass,
-				Provider:    g.Provider,
-				GPUMemGB:    mem,
-				MaxGPUMemGB: memMax,
-				DiskGB:      g.DiskGB,
-				Image:       g.Image,
-				Preemptible: g.Preemptible,
-				Jobs:        []*db.Job{job},
+				GPUClass:      g.GPUClass,
+				Provider:      g.Provider,
+				GPUMemGB:      mem,
+				MaxGPUMemGB:   memMax,
+				DiskGB:        g.DiskGB,
+				Image:         g.Image,
+				Preemptible:   g.Preemptible,
+				MaxComputeCap: groupMaxComputeCap(nil, []*db.Job{job}),
+				MinComputeCap: groupMinComputeCap([]*db.Job{job}),
+				Jobs:          []*db.Job{job},
 			})
 		}
 	}
@@ -678,6 +713,7 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 				VastCapAdd:       sub.vastCapAdd,
 				Preemptible:      g.Preemptible,
 				MaxComputeCap:    groupMaxComputeCap(database, sub.jobs),
+				MinComputeCap:    groupMinComputeCap(sub.jobs),
 				Jobs:             sub.jobs,
 			})
 		}
@@ -800,6 +836,10 @@ func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 		cap := job.MaxComputeCap
 		if cap == "" {
 			cap = resolveAndPersist(job)
+		} else if cap != placement.MaxComputeCapAny {
+			if resolved := resolveAndPersist(job); resolved != "" && resolved != placement.MaxComputeCapAny && resolved != cap {
+				cap = resolved
+			}
 		}
 		switch {
 		case cap == "":
@@ -816,6 +856,41 @@ func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 		}
 	}
 	return minCap
+}
+
+func groupMinComputeCap(jobs []*db.Job) string {
+	type capKey struct{ dir string }
+	resolveCache := map[capKey]string{}
+	maxMinCap := ""
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		k := capKey{localDir}
+		cap, ok := resolveCache[k]
+		if !ok {
+			cap = placement.MinComputeCapForJob(localDir)
+			resolveCache[k] = cap
+		}
+		if cap != "" && (maxMinCap == "" || placement.CompareComputeCap(cap, maxMinCap) > 0) {
+			maxMinCap = cap
+		}
+	}
+	return maxMinCap
+}
+
+// GroupMaxComputeCap reduces per-job arch caps into the most restrictive cap
+// for a group. It is exported for orchestration paths that build ad hoc groups
+// outside campaign planning.
+func GroupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
+	return groupMaxComputeCap(database, jobs)
+}
+
+// GroupMinComputeCap reduces per-job arch lower bounds into the most
+// restrictive lower bound for a group.
+func GroupMinComputeCap(jobs []*db.Job) string {
+	return groupMinComputeCap(jobs)
 }
 
 // ResolveJobVastCapAdd returns the Vast.ai-only capabilities to request for a

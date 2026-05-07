@@ -34,14 +34,22 @@ func RefreshProjectDerivedMetadata(database *sql.DB, jobID int64, workingDir, co
 		return fmt.Errorf("refresh job output dirs: %w", err)
 	}
 
-	// Invalidate the persisted arch cap so the next launch re-resolves it
-	// against current sources. Done here (rather than calling placement) to
-	// avoid an ops→placement→ops cycle via placement/metrics.go.
-	if err := db.SetJobMaxComputeCap(database, jobID, ""); err != nil {
-		return fmt.Errorf("clear max_compute_cap: %w", err)
+	if err := db.SetJobMaxComputeCap(database, jobID, ResolveProjectMaxComputeCap(localDir, command)); err != nil {
+		return fmt.Errorf("refresh max_compute_cap: %w", err)
 	}
 
 	return nil
+}
+
+// ResolveProjectMaxComputeCap resolves the persisted cap encoding for project
+// metadata refreshes. Keep this in ops to avoid importing placement here; the
+// launch path still re-resolves empty caps as a second line of defense.
+func ResolveProjectMaxComputeCap(localDir, command string) string {
+	archMax := ""
+	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
+		archMax = meta.GPUArchMax
+	}
+	return dataloc.ResolveTorchMaxComputeCapForPersistence(archMax, localDir)
 }
 
 func mergeStringSlices(a, b []string) []string {

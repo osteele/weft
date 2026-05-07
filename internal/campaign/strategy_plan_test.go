@@ -762,6 +762,39 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing
 	}
 }
 
+func TestRankGroupOffersForPlanning_FiltersOffersAboveMaxComputeCap(t *testing.T) {
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass:      "NVIDIA",
+			GPUMemGB:      82,
+			MaxComputeCap: "9.0",
+			Jobs:          []*db.Job{{ID: 1888, Project: "markov-attention", Command: "uv run python -u scripts/exp177_ols_init_for_lora.py"}},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "blackwell", GPUName: "RTX PRO 6000 WS", GPUMemGB: 96, CostPerHour: 0.10, DLPerf: 60.0},
+			{ProviderID: "h100", GPUName: "H100", GPUMemGB: 94, CostPerHour: 0.80, DLPerf: 35.0},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "h100" {
+		t.Fatalf("expected sm_9.0-compatible offer, got %s", offers[0].Offer.ProviderID)
+	}
+	if offers[0].FilterStats.TorchArchExampleGPU != "RTX PRO 6000 WS" {
+		t.Fatalf("expected Blackwell offer to be reported as arch-filtered, got %#v", offers[0].FilterStats)
+	}
+}
+
 func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200ForPythiaScaling(t *testing.T) {
 	original := resolvePredictBatch
 	t.Cleanup(func() { resolvePredictBatch = original })

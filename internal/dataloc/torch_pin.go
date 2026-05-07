@@ -64,6 +64,18 @@ var (
 	cudaRuntimeVersionRe = regexp.MustCompile(`^(\d+)\.(\d+)\.`)
 )
 
+var cudaBearingNvidiaPackages = map[string]bool{
+	"nvidia-cublas-cu12":       true,
+	"nvidia-cuda-cupti-cu12":   true,
+	"nvidia-cuda-nvrtc-cu12":   true,
+	"nvidia-cuda-runtime-cu12": true,
+	"nvidia-cufft-cu12":        true,
+	"nvidia-curand-cu12":       true,
+	"nvidia-cusolver-cu12":     true,
+	"nvidia-cusparse-cu12":     true,
+	"nvidia-nvjitlink-cu12":    true,
+}
+
 // scanUVLock scans uv.lock for a torch pin. Returns nil if the file is missing
 // or torch is not present.
 func scanUVLock(path string) *TorchPin {
@@ -75,7 +87,7 @@ func scanUVLock(path string) *TorchPin {
 	var (
 		torchVersion   string
 		cudaFromWheel  string
-		cudaFromRunt   string
+		cudaFromNvidia string
 		curName        string
 		curVersion     string
 		inPackageBlock bool
@@ -87,10 +99,13 @@ func scanUVLock(path string) *TorchPin {
 			if curVersion != "" && torchVersion == "" {
 				torchVersion = curVersion
 			}
-		case "nvidia-cuda-runtime-cu12":
-			if cudaFromRunt == "" {
+		default:
+			if cudaBearingNvidiaPackages[curName] {
 				if m := cudaRuntimeVersionRe.FindStringSubmatch(curVersion); m != nil {
-					cudaFromRunt = "cu" + m[1] + m[2]
+					cu := "cu" + m[1] + m[2]
+					if cu > cudaFromNvidia {
+						cudaFromNvidia = cu
+					}
 				}
 			}
 		}
@@ -117,7 +132,7 @@ func scanUVLock(path string) *TorchPin {
 			curName = m[1]
 			continue
 		}
-		if curName == "torch" || curName == "nvidia-cuda-runtime-cu12" {
+		if curName == "torch" || cudaBearingNvidiaPackages[curName] {
 			if m := uvLockVersionRe.FindStringSubmatch(trimmed); m != nil && curVersion == "" {
 				curVersion = m[1]
 			}
@@ -137,8 +152,8 @@ func scanUVLock(path string) *TorchPin {
 	switch {
 	case cudaFromWheel != "":
 		pin.CudaVariant = cudaFromWheel
-	case cudaFromRunt != "":
-		pin.CudaVariant = cudaFromRunt
+	case cudaFromNvidia != "":
+		pin.CudaVariant = cudaFromNvidia
 	}
 	return pin
 }

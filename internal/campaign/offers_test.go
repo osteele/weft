@@ -937,7 +937,8 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 	}{
 		{"vram", OfferFilterStats{RawCount: 12}, "12 offers found, all filtered by VRAM requirement"},
 		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 offers passed VRAM but all filtered by CUDA compatibility"},
-		{"torch arch", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMaxCap: "sm_89"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
+		{"torch arch max", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMaxCap: "sm_89"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
+		{"torch arch min", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMinCap: "7.5"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch lower bound (min cap=7.5)"},
 		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 offers passed filters but none met survival threshold"},
 		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
 		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
@@ -998,7 +999,7 @@ func TestFilterOffersByTorchArch(t *testing.T) {
 	}
 	// Cap at 9.0 (Hopper): A100 and H100 pass; B200/RTX PRO Blackwell rejected;
 	// unknown GPU passes (we cannot prove violation).
-	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "9.0")
+	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "", "9.0")
 	if filtered != 2 {
 		t.Errorf("filtered = %d, want 2", filtered)
 	}
@@ -1019,8 +1020,34 @@ func TestFilterOffersByTorchArch(t *testing.T) {
 
 func TestFilterOffersByTorchArch_NoBound(t *testing.T) {
 	offers := []cloud.Offer{{ProviderID: "x", GPUName: "RTX 5090"}}
-	got, filtered, _, _ := filterOffersByTorchArch(offers, "")
+	got, filtered, _, _ := filterOffersByTorchArch(offers, "", "")
 	if filtered != 0 || len(got) != 1 {
 		t.Errorf("unbounded filter dropped offers: filtered=%d remaining=%d", filtered, len(got))
+	}
+}
+
+func TestFilterOffersByTorchArch_MinBound(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "v100", GPUName: "Tesla V100"},
+		{ProviderID: "t4", GPUName: "Tesla T4"},
+		{ProviderID: "a100", GPUName: "A100"},
+		{ProviderID: "unknown", GPUName: "weird-future-gpu"},
+	}
+	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "7.5", "")
+	if filtered != 1 {
+		t.Errorf("filtered = %d, want 1", filtered)
+	}
+	if exGPU == "" || exCap != "7.0" {
+		t.Errorf("expected V100 example with sm_7.0, got %q %q", exGPU, exCap)
+	}
+	keepIDs := map[string]bool{}
+	for _, o := range got {
+		keepIDs[o.ProviderID] = true
+	}
+	if keepIDs["v100"] {
+		t.Errorf("expected v100 to be filtered; got %+v", keepIDs)
+	}
+	if !keepIDs["t4"] || !keepIDs["a100"] || !keepIDs["unknown"] {
+		t.Errorf("expected t4, a100, unknown to survive; got %+v", keepIDs)
 	}
 }

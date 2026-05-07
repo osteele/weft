@@ -460,6 +460,34 @@ func TestMergeCompatibleGroups_TakesMemorySupremum(t *testing.T) {
 	}
 }
 
+func TestMergeCompatibleGroups_PreservesMostRestrictiveMaxComputeCap(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 82, MaxComputeCap: "12.0", Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 82, MaxComputeCap: "9.0", Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged group, got %d", len(merged))
+	}
+	if merged[0].MaxComputeCap != "9.0" {
+		t.Fatalf("MaxComputeCap = %q, want 9.0", merged[0].MaxComputeCap)
+	}
+}
+
+func TestMergeCompatibleGroups_PreservesMostRestrictiveMinComputeCap(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 24, MinComputeCap: "7.5", Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 24, MinComputeCap: "8.0", Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("len(merged) = %d, want 1", len(merged))
+	}
+	if merged[0].MinComputeCap != "8.0" {
+		t.Fatalf("MinComputeCap = %q, want 8.0", merged[0].MinComputeCap)
+	}
+}
+
 func TestMergeCompatibleGroups_DifferentTiersStaySeparate(t *testing.T) {
 	// Groups in different VRAM tiers (24 vs 48) should NOT merge
 	groups := []InstanceGroup{
@@ -911,9 +939,9 @@ func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 		DiskGB:   50,
 		Image:    "cuda:12.4",
 		Jobs: []*db.Job{
-			{ID: 1, GPUMemGB: intPtr(20), GPUMemMaxGB: intPtr(24)},
-			{ID: 2, GPUMemGB: intPtr(8)},
-			{ID: 3, GPUMemGB: intPtr(8)},
+			{ID: 1, GPUMemGB: intPtr(20), GPUMemMaxGB: intPtr(24), MaxComputeCap: "9.0"},
+			{ID: 2, GPUMemGB: intPtr(8), MaxComputeCap: "12.0"},
+			{ID: 3, GPUMemGB: intPtr(8), MaxComputeCap: "12.0"},
 		},
 	}
 	result := SplitToParallel([]InstanceGroup{group})
@@ -943,6 +971,9 @@ func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 	if result[0].MaxGPUMemGB != 24 {
 		t.Errorf("first group MaxGPUMemGB = %d, want 24", result[0].MaxGPUMemGB)
 	}
+	if result[0].MaxComputeCap != "9.0" {
+		t.Errorf("first group MaxComputeCap = %q, want 9.0", result[0].MaxComputeCap)
+	}
 	// The 8GB jobs should have their own GPUMemGB and a VRAM tier ceiling
 	for _, g := range result[1:] {
 		if g.GPUMemGB != 8 {
@@ -952,14 +983,19 @@ func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 			t.Errorf("8GB group (job %d): MaxGPUMemGB = %d, want 12 (VRAM tier default)",
 				g.Jobs[0].ID, g.MaxGPUMemGB)
 		}
+		if g.MaxComputeCap != "12.0" {
+			t.Errorf("8GB group (job %d): MaxComputeCap = %q, want 12.0",
+				g.Jobs[0].ID, g.MaxComputeCap)
+		}
 	}
 }
 
 func TestSplitToParallel_SingleJobGroup(t *testing.T) {
 	group := InstanceGroup{
-		GPUClass: "RTX_3090",
-		GPUMemGB: 24,
-		Jobs:     []*db.Job{{ID: 1, GPUMemGB: intPtr(24)}},
+		GPUClass:      "RTX_3090",
+		GPUMemGB:      24,
+		MaxComputeCap: "9.0",
+		Jobs:          []*db.Job{{ID: 1, GPUMemGB: intPtr(24)}},
 	}
 	result := SplitToParallel([]InstanceGroup{group})
 	if len(result) != 1 {
@@ -970,6 +1006,9 @@ func TestSplitToParallel_SingleJobGroup(t *testing.T) {
 	}
 	if result[0].GPUMemGB != 24 {
 		t.Errorf("GPUMemGB = %d, want 24", result[0].GPUMemGB)
+	}
+	if result[0].MaxComputeCap != "9.0" {
+		t.Errorf("MaxComputeCap = %q, want 9.0", result[0].MaxComputeCap)
 	}
 }
 
@@ -1013,5 +1052,34 @@ func TestGroupMaxComputeCap_LazyBackfillFromMissingTorchPin(t *testing.T) {
 	got := groupMaxComputeCap(nil, jobs)
 	if got != "" {
 		t.Errorf("groupMaxComputeCap = %q, want \"\" (job 2 backfills to \"any\" → group unbounded)", got)
+	}
+}
+
+func TestGroupMaxComputeCap_RefreshesStalePersistedTorchCap(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.4.5.8"
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	jobs := []*db.Job{
+		{
+			ID:            1,
+			WorkingDir:    dir,
+			Command:       "uv run python train.py",
+			MaxComputeCap: "10.0",
+		},
+	}
+
+	got := groupMaxComputeCap(nil, jobs)
+	if got != "9.0" {
+		t.Errorf("groupMaxComputeCap = %q, want refreshed cap 9.0", got)
 	}
 }

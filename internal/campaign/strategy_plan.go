@@ -1452,6 +1452,22 @@ func rankOfferWithPredictedRuntime(
 		return result, true
 	}
 
+	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
+		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
+		stats.TorchArchMinCap = group.MinComputeCap
+		stats.TorchArchMaxCap = group.MaxComputeCap
+		if archFiltered > 0 {
+			stats.TorchArchExampleGPU = exampleGPU
+			stats.TorchArchExampleCap = exampleCap
+		}
+		offers = archOffers
+	}
+	stats.AfterTorchArch = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result, true
+	}
+
 	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
 	result.RejectedGroups = rejected
 	stats.AfterSurvival = len(filtered)
