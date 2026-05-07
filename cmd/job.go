@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/queuejob"
+	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -141,6 +143,14 @@ var (
 	jobMoveTo      string
 	jobMoveFrom    string
 	jobMoveNoTUI   bool
+)
+
+var (
+	moveQueuedJobToNewInstance   = orchestration.MoveQueuedJobToNewInstance
+	moveQueuedJobsToNewInstances = orchestration.MoveQueuedJobsToNewInstances
+	moveNewMaxAttempts           = retrypolicy.MaxAttempts
+	moveNewBackoffDelay          = retrypolicy.BackoffDelay
+	moveNewWait                  = waitForNewInstanceRetry
 )
 
 var jobMoveCmd = &cobra.Command{
@@ -631,10 +641,40 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 		defer restore()
 	}
 
+	maxAttempts := moveNewMaxAttempts()
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = moveJobsToNewInstancesOnce(database, jobs, separateEach, noTUI)
+		if err == nil {
+			return nil
+		}
+		if attempt >= maxAttempts-1 || !orchestration.IsRetryableNewInstanceLaunchError(err) {
+			break
+		}
+		delay, ok := moveNewBackoffDelay(attempt)
+		if !ok {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "Move-to-new attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
+		fmt.Fprintf(os.Stderr, "Retrying move-to-new launch in %s (next attempt %d/%d)\n", delay, attempt+2, maxAttempts)
+		if waitErr := moveNewWait(context.Background(), delay); waitErr != nil {
+			return waitErr
+		}
+	}
+	if err != nil && maxAttempts > 1 && orchestration.IsRetryableNewInstanceLaunchError(err) {
+		return fmt.Errorf("move-to-new launch failed after %d attempts: %w", maxAttempts, err)
+	}
+	return err
+}
+
+func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach bool, noTUI bool) error {
 	// Keep single-job move-to-new on the same implementation path as TUI move,
 	// so behavior and instrumentation stay consistent across interfaces.
 	if len(jobs) == 1 && !separateEach {
-		res, err := orchestration.MoveQueuedJobToNewInstance(database, jobs[0].ID)
+		res, err := moveQueuedJobToNewInstance(database, jobs[0].ID)
 		if err != nil {
 			return err
 		}
@@ -653,7 +693,7 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 		launchTUI = terminal.StartLaunchProgressTUI(0, 0)
 		defer func() { _ = launchTUI.Stop() }()
 	}
-	result, err := orchestration.MoveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
+	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {
 			if launchTUI == nil {
 				fmt.Println(message)

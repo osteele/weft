@@ -1,13 +1,17 @@
 package cmd
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/spf13/cobra"
 )
 
@@ -253,5 +257,88 @@ func TestRunMove_AllowsFlagOnlySelectorForms(t *testing.T) {
 	err := runMove(moveCmd, nil)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected delegated execution, got %v", err)
+	}
+}
+
+func TestMoveJobsToNewInstancesRetriesSingleJobRetryableLaunch(t *testing.T) {
+	restore := stubMoveToNewRetryHooks(t)
+	defer restore()
+
+	attempts := 0
+	moveQueuedJobToNewInstance = func(_ *sql.DB, jobID int64) (orchestration.Result, error) {
+		attempts++
+		if attempts == 1 {
+			return orchestration.Result{}, cloud.ErrProviderRejected
+		}
+		return orchestration.Result{TargetDesc: "new A100 instance wi42"}, nil
+	}
+
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, true)
+	if err != nil {
+		t.Fatalf("moveJobsToNewInstances: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestMoveJobsToNewInstancesRetriesBulkRetryableLaunch(t *testing.T) {
+	restore := stubMoveToNewRetryHooks(t)
+	defer restore()
+
+	attempts := 0
+	moveQueuedJobsToNewInstances = func(_ *sql.DB, _ []*db.Job, _ bool, _ orchestration.BulkCallbacks) (orchestration.BulkResult, error) {
+		attempts++
+		if attempts == 1 {
+			return orchestration.BulkResult{}, cloud.ErrProviderRejected
+		}
+		return orchestration.BulkResult{InstanceIDs: []int64{42}}, nil
+	}
+
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}, {ID: 124}}, false, true)
+	if err != nil {
+		t.Fatalf("moveJobsToNewInstances: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestMoveJobsToNewInstancesDoesNotRetryNonRetryableLaunch(t *testing.T) {
+	restore := stubMoveToNewRetryHooks(t)
+	defer restore()
+
+	attempts := 0
+	sentinel := errors.New("bad config")
+	moveQueuedJobToNewInstance = func(_ *sql.DB, jobID int64) (orchestration.Result, error) {
+		attempts++
+		return orchestration.Result{}, sentinel
+	}
+
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, true)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("moveJobsToNewInstances err = %v, want %v", err, sentinel)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func stubMoveToNewRetryHooks(t *testing.T) func() {
+	t.Helper()
+	origSingle := moveQueuedJobToNewInstance
+	origBulk := moveQueuedJobsToNewInstances
+	origMaxAttempts := moveNewMaxAttempts
+	origBackoff := moveNewBackoffDelay
+	origWait := moveNewWait
+	moveNewMaxAttempts = func() int { return 3 }
+	moveNewBackoffDelay = func(attempt int) (time.Duration, bool) { return 0, true }
+	moveNewWait = func(context.Context, time.Duration) error { return nil }
+	return func() {
+		moveQueuedJobToNewInstance = origSingle
+		moveQueuedJobsToNewInstances = origBulk
+		moveNewMaxAttempts = origMaxAttempts
+		moveNewBackoffDelay = origBackoff
+		moveNewWait = origWait
 	}
 }
