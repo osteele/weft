@@ -227,24 +227,21 @@ func (m *launchProgressModel) ensureRow(group campaign.InstanceGroup) *launchPro
 
 func (m launchProgressModel) View() string {
 	var b strings.Builder
-	header := "Campaign ?"
-	if m.campaignID > 0 {
-		header = fmt.Sprintf("Campaign %d", m.campaignID)
-	}
 	total := m.expectedWorkers
 	if total == 0 {
 		total = len(m.rowOrder)
 	}
-	b.WriteString(fmt.Sprintf("%s · Launching %d instances · %s elapsed\n", header, total, formatMMSS(time.Since(m.startedAt))))
-	if strings.TrimSpace(m.headerMsg) != "" {
-		b.WriteString("  " + m.headerMsg + "\n")
+	b.WriteString(fmt.Sprintf("Launching %s · %s elapsed\n", pluralize(total, "instance", "instances"), formatMMSS(time.Since(m.startedAt))))
+	headerMsg := launchProgressHeaderMessage(m.headerMsg)
+	if headerMsg != "" {
+		b.WriteString("  " + headerMsg + "\n")
 	}
 	b.WriteString("\n")
 
 	maxRows := len(m.rowOrder)
 	footerLines := 2
 	headerLines := 2
-	if strings.TrimSpace(m.headerMsg) != "" {
+	if headerMsg != "" {
 		headerLines = 3
 	}
 	if m.height > 0 {
@@ -285,9 +282,17 @@ func (m launchProgressModel) View() string {
 	if denom == 0 {
 		denom = len(m.rowOrder)
 	}
-	b.WriteString(fmt.Sprintf("  ready %d/%d · failed %d · elapsed %s\n", ready, denom, failed, formatMMSS(time.Since(m.startedAt))))
+	b.WriteString(fmt.Sprintf("  ready %d/%d · failed %d\n", ready, denom, failed))
 	b.WriteString("  [q] quit  [d] details  [l] logs")
 	return b.String()
+}
+
+func launchProgressHeaderMessage(phase string) string {
+	phase = strings.TrimSpace(phase)
+	if strings.EqualFold(phase, "launching worker instances") {
+		return ""
+	}
+	return phase
 }
 
 func (m launchProgressModel) renderRow(row *launchProgressRow) string {
