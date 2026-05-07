@@ -38,3 +38,28 @@ func TestLaunchProgressHeaderMessageKeepsSpecificStatus(t *testing.T) {
 		t.Fatalf("launchProgressHeaderMessage returned %q", got)
 	}
 }
+
+func TestLaunchProgressRowPhaseShowsElapsed(t *testing.T) {
+	now := time.Unix(1000, 0)
+	row := &launchProgressRow{
+		phase:          "waiting for SSH",
+		phaseStartedAt: now.Add(-2*time.Minute - 3*time.Second),
+	}
+
+	if got := launchProgressRowPhase(row, now); got != "waiting for SSH 02:03" {
+		t.Fatalf("launchProgressRowPhase = %q", got)
+	}
+}
+
+func TestLaunchProgressRowPhaseDoesNotChangeCompletedRows(t *testing.T) {
+	now := time.Unix(1000, 0)
+	row := &launchProgressRow{
+		phase:          "running bootstrap script",
+		phaseStartedAt: now.Add(-2 * time.Minute),
+		done:           true,
+	}
+
+	if got := launchProgressRowPhase(row, now); got != "running bootstrap script" {
+		t.Fatalf("launchProgressRowPhase = %q", got)
+	}
+}

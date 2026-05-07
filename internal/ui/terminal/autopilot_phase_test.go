@@ -17,6 +17,7 @@ func TestAutoPilotPhaseLabel(t *testing.T) {
 		{"eligible", &db.LifecycleEvent{EventKind: db.EventRelaunchEligible}, "scanning candidates"},
 		{"disk bump", &db.LifecycleEvent{EventKind: db.EventRelaunchDiskBump}, "raising disk allowance"},
 		{"launch success", &db.LifecycleEvent{EventKind: db.EventRelaunchLaunchSuccess}, "pod launched, bootstrapping"},
+		{"runpod ssh waiting", &db.LifecycleEvent{EventKind: db.EventRelaunchRunpodSSHWaiting}, "waiting for RunPod SSH readiness"},
 		{"launch failed without error text", &db.LifecycleEvent{EventKind: db.EventRelaunchLaunchFailed}, "launch failed"},
 		{"launch failed with error text uses first line", &db.LifecycleEvent{EventKind: db.EventRelaunchLaunchFailed, ErrorText: "pod not ready\nsecond line"}, "launch failed: pod not ready"},
 		{"pass_summary maps to empty", &db.LifecycleEvent{EventKind: db.EventRelaunchPassSummary}, ""},

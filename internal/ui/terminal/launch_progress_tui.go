@@ -41,7 +41,8 @@ type launchProgressRow struct {
 	jobLabel   string
 	constraint string
 
-	phase string
+	phase          string
+	phaseStartedAt time.Time
 
 	assetsReady int
 	assetsTotal int
@@ -178,6 +179,7 @@ func (m launchProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *launchProgressModel) applyEvent(event campaign.LaunchEvent) {
+	now := time.Now()
 	switch event.Kind {
 	case campaign.LaunchEventCampaignStatus:
 		m.headerMsg = strings.TrimSpace(event.Phase)
@@ -185,27 +187,25 @@ func (m *launchProgressModel) applyEvent(event campaign.LaunchEvent) {
 		row := m.ensureRow(event.Group)
 		switch event.Kind {
 		case campaign.LaunchEventGroupPhase:
-			if strings.TrimSpace(event.Phase) != "" {
-				row.phase = strings.TrimSpace(event.Phase)
-			}
+			row.setPhase(event.Phase, now)
 		case campaign.LaunchEventGroupAssets:
-			row.phase = "staging"
+			row.setPhase("staging", now)
 			row.assetsReady = event.AssetsReady
 			row.assetsTotal = event.AssetsTotal
 		case campaign.LaunchEventGroupRetry:
-			row.phase = "creating instance"
+			row.setPhase("creating instance", now)
 			row.retryAttempt = event.RetryAttempt
 			row.retryMax = event.RetryMax
 		case campaign.LaunchEventGroupDone:
 			row.done = true
 			row.failed = false
 			row.instanceID = event.InstanceID
-			row.doneAt = time.Now()
+			row.doneAt = now
 		case campaign.LaunchEventGroupFailed:
 			row.failed = true
 			row.done = false
 			row.reason = strings.TrimSpace(event.Reason)
-			row.phase = "failed"
+			row.setPhase("failed", now)
 		}
 	}
 }
@@ -216,22 +216,35 @@ func (m *launchProgressModel) ensureRow(group campaign.InstanceGroup) *launchPro
 		return row
 	}
 	row := &launchProgressRow{
-		jobLabel:   launchRowJobLabel(group),
-		constraint: strings.TrimSpace(group.GPUSpec()),
-		phase:      "staging",
+		jobLabel:       launchRowJobLabel(group),
+		constraint:     strings.TrimSpace(group.GPUSpec()),
+		phase:          "staging",
+		phaseStartedAt: time.Now(),
 	}
 	m.rows[key] = row
 	m.rowOrder = append(m.rowOrder, key)
 	return row
 }
 
+func (r *launchProgressRow) setPhase(phase string, now time.Time) {
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		return
+	}
+	if r.phase != phase || r.phaseStartedAt.IsZero() {
+		r.phase = phase
+		r.phaseStartedAt = now
+	}
+}
+
 func (m launchProgressModel) View() string {
 	var b strings.Builder
+	now := time.Now()
 	total := m.expectedWorkers
 	if total == 0 {
 		total = len(m.rowOrder)
 	}
-	b.WriteString(fmt.Sprintf("Launching %s · %s elapsed\n", pluralize(total, "instance", "instances"), formatMMSS(time.Since(m.startedAt))))
+	b.WriteString(fmt.Sprintf("Launching %s · %s elapsed\n", pluralize(total, "instance", "instances"), formatMMSS(now.Sub(m.startedAt))))
 	headerMsg := launchProgressHeaderMessage(m.headerMsg)
 	if headerMsg != "" {
 		b.WriteString("  " + headerMsg + "\n")
@@ -260,7 +273,7 @@ func (m launchProgressModel) View() string {
 	}
 	for i := 0; i < displayRows; i++ {
 		row := m.rows[m.rowOrder[i]]
-		b.WriteString(m.renderRow(row))
+		b.WriteString(m.renderRow(row, now))
 		b.WriteString("\n")
 	}
 	if overflow > 0 {
@@ -295,11 +308,11 @@ func launchProgressHeaderMessage(phase string) string {
 	return phase
 }
 
-func (m launchProgressModel) renderRow(row *launchProgressRow) string {
+func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) string {
 	job := fitText(row.jobLabel, 8)
 	constraint := fitText(row.constraint, 18)
 
-	phase := row.phase
+	phase := launchProgressRowPhase(row, now)
 	spin := m.spin.View()
 	phaseText := fmt.Sprintf("%s %s", spin, phase)
 	if row.done {
@@ -334,6 +347,17 @@ func (m launchProgressModel) renderRow(row *launchProgressRow) string {
 	}
 
 	return fmt.Sprintf("  %-8s  %-18s  %-28s  %-24s  %s", job, constraint, phaseCol, progressCol, badges)
+}
+
+func launchProgressRowPhase(row *launchProgressRow, now time.Time) string {
+	phase := strings.TrimSpace(row.phase)
+	if phase == "" {
+		return ""
+	}
+	if row.done || row.failed || row.phaseStartedAt.IsZero() || now.Before(row.phaseStartedAt) {
+		return phase
+	}
+	return fmt.Sprintf("%s %s", phase, formatMMSS(now.Sub(row.phaseStartedAt)))
 }
 
 func launchRowJobLabel(group campaign.InstanceGroup) string {

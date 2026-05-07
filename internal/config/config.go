@@ -500,11 +500,13 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 	switch provider {
 	case cloud.ProviderRunpod:
 		image := cloud.DefaultRunpodImage
+		templateID := ""
 		if c != nil {
 			configured := strings.TrimSpace(c.Runpod.DefaultImage)
 			if strings.HasPrefix(strings.ToLower(configured), "runpod/") {
 				image = configured
 			}
+			templateID = strings.TrimSpace(c.Runpod.BootstrapTemplateID)
 		}
 		return cloud.CreateOpts{
 			Image:            image,
@@ -512,6 +514,7 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 			SSHEnabled:       true,
 			SSHIdentityFile:  sshIdentity,
 			SSHPublicKeyFile: sshPublicKey,
+			TemplateID:       templateID,
 		}, nil
 	case cloud.ProviderVastai:
 		image := ""

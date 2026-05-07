@@ -23,6 +23,18 @@ func TestCloudCreateOpts_RunpodDefaults(t *testing.T) {
 	}
 }
 
+func TestCloudCreateOpts_RunpodIncludesBootstrapTemplate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runpod.BootstrapTemplateID = "tpl-bootstrap"
+	opts, err := cfg.CloudCreateOpts(cloud.ProviderRunpod)
+	if err != nil {
+		t.Fatalf("CloudCreateOpts: %v", err)
+	}
+	if opts.TemplateID != "tpl-bootstrap" {
+		t.Fatalf("TemplateID = %q, want tpl-bootstrap", opts.TemplateID)
+	}
+}
+
 func TestCloudCreateOpts_IncludesCloudSSHIdentity(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Cloud.SSH.IdentityFile = "~/.ssh/weft_cloud_ed25519"

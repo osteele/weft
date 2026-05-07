@@ -35,6 +35,8 @@ func autoPilotPhaseLabel(ev *db.LifecycleEvent) string {
 		return "raising disk allowance"
 	case db.EventRelaunchLaunchSuccess:
 		return "pod launched, bootstrapping"
+	case db.EventRelaunchRunpodSSHWaiting:
+		return "waiting for RunPod SSH readiness"
 	case db.EventRelaunchLaunchFailed:
 		if msg := firstLine(ev.ErrorText); msg != "" {
 			return "launch failed: " + truncate(msg, 60)

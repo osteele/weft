@@ -433,6 +433,9 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 		if opts.OnStartCmd != "" {
 			return nil, fmt.Errorf("runpod templates manage startup commands; remove OnStartCmd when using template %q", opts.TemplateID)
 		}
+		if opts.Image != "" {
+			args = append(args, "--image", opts.Image)
+		}
 	case opts.OnStartCmd != "":
 		return nil, fmt.Errorf("%w; configure runpod.bootstrap_template_id or run `weft runpod setup`", ErrPerPodStartupUnsupported)
 	case opts.Image != "":
@@ -490,6 +493,15 @@ func parseCreatedPodID(out []byte) (string, error) {
 // BootstrapFromR2 waits for RunPod SSH readiness and executes the uploaded
 // bootstrap script from R2 on the pod.
 func (c *CloudClient) BootstrapFromR2(ctx context.Context, podID, bucket, bootstrapKey string) error {
+	return c.BootstrapFromR2WithProgress(ctx, podID, bucket, bootstrapKey, nil)
+}
+
+// BootstrapFromR2WithProgress is BootstrapFromR2 with phase callbacks for UIs
+// that need to distinguish SSH readiness from the remote bootstrap command.
+func (c *CloudClient) BootstrapFromR2WithProgress(ctx context.Context, podID, bucket, bootstrapKey string, progress cloud.ProgressFunc) error {
+	if progress == nil {
+		progress = func(string) {}
+	}
 	if strings.TrimSpace(podID) == "" {
 		return fmt.Errorf("pod ID is required")
 	}
@@ -499,17 +511,21 @@ func (c *CloudClient) BootstrapFromR2(ctx context.Context, podID, bucket, bootst
 	if strings.TrimSpace(bootstrapKey) == "" {
 		return fmt.Errorf("bootstrap key is required")
 	}
+	progress("waiting for SSH")
 	sshCmd, err := c.waitForSSHCommand(ctx, podID)
 	if err != nil {
 		return err
 	}
+	progress("SSH ready")
 	sshCmd = injectNonInteractiveSSHOptions(sshCmd)
 	remoteCmd := fmt.Sprintf(`set -euo pipefail; rclone cat "r2:%s/%s" > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`, bucket, bootstrapKey)
 	wrapped := fmt.Sprintf("%s %s", sshCmd, shellQuoteSingle(remoteCmd))
+	progress("running bootstrap script")
 	out, runErr := c.runLocalCommand(ctx, wrapped)
 	if runErr != nil {
 		return fmt.Errorf("run bootstrap over SSH for pod %s: %w: %s", podID, runErr, strings.TrimSpace(string(out)))
 	}
+	progress("bootstrap script finished")
 	return nil
 }
 

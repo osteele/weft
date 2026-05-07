@@ -40,6 +40,7 @@ func TestEncodeTemplateStartCommandArg(t *testing.T) {
 func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 	args, err := buildCreatePodArgs("NVIDIA A100 80GB PCIe", cloud.CreateOpts{
 		TemplateID: "tpl-bootstrap",
+		Image:      "runpod/pytorch:stable",
 		GPUCount:   4,
 		DiskGB:     120,
 		Label:      "weft/c42",
@@ -58,6 +59,7 @@ func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 		"--gpu-id NVIDIA A100 80GB PCIe",
 		"--gpu-count 4",
 		"--template-id tpl-bootstrap",
+		"--image runpod/pytorch:stable",
 		"--volume-in-gb 120",
 		"--name weft/c42",
 		"--env",

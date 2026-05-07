@@ -102,6 +102,31 @@ func TestFormatBootstrapWaitingShowsElapsedTime(t *testing.T) {
 	}
 }
 
+func TestFormatObservedActivityShowsRunpodSSHReadinessWait(t *testing.T) {
+	now := time.Now()
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                 112,
+			Status:             db.LaunchStatusLaunching,
+			Provider:           "runpod",
+			ProviderInstanceID: "pod-123",
+			GPUSpec:            "RTX A6000",
+		},
+		InstancePhase:  "waiting for RunPod SSH readiness",
+		PhaseChangedAt: &now,
+	}, now.Add(2*time.Minute))
+
+	if !strings.Contains(activity.Phase, "waiting for RunPod SSH readiness") {
+		t.Fatalf("phase = %q, want RunPod SSH readiness message", activity.Phase)
+	}
+	if !strings.Contains(activity.Phase, "for 2m0s") {
+		t.Fatalf("phase = %q, want duration", activity.Phase)
+	}
+	if activity.Bootstrap != "" {
+		t.Fatalf("bootstrap = %q, want empty", activity.Bootstrap)
+	}
+}
+
 func TestFormatBootstrapWaitingShowsConditionalEstimate(t *testing.T) {
 	launchedAt := time.Now().Add(-45 * time.Second).Unix()
 	activity := formatObservedActivity(campaign.InstanceUpdate{

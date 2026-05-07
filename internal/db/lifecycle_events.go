@@ -44,6 +44,14 @@ const (
 	// intent's age at prune time so leak patterns are diagnosable.
 	EventPlacementIntentPruned = "placement_intent.pruned"
 
+	// Launch progress (provider-specific bootstrap phases that can otherwise
+	// look like an inert launching row).
+	EventLaunchRunpodSSHWaiting = "launch.runpod_ssh_waiting"
+
+	// Relaunch progress (same signal, scoped to the autopilot/relaunch status
+	// line which watches relaunch.* events).
+	EventRelaunchRunpodSSHWaiting = "relaunch.runpod_ssh_waiting"
+
 	// Reconciliation actions (from ExecuteAction / reconcileStaleHeartbeat)
 	EventReconcileBootstrapTimeout  = "reconcile.bootstrap_timeout"
 	EventReconcileGraceExpired      = "reconcile.grace_expired"

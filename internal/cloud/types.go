@@ -295,7 +295,16 @@ access_key_id = ${R2_ACCESS_KEY_ID}
 secret_access_key = ${R2_SECRET_ACCESS_KEY}
 endpoint = ${R2_ENDPOINT}
 RCLONE_EOF
-rclone cat "r2:${R2_BUCKET}/%s" > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`,
+rclone_ready=0
+for i in $(seq 1 60); do
+  if rclone cat "r2:${R2_BUCKET}/%s" > /tmp/bootstrap.sh; then
+    rclone_ready=1
+    break
+  fi
+  sleep 5
+done
+[ "$rclone_ready" = 1 ] || { _weft_stage bootstrap-missing-exit; echo 'bootstrap script not available after retries' >&2; exit 1; }
+bash /tmp/bootstrap.sh`,
 		DefaultOnStartCmd, bootstrapKey,
 	)
 }

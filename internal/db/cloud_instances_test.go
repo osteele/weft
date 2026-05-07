@@ -106,6 +106,44 @@ func TestGetLaunchJobsIncludingAttemptsTreatsOpenAttemptsAsCurrent(t *testing.T)
 	}
 }
 
+func TestSetLaunchLiveInstancePhasePreservesBootstrapState(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := UpsertLaunchLiveState(database, LaunchLiveState{
+		LaunchID:       launchID,
+		BootstrapStage: "agent_installed",
+		AgentVersion:   "abc123",
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+
+	changedAt, err := SetLaunchLiveInstancePhase(database, launchID, "waiting for RunPod SSH readiness")
+	if err != nil {
+		t.Fatalf("SetLaunchLiveInstancePhase: %v", err)
+	}
+	if changedAt == nil {
+		t.Fatal("phase_changed_at should be set on first phase observation")
+	}
+
+	state, err := GetLaunchLiveState(database, launchID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if state.InstancePhase != "waiting for RunPod SSH readiness" {
+		t.Fatalf("InstancePhase = %q", state.InstancePhase)
+	}
+	if state.BootstrapStage != "agent_installed" {
+		t.Fatalf("BootstrapStage = %q, want preserved stage", state.BootstrapStage)
+	}
+	if state.AgentVersion != "abc123" {
+		t.Fatalf("AgentVersion = %q, want preserved version", state.AgentVersion)
+	}
+}
+
 func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	database := setupTestDB(t)
 

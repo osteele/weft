@@ -475,9 +475,59 @@ func replacementPriceAllowed(originalPricePerHour, replacementPricePerHour float
 // maxCreateAttempts is the maximum number of offers to try before giving up.
 const maxCreateAttempts = 4
 
+// runpodSSHBootstrapTimeout must stay below launchingPhaseTimeout so the
+// launch goroutine fails before the reconciler's launching-phase safety net.
+const runpodSSHBootstrapTimeout = 10 * time.Minute
+
+const (
+	runpodSSHWaitingPhase   = "waiting for RunPod SSH readiness"
+	runpodSSHReadyPhase     = "RunPod SSH ready; starting bootstrap"
+	runpodSSHBootstrapPhase = "running bootstrap over RunPod SSH"
+	runpodSSHFinishedPhase  = "RunPod SSH bootstrap finished"
+)
+
 // isRetryableCreateError returns true if the error warrants trying a different offer.
 func isRetryableCreateError(err error) bool {
 	return errors.Is(err, cloud.ErrOfferUnavailable) || errors.Is(err, cloud.ErrProviderRejected)
+}
+
+func runpodObservedBootstrapPhase(phase string) string {
+	switch strings.TrimSpace(phase) {
+	case "waiting for SSH":
+		return runpodSSHWaitingPhase
+	case "SSH ready":
+		return runpodSSHReadyPhase
+	case "running bootstrap script":
+		return runpodSSHBootstrapPhase
+	case "bootstrap script finished":
+		return runpodSSHFinishedPhase
+	default:
+		return ""
+	}
+}
+
+func recordRunpodObservedBootstrapPhase(database *sql.DB, campaignID *int64, launchID int64, phase string) {
+	observed := runpodObservedBootstrapPhase(phase)
+	if observed == "" {
+		return
+	}
+	if _, err := db.SetLaunchLiveInstancePhase(database, launchID, observed); err != nil {
+		slog.Debug("record runpod bootstrap phase", "component", "launch", "launch_id", launchID, "phase", observed, "error", err)
+	}
+	if observed != runpodSSHWaitingPhase {
+		return
+	}
+	event := &db.LifecycleEvent{
+		EventKind: db.EventLaunchRunpodSSHWaiting,
+		LaunchID:  launchID,
+		Detail:    observed,
+	}
+	if campaignID != nil {
+		event.CampaignID = *campaignID
+	}
+	if err := db.InsertLifecycleEvent(database, event); err != nil {
+		slog.Debug("record runpod ssh waiting event", "component", "launch", "launch_id", launchID, "error", err)
+	}
 }
 
 var retryAttemptPattern = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
@@ -1264,10 +1314,13 @@ func firstRegistrationScopeFromOffers(offers []cloud.Offer) db.FirstRegistration
 func configureBootstrapCreateOpts(client cloud.Client, createOpts *cloud.CreateOpts, bootstrapKey string) error {
 	switch client.Provider() {
 	case cloud.ProviderRunpod:
-		// RunPod bootstrap is executed over SSH after pod creation; avoid relying
-		// on template startup hooks.
-		createOpts.TemplateID = ""
 		createOpts.OnStartCmd = ""
+		if createOpts.TemplateID != "" {
+			if createOpts.EnvVars == nil {
+				createOpts.EnvVars = map[string]string{}
+			}
+			createOpts.EnvVars[cloud.R2BootstrapKeyEnvVar] = bootstrapKey
+		}
 	default:
 		createOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
 	}
@@ -1386,6 +1439,9 @@ func LaunchInstance(
 	}
 	emitProgress := func(phase string) {
 		progress(phase)
+		if client.Provider() == cloud.ProviderRunpod {
+			recordRunpodObservedBootstrapPhase(database, campaignID, instanceID, phase)
+		}
 		oplog.Log(oplog.OpLaunchLaunchPhase, oplog.WithDetailf(
 			"launch_id=%d provider=%s offer_id=%s phase=%s",
 			instanceID,
@@ -1779,9 +1835,12 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 
-	if client.Provider() == cloud.ProviderRunpod {
+	if client.Provider() == cloud.ProviderRunpod && createOpts.TemplateID == "" {
 		type runpodBootstrapper interface {
 			BootstrapFromR2(context.Context, string, string, string) error
+		}
+		type runpodProgressBootstrapper interface {
+			BootstrapFromR2WithProgress(context.Context, string, string, string, cloud.ProgressFunc) error
 		}
 		bootstrapper, ok := client.(runpodBootstrapper)
 		if !ok {
@@ -1793,9 +1852,15 @@ func LaunchInstance(
 			return instanceID, err
 		}
 		emitProgress("runpod ssh bootstrap")
-		sshCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+		sshCtx, cancel := context.WithTimeout(ctx, runpodSSHBootstrapTimeout)
 		defer cancel()
-		if err := bootstrapper.BootstrapFromR2(sshCtx, providerInstID, r2Cfg.Bucket, bootstrapKey); err != nil {
+		var err error
+		if progressBootstrapper, ok := client.(runpodProgressBootstrapper); ok {
+			err = progressBootstrapper.BootstrapFromR2WithProgress(sshCtx, providerInstID, r2Cfg.Bucket, bootstrapKey, emitProgress)
+		} else {
+			err = bootstrapper.BootstrapFromR2(sshCtx, providerInstID, r2Cfg.Bucket, bootstrapKey)
+		}
+		if err != nil {
 			destroyLeakedInstance(client, providerInstID, instanceID)
 			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "runpod ssh bootstrap failed: "+err.Error())
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)

@@ -2708,6 +2708,35 @@ func recordBootstrapTransition(database *sql.DB, launchID int64, stage string, e
 	return err
 }
 
+// SetLaunchLiveInstancePhase records an orchestrator-observed launch phase
+// without overwriting R2-sourced bootstrap, heartbeat, or job progress fields.
+func SetLaunchLiveInstancePhase(database *sql.DB, launchID int64, phase string) (*int64, error) {
+	now := time.Now().Unix()
+	phase = strings.TrimSpace(phase)
+
+	var oldPhase sql.NullString
+	_ = database.QueryRow(`SELECT instance_phase FROM launch_live_state WHERE launch_id = ?`, launchID).Scan(&oldPhase)
+	phaseChangedAt := (*int64)(nil)
+	if phase != oldPhase.String {
+		phaseChangedAt = &now
+	}
+
+	_, err := database.Exec(`
+		INSERT INTO launch_live_state
+			(launch_id, instance_phase, updated_at, phase_changed_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(launch_id) DO UPDATE SET
+			instance_phase=excluded.instance_phase,
+			phase_changed_at=COALESCE(excluded.phase_changed_at, launch_live_state.phase_changed_at),
+			updated_at=excluded.updated_at`,
+		launchID, phase, now, phaseChangedAt,
+	)
+	if err != nil {
+		return phaseChangedAt, err
+	}
+	return phaseChangedAt, nil
+}
+
 // nullableProgressPct returns nil if pct is -1 (unavailable), otherwise the value.
 func nullableProgressPct(pct int) any {
 	if pct < 0 {

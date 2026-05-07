@@ -541,10 +541,23 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			// no client, etc.) never open intents and remain Unplaced with
 			// their existing block reason.
 			intentIDs := openRelaunchIntents(cfg.Database, group.Jobs)
+			emittedRunpodSSHWaiting := false
+			progress := cloud.ProgressFunc(func(phase string) {
+				if emittedRunpodSSHWaiting || runpodObservedBootstrapPhase(phase) != runpodSSHWaitingPhase {
+					return
+				}
+				emittedRunpodSSHWaiting = true
+				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+					EventKind: db.EventRelaunchRunpodSSHWaiting,
+					GPUSpec:   group.GPUSpec(),
+					JobCount:  len(group.Jobs),
+					Detail:    runpodSSHWaitingPhase,
+				})
+			})
 			instanceID, err := LaunchInstance(
 				client, cfg.Database, campaignID, group, offer,
 				cfg.LaunchOpts, cfg.R2Cfg, createOpts,
-				*r2Assets, nil, nil, nil,
+				*r2Assets, nil, progress, nil,
 			)
 			mu.Lock()
 			defer mu.Unlock()

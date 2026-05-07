@@ -21,6 +21,32 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db.SetupTestDB(t)
 }
 
+func TestRunPodSSHBootstrapTimeoutPrecedesLaunchingWatchdog(t *testing.T) {
+	if runpodSSHBootstrapTimeout >= launchingPhaseTimeout {
+		t.Fatalf("runpodSSHBootstrapTimeout = %s, must be below launchingPhaseTimeout = %s", runpodSSHBootstrapTimeout, launchingPhaseTimeout)
+	}
+}
+
+func TestConfigureBootstrapCreateOpts_RunpodKeepsTemplate(t *testing.T) {
+	client := &cloud.MockClient{ProviderVal: cloud.ProviderRunpod}
+	opts := cloud.CreateOpts{
+		TemplateID: "tpl-bootstrap",
+		OnStartCmd: "echo should be cleared",
+	}
+	if err := configureBootstrapCreateOpts(client, &opts, "bootstrap/1.sh"); err != nil {
+		t.Fatalf("configureBootstrapCreateOpts: %v", err)
+	}
+	if opts.TemplateID != "tpl-bootstrap" {
+		t.Fatalf("TemplateID = %q, want tpl-bootstrap", opts.TemplateID)
+	}
+	if opts.OnStartCmd != "" {
+		t.Fatalf("OnStartCmd = %q, want empty", opts.OnStartCmd)
+	}
+	if opts.EnvVars[cloud.R2BootstrapKeyEnvVar] != "bootstrap/1.sh" {
+		t.Fatalf("%s = %q, want bootstrap/1.sh", cloud.R2BootstrapKeyEnvVar, opts.EnvVars[cloud.R2BootstrapKeyEnvVar])
+	}
+}
+
 func TestLaunchInstanceNilR2Client(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
