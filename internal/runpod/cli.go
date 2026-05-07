@@ -69,11 +69,42 @@ func formatRunpodctlError(args []string, err error, stream []byte) error {
 	if len(prefix) > 3 {
 		prefix = args[:3]
 	}
-	detail := strings.TrimSpace(string(stream))
+	detail := cleanRunpodctlErrorDetail(stream)
 	if detail == "" {
 		detail = err.Error()
 	}
 	return fmt.Errorf("%s: %s", strings.Join(prefix, " "), detail)
+}
+
+func cleanRunpodctlErrorDetail(stream []byte) string {
+	detail := strings.TrimSpace(string(stream))
+	if detail == "" {
+		return ""
+	}
+	if msg := firstRunpodctlJSONError(detail); msg != "" {
+		return msg
+	}
+	if idx := strings.Index(detail, "\nUsage:"); idx >= 0 {
+		detail = strings.TrimSpace(detail[:idx])
+	}
+	return detail
+}
+
+func firstRunpodctlJSONError(detail string) string {
+	for _, line := range strings.Split(detail, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			continue
+		}
+		if msg := firstString(payload, "error", "message"); msg != "" {
+			return msg
+		}
+	}
+	return ""
 }
 
 func runpodctlCommandEnv() []string {
@@ -319,6 +350,8 @@ func isOfferUnavailableError(err error) bool {
 	case strings.Contains(msg, "no longer any instances available"):
 		return true
 	case strings.Contains(msg, "no instances available"):
+		return true
+	case strings.Contains(msg, "something went wrong") && strings.Contains(msg, "try again later"):
 		return true
 	default:
 		return false

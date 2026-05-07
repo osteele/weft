@@ -34,6 +34,39 @@ func TestRunpodctlCommandEnvLoadsKeyFromConfig(t *testing.T) {
 	}
 }
 
+func TestCleanRunpodctlErrorDetailPrefersJSONError(t *testing.T) {
+	stream := []byte(`{"error":"Something went wrong. Please try again later or contact support."}
+Usage:
+  runpodctl pod create [flags]
+
+Flags:
+  -h, --help   help for create
+{"error":"failed to create pod: Something went wrong. Please try again later or contact support."}`)
+
+	got := cleanRunpodctlErrorDetail(stream)
+	want := "Something went wrong. Please try again later or contact support."
+	if got != want {
+		t.Fatalf("cleanRunpodctlErrorDetail = %q, want %q", got, want)
+	}
+}
+
+func TestIsOfferUnavailableError_RunpodTransientCreateFailure(t *testing.T) {
+	err := formatRunpodctlError(
+		[]string{"pod", "create", "--gpu-id", "NVIDIA L40"},
+		errTestExit{},
+		[]byte(`{"error":"Something went wrong. Please try again later or contact support."}
+Usage:
+  runpodctl pod create [flags]`),
+	)
+	if !isOfferUnavailableError(err) {
+		t.Fatalf("isOfferUnavailableError(%v) = false, want true", err)
+	}
+}
+
+type errTestExit struct{}
+
+func (errTestExit) Error() string { return "exit status 1" }
+
 func envContainsKV(env []string, key, value string) bool {
 	prefix := key + "="
 	for _, entry := range env {
