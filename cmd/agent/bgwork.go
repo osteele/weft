@@ -23,12 +23,8 @@ const staleLogSnapshotAge = 6 * time.Hour
 // the set of workdirs touched during a campaign for end-of-campaign cleanup.
 // It also provides a barrier for benchmark jobs that need a quiescent system.
 //
-// Workdir deletion is intentionally deferred until CleanupWorkdirs() is called
-// at end of campaign. Eager per-job deletion (which previously fired when a
-// refcount hit zero) was racy with checkForNewJobs: a new job for the same
-// workdir could be picked up after the cleanup goroutine had already started
-// os.RemoveAll, leaving the next job to run against a missing/partial source
-// tree (e.g. pyproject.toml gone, uv sync silently skipped, ModuleNotFoundError).
+// Workdir deletion is deferred until CleanupWorkdirs() so a later job in the
+// same campaign cannot race a per-job cleanup for a shared source tree.
 type bgWorkManager struct {
 	wg           sync.WaitGroup
 	mu           sync.Mutex

@@ -27,16 +27,10 @@ type InstanceOutcome struct {
 // Rows missing a provider are skipped because survival statistics must be
 // scoped per-provider (RunPod and Vast have different reliability baselines).
 //
-// Includes pre-creation failures (provider_instance_id IS NULL): when Vast
-// repeatedly refuses to provision on a specific machine, those failures are
-// strong evidence that the offer/machine is bad — exactly the signal the
-// survival model is supposed to capture. Without these rows the machine
-// stays at its prior posterior and the autopilot keeps picking it.
-// Observed 2026-05-06: machine 57982 produced 6 pre-creation infra_failures
-// in a row over ~30 minutes; without this fix the autopilot kept targeting
-// it indefinitely. The geoAdjustment naturally skips records with empty
-// machine_id, so dropping the provider_instance_id filter cannot pollute
-// the per-machine cache with launches that have no machine attribution.
+// Pre-creation failures are included because repeated provisioning failures
+// are survival-model signal. Rows without machine attribution still contribute
+// to provider/SKU buckets, while geoAdjustment naturally skips their
+// per-machine cache.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,

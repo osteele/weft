@@ -8,10 +8,10 @@ import (
 	jobdb "github.com/osteele/weft/internal/db"
 )
 
-func TestLoadInstanceOutcomes_IncludesPreRunningFailuresWithProviderInstance(t *testing.T) {
+func TestLoadInstanceOutcomes_IncludesPreCreationFailures(t *testing.T) {
 	database := jobdb.SetupTestDB(t)
 
-	preRunningID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+	withProviderID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
 		Status:           jobdb.LaunchStatusLaunching,
 		Provider:         "vastai",
 		ResolvedGPUName:  "RTX 4090",
@@ -19,13 +19,28 @@ func TestLoadInstanceOutcomes_IncludesPreRunningFailuresWithProviderInstance(t *
 		Reliability:      0.9,
 	})
 	if err != nil {
-		t.Fatalf("CreateLaunch(pre-running): %v", err)
+		t.Fatalf("CreateLaunch(with provider id): %v", err)
 	}
-	if err := jobdb.SetLaunchProviderID(database, preRunningID, "offer-pre"); err != nil {
-		t.Fatalf("SetLaunchProviderID(pre-running): %v", err)
+	if err := jobdb.SetLaunchProviderID(database, withProviderID, "offer-pre"); err != nil {
+		t.Fatalf("SetLaunchProviderID(with provider id): %v", err)
 	}
-	if err := jobdb.UpdateLaunchStatus(database, preRunningID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonProviderFailure); err != nil {
-		t.Fatalf("UpdateLaunchStatus(pre-running): %v", err)
+	if err := jobdb.UpdateLaunchStatus(database, withProviderID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonProviderFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(with provider id): %v", err)
+	}
+
+	withoutProviderID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+		Status:           jobdb.LaunchStatusLaunching,
+		Provider:         "vastai",
+		ResolvedGPUName:  "RTX 4090",
+		CostPerHourCents: 100,
+		Reliability:      0.9,
+		MachineID:        "machine-precreate",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(without provider id): %v", err)
+	}
+	if err := jobdb.UpdateLaunchStatus(database, withoutProviderID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonProviderFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(without provider id): %v", err)
 	}
 
 	cancelledID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
@@ -60,11 +75,13 @@ func TestLoadInstanceOutcomes_IncludesPreRunningFailuresWithProviderInstance(t *
 	if err != nil {
 		t.Fatalf("LoadInstanceOutcomes: %v", err)
 	}
-	if len(outcomes) != 1 {
-		t.Fatalf("LoadInstanceOutcomes returned %d outcomes, want 1 (cancelled and weft_bug must both be excluded)", len(outcomes))
+	if len(outcomes) != 2 {
+		t.Fatalf("LoadInstanceOutcomes returned %d outcomes, want 2 (cancelled and weft_bug must both be excluded)", len(outcomes))
 	}
-	if outcomes[0].TerminationReason != jobdb.TerminationReasonProviderFailure {
-		t.Fatalf("TerminationReason = %q, want %q", outcomes[0].TerminationReason, jobdb.TerminationReasonProviderFailure)
+	for i, outcome := range outcomes {
+		if outcome.TerminationReason != jobdb.TerminationReasonProviderFailure {
+			t.Fatalf("outcome %d TerminationReason = %q, want %q", i, outcome.TerminationReason, jobdb.TerminationReasonProviderFailure)
+		}
 	}
 
 	model := BuildSurvivalModel(outcomes)
@@ -72,8 +89,8 @@ func TestLoadInstanceOutcomes_IncludesPreRunningFailuresWithProviderInstance(t *
 		t.Fatal("BuildSurvivalModel returned nil")
 	}
 	gs := model.Global["vastai"]
-	if gs == nil || gs.Total != 1 || gs.Survived != 0 {
-		t.Fatalf("vastai global survival = %+v, want {Survived:0 Total:1}", gs)
+	if gs == nil || gs.Total != 2 || gs.Survived != 0 {
+		t.Fatalf("vastai global survival = %+v, want {Survived:0 Total:2}", gs)
 	}
 }
 

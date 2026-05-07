@@ -393,21 +393,9 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 
 // fetchRemoteRunnerState reads the runner's state.json from the remote
 // host. The wrapping shell `if [ -e ] then cat else echo SENTINEL`
-// distinguishes "file does not exist yet (runner not started)" — for
-// which (nil, nil) is the right answer, the caller treats it as
-// "runner has no jobs" — from "ssh produced no stdout for some other
-// reason" (transient connection hiccup, truncated read, permission
-// failure on a runner whose state file already exists). The latter
-// must surface as an error so the caller skips the re-dispatch check
-// instead of treating every synced job as missing-from-runner-state
-// and triggering a thundering herd of false-positive re-dispatches.
-//
-// Without this distinction a transient empty read against a running
-// host (observed wj1811 11:23:15: cool30's runner state file was intact
-// and contained 1811, but a momentary empty-stdout fetch convinced
-// weft to re-dispatch every synced job, then macOS killed the
-// resulting concurrent rsyncs and produced a stale-looking
-// queue.dispatch.deferred row that pinned the TUI for >15 min).
+// distinguishes a not-yet-started runner from an empty SSH response. The
+// former maps to (nil, nil); the latter is an error so callers do not
+// redispatch every synced job as missing from runner state.
 func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, error) {
 	const noFileSentinel = "__WEFT_NO_STATE_FILE__"
 	cmd := fmt.Sprintf(`if [ -e %s ]; then cat %s; else echo %s; fi`,
@@ -803,10 +791,8 @@ func materializeCloudNeeds(database *sql.DB, job *db.Job, timeout time.Duration,
 	// Refresh metadata from the database. ListUnsyncedQueuedJobs may have read
 	// the job row before the submitter finished writing job_attempts.job_metadata
 	// (the two writes are not atomic), which would leave CloudNeeds empty on
-	// the in-memory job struct even though it has since been persisted. A
-	// stale read here would silently skip staging and dispatch the job with
-	// missing inputs — see the wj1088 incident. Re-reading immediately before
-	// the dispatch decision closes that window.
+	// the in-memory job struct even though it has since been persisted.
+	// Re-reading immediately before the dispatch decision closes that window.
 	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
 		job.Metadata = fresh.Metadata
 	}
@@ -1014,13 +1000,9 @@ func needsStageLeaseOwner() string {
 // on-host bytes already match R2) costs no extra SSH round-trips.
 //
 // Per-need DB lease (`needs-stage:<host>:<markerName>`) prevents duplicate
-// concurrent transfers of the same artifact to the same host. Without it,
-// a TUI tick + autopilot tick + manual sync that overlap in time each
-// spawn their own scp into the same `.weft-staging` destination —
-// observed wj1811 in production: three concurrent 498 MB scp's, all
-// stuck, none making progress because they were stomping each other.
-// The TTL is generous (15m) so transfers larger than the typical link
-// speed × 15m don't accidentally double-spawn after lease expiry.
+// concurrent transfers of the same artifact into the same host staging
+// destination. The TTL is generous (15m) so slower transfers do not
+// accidentally double-spawn after lease expiry.
 func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state map[string]remoteNeedState, timeout time.Duration, getR2Client func() (*r2.Client, error)) error {
 	// Lazy-init the R2 client and tmp dir: only pay the cost when at
 	// least one need actually transfers (lease acquired + bytes

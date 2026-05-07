@@ -20,8 +20,7 @@ import (
 // deciding whether to skip staging. ListUnsyncedQueuedJobs can read a job row
 // before the submitter has written job_attempts.job_metadata (the two writes
 // are not atomic), leaving CloudNeeds empty on the in-memory struct. Without
-// the fresh re-read the job would be dispatched with missing inputs — the
-// wj1088 incident.
+// the fresh re-read the job would be dispatched with missing inputs.
 func TestMaterializeCloudNeeds_RefreshesStaleMetadata(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -476,8 +475,8 @@ func TestHFInputStageTimeout(t *testing.T) {
 // TestStageMissingNeeds_LeaseSkipsConcurrentDuplicate verifies that when a
 // staging lease for the same (host, artifact) is already held, a second
 // caller skips the transfer instead of spawning a duplicate scp. This is
-// the regression for the wj1811 case: three concurrent 498 MB scp's
-// stomping the same .weft-staging destination.
+// the regression for overlapping sync passes stomping the same .weft-staging
+// destination.
 func TestStageMissingNeeds_LeaseSkipsConcurrentDuplicate(t *testing.T) {
 	database := db.SetupTestDB(t)
 
