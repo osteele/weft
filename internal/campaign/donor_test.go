@@ -99,7 +99,7 @@ func TestFindDonorOffer_NoCollocatedOffers(t *testing.T) {
 func TestCollectHFModels(t *testing.T) {
 	groups := []InstanceGroup{
 		{Jobs: []*db.Job{
-			{Inputs: []string{"hf:meta-llama/Llama-3-8B", "dataset:wikitext"}},
+			{Inputs: []string{"hf:meta-llama/Llama-3-8B", "hf-dataset:wikitext"}},
 			{Inputs: []string{"hf:openai/whisper-large-v3"}},
 		}},
 		{Jobs: []*db.Job{
@@ -121,6 +121,11 @@ func TestCollectHFModels(t *testing.T) {
 	}
 	if !found["openai/whisper-large-v3"] {
 		t.Error("missing openai/whisper-large-v3")
+	}
+
+	datasets := collectHFDatasets(groups)
+	if len(datasets) != 1 || datasets[0] != "wikitext" {
+		t.Fatalf("datasets = %v, want [wikitext]", datasets)
 	}
 }
 
@@ -194,6 +199,7 @@ func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 		Sources:      []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
 		DonorMode:    true,
 		HFModels:     []string{"meta-llama/Llama-3-8B", "openai/whisper-large-v3"},
+		HFDatasets:   []string{"wikitext"},
 		DonorID:      "42",
 		DBInstanceID: 42,
 	}
@@ -212,11 +218,14 @@ func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 	}
 
 	// Should download HF models
-	if !strings.Contains(script, "huggingface-cli download") {
+	if !strings.Contains(script, "hf_download model") {
 		t.Error("donor script should download HF models")
 	}
 	if !strings.Contains(script, "meta-llama/Llama-3-8B") {
 		t.Error("donor script should reference Llama model")
+	}
+	if !strings.Contains(script, "hf_download dataset \"wikitext\"") {
+		t.Error("donor script should download HF datasets")
 	}
 
 	// Should write ready marker
@@ -296,20 +305,66 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 	}
 }
 
+func TestGenerateBootstrapScript_WorkerForegroundMode(t *testing.T) {
+	manifest := BootstrapManifest{
+		AgentR2Key:      "agent/v1/linux-amd64",
+		DBInstanceID:    7,
+		AgentForeground: true,
+		DonorMode:       false,
+	}
+
+	script := GenerateBootstrapScript(manifest)
+
+	if !strings.Contains(script, "exec weft-agent run-campaign") {
+		t.Error("foreground worker script should exec weft-agent run-campaign")
+	}
+	if strings.Contains(script, "nohup weft-agent run-campaign") {
+		t.Error("foreground worker script should not launch via nohup")
+	}
+	if strings.Contains(script, "2>&1 &") {
+		t.Error("foreground worker script should not background the agent")
+	}
+}
+
 func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 	manifest := BootstrapManifest{
 		AgentR2Key:   "agent/v1/linux-amd64",
 		Sources:      []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
 		DBInstanceID: 9,
 		HFModels:     []string{"EleutherAI/pythia-1.4b", "gpt2-xl"},
+		HFDatasets:   []string{"wikitext"},
 		DonorMode:    false,
 	}
 
 	script := GenerateBootstrapScript(manifest)
 
 	// Should download HF models before launching agent
-	if !strings.Contains(script, "huggingface-cli download") {
+	if !strings.Contains(script, "ensure_hf_download_tool") {
+		t.Error("worker script should install an HF download tool")
+	}
+	if !strings.Contains(script, "hf_download model") {
 		t.Error("worker script should download HF models")
+	}
+	if !strings.Contains(script, "export HF_HOME=/workspace/.cache/huggingface") {
+		t.Error("worker script should keep HF cache on the workspace volume")
+	}
+	if !strings.Contains(script, "export HF_HUB_CACHE=/workspace/.cache/huggingface/hub") {
+		t.Error("worker script should point HF hub cache at the workspace volume")
+	}
+	if strings.Contains(script, "export TRANSFORMERS_CACHE=") {
+		t.Error("worker script should not set deprecated TRANSFORMERS_CACHE separately from the HF hub cache")
+	}
+	if !strings.Contains(script, "export UV_CACHE_DIR=/workspace/.cache/uv") {
+		t.Error("worker script should keep uv cache on the workspace volume")
+	}
+	if !strings.Contains(script, "failed:${_weft_rc}") {
+		t.Error("worker script should report bootstrap failures")
+	}
+	if strings.Contains(script, "|| echo 'Failed to download") {
+		t.Error("worker script should fail bootstrap on HF prefetch errors")
+	}
+	if !strings.Contains(script, `echo "downloading_hf:${_hf_done}/${_hf_total}"`) {
+		t.Error("worker script should report HF download progress before downloads")
 	}
 	if !strings.Contains(script, "EleutherAI/pythia-1.4b") {
 		t.Error("worker script should reference Pythia model")
@@ -317,12 +372,15 @@ func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 	if !strings.Contains(script, "gpt2-xl") {
 		t.Error("worker script should reference GPT-2 XL model")
 	}
+	if !strings.Contains(script, "hf_download dataset \"wikitext\"") {
+		t.Error("worker script should download HF datasets")
+	}
 	if !strings.Contains(script, "sources_extracting:0/1") {
 		t.Error("worker script should report source extraction progress")
 	}
 
 	// HF downloads should appear before the agent launch
-	dlIdx := strings.Index(script, "huggingface-cli download")
+	dlIdx := strings.Index(script, "hf_download model")
 	agentIdx := strings.Index(script, "nohup weft-agent run-campaign")
 	if dlIdx >= agentIdx {
 		t.Error("HF downloads should happen before agent launch")

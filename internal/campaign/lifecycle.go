@@ -887,6 +887,7 @@ func launchCampaignWithStager(
 					Image:        donorCreateOpts.Image,
 					DonorMode:    true,
 					HFModels:     donorCfg.HFModels,
+					HFDatasets:   donorCfg.HFDatasets,
 					DonorID:      fmt.Sprintf("%d", donorInstanceID),
 					DBInstanceID: donorInstanceID,
 				})
@@ -1822,9 +1823,11 @@ func LaunchInstance(
 		Sources:            sources,
 		Image:              createOpts.Image,
 		HFModels:           collectHFModels([]InstanceGroup{group}),
+		HFDatasets:         collectHFDatasets([]InstanceGroup{group}),
 		DBInstanceID:       instanceID,
 		MaxTimeSeconds:     opts.MaxTimeSeconds,
 		GracePeriodSeconds: opts.GracePeriodSeconds,
+		AgentForeground:    client.Provider() == cloud.ProviderRunpod && createOpts.TemplateID != "",
 	})
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {

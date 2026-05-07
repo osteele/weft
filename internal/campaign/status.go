@@ -752,6 +752,12 @@ func truncateText(s string, maxLen int) string {
 
 // BootstrapStageLabel returns a human-readable label for a bootstrap stage.
 func BootstrapStageLabel(stage string) string {
+	if after, ok := strings.CutPrefix(stage, "failed:"); ok {
+		return "bootstrap failed (" + after + ")"
+	}
+	if after, ok := strings.CutPrefix(stage, "downloading_hf:"); ok {
+		return "downloading HF assets (" + after + ")"
+	}
 	if after, ok := strings.CutPrefix(stage, "downloading_models:"); ok {
 		return "downloading models (" + after + ")"
 	}
@@ -771,6 +777,10 @@ func BootstrapStageLabel(stage string) string {
 		return "installing dependencies"
 	case "deps_installed":
 		return "dependencies installed"
+	case "hf_tool_installing":
+		return "installing HF download tool"
+	case "hf_tool_installed":
+		return "HF download tool installed"
 	case bootstrapStageReady:
 		return "ready"
 	case "starting_jobs":

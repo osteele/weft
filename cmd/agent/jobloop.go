@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -63,6 +64,22 @@ func agentRentalEnv(cfg jobSequenceConfig) []string {
 		env = append(env, "WEFT_RESUMED=1")
 	}
 	return env
+}
+
+func hasDeclaredHFInput(inputs []string) bool {
+	for _, input := range inputs {
+		if strings.HasPrefix(input, "hf:") || strings.HasPrefix(input, "hf-dataset:") {
+			return true
+		}
+	}
+	return false
+}
+
+func hfOfflineEnv(inputs []string) []string {
+	if !hasDeclaredHFInput(inputs) {
+		return nil
+	}
+	return nil
 }
 
 // pickWatchdogTimeouts selects GPU-idle and stdout-silence timeouts based on
@@ -327,6 +344,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 	gpuIdle, stdoutSilence := pickWatchdogTimeouts(cfg.CostPerHourCents)
 	env := agentRentalEnv(cfg)
 	env = append(env, job.Env...)
+	env = append(env, hfOfflineEnv(job.Inputs)...)
 	return runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: ops.CommandJob{

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,8 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 		OutputDirs: []string{"results/"},
 		Produces:   []string{"results/model.pt"},
 		Needs:      []string{"inputs/data.csv:41"},
+		Inputs:     []string{"hf:meta-llama/Llama-3.1-8B", "hf-dataset:wikitext"},
+		Env:        []string{"HF_HUB_OFFLINE=0"},
 	}
 
 	got := singleJobConfigForAgentJob(job, cfg, "/tmp/work", 5*time.Minute)
@@ -133,6 +136,11 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Job.Needs, job.Needs) {
 		t.Fatalf("needs = %v, want %v", got.Job.Needs, job.Needs)
+	}
+	for _, forbidden := range []string{"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "HF_DATASETS_OFFLINE=1"} {
+		if slices.Contains(got.Job.Env, forbidden) {
+			t.Fatalf("env should not force %q: %v", forbidden, got.Job.Env)
+		}
 	}
 }
 

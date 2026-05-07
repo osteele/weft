@@ -499,6 +499,17 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// reconciler also honors later adaptive survival thresholds so already
 	// running launches are not killed by an older, shorter stamped deadline.
 	bootstrapPhaseActive := ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching
+	if bootstrapPhaseActive && strings.HasPrefix(strings.TrimSpace(p.BootstrapStage), "failed:") && !p.JobState.HasStartedJob {
+		return InstanceAction{
+			Kind:              ActionBootstrapStalled,
+			TerminalStatus:    db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonInfraFailure,
+			StallMessage:      fmt.Sprintf("bootstrap failed at %s — terminating instance, jobs reset to queued", BootstrapStageLabel(p.BootstrapStage)),
+			DestroyProvider:   true,
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeOrphaned,
+		}
+	}
 	if bootstrapPhaseActive && ci.BootstrapDeadlineUnix != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		deadline := time.Unix(*ci.BootstrapDeadlineUnix, 0)
 		warnTimeout := bootstrapWarnTimeout

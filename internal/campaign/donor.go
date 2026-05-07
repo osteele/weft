@@ -21,6 +21,7 @@ type DonorConfig struct {
 	Offer      cloud.Offer
 	DataCenter string
 	HFModels   []string // collected from jobs' --input hf:* declarations
+	HFDatasets []string // collected from jobs' --input hf-dataset:* declarations
 	SourceDirs []string // unique project dirs for uv sync
 }
 
@@ -125,7 +126,7 @@ func FindDonorOffer(client cloud.Client, workerOffers []cloud.Offer, estimates [
 		return nil, nil
 	}
 
-	hfModels := collectHFModels(groups)
+	hfModels, hfDatasets := collectHFAssets(groups)
 	var sourceDirs []string
 	seen := make(map[string]bool)
 	for _, g := range groups {
@@ -141,6 +142,7 @@ func FindDonorOffer(client cloud.Client, workerOffers []cloud.Offer, estimates [
 		Offer:      bestDonorOffer,
 		DataCenter: bestDC,
 		HFModels:   hfModels,
+		HFDatasets: hfDatasets,
 		SourceDirs: sourceDirs,
 	}, nil
 }
@@ -206,23 +208,45 @@ func workerDownloadTime(est CostEstimate) time.Duration {
 	return downloadTime
 }
 
-// collectHFModels extracts HF model IDs from all jobs across all groups.
-func collectHFModels(groups []InstanceGroup) []string {
-	seen := make(map[string]bool)
+// collectHFAssets extracts HF model and dataset IDs from all jobs across all groups.
+func collectHFAssets(groups []InstanceGroup) ([]string, []string) {
+	seenModels := make(map[string]bool)
+	seenDatasets := make(map[string]bool)
 	var models []string
+	var datasets []string
 	for _, g := range groups {
 		for _, ref := range g.AllInputs() {
 			asset, ok := dataloc.ParseAssetRef(ref)
-			if !ok || asset.Kind != dataloc.AssetHFModel {
+			if !ok {
 				continue
 			}
-			if !seen[asset.ID] {
-				seen[asset.ID] = true
-				models = append(models, asset.ID)
+			switch asset.Kind {
+			case dataloc.AssetHFModel:
+				if !seenModels[asset.ID] {
+					seenModels[asset.ID] = true
+					models = append(models, asset.ID)
+				}
+			case dataloc.AssetHFDataset:
+				if !seenDatasets[asset.ID] {
+					seenDatasets[asset.ID] = true
+					datasets = append(datasets, asset.ID)
+				}
 			}
 		}
 	}
+	return models, datasets
+}
+
+// collectHFModels extracts HF model IDs from all jobs across all groups.
+func collectHFModels(groups []InstanceGroup) []string {
+	models, _ := collectHFAssets(groups)
 	return models
+}
+
+// collectHFDatasets extracts HF dataset IDs from all jobs across all groups.
+func collectHFDatasets(groups []InstanceGroup) []string {
+	_, datasets := collectHFAssets(groups)
+	return datasets
 }
 
 // workerInfo holds the provider and DB IDs of a worker instance.
