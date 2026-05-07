@@ -663,7 +663,7 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingGroupsMultiJobInstance(t *te
 	}
 }
 
-func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndOverdue(t *testing.T) {
+func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndZeroRemaining(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	launchID := int64(2332)
 	jobs := []*db.Job{
@@ -680,9 +680,69 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndOverdue(t *
 			totalSamples: 8,
 		},
 	})
-	want := "- ✓ wj1749 — proj ready job (rental) — agent ready · 16m ago · overdue"
+	want := "- ✓ wj1749 — proj ready job (rental) — agent ready · 16m ago · ~0s remaining"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+	if strings.Contains(out, "overdue") {
+		t.Fatalf("expected p50 overrun to stay advisory, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingOverdueUsesBootstrapDeadline(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2333)
+	deadline := now.Add(-time.Second).Unix()
+	jobs := []*db.Job{
+		{ID: 1751, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "deadline job"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID: map[int64]*db.Launch{launchID: {
+			ID:                    launchID,
+			CreatedAt:             now.Add(-2 * time.Minute).Unix(),
+			BootstrapDeadlineUnix: &deadline,
+		}},
+		now: now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50:     10 * time.Minute,
+			totalSamples: 8,
+		},
+	})
+	if !strings.Contains(out, "overdue") {
+		t.Fatalf("expected overdue once bootstrap deadline is exceeded:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingFutureDeadlineSuppressesOverdue(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2334)
+	deadline := now.Add(10 * time.Minute).Unix()
+	providerRunningAt := now.Add(-2 * time.Minute).Unix()
+	jobs := []*db.Job{
+		{ID: 1752, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "runpod job"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID: map[int64]*db.Launch{launchID: {
+			ID:                    launchID,
+			CreatedAt:             now.Add(-30 * time.Minute).Unix(),
+			ProviderRunningAt:     &providerRunningAt,
+			BootstrapDeadlineUnix: &deadline,
+		}},
+		now: now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50:     time.Minute,
+			totalSamples: 8,
+		},
+	})
+	if strings.Contains(out, "overdue") {
+		t.Fatalf("did not expect overdue before provider-scoped bootstrap deadline:\n%s", out)
+	}
+	if !strings.Contains(out, "2m ago") {
+		t.Fatalf("expected launch elapsed to use bootstrap origin, got:\n%s", out)
 	}
 }
 

@@ -622,28 +622,42 @@ func normalizeLaunchingStageLabel(stage string) string {
 }
 
 func groupedStatusLaunchingElapsed(job *db.Job, launch *db.Launch, now time.Time) string {
-	createdAt := int64(0)
-	if launch != nil && launch.CreatedAt > 0 {
-		createdAt = launch.CreatedAt
+	startedAt := int64(0)
+	if launch != nil {
+		if origin := launch.BootstrapOrigin(); origin != nil && *origin > 0 {
+			startedAt = *origin
+		} else if launch.CreatedAt > 0 {
+			startedAt = launch.CreatedAt
+		}
 	} else if job != nil && job.QueuedAt > 0 {
-		createdAt = job.QueuedAt
+		startedAt = job.QueuedAt
 	}
-	if createdAt <= 0 {
+	if startedAt <= 0 {
 		return ""
 	}
-	return shortRelativeTime(now.Unix() - createdAt)
+	return shortRelativeTime(now.Unix() - startedAt)
 }
 
 func groupedStatusLaunchingETAText(launch *db.Launch, live *db.LaunchLiveState, now time.Time, eta groupedStatusLaunchingETA) string {
+	if launch != nil && launch.BootstrapDeadlineExceeded(now) {
+		return "overdue"
+	}
 	stageETA, stageEnteredAt := groupedStatusLaunchingStageETAForLaunch(launch, live, now, eta)
 	if stageETA.samples >= 5 && stageETA.p50 > 0 && stageEnteredAt > 0 && now.Sub(time.Unix(stageETA.oldest, 0)) >= db.BootstrapStageStatsMinSpan() {
 		elapsed := now.Sub(time.Unix(stageEnteredAt, 0))
 		return groupedStatusRemainingText(elapsed, stageETA.p50)
 	}
-	if launch == nil || launch.CreatedAt <= 0 || eta.totalSamples < 5 || eta.totalP50 <= 0 {
+	if launch == nil || eta.totalSamples < 5 || eta.totalP50 <= 0 {
 		return ""
 	}
-	elapsed := now.Sub(time.Unix(launch.CreatedAt, 0))
+	origin := launch.CreatedAt
+	if bootstrapOrigin := launch.BootstrapOrigin(); bootstrapOrigin != nil && *bootstrapOrigin > 0 {
+		origin = *bootstrapOrigin
+	}
+	if origin <= 0 {
+		return ""
+	}
+	elapsed := now.Sub(time.Unix(origin, 0))
 	return groupedStatusRemainingText(elapsed, eta.totalP50)
 }
 
@@ -665,9 +679,6 @@ func groupedStatusLaunchingStageETAForLaunch(launch *db.Launch, live *db.LaunchL
 func groupedStatusRemainingText(elapsed time.Duration, p50 time.Duration) string {
 	if elapsed < 0 {
 		elapsed = 0
-	}
-	if elapsed > p50+p50/2 {
-		return "overdue"
 	}
 	remaining := p50 - elapsed
 	if remaining < 0 {
