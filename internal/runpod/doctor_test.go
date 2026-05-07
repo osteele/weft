@@ -42,6 +42,11 @@ func newStubRunner(t *testing.T, combined map[string]stubCLIResponse, output map
 			if resp, ok := output[key]; ok {
 				return resp.out, resp.err
 			}
+			for prefix, resp := range output {
+				if strings.HasSuffix(prefix, "*") && strings.HasPrefix(key, strings.TrimSuffix(prefix, "*")) {
+					return resp.out, resp.err
+				}
+			}
 			t.Fatalf("unexpected output command %q", key)
 			return nil, nil
 		},
@@ -167,7 +172,10 @@ func TestSetupPersistsCompatibleDefaultImage(t *testing.T) {
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
 		map[string]stubCLIResponse{
-			"user": {out: []byte(`{"id":"me"}`)},
+			"user":                      {out: []byte(`{"id":"me"}`)},
+			"template list --type user": {out: []byte(`[]`)},
+			"template create --name *":  {out: []byte(`{"id":"tpl-created"}`)},
+			"template get tpl-created":  {out: []byte(`{"id":"tpl-created","imageName":"runpod/pytorch:test","dockerStartCmd":"bash,-lc,placeholder"}`)},
 		},
 	)
 
@@ -181,6 +189,9 @@ func TestSetupPersistsCompatibleDefaultImage(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `default_image = "runpod/pytorch:test"`) {
 		t.Fatalf("config does not contain expected default image:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), `bootstrap_template_id = "tpl-created"`) {
+		t.Fatalf("config does not contain expected template id:\n%s", string(data))
 	}
 	if result.Diagnosis == nil {
 		t.Fatal("expected diagnosis")
@@ -211,7 +222,10 @@ func TestSetupNormalizesIncompatibleDefaultImage(t *testing.T) {
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
 		map[string]stubCLIResponse{
-			"user": {out: []byte(`{"id":"me"}`)},
+			"user":                      {out: []byte(`{"id":"me"}`)},
+			"template list --type user": {out: []byte(`[]`)},
+			"template create --name *":  {out: []byte(`{"id":"tpl-created"}`)},
+			"template get tpl-created":  {out: []byte(`{"id":"tpl-created","imageName":"runpod/base:1.0.2-ubuntu2204","dockerStartCmd":"bash,-lc,placeholder"}`)},
 		},
 	)
 
@@ -226,6 +240,9 @@ func TestSetupNormalizesIncompatibleDefaultImage(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `default_image = "`+cloud.DefaultRunpodImage+`"`) {
 		t.Fatalf("config does not contain normalized default image:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), `bootstrap_template_id = "tpl-created"`) {
+		t.Fatalf("config does not contain expected template id:\n%s", string(data))
 	}
 	if result.Diagnosis == nil {
 		t.Fatal("expected diagnosis")

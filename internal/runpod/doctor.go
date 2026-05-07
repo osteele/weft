@@ -31,10 +31,7 @@ func newManagerWithClient(client *CloudClient) *Manager {
 
 // DesiredBootstrapTemplate returns the desired RunPod bootstrap template spec.
 func DesiredBootstrapTemplate(cfg *config.Config) BootstrapTemplateSpec {
-	image := cloud.DefaultImage
-	if cfg != nil && strings.TrimSpace(cfg.Runpod.DefaultImage) != "" {
-		image = strings.TrimSpace(cfg.Runpod.DefaultImage)
-	}
+	image := effectiveRunpodImage(cfg)
 	startCommand := templateStartCommand(cloud.R2BootstrapTemplateStartCmd())
 	hashInput := image + "\n" + startCommand
 	sum := sha256.Sum256([]byte(hashInput))
@@ -132,14 +129,24 @@ func (m *Manager) Setup(cfg *config.Config) (*SetupResult, error) {
 		return result, fmt.Errorf("runpod search is not ready; run `weft runpod doctor` for details")
 	}
 
-	_ = spec
-	_ = caps
-
 	image := effectiveRunpodImage(cfg)
+	templateCfg := *cfg
+	templateCfg.Runpod.DefaultImage = image
+	spec = DesiredBootstrapTemplate(&templateCfg)
+
+	template, created, err := m.ensureBootstrapTemplate(context.Background(), caps, spec)
+	if err != nil {
+		return result, fmt.Errorf("ensure RunPod bootstrap template: %w", err)
+	}
+	result.Template = template
+	result.CreatedTemplate = created
 
 	if err := config.UpdateGlobalTOML(func(tree *toml.Tree) error {
 		tree.SetPath([]string{"runpod", "enabled"}, true)
 		tree.SetPath([]string{"runpod", "default_image"}, image)
+		if template != nil && template.ID != "" {
+			tree.SetPath([]string{"runpod", "bootstrap_template_id"}, template.ID)
+		}
 		return nil
 	}); err != nil {
 		return result, fmt.Errorf("persist RunPod config: %w", err)
@@ -149,11 +156,32 @@ func (m *Manager) Setup(cfg *config.Config) (*SetupResult, error) {
 	updatedCfg := *cfg
 	updatedCfg.Runpod.Enabled = true
 	updatedCfg.Runpod.DefaultImage = image
+	if template != nil {
+		updatedCfg.Runpod.BootstrapTemplateID = template.ID
+	}
 	result.Diagnosis, err = m.Diagnose(&updatedCfg)
 	if err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func (m *Manager) ensureBootstrapTemplate(ctx context.Context, caps *cliCapabilities, spec BootstrapTemplateSpec) (*TemplateInfo, bool, error) {
+	if caps == nil || len(caps.templateCreateCommand) == 0 || len(caps.templateGetCommand) == 0 || len(caps.templateListCommand) == 0 {
+		return nil, false, fmt.Errorf("runpodctl template commands are unavailable")
+	}
+	template, err := m.findReusableTemplate(ctx, caps, spec)
+	if err != nil {
+		return nil, false, err
+	}
+	if template != nil {
+		return template, false, nil
+	}
+	template, err = m.client.createTemplate(ctx, caps, spec)
+	if err != nil {
+		return nil, false, err
+	}
+	return template, true, nil
 }
 
 func setupPrereqsReady(diag *Diagnosis) bool {
