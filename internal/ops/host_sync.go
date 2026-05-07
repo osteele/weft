@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +36,16 @@ import (
 )
 
 const minHFInputStageTimeout = 10 * time.Minute
+
+// dispatchEventDedupeWindow is how long a queue.dispatch.{failed,deferred}
+// row suppresses an identical follow-up. Two AP-side processes hammering
+// the same recurring failure (e.g., SIGKILL'd rsync every 30s) otherwise
+// fill lifecycle_events with byte-identical rows; the hydrator already
+// collapses them in the display path, but the audit log gets noisy. The
+// window must be larger than the typical sync tick (60s) so consecutive
+// retries dedupe, and small enough that a fresh recurrence after a
+// genuine cleared interval still records.
+const dispatchEventDedupeWindow = 5 * time.Minute
 
 // HostSyncOptions configures a full host sync.
 type HostSyncOptions struct {
@@ -379,16 +391,37 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	return result, nil
 }
 
-// fetchRemoteRunnerState reads the runner's state.json from the remote host.
-// Returns nil (no error) if the file does not exist.
+// fetchRemoteRunnerState reads the runner's state.json from the remote
+// host. The wrapping shell `if [ -e ] then cat else echo SENTINEL`
+// distinguishes "file does not exist yet (runner not started)" — for
+// which (nil, nil) is the right answer, the caller treats it as
+// "runner has no jobs" — from "ssh produced no stdout for some other
+// reason" (transient connection hiccup, truncated read, permission
+// failure on a runner whose state file already exists). The latter
+// must surface as an error so the caller skips the re-dispatch check
+// instead of treating every synced job as missing-from-runner-state
+// and triggering a thundering herd of false-positive re-dispatches.
+//
+// Without this distinction a transient empty read against a running
+// host (observed wj1811 11:23:15: cool30's runner state file was intact
+// and contained 1811, but a momentary empty-stdout fetch convinced
+// weft to re-dispatch every synced job, then macOS killed the
+// resulting concurrent rsyncs and produced a stale-looking
+// queue.dispatch.deferred row that pinned the TUI for >15 min).
 func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, error) {
-	stdout, _, err := ssh.TryRunWithTimeout(host, fmt.Sprintf("cat %s 2>/dev/null || true", StateFilePath()), timeout)
+	const noFileSentinel = "__WEFT_NO_STATE_FILE__"
+	cmd := fmt.Sprintf(`if [ -e %s ]; then cat %s; else echo %s; fi`,
+		StateFilePath(), StateFilePath(), noFileSentinel)
+	stdout, _, err := ssh.TryRunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return nil, err
 	}
 	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
+	if stdout == noFileSentinel {
 		return nil, nil
+	}
+	if stdout == "" {
+		return nil, fmt.Errorf("empty runner state response (transient read failure?)")
 	}
 	var state RunnerState
 	if err := json.Unmarshal([]byte(stdout), &state); err != nil {
@@ -526,11 +559,11 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
 		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
-		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
 			EventKind: db.EventQueueDispatchFailed,
 			JobID:     jobID,
 			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
-		})
+		}, dispatchEventDedupeWindow)
 	}
 	recordDispatchOK := func(jobID int64) {
 		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
@@ -539,11 +572,11 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		})
 	}
 	recordDeferred := func(jobID int64, stage string, err error) {
-		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
 			EventKind: db.EventQueueDispatchDeferred,
 			JobID:     jobID,
 			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
-		})
+		}, dispatchEventDedupeWindow)
 	}
 	for _, job := range jobs {
 		ready, reason, err := cloudDepsReady(database, job)
@@ -678,6 +711,51 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 // truncateDispatchDetail caps a dispatch failure detail at a length suitable
 // for storage and TUI display. rsync errors can be multi-line and very long;
 // the first line is usually the actionable summary.
+// findExistingScpToRemote returns the PIDs of running scp processes
+// whose command line targets the given `<host>:<remotePath>`. Used as a
+// belt-and-suspenders before spawning a new staging scp: the per-(host,
+// artifact) DB lease catches the same-binary case, but a peer process
+// running an older code version can bypass it. Match is intentionally
+// narrow (host AND full remote path) to avoid false positives against
+// unrelated scp's.
+//
+// pgrep's command-line match is portable across macOS and Linux. If
+// pgrep is unavailable or fails, returns empty — the function falls
+// open rather than blocking the staging path.
+func findExistingScpToRemote(remoteHost, remotePath string) []int {
+	if remoteHost == "" || remotePath == "" {
+		return nil
+	}
+	needle := fmt.Sprintf("scp .*%s:%s", regexp.QuoteMeta(remoteHost), regexp.QuoteMeta(remotePath))
+	out, err := exec.Command("pgrep", "-f", needle).Output()
+	if err != nil {
+		// pgrep returns non-zero when no matches found; that's the
+		// happy path. Anything else (binary missing, permission) we
+		// treat as "no opinion" and let the caller proceed.
+		return nil
+	}
+	self := os.Getpid()
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, perr := strconv.Atoi(line)
+		if perr != nil {
+			continue
+		}
+		// Don't report our own scp's-in-flight (none of which should
+		// match the path of a not-yet-spawned scp anyway, but cheap
+		// to filter).
+		if pid == self {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
 func truncateDispatchDetail(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
@@ -1053,6 +1131,24 @@ func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state 
 		}
 
 		if needsTransfer {
+			// Belt-and-suspenders: even with the lease, an out-of-tree
+			// caller (an old binary running concurrently, a manual
+			// `weft job sync`, etc.) can bypass our DB lock. If an
+			// existing scp is already pushing this exact artifact to
+			// the same remote path, skip rather than stomp; concurrent
+			// scp's to one destination produce torn writes and (under
+			// macOS memory pressure) get OOM-killed.
+			if pids := findExistingScpToRemote(job.Host, stagingPath); len(pids) > 0 {
+				releaseLease()
+				_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+					EventKind: db.EventQueueDispatchDeferred,
+					JobID:     job.ID,
+					Detail:    truncateDispatchDetail(fmt.Sprintf("artifact staging skipped: peer scp(s) %v already targeting %s", pids, stagingPath)),
+				}, dispatchEventDedupeWindow)
+				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+					oplog.WithDetailf("artifact needs staging skipped (peer scp in flight): %s", n.spec))
+				continue
+			}
 			localPath := filepath.Join(tmpDir, filepath.FromSlash(strings.TrimPrefix(n.path, "/")))
 			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 				releaseLease()

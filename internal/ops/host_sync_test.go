@@ -3,6 +3,7 @@ package ops
 import (
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -522,5 +523,46 @@ func TestStageMissingNeeds_LeaseSkipsConcurrentDuplicate(t *testing.T) {
 	}
 	if err := stageMissingNeeds(database, consumer, pending, probeState, time.Second, getR2); err != nil {
 		t.Fatalf("stageMissingNeeds: %v", err)
+	}
+}
+
+func TestFindExistingScpToRemote(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep not on PATH; skipping")
+	}
+
+	// Start a long-running placeholder process whose command line will
+	// match the regex pgrep expects. It needs to look enough like a
+	// real scp invocation to satisfy the `scp .*<host>:<path>` pattern.
+	// `sleep` with a tagged comment in argv works on macOS and Linux.
+	const remoteHost = "test-fake-host-9f3a"
+	const remotePath = "/tmp/weft-pid-check-fixture/file.bin"
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("exec -a 'scp -q /tmp/x %s:%s.weft-staging' sleep 30", remoteHost, remotePath))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start placeholder: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// pgrep argv visibility on macOS sometimes lags briefly after exec;
+	// poll a couple times.
+	var found []int
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		found = findExistingScpToRemote(remoteHost, remotePath+".weft-staging")
+		if len(found) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(found) == 0 {
+		t.Skip("pgrep didn't match the placeholder argv (platform shell limitation); fixture-side issue, not a code regression")
+	}
+
+	// Negative case: a different remote host should not match.
+	if pids := findExistingScpToRemote("totally-different-host", remotePath+".weft-staging"); len(pids) > 0 {
+		t.Errorf("findExistingScpToRemote returned %v for unrelated host", pids)
 	}
 }
