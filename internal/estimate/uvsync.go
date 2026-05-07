@@ -142,7 +142,7 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 		return nil
 	}
 	if len(m.Packages) == 0 {
-		slog.Warn("skipping empty uv manifest", "component", "estimate", "r2_key", r2Key)
+		slog.Debug("skipping empty uv manifest", "component", "estimate", "r2_key", r2Key)
 		return nil
 	}
 

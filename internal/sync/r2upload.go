@@ -50,7 +50,7 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 	cleanup := func() {}
 	if len(inputs) > 0 {
 		onProgress("staging explicit inputs")
-		slog.Info("source overlay: staging inputs", "component", "sync",
+		slog.Debug("source overlay: staging inputs", "component", "sync",
 			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs)
 		stagedDir, cleanupFn, err := stageSourceDirWithLocalInputs(localDir, inputs)
 		if err != nil {
@@ -60,10 +60,10 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 			sourceDir = stagedDir
 			applyExcludes = false
 			cleanup = cleanupFn
-			slog.Info("source overlay: staged directory created", "component", "sync",
+			slog.Debug("source overlay: staged directory created", "component", "sync",
 				"stagedDir", stagedDir)
 		} else {
-			slog.Info("source overlay: no local overlays needed", "component", "sync",
+			slog.Debug("source overlay: no local overlays needed", "component", "sync",
 				"localDir", localDir)
 		}
 	}
@@ -85,7 +85,7 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 	}
 	defer os.Remove(tmpPath)
 
-	slog.Info("source overlay: tarball created", "component", "sync",
+	slog.Debug("source overlay: tarball created", "component", "sync",
 		"hash", hash, "applyExcludes", applyExcludes, "sourceDir", sourceDir)
 
 	key := dataplane.SourceTarball(hash)

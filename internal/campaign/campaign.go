@@ -601,7 +601,7 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 						preferTorch := hasTorch || isPyTorchImage(effectiveImage)
 						if upgraded := chooseAutoImageForMinCUDA(requiredCUDA, preferTorch); upgraded != "" && upgraded != effectiveImage {
 							img = upgraded
-							slog.Info("auto-selected CUDA-compatible image for GPU constraint",
+							slog.Debug("auto-selected CUDA-compatible image for GPU constraint",
 								"component", "campaign",
 								"gpu_class", g.GPUClass,
 								"required_cuda", requiredCUDA,
