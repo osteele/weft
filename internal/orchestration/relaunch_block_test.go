@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -547,7 +548,94 @@ func TestDispatchBlockedReasons_DeferredSupersedesOlderFailed(t *testing.T) {
 		t.Fatalf("insert deferred event: %v", err)
 	}
 	reasons := dispatchBlockedReasonsFromEvents(database, map[int64]int64{jobID: 0})
-	if got, want := reasons[jobID], "queue append deferred (host unreachable): ssh timeout"; got != want {
-		t.Errorf("reasons[%d] = %q, want %q (deferred should supersede older failed)", jobID, got, want)
+	got := reasons[jobID]
+	if !strings.Contains(got, "queue append deferred (host unreachable): ssh timeout") {
+		t.Errorf("reasons[%d] = %q, want substring %q (deferred should supersede older failed)", jobID, got, "queue append deferred (host unreachable): ssh timeout")
+	}
+	if !strings.HasPrefix(got, "[") || !strings.Contains(got, " ago] ") {
+		t.Errorf("reasons[%d] = %q, want a [<rel> ago] prefix (operator needs freshness visible before truncation)", jobID, got)
+	}
+}
+
+func TestDispatchBlockedReasons_AnnotatesRetryCount(t *testing.T) {
+	database := db.SetupTestDB(t)
+	const jobID = int64(1812)
+	if _, err := db.RecordQueued(database, "cool30", "/tmp", "consumer", "consumer"); err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	now := time.Now().Unix()
+	// Three identical failures, no .ok in between → expect retry #3.
+	for i, ago := range []int64{600, 300, 60} {
+		_ = i
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind:  db.EventQueueDispatchFailed,
+			JobID:      jobID,
+			Detail:     "source sync failed: rsync killed",
+			OccurredAt: now - ago,
+		}); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	reasons := dispatchBlockedReasonsFromEvents(database, map[int64]int64{jobID: 0})
+	got := reasons[jobID]
+	if !strings.Contains(got, "retry #3") {
+		t.Errorf("reasons[%d] = %q, want retry #3 annotation", jobID, got)
+	}
+	if !strings.HasPrefix(got, "[") || !strings.Contains(got, " ago,") {
+		t.Errorf("reasons[%d] = %q, want a [<rel> ago, retry #N] prefix", jobID, got)
+	}
+}
+
+func TestDispatchBlockedReasons_DifferentDetailResetsRetryCount(t *testing.T) {
+	database := db.SetupTestDB(t)
+	const jobID = int64(1813)
+	if _, err := db.RecordQueued(database, "cool30", "/tmp", "consumer", "consumer"); err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	now := time.Now().Unix()
+	// Older failure with a different detail, then two newer failures with
+	// the same detail. The retry count should be 2, not 3 — different
+	// detail breaks the streak.
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed, JobID: jobID, Detail: "queue append failed: timeout", OccurredAt: now - 600,
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed, JobID: jobID, Detail: "source sync failed: rsync killed", OccurredAt: now - 300,
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed, JobID: jobID, Detail: "source sync failed: rsync killed", OccurredAt: now - 60,
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	reasons := dispatchBlockedReasonsFromEvents(database, map[int64]int64{jobID: 0})
+	got := reasons[jobID]
+	if !strings.Contains(got, "retry #2") {
+		t.Errorf("reasons[%d] = %q, want retry #2 (older different-detail row should not count)", jobID, got)
+	}
+}
+
+func TestHumanRelativeAge(t *testing.T) {
+	cases := []struct {
+		seconds int64
+		want    string
+	}{
+		{0, "0s"},
+		{45, "45s"},
+		{60, "1m"},
+		{90, "1m"},
+		{3599, "59m"},
+		{3600, "1h"},
+		{86399, "23h"},
+		{86400, "1d"},
+		{172800, "2d"},
+	}
+	for _, c := range cases {
+		if got := humanRelativeAge(c.seconds); got != c.want {
+			t.Errorf("humanRelativeAge(%d) = %q, want %q", c.seconds, got, c.want)
+		}
 	}
 }

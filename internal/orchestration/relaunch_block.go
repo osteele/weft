@@ -78,6 +78,13 @@ func HydrateInventoryDispatchBlockedReasons(database *sql.DB, jobs []*db.Job) {
 // so a transient "host unreachable" deferral after an old hard failure
 // no longer leaves the stale failure pinned as the latest visible
 // blocker.
+//
+// The returned detail is annotated with `[<rel> ago]` and, when the
+// same detail string has fired ≥2 consecutive times, `(retry #N)`. The
+// goal is to make a recurring-but-fresh failure visibly different from
+// a one-shot stale reason — a 4h-old SIGKILL'd rsync looks identical
+// to a fresh one in raw event text, but the annotation surfaces that
+// the failure is being actively re-tried.
 func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int64) map[int64]string {
 	reasons := make(map[int64]string)
 	if database == nil || len(floorByJob) == 0 {
@@ -105,6 +112,13 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 	}
 	defer rows.Close()
 
+	type reasonState struct {
+		detail     string
+		occurredAt int64
+		retryCount int  // consecutive .failed/.deferred with same detail, ≥1
+		closed     bool // saw a different-detail or .ok row, stop counting
+	}
+	state := make(map[int64]*reasonState)
 	latestOK := make(map[int64]int64)
 	for rows.Next() {
 		var (
@@ -124,21 +138,74 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 			if existing, ok := latestOK[jobID]; !ok || occurredAt > existing {
 				latestOK[jobID] = occurredAt
 			}
+			if s := state[jobID]; s != nil {
+				s.closed = true
+			}
 		case db.EventQueueDispatchFailed, db.EventQueueDispatchDeferred:
-			if _, exists := reasons[jobID]; exists {
-				continue
-			}
-			if okAt := latestOK[jobID]; okAt > 0 && okAt >= occurredAt {
-				continue
-			}
 			detail = strings.TrimSpace(detail)
 			if detail == "" {
 				continue
 			}
-			reasons[jobID] = detail
+			s := state[jobID]
+			if s == nil {
+				if okAt := latestOK[jobID]; okAt > 0 && okAt >= occurredAt {
+					continue
+				}
+				state[jobID] = &reasonState{detail: detail, occurredAt: occurredAt, retryCount: 1}
+				continue
+			}
+			if s.closed {
+				continue
+			}
+			if detail == s.detail {
+				s.retryCount++
+			} else {
+				s.closed = true
+			}
 		}
 	}
+
+	now := time.Now().Unix()
+	for jobID, s := range state {
+		reasons[jobID] = annotateBlockedReason(s.detail, s.occurredAt, s.retryCount, now)
+	}
 	return reasons
+}
+
+// annotateBlockedReason prepends `[<rel> ago]` (and merges in `retry #N`
+// when retryCount ≥ 2) to a raw blocked-reason detail. The annotation
+// goes at the front rather than the back because the TUI's blocked-
+// reason group header is truncated to terminal width — putting freshness
+// last hid it behind the ellipsis exactly when the operator most needed
+// to know whether an old-looking message is stale or actively recurring.
+func annotateBlockedReason(detail string, occurredAt int64, retryCount int, nowUnix int64) string {
+	prefix := ""
+	switch {
+	case occurredAt > 0 && nowUnix > occurredAt && retryCount >= 2:
+		prefix = "[" + humanRelativeAge(nowUnix-occurredAt) + " ago, retry #" + strconv.Itoa(retryCount) + "] "
+	case occurredAt > 0 && nowUnix > occurredAt:
+		prefix = "[" + humanRelativeAge(nowUnix-occurredAt) + " ago] "
+	case retryCount >= 2:
+		prefix = "[retry #" + strconv.Itoa(retryCount) + "] "
+	}
+	return prefix + detail
+}
+
+// humanRelativeAge formats an age in seconds as a short human string:
+// "12s", "3m", "2h", "1d". Tuned for the blocked-reason annotation;
+// resolution is deliberately coarse so the displayed reason changes
+// noticeably over time without flickering every second.
+func humanRelativeAge(ageSeconds int64) string {
+	switch {
+	case ageSeconds < 60:
+		return strconv.FormatInt(ageSeconds, 10) + "s"
+	case ageSeconds < 3600:
+		return strconv.FormatInt(ageSeconds/60, 10) + "m"
+	case ageSeconds < 86400:
+		return strconv.FormatInt(ageSeconds/3600, 10) + "h"
+	default:
+		return strconv.FormatInt(ageSeconds/86400, 10) + "d"
+	}
 }
 
 // relaunchOfferErrorFreshness bounds how long a relaunch.skipped.offer_error
