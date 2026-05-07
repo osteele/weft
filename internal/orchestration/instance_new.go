@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -45,6 +46,43 @@ type NewInstanceResult struct {
 	DryRun      bool
 	Canceled    bool
 	Warning     string
+}
+
+var ErrNoNewInstanceOffer = errors.New("no compatible new-instance offer found")
+
+type InstanceEndedBeforeReadyError struct {
+	InstanceID int64
+	Launch     *db.Launch
+}
+
+func (e *InstanceEndedBeforeReadyError) Error() string {
+	status := ""
+	if e.Launch != nil {
+		status = e.Launch.Status
+	}
+	base := fmt.Sprintf("instance %s ended before agent_ready (%s)", ids.FormatInstanceID(e.InstanceID), status)
+	if e.Launch == nil {
+		return base
+	}
+	detail := strings.TrimSpace(e.Launch.DisplayTerminationReason())
+	if detail == "" || detail == status {
+		return base
+	}
+	return fmt.Sprintf("%s: %s", base, detail)
+}
+
+func IsRetryableNewInstanceLaunchError(err error) bool {
+	if errors.Is(err, ErrNoNewInstanceOffer) ||
+		errors.Is(err, campaign.ErrNoReplacementOffer) ||
+		errors.Is(err, cloud.ErrOfferUnavailable) ||
+		errors.Is(err, cloud.ErrProviderRejected) {
+		return true
+	}
+	var readyErr *InstanceEndedBeforeReadyError
+	if errors.As(err, &readyErr) {
+		return db.IsRetryableTermination(readyErr.Launch)
+	}
+	return false
 }
 
 var launchCampaignForNewInstance = campaign.LaunchCampaign
@@ -106,7 +144,7 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 		if len(groupOffers) > 0 && groupOffers[0].Err != nil {
 			return NewInstanceResult{}, groupOffers[0].Err
 		}
-		return NewInstanceResult{}, fmt.Errorf("no compatible new-instance offer found for %s", group.GPUSpec())
+		return NewInstanceResult{}, fmt.Errorf("%w for %s", ErrNoNewInstanceOffer, group.GPUSpec())
 	}
 	offer := *groupOffers[0].Offer
 	result := NewInstanceResult{
@@ -185,7 +223,6 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 		return result, fmt.Errorf("no instance launched")
 	}
 	result.InstanceIDs = launchResult.InstanceIDs
-	success = true
 	for _, e := range launchResult.Errors {
 		if e != nil {
 			result.Warning = appendWarning(result.Warning, e.Error())
@@ -195,6 +232,7 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 		for _, intent := range intents {
 			_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, "new instance launched without waiting for agent_ready")
 		}
+		success = true
 		return result, nil
 	}
 	readyID, err := waitForLaunchedInstanceReady(ctx, database, cfg, clients, r2Client, launchResult.InstanceIDs, readyTimeout, syncInterval, opts.OnStatus)
@@ -204,6 +242,7 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 	for _, intent := range intents {
 		_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, fmt.Sprintf("new instance %s accepted jobs", ids.FormatInstanceID(readyID)))
 	}
+	success = true
 	return result, nil
 }
 
@@ -307,6 +346,7 @@ func waitForLaunchedInstanceReady(
 	interval time.Duration,
 	onStatus func(string),
 ) (int64, error) {
+	started := time.Now()
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -326,7 +366,7 @@ func waitForLaunchedInstanceReady(
 			return 0, fmt.Errorf("timed out waiting for agent_ready on %s", formatInstanceList(instanceIDs))
 		}
 		if onStatus != nil {
-			onStatus("Waiting for new instance agent_ready...")
+			onStatus(formatNewInstanceWaitStatus(database, instanceIDs, time.Since(started)))
 		}
 		syncorch.SyncCloud(cfg, database, syncorch.CloudSyncOptions{
 			Context:    ctx,
@@ -344,19 +384,47 @@ func waitForLaunchedInstanceReady(
 }
 
 func newInstanceEndedBeforeReadyError(instanceID int64, launch *db.Launch) error {
-	status := ""
-	if launch != nil {
-		status = launch.Status
+	return &InstanceEndedBeforeReadyError{InstanceID: instanceID, Launch: launch}
+}
+
+func formatNewInstanceWaitStatus(database *sql.DB, instanceIDs []int64, elapsed time.Duration) string {
+	elapsed = elapsed.Truncate(time.Second)
+	parts := []string{
+		fmt.Sprintf("Waiting for new instance agent_ready... elapsed %s", db.FormatDuration(int64(elapsed.Seconds()))),
 	}
-	base := fmt.Sprintf("instance %s ended before agent_ready (%s)", ids.FormatInstanceID(instanceID), status)
-	if launch == nil {
-		return fmt.Errorf("%s", base)
+	if phase := newInstanceWaitPhase(database, instanceIDs); phase != "" {
+		parts = append(parts, phase)
 	}
-	detail := strings.TrimSpace(launch.DisplayTerminationReason())
-	if detail == "" || detail == status {
-		return fmt.Errorf("%s", base)
+	return strings.Join(parts, "; ")
+}
+
+func newInstanceWaitPhase(database *sql.DB, instanceIDs []int64) string {
+	if database == nil {
+		return ""
 	}
-	return fmt.Errorf("%s: %s", base, detail)
+	for _, instanceID := range instanceIDs {
+		live, err := db.GetLaunchLiveState(database, instanceID)
+		if err == nil && live != nil {
+			parts := make([]string, 0, 3)
+			if stage := strings.TrimSpace(live.BootstrapStage); stage != "" {
+				parts = append(parts, "bootstrap="+stage)
+			}
+			if phase := strings.TrimSpace(live.InstancePhase); phase != "" {
+				parts = append(parts, "phase="+phase)
+			}
+			if live.JobProgressID > 0 && live.JobProgressPct >= 0 {
+				parts = append(parts, fmt.Sprintf("%s %d%%", ids.FormatJobID(live.JobProgressID), live.JobProgressPct))
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, ", ")
+			}
+		}
+		launch, err := db.GetLaunch(database, instanceID)
+		if err == nil && launch != nil && strings.TrimSpace(launch.Status) != "" {
+			return "status=" + strings.TrimSpace(launch.Status)
+		}
+	}
+	return ""
 }
 
 func clientsAsAny(clients []cloud.Client) []any {

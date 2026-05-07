@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
@@ -163,5 +164,24 @@ func TestConfirmInstanceNewLaunch(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("empty confirmation should decline")
+	}
+}
+
+func TestInstanceNewMaxAttempts_YesUsesRetryPolicy(t *testing.T) {
+	oldYes, oldDryRun := instanceNewYes, instanceNewDryRun
+	t.Cleanup(func() {
+		instanceNewYes = oldYes
+		instanceNewDryRun = oldDryRun
+	})
+
+	instanceNewYes = true
+	instanceNewDryRun = false
+	if got, want := instanceNewMaxAttempts(), retrypolicy.MaxAttempts(); got != want {
+		t.Fatalf("instanceNewMaxAttempts() = %d, want %d", got, want)
+	}
+
+	instanceNewDryRun = true
+	if got := instanceNewMaxAttempts(); got != 1 {
+		t.Fatalf("dry-run instanceNewMaxAttempts() = %d, want 1", got)
 	}
 }

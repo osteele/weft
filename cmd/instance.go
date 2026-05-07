@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	xterm "github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
@@ -23,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
@@ -232,37 +235,207 @@ func runInstanceNew(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	res, err := orchestration.LaunchNewInstanceWithRebalance(cmd.Context(), database, cfg, orchestration.NewInstanceOptions{
-		JobScope:     jobScope,
-		Project:      instanceNewProject,
-		Strategy:     strategy,
-		MinSurvival:  instanceNewMinSurvival,
-		DryRun:       instanceNewDryRun,
-		WaitReady:    instanceNewWait,
-		ReadyTimeout: instanceNewTimeout,
-		OnStatus: func(message string) {
-			fmt.Fprintln(cmd.ErrOrStderr(), message)
-		},
-		OnEvent: func(event campaign.LaunchEvent) {
-			if line := formatInstanceNewLaunchEvent(event); line != "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), line)
-			}
-		},
-		OnCampaign: func(campaignID int64) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Campaign %d: launching one instance...\n", campaignID)
-		},
-		ConfirmBeforeLaunch: func(res orchestration.NewInstanceResult) (bool, error) {
-			if instanceNewDryRun || instanceNewYes {
-				return true, nil
-			}
-			return confirmInstanceNewLaunch(cmd.InOrStdin(), cmd.OutOrStdout(), res)
-		},
-	})
+
+	statusLine := newInstanceStatusLine(cmd.ErrOrStderr())
+	defer statusLine.Finish()
+
+	maxAttempts := instanceNewMaxAttempts()
+	var res orchestration.NewInstanceResult
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		res, err = orchestration.LaunchNewInstanceWithRebalance(cmd.Context(), database, cfg, orchestration.NewInstanceOptions{
+			JobScope:     jobScope,
+			Project:      instanceNewProject,
+			Strategy:     strategy,
+			MinSurvival:  instanceNewMinSurvival,
+			DryRun:       instanceNewDryRun,
+			WaitReady:    instanceNewWait,
+			ReadyTimeout: instanceNewTimeout,
+			OnStatus: func(message string) {
+				statusLine.Update(message)
+			},
+			OnEvent: func(event campaign.LaunchEvent) {
+				if line := formatInstanceNewLaunchEvent(event); line != "" {
+					statusLine.Println(line)
+				}
+			},
+			OnCampaign: func(campaignID int64) {
+				statusLine.Println(fmt.Sprintf("Campaign %d: launching one instance...", campaignID))
+			},
+			ConfirmBeforeLaunch: func(res orchestration.NewInstanceResult) (bool, error) {
+				if instanceNewDryRun || instanceNewYes {
+					return true, nil
+				}
+				return confirmInstanceNewLaunch(cmd.InOrStdin(), cmd.OutOrStdout(), res)
+			},
+		})
+		if err == nil {
+			statusLine.Finish()
+			printInstanceNewResult(cmd.OutOrStdout(), res)
+			return nil
+		}
+		if attempt >= maxAttempts-1 || !orchestration.IsRetryableNewInstanceLaunchError(err) {
+			break
+		}
+		delay, ok := retrypolicy.BackoffDelay(attempt)
+		if !ok {
+			break
+		}
+		statusLine.Println(fmt.Sprintf("New instance attempt %d/%d failed: %v", attempt+1, maxAttempts, err))
+		statusLine.Update(fmt.Sprintf("Retrying new instance launch in %s (next attempt %d/%d)", delay, attempt+2, maxAttempts))
+		if waitErr := waitForNewInstanceRetry(cmd.Context(), delay); waitErr != nil {
+			statusLine.Finish()
+			return waitErr
+		}
+	}
 	if err != nil {
+		statusLine.Finish()
+		if maxAttempts > 1 && orchestration.IsRetryableNewInstanceLaunchError(err) {
+			return fmt.Errorf("new instance launch failed after %d attempts: %w", maxAttempts, err)
+		}
 		return err
 	}
+	statusLine.Finish()
 	printInstanceNewResult(cmd.OutOrStdout(), res)
 	return nil
+}
+
+func instanceNewMaxAttempts() int {
+	if instanceNewYes && !instanceNewDryRun {
+		return retrypolicy.MaxAttempts()
+	}
+	return 1
+}
+
+func waitForNewInstanceRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type instanceStatusLine struct {
+	mu          sync.Mutex
+	w           io.Writer
+	interactive bool
+	frames      []string
+	frame       int
+	message     string
+	rendered    bool
+	done        chan struct{}
+	closed      bool
+	lastPlain   time.Time
+}
+
+func newInstanceStatusLine(w io.Writer) *instanceStatusLine {
+	s := &instanceStatusLine{
+		w:      w,
+		frames: []string{"|", "/", "-", "\\"},
+	}
+	if f, ok := w.(*os.File); ok && xterm.IsTerminal(f.Fd()) {
+		s.interactive = true
+		s.done = make(chan struct{})
+		go s.renderLoop()
+	}
+	return s
+}
+
+func (s *instanceStatusLine) Update(message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.message = message
+	if s.interactive {
+		s.renderLocked()
+		return
+	}
+	now := time.Now()
+	if s.lastPlain.IsZero() || now.Sub(s.lastPlain) >= time.Minute {
+		fmt.Fprintln(s.w, message)
+		s.lastPlain = now
+	}
+}
+
+func (s *instanceStatusLine) Println(message string) {
+	message = strings.TrimRight(message, "\r\n")
+	if message == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	if s.interactive {
+		s.clearLocked()
+	}
+	s.message = ""
+	fmt.Fprintln(s.w, message)
+}
+
+func (s *instanceStatusLine) Finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	if s.done != nil {
+		close(s.done)
+	}
+	if s.interactive {
+		s.clearLocked()
+	}
+}
+
+func (s *instanceStatusLine) renderLoop() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				return
+			}
+			if s.message != "" {
+				s.renderLocked()
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+func (s *instanceStatusLine) renderLocked() {
+	if len(s.frames) == 0 {
+		fmt.Fprintf(s.w, "\r\033[K%s", s.message)
+		s.rendered = true
+		return
+	}
+	frame := s.frames[s.frame%len(s.frames)]
+	s.frame++
+	fmt.Fprintf(s.w, "\r\033[K%s %s", frame, s.message)
+	s.rendered = true
+}
+
+func (s *instanceStatusLine) clearLocked() {
+	if !s.rendered {
+		return
+	}
+	fmt.Fprint(s.w, "\r\033[K")
+	s.rendered = false
 }
 
 func parseInstanceNewJobScope(args []string, jobsFlag string) (map[int64]struct{}, error) {

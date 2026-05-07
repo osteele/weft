@@ -76,3 +76,61 @@ func TestWaitForLaunchedInstanceReady_TerminalStatusIncludesTerminationReason(t 
 		t.Fatalf("error = %q, want substring %q", err.Error(), want)
 	}
 }
+
+func TestFormatNewInstanceWaitStatusIncludesElapsedAndPhase(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:       instanceID,
+		BootstrapStage: "deps_installed",
+		InstancePhase:  "setup:uv",
+		JobProgressID:  42,
+		JobProgressPct: 17,
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+
+	got := formatNewInstanceWaitStatus(database, []int64{instanceID}, 65*time.Second)
+	for _, want := range []string{
+		"elapsed 1m 5s",
+		"bootstrap=deps_installed",
+		"phase=setup:uv",
+		"wj42 17%",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status = %q, want substring %q", got, want)
+		}
+	}
+}
+
+func TestIsRetryableNewInstanceLaunchError(t *testing.T) {
+	if !IsRetryableNewInstanceLaunchError(ErrNoNewInstanceOffer) {
+		t.Fatal("no new-instance offer should be retryable")
+	}
+
+	retryable := &InstanceEndedBeforeReadyError{
+		InstanceID: 1,
+		Launch: &db.Launch{
+			Status:            db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonInfraFailure,
+		},
+	}
+	if !IsRetryableNewInstanceLaunchError(retryable) {
+		t.Fatal("infra failure before agent_ready should be retryable")
+	}
+
+	jobFailure := &InstanceEndedBeforeReadyError{
+		InstanceID: 2,
+		Launch: &db.Launch{
+			Status:            db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonJobFailure,
+		},
+	}
+	if IsRetryableNewInstanceLaunchError(jobFailure) {
+		t.Fatal("job failure before agent_ready should not be retryable")
+	}
+}

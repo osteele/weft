@@ -1,8 +1,6 @@
 package terminal
 
 import (
-	"time"
-
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
@@ -55,14 +53,6 @@ type retryResultMsg struct {
 
 // retryBackoffMsg triggers a delayed retry attempt after no offers were found.
 type retryBackoffMsg struct{}
-
-// retryBackoffDelays defines the delay before each retry attempt.
-var retryBackoffDelays = []time.Duration{
-	30 * time.Second,
-	60 * time.Second,
-	2 * time.Minute,
-	5 * time.Minute,
-}
 
 // System-mode messages
 type watchAllTickMsg struct{}

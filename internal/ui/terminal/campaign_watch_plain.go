@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 func summaryInterval(elapsed time.Duration) time.Duration {
@@ -164,8 +165,8 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 								retryDone = false
 								retryMu.Unlock()
 							}()
-							maxAttempts := len(retryBackoffDelays) + 1
-							for attempt := range maxAttempts {
+							maxAttempts := retrypolicy.MaxAttempts()
+							for attempt := 0; attempt < maxAttempts; attempt++ {
 								fmt.Printf("instance %s: retryable failure (%s), attempting relaunch (attempt %d/%d)...\n",
 									ids.FormatInstanceID(instanceID), ci.DisplayTerminationReason(), attempt+1, maxAttempts)
 								scopeJobIDs := rentalScopedUnplacedJobIDs(unplacedJobs)
@@ -195,8 +196,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 									}
 									return
 								}
-								if attempt < len(retryBackoffDelays) {
-									delay := retryBackoffDelays[attempt]
+								if delay, ok := retrypolicy.BackoffDelay(attempt); ok {
 									fmt.Printf("instance %s: no offers available, retrying in %s...\n", ids.FormatInstanceID(instanceID), delay)
 									select {
 									case <-time.After(delay):
