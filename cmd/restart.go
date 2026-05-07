@@ -551,8 +551,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return err
 		}
 		_ = logcache.Delete(jobID)
-		fmt.Printf("Reset job %s to queued (cloud instance no longer available)\n", ids.FormatJobID(jobID))
-		fmt.Printf("  Use 'weft launch instances' to run on a new instance\n")
+		fmt.Printf("Reset job %s to queued\n", ids.FormatJobID(jobID))
 		printRestartModeLine()
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)

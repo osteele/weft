@@ -165,6 +165,7 @@ Jobs that are not queued are skipped with a warning.
 Destinations:
   <hostname>     Move to an on-prem inventory host (e.g., cool100, studio)
   wi<N>          Submit to an existing cloud instance (e.g., wi872)
+  auto           Return to the unplaced pool for automatic placement
   new            Launch new instance(s) sized for the jobs (grouped by GPU affinity)
   create         Alias for 'new'
   distinct       Alias for '--each --to new' (separate new instance per job)
@@ -178,6 +179,7 @@ Flags:
 Examples:
   weft job move 42 cool100              # Place job 42 on cool100
   weft job move 43 wi872                # Submit job 43 to instance wi872
+  weft job move 43 --to auto            # Return job 43 to automatic placement
   weft job move 44 new                  # Launch one new instance for job 44
   weft job move 44 45 46 new            # Launch instance(s) for jobs 44-46
   weft job move 44 45 --to new          # Destination via --to/-t
@@ -535,6 +537,11 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 	}
 
 	switch {
+	case strings.EqualFold(dest, "auto") || strings.EqualFold(dest, "unplaced"):
+		if each {
+			return usageErrorf("--each is only valid with 'new', 'create', or 'distinct' destination")
+		}
+		return moveJobsToAuto(database, eligible)
 	case strings.EqualFold(dest, "new") || strings.EqualFold(dest, "create"):
 		return moveJobsToNewInstances(database, eligible, each, noTUI)
 	default:
@@ -619,6 +626,21 @@ func moveJobsToHost(database *sql.DB, jobs []*db.Job, host string) error {
 	}
 	if syncErr := syncHostAfterQueueChange(database, host); syncErr != nil {
 		reportQueueChangeSyncFailure(host, syncErr)
+	}
+	return nil
+}
+
+func moveJobsToAuto(database *sql.DB, jobs []*db.Job) error {
+	errorsList := unplaceJobs(database, jobs, ops.DefaultOptions(), true, unplaceJobCallbacks{
+		OnAlreadyUnplaced: func(job *db.Job) {
+			fmt.Printf("Job %s already auto\n", ids.FormatJobID(job.ID))
+		},
+		OnUnplaced: func(job *db.Job, _ ops.Result) {
+			fmt.Printf("Moved job %s → auto\n", ids.FormatJobID(job.ID))
+		},
+	})
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
 }
@@ -759,6 +781,20 @@ func runJobUnplace(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	jobs, errorsList := loadJobsForUnplace(database, jobIDs)
+	errorsList = append(errorsList, unplaceJobs(database, jobs, ops.OptionsForMode(ops.TimeoutNormal), false, unplaceJobCallbacks{
+		OnUnplaced: func(_ *db.Job, result ops.Result) {
+			fmt.Println(result.Message)
+		},
+	})...)
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
+	return nil
+}
+
+func loadJobsForUnplace(database *sql.DB, jobIDs []int64) ([]*db.Job, []string) {
+	jobs := make([]*db.Job, 0, len(jobIDs))
 	var errorsList []string
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
@@ -770,18 +806,39 @@ func runJobUnplace(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
-		result, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
-		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
+		jobs = append(jobs, job)
+	}
+	return jobs, errorsList
+}
+
+type unplaceJobCallbacks struct {
+	OnAlreadyUnplaced func(job *db.Job)
+	OnUnplaced        func(job *db.Job, result ops.Result)
+}
+
+func unplaceJobs(database *sql.DB, jobs []*db.Job, opts ops.ExecuteOptions, allowAlreadyUnplaced bool, callbacks unplaceJobCallbacks) []string {
+	var errorsList []string
+	for _, job := range jobs {
+		if job == nil {
+			errorsList = append(errorsList, "job is nil")
 			continue
 		}
-		fmt.Println(result.Message)
+		if job.TargetKind() == db.JobTargetUnplaced && allowAlreadyUnplaced {
+			if callbacks.OnAlreadyUnplaced != nil {
+				callbacks.OnAlreadyUnplaced(job)
+			}
+			continue
+		}
+		result, err := ops.UnplaceQueuedJob(database, job, opts)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(job.ID), err))
+			continue
+		}
+		if callbacks.OnUnplaced != nil {
+			callbacks.OnUnplaced(job, result)
+		}
 	}
-
-	if len(errorsList) > 0 {
-		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
-	}
-	return nil
+	return errorsList
 }
 
 func runJobStartNowBare(cmd *cobra.Command, args []string) error {

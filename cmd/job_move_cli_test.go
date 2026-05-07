@@ -61,6 +61,45 @@ func TestNormalizeMoveDestination_OtherDestinationsUnchanged(t *testing.T) {
 	}
 }
 
+func TestMoveJobsToAuto_ReturnsCloudJobToUnplaced(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "echo queued", "queued")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set launch id: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if err := moveJobsToAuto(database, []*db.Job{job}); err != nil {
+		t.Fatalf("moveJobsToAuto returned error: %v", err)
+	}
+
+	moved, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get moved job: %v", err)
+	}
+	if moved.TargetKind() != db.JobTargetUnplaced {
+		t.Fatalf("target kind = %s, want %s", moved.TargetKind(), db.JobTargetUnplaced)
+	}
+	if moved.LaunchID != nil {
+		t.Fatalf("launch ID = %v, want nil", *moved.LaunchID)
+	}
+}
+
 func TestValidateMoveSelectors_RejectsMixedSelectors(t *testing.T) {
 	err := validateMoveSelectors([]string{"wj946"}, "myproj", "")
 	if err == nil {
