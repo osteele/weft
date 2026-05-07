@@ -283,16 +283,17 @@ func loadUnprocessedCounts(database *sql.DB, project string) (narrate.Unprocesse
 	completedProjects := map[string]struct{}{}
 	failedProjects := map[string]struct{}{}
 	for _, j := range jobs {
-		switch j.Status {
-		case status.Completed:
-			counts.Completed++
-			if p := strings.TrimSpace(j.Project); p != "" {
-				completedProjects[p] = struct{}{}
-			}
-		case status.Failed, status.Dead, status.Killed, status.Canceled:
+		if isFailedJob(j) {
 			counts.Failed++
 			if p := strings.TrimSpace(j.Project); p != "" {
 				failedProjects[p] = struct{}{}
+			}
+			continue
+		}
+		if j.EffectiveStatus() == status.Completed {
+			counts.Completed++
+			if p := strings.TrimSpace(j.Project); p != "" {
+				completedProjects[p] = struct{}{}
 			}
 		}
 	}

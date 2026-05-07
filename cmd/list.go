@@ -467,7 +467,7 @@ func listFilters() (statusFilter, processedFilter string, failedOnly bool, err e
 		}
 		processedFilter = "unprocessed"
 	}
-	if listStatus != "" && processedFilter == "" {
+	if listStatus != "" && listStatus != "processed" && listStatus != "unprocessed" {
 		statusFilter = listStatus
 	}
 	if listRunning {

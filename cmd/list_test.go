@@ -193,6 +193,44 @@ func TestFilterActiveJobsExcludesTerminalStatuses(t *testing.T) {
 	}
 }
 
+func TestListFiltersStatusComposesWithUnprocessed(t *testing.T) {
+	prevStatus := listStatus
+	prevProcessed := listProcessed
+	prevUnprocessed := listUnprocessed
+	prevRunning := listRunning
+	prevCompleted := listCompleted
+	prevQueued := listQueued
+	prevDead := listDead
+	prevFailed := listFailed
+	listStatus = db.StatusFailed
+	listProcessed = false
+	listUnprocessed = true
+	listRunning = false
+	listCompleted = false
+	listQueued = false
+	listDead = false
+	listFailed = false
+	t.Cleanup(func() {
+		listStatus = prevStatus
+		listProcessed = prevProcessed
+		listUnprocessed = prevUnprocessed
+		listRunning = prevRunning
+		listCompleted = prevCompleted
+		listQueued = prevQueued
+		listDead = prevDead
+		listFailed = prevFailed
+	})
+
+	statusFilter, processedFilter, failedOnly, err := listFilters()
+	if err != nil {
+		t.Fatalf("listFilters: %v", err)
+	}
+	if statusFilter != db.StatusFailed || processedFilter != "unprocessed" || failedOnly {
+		t.Fatalf("filters = status %q processed %q failedOnly %v, want failed/unprocessed/false",
+			statusFilter, processedFilter, failedOnly)
+	}
+}
+
 func TestWriteWarningsDeduplicatesMessages(t *testing.T) {
 	var b strings.Builder
 	writeWarnings(&b, []string{"Warning: R2 storage unreachable", "Warning: R2 storage unreachable", "Warning: host slow"})
