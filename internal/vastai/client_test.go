@@ -319,6 +319,24 @@ func TestIsUnavailableOfferError(t *testing.T) {
 	}
 }
 
+func TestIsProviderRejectedCreateError(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{err: nil, want: false},
+		{err: errors.New("create instance 27681642: exit -1 (no stderr)"), want: true},
+		{err: errors.New("search offers --raw: exit -1 (no stderr)"), want: false},
+		{err: errors.New("create instance 123: insufficient balance"), want: false},
+	}
+
+	for _, tt := range tests {
+		if got := isProviderRejectedCreateError(tt.err); got != tt.want {
+			t.Fatalf("isProviderRejectedCreateError(%v) = %v, want %v", tt.err, got, tt.want)
+		}
+	}
+}
+
 func TestExtractCLIError(t *testing.T) {
 	tests := []struct {
 		name string

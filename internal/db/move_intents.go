@@ -28,6 +28,8 @@ type MoveIntent struct {
 	TargetOfferID       string
 	TargetGPUName       string
 	State               MoveIntentState
+	AttemptCount        int
+	MaxAttempts         int
 	CreatedAt           int64
 	ResolvedAt          *int64
 	Resolution          string
@@ -63,6 +65,8 @@ type CreateMoveIntentParams struct {
 	TargetOfferProvider string
 	TargetOfferID       string
 	TargetGPUName       string
+	AttemptCount        int
+	MaxAttempts         int
 }
 
 // CreateMoveIntent inserts a new open intent. Atomicity of the
@@ -80,17 +84,25 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 		return nil, fmt.Errorf("existing target requires target_launch_id")
 	}
 	now := time.Now().Unix()
+	attemptCount := p.AttemptCount
+	if attemptCount <= 0 {
+		attemptCount = 1
+	}
+	maxAttempts := p.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
 
 	res, err := database.Exec(
 		`INSERT INTO move_intents (
 			job_id, source_attempt_id, source_launch_id,
 			target_kind, target_launch_id, target_offer_provider, target_offer_id, target_gpu_name,
-			state, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+			state, attempt_count, max_attempts, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
 		p.JobID, nullableInt64(p.SourceAttemptID), nullableInt64(p.SourceLaunchID),
 		string(p.TargetKind), nullableInt64(p.TargetLaunchID),
 		emptyToNull(p.TargetOfferProvider), emptyToNull(p.TargetOfferID), emptyToNull(p.TargetGPUName),
-		now,
+		attemptCount, maxAttempts, now,
 	)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
@@ -143,6 +155,25 @@ func ListOpenMoveIntents(database *sql.DB) ([]*MoveIntent, error) {
 	return out, rows.Err()
 }
 
+// ListOpenNewMoveIntents returns open move-to-new intents for durable
+// fulfillment by the autopilot.
+func ListOpenNewMoveIntents(database *sql.DB) ([]*MoveIntent, error) {
+	rows, err := database.Query(moveIntentSelect+` WHERE state = 'open' AND target_kind = ? ORDER BY created_at ASC`, string(MoveTargetNew))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*MoveIntent
+	for rows.Next() {
+		intent, err := scanMoveIntent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, intent)
+	}
+	return out, rows.Err()
+}
+
 // JobIDsWithOpenMoveIntents returns the set of job ids that currently have
 // an open intent. Used by the autopilot to exclude moving jobs from its
 // candidate set.
@@ -169,6 +200,21 @@ func UpdateMoveIntentTargetLaunch(database *sql.DB, intentID, launchID int64) er
 	_, err := database.Exec(
 		`UPDATE move_intents SET target_launch_id = ? WHERE id = ? AND state = 'open'`,
 		launchID, intentID,
+	)
+	return err
+}
+
+// AdvanceMoveIntentTargetLaunch records a replacement launch for an open
+// move-to-new intent and increments the durable attempt counter.
+func AdvanceMoveIntentTargetLaunch(database *sql.DB, intentID, launchID int64) error {
+	_, err := database.Exec(
+		`UPDATE move_intents
+		    SET target_launch_id = ?,
+		        attempt_count = attempt_count + 1
+		  WHERE id = ?
+		    AND state = 'open'
+		    AND target_kind = ?`,
+		launchID, intentID, string(MoveTargetNew),
 	)
 	return err
 }
@@ -207,10 +253,64 @@ func ConfirmOpenMoveIntentsForTargetLaunch(database *sql.DB, launchID int64, res
 	return err
 }
 
+// PrunedMoveIntent describes a move intent that PruneMoveIntents just
+// resolved, suitable for logging or UI narration.
+type PrunedMoveIntent struct {
+	ID        int64
+	JobID     int64
+	CreatedAt int64
+}
+
+// MoveIntentResolutionStale is the resolution string written to stale move
+// intents whose target launch is no longer live.
+const MoveIntentResolutionStale = "stale: no non-terminal target launch (auto-pruned)"
+
+// PruneMoveIntents cancels open move intents that no longer represent an
+// active move. A fresh intent is protected for protectionWindow so the
+// offer-search -> provider-create gap is not pruned prematurely.
+func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]PrunedMoveIntent, error) {
+	if database == nil {
+		return nil, nil
+	}
+	now := time.Now().Unix()
+	cutoff := time.Now().Add(-protectionWindow).Unix()
+	const query = `
+ 		UPDATE move_intents
+ 		   SET state = 'canceled', resolved_at = ?, resolution = ?
+ 		 WHERE state = 'open'
+ 		   AND created_at < ?
+ 		   AND (
+ 		         target_launch_id IS NULL
+ 		         OR NOT EXISTS (
+ 		              SELECT 1
+ 		                FROM launches l
+ 		               WHERE l.id = move_intents.target_launch_id
+ 		                 AND l.status NOT IN ('failed','canceled','completed')
+		            )
+		       )
+		   AND attempt_count >= max_attempts
+		RETURNING id, job_id, created_at`
+	rows, err := database.Query(query, now, MoveIntentResolutionStale, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("prune stale move intents: %w", err)
+	}
+	defer rows.Close()
+
+	var pruned []PrunedMoveIntent
+	for rows.Next() {
+		var mi PrunedMoveIntent
+		if err := rows.Scan(&mi.ID, &mi.JobID, &mi.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan pruned move intent: %w", err)
+		}
+		pruned = append(pruned, mi)
+	}
+	return pruned, rows.Err()
+}
+
 const moveIntentSelect = `SELECT
 	id, job_id, source_attempt_id, source_launch_id,
 	target_kind, target_launch_id, target_offer_provider, target_offer_id, target_gpu_name,
-	state, created_at, resolved_at, resolution
+	state, attempt_count, max_attempts, created_at, resolved_at, resolution
 FROM move_intents`
 
 type moveIntentScanner interface {
@@ -227,7 +327,7 @@ func scanMoveIntent(s moveIntentScanner) (*MoveIntent, error) {
 	err := s.Scan(
 		&mi.ID, &mi.JobID, &sourceAttempt, &sourceLaunch,
 		&targetKind, &targetLaunch, &targetOfferProvider, &targetOfferID, &targetGPUName,
-		&stateStr, &mi.CreatedAt, &resolvedAt, &resolution,
+		&stateStr, &mi.AttemptCount, &mi.MaxAttempts, &mi.CreatedAt, &resolvedAt, &resolution,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

@@ -239,6 +239,20 @@ var versionedMigrations = []migration{
 			return ensureLaunchesTableConstraints(db)
 		},
 	},
+	{
+		Description: "add retry budget to move_intents",
+		Apply: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE move_intents ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1`,
+				`ALTER TABLE move_intents ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1`,
+			} {
+				if err := addColumnIfMissing(db, stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

@@ -190,6 +190,66 @@ func TestUnplaceIfNeeded_RentalSourceLeftAttached(t *testing.T) {
 	}
 }
 
+func TestOpenBulkMoveIntentsKeepsRetryableNoStartFailureUnplaced(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "rental job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	intentIDs, err := openMoveIntentsForNewInstanceGroups(database, []campaign.InstanceGroup{{GPUClass: "A100", Jobs: []*db.Job{job}}}, []cloud.Offer{{Provider: cloud.ProviderVastai, ProviderID: "offer-1", GPUName: "A100"}})
+	if err != nil {
+		t.Fatalf("openMoveIntentsForNewInstanceGroups: %v", err)
+	}
+	if intentIDs[jobID] == 0 {
+		t.Fatal("expected move intent id for job")
+	}
+	if err := db.UpdateMoveIntentTargetLaunch(database, intentIDs[jobID], dst); err != nil {
+		t.Fatalf("UpdateMoveIntentTargetLaunch: %v", err)
+	}
+	if err := db.TransferJobLaunchID(database, jobID, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+
+	n, err := db.ResetLaunchJobs(database, dst, db.AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+	after, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.LaunchID != nil {
+		t.Fatalf("after launch_id = %v, want unplaced while retry budget remains", *after.LaunchID)
+	}
+	intent, err := db.GetMoveIntent(database, intentIDs[jobID])
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if intent.State != db.MoveIntentStateOpen {
+		t.Fatalf("intent state = %q, want open", intent.State)
+	}
+}
+
 func TestJobsForGrouping_ClonesPendingPlacementAsQueued(t *testing.T) {
 	pending := db.StatusPendingPlacement
 	original := &db.Job{ID: 1, Status: db.StatusQueued, PendingStatus: &pending}

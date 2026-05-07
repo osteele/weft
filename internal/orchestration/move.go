@@ -239,8 +239,10 @@ func executeWithIntent(
 		}
 		return "", err
 	}
-	if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, desc); err != nil {
-		slog.Warn("resolve move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
+	if !opt.IsNew {
+		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, desc); err != nil {
+			slog.Warn("resolve move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
+		}
 	}
 	return desc, nil
 }
@@ -255,6 +257,8 @@ func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, 
 	}
 	if opt.IsNew {
 		params.TargetKind = db.MoveTargetNew
+		params.AttemptCount = 1
+		params.MaxAttempts = defaultMoveToNewMaxAttempts
 		if opt.Offer != nil {
 			params.TargetOfferProvider = string(opt.Offer.Provider)
 			params.TargetOfferID = opt.Offer.ProviderID
@@ -662,19 +666,17 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		TransferClaim: true,
 	}
 	launchStarted := time.Now()
-	result, err := campaign.LaunchCampaign(
-		clients,
-		database,
-		launchGroups,
-		launchOffers,
-		nil,
-		nil,
-		opts,
-		cfg.Vastai.R2.ToCloudR2Config(),
-		func(provider cloud.Provider) (cloud.CreateOpts, error) {
+	execution, err := executeNewInstanceLaunchWithMoveIntents(newInstanceLaunchExecutionOptions{
+		Database:   database,
+		Clients:    clients,
+		Groups:     launchGroups,
+		Offers:     launchOffers,
+		LaunchOpts: opts,
+		R2Config:   cfg.Vastai.R2.ToCloudR2Config(),
+		CreateOptions: func(provider cloud.Provider) (cloud.CreateOpts, error) {
 			return createOptsForProvider(cfg, provider)
 		},
-		func(event campaign.LaunchEvent) {
+		OnEvent: func(event campaign.LaunchEvent) {
 			if cb.OnEvent != nil {
 				cb.OnEvent(event)
 			}
@@ -684,7 +686,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 				}
 			}
 		},
-		func(id int64) {
+		OnCampaignCreated: func(id int64) {
 			if cb.OnCampaignCreated != nil {
 				cb.OnCampaignCreated(id, len(launchGroups))
 			}
@@ -692,12 +694,12 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 				cb.OnStatus(fmt.Sprintf("Campaign %d: launching %d instance(s)...", id, len(launchGroups)))
 			}
 		},
-		nil,
-	)
+	})
 	if err != nil {
 		logPhase("launch_campaign", launchStarted, "", err)
 		return BulkResult{}, err
 	}
+	result := execution.Result
 	logPhase("launch_campaign", launchStarted, fmt.Sprintf("instance_ids=%d errors=%d", len(result.InstanceIDs), len(result.Errors)), nil)
 
 	for _, e := range result.Errors {
@@ -706,6 +708,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		}
 	}
 	if len(result.InstanceIDs) == 0 && len(result.Errors) > 0 {
+		execution.Cancel("bulk move launch failed")
 		return BulkResult{}, result.Errors[0]
 	}
 	if cb.OnStatus != nil {
@@ -714,6 +717,9 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		}
 	}
 	logPhase("complete", moveStarted, fmt.Sprintf("instances=%d", len(result.InstanceIDs)), nil)
+	// Leave the move_intents open. The CLI/TUI only waited for provider
+	// acceptance here; the autopilot owns the longer "target reached
+	// agent_ready or retry replacement launch" lifecycle.
 	bulkSuccess = true
 	return BulkResult{InstanceIDs: result.InstanceIDs}, nil
 }

@@ -740,6 +740,93 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenMoveIntent(t *testing.T) {
 	}
 }
 
+func TestRunGroupedAutoPilotPass_RetriesOpenMoveIntentAfterNoStartLaunchFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "moving", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, target); err != nil {
+		t.Fatalf("SetJobLaunchID target: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, target, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus target: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &target,
+		AttemptCount:   1,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+
+	originalRetry := autoPilotLaunchMoveIntentRetry
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotLaunchMoveIntentRetry = originalRetry
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+	var retryCalls int
+	var replacementID int64
+	autoPilotLaunchMoveIntentRetry = func(_ context.Context, database *sql.DB, got *db.MoveIntent) (int, error) {
+		retryCalls++
+		if got.ID != intent.ID {
+			t.Fatalf("retry intent id = %d, want %d", got.ID, intent.ID)
+		}
+		var err error
+		replacementID, err = db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusLaunching, Provider: "vastai"})
+		if err != nil {
+			return 0, err
+		}
+		if err := db.AdvanceMoveIntentTargetLaunch(database, got.ID, replacementID); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	}
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if retryCalls != 1 {
+		t.Fatalf("retry calls = %d, want 1", retryCalls)
+	}
+	if result == nil || result.Launched != 1 {
+		t.Fatalf("result.Launched = %v, want 1", result)
+	}
+	got, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != db.MoveIntentStateOpen {
+		t.Fatalf("intent state = %q, want open", got.State)
+	}
+	if got.AttemptCount != 2 {
+		t.Fatalf("attempt_count = %d, want 2", got.AttemptCount)
+	}
+	if got.TargetLaunchID == nil || *got.TargetLaunchID != replacementID {
+		t.Fatalf("target_launch_id = %v, want %d", got.TargetLaunchID, replacementID)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_ReusesExistingInstanceWhenLaunchBlocked(t *testing.T) {
 	database := db.SetupTestDB(t)
 

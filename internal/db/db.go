@@ -3068,6 +3068,10 @@ func ResetJobToUnplaced(database *sql.DB, jobID int64) error {
 		tx.Rollback()
 		return err
 	}
+	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
 		encodeStringSlice(resetJobPlacementReasons(job)), jobID); err != nil {
 		tx.Rollback()

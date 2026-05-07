@@ -68,6 +68,10 @@ type RelaunchConfig struct {
 	// even when the breaker is tripped. Should not be set for normal
 	// relaunch traffic.
 	BypassRunawayBreaker bool
+	// OnInstanceLaunched is called after a replacement launch is registered.
+	// It lets higher-level durable workflows (for example move-to-new intents)
+	// attach their own state to the new launch without forking relaunch logic.
+	OnInstanceLaunched func(group InstanceGroup, instanceID int64)
 }
 
 // RetryBudget defines hard retry-stop limits by retry tier.
@@ -583,6 +587,9 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				delete(result.BudgetBlocked, predecessorID)
 			}
 			slog.Info("launched instance for relaunch", "component", "relaunch", "instance", instanceID, "job_count", len(group.Jobs), "gpu_spec", group.GPUSpec())
+			if cfg.OnInstanceLaunched != nil {
+				cfg.OnInstanceLaunched(group, instanceID)
+			}
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchLaunchSuccess,
 				LaunchID:  instanceID,

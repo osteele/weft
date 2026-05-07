@@ -167,59 +167,41 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 		}
 	}
 
-	intents, err := openNewInstanceMoveIntents(database, group.Jobs, &offer)
-	if err != nil {
-		return NewInstanceResult{}, err
-	}
-	for _, intent := range intents {
-		result.IntentIDs = append(result.IntentIDs, intent.ID)
-	}
-	success := false
-	defer func() {
-		if success {
-			return
-		}
-		for _, intent := range intents {
-			_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "new instance launch failed")
-		}
-	}()
-
 	createOptions := opts.CreateOptions
 	if createOptions == nil {
 		createOptions = func(provider cloud.Provider) (cloud.CreateOpts, error) {
 			return createOptsForProvider(cfg, provider)
 		}
 	}
-	launchResult, err := launchCampaignForNewInstance(
-		clients,
-		database,
-		[]campaign.InstanceGroup{group},
-		[]cloud.Offer{offer},
-		nil,
-		buildSurvivalModel(database),
-		campaign.LaunchOpts{
+	groups := []campaign.InstanceGroup{group}
+	execution, err := executeNewInstanceLaunchWithMoveIntents(newInstanceLaunchExecutionOptions{
+		Database:      database,
+		Clients:       clients,
+		Groups:        groups,
+		Offers:        []cloud.Offer{offer},
+		SurvivalModel: buildSurvivalModel(database),
+		LaunchOpts: campaign.LaunchOpts{
 			GracePeriodSeconds: defaultGracePeriodSeconds(cfg),
 			Strategy:           strategy,
 			MinSurvival:        minSurvival,
-			TransferClaim:      true,
 		},
-		cfg.Vastai.R2.ToCloudR2Config(),
-		createOptions,
-		opts.OnEvent,
-		opts.OnCampaign,
-		func(group campaign.InstanceGroup, instanceID int64) {
-			for _, intent := range intents {
-				_ = db.UpdateMoveIntentTargetLaunch(database, intent.ID, instanceID)
-			}
-		},
-	)
+		R2Config:          cfg.Vastai.R2.ToCloudR2Config(),
+		CreateOptions:     createOptions,
+		OnEvent:           opts.OnEvent,
+		OnCampaignCreated: opts.OnCampaign,
+		LaunchCampaign:    launchCampaignForNewInstance,
+	})
 	if err != nil {
 		return result, err
 	}
+	result.IntentIDs = orderedMoveIntentIDs(groups, execution.IntentIDs)
+	launchResult := execution.Result
 	if launchResult == nil || len(launchResult.InstanceIDs) == 0 {
 		if launchResult != nil && len(launchResult.Errors) > 0 {
+			execution.Cancel("new instance launch failed")
 			return result, launchResult.Errors[0]
 		}
+		execution.Cancel("new instance launch failed")
 		return result, fmt.Errorf("no instance launched")
 	}
 	result.InstanceIDs = launchResult.InstanceIDs
@@ -229,20 +211,15 @@ func LaunchNewInstanceWithRebalance(ctx context.Context, database *sql.DB, cfg *
 		}
 	}
 	if !opts.WaitReady {
-		for _, intent := range intents {
-			_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, "new instance launched without waiting for agent_ready")
-		}
-		success = true
+		execution.Confirm("new instance launched without waiting for agent_ready")
 		return result, nil
 	}
 	readyID, err := waitForLaunchedInstanceReady(ctx, database, cfg, clients, r2Client, launchResult.InstanceIDs, readyTimeout, syncInterval, opts.OnStatus)
 	if err != nil {
+		execution.Cancel("new instance launch failed")
 		return result, err
 	}
-	for _, intent := range intents {
-		_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, fmt.Sprintf("new instance %s accepted jobs", ids.FormatInstanceID(readyID)))
-	}
-	success = true
+	execution.Confirm(fmt.Sprintf("new instance %s accepted jobs", ids.FormatInstanceID(readyID)))
 	return result, nil
 }
 
@@ -300,39 +277,6 @@ func prepareSingleNewInstanceGroup(database *sql.DB, cfg *config.Config, r2Clien
 		return campaign.InstanceGroup{}, false
 	}
 	return groups[0], true
-}
-
-func openNewInstanceMoveIntents(database *sql.DB, jobs []*db.Job, offer *cloud.Offer) ([]*db.MoveIntent, error) {
-	intents := make([]*db.MoveIntent, 0, len(jobs))
-	for _, job := range jobs {
-		if job == nil {
-			continue
-		}
-		var sourceLaunchID *int64
-		if job.LaunchID != nil && *job.LaunchID > 0 {
-			v := *job.LaunchID
-			sourceLaunchID = &v
-		}
-		params := db.CreateMoveIntentParams{
-			JobID:          job.ID,
-			SourceLaunchID: sourceLaunchID,
-			TargetKind:     db.MoveTargetNew,
-		}
-		if offer != nil {
-			params.TargetOfferProvider = string(offer.Provider)
-			params.TargetOfferID = offer.ProviderID
-			params.TargetGPUName = offer.GPUName
-		}
-		intent, err := db.CreateMoveIntent(database, params)
-		if err != nil {
-			for _, opened := range intents {
-				_ = db.ResolveMoveIntent(database, opened.ID, db.MoveIntentStateCanceled, "new instance planning failed")
-			}
-			return nil, fmt.Errorf("open move intent for job %s: %w", ids.FormatJobID(job.ID), err)
-		}
-		intents = append(intents, intent)
-	}
-	return intents, nil
 }
 
 func waitForLaunchedInstanceReady(

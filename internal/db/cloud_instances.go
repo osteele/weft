@@ -1535,9 +1535,12 @@ func restoreNoStartMoveToSourceTx(tx *sql.Tx, jobID, targetLaunchID, now int64, 
 		sourceLaunchID int64
 		sourceStatus   string
 		targetStarted  sql.NullInt64
+		attemptCount   int
+		maxAttempts    int
 	)
 	err := tx.QueryRow(`
-		SELECT mi.id, mi.source_launch_id, COALESCE(src.status, ''), target.start_time
+		SELECT mi.id, mi.source_launch_id, COALESCE(src.status, ''), target.start_time,
+		       mi.attempt_count, mi.max_attempts
 		  FROM move_intents mi
 		  JOIN launches src ON src.id = mi.source_launch_id
 		  JOIN job_attempts target
@@ -1551,7 +1554,7 @@ func restoreNoStartMoveToSourceTx(tx *sql.Tx, jobID, targetLaunchID, now int64, 
 		 ORDER BY mi.created_at DESC
 		 LIMIT 1`,
 		jobID, targetLaunchID, string(MoveTargetNew), string(MoveIntentStateOpen),
-	).Scan(&intentID, &sourceLaunchID, &sourceStatus, &targetStarted)
+	).Scan(&intentID, &sourceLaunchID, &sourceStatus, &targetStarted, &attemptCount, &maxAttempts)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -1562,6 +1565,9 @@ func restoreNoStartMoveToSourceTx(tx *sql.Tx, jobID, targetLaunchID, now int64, 
 		return false, nil
 	}
 	if targetStarted.Valid && targetStarted.Int64 > 0 {
+		return false, nil
+	}
+	if attemptCount < maxAttempts {
 		return false, nil
 	}
 

@@ -113,6 +113,9 @@ func TestRestartJob_RemovesProcessedTag(t *testing.T) {
 	if job.HasTag(db.ProcessedTag) {
 		t.Fatalf("job still has processed tag after restart")
 	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("status after restart = %q, want queued", job.EffectiveStatus())
+	}
 }
 
 func TestRestartQueuedJob_NoError(t *testing.T) {

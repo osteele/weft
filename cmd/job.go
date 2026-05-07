@@ -688,10 +688,8 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 		fmt.Printf("Moved job %s → %s\n", ids.FormatJobID(jobs[0].ID), target)
 		return nil
 	}
+	useLaunchTUI := terminal.UseLaunchProgressTUI(noTUI)
 	var launchTUI *terminal.LaunchProgressTUI
-	if terminal.UseLaunchProgressTUI(noTUI) {
-		launchTUI = terminal.StartLaunchProgressTUI(0, 0)
-	}
 	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {
 			if launchTUI == nil {
@@ -699,6 +697,13 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 			}
 		},
 		OnWarning: func(message string) {
+			if launchTUI != nil {
+				launchTUI.SendEvent(campaign.LaunchEvent{
+					Kind:  campaign.LaunchEventCampaignStatus,
+					Phase: message,
+				})
+				return
+			}
 			fmt.Fprintln(os.Stderr, message)
 		},
 		OnEvent: func(event campaign.LaunchEvent) {
@@ -707,6 +712,10 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 			}
 		},
 		OnCampaignCreated: func(campaignID int64, expectedWorkers int) {
+			if useLaunchTUI && launchTUI == nil {
+				launchTUI = terminal.StartLaunchProgressTUI(campaignID, expectedWorkers)
+				return
+			}
 			if launchTUI != nil {
 				launchTUI.SetCampaign(campaignID, expectedWorkers)
 			}

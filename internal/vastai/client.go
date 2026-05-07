@@ -182,6 +182,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		if isUnavailableOfferError(err) {
 			return nil, fmt.Errorf("%w: %v", cloud.ErrOfferUnavailable, err)
 		}
+		if isProviderRejectedCreateError(err) {
+			return nil, fmt.Errorf("%w: %v", cloud.ErrProviderRejected, err)
+		}
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
 
@@ -302,6 +305,14 @@ func isUnavailableOfferError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isProviderRejectedCreateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "create instance") && strings.Contains(msg, "exit -1 (no stderr)")
 }
 
 // ShowInstance fetches the current state of an instance.
