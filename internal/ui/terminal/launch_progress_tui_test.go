@@ -64,6 +64,45 @@ func TestLaunchProgressRowPhaseDoesNotChangeCompletedRows(t *testing.T) {
 	}
 }
 
+func TestLaunchProgressCompleteMarksPendingRowsDone(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := launchProgressModel{
+		startedAt:       now.Add(-2 * time.Minute),
+		expectedWorkers: 1,
+		width:           100,
+		rowOrder:        []string{"g1"},
+		rows: map[string]*launchProgressRow{
+			"g1": {
+				jobLabel:       "wj1769",
+				constraint:     "NVIDIA >=42GB <=48GB",
+				phase:          "uploading bootstrap",
+				phaseStartedAt: now.Add(-time.Second),
+				assetsReady:    2,
+				assetsTotal:    2,
+			},
+		},
+	}
+
+	m.markSuccessfulRowsDone([]int64{2549})
+	row := m.rows["g1"]
+	if !row.done {
+		t.Fatal("row.done = false, want true")
+	}
+	if row.instanceID != 2549 {
+		t.Fatalf("row.instanceID = %d, want 2549", row.instanceID)
+	}
+	out := stripANSI(m.renderRow(row, now))
+	if !strings.Contains(out, "wi2549 ready") {
+		t.Fatalf("completed row did not render final ready state: %q", out)
+	}
+	if strings.Contains(out, "uploading bootstrap") {
+		t.Fatalf("completed row still renders transient phase: %q", out)
+	}
+	if strings.Contains(out, "assets 2/2") {
+		t.Fatalf("completed row still renders asset progress: %q", out)
+	}
+}
+
 func TestLaunchProgressRenderRowFitsNarrowTerminal(t *testing.T) {
 	now := time.Unix(1000, 0)
 	m := launchProgressModel{width: 80}

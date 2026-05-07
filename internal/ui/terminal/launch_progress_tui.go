@@ -34,7 +34,10 @@ type launchProgressCampaignMsg struct {
 	expectedWorkers int
 }
 
-type launchProgressCompleteMsg struct{}
+type launchProgressCompleteMsg struct {
+	success     bool
+	instanceIDs []int64
+}
 type launchProgressTickMsg time.Time
 
 type launchProgressRow struct {
@@ -127,6 +130,19 @@ func (t *LaunchProgressTUI) Stop() error {
 	return t.err
 }
 
+func (t *LaunchProgressTUI) Complete(instanceIDs []int64) error {
+	if t == nil {
+		return nil
+	}
+	if !t.closed.Load() {
+		t.program.Send(launchProgressCompleteMsg{success: true, instanceIDs: instanceIDs})
+	}
+	<-t.done
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.err
+}
+
 func (m launchProgressModel) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, launchProgressTickCmd())
 }
@@ -172,6 +188,9 @@ func (m launchProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyEvent(msg.event)
 		return m, nil
 	case launchProgressCompleteMsg:
+		if msg.success {
+			m.markSuccessfulRowsDone(msg.instanceIDs)
+		}
 		return m, tea.Quit
 	default:
 		return m, nil
@@ -206,6 +225,22 @@ func (m *launchProgressModel) applyEvent(event campaign.LaunchEvent) {
 			row.done = false
 			row.reason = strings.TrimSpace(event.Reason)
 			row.setPhase("failed", now)
+		}
+	}
+}
+
+func (m *launchProgressModel) markSuccessfulRowsDone(instanceIDs []int64) {
+	now := time.Now()
+	for i, key := range m.rowOrder {
+		row := m.rows[key]
+		if row == nil || row.done || row.failed {
+			continue
+		}
+		row.done = true
+		row.failed = false
+		row.doneAt = now
+		if i < len(instanceIDs) {
+			row.instanceID = instanceIDs[i]
 		}
 	}
 }

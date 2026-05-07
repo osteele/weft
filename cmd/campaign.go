@@ -531,7 +531,6 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	var launchTUI *terminal.LaunchProgressTUI
 	if useLaunchProgressTUI {
 		launchTUI = terminal.StartLaunchProgressTUI(0, len(groupsToLaunch))
-		defer func() { _ = launchTUI.Stop() }()
 	}
 
 	result, err := campaign.LaunchCampaign(
@@ -568,6 +567,15 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 		},
 		nil,
 	)
+	if launchTUI != nil {
+		if err == nil {
+			if stopErr := launchTUI.Complete(result.InstanceIDs); stopErr != nil {
+				return stopErr
+			}
+		} else {
+			_ = launchTUI.Stop()
+		}
+	}
 	if err != nil {
 		return err
 	}

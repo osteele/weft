@@ -691,7 +691,6 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 	var launchTUI *terminal.LaunchProgressTUI
 	if terminal.UseLaunchProgressTUI(noTUI) {
 		launchTUI = terminal.StartLaunchProgressTUI(0, 0)
-		defer func() { _ = launchTUI.Stop() }()
 	}
 	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {
@@ -713,7 +712,17 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 			}
 		},
 	})
-	if err == nil && launchTUI != nil {
+	usedLaunchTUI := launchTUI != nil
+	if launchTUI != nil {
+		if err == nil {
+			if stopErr := launchTUI.Complete(result.InstanceIDs); stopErr != nil {
+				return stopErr
+			}
+		} else {
+			_ = launchTUI.Stop()
+		}
+	}
+	if err == nil && !usedLaunchTUI {
 		for _, id := range result.InstanceIDs {
 			fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
 		}
