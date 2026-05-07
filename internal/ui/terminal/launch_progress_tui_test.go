@@ -63,3 +63,29 @@ func TestLaunchProgressRowPhaseDoesNotChangeCompletedRows(t *testing.T) {
 		t.Fatalf("launchProgressRowPhase = %q", got)
 	}
 }
+
+func TestLaunchProgressRenderRowFitsNarrowTerminal(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := launchProgressModel{width: 80}
+	row := &launchProgressRow{
+		jobLabel:       "wj1777",
+		constraint:     "NVIDIA >=42GB <=48GB",
+		phase:          "uploading bootstrap",
+		phaseStartedAt: now,
+		assetsReady:    2,
+		assetsTotal:    2,
+		retryAttempt:   2,
+		retryMax:       4,
+	}
+
+	out := stripANSI(m.renderRow(row, now))
+	if got := displayWidth(out); got > 80 {
+		t.Fatalf("row width = %d, want <= 80; row=%q", got, out)
+	}
+	if strings.Contains(out, "assets 2/2") {
+		t.Fatalf("narrow row should omit asset progress before wrapping: %q", out)
+	}
+	if !strings.Contains(out, "retry 2/4") {
+		t.Fatalf("narrow row should retain retry badge: %q", out)
+	}
+}

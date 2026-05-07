@@ -309,8 +309,42 @@ func launchProgressHeaderMessage(phase string) string {
 }
 
 func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) string {
-	job := fitText(row.jobLabel, 8)
-	constraint := fitText(row.constraint, 18)
+	jobWidth := 8
+	constraintWidth := 18
+	phaseWidth := 28
+	progressWidth := 24
+	showProgress := true
+
+	available := m.width
+	if available > 0 {
+		badgeWidth := 0
+		if !row.done && row.retryMax > 0 {
+			badgeWidth = len(fmt.Sprintf("retry %d/%d", row.retryAttempt, row.retryMax))
+		}
+		if row.failed && row.reason != "" {
+			if badgeWidth > 0 {
+				badgeWidth += 2
+			}
+			badgeWidth += minInt(displayWidth(row.reason), 28)
+		}
+		fixedWidth := 2 + jobWidth + 2 + constraintWidth + 2 + phaseWidth + 2 + progressWidth + 2 + badgeWidth
+		if fixedWidth > available {
+			showProgress = false
+			fixedWidth -= progressWidth
+		}
+		if fixedWidth > available {
+			over := fixedWidth - available
+			phaseWidth = maxInt(18, phaseWidth-over)
+			fixedWidth -= over
+		}
+		if fixedWidth > available {
+			over := fixedWidth - available
+			constraintWidth = maxInt(12, constraintWidth-over)
+		}
+	}
+
+	job := fitText(row.jobLabel, jobWidth)
+	constraint := fitText(row.constraint, constraintWidth)
 
 	phase := launchProgressRowPhase(row, now)
 	spin := m.spin.View()
@@ -325,14 +359,14 @@ func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) st
 	if row.failed {
 		phaseText = "✗ failed"
 	}
-	phaseCol := fitText(phaseText, 28)
+	phaseCol := fitText(phaseText, phaseWidth)
 	phaseCol = phaseStyleForRow(row).Render(phaseCol)
 
 	progressCol := ""
-	if !row.done && !row.failed && row.assetsTotal > 0 {
+	if showProgress && !row.done && !row.failed && row.assetsTotal > 0 {
 		progressCol = fmt.Sprintf("%s  assets %d/%d", renderBar(row.assetsReady, row.assetsTotal, 10), row.assetsReady, row.assetsTotal)
 	}
-	progressCol = fitText(progressCol, 24)
+	progressCol = fitText(progressCol, progressWidth)
 
 	badges := ""
 	if !row.done && row.retryMax > 0 {
@@ -346,7 +380,22 @@ func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) st
 		badges += lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(reason)
 	}
 
-	return fmt.Sprintf("  %-8s  %-18s  %-28s  %-24s  %s", job, constraint, phaseCol, progressCol, badges)
+	parts := []string{
+		padRight(job, jobWidth),
+		padRight(constraint, constraintWidth),
+		padRight(phaseCol, phaseWidth),
+	}
+	if showProgress {
+		parts = append(parts, padRight(progressCol, progressWidth))
+	}
+	if badges != "" {
+		parts = append(parts, badges)
+	}
+	line := "  " + strings.Join(parts, "  ")
+	if available > 0 && displayWidth(line) > available {
+		line = fitText(line, available)
+	}
+	return line
 }
 
 func launchProgressRowPhase(row *launchProgressRow, now time.Time) string {
@@ -386,13 +435,58 @@ func fitText(s string, width int) string {
 		return ""
 	}
 	runes := []rune(strings.TrimSpace(s))
-	if len(runes) <= width {
+	if displayWidth(string(runes)) <= width {
 		return string(runes)
 	}
 	if width <= 3 {
-		return string(runes[:width])
+		var b strings.Builder
+		for _, r := range runes {
+			next := b.String() + string(r)
+			if displayWidth(next) > width {
+				break
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
 	}
-	return string(runes[:width-3]) + "..."
+	var b strings.Builder
+	for _, r := range runes {
+		next := b.String() + string(r) + "..."
+		if displayWidth(next) > width {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "..."
+}
+
+func padRight(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	padding := width - displayWidth(s)
+	if padding <= 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", padding)
+}
+
+func displayWidth(s string) int {
+	return lipgloss.Width(s)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func renderBar(done, total, width int) string {
