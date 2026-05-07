@@ -75,3 +75,43 @@ func TestInsertLifecycleEventNilDB(t *testing.T) {
 		t.Errorf("expected nil error for nil db, got %v", err)
 	}
 }
+
+func TestInsertLifecycleEventDedup(t *testing.T) {
+	database := SetupTestDB(t)
+	const jobID = int64(901)
+	now := time.Now().Unix()
+	mk := func(detail string, occurredAt int64) *LifecycleEvent {
+		return &LifecycleEvent{
+			EventKind:  EventQueueDispatchFailed,
+			JobID:      jobID,
+			Detail:     detail,
+			OccurredAt: occurredAt,
+		}
+	}
+
+	// First insert always proceeds.
+	if inserted, err := InsertLifecycleEventDedup(database, mk("rsync killed", now-90), 5*time.Minute); err != nil || !inserted {
+		t.Fatalf("first insert: inserted=%v err=%v", inserted, err)
+	}
+	// Same detail within the window → skipped.
+	if inserted, err := InsertLifecycleEventDedup(database, mk("rsync killed", now-30), 5*time.Minute); err != nil || inserted {
+		t.Fatalf("dup insert should skip: inserted=%v err=%v", inserted, err)
+	}
+	// Different detail within the window → inserts (different reason).
+	if inserted, err := InsertLifecycleEventDedup(database, mk("ssh timeout", now-20), 5*time.Minute); err != nil || !inserted {
+		t.Fatalf("different-detail insert: inserted=%v err=%v", inserted, err)
+	}
+	// Same detail but past the window → inserts (window scoped to recent).
+	if inserted, err := InsertLifecycleEventDedup(database, mk("rsync killed", now-10), 5*time.Second); err != nil || !inserted {
+		t.Fatalf("past-window insert: inserted=%v err=%v", inserted, err)
+	}
+
+	// Confirm rows count.
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM lifecycle_events WHERE job_id = ? AND event_kind = ?`, jobID, EventQueueDispatchFailed).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("rows = %d, want 3 (first, different-detail, past-window)", count)
+	}
+}

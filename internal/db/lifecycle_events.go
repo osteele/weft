@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -144,6 +145,48 @@ func InsertLifecycleEvent(database *sql.DB, event *LifecycleEvent) error {
 		nullIfZero(int64(event.DiskGB)),
 	)
 	return err
+}
+
+// InsertLifecycleEventDedup inserts a lifecycle event unless an event
+// with the same (event_kind, job_id, detail) has already been recorded
+// within the freshness window. Used by retry-prone dispatch sites
+// (recordFailure, recordDeferred) to keep the audit log from filling
+// with byte-identical rows when the same failure recurs every tick.
+//
+// Best-effort: a concurrent caller seeing "no recent row" simultaneously
+// can still cause two inserts. The hydrator's latest-wins semantics
+// tolerate that — the dedupe is a noise reducer, not a correctness
+// requirement. Returns whether the row was inserted (true) or skipped
+// as a duplicate (false).
+func InsertLifecycleEventDedup(database *sql.DB, event *LifecycleEvent, freshness time.Duration) (bool, error) {
+	if database == nil {
+		return false, nil
+	}
+	if freshness <= 0 || event.JobID == 0 {
+		return true, InsertLifecycleEvent(database, event)
+	}
+	cutoff := time.Now().Add(-freshness).Unix()
+	var existing string
+	err := database.QueryRow(`
+		SELECT COALESCE(detail, '')
+		FROM lifecycle_events
+		WHERE event_kind = ?
+		  AND job_id = ?
+		  AND occurred_at > ?
+		ORDER BY id DESC LIMIT 1`,
+		event.EventKind, event.JobID, cutoff,
+	).Scan(&existing)
+	switch {
+	case err == nil:
+		if existing == event.Detail {
+			return false, nil
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		// No recent same-kind event for this job — proceed to insert.
+	default:
+		return false, err
+	}
+	return true, InsertLifecycleEvent(database, event)
 }
 
 // LifecycleEventFilter controls which events are returned by ListLifecycleEvents.
