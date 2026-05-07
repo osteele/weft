@@ -128,3 +128,32 @@ func TestLaunchProgressRenderRowFitsNarrowTerminal(t *testing.T) {
 		t.Fatalf("narrow row should retain retry badge: %q", out)
 	}
 }
+
+func TestLaunchProgressFailedReasonAlignsWithoutRetryBadge(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := launchProgressModel{width: 100}
+	withRetry := stripANSI(m.renderRow(&launchProgressRow{
+		jobLabel:     "wj1810",
+		constraint:   "GPU",
+		failed:       true,
+		retryAttempt: 2,
+		retryMax:     4,
+		reason:       "search replacement offer: capped",
+	}, now))
+	withoutRetry := stripANSI(m.renderRow(&launchProgressRow{
+		jobLabel:   "wj1828",
+		constraint: "NVIDIA",
+		failed:     true,
+		reason:     "search replacement offer: capped",
+	}, now))
+
+	withReasonCol := strings.Index(withRetry, "search replacement")
+	withoutReasonCol := strings.Index(withoutRetry, "search replacement")
+	if withReasonCol < 0 || withoutReasonCol < 0 {
+		t.Fatalf("rows missing reason text:\nwith retry: %q\nwithout retry: %q", withRetry, withoutRetry)
+	}
+	if withReasonCol != withoutReasonCol {
+		t.Fatalf("reason columns differ: with retry %d, without retry %d\nwith retry: %q\nwithout retry: %q",
+			withReasonCol, withoutReasonCol, withRetry, withoutRetry)
+	}
+}

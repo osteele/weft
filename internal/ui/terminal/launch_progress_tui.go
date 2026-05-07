@@ -349,12 +349,17 @@ func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) st
 	phaseWidth := 28
 	progressWidth := 24
 	showProgress := true
+	retryWidth := len(fmt.Sprintf("retry %d/%d", row.retryAttempt, row.retryMax))
+	if retryWidth == 0 {
+		retryWidth = len("retry 0/0")
+	}
+	showRetryCol := !row.done && (row.retryMax > 0 || row.failed)
 
 	available := m.width
 	if available > 0 {
 		badgeWidth := 0
-		if !row.done && row.retryMax > 0 {
-			badgeWidth = len(fmt.Sprintf("retry %d/%d", row.retryAttempt, row.retryMax))
+		if showRetryCol {
+			badgeWidth = retryWidth
 		}
 		if row.failed && row.reason != "" {
 			if badgeWidth > 0 {
@@ -405,7 +410,9 @@ func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) st
 
 	badges := ""
 	if !row.done && row.retryMax > 0 {
-		badges += lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render(fmt.Sprintf("retry %d/%d", row.retryAttempt, row.retryMax))
+		badges += lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render(padRight(fmt.Sprintf("retry %d/%d", row.retryAttempt, row.retryMax), retryWidth))
+	} else if showRetryCol {
+		badges += strings.Repeat(" ", retryWidth)
 	}
 	if row.failed && row.reason != "" {
 		if badges != "" {

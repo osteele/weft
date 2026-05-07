@@ -472,8 +472,45 @@ func replacementPriceAllowed(originalPricePerHour, replacementPricePerHour float
 	return replacementPricePerHour <= originalPricePerHour*replacementOfferMaxPriceMultiplier
 }
 
-// maxCreateAttempts is the maximum number of offers to try before giving up.
+func replacementPriceCapError(originalPricePerHour float64, replacement cloud.Offer) error {
+	return fmt.Errorf(
+		"replacement offer price $%.2f/hr exceeds %.0f%% cap over original offer $%.2f/hr",
+		replacement.CostPerHour,
+		(replacementOfferMaxPriceMultiplier-1)*100,
+		originalPricePerHour,
+	)
+}
+
+func searchReplacementOfferWithPriceCap(originalPricePerHour float64, excludeOfferKeys map[string]struct{}, search func(map[string]struct{}) GroupOffer) (*cloud.Offer, error) {
+	var lastPriceErr error
+	for range replacementOfferSearchAttempts {
+		replacement := search(excludeOfferKeys)
+		if replacement.Err != nil {
+			return nil, replacement.Err
+		}
+		if replacement.Offer == nil {
+			if lastPriceErr != nil {
+				return nil, lastPriceErr
+			}
+			return nil, nil
+		}
+		if replacementPriceAllowed(originalPricePerHour, replacement.Offer.CostPerHour) {
+			return replacement.Offer, nil
+		}
+
+		lastPriceErr = replacementPriceCapError(originalPricePerHour, *replacement.Offer)
+		excludeOfferKeys[replacement.Offer.Key()] = struct{}{}
+	}
+	return nil, lastPriceErr
+}
+
+// maxCreateAttempts is the maximum number of actual provider create requests
+// before giving up.
 const maxCreateAttempts = 4
+
+// replacementOfferSearchAttempts is separate from maxCreateAttempts because
+// listing and scoring candidate offers is cheap compared with creating them.
+const replacementOfferSearchAttempts = 10
 
 // runpodSSHBootstrapTimeout must stay below launchingPhaseTimeout so the
 // launch goroutine fails before the reconciler's launching-phase safety net.
@@ -1092,29 +1129,19 @@ func launchCampaignWithStager(
 				minReliability = cfg.CampaignReliability()
 			}
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
-				replacement := SearchBestOfferForGroupWithProfile(
-					[]cloud.Client{client},
-					group,
-					survivalModel,
-					jobDurationHrs,
-					bidding.ConstantSetup(setupOverheadHrs),
-					excludeOfferKeys,
-					opts.ScoringProfile(),
-					minReliability,
-					opts.MinSurvival,
-				)
-				if replacement.Err != nil {
-					return nil, replacement.Err
-				}
-				if replacement.Offer != nil && !replacementPriceAllowed(originalPrice, replacement.Offer.CostPerHour) {
-					return nil, fmt.Errorf(
-						"replacement offer price $%.2f/hr exceeds %.0f%% cap over original offer $%.2f/hr",
-						replacement.Offer.CostPerHour,
-						(replacementOfferMaxPriceMultiplier-1)*100,
-						originalPrice,
+				return searchReplacementOfferWithPriceCap(originalPrice, excludeOfferKeys, func(exclude map[string]struct{}) GroupOffer {
+					return SearchBestOfferForGroupWithProfile(
+						[]cloud.Client{client},
+						group,
+						survivalModel,
+						jobDurationHrs,
+						bidding.ConstantSetup(setupOverheadHrs),
+						exclude,
+						opts.ScoringProfile(),
+						minReliability,
+						opts.MinSurvival,
 					)
-				}
-				return replacement.Offer, nil
+				})
 			})
 
 			cID, err := LaunchInstance(

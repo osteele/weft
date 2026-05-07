@@ -734,6 +734,38 @@ func TestReplacementPriceAllowed(t *testing.T) {
 	}
 }
 
+func TestSearchReplacementOfferWithPriceCapSkipsExpensiveCandidates(t *testing.T) {
+	var calls int
+	offer, err := searchReplacementOfferWithPriceCap(1.00, map[string]struct{}{}, func(exclude map[string]struct{}) GroupOffer {
+		calls++
+		if calls <= replacementOfferSearchAttempts-1 {
+			id := fmt.Sprintf("expensive-%d", calls)
+			if _, ok := exclude[cloud.Offer{ProviderID: id, Provider: cloud.ProviderVastai}.Key()]; ok {
+				t.Fatalf("offer %s was already excluded before it was returned", id)
+			}
+			return GroupOffer{Offer: &cloud.Offer{
+				ProviderID:  id,
+				Provider:    cloud.ProviderVastai,
+				CostPerHour: 1.26,
+			}}
+		}
+		return GroupOffer{Offer: &cloud.Offer{
+			ProviderID:  "allowed",
+			Provider:    cloud.ProviderVastai,
+			CostPerHour: 1.25,
+		}}
+	})
+	if err != nil {
+		t.Fatalf("searchReplacementOfferWithPriceCap: %v", err)
+	}
+	if offer == nil || offer.ProviderID != "allowed" {
+		t.Fatalf("offer = %+v, want allowed", offer)
+	}
+	if calls != replacementOfferSearchAttempts {
+		t.Fatalf("search calls = %d, want %d", calls, replacementOfferSearchAttempts)
+	}
+}
+
 func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	// Regression: with LaunchOpts.TransferClaim=true (move-to-new path),
 	// the source's active claim is superseded rather than rejected with
