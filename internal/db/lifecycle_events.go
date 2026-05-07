@@ -79,6 +79,14 @@ const (
 	// providing a fresher floor for the hydrator query.
 	EventQueueDispatchFailed = "queue.dispatch.failed"
 	EventQueueDispatchOK     = "queue.dispatch.ok"
+	// EventQueueDispatchDeferred records a *non-failure* skip during a
+	// dispatch attempt — typically an ssh.IsConnectionError from a stage
+	// the dispatcher returns early on. Without this, the latest visible
+	// dispatch event remains the most recent .failed for hours after a
+	// transient host outage masked itself as the active blocker.
+	// dispatchBlockedReasonsFromEvents treats a fresher .deferred as
+	// superseding an older .failed.
+	EventQueueDispatchDeferred = "queue.dispatch.deferred"
 
 	// TUI retry outcomes
 	EventRetryAutoTriggered   = "retry.auto_triggered"

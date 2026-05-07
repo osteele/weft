@@ -528,3 +528,26 @@ func TestHydrateInventoryDispatchBlockedReasons_RespectsExistingReason(t *testin
 		t.Fatalf("QueueBlockedReason = %q, want pre-existing reason preserved", jobs[0].QueueBlockedReason)
 	}
 }
+
+func TestDispatchBlockedReasons_DeferredSupersedesOlderFailed(t *testing.T) {
+	database := db.SetupTestDB(t)
+	const jobID = int64(1811)
+	if _, err := db.RecordQueued(database, "cool30", "/tmp", "consumer", "consumer"); err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	now := time.Now().Unix()
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed, JobID: jobID, Detail: "source sync failed: rsync killed", OccurredAt: now - 3600,
+	}); err != nil {
+		t.Fatalf("insert failed event: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchDeferred, JobID: jobID, Detail: "queue append deferred (host unreachable): ssh timeout", OccurredAt: now - 60,
+	}); err != nil {
+		t.Fatalf("insert deferred event: %v", err)
+	}
+	reasons := dispatchBlockedReasonsFromEvents(database, map[int64]int64{jobID: 0})
+	if got, want := reasons[jobID], "queue append deferred (host unreachable): ssh timeout"; got != want {
+		t.Errorf("reasons[%d] = %q, want %q (deferred should supersede older failed)", jobID, got, want)
+	}
+}

@@ -538,6 +538,13 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			JobID:     jobID,
 		})
 	}
+	recordDeferred := func(jobID int64, stage string, err error) {
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchDeferred,
+			JobID:     jobID,
+			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
+		})
+	}
 	for _, job := range jobs {
 		ready, reason, err := cloudDepsReady(database, job)
 		if err != nil {
@@ -571,7 +578,11 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 				}
 				if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
 					if ssh.IsConnectionError(err.Error()) {
-						// Host is offline — bail out silently
+						// Host is offline — bail out silently, but
+						// record a deferred event so the TUI sees a
+						// fresh "waiting on host" reason instead of
+						// the last hard failure.
+						recordDeferred(job.ID, "source sync deferred (host unreachable)", err)
 						return ensured, contacted, nil
 					}
 					syncLog.Debug("skipping job, source sync failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
@@ -597,6 +608,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if job.Backend != db.BackendSlurm {
 			if err := ensureHFInputsAvailable(database, job.Host, job.Inputs, timeout); err != nil {
 				if ssh.IsConnectionError(err.Error()) {
+					recordDeferred(job.ID, "input staging deferred (host unreachable)", err)
 					return ensured, contacted, nil
 				}
 				syncLog.Debug("skipping job, HF input ensure failed", "job_id", job.ID, "host", job.Host, "error", err)
@@ -644,6 +656,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		}
 		if err := AppendJobToQueueWithSource(job, timeout, sourceSHA256); err != nil {
 			if ssh.IsConnectionError(err.Error()) {
+				recordDeferred(job.ID, "queue append deferred (host unreachable)", err)
 				return ensured, contacted, nil
 			}
 			recordFailure(job.ID, "queue append failed", err)
@@ -982,6 +995,11 @@ func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state 
 		if !acquired {
 			oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 				oplog.WithDetailf("artifact needs staging skipped (in flight): %s", n.spec))
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: db.EventQueueDispatchDeferred,
+				JobID:     job.ID,
+				Detail:    truncateDispatchDetail("artifact staging in flight: " + n.spec),
+			})
 			continue
 		}
 		needLeaseReleased := false

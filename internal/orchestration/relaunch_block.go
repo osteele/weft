@@ -69,9 +69,15 @@ func HydrateInventoryDispatchBlockedReasons(database *sql.DB, jobs []*db.Job) {
 	}
 }
 
-// dispatchBlockedReasonsFromEvents returns the latest queue.dispatch.failed
-// detail per job, suppressed if a queue.dispatch.ok event exists at the same
-// or later timestamp (the failure has been resolved on a subsequent pass).
+// dispatchBlockedReasonsFromEvents returns the most recent dispatch
+// reason per job, suppressed if a queue.dispatch.ok event exists at the
+// same or later timestamp (the failure has been resolved on a subsequent
+// pass). Both queue.dispatch.failed (hard failures) and
+// queue.dispatch.deferred (silent bails on connection error, lease held,
+// etc.) are eligible reasons; whichever has the freshest timestamp wins,
+// so a transient "host unreachable" deferral after an old hard failure
+// no longer leaves the stale failure pinned as the latest visible
+// blocker.
 func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int64) map[int64]string {
 	reasons := make(map[int64]string)
 	if database == nil || len(floorByJob) == 0 {
@@ -89,10 +95,10 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 	}
 	query := fmt.Sprintf(`SELECT job_id, occurred_at, event_kind, COALESCE(detail, '')
 		FROM lifecycle_events
-		WHERE event_kind IN (?, ?)
+		WHERE event_kind IN (?, ?, ?)
 		  AND job_id IN (%s)
 		ORDER BY occurred_at DESC, id DESC`, strings.Join(placeholders, ","))
-	queryArgs := append([]any{db.EventQueueDispatchFailed, db.EventQueueDispatchOK}, args...)
+	queryArgs := append([]any{db.EventQueueDispatchFailed, db.EventQueueDispatchOK, db.EventQueueDispatchDeferred}, args...)
 	rows, err := database.Query(query, queryArgs...)
 	if err != nil {
 		return reasons
@@ -118,7 +124,7 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 			if existing, ok := latestOK[jobID]; !ok || occurredAt > existing {
 				latestOK[jobID] = occurredAt
 			}
-		case db.EventQueueDispatchFailed:
+		case db.EventQueueDispatchFailed, db.EventQueueDispatchDeferred:
 			if _, exists := reasons[jobID]; exists {
 				continue
 			}
