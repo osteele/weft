@@ -36,6 +36,7 @@ const (
 	ActionPause                                    // provider stopped instance (preempted / account pause) -> launch=paused
 	ActionResume                                   // previously paused launch resumed by provider -> launch=running
 	ActionHedgeCull                                // hedge cohort sibling reached ready first -> destroy this loser
+	ActionTerminalLivePhase                        // live phase reports running job that is already terminal in DB
 )
 
 // graceShutdownTimeout is how long after the grace deadline the coordinator
@@ -204,6 +205,14 @@ type CheckInstanceParams struct {
 	// watchdog from false-firing on transient empty R2 reads after
 	// bootstrap has already shown progress.
 	BootstrapActivitySeen bool
+
+	// RunningPhaseJobTerminalSince is set when InstancePhase reports
+	// running:<job> but that job's attempt on this launch is already
+	// terminal in the DB. A fresh heartbeat can otherwise keep a dead
+	// launch alive forever while queued attempts stay attached to it.
+	RunningPhaseJobID            int64
+	RunningPhaseJobStatus        string
+	RunningPhaseJobTerminalSince *time.Time
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -320,6 +329,29 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			DestroyProvider:   true,
 			ResetJobs:         true,
 			AttemptOutcome:    db.AttemptOutcomeOrphaned,
+		}
+	}
+
+	// 3b. Impossible live phase: the sidecar/phase marker is fresh and claims
+	// a job is running, but the DB already has that launch attempt in a
+	// terminal state. Treat this as an unhealthy agent/phase loop and orphan
+	// the remaining queued attempts so they can be placed elsewhere.
+	if ci.Status == db.LaunchStatusRunning && p.RunningPhaseJobTerminalSince != nil {
+		age := p.Now.Sub(*p.RunningPhaseJobTerminalSince)
+		if age > 2*time.Minute {
+			status := strings.TrimSpace(p.RunningPhaseJobStatus)
+			if status == "" {
+				status = "terminal"
+			}
+			return InstanceAction{
+				Kind:              ActionTerminalLivePhase,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("live phase reports wj%d running, but its attempt is %s for %s — terminating instance", p.RunningPhaseJobID, status, age.Truncate(time.Second)),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
 		}
 	}
 
@@ -965,6 +997,8 @@ func (k InstanceActionKind) String() string {
 		return "resume"
 	case ActionHedgeCull:
 		return "hedge_cull"
+	case ActionTerminalLivePhase:
+		return "terminal_live_phase"
 	default:
 		return fmt.Sprintf("kind_%d", int(k))
 	}
@@ -1023,6 +1057,8 @@ func actionEventKind(kind InstanceActionKind) string {
 		return db.EventReconcileProviderResumed
 	case ActionHedgeCull:
 		return db.EventReconcileHedgeCull
+	case ActionTerminalLivePhase:
+		return db.EventReconcileRunningStall
 	default:
 		return ""
 	}

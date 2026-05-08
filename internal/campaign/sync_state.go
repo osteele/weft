@@ -150,6 +150,14 @@ func SyncInstanceState(
 	}
 	wave2.Wait()
 
+	if hbPhase := freshHeartbeatPhase(ci, s.Heartbeat, s.HeartbeatAge); hbPhase != "" && hbPhase != s.InstancePhase {
+		if phase, _ := displayPhase(jobStatuses, jobs, hbPhase); phase != "" {
+			s.InstancePhase = phase
+			phaseNonEmpty = true
+			s.JobProgressID, s.JobProgress, s.JobProgressPhase = syncFetchJobProgress(ctx, r2Client, s.InstancePhase, jobs)
+		}
+	}
+
 	// First-ready signal: persist agent_ready_at_unix the first time
 	// either the bootstrap stage flips to "ready" or any job has started
 	// running on this launch. The DB update is idempotent (the IfUnset
@@ -226,7 +234,6 @@ func SyncInstanceState(
 		s.JobsUpdated += int(updated)
 	}
 
-	// Persist to launch_live_state and get resolved PhaseChangedAt.
 	var hbJSON string
 	var hbTS int64
 	if s.Heartbeat != nil {
@@ -250,24 +257,57 @@ func SyncInstanceState(
 		}
 		s.BootstrapActivitySeen = seen
 	}
-	phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
-		LaunchID:         instanceID,
-		InstancePhase:    s.InstancePhase,
-		BootstrapStage:   s.BootstrapStage,
-		HeartbeatJSON:    hbJSON,
-		HeartbeatTS:      hbTS,
-		JobProgressPct:   s.JobProgress,
-		JobProgressID:    s.JobProgressID,
-		JobProgressPhase: s.JobProgressPhase,
-		AgentVersion:     s.AgentVersion,
-	})
-	if phaseChangedAt != nil {
-		t := time.Unix(*phaseChangedAt, 0)
-		s.PhaseChangedAt = &t
+	if syncObservedR2State(s) {
+		phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+			LaunchID:         instanceID,
+			InstancePhase:    s.InstancePhase,
+			BootstrapStage:   s.BootstrapStage,
+			HeartbeatJSON:    hbJSON,
+			HeartbeatTS:      hbTS,
+			JobProgressPct:   s.JobProgress,
+			JobProgressID:    s.JobProgressID,
+			JobProgressPhase: s.JobProgressPhase,
+			AgentVersion:     s.AgentVersion,
+		})
+		if phaseChangedAt != nil {
+			t := time.Unix(*phaseChangedAt, 0)
+			s.PhaseChangedAt = &t
+		}
 	}
 	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
 
 	return s
+}
+
+func syncObservedR2State(s *SyncedState) bool {
+	if s == nil {
+		return false
+	}
+	return strings.TrimSpace(s.RawInstancePhase) != "" ||
+		strings.TrimSpace(s.InstancePhase) != "" ||
+		strings.TrimSpace(s.BootstrapStage) != "" ||
+		s.Heartbeat != nil ||
+		strings.TrimSpace(s.AgentVersion) != "" ||
+		s.TerminationIntent != nil ||
+		s.JobProgressID > 0 ||
+		s.JobProgress >= 0
+}
+
+func freshHeartbeatPhase(ci *db.Launch, heartbeat *HeartbeatSample, age time.Duration) string {
+	if heartbeat == nil {
+		return ""
+	}
+	if heartbeat.AgentAlive != nil && !*heartbeat.AgentAlive {
+		return ""
+	}
+	threshold := heartbeatStaleThreshold
+	if ci != nil {
+		threshold = effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, time.Now())
+	}
+	if age > threshold {
+		return ""
+	}
+	return strings.TrimSpace(heartbeat.Phase)
 }
 
 func extendBootstrapDeadlineFromProgress(database *sql.DB, ci *db.Launch, stage string, previousStage string) {

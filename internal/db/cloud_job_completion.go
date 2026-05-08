@@ -22,7 +22,7 @@ import (
 // NeedsCloudCompletionBackfill keeps returning true and a later sync that
 // finds the JSON will overwrite the placeholder values. This avoids silently
 // substituting wall-clock sync time as a completion timestamp.
-func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string, markerLastModified time.Time) (int64, error) {
+func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string, markerLastModified time.Time, runID int64) (int64, error) {
 	targetStatus := StatusCompleted
 	outcome := AttemptOutcomeCompleted
 	if exitCode != 0 {
@@ -65,7 +65,18 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	}
 
 	var cloudInstanceID sql.NullInt64
-	if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
+	if runID > 0 {
+		err := database.QueryRow(
+			`SELECT launch_id FROM job_attempts WHERE id = ? AND job_id = ?`,
+			runID, jobID,
+		).Scan(&cloudInstanceID)
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+	} else if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
 		return 0, err
 	}
 
@@ -73,15 +84,28 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	// of whether it is open or closed. This handles the case where
 	// cleanupStaleAttempts already closed the original attempt and created a
 	// new one.
-	if _, err := database.Exec(
-		`UPDATE job_attempts
-		 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
-		     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
-		     cloud_outcome = ?
-		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
-		targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, jobID,
-	); err != nil {
-		return 0, err
+	if runID > 0 {
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
+			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
+			     cloud_outcome = ?
+			 WHERE id = ? AND job_id = ?`,
+			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, runID, jobID,
+		); err != nil {
+			return 0, err
+		}
+	} else {
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
+			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
+			     cloud_outcome = ?
+			 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, jobID,
+		); err != nil {
+			return 0, err
+		}
 	}
 
 	// If the latest attempt has no launch_id (e.g., a blank replacement from
@@ -91,15 +115,27 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		inferredID, err := inferSiblingLaunch(database, jobID)
 		if err == nil && inferredID > 0 {
 			host := LaunchHost(inferredID)
-			if _, err := database.Exec(`
-				UPDATE job_attempts
-				SET launch_id = ?,
-				    host = CASE WHEN (host = '' OR host IS NULL) THEN ? ELSE host END
-				WHERE id = `+latestAttemptSubquery+`
-				  AND launch_id IS NULL`,
-				inferredID, host, jobID,
-			); err != nil {
-				return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
+			if runID > 0 {
+				if _, err := database.Exec(`
+					UPDATE job_attempts
+					SET launch_id = ?,
+					    host = CASE WHEN (host = '' OR host IS NULL) THEN ? ELSE host END
+					WHERE id = ? AND job_id = ? AND launch_id IS NULL`,
+					inferredID, host, runID, jobID,
+				); err != nil {
+					return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
+				}
+			} else {
+				if _, err := database.Exec(`
+					UPDATE job_attempts
+					SET launch_id = ?,
+					    host = CASE WHEN (host = '' OR host IS NULL) THEN ? ELSE host END
+					WHERE id = `+latestAttemptSubquery+`
+					  AND launch_id IS NULL`,
+					inferredID, host, jobID,
+				); err != nil {
+					return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
+				}
 			}
 			return inferredID, nil
 		}

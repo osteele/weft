@@ -897,6 +897,33 @@ func TestListTUIAutoPilotFailureSchedulesCooldown(t *testing.T) {
 	}
 }
 
+func TestListTUIBackgroundCloudSyncDedupesWhileInFlight(t *testing.T) {
+	m := listTUIModel{
+		pendingSyncHosts: make(map[string]struct{}),
+		database:         db.SetupTestDB(t),
+	}
+
+	cmds := []tea.Cmd{}
+	cmds = m.enqueueBackgroundCloudSync(cmds, true)
+	if len(cmds) != 1 {
+		t.Fatalf("commands after first enqueue = %d, want 1", len(cmds))
+	}
+	if _, ok := m.pendingSyncHosts[backgroundSyncKey]; !ok {
+		t.Fatal("background cloud sync should be marked in-flight")
+	}
+
+	cmds = m.enqueueBackgroundCloudSync(cmds, true)
+	if len(cmds) != 1 {
+		t.Fatalf("commands after duplicate enqueue = %d, want 1", len(cmds))
+	}
+
+	delete(m.pendingSyncHosts, backgroundSyncKey)
+	cmds = m.enqueueBackgroundCloudSync(cmds, true)
+	if len(cmds) != 2 {
+		t.Fatalf("commands after completed sync = %d, want 2", len(cmds))
+	}
+}
+
 func TestListTUIAutoPilotOutcomeCooldowns(t *testing.T) {
 	cases := []struct {
 		name string

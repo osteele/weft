@@ -107,7 +107,7 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
-	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "", time.Time{})
+	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "", time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestRecordCloudJobCompletion_UpdatesClosedAttempt(t *testing.T) {
 	}
 
 	// RecordCloudJobCompletion should update the latest attempt (the new empty one)
-	if _, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "", time.Time{}); err != nil {
+	if _, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "", time.Time{}, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestRecordCloudJobCompletion_InfersLaunchID(t *testing.T) {
 	}
 
 	// Complete jobA — should infer launch from jobB's sibling relationship.
-	returnedID, err := db.RecordCloudJobCompletion(database, jobA, 0, 200, 300, "", time.Time{})
+	returnedID, err := db.RecordCloudJobCompletion(database, jobA, 0, 200, 300, "", time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}

@@ -371,6 +371,66 @@ func TestSyncInstanceState_ReconcilesDisplayPhaseFromDBAndR2(t *testing.T) {
 	}
 }
 
+func TestSyncInstanceState_PrefersFreshHeartbeatPhase(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE launches SET agent_ready_at_unix = ? WHERE id = ?`, now, instanceID); err != nil {
+		t.Fatalf("set agent ready: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "uploading:1383" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		alive := true
+		return &HeartbeatSample{Ts: time.Now().Unix(), Phase: "setup:1760", AgentAlive: &alive}, time.Second
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool { return false }
+
+	jobs := []*db.Job{
+		{ID: 1383, Status: db.StatusFailed},
+		{ID: 1760, Status: db.StatusQueued},
+	}
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, jobs, JobState{HasStartedJob: true}, SyncInstanceStateOpts{AgentVersionFetched: true})
+	if synced.RawInstancePhase != "uploading:1383" {
+		t.Fatalf("RawInstancePhase = %q, want %q", synced.RawInstancePhase, "uploading:1383")
+	}
+	if synced.InstancePhase != "setup:1760" {
+		t.Fatalf("InstancePhase = %q, want %q", synced.InstancePhase, "setup:1760")
+	}
+}
+
 func TestSyncInstanceState_ExtendsBootstrapDeadlineFromFirstStage(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

@@ -376,6 +376,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	params.ProviderErr = providerErr
 	params.SetupSurvival = setupSurvival
 	params.PauseTolerant = hasPreemptibleJobs(jobs)
+	populateRunningPhaseTerminalJob(&params, jobs, attemptOutcomes)
 	if ci.HedgeCohortID != nil && ci.AgentReadyAtUnix == nil {
 		// Gated on AgentReadyAtUnix == nil so the survivor — which by
 		// definition has it set — never queries for its own cull.
@@ -440,6 +441,30 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	return false, false, synced.JobsUpdated
+}
+
+func populateRunningPhaseTerminalJob(params *CheckInstanceParams, jobs []*db.Job, outcomes map[int64]string) {
+	if params == nil {
+		return
+	}
+	verb, phaseJobID, ok := ParsePhaseJobID(params.InstancePhase)
+	if !ok || verb != PhaseRunning || phaseJobID <= 0 {
+		return
+	}
+	for _, job := range jobs {
+		if job == nil || job.ID != phaseJobID {
+			continue
+		}
+		status := AttemptDisplayStatus(job, outcomes)
+		if !IsJobTerminal(status) || job.EndTime == nil || *job.EndTime <= 0 {
+			return
+		}
+		end := time.Unix(*job.EndTime, 0)
+		params.RunningPhaseJobID = phaseJobID
+		params.RunningPhaseJobStatus = status
+		params.RunningPhaseJobTerminalSince = &end
+		return
+	}
 }
 
 // syncJobCompletionsFromR2 checks R2 for per-job .complete markers and records

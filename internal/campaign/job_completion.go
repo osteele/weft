@@ -136,7 +136,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 		}
 	}
 
-	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified)
+	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified, runID)
 	if err != nil {
 		slog.Warn("failed to record completion for job",
 			"component", "reconcile", "job_id", jobID, "source", source, "error", err)

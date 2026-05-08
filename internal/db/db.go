@@ -4862,8 +4862,10 @@ func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
 
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND status IN (?, ?, ?, ?) AND tombstoned = 0
+		ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
 // ListActiveOnPremJobs returns all non-cloud active jobs with host assignments.
@@ -4880,38 +4882,53 @@ func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
 // ListUnsyncedQueuedJobs returns queued jobs on a host that haven't been pushed
 // to the remote queue yet (last_synced_status is not 'queued' and no pending operation).
 func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND (last_synced_status IS NULL OR last_synced_status != ?) AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusQueued, StatusQueued)
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND status = ?
+		  AND (last_synced_status IS NULL OR last_synced_status != ?)
+		  AND pending_status IS NULL AND tombstoned = 0
+		ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusQueued, StatusQueued)
 }
 
 // ListSyncedQueuedJobs returns queued jobs on a host that were already pushed to
 // the remote queue (last_synced_status = 'queued') but may be missing from the
 // runner's live state (e.g. runner crashed before processing the command).
 func ListSyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND last_synced_status = ? AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusQueued, StatusQueued)
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND status = ?
+		  AND last_synced_status = ? AND pending_status IS NULL AND tombstoned = 0
+		ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusQueued, StatusQueued)
 }
 
 // ListDraftJobsPendingSync returns draft jobs that still need remote cleanup.
 func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?) ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusDraft, StatusDraft, StatusDraft)
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND status = ? AND tombstoned = 0
+		  AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?)
+		ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusDraft, StatusDraft, StatusDraft)
 }
 
 // ListJobsPendingReconciliation returns jobs that have unresolved pending operations.
 // These are jobs where the user requested a status change (kill, cancel, etc.) that
 // may not have been applied to the remote yet.
 func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND pending_status IS NOT NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host)
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND pending_status IS NOT NULL AND tombstoned = 0
+		ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost))
 }
 
 // ListPotentiallyRestartedJobs returns jobs that may have been restarted by the queue runner.
 // These are queue runner jobs (no session name) that are in terminal status (failed, dead)
 // but may have been re-queued and started again.
 func ListPotentiallyRestartedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND (backend IS NULL OR backend = ?) AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, BackendQueueRunner, StatusFailed, StatusDead)
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND (backend IS NULL OR backend = ?)
+		  AND status IN (?, ?) AND tombstoned = 0
+		ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), BackendQueueRunner, StatusFailed, StatusDead)
 }
 
 // ListAllQueued returns all queued jobs across all hosts

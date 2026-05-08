@@ -375,7 +375,7 @@ func syncOneCompletedJobMarker(
 		}
 	}
 
-	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified)
+	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified, runID)
 	if err != nil {
 		slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
 		os.RemoveAll(tmpDir)

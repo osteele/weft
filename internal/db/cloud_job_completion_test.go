@@ -60,7 +60,7 @@ func TestNeedsCloudCompletionBackfill_TerminalComplete(t *testing.T) {
 	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", time.Time{}); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", time.Time{}, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestRecordCloudJobCompletion_ZeroEndTimeUsesMarkerLastModified(t *testing.T
 	}
 
 	markerTime := time.Unix(1700000000, 0)
-	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", markerTime); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", markerTime, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestRecordCloudJobCompletion_ZeroEndTimeNoMarker(t *testing.T) {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
-	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", time.Time{}); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", time.Time{}, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -205,6 +205,94 @@ func TestRecordCloudJobCompletion_ZeroEndTimeNoMarker(t *testing.T) {
 	}
 	if !needs {
 		t.Fatal("needs backfill = false, want true")
+	}
+}
+
+func TestRecordCloudJobCompletion_UsesRunIDInsteadOfLatestAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	firstLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch first: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, firstLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID first: %v", err)
+	}
+	firstRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID first: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ? WHERE id = ?`,
+		StatusRunning, int64(100), firstRunID,
+	); err != nil {
+		t.Fatalf("seed first running attempt: %v", err)
+	}
+
+	now := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, cloud_outcome = ?, end_time = ? WHERE id = ?`,
+		StatusCanceled, AttemptOutcomeSuperseded, now, firstRunID,
+	); err != nil {
+		t.Fatalf("supersede first attempt: %v", err)
+	}
+	secondLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch second: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", &secondLaunchID, StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt second: %v", err)
+	}
+	secondRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID second: %v", err)
+	}
+
+	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", time.Time{}, firstRunID); err != nil {
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
+	}
+
+	var firstStatus, firstOutcome string
+	var firstExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, cloud_outcome, exit_code FROM job_attempts WHERE id = ?`,
+		firstRunID,
+	).Scan(&firstStatus, &firstOutcome, &firstExit); err != nil {
+		t.Fatalf("query first attempt: %v", err)
+	}
+	if firstStatus != StatusFailed || firstOutcome != AttemptOutcomeFailed || !firstExit.Valid || firstExit.Int64 != 1 {
+		t.Fatalf("first attempt = status %q outcome %q exit %v, want failed/failed/1", firstStatus, firstOutcome, firstExit)
+	}
+
+	var secondStatus string
+	var secondOutcome sql.NullString
+	var secondExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, cloud_outcome, exit_code FROM job_attempts WHERE id = ?`,
+		secondRunID,
+	).Scan(&secondStatus, &secondOutcome, &secondExit); err != nil {
+		t.Fatalf("query second attempt: %v", err)
+	}
+	if secondStatus != StatusQueued {
+		t.Fatalf("second status = %q, want %q", secondStatus, StatusQueued)
+	}
+	if secondOutcome.Valid {
+		t.Fatalf("second cloud_outcome = %q, want NULL", secondOutcome.String)
+	}
+	if secondExit.Valid {
+		t.Fatalf("second exit_code = %d, want NULL", secondExit.Int64)
 	}
 }
 

@@ -314,8 +314,8 @@ func (m listTUIModel) Init() tea.Cmd {
 			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return listSyncWorkerResultMsg{result: r}
 			}),
-			m.runBackgroundCloudSync(false),
 		)
+		cmds = m.enqueueBackgroundCloudSync(cmds, false)
 	} else if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
@@ -649,7 +649,10 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{m.scheduleListSyncTick()}
 		if m.syncWorker != nil {
 			m.requestActiveSyncs()
-			cmds = append(cmds, m.reloadJobs(), m.runBackgroundCloudSync(true))
+			cmds = append(cmds, m.reloadJobs())
+			// The worker owns cloud result-marker sync; the TUI tick only needs
+			// cloud instance reconciliation so it stays cheap and non-overlapping.
+			cmds = m.enqueueBackgroundCloudSync(cmds, false)
 		} else if m.syncEnabled && !m.syncInProgress() {
 			m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
 			if !m.quickLaunchStatusProtected() {
@@ -1977,6 +1980,7 @@ func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {
 	}
 	if m.syncWorker != nil {
 		m.requestActiveSyncs()
+		cmds = m.enqueueBackgroundCloudSync(cmds, true)
 	} else if m.syncEnabled && !m.syncInProgress() {
 		m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
 		cmds = append(cmds, m.runBackgroundSync(true))
@@ -2327,6 +2331,17 @@ func (m listTUIModel) runBackgroundCloudSync(full bool) tea.Cmd {
 	return m.runBackgroundSyncFn(full, syncCloudStateForTUI)
 }
 
+func (m *listTUIModel) enqueueBackgroundCloudSync(cmds []tea.Cmd, full bool) []tea.Cmd {
+	if m.pendingSyncHosts == nil {
+		m.pendingSyncHosts = make(map[string]struct{})
+	}
+	if _, ok := m.pendingSyncHosts[backgroundSyncKey]; ok {
+		return cmds
+	}
+	m.pendingSyncHosts[backgroundSyncKey] = struct{}{}
+	return append(cmds, m.runBackgroundCloudSync(full))
+}
+
 func (m listTUIModel) runBackgroundSyncFn(full bool, fn func(*sql.DB, bool) []string) tea.Cmd {
 	database := m.database
 	ctx := m.ctx
@@ -2550,52 +2565,18 @@ func runQuickLaunchWithProgress(
 	jobs []*db.Job,
 	progress chan<- listQuickLaunchProgressMsg,
 ) listQuickLaunchDoneMsg {
-	if scopeOwner != "" && scope != "" {
-		acquired, err := db.AcquireAutoLease(database, scope, scopeOwner, listAutoLeaseTTL)
-		if err != nil {
-			return listQuickLaunchDoneMsg{err: err}
+	res, err := orchestration.RunQuickLaunch(ctx, database, scopeOwner, scope, jobs, func(message string) {
+		select {
+		case progress <- listQuickLaunchProgressMsg{message: message}:
+		default:
 		}
-		if !acquired {
-			return listQuickLaunchDoneMsg{err: fmt.Errorf("another TUI is launching for this scope")}
-		}
-		defer db.ReleaseAutoLease(database, scope, scopeOwner)
-	}
-	jobScope := make(map[int64]struct{}, len(jobs))
-	for _, job := range jobs {
-		if job != nil && job.ID > 0 {
-			jobScope[job.ID] = struct{}{}
-		}
-	}
-	res, err := orchestration.LaunchNewInstanceWithRebalance(ctx, database, nil, orchestration.NewInstanceOptions{
-		JobScope:    jobScope,
-		Strategy:    "fastest",
-		MinSurvival: 0.4,
-		WaitReady:   true,
-		OnStatus: func(message string) {
-			select {
-			case progress <- listQuickLaunchProgressMsg{message: message}:
-			default:
-			}
-		},
-		OnEvent: func(event campaign.LaunchEvent) {
-			if line := formatQuickLaunchEventLine(event); line != "" {
-				select {
-				case progress <- listQuickLaunchProgressMsg{message: line}:
-				default:
-				}
-			}
-		},
 	})
 	if err != nil {
 		return listQuickLaunchDoneMsg{err: err}
 	}
-	movedJobs := len(res.JobIDs) - 1
-	if movedJobs < 0 {
-		movedJobs = 0
-	}
 	return listQuickLaunchDoneMsg{
 		instanceIDs: res.InstanceIDs,
-		movedJobs:   movedJobs,
+		movedJobs:   res.MovedJobs,
 		warning:     res.Warning,
 	}
 }
