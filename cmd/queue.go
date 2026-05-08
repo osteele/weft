@@ -441,7 +441,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		if gpuMemMaxGB != nil {
 			if err := db.SetJobGPUMemMaxGB(database, jobID, gpuMemMaxGB); err != nil {
 				db.DeleteJob(database, jobID)
-				return fmt.Errorf("record draft GPU memory ceiling: %w", err)
+				return fmt.Errorf("record draft legacy GPU memory upper metadata: %w", err)
 			}
 		}
 		if projectName != "" {

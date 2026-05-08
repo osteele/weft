@@ -41,7 +41,7 @@ func TestLaunchModelView_ShowsPartialFailures(t *testing.T) {
 
 func TestFormatPartialErrors_WrapsLongLines(t *testing.T) {
 	out := formatPartialErrors([]string{
-		"NVIDIA ≥8GB ≤12GB: search replacement offer: replacement offer price $0.08/hr exceeds 25% cap over original offer $0.06/hr",
+		"NVIDIA ≥8GB: search replacement offer: replacement offer price $0.08/hr exceeds 25% cap over original offer $0.06/hr",
 	}, 72)
 
 	if !strings.Contains(out, "1 planned launch(es) failed:") {
@@ -192,14 +192,14 @@ func TestLaunchModelView_RawOfferSummaryAggregatesDuplicateSpecs(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"NVIDIA 8-12 GB (2 groups): 64 direct offers",
+		"NVIDIA ≥8GB (2 groups): 64 direct offers",
 		"Unspecified GPU: 64 direct offers",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "NVIDIA 8-12 GB: 64 direct offers\n  NVIDIA 8-12 GB: 64 direct offers") {
+	if strings.Contains(out, "NVIDIA ≥8GB: 64 direct offers\n  NVIDIA ≥8GB: 64 direct offers") {
 		t.Fatalf("expected duplicate summary lines to be aggregated, got:\n%s", out)
 	}
 }
@@ -239,8 +239,8 @@ func TestLaunchModelView_RawOfferSummaryKeepsDifferentStatusesSeparate(t *testin
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"NVIDIA 8-12 GB: 1 direct offer",
-		"NVIDIA 8-12 GB: 0 direct offers",
+		"NVIDIA ≥8GB: 1 direct offer",
+		"NVIDIA ≥8GB: 0 direct offers",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)

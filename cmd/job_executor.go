@@ -102,7 +102,7 @@ type queueJobOptions struct {
 	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	GPUMemStrict bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
-	GPUMemMaxGB  *int   // GPU memory ceiling in GB; soft cap for offer selection
+	GPUMemMaxGB  *int   // Legacy GPU memory upper metadata; ignored by placement
 	Dependencies []queueDependency
 	AutoStart    bool
 	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")

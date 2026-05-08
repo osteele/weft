@@ -14,16 +14,17 @@ func resolveEffectiveGPUMemWithConfig(cfg *config.Config, explicit *int, gpu str
 	return floor, predicted
 }
 
-// resolveEffectiveGPUMemAndCeiling returns the GPU memory floor, ceiling, and
-// whether the floor was predicted. The ceiling is nil when no prediction is
-// available or the prediction exceeds all known VRAM tiers.
+// resolveEffectiveGPUMemAndCeiling returns the GPU memory floor and whether the
+// floor was predicted. The second return value is legacy compatibility metadata;
+// new submissions do not derive a maximum GPU memory requirement from predictor
+// telemetry.
 func resolveEffectiveGPUMemAndCeiling(cfg *config.Config, explicit *int, gpu string, gpuClass string, strict bool, host string, project string, command string, oomFloorGB int) (floor *int, ceiling *int, predicted bool) {
 	pcfg := predictor.Config{}
 	if cfg != nil {
 		pcfg = buildPredictorConfig(cfg)
 	}
 	needsGPU := gpu != "" || gpuClass != ""
-	floor, ceiling, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB)
+	floor, _, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB)
 	if floor != nil {
 		effective := applyGPUMemHeadroom(*floor, explicit != nil, strict)
 		if effective != *floor {
@@ -31,11 +32,7 @@ func resolveEffectiveGPUMemAndCeiling(cfg *config.Config, explicit *int, gpu str
 			predicted = false
 		}
 	}
-	if floor != nil && ceiling != nil && *ceiling < *floor {
-		adjusted := *floor
-		ceiling = &adjusted
-	}
-	return floor, ceiling, predicted
+	return floor, nil, predicted
 }
 
 func resolveEffectiveGPUMem(explicit *int, gpu string, gpuClass string, host string, project string, command string) (*int, bool) {

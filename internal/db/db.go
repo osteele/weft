@@ -61,7 +61,7 @@ type Job struct {
 	GPUClass             string // GPU class name (e.g., "A100") — resolved to device at runtime
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
 	GPUMemGB             *int   // GPU memory reservation in GB per device (nil = use default)
-	GPUMemMaxGB          *int   // GPU memory ceiling in GB (nil = no ceiling); prevents over-provisioning
+	GPUMemMaxGB          *int   // Legacy GPU memory upper metadata; ignored by placement
 	MaxComputeCap        string // CUDA compute-capability cap: "" = unresolved, placement.MaxComputeCapAny = unbounded, "X.Y" = numeric
 	Metadata             *JobMetadata
 	EnvVars              []string
@@ -1975,7 +1975,7 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: add GPU memory ceiling for over-provisioning prevention
+	// Migration: add legacy GPU memory upper metadata.
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu_mem_max_gb INTEGER`); err != nil {
 		return err
 	}
@@ -3381,7 +3381,7 @@ func SetJobGPUMemGB(db *sql.DB, jobID int64, gpuMemGB *int) error {
 	return setJobNullableInt(db, jobID, "gpu_mem_gb", gpuMemGB)
 }
 
-// SetJobGPUMemMaxGB updates the GPU memory ceiling in GB (nil clears it).
+// SetJobGPUMemMaxGB updates legacy GPU memory upper metadata in GB (nil clears it).
 func SetJobGPUMemMaxGB(db *sql.DB, jobID int64, gpuMemMaxGB *int) error {
 	return setJobNullableInt(db, jobID, "gpu_mem_max_gb", gpuMemMaxGB)
 }

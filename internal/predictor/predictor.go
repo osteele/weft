@@ -1105,13 +1105,12 @@ func PredictedGPUMemGB(p *Prediction) (int, bool) {
 }
 
 // standardVRAMTiers lists common GPU VRAM sizes in GB, ordered ascending.
-// Used to snap predicted memory to the next available tier for ceiling caps.
+// Used to snap predicted memory to the next available tier for metadata.
 var standardVRAMTiers = []int{12, 16, 24, 48, 80, 141}
 
 // PredictedGPUMemCeilingGB snaps a GPU memory prediction's upper bound to the
-// next standard VRAM tier. This provides a ceiling that prevents over-provisioning
-// — e.g., a job predicted to need 20GB gets capped at the 24GB tier, avoiding
-// placement on 80GB+ GPUs that provide no benefit.
+// next standard VRAM tier. The tier is retained as prediction metadata; rental
+// placement does not use it as a maximum GPU memory requirement.
 //
 // Returns (0, false) if the prediction is nil or has no upper bound.
 func PredictedGPUMemCeilingGB(p *Prediction) (int, bool) {

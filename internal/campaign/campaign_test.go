@@ -369,53 +369,15 @@ func TestInstanceGroupGPUSpec(t *testing.T) {
 		{InstanceGroup{GPUClass: "A100"}, "A100"},
 		{InstanceGroup{GPUMemGB: 24}, "≥24GB"},
 		{InstanceGroup{}, "GPU"},
-		{InstanceGroup{GPUClass: "A100", GPUMemGB: 24, MaxGPUMemGB: 48}, "A100 ≥24GB ≤48GB"},
-		{InstanceGroup{GPUMemGB: 24, MaxGPUMemGB: 24}, "≥24GB ≤24GB"},
-		{InstanceGroup{GPUClass: "V100", GPUMemGB: 22, MaxGPUMemGB: 20}, "V100 ≥22GB (20GB tier)"},
+		{InstanceGroup{GPUClass: "A100", GPUMemGB: 24, MaxGPUMemGB: 48}, "A100 ≥24GB"},
+		{InstanceGroup{GPUMemGB: 24, MaxGPUMemGB: 24}, "≥24GB"},
+		{InstanceGroup{GPUClass: "V100", GPUMemGB: 22, MaxGPUMemGB: 20}, "V100 ≥22GB"},
 	}
 	for _, tt := range tests {
 		got := tt.group.GPUSpec()
 		if got != tt.want {
 			t.Errorf("GPUSpec() = %q, want %q", got, tt.want)
 		}
-	}
-}
-
-func TestGroupByAffinityPropagatesMaxGPUMemGB(t *testing.T) {
-	jobs := []*db.Job{
-		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
-			GPUMemMaxGB: intPtr(24),
-			Inputs:      []string{"hf:model-a"}},
-		{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
-			GPUMemMaxGB: intPtr(48),
-			Inputs:      []string{"hf:model-a"}},
-	}
-	groups := GroupByAffinity(jobs, nil)
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
-	}
-	// Both jobs have ceilings: group ceiling = max(24, 48) = 48
-	if groups[0].MaxGPUMemGB != 48 {
-		t.Errorf("MaxGPUMemGB = %d, want 48", groups[0].MaxGPUMemGB)
-	}
-}
-
-func TestGroupCeilingDefaultsToVRAMTier(t *testing.T) {
-	jobs := []*db.Job{
-		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
-			GPUMemMaxGB: intPtr(24),
-			Inputs:      []string{"hf:model-a"}},
-		{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
-			Inputs: []string{"hf:model-a"}}, // no explicit ceiling
-	}
-	groups := GroupByAffinity(jobs, nil)
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
-	}
-	// Job 2 has no explicit ceiling → defaults to VRAM tier (24)
-	// mergeGPUMemCeiling(24, 24) = 24
-	if groups[0].MaxGPUMemGB != 24 {
-		t.Errorf("MaxGPUMemGB = %d, want 24 (VRAM tier default)", groups[0].MaxGPUMemGB)
 	}
 }
 
@@ -449,8 +411,8 @@ func TestMergeCompatibleGroups_PreservesIncompatible(t *testing.T) {
 func TestMergeCompatibleGroups_TakesMemorySupremum(t *testing.T) {
 	// Groups in the same VRAM tier merge and take the supremum
 	groups := []InstanceGroup{
-		{GPUClass: "NVIDIA", GPUMemGB: 20, MaxGPUMemGB: 24, Jobs: []*db.Job{{ID: 1}}},
-		{GPUClass: "NVIDIA", GPUMemGB: 22, MaxGPUMemGB: 24, Jobs: []*db.Job{{ID: 2}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 22, Jobs: []*db.Job{{ID: 2}}},
 	}
 	merged := MergeCompatibleGroups(groups)
 	if len(merged) != 1 {
@@ -525,25 +487,6 @@ func TestMergeCompatibleGroups_DoesNotMutateOriginal(t *testing.T) {
 	}
 }
 
-func TestMergeGPUMemCeiling(t *testing.T) {
-	tests := []struct {
-		a, b, want int
-	}{
-		{0, 0, 0},    // both uncapped → uncapped
-		{24, 0, 0},   // one uncapped → uncapped
-		{0, 48, 0},   // one uncapped → uncapped
-		{24, 48, 48}, // both capped → max
-		{48, 24, 48}, // both capped → max
-		{24, 24, 24}, // same → same
-	}
-	for _, tt := range tests {
-		got := mergeGPUMemCeiling(tt.a, tt.b)
-		if got != tt.want {
-			t.Errorf("mergeGPUMemCeiling(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
-		}
-	}
-}
-
 func TestGroupByAffinity_SeparatesMemoryTiers(t *testing.T) {
 	// Jobs with different VRAM tiers should form separate groups even with
 	// shared inputs. This prevents 8GB jobs from being routed to expensive
@@ -574,7 +517,7 @@ func TestGroupByAffinity_SeparatesMemoryTiers(t *testing.T) {
 	if !found20GB {
 		t.Error("expected the 20GB job to be in its own group")
 	}
-	// The 8GB jobs (tier 12) should be grouped together with VRAM tier ceiling
+	// The 8GB jobs should be grouped together.
 	var group8GB *InstanceGroup
 	for i := range groups {
 		if groups[i].GPUMemGB == 8 && len(groups[i].Jobs) == 4 {
@@ -583,9 +526,6 @@ func TestGroupByAffinity_SeparatesMemoryTiers(t *testing.T) {
 	}
 	if group8GB == nil {
 		t.Fatal("expected the four 8GB jobs to be grouped together")
-	}
-	if group8GB.MaxGPUMemGB != 12 {
-		t.Errorf("8GB group MaxGPUMemGB = %d, want 12 (VRAM tier)", group8GB.MaxGPUMemGB)
 	}
 }
 
@@ -969,20 +909,16 @@ func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 	if result[0].GPUMemGB != 20 {
 		t.Errorf("first group GPUMemGB = %d, want 20", result[0].GPUMemGB)
 	}
-	if result[0].MaxGPUMemGB != 24 {
-		t.Errorf("first group MaxGPUMemGB = %d, want 24", result[0].MaxGPUMemGB)
+	if result[0].MaxGPUMemGB != 0 {
+		t.Errorf("first group MaxGPUMemGB = %d, want 0", result[0].MaxGPUMemGB)
 	}
 	if result[0].MaxComputeCap != "9.0" {
 		t.Errorf("first group MaxComputeCap = %q, want 9.0", result[0].MaxComputeCap)
 	}
-	// The 8GB jobs should have their own GPUMemGB and a VRAM tier ceiling
+	// The 8GB jobs should have their own GPUMemGB and compute-cap bound.
 	for _, g := range result[1:] {
 		if g.GPUMemGB != 8 {
 			continue
-		}
-		if g.MaxGPUMemGB != 12 {
-			t.Errorf("8GB group (job %d): MaxGPUMemGB = %d, want 12 (VRAM tier default)",
-				g.Jobs[0].ID, g.MaxGPUMemGB)
 		}
 		if g.MaxComputeCap != "12.0" {
 			t.Errorf("8GB group (job %d): MaxComputeCap = %q, want 12.0",

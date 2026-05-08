@@ -41,7 +41,7 @@ type InstanceGroup struct {
 	GPUClass         string   // Normalized GPU class (uppercase), e.g. "H100"
 	Provider         string   // Requested provider ("vastai" or "runpod"), empty = any
 	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
-	MaxGPUMemGB      int      // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
+	MaxGPUMemGB      int      // Legacy metadata retained for old rows; not used for placement
 	DiskGB           int      // Estimated disk space needed (0 = use default)
 	Image            string   // Per-project Docker image override ("" = use global default)
 	MinDriverVersion int      // Minimum NVIDIA driver version required by the image
@@ -158,7 +158,6 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 		if job.GPUMemGB != nil {
 			mem = *job.GPUMemGB
 		}
-		memMax := jobGPUMemMaxGB(job)
 
 		merged := false
 		for i := range groups {
@@ -180,7 +179,6 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 			if mem > groups[i].GPUMemGB {
 				groups[i].GPUMemGB = mem
 			}
-			groups[i].MaxGPUMemGB = mergeGPUMemCeiling(groups[i].MaxGPUMemGB, memMax)
 			merged = true
 			break
 		}
@@ -190,35 +188,12 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 				GPUClass:    strings.ToUpper(job.GPUClass),
 				Provider:    provider,
 				GPUMemGB:    mem,
-				MaxGPUMemGB: memMax,
 				Preemptible: job.UsesPreemptiblePlacement(),
 				Jobs:        []*db.Job{job},
 			})
 		}
 	}
 	return groups
-}
-
-// jobGPUMemMaxGB returns the job's GPU memory ceiling, or 0 if unconstrained.
-func jobGPUMemMaxGB(job *db.Job) int {
-	if job.GPUMemMaxGB != nil {
-		return *job.GPUMemMaxGB
-	}
-	return 0
-}
-
-// mergeGPUMemCeiling computes the group ceiling from two job ceilings.
-// 0 means "no ceiling". If either is 0, the group has no ceiling (can't
-// constrain the group tighter than any unconstrained job). Otherwise,
-// the group ceiling is the maximum (to fit all jobs).
-func mergeGPUMemCeiling(a, b int) int {
-	if a == 0 || b == 0 {
-		return 0
-	}
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // affinityGroupUnconstrained groups unconstrained and floatable jobs by shared
@@ -305,14 +280,6 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			}
 		}
 
-		memMax := jobGPUMemMaxGB(info.job)
-		// When a floatable job has no explicit memory ceiling, default to the
-		// VRAM tier. This signals "no performance advantage above this tier"
-		// to the bidding system, preventing oversized GPU selection.
-		if memMax == 0 && mem > 0 {
-			memMax = vramTierOf(mem)
-		}
-
 		if bestIdx >= 0 && bestScore > 0 {
 			g := &groups[bestIdx]
 			g.group.Jobs = append(g.group.Jobs, info.job)
@@ -321,7 +288,6 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			if mem > g.group.GPUMemGB {
 				g.group.GPUMemGB = mem
 			}
-			g.group.MaxGPUMemGB = mergeGPUMemCeiling(g.group.MaxGPUMemGB, memMax)
 			for id := range info.hfInputs {
 				g.hfUnion[id] = struct{}{}
 			}
@@ -335,7 +301,6 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 					GPUClass:    strings.ToUpper(jobGPU),
 					Provider:    jobProvider,
 					GPUMemGB:    mem,
-					MaxGPUMemGB: memMax,
 					Preemptible: jobPreemptible,
 					Jobs:        []*db.Job{info.job},
 				},
@@ -483,7 +448,6 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			if g.GPUMemGB > merged[i].GPUMemGB {
 				merged[i].GPUMemGB = g.GPUMemGB
 			}
-			merged[i].MaxGPUMemGB = mergeGPUMemCeiling(merged[i].MaxGPUMemGB, g.MaxGPUMemGB)
 			if g.DiskGB > merged[i].DiskGB {
 				merged[i].DiskGB = g.DiskGB
 			}
@@ -498,7 +462,6 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 				GPUClass:      g.GPUClass,
 				Provider:      g.Provider,
 				GPUMemGB:      g.GPUMemGB,
-				MaxGPUMemGB:   g.MaxGPUMemGB,
 				DiskGB:        g.DiskGB,
 				Image:         g.Image,
 				Preemptible:   g.Preemptible,
@@ -525,7 +488,6 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 				GPUClass:      g.GPUClass,
 				Provider:      g.Provider,
 				GPUMemGB:      g.GPUMemGB,
-				MaxGPUMemGB:   g.MaxGPUMemGB,
 				DiskGB:        g.DiskGB,
 				Image:         g.Image,
 				Preemptible:   g.Preemptible,
@@ -540,15 +502,10 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 			if job.GPUMemGB != nil {
 				mem = *job.GPUMemGB
 			}
-			memMax := jobGPUMemMaxGB(job)
-			if memMax == 0 && mem > 0 {
-				memMax = vramTierOf(mem)
-			}
 			result = append(result, InstanceGroup{
 				GPUClass:      g.GPUClass,
 				Provider:      g.Provider,
 				GPUMemGB:      mem,
-				MaxGPUMemGB:   memMax,
 				DiskGB:        g.DiskGB,
 				Image:         g.Image,
 				Preemptible:   g.Preemptible,
@@ -704,7 +661,6 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 				GPUClass:         g.GPUClass,
 				Provider:         g.Provider,
 				GPUMemGB:         g.GPUMemGB,
-				MaxGPUMemGB:      g.MaxGPUMemGB,
 				DiskGB:           g.DiskGB,
 				Image:            sub.image,
 				MinDriverVersion: sub.minDriverVersion,
@@ -1004,13 +960,6 @@ func (g InstanceGroup) GPUSpec() string {
 		spec = "≥" + strconv.Itoa(g.GPUMemGB) + "GB"
 	default:
 		spec = "GPU"
-	}
-	if g.MaxGPUMemGB > 0 {
-		if g.GPUMemGB > 0 && g.MaxGPUMemGB < g.GPUMemGB {
-			spec += " (" + strconv.Itoa(g.MaxGPUMemGB) + "GB tier)"
-		} else {
-			spec += " ≤" + strconv.Itoa(g.MaxGPUMemGB) + "GB"
-		}
 	}
 	return spec
 }

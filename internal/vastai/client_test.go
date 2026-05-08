@@ -225,13 +225,13 @@ func TestBuildSearchFilter_NoCPUCores(t *testing.T) {
 	}
 }
 
-func TestBuildSearchFilter_MaxGPUMem(t *testing.T) {
+func TestBuildSearchFilter_IgnoresMaxGPUMem(t *testing.T) {
 	filter, _ := buildSearchFilter(OfferConstraints{MinGPUMemGB: 24, MaxGPUMemGB: 48})
 	if !strings.Contains(filter, "gpu_ram>=24") {
 		t.Errorf("filter %q should contain gpu_ram>=24", filter)
 	}
-	if !strings.Contains(filter, "gpu_ram<=48") {
-		t.Errorf("filter %q should contain gpu_ram<=48", filter)
+	if strings.Contains(filter, "gpu_ram<=") {
+		t.Errorf("filter %q should not contain gpu_ram<=", filter)
 	}
 }
 

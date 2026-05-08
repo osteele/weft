@@ -1909,7 +1909,7 @@ func TestSetJobLaunchID_RunningAttempt(t *testing.T) {
 func TestDisplayGPUBrief_UsesResolvedNameAndActualMem(t *testing.T) {
 	ci := &Launch{
 		ResolvedGPUName: "RTX 4090",
-		GPUSpec:         "NVIDIA ≥20GB ≤20GB",
+		GPUSpec:         "NVIDIA ≥20GB",
 		GPUMemGB:        24,
 		NumGPUs:         1,
 	}

@@ -120,9 +120,6 @@ func FormatOfferConstraints(c cloud.OfferConstraints) string {
 	if c.MinGPUMemGB > 0 {
 		parts = append(parts, fmt.Sprintf("vram>=%dGB", c.MinGPUMemGB))
 	}
-	if c.MaxGPUMemGB > 0 {
-		parts = append(parts, fmt.Sprintf("vram<=%dGB", c.MaxGPUMemGB))
-	}
 	if c.MinDiskGB > 0 {
 		parts = append(parts, fmt.Sprintf("disk>=%dGB", c.MinDiskGB))
 	}
@@ -187,8 +184,9 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		MinReliability:   minReliability,
 		MinDriverVersion: group.MinDriverVersion,
 		MinCUDAVersion:   group.MinCUDAVersion,
-		// MaxGPUMemGB is intentionally NOT passed to the search filter.
-		// It is a scheduler-side planning hint, not a hard offer filter.
+		// Legacy GPU memory upper metadata is intentionally not passed to search.
+		// Offer selection relies on cost/runtime scoring after the hard
+		// minimum compatibility filters.
 	}
 	if group.HasComputeIntensiveJob() {
 		c.MinCPUCoresEffective = computeCPUCoresFloor()
@@ -299,8 +297,7 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 
 // filterOffersByVRAMReq applies a defensive local VRAM minimum filter.
 // We still rely on provider-side filtering, but this guards against provider
-// inconsistencies. MaxGPUMemGB is not enforced here — it is a soft signal
-// used by the bidding system to avoid overpaying for oversized GPUs.
+// inconsistencies. Legacy GPU memory upper metadata is not enforced here.
 func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
 	if len(offers) == 0 {
 		return offers, 0
@@ -382,7 +379,7 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	if len(group.Jobs) > 1 {
 		totalJobDurationHrs *= float64(len(group.Jobs))
 	}
-	_, best := bidding.BestOfferForJobGroupWithProfile(survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, group.MaxGPUMemGB)
+	_, best := bidding.BestOfferForJobGroupWithProfile(survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, 0)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)

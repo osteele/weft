@@ -338,14 +338,6 @@ For example, GPT-2 small (124M params) training uses ~3GB of VRAM. Declaring
 placement on GPUs like the T4 (16GB), while avoiding exact-capacity 8GB cards.
 If you need exact 8GB matching, set `gpu-mem-strict = true`.
 
-**Predictor-derived ceilings**: After a job completes, weft records peak GPU
-memory usage via telemetry. On subsequent submissions of the same command, the
-predictor sets a **ceiling** by snapping the p90 upper bound to the next
-standard VRAM tier (12, 16, 24, 48, 80, 141 GB). This ceiling filters out GPUs
-larger than needed, preventing the "fastest" strategy from selecting high-end
-GPUs for lightweight workloads. First runs have no ceiling — the predictor needs
-at least one completed run to derive it.
-
 ### Project-relative data inputs
 
 Use the `local:` prefix to declare project-relative directories that should be

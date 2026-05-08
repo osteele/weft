@@ -778,9 +778,6 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 		if constraints.MinGPUMemGB > 0 && gt.MemoryInGb < constraints.MinGPUMemGB {
 			continue
 		}
-		if constraints.MaxGPUMemGB > 0 && gt.MemoryInGb > constraints.MaxGPUMemGB {
-			continue
-		}
 		if gt.MaxGPUCount > 0 && gt.MaxGPUCount < numGPUs {
 			continue
 		}
@@ -842,9 +839,6 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 	for _, row := range rows {
 		memGB := firstInt(row, "memoryInGb", "gpuMemoryInGb", "gpuMemoryGb", "memory")
 		if constraints.MinGPUMemGB > 0 && memGB < constraints.MinGPUMemGB {
-			continue
-		}
-		if constraints.MaxGPUMemGB > 0 && memGB > constraints.MaxGPUMemGB {
 			continue
 		}
 

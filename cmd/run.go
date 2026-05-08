@@ -961,7 +961,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if resolvedGPUMemMaxGB != nil {
 			if err := db.SetJobGPUMemMaxGB(database, jobID, resolvedGPUMemMaxGB); err != nil {
-				return fmt.Errorf("set GPU memory ceiling: %w", err)
+				return fmt.Errorf("set legacy GPU memory upper metadata: %w", err)
 			}
 		}
 		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {

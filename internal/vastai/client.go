@@ -462,9 +462,6 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	if c.MinGPUMemGB > 0 {
 		parts = append(parts, fmt.Sprintf("gpu_ram>=%d", c.MinGPUMemGB)) // search filter uses GB (response field is MB)
 	}
-	if c.MaxGPUMemGB > 0 {
-		parts = append(parts, fmt.Sprintf("gpu_ram<=%d", c.MaxGPUMemGB))
-	}
 	if c.MinDiskGB > 0 {
 		parts = append(parts, fmt.Sprintf("disk_space>=%d", c.MinDiskGB))
 	}

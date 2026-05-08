@@ -659,9 +659,8 @@ func TestSummarizeGroupOffers_ParallelInstanceCount(t *testing.T) {
 // TestJob545Through549_FullPipeline exercises the full pipeline for the actual
 // job scenario: grouping → offer ranking → strategy selection. Verifies:
 // 1. 8GB jobs (546-549) are in a separate group from 20GB jobs
-// 2. MaxGPUMemGB is set (caps DLPerf for oversized GPUs)
-// 3. Fastest strategy doesn't pick H200 for 8GB jobs
-// 4. Parallel candidate splits the 4-job group for parallel execution
+// 2. Fastest strategy doesn't pick H200 for 8GB jobs without runtime evidence
+// 3. Parallel candidate splits the 4-job group for parallel execution
 func TestJob545Through549_FullPipeline(t *testing.T) {
 	// Step 1: Group the jobs
 	jobs := []*db.Job{
@@ -683,7 +682,7 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 	groups := GroupByAffinity(jobs, nil)
 	t.Logf("Groups: %d", len(groups))
 	for i, g := range groups {
-		t.Logf("  group %d: %s ≥%dGB (max=%d), %d jobs", i, g.GPUClass, g.GPUMemGB, g.MaxGPUMemGB, len(g.Jobs))
+		t.Logf("  group %d: %s ≥%dGB, %d jobs", i, g.GPUClass, g.GPUMemGB, len(g.Jobs))
 	}
 
 	// Find the 8GB group
@@ -700,9 +699,6 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 	if len(group8GB.Jobs) != 4 {
 		t.Errorf("8GB group has %d jobs, want 4", len(group8GB.Jobs))
 	}
-	if group8GB.MaxGPUMemGB == 0 {
-		t.Error("8GB group MaxGPUMemGB=0 — should be set to VRAM tier (12)")
-	}
 
 	// Step 2: Verify the legacy fallback selector stays neutral on runtime.
 	// Even with oversized offers present, the fastest strategy should prefer a
@@ -713,10 +709,9 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 		{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
 	}
 	_, best := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5),
-		bidding.StrategyFastest, group8GB.MaxGPUMemGB)
+		bidding.StrategyFastest, 0)
 	if best.ProviderID == "h200" {
-		t.Errorf("fastest strategy picked H200 for 8GB group with MaxGPUMemGB=%d — neutral runtime fallback failed",
-			group8GB.MaxGPUMemGB)
+		t.Errorf("fastest strategy picked H200 for 8GB group — neutral runtime fallback failed")
 	}
 	t.Logf("fastest strategy picked %s ($%.2f/hr) for 8GB group", best.GPUName, best.CostPerHour)
 
@@ -726,15 +721,11 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 		t.Errorf("parallel candidate has %d groups (same as split %d) — splitting failed",
 			len(parallelGroups), len(groups))
 	}
-	// Count 1-job groups that came from the 8GB group and verify MaxGPUMemGB
+	// Count 1-job groups that came from the 8GB group.
 	var singleJob8GB int
 	for _, g := range parallelGroups {
 		if g.GPUMemGB == 8 && len(g.Jobs) == 1 {
 			singleJob8GB++
-			if g.MaxGPUMemGB == 0 {
-				t.Errorf("parallel 8GB group (job %d) has MaxGPUMemGB=0 — should be 12 (VRAM tier)",
-					g.Jobs[0].ID)
-			}
 		}
 	}
 	if singleJob8GB != 4 {
@@ -748,10 +739,10 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 			continue
 		}
 		_, pick := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5),
-			bidding.StrategyFastest, g.MaxGPUMemGB)
+			bidding.StrategyFastest, 0)
 		if pick.ProviderID == "h200" {
-			t.Errorf("parallel 8GB group (job %d, MaxGPUMemGB=%d): fastest picked H200 — should pick cheaper GPU",
-				g.Jobs[0].ID, g.MaxGPUMemGB)
+			t.Errorf("parallel 8GB group (job %d): fastest picked H200 — should pick cheaper GPU",
+				g.Jobs[0].ID)
 		}
 	}
 
@@ -775,10 +766,7 @@ func TestJob545Through549_FullPipeline(t *testing.T) {
 	t.Logf("grouped score=%.3f, parallel score=%.3f (%.1fx improvement)", groupedScore, parallelScore, groupedScore/parallelScore)
 }
 
-// TestOfferConstraints_MaxGPUMemGB_NotHardFilter verifies that MaxGPUMemGB
-// is NOT passed as a hard filter to the cloud search. It's a soft signal
-// for DLPerf capping only.
-func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
+func TestOfferConstraints_UsesOnlyMinGPUMemGB(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",
 		GPUMemGB:    8,
@@ -786,8 +774,7 @@ func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
 	}
 	c := offerConstraintsForGroup(group, 0.95)
 	if c.MaxGPUMemGB != 0 {
-		t.Errorf("MaxGPUMemGB should not be passed to search constraints (got %d); "+
-			"it's a soft signal for DLPerf capping, not a hard offer filter", c.MaxGPUMemGB)
+		t.Errorf("MaxGPUMemGB should not be passed to search constraints (got %d)", c.MaxGPUMemGB)
 	}
 	if c.MinGPUMemGB != 8 {
 		t.Errorf("MinGPUMemGB = %d, want 8", c.MinGPUMemGB)
@@ -795,8 +782,8 @@ func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
 }
 
 func TestRankOffer_NoHardVRAMCeiling(t *testing.T) {
-	// MaxGPUMemGB is a soft signal for the bidding system, not a hard filter.
-	// All offers meeting the minimum should be eligible; cheapest wins.
+	// Legacy MaxGPUMemGB values are not a hard filter. All offers meeting the
+	// minimum should be eligible; cheapest wins.
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",
 		GPUMemGB:    18,
@@ -820,18 +807,15 @@ func TestRankOffer_NoHardVRAMCeiling(t *testing.T) {
 	}
 }
 
-// TestSplitToParallel_PreservesMaxGPUMemGB verifies that SplitToParallel
-// applies the VRAM tier ceiling to individual groups, matching the behavior
-// of affinityGroupUnconstrained.
-func TestSplitToParallel_PreservesMaxGPUMemGB(t *testing.T) {
+func TestSplitToParallel_UsesOnlyPerJobMinimumMemory(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",
 		GPUMemGB:    20, // supremum
-		MaxGPUMemGB: 24, // group ceiling
+		MaxGPUMemGB: 24, // legacy metadata ignored
 		Jobs: []*db.Job{
-			{ID: 1, GPUMemGB: intPtr(20)},                         // no explicit ceiling
-			{ID: 2, GPUMemGB: intPtr(8)},                          // no explicit ceiling
-			{ID: 3, GPUMemGB: intPtr(8), GPUMemMaxGB: intPtr(16)}, // explicit ceiling
+			{ID: 1, GPUMemGB: intPtr(20)},
+			{ID: 2, GPUMemGB: intPtr(8)},
+			{ID: 3, GPUMemGB: intPtr(8), GPUMemMaxGB: intPtr(16)},
 		},
 	}
 	result := SplitToParallel([]InstanceGroup{group})
@@ -840,31 +824,8 @@ func TestSplitToParallel_PreservesMaxGPUMemGB(t *testing.T) {
 	}
 
 	for _, g := range result {
-		if g.MaxGPUMemGB == 0 {
-			t.Errorf("group with GPUMemGB=%d has MaxGPUMemGB=0; "+
-				"should be VRAM tier default or explicit ceiling", g.GPUMemGB)
-		}
-		job := g.Jobs[0]
-		if job.GPUMemGB != nil && *job.GPUMemGB == 8 && job.GPUMemMaxGB == nil {
-			// 8GB job without explicit ceiling → should get tier 12
-			if g.MaxGPUMemGB != 12 {
-				t.Errorf("8GB job without ceiling: MaxGPUMemGB=%d, want 12 (VRAM tier)",
-					g.MaxGPUMemGB)
-			}
-		}
-		if job.GPUMemGB != nil && *job.GPUMemGB == 8 && job.GPUMemMaxGB != nil {
-			// 8GB job with explicit ceiling of 16
-			if g.MaxGPUMemGB != 16 {
-				t.Errorf("8GB job with ceiling=16: MaxGPUMemGB=%d, want 16",
-					g.MaxGPUMemGB)
-			}
-		}
-		if job.GPUMemGB != nil && *job.GPUMemGB == 20 {
-			// 20GB job without explicit ceiling → should get tier 24
-			if g.MaxGPUMemGB != 24 {
-				t.Errorf("20GB job without ceiling: MaxGPUMemGB=%d, want 24 (VRAM tier)",
-					g.MaxGPUMemGB)
-			}
+		if g.MaxGPUMemGB != 0 {
+			t.Errorf("group with GPUMemGB=%d has MaxGPUMemGB=%d, want 0", g.GPUMemGB, g.MaxGPUMemGB)
 		}
 	}
 }

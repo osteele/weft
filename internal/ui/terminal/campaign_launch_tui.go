@@ -2081,26 +2081,10 @@ func renderRawOfferSummary(b *strings.Builder, raw []campaign.GroupRawOffers) {
 }
 
 func launchSummaryGPUSpec(group campaign.InstanceGroup) string {
-	if group.GPUClass == "" && group.GPUMemGB <= 0 && group.MaxGPUMemGB <= 0 {
+	if group.GPUClass == "" && group.GPUMemGB <= 0 {
 		return "Unspecified GPU"
 	}
-	if group.GPUMemGB <= 0 || group.MaxGPUMemGB <= 0 {
-		return group.GPUSpec()
-	}
-
-	prefix := strings.TrimSpace(group.GPUClass)
-	if prefix != "" {
-		prefix += " "
-	}
-
-	switch {
-	case group.MaxGPUMemGB == group.GPUMemGB:
-		return fmt.Sprintf("%s%d GB", prefix, group.GPUMemGB)
-	case group.MaxGPUMemGB > group.GPUMemGB:
-		return fmt.Sprintf("%s%d-%d GB", prefix, group.GPUMemGB, group.MaxGPUMemGB)
-	default:
-		return group.GPUSpec()
-	}
+	return group.GPUSpec()
 }
 
 // renderCostTable writes a CostTable to the builder, dimming lines as needed.
