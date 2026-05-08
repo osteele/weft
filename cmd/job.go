@@ -714,7 +714,7 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 	var launchTUI *terminal.LaunchProgressTUI
 	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {
-			if launchTUI == nil {
+			if shouldPrintMoveLaunchStatus(useLaunchTUI, launchTUI != nil) {
 				fmt.Println(message)
 			}
 		},
@@ -758,7 +758,14 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 			fmt.Printf("Launched instance %s\n", ids.FormatInstanceID(id))
 		}
 	}
+	if err == nil && usedLaunchTUI {
+		fmt.Fprint(os.Stdout, terminal.FormatMoveExitSummary(database, jobs, result.InstanceIDs))
+	}
 	return err
+}
+
+func shouldPrintMoveLaunchStatus(useLaunchTUI bool, launchTUIStarted bool) bool {
+	return !useLaunchTUI && !launchTUIStarted
 }
 
 func countGroupJobs(groups []campaign.InstanceGroup) int {

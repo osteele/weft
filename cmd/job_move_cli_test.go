@@ -363,6 +363,27 @@ func TestMoveJobsToNewInstancesDoesNotRetryNonRetryableLaunch(t *testing.T) {
 	}
 }
 
+func TestShouldPrintMoveLaunchStatus(t *testing.T) {
+	tests := []struct {
+		name             string
+		useLaunchTUI     bool
+		launchTUIStarted bool
+		want             bool
+	}{
+		{name: "plain mode before tui", want: true},
+		{name: "plain mode after tui started", launchTUIStarted: true, want: false},
+		{name: "tui mode before tui starts", useLaunchTUI: true, want: false},
+		{name: "tui mode after tui starts", useLaunchTUI: true, launchTUIStarted: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldPrintMoveLaunchStatus(tt.useLaunchTUI, tt.launchTUIStarted); got != tt.want {
+				t.Fatalf("shouldPrintMoveLaunchStatus() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func stubMoveToNewRetryHooks(t *testing.T) func() {
 	t.Helper()
 	origSingle := moveQueuedJobToNewInstance

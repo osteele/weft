@@ -87,7 +87,7 @@ func StartLaunchProgressTUI(campaignID int64, expectedWorkers int) *LaunchProgre
 		rows:            make(map[string]*launchProgressRow),
 		spin:            s,
 	}
-	program := tea.NewProgram(model)
+	program := tea.NewProgram(model, tea.WithAltScreen())
 	tui := &LaunchProgressTUI{
 		program: program,
 		done:    make(chan struct{}),
