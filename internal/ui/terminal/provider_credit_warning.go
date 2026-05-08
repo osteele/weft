@@ -270,6 +270,8 @@ func fetchProviderCreditWarning() string {
 		if err == nil {
 			threshold := max(defaultLowProviderCreditThreshold, cfg.Vastai.SpendingLimit)
 			warnings = appendProviderCreditWarnings(warnings, cloud.ProviderVastai, credit, threshold)
+		} else {
+			warnings = appendProviderCreditCheckWarning(warnings, cloud.ProviderVastai, err)
 		}
 	}
 	if cfg.Runpod.Enabled {
@@ -277,6 +279,8 @@ func fetchProviderCreditWarning() string {
 		if err == nil {
 			threshold := max(defaultLowProviderCreditThreshold, cfg.Runpod.SpendingLimit)
 			warnings = appendProviderCreditWarnings(warnings, cloud.ProviderRunpod, credit, threshold)
+		} else {
+			warnings = appendProviderCreditCheckWarning(warnings, cloud.ProviderRunpod, err)
 		}
 	}
 
@@ -297,6 +301,21 @@ func appendProviderCreditWarnings(warnings []string, provider cloud.Provider, cr
 	default:
 		return warnings
 	}
+}
+
+func appendProviderCreditCheckWarning(warnings []string, provider cloud.Provider, err error) []string {
+	if err == nil {
+		return warnings
+	}
+	name := provider.DisplayName()
+	if name == "" {
+		name = string(provider)
+	}
+	detail := truncate(strings.TrimSpace(err.Error()), 120)
+	if detail == "" {
+		detail = "unknown error"
+	}
+	return append(warnings, fmt.Sprintf("WARNING: %s credit check failed (%s)", name, detail))
 }
 
 // burnHoursAtCurrentRate returns the cached burn-rate runway for the given

@@ -3,6 +3,8 @@ package vastai
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +154,144 @@ func TestParseCreateInstance(t *testing.T) {
 	}
 	if !resp.Success {
 		t.Error("Success = false, want true")
+	}
+}
+
+func TestCreateInstanceEmptyOutputIsProviderRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, want provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("CreateInstance error = %v, want empty response detail", err)
+	}
+}
+
+func TestCreateInstanceProviderErrorJSONIsProviderRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\": true, \"status_code\": 400, \"msg\": \"error 404/3603: no_such_ask\"}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, want provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "no_such_ask") {
+		t.Fatalf("CreateInstance error = %v, want provider message", err)
+	}
+}
+
+func TestAvailableRejectsProviderErrorJSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\": true, \"status_code\": 400, \"msg\": \"owner: Extra inputs are not permitted\"}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	err := c.Available()
+	if err == nil {
+		t.Fatal("Available() error = nil, want provider error")
+	}
+	if !strings.Contains(err.Error(), "owner: Extra inputs are not permitted") {
+		t.Fatalf("Available() error = %v, want provider message", err)
+	}
+}
+
+func TestShowUserProviderErrorJSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\": true, \"status_code\": 400, \"msg\": \"owner: Extra inputs are not permitted\"}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ShowUser()
+	if err == nil {
+		t.Fatal("ShowUser() error = nil, want provider error")
+	}
+	if !strings.Contains(err.Error(), "owner: Extra inputs are not permitted") {
+		t.Fatalf("ShowUser() error = %v, want provider message", err)
+	}
+	if strings.Contains(err.Error(), "parse user") {
+		t.Fatalf("ShowUser() error = %v, should not report parse failure for provider error", err)
+	}
+}
+
+func TestShowUserEmptyOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ShowUser()
+	if err == nil {
+		t.Fatal("ShowUser() error = nil, want empty response error")
+	}
+	if !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("ShowUser() error = %v, want empty response detail", err)
+	}
+	if strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("ShowUser() error = %v, should not expose JSON EOF", err)
+	}
+}
+
+func TestShowUserFromAPI(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"credit": 12.34, "balance": 12.34, "email": "user@example.com", "can_pay": true}`))
+	}))
+	defer server.Close()
+
+	user, err := showUserFromAPI("test-key", server.URL)
+	if err != nil {
+		t.Fatalf("showUserFromAPI: %v", err)
+	}
+	if user.Credit != 12.34 {
+		t.Fatalf("Credit = %v, want 12.34", user.Credit)
+	}
+}
+
+func TestShowUserFromAPIProviderError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error": true, "status_code": 400, "msg": "owner: Extra inputs are not permitted"}`))
+	}))
+	defer server.Close()
+
+	_, err := showUserFromAPI("test-key", server.URL)
+	if err == nil {
+		t.Fatal("showUserFromAPI error = nil, want provider error")
+	}
+	if !strings.Contains(err.Error(), "owner: Extra inputs are not permitted") {
+		t.Fatalf("showUserFromAPI error = %v, want provider message", err)
 	}
 }
 

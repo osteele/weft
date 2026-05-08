@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -278,6 +279,35 @@ func TestFetchProviderCreditWarningIncludesRunpod(t *testing.T) {
 
 	got := fetchProviderCreditWarning()
 	if !strings.Contains(got, "RunPod credits low ($5.00 < $20.00)") {
+		t.Fatalf("fetchProviderCreditWarning() = %q", got)
+	}
+}
+
+func TestFetchProviderCreditWarningIncludesVastaiCreditCheckFailure(t *testing.T) {
+	prevLoad := providerCreditWarningLoad
+	prevRunpodUser := runpodCreditWarningUser
+	prevVastUser := vastaiCreditWarningUser
+	providerCreditWarningLoad = func() (*config.Config, error) {
+		cfg := config.DefaultConfig()
+		cfg.Vastai.Enabled = true
+		cfg.Runpod.Enabled = false
+		return cfg, nil
+	}
+	vastaiCreditWarningUser = func() (float64, error) {
+		return 0, errors.New("show user: owner: Extra inputs are not permitted")
+	}
+	runpodCreditWarningUser = func() (float64, error) {
+		t.Fatal("runpod user fetch should not run when disabled")
+		return 0, nil
+	}
+	t.Cleanup(func() {
+		providerCreditWarningLoad = prevLoad
+		runpodCreditWarningUser = prevRunpodUser
+		vastaiCreditWarningUser = prevVastUser
+	})
+
+	got := fetchProviderCreditWarning()
+	if !strings.Contains(got, "Vast.ai credit check failed") || !strings.Contains(got, "owner: Extra inputs are not permitted") {
 		t.Fatalf("fetchProviderCreditWarning() = %q", got)
 	}
 }

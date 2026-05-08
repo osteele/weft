@@ -27,10 +27,11 @@ type InstanceOutcome struct {
 // Rows missing a provider are skipped because survival statistics must be
 // scoped per-provider (RunPod and Vast have different reliability baselines).
 //
-// Pre-creation failures are included because repeated provisioning failures
-// are survival-model signal. Rows without machine attribution still contribute
-// to provider/SKU buckets, while geoAdjustment naturally skips their
-// per-machine cache.
+// Pre-creation failures are included when they are provider-offer signal.
+// Account/client failures are excluded because they would otherwise poison
+// provider/SKU/region priors without saying anything about machine survival.
+// Rows without machine attribution still contribute to provider/SKU buckets,
+// while geoAdjustment naturally skips their per-machine cache.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
@@ -45,6 +46,10 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		  AND provider != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
+		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%provider returned empty response%'
+		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%insufficient balance%'
+		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account lacks credit%'
+		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account credit%'
 		ORDER BY id
 	`, jobdb.TerminationReasonCancelled, jobdb.TerminationReasonWeftBug)
 	if err != nil {

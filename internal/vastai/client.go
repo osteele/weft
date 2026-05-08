@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -20,6 +22,9 @@ import (
 // cliTimeout is the maximum time to wait for a vastai CLI command to complete.
 const cliTimeout = 30 * time.Second
 const availabilityGracePeriod = 2 * time.Minute
+const userAPITimeout = 10 * time.Second
+
+var vastaiUserEndpoint = "https://console.vast.ai/api/v0/users/current/"
 
 var availabilityState struct {
 	mu          sync.Mutex
@@ -59,7 +64,8 @@ func (c *Client) Available() error {
 		return fmt.Errorf("vastai CLI not found in PATH (install: pip install vastai)")
 	}
 	// Quick account check. This can fail for auth, network, or transient CLI errors.
-	if _, err := c.run("show", "user", "--raw"); err != nil {
+	out, err := c.run("show", "user", "--raw")
+	if err != nil {
 		if isVastAuthError(err) {
 			return fmt.Errorf("vastai CLI authentication failed: %v", err)
 		}
@@ -67,6 +73,9 @@ func (c *Client) Available() error {
 			return nil
 		}
 		return fmt.Errorf("vastai CLI availability check failed: %v", err)
+	}
+	if msg := extractProviderErrorMessage(out); msg != "" {
+		return fmt.Errorf("vastai CLI availability check failed: %s", msg)
 	}
 	markAvailabilitySuccess(time.Now())
 	return nil
@@ -120,13 +129,61 @@ func isVastTransientAvailabilityError(err error) bool {
 
 // ShowUser returns the authenticated user's account information.
 func (c *Client) ShowUser() (*User, error) {
+	if c.CLIPath == "" || c.CLIPath == "vastai" {
+		if apiKey := ReadAPIKey(); apiKey != "" {
+			return showUserFromAPI(apiKey, vastaiUserEndpoint)
+		}
+	}
 	out, err := c.run("show", "user", "--raw")
 	if err != nil {
 		return nil, fmt.Errorf("show user: %w", err)
 	}
+	return parseShowUserOutput(out)
+}
+
+func showUserFromAPI(apiKey, endpoint string) (*User, error) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, fmt.Errorf("show user: missing Vast.ai API key")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), userAPITimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("show user: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("show user: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("show user: read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if msg := extractProviderErrorMessage(out); msg != "" {
+			return nil, fmt.Errorf("show user: HTTP %d: %s", resp.StatusCode, msg)
+		}
+		return nil, fmt.Errorf("show user: HTTP %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(out)), 200))
+	}
+	return parseShowUserOutput(out)
+}
+
+func parseShowUserOutput(out []byte) (*User, error) {
+	if msg := extractProviderErrorMessage(out); msg != "" {
+		return nil, fmt.Errorf("show user: %s", msg)
+	}
+	if msg := extractCLIError(out); msg != "" {
+		return nil, fmt.Errorf("show user: %s", msg)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil, fmt.Errorf("show user: provider returned empty response")
+	}
 	var user User
 	if err := json.Unmarshal(out, &user); err != nil {
-		return nil, fmt.Errorf("parse user: %w", err)
+		return nil, fmt.Errorf("parse user: %w (output: %s)", err, truncate(string(out), 200))
 	}
 	return &user, nil
 }
@@ -190,22 +247,25 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 
 	// Parse response — vastai create returns {"new_contract": <id>, "success": true}
 	var resp struct {
-		NewContract int    `json:"new_contract"`
-		Success     bool   `json:"success"`
-		Error       string `json:"error"`
-		Msg         string `json:"msg"`
+		NewContract int             `json:"new_contract"`
+		Success     bool            `json:"success"`
+		Error       json.RawMessage `json:"error"`
+		Msg         string          `json:"msg"`
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil, fmt.Errorf("create instance failed: %w: provider returned empty response", cloud.ErrProviderRejected)
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
+		if msg := extractProviderErrorMessage(out); msg != "" {
+			return nil, fmt.Errorf("create instance failed: %w: %s", cloud.ErrProviderRejected, msg)
+		}
 		if msg := extractCLIError(out); msg != "" {
 			return nil, fmt.Errorf("create instance: %s", msg)
 		}
 		return nil, fmt.Errorf("parse create response: %w (output: %s)", err, truncate(string(out), 200))
 	}
 	if !resp.Success {
-		reason := resp.Error
-		if reason == "" {
-			reason = resp.Msg
-		}
+		reason := createResponseErrorReason(resp.Error, resp.Msg)
 		if reason == "" {
 			reason = "provider returned success=false"
 		}
@@ -518,6 +578,36 @@ func extractCLIError(out []byte) string {
 		return ""
 	}
 	return s
+}
+
+func extractProviderErrorMessage(out []byte) string {
+	var resp struct {
+		Error      json.RawMessage `json:"error"`
+		Msg        string          `json:"msg"`
+		StatusCode int             `json:"status_code"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return ""
+	}
+	return createResponseErrorReason(resp.Error, resp.Msg)
+}
+
+func createResponseErrorReason(errorValue json.RawMessage, msg string) string {
+	if strings.TrimSpace(msg) != "" {
+		return strings.TrimSpace(msg)
+	}
+	if len(errorValue) == 0 || string(errorValue) == "null" {
+		return ""
+	}
+	var errorString string
+	if err := json.Unmarshal(errorValue, &errorString); err == nil {
+		return strings.TrimSpace(errorString)
+	}
+	var hasError bool
+	if err := json.Unmarshal(errorValue, &hasError); err == nil && hasError {
+		return "provider returned error"
+	}
+	return ""
 }
 
 func truncate(s string, max int) string {

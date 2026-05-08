@@ -43,6 +43,21 @@ func TestLoadInstanceOutcomes_IncludesPreCreationFailures(t *testing.T) {
 		t.Fatalf("UpdateLaunchStatus(without provider id): %v", err)
 	}
 
+	accountFailureID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+		Status:           jobdb.LaunchStatusLaunching,
+		Provider:         "vastai",
+		ResolvedGPUName:  "RTX 4090",
+		CostPerHourCents: 100,
+		Reliability:      0.9,
+		MachineID:        "machine-account",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(account failure): %v", err)
+	}
+	if err := jobdb.UpdateLaunchStatus(database, accountFailureID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonInfraFailure, "instance creation failed: provider returned empty response while account credit was exhausted"); err != nil {
+		t.Fatalf("UpdateLaunchStatus(account failure): %v", err)
+	}
+
 	cancelledID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
 		Status:           jobdb.LaunchStatusLaunching,
 		Provider:         "vastai",
