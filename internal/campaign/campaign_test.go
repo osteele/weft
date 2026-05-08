@@ -371,6 +371,7 @@ func TestInstanceGroupGPUSpec(t *testing.T) {
 		{InstanceGroup{}, "GPU"},
 		{InstanceGroup{GPUClass: "A100", GPUMemGB: 24, MaxGPUMemGB: 48}, "A100 ≥24GB ≤48GB"},
 		{InstanceGroup{GPUMemGB: 24, MaxGPUMemGB: 24}, "≥24GB ≤24GB"},
+		{InstanceGroup{GPUClass: "V100", GPUMemGB: 22, MaxGPUMemGB: 20}, "V100 ≥22GB (20GB tier)"},
 	}
 	for _, tt := range tests {
 		got := tt.group.GPUSpec()

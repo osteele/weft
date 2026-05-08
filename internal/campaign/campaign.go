@@ -1006,7 +1006,11 @@ func (g InstanceGroup) GPUSpec() string {
 		spec = "GPU"
 	}
 	if g.MaxGPUMemGB > 0 {
-		spec += " ≤" + strconv.Itoa(g.MaxGPUMemGB) + "GB"
+		if g.GPUMemGB > 0 && g.MaxGPUMemGB < g.GPUMemGB {
+			spec += " (" + strconv.Itoa(g.MaxGPUMemGB) + "GB tier)"
+		} else {
+			spec += " ≤" + strconv.Itoa(g.MaxGPUMemGB) + "GB"
+		}
 	}
 	return spec
 }

@@ -52,16 +52,19 @@ type QueueRebalanceOptions struct {
 }
 
 type QueueRebalanceMove struct {
-	JobID          int64
-	FromInstanceID int64
-	ToInstanceID   int64
-	CostRatio      float64
-	CostCeiling    float64
-	MeanDelta      float64
-	LowerDelta     float64
-	UpperDelta     float64
-	ProfileID      string
-	Reason         string
+	JobID           int64
+	FromInstanceID  int64
+	ToInstanceID    int64
+	CostRatio       float64
+	CostCeiling     float64
+	MeanDelta       float64
+	LowerDelta      float64
+	UpperDelta      float64
+	PriorityDelta   float64
+	ThroughputDelta float64
+	CostDelta       float64
+	ProfileID       string
+	Reason          string
 }
 
 type QueueRebalanceResult struct {
@@ -92,6 +95,14 @@ type rebalancePlan struct {
 }
 
 type runtimeBook map[int64]estimate.DurationPrediction
+
+type rebalanceObjective struct {
+	PriorityCompletion float64
+	TotalCompletion    float64
+	TotalCost          float64
+	Makespan           float64
+	Score              float64
+}
 
 type durationPoint int
 
@@ -223,7 +234,7 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		if !policy.enabled {
 			continue
 		}
-		bestDst, ratio, bestMean, bestLower, bestUpper, ok := pickBestRebalanceDestination(
+		bestDst, ratio, bestMean, bestLower, bestUpper, bestObj, ok := pickBestRebalanceDestination(
 			job, policy, srcID, plan, profile, runtimes, baseMean, scoreEpsilon, opts.InstanceScope,
 		)
 		if !ok || bestDst == nil {
@@ -232,18 +243,22 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		meanDelta := bestMean - baseMean
 		lowerDelta := bestLower - baseLower
 		upperDelta := bestUpper - baseUpper
+		baseObj := plan.objective(profile, runtimes, durationPointMean)
 
 		move := QueueRebalanceMove{
-			JobID:          job.ID,
-			FromInstanceID: srcID,
-			ToInstanceID:   bestDst.launch.ID,
-			CostRatio:      ratio,
-			CostCeiling:    policy.budgetCeiling,
-			MeanDelta:      meanDelta,
-			LowerDelta:     lowerDelta,
-			UpperDelta:     upperDelta,
-			ProfileID:      profile.ID,
-			Reason:         describeRebalanceReason(srcState.launch, bestDst.launch, ratio, meanDelta, profile.ID),
+			JobID:           job.ID,
+			FromInstanceID:  srcID,
+			ToInstanceID:    bestDst.launch.ID,
+			CostRatio:       ratio,
+			CostCeiling:     policy.budgetCeiling,
+			MeanDelta:       meanDelta,
+			LowerDelta:      lowerDelta,
+			UpperDelta:      upperDelta,
+			PriorityDelta:   bestObj.PriorityCompletion - baseObj.PriorityCompletion,
+			ThroughputDelta: bestObj.TotalCompletion - baseObj.TotalCompletion,
+			CostDelta:       bestObj.TotalCost - baseObj.TotalCost,
+			ProfileID:       profile.ID,
+			Reason:          describeRebalanceReason(srcState.launch, bestDst.launch, ratio, meanDelta, profile.ID),
 		}
 		logRebalanceDecision(move)
 
@@ -257,11 +272,14 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 				op = "rebalance"
 			}
 			oplog.Log(op, oplog.WithDetailf(
-				"moved=1 src=%s dst=%s ratio=%.2f profile_id=%s mean_delta=%.6f lower_delta=%.6f upper_delta=%.6f",
+				"moved=1 src=%s dst=%s ratio=%.2f profile_id=%s priority_delta=%.6f throughput_delta=%.6f cost_delta=%.6f mean_delta=%.6f lower_delta=%.6f upper_delta=%.6f",
 				ids.FormatInstanceID(move.FromInstanceID),
 				ids.FormatInstanceID(move.ToInstanceID),
 				move.CostRatio,
 				move.ProfileID,
+				move.PriorityDelta,
+				move.ThroughputDelta,
+				move.CostDelta,
 				move.MeanDelta,
 				move.LowerDelta,
 				move.UpperDelta,
@@ -479,6 +497,18 @@ func (p *rebalancePlan) scorePoint(profile bidding.ScoreProfile, runtimes runtim
 	return weights.Cost*totalCost + weights.Time*makespan
 }
 
+func (p *rebalancePlan) objective(profile bidding.ScoreProfile, runtimes runtimeBook, point durationPoint) rebalanceObjective {
+	priorityCompletion, totalCompletion := p.completionSums(runtimes, point)
+	totalCost, makespan := p.costAndMakespan(runtimes, point)
+	return rebalanceObjective{
+		PriorityCompletion: priorityCompletion,
+		TotalCompletion:    totalCompletion,
+		TotalCost:          totalCost,
+		Makespan:           makespan,
+		Score:              p.scorePoint(profile, runtimes, point),
+	}
+}
+
 func (p *rebalancePlan) costAndMakespan(runtimes runtimeBook, point durationPoint) (totalCost, makespan float64) {
 	if p == nil {
 		return 0, 0
@@ -495,6 +525,48 @@ func (p *rebalancePlan) costAndMakespan(runtimes runtimeBook, point durationPoin
 		}
 	}
 	return totalCost, makespan
+}
+
+func (p *rebalancePlan) completionSums(runtimes runtimeBook, point durationPoint) (priorityCompletion, totalCompletion float64) {
+	if p == nil {
+		return 0, 0
+	}
+	for _, state := range p.instances {
+		p, total := instanceCompletionSums(state, runtimes, point)
+		priorityCompletion += p
+		totalCompletion += total
+	}
+	return priorityCompletion, totalCompletion
+}
+
+func instanceCompletionSums(state *rebalanceInstanceState, runtimes runtimeBook, point durationPoint) (priorityCompletion, totalCompletion float64) {
+	if state == nil {
+		return 0, 0
+	}
+	slots := instanceSlots(state.launch)
+	slotTimes := make([]float64, slots)
+	for idx, job := range state.runningJobs {
+		remaining := predictionDurationHours(job, runtimes, point, true)
+		if idx < len(slotTimes) {
+			slotTimes[idx] = remaining
+		} else {
+			slotTimes = append(slotTimes, remaining)
+		}
+		totalCompletion += remaining
+		if job != nil && job.Priority > 0 {
+			priorityCompletion += remaining
+		}
+	}
+	for _, job := range state.queued {
+		idx := firstFreeSlot(slotTimes)
+		slotTimes[idx] += predictionDurationHours(job, runtimes, point, false)
+		completion := slotTimes[idx]
+		totalCompletion += completion
+		if job != nil && job.Priority > 0 {
+			priorityCompletion += completion
+		}
+	}
+	return priorityCompletion, totalCompletion
 }
 
 func instanceQueueDrainHours(state *rebalanceInstanceState, runtimes runtimeBook, point durationPoint) float64 {
@@ -641,17 +713,17 @@ func pickBestRebalanceDestination(
 	baseScore float64,
 	epsilon float64,
 	instanceScope map[int64]struct{},
-) (*rebalanceInstanceState, float64, float64, float64, float64, bool) {
+) (*rebalanceInstanceState, float64, float64, float64, float64, rebalanceObjective, bool) {
 	if job == nil {
-		return nil, 0, 0, 0, 0, false
+		return nil, 0, 0, 0, 0, rebalanceObjective{}, false
 	}
 	src := plan.instances[srcID]
 	if src == nil || src.launch == nil {
-		return nil, 0, 0, 0, 0, false
+		return nil, 0, 0, 0, 0, rebalanceObjective{}, false
 	}
 	srcCost := src.launch.CostPerHourCents
 	if srcCost < 0 {
-		return nil, 0, 0, 0, 0, false
+		return nil, 0, 0, 0, 0, rebalanceObjective{}, false
 	}
 
 	var best *rebalanceInstanceState
@@ -659,7 +731,8 @@ func pickBestRebalanceDestination(
 	bestMean := baseScore
 	bestLower := 0.0
 	bestUpper := 0.0
-	baseCost, baseMakespan := plan.costAndMakespan(runtimes, durationPointMean)
+	bestObj := rebalanceObjective{}
+	baseObj := plan.objective(profile, runtimes, durationPointMean)
 	for id, dst := range plan.instances {
 		if id == srcID || dst == nil || dst.launch == nil {
 			continue
@@ -682,39 +755,89 @@ func pickBestRebalanceDestination(
 		}
 		candidate := plan.withMove(job, srcID, id)
 		mean, lower, upper := candidate.score(profile, runtimes)
-		candidateCost, candidateMakespan := candidate.costAndMakespan(runtimes, durationPointMean)
+		candidateObj := candidate.objective(profile, runtimes, durationPointMean)
 		scalarImproves := mean < baseScore*(1-epsilon)
-		makespanImprovesWithoutCostIncrease := candidateCost <= baseCost*(1+1e-9) &&
-			candidateMakespan < baseMakespan*(1-epsilon)
-		if !scalarImproves && !makespanImprovesWithoutCostIncrease {
+		throughputImproves := rebalanceObjectiveImproves(baseObj, candidateObj, epsilon)
+		if !throughputImproves && !scalarImproves {
 			continue
 		}
-		if best == nil || mean < bestMean {
+		if best == nil || rebalanceObjectiveLess(candidateObj, bestObj, epsilon) {
 			best = dst
 			bestRatio = ratio
 			bestMean = mean
 			bestLower = lower
 			bestUpper = upper
+			bestObj = candidateObj
 			continue
 		}
-		if nearlyEqual(mean, bestMean) && dst.launch.CostPerHourCents < best.launch.CostPerHourCents {
+		if rebalanceObjectivesEquivalent(candidateObj, bestObj, epsilon) && mean < bestMean {
 			best = dst
 			bestRatio = ratio
 			bestMean = mean
 			bestLower = lower
 			bestUpper = upper
+			bestObj = candidateObj
 			continue
 		}
-		if nearlyEqual(mean, bestMean) && dst.launch.CostPerHourCents == best.launch.CostPerHourCents &&
+		if rebalanceObjectivesEquivalent(candidateObj, bestObj, epsilon) && nearlyEqual(mean, bestMean) &&
+			dst.launch.CostPerHourCents < best.launch.CostPerHourCents {
+			best = dst
+			bestRatio = ratio
+			bestMean = mean
+			bestLower = lower
+			bestUpper = upper
+			bestObj = candidateObj
+			continue
+		}
+		if rebalanceObjectivesEquivalent(candidateObj, bestObj, epsilon) && nearlyEqual(mean, bestMean) &&
+			dst.launch.CostPerHourCents == best.launch.CostPerHourCents &&
 			remainingRentalSeconds(dst.launch) > remainingRentalSeconds(best.launch) {
 			best = dst
 			bestRatio = ratio
 			bestMean = mean
 			bestLower = lower
 			bestUpper = upper
+			bestObj = candidateObj
 		}
 	}
-	return best, bestRatio, bestMean, bestLower, bestUpper, best != nil
+	return best, bestRatio, bestMean, bestLower, bestUpper, bestObj, best != nil
+}
+
+func rebalanceObjectiveImproves(base, candidate rebalanceObjective, epsilon float64) bool {
+	return candidate.PriorityCompletion < base.PriorityCompletion*(1-epsilon) ||
+		(nearlyEqualWithEpsilon(candidate.PriorityCompletion, base.PriorityCompletion, epsilon) &&
+			candidate.TotalCompletion < base.TotalCompletion*(1-epsilon)) ||
+		(nearlyEqualWithEpsilon(candidate.PriorityCompletion, base.PriorityCompletion, epsilon) &&
+			nearlyEqualWithEpsilon(candidate.TotalCompletion, base.TotalCompletion, epsilon) &&
+			candidate.Score < base.Score*(1-epsilon))
+}
+
+func rebalanceObjectiveLess(a, b rebalanceObjective, epsilon float64) bool {
+	if !nearlyEqualWithEpsilon(a.PriorityCompletion, b.PriorityCompletion, epsilon) {
+		return a.PriorityCompletion < b.PriorityCompletion
+	}
+	if !nearlyEqualWithEpsilon(a.TotalCompletion, b.TotalCompletion, epsilon) {
+		return a.TotalCompletion < b.TotalCompletion
+	}
+	if !nearlyEqualWithEpsilon(a.TotalCost, b.TotalCost, epsilon) {
+		return a.TotalCost < b.TotalCost
+	}
+	if !nearlyEqualWithEpsilon(a.Score, b.Score, epsilon) {
+		return a.Score < b.Score
+	}
+	return a.Makespan < b.Makespan
+}
+
+func rebalanceObjectivesEquivalent(a, b rebalanceObjective, epsilon float64) bool {
+	return nearlyEqualWithEpsilon(a.PriorityCompletion, b.PriorityCompletion, epsilon) &&
+		nearlyEqualWithEpsilon(a.TotalCompletion, b.TotalCompletion, epsilon) &&
+		nearlyEqualWithEpsilon(a.TotalCost, b.TotalCost, epsilon) &&
+		nearlyEqualWithEpsilon(a.Score, b.Score, epsilon)
+}
+
+func nearlyEqualWithEpsilon(a, b, epsilon float64) bool {
+	scale := math.Max(1, math.Max(math.Abs(a), math.Abs(b)))
+	return math.Abs(a-b) <= scale*math.Max(epsilon, 1e-9)
 }
 
 func resolveRebalancePolicy(job *db.Job, costCeilingOverride float64) rebalanceJobPolicy {
@@ -895,12 +1018,15 @@ func nearlyEqual(a, b float64) bool {
 
 func logRebalanceDecision(move QueueRebalanceMove) {
 	oplog.Log("rebalance.decision", oplog.WithDetailf(
-		"job=%s src=%s dst=%s ratio=%.2f profile_id=%s mean_delta=%.6f lower_delta=%.6f upper_delta=%.6f",
+		"job=%s src=%s dst=%s ratio=%.2f profile_id=%s priority_delta=%.6f throughput_delta=%.6f cost_delta=%.6f mean_delta=%.6f lower_delta=%.6f upper_delta=%.6f",
 		ids.FormatJobID(move.JobID),
 		ids.FormatInstanceID(move.FromInstanceID),
 		ids.FormatInstanceID(move.ToInstanceID),
 		move.CostRatio,
 		move.ProfileID,
+		move.PriorityDelta,
+		move.ThroughputDelta,
+		move.CostDelta,
 		move.MeanDelta,
 		move.LowerDelta,
 		move.UpperDelta,

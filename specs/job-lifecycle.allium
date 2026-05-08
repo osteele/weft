@@ -77,7 +77,9 @@ entity Job {
                                 -- are accepted (e.g. "3090", "a5000"), and
                                 -- model+ means "this generation or newer"
     gpu_mem_gb: Integer?        -- minimum GPU memory per device
-    gpu_mem_max_gb: Integer?    -- maximum GPU memory per device
+    gpu_mem_max_gb: Integer?    -- soft GPU memory ceiling / VRAM tier hint
+                                -- for offer selection; not a hard minimum
+                                -- compatibility bound
     gpu_devices: String?        -- CUDA_VISIBLE_DEVICES allocation
 
     -- CPU allotment (percent of host CPU) requested by the user. null

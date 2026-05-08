@@ -1538,19 +1538,53 @@ rule ExistingInstanceCPUFloor {
 --
 -- A move is accepted iff it lowers
 --
---     Score(plan) = Cost · TotalRentalCost($)
---                 + Time · GlobalMakespan(hours)
+--     Objective(plan) =
+--       1. priority_completion_sum(hours)
+--       2. total_completion_sum(hours)
+--       3. TotalRentalCost($)
+--       4. scalar Score(plan)
+--       5. GlobalMakespan(hours)
 --
--- by at least ε under the chosen ScoreProfile, after enforcing a hard cost-
--- ceiling guard, capacity match, and image compatibility.
+-- The objective is lexicographic. Priority jobs are jobs whose durable priority
+-- is greater than zero. A move that improves non-priority throughput must not
+-- compensate for delaying priority jobs.
+--
+-- A candidate move must improve the lexicographic objective by at least ε in
+-- the first component it changes, or improve the scalar score by ε as a
+-- fallback. It must also pass hard cost-effectiveness, capacity, disk, data,
+-- image, and CPU guards.
+--
+-- Cost-effectiveness is deliberately stricter than "is there a compatible
+-- destination": a job may not consume a much more expensive/scarce instance
+-- merely because it exists. The first hard guard is destination $/hr <=
+-- rebalance_cost_ceiling * source $/hr. Future versions may replace or augment
+-- this with an opportunity-cost model that compares the destination against the
+-- cheapest adequate compatible capacity and reserves high-end GPUs for jobs that
+-- require them.
 --
 -- TotalRentalCost is the sum across all instances of (instance.$/hr ·
 -- instance.queue_drain_hours). GlobalMakespan is the maximum across all
 -- instances of instance.queue_drain_hours. Per-instance queue-drain hours
 -- are estimated using mean runtime predictions from
 -- predictor.ResolvePredictBatch (DefaultJobDuration fallback when absent),
--- accounting for slot count = launch.NumGPUs. Running jobs contribute their
+-- accounting for slot count = launch.NumGPUs. Completion sums are computed by
+-- simulating the same per-instance slots. Running jobs contribute their
 -- remaining predicted time (clamped to a small positive minimum).
+--
+-- Logistics included in the initial implementation:
+--   - InstanceSatisfiesJob includes GPU class, VRAM, CPU floor, grace-window,
+--     disk feasibility, declared HF input disk, and cold uv-sync disk estimates.
+--   - Reuse scoring already gives a positive signal to instances whose
+--     provisioned_inputs overlap declared job inputs, which captures some HF
+--     asset amortization.
+--
+-- Logistics intentionally deferred:
+--   - Explicit same-disk affinity for --produces / --needs pairs.
+--   - Runtime/cost amortization for downloaded HF models/datasets beyond the
+--     current provisioned-input heuristic.
+--   - Artifact staging amortization from R2 or local stores.
+--   - uv package cache amortization as a scoring benefit. The current code
+--     accounts for uv disk feasibility, not setup-time reuse.
 
 config {
     rebalance_cost_ceiling: Decimal = 1.10    -- upper bound on dst/src $/hr
@@ -1581,7 +1615,10 @@ rule QueueRebalanceJob {
                                      * src.cost_per_hour
 
       let plan_after = ApplyMove(plan, job, src, dst)
-      requires: ScoreUnder(plan_after, profile)
+      requires: LexicographicObjective(plan_after, profile)
+              improves_over LexicographicObjective(plan, profile)
+              by config.rebalance_score_epsilon
+            or ScoreUnder(plan_after, profile)
               < ScoreUnder(plan, profile)
                 * (1 - config.rebalance_score_epsilon)
 
@@ -1613,12 +1650,43 @@ invariant RebalanceNeverPreemptsRunning {
 }
 
 invariant RebalanceImprovesScore {
-    -- Every accepted move strictly improves the scalarized score under the
-    -- chosen profile, by at least the configured relative epsilon.
+    -- Every accepted move strictly improves priority throughput, total
+    -- throughput, or the scalarized score under the chosen profile, by at
+    -- least the configured relative epsilon.
     for move in QueueRebalanceMoves:
-        ScoreUnder(move.plan_after, move.profile)
-            < ScoreUnder(move.plan_before, move.profile)
-              * (1 - config.rebalance_score_epsilon)
+        LexicographicObjective(move.plan_after, move.profile)
+            improves_over LexicographicObjective(move.plan_before, move.profile)
+            by config.rebalance_score_epsilon
+        or ScoreUnder(move.plan_after, move.profile)
+           < ScoreUnder(move.plan_before, move.profile)
+             * (1 - config.rebalance_score_epsilon)
+}
+
+rule QuickLaunchChoosesUsefulCapacity {
+    when: UserPressesTUIKey("n")
+
+    let candidates = LaunchableNewInstanceGroups(current_view.jobs)
+    for group in candidates ordered by
+        group.priority descending,
+        group.job_count descending,
+        group.cost_per_hour ascending:
+      let candidate_instance = NewInstanceOffer(group)
+      let plan_after_launch =
+          RebalancePlan(current_running_instances + candidate_instance,
+                        current_view.queued_jobs)
+
+      requires: plan_after_launch improves priority throughput before
+                non-priority throughput
+      requires: candidate_instance is cost-effective under the same guards as
+                QueueRebalanceJob
+
+      ensures: LaunchInstance(candidate_instance)
+      ensures: ApplyCostEffectiveRebalance(plan_after_launch)
+
+    -- Groups with no compatible/currently available offers, stale provider
+    -- data, or other blocked placement reasons are skipped and reported. A
+    -- stale queued job must not veto quick launch for the rest of the current
+    -- view.
 }
 
 invariant RebalanceLogsDeltaBounds {

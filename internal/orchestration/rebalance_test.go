@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
@@ -247,6 +248,57 @@ func TestRebalanceQueuedJobsAcrossInstances_UsesMultiSlotDrainModel(t *testing.T
 	}
 	if len(result.Moves) < 1 {
 		t.Fatalf("moves len = %d, want multi-slot balancing moves", len(result.Moves))
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_ReportsPriorityThroughputDelta(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	_ = createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(src): %v", err)
+	}
+	priorityJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.SetJobPriority(database, priorityJob, 1); err != nil {
+		t.Fatalf("SetJobPriority: %v", err)
+	}
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply: false,
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) != 1 {
+		t.Fatalf("moves len = %d, want 1", len(result.Moves))
+	}
+	if result.Moves[0].JobID != priorityJob {
+		t.Fatalf("moved job = %d, want priority job %d", result.Moves[0].JobID, priorityJob)
+	}
+	if result.Moves[0].PriorityDelta >= 0 {
+		t.Fatalf("priority delta = %.3f, want negative improvement", result.Moves[0].PriorityDelta)
+	}
+}
+
+func TestRankedQuickLaunchGroups_PrefersPriorityThenThroughputThenCost(t *testing.T) {
+	groups := rankedQuickLaunchGroups(campaign.AutoPlacementPlan{
+		LaunchGroups: []campaign.LaunchGroup{
+			{JobIDs: []int64{3, 4}, CostPerHourCents: 20, Priority: 0},
+			{JobIDs: []int64{2}, CostPerHourCents: 50, Priority: 1},
+			{JobIDs: []int64{1}, CostPerHourCents: 10, Priority: 1},
+		},
+	})
+	if len(groups) != 3 {
+		t.Fatalf("groups len = %d, want 3", len(groups))
+	}
+	if groups[0].JobIDs[0] != 1 {
+		t.Fatalf("first group = %+v, want cheaper priority group with job 1", groups[0])
+	}
+	if groups[2].JobIDs[0] != 3 {
+		t.Fatalf("last group = %+v, want non-priority throughput group", groups[2])
 	}
 }
 
