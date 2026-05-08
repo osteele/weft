@@ -1117,7 +1117,7 @@ rule TUIPeriodicSync {
 -- ==========================================================================
 
 -- Cloud sync lease: prevents redundant provider API calls when multiple
--- TUIs or a coordinator are running simultaneously.
+-- commands, TUIs, monitors, or coordinators run simultaneously.
 rule CloudSyncLease {
     when: CloudSyncRequested()
 
@@ -1137,8 +1137,11 @@ rule CloudSyncLease {
         -- Lease table: auto_leases(scope, owner, expires_at, updated_at)
         -- Scope: "sync:cloud:reconcile"
         -- TTL: 180 seconds
-        -- Owner: "{hostname}:{pid}:{nanotime}" for TUI, "coordinator-cloud"
-        --   for the coordinator daemon.
+        -- Owner: "{hostname}:{pid}:{nanotime}" by default, unless a caller
+        --   supplies a narrower owner for a legacy coordinator path.
+        -- internal/syncorch.SyncCloud applies this lease by default for
+        --   normal database-backed cloud sync callers. Tests and narrow
+        --   maintenance paths may opt out explicitly with DisableLease.
         -- DB-only fallback applies only local DB repairs (orphaned job
         --   resets, campaign status reconciliation) without R2 or provider
         --   API calls.
@@ -1171,13 +1174,14 @@ rule HostSyncLease {
 
 -- DB as shared notification bus: all processes read/write the same SQLite DB.
 -- Any process that updates job or instance state makes changes visible to all
--- other processes on their next DB read. TUIs reload from DB every sync tick
--- (60s) regardless of which process performed the sync.
+-- other processes on their next DB read. Watch-style processes subscribe to
+-- the shared SQLite DB/WAL/SHM change source and debounce reloads so they
+-- usually react before the periodic tick.
 rule DBAsSharedBus {
     when: AnyProcessUpdatesDB()
 
-    -- No explicit notification mechanism. Processes discover changes by
-    -- re-reading from DB on their next poll cycle.
+    -- Notifications are invalidations only. Processes still re-read from DB;
+    -- the watcher does not carry row-level payloads.
     ensures: AllProcessesEventuallyReadUpdatedState()
 
     @guidance
@@ -1191,7 +1195,8 @@ rule DBAsSharedBus {
         --   3. DB file watcher (inotify/kqueue) → debounced reload
         --
         -- This means a TUI that loses the cloud sync lease still gets
-        -- updated data within 60s of the winning process writing to DB.
+        -- updated data on the next DB watcher invalidation, with the 60s
+        -- periodic tick as a backstop.
 }
 
 -- ==========================================================================

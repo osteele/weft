@@ -157,6 +157,11 @@ on timeout, `weft autopilot run` performs a cloud sync, and only replans if
 that sync updates local state. This keeps unattended autopilot from repeatedly
 planning against an unchanged DB.
 
+Cloud sync is process-coordinated with the same provider lease used by the
+TUIs and monitor paths. If another process is already reconciling providers,
+the headless runner uses the database-only fallback and waits for the winning
+process to publish changes into SQLite.
+
 `--once --json` is the right tool for cron jobs and ops scripts: each line
 is one JSON pass record with `outcome`, `placed`, `rebalanced`,
 `launched`, and `blocked_reasons`. `outcome` is one of `progress` (work

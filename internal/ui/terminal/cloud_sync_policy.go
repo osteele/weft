@@ -2,8 +2,6 @@ package terminal
 
 import (
 	"database/sql"
-	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,14 +12,7 @@ import (
 	"github.com/osteele/weft/internal/degraded"
 )
 
-const (
-	cloudSyncLeaseScope = "sync:cloud:reconcile"
-	cloudSyncLeaseTTL   = 180 * time.Second
-)
-
 var (
-	cloudSyncLeaseOwnerOnce sync.Once
-	cloudSyncLeaseOwner     string
 	cloudSyncReconcilerOnce sync.Once
 	cloudSyncReconciler     *campaign.Reconciler
 )
@@ -34,25 +25,14 @@ func syncCloudStateForTUI(database *sql.DB, full bool) []string {
 		timeout = NormalCloudSyncTimeout
 	}
 
-	ok, err := db.AcquireAutoLease(database, cloudSyncLeaseScope, cloudSyncOwner(), cloudSyncLeaseTTL)
-	if err != nil {
-		warnings := []string{fmt.Sprintf("cloud sync lease error: %v", err)}
-		warnings = append(warnings, syncCloudDatabaseOnlyForTUI(database, timeout)...)
-		return compactWarnings(warnings)
-	}
-	if !ok {
-		return syncCloudDatabaseOnlyForTUI(database, timeout)
-	}
-	defer func() {
-		_ = db.ReleaseAutoLease(database, cloudSyncLeaseScope, cloudSyncOwner())
-	}()
-
 	cfg, _ := config.Load()
 	syncResults := full
-	if _, completed := syncCloudStateWithTimeoutAndResults(cfg, database, tuiCloudReconciler(), timeout, false, syncResults); !completed {
-		return []string{degraded.CloudSyncTimedOutWaitingForDB(timeout.String())}
+	result, completed := syncCloudStateWithTimeoutAndResults(cfg, database, tuiCloudReconciler(), timeout, false, syncResults)
+	warnings := append([]string(nil), result.Warnings...)
+	if !completed {
+		warnings = append(warnings, degraded.CloudSyncTimedOutWaitingForDB(timeout.String()))
 	}
-	return nil
+	return compactWarnings(warnings)
 }
 
 // syncCloudStateTwoPhaseForTUI runs fast sync first and full sync second.
@@ -80,17 +60,6 @@ func compactWarnings(warnings []string) []string {
 		out = append(out, warning)
 	}
 	return out
-}
-
-func cloudSyncOwner() string {
-	cloudSyncLeaseOwnerOnce.Do(func() {
-		host, _ := os.Hostname()
-		if host == "" {
-			host = "unknown-host"
-		}
-		cloudSyncLeaseOwner = fmt.Sprintf("%s:%d:%d", host, os.Getpid(), time.Now().UnixNano())
-	})
-	return cloudSyncLeaseOwner
 }
 
 func tuiCloudReconciler() *campaign.Reconciler {

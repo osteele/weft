@@ -58,6 +58,12 @@ adaptive or fixed interval is a maximum wait and triggers cloud sync; if sync
 finds no local updates, the runner keeps waiting rather than replanning
 unchanged jobs.
 
+Cloud sync itself is guarded by the shared `sync:cloud:reconcile` provider
+lease in the sync orchestrator, so TUIs, monitor paths, and headless autopilot
+do not all query cloud providers at once. A process that loses the lease still
+runs the DB-local reconciliation fallback and observes provider changes through
+the next database notification from the process that won.
+
 Older per-scope leases remain useful for UI feedback and local contention, but
 the singleton row is the correctness boundary: only one autopilot pass should
 be in flight across Weft processes.

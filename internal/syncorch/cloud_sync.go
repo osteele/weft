@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -32,6 +33,10 @@ type CloudSyncOptions struct {
 	LeaseScope string
 	LeaseOwner string
 	LeaseTTL   time.Duration
+	// DisableLease bypasses the default cloud reconcile lease. This is for
+	// tests and narrow maintenance paths; normal callers should share the
+	// global lease so only one process contacts providers at a time.
+	DisableLease bool
 }
 
 type CloudSyncResult struct {
@@ -44,6 +49,11 @@ type CloudSyncResult struct {
 var (
 	leaseOwnerOnce sync.Once
 	leaseOwnerVal  string
+)
+
+const (
+	DefaultCloudSyncLeaseScope = "sync:cloud:reconcile"
+	DefaultCloudSyncLeaseTTL   = 180 * time.Second
 )
 
 func SyncCloud(cfg *config.Config, database *sql.DB, opts CloudSyncOptions) CloudSyncResult {
@@ -105,27 +115,33 @@ func syncCloud(ctx context.Context, cfg *config.Config, database *sql.DB, opts C
 		}
 	}
 
-	if opts.LeaseScope != "" {
+	leaseScope := opts.LeaseScope
+	if leaseScope == "" && !opts.DisableLease && database != nil {
+		leaseScope = DefaultCloudSyncLeaseScope
+	}
+	if leaseScope != "" {
 		owner := opts.LeaseOwner
 		if owner == "" {
 			owner = cloudSyncOwner()
 		}
 		ttl := opts.LeaseTTL
 		if ttl <= 0 {
-			ttl = 180 * time.Second
+			ttl = DefaultCloudSyncLeaseTTL
 		}
-		ok, err := db.AcquireAutoLease(database, opts.LeaseScope, owner, ttl)
+		ok, err := db.AcquireAutoLease(database, leaseScope, owner, ttl)
 		if err != nil {
+			slog.Warn("cloud sync lease error; running database-only fallback", "component", "sync", "scope", leaseScope, "error", err)
 			warnings := []string{fmt.Sprintf("cloud sync lease error: %v", err)}
 			res := syncCloudWithClients(ctx, database, reconciler, nil, nil, opts, cfg)
 			res.Warnings = append(res.Warnings, warnings...)
 			return res
 		}
 		if !ok {
+			slog.Debug("cloud sync lease held; running database-only fallback", "component", "sync", "scope", leaseScope)
 			return syncCloudWithClients(ctx, database, reconciler, nil, nil, opts, cfg)
 		}
 		defer func() {
-			_ = db.ReleaseAutoLease(database, opts.LeaseScope, owner)
+			_ = db.ReleaseAutoLease(database, leaseScope, owner)
 		}()
 	}
 

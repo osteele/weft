@@ -27,6 +27,7 @@ const (
 type CloudSyncResult struct {
 	Updated         int
 	ReconcileResult *campaign.ReconcileResult
+	Warnings        []string
 }
 
 type cloudSyncResult = CloudSyncResult

@@ -16,8 +16,6 @@ import (
 func resetCloudSyncSingletonsForTest() {
 	cloudSyncReconcilerOnce = sync.Once{}
 	cloudSyncReconciler = nil
-	cloudSyncLeaseOwnerOnce = sync.Once{}
-	cloudSyncLeaseOwner = ""
 }
 
 func TestSyncCloudStateForTUI_ReusesReconciler(t *testing.T) {

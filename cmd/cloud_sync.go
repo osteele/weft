@@ -14,6 +14,7 @@ import (
 type cloudSyncResult struct {
 	Updated         int
 	ReconcileResult *campaign.ReconcileResult
+	Warnings        []string
 }
 
 const (
@@ -30,7 +31,7 @@ func syncCloudState(cfg *config.Config, database *sql.DB, reconciler *campaign.R
 		SyncResults: true,
 		Timeout:     0,
 	})
-	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}
+	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult, Warnings: res.Warnings}
 }
 
 // syncCloudStateWithTimeout runs a cloud sync in a goroutine and returns false
@@ -47,7 +48,7 @@ func syncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, r
 		SyncResults: syncResults,
 		Timeout:     timeout,
 	})
-	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}, res.Completed
+	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult, Warnings: res.Warnings}, res.Completed
 }
 
 func syncCloudStateWithClients(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, verbose bool) cloudSyncResult {
@@ -63,7 +64,7 @@ func syncCloudStateWithClients(cfg *config.Config, database *sql.DB, reconciler 
 		SyncResults: true,
 		Timeout:     0,
 	})
-	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}
+	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult, Warnings: res.Warnings}
 }
 
 // syncCloudStateWithClientsTimeout runs a cloud sync with pre-built clients in
@@ -82,5 +83,5 @@ func syncCloudStateWithClientsTimeout(cfg *config.Config, database *sql.DB, reco
 		SyncResults: true,
 		Timeout:     timeout,
 	})
-	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult}, res.Completed
+	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult, Warnings: res.Warnings}, res.Completed
 }
