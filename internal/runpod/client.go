@@ -597,28 +597,50 @@ func injectNonInteractiveSSHOptions(sshCmd string) string {
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "ssh"))
 	opts := []string{
+		"-F /dev/null",
 		"-o BatchMode=yes",
 		"-o StrictHostKeyChecking=no",
 		"-o UserKnownHostsFile=/dev/null",
 		"-o LogLevel=ERROR",
 		"-o IdentitiesOnly=yes",
+		"-o IdentityAgent=none",
 	}
 	missing := make([]string, 0, len(opts))
 	for _, opt := range opts {
-		name := sshOptionName(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(opt, "-o ")), "-o"))
-		if hasSSHOption(rest, name) {
-			continue
+		if strings.HasPrefix(opt, "-o ") {
+			name := sshOptionName(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(opt, "-o ")), "-o"))
+			if hasSSHOption(rest, name) {
+				continue
+			}
+		} else if opt == "-F /dev/null" {
+			if hasSSHConfigFile(rest) {
+				continue
+			}
 		}
 		missing = append(missing, opt)
 	}
-	rest = strings.TrimSpace(strings.Join(append(missing, rest), " "))
-	if identity := cloud.SSHIdentityFile(); identity != "" && !hasSSHIdentityFile(rest) {
+	if identity := cloud.SSHIdentityFile(); identity != "" {
+		rest = removeSSHIdentityFiles(rest)
 		rest = strings.TrimSpace("-i " + shellQuoteSingle(identity) + " " + rest)
 	}
+	rest = strings.TrimSpace(strings.Join(append(missing, rest), " "))
 	if rest == "" {
 		return "ssh"
 	}
 	return "ssh " + rest
+}
+
+func hasSSHConfigFile(sshArgs string) bool {
+	fields := strings.Fields(sshArgs)
+	for i, field := range fields {
+		if field == "-F" && i+1 < len(fields) {
+			return true
+		}
+		if strings.HasPrefix(field, "-F") && len(field) > len("-F") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasSSHOption(sshArgs, optionName string) bool {
@@ -662,6 +684,29 @@ func hasSSHIdentityFile(sshArgs string) bool {
 		}
 	}
 	return false
+}
+
+func removeSSHIdentityFiles(sshArgs string) string {
+	fields := strings.Fields(sshArgs)
+	if len(fields) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		field := fields[i]
+		if field == "-i" || field == "-o" && i+1 < len(fields) && sshOptionName(fields[i+1]) == "identityfile" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(field, "-i") && len(field) > len("-i") {
+			continue
+		}
+		if strings.HasPrefix(field, "-o") && sshOptionName(strings.TrimPrefix(field, "-o")) == "identityfile" {
+			continue
+		}
+		out = append(out, field)
+	}
+	return strings.Join(out, " ")
 }
 
 func sshOptionName(opt string) string {

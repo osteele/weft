@@ -320,22 +320,22 @@ func TestInjectNonInteractiveSSHOptions(t *testing.T) {
 		{
 			name: "typical runpodctl command",
 			in:   "ssh -i /tmp/runpod_key -p 22000 root@1.2.3.4",
-			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+			want: "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityAgent=none -i /tmp/runpod_key -p 22000 root@1.2.3.4",
 		},
 		{
 			name: "leading whitespace",
 			in:   "  ssh root@host",
-			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes root@host",
+			want: "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityAgent=none root@host",
 		},
 		{
 			name: "does not duplicate existing identities option",
 			in:   "ssh -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
-			want: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
+			want: "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentityAgent=none -o IdentitiesOnly=yes -i /tmp/runpod_key -p 22000 root@1.2.3.4",
 		},
 		{
 			name: "recognizes split option form",
 			in:   "ssh -o IdentitiesOnly=yes -o BatchMode=yes -i /tmp/runpod_key root@host",
-			want: "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o BatchMode=yes -i /tmp/runpod_key root@host",
+			want: "ssh -F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentityAgent=none -o IdentitiesOnly=yes -o BatchMode=yes -i /tmp/runpod_key root@host",
 		},
 		{
 			name: "non-ssh command left alone",
@@ -358,7 +358,18 @@ func TestInjectNonInteractiveSSHOptions_UsesConfiguredIdentity(t *testing.T) {
 	cloud.SetSSHIdentityFile("/tmp/weft_cloud_ed25519")
 
 	got := injectNonInteractiveSSHOptions("ssh root@host")
-	want := "ssh -i '/tmp/weft_cloud_ed25519' -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes root@host"
+	want := "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityAgent=none -i '/tmp/weft_cloud_ed25519' root@host"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestInjectNonInteractiveSSHOptions_ConfiguredIdentityReplacesRunpodIdentity(t *testing.T) {
+	t.Cleanup(func() { cloud.SetSSHIdentityFile("") })
+	cloud.SetSSHIdentityFile("/tmp/weft_cloud_ed25519")
+
+	got := injectNonInteractiveSSHOptions("ssh -i /tmp/RunPod-Key-Go -p 22000 root@1.2.3.4")
+	want := "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityAgent=none -i '/tmp/weft_cloud_ed25519' -p 22000 root@1.2.3.4"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
