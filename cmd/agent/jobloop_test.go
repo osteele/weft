@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -202,6 +203,144 @@ func TestSingleJobConfigForAgentJob_AppliesCostTieredWatchdogs(t *testing.T) {
 			t.Errorf("silence = %s, want 30m", got.StdoutSilenceTimeout)
 		}
 	})
+}
+
+func TestSingleJobConfigForAgentJob_UsesRentalSetupTimeout(t *testing.T) {
+	t.Run("rental gets longer setup window", func(t *testing.T) {
+		cfg := jobSequenceConfig{
+			R2Bucket: "bucket",
+			LogDir:   "/tmp/logs",
+			Provider: string(cloud.ProviderRunpod),
+		}
+		got := singleJobConfigForAgentJob(cloud.AgentJob{ID: 1, Command: "echo"}, cfg, "/tmp/work", 0)
+		if got.SetupTimeout != time.Hour {
+			t.Errorf("setup timeout = %s, want 1h", got.SetupTimeout)
+		}
+	})
+
+	t.Run("inventory host keeps default setup window", func(t *testing.T) {
+		cfg := jobSequenceConfig{
+			R2Bucket: "bucket",
+			LogDir:   "/tmp/logs",
+		}
+		got := singleJobConfigForAgentJob(cloud.AgentJob{ID: 2, Command: "echo"}, cfg, "/tmp/work", 0)
+		if got.SetupTimeout != inventory.DefaultSetupTimeout {
+			t.Errorf("setup timeout = %s, want %s", got.SetupTimeout, inventory.DefaultSetupTimeout)
+		}
+	})
+}
+
+func TestOrderJobsForSetupOverlap_PutsFastSetupFirst(t *testing.T) {
+	fastDir := t.TempDir()
+	heavyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(heavyDir, "pyproject.toml"), []byte("[project]\nname='heavy'\nversion='0.1.0'\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(heavyDir, "uv.lock"), []byte("version = 1\n"), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	jobs := []cloud.AgentJob{
+		{ID: 1, Command: "echo heavy", Dir: heavyDir},
+		{ID: 2, Command: "echo fast", Dir: fastDir},
+	}
+	got := orderJobsForSetupOverlap(jobs)
+	if got[0].ID != 2 || got[1].ID != 1 {
+		t.Fatalf("order = [%d,%d], want [2,1]", got[0].ID, got[1].ID)
+	}
+}
+
+func TestOrderJobsForSetupOverlap_PreservesDependencyOrder(t *testing.T) {
+	fastDir := t.TempDir()
+	heavyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(heavyDir, "pyproject.toml"), []byte("[project]\nname='heavy'\nversion='0.1.0'\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(heavyDir, "uv.lock"), []byte("version = 1\n"), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	jobs := []cloud.AgentJob{
+		{ID: 1, Command: "echo heavy", Dir: heavyDir},
+		{ID: 2, Command: "echo fast", Dir: fastDir, Priority: 10, Needs: []string{"out/model.pt:1"}},
+	}
+	got := orderJobsForSetupOverlap(jobs)
+	if got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("order = [%d,%d], want producer before consumer [1,2]", got[0].ID, got[1].ID)
+	}
+}
+
+func TestOrderJobsForSetupOverlap_PriorityBeatsSetupWeight(t *testing.T) {
+	fastDir := t.TempDir()
+	heavyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(heavyDir, "pyproject.toml"), []byte("[project]\nname='heavy'\nversion='0.1.0'\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(heavyDir, "uv.lock"), []byte("version = 1\n"), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	jobs := []cloud.AgentJob{
+		{ID: 1, Command: "echo fast", Dir: fastDir},
+		{ID: 2, Command: "echo heavy", Dir: heavyDir, Priority: 1},
+	}
+	got := orderJobsForSetupOverlap(jobs)
+	if got[0].ID != 2 || got[1].ID != 1 {
+		t.Fatalf("order = [%d,%d], want priority first [2,1]", got[0].ID, got[1].ID)
+	}
+}
+
+func TestOrderJobsForSetupOverlap_PreservesOriginalOrderAsTieBreaker(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, Command: "echo one", Dir: t.TempDir()},
+		{ID: 2, Command: "echo two", Dir: t.TempDir()},
+	}
+	got := orderJobsForSetupOverlap(jobs)
+	if got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("order = [%d,%d], want original [1,2]", got[0].ID, got[1].ID)
+	}
+}
+
+func TestHFInputAssets(t *testing.T) {
+	got := hfInputAssets([]string{
+		"hf:meta-llama/Llama-3.1-8B",
+		"hf-dataset:wikitext",
+		"local:data",
+		"unknown",
+	})
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2: %v", len(got), got)
+	}
+	if got[0].String() != "hf:meta-llama/Llama-3.1-8B" || got[1].String() != "hf-dataset:wikitext" {
+		t.Fatalf("assets = %v", got)
+	}
+}
+
+func TestHFDownloadScriptDownloadsModelsAndDatasets(t *testing.T) {
+	script := hfDownloadScript(hfInputAssets([]string{
+		"hf:org/model",
+		"hf-dataset:org/data",
+	}))
+	for _, want := range []string{
+		"ensure_hf_download_tool",
+		"hf_download 'model' 'org/model'",
+		"hf_download 'dataset' 'org/data'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestSetupWeightTreatsHFInputsAsSlow(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, Command: "echo hf", Dir: t.TempDir(), Inputs: []string{"hf:org/model"}},
+		{ID: 2, Command: "echo fast", Dir: t.TempDir()},
+	}
+	got := orderJobsForSetupOverlap(jobs)
+	if got[0].ID != 2 || got[1].ID != 1 {
+		t.Fatalf("order = [%d,%d], want fast before HF [2,1]", got[0].ID, got[1].ID)
+	}
 }
 
 func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {

@@ -86,7 +86,6 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 	if manifest.DonorMode {
 		generateDonorBootstrapTail(&b, manifest)
 	} else {
-		writeHFDownloads(&b, manifest.HFModels, manifest.HFDatasets, manifest.DBInstanceID)
 		writeStageMarker(&b, manifest.DBInstanceID, "starting_jobs")
 		generateWorkerBootstrapTail(&b, manifest)
 	}

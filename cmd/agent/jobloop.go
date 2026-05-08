@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -94,6 +96,355 @@ func pickWatchdogTimeouts(costPerHourCents int) (gpuIdle, stdoutSilence time.Dur
 	return 20 * time.Minute, 30 * time.Minute
 }
 
+func pickSetupTimeout(cfg jobSequenceConfig) time.Duration {
+	if cfg.Provider != "" || cfg.CostPerHourCents > 0 {
+		return 60 * time.Minute
+	}
+	return inventory.DefaultSetupTimeout
+}
+
+type setupPrewarmResult struct {
+	ok       bool
+	logPath  string
+	setupRan bool
+	didWork  bool
+	err      error
+}
+
+type setupPrewarm struct {
+	jobID   int64
+	runID   int64
+	workDir string
+	done    chan setupPrewarmResult
+}
+
+type setupPrewarmManager struct {
+	mu      sync.Mutex
+	active  *setupPrewarm
+	results map[int64]setupPrewarmResult
+}
+
+func newSetupPrewarmManager() *setupPrewarmManager {
+	return &setupPrewarmManager{results: map[int64]setupPrewarmResult{}}
+}
+
+func setupPrewarmKey(job cloud.AgentJob) int64 {
+	if job.RunID > 0 {
+		return job.RunID
+	}
+	return -job.ID
+}
+
+func (m *setupPrewarmManager) startNext(currentIndex int, jobs []cloud.AgentJob, cfg jobSequenceConfig, currentWorkDir string) {
+	if m == nil || currentIndex < 0 || currentIndex >= len(jobs) {
+		return
+	}
+	current := jobs[currentIndex]
+	if slices.Contains(current.Tags, "benchmark") {
+		return
+	}
+	currentDir := runner.ExpandTilde(currentWorkDir)
+	for i := currentIndex + 1; i < len(jobs); i++ {
+		next := jobs[i]
+		nextDir := runner.ExpandTilde(next.Dir)
+		if !setupPrewarmEligible(currentDir, next, nextDir) {
+			continue
+		}
+		key := setupPrewarmKey(next)
+		m.mu.Lock()
+		if m.active != nil || m.results[key].ok || m.results[key].err != nil {
+			m.mu.Unlock()
+			return
+		}
+		pw := &setupPrewarm{
+			jobID:   next.ID,
+			runID:   next.RunID,
+			workDir: nextDir,
+			done:    make(chan setupPrewarmResult, 1),
+		}
+		m.active = pw
+		m.mu.Unlock()
+
+		oplog.LogJob(oplog.OpPhaseTransition, next.ID, "", oplog.WithDetail("setup_prewarm_start"))
+		go m.run(pw, next, cfg)
+		return
+	}
+}
+
+func setupPrewarmEligible(currentDir string, job cloud.AgentJob, nextDir string) bool {
+	if nextDir == "" || nextDir == currentDir {
+		return false
+	}
+	if len(job.CloudAfter) > 0 || slices.Contains(job.Tags, "benchmark") {
+		return false
+	}
+	if len(hfInputAssets(job.Inputs)) > 0 {
+		return true
+	}
+	setupCmd := runner.DetectSetupCommand(nextDir)
+	if setupCmd == "" {
+		return false
+	}
+	if setupCmd == "uv sync" {
+		scriptMeta, _ := dataloc.ScanScriptMeta(nextDir, job.Command)
+		if runner.ShouldSkipSetup(setupCmd, scriptMeta) {
+			return false
+		}
+	}
+	return true
+}
+
+func orderJobsForSetupOverlap(jobs []cloud.AgentJob) []cloud.AgentJob {
+	if len(jobs) < 2 {
+		return jobs
+	}
+	edges, indegree := jobDependencyGraph(jobs)
+	remaining := make(map[int64]cloud.AgentJob, len(jobs))
+	originalIndex := make(map[int64]int, len(jobs))
+	for i, job := range jobs {
+		remaining[job.ID] = job
+		originalIndex[job.ID] = i
+	}
+	ordered := make([]cloud.AgentJob, 0, len(jobs))
+	for len(remaining) > 0 {
+		bestID := int64(0)
+		bestSet := false
+		for id, job := range remaining {
+			if indegree[id] != 0 {
+				continue
+			}
+			if !bestSet || setupOrderLess(job, remaining[bestID], originalIndex) {
+				bestID = id
+				bestSet = true
+			}
+		}
+		if !bestSet {
+			appendRemainingInOriginalOrder(&ordered, jobs, remaining)
+			return ordered
+		}
+		job := remaining[bestID]
+		delete(remaining, bestID)
+		ordered = append(ordered, job)
+		for _, dependentID := range edges[bestID] {
+			indegree[dependentID]--
+		}
+	}
+	return ordered
+}
+
+func jobDependencyGraph(jobs []cloud.AgentJob) (map[int64][]int64, map[int64]int) {
+	ids := make(map[int64]bool, len(jobs))
+	edges := make(map[int64][]int64, len(jobs))
+	indegree := make(map[int64]int, len(jobs))
+	for _, job := range jobs {
+		ids[job.ID] = true
+		indegree[job.ID] = 0
+	}
+	addEdge := func(producerID, consumerID int64) {
+		if producerID == consumerID || !ids[producerID] || !ids[consumerID] {
+			return
+		}
+		for _, existing := range edges[producerID] {
+			if existing == consumerID {
+				return
+			}
+		}
+		edges[producerID] = append(edges[producerID], consumerID)
+		indegree[consumerID]++
+	}
+	for _, job := range jobs {
+		for _, ref := range job.CloudAfter {
+			addEdge(ref.JobID, job.ID)
+		}
+		for _, spec := range job.Needs {
+			parsed, err := runner.ParseNeedsSpec(spec)
+			if err == nil {
+				addEdge(parsed.Version, job.ID)
+			}
+		}
+	}
+	return edges, indegree
+}
+
+func setupOrderLess(a, b cloud.AgentJob, originalIndex map[int64]int) bool {
+	if a.Priority != b.Priority {
+		return a.Priority > b.Priority
+	}
+	if aw, bw := setupWeight(a), setupWeight(b); aw != bw {
+		return aw < bw
+	}
+	return originalIndex[a.ID] < originalIndex[b.ID]
+}
+
+func appendRemainingInOriginalOrder(ordered *[]cloud.AgentJob, original []cloud.AgentJob, remaining map[int64]cloud.AgentJob) {
+	for _, job := range original {
+		if _, ok := remaining[job.ID]; ok {
+			*ordered = append(*ordered, job)
+			delete(remaining, job.ID)
+		}
+	}
+}
+
+func setupWeight(job cloud.AgentJob) int {
+	if len(hfInputAssets(job.Inputs)) > 0 {
+		return 1
+	}
+	workDir := runner.ExpandTilde(job.Dir)
+	if workDir == "" {
+		return 0
+	}
+	setupCmd := runner.DetectSetupCommand(workDir)
+	if setupCmd == "" {
+		return 0
+	}
+	if setupCmd == "uv sync" {
+		scriptMeta, _ := dataloc.ScanScriptMeta(workDir, job.Command)
+		if runner.ShouldSkipSetup(setupCmd, scriptMeta) {
+			return 0
+		}
+	}
+	return 1
+}
+
+func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobSequenceConfig) {
+	result := runSetupPrewarm(job, cfg, pw.workDir, true)
+	pw.done <- result
+	close(pw.done)
+
+	key := setupPrewarmKey(job)
+	m.mu.Lock()
+	m.results[key] = result
+	if m.active == pw {
+		m.active = nil
+	}
+	m.mu.Unlock()
+	if result.err != nil {
+		oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetailf("setup prewarm failed: %v", result.err))
+	} else {
+		oplog.LogJob(oplog.OpPhaseTransition, job.ID, "", oplog.WithDetail("setup_prewarm_done"))
+	}
+}
+
+func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, includeSetup bool) setupPrewarmResult {
+	logDir := filepath.Join(os.TempDir(), "weft-setup-prewarm", fmt.Sprintf("%d-%d", job.ID, job.RunID))
+	_ = os.RemoveAll(logDir)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return setupPrewarmResult{err: err}
+	}
+	paths := runner.NewJobPaths(logDir, job.ID)
+	if err := os.WriteFile(paths.Log, []byte(fmt.Sprintf("=== PREWARM %s ===\njob_id: %d\ncd: %s\n===\n", time.Now().Format(time.UnixDate), job.ID, workDir)), 0o644); err != nil {
+		return setupPrewarmResult{err: err}
+	}
+
+	env := agentRentalEnv(cfg)
+	if dotenvVars, err := runner.LoadDotenvFiles(workDir); err == nil {
+		env = append(env, dotenvVars...)
+	}
+	env = append(env, job.Env...)
+	env = append(env, hfOfflineEnv(job.Inputs)...)
+
+	didWork := false
+	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
+		didWork = true
+		if ei, err := runner.RunSetupCommand(hfDownloadScript(assets), job.ID, workDir, env, paths, pickSetupTimeout(cfg)); err != nil {
+			return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("hf prewarm failed exit %d: %w", ei.ExitCode, err)}
+		}
+	}
+
+	if !includeSetup {
+		return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
+	}
+
+	setupCmd := runner.DetectSetupCommand(workDir)
+	if setupCmd == "" {
+		return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
+	}
+	if setupCmd == "uv sync" {
+		scriptMeta, _ := dataloc.ScanScriptMeta(workDir, job.Command)
+		if runner.ShouldSkipSetup(setupCmd, scriptMeta) {
+			return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
+		}
+	}
+	didWork = true
+	ei, err := runner.RunSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg))
+	if err != nil {
+		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: err}
+	}
+	if ei.ExitCode != 0 {
+		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("setup prewarm exit %d", ei.ExitCode)}
+	}
+	return setupPrewarmResult{ok: true, didWork: true, setupRan: true, logPath: paths.Log}
+}
+
+func hfInputAssets(inputs []string) []dataloc.DataAsset {
+	assets := make([]dataloc.DataAsset, 0, len(inputs))
+	for _, input := range inputs {
+		asset, ok := dataloc.ParseAssetRef(input)
+		if !ok {
+			continue
+		}
+		if asset.Kind == dataloc.AssetHFModel || asset.Kind == dataloc.AssetHFDataset {
+			assets = append(assets, asset)
+		}
+	}
+	return assets
+}
+
+func hfDownloadScript(assets []dataloc.DataAsset) string {
+	var b strings.Builder
+	b.WriteString("set -euo pipefail\n")
+	b.WriteString("export PATH=\"$HOME/.local/bin:$HOME/bin:${PATH}\"\n")
+	b.WriteString("ensure_hf_download_tool() {\n")
+	b.WriteString("  if command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1; then return 0; fi\n")
+	b.WriteString("  if command -v uv >/dev/null 2>&1; then uv tool install 'huggingface-hub[hf_xet]' >/dev/null; elif command -v python3 >/dev/null 2>&1; then python3 -m pip install --quiet 'huggingface-hub[hf_xet]'; else echo 'no uv or python3 available to install huggingface-hub' >&2; return 127; fi\n")
+	b.WriteString("}\n")
+	b.WriteString("hf_download() {\n")
+	b.WriteString("  _repo_type=\"$1\"; _repo_id=\"$2\"\n")
+	b.WriteString("  if command -v hf >/dev/null 2>&1; then hf download --repo-type \"$_repo_type\" \"$_repo_id\" 2>&1; elif command -v huggingface-cli >/dev/null 2>&1; then huggingface-cli download --repo-type \"$_repo_type\" \"$_repo_id\" 2>&1; else python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2])' \"$_repo_id\" \"$_repo_type\"; fi\n")
+	b.WriteString("}\n")
+	b.WriteString("ensure_hf_download_tool\n")
+	for _, asset := range assets {
+		repoType := "model"
+		if asset.Kind == dataloc.AssetHFDataset {
+			repoType = "dataset"
+		}
+		b.WriteString(fmt.Sprintf("echo 'Downloading HF %s: %s'\n", repoType, asset.ID))
+		b.WriteString(fmt.Sprintf("hf_download %s %s\n", shellQuoteLocal(repoType), shellQuoteLocal(asset.ID)))
+	}
+	b.WriteString(`find "${HF_HOME:-/root/.cache/huggingface}" -type l ! -exec test -e {} \; -delete 2>/dev/null || true` + "\n")
+	return b.String()
+}
+
+func shellQuoteLocal(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func (m *setupPrewarmManager) waitFor(job cloud.AgentJob) setupPrewarmResult {
+	if m == nil {
+		return setupPrewarmResult{}
+	}
+	key := setupPrewarmKey(job)
+	m.mu.Lock()
+	if result, ok := m.results[key]; ok {
+		delete(m.results, key)
+		m.mu.Unlock()
+		return result
+	}
+	active := m.active
+	if active == nil || active.runID != job.RunID || active.jobID != job.ID {
+		m.mu.Unlock()
+		return setupPrewarmResult{}
+	}
+	done := active.done
+	m.mu.Unlock()
+
+	result := <-done
+	m.mu.Lock()
+	delete(m.results, key)
+	m.mu.Unlock()
+	return result
+}
+
 // jobSequenceResult holds the outcome of running a sequence of jobs.
 type jobSequenceResult struct {
 	FailedJobs []int64
@@ -104,8 +455,10 @@ type jobSequenceResult struct {
 // uploads with the next job's execution. Benchmark jobs act as a barrier —
 // all background work must finish before a benchmark job starts.
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
+	jobs = orderJobsForSetupOverlap(jobs)
 	var result jobSequenceResult
 	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
+	setupPrewarms := newSetupPrewarmManager()
 	gpuWarmedUp := false
 	canceledAttempts := map[int64]struct{}{}
 	var lastPostJobID int64
@@ -209,6 +562,36 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		jobCfg := singleJobConfigForAgentJob(job, cfg, workDir, jobMaxTime)
+		prewarm := setupPrewarms.waitFor(job)
+		if !prewarm.ok && prewarm.err == nil && len(hfInputAssets(job.Inputs)) > 0 {
+			prewarm = runSetupPrewarm(job, cfg, runner.ExpandTilde(workDir), false)
+		}
+		if prewarm.ok {
+			jobCfg.SetupPrewarmed = prewarm.setupRan
+			if prewarm.didWork {
+				jobCfg.SetupPrewarmLog = prewarm.logPath
+			}
+		} else if prewarm.err != nil {
+			fmt.Fprintf(os.Stderr, "prewarm for job %d failed: %v\n", job.ID, prewarm.err)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(prewarm.err))
+			result.AnyFailed = true
+			result.FailedJobs = append(result.FailedJobs, job.ID)
+			stopTimeseriesUploader()
+			stopTelemetryUploader()
+			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
+			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
+			recordPrewarmFailure(cfg, job, prewarm)
+			continue
+		}
+		originalOnPhase := jobCfg.OnPhase
+		jobCfg.OnPhase = func(phase string) {
+			if originalOnPhase != nil {
+				originalOnPhase(phase)
+			}
+			if phase == "running" {
+				setupPrewarms.startNext(i, jobs, cfg, workDir)
+			}
+		}
 
 		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.InstanceID, cfg.LogDir, jobCfg)
 		if job.UsesGPU {
@@ -340,8 +723,53 @@ func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {
 	writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
 }
 
+func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm setupPrewarmResult) {
+	paths := runner.NewJobPaths(cfg.LogDir, job.ID)
+	_ = os.MkdirAll(cfg.LogDir, 0o755)
+	runner.ArchiveExistingFiles(cfg.LogDir, job.ID)
+	now := time.Now().Unix()
+	_ = runner.WriteMetaFile(paths, job.ID, job.Dir, job.Command, "", now, "")
+	_ = runner.WriteLogHeader(paths, job.ID, job.Dir, job.Command, "")
+	if prewarm.logPath != "" {
+		appendPrewarmLogForFailure(paths.Log, prewarm.logPath)
+	}
+	reason := "prewarm_failed"
+	if prewarm.err != nil {
+		reason = prewarm.err.Error()
+	}
+	ei := runner.ExitInfo{ExitCode: 1}
+	_ = runner.WriteStatusFile(paths, ei)
+	_ = runner.WriteFailureReasonFile(paths, reason)
+	_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", reason, now, now, nil)
+	_ = runner.WritePhasesFile(paths, runner.PhaseTiming{
+		WrapperStart: now,
+		SetupStart:   now,
+		SetupEnd:     now,
+	})
+	r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+}
+
+func appendPrewarmLogForFailure(jobLog, prewarmLog string) {
+	data, err := os.ReadFile(prewarmLog)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	f, err := os.OpenFile(jobLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString("\n=== PREWARM LOG ===\n")
+	_, _ = f.Write(data)
+	if data[len(data)-1] != '\n' {
+		_, _ = f.WriteString("\n")
+	}
+	_, _ = f.WriteString("=== END PREWARM LOG ===\n")
+}
+
 func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, jobMaxTime time.Duration) runner.SingleJobConfig {
 	gpuIdle, stdoutSilence := pickWatchdogTimeouts(cfg.CostPerHourCents)
+	setupTimeout := pickSetupTimeout(cfg)
 	env := agentRentalEnv(cfg)
 	env = append(env, job.Env...)
 	env = append(env, hfOfflineEnv(job.Inputs)...)
@@ -358,7 +786,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 		LogDir:               cfg.LogDir,
 		WorkingDir:           workDir,
 		MaxTime:              jobMaxTime,
-		SetupTimeout:         inventory.DefaultSetupTimeout,
+		SetupTimeout:         setupTimeout,
 		GPUIdleTimeout:       gpuIdle,
 		StdoutSilenceTimeout: stdoutSilence,
 		OnPhase:              phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),

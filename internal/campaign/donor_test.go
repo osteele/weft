@@ -338,12 +338,13 @@ func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 
 	script := GenerateBootstrapScript(manifest)
 
-	// Should download HF models before launching agent
+	// Worker instances leave declared HF input staging to the agent, so downloads
+	// can be charged to the job and overlapped with the previous job's run.
 	if !strings.Contains(script, "ensure_hf_download_tool") {
-		t.Error("worker script should install an HF download tool")
+		t.Error("worker script should include HF download helpers for agent compatibility")
 	}
-	if !strings.Contains(script, "hf_download model") {
-		t.Error("worker script should download HF models")
+	if strings.Contains(script, "hf_download model") {
+		t.Error("worker script should not download HF models during bootstrap")
 	}
 	if !strings.Contains(script, "export HF_HOME=/workspace/.cache/huggingface") {
 		t.Error("worker script should keep HF cache on the workspace volume")
@@ -363,26 +364,25 @@ func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 	if strings.Contains(script, "|| echo 'Failed to download") {
 		t.Error("worker script should fail bootstrap on HF prefetch errors")
 	}
-	if !strings.Contains(script, `echo "downloading_hf:${_hf_done}/${_hf_total}"`) {
-		t.Error("worker script should report HF download progress before downloads")
+	if strings.Contains(script, `echo "downloading_hf:${_hf_done}/${_hf_total}"`) {
+		t.Error("worker script should not report bootstrap HF download progress")
 	}
-	if !strings.Contains(script, "EleutherAI/pythia-1.4b") {
-		t.Error("worker script should reference Pythia model")
+	if strings.Contains(script, "EleutherAI/pythia-1.4b") {
+		t.Error("worker script should not reference Pythia model in bootstrap")
 	}
-	if !strings.Contains(script, "gpt2-xl") {
-		t.Error("worker script should reference GPT-2 XL model")
+	if strings.Contains(script, "gpt2-xl") {
+		t.Error("worker script should not reference GPT-2 XL model in bootstrap")
 	}
-	if !strings.Contains(script, "hf_download dataset \"wikitext\"") {
-		t.Error("worker script should download HF datasets")
+	if strings.Contains(script, "hf_download dataset \"wikitext\"") {
+		t.Error("worker script should not download HF datasets during bootstrap")
 	}
 	if !strings.Contains(script, "sources_extracting:0/1") {
 		t.Error("worker script should report source extraction progress")
 	}
 
-	// HF downloads should appear before the agent launch
-	dlIdx := strings.Index(script, "hf_download model")
 	agentIdx := strings.Index(script, "nohup weft-agent run-campaign")
-	if dlIdx >= agentIdx {
-		t.Error("HF downloads should happen before agent launch")
+	startIdx := strings.Index(script, "starting_jobs")
+	if startIdx >= agentIdx {
+		t.Error("bootstrap should report starting_jobs before agent launch")
 	}
 }

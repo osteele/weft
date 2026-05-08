@@ -19,15 +19,17 @@ import (
 
 // SingleJobConfig configures a single-shot job execution.
 type SingleJobConfig struct {
-	JobID          int64
-	Job            opsqueue.CommandJob
-	LogDir         string
-	WorkingDir     string             // Override job.Dir if non-empty
-	SampleInterval time.Duration      // Default 1s
-	MaxTime        time.Duration      // If >0, kill the job after this duration
-	SetupTimeout   time.Duration      // If >0, kill the setup command after this duration (default 20m)
-	SkipProbes     bool               // Skip cache size probes (useful in tests)
-	OnPhase        func(phase string) // Called at phase transitions: "setup", "running"
+	JobID           int64
+	Job             opsqueue.CommandJob
+	LogDir          string
+	WorkingDir      string             // Override job.Dir if non-empty
+	SampleInterval  time.Duration      // Default 1s
+	MaxTime         time.Duration      // If >0, kill the job after this duration
+	SetupTimeout    time.Duration      // If >0, kill the setup command after this duration (default 20m)
+	SetupPrewarmed  bool               // If true, skip the detected setup command
+	SetupPrewarmLog string             // Optional setup prewarm log to append to this job log
+	SkipProbes      bool               // Skip cache size probes (useful in tests)
+	OnPhase         func(phase string) // Called at phase transitions: "setup", "running"
 
 	// Hang-detection watchdogs. Zero disables. See specs/job-lifecycle.allium
 	// rules GPUIdleKillsJob and StdoutSilenceKillsJob.
@@ -104,6 +106,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// Write metadata
 	WriteMetaFile(paths, cfg.JobID, workingDir, command, job.Desc, phases.WrapperStart, "")
 	WriteLogHeader(paths, cfg.JobID, workingDir, command, "")
+	if cfg.SetupPrewarmLog != "" {
+		appendPrewarmLog(paths.Log, cfg.SetupPrewarmLog)
+	}
 
 	// Build environment
 	var envVars []string
@@ -201,22 +206,27 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Run setup command as a separate phase
 	if setupCmd != "" {
-		ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths, cfg.SetupTimeout)
-		if setupErr != nil {
-			now := time.Now().Unix()
-			phases.SetupEnd = now
+		if cfg.SetupPrewarmed {
+			slog.Info("skipping setup command: setup already prewarmed",
+				"component", "runner", "job_id", cfg.JobID, "cmd", setupCmd)
+		} else {
+			ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths, cfg.SetupTimeout)
+			if setupErr != nil {
+				now := time.Now().Unix()
+				phases.SetupEnd = now
 
-			// Early return skips the normal completion writes below;
-			// without these the reconciler has no timestamps or logs.
-			failureReason := DetectFailureReasonFromExitInfo(ei)
-			WriteFailureReasonFile(paths, failureReason)
-			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
-			WritePhasesFile(paths, phases)
+				// Early return skips the normal completion writes below;
+				// without these the reconciler has no timestamps or logs.
+				failureReason := DetectFailureReasonFromExitInfo(ei)
+				WriteFailureReasonFile(paths, failureReason)
+				WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
+				WritePhasesFile(paths, phases)
 
-			return ei, setupErr
-		}
-		if setupCmd == "uv sync" {
-			collectAndWriteUVManifest(cfg.JobID, expandedDir, cfg.LogDir)
+				return ei, setupErr
+			}
+			if setupCmd == "uv sync" {
+				collectAndWriteUVManifest(cfg.JobID, expandedDir, cfg.LogDir)
+			}
 		}
 	}
 
@@ -517,6 +527,27 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	slog.Info("job completed", "component", "runner", "job_id", cfg.JobID, "exit_code", ei.ExitCode)
 	return ei, nil
+}
+
+func appendPrewarmLog(jobLog, prewarmLog string) {
+	if prewarmLog == "" {
+		return
+	}
+	data, err := os.ReadFile(prewarmLog)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	f, err := os.OpenFile(jobLog, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString("\n=== prewarmed setup ===\n")
+	_, _ = f.Write(data)
+	if data[len(data)-1] != '\n' {
+		_, _ = f.WriteString("\n")
+	}
+	_, _ = f.WriteString("=== prewarmed setup complete ===\n")
 }
 
 // readLogTail reads the last maxBytes of a log file. Returns empty string on error.

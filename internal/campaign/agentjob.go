@@ -29,6 +29,7 @@ func newAgentJob(job *db.Job, remoteDir string) cloud.AgentJob {
 		Command:    job.EffectiveCommand(),
 		Dir:        remoteDir,
 		Tags:       append([]string(nil), job.Tags...),
+		Priority:   job.Priority,
 		UsesGPU:    job.UsesGPU(),
 		OutputDirs: append([]string(nil), job.OutputDirs...),
 		Produces:   append([]string(nil), job.Produces...),

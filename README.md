@@ -43,7 +43,8 @@ Remote Hosts (titan, atlas)
   one based on GPU class, memory, data locality, and current load
 - **Data locality**: Declare `--input hf:model-name` and the coordinator prefers
   hosts with the data cached, pre-stages it via rsync, or downloads missing HF
-  assets before the job starts
+  assets before the job starts. On cloud instances, declared HF inputs and
+  setup work for the next job can be prewarmed while the current job runs
 - **Occasionally connected**: Jobs are recorded locally first and synced when
   hosts are reachable — your laptop can sleep, travel, or disconnect
 - **Graceful degradation**: When the coordinator is unreachable, the CLI falls
@@ -531,6 +532,11 @@ If no host already has a declared `hf:` or `hf-dataset:` input, the
 coordinator downloads it onto the target on-prem host before queueing the job.
 Downloads use `huggingface-cli download` and first check that the target HF
 cache volume has enough free space.
+
+On cloud instances, the agent stages each job's declared HF inputs before the
+job command starts, and may prewarm the next job's HF inputs and environment
+setup while the current job is running. Setup time remains tracked separately
+from job execution time.
 
 ### Data Locality
 

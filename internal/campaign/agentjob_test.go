@@ -15,6 +15,7 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 		Command:     "python train.py",
 		Tags:        []string{"benchmark", "nightly"},
 		GPUClass:    "a100",
+		Priority:    3,
 		OutputDirs:  []string{"results/"},
 		Produces:    []string{"results/model.pt"},
 		Needs:       []string{"inputs/data.csv:41"},
@@ -32,6 +33,9 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 	if got.Dir != cloud.ProjectRootDir+"/repo" {
 		t.Fatalf("dir = %q", got.Dir)
+	}
+	if got.Priority != job.Priority {
+		t.Fatalf("priority = %d, want %d", got.Priority, job.Priority)
 	}
 	if !reflect.DeepEqual(got.OutputDirs, job.OutputDirs) {
 		t.Fatalf("output dirs = %v, want %v", got.OutputDirs, job.OutputDirs)

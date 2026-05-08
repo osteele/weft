@@ -7,6 +7,7 @@ type AgentJob struct {
 	Command    string   `json:"cmd"`
 	Dir        string   `json:"dir,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	Priority   int      `json:"priority,omitempty"`
 	UsesGPU    bool     `json:"uses_gpu,omitempty"`
 	OutputDirs []string `json:"output_dirs,omitempty"`
 	Produces   []string `json:"produces,omitempty"`

@@ -607,12 +607,12 @@ rule OnPremStagingFromR2 {
         -- simultaneous half-finished uploads that stomped each other.
 }
 
--- Design intent: HF models and datasets declared on a cloud-bound job are
--- prestaged by weft to the instance (either by uploading to R2 under an
--- assets/ prefix and having the agent pull them, or by transferring from
--- a donor host into the instance's HF cache) before the job starts. Same
--- motivation as PrestageMissingAssetsOnPrem: disk budgeting and bandwidth
--- accounting are impossible if the job itself fetches undeclared bytes.
+-- HF models and datasets declared on a cloud-bound job are staged by the
+-- cloud agent into the instance's HF cache before the job command starts.
+-- The staging step is per-job, so failures are attributed to the job
+-- attempt rather than hidden inside instance bootstrap. The agent may
+-- prewarm the next job's declared HF inputs while the current job is
+-- running, subject to dependency and benchmark barriers.
 rule HFAssetsPrestagedOnCloud {
     when: CloudStagingRequested(job)
     requires: job.target_kind = rental_instance
@@ -624,23 +624,39 @@ rule HFAssetsPrestagedOnCloud {
             CloudAssetStaged(
                 instance: job.cloud_instance,
                 asset: input.asset,
-                via: PreferredCloudStagingVenue(input.asset)
+                via: agent_hf_download
             )
+        JobCommandStarts(job) only_after CloudHFInputsReady(job)
 
     @guidance
-        -- IMPLEMENTATION DIVERGENCE (2026-04-22):
-        -- The current cloud agent wrapper lets the job's own command
-        -- download HF assets at runtime; weft does not pre-populate the
-        -- cloud instance's HF cache and does not add hf:... declarations
-        -- to the manifest as prestage targets. This is the intent the
-        -- spec is asserting — cloud should match on-prem here — and a
-        -- future /weed pass should surface the gap:
-        --   internal/cloud/wrapper.go GenerateAgentWrapper  — no prestage
-        --   internal/cloudneeds/                            — only handles
-        --                                                     producer outputs
-        -- The consequence is disk-full failures on cloud instances when a
-        -- job's declared hf inputs undercount the actual download footprint;
-        -- see CLAUDE.md § "Declaring data dependencies".
+        -- Worker bootstrap starts the agent after installing sources; it
+        -- does not front-load all HF downloads. Donor bootstrap may still
+        -- populate a reusable HF cache. Implementation: cmd/agent
+        -- setupPrewarmManager downloads hf:/hf-dataset: inputs before
+        -- RunSingleJob, and can do this in the background for the next
+        -- eligible job once the current job reaches the running phase.
+}
+
+rule CloudPrewarmRespectsJobOrder {
+    when: AgentRunsCampaign(instance)
+
+    -- Ordering is a soft optimization except for data dependencies. Among
+    -- jobs with no dependency relation, the agent prefers:
+    --   1. higher job priority
+    --   2. jobs without slow setup/prewarm work
+    --   3. original manifest order
+    -- A job that needs an artifact from another same-instance job must not
+    -- be moved before its producer.
+
+    ensures:
+        for producer, consumer in same_instance_data_dependencies(instance):
+            index(producer) < index(consumer)
+
+    @guidance
+        -- Data dependency edges come from CloudAfter and --needs specs.
+        -- Slow setup includes declared HF inputs and detected setup
+        -- commands such as uv sync that are not skipped by script metadata.
+        -- Benchmark jobs are barriers for background prewarm.
 }
 
 -- Every source or data transfer weft performs gets a TransferObservation

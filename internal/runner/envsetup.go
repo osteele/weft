@@ -138,6 +138,7 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 			preparedEnv = envVars
 		}
 	}
+	appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: setup command: %s\n", preparedCmd)))
 	slog.Debug("running setup command", "component", "runner", "job_id", jobID, "cmd", preparedCmd, "timeout", timeout)
 	proc, err := StartProcess(preparedCmd, workingDir, preparedEnv, paths.Log)
 	if err != nil {

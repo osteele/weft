@@ -99,6 +99,60 @@ func TestRunSingleJob_EchoHello(t *testing.T) {
 	}
 }
 
+func TestRunSingleJob_AppendsPrewarmLogWithoutSkippingSetup(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "pyproject.toml"), []byte("[project]\nname='p'\nversion='0.1.0'\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	venvDir := filepath.Join(workDir, ".venv")
+	if err := os.MkdirAll(venvDir, 0o755); err != nil {
+		t.Fatalf("mkdir .venv: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(venvDir, "pyvenv.cfg"), []byte("home = test\n"), 0o644); err != nil {
+		t.Fatalf("write pyvenv.cfg: %v", err)
+	}
+	prewarmLog := filepath.Join(t.TempDir(), "prewarm.log")
+	if err := os.WriteFile(prewarmLog, []byte("Downloading HF model: example/model\n"), 0o644); err != nil {
+		t.Fatalf("write prewarm log: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "uv"), []byte("#!/bin/sh\necho fake uv sync\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake uv: %v", err)
+	}
+	cfg := SingleJobConfig{
+		JobID:           43,
+		Job:             opsqueue.CommandJob{Cmd: "echo run", Env: []string{"PATH=" + binDir + ":" + os.Getenv("PATH")}},
+		WorkingDir:      workDir,
+		LogDir:          t.TempDir(),
+		SetupTimeout:    time.Second,
+		SetupPrewarmLog: prewarmLog,
+		SkipProbes:      true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", ei.ExitCode)
+	}
+	data, err := os.ReadFile(NewJobPaths(cfg.LogDir, 43).Log)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "Downloading HF model: example/model") {
+		t.Fatalf("log missing prewarm content: %s", log)
+	}
+	if !strings.Contains(log, "uv sync") {
+		t.Fatalf("log missing setup command output/header: %s", log)
+	}
+}
+
 func TestWriteCompletionRecordIncludesFinalRSS(t *testing.T) {
 	logDir := t.TempDir()
 	paths := NewJobPaths(logDir, 77)
