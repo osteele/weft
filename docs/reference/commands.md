@@ -727,6 +727,31 @@ weft sync inspect --show-excludes
 weft sync inspect --json
 ```
 
+### weft source
+
+Inspect the exact source snapshot uploaded to R2 for a cloud job attempt.
+
+```bash
+weft source ls <job-id> [prefix] [flags]
+weft source cat <job-id> [path] [flags]
+```
+
+**Flags:**
+- `--attempt N`: Use a specific attempt number (default: latest)
+
+When `path` is omitted, `cat` tries to print the script referenced by the job
+command. Pass an explicit path if the command references multiple scripts or no
+script can be inferred.
+
+**Examples:**
+```bash
+weft source ls wj1443
+weft source ls wj1443 scripts/
+weft source cat wj1443
+weft source cat wj1443 scripts/exp141_pythia_checkpoint_sweep.py
+weft source cat wj1443 --attempt 4 scripts/train.py
+```
+
 ### weft log
 
 View the full log file for a job.

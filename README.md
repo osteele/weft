@@ -976,6 +976,9 @@ weft sync inspect --show-excludes # Also print the effective exclude patterns
 weft sync inspect --json          # Machine-readable output
 ```
 
+After a cloud job runs, `weft source ls` and `weft source cat` can inspect the
+exact source snapshot that the instance downloaded from R2.
+
 Cloud instances automatically sync your project sources and collect detailed
 telemetry (CPU, memory, GPU usage, failure detection). Benchmark jobs
 (`--tag benchmark`) get additional telemetry controls: a benchmark barrier
