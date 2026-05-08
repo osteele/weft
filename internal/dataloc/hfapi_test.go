@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // setupHFTestServer configures the package-level HF client and URL to use the
@@ -169,6 +170,39 @@ func TestResolveInputSizes(t *testing.T) {
 	}
 	if total != 32158192699 {
 		t.Errorf("got total %d, want 32158192699", total)
+	}
+}
+
+func TestResolveInputSizes_UsesFullHFSizeOverPartialHostCache(t *testing.T) {
+	db := setupTestDB(t)
+	if err := RecordAsset(db, HostDataEntry{
+		Host:      "host-alpha",
+		Asset:     DataAsset{Kind: AssetHFModel, ID: "openai-community/gpt2"},
+		SizeBytes: 550_000_000,
+		LastSeen:  time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models/openai-community/gpt2/tree/main" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"path":"model.safetensors","size":3666000000}]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	setupHFTestServer(t, server)
+
+	total, unresolved, err := ResolveInputSizes([]string{"hf:openai-community/gpt2"}, db)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(unresolved) != 0 {
+		t.Errorf("unexpected unresolved refs: %v", unresolved)
+	}
+	if total != 3_666_000_000 {
+		t.Errorf("got total %d, want full HF repo size", total)
 	}
 }
 

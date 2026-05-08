@@ -285,14 +285,21 @@ func resolveAssetSizeFromDB(asset DataAsset, localDB *sql.DB) int64 {
 // API is wrapped as ErrHFRefIsDataset so the caller can nudge the user to
 // the correct hf-dataset: prefix.
 func resolveModelSize(asset DataAsset, localDB *sql.DB) (int64, error) {
-	if size := resolveAssetSizeFromDB(asset, localDB); size > 0 {
-		return size, nil
-	}
-	size, err := FetchHFModelSize(asset.ID)
+	dbSize := resolveAssetSizeFromDB(asset, localDB)
+	hfSize, err := FetchHFModelSize(asset.ID)
 	if err != nil && errors.Is(err, ErrHFModelNotFound) && hfRefIsDataset(asset.ID) {
 		return 0, fmt.Errorf("%w: %s (did you mean hf-dataset:%s?)", ErrHFRefIsDataset, asset.ID, asset.ID)
 	}
-	return size, err
+	if err != nil {
+		if dbSize > 0 {
+			return dbSize, nil
+		}
+		return 0, err
+	}
+	if dbSize > hfSize {
+		return dbSize, nil
+	}
+	return hfSize, nil
 }
 
 // hfDatasetExistsCache memoises hfRefIsDataset probes for this process so
