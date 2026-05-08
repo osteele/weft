@@ -27,6 +27,10 @@ type switchToLaunchMsg struct{}
 // switchToSystemWatchMsg is emitted by listTUIModel when the user presses 'i'.
 type switchToSystemWatchMsg struct{}
 
+type systemWatchReadyMsg struct {
+	model watchModel
+}
+
 // switchToListMsg is emitted by watchModel when the user presses 'J' or 'U'.
 type switchToListMsg struct {
 	groupedByStatus bool
@@ -103,6 +107,32 @@ type watchRouterModel struct {
 	// after p.Run() returns and performs the exec there, so bubbletea has
 	// fully restored the terminal first.
 	pendingExec func() error
+}
+
+type routerLoadingModel struct {
+	message string
+	width   int
+}
+
+func (m routerLoadingModel) Init() tea.Cmd { return nil }
+
+func (m routerLoadingModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = ws.Width
+	}
+	return m, nil
+}
+
+func (m routerLoadingModel) View() string {
+	message := strings.TrimSpace(m.message)
+	if message == "" {
+		message = "Loading..."
+	}
+	width := m.width
+	if width <= 0 {
+		width = 120
+	}
+	return watchDimStyle.Render(truncateDisplayWidth(message, width)) + "\n"
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, autoMode bool) watchRouterModel {
@@ -325,7 +355,16 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.homeMode = watchModeSystem
 		m.cleanupActive()
-		return m.switchTo(m.buildHomeWatch(""))
+		m.active = routerLoadingModel{message: "Opening instances watch..."}
+		cmds := []tea.Cmd{m.prepareSystemWatch()}
+		if m.windowSize.Width > 0 {
+			ws := m.windowSize
+			cmds = append(cmds, func() tea.Msg { return ws })
+		}
+		return m, tea.Batch(cmds...)
+
+	case systemWatchReadyMsg:
+		return m.switchTo(msg.model)
 
 	case switchToListMsg:
 		if w, ok := m.active.(watchModel); ok {
@@ -381,6 +420,17 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.active.Update(msg)
 	m.active = updated
 	return m, cmd
+}
+
+func (m watchRouterModel) prepareSystemWatch() tea.Cmd {
+	database := m.database
+	cfg := m.config
+	autoMode := m.autoMode
+	return func() tea.Msg {
+		w := newSystemWatchModel(database, cfg, "")
+		w.autoMode = autoMode
+		return systemWatchReadyMsg{model: w}
+	}
 }
 
 func (m watchRouterModel) View() string {

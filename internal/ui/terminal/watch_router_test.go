@@ -227,6 +227,25 @@ func TestWatchRouterSwitchToSystemWatchFromList(t *testing.T) {
 
 	next, _ := router.Update(switchToSystemWatchMsg{})
 	got := next.(watchRouterModel)
+	if _, ok := got.active.(routerLoadingModel); !ok {
+		t.Fatalf("active model = %T, want routerLoadingModel", got.active)
+	}
+}
+
+func TestWatchRouterSystemWatchReadySwitchesToWatch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	watch := watchModel{
+		mode:     watchModeSystem,
+		database: database,
+	}
+	router := watchRouterModel{
+		active:   routerLoadingModel{message: "Opening instances watch..."},
+		database: database,
+		config:   &config.Config{},
+	}
+
+	next, _ := router.Update(systemWatchReadyMsg{model: watch})
+	got := next.(watchRouterModel)
 	watch, ok := got.active.(watchModel)
 	if !ok {
 		t.Fatalf("active model = %T, want watchModel", got.active)

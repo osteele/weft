@@ -1769,7 +1769,7 @@ func TestListTUIHelpOverlayOpensAndClosesInUngroupedView(t *testing.T) {
 	if !strings.Contains(out, "Jobs List Keybindings") {
 		t.Fatalf("expected list help title, got:\n%s", out)
 	}
-	if !strings.Contains(out, "v toggle grouped/ungrouped view") {
+	if !strings.Contains(out, "v toggle grouped/ungrouped jobs") {
 		t.Fatalf("expected shared keybinding help text, got:\n%s", out)
 	}
 
@@ -1793,13 +1793,36 @@ func TestListTUIHelpOverlayShowsGroupedActions(t *testing.T) {
 		t.Fatal("expected grouped help overlay to open")
 	}
 	out := stripANSI(got.View())
-	if !strings.Contains(out, "Grouped-only actions:") {
+	if !strings.Contains(out, "Selected job actions:") {
 		t.Fatalf("expected grouped actions section, got:\n%s", out)
 	}
-	if !strings.Contains(out, "m move selected queued job") {
+	if !strings.Contains(out, "m move selected") {
 		t.Fatalf("expected grouped move keybinding, got:\n%s", out)
 	}
-	if !strings.Contains(out, "e toggle auto-pilot error details") {
+	if !strings.Contains(out, "e auto-pilot error details") {
 		t.Fatalf("expected grouped error-details keybinding, got:\n%s", out)
+	}
+}
+
+func TestListTUIHelpOverlayUsesTwoColumnsOnShortWideTerminal(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          16,
+		showHelp:        true,
+	}
+
+	out := stripANSI(m.View())
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) > m.height {
+		t.Fatalf("help lines = %d, want <= %d:\n%s", len(lines), m.height, out)
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > m.width {
+			t.Fatalf("line width = %d, want <= %d: %q", lipgloss.Width(line), m.width, line)
+		}
+	}
+	if !strings.Contains(out, "Navigation:") || !strings.Contains(out, "Automation:") {
+		t.Fatalf("expected two-column help to retain sections, got:\n%s", out)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -940,6 +941,30 @@ func TestWatchModelHandleKey_TogglesHelpOverlayInInstanceMode(t *testing.T) {
 	got = updated.(watchModel)
 	if got.projectHelp {
 		t.Fatal("expected help overlay to close on Esc")
+	}
+}
+
+func TestWatchHelpUsesTwoColumnsOnShortWideTerminal(t *testing.T) {
+	m := watchModel{
+		mode:                  watchModeInstances,
+		width:                 100,
+		height:                16,
+		projectHelp:           true,
+		retryBudgetMultiplier: map[int64]float64{},
+	}
+
+	out := stripANSI(m.View())
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) > m.height {
+		t.Fatalf("help lines = %d, want <= %d:\n%s", len(lines), m.height, out)
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > m.width {
+			t.Fatalf("line width = %d, want <= %d: %q", lipgloss.Width(line), m.width, line)
+		}
+	}
+	if !strings.Contains(out, "Views:") || !strings.Contains(out, "Automation:") {
+		t.Fatalf("expected two-column help to retain sections, got:\n%s", out)
 	}
 }
 

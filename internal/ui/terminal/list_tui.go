@@ -1928,55 +1928,69 @@ func (m listTUIModel) footerText(rows int) string {
 }
 
 func (m listTUIModel) renderListHelpView() string {
-	lines := []string{
-		"Jobs List Keybindings",
-		"",
-		"Navigation:",
-		"  up/down (or j/k) move selection",
-		"  pgup/pgdown (or b/space) page up/down",
-		"  g/G jump top/bottom",
-		"",
-		"Common:",
-		"  a view attempts for selected job",
-		"  c coding-assistant (progress / review / remediate, status-dependent)",
-		"  r refresh",
-		"  v toggle grouped/ungrouped view",
-		"  i open instances watch",
-		"  q quit",
+	sections := []keyHelpSection{
+		{
+			Title: "Navigation",
+			Lines: []string{
+				"  up/down (or j/k) move selection",
+				"  pgup/pgdown (or b/space) page up/down",
+				"  g/G jump top/bottom",
+			},
+		},
+		{
+			Title: "Views",
+			Lines: []string{
+				"  v toggle grouped/ungrouped jobs",
+				"  i open instances watch",
+			},
+		},
+		{
+			Title: "Selected job",
+			Lines: []string{
+				"  a view attempts for selected job",
+				"  c coding-assistant (progress / review / remediate, status-dependent)",
+			},
+		},
+		{
+			Title: "General",
+			Lines: []string{
+				"  r refresh",
+				"  q quit",
+			},
+		},
 	}
 	if m.groupedByStatus {
-		lines = append(lines,
-			"",
-			"Grouped-only actions:",
-			"  A toggle auto-pilot",
-			"  $ set run-rate + daily cap (H/D clear; r resets breaker)",
-			"  n launch a new instance for queued jobs",
-			"  N launch a new instance for selected queued job",
-			"  P toggle selected job priority",
-			"  R preview rebalance moves",
-			"  k kill selected job",
-			"  u unplace selected queued job",
-			"  p mark selected job as processed",
-			"  m move selected queued job",
-			"  e toggle auto-pilot error details",
+		sections = append(sections,
+			keyHelpSection{
+				Title: "Selected job actions",
+				Lines: []string{
+					"  N launch selected on new instance",
+					"  P toggle priority",
+					"  k kill selected",
+					"  u unplace selected",
+					"  p mark processed",
+					"  m move selected",
+				},
+			},
+			keyHelpSection{
+				Title: "Queue and placement",
+				Lines: []string{
+					"  n launch queued jobs",
+					"  R preview rebalance moves",
+				},
+			},
+			keyHelpSection{
+				Title: "Automation",
+				Lines: []string{
+					"  A toggle auto-pilot",
+					"  $ set run-rate + daily cap",
+					"    H/D clear; r resets breaker",
+					"  e auto-pilot error details",
+				},
+			},
 		)
 	}
-	lines = append(lines,
-		"",
-		"Help:",
-		"  ? toggle this help",
-		"  q or Esc close help",
-	)
-
-	var b strings.Builder
-	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(lines[0], m.width)))
-	b.WriteString("\n")
-	for i := 1; i < len(lines); i++ {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(lines[i], m.width)))
-		b.WriteString("\n")
-	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth("? close help", m.width)))
-	return b.String()
+	return renderKeyHelp("Jobs List Keybindings", sections, m.width, m.height, listTUITitleStyle, listTUIFooterStyle)
 }
 
 func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {

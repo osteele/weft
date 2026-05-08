@@ -1010,49 +1010,52 @@ func (m watchModel) renderProjectHelpView() string {
 }
 
 func (m watchModel) renderWatchHelpView() string {
-	rows := max(1, m.height-1)
-	lines := []string{
-		"Watch Keybindings",
-		"",
-		"Navigation:",
-		"  up/down (or j/k) move selection",
-		"  pgup/pgdown (or Ctrl+u/Ctrl+d) page up/down",
-		"  g/G jump top/bottom",
-		"",
-		"Actions:",
-		"  a view attempts for selected job",
-		"  u unplace selected queued job",
-		"  x kill selected running job",
-		"  t terminate selected cloud instance",
-		"  s submit selected unplaced job",
-		"  m move selected queued cloud job",
-		"  N launch new instance now (fastest strategy)",
-		"  l open launch planner",
-		"  J open ungrouped jobs list",
-		"  U open grouped jobs list",
-		"  r retry failed instances",
-		"  B double retry budget for selected failed instance and retry",
-		"  A toggle auto-pilot",
-		"  $ set run-rate + daily cap (H/D clear; r resets breaker)",
-		"",
-		"Help:",
-		"  ? toggle this help",
-		"  q or Esc close help",
+	sections := []keyHelpSection{
+		{
+			Title: "Navigation",
+			Lines: []string{
+				"  up/down (or j/k) move selection",
+				"  pgup/pgdown (or Ctrl+u/Ctrl+d) page",
+				"  g/G jump top/bottom",
+			},
+		},
+		{
+			Title: "Views",
+			Lines: []string{
+				"  J open ungrouped jobs",
+				"  U open grouped jobs",
+				"  l open launch planner",
+			},
+		},
+		{
+			Title: "Selected job or instance",
+			Lines: []string{
+				"  a view attempts",
+				"  u unplace queued job",
+				"  x kill running job",
+				"  t terminate cloud instance",
+				"  s submit unplaced job",
+				"  m move queued cloud job",
+			},
+		},
+		{
+			Title: "Queue and placement",
+			Lines: []string{
+				"  N launch new instance now",
+				"  r retry failed instances",
+				"  B double retry budget and retry",
+			},
+		},
+		{
+			Title: "Automation",
+			Lines: []string{
+				"  A toggle auto-pilot",
+				"  $ set run-rate + daily cap",
+				"    H/D clear; r resets breaker",
+			},
+		},
 	}
-
-	var b strings.Builder
-	b.WriteString(watchTitleStyle.Render(truncateDisplayWidth(lines[0], m.width)))
-	b.WriteString("\n")
-	for i := 1; i < rows; i++ {
-		if i >= len(lines) {
-			b.WriteString("\n")
-			continue
-		}
-		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(lines[i], m.width)))
-		b.WriteString("\n")
-	}
-	b.WriteString(watchDimStyle.Render(truncateDisplayWidth("? close help", m.width)))
-	return b.String()
+	return renderKeyHelp("Watch Keybindings", sections, m.width, m.height, watchTitleStyle, watchDimStyle)
 }
 
 func (m watchModel) projectEmptyStateText() string {
