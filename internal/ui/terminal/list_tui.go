@@ -230,11 +230,17 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
 
 	outputOpt, restore := InstallTUIStdioCapture()
-	defer restore()
 
-	_, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
+	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
+	restore()
 	if err != nil {
 		return fmt.Errorf("run list TUI: %w", err)
+	}
+	if r, ok := finalModel.(watchRouterModel); ok {
+		r.stopBanners()
+		if summary := listTUIExitSummary(r.active); summary != "" {
+			fmt.Fprint(os.Stdout, summary)
+		}
 	}
 	return nil
 }
