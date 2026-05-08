@@ -101,6 +101,7 @@ func createJobAttemptsTableSQL() string {
 		-- Placement
 		host TEXT NOT NULL DEFAULT '',
 		launch_id INTEGER REFERENCES launches(id),
+		target_id INTEGER REFERENCES execution_targets(id),
 
 		-- Execution state
 		status TEXT NOT NULL DEFAULT 'queued',
@@ -157,6 +158,9 @@ func initJobAttemptsSchema(db *sql.DB) error {
 	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN predecessor_attempt_id INTEGER`); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN target_id INTEGER REFERENCES execution_targets(id)`); err != nil {
+		return err
+	}
 	// Drop views and triggers that reference old column names before renaming.
 	// These are recreated later in initSchema.
 	for _, v := range []string{"launch_job_membership", "job_status", "job_run_training_examples", "training_examples", "job_effective_state", "all_runs"} {
@@ -177,6 +181,7 @@ func initJobAttemptsSchema(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_job_attempts_job ON job_attempts(job_id, attempt_number DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_job_attempts_status ON job_attempts(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_job_attempts_launch ON job_attempts(launch_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_job_attempts_target ON job_attempts(target_id)`,
 	}
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
@@ -880,12 +885,16 @@ func CreateAttempt(db *sql.DB, jobID int64, host string, cloudInstanceID *int64,
 
 func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
 	now := time.Now().Unix()
+	targetID, err := ensureExecutionTargetForAttempt(execer, host, cloudInstanceID)
+	if err != nil {
+		return 0, fmt.Errorf("ensure execution target for job %d: %w", jobID, err)
+	}
 	result, err := execer.Exec(`
-		INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
+		INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, target_id, status, queued_at)
 		VALUES (?,
 			COALESCE((SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = ?), 0) + 1,
-			?, ?, ?, ?)`,
-		jobID, jobID, host, cloudInstanceID, status, now,
+			?, ?, ?, ?, ?)`,
+		jobID, jobID, host, cloudInstanceID, targetID, status, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create attempt for job %d: %w", jobID, err)
@@ -1096,15 +1105,21 @@ func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 // This re-links an orphaned job (whose attempt was reset without a launch_id)
 // back to the launch that is actually running it, as observed from R2 phase.
 func SetAttemptLaunch(database *sql.DB, jobID int64, launchID int64) error {
+	if err := EnsureRentalExecutionTarget(database, launchID); err != nil {
+		return err
+	}
 	_, err := database.Exec(`
 		UPDATE job_attempts
-		SET launch_id = ?, host = ?,
+		SET launch_id = ?, host = ?, target_id = (
+		        SELECT id FROM execution_targets
+		         WHERE kind = 'rental_instance' AND launch_id = ?
+		    ),
 		    pending_status = CASE
 		        WHEN pending_status = ? THEN ?
 		        ELSE pending_status
 		    END
 		WHERE id = `+latestOpenAttemptSubquery,
-		launchID, LaunchHost(launchID), StatusPendingPlacement, StatusQueued, jobID,
+		launchID, LaunchHost(launchID), launchID, StatusPendingPlacement, StatusQueued, jobID,
 	)
 	return err
 }

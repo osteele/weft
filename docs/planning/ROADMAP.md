@@ -147,6 +147,29 @@ The "rare TUI gets banner integration first time it's used" pattern is fine
 — banners are a net additive feature; entrypoints without integration are
 no worse than before.
 
+## Execution target normalization
+
+Phase one is in place: `execution_targets` stores inventory hosts and rental
+instances, `launches.target_id` links rental rows, and
+`job_attempts.target_id` is now backfilled as a compatibility shadow for the
+existing `host` / `launch_id` placement columns.
+
+Remaining work:
+
+- Make `job_attempts.target_id` the only placement pointer used by new code.
+- Replace `job_status.effective_target_kind` derivation from parallel
+  `host` / `launch_id` columns with a join through `execution_targets`.
+- Move host-sync, rental-sync, placement, and TUI queries to target-kind
+  filters instead of ad hoc `host` / `launch_id` predicates.
+- Add integrity validation that rejects mixed placement state
+  (`target_id` disagrees with `host` or `launch_id`).
+- Once callers no longer depend on the shadow fields, rebuild
+  `job_attempts` without duplicated placement columns or keep them as
+  generated/compatibility columns with one-way writes from `target_id`.
+
+The goal is to make "inventory host plus rental launch on the same attempt"
+impossible by schema shape rather than by scattered update guards.
+
 ## UserIntent entity (replaces requested_status three-way merge)
 
 The `job_status` view derives `Job.status` from `jobs.requested_status`

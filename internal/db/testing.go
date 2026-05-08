@@ -245,6 +245,7 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			attempt_number INTEGER NOT NULL DEFAULT 1,
 			host TEXT DEFAULT '',
 			launch_id INTEGER,
+			target_id INTEGER,
 			status TEXT DEFAULT 'queued',
 			queued_at INTEGER,
 			start_time INTEGER,

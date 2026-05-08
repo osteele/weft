@@ -116,6 +116,131 @@ func initExecutionTargetsSchema(database *sql.DB) error {
 	return SyncExecutionTargets(database)
 }
 
+func ensureExecutionTargetForAttempt(execer dbExecer, host string, launchID *int64) (any, error) {
+	if launchID != nil && *launchID > 0 {
+		if _, err := execer.Exec(`
+			INSERT INTO execution_targets
+				(kind, host, launch_id, status, gpu_class, gpu_mem_gb, num_gpus, cordoned, cordon_reason, cordoned_at,
+				 deadline_unix, created_at, updated_at, last_observed_at)
+			SELECT 'rental_instance',
+			       'rental:' || l.id,
+			       l.id,
+			       CASE
+			         WHEN l.status IN ('planned','launching') THEN 'provisioning'
+			         WHEN l.status IN ('running','grace') THEN 'running'
+			         WHEN l.status = 'paused' THEN 'draining'
+			         ELSE 'terminated'
+			       END,
+			       l.gpu_class,
+			       COALESCE(l.gpu_mem_gb, 0),
+			       COALESCE(l.num_gpus, 0),
+			       COALESCE(l.cordoned, 0),
+			       l.cordon_reason,
+			       l.cordoned_at,
+			       l.grace_deadline,
+			       l.created_at,
+			       strftime('%s','now'),
+			       COALESCE(l.agent_ready_at_unix, l.ready_at, l.launched_at, l.created_at)
+			  FROM launches l
+			 WHERE l.id = ?
+			ON CONFLICT(launch_id) WHERE kind = 'rental_instance' DO UPDATE SET
+				status = excluded.status,
+				gpu_class = excluded.gpu_class,
+				gpu_mem_gb = excluded.gpu_mem_gb,
+				num_gpus = excluded.num_gpus,
+				cordoned = excluded.cordoned,
+				cordon_reason = excluded.cordon_reason,
+				cordoned_at = excluded.cordoned_at,
+				deadline_unix = excluded.deadline_unix,
+				updated_at = excluded.updated_at,
+				last_observed_at = excluded.last_observed_at`, *launchID); err != nil {
+			return nil, err
+		}
+		var targetID int64
+		if err := execer.QueryRow(
+			`SELECT id FROM execution_targets WHERE kind = 'rental_instance' AND launch_id = ?`,
+			*launchID,
+		).Scan(&targetID); err != nil {
+			return nil, err
+		}
+		return targetID, nil
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || IsLaunchHost(host) {
+		return nil, nil
+	}
+	now := time.Now().Unix()
+	if _, err := execer.Exec(`
+		INSERT INTO execution_targets (kind, host, status, created_at, updated_at, last_observed_at)
+		VALUES ('inventory_host', ?, 'ready', ?, ?, ?)
+		ON CONFLICT(host) WHERE kind = 'inventory_host' DO UPDATE SET
+			updated_at = excluded.updated_at,
+			last_observed_at = excluded.last_observed_at`,
+		host, now, now, now); err != nil {
+		return nil, err
+	}
+	var targetID int64
+	if err := execer.QueryRow(
+		`SELECT id FROM execution_targets WHERE kind = 'inventory_host' AND host = ?`,
+		host,
+	).Scan(&targetID); err != nil {
+		return nil, err
+	}
+	return targetID, nil
+}
+
+func BackfillJobAttemptExecutionTargets(database *sql.DB) error {
+	if database == nil {
+		return nil
+	}
+	if err := SyncExecutionTargets(database); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`
+		INSERT INTO execution_targets (kind, host, status, created_at, updated_at, last_observed_at)
+		SELECT DISTINCT 'inventory_host', ja.host, 'ready', ?, ?, ?
+		  FROM job_attempts ja
+		 WHERE COALESCE(ja.host, '') != ''
+		   AND ja.launch_id IS NULL
+		   AND ja.host NOT LIKE 'vastai:%'
+		   AND ja.host NOT LIKE 'runpod:%'
+		   AND ja.host NOT LIKE 'rental:%'
+		ON CONFLICT(host) WHERE kind = 'inventory_host' DO UPDATE SET
+			updated_at = excluded.updated_at,
+			last_observed_at = excluded.last_observed_at`,
+		now, now, now); err != nil {
+		return err
+	}
+	if _, err := database.Exec(`
+		UPDATE job_attempts
+		   SET target_id = (
+		       SELECT et.id
+		         FROM execution_targets et
+		        WHERE et.kind = 'rental_instance'
+		          AND et.launch_id = job_attempts.launch_id
+		   )
+		 WHERE target_id IS NULL
+		   AND launch_id IS NOT NULL`); err != nil {
+		return err
+	}
+	_, err := database.Exec(`
+		UPDATE job_attempts
+		   SET target_id = (
+		       SELECT et.id
+		         FROM execution_targets et
+		        WHERE et.kind = 'inventory_host'
+		          AND et.host = job_attempts.host
+		   )
+		 WHERE target_id IS NULL
+		   AND launch_id IS NULL
+		   AND COALESCE(host, '') != ''
+		   AND host NOT LIKE 'vastai:%'
+		   AND host NOT LIKE 'runpod:%'
+		   AND host NOT LIKE 'rental:%'`)
+	return err
+}
+
 func SyncExecutionTargets(database *sql.DB) error {
 	if database == nil {
 		return nil

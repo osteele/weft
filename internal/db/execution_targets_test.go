@@ -60,6 +60,63 @@ func TestExecutionTargetsBackfillInventoryAndRental(t *testing.T) {
 	}
 }
 
+func TestJobAttemptExecutionTargetBackfill(t *testing.T) {
+	database := SetupTestDB(t)
+
+	hostJobID, err := RecordQueued(database, "cool30", "/tmp/project", "echo host", "host")
+	if err != nil {
+		t.Fatalf("RecordQueued host: %v", err)
+	}
+	rentalJobID, err := RecordQueued(database, "", "/tmp/project", "echo rental", "rental")
+	if err != nil {
+		t.Fatalf("RecordQueued rental: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "runpod",
+		GPUClass: "a6000",
+		GPUMemGB: 48,
+		NumGPUs:  1,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, rentalJobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET target_id = NULL WHERE job_id IN (?, ?)`, hostJobID, rentalJobID); err != nil {
+		t.Fatalf("clear target ids: %v", err)
+	}
+
+	if err := BackfillJobAttemptExecutionTargets(database); err != nil {
+		t.Fatalf("BackfillJobAttemptExecutionTargets: %v", err)
+	}
+
+	var hostKind, rentalKind string
+	if err := database.QueryRow(`
+		SELECT et.kind
+		  FROM job_attempts ja
+		  JOIN execution_targets et ON et.id = ja.target_id
+		 WHERE ja.job_id = ?
+		 ORDER BY ja.attempt_number DESC LIMIT 1`, hostJobID).Scan(&hostKind); err != nil {
+		t.Fatalf("query host target kind: %v", err)
+	}
+	if hostKind != string(ExecutionTargetInventoryHost) {
+		t.Fatalf("host target kind = %q, want %q", hostKind, ExecutionTargetInventoryHost)
+	}
+	if err := database.QueryRow(`
+		SELECT et.kind
+		  FROM job_attempts ja
+		  JOIN execution_targets et ON et.id = ja.target_id
+		 WHERE ja.job_id = ?
+		 ORDER BY ja.attempt_number DESC LIMIT 1`, rentalJobID).Scan(&rentalKind); err != nil {
+		t.Fatalf("query rental target kind: %v", err)
+	}
+	if rentalKind != string(ExecutionTargetRentalInstance) {
+		t.Fatalf("rental target kind = %q, want %q", rentalKind, ExecutionTargetRentalInstance)
+	}
+}
+
 func TestSetLaunchCordonedMirrorsExecutionTarget(t *testing.T) {
 	database := SetupTestDB(t)
 

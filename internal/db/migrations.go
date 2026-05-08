@@ -170,6 +170,18 @@ var versionedMigrations = []migration{
 		},
 	},
 	{
+		Description: "add job_attempts.target_id column",
+		Apply: func(db *sql.DB) error {
+			if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN target_id INTEGER REFERENCES execution_targets(id)`); err != nil {
+				return err
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_attempts_target ON job_attempts(target_id)`); err != nil {
+				return err
+			}
+			return BackfillJobAttemptExecutionTargets(db)
+		},
+	},
+	{
 		Description: "add jobs.priority column",
 		Apply: func(db *sql.DB) error {
 			return addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`)
