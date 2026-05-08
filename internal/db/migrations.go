@@ -253,6 +253,23 @@ var versionedMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		Description: "record autopilot runner binary identity",
+		Apply: func(db *sql.DB) error {
+			for _, stmt := range []string{
+				`ALTER TABLE autopilot_state ADD COLUMN active_binary_path TEXT`,
+				`ALTER TABLE autopilot_state ADD COLUMN active_binary_size INTEGER`,
+				`ALTER TABLE autopilot_state ADD COLUMN active_binary_mtime INTEGER`,
+				`ALTER TABLE autopilot_state ADD COLUMN active_binary_dev INTEGER`,
+				`ALTER TABLE autopilot_state ADD COLUMN active_binary_ino INTEGER`,
+			} {
+				if err := addColumnIfMissing(db, stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

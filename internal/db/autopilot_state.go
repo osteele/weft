@@ -21,12 +21,21 @@ type AutopilotState struct {
 	ActiveRunnerPID    int
 	ActiveRunnerLabel  string
 	ActiveRunnerHost   string
+	ActiveBinary       BinaryIdentity
 	PassStartedAt      time.Time
 	LastHeartbeat      time.Time
 	LastPassFinishedAt time.Time
 	LastPassDurationMS int64
 	LastPassSummary    string
 	LastPassError      string
+}
+
+type BinaryIdentity struct {
+	Path        string
+	Size        int64
+	ModTimeUnix int64
+	Dev         uint64
+	Ino         uint64
 }
 
 func (s *AutopilotState) IsActive(now time.Time, staleAfter time.Duration) bool {
@@ -69,6 +78,8 @@ func scanAutopilotState(database *sql.DB) (*AutopilotState, error) {
 	row := database.QueryRow(`
 		SELECT paused, paused_at, paused_by, paused_reason,
 		       active_runner_pid, active_runner_label, active_runner_host,
+		       active_binary_path, active_binary_size, active_binary_mtime,
+		       active_binary_dev, active_binary_ino,
 		       pass_started_at, last_heartbeat,
 		       last_pass_finished_at, last_pass_duration_ms,
 		       last_pass_summary, last_pass_error
@@ -82,6 +93,11 @@ func scanAutopilotState(database *sql.DB) (*AutopilotState, error) {
 		runnerPID          sql.NullInt64
 		runnerLabel        sql.NullString
 		runnerHost         sql.NullString
+		binaryPath         sql.NullString
+		binarySize         sql.NullInt64
+		binaryMtime        sql.NullInt64
+		binaryDev          sql.NullInt64
+		binaryIno          sql.NullInt64
 		passStartedAt      sql.NullInt64
 		lastHeartbeat      sql.NullInt64
 		lastPassFinishedAt sql.NullInt64
@@ -92,6 +108,7 @@ func scanAutopilotState(database *sql.DB) (*AutopilotState, error) {
 	if err := row.Scan(
 		&paused, &pausedAt, &pausedBy, &pausedReason,
 		&runnerPID, &runnerLabel, &runnerHost,
+		&binaryPath, &binarySize, &binaryMtime, &binaryDev, &binaryIno,
 		&passStartedAt, &lastHeartbeat,
 		&lastPassFinishedAt, &lastPassDurationMS,
 		&lastPassSummary, &lastPassError,
@@ -99,12 +116,19 @@ func scanAutopilotState(database *sql.DB) (*AutopilotState, error) {
 		return nil, err
 	}
 	state := &AutopilotState{
-		Paused:             paused != 0,
-		PausedBy:           pausedBy.String,
-		PausedReason:       pausedReason.String,
-		ActiveRunnerPID:    int(runnerPID.Int64),
-		ActiveRunnerLabel:  runnerLabel.String,
-		ActiveRunnerHost:   runnerHost.String,
+		Paused:            paused != 0,
+		PausedBy:          pausedBy.String,
+		PausedReason:      pausedReason.String,
+		ActiveRunnerPID:   int(runnerPID.Int64),
+		ActiveRunnerLabel: runnerLabel.String,
+		ActiveRunnerHost:  runnerHost.String,
+		ActiveBinary: BinaryIdentity{
+			Path:        binaryPath.String,
+			Size:        binarySize.Int64,
+			ModTimeUnix: binaryMtime.Int64,
+			Dev:         uint64(binaryDev.Int64),
+			Ino:         uint64(binaryIno.Int64),
+		},
 		LastPassDurationMS: lastPassDurationMS.Int64,
 		LastPassSummary:    lastPassSummary.String,
 		LastPassError:      lastPassError.String,
@@ -156,7 +180,7 @@ func ResumeAutopilot(database *sql.DB) (*AutopilotState, error) {
 //   - existing!=nil: another runner holds a fresh claim
 //
 // A claim aged past staleAfter is reclaimed automatically.
-func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleAfter time.Duration) (claimed, paused bool, existing *AutopilotState, err error) {
+func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity) (claimed, paused bool, existing *AutopilotState, err error) {
 	tx, err := database.BeginTx(context.Background(), nil)
 	if err != nil {
 		return false, false, nil, err
@@ -171,6 +195,11 @@ func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleA
 		runnerPID          sql.NullInt64
 		runnerLabel        sql.NullString
 		runnerHost         sql.NullString
+		binaryPath         sql.NullString
+		binarySize         sql.NullInt64
+		binaryMtime        sql.NullInt64
+		binaryDev          sql.NullInt64
+		binaryIno          sql.NullInt64
 		passStartedAt      sql.NullInt64
 		lastHeartbeat      sql.NullInt64
 		lastPassFinishedAt sql.NullInt64
@@ -181,6 +210,8 @@ func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleA
 	if err := tx.QueryRow(`
 		SELECT paused, paused_at, paused_by, paused_reason,
 		       active_runner_pid, active_runner_label, active_runner_host,
+		       active_binary_path, active_binary_size, active_binary_mtime,
+		       active_binary_dev, active_binary_ino,
 		       pass_started_at, last_heartbeat,
 		       last_pass_finished_at, last_pass_duration_ms,
 		       last_pass_summary, last_pass_error
@@ -188,6 +219,7 @@ func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleA
 	`).Scan(
 		&pausedInt, &pausedAt, &pausedBy, &pausedReason,
 		&runnerPID, &runnerLabel, &runnerHost,
+		&binaryPath, &binarySize, &binaryMtime, &binaryDev, &binaryIno,
 		&passStartedAt, &lastHeartbeat,
 		&lastPassFinishedAt, &lastPassDurationMS,
 		&lastPassSummary, &lastPassError,
@@ -197,12 +229,19 @@ func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleA
 
 	buildExisting := func() *AutopilotState {
 		s := &AutopilotState{
-			Paused:             pausedInt != 0,
-			PausedBy:           pausedBy.String,
-			PausedReason:       pausedReason.String,
-			ActiveRunnerPID:    int(runnerPID.Int64),
-			ActiveRunnerLabel:  runnerLabel.String,
-			ActiveRunnerHost:   runnerHost.String,
+			Paused:            pausedInt != 0,
+			PausedBy:          pausedBy.String,
+			PausedReason:      pausedReason.String,
+			ActiveRunnerPID:   int(runnerPID.Int64),
+			ActiveRunnerLabel: runnerLabel.String,
+			ActiveRunnerHost:  runnerHost.String,
+			ActiveBinary: BinaryIdentity{
+				Path:        binaryPath.String,
+				Size:        binarySize.Int64,
+				ModTimeUnix: binaryMtime.Int64,
+				Dev:         uint64(binaryDev.Int64),
+				Ino:         uint64(binaryIno.Int64),
+			},
 			LastPassDurationMS: lastPassDurationMS.Int64,
 			LastPassSummary:    lastPassSummary.String,
 			LastPassError:      lastPassError.String,
@@ -239,10 +278,14 @@ func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleA
 	if _, err := tx.Exec(`
 		UPDATE autopilot_state
 		   SET active_runner_pid = ?, active_runner_label = ?, active_runner_host = ?,
+		       active_binary_path = ?, active_binary_size = ?, active_binary_mtime = ?,
+		       active_binary_dev = ?, active_binary_ino = ?,
 		       pass_started_at = ?, last_heartbeat = ?,
 		       last_pass_error = NULL
 		 WHERE id = 1
-	`, pid, label, host, now.Unix(), now.Unix()); err != nil {
+	`, pid, label, host,
+		emptyToNull(binary.Path), binary.Size, binary.ModTimeUnix, int64(binary.Dev), int64(binary.Ino),
+		now.Unix(), now.Unix()); err != nil {
 		return false, false, nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -282,6 +325,8 @@ func ReleaseAutopilotPass(database *sql.DB, pid int, duration time.Duration, sum
 	_, err := database.Exec(`
 		UPDATE autopilot_state
 		   SET active_runner_pid = NULL, active_runner_label = NULL, active_runner_host = NULL,
+		       active_binary_path = NULL, active_binary_size = NULL, active_binary_mtime = NULL,
+		       active_binary_dev = NULL, active_binary_ino = NULL,
 		       pass_started_at = NULL, last_heartbeat = NULL,
 		       last_pass_finished_at = ?, last_pass_duration_ms = ?,
 		       last_pass_summary = ?, last_pass_error = ?

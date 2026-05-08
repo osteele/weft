@@ -58,8 +58,9 @@ func TestAutopilotState_PauseAndResume(t *testing.T) {
 
 func TestAutopilotState_TryClaimContention(t *testing.T) {
 	database := setupTestDB(t)
+	binary := BinaryIdentity{Path: "/tmp/weft", Size: 42, ModTimeUnix: 123, Dev: 7, Ino: 9}
 
-	claimed, paused, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second)
+	claimed, paused, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second, binary)
 	if err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestAutopilotState_TryClaimContention(t *testing.T) {
 		t.Fatal("first claim returned paused=true unexpectedly")
 	}
 
-	claimed, paused, existing, err := TryClaimAutopilotPass(database, 200, "watch-tui", "host-a", 30*time.Second)
+	claimed, paused, existing, err := TryClaimAutopilotPass(database, 200, "watch-tui", "host-a", 30*time.Second, BinaryIdentity{})
 	if err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
@@ -86,6 +87,9 @@ func TestAutopilotState_TryClaimContention(t *testing.T) {
 	if existing.ActiveRunnerPID != 100 {
 		t.Errorf("existing.ActiveRunnerPID = %d, want 100", existing.ActiveRunnerPID)
 	}
+	if existing.ActiveBinary != binary {
+		t.Errorf("existing.ActiveBinary = %+v, want %+v", existing.ActiveBinary, binary)
+	}
 }
 
 func TestAutopilotState_TryClaimRespectsPause(t *testing.T) {
@@ -94,7 +98,7 @@ func TestAutopilotState_TryClaimRespectsPause(t *testing.T) {
 	if _, err := PauseAutopilot(database, "alice", ""); err != nil {
 		t.Fatalf("PauseAutopilot: %v", err)
 	}
-	claimed, paused, state, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second)
+	claimed, paused, state, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second, BinaryIdentity{})
 	if err != nil {
 		t.Fatalf("TryClaim while paused: %v", err)
 	}
@@ -113,7 +117,7 @@ func TestAutopilotState_StaleClaimReclaimable(t *testing.T) {
 	database := setupTestDB(t)
 
 	// Take a claim.
-	claimed, _, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second)
+	claimed, _, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second, BinaryIdentity{})
 	if err != nil || !claimed {
 		t.Fatalf("seed claim: %v / %v", err, claimed)
 	}
@@ -123,7 +127,7 @@ func TestAutopilotState_StaleClaimReclaimable(t *testing.T) {
 		t.Fatalf("age heartbeat: %v", err)
 	}
 
-	claimed, _, _, err = TryClaimAutopilotPass(database, 200, "watch-tui", "host-b", 30*time.Second)
+	claimed, _, _, err = TryClaimAutopilotPass(database, 200, "watch-tui", "host-b", 30*time.Second, BinaryIdentity{})
 	if err != nil {
 		t.Fatalf("reclaim: %v", err)
 	}
@@ -142,7 +146,7 @@ func TestAutopilotState_StaleClaimReclaimable(t *testing.T) {
 func TestAutopilotState_HeartbeatRequiresOwnership(t *testing.T) {
 	database := setupTestDB(t)
 
-	if _, _, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second); err != nil {
+	if _, _, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second, BinaryIdentity{}); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	if err := HeartbeatAutopilotPass(database, 100); err != nil {
@@ -157,7 +161,7 @@ func TestAutopilotState_HeartbeatRequiresOwnership(t *testing.T) {
 func TestAutopilotState_ReleaseRecordsSummary(t *testing.T) {
 	database := setupTestDB(t)
 
-	if _, _, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second); err != nil {
+	if _, _, _, err := TryClaimAutopilotPass(database, 100, "list-tui", "host-a", 30*time.Second, BinaryIdentity{}); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	if err := ReleaseAutopilotPass(database, 100, 1500*time.Millisecond, "placed=2 launched=1", nil); err != nil {
@@ -169,6 +173,9 @@ func TestAutopilotState_ReleaseRecordsSummary(t *testing.T) {
 	}
 	if state.ActiveRunnerPID != 0 {
 		t.Error("ActiveRunnerPID should be cleared after release")
+	}
+	if state.ActiveBinary.Path != "" {
+		t.Errorf("ActiveBinary.Path = %q, want cleared", state.ActiveBinary.Path)
 	}
 	if !state.PassStartedAt.IsZero() {
 		t.Error("PassStartedAt should be cleared after release")

@@ -2482,7 +2482,9 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 // pause/active-runner gate. It returns ErrAutopilotPaused or ErrAutopilotBusy
 // (via the runner package) without running a pass when those conditions hold.
 func runGatedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string) (int, int, int, string, map[int64]string, error) {
-	result, err := orchestration.RunGroupedAutoPilotPassGated(ctx, database, scopedJobs, label)
+	result, err := orchestration.RunGroupedAutoPilotPassGatedWithOptions(ctx, database, scopedJobs, label, orchestration.AutopilotRunnerOptions{
+		AllowStaleBinary: true,
+	})
 	if result != nil {
 		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, err
 	}

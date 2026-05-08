@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/processguard"
 )
 
 // Coarse, observable, externally-controllable layer above the per-scope
@@ -33,6 +34,15 @@ const (
 var ErrAutopilotPaused = errors.New("autopilot is paused")
 var ErrAutopilotBusy = errors.New("autopilot pass is in progress on another runner")
 
+var ensureCurrentBinary = processguard.EnsureCurrentBinary
+
+type AutopilotRunnerOptions struct {
+	// AllowStaleBinary lets foreground controllers such as `weft uj` keep
+	// driving autopilot after `weft` is rebuilt while the TUI is open.
+	// Headless controllers should keep the default strict behavior.
+	AllowStaleBinary bool
+}
+
 // AutopilotRunner claims the singleton autopilot pass slot, heartbeats while a
 // pass runs, and releases on completion.
 type AutopilotRunner struct {
@@ -40,6 +50,7 @@ type AutopilotRunner struct {
 	pid      int
 	label    string
 	host     string
+	opts     AutopilotRunnerOptions
 
 	mu      sync.Mutex
 	holding bool
@@ -48,12 +59,17 @@ type AutopilotRunner struct {
 }
 
 func NewAutopilotRunner(database *sql.DB, label string) *AutopilotRunner {
+	return NewAutopilotRunnerWithOptions(database, label, AutopilotRunnerOptions{})
+}
+
+func NewAutopilotRunnerWithOptions(database *sql.DB, label string, opts AutopilotRunnerOptions) *AutopilotRunner {
 	host, _ := os.Hostname()
 	return &AutopilotRunner{
 		database: database,
 		pid:      os.Getpid(),
 		label:    label,
 		host:     host,
+		opts:     opts,
 	}
 }
 
@@ -64,7 +80,12 @@ func (r *AutopilotRunner) TryAcquire() error {
 	if r == nil || r.database == nil {
 		return nil
 	}
-	claimed, paused, _, err := db.TryClaimAutopilotPass(r.database, r.pid, r.label, r.host, AutopilotPassStaleAfter)
+	if !r.opts.AllowStaleBinary {
+		if err := ensureCurrentBinary(); err != nil {
+			return err
+		}
+	}
+	claimed, paused, _, err := db.TryClaimAutopilotPass(r.database, r.pid, r.label, r.host, AutopilotPassStaleAfter, processguard.CurrentBinaryIdentity())
 	if err != nil {
 		return err
 	}
@@ -129,7 +150,11 @@ func (r *AutopilotRunner) Release(duration time.Duration, summary string, passEr
 // pause/active-runner gate. On ErrAutopilotPaused or ErrAutopilotBusy the
 // inner pass is not run.
 func RunGroupedAutoPilotPassGated(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string) (result *GroupedAutoPilotResult, err error) {
-	runner := NewAutopilotRunner(database, label)
+	return RunGroupedAutoPilotPassGatedWithOptions(ctx, database, scopedJobs, label, AutopilotRunnerOptions{})
+}
+
+func RunGroupedAutoPilotPassGatedWithOptions(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string, opts AutopilotRunnerOptions) (result *GroupedAutoPilotResult, err error) {
+	runner := NewAutopilotRunnerWithOptions(database, label, opts)
 	if err := runner.TryAcquire(); err != nil {
 		return nil, err
 	}

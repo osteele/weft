@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/processguard"
 	"github.com/spf13/cobra"
 )
 
@@ -182,6 +183,8 @@ type autopilotStateView struct {
 	ActiveRunnerPID    int                `json:"active_runner_pid,omitempty"`
 	ActiveRunnerLabel  string             `json:"active_runner_label,omitempty"`
 	ActiveRunnerHost   string             `json:"active_runner_host,omitempty"`
+	ActiveBinaryPath   string             `json:"active_binary_path,omitempty"`
+	ActiveBinaryStale  bool               `json:"active_binary_stale,omitempty"`
 	PassStartedAt      *string            `json:"pass_started_at,omitempty"`
 	PassAgeSeconds     int64              `json:"pass_age_seconds,omitempty"`
 	HeartbeatAt        *string            `json:"heartbeat_at,omitempty"`
@@ -225,6 +228,7 @@ func buildAutopilotStateView(state *db.AutopilotState) autopilotStateView {
 	view.ActiveRunnerPID = state.ActiveRunnerPID
 	view.ActiveRunnerLabel = state.ActiveRunnerLabel
 	view.ActiveRunnerHost = state.ActiveRunnerHost
+	view.ActiveBinaryPath = state.ActiveBinary.Path
 	view.LastPassDurationMS = state.LastPassDurationMS
 	view.LastPassSummary = state.LastPassSummary
 	view.LastPassError = state.LastPassError
@@ -246,10 +250,15 @@ func buildAutopilotStateView(state *db.AutopilotState) autopilotStateView {
 		s := state.LastPassFinishedAt.Format(time.RFC3339)
 		view.LastPassFinishedAt = &s
 	}
+	if changed, err := processguard.ActiveRunnerBinaryChanged(state.ActiveBinary); err == nil && changed {
+		view.ActiveBinaryStale = true
+	}
 
 	switch {
 	case state.Paused:
 		view.State = statePaused
+	case view.ActiveBinaryStale && state.IsActive(now, staleAfter):
+		view.State = stateStale
 	case state.IsActive(now, staleAfter):
 		view.State = stateRunning
 	case state.IsStale(now, staleAfter):
@@ -326,12 +335,19 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 			db.FormatDuration(view.PassAgeSeconds),
 			db.FormatDuration(view.HeartbeatAgeS))
 	case stateStale:
-		fmt.Fprintf(&b, "autopilot: STALE — %s (pid %d on %s) claimed pass but heartbeat is %s old (>%ds); next runner will reclaim",
-			defaultStr(view.ActiveRunnerLabel, "unknown"),
-			view.ActiveRunnerPID,
-			defaultStr(view.ActiveRunnerHost, "?"),
-			db.FormatDuration(view.HeartbeatAgeS),
-			view.StaleAfterSeconds)
+		if view.ActiveBinaryStale {
+			fmt.Fprintf(&b, "autopilot: STALE — %s (pid %d on %s) is running an old weft binary; restart autopilot",
+				defaultStr(view.ActiveRunnerLabel, "unknown"),
+				view.ActiveRunnerPID,
+				defaultStr(view.ActiveRunnerHost, "?"))
+		} else {
+			fmt.Fprintf(&b, "autopilot: STALE — %s (pid %d on %s) claimed pass but heartbeat is %s old (>%ds); next runner will reclaim",
+				defaultStr(view.ActiveRunnerLabel, "unknown"),
+				view.ActiveRunnerPID,
+				defaultStr(view.ActiveRunnerHost, "?"),
+				db.FormatDuration(view.HeartbeatAgeS),
+				view.StaleAfterSeconds)
+		}
 	case statePaused:
 		fmt.Fprint(&b, "autopilot: PAUSED")
 		if view.PausedBy != "" {

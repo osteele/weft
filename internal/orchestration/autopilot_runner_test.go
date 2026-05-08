@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/processguard"
 )
 
 func openMigratedTestDB(t *testing.T) *sql.DB {
@@ -82,6 +83,36 @@ func TestAutopilotRunner_PausedReturnsErr(t *testing.T) {
 	err := r.TryAcquire()
 	if !errors.Is(err, ErrAutopilotPaused) {
 		t.Fatalf("expected ErrAutopilotPaused, got %v", err)
+	}
+}
+
+func TestAutopilotRunner_StaleBinaryEnforcedByDefault(t *testing.T) {
+	database := openMigratedTestDB(t)
+	oldEnsureCurrentBinary := ensureCurrentBinary
+	ensureCurrentBinary = func() error { return processguard.ErrBinaryChanged }
+	t.Cleanup(func() { ensureCurrentBinary = oldEnsureCurrentBinary })
+
+	r := NewAutopilotRunner(database, "test")
+	err := r.TryAcquire()
+	if !errors.Is(err, processguard.ErrBinaryChanged) {
+		t.Fatalf("expected ErrBinaryChanged, got %v", err)
+	}
+}
+
+func TestAutopilotRunner_StaleBinaryAllowedForForegroundController(t *testing.T) {
+	database := openMigratedTestDB(t)
+	oldEnsureCurrentBinary := ensureCurrentBinary
+	ensureCurrentBinary = func() error { return processguard.ErrBinaryChanged }
+	t.Cleanup(func() { ensureCurrentBinary = oldEnsureCurrentBinary })
+
+	r := NewAutopilotRunnerWithOptions(database, "list-tui", AutopilotRunnerOptions{
+		AllowStaleBinary: true,
+	})
+	if err := r.TryAcquire(); err != nil {
+		t.Fatalf("TryAcquire with AllowStaleBinary: %v", err)
+	}
+	if err := r.Release(time.Millisecond, "ok", nil); err != nil {
+		t.Fatalf("Release: %v", err)
 	}
 }
 
