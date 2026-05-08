@@ -1453,11 +1453,11 @@ rule RunawayBreakerClears {
 -- Autopilot placement pass
 -- ==========================================================================
 
--- On each scheduling tick, the autopilot asks the planner for an
--- AutoPlacementPlan over the current unplaced jobs, then launches the
--- jobs the planner approved. Jobs the planner explicitly blocked MUST
--- NOT be launched in the same pass — their block reasons are surfaced
--- to the user and re-evaluated on the next pass.
+-- On each scheduling tick or database invalidation, the autopilot asks
+-- the planner for an AutoPlacementPlan over the current unplaced jobs,
+-- then launches the jobs the planner approved. Jobs the planner explicitly
+-- blocked MUST NOT be launched in the same pass — their block reasons are
+-- surfaced to the user and re-evaluated on the next pass.
 --
 -- The unplaced_jobs input is defined by jobs.is_unplaced_awaiting_placement
 -- (target_kind = unplaced AND status = queued AND no open MoveIntent or
@@ -1502,7 +1502,11 @@ rule AutoPilotPass {
         -- jobs still skip this on-prem preference.
         -- A job appearing in blocked_reasons is surfaced to the user
         -- (e.g. "waiting for donor", "no matching offers") and retried
-        -- on the next autopilot tick, not this one.
+        -- after a later DB change or max-interval fallback, not this one.
+        -- Headless `weft autopilot run` waits on internal/app/dbwatch
+        -- after each pass. On timeout it syncs cloud state; if that sync
+        -- does not update the DB, it continues waiting instead of
+        -- replanning unchanged state.
 }
 
 rule ExistingInstanceCPUFloor {

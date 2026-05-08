@@ -19,27 +19,33 @@ weft narrate --once     # one-shot description of current state
 
 ## What it watches
 
-Every tick (default 30s), the command:
+The command wakes when the local SQLite database changes, with a maximum
+interval fallback (default 30s). After a DB-change wake it waits for a short
+quiet window (default 5s) so a burst of job/instance updates produces one
+narration pass instead of several.
+
+On each narration pass, the command:
 
 1. Reads the local SQLite DB for active jobs, non-terminal cloud
    instances, active campaigns, and autopilot state.
-2. Computes a delta against the previous tick.
+2. Computes a delta against the previous pass.
 3. Sends a structured snapshot + delta to Anthropic Claude, which returns
    a narration paragraph and a terse state recap (via a tool call).
 4. Prints the narration; appends the recap to a growing context block so
-   the next tick has continuity.
+   the next pass has continuity.
 
 **Ticks with no transitions are skipped — no API call, no token spend, no
 output.** If you've launched the narrator and nothing has happened in the
 DB since the priming snapshot, you'll see one paragraph and then silence
-until something actually transitions. Use `--debug` to confirm ticks are
-firing.
+until something actually transitions. Use `--debug` to confirm change wakes
+and max-interval passes are firing.
 
 ## Flags
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--tick DURATION` | `30s` | Polling interval. |
+| `--tick DURATION` | `30s` | Maximum interval between checks. |
+| `--quiet-window DURATION` | `5s` | Quiet period after a DB change before narrating. |
 | `--project NAME` | (whole system) | Limit to a project (uses the same project derivation as `weft project jobs`). |
 | `--model NAME` | from config | Override the Anthropic model ID. |
 | `--once` | loop | Emit one narration of current state and exit. |
@@ -53,6 +59,7 @@ firing.
 [ai.narrate]
 model = "claude-sonnet-4-20250514"
 tick_seconds = 30
+quiet_seconds = 5
 max_output_tokens = 600
 compaction_threshold_tokens = 15000
 ```
@@ -95,8 +102,9 @@ has been invalidated by something upstream.
   transitions ("the job failed because…"). The system prompt requires
   hedging language ("likely", "possibly"), but treat the prose as
   commentary, not diagnosis.
-- **Stale by one tick.** Polling-based; sub-tick transitions are
-  narrated on the next tick at the latest.
+- **Quiet-window latency.** DB-change driven; bursts are intentionally
+  delayed until the quiet window expires, and the max interval still
+  bounds checks if filesystem notifications are unavailable.
 - **Register drift.** The terse recap chain is wrapped in a
   `<prior_state_recap>` block that the system prompt explicitly
   disclaims, so the model doesn't imitate it. If you ever see narration
@@ -106,6 +114,8 @@ has been invalidated by something upstream.
 ## Implementation pointers
 
 - `cmd/narrate.go` — cobra command, orchestration loop.
+- `internal/app/dbwatch` — DB/WAL/SHM change source shared with watch and
+  autopilot loops.
 - `internal/narrate/snapshot.go` — DB → `Snapshot` + `Delta` diffing.
 - `internal/narrate/format.go` — snapshot/delta → JSON for the prompt.
 - `internal/narrate/session.go` — recap accumulator + compaction trigger.

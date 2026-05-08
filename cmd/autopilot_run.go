@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
@@ -110,27 +112,33 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	changeSource := openDBChangeSource("autopilot run")
+	if changeSource != nil {
+		defer changeSource.Close()
+	}
+
 	pass := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		pass++
 
 		// Pre-check pause without claiming the singleton lock so paused mode
 		// loops cheaply and uses the longer --paused-wait cadence. The Gated
 		// call below still re-checks; transient races are fine.
 		paused, perr := orchestration.IsAutopilotPaused(database)
 		if perr == nil && paused {
+			pass++
 			emitPausedEvent(pass, autopilotRunPausedWait)
 			if autopilotRunOnce {
 				return nil
 			}
-			if waitOrDone(ctx, autopilotRunPausedWait) {
+			if _, done := waitForDBChangeOrTimeout(ctx, changeSource, autopilotRunPausedWait, "autopilot run"); done {
 				return nil
 			}
 			continue
 		}
+		pass++
 
 		// Sync first so the pass sees fresh job_attempts state. Bounded
 		// timeout: if sync exceeds it, sync continues in the background
@@ -182,8 +190,30 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		if autopilotRunMaxPasses > 0 && pass >= autopilotRunMaxPasses {
 			return nil
 		}
-		if waitOrDone(ctx, wait) {
+		if waitForAutopilotInvalidation(ctx, changeSource, cfg, database, wait) {
 			return nil
+		}
+	}
+}
+
+func waitForAutopilotInvalidation(ctx context.Context, changeSource *dbwatch.Source, cfg *config.Config, database *sql.DB, wait time.Duration) bool {
+	if changeSource == nil {
+		return waitForDurationOrDone(ctx, wait)
+	}
+	for {
+		changed, done := waitForDBChangeOrTimeout(ctx, changeSource, wait, "autopilot run")
+		if done {
+			return true
+		}
+		if changed {
+			return false
+		}
+		if cfg == nil {
+			continue
+		}
+		result, completed := syncCloudStateWithTimeout(cfg, database, nil, NormalCloudSyncTimeout, false)
+		if !completed || result.Updated > 0 {
+			return false
 		}
 	}
 }

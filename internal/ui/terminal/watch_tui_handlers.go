@@ -690,8 +690,7 @@ func (m watchModel) handleDBWatcherReady(msg watchDBWatcherReadyMsg) (tea.Model,
 		}
 		return m, nil
 	}
-	m.dbWatcher = msg.watcher
-	m.dbWatcherTargets = msg.targets
+	m.dbWatcher = msg.source
 	return m, m.waitForDBEvent()
 }
 

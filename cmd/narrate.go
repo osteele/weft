@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/narrate"
@@ -24,6 +25,7 @@ import (
 
 var (
 	narrateTickFlag    time.Duration
+	narrateQuietFlag   time.Duration
 	narrateProjectFlag string
 	narrateModelFlag   string
 	narrateOnceFlag    bool
@@ -50,7 +52,8 @@ use 'weft instance watch' / 'weft job watch' for the structured truth.`,
 
 func init() {
 	rootCmd.AddCommand(narrateCmd)
-	narrateCmd.Flags().DurationVar(&narrateTickFlag, "tick", 0, "Polling interval (default 30s, or config.ai.narrate.tick_seconds)")
+	narrateCmd.Flags().DurationVar(&narrateTickFlag, "tick", 0, "Maximum interval between checks (default 30s, or config.ai.narrate.tick_seconds)")
+	narrateCmd.Flags().DurationVar(&narrateQuietFlag, "quiet-window", 0, "DB-change quiet window before narrating (default 5s, or config.ai.narrate.quiet_seconds)")
 	narrateCmd.Flags().StringVar(&narrateProjectFlag, "project", "", "Limit narration to a project (default: whole system)")
 	narrateCmd.Flags().StringVar(&narrateModelFlag, "model", "", "Override Anthropic model ID")
 	narrateCmd.Flags().BoolVar(&narrateOnceFlag, "once", false, "Emit a single narration of current state, then exit")
@@ -104,6 +107,13 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 	tick := narrateTickFlag
 	if tick <= 0 {
 		tick = cfg.NarrateTickInterval()
+	}
+	quiet := narrateQuietFlag
+	if quiet <= 0 {
+		quiet = cfg.NarrateQuietWindow()
+	}
+	if quiet > tick {
+		quiet = tick
 	}
 
 	sess, err := narrate.NewSession(narrate.SessionOptions{
@@ -161,21 +171,60 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 	if err := r.tick(ctx); err != nil {
 		return err
 	}
+	lastTick := time.Now()
 	if narrateOnceFlag {
 		return nil
 	}
 
-	ticker := time.NewTicker(tick)
-	defer ticker.Stop()
+	changeSource := openDBChangeSource("narrate")
+	if changeSource != nil {
+		defer changeSource.Close()
+	}
 	for {
-		select {
-		case <-ctx.Done():
+		wait := time.Until(lastTick.Add(tick))
+		if wait <= 0 {
+			wait = tick
+		}
+		changed, done := waitForDBChangeOrTimeout(ctx, changeSource, wait, "narrate")
+		if done {
 			fmt.Fprintln(os.Stderr, "weft narrate: stopping")
 			return nil
-		case <-ticker.C:
-			if err := r.tick(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "weft narrate: tick error: %v\n", err)
+		}
+		if changed && waitForNarrateQuietWindow(ctx, changeSource, quiet, lastTick.Add(tick)) {
+			fmt.Fprintln(os.Stderr, "weft narrate: stopping")
+			return nil
+		}
+		if err := r.tick(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "weft narrate: tick error: %v\n", err)
+		}
+		lastTick = time.Now()
+	}
+}
+
+func waitForNarrateQuietWindow(ctx context.Context, changeSource *dbwatch.Source, quiet time.Duration, deadline time.Time) bool {
+	if quiet <= 0 || changeSource == nil {
+		return false
+	}
+	for {
+		wait := quiet
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return false
 			}
+			if wait > remaining {
+				wait = remaining
+			}
+		}
+		if wait <= 0 {
+			return false
+		}
+		changed, done := waitForDBChangeOrTimeout(ctx, changeSource, wait, "narrate")
+		if done {
+			return true
+		}
+		if !changed {
+			return false
 		}
 	}
 }

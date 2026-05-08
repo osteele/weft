@@ -112,6 +112,18 @@ bucket = "bucket"
 	}
 }
 
+func TestNarrateQuietWindowDefaultAndOverride(t *testing.T) {
+	var cfg Config
+	if got := cfg.NarrateQuietWindow(); got != 5*time.Second {
+		t.Fatalf("default quiet window = %s, want 5s", got)
+	}
+
+	cfg.AI.Narrate.QuietSeconds = 12
+	if got := cfg.NarrateQuietWindow(); got != 12*time.Second {
+		t.Fatalf("configured quiet window = %s, want 12s", got)
+	}
+}
+
 func TestLoadTOMLDecodesSharedHostOverrides(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "config.toml")

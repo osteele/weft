@@ -52,6 +52,12 @@ coordination point. A runner claims the row, heartbeats while a pass is active,
 then releases it. Pause is stored on the same row so every runner observes the
 same sticky external stop signal.
 
+Headless `weft autopilot run` is DB-invalidation driven: after a pass it waits
+for the shared SQLite DB/WAL/SHM change source before planning again. Its
+adaptive or fixed interval is a maximum wait and triggers cloud sync; if sync
+finds no local updates, the runner keeps waiting rather than replanning
+unchanged jobs.
+
 Older per-scope leases remain useful for UI feedback and local contention, but
 the singleton row is the correctness boundary: only one autopilot pass should
 be in flight across Weft processes.

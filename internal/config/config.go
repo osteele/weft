@@ -325,6 +325,8 @@ type NarrateConfig struct {
 	Model string `yaml:"model" toml:"model"`
 	// TickSeconds is the polling interval in seconds (default: 30).
 	TickSeconds int `yaml:"tick_seconds" toml:"tick_seconds"`
+	// QuietSeconds is the DB-change quiet window before narrating (default: 5).
+	QuietSeconds int `yaml:"quiet_seconds" toml:"quiet_seconds"`
 	// MaxOutputTokens caps the model's reply size per tick (default: 600).
 	MaxOutputTokens int `yaml:"max_output_tokens" toml:"max_output_tokens"`
 	// CompactionThresholdTokens is the accumulated-recap token count that triggers compaction (default: 15000).
@@ -345,6 +347,14 @@ func (c *Config) NarrateTickInterval() time.Duration {
 		return time.Duration(c.AI.Narrate.TickSeconds) * time.Second
 	}
 	return 30 * time.Second
+}
+
+// NarrateQuietWindow returns the DB-change quiet window, or 5s.
+func (c *Config) NarrateQuietWindow() time.Duration {
+	if c != nil && c.AI.Narrate.QuietSeconds > 0 {
+		return time.Duration(c.AI.Narrate.QuietSeconds) * time.Second
+	}
+	return 5 * time.Second
 }
 
 // NarrateMaxOutputTokens returns the configured per-tick output cap, or 600.

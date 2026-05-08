@@ -8,7 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/flash"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
@@ -98,10 +98,9 @@ type watchModel struct {
 	cloudReason    string
 
 	// --- DB watcher (project + instance modes) ---
-	dbWatcher        *fsnotify.Watcher
-	dbWatcherTargets map[string]struct{}
-	debounceActive   bool
-	debouncePending  bool
+	dbWatcher       *dbwatch.Source
+	debounceActive  bool
+	debouncePending bool
 
 	// --- Project-mode fields ---
 	projectGroups  []projectGroup

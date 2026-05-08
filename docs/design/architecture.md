@@ -258,6 +258,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 │  - tea.KeyMsg              - Keyboard input              │
 │  - jobsRefreshedMsg        - DB query result             │
 │  - syncCompletedMsg        - Background sync done        │
+│  - dbWatchEventMsg         - SQLite DB/WAL/SHM changed   │
 │  - logFetchedMsg           - SSH log fetch result        │
 │  - processStatsMsg         - CPU/GPU stats               │
 │  - hostInfoMsg             - Host system info            │
@@ -286,7 +287,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 **Key TUI Features:**
 - Two views: Jobs (default) and Hosts
 - Split-screen: list at top, details/logs at bottom
-- Background polling for status updates
+- DB-change driven refreshes with timer fallbacks for background sync
 - Real-time CPU/GPU stats for running jobs
 - Modal overlays for job creation and long operations
 

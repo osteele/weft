@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/bidding"
@@ -645,44 +644,32 @@ func (m watchModel) runProjectBackgroundSync(full bool) tea.Cmd {
 
 func (m watchModel) startDBWatcher() tea.Cmd {
 	return func() tea.Msg {
-		watcher, targets, err := dbwatch.OpenJobsDBWatcher()
+		source, err := dbwatch.OpenChangeSource()
 		if err != nil {
 			return watchDBWatcherReadyMsg{err: err}
 		}
-		if watcher == nil {
+		if source == nil {
 			return nil
 		}
-		return watchDBWatcherReadyMsg{watcher: watcher, targets: targets}
+		return watchDBWatcherReadyMsg{source: source}
 	}
 }
 
 func (m watchModel) waitForDBEvent() tea.Cmd {
-	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
+	if m.dbWatcher == nil {
 		return nil
 	}
-	watcher := m.dbWatcher
-	targets := m.dbWatcherTargets
+	source := m.dbWatcher
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return func() tea.Msg {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return watchDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
-				}
-				if !dbwatch.IsWatchedFile(event.Name, targets) {
-					continue
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
-					continue
-				}
-				return watchDBWatchEventMsg{}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return watchDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
-				}
-				return watchDBWatchEventMsg{err: err}
-			}
+		_, err := source.Wait(ctx, 0)
+		if err != nil && ctx.Err() == nil {
+			return watchDBWatchEventMsg{err: err}
 		}
+		return watchDBWatchEventMsg{}
 	}
 }
 

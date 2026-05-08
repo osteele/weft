@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -8,7 +9,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
@@ -34,19 +34,18 @@ type campaignListItem struct {
 }
 
 type campaignListModel struct {
-	items            []campaignListItem
-	cursor           int
-	database         *sql.DB
-	quitting         bool
-	showHelp         bool
-	syncEnabled      bool
-	syncInProgress   bool
-	statusMessage    string
-	dbWatcher        *fsnotify.Watcher
-	dbWatcherTargets map[string]struct{}
-	debounceActive   bool
-	debouncePending  bool
-	focused          bool
+	items           []campaignListItem
+	cursor          int
+	database        *sql.DB
+	quitting        bool
+	showHelp        bool
+	syncEnabled     bool
+	syncInProgress  bool
+	statusMessage   string
+	dbWatcher       *dbwatch.Source
+	debounceActive  bool
+	debouncePending bool
+	focused         bool
 }
 
 type campaignListLoadedMsg struct {
@@ -60,9 +59,8 @@ type campaignListSyncFinishedMsg struct {
 }
 
 type campaignListDBWatcherReadyMsg struct {
-	watcher *fsnotify.Watcher
-	targets map[string]struct{}
-	err     error
+	source *dbwatch.Source
+	err    error
 }
 
 type campaignListDBWatchEventMsg struct {
@@ -238,8 +236,7 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("DB watch error: %v", msg.err)
 			return m, nil
 		}
-		m.dbWatcher = msg.watcher
-		m.dbWatcherTargets = msg.targets
+		m.dbWatcher = msg.source
 		return m, m.waitForDBEvent()
 
 	case campaignListDBWatchEventMsg:
@@ -440,45 +437,29 @@ func syncCampaignListTUIData(database *sql.DB, full bool) []string {
 
 func (m campaignListModel) startDBWatcher() tea.Cmd {
 	return func() tea.Msg {
-		watcher, targets, err := dbwatch.OpenJobsDBWatcher()
+		source, err := dbwatch.OpenChangeSource()
 		if err != nil {
 			return campaignListDBWatcherReadyMsg{err: err}
 		}
-		if watcher == nil {
+		if source == nil {
 			return nil
 		}
-		return campaignListDBWatcherReadyMsg{watcher: watcher, targets: targets}
+		return campaignListDBWatcherReadyMsg{source: source}
 	}
 }
 
 func (m campaignListModel) waitForDBEvent() tea.Cmd {
-	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
+	if m.dbWatcher == nil {
 		return nil
 	}
-	watcher := m.dbWatcher
-	targets := m.dbWatcherTargets
+	source := m.dbWatcher
 
 	return func() tea.Msg {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return campaignListDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
-				}
-				if !dbwatch.IsWatchedFile(event.Name, targets) {
-					continue
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
-					continue
-				}
-				return campaignListDBWatchEventMsg{}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return campaignListDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
-				}
-				return campaignListDBWatchEventMsg{err: err}
-			}
+		_, err := source.Wait(context.Background(), 0)
+		if err != nil {
+			return campaignListDBWatchEventMsg{err: err}
 		}
+		return campaignListDBWatchEventMsg{}
 	}
 }
 

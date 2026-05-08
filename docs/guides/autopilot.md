@@ -151,6 +151,12 @@ weft autopilot run --once             # single pass and exit
 weft autopilot run --once --json      # machine-readable per-pass output
 ```
 
+After each pass, the headless runner waits for the jobs database to change
+before planning again. The adaptive or fixed interval is still a maximum wait:
+on timeout, `weft autopilot run` performs a cloud sync, and only replans if
+that sync updates local state. This keeps unattended autopilot from repeatedly
+planning against an unchanged DB.
+
 `--once --json` is the right tool for cron jobs and ops scripts: each line
 is one JSON pass record with `outcome`, `placed`, `rebalanced`,
 `launched`, and `blocked_reasons`. `outcome` is one of `progress` (work

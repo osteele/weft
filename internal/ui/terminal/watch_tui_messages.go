@@ -1,7 +1,7 @@
 package terminal
 
 import (
-	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
@@ -124,9 +124,8 @@ type watchProjectSyncResultMsg struct {
 }
 
 type watchDBWatcherReadyMsg struct {
-	watcher *fsnotify.Watcher
-	targets map[string]struct{}
-	err     error
+	source *dbwatch.Source
+	err    error
 }
 
 type watchDBWatchEventMsg struct {

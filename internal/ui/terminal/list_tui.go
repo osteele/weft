@@ -17,7 +17,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
@@ -57,8 +56,7 @@ type listTUIModel struct {
 	pendingSyncHosts           map[string]struct{}
 	nextSyncTickAt             time.Time
 	statusMessage              string
-	dbWatcher                  *fsnotify.Watcher
-	dbWatcherTargets           map[string]struct{}
+	dbWatcher                  *dbwatch.Source
 	debounceActive             bool
 	debouncePending            bool
 	syncWorker                 *hostsync.Worker
@@ -140,9 +138,8 @@ type listSyncFinishedMsg struct {
 }
 
 type listDBWatcherReadyMsg struct {
-	watcher *fsnotify.Watcher
-	targets map[string]struct{}
-	err     error
+	source *dbwatch.Source
+	err    error
 }
 
 type listDBWatchEventMsg struct {
@@ -593,8 +590,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("DB watch error: %v", msg.err)
 			return m, nil
 		}
-		m.dbWatcher = msg.watcher
-		m.dbWatcherTargets = msg.targets
+		m.dbWatcher = msg.source
 		return m, m.waitForDBEvent()
 
 	case listDBWatchEventMsg:
@@ -2999,44 +2995,32 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []group
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {
 	return func() tea.Msg {
-		watcher, targets, err := dbwatch.OpenJobsDBWatcher()
+		source, err := dbwatch.OpenChangeSource()
 		if err != nil {
 			return listDBWatcherReadyMsg{err: err}
 		}
-		if watcher == nil {
+		if source == nil {
 			return nil
 		}
-		return listDBWatcherReadyMsg{watcher: watcher, targets: targets}
+		return listDBWatcherReadyMsg{source: source}
 	}
 }
 
 func (m listTUIModel) waitForDBEvent() tea.Cmd {
-	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
+	if m.dbWatcher == nil {
 		return nil
 	}
-	watcher := m.dbWatcher
-	targets := m.dbWatcherTargets
+	source := m.dbWatcher
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	return func() tea.Msg {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return listDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
-				}
-				if !dbwatch.IsWatchedFile(event.Name, targets) {
-					continue
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
-					continue
-				}
-				return listDBWatchEventMsg{}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return listDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
-				}
-				return listDBWatchEventMsg{err: err}
-			}
+		_, err := source.Wait(ctx, 0)
+		if err != nil && ctx.Err() == nil {
+			return listDBWatchEventMsg{err: err}
 		}
+		return listDBWatchEventMsg{}
 	}
 }

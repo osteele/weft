@@ -1032,15 +1032,16 @@ and autopilot transitions. Uses the Anthropic API (requires
 `ANTHROPIC_API_KEY`). Commentary, not authoritative status.
 
 ```bash
-weft narrate                          # poll every 30s; narrate transitions to stdout
-weft narrate --tick 10s               # tighter cadence
+weft narrate                          # narrate DB-driven transitions to stdout
+weft narrate --tick 10s               # maximum interval between checks
+weft narrate --quiet-window 3s        # coalesce DB-change bursts for 3s
 weft narrate --once                   # single description of current state
 weft narrate --project myproj         # scope to one project
 weft narrate --debug                  # write deltas + cache stats to stderr
 ```
 
-Ticks with no transitions are skipped — no API call, no output. Silence
-between paragraphs means the DB hasn't changed.
+Passes with no transitions are skipped — no API call, no output. Silence
+between paragraphs means no narratable transition has been observed.
 
 See [Activity Narration](../guides/narrate.md) for the full reference,
 including caching/cost shape and configuration knobs.

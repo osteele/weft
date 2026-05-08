@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -64,6 +65,13 @@ func RunWatchPlainLoop(ctx context.Context, opts WatchPlainOptions, step WatchPl
 	if opts.EmitsEvents() {
 		tracker = NewTransitionTracker()
 	}
+	changeSource, err := dbwatch.OpenChangeSource()
+	if err != nil {
+		slog.Debug("db change source unavailable", "component", "watch", "error", err)
+	}
+	if changeSource != nil {
+		defer changeSource.Close()
+	}
 	for {
 		now := time.Now()
 		s, err := step(now)
@@ -100,11 +108,36 @@ func RunWatchPlainLoop(ctx context.Context, opts WatchPlainOptions, step WatchPl
 			return nil
 		}
 
+		changed, err := changeSource.Wait(ctx, TerminalSyncInterval)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			slog.Debug("db change source wait failed", "component", "watch", "error", err)
+			if waitOrContextDone(ctx, TerminalSyncInterval) {
+				return nil
+			}
+		}
+		_ = changed
+	}
+}
+
+func waitOrContextDone(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
 		select {
 		case <-ctx.Done():
-			return nil
-		case <-time.After(TerminalSyncInterval):
+			return true
+		default:
+			return false
 		}
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return true
+	case <-t.C:
+		return false
 	}
 }
 

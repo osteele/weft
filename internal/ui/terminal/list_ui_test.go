@@ -564,6 +564,7 @@ func TestListTUISyncFinishedKeepsNonCloudTimeoutWarnings(t *testing.T) {
 }
 
 func TestListTUIGroupedViewShortViewportPreservesAllSectionHeaders(t *testing.T) {
+	resetProviderCreditWarningCacheForTest(t)
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           100,
@@ -803,6 +804,7 @@ func TestSelectGroupedRowsForViewport_RemovesBlankLinesBetweenAbbreviatedGroups(
 }
 
 func TestListTUIGroupedViewPinsFooterAtBottomWithSeparator(t *testing.T) {
+	resetProviderCreditWarningCacheForTest(t)
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           80,
