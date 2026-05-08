@@ -2056,17 +2056,7 @@ func (m listTUIModel) hasActiveLaunchingSpinner() bool {
 }
 
 func (m listTUIModel) launchesWithActiveJob() map[int64]bool {
-	out := make(map[int64]bool)
-	for _, job := range m.groupedJobsWithAutoReasons() {
-		if job == nil || job.LaunchID == nil {
-			continue
-		}
-		switch job.EffectiveStatus() {
-		case db.StatusRunning, db.StatusStarting:
-			out[*job.LaunchID] = true
-		}
-	}
-	return out
+	return computeLaunchesWithActiveJob(m.groupedJobsWithAutoReasons(), m.launchLiveByID)
 }
 
 func (m *listTUIModel) clampCursor() {

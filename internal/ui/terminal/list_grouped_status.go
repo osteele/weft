@@ -174,19 +174,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 	failedJobs := make([]*db.Job, 0)
 	killedCanceled := make([]*db.Job, 0)
 
-	// Launch-active set is derived from actual job statuses rather than
-	// LaunchLiveState.JobProgressID, which can point at a job that has
-	// since finished or fallen back to queued.
-	launchesWithActiveJob := make(map[int64]bool)
-	for _, job := range jobs {
-		if job == nil || job.LaunchID == nil {
-			continue
-		}
-		switch job.EffectiveStatus() {
-		case db.StatusRunning, db.StatusStarting:
-			launchesWithActiveJob[*job.LaunchID] = true
-		}
-	}
+	launchesWithActiveJob := computeLaunchesWithActiveJob(jobs, opts.launchLiveByID)
 
 	for _, job := range jobs {
 		if job == nil {
@@ -273,6 +261,29 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 	}
 
 	return rows
+}
+
+func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) map[int64]bool {
+	out := make(map[int64]bool)
+	for _, job := range jobs {
+		if job == nil || job.LaunchID == nil {
+			continue
+		}
+		switch job.EffectiveStatus() {
+		case db.StatusRunning, db.StatusStarting:
+			out[*job.LaunchID] = true
+		}
+	}
+	for launchID, live := range launchLiveByID {
+		if live == nil {
+			continue
+		}
+		verb, phaseJobID, ok := campaign.ParsePhaseJobID(live.InstancePhase)
+		if ok && verb == campaign.PhaseRunning && phaseJobID > 0 {
+			out[launchID] = true
+		}
+	}
+	return out
 }
 
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping

@@ -571,6 +571,16 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedCloudJob_BucketsByLaunchStatus(
 			nil,
 			"Launching (1):",
 		},
+		// The active job may be filtered out of this view. The live phase
+		// still tells us the launch is running a job, so this job is queued
+		// behind it rather than waiting for the rental to launch.
+		{
+			"running_live_phase_active",
+			db.LaunchStatusRunning,
+			map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, InstancePhase: "running:99"}},
+			nil,
+			"Queued (1):",
+		},
 		// A sibling is actually Running on this launch, so this job is
 		// queued behind it.
 		{
