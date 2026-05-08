@@ -254,6 +254,55 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 	}
 }
 
+func TestShowUserParsesBalance(t *testing.T) {
+	const path = "/opt/homebrew/bin/runpodctl"
+	runner := &cliRunner{
+		cliPath:  "runpodctl",
+		lookPath: func(string) (string, error) { return path, nil },
+		runCombined: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runCombined path = %q, want %q", gotPath, path)
+			}
+			switch strings.Join(args, " ") {
+			case "version":
+				return []byte("runpodctl 2.1.6"), nil
+			case "get --help":
+				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "gpu --help":
+				return []byte("Available Commands:\n  list\n"), nil
+			case "pod --help":
+				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
+			case "template --help":
+				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
+			default:
+				t.Fatalf("unexpected combined command %q", strings.Join(args, " "))
+				return nil, nil
+			}
+		},
+		runOutput: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runOutput path = %q, want %q", gotPath, path)
+			}
+			if strings.Join(args, " ") == "user" {
+				return []byte(`{"clientBalance":12.5,"currentSpendPerHr":0.42,"spendLimit":80,"notifyLowBalance":true}`), nil
+			}
+			t.Fatalf("unexpected output command %q", strings.Join(args, " "))
+			return nil, nil
+		},
+	}
+
+	user, err := newCloudClientForTests(runner).ShowUser()
+	if err != nil {
+		t.Fatalf("ShowUser: %v", err)
+	}
+	if user.ClientBalance != 12.5 {
+		t.Fatalf("ClientBalance = %v, want 12.5", user.ClientBalance)
+	}
+	if user.CurrentSpendHr != 0.42 {
+		t.Fatalf("CurrentSpendHr = %v, want 0.42", user.CurrentSpendHr)
+	}
+}
+
 func TestParseSearchOutput_AllowsCLIWarningPrefix(t *testing.T) {
 	input := []byte(`warning: 'runpodctl get cloud' is deprecated
 [{"id":"offer-4090","displayName":"RTX 4090","memoryInGb":24,"communityPrice":0.44,"maxGpuCount":1}]`)

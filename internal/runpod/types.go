@@ -14,6 +14,14 @@ type Pod struct {
 	SSHPort     int     `json:"sshPort"`
 }
 
+// User represents RunPod account information returned by `runpodctl user`.
+type User struct {
+	ClientBalance    float64 `json:"clientBalance"`
+	CurrentSpendHr   float64 `json:"currentSpendPerHr"`
+	SpendLimit       float64 `json:"spendLimit"`
+	NotifyLowBalance bool    `json:"notifyLowBalance"`
+}
+
 // TemplateInfo captures the subset of template fields we care about.
 type TemplateInfo struct {
 	ID             string

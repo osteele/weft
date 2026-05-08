@@ -98,6 +98,26 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 	return buildOffersFromGraphQL(gpuTypes, constraints), nil
 }
 
+// ShowUser returns the authenticated RunPod account balance/spend summary.
+func (c *CloudClient) ShowUser() (*User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	caps, err := c.capabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.runner.runOutput(ctx, caps.path, "user")
+	if err != nil {
+		return nil, fmt.Errorf("runpodctl user: %w", err)
+	}
+	var user User
+	if err := json.Unmarshal(out, &user); err != nil {
+		return nil, fmt.Errorf("parse runpod user: %w", err)
+	}
+	return &user, nil
+}
+
 func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
 	// Pod create can take longer than cliTimeout when runpod's API is slow;
 	// give it 2 minutes rather than 30 seconds.
@@ -209,6 +229,14 @@ func (c *CloudClient) ListAllInstances() ([]cloud.Instance, error) {
 	// (nil, nil) to signal batch unsupported — the reconciler falls back to
 	// per-instance ShowInstance calls which are consistent.
 	return nil, nil
+}
+
+// ListInstancesForCleanup returns the current RunPod pod inventory for
+// commands that only act on terminal database launches. Cleanup does not use
+// absence from this list to classify active launches, so it can safely use the
+// faster batch API that reconciliation avoids.
+func (c *CloudClient) ListInstancesForCleanup() ([]cloud.Instance, error) {
+	return c.listAllInstancesViaCLI()
 }
 
 func (c *CloudClient) listAllInstancesViaCLI() ([]cloud.Instance, error) {

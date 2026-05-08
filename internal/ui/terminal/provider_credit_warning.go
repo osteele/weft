@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	dbpkg "github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/vastai"
 )
 
@@ -24,6 +25,21 @@ var (
 	providerCreditWarningNow = time.Now
 
 	providerCreditWarningFetch = fetchProviderCreditWarning
+	providerCreditWarningLoad  = config.Load
+	vastaiCreditWarningUser    = func() (float64, error) {
+		user, err := vastai.NewClient().ShowUser()
+		if err != nil || user == nil {
+			return 0, err
+		}
+		return user.Credit, nil
+	}
+	runpodCreditWarningUser = func() (float64, error) {
+		user, err := runpod.NewCloudClient().ShowUser()
+		if err != nil || user == nil {
+			return 0, err
+		}
+		return user.ClientBalance, nil
+	}
 
 	providerCreditWarningCache struct {
 		mu          sync.Mutex
@@ -243,28 +259,44 @@ func pluralize(n int, singular, plural string) string {
 const lowCreditBurnHours = 2.0
 
 func fetchProviderCreditWarning() string {
-	cfg, err := config.Load()
+	cfg, err := providerCreditWarningLoad()
 	if err != nil || cfg == nil {
 		return ""
 	}
 
 	var warnings []string
 	if cfg.Vastai.Enabled {
-		client := vastai.NewClient()
-		user, err := client.ShowUser()
-		if err == nil && user != nil {
+		credit, err := vastaiCreditWarningUser()
+		if err == nil {
 			threshold := max(defaultLowProviderCreditThreshold, cfg.Vastai.SpendingLimit)
-			burnHours := burnHoursAtCurrentRate(user.Credit)
-			switch {
-			case user.Credit < threshold:
-				warnings = append(warnings, fmt.Sprintf("WARNING: %s credits low ($%.2f < $%.2f)", cloud.ProviderVastai, user.Credit, threshold))
-			case burnHours > 0 && burnHours < lowCreditBurnHours:
-				warnings = append(warnings, fmt.Sprintf("WARNING: %s balance $%.2f covers ~%.1fh at current burn", cloud.ProviderVastai, user.Credit, burnHours))
-			}
+			warnings = appendProviderCreditWarnings(warnings, cloud.ProviderVastai, credit, threshold)
+		}
+	}
+	if cfg.Runpod.Enabled {
+		credit, err := runpodCreditWarningUser()
+		if err == nil {
+			threshold := max(defaultLowProviderCreditThreshold, cfg.Runpod.SpendingLimit)
+			warnings = appendProviderCreditWarnings(warnings, cloud.ProviderRunpod, credit, threshold)
 		}
 	}
 
 	return strings.Join(warnings, " | ")
+}
+
+func appendProviderCreditWarnings(warnings []string, provider cloud.Provider, credit float64, threshold float64) []string {
+	burnHours := burnHoursAtCurrentRate(credit)
+	name := provider.DisplayName()
+	if name == "" {
+		name = string(provider)
+	}
+	switch {
+	case credit < threshold:
+		return append(warnings, fmt.Sprintf("WARNING: %s credits low ($%.2f < $%.2f)", name, credit, threshold))
+	case burnHours > 0 && burnHours < lowCreditBurnHours:
+		return append(warnings, fmt.Sprintf("WARNING: %s balance $%.2f covers ~%.1fh at current burn", name, credit, burnHours))
+	default:
+		return warnings
+	}
 }
 
 // burnHoursAtCurrentRate returns the cached burn-rate runway for the given

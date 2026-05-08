@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -250,6 +251,34 @@ func TestProviderCreditWarningTextDoesNotBlockOnRefresh(t *testing.T) {
 	}
 	if n := fetchCalls.Load(); n != 1 {
 		t.Fatalf("fetch called %d times; want exactly 1", n)
+	}
+}
+
+func TestFetchProviderCreditWarningIncludesRunpod(t *testing.T) {
+	prevLoad := providerCreditWarningLoad
+	prevRunpodUser := runpodCreditWarningUser
+	prevVastUser := vastaiCreditWarningUser
+	providerCreditWarningLoad = func() (*config.Config, error) {
+		cfg := config.DefaultConfig()
+		cfg.Runpod.Enabled = true
+		cfg.Runpod.SpendingLimit = 20
+		cfg.Vastai.Enabled = false
+		return cfg, nil
+	}
+	runpodCreditWarningUser = func() (float64, error) { return 5, nil }
+	vastaiCreditWarningUser = func() (float64, error) {
+		t.Fatal("vastai user fetch should not run when disabled")
+		return 0, nil
+	}
+	t.Cleanup(func() {
+		providerCreditWarningLoad = prevLoad
+		runpodCreditWarningUser = prevRunpodUser
+		vastaiCreditWarningUser = prevVastUser
+	})
+
+	got := fetchProviderCreditWarning()
+	if !strings.Contains(got, "RunPod credits low ($5.00 < $20.00)") {
+		t.Fatalf("fetchProviderCreditWarning() = %q", got)
 	}
 }
 
