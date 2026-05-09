@@ -348,7 +348,12 @@ func FormatReuseAssignments(assignments []ReuseAssignment) string {
 			remaining := a.Instance.GraceRemaining.Truncate(time.Second)
 			detail = fmt.Sprintf("grace — %s remaining", remaining)
 		} else {
-			detail = fmt.Sprintf("running — %d job(s) ahead", a.Instance.RunningJobCount-1)
+			jobsAhead := max(0, a.Instance.RunningJobCount-1)
+			if jobsAhead > 0 {
+				detail = fmt.Sprintf("running — %d job(s) ahead, ~%s wait", jobsAhead, formatReuseWaitEstimate(jobsAhead))
+			} else {
+				detail = "running — no queued jobs ahead"
+			}
 		}
 		cost := "$0.00"
 		if inst.Status == db.LaunchStatusRunning {
@@ -358,6 +363,22 @@ func FormatReuseAssignments(assignments []ReuseAssignment) string {
 			a.Job.ID, ids.FormatInstanceID(inst.ID), inst.DisplayGPUSpec(), detail, cost))
 	}
 	return b.String()
+}
+
+func formatReuseWaitEstimate(jobsAhead int) string {
+	if jobsAhead <= 0 {
+		return "0m"
+	}
+	d := time.Duration(jobsAhead) * 30 * time.Minute
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%02dm", h, m)
 }
 
 // GracePayload is the JSON structure written to R2 for job submission.
@@ -438,9 +459,17 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	// Upload sources and build payload
 	for _, job := range claimedJobs {
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if sourceDir == "" || workdir.IsContainerPath(sourceDir) {
+			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			err := fmt.Errorf("job %s has no local source directory (working_dir=%q)", ids.FormatJobID(job.ID), job.EffectiveWorkingDir())
+			if rollbackErr != nil {
+				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
+			}
+			return err
+		}
 
 		// Upload fresh sources (content-addressed, so deduped)
-		slog.Info("source upload: reuse path", "component", "reuse",
+		slog.Debug("source upload: reuse path", "component", "reuse",
 			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
 		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir, job.Inputs)
 		if err != nil {

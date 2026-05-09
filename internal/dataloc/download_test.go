@@ -132,3 +132,27 @@ func TestDownloadAssetToHost_GenericStderrIsNormalized(t *testing.T) {
 		t.Fatalf("message contains newlines: %q", msg)
 	}
 }
+
+func TestDownloadAssetToHost_IncludesStdoutRetryLoop(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+
+	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
+		if strings.Contains(command, "df -Pk") {
+			return "123456789\n", "", nil
+		}
+		return "Fetching 52 files...\nNo local file found. Retrying...\n", "", errors.New("exit status 1")
+	}
+
+	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFDataset, ID: "DKYoon/SlimPajama-6B"}, "main")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Hugging Face retried missing files") {
+		t.Fatalf("expected retry-loop diagnosis, got: %q", msg)
+	}
+	if !strings.Contains(msg, "No local file found") {
+		t.Fatalf("expected stdout to be included, got: %q", msg)
+	}
+}

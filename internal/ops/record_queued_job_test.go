@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -41,6 +42,21 @@ func TestRecordQueuedJob_Basic(t *testing.T) {
 	}
 	if len(job.Tags) != 1 || job.Tags[0] != "gpu" {
 		t.Errorf("expected tags=[gpu], got %v", job.Tags)
+	}
+}
+
+func TestRecordQueuedJob_CloudRequiresWorkingDir(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	_, err := RecordQueuedJob(database, QueueJobParams{
+		Command:     "echo hello",
+		Description: "cloud job",
+	})
+	if err == nil {
+		t.Fatal("expected missing working directory error")
+	}
+	if !strings.Contains(err.Error(), "cloud jobs require a local working directory") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

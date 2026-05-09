@@ -56,6 +56,29 @@ func TestMatchJobToInstance_GPUClass(t *testing.T) {
 	}
 }
 
+func TestFormatReuseAssignmentsShowsEstimatedWait(t *testing.T) {
+	assignments := []ReuseAssignment{{
+		Job: &db.Job{ID: 1877},
+		Instance: InstanceCapacity{
+			Instance: &db.Launch{
+				ID:       2703,
+				Status:   db.LaunchStatusRunning,
+				GPUSpec:  "A100",
+				GPUMemGB: 80,
+			},
+			RunningJobCount: 11,
+		},
+	}}
+
+	got := FormatReuseAssignments(assignments)
+	if !strings.Contains(got, "10 job(s) ahead") {
+		t.Fatalf("missing jobs-ahead detail: %s", got)
+	}
+	if !strings.Contains(got, "~5h wait") {
+		t.Fatalf("missing estimated wait: %s", got)
+	}
+}
+
 func TestMatchJobToInstance_GPUMemory(t *testing.T) {
 	mem24 := 24
 	mem80 := 80
@@ -725,6 +748,52 @@ func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {
 	}
 	if reloadedB.LaunchID != nil {
 		t.Fatalf("job B LaunchID = %v, want nil", *reloadedB.LaunchID)
+	}
+}
+
+func TestSubmitJobsToInstanceRejectsEmptySourceDirBeforeUpload(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	t.Cleanup(func() { uploadSourceToR2 = prevUpload })
+	uploadCalled := false
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
+		uploadCalled = true
+		return "sources/unexpected.tar.gz", nil
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected empty source directory error")
+	}
+	if !strings.Contains(err.Error(), "has no local source directory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uploadCalled {
+		t.Fatal("uploadSourceToR2 should not be called for empty source directory")
+	}
+	reloaded, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload: %v", err)
+	}
+	if reloaded.LaunchID != nil {
+		t.Fatalf("LaunchID = %v, want nil after rollback", *reloaded.LaunchID)
 	}
 }
 

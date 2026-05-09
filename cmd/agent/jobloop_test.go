@@ -145,6 +145,21 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 }
 
+func TestPrewarmLogTailIncludesRecentOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prewarm.log")
+	if err := os.WriteFile(path, []byte("first\nFetching 52 files...\nNo local file found. Retrying...\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	got := prewarmLogTail(path)
+	if !strings.Contains(got, "prewarm log tail") {
+		t.Fatalf("missing label: %q", got)
+	}
+	if !strings.Contains(got, "No local file found") {
+		t.Fatalf("missing recent output: %q", got)
+	}
+}
+
 func TestPickWatchdogTimeouts(t *testing.T) {
 	cases := []struct {
 		name             string

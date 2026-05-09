@@ -38,8 +38,8 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 	if err != nil {
 		return HostDataEntry{}, err
 	}
-	if _, stderr, err := hostCommandRunner(ctx, host, cmd); err != nil {
-		return HostDataEntry{}, formatHFDownloadError(host, asset, stderr, err)
+	if stdout, stderr, err := hostCommandRunner(ctx, host, cmd); err != nil {
+		return HostDataEntry{}, formatHFDownloadError(host, asset, strings.TrimSpace(stdout+"\n"+stderr), err)
 	}
 
 	entries, err := ScanHFCacheDetailed(host)
@@ -66,6 +66,15 @@ func formatHFDownloadError(host string, asset DataAsset, stderr string, runErr e
 			host,
 			repoType,
 			asset.ID,
+			runErr,
+		)
+	}
+	if strings.Contains(lowerStderr, "no local file found") && strings.Contains(lowerStderr, "retrying") {
+		return fmt.Errorf(
+			"download %s on %s failed while Hugging Face retried missing files; this is usually an auth, repo-type, revision, or dataset shard issue. Last output: %s: %w",
+			asset,
+			host,
+			stderr,
 			runErr,
 		)
 	}

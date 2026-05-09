@@ -42,12 +42,38 @@ laptop$ weft run \
 # Auto-placed on atlas (pythia-160m cached there)
 ```
 
+Use `hf:<repo>` for Hugging Face model repositories and
+`hf-dataset:<repo>` for dataset repositories. If a dataset is declared with
+`hf:`, Weft treats it as a model and the Hugging Face model lookup can fail
+before staging starts.
+
 If the model is on atlas but not titan, the coordinator places the job on
 atlas. If neither host has it, the coordinator can download it before the job
 starts using `huggingface-cli`, after checking that the target HF cache volume
 has enough free space. When you want to warm a cache ahead of time or ensure a
 specific host has the asset, use `weft data fetch`; you do not need a separate
 prefetch job.
+
+On shared filesystems, Hugging Face cache directories can be owned by a
+different UID than the job process. If cache writes fail with `PermissionError`,
+use a project-local cache:
+
+```
+laptop$ weft run \
+  --env HF_HOME=/home/oliver/code/research/my-project/cache/hf \
+  --input hf:gpt2 \
+  'uv run python train.py'
+```
+
+For scripts that call Hugging Face APIs at runtime, make sure host-level offline
+settings are not inherited unintentionally:
+
+```
+laptop$ weft run \
+  --env HF_HUB_OFFLINE=0 \
+  --env TRANSFORMERS_OFFLINE=0 \
+  'uv run python train.py'
+```
 
 **Declare all models your job downloads**, not just the primary one. If your
 script uses `AutoTokenizer.from_pretrained("bert-base-uncased")` in addition to
@@ -151,6 +177,10 @@ CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
+
+Malformed PEP 723 metadata is a submission error. Weft does not ignore a broken
+`[tool.weft]` table, because doing so would silently drop resource constraints,
+inputs, and environment defaults.
 
 The `uv-args` key injects extra arguments into `uv run` commands. For example,
 `uv-args = ["--system"]` rewrites `uv run script.py` to

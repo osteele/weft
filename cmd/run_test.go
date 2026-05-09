@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -143,6 +144,37 @@ func TestSubmitJobToCloudReuse_SubmitFailure(t *testing.T) {
 	}
 	if outcome != cloudReuseSubmitFailed {
 		t.Fatalf("outcome = %v, want %v", outcome, cloudReuseSubmitFailed)
+	}
+}
+
+func TestScanRunScriptMetaRejectsMalformedPEP723(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "train.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# [tool.weft]
+# note = "contains / and never closes
+# inputs = ["hf:gpt2"]
+# ///
+print("hello")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	_, err := scanRunScriptMeta(dir, "uv run python train.py")
+	if err == nil {
+		t.Fatal("expected malformed metadata to fail")
+	}
+	if !strings.Contains(err.Error(), "invalid script metadata") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHasEnvAssignment(t *testing.T) {
+	if !hasEnvAssignment([]string{"HF_HUB_OFFLINE=0"}, "HF_HUB_OFFLINE") {
+		t.Fatal("expected exact env assignment to match")
+	}
+	if hasEnvAssignment([]string{"MY_HF_HUB_OFFLINE=0"}, "HF_HUB_OFFLINE") {
+		t.Fatal("expected prefixed env name not to match")
 	}
 }
 

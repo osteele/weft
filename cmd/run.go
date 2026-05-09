@@ -360,9 +360,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
-	scriptMeta, scriptMetaErr := dataloc.ScanScriptMeta(localDir, command)
+	scriptMeta, scriptMetaErr := scanRunScriptMeta(localDir, command)
 	if scriptMetaErr != nil {
-		slog.Warn("script metadata error", "error", scriptMetaErr)
+		return scriptMetaErr
 	}
 	if meta := scriptMeta; meta != nil {
 		var applied []string
@@ -439,6 +439,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	maybeWarnHFOfflineEnv(runInputs, runEnvVars)
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
@@ -1066,6 +1067,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func scanRunScriptMeta(localDir, command string) (*dataloc.ScriptMeta, error) {
+	scriptMeta, err := dataloc.ScanScriptMeta(localDir, command)
+	if err != nil {
+		return nil, fmt.Errorf("invalid script metadata: %w", err)
+	}
+	return scriptMeta, nil
+}
+
 // printUnplacedJobMessage prints user-facing output when a job has no eligible local host.
 func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Constraints, result *placement.PlacementResult) {
 	if result != nil && result.SpilledToRental {
@@ -1244,6 +1253,35 @@ func pathHasHomePrefix(dir, home string) bool {
 	dirClean := filepath.Clean(dir)
 	homeClean := filepath.Clean(home)
 	return dirClean == homeClean || strings.HasPrefix(dirClean, homeClean+string(os.PathSeparator))
+}
+
+func maybeWarnHFOfflineEnv(inputs, envVars []string) {
+	if !usageHintsEnabled() || !hasDeclaredHFInput(inputs) {
+		return
+	}
+	if hasEnvAssignment(envVars, "HF_HUB_OFFLINE") || hasEnvAssignment(envVars, "TRANSFORMERS_OFFLINE") || hasEnvAssignment(envVars, "HF_DATASETS_OFFLINE") {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "\nTip: this job declares Hugging Face inputs. If the target host sets HF offline mode globally, add --env HF_HUB_OFFLINE=0 and --env TRANSFORMERS_OFFLINE=0.")
+}
+
+func hasDeclaredHFInput(inputs []string) bool {
+	for _, input := range inputs {
+		if strings.HasPrefix(input, "hf:") || strings.HasPrefix(input, "hf-dataset:") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEnvAssignment(envVars []string, key string) bool {
+	prefix := key + "="
+	for _, env := range envVars {
+		if strings.HasPrefix(env, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // printCommandRecommendations checks for common command patterns and suggests

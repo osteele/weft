@@ -109,6 +109,10 @@ func MirrorQueuedJobWithID(database *sql.DB, jobID int64, params QueueJobParams)
 }
 
 func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID bool) (int64, error) {
+	if strings.TrimSpace(params.Host) == "" && strings.TrimSpace(params.WorkingDir) == "" {
+		return 0, fmt.Errorf("cloud jobs require a local working directory; run from a configured automap directory or pass --dir")
+	}
+
 	// Extract GPU from env vars if not explicitly set
 	gpu := params.GPU
 	if gpu == "" {

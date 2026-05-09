@@ -347,7 +347,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
 		didWork = true
 		if ei, err := runner.RunSetupCommand(hfDownloadScript(assets), job.ID, workDir, env, paths, pickSetupTimeout(cfg)); err != nil {
-			return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("hf prewarm failed exit %d: %w", ei.ExitCode, err)}
+			return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("hf prewarm failed exit %d: %w%s", ei.ExitCode, err, prewarmLogTail(paths.Log))}
 		}
 	}
 
@@ -368,12 +368,31 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	didWork = true
 	ei, err := runner.RunSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg))
 	if err != nil {
-		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: err}
+		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("%w%s", err, prewarmLogTail(paths.Log))}
 	}
 	if ei.ExitCode != 0 {
 		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("setup prewarm exit %d", ei.ExitCode)}
 	}
 	return setupPrewarmResult{ok: true, didWork: true, setupRan: true, logPath: paths.Log}
+}
+
+func prewarmLogTail(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	const max = 2000
+	if len(data) > max {
+		data = data[len(data)-max:]
+		if i := strings.IndexByte(string(data), '\n'); i >= 0 && i+1 < len(data) {
+			data = data[i+1:]
+		}
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return ""
+	}
+	return "\nprewarm log tail:\n" + text
 }
 
 func hfInputAssets(inputs []string) []dataloc.DataAsset {
