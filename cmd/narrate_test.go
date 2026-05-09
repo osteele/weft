@@ -185,6 +185,23 @@ func TestNarrateSlackPostingSkipsEmptyUnchangedEntry(t *testing.T) {
 	}
 }
 
+func TestFormatNarrateSlackMessageStripsANSI(t *testing.T) {
+	msg := formatNarrateSlackMessage(narrate.StatusLine{
+		Now:                  time.Unix(1710000000, 0),
+		UnprocessedCompleted: 1,
+		CompletedProjects:    []string{"augur"},
+		AutopilotState:       "idle",
+	}, "done", 100)
+	if strings.Contains(msg, "\x1b[") {
+		t.Fatalf("Slack message contains ANSI escapes: %q", msg)
+	}
+	for _, want := range []string{"1 job completed", "augur", "done"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("Slack message missing %q: %q", want, msg)
+		}
+	}
+}
+
 func TestValidateNarrateSlackConfigRequiresWebhookWhenEnabled(t *testing.T) {
 	err := validateNarrateSlackConfig(true, "")
 	if err == nil {

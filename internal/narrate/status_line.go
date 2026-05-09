@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/status"
@@ -44,6 +45,12 @@ type UnprocessedCounts struct {
 	CompletedProjects []string
 	FailedProjects    []string
 }
+
+var (
+	statusCompletedStyle = "\x1b[1;32m"
+	statusFailedStyle    = "\x1b[1;31m"
+	statusResetStyle     = "\x1b[0m"
+)
 
 // BuildStatusLine summarizes a snapshot. budgetCentsPerHour is the
 // configured autopilot run-rate target (0 if unset). unprocessed is the
@@ -142,7 +149,7 @@ func (sl StatusLine) HeaderLines(width int) []string {
 	// Second row: jobs counters + projects
 	jobParts, noAttributionJobParts := sl.jobSegments()
 	row2 := strings.Join(jobParts, " | ")
-	if width > 0 && runewidth.StringWidth(indent)+runewidth.StringWidth(row2) > width {
+	if width > 0 && displayWidth(indent)+displayWidth(row2) > width {
 		row2 = strings.Join(noAttributionJobParts, " | ")
 	}
 	if len(jobParts) == 0 && len(sl.Projects) == 0 {
@@ -152,19 +159,19 @@ func (sl StatusLine) HeaderLines(width int) []string {
 	if len(sl.Projects) > 0 {
 		inlineBudget := 0
 		if width > 0 {
-			inlineBudget = bodyWidth - runewidth.StringWidth(row2)
+			inlineBudget = bodyWidth - displayWidth(row2)
 			if row2 != "" {
 				inlineBudget -= len(" | ")
 			}
 		}
-		if inline, ok := renderProjectsInline(sl.Projects, inlineBudget); ok {
+		if inline, ok := renderProjectsInline(sl.Projects, inlineBudget, sl.projectStyles()); ok {
 			if row2 != "" {
 				row2 += " | "
 			}
 			row2 += inline
 		} else {
 			row2 = strings.Join(noAttributionJobParts, " | ")
-			projectLines = renderProjectLines(sl.Projects, bodyWidth)
+			projectLines = renderProjectLines(sl.Projects, bodyWidth, sl.projectStyles())
 		}
 	}
 	if row2 != "" {
@@ -178,7 +185,7 @@ func (sl StatusLine) HeaderLines(width int) []string {
 
 const minInlineProjectWidth = 16
 
-func renderProjectsInline(projects []string, budget int) (string, bool) {
+func renderProjectsInline(projects []string, budget int, styles map[string]string) (string, bool) {
 	if budget <= 0 {
 		return "", false
 	}
@@ -186,40 +193,41 @@ func renderProjectsInline(projects []string, budget int) (string, bool) {
 	if len(projects) == 0 {
 		return "", false
 	}
-	full := strings.Join(projects, " ")
-	if runewidth.StringWidth(full) <= budget {
+	full := renderProjectNames(projects, styles)
+	if displayWidth(full) <= budget {
 		return full, true
 	}
 	for cap := 20; cap >= minInlineProjectWidth; cap -= 2 {
 		parts := make([]string, 0, len(projects))
 		for _, project := range projects {
-			parts = append(parts, dashboard.AbbreviateProject(project, cap))
+			parts = append(parts, styleProjectName(project, dashboard.AbbreviateProject(project, cap), styles))
 		}
 		joined := strings.Join(parts, " ")
-		if runewidth.StringWidth(joined) <= budget {
+		if displayWidth(joined) <= budget {
 			return joined, true
 		}
 	}
 	return "", false
 }
 
-func renderProjectLines(projects []string, width int) []string {
+func renderProjectLines(projects []string, width int, styles map[string]string) []string {
 	projects = compactSortedProjects(projects)
 	if len(projects) == 0 {
 		return nil
 	}
 	if width <= 0 {
-		return []string{strings.Join(projects, " ")}
+		return []string{renderProjectNames(projects, styles)}
 	}
 	lines := make([]string, 0, len(projects))
 	current := ""
 	currentWidth := 0
 	for _, project := range projects {
-		part := project
-		if runewidth.StringWidth(part) > width {
-			part = fitDisplayWidth(dashboard.AbbreviateProject(part, width), width)
+		label := project
+		if displayWidth(label) > width {
+			label = fitDisplayWidth(dashboard.AbbreviateProject(label, width), width)
 		}
-		partWidth := runewidth.StringWidth(part)
+		part := styleProjectName(project, label, styles)
+		partWidth := displayWidth(part)
 		if current == "" {
 			current = part
 			currentWidth = partWidth
@@ -241,12 +249,13 @@ func renderProjectLines(projects []string, width int) []string {
 }
 
 func fitDisplayWidth(s string, width int) string {
-	if width <= 0 || runewidth.StringWidth(s) <= width {
+	if width <= 0 || displayWidth(s) <= width {
 		return s
 	}
 	if width <= 1 {
 		return "…"
 	}
+	s = ansi.Strip(s)
 	var b strings.Builder
 	currentWidth := 0
 	for _, r := range s {
@@ -259,6 +268,10 @@ func fitDisplayWidth(s string, width int) string {
 	}
 	b.WriteString("…")
 	return b.String()
+}
+
+func displayWidth(s string) int {
+	return runewidth.StringWidth(ansi.Strip(s))
 }
 
 func (sl StatusLine) jobSegments() ([]string, []string) {
@@ -297,10 +310,13 @@ func appendJobStateSegment(parts []string, hasJobNoun bool, count int, state str
 		return parts, hasJobNoun
 	}
 	suffix := formatProjectSuffix(projects)
+	var segment string
 	if !hasJobNoun {
-		return append(parts, fmt.Sprintf("%s %s%s", pluralizeJobs(count), state, suffix)), true
+		segment = fmt.Sprintf("%s %s%s", pluralizeJobs(count), state, suffix)
+	} else {
+		segment = fmt.Sprintf("%d %s%s", count, state, suffix)
 	}
-	return append(parts, fmt.Sprintf("%d %s%s", count, state, suffix)), true
+	return append(parts, styleJobStateSegment(state, segment)), true
 }
 
 func formatProjectSuffix(projects []string) string {
@@ -325,6 +341,51 @@ func compactSortedProjects(projects []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func styleJobStateSegment(state, segment string) string {
+	switch state {
+	case "completed":
+		return renderStatusStyle(statusCompletedStyle, segment)
+	case "failed":
+		return renderStatusStyle(statusFailedStyle, segment)
+	default:
+		return segment
+	}
+}
+
+func (sl StatusLine) projectStyles() map[string]string {
+	styles := make(map[string]string)
+	for _, project := range compactSortedProjects(sl.FailedProjects) {
+		styles[project] = statusFailedStyle
+	}
+	for _, project := range compactSortedProjects(sl.CompletedProjects) {
+		styles[project] = statusCompletedStyle
+	}
+	return styles
+}
+
+func renderProjectNames(projects []string, styles map[string]string) string {
+	parts := make([]string, 0, len(projects))
+	for _, project := range projects {
+		parts = append(parts, styleProjectName(project, project, styles))
+	}
+	return strings.Join(parts, " ")
+}
+
+func styleProjectName(project, label string, styles map[string]string) string {
+	style, ok := styles[project]
+	if !ok {
+		return label
+	}
+	return renderStatusStyle(style, label)
+}
+
+func renderStatusStyle(style, s string) string {
+	if style == "" || s == "" {
+		return s
+	}
+	return style + s + statusResetStyle
 }
 
 func pluralizeJobs(count int) string {

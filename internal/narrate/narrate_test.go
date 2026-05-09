@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -486,10 +487,37 @@ func TestStatusLineHeaderJobGrammar(t *testing.T) {
 			if len(lines) < 2 {
 				t.Fatalf("expected job count line, got %v", lines)
 			}
-			if !strings.Contains(lines[1], tc.want) {
+			if !strings.Contains(ansi.Strip(lines[1]), tc.want) {
 				t.Fatalf("HeaderLines()[1] = %q, want %q", lines[1], tc.want)
 			}
 		})
+	}
+}
+
+func TestStatusLineHeaderStylesTerminalCountsAndProjects(t *testing.T) {
+	sl := StatusLine{
+		Now:                  time.Unix(1700000000, 0).UTC(),
+		RunningJobs:          1,
+		UnprocessedCompleted: 1,
+		UnprocessedFailed:    1,
+		Projects:             []string{"completed-project", "failed-project", "mixed-project", "running-project"},
+		CompletedProjects:    []string{"completed-project", "mixed-project"},
+		FailedProjects:       []string{"failed-project", "mixed-project"},
+		AutopilotState:       "idle",
+	}
+
+	lines := sl.HeaderLines(120)
+	joined := strings.Join(lines, "\n")
+	plain := ansi.Strip(joined)
+	for _, want := range []string{"1 completed", "1 failed", "completed-project", "failed-project", "running-project"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("HeaderLines missing %q:\n%s", want, plain)
+		}
+	}
+	for _, want := range []string{"\x1b[1;32m1 completed", "\x1b[1;31m1 failed", "\x1b[1;32mcompleted-project", "\x1b[1;31mfailed-project", "\x1b[1;32mmixed-project"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("HeaderLines missing styled %q:\n%q", want, joined)
+		}
 	}
 }
 
@@ -509,7 +537,7 @@ func TestStatusLineHeaderDropsUnprocessedProjectParensBeforeActiveProjects(t *te
 	if len(lines) < 2 {
 		t.Fatalf("expected job line, got %v", lines)
 	}
-	line := lines[1]
+	line := ansi.Strip(lines[1])
 	if strings.Contains(line, "(augur") || strings.Contains(line, "(weft") {
 		t.Fatalf("unprocessed project parens should be dropped before active projects are truncated:\n%s", line)
 	}
@@ -534,7 +562,7 @@ func TestStatusLineHeaderMovesProjectListToNextLineBeforeOverCompacting(t *testi
 	if len(lines) < 3 {
 		t.Fatalf("expected project list on a separate line, got %v", lines)
 	}
-	if !strings.Contains(lines[1], "24 jobs queued | 9 failed") {
+	if !strings.Contains(ansi.Strip(lines[1]), "24 jobs queued | 9 failed") {
 		t.Fatalf("job counters missing from second line: %q", lines[1])
 	}
 	if strings.Contains(lines[1], "llm-") || strings.Contains(lines[1], "markov") || strings.Contains(lines[1], "struct") {

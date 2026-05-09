@@ -11,9 +11,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/config"
@@ -23,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/syncorch"
 	"github.com/spf13/cobra"
 )
 
@@ -171,8 +174,10 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 	}
 	defer database.Close()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer cancel()
+	restoreRaw := enableNarrateRawQuit(cancel)
+	defer restoreRaw()
 	shutdownDone := make(chan struct{})
 	defer close(shutdownDone)
 	go func() {
@@ -181,6 +186,7 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 		case <-shutdownDone:
 			return
 		case <-time.After(2 * time.Second):
+			restoreRaw()
 			os.Exit(130)
 		}
 	}()
@@ -257,6 +263,60 @@ func validateNarrateSlackConfig(enabled bool, webhook string) error {
 	return errors.New("Slack is enabled for narrate, but no webhook is configured; set WEFT_SLACK_WEBHOOK or SLACK_WEBHOOK in ~/.config/weft/config")
 }
 
+func enableNarrateRawQuit(cancel context.CancelFunc) func() {
+	if cancel == nil || narrateOnceFlag || !term.IsTerminal(os.Stdin.Fd()) {
+		return func() {}
+	}
+	fd := os.Stdin.Fd()
+	oldState, err := makeCbreak(fd)
+	if err != nil {
+		return func() {}
+	}
+	var restoreOnce sync.Once
+	restore := func() {
+		restoreOnce.Do(func() {
+			restoreCbreak(fd, oldState)
+		})
+	}
+	done := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		select {
+		case <-sigCh:
+			restore()
+			cancel()
+		case <-done:
+		}
+	}()
+	go func() {
+		var buf [1]byte
+		for {
+			n, err := os.Stdin.Read(buf[:])
+			if err != nil {
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			switch buf[0] {
+			case 'q', 'Q', 3, 4, 26:
+				restore()
+				cancel()
+				return
+			}
+		}
+	}()
+	var cleanupOnce sync.Once
+	return func() {
+		cleanupOnce.Do(func() {
+			close(done)
+			signal.Stop(sigCh)
+			restore()
+		})
+	}
+}
+
 func waitForNarrateQuietWindow(ctx context.Context, changeSource *dbwatch.Source, quiet time.Duration, deadline time.Time) bool {
 	if quiet <= 0 || changeSource == nil {
 		return false
@@ -294,7 +354,11 @@ func (r *narrateRunner) driveSyncAndAutopilot(ctx context.Context) {
 	defer restoreLogs()
 
 	if r.syncEnabled && r.cfg != nil {
-		syncCloudStateWithTimeout(r.cfg, r.database, nil, NormalCloudSyncTimeout, false)
+		syncorch.SyncCloud(r.cfg, r.database, syncorch.CloudSyncOptions{
+			Context:     ctx,
+			Timeout:     NormalCloudSyncTimeout,
+			SyncResults: true,
+		})
 	}
 	if !r.apEnabled {
 		return
@@ -545,6 +609,9 @@ func (r *narrateRunner) maybePostSlack(statusLine narrate.StatusLine, narration 
 
 func formatNarrateSlackMessage(statusLine narrate.StatusLine, narration string, width int) string {
 	lines := statusLine.HeaderLines(width)
+	for i := range lines {
+		lines[i] = ansi.Strip(lines[i])
+	}
 	narration = strings.TrimSpace(narration)
 	if narration != "" {
 		lines = append(lines, narration)
