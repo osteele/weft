@@ -264,12 +264,6 @@ func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, 
 	if db.IsTerminalStatus(currentStatus) && needsBackfill {
 		return true
 	}
-	if launchID.Valid {
-		switch currentStatus {
-		case db.StatusQueued, db.StatusStarting, db.StatusRunning:
-			return true
-		}
-	}
 	return false
 }
 
