@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // StdioCapture redirects file descriptors 1 (stdout) and 2 (stderr) to a
@@ -54,14 +56,14 @@ func StartStdioCapture(logPath string) (*StdioCapture, error) {
 		return nil, fmt.Errorf("open sink: %w", openErr)
 	}
 
-	if err := syscall.Dup2(int(sinkFile.Fd()), int(os.Stdout.Fd())); err != nil {
+	if err := unix.Dup2(int(sinkFile.Fd()), int(os.Stdout.Fd())); err != nil {
 		_ = sinkFile.Close()
 		_ = syscall.Close(origStdoutFd)
 		_ = syscall.Close(origStderrFd)
 		return nil, fmt.Errorf("dup2 stdout: %w", err)
 	}
-	if err := syscall.Dup2(int(sinkFile.Fd()), int(os.Stderr.Fd())); err != nil {
-		_ = syscall.Dup2(origStdoutFd, int(os.Stdout.Fd()))
+	if err := unix.Dup2(int(sinkFile.Fd()), int(os.Stderr.Fd())); err != nil {
+		_ = unix.Dup2(origStdoutFd, int(os.Stdout.Fd()))
 		_ = sinkFile.Close()
 		_ = syscall.Close(origStdoutFd)
 		_ = syscall.Close(origStderrFd)
@@ -101,8 +103,8 @@ func openSinkFile(logPath string) (*os.File, string, error) {
 // file so leaks remain visible and fixable.
 func (c *StdioCapture) Restore() {
 	c.restoreOnce.Do(func() {
-		_ = syscall.Dup2(c.origStdoutFd, int(os.Stdout.Fd()))
-		_ = syscall.Dup2(c.origStderrFd, int(os.Stderr.Fd()))
+		_ = unix.Dup2(c.origStdoutFd, int(os.Stdout.Fd()))
+		_ = unix.Dup2(c.origStderrFd, int(os.Stderr.Fd()))
 		var capturedBytes int64
 		if c.logPath != "" {
 			if info, err := os.Stat(c.logPath); err == nil {
