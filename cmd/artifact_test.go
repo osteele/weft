@@ -223,6 +223,89 @@ func TestSyncArtifactsForJob_UsesCloudSyncForLaunchJobs(t *testing.T) {
 	}
 }
 
+func TestSyncArtifactsForJob_FallsBackToConventionOutputs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevCloud := syncCloudJobArtifactsFunc
+	prevOutputs := syncJobOutputsFunc
+	t.Cleanup(func() {
+		syncCloudJobArtifactsFunc = prevCloud
+		syncJobOutputsFunc = prevOutputs
+	})
+
+	outputsCalled := false
+	syncCloudJobArtifactsFunc = func(*sql.DB, *r2.Client, *db.Job) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, artifacts.ErrManifestMissing
+	}
+	syncJobOutputsFunc = func(*db.Job) (artifacts.SyncResult, error) {
+		outputsCalled = true
+		return artifacts.SyncResult{Added: 2}, nil
+	}
+
+	if err := syncArtifactsForJob(database, job, nil, time.Second); err != nil {
+		t.Fatalf("syncArtifactsForJob: %v", err)
+	}
+	if !outputsCalled {
+		t.Fatal("expected convention output fallback")
+	}
+}
+
+func TestRunArtifactSync_PrintsZeroConventionOutputs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	prevCloud := syncCloudJobArtifactsFunc
+	prevOutputs := syncJobOutputsFunc
+	t.Cleanup(func() {
+		syncCloudJobArtifactsFunc = prevCloud
+		syncJobOutputsFunc = prevOutputs
+	})
+	syncCloudJobArtifactsFunc = func(*sql.DB, *r2.Client, *db.Job) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, artifacts.ErrManifestMissing
+	}
+	syncJobOutputsFunc = func(*db.Job) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, nil
+	}
+
+	outBuf := &bytes.Buffer{}
+	c := &cobra.Command{}
+	c.SetOut(outBuf)
+
+	if err := runArtifactSync(c, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactSync: %v", err)
+	}
+	if got := outBuf.String(); !strings.Contains(got, "synced 0 convention-based outputs") {
+		t.Fatalf("stdout = %q, want zero-output count", got)
+	}
+}
+
 func TestSyncCloudJobArtifactsWithStore_FallsBackToRunZeroManifest(t *testing.T) {
 	database := db.SetupTestDB(t)
 	home := t.TempDir()

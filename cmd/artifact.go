@@ -213,12 +213,12 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if job.IsLaunchJob() {
-			result, syncErr := syncCloudJobArtifacts(database, r2Client, job)
+			result, syncErr := syncCloudJobArtifactsFunc(database, r2Client, job)
 			if syncErr != nil {
 				if errors.Is(syncErr, artifacts.ErrManifestMissing) {
 					// No manifest in R2; try convention-based output sync
-					if outErr := syncJobOutputs(job); outErr == nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced convention-based outputs\n", ids.FormatJobID(jobID))
+					if outResult, outErr := syncJobOutputsFunc(job); outErr == nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs\n", ids.FormatJobID(jobID), outResult.Added)
 						continue
 					}
 					errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", ids.FormatJobID(jobID)))
@@ -234,8 +234,8 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				// Try convention-based output sync instead
-				if syncErr := syncJobOutputs(job); syncErr == nil {
-					fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced convention-based outputs\n", ids.FormatJobID(jobID))
+				if outResult, syncErr := syncJobOutputsFunc(job); syncErr == nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs\n", ids.FormatJobID(jobID), outResult.Added)
 					continue
 				}
 				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", ids.FormatJobID(jobID)))
@@ -1590,31 +1590,32 @@ func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry
 	return results, nil
 }
 
-// syncJobOutputs rsyncs convention-based output directories from a remote host to the local working dir.
-// For cloud jobs, it downloads outputs from R2 instead.
-func syncJobOutputs(job *db.Job) error {
+// syncJobOutputs rsyncs convention-based output directories from a remote host
+// to the local working dir. For cloud jobs, it downloads outputs from R2
+// instead. The result count is the number of files downloaded or copied.
+func syncJobOutputs(job *db.Job) (artifacts.SyncResult, error) {
 	if job.IsLaunchJob() {
 		return syncCloudJobOutputs(job)
 	}
 
 	if !job.HasInventoryHost() || job.WorkingDir == "" {
-		return nil
+		return artifacts.SyncResult{}, nil
 	}
 
 	// Read completion record from remote to get output files
 	completionPath := fmt.Sprintf("~/.cache/weft/logs/%d.completion.json", job.ID)
 	stdout, _, err := ssh.RunWithTimeout(job.Host, fmt.Sprintf("cat %s 2>/dev/null", completionPath), NormalSyncTimeout)
 	if err != nil {
-		return nil
+		return artifacts.SyncResult{}, nil
 	}
 
 	var rec runner.CompletionRecord
 	if err := json.Unmarshal([]byte(stdout), &rec); err != nil {
-		return nil
+		return artifacts.SyncResult{}, nil
 	}
 
 	if len(rec.OutputFiles) == 0 {
-		return nil
+		return artifacts.SyncResult{}, nil
 	}
 
 	// Extract unique top-level directories from output file paths
@@ -1630,69 +1631,106 @@ func syncJobOutputs(job *db.Job) error {
 
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	if localDir == "" {
-		return nil
+		return artifacts.SyncResult{}, nil
 	}
 
 	totalMB := runner.TotalSizeMB(rec.OutputFiles)
-	return srcsync.SyncOutputsBack(job.Host, job.WorkingDir, localDir, dirs, totalMB, 0)
+	if err := srcsync.SyncOutputsBack(job.Host, job.WorkingDir, localDir, dirs, totalMB, 0); err != nil {
+		return artifacts.SyncResult{}, err
+	}
+	return artifacts.SyncResult{Added: len(rec.OutputFiles)}, nil
 }
 
 // syncCloudJobOutputs downloads convention-based outputs and artifact manifest
 // entries from R2 for cloud jobs.
-func syncCloudJobOutputs(job *db.Job) error {
+func syncCloudJobOutputs(job *db.Job) (artifacts.SyncResult, error) {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	if localDir == "" {
-		return fmt.Errorf("cannot resolve local working directory for job %s", ids.FormatJobID(job.ID))
+		return artifacts.SyncResult{}, fmt.Errorf("cannot resolve local working directory for job %s", ids.FormatJobID(job.ID))
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return artifacts.SyncResult{}, fmt.Errorf("load config: %w", err)
 	}
 	r2Client, err := buildR2Client(cfg)
 	if err != nil {
-		return fmt.Errorf("create R2 client: %w", err)
+		return artifacts.SyncResult{}, fmt.Errorf("create R2 client: %w", err)
 	}
 	if r2Client == nil {
-		return fmt.Errorf("R2 not configured; cannot fetch cloud job outputs")
+		return artifacts.SyncResult{}, fmt.Errorf("R2 not configured; cannot fetch cloud job outputs")
 	}
 
 	var lastErr error
 	for _, runID := range jobAttemptRunIDs(job) {
-		// Download convention-based outputs
-		outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-		err := r2Client.DownloadResultsWithIdleTimeout(context.Background(), outputsPrefix, localDir, artifactTimeout)
-		if err != nil {
-			lastErr = err
+		result := artifacts.SyncResult{}
+		for _, prefix := range []string{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID),
+			r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID),
+		} {
+			added, err := downloadCloudPrefix(r2Client, prefix, localDir)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			result.Added += added
+		}
+		if result.Added > 0 {
+			return result, nil
+		}
+	}
+	if lastErr != nil {
+		return artifacts.SyncResult{}, lastErr
+	}
+	return artifacts.SyncResult{}, nil
+}
+
+func downloadCloudPrefix(r2Client *r2.Client, prefix, localDir string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	files, err := r2Client.ListObjects(ctx, prefix)
+	cancel()
+	if err != nil {
+		return 0, err
+	}
+
+	added := 0
+	for _, f := range files {
+		relPath := strings.TrimPrefix(f.Key, prefix)
+		relPath = strings.TrimPrefix(relPath, "/")
+		if relPath == "" {
 			continue
 		}
-
-		// Download artifact manifest entries (files declared via WEFT_ARTIFACT_MANIFEST)
-		artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
-		err = r2Client.DownloadResultsWithIdleTimeout(context.Background(), artifactsPrefix, localDir, artifactTimeout)
-		if err == nil {
-			return nil
+		localPath := filepath.Join(localDir, relPath)
+		if _, err := r2Client.DownloadObjectToFileWithIdleTimeout(context.Background(), f.Key, localPath, artifactTimeout); err != nil {
+			return added, fmt.Errorf("download %s: %w", f.Key, err)
 		}
-		lastErr = err
+		added++
 	}
-	return lastErr
+	return added, nil
 }
 
 var (
 	syncLocalJobArtifacts     = artifacts.SyncJob
 	syncCloudJobArtifactsFunc = syncCloudJobArtifacts
+	syncJobOutputsFunc        = syncJobOutputs
 )
 
 func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, timeout time.Duration) error {
 	if job.IsLaunchJob() {
 		_, err := syncCloudJobArtifactsFunc(database, r2Client, job)
-		if err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+		if errors.Is(err, artifacts.ErrManifestMissing) {
+			_, err = syncJobOutputsFunc(job)
+		}
+		if err != nil {
 			return err
 		}
 		return nil
 	}
 	_, err := syncLocalJobArtifacts(database, job, timeout)
-	if err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+	if errors.Is(err, artifacts.ErrManifestMissing) {
+		_, err = syncJobOutputsFunc(job)
+	}
+	if err != nil {
 		return err
 	}
 	return nil
