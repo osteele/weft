@@ -400,3 +400,46 @@ func TestPruneMoveIntents(t *testing.T) {
 		}
 	})
 }
+
+func TestAttachMoveIntentTargetLaunch(t *testing.T) {
+	database := SetupTestDB(t)
+	insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:       100,
+		TargetKind:  MoveTargetNew,
+		MaxAttempts: 4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	first := mustCreateLaunch(t, database)
+	if err := AttachMoveIntentTargetLaunch(database, intent, first); err != nil {
+		t.Fatalf("AttachMoveIntentTargetLaunch first: %v", err)
+	}
+	got, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent first: %v", err)
+	}
+	if got.TargetLaunchID == nil || *got.TargetLaunchID != first {
+		t.Fatalf("target_launch_id = %v, want %d", got.TargetLaunchID, first)
+	}
+	if got.AttemptCount != 1 {
+		t.Fatalf("attempt_count after first attach = %d, want 1", got.AttemptCount)
+	}
+
+	second := mustCreateLaunch(t, database)
+	if err := AttachMoveIntentTargetLaunch(database, got, second); err != nil {
+		t.Fatalf("AttachMoveIntentTargetLaunch second: %v", err)
+	}
+	got, err = GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent second: %v", err)
+	}
+	if got.TargetLaunchID == nil || *got.TargetLaunchID != second {
+		t.Fatalf("target_launch_id = %v, want %d", got.TargetLaunchID, second)
+	}
+	if got.AttemptCount != 2 {
+		t.Fatalf("attempt_count after replacement attach = %d, want 2", got.AttemptCount)
+	}
+}

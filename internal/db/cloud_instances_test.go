@@ -1198,7 +1198,7 @@ func TestResetLaunchJobs_RestoresRetryableNoStartMoveTargetAndKeepsIntentOpen(t 
 	}
 }
 
-func TestRestoreNoStartMoveTargetToSource_ConsumesStaleClosedTarget(t *testing.T) {
+func TestHandleMoveTargetFailedBeforeStart_ConsumesStaleClosedTarget(t *testing.T) {
 	database := setupTestDB(t)
 
 	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
@@ -1239,12 +1239,15 @@ func TestRestoreNoStartMoveTargetToSource_ConsumesStaleClosedTarget(t *testing.T
 		t.Fatalf("restore source attempt: %v", err)
 	}
 
-	restored, err := RestoreNoStartMoveTargetToSource(database, 1205, dst, AttemptOutcomeOrphaned)
+	transition, err := HandleMoveTargetFailedBeforeStart(database, 1205, dst, AttemptOutcomeOrphaned)
 	if err != nil {
-		t.Fatalf("RestoreNoStartMoveTargetToSource: %v", err)
+		t.Fatalf("HandleMoveTargetFailedBeforeStart: %v", err)
 	}
-	if !restored {
-		t.Fatal("restored = false, want true")
+	if !transition.Handled {
+		t.Fatal("Handled = false, want true")
+	}
+	if !transition.Retryable || transition.Exhausted {
+		t.Fatalf("transition retryable/exhausted = %t/%t, want true/false", transition.Retryable, transition.Exhausted)
 	}
 	gotIntent, err := GetMoveIntent(database, intent.ID)
 	if err != nil {

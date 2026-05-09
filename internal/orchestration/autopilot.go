@@ -543,14 +543,16 @@ func moveIntentRetryAction(database *sql.DB, intent *db.MoveIntent) (moveIntentA
 	if !campaign.IsInstanceTerminal(launch.Status) {
 		return moveIntentActionWait, nil
 	}
-	if restored, err := db.RestoreNoStartMoveTargetToSource(database, intent.JobID, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
+	transition, err := db.HandleMoveTargetFailedBeforeStart(database, intent.JobID, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned)
+	if err != nil {
 		return moveIntentActionWait, err
-	} else if !restored {
+	}
+	if !transition.Handled {
 		if _, err := db.ResetLaunchJobs(database, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
 			return moveIntentActionWait, err
 		}
 	}
-	if intent.AttemptCount >= intent.MaxAttempts {
+	if transition.Exhausted || intent.AttemptCount >= intent.MaxAttempts {
 		return moveIntentActionExhaust, nil
 	}
 	return moveIntentActionRetry, nil
