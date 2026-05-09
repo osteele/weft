@@ -114,6 +114,7 @@ Python project, invoked by weft through:
 uv run --project <predictor.project_path> job-estimator predict ...
 uv run --project <predictor.project_path> job-estimator predict-batch ...
 uv run --project <predictor.project_path> job-estimator train ...
+uv run --project <predictor.project_path> job-estimator eval ...
 ```
 
 The predictor is configured in `~/.config/weft/config.toml`:
@@ -132,6 +133,7 @@ The predictor receives:
 
 - the command string
 - the project name
+- the working directory
 - the target host or GPU class
 - training examples exported from one or more job databases
 
@@ -159,6 +161,12 @@ runtime-semantics fields such as:
 
 - `source`
 - `confidence`
+- `contract_version`
+- `workload_fingerprint`
+- `script_family`
+- `explanations`
+- `ood_reasons`
+- `feature_coverage`
 - `feasible`
 - `bottleneck`
 - `memory_headroom_mib`
@@ -167,6 +175,12 @@ runtime-semantics fields such as:
 Campaign planning and reusable-instance scoring use that metadata to shrink weak
 or poorly explained speedups toward a neutral baseline, while still trusting
 explicit memory-capacity signals.
+
+Weft applies a local residual correction after predictor output when recent
+completed runs provide at least five matching actual/predicted ratios. Matching
+starts at exact command plus GPU class, then falls back to project plus GPU
+class and project-only groups. The correction is capped to a conservative range
+and annotated in `duration_metadata`; with insufficient support it is a no-op.
 
 ### Retraining
 
@@ -187,6 +201,7 @@ You can also rebuild immediately with:
 
 ```bash
 weft estimation status
+weft estimation eval
 weft retrain
 ```
 

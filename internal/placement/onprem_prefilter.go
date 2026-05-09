@@ -140,11 +140,12 @@ func BuildBatchPredictors(cfg *config.Config, jobs []*db.Job, hosts []inventory.
 		}
 		for _, host := range hosts {
 			batchJobs = append(batchJobs, predictor.BatchJob{
-				ID:       nextID,
-				Command:  constraints.Command,
-				Host:     host.Name,
-				Project:  constraints.Project,
-				GPUClass: constraints.GPUClass,
+				ID:         nextID,
+				Command:    constraints.Command,
+				Host:       host.Name,
+				Project:    constraints.Project,
+				GPUClass:   constraints.GPUClass,
+				WorkingDir: job.WorkingDir,
 			})
 			refs[nextID] = batchRef{jobID: job.ID, host: host.Name}
 			nextID++

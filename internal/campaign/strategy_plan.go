@@ -1148,10 +1148,11 @@ func predictOfferRuntimes(
 					continue
 				}
 				batchJobs = append(batchJobs, predictor.BatchJob{
-					ID:       nextID,
-					Command:  job.Command,
-					Project:  job.Project,
-					GPUClass: offer.GPUName,
+					ID:         nextID,
+					Command:    job.Command,
+					Project:    job.Project,
+					GPUClass:   offer.GPUName,
+					WorkingDir: job.WorkingDir,
 				})
 				refs[nextID] = batchRef{groupIdx: groupIdx, offerKey: key, jobIdx: jobIdx}
 				nextID++
@@ -2009,10 +2010,11 @@ func estimateReuseDurationsDetailed(predCfg *predictor.Config, gpuLabel string, 
 			continue
 		}
 		batchJobs = append(batchJobs, predictor.BatchJob{
-			ID:       int64(idx + 1),
-			Command:  job.Command,
-			Project:  job.Project,
-			GPUClass: gpuLabel,
+			ID:         int64(idx + 1),
+			Command:    job.Command,
+			Project:    job.Project,
+			GPUClass:   gpuLabel,
+			WorkingDir: job.WorkingDir,
 		})
 	}
 	if len(batchJobs) == 0 {

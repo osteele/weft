@@ -64,6 +64,18 @@ func runPredict(cmd *cobra.Command, args []string) error {
 		if meta.Bottleneck != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "Bounded:  %s\n", meta.Bottleneck)
 		}
+		if meta.ScriptFamily != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Family:   %s\n", meta.ScriptFamily)
+		}
+		if meta.WorkloadFingerprint != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Fingerprint: %s\n", meta.WorkloadFingerprint)
+		}
+		if meta.ResidualCorrectionFactor > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Residual: %.2fx (%s)\n", meta.ResidualCorrectionFactor, meta.ResidualCorrectionSource)
+		}
+		for _, reason := range meta.OODReasons {
+			fmt.Fprintf(cmd.OutOrStdout(), "OOD:      %s\n", reason)
+		}
 		if meta.Feasible != nil {
 			if *meta.Feasible {
 				fmt.Fprintln(cmd.OutOrStdout(), "Fits GPU: yes")

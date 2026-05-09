@@ -30,6 +30,7 @@ func EstimateJobDurationDetailed(predCfg *predictor.Config, gpuClass string, job
 	if err != nil || result == nil || result.DurationS == nil {
 		return DurationPrediction{Estimate: DefaultJobDuration}, false
 	}
+	ApplyResidualCorrection(job.ID, job.Project, gpuClass, job.Command, result)
 
 	return DurationPrediction{
 		Estimate: FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper),
@@ -52,6 +53,9 @@ func EstimateJobDurationsDetailed(predCfg *predictor.Config, batchJobs []predict
 	estimates := make(map[int64]DurationPrediction, len(results))
 	for id, r := range results {
 		if r != nil && r.DurationS != nil {
+			if job := batchJobByID(batchJobs, id); job != nil {
+				ApplyResidualCorrection(id, job.Project, job.GPUClass, job.Command, r)
+			}
 			estimates[id] = DurationPrediction{
 				Estimate: FromSeconds(r.DurationS.Mean, r.DurationS.Lower, r.DurationS.Upper),
 				Metadata: r.DurationMetadata,
@@ -59,4 +63,13 @@ func EstimateJobDurationsDetailed(predCfg *predictor.Config, batchJobs []predict
 		}
 	}
 	return estimates
+}
+
+func batchJobByID(batchJobs []predictor.BatchJob, id int64) *predictor.BatchJob {
+	for i := range batchJobs {
+		if batchJobs[i].ID == id {
+			return &batchJobs[i]
+		}
+	}
+	return nil
 }

@@ -27,9 +27,11 @@ It should not own scheduler policy, cloud pricing, or ranking across offers.
 `job-estimator` owns workload interpretation and learned prediction:
 
 - parsing commands into workload features
+- producing stable workload fingerprints and script-family labels
 - calling `llm-performance-models` to derive analytical features per candidate GPU
 - fitting and serving learned predictions for duration, peak RSS, and GPU memory
 - model schema versioning, retraining, cache compatibility, and freshness reporting
+- model-side evaluation, calibration, uncertainty, and explanation metadata
 
 It should answer questions such as:
 
@@ -48,6 +50,8 @@ It should not own cloud-offer search, retry budgeting, or launch strategy.
 - finding cloud offers and reusable instances
 - hard feasibility filters such as minimum VRAM and CUDA compatibility
 - setup, transfer, wait, and survival modeling
+- phase timing, failure/censoring, and telemetry export for estimator training
+- recent local residual correction for operational drift
 - final ranking on predicted runtime, cost, and reliability
 
 `weft` should treat estimator-produced runtimes as authoritative when they are
@@ -68,6 +72,8 @@ using it consistently across execution paths:
 - explicit `memory_capacity` signals may justify paying for a larger GPU
 - `benefits_from_additional_vram=false` should suppress oversized-GPU wins when
   the predicted speedup is otherwise weak
+- residual-corrected durations should carry metadata that identifies the
+  correction source and factor
 
 ## Fallback Policy
 

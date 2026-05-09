@@ -680,11 +680,12 @@ func loadRuntimePredictions(database *sql.DB, jobs []*db.Job) runtimeBook {
 		}
 		seen[job.ID] = struct{}{}
 		batch = append(batch, predictor.BatchJob{
-			ID:       job.ID,
-			Command:  job.Command,
-			Host:     job.Host,
-			Project:  job.Project,
-			GPUClass: job.GPUClass,
+			ID:         job.ID,
+			Command:    job.Command,
+			Host:       job.Host,
+			Project:    job.Project,
+			GPUClass:   job.GPUClass,
+			WorkingDir: job.WorkingDir,
 		})
 	}
 	predictions := estimateRebalanceDurationsDetailed(&predCfg, batch)

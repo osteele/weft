@@ -665,6 +665,22 @@ func createTrainingExamplesView(db *sql.DB) error {
 	selectedGPUClassExpr := sqlNormalizeGPUClassExpr(`json_extract(je.value, '$.Name')`)
 	launchGPUClassExpr := sqlNormalizeGPUClassExpr(`COALESCE(base.launch_resolved_gpu_name, base.launch_gpu_class)`)
 	gpuMemExpr := sqlParseMemoryMiBExpr(`json_extract(je.value, '$.MemTotal')`)
+	phaseTimingSelect := `
+				NULL AS wrapper_start,
+				NULL AS setup_start,
+				NULL AS setup_end,
+				NULL AS upload_start,
+				NULL AS upload_end,`
+	phaseTimingJoin := ``
+	if hasJobPhaseTimingsTable(db) {
+		phaseTimingSelect = `
+				jpt.wrapper_start,
+				jpt.setup_start,
+				jpt.setup_end,
+				jpt.upload_start,
+				jpt.upload_end,`
+		phaseTimingJoin = `LEFT JOIN job_phase_timings jpt ON jpt.job_id = ja.job_id`
+	}
 
 	createTrainingExamplesSQL := fmt.Sprintf(`
 		CREATE VIEW training_examples AS
@@ -682,6 +698,7 @@ func createTrainingExamplesView(db *sql.DB) error {
 				ja.placement_meta,
 				ja.cost,
 				ja.launch_id,
+				ja.cloud_outcome,
 				ja.error_message,
 				ja.failure_reason,
 				ja.error_diagnosis,
@@ -712,6 +729,7 @@ func createTrainingExamplesView(db *sql.DB) error {
 				l.gpu_class AS launch_gpu_class,
 				l.num_gpus AS launch_gpu_count,
 				l.gpu_mem_gb AS launch_gpu_mem_gb,
+				%s
 				NULLIF(REPLACE(COALESCE(json_extract(ja.job_metadata, '$.resource.gpu_devices'), ''), ' ', ''), '') AS assigned_gpu_devices_csv,
 				CASE
 					WHEN json_type(ja.job_metadata, '$.telemetry.assigned_gpu_indices') = 'array'
@@ -721,6 +739,7 @@ func createTrainingExamplesView(db *sql.DB) error {
 			JOIN jobs j ON j.id = ja.job_id
 			LEFT JOIN host_info_cache hic ON hic.name = ja.host
 			LEFT JOIN launches l ON l.id = ja.launch_id
+			%s
 			WHERE ja.start_time IS NOT NULL AND ja.end_time IS NOT NULL
 		),
 		selected_gpu_inventory AS (
@@ -809,6 +828,18 @@ func createTrainingExamplesView(db *sql.DB) error {
 			base.cost,
 			base.attempt_number - 1 AS retry_count,
 			base.launch_id,
+			base.cloud_outcome,
+			CASE
+				WHEN COALESCE(base.cloud_outcome, '') != '' THEN base.cloud_outcome
+				WHEN LOWER(TRIM(COALESCE(base.status, ''))) = 'completed' AND COALESCE(base.exit_code, 0) = 0 THEN 'completed'
+				WHEN LOWER(TRIM(COALESCE(base.status, ''))) IN ('canceled', 'cancelled') THEN 'canceled'
+				WHEN LOWER(TRIM(COALESCE(base.status, ''))) = 'preempted' THEN 'preempted'
+				ELSE 'failed'
+			END AS terminal_outcome,
+			CASE
+				WHEN LOWER(TRIM(COALESCE(base.status, ''))) = 'completed' AND COALESCE(base.exit_code, 0) = 0 THEN 0
+				ELSE 1
+			END AS censored,
 			base.error_message,
 			base.failure_reason,
 			base.error_diagnosis,
@@ -843,10 +874,13 @@ func createTrainingExamplesView(db *sql.DB) error {
 			base.host_hardware_last_updated,
 			CAST(json_extract(base.job_metadata, '$.resource.peak_rss_kb') AS INTEGER) AS peak_rss_kb,
 			CAST(json_extract(base.job_metadata, '$.resource.max_gpu_mem_mib') AS INTEGER) AS max_gpu_mem_mib,
-			CAST(json_extract(base.job_metadata, '$.cpu.mean') AS REAL) AS cpu_mean
+			CAST(json_extract(base.job_metadata, '$.cpu.mean') AS REAL) AS cpu_mean,
+			CASE WHEN base.setup_start > 0 AND base.setup_end > base.setup_start THEN base.setup_end - base.setup_start END AS setup_duration_s,
+			CASE WHEN base.upload_start > 0 AND base.upload_end > base.upload_start THEN base.upload_end - base.upload_start END AS upload_duration_s,
+			CASE WHEN base.wrapper_start > 0 AND base.start_time > base.wrapper_start THEN base.start_time - base.wrapper_start END AS wrapper_to_start_s
 		FROM completed_runs base
 		LEFT JOIN selected_gpu_summary gpu ON gpu.run_id = base.run_id
-	`, gpuMemExpr, selectedGPUClassExpr, launchGPUClassExpr, launchGPUClassExpr)
+	`, phaseTimingSelect, phaseTimingJoin, gpuMemExpr, selectedGPUClassExpr, launchGPUClassExpr, launchGPUClassExpr)
 
 	if _, err := db.Exec(createTrainingExamplesSQL); err != nil {
 		return err
@@ -854,6 +888,12 @@ func createTrainingExamplesView(db *sql.DB) error {
 
 	_, err := db.Exec(`CREATE VIEW job_run_training_examples AS SELECT * FROM training_examples`)
 	return err
+}
+
+func hasJobPhaseTimingsTable(db *sql.DB) bool {
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'job_phase_timings'`).Scan(&name)
+	return err == nil
 }
 
 // --- Attempt helper functions ---

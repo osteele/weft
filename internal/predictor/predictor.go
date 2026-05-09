@@ -46,14 +46,22 @@ type Prediction struct {
 
 // RuntimeMetadata describes how a duration prediction was produced.
 type RuntimeMetadata struct {
-	Source                     string  `json:"source,omitempty"`
-	Confidence                 float64 `json:"confidence,omitempty"`
-	Feasible                   *bool   `json:"feasible,omitempty"`
-	Bottleneck                 string  `json:"bottleneck,omitempty"`
-	MemoryHeadroomMiB          float64 `json:"memory_headroom_mib,omitempty"`
-	BenefitsFromAdditionalVRAM *bool   `json:"benefits_from_additional_vram,omitempty"`
-	AnalyticalDurationS        float64 `json:"analytical_duration_s,omitempty"`
-	AnalyticalPeakMemoryMiB    float64 `json:"analytical_peak_memory_mib,omitempty"`
+	ContractVersion            int            `json:"contract_version,omitempty"`
+	Source                     string         `json:"source,omitempty"`
+	Confidence                 float64        `json:"confidence,omitempty"`
+	WorkloadFingerprint        string         `json:"workload_fingerprint,omitempty"`
+	ScriptFamily               string         `json:"script_family,omitempty"`
+	Explanations               []string       `json:"explanations,omitempty"`
+	OODReasons                 []string       `json:"ood_reasons,omitempty"`
+	FeatureCoverage            map[string]int `json:"feature_coverage,omitempty"`
+	ResidualCorrectionFactor   float64        `json:"residual_correction_factor,omitempty"`
+	ResidualCorrectionSource   string         `json:"residual_correction_source,omitempty"`
+	Feasible                   *bool          `json:"feasible,omitempty"`
+	Bottleneck                 string         `json:"bottleneck,omitempty"`
+	MemoryHeadroomMiB          float64        `json:"memory_headroom_mib,omitempty"`
+	BenefitsFromAdditionalVRAM *bool          `json:"benefits_from_additional_vram,omitempty"`
+	AnalyticalDurationS        float64        `json:"analytical_duration_s,omitempty"`
+	AnalyticalPeakMemoryMiB    float64        `json:"analytical_peak_memory_mib,omitempty"`
 }
 
 // Status describes the current usability and refresh state of predictor models.
@@ -120,7 +128,7 @@ type Meta struct {
 	SchemaVersion int            `json:"schema_version,omitempty"`
 }
 
-const ExpectedModelSchemaVersion = 3
+const ExpectedModelSchemaVersion = 4
 
 var modelArtifactNames = []string{"duration", "peak_rss_kb", "max_gpu_mem_mib"}
 
@@ -178,11 +186,12 @@ var backgroundRetrains = struct {
 }
 
 type predictionCacheKey struct {
-	modelDir string
-	host     string
-	project  string
-	gpuClass string
-	command  string
+	modelDir   string
+	host       string
+	project    string
+	gpuClass   string
+	workingDir string
+	command    string
 }
 
 type backgroundRetrainState struct {
@@ -242,6 +251,11 @@ func (c *Config) modelDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".cache", "weft", "models")
+}
+
+// ModelDirPath returns the effective model directory, including the default.
+func (c *Config) ModelDirPath() string {
+	return c.modelDir()
 }
 
 func (c *Config) retrainInterval() int {
@@ -503,13 +517,14 @@ func invalidateStatusCache(cfg Config) {
 	_ = os.Remove(cfg.statusCachePath())
 }
 
-func predictionKey(cfg Config, host, project, gpuClass, command string) predictionCacheKey {
+func predictionKey(cfg Config, host, project, gpuClass, workingDir, command string) predictionCacheKey {
 	return predictionCacheKey{
-		modelDir: cfg.modelDir(),
-		host:     host,
-		project:  project,
-		gpuClass: gpuClass,
-		command:  command,
+		modelDir:   cfg.modelDir(),
+		host:       host,
+		project:    project,
+		gpuClass:   gpuClass,
+		workingDir: workingDir,
+		command:    command,
 	}
 }
 
@@ -547,6 +562,14 @@ func cloneResult(result *Result) *Result {
 	var metadata *RuntimeMetadata
 	if result.DurationMetadata != nil {
 		cloned := *result.DurationMetadata
+		cloned.Explanations = append([]string(nil), result.DurationMetadata.Explanations...)
+		cloned.OODReasons = append([]string(nil), result.DurationMetadata.OODReasons...)
+		if result.DurationMetadata.FeatureCoverage != nil {
+			cloned.FeatureCoverage = make(map[string]int, len(result.DurationMetadata.FeatureCoverage))
+			for k, v := range result.DurationMetadata.FeatureCoverage {
+				cloned.FeatureCoverage[k] = v
+			}
+		}
 		metadata = &cloned
 	}
 	return &Result{
@@ -622,7 +645,7 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 	if err := preparePredictorForUse(cfg); err != nil {
 		return nil, err
 	}
-	key := predictionKey(cfg, host, project, gpuClass, command)
+	key := predictionKey(cfg, host, project, gpuClass, "", command)
 	if result, ok := cachedPrediction(key); ok {
 		return result, nil
 	}
@@ -645,11 +668,12 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 
 // BatchJob describes a single job for batch prediction.
 type BatchJob struct {
-	ID       int64  `json:"id"`
-	Command  string `json:"command"`
-	Host     string `json:"host"`
-	Project  string `json:"project"`
-	GPUClass string `json:"gpu_class"`
+	ID         int64  `json:"id"`
+	Command    string `json:"command"`
+	Host       string `json:"host"`
+	Project    string `json:"project"`
+	GPUClass   string `json:"gpu_class"`
+	WorkingDir string `json:"working_dir,omitempty"`
 }
 
 // batchResultEntry is the JSON shape returned by predict-batch per job.
@@ -676,7 +700,7 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 	keysByBatchID := make(map[int64]predictionCacheKey)
 	idsByKey := make(map[predictionCacheKey][]int64)
 	for _, job := range jobs {
-		key := predictionKey(cfg, job.Host, job.Project, job.GPUClass, job.Command)
+		key := predictionKey(cfg, job.Host, job.Project, job.GPUClass, job.WorkingDir, job.Command)
 		if cached, ok := cachedPrediction(key); ok {
 			results[job.ID] = cached
 			continue

@@ -22,6 +22,9 @@ type TrainingJobRun struct {
 	Backend             string
 	Tenant              string
 	Status              string
+	CloudOutcome        string
+	TerminalOutcome     string
+	Censored            bool
 	StartTime           int64
 	EndTime             int64
 	DurationS           int64
@@ -43,6 +46,9 @@ type TrainingJobRun struct {
 	PeakRSSKB           int64
 	MaxGPUMemMiB        int64
 	CPUMean             float64
+	SetupDurationS      float64
+	UploadDurationS     float64
+	WrapperToStartS     float64
 }
 
 // ListTrainingJobRuns returns terminal execution attempts ordered by start time.
@@ -63,6 +69,9 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 			backend,
 			tenant,
 			status,
+			cloud_outcome,
+			terminal_outcome,
+			COALESCE(censored, 0),
 			start_time,
 			end_time,
 			COALESCE(duration_s, 0),
@@ -83,7 +92,10 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 			placement_meta,
 			peak_rss_kb,
 			max_gpu_mem_mib,
-			cpu_mean
+			cpu_mean,
+			setup_duration_s,
+			upload_duration_s,
+			wrapper_to_start_s
 		FROM training_examples
 	`
 	var args []any
@@ -104,12 +116,15 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 		var run TrainingJobRun
 		var workingDir, project, tags, requestedGPU, requestedGPUClass sql.NullString
 		var backend, tenant, status sql.NullString
+		var cloudOutcome, terminalOutcome sql.NullString
+		var censored sql.NullBool
 		var cpuAllotment, gpuMemGB, cpuCount sql.NullInt64
 		var cpuModel, cpuFreq, memTotal sql.NullString
 		var actualGPUName, gpuNames, actualGPUClass sql.NullString
 		var failureReason, errorDiagnosis, jobMetadata, placementMeta sql.NullString
 		var peakRSSKB, maxGPUMemMiB sql.NullInt64
 		var cpuMean sql.NullFloat64
+		var setupDurationS, uploadDurationS, wrapperToStartS sql.NullFloat64
 		if err := rows.Scan(
 			&run.RunID,
 			&run.JobID,
@@ -125,6 +140,9 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 			&backend,
 			&tenant,
 			&status,
+			&cloudOutcome,
+			&terminalOutcome,
+			&censored,
 			&run.StartTime,
 			&run.EndTime,
 			&run.DurationS,
@@ -146,6 +164,9 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 			&peakRSSKB,
 			&maxGPUMemMiB,
 			&cpuMean,
+			&setupDurationS,
+			&uploadDurationS,
+			&wrapperToStartS,
 		); err != nil {
 			return nil, fmt.Errorf("scan training job run: %w", err)
 		}
@@ -182,6 +203,15 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 		if status.Valid {
 			run.Status = status.String
 		}
+		if cloudOutcome.Valid {
+			run.CloudOutcome = cloudOutcome.String
+		}
+		if terminalOutcome.Valid {
+			run.TerminalOutcome = terminalOutcome.String
+		}
+		if censored.Valid {
+			run.Censored = censored.Bool
+		}
 		if cpuCount.Valid {
 			run.CPUCount = int(cpuCount.Int64)
 		}
@@ -217,6 +247,15 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 		}
 		if cpuMean.Valid {
 			run.CPUMean = cpuMean.Float64
+		}
+		if setupDurationS.Valid {
+			run.SetupDurationS = setupDurationS.Float64
+		}
+		if uploadDurationS.Valid {
+			run.UploadDurationS = uploadDurationS.Float64
+		}
+		if wrapperToStartS.Valid {
+			run.WrapperToStartS = wrapperToStartS.Float64
 		}
 		runs = append(runs, run)
 	}

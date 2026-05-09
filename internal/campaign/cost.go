@@ -84,10 +84,11 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 		}
 		for _, job := range go_.Group.Jobs {
 			allBatchJobs = append(allBatchJobs, predictor.BatchJob{
-				ID:       job.ID,
-				Command:  job.Command,
-				Project:  job.Project,
-				GPUClass: go_.Offer.GPUName,
+				ID:         job.ID,
+				Command:    job.Command,
+				Project:    job.Project,
+				GPUClass:   go_.Offer.GPUName,
+				WorkingDir: job.WorkingDir,
 			})
 		}
 	}

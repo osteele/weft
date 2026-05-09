@@ -60,6 +60,9 @@ type trainingDataRecord struct {
 	Backend             string                `json:"backend"`
 	Tenant              string                `json:"tenant"`
 	Status              string                `json:"status"`
+	CloudOutcome        string                `json:"cloud_outcome,omitempty"`
+	TerminalOutcome     string                `json:"terminal_outcome,omitempty"`
+	Censored            bool                  `json:"censored,omitempty"`
 	StartTime           int64                 `json:"start_time"`
 	EndTime             int64                 `json:"end_time"`
 	DurationS           int64                 `json:"duration_s"`
@@ -81,6 +84,9 @@ type trainingDataRecord struct {
 	PeakRSSKB           int64                 `json:"peak_rss_kb,omitempty"`
 	MaxGPUMiB           int64                 `json:"max_gpu_mem_mib,omitempty"`
 	CPUMean             float64               `json:"cpu_mean,omitempty"`
+	SetupDurationS      float64               `json:"setup_duration_s,omitempty"`
+	UploadDurationS     float64               `json:"upload_duration_s,omitempty"`
+	WrapperToStartS     float64               `json:"wrapper_to_start_s,omitempty"`
 	AssignedGPUIndices  []string              `json:"assigned_gpu_indices,omitempty"`
 	HostSpecs           *trainingHostSpecs    `json:"host_specs,omitempty"`
 	Timeseries          []db.TimeseriesSample `json:"timeseries,omitempty"`
@@ -158,6 +164,9 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 			Backend:             run.Backend,
 			Tenant:              run.Tenant,
 			Status:              run.Status,
+			CloudOutcome:        run.CloudOutcome,
+			TerminalOutcome:     run.TerminalOutcome,
+			Censored:            run.Censored,
 			StartTime:           run.StartTime,
 			EndTime:             run.EndTime,
 			DurationS:           run.DurationS,
@@ -179,6 +188,9 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 			PeakRSSKB:           run.PeakRSSKB,
 			MaxGPUMiB:           run.MaxGPUMemMiB,
 			CPUMean:             run.CPUMean,
+			SetupDurationS:      run.SetupDurationS,
+			UploadDurationS:     run.UploadDurationS,
+			WrapperToStartS:     run.WrapperToStartS,
 			HostSpecs:           runtimeHostSpecsFromRun(run),
 		}
 
