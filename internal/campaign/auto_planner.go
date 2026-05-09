@@ -108,6 +108,9 @@ func BuildAutoPlacementPlanWithOptions(
 	groups := GroupByAffinity(jobs, nil)
 	groups = SplitGroupsByImage(database, groups)
 	groups = ApplyImageMetadataRequirements(cfg, groups)
+	for i := range groups {
+		groups[i].DiskGB = EstimateGroupDisk(groups[i], database, nil)
+	}
 	if len(groups) == 0 {
 		return plan, nil
 	}

@@ -348,6 +348,71 @@ func TestLaunchInstanceRecordsOfferGPUMemory(t *testing.T) {
 	}
 }
 
+func TestLaunchInstanceRecomputesDiskFloor(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	errStop := errors.New("stop after registration")
+	var gotCreateOpts cloud.CreateOpts
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(_ string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			gotCreateOpts = opts
+			return nil, errStop
+		},
+	}
+
+	job := &db.Job{
+		ID:         771,
+		Status:     db.StatusQueued,
+		WorkingDir: "/tmp/project",
+		Command:    "python train.py",
+		Metadata: &db.JobMetadata{
+			Disk: &db.JobDiskMetadata{DiskGB: 96},
+		},
+	}
+	group := InstanceGroup{
+		GPUClass: "RTX_3090",
+		GPUMemGB: 20,
+		Jobs:     []*db.Job{job},
+	}
+	offer := cloud.Offer{
+		ProviderID: "900",
+		Provider:   cloud.ProviderVastai,
+		GPUName:    "RTX_3090",
+		GPUMemGB:   24,
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, ?, ?, ?, ?, 0)`,
+		job.ID, job.WorkingDir, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	instanceID, err := LaunchInstance(
+		mockClient, database, nil, group, offer,
+		LaunchOpts{},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04", DiskGB: 50},
+		R2Assets{Client: &r2.Client{}},
+		nil, func(string) {}, nil,
+	)
+	if err == nil || !errors.Is(err, errStop) {
+		t.Fatalf("LaunchInstance() error = %v, want stop-after-registration failure", err)
+	}
+	if gotCreateOpts.DiskGB != 96 {
+		t.Fatalf("CreateInstance DiskGB = %d, want 96", gotCreateOpts.DiskGB)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if ci.DiskGB != 96 {
+		t.Fatalf("Launch.DiskGB = %d, want 96", ci.DiskGB)
+	}
+}
+
 func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
