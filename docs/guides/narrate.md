@@ -65,7 +65,7 @@ model = "claude-sonnet-4-20250514"
 [ai.narrate]
 tick_seconds = 30
 quiet_seconds = 5
-max_output_tokens = 600
+max_output_tokens = 1600
 compaction_threshold_tokens = 15000
 slack = false
 slack_min_interval_seconds = 300

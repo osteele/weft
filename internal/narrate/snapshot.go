@@ -36,6 +36,8 @@ type JobView struct {
 	QueueBlockedReason string   // transient queue-gate reason
 	FailureReason      string   // normalized failure reason (e.g. "timeout", "oom")
 	ErrorMessage       string
+	ProgressPct        int // 0-100, -1 if unavailable
+	ProgressPhase      int // 1-based phase number, 0 if unknown/single-phase
 }
 
 // InstanceView is the trimmed Launch.
@@ -94,8 +96,18 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
+	launchIDs := make([]int64, 0, len(jobs))
 	for _, j := range jobs {
-		snap.Jobs[j.ID] = jobToView(j)
+		if j != nil && j.LaunchID != nil && *j.LaunchID > 0 {
+			launchIDs = append(launchIDs, *j.LaunchID)
+		}
+	}
+	liveByLaunch, err := db.GetLaunchLiveStates(database, launchIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load launch live states: %w", err)
+	}
+	for _, j := range jobs {
+		snap.Jobs[j.ID] = jobToView(j, liveByLaunch)
 	}
 
 	instances, err := db.ListNonTerminalLaunches(database)
@@ -115,8 +127,8 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	return snap, nil
 }
 
-func jobToView(j *db.Job) JobView {
-	return JobView{
+func jobToView(j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState) JobView {
+	view := JobView{
 		ID:                 j.ID,
 		Status:             j.Status,
 		Host:               j.Host,
@@ -131,7 +143,15 @@ func jobToView(j *db.Job) JobView {
 		QueueBlockedReason: j.QueueBlockedReason,
 		FailureReason:      j.FailureReason,
 		ErrorMessage:       j.ErrorMessage,
+		ProgressPct:        -1,
 	}
+	if j.LaunchID != nil && liveByLaunch != nil {
+		if live := liveByLaunch[*j.LaunchID]; live != nil && live.JobProgressID == j.ID && live.JobProgressPct >= 0 {
+			view.ProgressPct = live.JobProgressPct
+			view.ProgressPhase = live.JobProgressPhase
+		}
+	}
+	return view
 }
 
 func instanceToView(c *db.Launch) InstanceView {
@@ -218,7 +238,14 @@ type InstanceChange struct {
 func (d Delta) Empty() bool {
 	return len(d.JobAdded) == 0 && len(d.JobChanged) == 0 && len(d.JobRemoved) == 0 && len(d.JobFinished) == 0 &&
 		len(d.InstAdded) == 0 && len(d.InstChanged) == 0 && len(d.InstRemoved) == 0 && len(d.InstTerminated) == 0 &&
-		d.AutopilotOld.State == d.AutopilotNew.State
+		!autopilotChangeNeedsNarration(d.AutopilotOld, d.AutopilotNew)
+}
+
+func autopilotChangeNeedsNarration(old, next AutopilotView) bool {
+	if old.State == next.State {
+		return false
+	}
+	return old.State == "paused" || next.State == "paused"
 }
 
 // ResolveRemovedInstances replaces the raw InstRemoved id list with
@@ -258,7 +285,7 @@ func (d *Delta) ResolveRemovedJobs(database *sql.DB) error {
 	}
 	for _, id := range d.JobRemoved {
 		if j, ok := jobs[id]; ok {
-			d.JobFinished = append(d.JobFinished, jobToView(j))
+			d.JobFinished = append(d.JobFinished, jobToView(j, nil))
 		}
 	}
 	d.JobRemoved = nil

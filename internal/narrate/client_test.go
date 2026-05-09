@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,6 +140,13 @@ func TestNarrateOpenRouterRequestUsesChatCompletionsAndCacheBreakpoints(t *testi
 	}
 }
 
+func TestNewClientDefaultMaxOutputTokensLeavesRoomForToolJSON(t *testing.T) {
+	client := NewClient(ClientConfig{APIKey: "key"})
+	if client.cfg.MaxOutputTokens != 1600 {
+		t.Fatalf("MaxOutputTokens = %d, want 1600", client.cfg.MaxOutputTokens)
+	}
+}
+
 func TestLookupProviderAPIKeyPrefersOpenRouterEnvironment(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "from-env")
 	if got := LookupProviderAPIKey(ProviderOpenRouter, "from-config"); got != "from-env" {
@@ -146,7 +154,7 @@ func TestLookupProviderAPIKeyPrefersOpenRouterEnvironment(t *testing.T) {
 	}
 }
 
-func TestNarrateOpenRouterSkipsEmptyToolArguments(t *testing.T) {
+func TestNarrateOpenRouterErrorsOnEmptyToolArguments(t *testing.T) {
 	rt := &captureTransport{resp: `{
 		"choices":[{"message":{"tool_calls":[{"type":"function","function":{"name":"report","arguments":""}}]}}],
 		"usage":{"prompt_tokens":100,"completion_tokens":20}
@@ -158,18 +166,18 @@ func TestNarrateOpenRouterSkipsEmptyToolArguments(t *testing.T) {
 		HTTPClient: &http.Client{Transport: rt},
 	})
 
-	report, _, err := client.Narrate(context.Background(), testTick())
-	if err != nil {
-		t.Fatalf("Narrate: %v", err)
+	_, _, err := client.Narrate(context.Background(), testTick())
+	if err == nil {
+		t.Fatal("Narrate succeeded, want empty tool arguments error")
 	}
-	if report.Narration != "" || report.StateRecap != "" {
-		t.Fatalf("unexpected report: %+v", report)
+	if !strings.Contains(err.Error(), "empty report tool arguments") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestNarrateOpenRouterSkipsTruncatedToolArguments(t *testing.T) {
+func TestNarrateOpenRouterErrorsOnTruncatedToolArguments(t *testing.T) {
 	rt := &captureTransport{resp: `{
-		"choices":[{"message":{"tool_calls":[{"type":"function","function":{"name":"report","arguments":"{"}}]}}],
+		"choices":[{"finish_reason":"length","native_finish_reason":"max_tokens","message":{"tool_calls":[{"type":"function","function":{"name":"report","arguments":"{"}}]}}],
 		"usage":{"prompt_tokens":100,"completion_tokens":20}
 	}`}
 	client := NewClient(ClientConfig{
@@ -179,11 +187,14 @@ func TestNarrateOpenRouterSkipsTruncatedToolArguments(t *testing.T) {
 		HTTPClient: &http.Client{Transport: rt},
 	})
 
-	report, _, err := client.Narrate(context.Background(), testTick())
-	if err != nil {
-		t.Fatalf("Narrate: %v", err)
+	_, _, err := client.Narrate(context.Background(), testTick())
+	if err == nil {
+		t.Fatal("Narrate succeeded, want invalid tool arguments error")
 	}
-	if report.Narration != "" || report.StateRecap != "" {
-		t.Fatalf("unexpected report: %+v", report)
+	if !strings.Contains(err.Error(), "invalid report tool arguments") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(err.Error(), `finish_reason="length"`) || !strings.Contains(err.Error(), `native_finish_reason="max_tokens"`) {
+		t.Fatalf("error missing finish metadata: %v", err)
 	}
 }

@@ -84,7 +84,7 @@ func TestDiffSnapshots_InstanceGraceTransition(t *testing.T) {
 	}
 }
 
-func TestDiffSnapshots_AutopilotStateChange(t *testing.T) {
+func TestDiffSnapshots_RoutineAutopilotStateChangeIsEmpty(t *testing.T) {
 	prev := &Snapshot{
 		Jobs:      map[int64]JobView{},
 		Instances: map[int64]InstanceView{},
@@ -96,11 +96,24 @@ func TestDiffSnapshots_AutopilotStateChange(t *testing.T) {
 		Autopilot: AutopilotView{State: "running"},
 	}
 	d := DiffSnapshots(prev, next)
-	if d.Empty() {
-		t.Fatal("autopilot state change should produce non-empty delta")
+	if !d.Empty() {
+		t.Fatal("routine autopilot state change should be empty")
 	}
-	if d.AutopilotOld.State != "idle" || d.AutopilotNew.State != "running" {
-		t.Fatalf("unexpected: %s -> %s", d.AutopilotOld.State, d.AutopilotNew.State)
+}
+
+func TestDiffSnapshots_AutopilotPauseChangeIsNotEmpty(t *testing.T) {
+	prev := &Snapshot{
+		Jobs:      map[int64]JobView{},
+		Instances: map[int64]InstanceView{},
+		Autopilot: AutopilotView{State: "idle"},
+	}
+	next := &Snapshot{
+		Jobs:      map[int64]JobView{},
+		Instances: map[int64]InstanceView{},
+		Autopilot: AutopilotView{State: "paused", Paused: true},
+	}
+	if DiffSnapshots(prev, next).Empty() {
+		t.Fatal("autopilot pause should produce non-empty delta")
 	}
 }
 
@@ -168,6 +181,55 @@ func TestFormatSnapshot_StableJSON(t *testing.T) {
 	idxTwo := strings.Index(out, `"id":2`)
 	if idxOne < 0 || idxTwo < 0 || idxOne > idxTwo {
 		t.Fatalf("jobs not sorted by id ascending:\n%s", out)
+	}
+}
+
+func TestFormatSnapshot_IncludesRunningJobProgress(t *testing.T) {
+	snap := &Snapshot{
+		Time: time.Unix(1700000000, 0).UTC(),
+		Jobs: map[int64]JobView{
+			1858: {ID: 1858, Status: "running", Project: "llm-performance-models", ProgressPct: 91},
+		},
+	}
+
+	out := FormatSnapshot(snap)
+	if !strings.Contains(out, `"progress":"91%"`) {
+		t.Fatalf("progress missing from snapshot:\n%s", out)
+	}
+}
+
+func TestBuildSnapshot_LoadsLiveJobProgress(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, db.LaunchHost(launchID), "/tmp", "echo ok", "progress job")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:         launchID,
+		JobProgressID:    jobID,
+		JobProgressPct:   91,
+		JobProgressPhase: 1,
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+
+	snap, err := BuildSnapshot(database, SnapshotOptions{})
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	job := snap.Jobs[jobID]
+	if job.ProgressPct != 91 {
+		t.Fatalf("ProgressPct = %d, want 91", job.ProgressPct)
 	}
 }
 
@@ -294,6 +356,45 @@ func TestFormatDelta_IncludesTerminatedInstanceAndPreviousInstance(t *testing.T)
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q from delta:\n%s", want, out)
+		}
+	}
+}
+
+func TestFallbackNarrationSummarizesTerminalJobs(t *testing.T) {
+	exitOne := 1
+	got := FallbackNarration(Delta{
+		JobFinished: []JobView{
+			{ID: 1, Status: "completed"},
+			{ID: 2, Status: "failed", ExitCode: &exitOne},
+		},
+		AutopilotOld: AutopilotView{State: "running"},
+		AutopilotNew: AutopilotView{State: "idle"},
+	})
+	for _, want := range []string{"2 jobs finished", "1 completed", "1 failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fallback narration missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "autopilot moved from running to idle") {
+		t.Fatalf("fallback narration leaked routine autopilot transition: %q", got)
+	}
+}
+
+func TestFormatLifecycleEventsAndFallback(t *testing.T) {
+	events := []db.LifecycleEvent{
+		{ID: 10, OccurredAt: 1710000000, EventKind: db.EventRelaunchLaunchSuccess, LaunchID: 42, GPUSpec: "RTX 4090", JobCount: 2},
+		{ID: 11, OccurredAt: 1710000001, EventKind: db.EventReconcileGraceExpired, LaunchID: 42, Detail: "grace expired"},
+	}
+	formatted := FormatLifecycleEvents(events)
+	for _, want := range []string{`"id":10`, `"kind":"relaunch.launch_success"`, `"instance_id":42`, `"detail":"grace expired"`} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("formatted events missing %q: %s", want, formatted)
+		}
+	}
+	fallback := FallbackEventNarration(events)
+	for _, want := range []string{"1 reconcile.grace_expired event", "1 relaunch.launch_success event"} {
+		if !strings.Contains(fallback, want) {
+			t.Fatalf("fallback missing %q: %q", want, fallback)
 		}
 	}
 }

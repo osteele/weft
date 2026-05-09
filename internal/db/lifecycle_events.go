@@ -200,6 +200,49 @@ type LifecycleEventFilter struct {
 	Limit      int // 0 = default 200
 }
 
+// LatestLifecycleEventID returns the highest lifecycle event id currently in
+// the database. It is suitable as a cursor for tailing newly inserted events.
+func LatestLifecycleEventID(database *sql.DB) (int64, error) {
+	if database == nil {
+		return 0, nil
+	}
+	var id sql.NullInt64
+	if err := database.QueryRow(`SELECT MAX(id) FROM lifecycle_events`).Scan(&id); err != nil {
+		return 0, err
+	}
+	if !id.Valid {
+		return 0, nil
+	}
+	return id.Int64, nil
+}
+
+// ListLifecycleEventsAfterID returns events with id greater than afterID,
+// ordered from oldest to newest. This is the streaming/tailing counterpart to
+// ListLifecycleEvents, whose newest-first order is better for inspection UIs.
+func ListLifecycleEventsAfterID(database *sql.DB, afterID int64, limit int) ([]LifecycleEvent, error) {
+	if database == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := database.Query(`
+		SELECT id, occurred_at, event_kind,
+			COALESCE(launch_id, 0), COALESCE(campaign_id, 0), COALESCE(job_id, 0),
+			COALESCE(gpu_spec, ''), COALESCE(job_count, 0),
+			COALESCE(detail, ''), COALESCE(error_text, ''),
+			COALESCE(attempt_number, 0), COALESCE(max_attempts, 0), COALESCE(disk_gb, 0)
+		FROM lifecycle_events
+		WHERE id > ?
+		ORDER BY id ASC
+		LIMIT ?`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanLifecycleEvents(rows)
+}
+
 // ListLifecycleEvents returns events matching the filter, ordered by occurred_at DESC.
 func ListLifecycleEvents(database *sql.DB, filter LifecycleEventFilter) ([]LifecycleEvent, error) {
 	var conditions []string
@@ -259,6 +302,10 @@ func ListLifecycleEvents(database *sql.DB, filter LifecycleEventFilter) ([]Lifec
 	}
 	defer rows.Close()
 
+	return scanLifecycleEvents(rows)
+}
+
+func scanLifecycleEvents(rows *sql.Rows) ([]LifecycleEvent, error) {
 	var events []LifecycleEvent
 	for rows.Next() {
 		var e LifecycleEvent

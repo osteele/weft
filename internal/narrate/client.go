@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -40,10 +41,36 @@ type Client struct {
 	http *http.Client
 }
 
+// AvailabilityError marks failures where the provider could not deliver a
+// usable response at all: network errors, timeouts, and non-OK HTTP statuses.
+type AvailabilityError struct {
+	Provider string
+	Err      error
+}
+
+func (e *AvailabilityError) Error() string {
+	if e == nil || e.Err == nil {
+		return "provider unavailable"
+	}
+	return e.Provider + " provider unavailable: " + e.Err.Error()
+}
+
+func (e *AvailabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func IsAvailabilityError(err error) bool {
+	var target *AvailabilityError
+	return errors.As(err, &target)
+}
+
 // NewClient builds a client from cfg.
 func NewClient(cfg ClientConfig) *Client {
 	if cfg.MaxOutputTokens <= 0 {
-		cfg.MaxOutputTokens = 600
+		cfg.MaxOutputTokens = 1600
 	}
 	cfg.Provider = normalizeProvider(cfg.Provider)
 	if cfg.HTTPClient == nil {
@@ -248,14 +275,17 @@ func (c *Client) narrateAnthropic(ctx context.Context, tick Tick) (*Report, Usag
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, Usage{}, fmt.Errorf("anthropic API: %w", err)
+		return nil, Usage{}, &AvailabilityError{Provider: ProviderAnthropic, Err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return nil, Usage{}, fmt.Errorf("anthropic API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String()))
+		return nil, Usage{}, &AvailabilityError{
+			Provider: ProviderAnthropic,
+			Err:      fmt.Errorf("API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String())),
+		}
 	}
 
 	var parsed struct {
@@ -341,14 +371,17 @@ func (c *Client) narrateOpenRouter(ctx context.Context, tick Tick) (*Report, Usa
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, Usage{}, fmt.Errorf("openrouter API: %w", err)
+		return nil, Usage{}, &AvailabilityError{Provider: ProviderOpenRouter, Err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return nil, Usage{}, fmt.Errorf("openrouter API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String()))
+		return nil, Usage{}, &AvailabilityError{
+			Provider: ProviderOpenRouter,
+			Err:      fmt.Errorf("API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String())),
+		}
 	}
 
 	var parsed openRouterResponse
@@ -356,34 +389,75 @@ func (c *Client) narrateOpenRouter(ctx context.Context, tick Tick) (*Report, Usa
 		return nil, Usage{}, fmt.Errorf("decode response: %w", err)
 	}
 	usage := parsed.usage()
-	for _, choice := range parsed.Choices {
+	for i, choice := range parsed.Choices {
 		for _, call := range choice.Message.ToolCalls {
 			if call.Function.Name != reportToolName {
 				continue
 			}
-			rep, err := c.decodeOpenRouterReport(call.Function.Arguments)
+			rep, err := c.decodeOpenRouterReport(call.Function.Arguments, openRouterChoiceMeta{
+				ChoiceIndex:        i,
+				FinishReason:       choice.FinishReason,
+				NativeFinishReason: choice.NativeFinishReason,
+				Usage:              usage,
+			})
 			if err != nil {
 				return nil, usage, err
 			}
 			return rep, usage, nil
 		}
 	}
-	return nil, usage, fmt.Errorf("model response did not include a %s tool call", reportToolName)
+	return nil, usage, fmt.Errorf("model response did not include a %s tool call (%s)", reportToolName, openRouterChoicesSummary(parsed, usage))
 }
 
-func (c *Client) decodeOpenRouterReport(arguments string) (*Report, error) {
+type openRouterChoiceMeta struct {
+	ChoiceIndex        int
+	FinishReason       string
+	NativeFinishReason string
+	Usage              Usage
+}
+
+func (c *Client) decodeOpenRouterReport(arguments string, meta openRouterChoiceMeta) (*Report, error) {
 	arguments = strings.TrimSpace(arguments)
 	if arguments == "" {
-		return &Report{}, nil
+		return nil, fmt.Errorf("openrouter model %s returned empty %s tool arguments (%s)", c.cfg.Model, reportToolName, openRouterToolDebug(arguments, meta))
 	}
 	var rep Report
 	if err := json.Unmarshal([]byte(arguments), &rep); err != nil {
-		if strings.Contains(err.Error(), "unexpected end of JSON input") {
-			return &Report{}, nil
-		}
-		return nil, fmt.Errorf("openrouter model %s returned invalid %s tool arguments: %w", c.cfg.Model, reportToolName, err)
+		return nil, fmt.Errorf("openrouter model %s returned invalid %s tool arguments: %w (%s)", c.cfg.Model, reportToolName, err, openRouterToolDebug(arguments, meta))
 	}
 	return &rep, nil
+}
+
+func openRouterToolDebug(arguments string, meta openRouterChoiceMeta) string {
+	parts := []string{
+		fmt.Sprintf("choice=%d", meta.ChoiceIndex),
+		fmt.Sprintf("finish_reason=%q", meta.FinishReason),
+		fmt.Sprintf("native_finish_reason=%q", meta.NativeFinishReason),
+		fmt.Sprintf("arguments_bytes=%d", len(arguments)),
+		fmt.Sprintf("output_tokens=%d", meta.Usage.OutputTokens),
+	}
+	if suffix := debugSuffix(arguments, 160); suffix != "" {
+		parts = append(parts, fmt.Sprintf("arguments_suffix=%q", suffix))
+	}
+	return strings.Join(parts, " ")
+}
+
+func openRouterChoicesSummary(resp openRouterResponse, usage Usage) string {
+	parts := make([]string, 0, len(resp.Choices)+1)
+	parts = append(parts, fmt.Sprintf("choices=%d output_tokens=%d", len(resp.Choices), usage.OutputTokens))
+	for i, choice := range resp.Choices {
+		parts = append(parts, fmt.Sprintf("choice[%d]: finish_reason=%q native_finish_reason=%q tool_calls=%d content_bytes=%d",
+			i, choice.FinishReason, choice.NativeFinishReason, len(choice.Message.ToolCalls), len(choice.Message.Content)))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func debugSuffix(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return s[len(s)-limit:]
 }
 
 // CompactRecaps is a one-shot call that summarizes a chain of prior recaps
@@ -423,13 +497,16 @@ func (c *Client) compactRecapsAnthropic(ctx context.Context, priorRecap string) 
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", Usage{}, fmt.Errorf("anthropic API: %w", err)
+		return "", Usage{}, &AvailabilityError{Provider: ProviderAnthropic, Err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return "", Usage{}, fmt.Errorf("anthropic API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String()))
+		return "", Usage{}, &AvailabilityError{
+			Provider: ProviderAnthropic,
+			Err:      fmt.Errorf("API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String())),
+		}
 	}
 	var parsed struct {
 		Content []struct {
@@ -483,13 +560,16 @@ func (c *Client) compactRecapsOpenRouter(ctx context.Context, priorRecap string)
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", Usage{}, fmt.Errorf("openrouter API: %w", err)
+		return "", Usage{}, &AvailabilityError{Provider: ProviderOpenRouter, Err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(resp.Body)
-		return "", Usage{}, fmt.Errorf("openrouter API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String()))
+		return "", Usage{}, &AvailabilityError{
+			Provider: ProviderOpenRouter,
+			Err:      fmt.Errorf("API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String())),
+		}
 	}
 	var parsed openRouterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
@@ -506,7 +586,9 @@ func (c *Client) compactRecapsOpenRouter(ctx context.Context, priorRecap string)
 
 type openRouterResponse struct {
 	Choices []struct {
-		Message struct {
+		FinishReason       string `json:"finish_reason"`
+		NativeFinishReason string `json:"native_finish_reason"`
+		Message            struct {
 			Content   string `json:"content"`
 			ToolCalls []struct {
 				Type     string `json:"type"`

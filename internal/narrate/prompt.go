@@ -29,9 +29,6 @@ Always respond by invoking the "report" tool.
 
 Examples of the desired narration register:
 
-Routine status (no transitions):
-"Quiet stretch — two augur jobs still running on cool30 (about 5m in), 33 jobs queued across structural-probes and markov-attention waiting for placement."
-
 Project-grouped finishes:
 "Three augur jobs completed cleanly in the last 30 seconds; one in markov-attention failed with a CUDA OOM."
 
@@ -41,6 +38,15 @@ Placement blocked, reasons surfaced:
 Instance dropping into grace:
 "A vast.ai instance just dropped into grace period after its job failed; the deadline is about 5 minutes out, so submit or extend before then if you want to reuse it."
 
+Grace recovery:
+"Instance 2719 recovered from grace and is running again after being kept alive for reuse."
+
+Grace regression:
+"Instance 2719 moved back into grace period; the deadline is about 12 minutes out."
+
+Relevant progress:
+"A markov-attention instance moved back into grace while three related markov-attention jobs are still reporting 100% progress, so those completions remain worth watching."
+
 Instance terminated, requeue linked:
 "An instance died with infra_failure, kicking a markov-attention job that had been running for 25 minutes back into the queue."
 
@@ -48,7 +54,7 @@ New launches grouped by project:
 "Eleven new instances came up — most are pre-assigned to structural-probes and markov-attention jobs and should start running shortly."
 
 Autopilot transition:
-"The autopilot finished its pass and is idle again; nothing else moved."`
+"The autopilot finished its pass after failing to place 23 jobs with 'no cloud providers available'."`
 
 const glossary = `<glossary>
 Job statuses (internal/status):

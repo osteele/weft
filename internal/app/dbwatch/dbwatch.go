@@ -43,15 +43,11 @@ func (s *Source) Close() error {
 }
 
 // Wait blocks until the watched DB files change, maxWait elapses, or ctx is
-// canceled. Pending events are drained before waiting; callers typically invoke
-// Wait after reloading a snapshot, so queued events from that reload/sync are
-// already reflected in memory.
+// canceled.
 func (s *Source) Wait(ctx context.Context, maxWait time.Duration) (bool, error) {
 	if s == nil || s.watcher == nil || len(s.targets) == 0 {
 		return waitWithoutSource(ctx, maxWait)
 	}
-
-	s.drainPending()
 
 	var timer <-chan time.Time
 	var t *time.Timer

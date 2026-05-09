@@ -68,6 +68,40 @@ func TestInsertAndListLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestListLifecycleEventsAfterID(t *testing.T) {
+	database := SetupTestDB(t)
+	if id, err := LatestLifecycleEventID(database); err != nil || id != 0 {
+		t.Fatalf("initial latest id = %d, err=%v; want 0, nil", id, err)
+	}
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{EventKind: EventRelaunchEligible}); err != nil {
+		t.Fatalf("insert first: %v", err)
+	}
+	cursor, err := LatestLifecycleEventID(database)
+	if err != nil {
+		t.Fatalf("LatestLifecycleEventID: %v", err)
+	}
+	if cursor == 0 {
+		t.Fatal("cursor should advance after first insert")
+	}
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{EventKind: EventRelaunchLaunchSuccess, LaunchID: 7}); err != nil {
+		t.Fatalf("insert second: %v", err)
+	}
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{EventKind: EventRelaunchLaunchFailed, LaunchID: 8}); err != nil {
+		t.Fatalf("insert third: %v", err)
+	}
+
+	events, err := ListLifecycleEventsAfterID(database, cursor, 10)
+	if err != nil {
+		t.Fatalf("ListLifecycleEventsAfterID: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events len = %d, want 2: %#v", len(events), events)
+	}
+	if events[0].EventKind != EventRelaunchLaunchSuccess || events[1].EventKind != EventRelaunchLaunchFailed {
+		t.Fatalf("events not oldest-first after cursor: %#v", events)
+	}
+}
+
 func TestInsertLifecycleEventNilDB(t *testing.T) {
 	// Should not panic
 	err := InsertLifecycleEvent(nil, &LifecycleEvent{EventKind: EventRelaunchEligible})

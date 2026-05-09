@@ -185,6 +185,28 @@ func TestNarrateSlackPostingSkipsEmptyUnchangedEntry(t *testing.T) {
 	}
 }
 
+func TestValidateNarrateSlackConfigRequiresWebhookWhenEnabled(t *testing.T) {
+	err := validateNarrateSlackConfig(true, "")
+	if err == nil {
+		t.Fatal("expected missing webhook to fail when Slack is enabled")
+	}
+	if !strings.Contains(err.Error(), "no webhook") {
+		t.Fatalf("error = %q, want missing webhook guidance", err)
+	}
+}
+
+func TestValidateNarrateSlackConfigAllowsMissingWebhookWhenDisabled(t *testing.T) {
+	if err := validateNarrateSlackConfig(false, ""); err != nil {
+		t.Fatalf("disabled Slack should not require webhook: %v", err)
+	}
+}
+
+func TestValidateNarrateSlackConfigAllowsConfiguredWebhook(t *testing.T) {
+	if err := validateNarrateSlackConfig(true, "https://hooks.slack.example/test"); err != nil {
+		t.Fatalf("configured webhook should be accepted: %v", err)
+	}
+}
+
 func TestNarrateStartupOverviewRecordsStatusWithoutSlack(t *testing.T) {
 	database := db.SetupTestDB(t)
 	sess, err := narrate.NewSession(narrate.SessionOptions{})
@@ -225,5 +247,123 @@ func TestNarrateStartupOverviewRecordsStatusWithoutSlack(t *testing.T) {
 	statusLine := narrate.BuildStatusLine(snap, 0, narrate.UnprocessedCounts{})
 	if changed := sess.UpdateStatus(statusLine); changed {
 		t.Fatal("startup overview should record status to avoid duplicate unchanged entry")
+	}
+}
+
+func TestShouldSkipNoTransitionTickIgnoresStatusOnlyUpdates(t *testing.T) {
+	prev := &narrate.Snapshot{}
+	if !shouldSkipNoTransitionTick(nil, narrate.Delta{}, prev, false) {
+		t.Fatal("no-transition tick should be skipped even if the status line changed")
+	}
+}
+
+func TestShouldSkipNoTransitionTickKeepsInitialAndTransitionTicks(t *testing.T) {
+	if shouldSkipNoTransitionTick(nil, narrate.Delta{}, nil, false) {
+		t.Fatal("initial tick should not be skipped")
+	}
+	if shouldSkipNoTransitionTick(nil, narrate.Delta{}, &narrate.Snapshot{}, true) {
+		t.Fatal("one-shot tick should not be skipped")
+	}
+	if shouldSkipNoTransitionTick([]db.LifecycleEvent{{EventKind: "job.started"}}, narrate.Delta{}, &narrate.Snapshot{}, false) {
+		t.Fatal("lifecycle-event tick should not be skipped")
+	}
+	if shouldSkipNoTransitionTick(nil, narrate.Delta{JobAdded: []narrate.JobView{{ID: 1}}}, &narrate.Snapshot{}, false) {
+		t.Fatal("snapshot-transition tick should not be skipped")
+	}
+}
+
+func TestNarrateAddsTerminalJobsCompletedBetweenTicks(t *testing.T) {
+	database := db.SetupTestDB(t)
+	prevTime := time.Now().Add(-2 * time.Second)
+	jobID, err := db.RecordQueued(database, "cool30", "/tmp/quick", "echo ok", "quick")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := db.SetJobProject(database, jobID, "quick-project"); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+	exitZero := 0
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitZero, time.Now().Unix()); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+
+	r := &narrateRunner{
+		database: database,
+		opts:     narrate.SnapshotOptions{},
+	}
+	delta := narrate.Delta{}
+	prev := &narrate.Snapshot{
+		Time:      prevTime,
+		Jobs:      map[int64]narrate.JobView{},
+		Instances: map[int64]narrate.InstanceView{},
+	}
+	if err := r.addRecentTerminalJobs(&delta, prev); err != nil {
+		t.Fatalf("addRecentTerminalJobs: %v", err)
+	}
+	if len(delta.JobFinished) != 1 {
+		t.Fatalf("JobFinished len = %d, want 1: %#v", len(delta.JobFinished), delta.JobFinished)
+	}
+	if delta.JobFinished[0].ID != jobID || delta.JobFinished[0].Status != db.StatusCompleted {
+		t.Fatalf("unexpected terminal job: %+v", delta.JobFinished[0])
+	}
+}
+
+func TestNarrateLoadsLifecycleEventsAfterCursor(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{EventKind: db.EventRelaunchEligible}); err != nil {
+		t.Fatalf("insert first event: %v", err)
+	}
+	cursor, err := db.LatestLifecycleEventID(database)
+	if err != nil {
+		t.Fatalf("LatestLifecycleEventID: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{EventKind: db.EventRelaunchLaunchSuccess, LaunchID: 44}); err != nil {
+		t.Fatalf("insert second event: %v", err)
+	}
+	r := &narrateRunner{database: database, lifecycleCursor: cursor}
+	events, nextCursor, err := r.loadLifecycleEvents()
+	if err != nil {
+		t.Fatalf("loadLifecycleEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != db.EventRelaunchLaunchSuccess {
+		t.Fatalf("events = %#v, want one launch success", events)
+	}
+	if nextCursor <= cursor {
+		t.Fatalf("next cursor = %d, want > %d", nextCursor, cursor)
+	}
+}
+
+func TestNarrateFiltersDispatchOKEventsButAdvancesCursor(t *testing.T) {
+	database := db.SetupTestDB(t)
+	cursor, err := db.LatestLifecycleEventID(database)
+	if err != nil {
+		t.Fatalf("LatestLifecycleEventID: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{EventKind: db.EventQueueDispatchOK, JobID: 10}); err != nil {
+		t.Fatalf("insert dispatch ok: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{EventKind: db.EventRelaunchPassSummary, Detail: "eligible=0 launched=0 skipped=2 errors=0 blocked=\"\""}); err != nil {
+		t.Fatalf("insert pass summary: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{EventKind: db.EventRelaunchSkippedBackoff, JobID: 12, Detail: "backoff 10m remaining"}); err != nil {
+		t.Fatalf("insert backoff: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{EventKind: db.EventQueueDispatchFailed, JobID: 11, Detail: "sync failed"}); err != nil {
+		t.Fatalf("insert dispatch failed: %v", err)
+	}
+	r := &narrateRunner{database: database, lifecycleCursor: cursor}
+	events, nextCursor, err := r.loadLifecycleEvents()
+	if err != nil {
+		t.Fatalf("loadLifecycleEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventKind != db.EventQueueDispatchFailed {
+		t.Fatalf("events = %#v, want only dispatch failed", events)
+	}
+	latest, err := db.LatestLifecycleEventID(database)
+	if err != nil {
+		t.Fatalf("LatestLifecycleEventID: %v", err)
+	}
+	if nextCursor != latest {
+		t.Fatalf("next cursor = %d, want latest %d", nextCursor, latest)
 	}
 }

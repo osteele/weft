@@ -2,9 +2,13 @@ package narrate
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/progress"
 )
 
 type formattedJobOut struct {
@@ -21,6 +25,7 @@ type formattedJobOut struct {
 	QueueBlockedReason string   `json:"queue_blocked_reason,omitempty"`
 	FailureReason      string   `json:"failure_reason,omitempty"`
 	ErrorMessage       string   `json:"error_message,omitempty"`
+	Progress           string   `json:"progress,omitempty"`
 }
 
 // FormatSnapshot renders a snapshot as compact JSON for the model. We keep
@@ -194,12 +199,177 @@ func FormatDelta(d Delta) string {
 		}
 		out.InstChanged = append(out.InstChanged, ic)
 	}
-	if d.AutopilotOld.State != d.AutopilotNew.State {
+	if autopilotChangeNeedsNarration(d.AutopilotOld, d.AutopilotNew) {
 		out.AutopilotFrom = d.AutopilotOld.State
 		out.AutopilotTo = d.AutopilotNew.State
 	}
 	b, _ := json.Marshal(out)
 	return string(b)
+}
+
+// FormatLifecycleEvents renders durable DB lifecycle events as compact JSON for
+// the narrator. The input is expected oldest-first, as returned by
+// db.ListLifecycleEventsAfterID.
+func FormatLifecycleEvents(events []db.LifecycleEvent) string {
+	type eventOut struct {
+		ID            int64  `json:"id"`
+		At            string `json:"at"`
+		Kind          string `json:"kind"`
+		LaunchID      int64  `json:"instance_id,omitempty"`
+		CampaignID    int64  `json:"campaign_id,omitempty"`
+		JobID         int64  `json:"job_id,omitempty"`
+		GPUSpec       string `json:"gpu,omitempty"`
+		JobCount      int    `json:"job_count,omitempty"`
+		Detail        string `json:"detail,omitempty"`
+		ErrorText     string `json:"error,omitempty"`
+		AttemptNumber int    `json:"attempt,omitempty"`
+		MaxAttempts   int    `json:"max_attempts,omitempty"`
+		DiskGB        int    `json:"disk_gb,omitempty"`
+	}
+	out := struct {
+		Events []eventOut `json:"events,omitempty"`
+	}{}
+	for _, event := range events {
+		out.Events = append(out.Events, eventOut{
+			ID:            event.ID,
+			At:            time.Unix(event.OccurredAt, 0).Format(time.RFC3339),
+			Kind:          event.EventKind,
+			LaunchID:      event.LaunchID,
+			CampaignID:    event.CampaignID,
+			JobID:         event.JobID,
+			GPUSpec:       event.GPUSpec,
+			JobCount:      event.JobCount,
+			Detail:        event.Detail,
+			ErrorText:     event.ErrorText,
+			AttemptNumber: event.AttemptNumber,
+			MaxAttempts:   event.MaxAttempts,
+			DiskGB:        event.DiskGB,
+		})
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
+}
+
+// FallbackNarration returns a compact local summary when the LLM call fails or
+// returns an empty narration. It is intentionally factual and low-flair.
+func FallbackNarration(d Delta) string {
+	parts := make([]string, 0, 6)
+	if n := len(d.JobAdded); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d job%s entered the active queue", n, plural(n)))
+	}
+	if n := len(d.JobChanged); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d job%s changed state", n, plural(n)))
+	}
+	if n := len(d.JobFinished); n > 0 {
+		completed, failed := terminalJobCounts(d.JobFinished)
+		switch {
+		case completed > 0 && failed > 0:
+			parts = append(parts, fmt.Sprintf("%d job%s finished: %d completed, %d failed", n, plural(n), completed, failed))
+		case completed > 0:
+			parts = append(parts, fmt.Sprintf("%d job%s completed", completed, plural(completed)))
+		case failed > 0:
+			parts = append(parts, fmt.Sprintf("%d job%s failed or stopped", failed, plural(failed)))
+		default:
+			parts = append(parts, fmt.Sprintf("%d job%s finished", n, plural(n)))
+		}
+	}
+	if n := len(d.InstAdded); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d instance%s appeared", n, plural(n)))
+	}
+	if n := len(d.InstChanged); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d instance%s changed state", n, plural(n)))
+	}
+	if n := len(d.InstTerminated); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d instance%s terminated", n, plural(n)))
+	}
+	if autopilotChangeNeedsNarration(d.AutopilotOld, d.AutopilotNew) {
+		parts = append(parts, fmt.Sprintf("autopilot moved from %s to %s", d.AutopilotOld.State, d.AutopilotNew.State))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+func FallbackEventNarration(events []db.LifecycleEvent) string {
+	if len(events) == 0 {
+		return ""
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		counts[event.EventKind]++
+	}
+	kinds := make([]string, 0, len(counts))
+	for kind := range counts {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		n := counts[kind]
+		parts = append(parts, fmt.Sprintf("%d %s event%s", n, kind, plural(n)))
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
+func FallbackStatusNarration(sl StatusLine) string {
+	parts := make([]string, 0, 6)
+	if sl.ActiveInstances > 0 || sl.LaunchingInst > 0 || sl.GraceInstances > 0 {
+		var inst []string
+		if sl.ActiveInstances > 0 {
+			inst = append(inst, fmt.Sprintf("%d running", sl.ActiveInstances))
+		}
+		if sl.LaunchingInst > 0 {
+			inst = append(inst, fmt.Sprintf("%d launching", sl.LaunchingInst))
+		}
+		if sl.GraceInstances > 0 {
+			inst = append(inst, fmt.Sprintf("%d in grace", sl.GraceInstances))
+		}
+		parts = append(parts, "instances: "+strings.Join(inst, ", "))
+	} else {
+		parts = append(parts, "no rentals")
+	}
+	jobParts := make([]string, 0, 4)
+	if sl.RunningJobs > 0 {
+		jobParts = append(jobParts, fmt.Sprintf("%d running", sl.RunningJobs))
+	}
+	if sl.QueuedJobs > 0 {
+		jobParts = append(jobParts, fmt.Sprintf("%d queued", sl.QueuedJobs))
+	}
+	if sl.StartingJobs > 0 {
+		jobParts = append(jobParts, fmt.Sprintf("%d starting", sl.StartingJobs))
+	}
+	if sl.PendingPlacement > 0 {
+		jobParts = append(jobParts, fmt.Sprintf("%d pending placement", sl.PendingPlacement))
+	}
+	if len(jobParts) > 0 {
+		parts = append(parts, "jobs: "+strings.Join(jobParts, ", "))
+	}
+	if sl.UnprocessedCompleted > 0 || sl.UnprocessedFailed > 0 {
+		parts = append(parts, fmt.Sprintf("unprocessed: %d completed, %d failed", sl.UnprocessedCompleted, sl.UnprocessedFailed))
+	}
+	if sl.AutopilotState != "" {
+		parts = append(parts, "autopilot "+sl.AutopilotState)
+	}
+	return "Current status: " + strings.Join(parts, "; ") + "."
+}
+
+func terminalJobCounts(jobs []JobView) (completed, failed int) {
+	for _, job := range jobs {
+		if job.Status == "completed" && (job.ExitCode == nil || *job.ExitCode == 0) {
+			completed++
+			continue
+		}
+		failed++
+	}
+	return completed, failed
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func autopilotNeedsSnapshotContext(v AutopilotView) bool {
@@ -220,6 +390,9 @@ func jobToOut(j JobView, now time.Time) formattedJobOut {
 		QueueBlockedReason: j.QueueBlockedReason,
 		FailureReason:      j.FailureReason,
 		ErrorMessage:       j.ErrorMessage,
+	}
+	if j.ProgressPct >= 0 {
+		out.Progress = strings.TrimSpace(progress.FormatPhaseProgress(j.ProgressPhase, j.ProgressPct))
 	}
 	if jobPlacementReasonsAreCurrent(j) {
 		out.PlacementReasons = j.PlacementReasons

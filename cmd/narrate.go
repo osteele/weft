@@ -91,6 +91,7 @@ type narrateRunner struct {
 	budgetCents      int
 	width            int
 	apLabel          string
+	lifecycleCursor  int64
 	syncEnabled      bool
 	apEnabled        bool
 	slackEnabled     bool
@@ -110,6 +111,11 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	slackEnabled := cfg.NarrateSlackEnabled() || narrateSlackFlag
+	if err := validateNarrateSlackConfig(slackEnabled, slack.GetWebhook()); err != nil {
+		return err
 	}
 
 	provider := cfg.NarrateProvider()
@@ -190,7 +196,7 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 		apLabel:          fmt.Sprintf("narrate/%d", os.Getpid()),
 		syncEnabled:      !narrateNoSyncFlag,
 		apEnabled:        !narrateNoAutopilot,
-		slackEnabled:     cfg.NarrateSlackEnabled() || narrateSlackFlag,
+		slackEnabled:     slackEnabled,
 		debug:            narrateDebugFlag,
 		slackMinInterval: slackMin,
 		slackPost:        slack.Post,
@@ -208,6 +214,11 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 	if err := r.emitStartupOverview(os.Stdout, initial); err != nil {
 		return err
 	}
+	cursor, err := db.LatestLifecycleEventID(database)
+	if err != nil {
+		return fmt.Errorf("load lifecycle cursor: %w", err)
+	}
+	r.lifecycleCursor = cursor
 	r.driveSyncAndAutopilot(ctx)
 	lastTick := time.Now()
 	if narrateOnceFlag {
@@ -233,10 +244,17 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 			return nil
 		}
 		if err := r.tick(ctx); err != nil {
-			r.debugf("weft narrate: tick error: %v\n", err)
+			return err
 		}
 		lastTick = time.Now()
 	}
+}
+
+func validateNarrateSlackConfig(enabled bool, webhook string) error {
+	if !enabled || strings.TrimSpace(webhook) != "" {
+		return nil
+	}
+	return errors.New("Slack is enabled for narrate, but no webhook is configured; set WEFT_SLACK_WEBHOOK or SLACK_WEBHOOK in ~/.config/weft/config")
 }
 
 func waitForNarrateQuietWindow(ctx context.Context, changeSource *dbwatch.Source, quiet time.Duration, deadline time.Time) bool {
@@ -323,8 +341,15 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 	if err := delta.ResolveRemovedJobs(r.database); err != nil {
 		return fmt.Errorf("resolve removed jobs: %w", err)
 	}
+	if err := r.addRecentTerminalJobs(&delta, r.session.Prev()); err != nil {
+		return fmt.Errorf("resolve recent terminal jobs: %w", err)
+	}
 	if err := delta.ResolveRemovedInstances(r.database); err != nil {
 		return fmt.Errorf("resolve removed instances: %w", err)
+	}
+	events, eventCursor, err := r.loadLifecycleEvents()
+	if err != nil {
+		return fmt.Errorf("load lifecycle events: %w", err)
 	}
 
 	unprocessed, err := loadUnprocessedCounts(r.database, r.opts.Project)
@@ -333,12 +358,11 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 	}
 	statusLine := narrate.BuildStatusLine(snap, r.budgetCents, unprocessed)
 	r.width = resolveTerminalWidth()
+	statusChanged := r.session.UpdateStatus(statusLine)
 
-	if delta.Empty() && !narrateOnceFlag && r.session.Prev() != nil {
-		statusChanged := r.session.UpdateStatus(statusLine)
-		r.session.EmitEntry(os.Stdout, statusLine, "", statusChanged, r.width)
-		r.maybePostSlack(statusLine, "", statusChanged)
+	if shouldSkipNoTransitionTick(events, delta, r.session.Prev(), narrateOnceFlag) {
 		r.session.SetPrev(snap)
+		r.lifecycleCursor = eventCursor
 		return nil
 	}
 
@@ -348,10 +372,14 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 	}
 	priorRecap := narrate.FormatPriorRecap(r.session.Recaps())
 
+	changeText := narrate.FormatDelta(delta)
+	if len(events) > 0 {
+		changeText = narrate.FormatLifecycleEvents(events)
+	}
 	tick := narrate.Tick{
 		PriorRecap:      priorRecap,
 		CurrentSnapshot: narrate.FormatSnapshot(snap),
-		Delta:           narrate.FormatDelta(delta),
+		Delta:           changeText,
 		Now:             snap.Time,
 		Since:           prevTime,
 	}
@@ -359,9 +387,31 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 	r.session.EmitDebug("delta", delta)
 	report, usage, err := r.client.Narrate(ctx, tick)
 	if err != nil {
-		return err
+		if !narrate.IsAvailabilityError(err) {
+			return fmt.Errorf("LLM narration failed: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "weft narrate: LLM unavailable, using local fallback: %v\n", err)
+		report = &narrate.Report{}
 	}
-	statusChanged := r.session.UpdateStatus(statusLine)
+	if strings.TrimSpace(report.Narration) == "" {
+		if err == nil {
+			return fmt.Errorf("LLM narration failed: decoded report had empty narration")
+		}
+		if len(events) > 0 {
+			report.Narration = narrate.FallbackEventNarration(events)
+		} else {
+			report.Narration = narrate.FallbackNarration(delta)
+		}
+		if strings.TrimSpace(report.Narration) == "" && statusChanged {
+			report.Narration = narrate.FallbackStatusNarration(statusLine)
+		}
+	}
+	if err == nil && strings.TrimSpace(report.StateRecap) == "" {
+		return fmt.Errorf("LLM narration failed: decoded report had empty state_recap")
+	}
+	if strings.TrimSpace(report.StateRecap) == "" {
+		report.StateRecap = report.Narration
+	}
 	r.session.EmitEntry(os.Stdout, statusLine, report.Narration, statusChanged, r.width)
 	r.maybePostSlack(statusLine, report.Narration, statusChanged)
 	r.session.EmitDebug("usage", usage)
@@ -376,6 +426,91 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 		}
 	}
 	r.session.SetPrev(snap)
+	r.lifecycleCursor = eventCursor
+	return nil
+}
+
+func shouldSkipNoTransitionTick(events []db.LifecycleEvent, delta narrate.Delta, prev *narrate.Snapshot, once bool) bool {
+	return len(events) == 0 && delta.Empty() && !once && prev != nil
+}
+
+func (r *narrateRunner) loadLifecycleEvents() ([]db.LifecycleEvent, int64, error) {
+	events, err := db.ListLifecycleEventsAfterID(r.database, r.lifecycleCursor, 200)
+	if err != nil {
+		return nil, r.lifecycleCursor, err
+	}
+	cursor := r.lifecycleCursor
+	narratable := make([]db.LifecycleEvent, 0, len(events))
+	for _, event := range events {
+		if event.ID > cursor {
+			cursor = event.ID
+		}
+		if narrateLifecycleEvent(event) {
+			narratable = append(narratable, event)
+		}
+	}
+	return narratable, cursor, nil
+}
+
+func narrateLifecycleEvent(event db.LifecycleEvent) bool {
+	switch event.EventKind {
+	case db.EventQueueDispatchOK,
+		db.EventRelaunchPassSummary,
+		db.EventRelaunchSkippedBackoff,
+		db.EventRelaunchEligible:
+		return false
+	default:
+		return true
+	}
+}
+
+func (r *narrateRunner) addRecentTerminalJobs(delta *narrate.Delta, prev *narrate.Snapshot) error {
+	if delta == nil || prev == nil || prev.Time.IsZero() {
+		return nil
+	}
+	jobs, err := db.ListRecentTerminalJobs(r.database, prev.Time.Unix())
+	if err != nil {
+		return err
+	}
+	if r.opts.Project != "" {
+		jobs = db.FilterJobsByProject(jobs, r.opts.Project)
+	}
+	jobs = db.FilterJobsByTags(jobs, nil, "unprocessed")
+	seen := make(map[int64]struct{}, len(delta.JobFinished)+len(delta.JobChanged))
+	for _, job := range delta.JobFinished {
+		seen[job.ID] = struct{}{}
+	}
+	for _, change := range delta.JobChanged {
+		seen[change.After.ID] = struct{}{}
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := prev.Jobs[job.ID]; ok {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		delta.JobFinished = append(delta.JobFinished, narrate.JobView{
+			ID:                 job.ID,
+			Status:             job.Status,
+			Host:               job.Host,
+			Project:            job.Project,
+			Command:            job.Command,
+			ExitCode:           job.ExitCode,
+			StartTime:          job.StartTime,
+			EndTime:            job.EndTime,
+			LaunchID:           job.LaunchID,
+			Tags:               append([]string(nil), job.Tags...),
+			PlacementReasons:   append([]string(nil), job.PlacementReasons...),
+			QueueBlockedReason: job.QueueBlockedReason,
+			FailureReason:      job.FailureReason,
+			ErrorMessage:       job.ErrorMessage,
+		})
+		seen[job.ID] = struct{}{}
+	}
 	return nil
 }
 
