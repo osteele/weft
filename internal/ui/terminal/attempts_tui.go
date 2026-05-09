@@ -3,6 +3,7 @@ package terminal
 import (
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,9 +21,20 @@ type attemptsListModel struct {
 	jobID    int64
 	job      *db.Job
 	views    []attemptView
+	sessions []attemptSession
 	err      error
+	loaded   bool
 	cursor   int
 	width    int
+	height   int
+	expanded bool
+}
+
+// attemptSession groups consecutive attempts sharing an effective host.
+// indices reference into attemptsListModel.views, newest-first.
+type attemptSession struct {
+	indices []int
+	host    string
 }
 
 // attemptView pairs an attempt with its launch (if any) and the derived
@@ -80,6 +92,46 @@ func newAttemptsListModel(database *sql.DB, jobID int64) attemptsListModel {
 	return attemptsListModel{database: database, jobID: jobID}
 }
 
+// groupAttemptSessions folds each contiguous run of attempts sharing an
+// effective host into one session. Attempts with no host inherit from
+// older neighbors so the (queued, canceled-superseded) intent pair lands
+// in the same session.
+func groupAttemptSessions(views []attemptView) []attemptSession {
+	if len(views) == 0 {
+		return nil
+	}
+	hosts := make([]string, len(views))
+	for i, v := range views {
+		h := attemptHostCell(v)
+		if h == "—" {
+			h = ""
+		}
+		hosts[i] = h
+	}
+	// Inherit empty hosts from the older neighbor, then forward-fill
+	// from the newer side for any leading empties.
+	for i := len(hosts) - 2; i >= 0; i-- {
+		if hosts[i] == "" {
+			hosts[i] = hosts[i+1]
+		}
+	}
+	for i := 1; i < len(hosts); i++ {
+		if hosts[i] == "" {
+			hosts[i] = hosts[i-1]
+		}
+	}
+
+	var sessions []attemptSession
+	for i, h := range hosts {
+		if i == 0 || h != hosts[i-1] || h == "" {
+			sessions = append(sessions, attemptSession{host: h})
+		}
+		s := &sessions[len(sessions)-1]
+		s.indices = append(s.indices, i)
+	}
+	return sessions
+}
+
 func (m attemptsListModel) Init() tea.Cmd {
 	return m.loadAttempts()
 }
@@ -119,6 +171,15 @@ func (m attemptsListModel) loadAttempts() tea.Cmd {
 	}
 }
 
+// rowCount returns the number of cursor-addressable rows for the current
+// view mode.
+func (m attemptsListModel) rowCount() int {
+	if m.expanded {
+		return len(m.views)
+	}
+	return len(m.sessions)
+}
+
 // derivePhase returns the furthest lifecycle checkpoint the attempt
 // reached, along with the timestamp that marks it. This is the single
 // source of truth the row columns key off.
@@ -153,13 +214,16 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		return m, nil
 	case attemptsLoadedMsg:
 		m.job = msg.job
 		m.views = msg.views
+		m.sessions = groupAttemptSessions(msg.views)
 		m.err = msg.err
-		if m.cursor >= len(m.views) {
-			m.cursor = max(0, len(m.views)-1)
+		m.loaded = true
+		if n := m.rowCount(); m.cursor >= n {
+			m.cursor = max(0, n-1)
 		}
 		return m, nil
 
@@ -175,7 +239,7 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "down", "j":
-			if m.cursor < len(m.views)-1 {
+			if m.cursor < m.rowCount()-1 {
 				m.cursor++
 			}
 			return m, nil
@@ -183,9 +247,15 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			return m, nil
 		case "G", "end":
-			if len(m.views) > 0 {
-				m.cursor = len(m.views) - 1
+			if n := m.rowCount(); n > 0 {
+				m.cursor = n - 1
 			}
+			return m, nil
+		case "c":
+			// Toggle between collapsed (one row per session) and expanded
+			// (one row per attempt). Keep the cursor anchored on the same
+			// underlying attempt across the toggle.
+			m = m.toggleExpanded()
 			return m, nil
 		case "r":
 			return m, m.loadAttempts()
@@ -194,10 +264,43 @@ func (m attemptsListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// toggleExpanded flips between collapsed and expanded modes, translating
+// the cursor so the same underlying attempt stays selected.
+func (m attemptsListModel) toggleExpanded() attemptsListModel {
+	if len(m.views) == 0 {
+		m.expanded = !m.expanded
+		return m
+	}
+	if m.expanded {
+		// Currently on a view index; find the session it belongs to.
+		viewIdx := m.cursor
+		for sIdx, s := range m.sessions {
+			for _, idx := range s.indices {
+				if idx == viewIdx {
+					m.cursor = sIdx
+					m.expanded = false
+					return m
+				}
+			}
+		}
+		m.cursor = 0
+	} else {
+		// Currently on a session index; jump to its first (newest) view.
+		if m.cursor >= 0 && m.cursor < len(m.sessions) {
+			m.cursor = m.sessions[m.cursor].indices[0]
+		} else {
+			m.cursor = 0
+		}
+		m.expanded = true
+	}
+	return m
+}
+
 func (m attemptsListModel) View() string {
 	var b strings.Builder
 
-	b.WriteString(m.renderHeader())
+	header := m.renderHeader()
+	b.WriteString(header)
 	b.WriteString("\n\n")
 
 	if m.err != nil {
@@ -207,17 +310,57 @@ func (m attemptsListModel) View() string {
 		return b.String()
 	}
 
+	if !m.loaded {
+		b.WriteString(tuiDimStyle.Render("Loading attempts…"))
+		return padToHeight(b.String(), m.height)
+	}
 	if len(m.views) == 0 {
 		b.WriteString(tuiDimStyle.Render("No attempts recorded for this job."))
 		b.WriteString("\n\n")
 		b.WriteString(tuiDimStyle.Render("esc/q back · r reload"))
-		return b.String()
+		return padToHeight(b.String(), m.height)
 	}
 
-	b.WriteString(m.renderTable())
+	footer := m.renderFooter()
+
+	// Compute how many body rows fit. Reserve lines for header (variable
+	// height because the description wraps), the blank line below, the
+	// table column header, the blank line above the footer, and the footer.
+	chrome := lipgloss.Height(header) + 1 + 1 + 1 + lipgloss.Height(footer)
+	bodyHeight := m.height - chrome
+	if bodyHeight < 1 || m.height == 0 {
+		bodyHeight = m.rowCount()
+	}
+
+	b.WriteString(m.renderTable(bodyHeight))
 	b.WriteString("\n")
-	b.WriteString(tuiDimStyle.Render("j/k move · g/G top/bottom · r reload · esc/q back"))
-	return b.String()
+	b.WriteString(footer)
+	return padToHeight(b.String(), m.height)
+}
+
+// padToHeight appends blank lines so the rendered frame always occupies
+// exactly `height` lines. Without this, narrowing the terminal can leave
+// the previous (taller) frame's content visible below the new render.
+func padToHeight(s string, height int) string {
+	if height <= 0 {
+		return s
+	}
+	have := lipgloss.Height(s)
+	if have >= height {
+		return s
+	}
+	return s + strings.Repeat("\n", height-have)
+}
+
+func (m attemptsListModel) renderFooter() string {
+	mode := "collapsed"
+	if m.expanded {
+		mode = "expanded"
+	}
+	return tuiDimStyle.Render(fmt.Sprintf(
+		"j/k move · g/G top/bottom · c %s · r reload · esc/q back",
+		mode,
+	))
 }
 
 func (m attemptsListModel) renderHeader() string {
@@ -251,7 +394,81 @@ func (m attemptsListModel) renderHeader() string {
 	for i, line := range wrapped {
 		descLines[i] = tuiDimStyle.Render(line)
 	}
-	return header + "\n" + strings.Join(descLines, "\n")
+	out := header + "\n" + strings.Join(descLines, "\n")
+	if chain := m.renderPlacementChain(wrapWidth); chain != "" {
+		out += "\n" + chain
+	}
+	return out
+}
+
+// renderPlacementChain summarizes the host-bounce pattern. Hosts appearing
+// in ≥2 non-adjacent sessions are "stable" (the source-of-record position
+// that gets restored after each move-to-new); single-occurrence hosts are
+// "transient" target attempts. Returns "" for trivial histories.
+func (m attemptsListModel) renderPlacementChain(wrapWidth int) string {
+	if len(m.sessions) < 3 {
+		return ""
+	}
+	occur := map[string]int{}
+	machines := map[string]string{}
+	for _, s := range m.sessions {
+		if s.host == "" {
+			continue
+		}
+		occur[s.host]++
+		if mid := machineForSession(m.views, s); mid != "" {
+			machines[s.host] = mid
+		}
+	}
+	var stable, transient []string
+	for _, s := range m.sessions {
+		if s.host == "" || slices.Contains(stable, s.host) || slices.Contains(transient, s.host) {
+			continue
+		}
+		if occur[s.host] >= 2 {
+			stable = append(stable, s.host)
+		} else {
+			transient = append(transient, s.host)
+		}
+	}
+	if len(stable) == 0 && len(transient) < 3 {
+		return ""
+	}
+
+	var parts []string
+	if len(stable) > 0 {
+		labels := make([]string, len(stable))
+		for i, h := range stable {
+			if mid := machines[h]; mid != "" {
+				labels[i] = fmt.Sprintf("%s (%s, ×%d)", h, mid, occur[h])
+			} else {
+				labels[i] = fmt.Sprintf("%s (×%d)", h, occur[h])
+			}
+		}
+		parts = append(parts, "stable: "+strings.Join(labels, ", "))
+	}
+	if len(transient) > 0 {
+		parts = append(parts, fmt.Sprintf("bounced through: %s", strings.Join(transient, ", ")))
+	}
+	line := "Placement: " + strings.Join(parts, " · ")
+	wrapped := wrapDisplayWidth(line, wrapWidth)
+	out := make([]string, len(wrapped))
+	for i, l := range wrapped {
+		out[i] = tuiDimStyle.Render(l)
+	}
+	return strings.Join(out, "\n")
+}
+
+// machineForSession returns the first non-empty machine ID across the
+// session's attempts, or "" if none of the underlying launches expose one.
+func machineForSession(views []attemptView, s attemptSession) string {
+	for _, idx := range s.indices {
+		v := views[idx]
+		if v.launch != nil && strings.TrimSpace(v.launch.MachineID) != "" {
+			return v.launch.MachineID
+		}
+	}
+	return ""
 }
 
 type attemptColumn struct {
@@ -262,11 +479,11 @@ type attemptColumn struct {
 
 func attemptColumns() []attemptColumn {
 	return []attemptColumn{
-		{"#", 4, func(v attemptView, _ int64) string { return fmt.Sprintf("%d", v.attempt.AttemptNumber) }},
+		{"#", 7, func(v attemptView, _ int64) string { return fmt.Sprintf("%d", v.attempt.AttemptNumber) }},
 		{"Status", 10, func(v attemptView, _ int64) string { return v.attempt.Status }},
 		{"Phase", 8, func(v attemptView, _ int64) string { return v.phase.Label() }},
-		{"Provider", 8, func(v attemptView, _ int64) string { return attemptProviderCell(v) }},
 		{"Host", 10, func(v attemptView, _ int64) string { return attemptHostCell(v) }},
+		{"Where", 18, func(v attemptView, _ int64) string { return attemptWhereCell(v) }},
 		{"GPU", 18, func(v attemptView, _ int64) string { return attemptGPUCell(v) }},
 		{"When", 24, func(v attemptView, _ int64) string { return attemptWhenCell(v) }},
 		{"Duration", 10, func(v attemptView, now int64) string { return attemptDurationCell(v, now) }},
@@ -280,7 +497,7 @@ func attemptColumns() []attemptColumn {
 	}
 }
 
-func (m attemptsListModel) renderTable() string {
+func (m attemptsListModel) renderTable(bodyHeight int) string {
 	cols := attemptColumns()
 	now := time.Now().Unix()
 	var b strings.Builder
@@ -292,20 +509,134 @@ func (m attemptsListModel) renderTable() string {
 	b.WriteString(tuiAccentStyle.Render(strings.Join(headerCells, " ")))
 	b.WriteString("\n")
 
-	for i, v := range m.views {
-		cells := make([]string, len(cols))
-		for j, c := range cols {
-			cells[j] = padOrTruncateDisplay(c.value(v, now), c.width, false)
-		}
-		row := strings.Join(cells, " ")
-		styled := attemptStatusStyle(v.attempt.Status).Render(row)
-		if i == m.cursor {
-			styled = tuiSelectedRowStyle.Render(styled)
-		}
-		b.WriteString(styled)
+	total := m.rowCount()
+	if bodyHeight < 1 {
+		bodyHeight = total
+	}
+	hintAbove, hintBelow := 0, 0
+	if total > bodyHeight {
+		hintAbove, hintBelow = 1, 1
+	}
+	rowsBudget := bodyHeight - hintAbove - hintBelow
+	if rowsBudget < 1 {
+		rowsBudget = 1
+	}
+	start, end := visibleWindow(m.cursor, total, rowsBudget)
+	if start == 0 {
+		hintAbove = 0
+	}
+	if end == total {
+		hintBelow = 0
+	}
+
+	if hintAbove > 0 {
+		b.WriteString(tuiDimStyle.Render(fmt.Sprintf("  ▲ %d more above", start)))
+		b.WriteString("\n")
+	}
+	for i := start; i < end; i++ {
+		b.WriteString(m.renderRow(cols, i, now))
+		b.WriteString("\n")
+	}
+	if hintBelow > 0 {
+		b.WriteString(tuiDimStyle.Render(fmt.Sprintf("  ▼ %d more below", total-end)))
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// renderRow formats one styled row for the current view mode (expanded =
+// per-attempt, collapsed = per-session). Only called for visible rows so
+// large histories don't materialize off-screen content.
+func (m attemptsListModel) renderRow(cols []attemptColumn, i int, now int64) string {
+	cells := make([]string, len(cols))
+	var statusKey string
+	if m.expanded || len(m.sessions) == 0 {
+		v := m.views[i]
+		for j, c := range cols {
+			cells[j] = padOrTruncateDisplay(c.value(v, now), c.width, false)
+		}
+		statusKey = v.attempt.Status
+	} else {
+		s := m.sessions[i]
+		latest := m.views[s.indices[0]]
+		for j, c := range cols {
+			switch c.title {
+			case "#":
+				cells[j] = padOrTruncateDisplay(sessionRangeLabel(m.views, s), c.width, false)
+			case "Outcome/Reason":
+				cells[j] = padOrTruncateDisplay(sessionOutcomeText(m.views, s), c.width, false)
+			default:
+				cells[j] = padOrTruncateDisplay(c.value(latest, now), c.width, false)
+			}
+		}
+		statusKey = latest.attempt.Status
+	}
+	row := strings.Join(cells, " ")
+	styled := attemptStatusStyle(statusKey).Render(row)
+	if i == m.cursor {
+		styled = tuiSelectedRowStyle.Render(styled)
+	}
+	return styled
+}
+
+// visibleWindow returns the [start, end) row range that keeps `cursor`
+// visible inside a window of `height` rows.
+func visibleWindow(cursor, total, height int) (int, int) {
+	if total <= height {
+		return 0, total
+	}
+	if cursor < height/2 {
+		return 0, height
+	}
+	if cursor >= total-height/2 {
+		return total - height, total
+	}
+	start := cursor - height/2
+	return start, start + height
+}
+
+// sessionRangeLabel returns "96" for a singleton session or "14–96" for a
+// multi-attempt run, using the underlying attempt numbers (not view
+// indices).
+func sessionRangeLabel(views []attemptView, s attemptSession) string {
+	if len(s.indices) == 0 {
+		return "—"
+	}
+	if len(s.indices) == 1 {
+		return fmt.Sprintf("%d", views[s.indices[0]].attempt.AttemptNumber)
+	}
+	first := views[s.indices[0]].attempt.AttemptNumber
+	last := views[s.indices[len(s.indices)-1]].attempt.AttemptNumber
+	if first == last {
+		return fmt.Sprintf("%d", first)
+	}
+	return fmt.Sprintf("%d–%d", last, first)
+}
+
+// sessionOutcomeText returns the latest attempt's outcome plus per-outcome
+// counts of the folded older attempts.
+func sessionOutcomeText(views []attemptView, s attemptSession) string {
+	if len(s.indices) == 0 {
+		return "—"
+	}
+	latest := attemptOutcomeText(views[s.indices[0]].attempt)
+	if len(s.indices) == 1 {
+		return latest
+	}
+	counts := map[string]int{}
+	for _, idx := range s.indices[1:] {
+		oc := views[idx].attempt.CloudOutcome
+		if oc == "" {
+			oc = "queued"
+		}
+		counts[oc]++
+	}
+	parts := make([]string, 0, len(counts))
+	for k, n := range counts {
+		parts = append(parts, fmt.Sprintf("%d× %s", n, k))
+	}
+	slices.Sort(parts)
+	return latest + " · " + strings.Join(parts, ", ")
 }
 
 func attemptStatusStyle(status string) lipgloss.Style {
@@ -342,6 +673,31 @@ func attemptHostCell(v attemptView) string {
 		return ids.FormatInstanceID(v.launch.ID)
 	}
 	return "—"
+}
+
+func attemptMachineCell(v attemptView) string {
+	if v.launch == nil || strings.TrimSpace(v.launch.MachineID) == "" {
+		return "—"
+	}
+	return v.launch.MachineID
+}
+
+// attemptWhereCell folds Provider and Machine into one cell so the table
+// reads as e.g. "52305 @ Vast.ai" or "Vast.ai" when no machine is known.
+// Falls back to "on-prem" for jobs running on weft inventory hosts.
+func attemptWhereCell(v attemptView) string {
+	provider := attemptProviderCell(v)
+	machine := attemptMachineCell(v)
+	switch {
+	case machine != "—" && provider != "—":
+		return machine + " @ " + provider
+	case provider != "—":
+		return provider
+	case machine != "—":
+		return machine
+	default:
+		return "—"
+	}
 }
 
 func attemptGPUCell(v attemptView) string {

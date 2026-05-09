@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -413,6 +414,7 @@ func init() {
 	for _, cmd := range []*cobra.Command{jobInfoCmd, infoCmd, showCmd} {
 		cmd.Flags().BoolVar(&jobInfoSync, "sync", false, "Perform full sync (30s timeout)")
 		cmd.Flags().BoolVar(&jobInfoNoSync, "no-sync", false, "Skip syncing job statuses")
+		cmd.Flags().BoolVar(&jobInfoAllAttempts, "all-attempts", false, "List every attempt (default: collapse same-host runs)")
 	}
 
 	// Copy flags from run command to job run
@@ -911,8 +913,9 @@ func runJobStartNowWithParser(cmd *cobra.Command, args []string, parser func([]s
 }
 
 var (
-	jobInfoSync   bool
-	jobInfoNoSync bool
+	jobInfoSync        bool
+	jobInfoNoSync      bool
+	jobInfoAllAttempts bool
 )
 
 var quickSyncJobsFunc = quickSyncJobs
@@ -1198,18 +1201,118 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  #\tWhen\tTarget\tStatus\tExit\tDuration\tOutcome")
-	for _, a := range attempts {
-		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			a.AttemptNumber,
-			attemptWhen(a),
-			attemptTarget(a),
-			dashIfEmpty(a.Status),
-			attemptExit(a),
-			attemptDuration(a, now),
-			attemptOutcome(a),
-		)
+	if jobInfoAllAttempts {
+		for _, a := range attempts {
+			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				a.AttemptNumber,
+				attemptWhen(a),
+				attemptTarget(a),
+				dashIfEmpty(a.Status),
+				attemptExit(a),
+				attemptDuration(a, now),
+				attemptOutcome(a),
+			)
+		}
+	} else {
+		sessions := groupAttemptsByTarget(attempts)
+		folded := 0
+		for _, s := range sessions {
+			latest := attempts[s.indices[0]]
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				attemptRangeLabel(attempts, s),
+				attemptWhen(latest),
+				attemptTarget(latest),
+				dashIfEmpty(latest.Status),
+				attemptExit(latest),
+				attemptDuration(latest, now),
+				attemptOutcomeWithFold(attempts, s),
+			)
+			if len(s.indices) > 1 {
+				folded += len(s.indices) - 1
+			}
+		}
+		if folded > 0 {
+			fmt.Fprintf(tw, "\n")
+			fmt.Fprintf(tw, "  (%d earlier attempts folded; pass --all-attempts to expand)\n", folded)
+		}
 	}
 	tw.Flush()
+}
+
+// attemptSession groups consecutive same-target attempts.
+type attemptSession struct {
+	indices []int
+	target  string
+}
+
+// groupAttemptsByTarget folds contiguous runs of same-target attempts (as
+// returned newest-first by ListAttempts). No-target attempts inherit from
+// older neighbors so the (queued, canceled-superseded) intent pair lands
+// in the same session.
+func groupAttemptsByTarget(attempts []db.JobAttempt) []attemptSession {
+	if len(attempts) == 0 {
+		return nil
+	}
+	targets := make([]string, len(attempts))
+	for i, a := range attempts {
+		t := attemptTarget(a)
+		if t == "-" {
+			t = ""
+		}
+		targets[i] = t
+	}
+	for i := len(targets) - 2; i >= 0; i-- {
+		if targets[i] == "" {
+			targets[i] = targets[i+1]
+		}
+	}
+	for i := 1; i < len(targets); i++ {
+		if targets[i] == "" {
+			targets[i] = targets[i-1]
+		}
+	}
+	var sessions []attemptSession
+	for i, t := range targets {
+		if i == 0 || t != targets[i-1] || t == "" {
+			sessions = append(sessions, attemptSession{target: t})
+		}
+		s := &sessions[len(sessions)-1]
+		s.indices = append(s.indices, i)
+	}
+	return sessions
+}
+
+func attemptRangeLabel(attempts []db.JobAttempt, s attemptSession) string {
+	if len(s.indices) == 0 {
+		return "-"
+	}
+	if len(s.indices) == 1 {
+		return strconv.Itoa(attempts[s.indices[0]].AttemptNumber)
+	}
+	first := attempts[s.indices[0]].AttemptNumber
+	last := attempts[s.indices[len(s.indices)-1]].AttemptNumber
+	return fmt.Sprintf("%d-%d", last, first)
+}
+
+func attemptOutcomeWithFold(attempts []db.JobAttempt, s attemptSession) string {
+	latest := attemptOutcome(attempts[s.indices[0]])
+	if len(s.indices) == 1 {
+		return latest
+	}
+	counts := map[string]int{}
+	for _, idx := range s.indices[1:] {
+		oc := attempts[idx].CloudOutcome
+		if oc == "" {
+			oc = "queued"
+		}
+		counts[oc]++
+	}
+	var parts []string
+	for k, n := range counts {
+		parts = append(parts, fmt.Sprintf("%dx %s", n, k))
+	}
+	slices.Sort(parts)
+	return latest + " (+" + strings.Join(parts, ", ") + ")"
 }
 
 func previousInstanceList(attempts []db.JobAttempt) string {
