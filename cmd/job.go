@@ -44,6 +44,9 @@ Available subcommands:
   show      Alias for info
   inspect   Print normalized job metadata
   diff      Compare job metadata and attempts
+  anomalies List recent jobs that look worth reviewing
+  churn     Group recent retry/churn clusters
+  recommend Suggest Weft improvements from recent job history
   restart   Requeue a killed, dead, failed, canceled, or completed job
   retry     Alias for restart
   list      List and search job history

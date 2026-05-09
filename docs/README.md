@@ -13,6 +13,7 @@ detail quickly.
 - [Activity Narration](guides/narrate.md) for `weft narrate` — LLM-streamed commentary on job and instance transitions
 - [Network Resilience](guides/network-resilience.md) for disconnected/offline behavior
 - [Debugging](guides/debugging.md) for operational troubleshooting
+- [Iterative Weft Improvement](guides/iterative-improvement.md) for mining job history and source snapshots into product fixes
 
 ## Reference
 

@@ -524,6 +524,37 @@ weft job diff wj1876 wj1877
 weft job diff wj1876 wj1877 --json
 ```
 
+### weft job anomalies / churn / recommend
+
+Mine recent job history for review targets and improvement suggestions.
+
+```bash
+weft job anomalies [--recent N] [--json]
+weft job churn [--recent N] [--json]
+weft job recommend [--recent N] [--json]
+```
+
+`anomalies` lists jobs that look worth reviewing: failed/dead/canceled jobs,
+non-zero exits, retries, multiple attempts, suspicious cloud outcomes, and
+common metadata gaps such as Hugging Face jobs without explicit cache or
+offline-mode overrides.
+
+`churn` groups recent jobs that look like iterations of the same script or
+command. Use the suggested `weft job diff` and `weft source diff` commands to
+compare adjacent jobs in a group.
+
+`recommend` turns the anomaly and churn signals into triage suggestions for
+Weft or workflow improvements. See
+[Iterative Weft Improvement](../guides/iterative-improvement.md) for the review
+loop.
+
+**Examples:**
+```bash
+weft job anomalies --recent 100
+weft job churn --recent 200
+weft job recommend --recent 100
+```
+
 ### weft job list
 
 Query and search job history from the local database.
