@@ -254,6 +254,9 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 //   - Terminal jobs that need backfill: cleanupStaleAttempts may have advanced
 //     latest_run_id past the run_id where the agent uploaded the marker, so we
 //     must look across all run_ids to recover authoritative timestamps.
+//   - Non-terminal cloud jobs whose latest attempt drifted past the actual
+//     run_id that uploaded completion. This can happen when placement cleanup
+//     or move retries created a replacement attempt before R2 completion sync.
 func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, needsBackfill bool) bool {
 	if currentStatus == db.StatusQueued && !launchID.Valid {
 		return true
@@ -261,7 +264,33 @@ func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, 
 	if db.IsTerminalStatus(currentStatus) && needsBackfill {
 		return true
 	}
+	if launchID.Valid {
+		switch currentStatus {
+		case db.StatusQueued, db.StatusStarting, db.StatusRunning:
+			return true
+		}
+	}
 	return false
+}
+
+func completedMarkerFallbackSafe(database *sql.DB, currentStatus string, launchID sql.NullInt64, jobID int64) bool {
+	if !launchID.Valid {
+		return true
+	}
+	switch currentStatus {
+	case db.StatusRunning, db.StatusStarting:
+	default:
+		return true
+	}
+	var phase string
+	if err := database.QueryRow(
+		`SELECT instance_phase FROM launch_live_state WHERE launch_id = ?`,
+		launchID.Int64,
+	).Scan(&phase); err != nil {
+		return false
+	}
+	verb, phaseJobID, ok := campaign.ParsePhaseJobID(phase)
+	return !(ok && verb == campaign.PhaseRunning && phaseJobID == jobID)
 }
 
 func ShouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
@@ -324,7 +353,11 @@ func syncOneCompletedJobMarker(
 			return completedMarkerResult{}
 		}
 		if altKey, ok := markers.AnyCompletedKey(jobID); ok {
-			runID = r2keys.ExtractRunID(altKey)
+			altRunID := r2keys.ExtractRunID(altKey)
+			if altRunID != runID && !completedMarkerFallbackSafe(database, currentStatus, launchID, jobID) {
+				return completedMarkerResult{}
+			}
+			runID = altRunID
 		} else {
 			return completedMarkerResult{}
 		}

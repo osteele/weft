@@ -1,6 +1,7 @@
 package syncorch
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -55,4 +56,31 @@ func TestSyncCloudDefaultLeaseSkipsProviderWhenHeld(t *testing.T) {
 	if result.Updated != 0 {
 		t.Fatalf("Updated = %d, want 0", result.Updated)
 	}
+}
+
+func TestCompletedMarkerFallbackSafeRejectsCurrentlyRunningJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const jobID = int64(1881)
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:      launchID,
+		InstancePhase: "running:1881",
+		UpdatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+
+	if completedMarkerFallbackSafe(database, db.StatusRunning, sqlNullInt64(launchID), jobID) {
+		t.Fatal("fallback should be unsafe while live phase is running the same job")
+	}
+	if !completedMarkerFallbackSafe(database, db.StatusRunning, sqlNullInt64(launchID), 1884) {
+		t.Fatal("fallback should be safe when live phase is running a different job")
+	}
+}
+
+func sqlNullInt64(v int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: v, Valid: true}
 }

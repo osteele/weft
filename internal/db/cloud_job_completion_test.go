@@ -296,6 +296,65 @@ func TestRecordCloudJobCompletion_UsesRunIDInsteadOfLatestAttempt(t *testing.T) 
 	}
 }
 
+func TestRecordCloudJobCompletion_FinalizesLaterSameLaunchOpenAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	firstRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID first: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", &launchID, StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt later: %v", err)
+	}
+	laterRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID later: %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning later: %v", err)
+	}
+
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", time.Time{}, firstRunID); err != nil {
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
+	}
+
+	var laterStatus string
+	var laterExit sql.NullInt64
+	var laterEnd sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, exit_code, end_time FROM job_attempts WHERE id = ?`,
+		laterRunID,
+	).Scan(&laterStatus, &laterExit, &laterEnd); err != nil {
+		t.Fatalf("query later attempt: %v", err)
+	}
+	if laterStatus != StatusCompleted || !laterExit.Valid || laterExit.Int64 != 0 || !laterEnd.Valid || laterEnd.Int64 != 200 {
+		t.Fatalf("later attempt = status %q exit %v end %v, want completed/0/200", laterStatus, laterExit, laterEnd)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	}
+}
+
 // TestNeedsCloudCompletionBackfill_StartTimeZero is a regression guard for the
 // case where an earlier marker-only sync wrote start_time=0 alongside a
 // fabricated end_time. NeedsCloudCompletionBackfill must still return true so
