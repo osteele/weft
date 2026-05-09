@@ -1,44 +1,34 @@
 package terminal
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/ids"
-	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/watchevents"
 )
 
 var stdoutDefault io.Writer = os.Stdout
 
-// DedupeJobsByID flattens any number of job slices and returns one job per
-// unique ID. Within a single ID, the last seen non-nil entry wins (callers
-// that need a specific winner should order their inputs accordingly). nils
-// are skipped.
-func DedupeJobsByID(slices ...[]*db.Job) []*db.Job {
-	by := make(map[int64]*db.Job)
-	order := make([]int64, 0)
-	for _, s := range slices {
-		for _, j := range s {
-			if j == nil {
-				continue
-			}
-			if _, seen := by[j.ID]; !seen {
-				order = append(order, j.ID)
-			}
-			by[j.ID] = j
-		}
-	}
-	out := make([]*db.Job, 0, len(order))
-	for _, id := range order {
-		out = append(out, by[id])
-	}
-	return out
+type TransitionEvent = watchevents.TransitionEvent
+type SnapshotJob = watchevents.SnapshotJob
+type SnapshotEvent = watchevents.SnapshotEvent
+type TransitionTracker = watchevents.TransitionTracker
+
+const (
+	EventTypeTransition = watchevents.EventTypeTransition
+	EventTypeSnapshot   = watchevents.EventTypeSnapshot
+)
+
+func DedupeJobsByID(slices ...[]*db.Job) []*db.Job { return watchevents.DedupeJobsByID(slices...) }
+func NewTransitionTracker() *TransitionTracker     { return watchevents.NewTransitionTracker() }
+func BuildSnapshotEvent(jobs []*db.Job, now time.Time) SnapshotEvent {
+	return watchevents.BuildSnapshotEvent(jobs, now)
 }
+func RenderTransitionPlain(ev TransitionEvent) string { return watchevents.RenderTransitionPlain(ev) }
+func EncodeJSONLine(w io.Writer, v any) error         { return watchevents.EncodeJSONLine(w, v) }
 
 // WatchPlainOptions configures the plain-mode watch loops shared by
 // `weft watch`, `weft job watch`, and `weft project watch`.
@@ -120,191 +110,4 @@ func (o WatchPlainOptions) SnapshotMode() SnapshotMode {
 	default:
 		return SnapshotText
 	}
-}
-
-// Event type discriminators emitted on the `type` field of stream output.
-const (
-	EventTypeTransition = "transition"
-	EventTypeSnapshot   = "snapshot"
-)
-
-// TransitionEvent describes a single status change observed across two
-// consecutive watch iterations. Stable v1 fields are documented in
-// specs/job-lifecycle.allium § WatchEmitsTransitionEvents.
-type TransitionEvent struct {
-	Type       string `json:"type"`
-	Timestamp  string `json:"timestamp"`
-	JobID      string `json:"job_id"`
-	ID         int64  `json:"id"`
-	Status     string `json:"status"`
-	PrevStatus string `json:"prev_status"`
-	Host       string `json:"host"`
-	Project    string `json:"project"`
-	InstanceID *int64 `json:"instance_id"`
-	ExitCode   *int   `json:"exit_code"`
-}
-
-// IsTerminal reports whether this event lands the job in a terminal state.
-func (e TransitionEvent) IsTerminal() bool {
-	return status.IsTerminal(e.Status)
-}
-
-// SnapshotJob is the per-job record emitted in JSONL snapshot mode.
-type SnapshotJob struct {
-	JobID      string `json:"job_id"`
-	ID         int64  `json:"id"`
-	Status     string `json:"status"`
-	Host       string `json:"host"`
-	Project    string `json:"project"`
-	InstanceID *int64 `json:"instance_id"`
-	ExitCode   *int   `json:"exit_code"`
-}
-
-// SnapshotEvent is one JSONL line per iteration in `--jsonl` snapshot mode.
-type SnapshotEvent struct {
-	Type      string        `json:"type"`
-	Timestamp string        `json:"timestamp"`
-	Jobs      []SnapshotJob `json:"jobs"`
-}
-
-// TransitionTracker carries job effective-status across watch iterations
-// and reports the diffs as TransitionEvents.
-type TransitionTracker struct {
-	prev   map[int64]string
-	seeded bool
-}
-
-// NewTransitionTracker returns an empty tracker. The first Diff call seeds
-// it (returns nil) and subsequent calls report changes.
-func NewTransitionTracker() *TransitionTracker {
-	return &TransitionTracker{prev: make(map[int64]string)}
-}
-
-// Diff updates the tracker with the current job slice and returns the list
-// of transitions since the last Diff call. The first call always returns
-// nil (baseline). Jobs appearing for the first time after the baseline are
-// reported with PrevStatus = "" (never seen before).
-//
-// Jobs missing from a subsequent slice are not reported as transitions —
-// they are simply forgotten, so a later reappearance is treated as a new
-// arrival.
-func (t *TransitionTracker) Diff(jobs []*db.Job, now time.Time) []TransitionEvent {
-	cur := make(map[int64]*db.Job, len(jobs))
-	for _, j := range jobs {
-		if j == nil {
-			continue
-		}
-		// dedupe by ID; later occurrences win (caller is expected to
-		// pre-sort attempts so the latest wins, but we do not depend
-		// on that — we only compare effective_status).
-		cur[j.ID] = j
-	}
-
-	if !t.seeded {
-		for id, j := range cur {
-			t.prev[id] = j.EffectiveStatus()
-		}
-		t.seeded = true
-		return nil
-	}
-
-	var events []TransitionEvent
-	for id, j := range cur {
-		s := j.EffectiveStatus()
-		prev, hadPrev := t.prev[id]
-		if hadPrev && prev == s {
-			continue
-		}
-		events = append(events, transitionEventFor(j, prev, s, now))
-		t.prev[id] = s
-	}
-	// Forget jobs that have dropped out of the window so a future
-	// reappearance is reported as a new arrival.
-	for id := range t.prev {
-		if _, ok := cur[id]; !ok {
-			delete(t.prev, id)
-		}
-	}
-	return events
-}
-
-func transitionEventFor(j *db.Job, prev, cur string, now time.Time) TransitionEvent {
-	return TransitionEvent{
-		Type:       EventTypeTransition,
-		Timestamp:  now.UTC().Format(time.RFC3339),
-		JobID:      ids.FormatJobID(j.ID),
-		ID:         j.ID,
-		Status:     cur,
-		PrevStatus: prev,
-		Host:       j.Host,
-		Project:    j.Project,
-		InstanceID: j.LaunchID,
-		ExitCode:   j.ExitCode,
-	}
-}
-
-// BuildSnapshotEvent constructs the SnapshotEvent for `--jsonl` snapshot mode.
-// Caller is responsible for deduplicating the job slice (flatten helpers
-// already do, as do the per-ID walks in watchJobsPlain).
-func BuildSnapshotEvent(jobs []*db.Job, now time.Time) SnapshotEvent {
-	out := make([]SnapshotJob, 0, len(jobs))
-	for _, j := range jobs {
-		if j == nil {
-			continue
-		}
-		out = append(out, SnapshotJob{
-			JobID:      ids.FormatJobID(j.ID),
-			ID:         j.ID,
-			Status:     j.EffectiveStatus(),
-			Host:       j.Host,
-			Project:    j.Project,
-			InstanceID: j.LaunchID,
-			ExitCode:   j.ExitCode,
-		})
-	}
-	return SnapshotEvent{
-		Type:      EventTypeSnapshot,
-		Timestamp: now.UTC().Format(time.RFC3339),
-		Jobs:      out,
-	}
-}
-
-// RenderTransitionPlain returns one human-readable line for an event, e.g.
-//
-//	wj1531  running → completed  cool30  exit=0
-//
-// Fields after the status arrow are omitted when empty/nil.
-func RenderTransitionPlain(ev TransitionEvent) string {
-	var b strings.Builder
-	b.WriteString(ev.JobID)
-	b.WriteString("  ")
-	if ev.PrevStatus == "" {
-		b.WriteString("(new)")
-	} else {
-		b.WriteString(ev.PrevStatus)
-	}
-	b.WriteString(" → ")
-	b.WriteString(ev.Status)
-	if ev.Host != "" {
-		b.WriteString("  ")
-		b.WriteString(ev.Host)
-	}
-	if ev.InstanceID != nil {
-		fmt.Fprintf(&b, "  %s", ids.FormatInstanceID(*ev.InstanceID))
-	}
-	if ev.ExitCode != nil {
-		fmt.Fprintf(&b, "  exit=%d", *ev.ExitCode)
-	}
-	if ev.Project != "" {
-		b.WriteString("  project=")
-		b.WriteString(ev.Project)
-	}
-	return b.String()
-}
-
-// EncodeJSONLine writes v as a single-line JSON object followed by '\n'.
-func EncodeJSONLine(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	return enc.Encode(v)
 }

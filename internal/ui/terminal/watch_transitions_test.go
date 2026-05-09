@@ -21,7 +21,7 @@ func TestTransitionTrackerSeedEmitsNothing(t *testing.T) {
 	if events := tr.Diff(jobs, time.Now()); events != nil {
 		t.Fatalf("seed Diff returned events: %+v", events)
 	}
-	if !tr.seeded {
+	if !tr.Seeded() {
 		t.Fatal("tracker not marked seeded")
 	}
 }
