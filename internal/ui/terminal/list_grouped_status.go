@@ -871,10 +871,6 @@ func groupedStatusJobParts(job *db.Job) (project, desc string) {
 	if desc == "" && project == "" {
 		desc = job.EffectiveCommand()
 	}
-	scope := groupedStatusScopeLabel(job)
-	if scope != "" {
-		desc += fmt.Sprintf(" (%s)", scope)
-	}
 	return project, desc
 }
 
@@ -889,13 +885,13 @@ func groupedStatusJobLabel(job *db.Job) string {
 	return desc
 }
 
-// groupedStatusPlacementMarker returns a one-cell glyph and the styled job ID
-// indicating whether the job is on a rental instance ("☁", cyan) or on-prem
-// (" ", default). The glyph slot is always one cell wide so that ids align
-// down the column regardless of placement.
+// groupedStatusPlacementMarker returns a one-cell glyph and the styled job ID.
+// On-prem jobs get a host marker; rental and unplaced jobs leave the slot blank
+// so ids align down the column regardless of placement.
 var (
-	rentalIDStyle    = lipgloss.NewStyle().Foreground(tuiAccentColor)
-	rentalGlyphCloud = rentalIDStyle.Render("☁")
+	placementIDStyle = lipgloss.NewStyle().Foreground(tuiAccentColor)
+	onPremGlyphHost  = placementIDStyle.Render("⌂")
+	rentalGlyphCloud = placementIDStyle.Render("☁")
 )
 
 func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
@@ -903,23 +899,10 @@ func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
 	if job.Priority > 0 {
 		return "!", id
 	}
-	if job.IsRentalJob() {
-		return rentalGlyphCloud, rentalIDStyle.Render(id)
+	if job.UsesInventoryPlacement() {
+		return onPremGlyphHost, placementIDStyle.Render(id)
 	}
 	return " ", id
-}
-
-func groupedStatusScopeLabel(job *db.Job) string {
-	switch {
-	case job == nil:
-		return ""
-	case job.UsesRentalPlacement():
-		return "rental"
-	case job.UsesInventoryPlacement():
-		return "inventory"
-	default:
-		return ""
-	}
 }
 
 // countVisibleRunningJobs counts jobs that would appear in the "Running" section.
@@ -1053,7 +1036,7 @@ func formatLaunchFailureRow(
 	now time.Time,
 ) string {
 	instanceID := ids.FormatInstanceID(f.ID)
-	idStyled := rentalIDStyle.Render(instanceID)
+	idStyled := placementIDStyle.Render(instanceID)
 
 	project := ""
 	if failures.projectByLaunchID != nil {

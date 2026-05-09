@@ -50,13 +50,13 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 		last = idx
 	}
 
-	if !strings.Contains(out, "-   wj4 — proj ok (inventory) — completed ok") {
+	if !strings.Contains(out, "- ⌂ wj4 — proj ok — completed ok") {
 		t.Fatalf("missing completion line in output:\n%s", out)
 	}
-	if !strings.Contains(out, "-   wj7 — proj bad exit (inventory) — completed (exit 2)") {
+	if !strings.Contains(out, "- ⌂ wj7 — proj bad exit — completed (exit 2)") {
 		t.Fatalf("missing failed-completed line in output:\n%s", out)
 	}
-	if !strings.Contains(out, "- ☁ wj9 — proj canceled (rental) — canceled") {
+	if !strings.Contains(out, "-   wj9 — proj canceled — canceled") {
 		t.Fatalf("missing rental canceled line in output:\n%s", out)
 	}
 }
@@ -106,7 +106,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) 
 	}, nil, nil, nil, nil, now)
 
 	for _, want := range []string{
-		"- ☁ wj42 — proj python train.py (rental) — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
+		"-   wj42 — proj python train.py — running 75% — ETA ~57m (20m–2h53) — started 10m ago",
 		"-   wj43 — proj queued — created 16m ago",
 		"-   wj44 — proj done — completed 1m ago — completed ok",
 	} {
@@ -131,7 +131,7 @@ func TestRenderJobListGroupedStatusPlainAt_RunningWithoutProgressDoesNotDuplicat
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	want := "- ☁ wj99 — proj python worker.py (rental)"
+	want := "-   wj99 — proj python worker.py"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -198,7 +198,7 @@ func TestRenderJobListGroupedStatusPlainAt_QueuedUsesHydratedPlacementTime(t *te
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, map[int64]int64{1693: 4_000}, nil, now)
-	want := "- ☁ wj1693 — proj restored move (rental) — placed 16m ago"
+	want := "-   wj1693 — proj restored move — placed 16m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -632,7 +632,7 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingShowsPhaseAndElapsed(t *test
 		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: 4_700}},
 		now:              now,
 	})
-	want := "- ☁ wj1725 — proj launching job (rental) — deps installing · 5m ago"
+	want := "-   wj1725 — proj launching job — deps installing · 5m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
@@ -661,8 +661,8 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingGroupsMultiJobInstance(t *te
 	})
 	for _, want := range []string{
 		"  ⠹ wi2329 — image pulling · 2m ago · ~2m remaining (2 jobs)",
-		"  - ☁ wj1725 — proj first (rental)",
-		"  - ☁ wj1734 — proj second (rental)",
+		"  -   wj1725 — proj first",
+		"  -   wj1734 — proj second",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
@@ -690,7 +690,7 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndZeroRemaini
 			totalSamples: 8,
 		},
 	})
-	want := "- ✓ wj1749 — proj ready job (rental) — agent ready · 16m ago · ~0s remaining"
+	want := "- ✓ wj1749 — proj ready job — agent ready · 16m ago · ~0s remaining"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}

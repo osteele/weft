@@ -1001,7 +1001,7 @@ func (m listTUIModel) View() string {
 			}
 			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), rowWidth)
 			if matesActive && (idx == m.cursor || mateRows[idx]) {
-				row = applyHostMateMarker(row)
+				row = applyHostMateMarkerForJob(row, m.jobs[idx])
 			}
 			if idx == m.cursor {
 				row = renderSelectedRow(row, m.width)
@@ -1094,12 +1094,12 @@ func (m listTUIModel) groupedView() string {
 		line := truncateDisplayWidth(row.text, rowWidth)
 		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
 			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateJobs[rj.ID] {
-				line = applyHostMateMarker(line)
+				line = applyHostMateMarkerForJob(line, rj)
 			}
 		}
 		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
 			if matesActive {
-				line = applyHostMateMarker(line)
+				line = applyHostMateMarkerForJob(line, m.groupedRows[row.rowIdx].job)
 			}
 			line = renderSelectedRow(line, m.width)
 		}

@@ -15,6 +15,7 @@ import (
 const hostMateMarker = "▎"
 
 var hostMateMarkerStyle = lipgloss.NewStyle().Foreground(tuiAccentColor)
+var hostMateRentalMarkerStyle = lipgloss.NewStyle()
 
 // hostMateKey returns a stable identifier for the host a job is placed on,
 // or "" if the job is unplaced or has no resolvable host. Unplaced jobs do
@@ -96,7 +97,18 @@ func hostMatesForGroupedView(selected *db.Job, jobs []*db.Job) (mates map[int64]
 // rows that aren't host-mates. If line is empty, just the styled marker is
 // returned.
 func applyHostMateMarker(line string) string {
-	styled := hostMateMarkerStyle.Render(hostMateMarker)
+	return applyStyledHostMateMarker(line, hostMateMarkerStyle.Render(hostMateMarker))
+}
+
+func applyHostMateMarkerForJob(line string, job *db.Job) string {
+	styled := hostMateRentalMarkerStyle.Render(hostMateMarker)
+	if job != nil && job.UsesInventoryPlacement() {
+		styled = hostMateMarkerStyle.Render(hostMateMarker)
+	}
+	return applyStyledHostMateMarker(line, styled)
+}
+
+func applyStyledHostMateMarker(line, styled string) string {
 	runes := []rune(line)
 	if len(runes) == 0 {
 		return styled
