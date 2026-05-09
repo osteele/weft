@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultOpenRouterModel   = "anthropic/claude-3.5-sonnet"
+	DefaultOpenRouterModel   = "anthropic/claude-sonnet-4.6"
 	DefaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
 	DefaultOpenRouterTimeout = 60 * time.Second
 )

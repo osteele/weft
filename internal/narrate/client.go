@@ -15,19 +15,26 @@ import (
 const (
 	anthropicAPIURL     = "https://api.anthropic.com/v1/messages"
 	anthropicAPIVersion = "2023-06-01"
+	openRouterAPIURL    = "https://openrouter.ai/api/v1/chat/completions"
 	defaultTimeout      = 60 * time.Second
 )
 
-// ClientConfig configures the Anthropic narrator client.
+const (
+	ProviderAnthropic  = "anthropic"
+	ProviderOpenRouter = "openrouter"
+)
+
+// ClientConfig configures the narrator client.
 type ClientConfig struct {
+	Provider        string
 	APIKey          string
 	Model           string
 	MaxOutputTokens int
 	HTTPClient      *http.Client
 }
 
-// Client wraps Anthropic API calls for narration. It deliberately keeps a
-// minimal surface — one method, returning structured output via tool use.
+// Client wraps LLM API calls for narration. It deliberately keeps a minimal
+// surface: narration and compaction, both returning normalized usage stats.
 type Client struct {
 	cfg  ClientConfig
 	http *http.Client
@@ -38,6 +45,7 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.MaxOutputTokens <= 0 {
 		cfg.MaxOutputTokens = 600
 	}
+	cfg.Provider = normalizeProvider(cfg.Provider)
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: defaultTimeout}
 	}
@@ -49,13 +57,48 @@ func (c *Client) IsAvailable() bool {
 	return strings.TrimSpace(c.cfg.APIKey) != ""
 }
 
-// LookupAPIKey returns the Anthropic API key from the env var, or from
-// ~/.config/weft/config (KEY=VALUE format) as a fallback. Mirrors the
-// pattern used by internal/slack.
+// LookupAPIKey returns the Anthropic API key from the environment or legacy
+// KEY=VALUE config file. It is kept for older callers; new code should call
+// LookupProviderAPIKey with a provider and structured-config fallback.
 func LookupAPIKey() string {
-	if v := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); v != "" {
+	return LookupProviderAPIKey(ProviderAnthropic, "")
+}
+
+// LookupProviderAPIKey returns the configured key for provider. Environment
+// variables win over structured config, which wins over the legacy
+// ~/.config/weft/config KEY=VALUE file.
+func LookupProviderAPIKey(provider, configured string) string {
+	provider = normalizeProvider(provider)
+	for _, key := range providerEnvKeys(provider) {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(configured); v != "" {
 		return v
 	}
+	return lookupLegacyAPIKey(providerLegacyKeys(provider)...)
+}
+
+func providerEnvKeys(provider string) []string {
+	switch normalizeProvider(provider) {
+	case ProviderOpenRouter:
+		return []string{"OPENROUTER_API_KEY", "CLAUDE_OPENROUTER_API_KEY", "CLAUDEM_OPENROUTER_API_KEY"}
+	default:
+		return []string{"ANTHROPIC_API_KEY"}
+	}
+}
+
+func providerLegacyKeys(provider string) []string {
+	switch normalizeProvider(provider) {
+	case ProviderOpenRouter:
+		return []string{"OPENROUTER_API_KEY", "CLAUDE_OPENROUTER_API_KEY", "CLAUDEM_OPENROUTER_API_KEY"}
+	default:
+		return []string{"ANTHROPIC_API_KEY"}
+	}
+}
+
+func lookupLegacyAPIKey(keys ...string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -64,13 +107,26 @@ func LookupAPIKey() string {
 	if err != nil {
 		return ""
 	}
-	prefix := "ANTHROPIC_API_KEY="
 	for _, line := range strings.Split(string(content), "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		for _, key := range keys {
+			prefix := key + "="
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
 		}
 	}
 	return ""
+}
+
+func normalizeProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", ProviderAnthropic:
+		return ProviderAnthropic
+	case ProviderOpenRouter:
+		return ProviderOpenRouter
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
 }
 
 // Report is the structured output we extract from the model's tool call.
@@ -100,13 +156,18 @@ type Tick struct {
 // Narrate calls Claude once and returns the structured report and usage stats.
 func (c *Client) Narrate(ctx context.Context, tick Tick) (*Report, Usage, error) {
 	if !c.IsAvailable() {
-		return nil, Usage{}, fmt.Errorf("ANTHROPIC_API_KEY not configured")
+		return nil, Usage{}, fmt.Errorf("%s API key not configured", c.cfg.Provider)
 	}
+	if c.cfg.Provider == ProviderOpenRouter {
+		return c.narrateOpenRouter(ctx, tick)
+	}
+	return c.narrateAnthropic(ctx, tick)
+}
 
-	// systemText is stable across calls — marked cache_control so every
-	// call after the first reads from cache.
+func narrationBlocks(tick Tick) ([]map[string]any, []map[string]any) {
+	// systemText is stable across calls and marked cache_control so every
+	// call after the first can read from cache.
 	systemText := systemPrompt + "\n\n" + glossary
-
 	systemBlocks := []map[string]any{
 		{
 			"type":          "text",
@@ -144,6 +205,13 @@ func (c *Client) Narrate(ctx context.Context, tick Tick) (*Report, Usage, error)
 		"type": "text",
 		"text": tail.String(),
 	})
+	return systemBlocks, userBlocks
+}
+
+// narrateAnthropic calls Anthropic Messages once and returns the structured
+// report and usage stats.
+func (c *Client) narrateAnthropic(ctx context.Context, tick Tick) (*Report, Usage, error) {
+	systemBlocks, userBlocks := narrationBlocks(tick)
 
 	body := map[string]any{
 		"model":      c.cfg.Model,
@@ -227,12 +295,110 @@ func (c *Client) Narrate(ctx context.Context, tick Tick) (*Report, Usage, error)
 	return nil, usage, fmt.Errorf("model response did not include a %s tool call", reportToolName)
 }
 
+func (c *Client) narrateOpenRouter(ctx context.Context, tick Tick) (*Report, Usage, error) {
+	systemBlocks, userBlocks := narrationBlocks(tick)
+	body := map[string]any{
+		"model":      c.cfg.Model,
+		"max_tokens": c.cfg.MaxOutputTokens,
+		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": systemBlocks,
+			},
+			{
+				"role":    "user",
+				"content": userBlocks,
+			},
+		},
+		"tools": []map[string]any{
+			{
+				"type": "function",
+				"function": map[string]any{
+					"name":        reportToolName,
+					"description": "Emit a narration paragraph for the operator and a terse state recap for the next tick.",
+					"parameters":  reportToolSchema,
+				},
+			},
+		},
+		"tool_choice": map[string]any{
+			"type": "function",
+			"function": map[string]string{
+				"name": reportToolName,
+			},
+		},
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, Usage{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", openRouterAPIURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, Usage{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, Usage{}, fmt.Errorf("openrouter API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(resp.Body)
+		return nil, Usage{}, fmt.Errorf("openrouter API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String()))
+	}
+
+	var parsed openRouterResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, Usage{}, fmt.Errorf("decode response: %w", err)
+	}
+	usage := parsed.usage()
+	for _, choice := range parsed.Choices {
+		for _, call := range choice.Message.ToolCalls {
+			if call.Function.Name != reportToolName {
+				continue
+			}
+			rep, err := c.decodeOpenRouterReport(call.Function.Arguments)
+			if err != nil {
+				return nil, usage, err
+			}
+			return rep, usage, nil
+		}
+	}
+	return nil, usage, fmt.Errorf("model response did not include a %s tool call", reportToolName)
+}
+
+func (c *Client) decodeOpenRouterReport(arguments string) (*Report, error) {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" {
+		return &Report{}, nil
+	}
+	var rep Report
+	if err := json.Unmarshal([]byte(arguments), &rep); err != nil {
+		if strings.Contains(err.Error(), "unexpected end of JSON input") {
+			return &Report{}, nil
+		}
+		return nil, fmt.Errorf("openrouter model %s returned invalid %s tool arguments: %w", c.cfg.Model, reportToolName, err)
+	}
+	return &rep, nil
+}
+
 // CompactRecaps is a one-shot call that summarizes a chain of prior recaps
 // into a fresh "story so far" block. Used when the recap budget is exceeded.
 func (c *Client) CompactRecaps(ctx context.Context, priorRecap string) (string, Usage, error) {
 	if !c.IsAvailable() {
-		return "", Usage{}, fmt.Errorf("ANTHROPIC_API_KEY not configured")
+		return "", Usage{}, fmt.Errorf("%s API key not configured", c.cfg.Provider)
 	}
+	if c.cfg.Provider == ProviderOpenRouter {
+		return c.compactRecapsOpenRouter(ctx, priorRecap)
+	}
+	return c.compactRecapsAnthropic(ctx, priorRecap)
+}
+
+func (c *Client) compactRecapsAnthropic(ctx context.Context, priorRecap string) (string, Usage, error) {
 	system := "You compact a chain of weft operations recaps into a single fresh recap. Output one terse bulleted recap that preserves all open threads and current state. Do not invent. No prose."
 	user := "<prior_state_recap>\n" + priorRecap + "\n</prior_state_recap>\n\nReturn only the compacted recap text."
 
@@ -292,4 +458,92 @@ func (c *Client) CompactRecaps(ctx context.Context, priorRecap string) (string, 
 		}
 	}
 	return "", usage, fmt.Errorf("compaction response was empty")
+}
+
+func (c *Client) compactRecapsOpenRouter(ctx context.Context, priorRecap string) (string, Usage, error) {
+	system := "You compact a chain of weft operations recaps into a single fresh recap. Output one terse bulleted recap that preserves all open threads and current state. Do not invent. No prose."
+	user := "<prior_state_recap>\n" + priorRecap + "\n</prior_state_recap>\n\nReturn only the compacted recap text."
+	body := map[string]any{
+		"model":      c.cfg.Model,
+		"max_tokens": 800,
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", Usage{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", openRouterAPIURL, bytes.NewReader(raw))
+	if err != nil {
+		return "", Usage{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", Usage{}, fmt.Errorf("openrouter API: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(resp.Body)
+		return "", Usage{}, fmt.Errorf("openrouter API status %d: %s", resp.StatusCode, strings.TrimSpace(buf.String()))
+	}
+	var parsed openRouterResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", Usage{}, err
+	}
+	usage := parsed.usage()
+	for _, choice := range parsed.Choices {
+		if text := strings.TrimSpace(choice.Message.Content); text != "" {
+			return text, usage, nil
+		}
+	}
+	return "", usage, fmt.Errorf("compaction response was empty")
+}
+
+type openRouterResponse struct {
+	Choices []struct {
+		Message struct {
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		PromptDetails    struct {
+			CachedTokens              int `json:"cached_tokens"`
+			CacheWriteTokens          int `json:"cache_write_tokens"`
+			CacheCreationInputTokens  int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens      int `json:"cache_read_input_tokens"`
+			CacheCreationOutputTokens int `json:"cache_creation_output_tokens"`
+		} `json:"prompt_tokens_details"`
+	} `json:"usage"`
+}
+
+func (r openRouterResponse) usage() Usage {
+	return Usage{
+		InputTokens:         r.Usage.PromptTokens,
+		OutputTokens:        r.Usage.CompletionTokens,
+		CacheCreationTokens: firstNonZero(r.Usage.PromptDetails.CacheWriteTokens, r.Usage.PromptDetails.CacheCreationInputTokens),
+		CacheReadTokens:     firstNonZero(r.Usage.PromptDetails.CachedTokens, r.Usage.PromptDetails.CacheReadInputTokens),
+	}
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }

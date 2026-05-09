@@ -56,6 +56,9 @@ type Config struct {
 	// AI/LLM configuration for automatic job description generation
 	AI AIConfig `yaml:"ai" toml:"ai"`
 
+	// LLM holds shared provider settings for API-backed model features.
+	LLM LLMConfig `yaml:"llm" toml:"llm"`
+
 	// BlockedCommandPatterns lists substrings that should cause an error if found in job commands.
 	// Each entry has a pattern (substring to match) and an error message to display.
 	BlockedCommandPatterns []BlockedPattern `yaml:"blocked_command_patterns" toml:"blocked_command_patterns"`
@@ -305,6 +308,16 @@ type BlockedPattern struct {
 	Message string `yaml:"message" toml:"message"`
 }
 
+// LLMConfig holds shared API-backed LLM provider configuration.
+type LLMConfig struct {
+	// Provider selects the LLM API provider: "anthropic" or "openrouter".
+	Provider string `yaml:"provider" toml:"provider"`
+	// APIKey optionally stores the provider key. Environment variables are preferred.
+	APIKey string `yaml:"api_key" toml:"api_key"`
+	// Model is the default provider model ID for API-backed LLM features.
+	Model string `yaml:"model" toml:"model"`
+}
+
 // AIConfig holds configuration for AI/LLM features
 type AIConfig struct {
 	// Enabled controls whether AI description generation is active
@@ -315,13 +328,13 @@ type AIConfig struct {
 	// Default: "llama3.2"
 	Model string `yaml:"model" toml:"model"`
 
-	// Narrate configures `weft narrate` (Anthropic-backed activity narration).
+	// Narrate configures `weft narrate` activity narration.
 	Narrate NarrateConfig `yaml:"narrate" toml:"narrate"`
 }
 
 // NarrateConfig configures `weft narrate`.
 type NarrateConfig struct {
-	// Model is the Anthropic model ID (default: claude-sonnet-4-20250514).
+	// Model overrides the shared LLM model ID for narrate.
 	Model string `yaml:"model" toml:"model"`
 	// TickSeconds is the polling interval in seconds (default: 30).
 	TickSeconds int `yaml:"tick_seconds" toml:"tick_seconds"`
@@ -331,14 +344,59 @@ type NarrateConfig struct {
 	MaxOutputTokens int `yaml:"max_output_tokens" toml:"max_output_tokens"`
 	// CompactionThresholdTokens is the accumulated-recap token count that triggers compaction (default: 15000).
 	CompactionThresholdTokens int `yaml:"compaction_threshold_tokens" toml:"compaction_threshold_tokens"`
+	// Slack posts narrate entries to the configured Slack webhook.
+	Slack bool `yaml:"slack" toml:"slack"`
+	// SlackMinIntervalSeconds rate-limits Slack posts (default: 300).
+	SlackMinIntervalSeconds int `yaml:"slack_min_interval_seconds" toml:"slack_min_interval_seconds"`
 }
 
-// NarrateModel returns the configured Anthropic model ID, or the built-in default.
+// LLMProvider returns the configured shared LLM provider, or anthropic.
+func (c *Config) LLMProvider() string {
+	if c != nil {
+		switch strings.ToLower(strings.TrimSpace(c.LLM.Provider)) {
+		case "openrouter":
+			return "openrouter"
+		case "anthropic", "":
+			return "anthropic"
+		default:
+			return strings.ToLower(strings.TrimSpace(c.LLM.Provider))
+		}
+	}
+	return "anthropic"
+}
+
+// LLMModel returns the configured shared LLM model ID, or the provider default.
+func (c *Config) LLMModel() string {
+	return c.LLMModelForProvider(c.LLMProvider())
+}
+
+// LLMModelForProvider returns the configured shared LLM model ID, or a provider default.
+func (c *Config) LLMModelForProvider(provider string) string {
+	if c != nil && strings.TrimSpace(c.LLM.Model) != "" {
+		return strings.TrimSpace(c.LLM.Model)
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "openrouter") {
+		return "anthropic/claude-sonnet-4.6"
+	}
+	return "claude-sonnet-4-20250514"
+}
+
+// NarrateProvider returns the provider used by narrate.
+func (c *Config) NarrateProvider() string {
+	return c.LLMProvider()
+}
+
+// NarrateModel returns the configured model ID, or the provider default.
 func (c *Config) NarrateModel() string {
+	return c.NarrateModelForProvider(c.NarrateProvider())
+}
+
+// NarrateModelForProvider returns the configured model ID, or a provider default.
+func (c *Config) NarrateModelForProvider(provider string) string {
 	if c != nil && strings.TrimSpace(c.AI.Narrate.Model) != "" {
 		return strings.TrimSpace(c.AI.Narrate.Model)
 	}
-	return "claude-sonnet-4-20250514"
+	return c.LLMModelForProvider(provider)
 }
 
 // NarrateTickInterval returns the configured tick interval, or 30s.
@@ -372,6 +430,19 @@ func (c *Config) NarrateCompactionThreshold() int {
 		return c.AI.Narrate.CompactionThresholdTokens
 	}
 	return 15000
+}
+
+// NarrateSlackEnabled reports whether narrate should post to Slack.
+func (c *Config) NarrateSlackEnabled() bool {
+	return c != nil && c.AI.Narrate.Slack
+}
+
+// NarrateSlackMinInterval returns the Slack post rate limit, or 5 minutes.
+func (c *Config) NarrateSlackMinInterval() time.Duration {
+	if c != nil && c.AI.Narrate.SlackMinIntervalSeconds > 0 {
+		return time.Duration(c.AI.Narrate.SlackMinIntervalSeconds) * time.Second
+	}
+	return 5 * time.Minute
 }
 
 // SSHConfig holds SSH connection pool settings.

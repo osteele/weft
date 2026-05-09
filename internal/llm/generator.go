@@ -60,6 +60,15 @@ func WithModel(model string) GeneratorOption {
 	}
 }
 
+// WithClient sets the LLM backend directly.
+func WithClient(client Generator) GeneratorOption {
+	return func(g *DescriptionGenerator) {
+		if client != nil {
+			g.client = client
+		}
+	}
+}
+
 // WithOnGenerate sets a callback function called when a description is generated
 func WithOnGenerate(fn func(jobID int64, description string)) GeneratorOption {
 	return func(g *DescriptionGenerator) {

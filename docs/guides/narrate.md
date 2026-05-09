@@ -47,33 +47,57 @@ and max-interval passes are firing.
 | `--tick DURATION` | `30s` | Maximum interval between checks. |
 | `--quiet-window DURATION` | `5s` | Quiet period after a DB change before narrating. |
 | `--project NAME` | (whole system) | Limit to a project (uses the same project derivation as `weft project jobs`). |
-| `--model NAME` | from config | Override the Anthropic model ID. |
+| `--model NAME` | from config | Override the provider model ID. |
 | `--once` | loop | Emit one narration of current state and exit. |
 | `--debug` | off | Write raw delta payloads and per-tick `usage` (cache hit/miss counts) to stderr. |
+| `--slack` | off | Also post emitted entries to the configured Slack webhook. |
+| `--slack-min-interval DURATION` | `5m` | Minimum interval between Slack posts. |
 
 ## Configuration
 
 `~/.config/weft/config.toml`:
 
 ```toml
-[ai.narrate]
+[llm]
+provider = "anthropic" # or "openrouter"
 model = "claude-sonnet-4-20250514"
+
+[ai.narrate]
 tick_seconds = 30
 quiet_seconds = 5
 max_output_tokens = 600
 compaction_threshold_tokens = 15000
+slack = false
+slack_min_interval_seconds = 300
 ```
 
-API key resolution (in order): `ANTHROPIC_API_KEY` env var, then
-`ANTHROPIC_API_KEY=...` in `~/.config/weft/config` (KEY=VALUE format,
-same file Slack notifications use).
+For OpenRouter:
+
+```toml
+[llm]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4.6"
+```
+
+API key resolution prefers environment variables over config. Anthropic uses
+`ANTHROPIC_API_KEY`. OpenRouter uses `OPENROUTER_API_KEY`, with
+`CLAUDE_OPENROUTER_API_KEY` and `CLAUDEM_OPENROUTER_API_KEY` accepted for
+local compatibility. As a fallback, `[llm].api_key` may be set in
+`config.toml`, or a matching `KEY=VALUE` entry may be placed in the legacy
+`~/.config/weft/config` file.
 
 If no key is found, the command prints a notice to stderr and exits 0
 without making any API calls.
 
+Slack posting uses the existing incoming-webhook configuration from
+`WEFT_SLACK_WEBHOOK` or `SLACK_WEBHOOK=...` in `~/.config/weft/config`.
+Incoming webhooks are bound to one Slack channel, so `weft narrate` does not
+select arbitrary channels by name.
+
 ## Cost shape
 
-Anthropic prompt caching is used aggressively:
+Anthropic-compatible prompt caching is used aggressively. Direct Anthropic and
+OpenRouter Claude models both receive explicit `cache_control` breakpoints:
 
 - The system prompt + glossary are marked with a 5-minute ephemeral
   cache breakpoint. Stable across ticks.
@@ -82,9 +106,8 @@ Anthropic prompt caching is used aggressively:
   is a longer match against the previous tick's cache entry.
 - Only the volatile current-state JSON + delta is uncached on each call.
 
-Pricing multipliers (per Anthropic docs at time of writing): 5-minute
-cache writes are 1.25× base input, cache reads are 0.1× base input. With
-30s ticks, the cache stays warm indefinitely (sliding 5-minute TTL).
+With 30s ticks, the cache stays warm indefinitely on providers that honor the
+5-minute sliding TTL.
 
 When the accumulated recap chain crosses
 `compaction_threshold_tokens`, a one-shot compaction call rewrites the
@@ -119,6 +142,6 @@ has been invalidated by something upstream.
 - `internal/narrate/snapshot.go` — DB → `Snapshot` + `Delta` diffing.
 - `internal/narrate/format.go` — snapshot/delta → JSON for the prompt.
 - `internal/narrate/session.go` — recap accumulator + compaction trigger.
-- `internal/narrate/client.go` — Anthropic API client with explicit
-  cache breakpoints and tool-use structured output.
+- `internal/narrate/client.go` — Anthropic/OpenRouter API client with
+  explicit cache breakpoints and tool-use structured output.
 - `internal/narrate/prompt.go` — system prompt, glossary, tool schema.

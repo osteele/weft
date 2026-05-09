@@ -151,6 +151,10 @@ func TestTruncateTail(t *testing.T) {
 func TestSummarizeJobLogs_NoKey(t *testing.T) {
 	// With no API key configured, summarizeJobLogs should return empty string
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("OPENROUTER_KEY", "")
+	t.Setenv("CLAUDE_OPENROUTER_API_KEY", "")
+	t.Setenv("CLAUDEM_OPENROUTER_API_KEY", "")
 	logs := map[int64]string{1: "some output"}
 	if got := summarizeJobLogs(logs); got != "" {
 		t.Errorf("expected empty summary without API key, got: %q", got)

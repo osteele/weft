@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/narrate"
 )
 
 func TestLoadUnprocessedCountsIncludesTerminalProjects(t *testing.T) {
@@ -128,5 +131,99 @@ func TestLoadUnprocessedCountsIncludesTerminalProjects(t *testing.T) {
 	}
 	if got := counts.FailedProjects; len(got) != 2 || got[0] != "augur" || got[1] != "bad-project" {
 		t.Fatalf("FailedProjects = %v, want [augur bad-project]", got)
+	}
+}
+
+func TestNarrateSlackPostingIsRateLimited(t *testing.T) {
+	var posted []string
+	base := time.Unix(1710000000, 0)
+	now := base
+	r := &narrateRunner{
+		slackEnabled:     true,
+		slackMinInterval: 5 * time.Minute,
+		slackPost: func(message string) error {
+			posted = append(posted, message)
+			return nil
+		},
+		now: func() time.Time { return now },
+	}
+	statusLine := narrate.StatusLine{
+		Now:             base,
+		ActiveInstances: 1,
+		AutopilotState:  "idle",
+	}
+
+	r.maybePostSlack(statusLine, "first", true)
+	now = base.Add(2 * time.Minute)
+	r.maybePostSlack(statusLine, "second", true)
+	now = base.Add(5 * time.Minute)
+	r.maybePostSlack(statusLine, "third", true)
+
+	if len(posted) != 2 {
+		t.Fatalf("posted %d messages, want 2: %v", len(posted), posted)
+	}
+	if posted[0] == posted[1] {
+		t.Fatalf("expected distinct messages, got %q", posted[0])
+	}
+}
+
+func TestNarrateSlackPostingSkipsEmptyUnchangedEntry(t *testing.T) {
+	var posted []string
+	r := &narrateRunner{
+		slackEnabled:     true,
+		slackMinInterval: 5 * time.Minute,
+		slackPost: func(message string) error {
+			posted = append(posted, message)
+			return nil
+		},
+		now: time.Now,
+	}
+
+	r.maybePostSlack(narrate.StatusLine{Now: time.Unix(1710000000, 0)}, "", false)
+	if len(posted) != 0 {
+		t.Fatalf("posted %d messages, want 0", len(posted))
+	}
+}
+
+func TestNarrateStartupOverviewRecordsStatusWithoutSlack(t *testing.T) {
+	database := db.SetupTestDB(t)
+	sess, err := narrate.NewSession(narrate.SessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var posted []string
+	base := time.Unix(1710000000, 0)
+	r := &narrateRunner{
+		session:          sess,
+		database:         database,
+		slackEnabled:     true,
+		slackMinInterval: 5 * time.Minute,
+		slackPost: func(message string) error {
+			posted = append(posted, message)
+			return nil
+		},
+		now: func() time.Time { return base },
+	}
+	snap := &narrate.Snapshot{
+		Time:      base,
+		Jobs:      map[int64]narrate.JobView{},
+		Instances: map[int64]narrate.InstanceView{},
+		Autopilot: narrate.AutopilotView{State: "idle"},
+	}
+
+	var out bytes.Buffer
+	if err := r.emitStartupOverview(&out, snap); err != nil {
+		t.Fatalf("emitStartupOverview: %v", err)
+	}
+	if !strings.Contains(out.String(), "no rentals") || !strings.Contains(out.String(), "autopilot:idle") {
+		t.Fatalf("startup overview missing status: %q", out.String())
+	}
+	if len(posted) != 0 {
+		t.Fatalf("startup overview posted to Slack: %v", posted)
+	}
+
+	statusLine := narrate.BuildStatusLine(snap, 0, narrate.UnprocessedCounts{})
+	if changed := sess.UpdateStatus(statusLine); changed {
+		t.Fatal("startup overview should record status to avoid duplicate unchanged entry")
 	}
 }

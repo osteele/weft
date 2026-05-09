@@ -124,6 +124,73 @@ func TestNarrateQuietWindowDefaultAndOverride(t *testing.T) {
 	}
 }
 
+func TestNarrateProviderAndModelDefaults(t *testing.T) {
+	var cfg Config
+	if got := cfg.NarrateProvider(); got != "anthropic" {
+		t.Fatalf("default provider = %q, want anthropic", got)
+	}
+	if got := cfg.NarrateModel(); got != "claude-sonnet-4-20250514" {
+		t.Fatalf("default model = %q", got)
+	}
+
+	cfg.LLM.Provider = "openrouter"
+	if got := cfg.NarrateProvider(); got != "openrouter" {
+		t.Fatalf("provider = %q, want openrouter", got)
+	}
+	if got := cfg.NarrateModel(); got != "anthropic/claude-sonnet-4.6" {
+		t.Fatalf("openrouter default model = %q", got)
+	}
+}
+
+func TestNarrateSlackMinIntervalDefaultAndOverride(t *testing.T) {
+	var cfg Config
+	if got := cfg.NarrateSlackMinInterval(); got != 5*time.Minute {
+		t.Fatalf("default slack interval = %s, want 5m", got)
+	}
+	cfg.AI.Narrate.SlackMinIntervalSeconds = 120
+	if got := cfg.NarrateSlackMinInterval(); got != 2*time.Minute {
+		t.Fatalf("configured slack interval = %s, want 2m", got)
+	}
+}
+
+func TestLoadTOMLDecodesNarrateProvider(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+
+	content := `
+[llm]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4.6"
+
+[ai.narrate]
+slack = true
+slack_min_interval_seconds = 300
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NarrateProvider() != "openrouter" {
+		t.Fatalf("provider = %q", cfg.NarrateProvider())
+	}
+	if cfg.NarrateModel() != "anthropic/claude-sonnet-4.6" {
+		t.Fatalf("model = %q", cfg.NarrateModel())
+	}
+	if !cfg.NarrateSlackEnabled() {
+		t.Fatal("slack should be enabled")
+	}
+	if cfg.NarrateSlackMinInterval() != 5*time.Minute {
+		t.Fatalf("slack interval = %s", cfg.NarrateSlackMinInterval())
+	}
+}
+
 func TestLoadTOMLDecodesSharedHostOverrides(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "config.toml")

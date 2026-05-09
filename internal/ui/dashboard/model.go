@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -1032,8 +1033,9 @@ func defaultLLMInit(database *sql.DB, appCfg *config.Config) *llm.DescriptionGen
 		return nil
 	}
 
-	genOpts := []llm.GeneratorOption{}
-	if model := appCfg.AIModel(); model != "" {
+	genOpts := []llm.GeneratorOption{llm.WithClient(llm.NewConfiguredClient(appCfg))}
+	if strings.TrimSpace(appCfg.LLM.Provider) == "" {
+		model := appCfg.AIModel()
 		genOpts = append(genOpts, llm.WithModel(model))
 	}
 

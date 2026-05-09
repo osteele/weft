@@ -1053,8 +1053,8 @@ periods, interruptible jobs, and survival-based offer selection, and
 ### weft narrate
 
 Stream a human-readable LLM-generated narration of job, instance, campaign,
-and autopilot transitions. Uses the Anthropic API (requires
-`ANTHROPIC_API_KEY`). Commentary, not authoritative status.
+and autopilot transitions. Uses Anthropic directly or OpenRouter when
+configured. Commentary, not authoritative status.
 
 ```bash
 weft narrate                          # narrate DB-driven transitions to stdout
@@ -1062,6 +1062,7 @@ weft narrate --tick 10s               # maximum interval between checks
 weft narrate --quiet-window 3s        # coalesce DB-change bursts for 3s
 weft narrate --once                   # single description of current state
 weft narrate --project myproj         # scope to one project
+weft narrate --slack                  # also post to configured Slack webhook
 weft narrate --debug                  # write deltas + cache stats to stderr
 ```
 

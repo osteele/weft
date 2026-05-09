@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"strings"
+
+	"github.com/osteele/weft/internal/config"
 )
 
 // Generator defines the interface for LLM backends.
@@ -37,6 +39,25 @@ func NewDefaultClient() Generator {
 	}
 
 	return NewOllamaClient(DefaultOllamaConfig())
+}
+
+// NewConfiguredClient selects an LLM backend from shared config, falling back
+// to the legacy environment-driven default when no shared provider is set.
+func NewConfiguredClient(cfg *config.Config) Generator {
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.LLMProvider()), "openrouter") {
+		key := firstNonEmpty(
+			os.Getenv("OPENROUTER_API_KEY"),
+			os.Getenv("CLAUDE_OPENROUTER_API_KEY"),
+			os.Getenv("CLAUDEM_OPENROUTER_API_KEY"),
+			os.Getenv("OPENROUTER_KEY"),
+			cfg.LLM.APIKey,
+		)
+		return NewOpenRouterClient(OpenRouterConfig{
+			APIKey: key,
+			Model:  cfg.LLMModelForProvider("openrouter"),
+		})
+	}
+	return NewDefaultClient()
 }
 
 func firstNonEmpty(values ...string) string {
