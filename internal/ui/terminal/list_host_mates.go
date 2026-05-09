@@ -14,7 +14,7 @@ import (
 // regardless of whether highlighting is active.
 const hostMateMarker = "▎"
 
-var hostMateMarkerStyle = lipgloss.NewStyle().Foreground(tuiAccentColor)
+var hostMateMarkerStyle = lipgloss.NewStyle().Foreground(tuiOnPremColor)
 var hostMateRentalMarkerStyle = lipgloss.NewStyle()
 
 // hostMateKey returns a stable identifier for the host a job is placed on,

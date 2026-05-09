@@ -6,6 +6,8 @@ import "github.com/charmbracelet/lipgloss"
 // Individual TUIs can compose these into more specific styles.
 var (
 	tuiAccentColor    = lipgloss.Color("39")  // cyan — headers, cursors, status
+	tuiInterruptColor = lipgloss.Color("178") // amber — interruptible rental markers
+	tuiOnPremColor    = lipgloss.Color("242") // dark gray — inventory placement markers
 	tuiRunningColor   = lipgloss.Color("10")  // green — active/running/selected
 	tuiCompletedColor = lipgloss.Color("243") // gray — completed, dim, terminal
 	tuiFailedColor    = lipgloss.Color("196") // red — errors, failures

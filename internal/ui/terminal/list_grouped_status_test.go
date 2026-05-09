@@ -68,6 +68,19 @@ func TestRenderJobListGroupedStatusPlainNone(t *testing.T) {
 	}
 }
 
+func TestGroupedStatusPlacementMarkerInterruptibleRental(t *testing.T) {
+	glyph, jobID := groupedStatusPlacementMarker(&db.Job{
+		ID:     123,
+		Host:   db.LaunchHost(44),
+		Tags:   []string{db.TagInterruptible},
+		Status: db.StatusRunning,
+	})
+
+	if got := stripANSI(glyph + " " + jobID); got != "☁ wj123" {
+		t.Fatalf("marker = %q, want cloud interruptible marker", got)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	launchID := int64(99)

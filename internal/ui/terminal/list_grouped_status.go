@@ -886,12 +886,15 @@ func groupedStatusJobLabel(job *db.Job) string {
 }
 
 // groupedStatusPlacementMarker returns a one-cell glyph and the styled job ID.
-// On-prem jobs get a host marker; rental and unplaced jobs leave the slot blank
-// so ids align down the column regardless of placement.
+// On-prem jobs get a host marker; interruptible rentals get a cloud marker;
+// other rental and unplaced jobs leave the slot blank so ids align down the
+// column regardless of placement.
 var (
-	placementIDStyle = lipgloss.NewStyle().Foreground(tuiAccentColor)
-	onPremGlyphHost  = placementIDStyle.Render("⌂")
-	rentalGlyphCloud = placementIDStyle.Render("☁")
+	onPremPlacementStyle     = lipgloss.NewStyle().Foreground(tuiOnPremColor)
+	interruptibleRentalStyle = lipgloss.NewStyle().Foreground(tuiInterruptColor)
+	onPremGlyphHost          = onPremPlacementStyle.Render("⌂")
+	rentalGlyphCloud         = onPremPlacementStyle.Render("☁")
+	interruptibleGlyphCloud  = interruptibleRentalStyle.Render("☁")
 )
 
 func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
@@ -900,7 +903,10 @@ func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
 		return "!", id
 	}
 	if job.UsesInventoryPlacement() {
-		return onPremGlyphHost, placementIDStyle.Render(id)
+		return onPremGlyphHost, onPremPlacementStyle.Render(id)
+	}
+	if job.UsesRentalPlacement() && job.UsesPreemptiblePlacement() {
+		return interruptibleGlyphCloud, interruptibleRentalStyle.Render(id)
 	}
 	return " ", id
 }
@@ -1036,7 +1042,7 @@ func formatLaunchFailureRow(
 	now time.Time,
 ) string {
 	instanceID := ids.FormatInstanceID(f.ID)
-	idStyled := placementIDStyle.Render(instanceID)
+	idStyled := onPremPlacementStyle.Render(instanceID)
 
 	project := ""
 	if failures.projectByLaunchID != nil {
