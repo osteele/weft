@@ -797,6 +797,51 @@ func TestSubmitJobsToInstanceRejectsEmptySourceDirBeforeUpload(t *testing.T) {
 	}
 }
 
+func TestSubmitJobsToInstanceHonorsCanceledContextAfterClaim(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	workDir := t.TempDir()
+	jobID, err := db.RecordQueuedWithGPU(database, "", workDir, "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+	})
+	uploadSourceToR2 = func(ctx context.Context, _ *r2.Client, _ string, _ []string) (string, error) {
+		return "", ctx.Err()
+	}
+	sendGraceJobPayloadNoAck = func(ctx context.Context, _ controlplane.GraceStore, _ int64, _ controlplane.GraceJobsRequest) error {
+		t.Fatal("grace payload should not be sent after canceled upload")
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = SubmitJobsToInstance(ctx, database, nil, instanceID, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected canceled context error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
 func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 	// Regression: the move-to-existing path skips the explicit "unplace
 	// source first" step. SubmitJobsToInstanceForMove must succeed even

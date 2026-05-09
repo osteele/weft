@@ -447,9 +447,11 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			cancelByLaunch[prior.LaunchID] = append(cancelByLaunch[prior.LaunchID], prior.AttemptID)
 		}
 	}
+	opCtx, opCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer opCancel()
 	if r2Client != nil && len(cancelByLaunch) > 0 {
 		for launchID, ids := range cancelByLaunch {
-			if err := sendGraceCancelAttempts(ctx, r2Client, launchID, ids); err != nil {
+			if err := sendGraceCancelAttempts(opCtx, r2Client, launchID, ids); err != nil {
 				slog.Warn("send cancel-attempts marker",
 					"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", err)
 			}
@@ -471,7 +473,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		// Upload fresh sources (content-addressed, so deduped)
 		slog.Debug("source upload: reuse path", "component", "reuse",
 			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
-		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir, job.Inputs)
+		sourceR2Key, err := uploadSourceToR2(opCtx, r2Client, sourceDir, job.Inputs)
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
@@ -491,7 +493,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			}
 			return fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
-		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Client, job, instanceID)
+		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(opCtx, database, r2Client, job, instanceID)
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
@@ -521,7 +523,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	// job finishes. Write the request to R2 but skip waiting for the ack;
 	// the agent will find it. Grace instances poll continuously, so we wait.
 	if inst.Status == db.LaunchStatusRunning {
-		if err := sendGraceJobPayloadNoAck(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
+		if err := sendGraceJobPayloadNoAck(opCtx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
 				return fmt.Errorf("submit jobs to instance control plane: %w (rollback: %v)", err, rollbackErr)
@@ -529,7 +531,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			return fmt.Errorf("submit jobs to instance control plane: %w", err)
 		}
 	} else {
-		if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
+		if _, err := sendGraceJobPayload(opCtx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
 				return fmt.Errorf("submit jobs to instance control plane: %w (rollback: %v)", err, rollbackErr)
