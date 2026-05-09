@@ -498,6 +498,32 @@ This command:
 - Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
   The command exits with `0` only if every waited-on job succeeds.
 
+### weft job inspect / diff
+
+Normalize job metadata for postmortem inspection, or compare two jobs.
+
+```bash
+weft job inspect <job-id> [--json]
+weft job diff <job-a> <job-b> [--json]
+```
+
+`inspect` prints the behaviorally relevant submission and execution fields:
+command, working directory, host / launch target, inputs, outputs, resource
+constraints, tags, redacted environment variables, placement metadata, and
+attempts.
+
+`diff` compares the same normalized fields between two jobs. This is useful for
+mining high-churn retry sequences where the command stayed similar but metadata
+changed, such as `HF_HOME`, `HF_HUB_OFFLINE`, input declarations, GPU
+constraints, or placement target.
+
+**Examples:**
+```bash
+weft job inspect wj1877 --json
+weft job diff wj1876 wj1877
+weft job diff wj1876 wj1877 --json
+```
+
 ### weft job list
 
 Query and search job history from the local database.
@@ -734,10 +760,13 @@ Inspect the exact source snapshot uploaded to R2 for a cloud job attempt.
 ```bash
 weft source ls <job-id> [prefix] [flags]
 weft source cat <job-id> [path] [flags]
+weft source diff <job-a> <job-b> [path] [flags]
 ```
 
 **Flags:**
 - `--attempt N`: Use a specific attempt number (default: latest)
+- `--attempt-a N`: For `diff`, use a specific attempt for the first job
+- `--attempt-b N`: For `diff`, use a specific attempt for the second job
 
 When `path` is omitted, `cat` tries to print the script referenced by the job
 command. Pass an explicit path if the command references multiple scripts or no
@@ -750,6 +779,8 @@ weft source ls wj1443 scripts/
 weft source cat wj1443
 weft source cat wj1443 scripts/exp141_pythia_checkpoint_sweep.py
 weft source cat wj1443 --attempt 4 scripts/train.py
+weft source diff wj1876 wj1877
+weft source diff wj1876 wj1877 scripts/exp_002_gain_vs_freeze.py
 ```
 
 ### weft log

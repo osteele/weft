@@ -6,6 +6,8 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -146,6 +148,50 @@ func TestInferCommandSourcePaths(t *testing.T) {
 	want := []string{"scripts/train.py", "scripts/post.sh"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestExtractSourceSnapshotRejectsTraversal(t *testing.T) {
+	tarball := makeSourceTarball(t, map[string]string{
+		"../escape.py": "bad\n",
+	})
+	store := &fakeSourceStore{objects: map[string][]byte{"src.tar.gz": tarball}}
+	err := extractSourceSnapshot(context.Background(), store, "src.tar.gz", t.TempDir())
+	if err == nil {
+		t.Fatal("expected traversal error")
+	}
+	if !strings.Contains(err.Error(), "escapes destination") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunRecursiveDiff(t *testing.T) {
+	dir := t.TempDir()
+	left := filepath.Join(dir, "left")
+	right := filepath.Join(dir, "right")
+	if err := os.MkdirAll(left, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(right, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(left, "train.py"), []byte("print('a')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(right, "train.py"), []byte("print('b')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runRecursiveDiff(&out, left, right, "wj1", "wj2", ""); err != nil {
+		t.Fatalf("runRecursiveDiff: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "wj1/train.py") || !strings.Contains(got, "wj2/train.py") {
+		t.Fatalf("diff did not use job labels: %s", got)
+	}
+	if !strings.Contains(got, "print('a')") || !strings.Contains(got, "print('b')") {
+		t.Fatalf("diff missing content: %s", got)
 	}
 }
 

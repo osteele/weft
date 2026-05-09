@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -50,7 +53,18 @@ var sourceCatCmd = &cobra.Command{
 	RunE:  runSourceCat,
 }
 
-var sourceAttempt int
+var sourceDiffCmd = &cobra.Command{
+	Use:   "diff <job-a> <job-b> [path]",
+	Short: "Diff two job source snapshots",
+	Args:  usageArgs(cobra.RangeArgs(2, 3)),
+	RunE:  runSourceDiff,
+}
+
+var (
+	sourceAttempt  int
+	sourceAttemptA int
+	sourceAttemptB int
+)
 
 const sourceCmdTimeout = 2 * time.Minute
 
@@ -58,8 +72,11 @@ func init() {
 	rootCmd.AddCommand(sourceCmd)
 	sourceCmd.AddCommand(sourceLsCmd)
 	sourceCmd.AddCommand(sourceCatCmd)
+	sourceCmd.AddCommand(sourceDiffCmd)
 	addSourceAttemptFlag(sourceLsCmd)
 	addSourceAttemptFlag(sourceCatCmd)
+	sourceDiffCmd.Flags().IntVar(&sourceAttemptA, "attempt-a", 0, "Use a specific attempt number for the first job (default: latest)")
+	sourceDiffCmd.Flags().IntVar(&sourceAttemptB, "attempt-b", 0, "Use a specific attempt number for the second job (default: latest)")
 }
 
 func addSourceAttemptFlag(cmd *cobra.Command) {
@@ -167,6 +184,74 @@ func runSourceCat(cmd *cobra.Command, args []string) error {
 	}
 	defer body.Close()
 	return catSourceTarballFile(body, targetPath, cmd.OutOrStdout())
+}
+
+func runSourceDiff(cmd *cobra.Command, args []string) error {
+	aID, err := parseSingleJobID(args[0])
+	if err != nil {
+		return err
+	}
+	bID, err := parseSingleJobID(args[1])
+	if err != nil {
+		return err
+	}
+	target := ""
+	if len(args) == 3 {
+		target = cleanSourcePath(args[2])
+	}
+
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	client, err := newSourceStore()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sourceCmdTimeout)
+	defer cancel()
+
+	a, err := resolveJobSource(ctx, database, client, aID, sourceAttemptA)
+	if err != nil {
+		return err
+	}
+	b, err := resolveJobSource(ctx, database, client, bID, sourceAttemptB)
+	if err != nil {
+		return err
+	}
+
+	tmp, err := os.MkdirTemp("", "weft-source-diff-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	aDir := filepath.Join(tmp, "a")
+	bDir := filepath.Join(tmp, "b")
+	if err := os.MkdirAll(aDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(bDir, 0o755); err != nil {
+		return err
+	}
+	aLabel := ids.FormatJobID(a.Job.ID)
+	bLabel := ids.FormatJobID(b.Job.ID)
+	if err := extractSourceSnapshot(ctx, client, a.Mapping.R2Key, aDir); err != nil {
+		return fmt.Errorf("extract %s source %s: %w", aLabel, a.Mapping.R2Key, err)
+	}
+	if err := extractSourceSnapshot(ctx, client, b.Mapping.R2Key, bDir); err != nil {
+		return fmt.Errorf("extract %s source %s: %w", bLabel, b.Mapping.R2Key, err)
+	}
+
+	left := aDir
+	right := bDir
+	if target != "" {
+		left = filepath.Join(aDir, filepath.FromSlash(target))
+		right = filepath.Join(bDir, filepath.FromSlash(target))
+	}
+	return runRecursiveDiff(cmd.OutOrStdout(), left, right, aLabel, bLabel, target)
 }
 
 func parseSingleJobID(raw string) (int64, error) {
@@ -374,6 +459,71 @@ func readSourceTarball(r io.Reader, visit func(*tar.Header, *tar.Reader) error) 
 			return err
 		}
 	}
+}
+
+func extractSourceSnapshot(ctx context.Context, store sourceObjectStore, key, dir string) error {
+	body, err := store.GetObjectReader(ctx, key)
+	if err != nil {
+		return fmt.Errorf("fetch source tarball from R2 key %s: %w", key, err)
+	}
+	defer body.Close()
+	return readSourceTarball(body, func(hdr *tar.Header, tr *tar.Reader) error {
+		name := cleanSourcePath(hdr.Name)
+		if name == "" {
+			return nil
+		}
+		dest := filepath.Join(dir, filepath.FromSlash(name))
+		if !strings.HasPrefix(dest, filepath.Clean(dir)+string(os.PathSeparator)) {
+			return fmt.Errorf("tar entry escapes destination: %s", hdr.Name)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			return os.MkdirAll(dest, 0o755)
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(f, tr)
+			closeErr := f.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeErr
+		default:
+			if hdr.Typeflag == tar.TypeReg {
+				_, _ = io.Copy(io.Discard, tr)
+			}
+			return nil
+		}
+	})
+}
+
+func runRecursiveDiff(out io.Writer, left, right, leftLabel, rightLabel, target string) error {
+	args := []string{"-ruN", left, right}
+	cmd := exec.Command("diff", args...)
+	data, err := cmd.CombinedOutput()
+	text := string(data)
+	if target != "" {
+		leftLabel += "/" + target
+		rightLabel += "/" + target
+	}
+	text = strings.ReplaceAll(text, left, leftLabel)
+	text = strings.ReplaceAll(text, right, rightLabel)
+	if text != "" {
+		fmt.Fprint(out, text)
+	}
+	if err == nil {
+		fmt.Fprintln(out, "No source differences.")
+		return nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return nil
+	}
+	return fmt.Errorf("run diff: %w", err)
 }
 
 var commandSourceExts = []string{".py", ".sh", ".bash", ".R", ".jl"}

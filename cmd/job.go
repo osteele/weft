@@ -42,6 +42,8 @@ Available subcommands:
   describe  Set or update job description
   info      Show detailed job information
   show      Alias for info
+  inspect   Print normalized job metadata
+  diff      Compare job metadata and attempts
   restart   Requeue a killed, dead, failed, canceled, or completed job
   retry     Alias for restart
   list      List and search job history
