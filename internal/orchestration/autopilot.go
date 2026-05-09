@@ -543,8 +543,12 @@ func moveIntentRetryAction(database *sql.DB, intent *db.MoveIntent) (moveIntentA
 	if !campaign.IsInstanceTerminal(launch.Status) {
 		return moveIntentActionWait, nil
 	}
-	if _, err := db.ResetLaunchJobs(database, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
+	if restored, err := db.RestoreNoStartMoveTargetToSource(database, intent.JobID, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
 		return moveIntentActionWait, err
+	} else if !restored {
+		if _, err := db.ResetLaunchJobs(database, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
+			return moveIntentActionWait, err
+		}
 	}
 	if intent.AttemptCount >= intent.MaxAttempts {
 		return moveIntentActionExhaust, nil
@@ -562,9 +566,6 @@ func moveIntentTargetStartedJob(database *sql.DB, jobID, launchID int64) (bool, 
 }
 
 func launchMoveIntentRetry(ctx context.Context, database *sql.DB, intent *db.MoveIntent) (int, error) {
-	if err := db.ResetJobToUnplaced(database, intent.JobID); err != nil {
-		return 0, err
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return 0, err
@@ -576,47 +577,59 @@ func launchMoveIntentRetry(ctx context.Context, database *sql.DB, intent *db.Mov
 	if len(clients) == 0 {
 		return 0, fmt.Errorf("no cloud providers available")
 	}
-	minReliability := cfg.CampaignReliability()
-	predCfg := buildPredictorConfig(cfg)
-	relaunchCfg := campaign.RelaunchConfig{
-		Clients:               clients,
-		R2Cfg:                 cfg.Vastai.R2.ToCloudR2Config(),
-		CreateOptsForProvider: cfg.CloudCreateOpts,
-		LaunchOpts:            campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
-		// Move-intent retries are bounded by move_intents.max_attempts. Do not
-		// let the generic historical retry budget preempt that smaller durable
-		// operation budget.
-		MaxAttempts:          1000,
-		SurvivalModel:        buildSurvivalModel(database),
-		MinReliability:       &minReliability,
-		MinSurvival:          0.4,
-		Database:             database,
-		AppConfig:            cfg,
-		PredictorConfig:      &predCfg,
-		ScopeJobIDs:          []int64{intent.JobID},
-		IncludeFreshUnplaced: true,
-		BypassRunawayBreaker: true,
-		SetupFactory:         campaign.OfferSetupOverheadFactory(database, buildOverheadModel(database)),
-		OnInstanceLaunched: func(group campaign.InstanceGroup, instanceID int64) {
-			for _, job := range group.Jobs {
-				if job != nil && job.ID == intent.JobID {
-					_ = db.AdvanceMoveIntentTargetLaunch(database, intent.ID, instanceID)
-				}
-			}
-		},
-	}
-	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
+	job, err := db.GetJobByID(database, intent.JobID)
 	if err != nil {
 		return 0, err
 	}
-	if result == nil {
+	if job == nil {
+		return 0, fmt.Errorf("job %d not found", intent.JobID)
+	}
+	launches, err := db.ListRunningLaunches(database)
+	if err != nil {
+		return 0, err
+	}
+	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
+	queuedCounts := make(map[int64]int, len(launches))
+	for _, ci := range launches {
+		liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
+		if jobsErr != nil {
+			continue
+		}
+		if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobsForMove(liveJobs)); ok {
+			capacities = append(capacities, cap)
+		}
+		for _, j := range liveJobs {
+			if j != nil && j.EffectiveStatus() == db.StatusQueued {
+				queuedCounts[ci.ID]++
+			}
+		}
+	}
+	var sourceLaunchID int64
+	if intent.SourceLaunchID != nil {
+		sourceLaunchID = *intent.SourceLaunchID
+	} else if job.LaunchID != nil {
+		sourceLaunchID = *job.LaunchID
+	}
+	options, err := BuildOptions(clients, job, capacities, queuedCounts, sourceLaunchID, cfg.CampaignReliability())
+	if err != nil {
+		return 0, err
+	}
+	var selected *Option
+	for i := range options {
+		if options[i].IsNew {
+			selected = &options[i]
+			break
+		}
+	}
+	if selected == nil {
+		oplog.LogJob("auto_pilot.move_intent_retry_blocked", intent.JobID, "",
+			oplog.WithDetail("no compatible new-instance destination found"))
 		return 0, nil
 	}
-	if result.BlockedReason != "" {
-		oplog.LogJob("auto_pilot.move_intent_retry_blocked", intent.JobID, "",
-			oplog.WithDetail(result.BlockedReason))
+	if _, err := executeMoveOption(ctx, database, nil, cfg, clients, job, *selected, intent); err != nil {
+		return 0, err
 	}
-	return len(result.InstanceIDs), nil
+	return 1, nil
 }
 
 func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Config, jobs []*db.Job) ([]*db.Job, int) {

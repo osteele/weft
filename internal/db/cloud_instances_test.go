@@ -1141,6 +1141,130 @@ func TestResetLaunchJobs_RestoresOpenNoStartMoveTargetToLiveSource(t *testing.T)
 	}
 }
 
+func TestResetLaunchJobs_RestoresRetryableNoStartMoveTargetAndKeepsIntentOpen(t *testing.T) {
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	insertTestJob(t, database, 1204, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 1204, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          1204,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &dst,
+		TargetGPUName:  "A100",
+		AttemptCount:   1,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := TransferJobLaunchID(database, 1204, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+
+	n, err := ResetLaunchJobs(database, dst, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+	job, err := GetJobByID(database, 1204)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != src {
+		t.Fatalf("job launch_id = %v, want source %d", job.LaunchID, src)
+	}
+	gotIntent, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateOpen {
+		t.Fatalf("move intent state = %q, want open", gotIntent.State)
+	}
+	if gotIntent.AttemptCount != 1 {
+		t.Fatalf("attempt_count = %d, want 1 until replacement launch registers", gotIntent.AttemptCount)
+	}
+}
+
+func TestRestoreNoStartMoveTargetToSource_ConsumesStaleClosedTarget(t *testing.T) {
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	insertTestJob(t, database, 1205, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 1205, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          1205,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &dst,
+		TargetGPUName:  "A100",
+		AttemptCount:   1,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := TransferJobLaunchID(database, 1205, dst); err != nil {
+		t.Fatalf("TransferJobLaunchID target: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		StatusCanceled, now, AttemptOutcomeOrphaned, 1205, dst,
+	); err != nil {
+		t.Fatalf("close target attempt: %v", err)
+	}
+	if _, err := CreateAttempt(database, 1205, "", &src, StatusQueued); err != nil {
+		t.Fatalf("restore source attempt: %v", err)
+	}
+
+	restored, err := RestoreNoStartMoveTargetToSource(database, 1205, dst, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("RestoreNoStartMoveTargetToSource: %v", err)
+	}
+	if !restored {
+		t.Fatal("restored = false, want true")
+	}
+	gotIntent, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateOpen {
+		t.Fatalf("move intent state = %q, want open", gotIntent.State)
+	}
+	var openSource int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		1205, src,
+	).Scan(&openSource); err != nil {
+		t.Fatalf("count source attempts: %v", err)
+	}
+	if openSource != 1 {
+		t.Fatalf("open source attempts = %d, want 1", openSource)
+	}
+}
+
 func TestResetLaunchJobs_DoesNotRestoreConfirmedNoStartMoveTarget(t *testing.T) {
 	database := setupTestDB(t)
 

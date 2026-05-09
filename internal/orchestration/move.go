@@ -356,13 +356,13 @@ func executeMoveOption(
 		func(cloud.Provider) (cloud.CreateOpts, error) { return createOpts, nil },
 		func(ev campaign.LaunchEvent) {
 			if ev.InstanceID > 0 && intent != nil {
-				_ = db.UpdateMoveIntentTargetLaunch(database, intent.ID, ev.InstanceID)
+				updateMoveIntentTarget(database, intent, ev.InstanceID)
 			}
 		},
 		nil,
 		func(_ campaign.InstanceGroup, instanceID int64) {
 			if intent != nil {
-				_ = db.UpdateMoveIntentTargetLaunch(database, intent.ID, instanceID)
+				updateMoveIntentTarget(database, intent, instanceID)
 			}
 		},
 	)
@@ -374,6 +374,21 @@ func executeMoveOption(
 		desc = fmt.Sprintf("new %s instance %s", opt.GPUName, ids.FormatInstanceID(result.InstanceIDs[0]))
 	}
 	return desc, nil
+}
+
+func updateMoveIntentTarget(database *sql.DB, intent *db.MoveIntent, instanceID int64) {
+	if intent == nil || intent.ID <= 0 || instanceID <= 0 {
+		return
+	}
+	if intent.TargetLaunchID != nil && *intent.TargetLaunchID > 0 && *intent.TargetLaunchID != instanceID {
+		if err := db.AdvanceMoveIntentTargetLaunch(database, intent.ID, instanceID); err != nil {
+			slog.Warn("advance move target launch", "component", "move", "job_id", intent.JobID, "launch_id", instanceID, "error", err)
+		}
+		return
+	}
+	if err := db.UpdateMoveIntentTargetLaunch(database, intent.ID, instanceID); err != nil {
+		slog.Warn("update move target launch", "component", "move", "job_id", intent.JobID, "launch_id", instanceID, "error", err)
+	}
 }
 
 // tryRestoreJobToSource re-attaches the job to its source launch if that

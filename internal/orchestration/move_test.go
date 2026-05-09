@@ -190,7 +190,7 @@ func TestUnplaceIfNeeded_RentalSourceLeftAttached(t *testing.T) {
 	}
 }
 
-func TestOpenBulkMoveIntentsKeepsRetryableNoStartFailureUnplaced(t *testing.T) {
+func TestOpenBulkMoveIntentsRestoresRetryableNoStartFailureToSource(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
@@ -238,8 +238,8 @@ func TestOpenBulkMoveIntentsKeepsRetryableNoStartFailureUnplaced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID after: %v", err)
 	}
-	if after.LaunchID != nil {
-		t.Fatalf("after launch_id = %v, want unplaced while retry budget remains", *after.LaunchID)
+	if after.LaunchID == nil || *after.LaunchID != src {
+		t.Fatalf("after launch_id = %v, want source %d while retry budget remains", after.LaunchID, src)
 	}
 	intent, err := db.GetMoveIntent(database, intentIDs[jobID])
 	if err != nil {
