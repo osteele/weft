@@ -39,3 +39,27 @@ func TestInstanceObservabilityKeys(t *testing.T) {
 		t.Fatalf("InstanceAgentDied = %q", got)
 	}
 }
+
+func TestBlackboardKeys(t *testing.T) {
+	if got := BlackboardPrefix(); got != "blackboard/v1/" {
+		t.Fatalf("BlackboardPrefix = %q", got)
+	}
+	if got := BlackboardAutopilotState(); got != "blackboard/v1/state/autopilot.json" {
+		t.Fatalf("BlackboardAutopilotState = %q", got)
+	}
+	if got := BlackboardJobSpec(42); got != "blackboard/v1/jobs/42/spec.json" {
+		t.Fatalf("BlackboardJobSpec = %q", got)
+	}
+	if got := BlackboardJobClaim(42); got != "blackboard/v1/jobs/42/claim.json" {
+		t.Fatalf("BlackboardJobClaim = %q", got)
+	}
+	if got := BlackboardJobAssignment(42); got != "blackboard/v1/jobs/42/assignment.json" {
+		t.Fatalf("BlackboardJobAssignment = %q", got)
+	}
+	if got := BlackboardAgentHeartbeat("agent-1"); got != "blackboard/v1/agents/agent-1/heartbeat.json" {
+		t.Fatalf("BlackboardAgentHeartbeat = %q", got)
+	}
+	if got := BlackboardEvent("evt-1"); got != "blackboard/v1/events/evt-1.json" {
+		t.Fatalf("BlackboardEvent = %q", got)
+	}
+}

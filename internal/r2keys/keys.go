@@ -142,3 +142,17 @@ func CoordinatorRelayRequest(requestID string) string {
 func CoordinatorRelayAck(requestID string) string { return controlplane.CoordinatorRelayAck(requestID) }
 func CoordinatorRelayInboxPrefix() string         { return controlplane.CoordinatorRelayInboxPrefix() }
 func CoordinatorRelayAckPrefix() string           { return controlplane.CoordinatorRelayAckPrefix() }
+
+func BlackboardPrefix() string                   { return controlplane.BlackboardPrefix() }
+func BlackboardAutopilotState() string           { return controlplane.BlackboardAutopilotState() }
+func BlackboardJobsPrefix() string               { return controlplane.BlackboardJobsPrefix() }
+func BlackboardJobPrefix(jobID int64) string     { return controlplane.BlackboardJobPrefix(jobID) }
+func BlackboardJobSpec(jobID int64) string       { return controlplane.BlackboardJobSpec(jobID) }
+func BlackboardJobClaim(jobID int64) string      { return controlplane.BlackboardJobClaim(jobID) }
+func BlackboardJobAssignment(jobID int64) string { return controlplane.BlackboardJobAssignment(jobID) }
+func BlackboardAgentsPrefix() string             { return controlplane.BlackboardAgentsPrefix() }
+func BlackboardAgentHeartbeat(agentID string) string {
+	return controlplane.BlackboardAgentHeartbeat(agentID)
+}
+func BlackboardEventsPrefix() string        { return controlplane.BlackboardEventsPrefix() }
+func BlackboardEvent(eventID string) string { return controlplane.BlackboardEvent(eventID) }

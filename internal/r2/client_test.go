@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	smithy "github.com/aws/smithy-go"
 )
 
 func jobStartedKey(jobID int64) string {
@@ -181,5 +183,18 @@ func TestCopyWithIdleTimeout_FailsWhenStalled(t *testing.T) {
 	}
 	if out.String() != "x" {
 		t.Fatalf("output = %q, want %q", out.String(), "x")
+	}
+}
+
+func TestIsPreconditionFailed(t *testing.T) {
+	err := &smithy.GenericAPIError{Code: "PreconditionFailed", Message: "condition failed"}
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("IsPreconditionFailed = false, want true")
+	}
+	if !IsPreconditionFailed(ErrPreconditionFailed) {
+		t.Fatalf("IsPreconditionFailed sentinel = false, want true")
+	}
+	if IsPreconditionFailed(fmt.Errorf("other")) {
+		t.Fatalf("IsPreconditionFailed unrelated = true, want false")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -443,6 +444,7 @@ type ObjectInfo struct {
 	Key          string
 	SizeBytes    int64
 	LastModified time.Time
+	ETag         string
 }
 
 // ListObjects returns all objects under a prefix.
@@ -472,6 +474,7 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 				Key:          aws.ToString(obj.Key),
 				SizeBytes:    size,
 				LastModified: lastModified,
+				ETag:         aws.ToString(obj.ETag),
 			})
 		}
 	}
@@ -493,6 +496,67 @@ func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, cont
 		return fmt.Errorf("put object %s: %w", key, err)
 	}
 	return nil
+}
+
+// ErrPreconditionFailed signals that an R2 conditional write or read failed
+// its ETag / existence precondition. This is the expected contention result
+// for blackboard-style claims.
+var ErrPreconditionFailed = errors.New("r2 precondition failed")
+
+// PutObjectConditional uploads an object using S3 conditional headers. Pass
+// ifNoneMatch="*" to create only when the key does not exist, or ifMatch=<etag>
+// to update only when the current object still has that ETag.
+func (c *Client) PutObjectConditional(ctx context.Context, key string, body io.Reader, contentType, ifMatch, ifNoneMatch string) (string, error) {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Body:   body,
+	}
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	}
+	if ifMatch != "" {
+		input.IfMatch = aws.String(ifMatch)
+	}
+	if ifNoneMatch != "" {
+		input.IfNoneMatch = aws.String(ifNoneMatch)
+	}
+	out, err := c.s3.PutObject(ctx, input)
+	if err != nil {
+		if isS3PreconditionFailed(err) {
+			return "", ErrPreconditionFailed
+		}
+		return "", fmt.Errorf("put object %s: %w", key, err)
+	}
+	return aws.ToString(out.ETag), nil
+}
+
+// HeadObject returns metadata for a single object, including its ETag.
+func (c *Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
+	out, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, fmt.Errorf("head object %s: %w", key, err)
+		}
+		return nil, fmt.Errorf("head object %s: %w", key, err)
+	}
+	size := int64(0)
+	if out.ContentLength != nil {
+		size = *out.ContentLength
+	}
+	var lastModified time.Time
+	if out.LastModified != nil {
+		lastModified = *out.LastModified
+	}
+	return &ObjectInfo{
+		Key:          key,
+		SizeBytes:    size,
+		LastModified: lastModified,
+		ETag:         aws.ToString(out.ETag),
+	}, nil
 }
 
 // PresignPutURL returns a presigned URL that can PUT to the given key for
@@ -650,6 +714,12 @@ func IsNotFound(err error) bool {
 	return isS3NotFound(err)
 }
 
+// IsPreconditionFailed returns true when err is ErrPreconditionFailed or an
+// SDK error equivalent to HTTP 412.
+func IsPreconditionFailed(err error) bool {
+	return errors.Is(err, ErrPreconditionFailed) || isS3PreconditionFailed(err)
+}
+
 // isS3NotFound returns true if the error indicates the object was not found.
 func isS3NotFound(err error) bool {
 	var notFound *types.NotFound
@@ -659,4 +729,16 @@ func isS3NotFound(err error) bool {
 	// R2 may return NoSuchKey instead of NotFound
 	var noSuchKey *types.NoSuchKey
 	return errors.As(err, &noSuchKey)
+}
+
+func isS3PreconditionFailed(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "PreconditionFailed", "ConditionalRequestConflict":
+			return true
+		}
+	}
+	var responseErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusPreconditionFailed
 }

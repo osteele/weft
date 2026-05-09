@@ -204,3 +204,49 @@ func CoordinatorRelayInboxPrefix() string {
 func CoordinatorRelayAckPrefix() string {
 	return "coordinator/v1/acks/"
 }
+
+// Federated R2 blackboard keys
+
+func BlackboardPrefix() string {
+	return "blackboard/v1/"
+}
+
+func BlackboardAutopilotState() string {
+	return BlackboardPrefix() + "state/autopilot.json"
+}
+
+func BlackboardJobsPrefix() string {
+	return BlackboardPrefix() + "jobs/"
+}
+
+func BlackboardJobPrefix(jobID int64) string {
+	return fmt.Sprintf("%sjobs/%d/", BlackboardPrefix(), jobID)
+}
+
+func BlackboardJobSpec(jobID int64) string {
+	return BlackboardJobPrefix(jobID) + "spec.json"
+}
+
+func BlackboardJobClaim(jobID int64) string {
+	return BlackboardJobPrefix(jobID) + "claim.json"
+}
+
+func BlackboardJobAssignment(jobID int64) string {
+	return BlackboardJobPrefix(jobID) + "assignment.json"
+}
+
+func BlackboardAgentsPrefix() string {
+	return BlackboardPrefix() + "agents/"
+}
+
+func BlackboardAgentHeartbeat(agentID string) string {
+	return fmt.Sprintf("%sagents/%s/heartbeat.json", BlackboardPrefix(), agentID)
+}
+
+func BlackboardEventsPrefix() string {
+	return BlackboardPrefix() + "events/"
+}
+
+func BlackboardEvent(eventID string) string {
+	return fmt.Sprintf("%sevents/%s.json", BlackboardPrefix(), eventID)
+}
