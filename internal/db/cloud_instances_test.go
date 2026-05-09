@@ -1268,6 +1268,79 @@ func TestHandleMoveTargetFailedBeforeStart_ConsumesStaleClosedTarget(t *testing.
 	}
 }
 
+func TestFailedMoveTargetMachineIDs_ReturnsNoStartFailures(t *testing.T) {
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dstFailed, err := CreateLaunch(database, &Launch{
+		Status:            LaunchStatusFailed,
+		Provider:          "vastai",
+		MachineID:         "machine-bad",
+		TerminationReason: TerminationReasonInfraFailure,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch failed target: %v", err)
+	}
+	dstStarted, err := CreateLaunch(database, &Launch{
+		Status:            LaunchStatusFailed,
+		Provider:          "vastai",
+		MachineID:         "machine-started",
+		TerminationReason: TerminationReasonInfraFailure,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch started target: %v", err)
+	}
+	jobID := int64(1206)
+	insertTestJob(t, database, jobID, "move target machines", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          jobID,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetNew,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := TransferJobLaunchID(database, jobID, dstFailed); err != nil {
+		t.Fatalf("TransferJobLaunchID failed target: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		StatusCanceled, time.Now().Unix(), AttemptOutcomeOrphaned, jobID, dstFailed,
+	); err != nil {
+		t.Fatalf("close failed target attempt: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("restore source: %v", err)
+	}
+	if err := TransferJobLaunchID(database, jobID, dstStarted); err != nil {
+		t.Fatalf("TransferJobLaunchID started target: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		StatusCanceled, time.Now().Unix()-10, time.Now().Unix(), AttemptOutcomeOrphaned, jobID, dstStarted,
+	); err != nil {
+		t.Fatalf("close started target attempt: %v", err)
+	}
+
+	got, err := FailedMoveTargetMachineIDs(database, intent)
+	if err != nil {
+		t.Fatalf("FailedMoveTargetMachineIDs: %v", err)
+	}
+	if _, ok := got["machine-bad"]; !ok {
+		t.Fatalf("machine-bad missing from failed machines: %#v", got)
+	}
+	if _, ok := got["machine-started"]; ok {
+		t.Fatalf("started target should not be excluded as no-start failure: %#v", got)
+	}
+}
+
 func TestResetLaunchJobs_DoesNotRestoreConfirmedNoStartMoveTarget(t *testing.T) {
 	database := setupTestDB(t)
 

@@ -57,6 +57,54 @@ func HandleMoveTargetFailedBeforeStart(database *sql.DB, jobID, targetLaunchID i
 	return result, nil
 }
 
+// FailedMoveTargetMachineIDs returns provider machine IDs that have already
+// failed before starting this move-to-new intent's job. These machines should
+// be skipped when selecting a replacement target for the same move.
+func FailedMoveTargetMachineIDs(database *sql.DB, intent *MoveIntent) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	if database == nil || intent == nil || intent.JobID <= 0 || intent.TargetKind != MoveTargetNew {
+		return out, nil
+	}
+	sourceLaunchID := int64(0)
+	if intent.SourceLaunchID != nil {
+		sourceLaunchID = *intent.SourceLaunchID
+	}
+	rows, err := database.Query(`
+		SELECT DISTINCT COALESCE(l.machine_id, '')
+		  FROM job_attempts ja
+		  JOIN launches l ON l.id = ja.launch_id
+		 WHERE ja.job_id = ?
+		   AND ja.launch_id IS NOT NULL
+		   AND ja.launch_id != ?
+		   AND COALESCE(l.machine_id, '') != ''
+		   AND (ja.start_time IS NULL OR ja.start_time = 0)
+		   AND (
+		        ja.cloud_outcome IN (?, ?)
+		        OR l.termination_reason IN (?, ?)
+		   )`,
+		intent.JobID,
+		sourceLaunchID,
+		AttemptOutcomeOrphaned,
+		AttemptOutcomeFailed,
+		TerminationReasonInfraFailure,
+		TerminationReasonProviderFailure,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var machineID string
+		if err := rows.Scan(&machineID); err != nil {
+			return nil, err
+		}
+		if machineID != "" {
+			out[machineID] = struct{}{}
+		}
+	}
+	return out, rows.Err()
+}
+
 func handleMoveTargetFailedBeforeStartTx(tx *sql.Tx, jobID, targetLaunchID, now int64, outcome string) (MoveTargetFailureResult, error) {
 	var (
 		intentID        int64

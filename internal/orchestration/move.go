@@ -55,6 +55,20 @@ func BuildOptions(
 	sourceInstanceID int64,
 	minReliability float64,
 ) ([]Option, error) {
+	return BuildOptionsWithSurvival(cloudClients, job, capacities, queuedCounts, sourceInstanceID, minReliability, nil, 0, nil)
+}
+
+func BuildOptionsWithSurvival(
+	cloudClients []cloud.Client,
+	job *db.Job,
+	capacities []campaign.InstanceCapacity,
+	queuedCounts map[int64]int,
+	sourceInstanceID int64,
+	minReliability float64,
+	survivalModel *bidding.SurvivalModel,
+	minSurvival float64,
+	excludedMachineIDs map[string]struct{},
+) ([]Option, error) {
 	var options []Option
 
 	var filtered []campaign.InstanceCapacity
@@ -95,6 +109,9 @@ func BuildOptions(
 		if len(rawOffers) > 0 && rawOffers[0].Err != nil {
 			return nil, rawOffers[0].Err
 		}
+		for i := range rawOffers {
+			rawOffers[i].Offers = filterOffersByMachine(rawOffers[i].Offers, excludedMachineIDs)
+		}
 
 		strategies := []bidding.SelectionStrategy{
 			bidding.StrategyCheap,
@@ -103,7 +120,7 @@ func BuildOptions(
 		}
 		seen := make(map[string]bool)
 		for _, strategy := range strategies {
-			ranked := campaign.RankGroupOffers(rawOffers, nil, 1.0, nil, strategy, 0)
+			ranked := campaign.RankGroupOffers(rawOffers, survivalModel, 1.0, nil, strategy, minSurvival)
 			if len(ranked) == 0 || ranked[0].Offer == nil {
 				continue
 			}
@@ -124,6 +141,22 @@ func BuildOptions(
 		}
 	}
 	return options, nil
+}
+
+func filterOffersByMachine(offers []cloud.Offer, excludedMachineIDs map[string]struct{}) []cloud.Offer {
+	if len(offers) == 0 || len(excludedMachineIDs) == 0 {
+		return offers
+	}
+	filtered := offers[:0]
+	for _, offer := range offers {
+		if offer.MachineID != "" {
+			if _, excluded := excludedMachineIDs[offer.MachineID]; excluded {
+				continue
+			}
+		}
+		filtered = append(filtered, offer)
+	}
+	return filtered
 }
 
 func ExecuteOption(
@@ -489,7 +522,7 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {
 	}
 
 	optionsStarted := time.Now()
-	options, err := BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability())
+	options, err := BuildOptionsWithSurvival(cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability(), buildSurvivalModel(database), 0.4, nil)
 	if err != nil {
 		logPhase("lookup_options", optionsStarted, "", err)
 		return Result{}, err

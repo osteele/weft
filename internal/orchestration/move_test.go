@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
@@ -130,6 +131,108 @@ func TestBuildOptions_NewOffersRespectJobMaxComputeCap(t *testing.T) {
 	}
 	if !foundA6000 {
 		t.Fatalf("expected compatible RTX A6000 option, got %+v", options)
+	}
+}
+
+func TestBuildOptionsWithSurvival_FiltersLowSurvivalMachine(t *testing.T) {
+	job := &db.Job{
+		ID:       1905,
+		Status:   db.StatusQueued,
+		GPUClass: "A100",
+	}
+	badMachine := "machine-bad"
+	goodMachine := "machine-good"
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{
+					ProviderID:  "bad",
+					Provider:    cloud.ProviderVastai,
+					GPUName:     "A100 PCIE",
+					GPUMemGB:    80,
+					CostPerHour: 0.10,
+					Reliability: 0.99,
+					MachineID:   badMachine,
+				},
+				{
+					ProviderID:  "good",
+					Provider:    cloud.ProviderVastai,
+					GPUName:     "A100 PCIE",
+					GPUMemGB:    80,
+					CostPerHour: 0.20,
+					Reliability: 0.99,
+					MachineID:   goodMachine,
+				},
+			}, nil
+		},
+	}
+
+	now := time.Now()
+	outcomes := []bidding.InstanceOutcome{
+		{Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonCompleted, ResolvedGPUName: "A100 PCIE", GPUMemGB: 80, CostPerHourCents: 20, Reliability: 0.99, MachineID: goodMachine, EndedAtUnix: now.Unix()},
+		{Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonCompleted, ResolvedGPUName: "A100 PCIE", GPUMemGB: 80, CostPerHourCents: 20, Reliability: 0.99, MachineID: goodMachine, EndedAtUnix: now.Unix()},
+		{Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonCompleted, ResolvedGPUName: "A100 PCIE", GPUMemGB: 80, CostPerHourCents: 20, Reliability: 0.99, MachineID: goodMachine, EndedAtUnix: now.Unix()},
+		{Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonInfraFailure, ResolvedGPUName: "A100 PCIE", GPUMemGB: 80, CostPerHourCents: 10, Reliability: 0.99, MachineID: badMachine, EndedAtUnix: now.Unix()},
+		{Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonInfraFailure, ResolvedGPUName: "A100 PCIE", GPUMemGB: 80, CostPerHourCents: 10, Reliability: 0.99, MachineID: badMachine, EndedAtUnix: now.Unix()},
+		{Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonInfraFailure, ResolvedGPUName: "A100 PCIE", GPUMemGB: 80, CostPerHourCents: 10, Reliability: 0.99, MachineID: badMachine, EndedAtUnix: now.Unix()},
+	}
+	model := bidding.BuildSurvivalModelAt(outcomes, now)
+
+	options, err := BuildOptionsWithSurvival([]cloud.Client{client}, job, nil, nil, 0, 0, model, 0.4, nil)
+	if err != nil {
+		t.Fatalf("BuildOptionsWithSurvival: %v", err)
+	}
+	for _, opt := range options {
+		if opt.IsNew && opt.Offer != nil && opt.Offer.MachineID == badMachine {
+			t.Fatalf("low-survival machine was returned: %+v", opt.Offer)
+		}
+	}
+	foundGood := false
+	for _, opt := range options {
+		if opt.IsNew && opt.Offer != nil && opt.Offer.MachineID == goodMachine {
+			foundGood = true
+		}
+	}
+	if !foundGood {
+		t.Fatalf("expected surviving offer from good machine, got %+v", options)
+	}
+}
+
+func TestBuildOptionsWithSurvival_ExcludesFailedMoveMachine(t *testing.T) {
+	job := &db.Job{
+		ID:       1905,
+		Status:   db.StatusQueued,
+		GPUClass: "A100",
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{ProviderID: "same-machine-new-offer", Provider: cloud.ProviderVastai, GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 0.10, MachineID: "56764"},
+				{ProviderID: "other-machine", Provider: cloud.ProviderVastai, GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 0.20, MachineID: "99999"},
+			}, nil
+		},
+	}
+	excluded := map[string]struct{}{"56764": {}}
+
+	options, err := BuildOptionsWithSurvival([]cloud.Client{client}, job, nil, nil, 0, 0, nil, 0, excluded)
+	if err != nil {
+		t.Fatalf("BuildOptionsWithSurvival: %v", err)
+	}
+	for _, opt := range options {
+		if opt.IsNew && opt.Offer != nil && opt.Offer.MachineID == "56764" {
+			t.Fatalf("excluded machine was returned: %+v", opt.Offer)
+		}
+	}
+	foundOther := false
+	for _, opt := range options {
+		if opt.IsNew && opt.Offer != nil && opt.Offer.MachineID == "99999" {
+			foundOther = true
+		}
+	}
+	if !foundOther {
+		t.Fatalf("expected offer from other machine, got %+v", options)
 	}
 }
 

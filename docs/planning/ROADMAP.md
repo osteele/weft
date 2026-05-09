@@ -170,6 +170,45 @@ Remaining work:
 The goal is to make "inventory host plus rental launch on the same attempt"
 impossible by schema shape rather than by scattered update guards.
 
+## Placement correctness by construction
+
+Recent move-to-new fixes added explicit transition helpers for target-launch
+attachment and no-start target failure handling. The next step is to make the
+rest of placement follow the same shape, so invalid intermediate rows are
+harder to produce and harder for the TUI to display.
+
+- **Make placement transitions the only write path.**
+  `AttachMoveIntentTargetLaunch` and `HandleMoveTargetFailedBeforeStart`
+  now exist, but other placement and attempt paths still write `jobs`,
+  `job_attempts`, `launches`, and `move_intents` directly. Keep moving state
+  changes behind named transition functions until orchestration mostly says
+  "apply transition X" instead of editing rows.
+- **Add DB invariants.**
+  Useful constraints include at most one open `move_intents` row per job,
+  at most one open `job_attempts` row per job, live source launches for open
+  move-to-new intents, `end_time` on terminal attempts, and a guard that
+  started attempts are never restored to a source queue.
+- **Unify retry-budget semantics.**
+  Move-to-new retry counters, launch attempts, relaunch blockers, and
+  campaign replacement loops still account for attempts separately. The goal
+  is one durable placement-attempt budget model so "four retries" means the
+  same thing across initial placement, relaunch, move-to-new, and replacement.
+- **Make stale rows self-healing from a single reconciler.**
+  Several cleanup paths still repair related row shapes independently. A
+  placement reconciler should consume facts such as "launch failed", "agent
+  started job", "attempt terminal", and "intent open", then converge rows into
+  one valid state.
+- **Fix notification/read-model timing.**
+  TUI and narration can observe different snapshots while placement is moving
+  through several table updates. Emit from transition events, or read from a
+  canonical placement status view, instead of partially updated intermediate
+  table state.
+- **Reduce TUI-specific status reconstruction.**
+  The TUI still infers placement state from launch rows, attempt rows, and
+  reason strings. A canonical DB/read-model query for "current placement
+  state" would keep stale rows and launch replacement states from leaking into
+  display code.
+
 ## UserIntent entity (replaces requested_status three-way merge)
 
 The `job_status` view derives `Job.status` from `jobs.requested_status`
