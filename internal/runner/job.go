@@ -97,6 +97,34 @@ func DetectFailureReasonFromExitInfo(ei ExitInfo) string {
 	return DetectFailureReason(ei.ExitCode)
 }
 
+// DetectFailureReasonFromExitInfoAndLog also checks the job log for textual
+// disk exhaustion errors that may not appear in dmesg before the process exits.
+func DetectFailureReasonFromExitInfoAndLog(ei ExitInfo, logPath string) string {
+	if logMentionsDiskFull(logPath) {
+		return "disk_full"
+	}
+	return DetectFailureReasonFromExitInfo(ei)
+}
+
+func logMentionsDiskFull(logPath string) bool {
+	if logPath == "" {
+		return false
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return false
+	}
+	const maxScanBytes = 1 << 20
+	if len(data) > maxScanBytes {
+		data = data[len(data)-maxScanBytes:]
+	}
+	text := strings.ToLower(string(data))
+	return strings.Contains(text, "no space left on device") ||
+		strings.Contains(text, "enospc") ||
+		strings.Contains(text, "quota exceeded") ||
+		strings.Contains(text, "disk quota exceeded")
+}
+
 // JobPaths holds all file paths for a job.
 type JobPaths struct {
 	Log           string

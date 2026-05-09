@@ -133,7 +133,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			phases.SetupEnd = now
 			WriteStatusFile(paths, ei)
 
-			failureReason := DetectFailureReasonFromExitInfo(ei)
+			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
 			WriteFailureReasonFile(paths, failureReason)
 			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
 			WritePhasesFile(paths, phases)
@@ -217,7 +217,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 				// Early return skips the normal completion writes below;
 				// without these the reconciler has no timestamps or logs.
-				failureReason := DetectFailureReasonFromExitInfo(ei)
+				failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
 				WriteFailureReasonFile(paths, failureReason)
 				WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
 				WritePhasesFile(paths, phases)

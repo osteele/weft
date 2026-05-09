@@ -518,6 +518,8 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	if setupCmd != "" {
 		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths, r.setupTimeout)
 		if setupErr != nil {
+			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+			WriteFailureReasonFile(paths, failureReason)
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
 			return setupErr
 		}

@@ -99,6 +99,25 @@ func TestDetectFailureReasonFromExitInfo_DiskFullOverridesSignal(t *testing.T) {
 	}
 }
 
+func TestDetectFailureReasonFromExitInfoAndLog_DiskFullFromQuotaExceeded(t *testing.T) {
+	binDir := t.TempDir()
+	writeFakeCommand(t, binDir, "dmesg", "#!/bin/sh\nexit 1\n")
+	writeFakeCommand(t, binDir, "df", "#!/bin/sh\necho 'Filesystem 1K-blocks Used Available Use% Mounted on'\necho '/dev/root 1000 100 900 10% /'\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logPath := filepath.Join(t.TempDir(), "job.log")
+	if err := os.WriteFile(logPath, []byte(`error: Failed to install: sympy-1.13.1-py3-none-any.whl
+  Caused by: failed to copy file: Quota exceeded (os error 122)
+`), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 2}, logPath)
+	if got != "disk_full" {
+		t.Fatalf("DetectFailureReasonFromExitInfoAndLog() = %q, want disk_full", got)
+	}
+}
+
 func writeFakeCommand(t *testing.T, dir, name, script string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
