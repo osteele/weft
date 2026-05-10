@@ -2345,7 +2345,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		}
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-		sendCampaignPhase("preparing campaign launch")
+		sendCampaignPhase("preparing instance launch")
 
 		result, err := campaign.LaunchCampaignWithAssetStager(
 			assetStager,
@@ -2826,7 +2826,7 @@ func (m launchModel) renderInlineLaunchOverview() string {
 	}
 	b.WriteString(spinnerText)
 	if m.campaignID != 0 {
-		b.WriteString(fmt.Sprintf(" Launching instances... (campaign %d)", m.campaignID))
+		b.WriteString(" Launching instances...")
 	} else {
 		b.WriteString(" Launching instances...")
 	}
@@ -2949,7 +2949,7 @@ func (m launchModel) View() string {
 		if m.campaignID == 0 && m.expectedInstanceCount == 0 && len(m.instanceIDs) > 0 {
 			b.WriteString("Submitted jobs to existing instances: ")
 		} else if m.campaignID != 0 {
-			b.WriteString(fmt.Sprintf("Campaign %d: launched instances: ", m.campaignID))
+			b.WriteString("Launched instances: ")
 		} else {
 			b.WriteString("Launched instances: ")
 		}
@@ -2975,7 +2975,7 @@ func (m launchModel) View() string {
 	if m.launching {
 		b.WriteString(m.spinner.View())
 		if m.campaignID != 0 {
-			b.WriteString(fmt.Sprintf(" Launching instances... (campaign %d)", m.campaignID))
+			b.WriteString(" Launching instances...")
 		} else {
 			b.WriteString(" Launching instances...")
 		}

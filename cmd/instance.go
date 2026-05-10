@@ -138,8 +138,8 @@ var instanceLaunchCmd = &cobra.Command{
 	Use:     "launch",
 	Aliases: []string{"run", "start"},
 	Short:   "Interactively select and launch cloud instances for unplaceable jobs",
-	Long:    campaignLaunchCmd.Long,
-	RunE:    runCampaignLaunch,
+	Long:    instanceLaunchLong,
+	RunE:    runInstanceLaunch,
 }
 
 var (
@@ -200,7 +200,7 @@ func init() {
 	instanceCordonCmd.Flags().StringVar(&instanceCordonReason, "reason", "", "Optional human-readable reason (recorded with the cordon)")
 
 	configureWatchFlags(instanceWatchCmd)
-	addCampaignLaunchFlags(instanceLaunchCmd)
+	addInstanceLaunchFlags(instanceLaunchCmd)
 	addInstanceNewFlags(instanceNewCmd)
 }
 
@@ -259,7 +259,7 @@ func runInstanceNew(cmd *cobra.Command, args []string) error {
 				}
 			},
 			OnCampaign: func(campaignID int64) {
-				statusLine.Println(fmt.Sprintf("Campaign %d: launching one instance...", campaignID))
+				statusLine.Println(fmt.Sprintf("Launching one instance in batch %d...", campaignID))
 			},
 			ConfirmBeforeLaunch: func(res orchestration.NewInstanceResult) (bool, error) {
 				if instanceNewDryRun || instanceNewYes {

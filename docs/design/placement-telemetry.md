@@ -10,8 +10,8 @@ Three categories of data fill the gaps between "which host was chosen" and
 
 ### 1. `placement.decided` oplog entries
 
-Logged whenever auto-placement selects a host (in `cmd/run.go` and
-`internal/coordinator/dispatch.go`).
+Logged whenever auto-placement selects a host (in `cmd/run.go`,
+`internal/placement/`, and `internal/ops/`).
 
 ```jsonl
 {"t":"2026-03-04T10:00:00Z","op":"placement.decided","host":"titan","detail":"selected=titan scores=titan:8.2,atlas:5.1 metrics=titan:{cpu:5,gpu:0,q:0},atlas:{cpu:80,gpu:95,q:4}"}

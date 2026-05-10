@@ -528,7 +528,7 @@ host that might have worked.
 weft predict --host atlas 'python train.py'
 weft retrain
 weft export training-data --output training-data.jsonl
-weft campaign launch --dry-run
+weft instance launch --dry-run
 ```
 
 ## Related Documents

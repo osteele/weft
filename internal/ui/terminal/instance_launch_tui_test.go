@@ -27,7 +27,7 @@ func TestLaunchModelView_ShowsPartialFailures(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"Campaign 49: launched instances: " + ids.FormatInstanceID(108),
+		"Launched instances: " + ids.FormatInstanceID(108),
 		"2 planned launch(es) failed:",
 		"RTX3090",
 		"A100",
@@ -816,7 +816,7 @@ func TestLaunchModelView_InlineWatchShowsLaunchOverviewBeforeRegistration(t *tes
 	m := launchModel{
 		launching:     true,
 		inlineWatch:   &inlineWatch,
-		campaignPhase: "preparing campaign launch",
+		campaignPhase: "preparing instance launch",
 		height:        20,
 		width:         100,
 	}
@@ -825,7 +825,7 @@ func TestLaunchModelView_InlineWatchShowsLaunchOverviewBeforeRegistration(t *tes
 	if !strings.Contains(out, "Launching instances...") {
 		t.Fatalf("expected launch overview header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "preparing campaign launch") {
+	if !strings.Contains(out, "preparing instance launch") {
 		t.Fatalf("expected campaign phase in launch overview, got:\n%s", out)
 	}
 	if strings.Contains(out, "Unplaced Jobs") {

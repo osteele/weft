@@ -741,7 +741,7 @@ laptop$ weft project launch --yes --watch # Non-interactive, watch progress
 laptop$ weft project launch --dry-run     # Preview for this project only
 ```
 
-`weft place` and `weft campaign launch` remain as deprecated aliases.
+`weft place` and `weft campaign launch` remain as compatibility aliases.
 
 After launch, monitor and manage:
 

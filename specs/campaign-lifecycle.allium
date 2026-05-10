@@ -418,7 +418,7 @@ rule DependencyGatesRentalLaunch {
 
     @guidance
         -- Implementation: cmd/campaign.go filterLaunchJobsByDependencies,
-        -- applied in runCampaignLaunch and refreshLaunchGroupsWithOnPrem.
+        -- applied in runInstanceLaunch and refreshLaunchGroupsWithOnPrem.
         -- The per-host queue on on-prem instances honors dep_spec on its
         -- own; this rule is specifically about keeping unsatisfied
         -- dependencies out of the rental-launch selection set so they do

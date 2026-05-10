@@ -382,10 +382,10 @@ weft run --gpu turing+ --tag rental --tag test-campaign -C "$(pwd)/testdata/camp
 
 ```bash
 # Dry run to check grouping and cost estimate
-weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --dry-run
+weft instance launch --jobs <ids> --max-spend '$1.00' --max-time 30m --dry-run
 
 # Launch with short grace period for faster testing
-weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --grace-period 2m --yes --no-watch
+weft instance launch --jobs <ids> --max-spend '$1.00' --max-time 30m --grace-period 2m --yes --no-watch
 ```
 
 ### Step 3: Monitor

@@ -64,7 +64,7 @@ entity Job {
     --                              that launch is not terminal / self-destructing.
     --                              Covers both same-batch co-location (producer
     --                              and consumer placed on one instance in the
-    --                              same campaign launch, launch still
+    --                              same instance launch, launch still
     --                              planned/launching) and reuse of an existing
     --                              running/grace instance.
     --   agent_job.cloud_needs   -- populated when a producer is no longer reachable by
@@ -510,7 +510,7 @@ rule ArtifactUploadTimeoutScalesWithSize {
         -- uploads on bursty cloud rental networks (kill via context.WithTimeout
         -- abandons the in-flight S3 multipart). The timeout is now scaled by
         -- the payload size at a 1 MB/s throughput floor, with a 5-minute
-        -- minimum. Implementation: cmd/agent/runcampaign.go
+        -- minimum. Implementation: cmd/agent/runinstance.go
         -- rcloneTimeoutForBytes() applied in uploadOutputDirs and
         -- rcloneUploadWithRetry. Retries (5s, 10s delays, 3 attempts) still
         -- handle transient failures; the scaling addresses the stalled-but-
@@ -544,7 +544,7 @@ rule PerArtifactUploadOutcomeRecorded {
         -- result. A failure on a single large file (e.g. a 500MB checkpoint
         -- whose upload timed out) must be visible per-path so users can see
         -- which artifact failed without inspecting agent logs.
-        -- Implementation: cmd/agent/runcampaign.go uploadArtifactManifestEntries
+        -- Implementation: cmd/agent/runinstance.go uploadArtifactManifestEntries
         -- appends one result.Dirs entry per artifact regardless of kind.
 }
 

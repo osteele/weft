@@ -166,5 +166,5 @@ weight, and `time_first` spends more readily to reduce completion time.
 
 This guide is the operator view. The formal placement model lives in
 [`specs/inventory-placement.allium`](../../specs/inventory-placement.allium).
-Design rationale belongs in
-[`docs/design/placement-and-auto-mode.md`](../design/placement-and-auto-mode.md).
+Related behavior for job moves and status synchronization is covered by the
+Allium specs in [`specs/`](../../specs/).

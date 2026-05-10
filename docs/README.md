@@ -30,8 +30,7 @@ detail quickly.
 - [CLI, TUI, and Core Responsibilities](design/facade-core.md) for layering boundaries
 - [Comparison to SLURM](design/comparison-to-slurm.md) for scheduler tradeoffs
 - [Placement Telemetry](design/placement-telemetry.md) for decision logging and offline analysis
-- [Queue Runner Concurrency](design/queue-concurrency.md) for the queue concurrency design
-- [Sync Queue Architecture](design/sync-queue-design.md) for sync-worker design notes
+- [Allium Specs](../specs/) for executable behavioral specifications of placement, job moves, and status sync
 
 ## Development
 
@@ -40,5 +39,5 @@ detail quickly.
 
 ## Planning
 
-- [Campaign Roadmap](planning/ROADMAP.md) for campaign-system gaps
+- [Roadmap](planning/ROADMAP.md) for current gaps and planned work
 - [Future Ideas](planning/IDEAS.md) for unprioritized design ideas

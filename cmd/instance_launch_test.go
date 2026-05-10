@@ -30,14 +30,14 @@ func TestParseLaunchOpts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set globals (restored after test)
-			oldSpend, oldTime := campaignLaunchMaxSpend, campaignLaunchMaxTime
+			oldSpend, oldTime := instanceLaunchMaxSpend, instanceLaunchMaxTime
 			defer func() {
-				campaignLaunchMaxSpend = oldSpend
-				campaignLaunchMaxTime = oldTime
+				instanceLaunchMaxSpend = oldSpend
+				instanceLaunchMaxTime = oldTime
 			}()
 
-			campaignLaunchMaxSpend = tt.maxSpend
-			campaignLaunchMaxTime = tt.maxTime
+			instanceLaunchMaxSpend = tt.maxSpend
+			instanceLaunchMaxTime = tt.maxTime
 
 			opts := parseLaunchOpts()
 
@@ -190,10 +190,10 @@ func TestNonInteractiveLaunchGrouping(t *testing.T) {
 }
 
 func TestParseLaunchOptsTimeDuration(t *testing.T) {
-	oldTime := campaignLaunchMaxTime
-	defer func() { campaignLaunchMaxTime = oldTime }()
+	oldTime := instanceLaunchMaxTime
+	defer func() { instanceLaunchMaxTime = oldTime }()
 
-	campaignLaunchMaxTime = "1h30m"
+	instanceLaunchMaxTime = "1h30m"
 	opts := parseLaunchOpts()
 
 	expected := int((1*time.Hour + 30*time.Minute).Seconds())

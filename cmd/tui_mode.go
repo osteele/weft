@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/x/term"
 )
 
-var campaignAgentEnvVars = []string{
+var tuiAgentEnvVars = []string{
 	"CLAUDECODE",
 	"CODEX_CI",
 	"GEMINI_CLI",
@@ -43,7 +43,7 @@ func inAgentContext() bool {
 }
 
 func inAgentContextWithTerminal(hasTerminal bool) bool {
-	for _, envVar := range campaignAgentEnvVars {
+	for _, envVar := range tuiAgentEnvVars {
 		if !isTruthyEnv(os.Getenv(envVar)) {
 			continue
 		}

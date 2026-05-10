@@ -102,9 +102,9 @@ func init() {
 	launchCmd.AddCommand(launchCampaignCmd)
 	launchCmd.AddCommand(launchInstanceCmd)
 	launchCmd.AddCommand(launchProjectCmd)
-	addCampaignLaunchFlags(launchCampaignCmd)
-	addCampaignLaunchFlags(launchInstanceCmd)
-	addCampaignLaunchFlags(launchProjectCmd)
+	addInstanceLaunchFlags(launchCampaignCmd)
+	addInstanceLaunchFlags(launchInstanceCmd)
+	addInstanceLaunchFlags(launchProjectCmd)
 
 	// new
 	newInstanceCmd := withPluralAlias(verbAlias("instance [job-id]...", instanceNewCmd))
@@ -159,9 +159,9 @@ func init() {
 	startCmd.AddCommand(startInstanceCmd)
 	startCmd.AddCommand(startCampaignCmd)
 	startCmd.AddCommand(startProjectCmd)
-	addCampaignLaunchFlags(startInstanceCmd)
-	addCampaignLaunchFlags(startCampaignCmd)
-	addCampaignLaunchFlags(startProjectCmd)
+	addInstanceLaunchFlags(startInstanceCmd)
+	addInstanceLaunchFlags(startCampaignCmd)
+	addInstanceLaunchFlags(startProjectCmd)
 
 	// "system watch" top-level alias
 	systemCmd := &cobra.Command{

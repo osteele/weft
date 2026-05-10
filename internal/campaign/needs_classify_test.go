@@ -152,7 +152,7 @@ func TestClassifyNeedsForLaunch_DeadProducerInstance_Fallback(t *testing.T) {
 
 func TestClassifyNeedsForLaunch_RentalSameBatch_Launching(t *testing.T) {
 	// Mid-batch co-location: both producer and consumer are being placed on
-	// the same instance in one campaign launch. The instance hasn't yet
+	// the same instance in one instance launch. The instance hasn't yet
 	// reached "running" status but is pinned, so co-location must be
 	// recognized (shared LaunchID = shared filesystem).
 	database := db.SetupTestDB(t)

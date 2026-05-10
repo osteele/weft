@@ -1,6 +1,6 @@
 package cloud
 
-// AgentJob describes a job for the campaign manifest, used by weft-agent run-campaign.
+// AgentJob describes a job for the campaign manifest, used by weft-agent run-instance.
 type AgentJob struct {
 	ID         int64    `json:"id"`
 	RunID      int64    `json:"run_id,omitempty"`
@@ -39,7 +39,7 @@ type CloudAfterRef struct {
 	AllowFailure bool  `json:"allow_failure,omitempty"`
 }
 
-// CampaignManifest is uploaded to R2 by the coordinator and read by weft-agent run-campaign.
+// CampaignManifest is uploaded to R2 by the coordinator and read by weft-agent run-instance.
 type CampaignManifest struct {
 	Jobs                []AgentJob        `json:"jobs"`
 	SelfDestructCmd     string            `json:"self_destruct_cmd"`

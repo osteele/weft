@@ -693,7 +693,7 @@ invariant PlacementReasonsExplainUnplaced {
 --
 -- campaign-lifecycle.allium owns the rental / cloud-offer side of
 -- placement: when PlaceWithFallback decides to spill, control passes
--- to the campaign launch workflow.
+-- to the instance launch workflow.
 --
 -- status-sync.allium owns the runtime reachability view of hosts
 -- (Online/Offline/Checking) and the TUI rendering of host metrics.

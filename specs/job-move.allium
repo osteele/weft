@@ -18,9 +18,7 @@
 --     campaign-lifecycle.allium): initial placement of an unplaced job.
 --   - Mid-execution attempts (running jobs are never moved by this spec).
 --
--- Authoritative source for the design rationale; the design doc at
--- docs/design/job-move-protocol.md is being absorbed into this spec and
--- the implementation as the work progresses.
+-- Authoritative source for the move protocol design rationale.
 
 -- ==========================================================================
 -- Model
@@ -420,7 +418,7 @@ invariant ResolvedIntentHasResolutionTime {
 --   pending_placement (which is also used by initial placement).
 
 -- ==========================================================================
--- Future work (tracked in docs/design/job-move-protocol.md until absorbed)
+-- Future work
 -- ==========================================================================
 --
 -- Speculative second-placement model:

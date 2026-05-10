@@ -103,7 +103,7 @@ func (opts *LaunchOpts) ApplyAutoBudget(estimates []CostEstimate) bool {
 	return changed
 }
 
-// LaunchResult holds the outcome of a campaign launch.
+// LaunchResult holds the outcome of an instance launch.
 type LaunchResult struct {
 	CampaignID  int64
 	InstanceIDs []int64

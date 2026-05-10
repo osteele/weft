@@ -6,9 +6,9 @@ than replacing it.
 
 Related design notes:
 
-- [Placement and Auto Mode](placement-and-auto-mode.md)
-- [Job Move Protocol](job-move-protocol.md)
 - [Placement Telemetry](placement-telemetry.md)
+- [`specs/inventory-placement.allium`](../../specs/inventory-placement.allium)
+- [`specs/job-move.allium`](../../specs/job-move.allium)
 - [`specs/status-sync.allium`](../../specs/status-sync.allium)
 
 ## Goals

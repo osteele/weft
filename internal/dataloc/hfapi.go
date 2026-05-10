@@ -26,7 +26,7 @@ var ErrHFRefIsDataset = errors.New("HF ref resolves to a dataset, not a model; u
 var fetchHFDatasetURL = "https://huggingface.co/api/datasets/%s"
 
 // hfModelSizeCache caches model sizes in-process to avoid redundant API calls
-// within a campaign launch (multiple jobs may reference the same model).
+// within an instance launch (multiple jobs may reference the same model).
 var hfModelSizeCache sync.Map // map[string]int64
 
 // hfHTTPClient is the HTTP client used for HF API calls (overridable for testing).

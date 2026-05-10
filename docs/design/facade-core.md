@@ -25,7 +25,7 @@ interfaces stay thin and resilient while orchestration logic lives in one place.
 * Converts validation errors or structured results into CLI-friendly text while
   preserving exit codes.
 
-## TUI (`internal/tui`)
+## TUI (`internal/ui/terminal`)
 
 * Maintains ephemeral UI state: selection, filters, cached logs, host telemetry,
   periodic timers, and Bubble Tea commands.

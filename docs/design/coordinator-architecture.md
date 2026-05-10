@@ -444,7 +444,7 @@ Allow jobs without explicit host. Local placement scoring.
 
 - Make host optional in `weft run`
 - Create `internal/placement/` package (scoring, constraints)
-- Create `internal/intent/` package (intent file writer)
+- Define the intent writer package boundary
 - Add `pending_placement` job status
 - Local placement works from laptop when online
 
@@ -468,7 +468,7 @@ Transfer-cost-aware decisions, data pre-staging, web dashboard.
 - ✅ Post-job artifact recording: declared outputs tracked on completion (`internal/ops/artifacts.go`)
 - ✅ HF cache scanner: detailed output with sizes (`internal/dataloc/hfscan.go`)
 - ✅ Web dashboard: cluster overview with live GPU bars, coordinator status, oplog (`internal/web/`)
-- ✅ Crash-safe idempotency: processed intents persisted to SQLite (`internal/coordinator/processed.go`)
+- ✅ Crash-safe idempotency: processed intents persisted to SQLite (`internal/db`)
 - ✅ Cloud GPU bursting: Vast.ai CLI wrapper, TUI cloud menu, cost estimation (`internal/vastai/`, `internal/placement/cloud_offers.go`)
 - 🔮 Integration hooks for llm-performance-models (future)
 

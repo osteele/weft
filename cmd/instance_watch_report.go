@@ -32,7 +32,7 @@ func watchAndReport(database *sql.DB, useTUI bool, mode terminal.Mode, instanceI
 	return err
 }
 
-// printWatchExitReport prints a concise summary after campaign watch completes.
+// printWatchExitReport prints a concise summary after instance watch completes.
 // It shows instance status, jobs, and total cost.
 func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	if len(instanceIDs) == 0 {
@@ -152,7 +152,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	}
 	fmt.Println()
 
-	// Instance table — current campaign
+	// Instance table — current watch session
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "  INSTANCE\tGPU\tSTATUS\tUPTIME\tCOST\tREASON\n")
 	for _, inst := range instances {
@@ -160,7 +160,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	}
 	w.Flush()
 
-	// Historical attempts from prior campaigns
+	// Historical attempts from prior batches
 	if len(historicalInstances) > 0 || omitted > 0 {
 		fmt.Println()
 		hw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)

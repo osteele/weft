@@ -698,7 +698,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 				cb.OnCampaignCreated(id, len(launchGroups))
 			}
 			if cb.OnStatus != nil {
-				cb.OnStatus(fmt.Sprintf("Campaign %d: launching %d instance(s)...", id, len(launchGroups)))
+				cb.OnStatus(fmt.Sprintf("Launching %d instance(s) in batch %d...", len(launchGroups), id))
 			}
 		},
 	})

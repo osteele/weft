@@ -9,8 +9,8 @@ import (
 )
 
 // Filter-layer flags new to `weft place` / `weft jobs place`. The
-// --project flag is reused from addCampaignLaunchFlags (shared global
-// campaignLaunchProject); other launch-mechanics flags (--watch, --yes,
+// --project flag is reused from addInstanceLaunchFlags (shared global
+// instanceLaunchProject); other launch-mechanics flags (--watch, --yes,
 // --dry-run, --grace-period, ...) are also inherited from there, so the
 // two entry points accept the same surface.
 var (
@@ -52,7 +52,7 @@ func init() {
 func addPlaceFlags(cmd *cobra.Command) {
 	// Shared flags first so our new filter flags can override their help
 	// text where the wording differs on the `place` surface.
-	addCampaignLaunchFlags(cmd)
+	addInstanceLaunchFlags(cmd)
 	cmd.Flags().StringVar(&placeStatus, "status", "", "Filter by effective status (default: queued; 'unplaced' accepted as alias)")
 	cmd.Flags().BoolVar(&placeAll, "all", false, "All queued unplaced jobs (explicit; same as no arguments)")
 	// Filter surface uses positional args / --project / --all; the legacy
@@ -75,12 +75,12 @@ func runPlace(cmd *cobra.Command, args []string) error {
 	// existing machinery (offer selection, donor strategy, watch, etc.)
 	// runs unchanged.
 	if len(jobIDs) > 0 {
-		campaignLaunchJobs = joinJobIDs(jobIDs)
+		instanceLaunchJobs = joinJobIDs(jobIDs)
 	}
-	// --project is already bound to campaignLaunchProject via the shared
+	// --project is already bound to instanceLaunchProject via the shared
 	// campaign-launch flag set, so no translation is needed here.
 
-	return runCampaignLaunch(cmd, nil)
+	return runInstanceLaunch(cmd, nil)
 }
 
 func validatePlaceFilters(cmd *cobra.Command, args []string) error {
@@ -97,7 +97,7 @@ func validatePlaceFilters(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			return usageErrorf("--all cannot be combined with job ID arguments")
 		}
-		if strings.TrimSpace(campaignLaunchProject) != "" {
+		if strings.TrimSpace(instanceLaunchProject) != "" {
 			return usageErrorf("--all cannot be combined with --project")
 		}
 	}
@@ -113,7 +113,7 @@ func validatePlaceFilters(cmd *cobra.Command, args []string) error {
 func resolvePlaceTargetJobIDs(args []string) ([]int64, error) {
 	if len(args) == 0 {
 		// No explicit selection: default to all queued unplaced jobs
-		// (optionally filtered by --project via campaignLaunchProject).
+		// (optionally filtered by --project via instanceLaunchProject).
 		return nil, nil
 	}
 	return ParseJobIDs(args)

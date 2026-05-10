@@ -838,7 +838,7 @@ func groupMinComputeCap(jobs []*db.Job) string {
 
 // GroupMaxComputeCap reduces per-job arch caps into the most restrictive cap
 // for a group. It is exported for orchestration paths that build ad hoc groups
-// outside campaign planning.
+// outside instance planning.
 func GroupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 	return groupMaxComputeCap(database, jobs)
 }

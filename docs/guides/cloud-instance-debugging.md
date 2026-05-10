@@ -1,7 +1,7 @@
 # Cloud Instance Debugging
 
 Troubleshooting guide for cloud GPU instance launches, whether via
-`weft instance launch`, `weft campaign launch`, or the TUI cloud menu.
+`weft instance launch`, `weft start instance`, or the TUI cloud menu.
 
 ## Exit report
 
@@ -361,8 +361,8 @@ background to free disk space for subsequent jobs. To keep working
 directories intact for debugging:
 
 ```bash
-# Via campaign launch flag
-weft campaign launch --skip-workdir-deletion
+# Via instance launch flag
+weft start instance --skip-workdir-deletion
 
 # Via instance launch
 weft instance launch --skip-workdir-deletion

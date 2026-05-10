@@ -200,16 +200,16 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 }
 
 // generateWorkerBootstrapTail generates the worker-specific portion:
-// launches weft-agent run-campaign via nohup.
+// launches weft-agent run-instance via nohup.
 func generateWorkerBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
-	b.WriteString("# Launch campaign agent\n")
+	b.WriteString("# Launch instance agent\n")
 	writeStageMarker(b, manifest.DBInstanceID, "agent_starting")
 	if manifest.AgentForeground {
 		b.WriteString("exec ")
 	} else {
 		b.WriteString("nohup ")
 	}
-	b.WriteString(fmt.Sprintf("weft-agent run-campaign"+
+	b.WriteString(fmt.Sprintf("weft-agent run-instance"+
 		" --r2-bucket=$R2_BUCKET"+
 		" --instance-id=%d",
 		manifest.DBInstanceID))

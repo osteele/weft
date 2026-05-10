@@ -54,7 +54,7 @@ Preferred direction:
 llm-performance-models can already use weft for lifecycle management while
 keeping its existing calibration logic:
 
-1. `weft campaign launch --yes --jobs <ids>` provisions instances.
+1. `weft instance launch --yes --jobs <ids>` provisions instances.
 2. `weft instance ssh --print <id>` provides access details.
 3. llm-performance-models runs calibration scripts over SSH.
 4. `weft campaign terminate <id>` handles teardown.

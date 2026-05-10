@@ -47,9 +47,10 @@ func main() {
 		return
 	}
 
-	// Handle run-campaign subcommand
-	if len(os.Args) > 1 && os.Args[1] == "run-campaign" {
-		runCampaign(os.Args[2:])
+	// Handle cloud instance worker subcommands. run-campaign is kept as a
+	// compatibility alias for manifests and cached agents that still use it.
+	if len(os.Args) > 1 && (os.Args[1] == "run-instance" || os.Args[1] == "run-campaign") {
+		runInstance(os.Args[2:])
 		return
 	}
 

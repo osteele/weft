@@ -89,7 +89,7 @@ func init() {
 
 	addListQueryFlags(projectListCmd)
 	addListQueryFlags(projectJobsCmd)
-	addCampaignLaunchFlags(projectLaunchCmd)
+	addInstanceLaunchFlags(projectLaunchCmd)
 	projectSpentCmd.Flags().StringVar(&projectSpentSince, "since", "", "Cutoff time as YYYY-MM-DD or duration ago (for example: \"24h ago\", \"7d\")")
 	_ = projectSpentCmd.MarkFlagRequired("since")
 }
@@ -119,12 +119,12 @@ func errNoJobsForProject(database *sql.DB, project string) error {
 	return fmt.Errorf("no jobs found for project %q; is the current directory a known project?", project)
 }
 
-// filterLaunchJobsByProject applies campaignLaunchProject to a job list.
+// filterLaunchJobsByProject applies instanceLaunchProject to a job list.
 func filterLaunchJobsByProject(jobs []*db.Job) []*db.Job {
-	if campaignLaunchProject == "" {
+	if instanceLaunchProject == "" {
 		return jobs
 	}
-	return db.FilterJobsByProject(jobs, campaignLaunchProject)
+	return db.FilterJobsByProject(jobs, instanceLaunchProject)
 }
 
 // defaultProjectFilter sets listProject from args or cwd if not already set via --project.
@@ -145,8 +145,8 @@ func runProjectLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	campaignLaunchProject = project
-	return runCampaignLaunch(cmd, nil)
+	instanceLaunchProject = project
+	return runInstanceLaunch(cmd, nil)
 }
 
 func runProjectList(cmd *cobra.Command, args []string) error {

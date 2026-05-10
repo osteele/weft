@@ -29,9 +29,9 @@ import (
 	"github.com/osteele/weft/internal/runner"
 )
 
-// runCampaign implements the "run-campaign" subcommand.
-// Usage: weft-agent run-campaign --r2-bucket=BUCKET --instance-id=ID [--log-dir=/tmp/weft-logs] [--max-time=2h] [--grace-period=15m]
-func runCampaign(args []string) {
+// runInstance implements the cloud instance worker subcommand.
+// Usage: weft-agent run-instance --r2-bucket=BUCKET --instance-id=ID [--log-dir=/tmp/weft-logs] [--max-time=2h] [--grace-period=15m]
+func runInstance(args []string) {
 	var r2Bucket string
 	var instanceID string
 	var logDir string
@@ -91,7 +91,7 @@ func runCampaign(args []string) {
 		fmt.Fprintf(os.Stderr, "invalid instance ID %q: %v\n", instanceID, err)
 		os.Exit(1)
 	}
-	oplog.Log(oplog.OpAgentStart, oplog.WithDetailf("run-campaign instance=%s", instanceID))
+	oplog.Log(oplog.OpAgentStart, oplog.WithDetailf("run-instance instance=%s", instanceID))
 
 	// Fetch manifest from R2
 	manifestKey := r2keys.CampaignManifest(instanceIDInt)
@@ -130,7 +130,7 @@ func runCampaign(args []string) {
 	// agent_fatal in the heartbeat sample.
 	defer func() {
 		if r := recover(); r != nil {
-			detail := fmt.Sprintf("runCampaign main panic: %v", r)
+			detail := fmt.Sprintf("runInstance main panic: %v", r)
 			oplog.Log(oplog.OpAgentPanic, oplog.WithDetail(detail))
 			fmt.Fprintln(os.Stderr, detail)
 			writeAgentFatal(detail)

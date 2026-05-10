@@ -74,7 +74,7 @@ func NewReconciler() *Reconciler {
 var (
 	fetchReconcileHeartbeat = fetchHeartbeat
 	probeCampaignAgent      = func(inst *cloud.Instance, timeout time.Duration) (bool, error) {
-		out, err := cloud.RunOnInstance(inst, "pgrep -af 'weft-agent .*run-campaign'", timeout)
+		out, err := cloud.RunOnInstance(inst, "pgrep -af 'weft-agent .*(run-instance|run-campaign)'", timeout)
 		if err != nil {
 			return false, err
 		}

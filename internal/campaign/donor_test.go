@@ -276,9 +276,9 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 
 	script := GenerateBootstrapScript(manifest)
 
-	// Should launch weft-agent run-campaign via nohup
-	if !strings.Contains(script, "nohup weft-agent run-campaign") {
-		t.Error("worker script should launch weft-agent run-campaign")
+	// Should launch weft-agent run-instance via nohup
+	if !strings.Contains(script, "nohup weft-agent run-instance") {
+		t.Error("worker script should launch weft-agent run-instance")
 	}
 	if !strings.Contains(script, "agent_starting") {
 		t.Error("worker script should report agent startup")
@@ -315,10 +315,10 @@ func TestGenerateBootstrapScript_WorkerForegroundMode(t *testing.T) {
 
 	script := GenerateBootstrapScript(manifest)
 
-	if !strings.Contains(script, "exec weft-agent run-campaign") {
-		t.Error("foreground worker script should exec weft-agent run-campaign")
+	if !strings.Contains(script, "exec weft-agent run-instance") {
+		t.Error("foreground worker script should exec weft-agent run-instance")
 	}
-	if strings.Contains(script, "nohup weft-agent run-campaign") {
+	if strings.Contains(script, "nohup weft-agent run-instance") {
 		t.Error("foreground worker script should not launch via nohup")
 	}
 	if strings.Contains(script, "2>&1 &") {
@@ -380,7 +380,7 @@ func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 		t.Error("worker script should report source extraction progress")
 	}
 
-	agentIdx := strings.Index(script, "nohup weft-agent run-campaign")
+	agentIdx := strings.Index(script, "nohup weft-agent run-instance")
 	startIdx := strings.Index(script, "starting_jobs")
 	if startIdx >= agentIdx {
 		t.Error("bootstrap should report starting_jobs before agent launch")

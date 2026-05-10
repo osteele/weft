@@ -87,7 +87,7 @@ Ideas for future enhancements that are not currently prioritized.
 
 ## Interruptible / Spot Instance Support
 
-- Intent: allow campaign launches to target interruptible/spot capacity.
+- Intent: allow instance launches to target interruptible/spot capacity.
 - User benefit: materially lower compute cost for checkpoint-friendly workloads.
 - Important design judgment: gate this mode on workload restartability and
   checkpoint behavior.
