@@ -13,12 +13,12 @@ var campaignAgentEnvVars = []string{
 	"GEMINI_CLI",
 }
 
-func resolveCampaignTUI(forceTUI, forcePlain bool) (bool, error) {
-	hasTerminal := hasCampaignTerminalIO()
-	return resolveCampaignTUIMode(forceTUI, forcePlain, hasTerminal, inCampaignAgentContextWithTerminal(hasTerminal))
+func resolveTUI(forceTUI, forcePlain bool) (bool, error) {
+	hasTerminal := hasTerminalIO()
+	return resolveTUIMode(forceTUI, forcePlain, hasTerminal, inAgentContextWithTerminal(hasTerminal))
 }
 
-func resolveCampaignTUIMode(forceTUI, forcePlain, hasTerminal, codingAgent bool) (bool, error) {
+func resolveTUIMode(forceTUI, forcePlain, hasTerminal, codingAgent bool) (bool, error) {
 	if forceTUI && forcePlain {
 		return false, usageErrorf("--tui and --plain are mutually exclusive")
 	}
@@ -34,15 +34,15 @@ func resolveCampaignTUIMode(forceTUI, forcePlain, hasTerminal, codingAgent bool)
 	return hasTerminal && !codingAgent, nil
 }
 
-func hasCampaignTerminalIO() bool {
+func hasTerminalIO() bool {
 	return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd())
 }
 
-func inCampaignAgentContext() bool {
-	return inCampaignAgentContextWithTerminal(hasCampaignTerminalIO())
+func inAgentContext() bool {
+	return inAgentContextWithTerminal(hasTerminalIO())
 }
 
-func inCampaignAgentContextWithTerminal(hasTerminal bool) bool {
+func inAgentContextWithTerminal(hasTerminal bool) bool {
 	for _, envVar := range campaignAgentEnvVars {
 		if !isTruthyEnv(os.Getenv(envVar)) {
 			continue

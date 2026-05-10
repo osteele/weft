@@ -157,7 +157,7 @@ func addCampaignListFlags(cmd *cobra.Command) {
 }
 
 func runCampaignLaunch(cmd *cobra.Command, args []string) error {
-	useTUI, err := resolveCampaignTUI(campaignLaunchTUI, campaignLaunchPlain)
+	useTUI, err := resolveTUI(campaignLaunchTUI, campaignLaunchPlain)
 	if err != nil {
 		return err
 	}
@@ -518,9 +518,8 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	}
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-	useLaunchProgressTUI := watchTUI && terminal.UseLaunchProgressTUI(false)
 	var launchTUI *terminal.LaunchProgressTUI
-	if useLaunchProgressTUI {
+	if watchTUI {
 		launchTUI = terminal.StartLaunchProgressTUI(0, len(groupsToLaunch))
 	}
 
@@ -780,7 +779,7 @@ func resolveCampaignWatchID(database *sql.DB, args []string) (int64, error) {
 }
 
 func runCampaignWatch(cmd *cobra.Command, args []string) error {
-	useTUI, err := resolveCampaignTUI(campaignWatchTUI, campaignWatchPlain)
+	useTUI, err := resolveTUI(campaignWatchTUI, campaignWatchPlain)
 	if err != nil {
 		return err
 	}
@@ -1056,7 +1055,7 @@ func runCampaignTerminate(cmd *cobra.Command, args []string) error {
 }
 
 func runCampaignList(cmd *cobra.Command, args []string) error {
-	useTUI, err := resolveCampaignTUI(campaignListTUI, campaignListPlain)
+	useTUI, err := resolveTUI(campaignListTUI, campaignListPlain)
 	if err != nil {
 		return err
 	}

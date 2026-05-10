@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +10,6 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/ids"
 )
@@ -578,27 +576,5 @@ func phaseStyleForRow(row *launchProgressRow) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	default:
 		return lipgloss.NewStyle()
-	}
-}
-
-func UseLaunchProgressTUI(noTUI bool) bool {
-	if noTUI {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
-		return false
-	}
-	if isTruthy(os.Getenv("CI")) {
-		return false
-	}
-	return term.IsTerminal(os.Stdout.Fd())
-}
-
-func isTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "0", "false", "no", "off":
-		return false
-	default:
-		return true
 	}
 }

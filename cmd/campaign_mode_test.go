@@ -2,7 +2,7 @@ package cmd
 
 import "testing"
 
-func TestResolveCampaignTUIMode(t *testing.T) {
+func TestResolveTUIMode(t *testing.T) {
 	tests := []struct {
 		name        string
 		forceTUI    bool
@@ -60,7 +60,7 @@ func TestResolveCampaignTUIMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveCampaignTUIMode(tt.forceTUI, tt.forcePlain, tt.hasTerminal, tt.agentCtx)
+			got, err := resolveTUIMode(tt.forceTUI, tt.forcePlain, tt.hasTerminal, tt.agentCtx)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -94,21 +94,21 @@ func TestIsTruthyEnv(t *testing.T) {
 	}
 }
 
-func TestInCampaignAgentContextWithTerminal(t *testing.T) {
+func TestInAgentContextWithTerminal(t *testing.T) {
 	t.Setenv("CLAUDECODE", "")
 	t.Setenv("CODEX_CI", "")
 	t.Setenv("GEMINI_CLI", "")
 
 	t.Setenv("CODEX_CI", "1")
-	if got := inCampaignAgentContextWithTerminal(true); got {
+	if got := inAgentContextWithTerminal(true); got {
 		t.Fatal("expected CODEX_CI in interactive terminal to not force agent context")
 	}
-	if got := inCampaignAgentContextWithTerminal(false); !got {
+	if got := inAgentContextWithTerminal(false); !got {
 		t.Fatal("expected CODEX_CI without terminal to force agent context")
 	}
 
 	t.Setenv("CLAUDECODE", "1")
-	if got := inCampaignAgentContextWithTerminal(true); !got {
+	if got := inAgentContextWithTerminal(true); !got {
 		t.Fatal("expected CLAUDECODE to force agent context even in terminal")
 	}
 }

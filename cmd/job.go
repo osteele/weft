@@ -148,6 +148,8 @@ var (
 	jobMoveProject string
 	jobMoveTo      string
 	jobMoveFrom    string
+	jobMoveTUI     bool
+	jobMovePlain   bool
 	jobMoveNoTUI   bool
 )
 
@@ -391,7 +393,6 @@ func init() {
 	jobTimeseriesCmd.Flags().BoolVar(&jobTimeseriesSummary, "summary", false, "Print high-water marks only")
 	jobTimeseriesCmd.Flags().Int64Var(&jobTimeseriesRunID, "run", 0, "Specific attempt run ID (default: latest)")
 	addJobMoveFlags(jobMoveCmd, &jobMoveEach, &jobMoveProject, &jobMoveTo, &jobMoveFrom)
-	jobMoveCmd.Flags().BoolVar(&jobMoveNoTUI, "no-tui", false, "Disable launch progress TUI for move-to-new")
 	jobCmd.AddCommand(jobMoveCmd)
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
@@ -462,7 +463,7 @@ func init() {
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveNoTUI)
+	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveTUI, jobMovePlain || jobMoveNoTUI)
 }
 
 func runJobPriority(cmd *cobra.Command, args []string) error {
@@ -513,6 +514,12 @@ func runJobPriority(cmd *cobra.Command, args []string) error {
 func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {
 	cmd.Flags().BoolVar(each, "each", false, "With 'new'/'create'/'distinct': launch a separate instance per job")
 	cmd.Flags().StringVar(project, "project", "", "Select all eligible queued jobs in the named project")
+	cmd.Flags().BoolVar(&jobMoveTUI, "tui", false, "Force launch progress TUI for move-to-new")
+	cmd.Flags().BoolVar(&jobMovePlain, "plain", false, "Force plain text output for move-to-new")
+	cmd.Flags().BoolVar(&jobMoveNoTUI, "no-tui", false, "Disable launch progress TUI for move-to-new (alias for --plain)")
+	_ = cmd.Flags().MarkHidden("no-tui")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	cmd.MarkFlagsMutuallyExclusive("tui", "no-tui")
 	if destination != nil {
 		cmd.Flags().StringVarP(destination, "to", "t", "", "Destination host, instance (wi<N>), or 'new'/'create'/'distinct'")
 	}
@@ -521,7 +528,7 @@ func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destinatio
 	}
 }
 
-func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string, noTUI bool) error {
+func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string, forceTUI bool, forcePlain bool) error {
 	dest, jobArgs, err := resolveMoveDestination(args, destinationFlag)
 	if err != nil {
 		return err
@@ -550,7 +557,11 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 		}
 		return moveJobsToAuto(database, eligible)
 	case strings.EqualFold(dest, "new") || strings.EqualFold(dest, "create"):
-		return moveJobsToNewInstances(database, eligible, each, noTUI)
+		useTUI, err := resolveTUI(forceTUI, forcePlain)
+		if err != nil {
+			return err
+		}
+		return moveJobsToNewInstances(database, eligible, each, useTUI)
 	default:
 		if each {
 			return usageErrorf("--each is only valid with 'new', 'create', or 'distinct' destination")
@@ -664,7 +675,7 @@ func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) erro
 	return err
 }
 
-func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, noTUI bool) error {
+func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, useLaunchTUI bool) error {
 	if !verbose {
 		restore := logging.Suppress()
 		defer restore()
@@ -676,7 +687,7 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 	}
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err = moveJobsToNewInstancesOnce(database, jobs, separateEach, noTUI)
+		err = moveJobsToNewInstancesOnce(database, jobs, separateEach, useLaunchTUI)
 		if err == nil {
 			return nil
 		}
@@ -699,7 +710,7 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 	return err
 }
 
-func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach bool, noTUI bool) error {
+func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach bool, useLaunchTUI bool) error {
 	// Keep single-job move-to-new on the same implementation path as TUI move,
 	// so behavior and instrumentation stay consistent across interfaces.
 	if len(jobs) == 1 && !separateEach {
@@ -717,7 +728,6 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 		fmt.Printf("Moved job %s → %s\n", ids.FormatJobID(jobs[0].ID), target)
 		return nil
 	}
-	useLaunchTUI := terminal.UseLaunchProgressTUI(noTUI)
 	var launchTUI *terminal.LaunchProgressTUI
 	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {

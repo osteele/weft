@@ -243,6 +243,15 @@ func TestMoveJobsVerbAlias_ExposesMoveFlags(t *testing.T) {
 	if cmd.Flags().Lookup("each") == nil {
 		t.Fatal("--each flag not found on move jobs alias")
 	}
+	if cmd.Flags().Lookup("tui") == nil {
+		t.Fatal("--tui flag not found on move jobs alias")
+	}
+	if cmd.Flags().Lookup("plain") == nil {
+		t.Fatal("--plain flag not found on move jobs alias")
+	}
+	if cmd.Flags().Lookup("no-tui") == nil {
+		t.Fatal("--no-tui compatibility flag not found on move jobs alias")
+	}
 }
 
 func TestMoveRootAlias_ExposesMoveFlags(t *testing.T) {
@@ -264,6 +273,74 @@ func TestMoveRootAlias_ExposesMoveFlags(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("each") == nil {
 		t.Fatal("--each flag not found on move command")
+	}
+	if cmd.Flags().Lookup("tui") == nil {
+		t.Fatal("--tui flag not found on move command")
+	}
+	if cmd.Flags().Lookup("plain") == nil {
+		t.Fatal("--plain flag not found on move command")
+	}
+	if cmd.Flags().Lookup("no-tui") == nil {
+		t.Fatal("--no-tui compatibility flag not found on move command")
+	}
+}
+
+func TestJobMove_ExposesTUIModeFlags(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"job", "move"})
+	if err != nil {
+		t.Fatalf("find job move command: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("job move command not found")
+	}
+	if cmd.Flags().Lookup("tui") == nil {
+		t.Fatal("--tui flag not found on job move")
+	}
+	if cmd.Flags().Lookup("plain") == nil {
+		t.Fatal("--plain flag not found on job move")
+	}
+	if flag := cmd.Flags().Lookup("no-tui"); flag == nil {
+		t.Fatal("--no-tui compatibility flag not found on job move")
+	} else if !flag.Hidden {
+		t.Fatal("--no-tui should be hidden")
+	}
+}
+
+func TestJobMove_TUIModeFlagsConflict(t *testing.T) {
+	origTUI := jobMoveTUI
+	origPlain := jobMovePlain
+	origNoTUI := jobMoveNoTUI
+	t.Cleanup(func() {
+		jobMoveTUI = origTUI
+		jobMovePlain = origPlain
+		jobMoveNoTUI = origNoTUI
+	})
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "tui and plain", args: []string{"--tui", "--plain"}},
+		{name: "tui and no-tui", args: []string{"--tui", "--no-tui"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var each bool
+			var project string
+			var dest string
+			var from string
+			cmd := &cobra.Command{
+				Use: "move-test",
+				RunE: func(_ *cobra.Command, _ []string) error {
+					return nil
+				},
+			}
+			addJobMoveFlags(cmd, &each, &project, &dest, &from)
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("expected mutually exclusive flag error")
+			}
+		})
 	}
 }
 
@@ -312,7 +389,7 @@ func TestMoveJobsToNewInstancesRetriesSingleJobRetryableLaunch(t *testing.T) {
 		return orchestration.Result{TargetDesc: "new A100 instance wi42"}, nil
 	}
 
-	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, true)
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, false)
 	if err != nil {
 		t.Fatalf("moveJobsToNewInstances: %v", err)
 	}
@@ -334,7 +411,7 @@ func TestMoveJobsToNewInstancesRetriesBulkRetryableLaunch(t *testing.T) {
 		return orchestration.BulkResult{InstanceIDs: []int64{42}}, nil
 	}
 
-	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}, {ID: 124}}, false, true)
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}, {ID: 124}}, false, false)
 	if err != nil {
 		t.Fatalf("moveJobsToNewInstances: %v", err)
 	}
@@ -354,7 +431,7 @@ func TestMoveJobsToNewInstancesDoesNotRetryNonRetryableLaunch(t *testing.T) {
 		return orchestration.Result{}, sentinel
 	}
 
-	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, true)
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, false)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("moveJobsToNewInstances err = %v, want %v", err, sentinel)
 	}

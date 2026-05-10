@@ -69,7 +69,7 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	useTUI, err := resolveCampaignTUI(projectWatchTUI, projectWatchPlain)
+	useTUI, err := resolveTUI(projectWatchTUI, projectWatchPlain)
 	if err != nil {
 		return err
 	}

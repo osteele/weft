@@ -47,7 +47,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 		return terminal.WatchJobsPlain(database, jobIDs, watchPlainOptions())
 	}
 
-	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
+	useTUI, err := resolveTUIMode(watchTUI, watchPlain, hasTerminalIO(), inAgentContext())
 	if err != nil {
 		return err
 	}
