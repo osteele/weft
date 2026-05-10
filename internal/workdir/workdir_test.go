@@ -122,6 +122,7 @@ func TestResolveLocal(t *testing.T) {
 	}{
 		{"empty returns empty", ""},
 		{"absolute path returns itself", "/tmp/test"},
+		{"tilde path expands", "~/code/research/llm-performance-models"},
 		{"relative non-tilde returns empty", "relative/path"},
 	}
 	for _, tt := range tests {
@@ -135,6 +136,15 @@ func TestResolveLocal(t *testing.T) {
 			case "absolute path returns itself":
 				if got != tt.dir {
 					t.Errorf("ResolveLocal(%q) = %q, want %q", tt.dir, got, tt.dir)
+				}
+			case "tilde path expands":
+				home, err := os.UserHomeDir()
+				if err != nil {
+					t.Fatalf("UserHomeDir: %v", err)
+				}
+				want := filepath.Join(home, "code", "research", "llm-performance-models")
+				if got != want {
+					t.Errorf("ResolveLocal(%q) = %q, want %q", tt.dir, got, want)
 				}
 			case "relative non-tilde returns empty":
 				if got != "" {

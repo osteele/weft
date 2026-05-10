@@ -509,6 +509,34 @@ func TestPruneReuseCandidates_LimitsPoolAndKeepsStrongCandidates(t *testing.T) {
 	}
 }
 
+func TestQuickReuseCompatible_RejectsInstanceBelowMinCUDA(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:       "V100",
+		GPUMemGB:       22,
+		MinCUDAVersion: "12.8",
+	}
+
+	if quickReuseCompatible(group, InstanceCapacity{Instance: &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		GPUClass:        "V100",
+		ResolvedGPUName: "Tesla V100",
+		GPUMemGB:        32,
+		CUDAVersion:     12.2,
+	}}) {
+		t.Fatal("expected CUDA 12.2 reusable instance to be incompatible with min CUDA 12.8")
+	}
+
+	if !quickReuseCompatible(group, InstanceCapacity{Instance: &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		GPUClass:        "V100",
+		ResolvedGPUName: "Tesla V100",
+		GPUMemGB:        32,
+		CUDAVersion:     12.8,
+	}}) {
+		t.Fatal("expected CUDA 12.8 reusable instance to be compatible with min CUDA 12.8")
+	}
+}
+
 func TestBuildProfilePlansFromSplitRaw_CachesSelectedOfferEstimatesAcrossProfiles(t *testing.T) {
 	originalResolve := resolvePredictBatch
 	originalCostPredict := estimateJobDurationsDetailedForCosts

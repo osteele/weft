@@ -503,7 +503,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 		if err != nil {
 			slog.Warn("failed to build R2 client for disk estimation", "error", err)
 		}
-		groups := campaign.PrepareGroups(jobs, database, "", r2Client)
+		groups := campaign.PrepareGroupsWithConfig(jobs, database, cfg, "", r2Client)
 
 		opts := campaign.LaunchOpts{Strategy: bidding.StrategyCheap, GPUWarmup: cfg.Campaign.GPUWarmup}
 		if gracePeriod := cfg.DefaultGracePeriod(); gracePeriod != "0" {

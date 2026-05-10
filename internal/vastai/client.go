@@ -203,6 +203,9 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil, fmt.Errorf("search offers: provider returned empty response")
+	}
 
 	var offers []Offer
 	if err := json.Unmarshal(out, &offers); err != nil {
@@ -221,6 +224,9 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 			offers[i].InstanceType = cloud.InstanceTypeOnDemand
 		}
 	}
+	if constraints.MinCUDAVersion != "" {
+		offers = filterOffersByMinCUDA(offers, constraints.MinCUDAVersion)
+	}
 
 	// Apply GPU class post-filter for generation/family constraints
 	if postFilter != nil {
@@ -228,6 +234,24 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	}
 
 	return offers, nil
+}
+
+func filterOffersByMinCUDA(offers []Offer, minCUDA string) []Offer {
+	minCUDA = strings.TrimSpace(minCUDA)
+	if minCUDA == "" {
+		return offers
+	}
+	min, err := strconv.ParseFloat(minCUDA, 64)
+	if err != nil {
+		return nil
+	}
+	filtered := offers[:0]
+	for _, offer := range offers {
+		if offer.CUDAVersion >= min {
+			filtered = append(filtered, offer)
+		}
+	}
+	return filtered
 }
 
 // CreateInstance creates a new instance from an offer.
@@ -533,6 +557,9 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	}
 	if c.MinDriverVersion > 0 {
 		parts = append(parts, fmt.Sprintf("driver_version>=%d", c.MinDriverVersion))
+	}
+	if c.MinCUDAVersion != "" {
+		parts = append(parts, fmt.Sprintf("cuda_vers>=%s", c.MinCUDAVersion))
 	}
 	numGPUs := c.NumGPUs
 	if numGPUs == 0 {

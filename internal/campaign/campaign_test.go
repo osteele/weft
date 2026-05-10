@@ -873,6 +873,33 @@ func TestSplitGroupsByImage_RunpodKeepsRunpodImage(t *testing.T) {
 	}
 }
 
+func TestSplitGroupsByImage_ReadsCloudRequirementsFromTildeWorkingDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectDir := filepath.Join(home, "code", "research", "llm-performance-models")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".weft.toml"), []byte("[cloud]\nmin_driver = \"570\"\nmin_cuda = \"12.8\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "V100",
+		Jobs: []*db.Job{{
+			ID:         1241,
+			WorkingDir: "~/code/research/llm-performance-models",
+			Command:    "uv run python scripts/profile_inference_vllm.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].MinDriverVersion != 570 || groups[0].MinCUDAVersion != "12.8" {
+		t.Fatalf("requirements = driver %d cuda %q, want driver 570 cuda 12.8", groups[0].MinDriverVersion, groups[0].MinCUDAVersion)
+	}
+}
+
 func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",

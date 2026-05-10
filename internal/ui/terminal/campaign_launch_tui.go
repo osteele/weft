@@ -649,7 +649,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		jobs = filterLaunchJobsForScope(jobs, projectFilter)
 		jobs = db.FilterJobsByIDSet(jobs, jobIDFilter)
 
-		groups := campaign.PrepareGroups(jobs, database, gpuFilter, r2Client)
+		groups := campaign.PrepareGroupsWithConfig(jobs, database, cfg, gpuFilter, r2Client)
 
 		return reconcileDoneMsg{groups: groups, warn: warn}
 	}

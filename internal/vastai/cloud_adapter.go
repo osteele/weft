@@ -39,6 +39,7 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 		MinDiskGB:            constraints.MinDiskGB,
 		MinReliability:       constraints.MinReliability,
 		MinDriverVersion:     constraints.MinDriverVersion,
+		MinCUDAVersion:       constraints.MinCUDAVersion,
 		NumGPUs:              constraints.NumGPUs,
 		ExcludeGeos:          constraints.ExcludeGeos,
 		MinCPUCoresEffective: constraints.MinCPUCoresEffective,

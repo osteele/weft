@@ -258,6 +258,54 @@ func TestShowUserEmptyOutput(t *testing.T) {
 	}
 }
 
+func TestSearchOffersEmptyOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.SearchOffers(OfferConstraints{})
+	if err == nil {
+		t.Fatal("SearchOffers() error = nil, want empty response error")
+	}
+	if !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("SearchOffers() error = %v, want empty response detail", err)
+	}
+	if strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("SearchOffers() error = %v, should not expose JSON EOF", err)
+	}
+}
+
+func TestSearchOffersPostFiltersMinCUDA(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := `#!/bin/sh
+cat <<'JSON'
+[
+  {"id": 1, "gpu_name": "Tesla V100", "num_gpus": 1, "gpu_ram": 32768, "cuda_max_good": 12.2, "dph_total": 0.14, "reliability2": 0.99},
+  {"id": 2, "gpu_name": "Tesla V100", "num_gpus": 1, "gpu_ram": 32768, "cuda_max_good": 12.8, "dph_total": 0.19, "reliability2": 0.99}
+]
+JSON
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	offers, err := c.SearchOffers(OfferConstraints{MinCUDAVersion: "12.8"})
+	if err != nil {
+		t.Fatalf("SearchOffers: %v", err)
+	}
+	if len(offers) != 1 || offers[0].ID != 2 {
+		t.Fatalf("offers = %#v, want only CUDA 12.8 offer", offers)
+	}
+}
+
 func TestShowUserFromAPI(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +411,13 @@ func TestBuildSearchFilter_MinDriverVersion(t *testing.T) {
 	filter, _ := buildSearchFilter(OfferConstraints{MinDriverVersion: 535})
 	if !strings.Contains(filter, "driver_version>=535") {
 		t.Errorf("filter %q missing driver_version>=535", filter)
+	}
+}
+
+func TestBuildSearchFilter_MinCUDAVersion(t *testing.T) {
+	filter, _ := buildSearchFilter(OfferConstraints{MinCUDAVersion: "12.8"})
+	if !strings.Contains(filter, "cuda_vers>=12.8") {
+		t.Errorf("filter %q missing cuda_vers>=12.8", filter)
 	}
 }
 

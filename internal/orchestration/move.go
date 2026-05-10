@@ -621,10 +621,10 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	groupCandidates := jobsForGrouping(launchable)
 	if separateEach {
 		for _, job := range groupCandidates {
-			groups = append(groups, campaign.PrepareGroups([]*db.Job{job}, database, "", r2Client)...)
+			groups = append(groups, campaign.PrepareGroupsWithConfig([]*db.Job{job}, database, cfg, "", r2Client)...)
 		}
 	} else {
-		groups = campaign.PrepareGroups(groupCandidates, database, "", r2Client)
+		groups = campaign.PrepareGroupsWithConfig(groupCandidates, database, cfg, "", r2Client)
 	}
 	if len(groups) == 0 {
 		groupErr := fmt.Errorf("no launchable groups from provided jobs")

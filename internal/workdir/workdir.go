@@ -76,6 +76,9 @@ func ResolveLocal(workingDir string) string {
 			return expanded
 		}
 	}
+	if strings.HasPrefix(workingDir, "~") {
+		return filepath.Clean(expandTilde(workingDir, home))
+	}
 	if filepath.IsAbs(workingDir) {
 		return workingDir
 	}

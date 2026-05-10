@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1706,6 +1707,9 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if group.GPUMemGB > 0 && inst.GPUMemGB > 0 && group.GPUMemGB > inst.GPUMemGB {
 		return false
 	}
+	if !instanceMeetsMinCUDAVersion(inst, group.MinCUDAVersion) {
+		return false
+	}
 	if group.HasComputeIntensiveJob() {
 		floor := computeCPUCoresFloor()
 		if inst.CPUCores <= 0 || inst.CPUCores < floor {
@@ -1713,6 +1717,21 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 		}
 	}
 	return true
+}
+
+func instanceMeetsMinCUDAVersion(inst *db.Launch, minCUDA string) bool {
+	minCUDA = strings.TrimSpace(minCUDA)
+	if minCUDA == "" {
+		return true
+	}
+	if inst == nil || inst.CUDAVersion <= 0 {
+		return false
+	}
+	min, err := strconv.ParseFloat(minCUDA, 64)
+	if err != nil {
+		return false
+	}
+	return inst.CUDAVersion >= min
 }
 
 func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap InstanceCapacity, preferReuse bool) float64 {

@@ -27,7 +27,7 @@ const (
 )
 
 type ProjectGroup = projectGroup
-type LaunchExecutionPlan = launchExecutionPlan
+type LaunchExecutionPlan = campaign.LaunchExecutionPlan
 type CloudInstanceObservability = cloudInstanceObservability
 type ObservedActivity = observedActivity
 type ColumnDef = columnDef
@@ -217,11 +217,11 @@ func RenderProjectWatchPlain(groups []ProjectGroup, width int, now time.Time, re
 }
 
 func PrepareLaunchExecutionPlan(database *sql.DB, clients []cloud.Client, providerErr error, groups []campaign.InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, minReliability float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel) (LaunchExecutionPlan, error) {
-	return prepareLaunchExecutionPlan(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel, nil)
+	return campaign.PrepareLaunchExecutionPlan(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel)
 }
 
 func PrepareLaunchExecutionPlanWithProgress(database *sql.DB, clients []cloud.Client, providerErr error, groups []campaign.InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, minReliability float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel, onProgress campaign.PlanProgressFunc) (LaunchExecutionPlan, error) {
-	return prepareLaunchExecutionPlan(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel, onProgress)
+	return campaign.PrepareLaunchExecutionPlanWithProgress(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel, onProgress)
 }
 
 func ObserveLaunch(ci *db.Launch, inst *cloud.Instance, now time.Time) CloudInstanceObservability {

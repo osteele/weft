@@ -48,6 +48,41 @@ func TestSelectLaunchGroups_FiltersSelectedJobs(t *testing.T) {
 	}
 }
 
+func TestSelectLaunchGroups_PreservesPlacementConstraints(t *testing.T) {
+	groups := []campaign.InstanceGroup{{
+		GPUClass:         "V100",
+		Provider:         "vastai",
+		GPUMemGB:         22,
+		MaxGPUMemGB:      32,
+		DiskGB:           121,
+		Image:            "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime",
+		MinDriverVersion: 570,
+		MinCUDAVersion:   "12.8",
+		ImagePullSecret:  "ghcr.io",
+		VastCapAdd:       []string{"SYS_ADMIN"},
+		Preemptible:      true,
+		MaxComputeCap:    "9.0",
+		MinComputeCap:    "7.0",
+		Jobs:             []*db.Job{{ID: 1241}, {ID: 1242}},
+	}}
+
+	selectedGroups, requestedJobs := selectLaunchGroups(groups, map[int64]bool{1241: true})
+
+	if requestedJobs != 1 || len(selectedGroups) != 1 {
+		t.Fatalf("selected groups = %d jobs=%d, want one group and one job", len(selectedGroups), requestedJobs)
+	}
+	got := selectedGroups[0]
+	if got.MinCUDAVersion != "12.8" || got.MinDriverVersion != 570 {
+		t.Fatalf("requirements = driver %d cuda %q, want driver 570 cuda 12.8", got.MinDriverVersion, got.MinCUDAVersion)
+	}
+	if got.ImagePullSecret != "ghcr.io" || len(got.VastCapAdd) != 1 || got.VastCapAdd[0] != "SYS_ADMIN" {
+		t.Fatalf("image/extra metadata not preserved: %#v", got)
+	}
+	if got.MaxComputeCap != "9.0" || got.MinComputeCap != "7.0" {
+		t.Fatalf("compute caps = %q/%q, want 9.0/7.0", got.MaxComputeCap, got.MinComputeCap)
+	}
+}
+
 func TestPrepareLaunchExecutionPlan_RevalidatesReusableInstances(t *testing.T) {
 	database := db.SetupTestDB(t)
 

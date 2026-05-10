@@ -441,7 +441,7 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	predCfg := buildPredictorConfig(cfg)
 	fmt.Println("Searching for GPU offers...")
 	reportPlanProgress := newPlanProgressPrinter(os.Stderr)
-	prep, err := terminal.PrepareLaunchExecutionPlanWithProgress(
+	prep, err := campaign.PrepareLaunchExecutionPlanWithProgress(
 		database,
 		clients,
 		providerErr,

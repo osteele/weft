@@ -59,6 +59,7 @@ type OfferConstraints struct {
 	MinDiskGB            int      // minimum disk space
 	MinReliability       float64  // minimum reliability score (0-1)
 	MinDriverVersion     int      // minimum NVIDIA driver major version
+	MinCUDAVersion       string   // minimum CUDA compatibility version
 	NumGPUs              int      // number of GPUs needed (default 1)
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores
