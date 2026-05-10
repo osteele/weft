@@ -103,7 +103,7 @@ func TestResolveGPUFilter(t *testing.T) {
 		{
 			name:      "v100 exact",
 			gpuClass:  "v100",
-			wantNames: []string{"V100"},
+			wantNames: []string{"Tesla V100"},
 		},
 		{
 			name:          "volta generation constraint",
@@ -282,6 +282,7 @@ func TestGPUClassMatchesOfferName(t *testing.T) {
 		{name: "rtx-4080 matches 4080s", gpuClass: "rtx-4080", gpuName: "RTX 4080S", want: true},
 		{name: "a6000 matches RTX A6000", gpuClass: "a6000", gpuName: "RTX A6000", want: true},
 		{name: "rtx-5090 matches RTX 5090", gpuClass: "rtx-5090", gpuName: "RTX 5090", want: true},
+		{name: "v100 matches Tesla V100", gpuClass: "v100", gpuName: "Tesla V100", want: true},
 		{name: "volta matches Tesla V100", gpuClass: "volta", gpuName: "Tesla V100", want: true},
 		{name: "volta rejects turing", gpuClass: "volta", gpuName: "RTX 2080 Ti", want: false},
 	}

@@ -315,6 +315,14 @@ func TestBuildSearchFilter(t *testing.T) {
 			wantParts: []string{`gpu_name="RTX 4090"`, "gpu_ram>=24", "num_gpus=1"},
 		},
 		{
+			name: "v100 maps to current Vast offer name",
+			constraints: OfferConstraints{
+				GPUClass:    "v100",
+				MinGPUMemGB: 22,
+			},
+			wantParts: []string{`gpu_name="Tesla V100"`, "gpu_ram>=22", "num_gpus=1"},
+		},
+		{
 			name: "with reliability",
 			constraints: OfferConstraints{
 				MinReliability: 0.95,

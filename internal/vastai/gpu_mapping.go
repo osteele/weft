@@ -163,6 +163,9 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 	if !minMode && norm == "rtx4080" {
 		return []string{"RTX 4080", "RTX 4080S"}, nil
 	}
+	if !minMode && norm == "v100" {
+		return []string{"Tesla V100"}, nil
+	}
 
 	// Generation name (e.g., "hopper", "hopper+")
 	if gen, ok := generationNameToGen[norm]; ok {
