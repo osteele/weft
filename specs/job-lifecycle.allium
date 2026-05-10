@@ -240,6 +240,8 @@ entity JobAttempt {
     cloud_outcome: AttemptOutcome?      -- set on closed cloud attempts; see
                                         -- campaign-lifecycle.allium for the
                                         -- enum and what each outcome means.
+    log_bytes: Integer?                 -- byte length of this attempt's log,
+                                        -- when the log object/file exists.
     predecessor_attempt_id: Integer?    -- id of the prior attempt this one
                                         -- continues (set when the job is
                                         -- reattached to a fresh launch after
@@ -1162,6 +1164,53 @@ rule AttemptsViewIsReadOnly {
         --   internal/ui/terminal/attempts_tui.go  — attemptsListModel
         --   internal/ui/terminal/watch_router.go  — switchToAttemptsMsg,
         --                                           switchBackFromAttemptsMsg
+}
+
+-- `weft log <job-id>` without --attempt reads the selected job attempt,
+-- which defaults to the job's latest attempt. It must not substitute an
+-- older attempt's log when the latest attempt has no log object or an empty
+-- log object.
+rule JobLogCommandReadsSelectedAttempt {
+    when: UserRequestsJobLog(job, requested_attempt)
+
+    let selected_attempt =
+        if requested_attempt != null:
+            job.attempts.find(a => a.attempt_number = requested_attempt)
+        else:
+            job.latest_attempt
+
+    requires: selected_attempt != null
+
+    ensures: JobLogOutputSource(job) = selected_attempt
+    if selected_attempt.log_bytes = 0:
+        ensures: JobLogOutputBytes(job) = 0
+
+    @guidance
+        -- Default command:
+        --   `weft log <job-id>` reads job.latest_attempt.
+        --
+        -- Explicit attempt command:
+        --   `weft log <job-id> --attempt N` reads the attempt whose
+        --   attempt_number is N.
+        --
+        -- For cloud jobs, the R2 run ID is selected_attempt.id, the
+        -- job_attempts primary key, and the keys are scoped under:
+        --   jobs/<jobID>/runs/<selected_attempt.id>/...
+        --
+        -- Missing or empty log objects for the selected attempt are
+        -- authoritative. The command may return zero bytes or a not-found
+        -- error for that selected attempt, but it must not scan older
+        -- job_attempts rows to find output from another attempt. Legacy
+        -- job-level R2 paths (jobs/<jobID>/...) may be checked as an
+        -- alternate storage location for historical jobs, but only as a
+        -- storage-compatibility fallback for the selected attempt. This
+        -- keeps `weft log` consistent with the AttemptsView and with
+        -- retry/relaunch history.
+        --
+        -- Implementation:
+        --   cmd/log.go — runLogFromR2, fetchCloudLogFromR2,
+        --                runLogForAttempt
+        --   internal/db/attempts.go — ListAttempts
 }
 
 -- Plain-mode watch commands (`weft watch`, `weft job watch`,

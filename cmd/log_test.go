@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,67 @@ func TestShouldUseCachedLogForJob_RejectsLegacyCacheForRunAwareJob(t *testing.T)
 	}
 	if shouldUseCachedLogForJob(job) {
 		t.Fatal("expected legacy cache to be rejected for run-aware job")
+	}
+}
+
+func TestRunLogFromR2UsesOnlyLatestAttempt(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	first, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID first: %v", err)
+	}
+	if first.LatestRunID == nil {
+		t.Fatal("first latest_run_id is nil")
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", &launchID, db.StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt latest: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID latest: %v", err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("latest_run_id is nil")
+	}
+
+	orig := fetchAndDisplayLogFromR2Func
+	defer func() { fetchAndDisplayLogFromR2Func = orig }()
+	var gotRunIDs []int64
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, runID int64) error {
+		gotRunIDs = append(gotRunIDs, runID)
+		return errors.New("latest attempt has no log")
+	}
+
+	err = runLogFromR2(&cobra.Command{Use: "log"}, database, job)
+	if err == nil {
+		t.Fatal("runLogFromR2 returned nil error, want latest-attempt fetch error")
+	}
+	if len(gotRunIDs) != 1 {
+		t.Fatalf("fetch calls = %v, want exactly one call", gotRunIDs)
+	}
+	if gotRunIDs[0] != *job.LatestRunID {
+		t.Fatalf("runID = %d, want latest_run_id %d", gotRunIDs[0], *job.LatestRunID)
+	}
+	if gotRunIDs[0] == *first.LatestRunID {
+		t.Fatalf("runID = first attempt %d; want latest attempt %d", gotRunIDs[0], *job.LatestRunID)
 	}
 }
 

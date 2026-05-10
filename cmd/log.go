@@ -641,39 +641,21 @@ func runArchivedLogForAttempt(target *db.JobAttempt, seq int) error {
 }
 
 // runLogFromR2 fetches log output from R2 for a cloud-based job.
-// Tries LatestRunID first, then falls back to other known run IDs
-// (handles cases where the run ID changed after the agent was given its manifest).
 func runLogFromR2(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 	if logFollow {
 		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud job logs from R2; showing current log.\n")
 	}
 
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
-	}
-	err := fetchAndDisplayLogFromR2(cmd, job, runID)
-	if err == nil {
-		return nil
-	}
+	return fetchAndDisplayLogFromR2Func(cmd, job, cloudLogRunID(job))
+}
 
-	// Try other known run IDs for this job (the agent may have used an
-	// older run ID from the manifest if latest_run_id was bumped after launch).
-	if database != nil {
-		runIDs, dbErr := db.GetJobRunIDs(database, job.ID)
-		if dbErr == nil {
-			for _, altRunID := range runIDs {
-				if altRunID == runID {
-					continue
-				}
-				if altErr := fetchAndDisplayLogFromR2(cmd, job, altRunID); altErr == nil {
-					return nil
-				}
-			}
-		}
-	}
+var fetchAndDisplayLogFromR2Func = fetchAndDisplayLogFromR2
 
-	return err
+func cloudLogRunID(job *db.Job) int64 {
+	if job != nil && job.LatestRunID != nil {
+		return *job.LatestRunID
+	}
+	return 0
 }
 
 // fetchAndDisplayLogFromR2 fetches a log from R2 with the given runID, displays it, and caches if terminal.
