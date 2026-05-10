@@ -467,6 +467,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass, job.GPUMemGB); err != nil {
 			return err
 		}
+		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+			return err
+		}
 		queuedEnded := job.EndTime != nil && *job.EndTime > 0
 		cloudAttemptCount, err := db.CountLaunchAttempts(database, jobID)
 		if err != nil {
@@ -475,16 +478,12 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		hasCloudRetryHistory := cloudAttemptCount > 0
 		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory || restartFromScratch
 		if !shouldForceFreshAttempt && len(updates) == 0 {
-			fmt.Printf("Job %s is already queued (no changes)\n", ids.FormatJobID(jobID))
+			fmt.Printf("Job %s is already queued; metadata refreshed, changed sources will be re-synced on dispatch\n", ids.FormatJobID(jobID))
 			tryResumeRunawayBreaker(database, job)
 			return nil
 		}
 
 		if shouldForceFreshAttempt {
-			if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
-				return err
-			}
-
 			// Remove processed tag so the retried job appears in unprocessed listings.
 			if job.HasTag(db.ProcessedTag) {
 				if err := db.RemoveJobTag(database, jobID, db.ProcessedTag); err != nil {

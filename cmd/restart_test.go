@@ -130,6 +130,35 @@ func TestRestartQueuedJob_NoError(t *testing.T) {
 	}
 }
 
+func TestRestartQueuedJob_NoChangesRefreshesProjectMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	cfg := "inputs = [\"hf:updated-model\"]\n\n[outputs]\ndirs = [\"results/\"]\n"
+	if err := os.WriteFile(filepath.Join(workDir, ".weft.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !slices.Equal(job.Inputs, []string{"hf:updated-model"}) {
+		t.Fatalf("Inputs = %v, want [hf:updated-model]", job.Inputs)
+	}
+	if !slices.Equal(job.OutputDirs, []string{"results/"}) {
+		t.Fatalf("OutputDirs = %v, want [results/]", job.OutputDirs)
+	}
+}
+
 func TestResolveRestartTargetJobIDs_RequiresSelector(t *testing.T) {
 	database := db.SetupTestDB(t)
 	prev := restartUnplaced
