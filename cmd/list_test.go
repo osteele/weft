@@ -241,6 +241,37 @@ func TestWriteWarningsDeduplicatesMessages(t *testing.T) {
 	}
 }
 
+func TestWritePendingRefreshNoticeClearsTerminalLine(t *testing.T) {
+	var b strings.Builder
+	clearNotice := writePendingRefreshNotice(&b, true)
+	clearNotice()
+
+	out := b.String()
+	if !strings.Contains(out, "Cloud state may be stale; refreshing in background...") {
+		t.Fatalf("missing pending refresh notice, got %q", out)
+	}
+	if !strings.Contains(out, "\r\x1b[2K") {
+		t.Fatalf("missing terminal clear sequence, got %q", out)
+	}
+	if strings.Contains(out, "\n") {
+		t.Fatalf("terminal notice should stay on one erasable line, got %q", out)
+	}
+}
+
+func TestWritePendingRefreshNoticeNonTerminalDoesNotEmitANSI(t *testing.T) {
+	var b strings.Builder
+	clearNotice := writePendingRefreshNotice(&b, false)
+	clearNotice()
+
+	out := b.String()
+	if out != "Cloud state may be stale; refreshing in background...\n" {
+		t.Fatalf("notice = %q", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Fatalf("non-terminal notice should not include ANSI, got %q", out)
+	}
+}
+
 func TestValidateListGroupingOptionsUnknownValue(t *testing.T) {
 	prevGroupBy := listGroupBy
 	prevFormat := listFormat

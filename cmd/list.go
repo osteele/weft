@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
@@ -196,12 +197,25 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	if !synced {
-		fmt.Fprintln(os.Stderr, degraded.CloudStateStalePendingRefresh())
+		clearPendingNotice := writePendingRefreshNotice(os.Stderr, term.IsTerminal(os.Stderr.Fd()))
 		late := <-syncCh
 		synced = true
+		clearPendingNotice()
 		printWarnings(dropCloudTimeoutWarnings(late))
 	}
 	return nil
+}
+
+func writePendingRefreshNotice(w io.Writer, isTerminal bool) func() {
+	msg := degraded.CloudStateStalePendingRefresh()
+	if !isTerminal {
+		fmt.Fprintln(w, msg)
+		return func() {}
+	}
+	fmt.Fprint(w, msg)
+	return func() {
+		fmt.Fprint(w, "\r\x1b[2K")
+	}
 }
 
 // dropCloudTimeoutWarnings filters out the cloud-sync timeout warning, which

@@ -9,7 +9,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestListTUIExitSummaryAt_PrintsCompactReceipt(t *testing.T) {
+func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 	launchID := int64(2663)
 	now := time.Unix(1778230000, 0)
 	model := listTUIModel{
@@ -48,15 +48,27 @@ func TestListTUIExitSummaryAt_PrintsCompactReceipt(t *testing.T) {
 
 	out := model.exitSummaryAt(now, 96)
 	for _, want := range []string{
-		"weft uj ended - ",
-		"Running:",
+		"Running (1):",
 		"wj707",
-		"wi2663 RTX A6000 48GB",
-		"Queue: 1 queued job - 1 unplaced job",
-		"Next: weft uj",
+		"baseline sweep",
+		"Queued (1):",
+		"wj1841",
+		"Unplaced (1):",
+		"wj1241",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{
+		"weft uj ended",
+		"View:",
+		"Filter:",
+		"Selected:",
+		"Next:",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("summary should not include %q:\n%s", unwanted, out)
 		}
 	}
 	if strings.Contains(out, "\x1b[") {
