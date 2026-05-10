@@ -379,6 +379,15 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--wait cannot be combined with --draft")
 	}
 	diskMeta := buildDiskMetadata(queueDiskGB, queueRuntimeDiskGB)
+	cliOverrides := &db.CLIResourceOverrides{}
+	if cmd.Flags().Changed("disk") {
+		disk := queueDiskGB
+		cliOverrides.DiskGB = &disk
+	}
+	if cmd.Flags().Changed("runtime-disk") {
+		runtimeDisk := queueRuntimeDiskGB
+		cliOverrides.RuntimeDiskGB = &runtimeDisk
+	}
 
 	var deps []queueDependency
 	var cloudAfter []db.JobDependencyRef
@@ -474,6 +483,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record draft metadata: %w", err)
 			}
 		}
+		if !cliOverrides.IsEmpty() {
+			if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft cli overrides: %w", err)
+			}
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -515,6 +530,11 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	jobID := result.JobID
+	if !cliOverrides.IsEmpty() {
+		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
+			return fmt.Errorf("record cli overrides: %w", err)
+		}
+	}
 
 	fmt.Printf("Job %s added to queue on %s\n\n", ids.FormatJobID(jobID), host)
 	fmt.Printf("  Working dir: %s\n", workingDir)

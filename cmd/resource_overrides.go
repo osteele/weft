@@ -33,6 +33,14 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 		v := *source.GPUMemStrict
 		clone.GPUMemStrict = &v
 	}
+	if source.DiskGB != nil {
+		v := *source.DiskGB
+		clone.DiskGB = &v
+	}
+	if source.RuntimeDiskGB != nil {
+		v := *source.RuntimeDiskGB
+		clone.RuntimeDiskGB = &v
+	}
 	return &clone
 }
 
@@ -76,10 +84,18 @@ func setJobCLIGPUMemStrictOverride(database *sql.DB, job *db.Job, strict bool) e
 	})
 }
 
+func setJobCLIDiskOverride(database *sql.DB, job *db.Job, diskGB *int) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		snap.DiskGB = cloneIntPtr(diskGB)
+	})
+}
+
+func setJobCLIRuntimeDiskOverride(database *sql.DB, job *db.Job, runtimeDiskGB *int) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		snap.RuntimeDiskGB = cloneIntPtr(runtimeDiskGB)
+	})
+}
+
 func cloneGPUMemPtr(source *int) *int {
-	if source == nil {
-		return nil
-	}
-	v := *source
-	return &v
+	return cloneIntPtr(source)
 }

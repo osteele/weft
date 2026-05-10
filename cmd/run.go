@@ -358,6 +358,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		s := runGPUMemStrict
 		cliOverrides.GPUMemStrict = &s
 	}
+	if cmd.Flags().Changed("disk") {
+		disk := runDiskGB
+		cliOverrides.DiskGB = &disk
+	}
+	if cmd.Flags().Changed("runtime-disk") {
+		runtimeDisk := runRuntimeDiskGB
+		cliOverrides.RuntimeDiskGB = &runtimeDisk
+	}
 
 	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
 	scriptMeta, scriptMetaErr := scanRunScriptMeta(localDir, command)

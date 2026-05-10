@@ -38,14 +38,16 @@ Examples:
 }
 
 var (
-	restartGPU          string
-	restartGPUClass     string
-	restartProvider     string
-	restartGPUMem       int
-	restartGPUMemStrict bool
-	restartUnplaced     bool
-	restartFromScratch  bool
-	restartCheckpointed bool
+	restartGPU           string
+	restartGPUClass      string
+	restartProvider      string
+	restartGPUMem        int
+	restartDiskGB        int
+	restartRuntimeDiskGB int
+	restartGPUMemStrict  bool
+	restartUnplaced      bool
+	restartFromScratch   bool
+	restartCheckpointed  bool
 )
 
 type restartOverrides struct {
@@ -58,6 +60,10 @@ type restartOverrides struct {
 	HasGPUMem       bool
 	HasGPUMemStrict bool
 	HasProvider     bool
+	HasDisk         bool
+	DiskGB          *int
+	HasRuntimeDisk  bool
+	RuntimeDiskGB   *int
 }
 
 func init() {
@@ -116,6 +122,8 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().StringVar(&restartGPUClass, "gpu-class", "", "GPU class or generation override (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	command.Flags().StringVar(&restartProvider, "provider", "", "Cloud provider override for rental placement (vastai or runpod)")
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
+	command.Flags().IntVar(&restartDiskGB, "disk", 0, "Rental instance disk floor override in GB (0 clears)")
+	command.Flags().IntVar(&restartRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom override in GB (0 clears)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
 	command.Flags().BoolVar(&restartFromScratch, "from-scratch", false, "Force a fresh attempt and ignore checkpoint/resume assumptions")
@@ -160,10 +168,14 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
 	hasGPUMemStrict := cmd.Flags().Changed("gpu-mem-strict")
 	hasProvider := cmd.Flags().Changed("provider")
+	hasDisk := cmd.Flags().Changed("disk")
+	hasRuntimeDisk := cmd.Flags().Changed("runtime-disk")
 	out.HasGPUMem = hasGPUMem
 	out.HasGPUMemStrict = hasGPUMemStrict
 	out.GPUMemStrict = restartGPUMemStrict
 	out.HasProvider = hasProvider
+	out.HasDisk = hasDisk
+	out.HasRuntimeDisk = hasRuntimeDisk
 
 	if gpuValue != "" && gpuClassValue != "" {
 		return out, fmt.Errorf("--gpu and --gpu-class cannot be used together")
@@ -201,9 +213,17 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 		}
 		out.Provider = &normalizedProvider
 	}
+	if hasDisk {
+		disk := restartDiskGB
+		out.DiskGB = &disk
+	}
+	if hasRuntimeDisk {
+		runtimeDisk := restartRuntimeDiskGB
+		out.RuntimeDiskGB = &runtimeDisk
+	}
 	out.GPU = gpuValue
 	out.GPUClass = gpuClassValue
-	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider
+	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider || hasDisk || hasRuntimeDisk
 	return out, nil
 }
 
@@ -216,6 +236,11 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 	if err != nil {
 		return nil, err
 	}
+	diskUpdates, err := applyScriptDiskDefaults(database, job)
+	if err != nil {
+		return nil, err
+	}
+	updates = append(updates, diskUpdates...)
 
 	if !overrides.HasAny {
 		return updates, nil
@@ -291,6 +316,34 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 			updates = append(updates, "provider: cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("provider: %s", normalizedProvider))
+		}
+	}
+	if overrides.HasDisk || overrides.HasRuntimeDisk {
+		diskGB, runtimeDiskGB := currentJobDisk(job)
+		if overrides.HasDisk {
+			diskGB = *overrides.DiskGB
+			if err := setJobCLIDiskOverride(database, job, overrides.DiskGB); err != nil {
+				return nil, fmt.Errorf("update disk override: %w", err)
+			}
+			if diskGB == 0 {
+				updates = append(updates, "disk: cleared")
+			} else {
+				updates = append(updates, fmt.Sprintf("disk: %d GB", diskGB))
+			}
+		}
+		if overrides.HasRuntimeDisk {
+			runtimeDiskGB = *overrides.RuntimeDiskGB
+			if err := setJobCLIRuntimeDiskOverride(database, job, overrides.RuntimeDiskGB); err != nil {
+				return nil, fmt.Errorf("update runtime-disk override: %w", err)
+			}
+			if runtimeDiskGB == 0 {
+				updates = append(updates, "runtime-disk: cleared")
+			} else {
+				updates = append(updates, fmt.Sprintf("runtime-disk: %d GB", runtimeDiskGB))
+			}
+		}
+		if err := setJobDiskMetadata(database, job, buildDiskMetadata(diskGB, runtimeDiskGB)); err != nil {
+			return nil, fmt.Errorf("update disk metadata: %w", err)
 		}
 	}
 	return updates, nil
@@ -448,6 +501,149 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 	return updates, nil
 }
 
+func applyScriptDiskDefaults(database *sql.DB, job *db.Job) ([]string, error) {
+	localDir := workdir.ResolveLocal(job.WorkingDir)
+	meta, err := dataloc.ScanScriptMeta(localDir, job.Command)
+	if err != nil {
+		slog.Warn("script metadata error", "error", err)
+		return nil, nil
+	}
+
+	diskGB := 0
+	runtimeDiskGB := 0
+	diskSet := false
+	runtimeDiskSet := false
+	if o := job.CLIResourceOverrides; o != nil {
+		if o.DiskGB != nil {
+			diskGB = *o.DiskGB
+			diskSet = true
+		}
+		if o.RuntimeDiskGB != nil {
+			runtimeDiskGB = *o.RuntimeDiskGB
+			runtimeDiskSet = true
+		}
+	}
+	if !diskSet && meta != nil && meta.DiskGB > 0 {
+		diskGB = meta.DiskGB
+		diskSet = true
+	}
+	if !runtimeDiskSet && meta != nil && meta.RuntimeDiskGB > 0 {
+		runtimeDiskGB = meta.RuntimeDiskGB
+		runtimeDiskSet = true
+	}
+
+	newDisk := buildDiskMetadata(diskGB, runtimeDiskGB)
+	if sameDiskMetadata(jobDiskMetadata(job), newDisk) {
+		return nil, nil
+	}
+	if err := setJobDiskMetadata(database, job, newDisk); err != nil {
+		return nil, fmt.Errorf("update disk metadata from script metadata: %w", err)
+	}
+	var updates []string
+	switch {
+	case newDisk == nil:
+		updates = append(updates, "disk metadata: cleared")
+	default:
+		if diskSet && diskGB > 0 {
+			updates = append(updates, fmt.Sprintf("disk: %d GB", diskGB))
+		}
+		if runtimeDiskSet && runtimeDiskGB > 0 {
+			updates = append(updates, fmt.Sprintf("runtime-disk: %d GB", runtimeDiskGB))
+		}
+	}
+	return updates, nil
+}
+
+func currentJobDisk(job *db.Job) (int, int) {
+	disk := jobDiskMetadata(job)
+	if disk == nil {
+		return 0, 0
+	}
+	return disk.DiskGB, disk.RuntimeDiskGB
+}
+
+func jobDiskMetadata(job *db.Job) *db.JobDiskMetadata {
+	if job == nil || job.Metadata == nil {
+		return nil
+	}
+	return job.Metadata.Disk
+}
+
+func sameDiskMetadata(a, b *db.JobDiskMetadata) bool {
+	if a == nil || (a.DiskGB <= 0 && a.RuntimeDiskGB <= 0) {
+		a = nil
+	}
+	if b == nil || (b.DiskGB <= 0 && b.RuntimeDiskGB <= 0) {
+		b = nil
+	}
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.DiskGB == b.DiskGB && a.RuntimeDiskGB == b.RuntimeDiskGB
+}
+
+func setJobDiskMetadata(database *sql.DB, job *db.Job, disk *db.JobDiskMetadata) error {
+	meta := cloneJobMetadata(job.Metadata)
+	if meta == nil {
+		meta = &db.JobMetadata{}
+	}
+	meta.Disk = disk
+	meta = persistentOrNonEmptyJobMetadata(meta)
+	if err := db.SetJobMetadata(database, job.ID, meta); err != nil {
+		return err
+	}
+	job.Metadata = meta
+	return nil
+}
+
+func cloneJobMetadata(source *db.JobMetadata) *db.JobMetadata {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	if source.Dependencies != nil {
+		deps := *source.Dependencies
+		deps.CloudAfter = append([]db.JobDependencyRef(nil), source.Dependencies.CloudAfter...)
+		deps.CloudNeeds = append([]string(nil), source.Dependencies.CloudNeeds...)
+		clone.Dependencies = &deps
+	}
+	if source.Disk != nil {
+		disk := *source.Disk
+		clone.Disk = &disk
+	}
+	return &clone
+}
+
+func persistentAttemptMetadata(meta *db.JobMetadata) *db.JobMetadata {
+	if meta == nil {
+		return nil
+	}
+	out := &db.JobMetadata{}
+	if meta.Dependencies != nil {
+		deps := &db.JobDependencyMetadata{}
+		deps.CloudAfter = append([]db.JobDependencyRef(nil), meta.Dependencies.CloudAfter...)
+		deps.CloudNeeds = append([]string(nil), meta.Dependencies.CloudNeeds...)
+		if len(deps.CloudAfter) > 0 || len(deps.CloudNeeds) > 0 {
+			out.Dependencies = deps
+		}
+	}
+	if meta.Disk != nil && (meta.Disk.DiskGB > 0 || meta.Disk.RuntimeDiskGB > 0) {
+		disk := *meta.Disk
+		out.Disk = &disk
+	}
+	return persistentOrNonEmptyJobMetadata(out)
+}
+
+func persistentOrNonEmptyJobMetadata(meta *db.JobMetadata) *db.JobMetadata {
+	if meta == nil {
+		return nil
+	}
+	if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil && meta.Disk == nil {
+		return nil
+	}
+	return meta
+}
+
 func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -497,6 +693,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			}
 			if err := db.RequeueFreshAttemptByID(database, jobID, retryHost); err != nil {
 				return fmt.Errorf("create fresh queued attempt: %w", err)
+			}
+			if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+				return fmt.Errorf("carry retry metadata: %w", err)
 			}
 			_ = logcache.Delete(jobID)
 
@@ -549,6 +748,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
 			return err
 		}
+		if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+			return fmt.Errorf("carry retry metadata: %w", err)
+		}
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued\n", ids.FormatJobID(jobID))
 		printRestartModeLine()
@@ -567,6 +769,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
 			return err
+		}
+		if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+			return fmt.Errorf("carry retry metadata: %w", err)
 		}
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued (unplaced job)\n", ids.FormatJobID(jobID))

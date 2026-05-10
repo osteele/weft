@@ -56,6 +56,31 @@ func TestEstimateRuntimeDiskGB_UserOverride(t *testing.T) {
 	}
 }
 
+func TestEstimateRuntimeDiskGB_CLIOverrideWinsOverScript(t *testing.T) {
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# runtime-disk = 12
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	runtimeDisk := 48
+	job := &db.Job{
+		ID:         1,
+		WorkingDir: workDir,
+		Command:    "python train.py",
+		CLIResourceOverrides: &db.CLIResourceOverrides{
+			RuntimeDiskGB: &runtimeDisk,
+		},
+	}
+	if disk := EstimateRuntimeDiskGB(job); disk != 48 {
+		t.Fatalf("runtime disk = %d, want CLI override 48", disk)
+	}
+}
+
 func TestEstimateGroupDisk_HonorsDiskFloor(t *testing.T) {
 	group := InstanceGroup{
 		Jobs: []*db.Job{{
@@ -68,6 +93,56 @@ func TestEstimateGroupDisk_HonorsDiskFloor(t *testing.T) {
 	}
 	if disk := EstimateGroupDisk(group, nil, nil); disk != 96 {
 		t.Fatalf("disk = %d, want explicit floor 96", disk)
+	}
+}
+
+func TestEstimateGroupDisk_RereadsScriptDiskFloor(t *testing.T) {
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# disk = 96
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	group := InstanceGroup{
+		Jobs: []*db.Job{{
+			ID:         1,
+			WorkingDir: workDir,
+			Command:    "python train.py",
+		}},
+	}
+	if disk := EstimateGroupDisk(group, nil, nil); disk != 96 {
+		t.Fatalf("disk = %d, want current script floor 96", disk)
+	}
+}
+
+func TestEstimateGroupDisk_CLIDiskFloorWinsOverScript(t *testing.T) {
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# disk = 96
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	diskFloor := 200
+	group := InstanceGroup{
+		Jobs: []*db.Job{{
+			ID:         1,
+			WorkingDir: workDir,
+			Command:    "python train.py",
+			CLIResourceOverrides: &db.CLIResourceOverrides{
+				DiskGB: &diskFloor,
+			},
+		}},
+	}
+	if disk := EstimateGroupDisk(group, nil, nil); disk != 200 {
+		t.Fatalf("disk = %d, want CLI floor 200", disk)
 	}
 }
 

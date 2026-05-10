@@ -878,6 +878,151 @@ print("train")
 	}
 }
 
+func TestRestartQueuedJob_ReplaysCLIDiskOverrideWithChangedScript(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# disk = 80
+# runtime-disk = 12
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("create queued attempt: %v", err)
+	}
+	cliDisk := 200
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{
+		DiskGB: &cliDisk,
+	}); err != nil {
+		t.Fatalf("set cli overrides: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Metadata == nil || job.Metadata.Disk == nil {
+		t.Fatalf("disk metadata missing, want CLI disk plus script runtime")
+	}
+	if job.Metadata.Disk.DiskGB != 200 {
+		t.Fatalf("DiskGB = %d, want 200 from CLI override", job.Metadata.Disk.DiskGB)
+	}
+	if job.Metadata.Disk.RuntimeDiskGB != 12 {
+		t.Fatalf("RuntimeDiskGB = %d, want 12 from current script metadata", job.Metadata.Disk.RuntimeDiskGB)
+	}
+}
+
+func TestRestartQueuedJob_RereadsScriptDiskWhenNoCLIOverride(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# disk = 96
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("create queued attempt: %v", err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
+		Disk: &db.JobDiskMetadata{DiskGB: 50},
+	}); err != nil {
+		t.Fatalf("set stale disk metadata: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Metadata == nil || job.Metadata.Disk == nil || job.Metadata.Disk.DiskGB != 96 {
+		t.Fatalf("disk metadata = %+v, want current script disk 96", job.Metadata)
+	}
+}
+
+func TestRestartQueuedWithCloudHistory_CarriesDiskToFreshAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# runtime-disk = 8
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", workDir, "python train.py", "queued retry reset")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	cliDisk := 200
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{
+		DiskGB: &cliDisk,
+	}); err != nil {
+		t.Fatalf("set cli overrides: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "H200",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	attempt1, err := db.CreateAttempt(database, jobID, "", &launchID, db.StatusCanceled)
+	if err != nil {
+		t.Fatalf("create cloud attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ?, end_time = ?, status = ?, cloud_outcome = ? WHERE id = ?`,
+		1_699_999_000, 1_700_000_000, db.StatusCanceled, db.AttemptOutcomeOrphaned, attempt1); err != nil {
+		t.Fatalf("close cloud attempt: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("create open queued attempt: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued-with-cloud-history failed: %v", err)
+	}
+
+	var raw string
+	if err := database.QueryRow(`
+		SELECT COALESCE(job_metadata, '')
+		FROM job_attempts
+		WHERE job_id = ?
+		ORDER BY attempt_number DESC
+		LIMIT 1`, jobID).Scan(&raw); err != nil {
+		t.Fatalf("query latest metadata: %v", err)
+	}
+	if !strings.Contains(raw, `"disk_gb":200`) {
+		t.Fatalf("latest metadata = %s, want disk_gb 200", raw)
+	}
+	if !strings.Contains(raw, `"runtime_disk_gb":8`) {
+		t.Fatalf("latest metadata = %s, want runtime_disk_gb 8", raw)
+	}
+}
+
 func TestRestartQueuedJob_PersistsRetryGPUClassOverride(t *testing.T) {
 	database := db.SetupTestDB(t)
 	workDir := t.TempDir()
