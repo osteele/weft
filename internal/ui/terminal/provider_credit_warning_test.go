@@ -209,6 +209,49 @@ func TestSharedTUIStatusLineWithVisibleRunning_GlobalMismatchPrefix(t *testing.T
 	}
 }
 
+func TestRenderPausedLaunchesBannerReportsProviderStatus(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusPaused, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.RecordProviderStatus(database, launchID, time.Unix(100, 0), "running", "offline"); err != nil {
+		t.Fatalf("RecordProviderStatus: %v", err)
+	}
+
+	plain := stripANSI(renderPausedLaunchesBanner(database, 0))
+	if !strings.Contains(plain, "PAUSED: 1 instance") {
+		t.Fatalf("banner = %q, want paused count", plain)
+	}
+	if !strings.Contains(plain, "provider reported offline") {
+		t.Fatalf("banner = %q, want raw provider status", plain)
+	}
+	if strings.Contains(plain, "preempted or account credit") {
+		t.Fatalf("banner = %q, should not guess the cause", plain)
+	}
+}
+
+func TestRenderPausedLaunchesBannerPossibleCreditHoldOnlyForStoppedFleet(t *testing.T) {
+	database := db.SetupTestDB(t)
+	for i := 0; i < 3; i++ {
+		launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusPaused, Provider: "vastai"})
+		if err != nil {
+			t.Fatalf("CreateLaunch %d: %v", i, err)
+		}
+		if err := db.RecordProviderStatus(database, launchID, time.Unix(int64(100+i), 0), "running", "stopped"); err != nil {
+			t.Fatalf("RecordProviderStatus %d: %v", i, err)
+		}
+	}
+
+	plain := stripANSI(renderPausedLaunchesBanner(database, 0))
+	if !strings.Contains(plain, "provider reported stopped") {
+		t.Fatalf("banner = %q, want stopped status", plain)
+	}
+	if !strings.Contains(plain, "possible account/credit hold") {
+		t.Fatalf("banner = %q, want fleet stopped hint", plain)
+	}
+}
+
 // TestProviderCreditWarningTextDoesNotBlockOnRefresh is a regression: a stale
 // cache must never block the caller on the provider fetch (which spawns the
 // vastai CLI / hits the network). The fetch runs asynchronously; stale calls

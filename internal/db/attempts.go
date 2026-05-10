@@ -925,16 +925,20 @@ func CreateAttempt(db *sql.DB, jobID int64, host string, cloudInstanceID *int64,
 
 func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
 	now := time.Now().Unix()
+	var endTime any
+	if IsTerminalStatus(status) {
+		endTime = now
+	}
 	targetID, err := ensureExecutionTargetForAttempt(execer, host, cloudInstanceID)
 	if err != nil {
 		return 0, fmt.Errorf("ensure execution target for job %d: %w", jobID, err)
 	}
 	result, err := execer.Exec(`
-		INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, target_id, status, queued_at)
+		INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, target_id, status, queued_at, end_time)
 		VALUES (?,
 			COALESCE((SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = ?), 0) + 1,
-			?, ?, ?, ?, ?)`,
-		jobID, jobID, host, cloudInstanceID, targetID, status, now,
+			?, ?, ?, ?, ?, ?)`,
+		jobID, jobID, host, cloudInstanceID, targetID, status, now, endTime,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create attempt for job %d: %w", jobID, err)

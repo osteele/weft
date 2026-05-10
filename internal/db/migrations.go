@@ -282,6 +282,47 @@ var versionedMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		Description: "add placement row invariants",
+		Apply: func(db *sql.DB) error {
+			stmts := []string{
+				`CREATE TRIGGER IF NOT EXISTS move_intents_open_new_requires_live_source_insert
+					BEFORE INSERT ON move_intents
+					FOR EACH ROW
+					WHEN NEW.state = 'open'
+					     AND NEW.target_kind = 'new'
+					     AND NEW.source_launch_id IS NOT NULL
+					     AND NOT EXISTS (
+					        SELECT 1 FROM launches
+					         WHERE id = NEW.source_launch_id
+					           AND status IN ('running','launching','paused','grace')
+					     )
+					BEGIN
+						SELECT RAISE(ABORT, 'open move-to-new intent requires live source launch');
+					END`,
+				`CREATE TRIGGER IF NOT EXISTS move_intents_open_new_requires_live_source_update
+					BEFORE UPDATE OF state, target_kind, source_launch_id ON move_intents
+					FOR EACH ROW
+					WHEN NEW.state = 'open'
+					     AND NEW.target_kind = 'new'
+					     AND NEW.source_launch_id IS NOT NULL
+					     AND NOT EXISTS (
+					        SELECT 1 FROM launches
+					         WHERE id = NEW.source_launch_id
+					           AND status IN ('running','launching','paused','grace')
+					     )
+					BEGIN
+						SELECT RAISE(ABORT, 'open move-to-new intent requires live source launch');
+					END`,
+			}
+			for _, stmt := range stmts {
+				if _, err := db.Exec(stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

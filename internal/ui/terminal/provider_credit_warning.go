@@ -3,6 +3,7 @@ package terminal
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,11 @@ var (
 	}
 )
 
+type pausedLaunchBannerSummary struct {
+	Count    int
+	Statuses map[string]int
+}
+
 // renderProviderCreditWarningLine returns a red warning line when any enabled
 // provider account appears to be low on credits.
 func renderProviderCreditWarningLine(width int) string {
@@ -107,29 +113,89 @@ func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, v
 }
 
 // renderPausedLaunchesBanner shows a warning when one or more launches are in
-// the paused state. Provider-paused instances still incur storage charges; if
-// many are paused at once it is usually an account-wide pause (credit
-// exhaustion) rather than per-instance preemption.
+// the paused state. Provider-paused instances still incur storage charges; the
+// provider status detail is shown when available so the banner does not guess
+// whether the cause was preemption, account credit, or provider maintenance.
 func renderPausedLaunchesBanner(database *sql.DB, width int) string {
 	if database == nil {
 		return ""
 	}
-	// Populate the shared cache (cheap if already warm); read paused count from it.
-	_, _, _ = sharedTUIStatusTextWithCount(database)
-	sharedTUIStatusCache.mu.Lock()
-	count := sharedTUIStatusCache.pausedLaunches
-	sharedTUIStatusCache.mu.Unlock()
-	if count == 0 {
+	summary, err := pausedLaunchBannerSummaryForDB(database)
+	if err != nil || summary.Count == 0 {
 		return ""
 	}
-	msg := fmt.Sprintf("PAUSED: %s — provider stopped (preempted or account credit) — instance still billable for storage", pluralize(count, "instance", "instances"))
-	if count >= 3 {
-		msg += " — likely account credit exhausted"
-	}
+	msg := formatPausedLaunchesBanner(summary)
 	if width > 0 {
 		msg = truncateDisplayWidth(msg, width)
 	}
 	return tuiFailedStyle.Render(msg)
+}
+
+func pausedLaunchBannerSummaryForDB(database *sql.DB) (pausedLaunchBannerSummary, error) {
+	summary := pausedLaunchBannerSummary{Statuses: map[string]int{}}
+	rows, err := database.Query(`
+		SELECT COALESCE((
+			SELECT pst.new_status
+			  FROM provider_status_transitions pst
+			 WHERE pst.launch_id = l.id
+			 ORDER BY pst.observed_at DESC, pst.id DESC
+			 LIMIT 1
+		), '') AS provider_status,
+		       COUNT(*)
+		  FROM launches l
+		 WHERE l.status = ?
+		 GROUP BY provider_status
+		 ORDER BY provider_status`,
+		dbpkg.LaunchStatusPaused,
+	)
+	if err != nil {
+		return summary, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return summary, err
+		}
+		if status == "" {
+			status = "unknown"
+		}
+		summary.Count += count
+		summary.Statuses[status] += count
+	}
+	return summary, rows.Err()
+}
+
+func formatPausedLaunchesBanner(summary pausedLaunchBannerSummary) string {
+	msg := fmt.Sprintf("PAUSED: %s", pluralize(summary.Count, "instance", "instances"))
+	if statusText := formatPausedProviderStatuses(summary.Statuses); statusText != "" {
+		msg += " — provider reported " + statusText
+	} else {
+		msg += " — provider paused"
+	}
+	msg += " — storage may still be billable"
+	if summary.Count >= 3 && summary.Statuses[cloud.ProviderStatusStopped] == summary.Count {
+		msg += " — possible account/credit hold"
+	}
+	return msg
+}
+
+func formatPausedProviderStatuses(statusCounts map[string]int) string {
+	if len(statusCounts) == 0 {
+		return ""
+	}
+	if len(statusCounts) == 1 {
+		for status := range statusCounts {
+			return status
+		}
+	}
+	statuses := make([]string, 0, len(statusCounts))
+	for status, count := range statusCounts {
+		statuses = append(statuses, fmt.Sprintf("%s:%d", status, count))
+	}
+	sort.Strings(statuses)
+	return strings.Join(statuses, ", ")
 }
 
 func renderSystemLine(database *sql.DB, width int, visibleRunning int, targetCents int) string {

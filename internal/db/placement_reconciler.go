@@ -86,6 +86,7 @@ func ReconcilePlacementRows(database *sql.DB, opts PlacementReconcileOptions) (P
 type openMoveIntentFact struct {
 	ID             int64
 	JobID          int64
+	SourceLaunchID sql.NullInt64
 	TargetKind     MoveTargetKind
 	TargetLaunchID sql.NullInt64
 	AttemptCount   int
@@ -95,7 +96,7 @@ type openMoveIntentFact struct {
 
 func reconcileOpenMoveIntentsTx(tx *sql.Tx, now, cutoff int64, result *PlacementReconcileResult) error {
 	rows, err := tx.Query(`
-		SELECT id, job_id, target_kind, target_launch_id, attempt_count, max_attempts, created_at
+		SELECT id, job_id, source_launch_id, target_kind, target_launch_id, attempt_count, max_attempts, created_at
 		  FROM move_intents
 		 WHERE state = ?
 		 ORDER BY created_at ASC`,
@@ -108,7 +109,7 @@ func reconcileOpenMoveIntentsTx(tx *sql.Tx, now, cutoff int64, result *Placement
 	for rows.Next() {
 		var fact openMoveIntentFact
 		var targetKind string
-		if err := rows.Scan(&fact.ID, &fact.JobID, &targetKind, &fact.TargetLaunchID, &fact.AttemptCount, &fact.MaxAttempts, &fact.CreatedAt); err != nil {
+		if err := rows.Scan(&fact.ID, &fact.JobID, &fact.SourceLaunchID, &targetKind, &fact.TargetLaunchID, &fact.AttemptCount, &fact.MaxAttempts, &fact.CreatedAt); err != nil {
 			rows.Close()
 			return err
 		}
@@ -169,6 +170,23 @@ func reconcileOpenMoveIntentTx(tx *sql.Tx, now, cutoff int64, intent openMoveInt
 		return err
 	}
 	if hasOpenAttempt && latestOpenLaunch != launchID {
+		if intent.SourceLaunchID.Valid && latestOpenLaunch == intent.SourceLaunchID.Int64 {
+			resolved, err := resolveMoveIntentRestoredToSourceTx(tx, now, intent.ID)
+			if err != nil {
+				return err
+			}
+			if resolved {
+				result.IntentsResolved++
+				result.Actions = append(result.Actions, PlacementReconcileAction{
+					Kind:     PlacementReconcileMoveCanceled,
+					JobID:    intent.JobID,
+					LaunchID: latestOpenLaunch,
+					IntentID: intent.ID,
+					Detail:   "move target failed before start; restored to source",
+				})
+			}
+			return nil
+		}
 		return nil
 	}
 

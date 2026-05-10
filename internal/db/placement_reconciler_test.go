@@ -62,8 +62,15 @@ func TestReconcilePlacementRows_RestoresNoStartMoveTargetToLiveSource(t *testing
 	if err != nil {
 		t.Fatalf("second ReconcilePlacementRows: %v", err)
 	}
-	if second.JobsUpdated != 0 || second.IntentsResolved != 0 {
-		t.Fatalf("second result = %+v, want no-op", second)
+	if second.JobsUpdated != 0 || second.IntentsResolved != 1 {
+		t.Fatalf("second result = %+v, want stale restored-source intent resolution", second)
+	}
+	gotIntent, err = GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent second: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateCanceled {
+		t.Fatalf("move intent state after second reconcile = %q, want canceled", gotIntent.State)
 	}
 }
 
@@ -71,7 +78,7 @@ func TestReconcilePlacementRows_DeadSourceReturnsMoveTargetToUnplaced(t *testing
 	database := setupTestDB(t)
 	now := time.Unix(20_000, 0)
 
-	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
 	if err != nil {
 		t.Fatalf("CreateLaunch source: %v", err)
 	}
@@ -93,6 +100,9 @@ func TestReconcilePlacementRows_DeadSourceReturnsMoveTargetToUnplaced(t *testing
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, src, LaunchStatusFailed, TerminationReasonProviderFailure, "source failed"); err != nil {
+		t.Fatalf("UpdateLaunchStatus source: %v", err)
 	}
 	if err := TransferJobLaunchID(database, 4102, dst); err != nil {
 		t.Fatalf("TransferJobLaunchID target: %v", err)

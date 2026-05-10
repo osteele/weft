@@ -385,14 +385,11 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	//     etc.): caught by rule 7 (provider_dead with hysteresis).
 	if ci.Status == db.LaunchStatusRunning && ci.AgentReadyAtUnix != nil &&
 		p.HeartbeatAge > effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, p.Now) {
-		// Yield to rule 4a-pause when the provider has paused the
-		// instance: a paused container stops writing heartbeats, so
-		// without this check the stale-agent watchdog would always
-		// fire first and we'd destroy paused-but-recoverable
-		// instances. on-demand instances can also be paused (credit
-		// low, host maintenance, abuse review), so this gate is not
-		// limited to interruptible types.
-		if p.ProviderInst == nil || !isPausedProviderStatus(p.ProviderInst.Status) {
+		// Yield to rule 4a-pause only when the provider status is expected to
+		// resume. Vast "offline" is resumable for interruptible placements, but
+		// for on-demand placements it is provider-dead evidence and should not
+		// mask a stale heartbeat.
+		if p.ProviderInst == nil || !isRecoverablePausedProviderStatus(p.ProviderInst.Status, p.PauseTolerant) {
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.LaunchStatusFailed,
@@ -414,13 +411,11 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 4a-pause. Provider paused the instance (preemption or account-wide
-	// pause). Vast.ai reports interruptible preemption as "offline";
-	// Stopped covers explicit account/credit pauses. Reflect as paused in
-	// the DB and wait up to stalePauseTimeout for resume; after that, give
-	// up and fail. Runs regardless of preemptible flag so account-wide
-	// credit pauses are also caught.
-	if p.ProviderInst != nil && isPausedProviderStatus(p.ProviderInst.Status) {
+	// 4a-pause. Provider paused the instance. Vast.ai reports interruptible
+	// preemption as "offline"; stopped covers explicit provider pauses such as
+	// account/credit holds. Only pause statuses that can reasonably resume are
+	// reflected as LaunchStatusPaused.
+	if p.ProviderInst != nil && isRecoverablePausedProviderStatus(p.ProviderInst.Status, p.PauseTolerant) {
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
 			if age > stalePauseTimeout {

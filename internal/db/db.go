@@ -845,6 +845,14 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 	// invalidates any view that references it. We recreate the views
 	// at the end of this function so callers don't have to know which
 	// init step normally owns recreation.
+	for _, trigger := range []string{
+		"move_intents_open_new_requires_live_source_insert",
+		"move_intents_open_new_requires_live_source_update",
+	} {
+		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + trigger); err != nil {
+			return fmt.Errorf("drop trigger %s: %w", trigger, err)
+		}
+	}
 	for _, v := range []string{"launch_job_membership", "job_status", "job_run_training_examples", "training_examples", "job_effective_state", "all_runs", "cloud_instances"} {
 		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + v); err != nil {
 			return fmt.Errorf("drop view %s: %w", v, err)

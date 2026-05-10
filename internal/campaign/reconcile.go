@@ -959,6 +959,17 @@ func isPausedProviderStatus(status string) bool {
 	return status == cloud.ProviderStatusStopped || status == cloud.ProviderStatusOffline
 }
 
+func isRecoverablePausedProviderStatus(status string, pauseTolerant bool) bool {
+	switch status {
+	case cloud.ProviderStatusStopped:
+		return true
+	case cloud.ProviderStatusOffline:
+		return pauseTolerant
+	default:
+		return false
+	}
+}
+
 func hasPreemptibleJobs(jobs []*db.Job) bool {
 	for _, job := range jobs {
 		if job != nil && job.UsesPreemptiblePlacement() {

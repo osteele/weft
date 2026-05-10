@@ -167,14 +167,7 @@ func handleMoveTargetFailedBeforeStartTx(tx *sql.Tx, jobID, targetLaunchID, now 
 
 	exhausted := attemptCount >= maxAttempts
 	if exhausted {
-		if _, err := tx.Exec(
-			`UPDATE move_intents
-			    SET state = ?, resolved_at = ?, resolution = ?
-			  WHERE id = ?
-			    AND state = ?`,
-			string(MoveIntentStateCanceled), now, "move target failed before start; restored to source",
-			intentID, string(MoveIntentStateOpen),
-		); err != nil {
+		if _, err := resolveMoveIntentRestoredToSourceTx(tx, now, intentID); err != nil {
 			return MoveTargetFailureResult{}, err
 		}
 	}
@@ -184,6 +177,22 @@ func handleMoveTargetFailedBeforeStartTx(tx *sql.Tx, jobID, targetLaunchID, now 
 		Exhausted:      exhausted,
 		SourceLaunchID: sourceLaunchID,
 	}, nil
+}
+
+func resolveMoveIntentRestoredToSourceTx(tx *sql.Tx, now, intentID int64) (bool, error) {
+	res, err := tx.Exec(
+		`UPDATE move_intents
+		    SET state = ?, resolved_at = ?, resolution = ?
+		  WHERE id = ?
+		    AND state = ?`,
+		string(MoveIntentStateCanceled), now, "move target failed before start; restored to source",
+		intentID, string(MoveIntentStateOpen),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func ensureMoveSourceAttemptTx(tx *sql.Tx, jobID, sourceLaunchID int64) error {

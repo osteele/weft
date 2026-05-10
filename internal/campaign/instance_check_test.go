@@ -1386,6 +1386,7 @@ func TestCheckInstance_PauseTolerant_StalePause_Preempted(t *testing.T) {
 	r := NewReconciler()
 	now := time.Now()
 	launchedAt := now.Add(-7 * time.Hour).Unix()
+	agentReadyAt := now.Add(-6*time.Hour - 55*time.Minute).Unix()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
 			ID:                 1,
@@ -1393,6 +1394,7 @@ func TestCheckInstance_PauseTolerant_StalePause_Preempted(t *testing.T) {
 			ProviderInstanceID: "test-123",
 			CreatedAt:          launchedAt,
 			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReadyAt,
 		},
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusStopped},
 		PauseTolerant: true,
@@ -1916,13 +1918,16 @@ func TestCheckInstance_PauseTolerant_OfflineFlipsToPaused(t *testing.T) {
 }
 
 func TestCheckInstance_OnDemand_StaleOffline_ProviderFailure(t *testing.T) {
-	// On-demand instances also flip to paused when offline (matches the
-	// existing stopped-status handling — rule 4a-pause runs regardless of
-	// pause-tolerance), but past stalePauseTimeout the termination reason
-	// is ProviderFailure rather than Preempted.
-	r := NewReconciler()
+	// On-demand Vast "offline" is provider-dead evidence, not a resumable
+	// interruptible preemption. It should skip the paused state.
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
 	now := time.Now()
 	launchedAt := now.Add(-7 * time.Hour).Unix()
+	agentReadyAt := now.Add(-6*time.Hour - 55*time.Minute).Unix()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
 			ID:                 1,
@@ -1930,13 +1935,15 @@ func TestCheckInstance_OnDemand_StaleOffline_ProviderFailure(t *testing.T) {
 			ProviderInstanceID: "test-123",
 			CreatedAt:          launchedAt,
 			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReadyAt,
 		},
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusOffline},
+		JobState:      JobState{HasStartedJob: true},
 		PauseTolerant: false,
 		Now:           now,
 	})
-	if action.Kind != ActionEmptyStatusTimeout {
-		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	if action.Kind != ActionProviderDead {
+		t.Fatalf("action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
 	}
 	if action.TerminationReason != db.TerminationReasonProviderFailure {
 		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonProviderFailure)
