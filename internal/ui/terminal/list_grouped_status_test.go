@@ -831,9 +831,12 @@ func TestRenderJobListGroupedStatusPlainAt_OpenIntentBucketsToPlacing(t *testing
 		{ID: 1700, Status: db.StatusQueued, Host: "cool30", Project: "proj", Description: "ordinary queued"},
 	}
 	placing := map[int64]struct{}{1657: {}, 1664: {}}
-	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, nil, nil, now)
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, placing, map[int64]int64{1657: 4_000}, nil, now)
 	if !strings.Contains(out, "Placing (2):") {
 		t.Fatalf("expected Placing section with 2 jobs, got:\n%s", out)
+	}
+	if !strings.Contains(out, "wj1657") || !strings.Contains(out, "— placing 16m ago") {
+		t.Fatalf("expected Placing row to use open intent age, got:\n%s", out)
 	}
 	if strings.Contains(out, "Unplaced (") {
 		t.Fatalf("did not expect Unplaced section for jobs with open intents, got:\n%s", out)

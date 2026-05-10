@@ -48,38 +48,24 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
-	// Sweep stale placement intents whose orchestrator died before
-	// resolving them; otherwise the leaked intent excludes its job from
-	// every future pass indefinitely.
-	if pruned, err := db.PrunePlacementIntents(database, placementIntentProtectionWindow); err != nil {
-		oplog.Log("auto_pilot.intents_prune_error", oplog.WithError(err))
-	} else if len(pruned) > 0 {
-		jobIDs := make([]int64, 0, len(pruned))
-		for _, pi := range pruned {
-			jobIDs = append(jobIDs, pi.JobID)
+	// Sweep stale placement rows whose orchestrator died before resolving
+	// them; otherwise leaked intents exclude jobs from future passes
+	// indefinitely.
+	if reconciled, err := db.ReconcilePlacementRows(database, db.PlacementReconcileOptions{ProtectionWindow: placementIntentProtectionWindow}); err != nil {
+		oplog.Log("auto_pilot.placement_reconcile_error", oplog.WithError(err))
+	} else if len(reconciled.Actions) > 0 {
+		jobIDs := make([]int64, 0, len(reconciled.Actions))
+		for _, action := range reconciled.Actions {
+			jobIDs = append(jobIDs, action.JobID)
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: db.EventPlacementIntentPruned,
-				JobID:     pi.JobID,
-				Detail:    fmt.Sprintf("intent_id=%d operation=%s age=%s reason=stale", pi.ID, pi.Operation, time.Since(time.Unix(pi.CreatedAt, 0)).Round(time.Second)),
+				JobID:     action.JobID,
+				LaunchID:  action.LaunchID,
+				Detail:    fmt.Sprintf("kind=%s intent_id=%d detail=%s", action.Kind, action.IntentID, action.Detail),
 			})
 		}
-		oplog.Log("auto_pilot.intents_pruned",
-			oplog.WithDetailf("count=%d job_ids=%v", len(pruned), jobIDs))
-	}
-	if pruned, err := db.PruneMoveIntents(database, placementIntentProtectionWindow); err != nil {
-		oplog.Log("auto_pilot.move_intents_prune_error", oplog.WithError(err))
-	} else if len(pruned) > 0 {
-		jobIDs := make([]int64, 0, len(pruned))
-		for _, mi := range pruned {
-			jobIDs = append(jobIDs, mi.JobID)
-			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
-				EventKind: db.EventPlacementIntentPruned,
-				JobID:     mi.JobID,
-				Detail:    fmt.Sprintf("move_intent_id=%d age=%s reason=stale", mi.ID, time.Since(time.Unix(mi.CreatedAt, 0)).Round(time.Second)),
-			})
-		}
-		oplog.Log("auto_pilot.move_intents_pruned",
-			oplog.WithDetailf("count=%d job_ids=%v", len(pruned), jobIDs))
+		oplog.Log("auto_pilot.placement_reconciled",
+			oplog.WithDetailf("actions=%d job_ids=%v", len(reconciled.Actions), jobIDs))
 	}
 	moveRetryLaunches, err := fulfillOpenMoveToNewIntents(ctx, database, scoped)
 	if err != nil {

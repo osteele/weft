@@ -192,13 +192,15 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	}
 	wg.Wait()
 
-	// Catch-all: reset jobs stranded on dead cloud instances (stale host field).
-	if orphaned, err := db.ResetOrphanedCloudJobs(database); err != nil {
-		slog.Warn("failed to reset orphaned cloud jobs", "component", "reconcile", "error", err)
-	} else if orphaned > 0 {
-		slog.Debug("reset orphaned jobs from dead cloud instances", "component", "reconcile", "count", orphaned)
+	// Catch-all: converge stale placement rows, including jobs stranded on
+	// dead cloud-instance host references.
+	if placement, err := db.ReconcilePlacementRows(database, db.PlacementReconcileOptions{}); err != nil {
+		slog.Warn("failed to reconcile placement rows", "component", "reconcile", "error", err)
+	} else if len(placement.Actions) > 0 {
+		slog.Debug("reconciled placement rows", "component", "reconcile", "actions", len(placement.Actions), "jobs_updated", placement.JobsUpdated, "intents_resolved", placement.IntentsResolved)
 		mu.Lock()
-		result.Reconciled += int(orphaned)
+		result.Reconciled += len(placement.Actions)
+		result.JobsUpdated += placement.JobsUpdated
 		mu.Unlock()
 	}
 

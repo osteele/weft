@@ -767,6 +767,9 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAt
 		}
 		label = "created"
 	} else {
+		if sectionKey == "placing" {
+			label = "placing"
+		}
 		placedAt = job.QueuedAt
 		if displayAt, ok := placementQueuedAtByJob[job.ID]; ok && displayAt > 0 {
 			placedAt = displayAt

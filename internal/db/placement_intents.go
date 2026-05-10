@@ -117,6 +117,50 @@ func JobIDsWithOpenMoveOrPlacementIntents(database *sql.DB) (map[int64]struct{},
 	return out, rows.Err()
 }
 
+// OpenMoveOrPlacementIntentCreatedAt returns the newest open intent timestamp
+// per job across MoveIntent and PlacementIntent. The UI uses this as the
+// display age for Placing rows so retries do not inherit attempt-chain times.
+func OpenMoveOrPlacementIntentCreatedAt(database *sql.DB, jobIDs []int64) (map[int64]int64, error) {
+	if database == nil || len(jobIDs) == 0 {
+		return map[int64]int64{}, nil
+	}
+	args := make([]any, 0, len(jobIDs))
+	for _, id := range jobIDs {
+		if id > 0 {
+			args = append(args, id)
+		}
+	}
+	if len(args) == 0 {
+		return map[int64]int64{}, nil
+	}
+	query := `
+		WITH open_intents AS (
+			SELECT job_id, created_at FROM move_intents WHERE state = 'open'
+			UNION ALL
+			SELECT job_id, created_at FROM placement_intents WHERE state = 'open'
+		)
+		SELECT job_id, MAX(created_at)
+		  FROM open_intents
+		 WHERE job_id IN (` + sqlPlaceholders(len(args)) + `)
+		 GROUP BY job_id`
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64]int64)
+	for rows.Next() {
+		var jobID, createdAt int64
+		if err := rows.Scan(&jobID, &createdAt); err != nil {
+			return nil, err
+		}
+		if createdAt > 0 {
+			out[jobID] = createdAt
+		}
+	}
+	return out, rows.Err()
+}
+
 // ResolvePlacementIntent transitions an open intent to a terminal state.
 // No-op if the intent is already resolved.
 func ResolvePlacementIntent(database *sql.DB, intentID int64, state PlacementIntentState, resolution string) error {

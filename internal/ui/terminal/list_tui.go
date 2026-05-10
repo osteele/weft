@@ -2179,6 +2179,12 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if placementErr != nil {
 			placementQueuedAtByJob = map[int64]int64{}
 		}
+		intentCreatedAtByJob, intentErr := db.OpenMoveOrPlacementIntentCreatedAt(database, listJobIDs(jobs))
+		if intentErr == nil {
+			for jobID, createdAt := range intentCreatedAtByJob {
+				placementQueuedAtByJob[jobID] = createdAt
+			}
+		}
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
@@ -2274,6 +2280,16 @@ func loadRecentLaunchFailures(database *sql.DB, window time.Duration, now time.T
 		projectByLaunchID: projects,
 		windowSince:       since,
 	}
+}
+
+func listJobIDs(jobs []*db.Job) []int64 {
+	ids := make([]int64, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.ID > 0 {
+			ids = append(ids, job.ID)
+		}
+	}
+	return ids
 }
 
 func queuedRentalJobIDs(jobs []*db.Job) []int64 {

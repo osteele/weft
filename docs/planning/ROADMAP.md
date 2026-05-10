@@ -193,11 +193,6 @@ harder to produce and harder for the TUI to display.
   campaign replacement loops still account for attempts separately. The goal
   is one durable placement-attempt budget model so "four retries" means the
   same thing across initial placement, relaunch, move-to-new, and replacement.
-- **Make stale rows self-healing from a single reconciler.**
-  Several cleanup paths still repair related row shapes independently. A
-  placement reconciler should consume facts such as "launch failed", "agent
-  started job", "attempt terminal", and "intent open", then converge rows into
-  one valid state.
 - **Fix notification/read-model timing.**
   TUI and narration can observe different snapshots while placement is moving
   through several table updates. Emit from transition events, or read from a
