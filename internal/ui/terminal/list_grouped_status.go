@@ -1,9 +1,7 @@
 package terminal
 
 import (
-	"database/sql"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -16,22 +14,6 @@ import (
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/dashboard"
 )
-
-// loadPlacingJobIDs returns the union of jobs with an open MoveIntent or
-// PlacementIntent — the "autopilot, hands off" set the grouped UI surfaces
-// as "Placing". Returns nil on error or no DB; caller renders without the
-// bucket rather than failing.
-func loadPlacingJobIDs(database *sql.DB) map[int64]struct{} {
-	if database == nil {
-		return nil
-	}
-	out, err := db.JobIDsWithOpenMoveOrPlacementIntents(database)
-	if err != nil {
-		slog.Warn("load open intents", "component", "ui.list", "error", err)
-		return nil
-	}
-	return out
-}
 
 type groupedStatusSection struct {
 	title string
@@ -53,6 +35,7 @@ type groupedStatusRenderOptions struct {
 	launchStatusByID       map[int64]string
 	placingJobIDs          map[int64]struct{}
 	placementQueuedAtByJob map[int64]int64
+	placementStatusByJob   map[int64]db.PlacementStatus
 	launchFailures         *recentLaunchFailures
 	launchByID             map[int64]*db.Launch
 	now                    time.Time
@@ -180,24 +163,24 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, opts.placingJobIDs, now) {
-		case "running":
+		switch groupedStatusBucketWithOptions(job, launchesWithActiveJob, opts) {
+		case db.PlacementBucketRunning:
 			running = append(running, job)
-		case "paused":
+		case db.PlacementBucketPaused:
 			paused = append(paused, job)
-		case "placing":
+		case db.PlacementBucketPlacing:
 			placing = append(placing, job)
-		case "launching":
+		case db.PlacementBucketLaunching:
 			launching = append(launching, job)
-		case "queued":
+		case db.PlacementBucketQueued:
 			queued = append(queued, job)
-		case "unplaced":
+		case db.PlacementBucketUnplaced:
 			unplaced = append(unplaced, job)
-		case "completions":
+		case db.PlacementBucketCompletions:
 			completions = append(completions, job)
-		case "failures":
+		case db.PlacementBucketFailures:
 			failedJobs = append(failedJobs, job)
-		case "killed_canceled":
+		case db.PlacementBucketKilledCanceled:
 			killedCanceled = append(killedCanceled, job)
 		}
 	}
@@ -865,6 +848,15 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launche
 	default:
 		return ""
 	}
+}
+
+func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, opts groupedStatusRenderOptions) string {
+	if opts.placementStatusByJob != nil && job != nil {
+		if ps, ok := opts.placementStatusByJob[job.ID]; ok && ps.Bucket != "" {
+			return ps.Bucket
+		}
+	}
+	return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, opts.placingJobIDs, opts.now)
 }
 
 // groupedStatusJobParts returns the project name and description separately.

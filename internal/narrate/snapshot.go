@@ -32,6 +32,8 @@ type JobView struct {
 	EndTime            *int64
 	LaunchID           *int64
 	Tags               []string
+	PlacementBucket    string
+	PlacementAt        int64
 	PlacementReasons   []string // why this job is currently unplaced (if any)
 	QueueBlockedReason string   // transient queue-gate reason
 	FailureReason      string   // normalized failure reason (e.g. "timeout", "oom")
@@ -106,8 +108,12 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load launch live states: %w", err)
 	}
+	placementStatusByJob, err := db.PlacementStatusForJobs(database, jobs, now)
+	if err != nil {
+		return nil, fmt.Errorf("load placement status: %w", err)
+	}
 	for _, j := range jobs {
-		snap.Jobs[j.ID] = jobToView(j, liveByLaunch)
+		snap.Jobs[j.ID] = jobToView(j, liveByLaunch, placementStatusByJob[j.ID])
 	}
 
 	instances, err := db.ListNonTerminalLaunches(database)
@@ -127,7 +133,7 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	return snap, nil
 }
 
-func jobToView(j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState) JobView {
+func jobToView(j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementStatus db.PlacementStatus) JobView {
 	view := JobView{
 		ID:                 j.ID,
 		Status:             j.Status,
@@ -139,6 +145,8 @@ func jobToView(j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState) JobView {
 		EndTime:            j.EndTime,
 		LaunchID:           j.LaunchID,
 		Tags:               append([]string(nil), j.Tags...),
+		PlacementBucket:    placementStatus.Bucket,
+		PlacementAt:        placementStatus.DisplayAt,
 		PlacementReasons:   append([]string(nil), j.PlacementReasons...),
 		QueueBlockedReason: j.QueueBlockedReason,
 		FailureReason:      j.FailureReason,
@@ -285,7 +293,7 @@ func (d *Delta) ResolveRemovedJobs(database *sql.DB) error {
 	}
 	for _, id := range d.JobRemoved {
 		if j, ok := jobs[id]; ok {
-			d.JobFinished = append(d.JobFinished, jobToView(j, nil))
+			d.JobFinished = append(d.JobFinished, jobToView(j, nil, db.PlacementStatus{}))
 		}
 	}
 	d.JobRemoved = nil
@@ -354,6 +362,12 @@ func jobChanged(a, b JobView) bool {
 		return true
 	}
 	if !equalInt64Ptr(a.LaunchID, b.LaunchID) {
+		return true
+	}
+	if a.PlacementBucket != b.PlacementBucket {
+		return true
+	}
+	if a.PlacementAt != b.PlacementAt {
 		return true
 	}
 	return false

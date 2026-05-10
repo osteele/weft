@@ -172,10 +172,11 @@ impossible by schema shape rather than by scattered update guards.
 
 ## Placement correctness by construction
 
-Recent move-to-new fixes added explicit transition helpers for target-launch
-attachment and no-start target failure handling. The next step is to make the
-rest of placement follow the same shape, so invalid intermediate rows are
-harder to produce and harder for the TUI to display.
+Recent move-to-new fixes added explicit transition helpers, a stale-row
+reconciler, and a canonical placement read model consumed by the TUI and
+narrator snapshots. The next step is to keep moving placement writes and
+notifications behind the same model, so invalid intermediate rows are harder
+to produce and harder for operators to observe.
 
 - **Make placement transitions the only write path.**
   `AttachMoveIntentTargetLaunch` and `HandleMoveTargetFailedBeforeStart`
@@ -193,16 +194,12 @@ harder to produce and harder for the TUI to display.
   campaign replacement loops still account for attempts separately. The goal
   is one durable placement-attempt budget model so "four retries" means the
   same thing across initial placement, relaunch, move-to-new, and replacement.
-- **Fix notification/read-model timing.**
-  TUI and narration can observe different snapshots while placement is moving
-  through several table updates. Emit from transition events, or read from a
-  canonical placement status view, instead of partially updated intermediate
-  table state.
-- **Reduce TUI-specific status reconstruction.**
-  The TUI still infers placement state from launch rows, attempt rows, and
-  reason strings. A canonical DB/read-model query for "current placement
-  state" would keep stale rows and launch replacement states from leaking into
-  display code.
+- **Emit placement notifications from transitions.**
+  The TUI and narrator now share a canonical placement read model, but
+  notifications can still be generated from snapshots taken between several
+  writes. Emit placement change events from named transitions, or from a
+  durable transition-event table, so narration does not report transient
+  intermediate states.
 
 ## UserIntent entity (replaces requested_status three-way merge)
 

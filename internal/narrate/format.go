@@ -12,20 +12,22 @@ import (
 )
 
 type formattedJobOut struct {
-	ID                 int64    `json:"id"`
-	Status             string   `json:"status"`
-	Host               string   `json:"host,omitempty"`
-	Project            string   `json:"project,omitempty"`
-	LaunchID           *int64   `json:"instance_id,omitempty"`
-	Tags               string   `json:"tags,omitempty"`
-	Command            string   `json:"command,omitempty"`
-	AgeSeconds         int64    `json:"age_seconds,omitempty"`
-	ExitCode           *int     `json:"exit_code,omitempty"`
-	PlacementReasons   []string `json:"placement_blocked_reasons,omitempty"`
-	QueueBlockedReason string   `json:"queue_blocked_reason,omitempty"`
-	FailureReason      string   `json:"failure_reason,omitempty"`
-	ErrorMessage       string   `json:"error_message,omitempty"`
-	Progress           string   `json:"progress,omitempty"`
+	ID                  int64    `json:"id"`
+	Status              string   `json:"status"`
+	Host                string   `json:"host,omitempty"`
+	Project             string   `json:"project,omitempty"`
+	LaunchID            *int64   `json:"instance_id,omitempty"`
+	Tags                string   `json:"tags,omitempty"`
+	Command             string   `json:"command,omitempty"`
+	AgeSeconds          int64    `json:"age_seconds,omitempty"`
+	ExitCode            *int     `json:"exit_code,omitempty"`
+	PlacementBucket     string   `json:"placement_bucket,omitempty"`
+	PlacementAgeSeconds int64    `json:"placement_age_seconds,omitempty"`
+	PlacementReasons    []string `json:"placement_blocked_reasons,omitempty"`
+	QueueBlockedReason  string   `json:"queue_blocked_reason,omitempty"`
+	FailureReason       string   `json:"failure_reason,omitempty"`
+	ErrorMessage        string   `json:"error_message,omitempty"`
+	Progress            string   `json:"progress,omitempty"`
 }
 
 // FormatSnapshot renders a snapshot as compact JSON for the model. We keep
@@ -387,9 +389,13 @@ func jobToOut(j JobView, now time.Time) formattedJobOut {
 		Command:            j.Command,
 		AgeSeconds:         ageSeconds(j.StartTime, now),
 		ExitCode:           j.ExitCode,
+		PlacementBucket:    j.PlacementBucket,
 		QueueBlockedReason: j.QueueBlockedReason,
 		FailureReason:      j.FailureReason,
 		ErrorMessage:       j.ErrorMessage,
+	}
+	if j.PlacementAt > 0 {
+		out.PlacementAgeSeconds = max(0, now.Unix()-j.PlacementAt)
 	}
 	if j.ProgressPct >= 0 {
 		out.Progress = strings.TrimSpace(progress.FormatPhaseProgress(j.ProgressPhase, j.ProgressPct))

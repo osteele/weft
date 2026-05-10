@@ -88,6 +88,7 @@ type listTUIModel struct {
 	launchStatusByID           map[int64]string
 	placingJobIDs              map[int64]struct{}
 	placementQueuedAtByJob     map[int64]int64
+	placementStatusByJob       map[int64]db.PlacementStatus
 	launchByID                 map[int64]*db.Launch
 	launchBootstrapP50         time.Duration
 	launchBootstrapSamples     int
@@ -121,6 +122,7 @@ type listJobsLoadedMsg struct {
 	launchStatusByID         map[int64]string
 	placingJobIDs            map[int64]struct{}
 	placementQueuedAtByJob   map[int64]int64
+	placementStatusByJob     map[int64]db.PlacementStatus
 	launchByID               map[int64]*db.Launch
 	launchBootstrapP50       time.Duration
 	launchBootstrapSamples   int
@@ -524,6 +526,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchStatusByID = msg.launchStatusByID
 		m.placingJobIDs = msg.placingJobIDs
 		m.placementQueuedAtByJob = msg.placementQueuedAtByJob
+		m.placementStatusByJob = msg.placementStatusByJob
 		m.launchByID = msg.launchByID
 		m.launchBootstrapP50 = msg.launchBootstrapP50
 		m.launchBootstrapSamples = msg.launchBootstrapSamples
@@ -2034,6 +2037,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		launchStatusByID:       m.launchStatusByID,
 		placingJobIDs:          m.placingJobIDs,
 		placementQueuedAtByJob: m.placementQueuedAtByJob,
+		placementStatusByJob:   m.placementStatusByJob,
 		launchFailures:         m.recentLaunchFailures,
 		launchByID:             m.launchByID,
 		now:                    time.Now(),
@@ -2059,7 +2063,12 @@ func (m listTUIModel) hasActiveLaunchingSpinner() bool {
 		return false
 	}
 	for _, job := range m.groupedJobsWithAutoReasons() {
-		if groupedStatusBucket(job, m.launchStatusByID, m.launchesWithActiveJob(), m.placingJobIDs, time.Now()) != "launching" {
+		if groupedStatusBucketWithOptions(job, m.launchesWithActiveJob(), groupedStatusRenderOptions{
+			launchStatusByID:     m.launchStatusByID,
+			placingJobIDs:        m.placingJobIDs,
+			placementStatusByJob: m.placementStatusByJob,
+			now:                  time.Now(),
+		}) != db.PlacementBucketLaunching {
 			continue
 		}
 		live := launchLiveStateForLaunchingJob(job, m.launchLiveByID)
@@ -2073,6 +2082,20 @@ func (m listTUIModel) hasActiveLaunchingSpinner() bool {
 
 func (m listTUIModel) launchesWithActiveJob() map[int64]bool {
 	return computeLaunchesWithActiveJob(m.groupedJobsWithAutoReasons(), m.launchLiveByID)
+}
+
+func placementDisplayMaps(statusByJob map[int64]db.PlacementStatus) (map[int64]struct{}, map[int64]int64) {
+	placingJobIDs := make(map[int64]struct{})
+	placementQueuedAtByJob := make(map[int64]int64)
+	for jobID, ps := range statusByJob {
+		if ps.HasOpenIntent {
+			placingJobIDs[jobID] = struct{}{}
+		}
+		if ps.DisplayAt > 0 {
+			placementQueuedAtByJob[jobID] = ps.DisplayAt
+		}
+	}
+	return placingJobIDs, placementQueuedAtByJob
 }
 
 func (m *listTUIModel) clampCursor() {
@@ -2175,23 +2198,19 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			bootstrapSamples = 0
 		}
 		stageETAByName, stageEnteredAtByID := loadLaunchingStageETA(database, jobs, launchLiveByID)
-		placementQueuedAtByJob, placementErr := db.PlacementDisplayQueuedAt(database, queuedRentalJobIDs(jobs))
+		placementStatusByJob, placementErr := db.PlacementStatusForJobs(database, jobs, time.Now())
 		if placementErr != nil {
-			placementQueuedAtByJob = map[int64]int64{}
+			placementStatusByJob = map[int64]db.PlacementStatus{}
 		}
-		intentCreatedAtByJob, intentErr := db.OpenMoveOrPlacementIntentCreatedAt(database, listJobIDs(jobs))
-		if intentErr == nil {
-			for jobID, createdAt := range intentCreatedAtByJob {
-				placementQueuedAtByJob[jobID] = createdAt
-			}
-		}
+		placingJobIDs, placementQueuedAtByJob := placementDisplayMaps(placementStatusByJob)
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
 			launchLiveByID:           launchLiveByID,
 			launchStatusByID:         launchStatusByID,
-			placingJobIDs:            loadPlacingJobIDs(database),
+			placingJobIDs:            placingJobIDs,
 			placementQueuedAtByJob:   placementQueuedAtByJob,
+			placementStatusByJob:     placementStatusByJob,
 			launchByID:               launchByID,
 			launchBootstrapP50:       bootstrapP50,
 			launchBootstrapSamples:   bootstrapSamples,
@@ -2280,29 +2299,6 @@ func loadRecentLaunchFailures(database *sql.DB, window time.Duration, now time.T
 		projectByLaunchID: projects,
 		windowSince:       since,
 	}
-}
-
-func listJobIDs(jobs []*db.Job) []int64 {
-	ids := make([]int64, 0, len(jobs))
-	for _, job := range jobs {
-		if job != nil && job.ID > 0 {
-			ids = append(ids, job.ID)
-		}
-	}
-	return ids
-}
-
-func queuedRentalJobIDs(jobs []*db.Job) []int64 {
-	ids := make([]int64, 0, len(jobs))
-	for _, job := range jobs {
-		if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-			continue
-		}
-		if job.EffectiveStatus() == db.StatusQueued {
-			ids = append(ids, job.ID)
-		}
-	}
-	return ids
 }
 
 // loadInventoryHostInfo returns CachedHostInfo keyed by host name, filtered

@@ -867,6 +867,27 @@ func TestRenderJobListGroupedStatusPlainAt_OpenIntentDoesNotOverrideRunning(t *t
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWithOptions_UsesPlacementStatusReadModel(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(12)
+	jobs := []*db.Job{
+		{ID: 1801, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "moving"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]db.PlacementStatus{
+			1801: {JobID: 1801, Bucket: db.PlacementBucketPlacing, DisplayAt: 4_000, HasOpenIntent: true, LaunchID: &launchID},
+		},
+		placementQueuedAtByJob: map[int64]int64{1801: 4_000},
+		now:                    now,
+	})
+	if !strings.Contains(out, "Placing (1):") {
+		t.Fatalf("expected Placing section from placement read model, got:\n%s", out)
+	}
+	if !strings.Contains(out, "— placing 16m ago") {
+		t.Fatalf("expected placement read-model time, got:\n%s", out)
+	}
+}
+
 func TestAppendRecentFailedLaunchRows_NilOrEmptyEmitsNothing(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	if got := appendRecentFailedLaunchRows(nil, nil, 0, 0, now); got != nil {
