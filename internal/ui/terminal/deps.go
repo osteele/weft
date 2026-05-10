@@ -40,6 +40,7 @@ type Dependencies struct {
 	BuildSurvivalModel                                func(*sql.DB) *bidding.SurvivalModel
 	CampaignActualCost                                func([]*db.Launch) string
 	CollectJobsForList                                func(*sql.DB, []string) ([]*db.Job, error)
+	CollectJobsForListWithFilters                     func(*sql.DB, []string, string, string) ([]*db.Job, error)
 	CreateOptsForProvider                             func(*config.Config, cloud.Provider) (cloud.CreateOpts, error)
 	ExecuteReuseAssignments                           func(*sql.DB, *r2.Client, []campaign.ReuseAssignment) error
 	FilterLaunchJobsByProject                         func([]*db.Job) []*db.Job
@@ -115,6 +116,26 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		return nil, fmt.Errorf("terminal dependencies are not configured")
 	}
 	return deps.CollectJobsForList(database, args)
+}
+
+func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter string) ([]*db.Job, error) {
+	if deps.CollectJobsForListWithFilters != nil {
+		return deps.CollectJobsForListWithFilters(database, args, statusFilter, processedFilter)
+	}
+	jobs, err := collectJobsForList(database, args)
+	if err != nil {
+		return nil, err
+	}
+	if statusFilter != "" {
+		filtered := make([]*db.Job, 0, len(jobs))
+		for _, job := range jobs {
+			if job != nil && job.EffectiveStatus() == statusFilter {
+				filtered = append(filtered, job)
+			}
+		}
+		jobs = filtered
+	}
+	return db.FilterJobsByTags(jobs, nil, processedFilter), nil
 }
 
 func createOptsForProvider(cfg *config.Config, provider cloud.Provider) (cloud.CreateOpts, error) {

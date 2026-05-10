@@ -17,7 +17,7 @@ func TestJobWatchNeedsWritableDB(t *testing.T) {
 	}
 
 	listGroupBy = ""
-	if jobWatchNeedsWritableDB(true) {
-		t.Fatal("expected non-grouped TUI watch to use read-only DB")
+	if !jobWatchNeedsWritableDB(true) {
+		t.Fatal("expected non-grouped TUI watch to require writable DB")
 	}
 }

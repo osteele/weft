@@ -40,7 +40,7 @@ func TestJobsWithEffectiveStatusReclassifiesHostlessRunningAsQueued(t *testing.T
 	}
 }
 
-func TestPrintJobsShowsDirectoryTailColumn(t *testing.T) {
+func TestPrintJobsDefaultColumnsShowProjectWithoutDirectory(t *testing.T) {
 	jobs := []*db.Job{
 		{
 			ID:          42,
@@ -59,14 +59,11 @@ func TestPrintJobsShowsDirectoryTailColumn(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(output, "DIR") {
-		t.Fatalf("output missing DIR header, got:\n%s", output)
+	if strings.Contains(output, "DIR") {
+		t.Fatalf("output unexpectedly includes DIR header, got:\n%s", output)
 	}
 	if !strings.Contains(output, "PROJECT") {
 		t.Fatalf("output missing PROJECT header, got:\n%s", output)
-	}
-	if !strings.Contains(output, "project-alpha") {
-		t.Fatalf("output missing directory tail, got:\n%s", output)
 	}
 	if !strings.Contains(output, "llm-performance-models") {
 		t.Fatalf("output missing project name, got:\n%s", output)

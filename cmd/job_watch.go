@@ -80,7 +80,7 @@ func openJobWatchDatabase(useTUI bool) (*sql.DB, error) {
 }
 
 func jobWatchNeedsWritableDB(useTUI bool) bool {
-	return useTUI && listGroupBy == "status"
+	return useTUI
 }
 
 // watchJobsPlainAll polls all jobs matching the current list filters,

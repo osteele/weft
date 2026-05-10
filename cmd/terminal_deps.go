@@ -21,6 +21,7 @@ func init() {
 		BuildSurvivalModel:                                buildSurvivalModel,
 		CampaignActualCost:                                campaignActualCost,
 		CollectJobsForList:                                collectJobsForList,
+		CollectJobsForListWithFilters:                     collectJobsForListWithFilters,
 		CreateOptsForProvider:                             createOptsForProvider,
 		ExecuteReuseAssignments:                           executeReuseAssignments,
 		FilterLaunchJobsByProject:                         filterLaunchJobsByProject,

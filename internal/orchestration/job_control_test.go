@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 )
 
 func TestKillOrCancelCloudJob_SetsRequestedStatusOnTerminalInstance(t *testing.T) {
@@ -45,5 +46,30 @@ func TestKillOrCancelCloudJob_SetsRequestedStatusOnTerminalInstance(t *testing.T
 	}
 	if updated.EffectiveStatus() != db.StatusKilled {
 		t.Fatalf("effective status = %q, want %q", updated.EffectiveStatus(), db.StatusKilled)
+	}
+}
+
+func TestKillOrCancelJobCancelsDraftJobLocally(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordDraftJob(database, "", "/tmp/project", "python train.py", "draft job", "", "")
+	if err != nil {
+		t.Fatalf("RecordDraftJob: %v", err)
+	}
+
+	result, err := KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast)
+	if err != nil {
+		t.Fatalf("KillOrCancelJob: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("result.Success = false")
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if updated.EffectiveStatus() != db.StatusCanceled {
+		t.Fatalf("effective status = %q, want %q", updated.EffectiveStatus(), db.StatusCanceled)
 	}
 }

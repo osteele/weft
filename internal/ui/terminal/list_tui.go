@@ -46,6 +46,8 @@ type listTUIModel struct {
 	database                   *sql.DB
 	args                       []string
 	title                      string
+	unprocessedView            bool
+	statusView                 string
 	jobs                       []*db.Job
 	layout                     jobListLayout
 	cursor                     int
@@ -258,10 +260,15 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
+	unprocessedView := listTitleHasPart(title, "unprocessed")
+	statusView := listTitleStatusView(title)
+	baseTitle := listTitleWithoutPart(listTitleWithoutPart(listTitleWithoutPart(title, "unprocessed"), "queued"), "draft")
 	model := listTUIModel{
 		database:               database,
 		args:                   append([]string(nil), args...),
-		title:                  title,
+		title:                  baseTitle,
+		unprocessedView:        unprocessedView,
+		statusView:             statusView,
 		jobs:                   jobs,
 		syncEnabled:            syncEnabled,
 		pendingSyncHosts:       map[string]struct{}{},
@@ -270,13 +277,13 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		ctx:                    ctx,
 		cancel:                 cancel,
 		groupedByStatus:        groupedByStatus,
-		groupedUnprocessedView: groupedStatusUnprocessedView(title),
+		groupedUnprocessedView: unprocessedView,
 		autoMode:               groupedByStatus && autoMode,
 		autoLeaseOwner:         fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
-		autoLeaseScope:         buildListAutoLeaseScope(title),
+		autoLeaseScope:         buildListAutoLeaseScope(baseTitle),
 		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(cfg),
 		autoDailyCapCents:      loadAutoRunawaySpendDailyCapCents(cfg),
-		quickLaunchScope:       "list_quick_launch:" + buildListAutoLeaseScope(title),
+		quickLaunchScope:       "list_quick_launch:" + buildListAutoLeaseScope(baseTitle),
 		focused:                true,
 		appConfig:              cfg,
 		cloudClients:           cloudClients,
@@ -366,74 +373,10 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.groupedByStatus {
 			return m.handleGroupedKey(msg)
 		}
+		if next, cmd, ok := handleListKeyBinding(m, msg.String(), listFlatKeyBindings()); ok {
+			return next, cmd
+		}
 		switch msg.String() {
-		case "ctrl+c", "q", "esc":
-			m.shutdown()
-			return m, tea.Quit
-		case "ctrl+z":
-			return m, tea.Suspend
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.jobs)-1 {
-				m.cursor++
-			}
-		case "g", "home":
-			m.cursor = 0
-		case "G", "end":
-			if len(m.jobs) > 0 {
-				m.cursor = len(m.jobs) - 1
-			}
-		case "pgdown", "space":
-			m.cursor += m.pageSize()
-			if m.cursor >= len(m.jobs) {
-				m.cursor = max(0, len(m.jobs)-1)
-			}
-		case "pgup", "b":
-			m.cursor -= m.pageSize()
-			if m.cursor < 0 {
-				m.cursor = 0
-			}
-		case "r":
-			return m.triggerManualRefresh()
-		case "v":
-			if m.moveLookupPending {
-				m.moveLookupPending = false
-				m.moveLookupRequestID = 0
-			}
-			m.groupedByStatus = !m.groupedByStatus
-			m.rebuildLayout()
-			m.rebuildGroupedRows()
-			m.clampCursor()
-			m.adjustOffset()
-			if m.groupedByStatus {
-				m.statusMessage = "Grouped status view"
-			} else {
-				m.statusMessage = "Ungrouped list view"
-			}
-			return m, nil
-		case "i":
-			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
-		case "?":
-			m.showHelp = true
-			return m, nil
-		case "a":
-			job := m.currentSelectedJob()
-			if job == nil {
-				m.statusMessage = "Select a job row to view attempts"
-				return m, nil
-			}
-			return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
-		case "c":
-			job := m.currentSelectedJob()
-			if job == nil {
-				m.statusMessage = "Select a job row for coding-assistant"
-				return m, nil
-			}
-			cmd := m.beginAIAssist(job)
-			return m, cmd
 		case "A":
 			if m.groupedByStatus {
 				m.autoMode = !m.autoMode
@@ -773,7 +716,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchProcessDoneMsg:
 		if msg.err != nil {
-			m.statusMessage = fmt.Sprintf("Mark processed failed: %v", msg.err)
+			m.statusMessage = fmt.Sprintf("Processed tag update failed: %v", msg.err)
 			return m, nil
 		}
 		if strings.TrimSpace(msg.message) != "" {
@@ -976,7 +919,7 @@ func (m listTUIModel) View() string {
 	mateRows, matesActive := hostMatesForFlatView(m.jobs, m.cursor)
 	rowWidth := m.width
 
-	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
+	title := fmt.Sprintf("%s (%d)", m.displayTitle(), len(m.jobs))
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
 	b.WriteString("\n")
 	header := truncateDisplayWidth(formatJobListHeader(layout), rowWidth)
@@ -1033,13 +976,27 @@ func (m listTUIModel) View() string {
 	return b.String()
 }
 
+func (m listTUIModel) displayTitle() string {
+	title := m.title
+	switch m.statusView {
+	case db.StatusQueued:
+		title = strings.TrimSpace(title + " • queued")
+	case db.StatusDraft:
+		title = strings.TrimSpace(title + " • draft")
+	}
+	if m.unprocessedView {
+		return strings.TrimSpace(title + " • unprocessed")
+	}
+	return title
+}
+
 func (m listTUIModel) groupedView() string {
 	if m.width <= 0 || m.height <= 0 {
 		return "Loading..."
 	}
 
 	var b strings.Builder
-	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
+	title := fmt.Sprintf("%s (%d)", m.displayTitle(), len(m.jobs))
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
 	b.WriteString("\n")
 
@@ -1247,28 +1204,34 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.autoMode {
 		autoState = "ON"
 	}
-	line := fmt.Sprintf("A:auto (%s)", autoState)
-	line += "  r:refresh"
+	line := fmt.Sprintf("%s (%s)", listKeyGroupedAuto.footerToken(), autoState)
+	line += "  " + listKeyRefresh.footerToken()
 	if m.selectedGroupedJob() != nil {
-		line += "  a:attempts  k:kill  u:unplace  p:processed"
+		line += "  " + listKeyAttempts.footerToken()
+		line += "  " + listKeyKillCancel.footerToken()
+		line += "  " + listKeyUnplace.footerToken()
+		line += "  " + listKeyToggleProcessed.footerToken()
 		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
-			line += "  m:move  N:new for selected"
+			line += "  " + listKeyMove.footerToken()
+			line += "  " + listKeyLaunchSelected.footerToken()
 		}
-		line += "  P:priority"
+		line += "  " + listKeyPriority.footerToken()
 	}
 	if hasQueued {
-		line += "  n:new instance"
+		line += "  " + listKeyLaunchQueued.footerToken()
 	}
-	line += "  R:rebalance"
+	line += "  " + listKeyRebalance.footerToken()
 	if strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
 		if m.showAutoPilotErrorDetails {
-			line += "  e:hide error"
+			line += "  " + listKeyAutoHideError.footerToken()
 		} else {
-			line += "  e:error details"
+			line += "  " + listKeyAutoErrorDetails.footerToken()
 		}
 	}
-	line += "  v:ungroup  i:watch  ?:help"
 	line += "  q:quit"
+	line += "  " + listKeyListView.footerToken()
+	line += "  " + listKeyInstances.footerToken()
+	line += "  ?:help"
 	return line
 }
 
@@ -1311,6 +1274,18 @@ func (m listTUIModel) currentSelectedJob() *db.Job {
 		return m.jobs[m.cursor]
 	}
 	return nil
+}
+
+func listJobCanKillOrCancel(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	switch job.EffectiveStatus() {
+	case db.StatusQueued, db.StatusDraft, db.StatusRunning, db.StatusStarting, db.StatusPaused:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m listTUIModel) selectedGroupedJob() *db.Job {
@@ -1513,205 +1488,8 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.autoRunRateInputActive {
 		return m.handleAutoRunRateInputKey(msg)
 	}
-	switch msg.String() {
-	case "esc":
-		if m.moveLookupPending {
-			m.moveLookupPending = false
-			m.moveLookupRequestID = 0
-			m.statusMessage = "Move lookup canceled"
-			return m, nil
-		}
-		m.shutdown()
-		return m, tea.Quit
-	case "ctrl+c", "q":
-		m.shutdown()
-		return m, tea.Quit
-	case "ctrl+z":
-		return m, tea.Suspend
-	case "up":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-		return m, nil
-	case "down", "j":
-		if m.cursor < len(m.groupedSelectableRows)-1 {
-			m.cursor++
-		}
-		return m, nil
-	case "g", "home":
-		m.cursor = 0
-		return m, nil
-	case "G", "end":
-		if len(m.groupedSelectableRows) > 0 {
-			m.cursor = len(m.groupedSelectableRows) - 1
-		}
-		return m, nil
-	case "pgdown", "space":
-		m.cursor += m.pageSize()
-		if m.cursor >= len(m.groupedSelectableRows) {
-			m.cursor = max(0, len(m.groupedSelectableRows)-1)
-		}
-		return m, nil
-	case "pgup", "b":
-		m.cursor -= m.pageSize()
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		return m, nil
-	case "r":
-		return m.triggerManualRefresh()
-	case "a":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			m.statusMessage = "Select a job row to view attempts"
-			return m, nil
-		}
-		return m, func() tea.Msg { return switchToAttemptsMsg{jobID: job.ID} }
-	case "c":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			m.statusMessage = "Select a job row for coding-assistant"
-			return m, nil
-		}
-		cmd := m.beginAIAssist(job)
-		return m, cmd
-	case "A":
-		m.autoMode = !m.autoMode
-		if m.autoMode {
-			m.clearAutoPilotPersistentState()
-			m.resumeAutoPilotNow()
-			m.statusMessage = "Auto-pilot ON"
-			return m, m.runAutoPilot()
-		}
-		m.autoInProgress = false
-		m.autoBlockReasons = nil
-		m.clearAutoPilotPersistentState()
-		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-		m.statusMessage = "Auto-pilot OFF"
-		return m, nil
-	case "$":
-		return m.beginAutoRunRateInput()
-	case "v":
-		if m.moveLookupPending {
-			m.moveLookupPending = false
-			m.moveLookupRequestID = 0
-		}
-		m.groupedByStatus = false
-		m.rebuildLayout()
-		m.rebuildGroupedRows()
-		m.clampCursor()
-		m.adjustOffset()
-		m.statusMessage = "Ungrouped list view"
-		return m, nil
-	case "i":
-		return m, func() tea.Msg { return switchToSystemWatchMsg{} }
-	case "?":
-		m.showHelp = true
-		return m, nil
-	case "e":
-		if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
-			m.statusMessage = "No auto-pilot error details."
-			return m, nil
-		}
-		m.showAutoPilotErrorDetails = !m.showAutoPilotErrorDetails
-		return m, nil
-	case "n":
-		if m.quickLaunching {
-			m.statusMessage = "Launch already in progress..."
-			return m, nil
-		}
-		if !computeGroupedETA(m.groupedJobsWithAutoReasons(), m.launchLiveByID, time.Now()).HasQueued {
-			m.statusMessage = "No queued jobs to launch."
-			return m, nil
-		}
-		m.clearAutoPilotPersistentState()
-		m.quickLaunching = true
-		m.statusMessage = "Launching new instance..."
-		progressCh := make(chan listQuickLaunchProgressMsg, 16)
-		doneCh := make(chan listQuickLaunchDoneMsg, 1)
-		m.quickLaunchProgress = progressCh
-		m.quickLaunchDone = doneCh
-		return m, tea.Batch(
-			m.startQuickLaunch(progressCh, doneCh),
-			m.waitForQuickLaunchProgress(),
-			m.waitForQuickLaunchDone(),
-		)
-	case "N":
-		return m.beginSelectedLaunchNew()
-	case "P":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			return m, nil
-		}
-		nextPriority := 1
-		if job.Priority > 0 {
-			nextPriority = 0
-		}
-		if err := db.SetJobPriority(m.database, job.ID, nextPriority); err != nil {
-			m.statusMessage = fmt.Sprintf("Failed to update priority for job #%d: %v", job.ID, err)
-			return m, nil
-		}
-		job.Priority = nextPriority
-		if nextPriority > 0 && job.EffectiveStatus() == db.StatusQueued && job.Host != "" {
-			_ = db.SetQueuedAtBefore(m.database, job.ID, job.Host)
-		}
-		if nextPriority > 0 {
-			m.statusMessage = fmt.Sprintf("Job #%d marked priority", job.ID)
-		} else {
-			m.statusMessage = fmt.Sprintf("Job #%d priority cleared", job.ID)
-		}
-		return m, m.reloadJobs()
-	case "R":
-		m.clearAutoPilotPersistentState()
-		_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-		m.rebalancePreview = rebalancePreviewModel{active: true, loading: true}
-		m.statusMessage = "Planning rebalance moves..."
-		return m, requestRebalancePreview(m.database)
-	case "k":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			return m, nil
-		}
-		m.clearAutoPilotPersistentState()
-		m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
-		return m, requestWatchJobKill(m.database, job.ID)
-	case "u":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			return m, nil
-		}
-		if job.EffectiveStatus() != db.StatusQueued {
-			m.statusMessage = fmt.Sprintf("Job #%d is %s; only queued jobs can be unplaced", job.ID, job.EffectiveStatus())
-			return m, nil
-		}
-		m.clearAutoPilotPersistentState()
-		m.statusMessage = fmt.Sprintf("Unplacing job #%d...", job.ID)
-		return m, requestWatchJobUnplace(m.database, job.ID)
-	case "p":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			return m, nil
-		}
-		m.clearAutoPilotPersistentState()
-		m.statusMessage = fmt.Sprintf("Marking job #%d as processed...", job.ID)
-		return m, requestWatchJobMarkProcessed(m.database, job.ID)
-	case "m":
-		job := m.selectedGroupedJob()
-		if job == nil {
-			return m, nil
-		}
-		if job.EffectiveStatus() != db.StatusQueued {
-			m.statusMessage = "Move is only available for queued jobs"
-			return m, nil
-		}
-		m.clearAutoPilotPersistentState()
-		m.moveLookupSeq++
-		reqID := m.moveLookupSeq
-		m.moveLookupPending = true
-		m.moveLookupRequestID = reqID
-		m.moveLookupJobID = job.ID
-		m.statusMessage = fmt.Sprintf("Searching move destinations for job #%d... (Esc to cancel)", job.ID)
-		return m, m.requestGroupedMoveOptions(reqID, job.ID)
+	if next, cmd, ok := handleListKeyBinding(m, msg.String(), listGroupedKeyBindings()); ok {
+		return next, cmd
 	}
 	return m, nil
 }
@@ -1731,6 +1509,50 @@ func (m listTUIModel) beginSelectedLaunchNew() (tea.Model, tea.Cmd) {
 	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 	m.statusMessage = fmt.Sprintf("Launching new instance for job #%d...", job.ID)
 	return m, m.requestSelectedLaunchNew(job.ID)
+}
+
+func (m listTUIModel) toggleSelectedGroupedPriority() (tea.Model, tea.Cmd) {
+	job := m.selectedGroupedJob()
+	if job == nil {
+		return m, nil
+	}
+	nextPriority := 1
+	if job.Priority > 0 {
+		nextPriority = 0
+	}
+	if err := db.SetJobPriority(m.database, job.ID, nextPriority); err != nil {
+		m.statusMessage = fmt.Sprintf("Failed to update priority for job #%d: %v", job.ID, err)
+		return m, nil
+	}
+	job.Priority = nextPriority
+	if nextPriority > 0 && job.EffectiveStatus() == db.StatusQueued && job.Host != "" {
+		_ = db.SetQueuedAtBefore(m.database, job.ID, job.Host)
+	}
+	if nextPriority > 0 {
+		m.statusMessage = fmt.Sprintf("Job #%d marked priority", job.ID)
+	} else {
+		m.statusMessage = fmt.Sprintf("Job #%d priority cleared", job.ID)
+	}
+	return m, m.reloadJobs()
+}
+
+func (m listTUIModel) beginGroupedMove() (tea.Model, tea.Cmd) {
+	job := m.selectedGroupedJob()
+	if job == nil {
+		return m, nil
+	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		m.statusMessage = "Move is only available for queued jobs"
+		return m, nil
+	}
+	m.clearAutoPilotPersistentState()
+	m.moveLookupSeq++
+	reqID := m.moveLookupSeq
+	m.moveLookupPending = true
+	m.moveLookupRequestID = reqID
+	m.moveLookupJobID = job.ID
+	m.statusMessage = fmt.Sprintf("Searching move destinations for job #%d... (Esc to cancel)", job.ID)
+	return m, m.requestGroupedMoveOptions(reqID, job.ID)
 }
 
 func (m listTUIModel) requestSelectedLaunchNew(jobID int64) tea.Cmd {
@@ -1922,11 +1744,47 @@ func (m listTUIModel) footerText(rows int) string {
 	if m.statusMessage != "" {
 		state += "  " + m.statusMessage
 	}
-	state += "  up/down move  space/b page  g/G top/bottom  P:priority  v:toggle  i:instances  ? help  q quit"
+	state += "  up/down move  space/b page  g/G top/bottom"
+	for _, binding := range []listKeyBinding{
+		listKeyToggleQueuedDraft,
+		listKeyToggleUnprocessed,
+		listKeyToggleProcessed,
+		listKeyKillCancel,
+		listKeyPriority,
+		listKeyGroupedView,
+		listKeyInstances,
+	} {
+		state += "  " + binding.footerToken()
+	}
+	state += "  ? help  q quit"
 	return state
 }
 
 func (m listTUIModel) renderListHelpView() string {
+	viewBinding := listKeyGroupedView
+	if m.groupedByStatus {
+		viewBinding = listKeyListView
+	}
+	selectedJobLines := []string{
+		"  a view attempts for selected job",
+		"  c coding-assistant (progress / review / remediate, status-dependent)",
+	}
+	if m.groupedByStatus {
+		selectedJobLines = append(selectedJobLines,
+			"  N launch selected on new instance",
+			"  P toggle priority",
+			"  x kill/cancel selected",
+			"  u unplace selected",
+			"  p toggle processed tag",
+			"  m move selected",
+		)
+	} else {
+		selectedJobLines = append(selectedJobLines,
+			listKeyToggleProcessed.helpLine()+" tag",
+			listKeyKillCancel.helpLine()+" selected job",
+		)
+	}
+
 	sections := []keyHelpSection{
 		{
 			Title: "Navigation",
@@ -1939,16 +1797,13 @@ func (m listTUIModel) renderListHelpView() string {
 		{
 			Title: "Views",
 			Lines: []string{
-				"  v toggle grouped/ungrouped jobs",
-				"  i open instances watch",
+				viewBinding.helpLine(),
+				listKeyInstances.helpLine(),
 			},
 		},
 		{
 			Title: "Selected job",
-			Lines: []string{
-				"  a view attempts for selected job",
-				"  c coding-assistant (progress / review / remediate, status-dependent)",
-			},
+			Lines: selectedJobLines,
 		},
 		{
 			Title: "General",
@@ -1958,19 +1813,19 @@ func (m listTUIModel) renderListHelpView() string {
 			},
 		},
 	}
-	if m.groupedByStatus {
+	if !m.groupedByStatus {
 		sections = append(sections,
 			keyHelpSection{
-				Title: "Selected job actions",
+				Title: "List filters",
 				Lines: []string{
-					"  N launch selected on new instance",
-					"  P toggle priority",
-					"  k kill selected",
-					"  u unplace selected",
-					"  p mark processed",
-					"  m move selected",
+					"  d toggle queued/draft",
+					"  U toggle unprocessed filter",
 				},
 			},
+		)
+	}
+	if m.groupedByStatus {
+		sections = append(sections,
 			keyHelpSection{
 				Title: "Queue and placement",
 				Lines: []string{
@@ -2162,8 +2017,13 @@ func (m listTUIModel) pageSize() int {
 func (m listTUIModel) reloadJobs() tea.Cmd {
 	database := m.database
 	args := append([]string(nil), m.args...)
+	processedFilter := ""
+	if m.unprocessedView {
+		processedFilter = "unprocessed"
+	}
+	statusFilter := m.statusView
 	return func() tea.Msg {
-		jobs, err := collectJobsForList(database, args)
+		jobs, err := collectJobsForListWithFilters(database, args, statusFilter, processedFilter)
 		if err != nil {
 			return listJobsLoadedMsg{jobs: jobs, err: err}
 		}
@@ -2708,12 +2568,48 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 }
 
 func groupedStatusUnprocessedView(title string) bool {
+	return listTitleHasPart(title, "unprocessed")
+}
+
+func listTitleHasPart(title, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
 	for _, part := range strings.Split(strings.ToLower(title), "•") {
-		if strings.TrimSpace(part) == "unprocessed" {
+		if strings.TrimSpace(part) == want {
 			return true
 		}
 	}
 	return false
+}
+
+func listTitleStatusView(title string) string {
+	for _, part := range strings.Split(strings.ToLower(title), "•") {
+		part = strings.TrimSpace(part)
+		switch part {
+		case "queued", "status=queued":
+			return db.StatusQueued
+		case "draft", "status=draft":
+			return db.StatusDraft
+		}
+	}
+	return ""
+}
+
+func listTitleWithoutPart(title, drop string) string {
+	drop = strings.ToLower(strings.TrimSpace(drop))
+	parts := strings.Split(title, "•")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		lower := strings.ToLower(part)
+		if part == "" || lower == drop || lower == "status="+drop {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == 0 {
+		return "Jobs"
+	}
+	return strings.Join(kept, " • ")
 }
 
 func persistentListSyncWarnings(warnings []string) []string {

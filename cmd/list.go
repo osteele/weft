@@ -391,6 +391,42 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	return jobs, nil
 }
 
+func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter string) ([]*db.Job, error) {
+	previousStatus := listStatus
+	previousProcessed := listProcessed
+	previousUnprocessed := listUnprocessed
+	previousRunning := listRunning
+	previousCompleted := listCompleted
+	previousQueued := listQueued
+	previousDead := listDead
+	defer func() {
+		listStatus = previousStatus
+		listProcessed = previousProcessed
+		listUnprocessed = previousUnprocessed
+		listRunning = previousRunning
+		listCompleted = previousCompleted
+		listQueued = previousQueued
+		listDead = previousDead
+	}()
+
+	if statusFilter != "" {
+		listStatus = statusFilter
+		listRunning = false
+		listCompleted = false
+		listQueued = false
+		listDead = false
+	}
+	listProcessed = false
+	listUnprocessed = false
+	switch processedFilter {
+	case "processed":
+		listProcessed = true
+	case "unprocessed":
+		listUnprocessed = true
+	}
+	return collectJobsForList(database, args)
+}
+
 func applyPostListFilters(jobs []*db.Job) ([]*db.Job, error) {
 	var err error
 	if listSince != "" {

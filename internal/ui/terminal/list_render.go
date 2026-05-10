@@ -133,7 +133,7 @@ func ignorePagerPipeError(err error) bool {
 func responsiveColumnKeys(width int) []string {
 	switch {
 	case width >= 96:
-		return []string{"check", "id", "host", "status", "started", "project", "dir", "description"}
+		return []string{"check", "id", "host", "status", "started", "project", "description"}
 	case width >= 80:
 		return []string{"check", "id", "host", "status", "started", "project", "description"}
 	case width >= 64:
@@ -246,11 +246,22 @@ func formatJobListHost(job *db.Job) string {
 	return job.TargetDisplay()
 }
 
-func formatJobListStarted(job *db.Job) string {
-	if job == nil || job.StartTime <= 0 {
+func formatJobListTime(job *db.Job) string {
+	t := jobListDisplayTime(job)
+	if t <= 0 {
 		return "-"
 	}
-	return time.Unix(job.StartTime, 0).Format("01/02 15:04")
+	return time.Unix(t, 0).Format("01/02 15:04")
+}
+
+func jobListDisplayTime(job *db.Job) int64 {
+	if job == nil {
+		return 0
+	}
+	if db.IsTerminalStatus(job.EffectiveStatus()) && job.EndTime != nil && *job.EndTime > 0 {
+		return *job.EndTime
+	}
+	return job.StartTime
 }
 
 func formatJobListStatus(job *db.Job) string {

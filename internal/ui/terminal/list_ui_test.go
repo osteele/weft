@@ -55,7 +55,7 @@ func TestRenderJobListPlainTruncatesToWidth(t *testing.T) {
 	}
 }
 
-func TestRenderJobListPlainIncludesDirectoryOnWideTerminals(t *testing.T) {
+func TestRenderJobListPlainShowsProjectWithoutDirectoryOnWideTerminals(t *testing.T) {
 	jobs := []*db.Job{
 		{
 			ID:          42,
@@ -69,17 +69,36 @@ func TestRenderJobListPlainIncludesDirectoryOnWideTerminals(t *testing.T) {
 	}
 
 	out := renderJobListPlain(jobs, 120)
-	if !strings.Contains(out, "DIR") {
-		t.Fatalf("output missing DIR header, got:\n%s", out)
+	if strings.Contains(out, "DIR") {
+		t.Fatalf("output unexpectedly includes DIR header, got:\n%s", out)
 	}
 	if !strings.Contains(out, "PROJECT") {
 		t.Fatalf("output missing PROJECT header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "project-alpha") {
-		t.Fatalf("output missing directory tail, got:\n%s", out)
-	}
 	if !strings.Contains(out, "llm-performance-models") {
 		t.Fatalf("output missing project name, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListPlainUsesTerminalTimeForTerminalJobs(t *testing.T) {
+	end := time.Date(2026, 5, 10, 8, 30, 0, 0, time.Local).Unix()
+	jobs := []*db.Job{
+		{
+			ID:          42,
+			Status:      db.StatusCompleted,
+			StartTime:   end - 3600,
+			EndTime:     &end,
+			Project:     "proj",
+			Description: "train model",
+		},
+	}
+
+	out := renderJobListPlain(jobs, 120)
+	if !strings.Contains(out, "TIME") {
+		t.Fatalf("output missing TIME header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "05/10 08:30") {
+		t.Fatalf("output missing terminal time, got:\n%s", out)
 	}
 }
 
@@ -488,7 +507,7 @@ func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "A:auto (ON)") || !strings.Contains(out, "v:ungrou") {
+	if !strings.Contains(out, "A:auto (ON)") || !strings.Contains(out, "q:quit") {
 		t.Fatalf("expected controls line to remain visible even with long status, got:\n%s", out)
 	}
 }
@@ -1277,7 +1296,7 @@ func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	m.rebuildGroupedRows()
 
 	line := m.groupedControlsText(true)
-	if !strings.Contains(line, "k:kill") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "p:processed") || !strings.Contains(line, "m:move") || !strings.Contains(line, "N:new for selected") {
+	if !strings.Contains(line, "x:kill/cancel") || !strings.Contains(line, "u:unplace") || !strings.Contains(line, "p:toggle processed") || !strings.Contains(line, "m:move") || !strings.Contains(line, "N:new for selected") {
 		t.Fatalf("controls line missing queued-job actions: %q", line)
 	}
 }
@@ -1708,6 +1727,77 @@ func TestListTUIGroupedKeyPMarksSelectedJobProcessed(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedKeyPTogglesSelectedJobProcessedOff(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
+		t.Fatalf("AddJobTag: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	m := listTUIModel{
+		database:        database,
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs:            []*db.Job{job},
+	}
+	m.rebuildGroupedRows()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	got := next.(listTUIModel)
+	if cmd == nil {
+		t.Fatal("expected command to toggle selected job processed tag")
+	}
+	if !strings.Contains(got.statusMessage, "unprocessed") {
+		t.Fatalf("statusMessage = %q, want unprocessed text", got.statusMessage)
+	}
+
+	msg := cmd()
+	next2, reloadCmd := got.Update(msg)
+	got2 := next2.(listTUIModel)
+	if reloadCmd == nil {
+		t.Fatal("expected reload command after processed toggle")
+	}
+	if !strings.Contains(got2.statusMessage, "marked as unprocessed") {
+		t.Fatalf("statusMessage = %q, want unprocessed confirmation", got2.statusMessage)
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID updated: %v", err)
+	}
+	if updated == nil || updated.HasTag(db.ProcessedTag) {
+		t.Fatalf("expected job %d not to have processed tag", jobID)
+	}
+}
+
+func TestListTUIUngroupedShiftUTogglesUnprocessedFilter(t *testing.T) {
+	m := listTUIModel{
+		width:  100,
+		height: 20,
+		jobs:   []*db.Job{{ID: 1, Status: db.StatusQueued}},
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'U'}})
+	got := next.(listTUIModel)
+	if cmd == nil {
+		t.Fatal("expected reload command")
+	}
+	if !got.unprocessedView || !got.groupedUnprocessedView {
+		t.Fatalf("unprocessed flags = %v/%v, want true/true", got.unprocessedView, got.groupedUnprocessedView)
+	}
+	if !strings.Contains(got.statusMessage, "unprocessed") {
+		t.Fatalf("statusMessage = %q, want unprocessed text", got.statusMessage)
+	}
+}
+
 func TestListTUIGroupedEscCancelsPendingMoveLookup(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus:     true,
@@ -1771,7 +1861,7 @@ func TestListTUIHelpOverlayOpensAndClosesInUngroupedView(t *testing.T) {
 	if !strings.Contains(out, "Jobs List Keybindings") {
 		t.Fatalf("expected list help title, got:\n%s", out)
 	}
-	if !strings.Contains(out, "v toggle grouped/ungrouped jobs") {
+	if !strings.Contains(out, "v grouped view") {
 		t.Fatalf("expected shared keybinding help text, got:\n%s", out)
 	}
 
@@ -1795,8 +1885,8 @@ func TestListTUIHelpOverlayShowsGroupedActions(t *testing.T) {
 		t.Fatal("expected grouped help overlay to open")
 	}
 	out := stripANSI(got.View())
-	if !strings.Contains(out, "Selected job actions:") {
-		t.Fatalf("expected grouped actions section, got:\n%s", out)
+	if !strings.Contains(out, "Selected job:") {
+		t.Fatalf("expected selected job section, got:\n%s", out)
 	}
 	if !strings.Contains(out, "m move selected") {
 		t.Fatalf("expected grouped move keybinding, got:\n%s", out)

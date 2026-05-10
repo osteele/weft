@@ -94,6 +94,18 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 	switch job.EffectiveStatus() {
 	case db.StatusQueued:
 		return ops.CancelQueuedJob(database, job, opts)
+	case db.StatusDraft:
+		if err := db.SetRequestedStatus(database, job.ID, db.StatusCanceled); err != nil {
+			return ops.Result{}, fmt.Errorf("set requested status: %w", err)
+		}
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusCanceled); err != nil {
+			return ops.Result{}, fmt.Errorf("update canceled status: %w", err)
+		}
+		return ops.Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %s canceled", ids.FormatJobID(job.ID)),
+		}, nil
 	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		return ops.KillJob(database, job, opts)
 	default:
