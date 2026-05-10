@@ -566,6 +566,43 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_PauseTolerant_Exited_Preempted(t *testing.T) {
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	agentReadyAt := now.Add(-25 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReadyAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusExited},
+		JobState:      JobState{HasStartedJob: true},
+		PauseTolerant: true,
+		Now:           now,
+	})
+	if action.Kind != ActionProviderDead {
+		t.Fatalf("action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
+	}
+	if action.TerminationReason != db.TerminationReasonPreempted {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonPreempted)
+	}
+	if action.AttemptOutcome != db.AttemptOutcomePreempted {
+		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomePreempted)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs=true so interruptible work relaunches")
+	}
+}
+
 func TestCheckInstance_ProviderDead_BeatsStaleHeartbeatWarning(t *testing.T) {
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
@@ -1367,6 +1404,9 @@ func TestCheckInstance_PauseTolerant_StalePause_Preempted(t *testing.T) {
 	if action.TerminationReason != db.TerminationReasonPreempted {
 		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonPreempted)
 	}
+	if action.AttemptOutcome != db.AttemptOutcomePreempted {
+		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomePreempted)
+	}
 	if !action.ResetJobs {
 		t.Error("expected ResetJobs=true so relaunch picks a fresh offer")
 	}
@@ -1901,6 +1941,9 @@ func TestCheckInstance_OnDemand_StaleOffline_ProviderFailure(t *testing.T) {
 	if action.TerminationReason != db.TerminationReasonProviderFailure {
 		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonProviderFailure)
 	}
+	if action.AttemptOutcome != db.AttemptOutcomeOrphaned {
+		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeOrphaned)
+	}
 }
 
 func TestCheckInstance_PreviouslyRunning_FreshDeadlineForNonRunning(t *testing.T) {
@@ -1982,6 +2025,9 @@ func TestCheckInstance_PauseTolerant_StaleOffline_Preempted(t *testing.T) {
 	}
 	if action.TerminationReason != db.TerminationReasonPreempted {
 		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonPreempted)
+	}
+	if action.AttemptOutcome != db.AttemptOutcomePreempted {
+		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomePreempted)
 	}
 }
 

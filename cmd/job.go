@@ -354,7 +354,7 @@ var jobTagCmd = &cobra.Command{
 var jobTagAddCmd = &cobra.Command{
 	Use:   "add <job-id>... <tag>",
 	Short: tagAddCmd.Short,
-	Args:  usageArgs(cobra.ExactArgs(1)),
+	Args:  usageArgs(cobra.MinimumNArgs(2)),
 	RunE:  runTagAdd,
 }
 
@@ -362,7 +362,7 @@ var jobTagRemoveCmd = &cobra.Command{
 	Use:     "rm <job-id>... <tag>",
 	Aliases: []string{"remove", "delete"},
 	Short:   tagRemoveCmd.Short,
-	Args:    usageArgs(cobra.ExactArgs(1)),
+	Args:    usageArgs(cobra.MinimumNArgs(2)),
 	RunE:    runTagRemove,
 }
 

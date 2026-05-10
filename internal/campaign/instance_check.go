@@ -425,8 +425,10 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			age := p.Now.Sub(*lifecycleStart)
 			if age > stalePauseTimeout {
 				reason := db.TerminationReasonPreempted
+				outcome := db.AttemptOutcomePreempted
 				if !p.PauseTolerant {
 					reason = db.TerminationReasonProviderFailure
+					outcome = db.AttemptOutcomeOrphaned
 				}
 				return InstanceAction{
 					Kind:              ActionEmptyStatusTimeout,
@@ -435,7 +437,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 					StallMessage:      fmt.Sprintf("instance %s for %s with no resume — giving up", p.ProviderInst.Status, age.Truncate(time.Minute)),
 					DestroyProvider:   true,
 					ResetJobs:         true,
-					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+					AttemptOutcome:    outcome,
 				}
 			}
 		}
@@ -716,7 +718,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			instDescr = fmt.Sprintf("status=%q intended=%q providerID=%q", p.ProviderInst.Status, p.ProviderInst.IntendedStatus, p.ProviderInst.ProviderID)
 		}
 		slog.Debug("reconcile: entering provider_dead path", "component", "reconcile", "instance", ci.ID, "inst", instDescr, "ci_status", ci.Status)
-		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now)
+		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now, p.PauseTolerant)
 	}
 	// Definitive live signal: provider returned a non-terminal instance. Reset
 	// any in-flight dead-confirm timer so the hysteresis requires a fresh
@@ -775,7 +777,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 	}
 }
 
-func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Client *r2.Client, jobState JobState, now time.Time) InstanceAction {
+func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Client *r2.Client, jobState JobState, now time.Time, pauseTolerant bool) InstanceAction {
 	// Check R2 for completion marker before assuming failure.
 	if hasR2CompletionMarker(r2Client, ci.ID) {
 		slog.Debug("provider dead: found R2 completion marker",
@@ -837,13 +839,22 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	// Use "unknown" as the default reason — we can't determine what happened.
 	// R2 markers may override below with a more specific reason.
 	reason := db.TerminationReasonUnknown
+	outcome := db.AttemptOutcomeOrphaned
 	if ci.LaunchedAt != nil && inst != nil && inst.Status != "" {
-		reason = db.TerminationReasonProviderFailure
+		if pauseTolerant && inst.Status == cloud.ProviderStatusExited {
+			reason = db.TerminationReasonPreempted
+			outcome = db.AttemptOutcomePreempted
+		} else {
+			reason = db.TerminationReasonProviderFailure
+		}
 	}
 	reasonAfterR2 := failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
+	if reasonAfterR2 != reason && reasonAfterR2 != db.TerminationReasonPreempted {
+		outcome = db.AttemptOutcomeOrphaned
+	}
 	detail := buildProviderDeadDetail(ci, inst, reason, reasonAfterR2, now)
 
-	slog.Warn("provider dead: no completion marker or termination intent found, orphaning jobs",
+	slog.Warn("provider dead: no completion marker or termination intent found, resetting jobs",
 		"component", "reconcile", "instance", ci.ID, "reason", reasonAfterR2, "detail", detail)
 	return InstanceAction{
 		Kind:              ActionProviderDead,
@@ -851,7 +862,7 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 		TerminationReason: reasonAfterR2,
 		StallMessage:      detail,
 		ResetJobs:         true,
-		AttemptOutcome:    db.AttemptOutcomeOrphaned,
+		AttemptOutcome:    outcome,
 	}
 }
 
