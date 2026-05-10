@@ -370,9 +370,9 @@ func (m watchModel) renderSystemView() (string, int) {
 	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 
-	// Render rows into content string
-	// Reserve: one blank separator + footer controls line + status/footer lines.
-	reservedFooterLines := 2 + len(sharedStatusLines)
+	// Render rows into content string. Reserve the footer controls plus any
+	// status/footer lines that render below the scrollable content.
+	reservedFooterLines := 1 + len(sharedStatusLines)
 	if m.autoPilotStatusLine() != "" {
 		reservedFooterLines++
 	}
