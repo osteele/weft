@@ -56,7 +56,7 @@ func TestBuildMoveGroupProgressLabels_FallsBackToOrdinalWhenNoJobIDs(t *testing.
 	}
 }
 
-func TestRefreshLaunchableJobs_AcceptsPendingPlacement(t *testing.T) {
+func TestRefreshMoveToNewJobs_AcceptsPendingPlacement(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "python train.py", "pending placement move")
@@ -74,7 +74,7 @@ func TestRefreshLaunchableJobs_AcceptsPendingPlacement(t *testing.T) {
 		t.Fatalf("SetPendingStatus: %v", err)
 	}
 
-	launchable, warnings := refreshLaunchableJobs(database, []*db.Job{staleJob})
+	launchable, warnings := refreshMoveToNewJobs(database, []*db.Job{staleJob})
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", warnings)
 	}
@@ -369,6 +369,34 @@ func TestJobsForGrouping_ClonesPendingPlacementAsQueued(t *testing.T) {
 	}
 	if got := original.EffectiveStatus(); got != db.StatusPendingPlacement {
 		t.Fatalf("original effective status = %q, want %q", got, db.StatusPendingPlacement)
+	}
+}
+
+func TestJobsForGrouping_ClearsInventoryHostWithoutMutatingSource(t *testing.T) {
+	attemptID := int64(26629)
+	original := &db.Job{
+		ID:          1885,
+		Status:      db.StatusQueued,
+		Host:        "cool100",
+		LatestRunID: &attemptID,
+		GPUClass:    "ampere",
+	}
+
+	grouping := jobsForGrouping([]*db.Job{original})
+	if len(grouping) != 1 {
+		t.Fatalf("grouping len = %d, want 1", len(grouping))
+	}
+	if grouping[0] == original {
+		t.Fatal("expected placed inventory job to be cloned for grouping")
+	}
+	if grouping[0].Host != "" {
+		t.Fatalf("grouping host = %q, want empty", grouping[0].Host)
+	}
+	if grouping[0].LatestRunID == nil || *grouping[0].LatestRunID != attemptID {
+		t.Fatalf("grouping LatestRunID = %v, want source attempt %d", grouping[0].LatestRunID, attemptID)
+	}
+	if original.Host != "cool100" {
+		t.Fatalf("original host = %q, want cool100", original.Host)
 	}
 }
 

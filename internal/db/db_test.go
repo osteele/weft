@@ -1073,6 +1073,55 @@ func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	}
 }
 
+func TestMoveQueuedJobToUnplaced_QueuedIntentOverTerminalHostAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "cool100", "/tmp/project", "python train.py", "completed but requeued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	end := time.Now().Unix()
+	if err := CloseAttempt(database, jobID, StatusCompleted, intPtr(0), end); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status queued: %v", err)
+	}
+	before, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID before: %v", err)
+	}
+	if before.EffectiveStatus() != StatusQueued || before.Host != "cool100" {
+		t.Fatalf("setup job status/host = %q/%q, want queued/cool100", before.EffectiveStatus(), before.Host)
+	}
+
+	if err := MoveQueuedJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplaced: %v", err)
+	}
+
+	after, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.EffectiveStatus() != StatusQueued {
+		t.Fatalf("status = %q, want queued", after.EffectiveStatus())
+	}
+	if after.Host != "" {
+		t.Fatalf("host = %q, want empty", after.Host)
+	}
+	if after.LatestRunID == nil {
+		t.Fatal("LatestRunID is nil, want fresh unplaced attempt")
+	}
+
+	var attempts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attempts); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempt count = %d, want 2", attempts)
+	}
+}
+
 func TestJobPriorityPersistsAndOrdersQueuedJobs(t *testing.T) {
 	database := SetupTestDB(t)
 

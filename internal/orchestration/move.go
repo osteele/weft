@@ -607,44 +607,14 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	}
 	logPhase("build_r2_client", r2Started, fmt.Sprintf("enabled=%t", r2Client != nil), nil)
 
-	unplaceStarted := time.Now()
-	unplaced := 0
-	for _, job := range jobs {
-		if err := unplaceIfNeeded(database, job); err != nil {
-			if cb.OnWarning != nil {
-				cb.OnWarning(fmt.Sprintf("Warning: unplace job %s failed: %v", ids.FormatJobID(job.ID), err))
-			}
-			continue
-		}
-		unplaced++
-	}
-	logPhase("unplace_jobs", unplaceStarted, fmt.Sprintf("ok=%d total=%d", unplaced, len(jobs)), nil)
-
 	refreshStarted := time.Now()
-	launchable, warnings := refreshLaunchableJobs(database, jobs)
+	launchable, warnings := refreshMoveToNewJobs(database, jobs)
 	for _, warning := range warnings {
 		if cb.OnWarning != nil {
 			cb.OnWarning(warning)
 		}
 	}
 	logPhase("refresh_launchable", refreshStarted, fmt.Sprintf("launchable=%d warnings=%d", len(launchable), len(warnings)), nil)
-
-	launchableIDs := make([]int64, 0, len(launchable))
-	for _, job := range launchable {
-		if job != nil {
-			launchableIDs = append(launchableIDs, job.ID)
-		}
-	}
-	window, err := openPlacementWindow(database, launchableIDs, "bulk_move")
-	if err != nil {
-		return BulkResult{}, err
-	}
-	bulkSuccess := false
-	defer func() {
-		if closeErr := closePlacementWindow(database, window, bulkSuccess); closeErr != nil {
-			slog.Warn("failed to close placement window", "component", "move", "error", closeErr)
-		}
-	}()
 
 	groupStarted := time.Now()
 	var groups []campaign.InstanceGroup
@@ -757,7 +727,6 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	// Leave the move_intents open. The CLI/TUI only waited for provider
 	// acceptance here; the autopilot owns the longer "target reached
 	// agent_ready or retry replacement launch" lifecycle.
-	bulkSuccess = true
 	return BulkResult{InstanceIDs: result.InstanceIDs}, nil
 }
 
@@ -873,7 +842,7 @@ func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
 	return err
 }
 
-func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
+func refreshMoveToNewJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
 	launchable := make([]*db.Job, 0, len(jobs))
 	var warnings []string
 	for _, job := range jobs {
@@ -891,11 +860,7 @@ func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []strin
 		}
 		status := latest.EffectiveStatus()
 		if status != db.StatusQueued && status != db.StatusPendingPlacement {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %s has status %s after unplace, skipping", ids.FormatJobID(job.ID), status))
-			continue
-		}
-		if latest.HasAssignedHost() {
-			warnings = append(warnings, fmt.Sprintf("Warning: job %s is still placed after unplace, skipping", ids.FormatJobID(job.ID)))
+			warnings = append(warnings, fmt.Sprintf("Warning: job %s has status %s, skipping", ids.FormatJobID(job.ID), status))
 			continue
 		}
 		launchable = append(launchable, latest)
@@ -904,7 +869,7 @@ func refreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []strin
 }
 
 func RefreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
-	return refreshLaunchableJobs(database, jobs)
+	return refreshMoveToNewJobs(database, jobs)
 }
 
 func jobsForGrouping(jobs []*db.Job) []*db.Job {
@@ -913,9 +878,10 @@ func jobsForGrouping(jobs []*db.Job) []*db.Job {
 		if job == nil {
 			continue
 		}
-		if job.EffectiveStatus() == db.StatusPendingPlacement {
+		if job.EffectiveStatus() == db.StatusPendingPlacement || job.HasInventoryHost() {
 			clone := *job
 			clone.PendingStatus = nil
+			clone.Host = ""
 			grouping = append(grouping, &clone)
 			continue
 		}

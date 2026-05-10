@@ -3041,9 +3041,11 @@ func RequeueFreshAttemptByID(database *sql.DB, id int64, host string) error {
 // MoveQueuedJobToUnplaced clears a queued job's host assignment. Jobs that are
 // not inventory-only gain the rental placement tag so they remain eligible for
 // rental launch workflows. Unlike ResetJobToUnplaced, this does not archive a
-// run because the job has not started; it only clears queue placement metadata.
-func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
-	job, err := GetJobByID(db, id)
+// run; it only clears queue placement metadata. If the visible queued placement
+// is a user requeue intent over a terminal latest attempt, it creates a fresh
+// unplaced attempt so job_status no longer exposes the terminal attempt's host.
+func MoveQueuedJobToUnplaced(database *sql.DB, id int64) error {
+	job, err := GetJobByID(database, id)
 	if err != nil {
 		return err
 	}
@@ -3058,17 +3060,39 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET host = '', launch_id = NULL, pending_status = NULL, pending_at = NULL, last_synced_status = NULL, queued_at = NULL WHERE job_id = ? AND end_time IS NULL`, id)
-	// Update spec columns on jobs (tags, placement_reasons)
-	_, err = db.Exec(
+
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE job_attempts SET host = '', launch_id = NULL, target_id = NULL, pending_status = NULL, pending_at = NULL, last_synced_status = NULL, queued_at = NULL WHERE job_id = ? AND end_time IS NULL`, id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		if _, err := createAttemptTx(tx, id, "", nil, StatusQueued); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	_, err = tx.Exec(
 		`UPDATE jobs
 		 SET tags = ?,
 		     placement_reasons = ?
 		 WHERE id = ?`,
 		tagValue, encodeStringSlice([]string{"manually moved to unplaced queue"}), id,
 	)
-	return err
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // HasTagHostConflict reports whether a queued job's tags conflict with its
