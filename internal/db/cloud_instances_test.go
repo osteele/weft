@@ -513,6 +513,91 @@ func TestCreateLaunch_CPUMetadataRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpdateLaunchInstanceMetadataStoresRunpodMachineMetadata(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:             LaunchStatusRunning,
+		Provider:           "runpod",
+		ProviderInstanceID: "pod-123",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetLaunchProviderID(database, instanceID, "pod-123"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	if err := UpdateLaunchInstanceMetadata(database, instanceID, &cloud.Instance{
+		ProviderID: "pod-123",
+		Provider:   cloud.ProviderRunpod,
+		MachineID:  "machine-9",
+		DataCenter: "US-KS-2",
+	}); err != nil {
+		t.Fatalf("UpdateLaunchInstanceMetadata: %v", err)
+	}
+	got, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.MachineID != "machine-9" {
+		t.Fatalf("MachineID = %q, want machine-9", got.MachineID)
+	}
+	if got.DataCenter != "US-KS-2" {
+		t.Fatalf("DataCenter = %q, want US-KS-2", got.DataCenter)
+	}
+}
+
+func TestListRunpodLaunchesMissingProviderMetadata(t *testing.T) {
+	database := setupTestDB(t)
+
+	missingID, err := CreateLaunch(database, &Launch{
+		Status:    LaunchStatusFailed,
+		Provider:  "runpod",
+		MachineID: "machine-9",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch missing: %v", err)
+	}
+	if err := SetLaunchProviderID(database, missingID, "pod-missing"); err != nil {
+		t.Fatalf("SetLaunchProviderID missing: %v", err)
+	}
+	completeID, err := CreateLaunch(database, &Launch{
+		Status:    LaunchStatusFailed,
+		Provider:  "runpod",
+		MachineID: "machine-10",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch complete: %v", err)
+	}
+	if err := SetLaunchProviderID(database, completeID, "pod-complete"); err != nil {
+		t.Fatalf("SetLaunchProviderID complete: %v", err)
+	}
+	if err := SetLaunchDataCenter(database, completeID, "US-KS-2"); err != nil {
+		t.Fatalf("SetLaunchDataCenter complete: %v", err)
+	}
+	vastaiID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch vastai: %v", err)
+	}
+	if err := SetLaunchProviderID(database, vastaiID, "vast-1"); err != nil {
+		t.Fatalf("SetLaunchProviderID vastai: %v", err)
+	}
+
+	got, err := ListRunpodLaunchesMissingProviderMetadata(database)
+	if err != nil {
+		t.Fatalf("ListRunpodLaunchesMissingProviderMetadata: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].ID != missingID {
+		t.Fatalf("ID = %d, want %d", got[0].ID, missingID)
+	}
+}
+
 func TestGetLaunchJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T) {
 	database := setupTestDB(t)
 

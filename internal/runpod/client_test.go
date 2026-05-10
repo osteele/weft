@@ -303,6 +303,101 @@ func TestShowUserParsesBalance(t *testing.T) {
 	}
 }
 
+func TestPodFromMapCapturesMachineMetadata(t *testing.T) {
+	pod := podFromMap(map[string]any{
+		"id":           "pod-123",
+		"status":       "RUNNING",
+		"dataCenterId": "EU-SE-1",
+		"machine": map[string]any{
+			"id": "machine-9",
+		},
+	})
+	inst := podToInstance(pod)
+	if inst.MachineID != "machine-9" {
+		t.Fatalf("MachineID = %q, want machine-9", inst.MachineID)
+	}
+	if inst.DataCenter != "EU-SE-1" {
+		t.Fatalf("DataCenter = %q, want EU-SE-1", inst.DataCenter)
+	}
+}
+
+func TestPodFromMapCapturesNestedDataCenter(t *testing.T) {
+	pod := podFromMap(map[string]any{
+		"id":     "pod-123",
+		"status": "RUNNING",
+		"machine": map[string]any{
+			"id": "machine-9",
+			"dataCenter": map[string]any{
+				"id": "US-KS-2",
+			},
+		},
+	})
+	if pod.MachineID != "machine-9" {
+		t.Fatalf("MachineID = %q, want machine-9", pod.MachineID)
+	}
+	if pod.DataCenter != "US-KS-2" {
+		t.Fatalf("DataCenter = %q, want US-KS-2", pod.DataCenter)
+	}
+}
+
+func TestShowInstanceBackfillsMachineMetadataFromDetail(t *testing.T) {
+	prev := fetchPodDetailFunc
+	t.Cleanup(func() { fetchPodDetailFunc = prev })
+	fetchPodDetailFunc = func(_ context.Context, podID string) (*Pod, error) {
+		if podID != "pod-123" {
+			t.Fatalf("podID = %q, want pod-123", podID)
+		}
+		return &Pod{MachineID: "machine-9", DataCenter: "US-KS-2"}, nil
+	}
+
+	const path = "/opt/homebrew/bin/runpodctl"
+	runner := &cliRunner{
+		cliPath:  "runpodctl",
+		lookPath: func(string) (string, error) { return path, nil },
+		runCombined: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runCombined path = %q, want %q", gotPath, path)
+			}
+			switch strings.Join(args, " ") {
+			case "version":
+				return []byte("runpodctl 2.1.6"), nil
+			case "get --help":
+				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "gpu --help":
+				return []byte("Available Commands:\n  list\n"), nil
+			case "pod --help":
+				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
+			case "template --help":
+				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
+			default:
+				t.Fatalf("unexpected combined command %q", strings.Join(args, " "))
+				return nil, nil
+			}
+		},
+		runOutput: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runOutput path = %q, want %q", gotPath, path)
+			}
+			if strings.Join(args, " ") == "pod get pod-123" {
+				return []byte(`{"id":"pod-123","desiredStatus":"RUNNING"}`), nil
+			}
+			t.Fatalf("unexpected output command %q", strings.Join(args, " "))
+			return nil, nil
+		},
+	}
+
+	inst, err := newCloudClientForTests(runner).ShowInstance("pod-123")
+	if err != nil {
+		t.Fatalf("ShowInstance: %v", err)
+	}
+	if inst.MachineID != "machine-9" {
+		t.Fatalf("MachineID = %q, want machine-9", inst.MachineID)
+	}
+	if inst.DataCenter != "US-KS-2" {
+		t.Fatalf("DataCenter = %q, want US-KS-2", inst.DataCenter)
+	}
+}
+
 func TestParseSearchOutput_AllowsCLIWarningPrefix(t *testing.T) {
 	input := []byte(`warning: 'runpodctl get cloud' is deprecated
 [{"id":"offer-4090","displayName":"RTX 4090","memoryInGb":24,"communityPrice":0.44,"maxGpuCount":1}]`)

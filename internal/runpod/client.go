@@ -219,6 +219,8 @@ func podToInstance(pod Pod) cloud.Instance {
 		SSHPort:     pod.SSHPort,
 		CostPerHour: pod.CostPerHour,
 		Label:       pod.Name,
+		DataCenter:  pod.DataCenter,
+		MachineID:   pod.MachineID,
 	}
 }
 
@@ -288,6 +290,13 @@ func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {
 	pod, err := parsePod(out)
 	if err != nil {
 		return nil, fmt.Errorf("parse pod response: %w", err)
+	}
+	if pod.MachineID == "" || pod.DataCenter == "" {
+		if detail, detailErr := fetchPodDetailFunc(ctx, instanceID); detailErr == nil {
+			mergePodProviderMetadata(pod, detail)
+		} else {
+			slog.Debug("runpod pod detail unavailable", "id", instanceID, "err", detailErr)
+		}
 	}
 	inst := podToInstance(*pod)
 	slog.Debug("runpod ShowInstance ok", "id", instanceID, "status", inst.Status, "providerID", inst.ProviderID)
@@ -933,6 +942,7 @@ func parsePod(data []byte) (*Pod, error) {
 }
 
 func podFromMap(row map[string]any) Pod {
+	machineID, dataCenter := podMachineMetadata(row)
 	return Pod{
 		ID:          firstString(row, "id", "podId"),
 		Name:        firstString(row, "name"),
@@ -942,7 +952,54 @@ func podFromMap(row map[string]any) Pod {
 		CostPerHour: firstFloat(row, "costPerHr", "price"),
 		SSHHost:     firstString(row, "sshHost", "ipAddress", "publicIp"),
 		SSHPort:     firstInt(row, "sshPort", "port"),
+		DataCenter:  dataCenter,
+		MachineID:   machineID,
 	}
+}
+
+func mergePodProviderMetadata(pod *Pod, detail *Pod) {
+	if pod == nil || detail == nil {
+		return
+	}
+	if pod.MachineID == "" {
+		pod.MachineID = detail.MachineID
+	}
+	if pod.DataCenter == "" {
+		pod.DataCenter = detail.DataCenter
+	}
+}
+
+func podMachineMetadata(row map[string]any) (machineID, dataCenter string) {
+	machineID = firstString(row, "machineId", "machineID", "machine_id")
+	dataCenter = firstString(row, "dataCenterId", "dataCenter", "data_center_id", "data_center", "region")
+	if machine, ok := nestedStringMap(row, "machine"); ok {
+		if machineID == "" {
+			machineID = firstString(machine, "id", "machineId", "machineID", "machine_id")
+		}
+		if dataCenter == "" {
+			dataCenter = firstString(machine, "dataCenterId", "dataCenter", "data_center_id", "data_center", "region")
+		}
+		if dataCenter == "" {
+			if dc, ok := nestedStringMap(machine, "dataCenter"); ok {
+				dataCenter = firstString(dc, "id", "name", "region")
+			}
+		}
+	}
+	if dataCenter == "" {
+		if dc, ok := nestedStringMap(row, "dataCenter"); ok {
+			dataCenter = firstString(dc, "id", "name", "region")
+		}
+	}
+	return machineID, dataCenter
+}
+
+func nestedStringMap(row map[string]any, key string) (map[string]any, bool) {
+	value, ok := row[key]
+	if !ok || value == nil {
+		return nil, false
+	}
+	nested, ok := value.(map[string]any)
+	return nested, ok
 }
 
 func templateInfoFromMap(row map[string]any) *TemplateInfo {

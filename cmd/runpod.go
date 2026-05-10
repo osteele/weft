@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/runpod"
 	"github.com/spf13/cobra"
 )
@@ -35,6 +39,13 @@ var runpodSetupCmd = &cobra.Command{
 	RunE:  runRunpodSetup,
 }
 
+var runpodBackfillMetadataCmd = &cobra.Command{
+	Use:   "backfill-metadata",
+	Short: "Backfill RunPod machine and datacenter metadata on launch rows",
+	Args:  cobra.NoArgs,
+	RunE:  runRunpodBackfillMetadata,
+}
+
 var runpodTemplateCmd = &cobra.Command{
 	Use:   "template",
 	Short: "Inspect the RunPod bootstrap template requirements",
@@ -51,6 +62,7 @@ func init() {
 	rootCmd.AddCommand(runpodCmd)
 	runpodCmd.AddCommand(runpodDoctorCmd)
 	runpodCmd.AddCommand(runpodSetupCmd)
+	runpodCmd.AddCommand(runpodBackfillMetadataCmd)
 	runpodCmd.AddCommand(runpodTemplateCmd)
 	runpodTemplateCmd.AddCommand(runpodTemplatePrintBootstrapCmd)
 }
@@ -93,6 +105,56 @@ func runRunpodSetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return err
+}
+
+func runRunpodBackfillMetadata(cmd *cobra.Command, args []string) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	launches, err := db.ListRunpodLaunchesMissingProviderMetadata(database)
+	if err != nil {
+		return fmt.Errorf("list RunPod launches missing provider metadata: %w", err)
+	}
+	var updated, unavailable int
+	var failures []string
+	for _, launch := range launches {
+		pod, err := runpod.FetchPodDetail(context.Background(), launch.ProviderInstanceID)
+		if errors.Is(err, cloud.ErrInstanceNotFound) {
+			unavailable++
+			continue
+		}
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("wi%d %s: %v", launch.ID, launch.ProviderInstanceID, err))
+			continue
+		}
+		if pod.MachineID == "" && pod.DataCenter == "" {
+			unavailable++
+			continue
+		}
+		inst := &cloud.Instance{
+			ProviderID:  launch.ProviderInstanceID,
+			Provider:    cloud.ProviderRunpod,
+			MachineID:   pod.MachineID,
+			DataCenter:  pod.DataCenter,
+			CostPerHour: pod.CostPerHour,
+		}
+		if err := db.UpdateLaunchInstanceMetadata(database, launch.ID, inst); err != nil {
+			failures = append(failures, fmt.Sprintf("wi%d %s: update: %v", launch.ID, launch.ProviderInstanceID, err))
+			continue
+		}
+		updated++
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Checked %d RunPod launch(es); updated %d; unavailable %d\n", len(launches), updated, unavailable)
+	for _, msg := range failures {
+		fmt.Fprintf(cmd.ErrOrStderr(), "backfill warning: %s\n", msg)
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("backfill completed with %d warning(s)", len(failures))
+	}
+	return nil
 }
 
 func runRunpodTemplatePrintBootstrap(cmd *cobra.Command, args []string) error {

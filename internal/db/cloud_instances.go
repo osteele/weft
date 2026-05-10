@@ -604,6 +604,36 @@ func ListRecentFailedCloudLaunches(database *sql.DB, sinceUnix int64) ([]*Launch
 	return out, rows.Err()
 }
 
+// ListRunpodLaunchesMissingProviderMetadata returns RunPod launches whose
+// provider pod ID is known but machine/datacenter metadata has not been stored.
+func ListRunpodLaunchesMissingProviderMetadata(database *sql.DB) ([]*Launch, error) {
+	rows, err := database.Query(
+		`SELECT `+launchSelectColumns+`
+		   FROM launches
+		  WHERE provider = ?
+		    AND provider_instance_id != ''
+		    AND (
+		      COALESCE(machine_id, '') = ''
+		      OR COALESCE(data_center, '') = ''
+		    )
+		  ORDER BY created_at DESC`,
+		string(cloud.ProviderRunpod),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Launch
+	for rows.Next() {
+		c, err := scanLaunchFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // LaunchSuccessorsRecovered returns the subset of the given failed-launch IDs
 // that have a successor launch (replaced_instance_id = id) currently in a
 // non-failed live state or already completed. Used to dim recovered failures
@@ -983,12 +1013,16 @@ func UpdateLaunchInstanceMetadata(database *sql.DB, id int64, inst *cloud.Instan
 		 SET cpu_cores_effective = CASE WHEN ? > 0 THEN ? ELSE cpu_cores_effective END,
 		     cpu_name = CASE WHEN ? != '' THEN ? ELSE cpu_name END,
 		     ram_gb = CASE WHEN ? > 0 THEN ? ELSE ram_gb END,
-		     disk_gb = CASE WHEN ? > 0 THEN CAST(? AS INTEGER) ELSE disk_gb END
+		     disk_gb = CASE WHEN ? > 0 THEN CAST(? AS INTEGER) ELSE disk_gb END,
+		     machine_id = CASE WHEN ? != '' THEN ? ELSE machine_id END,
+		     data_center = CASE WHEN ? != '' THEN ? ELSE data_center END
 		 WHERE id = ?`,
 		inst.CPUCores, inst.CPUCores,
 		inst.CPUName, inst.CPUName,
 		inst.RAMGB, inst.RAMGB,
 		inst.DiskGB, inst.DiskGB,
+		inst.MachineID, inst.MachineID,
+		inst.DataCenter, inst.DataCenter,
 		id,
 	)
 	return err

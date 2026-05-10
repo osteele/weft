@@ -12,6 +12,8 @@ type Pod struct {
 	CostPerHour float64 `json:"costPerHr"`
 	SSHHost     string  `json:"sshHost"`
 	SSHPort     int     `json:"sshPort"`
+	DataCenter  string  `json:"dataCenterId"`
+	MachineID   string  `json:"machineId"`
 }
 
 // User represents RunPod account information returned by `runpodctl user`.
