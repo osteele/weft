@@ -373,6 +373,9 @@ func appendProviderCreditCheckWarning(warnings []string, provider cloud.Provider
 	if err == nil {
 		return warnings
 	}
+	if isTransientProviderCreditCheckError(err) {
+		return warnings
+	}
 	name := provider.DisplayName()
 	if name == "" {
 		name = string(provider)
@@ -382,6 +385,21 @@ func appendProviderCreditCheckWarning(warnings []string, provider cloud.Provider
 		detail = "unknown error"
 	}
 	return append(warnings, fmt.Sprintf("WARNING: %s credit check failed (%s)", name, detail))
+}
+
+func isTransientProviderCreditCheckError(err error) bool {
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "request failed:") ||
+		strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "temporary failure") ||
+		strings.Contains(msg, "failed to resolve") ||
+		strings.Contains(msg, "name resolution") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "eof")
 }
 
 // burnHoursAtCurrentRate returns the cached burn-rate runway for the given

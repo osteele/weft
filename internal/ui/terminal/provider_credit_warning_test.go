@@ -355,6 +355,35 @@ func TestFetchProviderCreditWarningIncludesVastaiCreditCheckFailure(t *testing.T
 	}
 }
 
+func TestFetchProviderCreditWarningSuppressesTransientVastaiCreditCheckFailure(t *testing.T) {
+	prevLoad := providerCreditWarningLoad
+	prevRunpodUser := runpodCreditWarningUser
+	prevVastUser := vastaiCreditWarningUser
+	providerCreditWarningLoad = func() (*config.Config, error) {
+		cfg := config.DefaultConfig()
+		cfg.Vastai.Enabled = true
+		cfg.Runpod.Enabled = false
+		return cfg, nil
+	}
+	vastaiCreditWarningUser = func() (float64, error) {
+		return 0, errors.New(`show user: request failed: Get "https://console.vast.ai/api/v0/users/current/": context deadline exceeded`)
+	}
+	runpodCreditWarningUser = func() (float64, error) {
+		t.Fatal("runpod user fetch should not run when disabled")
+		return 0, nil
+	}
+	t.Cleanup(func() {
+		providerCreditWarningLoad = prevLoad
+		runpodCreditWarningUser = prevRunpodUser
+		vastaiCreditWarningUser = prevVastUser
+	})
+
+	got := fetchProviderCreditWarning()
+	if got != "" {
+		t.Fatalf("fetchProviderCreditWarning() = %q, want no warning for transient request failure", got)
+	}
+}
+
 func TestFormatCostRateSegment(t *testing.T) {
 	cases := []struct {
 		burn   int
