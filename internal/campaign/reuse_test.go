@@ -470,6 +470,58 @@ func TestFindReusableInstancesIncludesNormalGraceAndRunningInstances(t *testing.
 	}
 }
 
+func TestFindReusableInstancesExcludesStaleAgentHeartbeat(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now()
+	readyAt := now.Add(-30 * time.Minute).Unix()
+
+	freshID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(fresh): %v", err)
+	}
+	staleID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_A6000",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(stale): %v", err)
+	}
+	if err := db.SetLaunchAgentReadyAtIfUnset(database, freshID, time.Unix(readyAt, 0)); err != nil {
+		t.Fatalf("SetLaunchAgentReadyAtIfUnset(fresh): %v", err)
+	}
+	if err := db.SetLaunchAgentReadyAtIfUnset(database, staleID, time.Unix(readyAt, 0)); err != nil {
+		t.Fatalf("SetLaunchAgentReadyAtIfUnset(stale): %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:    freshID,
+		HeartbeatTS: now.Add(-time.Minute).Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState(fresh): %v", err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:    staleID,
+		HeartbeatTS: now.Add(-25 * time.Minute).Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState(stale): %v", err)
+	}
+
+	instances, err := FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 reusable instance, got %d", len(instances))
+	}
+	if instances[0].Instance.ID != freshID {
+		t.Fatalf("reusable instance id = %d, want %d", instances[0].Instance.ID, freshID)
+	}
+}
+
 func TestPlanReuse_JobIDOrder(t *testing.T) {
 	// Jobs with different GPU classes should still be assigned in ID order.
 	instances := []InstanceCapacity{{

@@ -69,6 +69,24 @@ func instanceAcceptsReuse(inst *db.Launch) (bool, string) {
 	return true, ""
 }
 
+func instanceAcceptsReuseWithLiveState(inst *db.Launch, live *db.LaunchLiveState, now time.Time) (bool, string) {
+	if ok, reason := instanceAcceptsReuse(inst); !ok {
+		return false, reason
+	}
+	if inst.Status != db.LaunchStatusRunning || inst.AgentReadyAtUnix == nil {
+		return true, ""
+	}
+	if live == nil || live.HeartbeatTS <= 0 {
+		return false, fmt.Sprintf("instance %s has no cached heartbeat after agent ready", ids.FormatInstanceID(inst.ID))
+	}
+	age := now.Sub(time.Unix(live.HeartbeatTS, 0))
+	threshold := effectiveHeartbeatStaleThreshold(inst.AgentReadyAtUnix, now)
+	if age > threshold {
+		return false, fmt.Sprintf("instance %s heartbeat is stale (%s old)", ids.FormatInstanceID(inst.ID), age.Truncate(time.Second))
+	}
+	return true, ""
+}
+
 // NewInstanceCapacity builds an InstanceCapacity for a single launch.
 // Returns (cap, true) if the instance is reusable, or (zero, false) if it
 // should be skipped (wrong status, self-destructing, expired grace).
@@ -103,9 +121,23 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 	}
 
 	jobCounts, _ := db.GetActiveLaunchJobCounts(database)
+	launchIDs := make([]int64, 0, len(instances))
+	for _, inst := range instances {
+		if inst != nil && inst.ID > 0 {
+			launchIDs = append(launchIDs, inst.ID)
+		}
+	}
+	liveStates, err := db.GetLaunchLiveStates(database, launchIDs)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
 
 	var result []InstanceCapacity
 	for _, inst := range instances {
+		if ok, _ := instanceAcceptsReuseWithLiveState(inst, liveStates[inst.ID], now); !ok {
+			continue
+		}
 		if cap, ok := NewInstanceCapacity(inst, jobCounts[inst.ID]); ok {
 			result = append(result, cap)
 		}
@@ -416,6 +448,9 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
+	if ok, reason := instanceAcceptsReuseWithCachedLiveState(database, inst, time.Now()); !ok {
+		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
+	}
 
 	payload := GracePayload{
 		Sources: []controlplane.SourceUpdate{},
@@ -520,6 +555,13 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
+	if ok, reason := instanceAcceptsReuseWithCachedLiveState(database, inst, time.Now()); !ok {
+		rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+		if rollbackErr != nil {
+			return fmt.Errorf("instance %s cannot accept reused jobs: %s (rollback: %v)", ids.FormatInstanceID(instanceID), reason, rollbackErr)
+		}
+		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
+	}
 
 	// Running instances pick up queued jobs between job executions but don't
 	// ack immediately — the agent only drains grace requests after the current
@@ -550,8 +592,19 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
+	if ok, reason := instanceAcceptsReuseWithCachedLiveState(database, inst, time.Now()); !ok {
+		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
+	}
 
 	return nil
+}
+
+func instanceAcceptsReuseWithCachedLiveState(database *sql.DB, inst *db.Launch, now time.Time) (bool, string) {
+	live, err := db.GetLaunchLiveState(database, inst.ID)
+	if err != nil {
+		return false, fmt.Sprintf("read cached live state: %v", err)
+	}
+	return instanceAcceptsReuseWithLiveState(inst, live, now)
 }
 
 func resetClaimedJobsToUnplaced(database *sql.DB, jobIDs []int64) error {
