@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/ops"
@@ -347,6 +348,15 @@ Examples:
 	RunE: runJobUnplace,
 }
 
+var jobDiagnoseCmd = &cobra.Command{
+	Use:   "diagnose <job-id>...",
+	Short: "Explain why a job is in its current state",
+	Long: `Explain the current state of one or more jobs using queue blockers,
+placement reasons, lifecycle events, and failure metadata.`,
+	Args: usageArgs(cobra.MinimumNArgs(1)),
+	RunE: runJobDiagnose,
+}
+
 var jobTagCmd = &cobra.Command{
 	Use:   "tag",
 	Short: tagCmd.Short,
@@ -407,6 +417,7 @@ func init() {
 	jobCmd.AddCommand(jobMarkUnprocessedCmd)
 	jobCmd.AddCommand(jobPredictCmd)
 	jobCmd.AddCommand(jobUnplaceCmd)
+	jobCmd.AddCommand(jobDiagnoseCmd)
 	jobCmd.AddCommand(jobTagCmd)
 	jobTagCmd.AddCommand(jobTagAddCmd)
 	jobTagCmd.AddCommand(jobTagRemoveCmd)
@@ -865,6 +876,32 @@ func unplaceJobs(database *sql.DB, jobs []*db.Job, opts ops.ExecuteOptions, allo
 	return errorsList
 }
 
+func runJobDiagnose(_ *cobra.Command, args []string) error {
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	jobs, errorsList := loadJobsForUnplace(database, jobIDs)
+	hydrateQueueBlockedReasons(jobs)
+	for i, job := range jobs {
+		if i > 0 {
+			fmt.Println("---")
+		}
+		x := explain.ForJob(database, job, time.Now())
+		fmt.Println(explain.DiagnoseText(x))
+	}
+	if len(errorsList) > 0 {
+		return fmt.Errorf("%s", strings.Join(errorsList, "; "))
+	}
+	return nil
+}
+
 func runJobStartNowBare(cmd *cobra.Command, args []string) error {
 	return runJobStartNowWithParser(cmd, args, ParseJobIDs)
 }
@@ -1034,6 +1071,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("             %s\n", info.MetricsLine())
 				fmt.Printf("             reset: weft autopilot blocked --unblock\n")
 			}
+		}
+		if x := explain.ForJob(database, job, time.Now()); x.SuggestedAction != "" && x.SuggestedAction != "none" {
+			fmt.Printf("Explain:     %s\n", x.SuggestedAction)
 		}
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())

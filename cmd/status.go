@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
@@ -307,7 +308,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 
 	// If the effective state is already terminal, use cached result.
 	if isWaitTerminalStatus(job.EffectiveStatus()) {
-		printJobStatus(job, exitOnComplete)
+		printJobStatus(database, job, exitOnComplete)
 		return
 	}
 
@@ -338,7 +339,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	}
 	hydrateQueueBlockedReasons([]*db.Job{job})
 
-	printJobStatus(job, exitOnComplete)
+	printJobStatus(database, job, exitOnComplete)
 	if progress := jobProgressSummary(database, job); progress != "" {
 		fmt.Printf("Progress: %s\n", progress)
 	}
@@ -644,9 +645,10 @@ func printJobStatusLine(job *db.Job) {
 	fmt.Println(line)
 }
 
-func printJobStatus(job *db.Job, exitOnComplete bool) {
+func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 	effectiveStatus := job.EffectiveStatus()
 	display := queueblock.Display(job, nil)
+	x := explain.ForJob(database, job, time.Now())
 
 	fmt.Printf("Job ID:   %s\n", ids.FormatJobID(job.ID))
 	fmt.Printf("Host:     %s\n", job.TargetDisplay())
@@ -655,6 +657,9 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Reason:   %s\n", display.Reason)
 	} else {
 		fmt.Printf("Status:   %s\n", effectiveStatus)
+	}
+	if x.SuggestedAction != "" && x.SuggestedAction != "none" {
+		fmt.Printf("Explain:  %s\n", x.SuggestedAction)
 	}
 
 	if job.EndTime != nil {

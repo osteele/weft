@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -354,7 +355,11 @@ func formatProjectWatchRow(job *db.Job, bucket string, now time.Time) string {
 	}
 	row := fmt.Sprintf("#%-5d %-16s %-12s %-14s %-12s %s", job.ID, status, host, dir, when, desc)
 	if display := queueblock.Display(job, nil); display.Blocked {
-		row += "  " + display.Reason
+		if summary := explain.SummaryLine(explain.ForJob(nil, job, now)); summary != "" {
+			row += "  " + summary
+		} else {
+			row += "  " + display.Reason
+		}
 	}
 	return row
 }

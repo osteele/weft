@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/status"
 )
 
@@ -36,6 +37,8 @@ type JobView struct {
 	PlacementAt        int64
 	PlacementReasons   []string // why this job is currently unplaced (if any)
 	QueueBlockedReason string   // transient queue-gate reason
+	Explanation        string   // normalized current-state explanation
+	SuggestedAction    string   // wait/replan/retry/etc. when known
 	FailureReason      string   // normalized failure reason (e.g. "timeout", "oom")
 	ErrorMessage       string
 	ProgressPct        int // 0-100, -1 if unavailable
@@ -113,7 +116,7 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 		return nil, fmt.Errorf("load placement status: %w", err)
 	}
 	for _, j := range jobs {
-		snap.Jobs[j.ID] = jobToView(j, liveByLaunch, placementStatusByJob[j.ID])
+		snap.Jobs[j.ID] = jobToView(database, j, liveByLaunch, placementStatusByJob[j.ID])
 	}
 
 	instances, err := db.ListNonTerminalLaunches(database)
@@ -133,7 +136,7 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	return snap, nil
 }
 
-func jobToView(j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementStatus db.PlacementStatus) JobView {
+func jobToView(database *sql.DB, j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementStatus db.PlacementStatus) JobView {
 	view := JobView{
 		ID:                 j.ID,
 		Status:             j.Status,
@@ -153,6 +156,9 @@ func jobToView(j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementS
 		ErrorMessage:       j.ErrorMessage,
 		ProgressPct:        -1,
 	}
+	x := explain.ForJob(database, j, time.Now())
+	view.Explanation = explain.SummaryLine(x)
+	view.SuggestedAction = x.SuggestedAction
 	if j.LaunchID != nil && liveByLaunch != nil {
 		if live := liveByLaunch[*j.LaunchID]; live != nil && live.JobProgressID == j.ID && live.JobProgressPct >= 0 {
 			view.ProgressPct = live.JobProgressPct
@@ -293,7 +299,7 @@ func (d *Delta) ResolveRemovedJobs(database *sql.DB) error {
 	}
 	for _, id := range d.JobRemoved {
 		if j, ok := jobs[id]; ok {
-			d.JobFinished = append(d.JobFinished, jobToView(j, nil, db.PlacementStatus{}))
+			d.JobFinished = append(d.JobFinished, jobToView(database, j, nil, db.PlacementStatus{}))
 		}
 	}
 	d.JobRemoved = nil
