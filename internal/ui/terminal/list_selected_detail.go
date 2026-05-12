@@ -156,7 +156,7 @@ func renderJobFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) str
 	if job.Priority > 0 {
 		parts = append(parts, fmt.Sprintf("priority %d", job.Priority))
 	}
-	parts = appendJobStatusParts(parts, job, now)
+	parts = appendJobStatusParts(parts, job, ctx, now)
 	if job.TargetKind() == db.JobTargetUnplaced {
 		parts = appendUnplacedParts(parts, job, ctx.cloudConfigured)
 	}
@@ -305,11 +305,14 @@ func waitingForSiblingJobID(job *db.Job, ctx selectedJobContext) int64 {
 	return 0
 }
 
-func appendJobStatusParts(parts []string, job *db.Job, now time.Time) []string {
+func appendJobStatusParts(parts []string, job *db.Job, ctx selectedJobContext, now time.Time) []string {
 	switch job.EffectiveStatus() {
 	case db.StatusRunning, db.StatusStarting:
 		if job.StartTime > 0 {
 			parts = append(parts, "elapsed "+estimate.FormatDurationShort(now.Sub(time.Unix(job.StartTime, 0))))
+		}
+		if cost, ok := selectedJobElapsedCost(job, ctx, now); ok {
+			parts = append(parts, fmt.Sprintf("cost $%.2f", cost))
 		}
 	case db.StatusQueued, db.StatusPendingPlacement:
 		if t := firstNonZeroTimestamp(job.QueuedAt, job.CreatedAt); t > 0 {
@@ -326,6 +329,25 @@ func appendJobStatusParts(parts []string, job *db.Job, now time.Time) []string {
 		}
 	}
 	return parts
+}
+
+func selectedJobElapsedCost(job *db.Job, ctx selectedJobContext, now time.Time) (float64, bool) {
+	if job == nil || job.StartTime <= 0 || job.LaunchID == nil {
+		return 0, false
+	}
+	launch := ctx.launchByID[*job.LaunchID]
+	if launch == nil {
+		return 0, false
+	}
+	obs := observeLaunch(launch, nil, now)
+	if obs.Rate == nil || *obs.Rate <= 0 {
+		return 0, false
+	}
+	elapsed := now.Sub(time.Unix(job.StartTime, 0))
+	if elapsed <= 0 {
+		return 0, false
+	}
+	return elapsed.Hours() * *obs.Rate, true
 }
 
 func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool) []string {

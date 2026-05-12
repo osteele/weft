@@ -338,6 +338,43 @@ func TestSelectedJobDetail_RentalHostEnriched(t *testing.T) {
 	}
 }
 
+func TestSelectedJobDetail_RentalRunningShowsElapsedCost(t *testing.T) {
+	now := time.Unix(3_000_000, 0)
+	launchID := int64(1935)
+	launchedAt := now.Add(-42 * time.Minute).Unix()
+	job := &db.Job{
+		ID:        1935,
+		LaunchID:  &launchID,
+		Tags:      []string{"provider:vastai"},
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-30 * time.Minute).Unix(),
+	}
+	ctx := selectedJobContext{
+		launchByID: map[int64]*db.Launch{
+			launchID: {
+				ID:               launchID,
+				Status:           db.LaunchStatusRunning,
+				Provider:         "vastai",
+				CostPerHourCents: 20,
+				LaunchedAt:       &launchedAt,
+			},
+		},
+	}
+
+	lines := renderSelectedJobDetail(job, ctx, now)
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 lines, got %v", lines)
+	}
+	for _, want := range []string{"Job: wj1935", "elapsed 30m", "cost $0.10"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("expected %q in Job line, got: %s", want, lines[0])
+		}
+	}
+	if !strings.Contains(lines[1], "$0.14") {
+		t.Errorf("expected host line to keep instance uptime cost, got: %s", lines[1])
+	}
+}
+
 func TestSelectedJobDetail_RentalHostFallbackWhenLaunchMissing(t *testing.T) {
 	now := time.Unix(3_000_000, 0)
 	launchID := int64(77)
