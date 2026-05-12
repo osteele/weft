@@ -56,6 +56,28 @@ func TestMatchJobToInstance_GPUClass(t *testing.T) {
 	}
 }
 
+func TestMatchJobToInstance_BroadNVIDIADoesNotReusePremiumAccelerator(t *testing.T) {
+	mem42 := 42
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "H100",
+			ResolvedGPUName: "H100 NVL",
+			GPUMemGB:        94,
+		},
+		DiskFreeGB: 100,
+	}
+
+	got, reason := MatchJobToInstance(&db.Job{GPUClass: "nvidia", GPUMemGB: &mem42}, cap)
+	if got {
+		t.Fatalf("broad NVIDIA job matched H100 reuse; reason=%q", reason)
+	}
+
+	got, reason = MatchJobToInstance(&db.Job{GPUClass: "h100", GPUMemGB: &mem42}, cap)
+	if !got {
+		t.Fatalf("explicit H100 job should match H100 reuse: %s", reason)
+	}
+}
+
 func TestFormatReuseAssignmentsShowsEstimatedWait(t *testing.T) {
 	assignments := []ReuseAssignment{{
 		Job: &db.Job{ID: 1877},

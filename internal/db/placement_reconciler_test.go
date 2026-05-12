@@ -62,15 +62,15 @@ func TestReconcilePlacementRows_RestoresNoStartMoveTargetToLiveSource(t *testing
 	if err != nil {
 		t.Fatalf("second ReconcilePlacementRows: %v", err)
 	}
-	if second.JobsUpdated != 0 || second.IntentsResolved != 1 {
-		t.Fatalf("second result = %+v, want stale restored-source intent resolution", second)
+	if second.JobsUpdated != 0 || second.IntentsResolved != 0 {
+		t.Fatalf("second result = %+v, want restored-source intent to stay open", second)
 	}
 	gotIntent, err = GetMoveIntent(database, intent.ID)
 	if err != nil {
 		t.Fatalf("GetMoveIntent second: %v", err)
 	}
-	if gotIntent.State != MoveIntentStateCanceled {
-		t.Fatalf("move intent state after second reconcile = %q, want canceled", gotIntent.State)
+	if gotIntent.State != MoveIntentStateOpen {
+		t.Fatalf("move intent state after second reconcile = %q, want open", gotIntent.State)
 	}
 }
 

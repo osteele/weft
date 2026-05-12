@@ -171,6 +171,9 @@ func reconcileOpenMoveIntentTx(tx *sql.Tx, now, cutoff int64, intent openMoveInt
 	}
 	if hasOpenAttempt && latestOpenLaunch != launchID {
 		if intent.SourceLaunchID.Valid && latestOpenLaunch == intent.SourceLaunchID.Int64 {
+			if intent.AttemptCount < intent.MaxAttempts {
+				return nil
+			}
 			resolved, err := resolveMoveIntentRestoredToSourceTx(tx, now, intent.ID)
 			if err != nil {
 				return err

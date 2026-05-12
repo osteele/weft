@@ -172,6 +172,9 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	if !gpuClassCompatible(job.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
 		return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", job.GPUClass, inst.GPUClass)
 	}
+	if broadNVIDIAConstraint(job.GPUClass) && premiumAcceleratorClass(inst.GPUClass, inst.ResolvedGPUName) {
+		return false, fmt.Sprintf("broad NVIDIA job should not reuse premium accelerator: job=%s instance=%s", job.GPUClass, inst.DisplayGPUBrief())
+	}
 
 	// GPU memory check
 	jobMemGB := 0
