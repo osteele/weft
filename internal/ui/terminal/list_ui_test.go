@@ -256,6 +256,38 @@ func TestListTUIPruneAutoBlockReasonsDropsStaleRunRateHeadroom(t *testing.T) {
 	}
 }
 
+func TestListTUIPruneAutoBlockReasonsDropsStaleRunRateSegment(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		CostPerHourCents: 40,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	reason := "run-rate headroom exhausted ($0.41/hr free, this group needs $2.69/hr); reuse blocked: wi2814 RTX 3090 24GB: GPU class mismatch"
+	m := listTUIModel{
+		database:               database,
+		autoRunRateTargetCents: 350,
+		autoPersistentBlocked:  reason,
+		autoPersistentBlockedN: 1,
+		autoBlockReasons:       map[int64]string{1: reason},
+		jobs:                   []*db.Job{{ID: 1, Status: db.StatusQueued}},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	got := m.autoBlockReasons[1]
+	if strings.Contains(got, "run-rate headroom exhausted") {
+		t.Fatalf("autoBlockReasons[1] = %q, want stale run-rate segment pruned", got)
+	}
+	if !strings.Contains(got, "reuse blocked") {
+		t.Fatalf("autoBlockReasons[1] = %q, want remaining reuse reason", got)
+	}
+	if !strings.Contains(m.autoPersistentBlocked, "reuse blocked") {
+		t.Fatalf("persistent blocked = %q, want recomputed reuse summary", m.autoPersistentBlocked)
+	}
+}
+
 func TestListTUIPruneAutoBlockReasonsKeepsCurrentRunRateHeadroom(t *testing.T) {
 	database := db.SetupTestDB(t)
 	if _, err := db.CreateLaunch(database, &db.Launch{

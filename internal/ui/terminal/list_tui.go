@@ -2493,9 +2493,15 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 			changed = true
 			continue
 		}
-		if hasRunRateHeadroom && staleRunRateBlockReason(reason, headroom) {
-			delete(m.autoBlockReasons, jobID)
-			changed = true
+		if hasRunRateHeadroom {
+			if pruned, prunedChanged := pruneStaleRunRateBlockReason(reason, headroom); prunedChanged {
+				if pruned == "" {
+					delete(m.autoBlockReasons, jobID)
+				} else {
+					m.autoBlockReasons[jobID] = pruned
+				}
+				changed = true
+			}
 		}
 	}
 	if changed {
@@ -2520,8 +2526,34 @@ func (m listTUIModel) currentRunRateHeadroomCents() (int, bool) {
 }
 
 func staleRunRateBlockReason(reason string, headroomCents int) bool {
-	needed, ok := parseRunRateBlockedNeedCents(reason)
-	return ok && needed > 0 && headroomCents >= needed
+	pruned, changed := pruneStaleRunRateBlockReason(reason, headroomCents)
+	return changed && strings.TrimSpace(pruned) == ""
+}
+
+func pruneStaleRunRateBlockReason(reason string, headroomCents int) (string, bool) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "", false
+	}
+	parts := strings.Split(reason, "; ")
+	kept := make([]string, 0, len(parts))
+	changed := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		needed, ok := parseRunRateBlockedNeedCents(part)
+		if ok && needed > 0 && headroomCents >= needed {
+			changed = true
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if !changed {
+		return reason, false
+	}
+	return strings.Join(kept, "; "), true
 }
 
 func parseRunRateBlockedNeedCents(reason string) (int, bool) {

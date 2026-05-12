@@ -978,6 +978,11 @@ func appendPlacementReason(database *sql.DB, jobID int64, reason string) {
 	if err != nil || job == nil {
 		return
 	}
+	for _, existing := range job.PlacementReasons {
+		if strings.TrimSpace(existing) == reason {
+			return
+		}
+	}
 	reasons := append([]string(nil), job.PlacementReasons...)
 	reasons = append(reasons, reason)
 	_ = db.SetJobPlacementReasons(database, jobID, reasons)

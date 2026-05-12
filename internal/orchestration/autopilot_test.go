@@ -637,6 +637,9 @@ func TestRunGroupedAutoPilotPass_ReuseFallbackExecutesAssignmentsWithoutLaunch(t
 		if instanceID == 0 {
 			t.Fatalf("instanceID = 0, want running instance id")
 		}
+		if err := db.SetJobLaunchID(database, jobs[0].ID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
 		return nil
 	}
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
@@ -953,6 +956,9 @@ func TestRunGroupedAutoPilotPass_ReusesExistingInstanceWhenLaunchBlocked(t *test
 		if len(jobs) != 1 || jobs[0].ID != jobID {
 			t.Fatalf("submitted jobs = %v, want job %d", jobs, jobID)
 		}
+		if err := db.SetJobLaunchID(database, jobs[0].ID, gotInstanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
 		return nil
 	}
 
@@ -968,6 +974,133 @@ func TestRunGroupedAutoPilotPass_ReusesExistingInstanceWhenLaunchBlocked(t *test
 	}
 	if reason := result.BlockedReasons[jobID]; reason != "" {
 		t.Fatalf("blocked reason for reused job = %q, want empty", reason)
+	}
+}
+
+func TestRunGroupedAutoPilotPass_FillsReusableInstanceAfterPlanner(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "fill reusable", "H100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUClass:         "H100",
+		ResolvedGPUName:  "H100 SXM",
+		GPUMemGB:         80,
+		CostPerHourCents: 300,
+		DiskGB:           200,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{BlockedReasons: map[int64]string{}}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		t.Fatalf("autoPilotRelaunch scope = %v, want no launch after reuse fill", scope)
+		return nil, nil
+	}
+
+	submitCalls := 0
+	autoPilotSubmitJobsToInstance = func(_ context.Context, _ *sql.DB, _ *r2.Client, gotInstanceID int64, jobs []*db.Job) error {
+		submitCalls++
+		if gotInstanceID != instanceID {
+			t.Fatalf("submit instance = %d, want %d", gotInstanceID, instanceID)
+		}
+		if len(jobs) != 1 || jobs[0] == nil || jobs[0].ID != jobID {
+			t.Fatalf("submitted jobs = %#v, want [%d]", jobs, jobID)
+		}
+		if err := db.SetJobLaunchID(database, jobs[0].ID, gotInstanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		return nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if submitCalls != 1 {
+		t.Fatalf("submit calls = %d, want 1", submitCalls)
+	}
+	if result.ReuseFilled != 1 {
+		t.Fatalf("ReuseFilled = %d, want 1", result.ReuseFilled)
+	}
+	if result.Placed != 1 {
+		t.Fatalf("Placed = %d, want 1", result.Placed)
+	}
+}
+
+func TestFillReusableInstancesRecordsRejectionReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "incompatible reuse", "H100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	gpuMem := 120
+	if err := db.SetJobGPUMemGB(database, jobID, &gpuMem); err != nil {
+		t.Fatalf("SetJobGPUMemGB: %v", err)
+	}
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "H100",
+		ResolvedGPUName: "H100 SXM",
+		GPUMemGB:        80,
+		DiskGB:          200,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	blocked := map[int64]string{}
+	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, blocked)
+	if err != nil {
+		t.Fatalf("fillReusableInstances: %v", err)
+	}
+	if placed != 0 {
+		t.Fatalf("placed = %d, want 0", placed)
+	}
+	if got := blocked[jobID]; !strings.Contains(got, "reuse blocked") || !strings.Contains(got, "GPU memory insufficient") {
+		t.Fatalf("blocked reason = %q, want reuse GPU memory reason", got)
+	}
+	persistBlockedReasonsForUnplaced(database, blocked)
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if len(job.PlacementReasons) != 1 || job.PlacementReasons[0] != blocked[jobID] {
+		t.Fatalf("placement reasons = %#v, want [%q]", job.PlacementReasons, blocked[jobID])
+	}
+}
+
+func TestAddAutoPilotBlockedReasonCombinesDistinctPaths(t *testing.T) {
+	reasons := map[int64]string{
+		1951: "run-rate headroom exhausted ($0.24/hr free, this group needs $1.52/hr)",
+	}
+
+	addAutoPilotBlockedReason(reasons, 1951, "reuse blocked: wi2808 RTX 6000Ada 45GB: GPU class mismatch: job=h100 instance=NVIDIA")
+	addAutoPilotBlockedReason(reasons, 1951, "reuse blocked: wi2808 RTX 6000Ada 45GB: GPU class mismatch: job=h100 instance=NVIDIA")
+
+	got := reasons[1951]
+	if !strings.Contains(got, "run-rate headroom exhausted") {
+		t.Fatalf("reason = %q, want run-rate reason", got)
+	}
+	if strings.Count(got, "reuse blocked") != 1 {
+		t.Fatalf("reason = %q, want one reuse reason", got)
 	}
 }
 
