@@ -88,6 +88,10 @@ const (
 	// dispatchBlockedReasonsFromEvents treats a fresher .deferred as
 	// superseding an older .failed.
 	EventQueueDispatchDeferred = "queue.dispatch.deferred"
+	// EventQueueDispatchAutoReplanned records an automatic move from an
+	// inventory-host queue back to the unplaced pool after sustained dispatch
+	// failures made the current target a poor placement.
+	EventQueueDispatchAutoReplanned = "queue.dispatch.auto_replanned"
 
 	// TUI retry outcomes
 	EventRetryAutoTriggered   = "retry.auto_triggered"

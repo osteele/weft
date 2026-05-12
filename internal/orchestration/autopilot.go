@@ -11,7 +11,10 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/explain"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -20,6 +23,7 @@ type GroupedAutoPilotResult struct {
 	Placed         int
 	Rebalanced     int
 	Launched       int
+	AutoReplanned  int
 	LaunchedClass  string
 	BlockedReasons map[int64]string
 }
@@ -31,6 +35,7 @@ var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
 var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
 var autoPilotLaunchMoveIntentRetry = launchMoveIntentRetry
+var autoReplanUnplaceQueuedJob = ops.UnplaceQueuedJob
 
 // placementIntentProtectionWindow shields freshly-opened intents from
 // auto-prune; it must exceed a healthy relaunch's offer-search →
@@ -72,14 +77,19 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		oplog.Log("auto_pilot.move_intents_retry_error", oplog.WithError(err))
 	}
 
-	unplacedJobs, err := db.ListUnplacedJobs(database)
-	if err != nil {
-		return nil, err
-	}
 	// Any job with an open intent (move or placement) is being handled by
 	// another path; the autopilot must not race it. See
 	// specs/job-move.allium § AutopilotIgnoresMovingJobs.
 	movingJobs, err := db.JobIDsWithOpenMoveOrPlacementIntents(database)
+	if err != nil {
+		return nil, err
+	}
+	autoReplanned, err := autoReplanStuckInventoryJobs(database, scoped, movingJobs)
+	if err != nil {
+		oplog.Log("auto_pilot.auto_replan_error", oplog.WithError(err))
+	}
+
+	unplacedJobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
 		return nil, err
 	}
@@ -114,8 +124,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			return nil, err
 		}
 		return &GroupedAutoPilotResult{
-			Rebalanced: len(rebalanceResult.Moves),
-			Launched:   moveRetryLaunches,
+			Rebalanced:    len(rebalanceResult.Moves),
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
 		}, nil
 	}
 
@@ -134,9 +145,10 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			return nil, err
 		}
 		return &GroupedAutoPilotResult{
-			Placed:     prePlaced,
-			Rebalanced: len(rebalanceResult.Moves),
-			Launched:   moveRetryLaunches,
+			Placed:        prePlaced,
+			Rebalanced:    len(rebalanceResult.Moves),
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
 		}, nil
 	}
 	r2Client, _ := BuildR2Client(cfg)
@@ -254,6 +266,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 						return &GroupedAutoPilotResult{
 							Placed:         0,
 							Launched:       moveRetryLaunches,
+							AutoReplanned:  autoReplanned,
 							LaunchedClass:  "",
 							BlockedReasons: blockedReasons,
 						}, nil
@@ -324,6 +337,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Placed:         placed,
 			Rebalanced:     rebalanced,
 			Launched:       moveRetryLaunches,
+			AutoReplanned:  autoReplanned,
 			LaunchedClass:  "",
 			BlockedReasons: blockedReasons,
 		}, nil
@@ -347,6 +361,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Placed:         placed,
 			Rebalanced:     rebalanced,
 			Launched:       moveRetryLaunches,
+			AutoReplanned:  autoReplanned,
 			LaunchedClass:  "",
 			BlockedReasons: blockedReasons,
 		}, err
@@ -356,6 +371,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Placed:         placed,
 			Rebalanced:     rebalanced,
 			Launched:       moveRetryLaunches,
+			AutoReplanned:  autoReplanned,
 			LaunchedClass:  "",
 			BlockedReasons: blockedReasons,
 		}, nil
@@ -436,9 +452,53 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		Placed:         placed,
 		Rebalanced:     rebalanced,
 		Launched:       moveRetryLaunches + len(result.InstanceIDs),
+		AutoReplanned:  autoReplanned,
 		LaunchedClass:  launchedClassFromResult(database, result.InstanceIDs),
 		BlockedReasons: blockedReasons,
 	}, nil
+}
+
+func autoReplanStuckInventoryJobs(database *sql.DB, scoped map[int64]struct{}, movingJobs map[int64]struct{}) (int, error) {
+	jobs, err := db.ListJobs(database, db.StatusQueued, "", 0, nil, "unprocessed")
+	if err != nil {
+		return 0, fmt.Errorf("list queued jobs for auto-replan: %w", err)
+	}
+	now := time.Now()
+	replanned := 0
+	for _, job := range jobs {
+		if job == nil || !job.HasInventoryHost() || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if len(scoped) > 0 {
+			if _, ok := scoped[job.ID]; !ok {
+				continue
+			}
+		}
+		if _, moving := movingJobs[job.ID]; moving {
+			continue
+		}
+		x := explain.ForJob(database, job, now)
+		if !x.AutoReplanAllowed {
+			continue
+		}
+		oldTarget := job.TargetDisplay()
+		if _, err := autoReplanUnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
+			return replanned, fmt.Errorf("auto-replan %s from %s: %w", ids.FormatJobID(job.ID), oldTarget, err)
+		}
+		reason := fmt.Sprintf("auto-replanned from %s after sustained dispatch block: %s", oldTarget, x.PrimaryReason)
+		appendPlacementReason(database, job.ID, reason)
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchAutoReplanned,
+			JobID:     job.ID,
+			Detail:    reason,
+		})
+		oplog.LogJob("auto_pilot.auto_replan", job.ID, oldTarget, oplog.WithDetail(reason))
+		replanned++
+	}
+	if replanned > 0 {
+		oplog.Log("auto_pilot.auto_replan", oplog.WithDetailf("jobs=%d", replanned))
+	}
+	return replanned, nil
 }
 
 func fulfillOpenMoveToNewIntents(ctx context.Context, database *sql.DB, scoped map[int64]struct{}) (int, error) {

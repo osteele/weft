@@ -7,13 +7,69 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
 )
+
+func TestAutoReplanStuckInventoryJobsMovesSustainedDispatchBlock(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", t.TempDir(), "python train.py", "blocked job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	now := time.Now()
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	for _, at := range []time.Time{now.Add(-20 * time.Minute), now.Add(-12 * time.Minute)} {
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			OccurredAt: at.Unix(),
+			EventKind:  db.EventQueueDispatchDeferred,
+			JobID:      jobID,
+			Detail:     "source sync deferred (host unreachable): ssh timeout",
+		}); err != nil {
+			t.Fatalf("InsertLifecycleEvent: %v", err)
+		}
+	}
+
+	originalUnplace := autoReplanUnplaceQueuedJob
+	t.Cleanup(func() { autoReplanUnplaceQueuedJob = originalUnplace })
+	autoReplanUnplaceQueuedJob = func(database *sql.DB, job *db.Job, _ ops.ExecuteOptions) (ops.Result, error) {
+		if err := db.MoveQueuedJobToUnplaced(database, job.ID); err != nil {
+			return ops.Result{}, err
+		}
+		return ops.Result{Success: true, JobID: job.ID}, nil
+	}
+
+	count, err := autoReplanStuckInventoryJobs(database, nil, nil)
+	if err != nil {
+		t.Fatalf("autoReplanStuckInventoryJobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.TargetKind() != db.JobTargetUnplaced {
+		t.Fatalf("TargetKind = %s, want unplaced", job.TargetKind())
+	}
+	var eventCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM lifecycle_events WHERE job_id = ? AND event_kind = ?`,
+		jobID, db.EventQueueDispatchAutoReplanned).Scan(&eventCount); err != nil {
+		t.Fatalf("count lifecycle events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("auto-replan events = %d, want 1", eventCount)
+	}
+}
 
 func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
