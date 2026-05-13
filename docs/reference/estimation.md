@@ -502,7 +502,7 @@ disk-full, and user cancellations are not retried.
 The relaunch logic:
 
 1. Resets jobs on terminal cloud instances to "unplaced" status.
-2. Filters to jobs with fewer than 3 prior cloud attempts (`DefaultMaxCloudAttempts`).
+2. Filters to jobs within the shared placement retry count budget.
 3. Groups eligible jobs by GPU requirements and fetches new offers.
 4. Launches replacement instances (inheriting the original campaign).
 

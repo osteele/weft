@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 func mustCreateLaunch(t *testing.T, database *sql.DB) int64 {
@@ -73,6 +75,9 @@ func TestCreateMoveIntent_NewWithoutTargetLaunch(t *testing.T) {
 	}
 	if intent.TargetOfferProvider != "vastai" {
 		t.Fatalf("offer provider = %q", intent.TargetOfferProvider)
+	}
+	if intent.MaxAttempts != retrypolicy.MaxPlacementAttempts() {
+		t.Fatalf("max_attempts = %d, want shared placement budget %d", intent.MaxAttempts, retrypolicy.MaxPlacementAttempts())
 	}
 }
 
@@ -294,8 +299,9 @@ func TestPruneMoveIntents(t *testing.T) {
 		database := SetupTestDB(t)
 		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
 		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-			JobID:      100,
-			TargetKind: MoveTargetNew,
+			JobID:       100,
+			TargetKind:  MoveTargetNew,
+			MaxAttempts: 1,
 		})
 		if err != nil {
 			t.Fatalf("CreateMoveIntent: %v", err)
@@ -355,6 +361,7 @@ func TestPruneMoveIntents(t *testing.T) {
 			JobID:          100,
 			TargetKind:     MoveTargetNew,
 			TargetLaunchID: &target,
+			MaxAttempts:    1,
 		})
 		if err != nil {
 			t.Fatalf("CreateMoveIntent: %v", err)
@@ -383,6 +390,7 @@ func TestPruneMoveIntents(t *testing.T) {
 			JobID:          100,
 			TargetKind:     MoveTargetNew,
 			TargetLaunchID: &target,
+			MaxAttempts:    1,
 		})
 		if err != nil {
 			t.Fatalf("CreateMoveIntent: %v", err)

@@ -291,7 +291,7 @@ func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, 
 	if opt.IsNew {
 		params.TargetKind = db.MoveTargetNew
 		params.AttemptCount = 1
-		params.MaxAttempts = defaultMoveToNewMaxAttempts
+		params.MaxAttempts = defaultMoveToNewMaxAttempts()
 		if opt.Offer != nil {
 			params.TargetOfferProvider = string(opt.Offer.Provider)
 			params.TargetOfferID = opt.Offer.ProviderID

@@ -6,7 +6,14 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
+
+func TestDefaultMaxCloudAttemptsUsesSharedPlacementBudget(t *testing.T) {
+	if got, want := DefaultMaxCloudAttempts, retrypolicy.MaxPlacementAttempts(); got != want {
+		t.Fatalf("DefaultMaxCloudAttempts = %d, want %d", got, want)
+	}
+}
 
 func TestRecordNotReplacedReason_DoesNotNestMultipleReasonsPrefix(t *testing.T) {
 	result := &RelaunchResult{NotReplacedReasons: map[int64]string{}}

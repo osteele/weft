@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 type newInstanceLaunchFunc func(
@@ -49,7 +50,9 @@ type newInstanceLaunchExecution struct {
 	database  *sql.DB
 }
 
-const defaultMoveToNewMaxAttempts = 4
+func defaultMoveToNewMaxAttempts() int {
+	return retrypolicy.MaxPlacementAttempts()
+}
 
 func executeNewInstanceLaunchWithMoveIntents(opts newInstanceLaunchExecutionOptions) (*newInstanceLaunchExecution, error) {
 	if opts.Database == nil {
@@ -130,7 +133,7 @@ func openMoveIntentsForNewInstanceGroups(database *sql.DB, groups []campaign.Ins
 				TargetOfferID:       offer.ProviderID,
 				TargetGPUName:       offer.GPUName,
 				AttemptCount:        1,
-				MaxAttempts:         defaultMoveToNewMaxAttempts,
+				MaxAttempts:         defaultMoveToNewMaxAttempts(),
 			})
 			if err != nil {
 				resolveMoveIntentIDs(database, intentIDs, db.MoveIntentStateCanceled, "new instance planning failed")

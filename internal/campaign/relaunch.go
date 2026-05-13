@@ -25,9 +25,11 @@ import (
 	"github.com/osteele/weft/internal/runner"
 )
 
-// DefaultMaxCloudAttempts is the default maximum number of cloud launch
-// attempts per job before giving up.
-const DefaultMaxCloudAttempts = 3
+// DefaultMaxCloudAttempts is the default maximum number of placement launch
+// attempts per job before giving up. Keep this tied to retrypolicy so
+// relaunches, move-to-new, and explicit new-instance launches use the same
+// count budget.
+var DefaultMaxCloudAttempts = retrypolicy.MaxPlacementAttempts()
 
 // backoffEventEmitted tracks the last attempt count for which a
 // relaunch.skipped.backoff event was recorded for each job, so the

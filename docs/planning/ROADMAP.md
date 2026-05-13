@@ -213,6 +213,24 @@ comparison dance, matching the Move/Placement/Termination intent shape.
 Worth revisiting when the view's complexity becomes a concrete pain
 point. Mostly clarity, not behavior change.
 
+## Mutable Current State Split
+
+Move mutable lifecycle fields out of historical attempts once placement
+identity is stable enough that the storage move can be evaluated on its own.
+
+Candidate fields:
+
+- `pending_status` / `pending_at` → an open intent or current-state table.
+- `last_synced_status` → current remote-observation state for the open
+  attempt.
+- `jobs.requested_status` → a durable user-intent entity, as above.
+
+The goal is to make completed `job_attempts` rows append-mostly historical
+facts, while live intent and sync state live in constrained current-state
+tables. Defer this until the current open-attempt and execution-target
+normalization has settled; doing it together with placement identity changes
+would make lifecycle regressions harder to isolate.
+
 ## Rebalance: variance-aware and regret-minimizing objectives
 
 The initial rebalance redesign (see `specs/campaign-lifecycle.allium`

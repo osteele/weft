@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 // MoveIntent records a speculative attempt to move a queued job from its
@@ -90,7 +92,7 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	}
 	maxAttempts := p.MaxAttempts
 	if maxAttempts <= 0 {
-		maxAttempts = 1
+		maxAttempts = retrypolicy.MaxPlacementAttempts()
 	}
 
 	res, err := database.Exec(

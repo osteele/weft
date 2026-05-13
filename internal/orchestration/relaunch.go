@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 // RelaunchOrphanedJobs resets jobs on terminal cloud instances and launches
@@ -55,7 +56,7 @@ func RelaunchOrphanedJobs(
 		R2Cfg:                 cfg.Vastai.R2.ToCloudR2Config(),
 		CreateOptsForProvider: cfg.CloudCreateOpts,
 		LaunchOpts:            campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
-		MaxAttempts:           campaign.DefaultMaxCloudAttempts + extraAttempts,
+		MaxAttempts:           retrypolicy.MaxAttemptsWithExtra(extraAttempts),
 		SurvivalModel:         buildSurvivalModel(database),
 		MinReliability:        &minReliability,
 		MinSurvival:           0.4,

@@ -30,6 +30,18 @@ func BackoffDelayClamped(attempt int) time.Duration {
 	}
 }
 
-func MaxAttempts() int {
+func MaxPlacementAttempts() int {
 	return len(backoffDelays) + 1
+}
+
+func MaxAttempts() int {
+	return MaxPlacementAttempts()
+}
+
+func MaxAttemptsWithExtra(extra int) int {
+	maxAttempts := MaxPlacementAttempts() + extra
+	if maxAttempts < 1 {
+		return 1
+	}
+	return maxAttempts
 }

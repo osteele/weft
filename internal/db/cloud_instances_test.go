@@ -1163,6 +1163,7 @@ func TestResetLaunchJobs_RestoresOpenNoStartMoveTargetToLiveSource(t *testing.T)
 		TargetKind:     MoveTargetNew,
 		TargetLaunchID: &dst,
 		TargetGPUName:  "A100",
+		MaxAttempts:    1,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
