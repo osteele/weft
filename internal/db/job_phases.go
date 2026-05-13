@@ -46,10 +46,10 @@ type JobPhaseTimings struct {
 	PeakGPUUtil   *int // peak GPU utilization (%)
 }
 
-// UpsertJobPhaseTimings inserts or replaces phase timing data for a job.
+// UpsertJobPhaseTimings inserts or merges phase timing data for a job.
 func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 	_, err := db.Exec(
-		`INSERT OR REPLACE INTO job_phase_timings
+		`INSERT INTO job_phase_timings
 		 (job_id, wrapper_start, setup_start, setup_end, run_start, run_end,
 		  upload_start, upload_end, upload_results_bytes, upload_workspace_bytes,
 		  output_upload_files, output_upload_retries, output_upload_duration_ms,
@@ -57,7 +57,33 @@ func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 		  cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
 		  uv_sync_seconds, disk_used_bytes, disk_total_bytes,
 		  peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(job_id) DO UPDATE SET
+		  wrapper_start = COALESCE(excluded.wrapper_start, job_phase_timings.wrapper_start),
+		  setup_start = COALESCE(excluded.setup_start, job_phase_timings.setup_start),
+		  setup_end = COALESCE(excluded.setup_end, job_phase_timings.setup_end),
+		  run_start = COALESCE(excluded.run_start, job_phase_timings.run_start),
+		  run_end = COALESCE(excluded.run_end, job_phase_timings.run_end),
+		  upload_start = COALESCE(excluded.upload_start, job_phase_timings.upload_start),
+		  upload_end = COALESCE(excluded.upload_end, job_phase_timings.upload_end),
+		  upload_results_bytes = COALESCE(excluded.upload_results_bytes, job_phase_timings.upload_results_bytes),
+		  upload_workspace_bytes = COALESCE(excluded.upload_workspace_bytes, job_phase_timings.upload_workspace_bytes),
+		  output_upload_files = COALESCE(excluded.output_upload_files, job_phase_timings.output_upload_files),
+		  output_upload_retries = COALESCE(excluded.output_upload_retries, job_phase_timings.output_upload_retries),
+		  output_upload_duration_ms = COALESCE(excluded.output_upload_duration_ms, job_phase_timings.output_upload_duration_ms),
+		  results_upload_files = COALESCE(excluded.results_upload_files, job_phase_timings.results_upload_files),
+		  results_upload_retries = COALESCE(excluded.results_upload_retries, job_phase_timings.results_upload_retries),
+		  results_upload_duration_ms = COALESCE(excluded.results_upload_duration_ms, job_phase_timings.results_upload_duration_ms),
+		  cache_hf_bytes = COALESCE(excluded.cache_hf_bytes, job_phase_timings.cache_hf_bytes),
+		  cache_uv_bytes = COALESCE(excluded.cache_uv_bytes, job_phase_timings.cache_uv_bytes),
+		  cache_uv_post_bytes = COALESCE(excluded.cache_uv_post_bytes, job_phase_timings.cache_uv_post_bytes),
+		  cache_hf_post_bytes = COALESCE(excluded.cache_hf_post_bytes, job_phase_timings.cache_hf_post_bytes),
+		  uv_sync_seconds = COALESCE(excluded.uv_sync_seconds, job_phase_timings.uv_sync_seconds),
+		  disk_used_bytes = COALESCE(excluded.disk_used_bytes, job_phase_timings.disk_used_bytes),
+		  disk_total_bytes = COALESCE(excluded.disk_total_bytes, job_phase_timings.disk_total_bytes),
+		  peak_gpu_mem_mib = COALESCE(excluded.peak_gpu_mem_mib, job_phase_timings.peak_gpu_mem_mib),
+		  mean_gpu_util = COALESCE(excluded.mean_gpu_util, job_phase_timings.mean_gpu_util),
+		  peak_gpu_util = COALESCE(excluded.peak_gpu_util, job_phase_timings.peak_gpu_util)`,
 		t.JobID, t.WrapperStart, t.SetupStart, t.SetupEnd, t.RunStart, t.RunEnd,
 		t.UploadStart, t.UploadEnd, t.UploadResultsBytes, t.UploadWorkspaceBytes,
 		t.OutputUploadFiles, t.OutputUploadRetries, t.OutputUploadDuration,

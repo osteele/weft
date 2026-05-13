@@ -5,6 +5,7 @@
 // Each endpoint is one of:
 //   - "hf"                            — Hugging Face Hub (source only)
 //   - "r2"                            — Cloudflare R2 (source only currently)
+//   - "donor:<instance_id>"           — donor-class cloud fan-out source
 //   - "cloud:<provider>:<datacenter>" — e.g., "cloud:vastai:us-east-1"
 //   - "onprem:<hostname>"             — e.g., "onprem:cool30"
 //
@@ -43,6 +44,8 @@ func (e Endpoint) Key() string {
 		return fmt.Sprintf("cloud:%s:%s", e.Provider, e.Datacenter)
 	case "onprem":
 		return fmt.Sprintf("onprem:%s", e.Hostname)
+	case "donor":
+		return fmt.Sprintf("donor:%s", e.InstanceID)
 	default:
 		return e.Kind
 	}
@@ -62,6 +65,11 @@ func CloudEndpoint(provider, datacenter, instanceID string) Endpoint {
 // OnPremEndpoint returns an endpoint for an on-premises host.
 func OnPremEndpoint(hostname string) Endpoint {
 	return Endpoint{Kind: "onprem", Hostname: hostname}
+}
+
+// DonorEndpoint returns an endpoint for donor-class cloud fan-out transfers.
+func DonorEndpoint(instanceID string) Endpoint {
+	return Endpoint{Kind: "donor", InstanceID: instanceID}
 }
 
 // BandwidthEstimate holds the computed bandwidth for a (source, dest) pair.

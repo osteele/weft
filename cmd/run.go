@@ -1202,7 +1202,7 @@ func recordRunPlacementTelemetry(database *sql.DB, cfg *config.Config, jobID int
 
 	sampleKey := fmt.Sprintf("run:%d:%d:%s", jobID, attemptID, operation)
 	sampled := db.ShouldSample(sampleKey, cfg.PlacementAlternativeSampleRate())
-	candidates := runPlacementCandidates(plan, result, cfg.PlacementAlternativeTopK(), selectedTarget)
+	candidates := runPlacementCandidates(database, plan, result, cfg.PlacementAlternativeTopK(), selectedTarget)
 	_, err = db.RecordPlacementDecision(database, db.PlacementDecision{
 		JobID:                  &jobID,
 		AttemptID:              attemptPtr,
@@ -1246,7 +1246,7 @@ func recordRunPlacementTelemetry(database *sql.DB, cfg *config.Config, jobID int
 	}
 }
 
-func runPlacementCandidates(plan *placement.PlacementPlan, result *placement.PlacementResult, limit int, selectedTarget string) []db.PlacementCandidate {
+func runPlacementCandidates(database *sql.DB, plan *placement.PlacementPlan, result *placement.PlacementResult, limit int, selectedTarget string) []db.PlacementCandidate {
 	if limit <= 0 {
 		return nil
 	}
@@ -1269,6 +1269,7 @@ func runPlacementCandidates(plan *placement.PlacementPlan, result *placement.Pla
 				EstCost:       &cost,
 				Survival:      &survival,
 				Selected:      c.ID == selectedTarget,
+				Details:       cacheSnapshotDetails(database, c.ID),
 			})
 		}
 		return out
@@ -1296,10 +1297,26 @@ func runPlacementCandidates(plan *placement.PlacementPlan, result *placement.Pla
 				"transfer_s":        s.TransferEst.Mean.Seconds(),
 				"run_s":             s.RunEst.Mean.Seconds(),
 				"contention_factor": s.ContentionFactor,
+				"cache_snapshot":    cacheSnapshotDetails(database, s.Host),
 			},
 		})
 	}
 	return out
+}
+
+func cacheSnapshotDetails(database *sql.DB, host string) map[string]any {
+	if database == nil || host == "" {
+		return nil
+	}
+	hash, count, err := dataloc.HostAssetSnapshotHash(database, host)
+	if err != nil {
+		return nil
+	}
+	return map[string]any{
+		"host":        host,
+		"asset_count": count,
+		"md5":         hash,
+	}
 }
 
 // parseCdPrefix extracts "cd /path && " or "cd /path; " prefix from a command.

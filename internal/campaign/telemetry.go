@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
@@ -43,6 +44,7 @@ func recordCampaignPlacementTelemetry(database *sql.DB, cfg *config.Config, camp
 			SelectedTarget:         offer.Key(),
 			SelectedScore:          selectedScore,
 			SampleCandidates:       sampled,
+			Details:                campaignPlacementDecisionDetails(group, job),
 		}, candidates)
 		if err != nil {
 			slog.Warn("failed to record campaign placement telemetry", "job_id", job.ID, "campaign_id", campaignID, "error", err)
@@ -65,6 +67,43 @@ func recordCampaignPlacementTelemetry(database *sql.DB, cfg *config.Config, camp
 				slog.Warn("failed to record campaign prediction history", "job_id", job.ID, "campaign_id", campaignID, "error", err)
 			}
 		}
+	}
+}
+
+func campaignPlacementDecisionDetails(group InstanceGroup, job *db.Job) map[string]any {
+	inputCounts := make(map[string]int)
+	for _, groupJob := range group.Jobs {
+		if groupJob == nil {
+			continue
+		}
+		for _, input := range groupJob.Inputs {
+			inputCounts[input]++
+		}
+	}
+	sharedInputs := make([]string, 0)
+	for input, count := range inputCounts {
+		if count > 1 {
+			sharedInputs = append(sharedInputs, input)
+		}
+	}
+	sort.Strings(sharedInputs)
+	jobOverlap := 0
+	jobInputCount := 0
+	if job != nil {
+		jobInputCount = len(job.Inputs)
+		for _, input := range job.Inputs {
+			if inputCounts[input] > 1 {
+				jobOverlap++
+			}
+		}
+	}
+	return map[string]any{
+		"group_job_count":          len(group.Jobs),
+		"group_input_count":        len(inputCounts),
+		"group_shared_input_count": len(sharedInputs),
+		"job_input_count":          jobInputCount,
+		"job_overlap_input_count":  jobOverlap,
+		"shared_inputs":            sharedInputs,
 	}
 }
 

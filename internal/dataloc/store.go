@@ -1,7 +1,10 @@
 package dataloc
 
 import (
+	"crypto/md5"
 	"database/sql"
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -68,6 +71,21 @@ func ListHostAssets(db *sql.DB, host string) ([]HostDataEntry, error) {
 	}
 	defer rows.Close()
 	return scanEntries(rows)
+}
+
+// HostAssetSnapshotHash returns an md5 of the host and resident asset IDs.
+func HostAssetSnapshotHash(db *sql.DB, host string) (string, int, error) {
+	entries, err := ListHostAssets(db, host)
+	if err != nil {
+		return "", 0, err
+	}
+	assets := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		assets = append(assets, string(entry.Asset.Kind)+":"+entry.Asset.ID)
+	}
+	sort.Strings(assets)
+	payload := host + "\n" + strings.Join(assets, "\n")
+	return fmt.Sprintf("%x", md5.Sum([]byte(payload))), len(assets), nil
 }
 
 // FindAssetHosts returns all hosts that have a given asset.

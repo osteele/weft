@@ -218,9 +218,14 @@ func detectFailureReason(tmpDir string, exitCode int) string {
 func ExtractPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
 	// Try structured phases.json first (from agent-based wrapper)
 	if timings := extractStructuredPhaseTimings(jobID, tmpDir); timings != nil {
+		mergeTelemetryPhaseMetrics(timings, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID)))
 		return timings
 	}
-	return extractLegacyPhaseTimings(jobID, tmpDir)
+	timings := extractLegacyPhaseTimings(jobID, tmpDir)
+	if timings != nil {
+		mergeTelemetryPhaseMetrics(timings, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID)))
+	}
+	return timings
 }
 
 // extractStructuredPhaseTimings reads a phases.json file written by weft-agent run-job.
@@ -358,6 +363,54 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 	}
 
 	return t
+}
+
+func mergeTelemetryPhaseMetrics(t *db.JobPhaseTimings, path string) {
+	if t == nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	samples := db.ParseTelemetrySamplesJSONL(string(data), 0)
+	if len(samples) == 0 {
+		return
+	}
+	summary := db.SummarizeTelemetry(samples, 0, nil)
+	if summary == nil {
+		return
+	}
+	var peakMem int
+	var utilSum float64
+	var utilCount int
+	var peakUtil int
+	for _, sample := range samples {
+		for _, gpu := range sample.GPUs {
+			if gpu.GPUUtilPct != nil && int(*gpu.GPUUtilPct) > peakUtil {
+				peakUtil = int(*gpu.GPUUtilPct)
+			}
+		}
+	}
+	for _, gpu := range summary.GPUs {
+		if gpu.GPUPeakMemMiB > peakMem {
+			peakMem = gpu.GPUPeakMemMiB
+		}
+		if gpu.GPUMeanUtilPct != nil {
+			utilSum += *gpu.GPUMeanUtilPct
+			utilCount++
+		}
+	}
+	if peakMem > 0 && t.PeakGPUMemMiB == nil {
+		t.PeakGPUMemMiB = &peakMem
+	}
+	if utilCount > 0 && t.MeanGPUUtil == nil {
+		mean := int(utilSum / float64(utilCount))
+		t.MeanGPUUtil = &mean
+	}
+	if peakUtil > 0 && t.PeakGPUUtil == nil {
+		t.PeakGPUUtil = &peakUtil
+	}
 }
 
 // extractLegacyPhaseTimings reads phase_* files and GPU monitor CSV from the results dir

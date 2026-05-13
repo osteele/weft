@@ -366,7 +366,7 @@ func syncOneCompletedJobMarker(
 		failureReason string
 		source        = campaign.SourceResults
 		tmpDir        string
-		haveResults   bool
+		haveDownload  bool
 	)
 
 	markerData, markerLastModified, markerErr := r2Client.GetObjectWithMeta(ctx, completeKey)
@@ -377,10 +377,8 @@ func syncOneCompletedJobMarker(
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
 	if err == nil {
 		if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err == nil {
+			haveDownload = true
 			exitCode, startTimeUnix, endTimeUnix, failureReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
-			if exitCode != nil {
-				haveResults = true
-			}
 		}
 	}
 
@@ -420,7 +418,7 @@ func syncOneCompletedJobMarker(
 		oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
 	}
 
-	if haveResults {
+	if haveDownload {
 		if err := importCloudTimeseriesFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)), "single"); err != nil && verbose {
 			fmt.Fprintf(os.Stderr, "Warning: cloud job %s final timeseries import failed: %v\n", ids.FormatJobID(jobID), err)
 		}

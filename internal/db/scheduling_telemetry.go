@@ -22,6 +22,7 @@ type PlacementDecision struct {
 	SelectedTarget         string
 	SelectedScore          *float64
 	SampleCandidates       bool
+	Details                any
 }
 
 // PlacementCandidate is a ranked placement alternative attached to a decision.
@@ -67,12 +68,16 @@ func RecordPlacementDecision(database *sql.DB, decision PlacementDecision, candi
 	if decision.SelectedScore != nil {
 		selectedScore = *decision.SelectedScore
 	}
+	details, err := jsonOrNull(decision.Details)
+	if err != nil {
+		return 0, err
+	}
 	res, err := database.Exec(`
 		INSERT INTO placement_decisions (
 			job_id, attempt_id, campaign_id, decision_kind, operation, objective,
 			placement_policy_version, model_fingerprint, selected_kind,
-			selected_target, selected_score, sample_candidates, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			selected_target, selected_score, sample_candidates, details_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableInt64(decision.JobID),
 		nullableInt64(decision.AttemptID),
 		nullableInt64(decision.CampaignID),
@@ -85,6 +90,7 @@ func RecordPlacementDecision(database *sql.DB, decision PlacementDecision, candi
 		decision.SelectedTarget,
 		selectedScore,
 		boolInt(decision.SampleCandidates),
+		details,
 		now,
 	)
 	if err != nil {

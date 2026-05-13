@@ -77,11 +77,13 @@ func updateJobResourceUsage(database *sql.DB, job *db.Job, timeout time.Duration
 
 	content, err := queueRemoteClient.Rusage(job.Host, job.ID, timeout)
 	if err != nil {
+		_ = upsertOnPremPhaseTimings(database, job, nil)
 		return false, nil // best effort
 	}
 
 	ru := parseResourceUsage(content)
 	if ru == nil {
+		_ = upsertOnPremPhaseTimings(database, job, nil)
 		return false, nil
 	}
 
@@ -94,5 +96,33 @@ func updateJobResourceUsage(database *sql.DB, job *db.Job, timeout time.Duration
 		return false, err
 	}
 	job.Metadata = meta
+	if err := upsertOnPremPhaseTimings(database, job, ru); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func upsertOnPremPhaseTimings(database *sql.DB, job *db.Job, ru *db.ResourceUsage) error {
+	if database == nil || job == nil {
+		return nil
+	}
+	fresh, err := db.GetJobByID(database, job.ID)
+	if err == nil && fresh != nil {
+		job = fresh
+	}
+	t := &db.JobPhaseTimings{JobID: job.ID}
+	if job.StartTime > 0 {
+		t.RunStart = &job.StartTime
+	}
+	if job.EndTime != nil && *job.EndTime > 0 {
+		t.RunEnd = job.EndTime
+	}
+	if ru != nil && ru.MaxGPUMemMiB != nil && *ru.MaxGPUMemMiB > 0 {
+		v := int(*ru.MaxGPUMemMiB)
+		t.PeakGPUMemMiB = &v
+	}
+	if t.RunStart == nil && t.RunEnd == nil && t.PeakGPUMemMiB == nil {
+		return nil
+	}
+	return db.UpsertJobPhaseTimings(database, t)
 }

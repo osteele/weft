@@ -348,6 +348,7 @@ var versionedMigrations = []migration{
 					selected_target TEXT,
 					selected_score REAL,
 					sample_candidates INTEGER NOT NULL DEFAULT 0,
+					details_json TEXT,
 					created_at INTEGER NOT NULL
 				)`,
 				`CREATE INDEX IF NOT EXISTS idx_placement_decisions_job ON placement_decisions(job_id, attempt_id)`,
@@ -396,6 +397,12 @@ var versionedMigrations = []migration{
 				}
 			}
 			return nil
+		},
+	},
+	{
+		Description: "add placement decision details",
+		Apply: func(db *sql.DB) error {
+			return addColumnIfMissing(db, `ALTER TABLE placement_decisions ADD COLUMN details_json TEXT`)
 		},
 	},
 }

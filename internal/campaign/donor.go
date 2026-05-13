@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/retry"
+	"github.com/osteele/weft/internal/transferbw"
 )
 
 // DonorConfig holds the selected donor offer and associated metadata.
@@ -339,6 +340,7 @@ func SeedWorkers(
 				onProgress(w.DBID, "copy failed, will download independently")
 			} else {
 				_ = db.SetLaunchSeedCopySecs(database, w.DBID, elapsed)
+				recordDonorTransferObservation(database, donor, w.ProviderID, w.DBID, time.Since(start))
 				onProgress(w.DBID, fmt.Sprintf("copy complete (%ds)", elapsed))
 				// This worker can now be a donor for others
 				donors <- w.ProviderID
@@ -352,6 +354,36 @@ func SeedWorkers(
 		return fmt.Errorf("some worker copies failed: %d/%d workers", len(errs), len(workers))
 	}
 	return nil
+}
+
+func recordDonorTransferObservation(database *sql.DB, donorProviderID, workerProviderID string, workerDBID int64, elapsed time.Duration) {
+	if database == nil || elapsed <= 0 {
+		return
+	}
+	worker, err := db.GetLaunch(database, workerDBID)
+	if err != nil || worker == nil {
+		return
+	}
+	bytesTransferred := estimateProvisionedInputBytes(worker.ProvisionedInputs)
+	if bytesTransferred <= 0 {
+		return
+	}
+	source := transferbw.DonorEndpoint(donorProviderID)
+	dest := transferbw.CloudEndpoint(worker.Provider, worker.DataCenter, workerProviderID)
+	if err := transferbw.RecordObservation(database, source, dest, bytesTransferred, elapsed); err != nil {
+		slog.Warn("failed to record donor transfer observation", "component", "donor", "worker", workerProviderID, "error", err)
+	}
+}
+
+func estimateProvisionedInputBytes(inputs []string) int64 {
+	if len(inputs) == 0 {
+		return 0
+	}
+	bytes, _, err := dataloc.ResolveInputSizes(inputs, nil)
+	if err != nil {
+		slog.Warn("failed to resolve donor transfer input sizes", "component", "donor", "error", err)
+	}
+	return bytes
 }
 
 // DefaultDonorReadyTimeout is how long to wait for donor to finish downloads.
