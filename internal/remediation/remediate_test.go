@@ -9,15 +9,18 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestAttemptRemediation_NoMatch(t *testing.T) {
+func TestAttemptRemediation_NoMatchStoresUnknown(t *testing.T) {
 	ctx := RemediationContext{
 		Job:        &db.Job{ID: 1, Host: "host-beta"},
 		LogContent: "Training complete! Loss: 0.01",
 		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	result := AttemptRemediation(ctx)
-	if result != nil {
-		t.Errorf("expected nil result for clean log, got %+v", result)
+	if result == nil {
+		t.Fatal("expected unknown diagnosis for failed attempt")
+	}
+	if result.Diagnosis.Pattern != "unknown" {
+		t.Errorf("expected unknown, got %s", result.Diagnosis.Pattern)
 	}
 }
 
@@ -41,8 +44,8 @@ func TestAttemptRemediation_RetryLimitReached(t *testing.T) {
 	if result.Retried {
 		t.Error("should not retry when retry limit is reached")
 	}
-	if result.Diagnosis.Pattern != "missing_import" {
-		t.Errorf("expected missing_import, got %s", result.Diagnosis.Pattern)
+	if result.Diagnosis.Pattern != "module_not_found" {
+		t.Errorf("expected module_not_found, got %s", result.Diagnosis.Pattern)
 	}
 }
 

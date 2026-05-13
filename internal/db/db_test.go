@@ -2196,7 +2196,8 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 			placement_meta TEXT,
 			job_metadata TEXT,
 			observed_inputs TEXT,
-			error_diagnosis TEXT
+			error_diagnosis TEXT,
+			error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE cloud_instances (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

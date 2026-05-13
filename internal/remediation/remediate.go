@@ -33,7 +33,7 @@ type RemediationResult struct {
 // AttemptRemediation diagnoses a failed job's log and, if possible, remediates
 // and retries it. Returns nil if no known error pattern is found.
 func AttemptRemediation(ctx RemediationContext) *RemediationResult {
-	diagnosis := DiagnoseFromLog(ctx.LogContent)
+	diagnosis := DiagnoseFailedAttemptFromLog(ctx.LogContent, "post")
 	if diagnosis == nil {
 		return nil
 	}

@@ -254,6 +254,7 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			error_message TEXT,
 			failure_reason TEXT,
 			error_diagnosis TEXT,
+			error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0,
 			session_name TEXT,
 			remote_id TEXT,
 			remote_state TEXT,

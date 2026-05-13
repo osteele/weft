@@ -405,6 +405,12 @@ var versionedMigrations = []migration{
 			return addColumnIfMissing(db, `ALTER TABLE placement_decisions ADD COLUMN details_json TEXT`)
 		},
 	},
+	{
+		Description: "add error diagnosis backfill marker",
+		Apply: func(db *sql.DB) error {
+			return addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0`)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

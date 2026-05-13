@@ -112,6 +112,7 @@ func createJobAttemptsTableSQL() string {
 		error_message TEXT,
 		failure_reason TEXT,
 		error_diagnosis TEXT,
+		error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0,
 
 		-- Backend-specific
 		session_name TEXT,
@@ -156,6 +157,9 @@ func initJobAttemptsSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN predecessor_attempt_id INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN target_id INTEGER REFERENCES execution_targets(id)`); err != nil {

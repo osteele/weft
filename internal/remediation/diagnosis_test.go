@@ -28,8 +28,8 @@ ModuleNotFoundError: No module named 'transformers'`
 	if d == nil {
 		t.Fatal("expected a diagnosis")
 	}
-	if d.Pattern != "missing_import" {
-		t.Errorf("expected missing_import, got %s", d.Pattern)
+	if d.Pattern != "module_not_found" {
+		t.Errorf("expected module_not_found, got %s", d.Pattern)
 	}
 }
 
@@ -67,6 +67,9 @@ func TestMarshalUnmarshalDiagnosis(t *testing.T) {
 		MissingAssets: []string{"hf:meta-llama/Llama-3-8B"},
 		Remediable:    true,
 		Details:       "FileNotFoundError: ...",
+		StructuredDetails: map[string]any{
+			"missing_module": "transformers",
+		},
 	}
 
 	s, err := MarshalDiagnosis(d)
@@ -84,6 +87,110 @@ func TestMarshalUnmarshalDiagnosis(t *testing.T) {
 	}
 	if len(d2.MissingAssets) != 1 || d2.MissingAssets[0] != "hf:meta-llama/Llama-3-8B" {
 		t.Errorf("missing assets mismatch: %v", d2.MissingAssets)
+	}
+	if d2.StructuredDetails["missing_module"] != "transformers" {
+		t.Errorf("structured details mismatch: %v", d2.StructuredDetails)
+	}
+}
+
+func TestDiagnoseFailedAttemptFromLog_PatternRegistry(t *testing.T) {
+	tests := []struct {
+		name    string
+		log     string
+		pattern string
+		detail  string
+	}{
+		{
+			name:    "preempted",
+			log:     "runpod spot interruption: preempted with 30 seconds notice",
+			pattern: "preempted",
+			detail:  "provider",
+		},
+		{
+			name:    "gpu oom",
+			log:     "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB on GPU 0",
+			pattern: "gpu_oom",
+			detail:  "requested_mib",
+		},
+		{
+			name:    "cuda error",
+			log:     "RuntimeError: CUDA error: 700 CUDA_ERROR_ILLEGAL_ADDRESS kernel name: matmul_fp16",
+			pattern: "cuda_error",
+			detail:  "cuda_error_code",
+		},
+		{
+			name:    "disk full",
+			log:     "OSError: [Errno 28] No space left on device",
+			pattern: "disk_full",
+		},
+		{
+			name:    "ssh disconnect",
+			log:     "ssh: Connection reset by peer; Broken pipe",
+			pattern: "ssh_disconnect",
+		},
+		{
+			name:    "timeout",
+			log:     "agent timed out: budget 3600 seconds elapsed 3610 seconds",
+			pattern: "timeout",
+			detail:  "budget_seconds",
+		},
+		{
+			name:    "module not found",
+			log:     "ModuleNotFoundError: No module named 'transformers'",
+			pattern: "module_not_found",
+			detail:  "missing_module",
+		},
+		{
+			name:    "assert failure",
+			log:     "Traceback (most recent call last):\n  File \"train.py\", line 1\nAssertionError: bad batch",
+			pattern: "assert_failure",
+		},
+		{
+			name:    "subprocess failure",
+			log:     "subprocess.CalledProcessError: Command 'python prep.py' returned non-zero exit status 2",
+			pattern: "subprocess_failure",
+		},
+		{
+			name:    "unknown",
+			log:     "job failed without a recognizable signature",
+			pattern: "unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := DiagnoseFailedAttemptFromLog(tt.log, "backfill")
+			if d == nil {
+				t.Fatal("expected diagnosis")
+			}
+			if d.Pattern != tt.pattern {
+				t.Fatalf("pattern = %q, want %q", d.Pattern, tt.pattern)
+			}
+			if d.DetectedBy != "backfill" {
+				t.Fatalf("detected_by = %q, want backfill", d.DetectedBy)
+			}
+			if d.MatchedText == "" {
+				t.Fatal("matched_text should be populated")
+			}
+			if tt.detail != "" {
+				if _, ok := d.StructuredDetails[tt.detail]; !ok {
+					t.Fatalf("details missing %q: %v", tt.detail, d.StructuredDetails)
+				}
+			}
+		})
+	}
+}
+
+func TestUnmarshalDiagnosis_LegacyDetailsString(t *testing.T) {
+	d, err := UnmarshalDiagnosis(`{"pattern":"gpu_oom","details":"CUDA out of memory","gpu_capacity_gb":24}`)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if d.Details != "CUDA out of memory" {
+		t.Fatalf("details = %q", d.Details)
+	}
+	if d.GPUCapacityGB != 24 {
+		t.Fatalf("gpu_capacity_gb = %d", d.GPUCapacityGB)
 	}
 }
 
