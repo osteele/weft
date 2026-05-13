@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
@@ -130,22 +129,37 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	if changeSource != nil {
 		defer changeSource.Close()
 	}
+	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
+	if snapshotErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", snapshotErr)
+	}
 
 	fmt.Printf("[%s] daemon started pid=%d\n", time.Now().Format("15:04:05"), pid)
 	pass := 0
+	runAutopilot := true
+	lastOutcome := outcomeIdle
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		pass++
-		wait := runDaemonPass(ctx, database, cfg, pass)
-		if waitForDBChangeOrDaemonTimeout(ctx, changeSource, wait) {
+		wait, outcome := runDaemonPass(ctx, database, cfg, pass, runAutopilot)
+		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
+			wakeSnapshot = nextSnapshot
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
+		}
+		lastOutcome = outcome
+		var reason autopilotWakeReason
+		wakeSnapshot, reason = waitForAutopilotInvalidation(ctx, changeSource, nil, database, wait, true, wakeSnapshot)
+		if reason == autopilotWakeDone {
 			return nil
 		}
+		runAutopilot = reason != autopilotWakeTimer || autopilotTimerRunsPass(lastOutcome)
 	}
 }
 
-func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int) time.Duration {
+func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) (time.Duration, autopilotOutcome) {
 	started := time.Now()
 	syncResult := syncorch.SyncAll(database, cfg, syncorch.SyncOptions{
 		SSHTimeout:        FastSyncTimeout,
@@ -164,11 +178,13 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		result *orchestration.GroupedAutoPilotResult
 		runErr error
 	)
-	paused, perr := orchestration.IsAutopilotPaused(database)
-	if perr == nil && paused {
-		runErr = orchestration.ErrAutopilotPaused
-	} else {
-		result, runErr = orchestration.RunGroupedAutoPilotPassGated(ctx, database, nil, fmt.Sprintf("daemon/%d", os.Getpid()))
+	if runAutopilot {
+		paused, perr := orchestration.IsAutopilotPaused(database)
+		if perr == nil && paused {
+			runErr = orchestration.ErrAutopilotPaused
+		} else {
+			result, runErr = orchestration.RunGroupedAutoPilotPassGated(ctx, database, nil, fmt.Sprintf("daemon/%d", os.Getpid()))
+		}
 	}
 
 	outcome, wait := classifyAutopilotPass(result, runErr, autopilotRunPausedWait)
@@ -181,7 +197,7 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		wait = orchestration.AutopilotCooldownBlocked
 	}
 	emitDaemonPass(pass, started, syncResult, result, outcome, runErr, wait)
-	return wait
+	return wait, outcome
 }
 
 func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult, result *orchestration.GroupedAutoPilotResult, outcome autopilotOutcome, runErr error, wait time.Duration) {
@@ -213,14 +229,6 @@ func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult,
 		parts = append(parts, fmt.Sprintf("err=%q", runErr.Error()))
 	}
 	fmt.Printf("[%s] %s (next in %s)\n", time.Now().Format("15:04:05"), strings.Join(parts, " "), wait.Truncate(time.Second))
-}
-
-func waitForDBChangeOrDaemonTimeout(ctx context.Context, source *dbwatch.Source, wait time.Duration) bool {
-	if source == nil {
-		return waitForDurationOrDone(ctx, wait)
-	}
-	_, done := waitForDBChangeOrTimeout(ctx, source, wait, "daemon")
-	return done
 }
 
 func runDaemonStart(cmd *cobra.Command, args []string) error {

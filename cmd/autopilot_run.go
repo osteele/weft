@@ -28,6 +28,8 @@ var (
 	autopilotRunPausedWait time.Duration
 )
 
+const autopilotLifecycleDebounce = 2 * time.Second
+
 var autopilotRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the autopilot in a loop without the TUI",
@@ -116,6 +118,10 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 	if changeSource != nil {
 		defer changeSource.Close()
 	}
+	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
+	if snapshotErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", snapshotErr)
+	}
 
 	pass := 0
 	for {
@@ -180,6 +186,11 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		ev.NextWaitMS = wait.Milliseconds()
 
 		emitPassEvent(ev)
+		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
+			wakeSnapshot = nextSnapshot
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
+		}
 
 		if autopilotRunOnce {
 			if outcome == outcomeError {
@@ -190,30 +201,130 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		if autopilotRunMaxPasses > 0 && pass >= autopilotRunMaxPasses {
 			return nil
 		}
-		if waitForAutopilotInvalidation(ctx, changeSource, cfg, database, wait) {
+		var reason autopilotWakeReason
+		wakeSnapshot, reason = waitForAutopilotInvalidation(ctx, changeSource, cfg, database, wait, autopilotTimerRunsPass(outcome), wakeSnapshot)
+		if reason == autopilotWakeDone {
 			return nil
 		}
 	}
 }
 
-func waitForAutopilotInvalidation(ctx context.Context, changeSource *dbwatch.Source, cfg *config.Config, database *sql.DB, wait time.Duration) bool {
-	if changeSource == nil {
-		return waitForDurationOrDone(ctx, wait)
+type autopilotWakeSnapshot struct {
+	LifecycleID          int64
+	UnplacedJobs         int
+	LiveLaunches         int
+	OpenPlacementIntents int
+	OpenMoveIntents      int
+}
+
+func readAutopilotWakeSnapshot(database *sql.DB) (autopilotWakeSnapshot, error) {
+	var snap autopilotWakeSnapshot
+	if database == nil {
+		return snap, nil
 	}
+	if err := database.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM lifecycle_events`).Scan(&snap.LifecycleID); err != nil {
+		return snap, err
+	}
+	if err := database.QueryRow(`
+		SELECT COUNT(*)
+		  FROM job_status
+		 WHERE tombstoned = 0
+		   AND effective_target_kind = ?
+		   AND COALESCE(pending_status, status) IN (?, ?)`,
+		string(db.JobTargetUnplaced), db.StatusQueued, db.StatusPendingPlacement,
+	).Scan(&snap.UnplacedJobs); err != nil {
+		return snap, err
+	}
+	if err := database.QueryRow(`
+		SELECT COUNT(*)
+		  FROM launches
+		 WHERE status IN (?, ?, ?, ?)`,
+		db.LaunchStatusLaunching, db.LaunchStatusRunning, db.LaunchStatusPaused, db.LaunchStatusGrace,
+	).Scan(&snap.LiveLaunches); err != nil {
+		return snap, err
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM placement_intents WHERE state = 'open'`).Scan(&snap.OpenPlacementIntents); err != nil {
+		return snap, err
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM move_intents WHERE state = 'open'`).Scan(&snap.OpenMoveIntents); err != nil {
+		return snap, err
+	}
+	return snap, nil
+}
+
+func autopilotTimerRunsPass(outcome autopilotOutcome) bool {
+	switch outcome {
+	case outcomeProgress, outcomeBlocked, outcomeError, outcomeBusy, outcomePaused:
+		return true
+	default:
+		return false
+	}
+}
+
+type autopilotWakeReason string
+
+const (
+	autopilotWakeAction autopilotWakeReason = "action"
+	autopilotWakeTimer  autopilotWakeReason = "timer"
+	autopilotWakeDone   autopilotWakeReason = "done"
+)
+
+func waitForAutopilotInvalidation(ctx context.Context, changeSource *dbwatch.Source, cfg *config.Config, database *sql.DB, wait time.Duration, timerRunsPass bool, baseline autopilotWakeSnapshot) (autopilotWakeSnapshot, autopilotWakeReason) {
+	if changeSource == nil {
+		if waitForDurationOrDone(ctx, wait) {
+			return baseline, autopilotWakeDone
+		}
+		return baseline, autopilotWakeTimer
+	}
+	var pending *autopilotWakeSnapshot
+	var debounceDeadline time.Time
 	for {
-		changed, done := waitForDBChangeOrTimeout(ctx, changeSource, wait, "autopilot run")
+		nextWait := wait
+		if pending != nil {
+			untilDebounce := time.Until(debounceDeadline)
+			if untilDebounce <= 0 {
+				return *pending, autopilotWakeAction
+			}
+			if nextWait <= 0 || untilDebounce < nextWait {
+				nextWait = untilDebounce
+			}
+		}
+		changed, done := waitForDBChangeOrTimeout(ctx, changeSource, nextWait, "autopilot run")
 		if done {
-			return true
+			return baseline, autopilotWakeDone
 		}
 		if changed {
-			return false
+			snap, err := readAutopilotWakeSnapshot(database)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
+				return baseline, autopilotWakeAction
+			}
+			if snap != baseline {
+				pendingSnap := snap
+				pending = &pendingSnap
+				debounceDeadline = time.Now().Add(autopilotLifecycleDebounce)
+			} else {
+				pending = nil
+			}
+			continue
+		}
+		if pending != nil && time.Now().After(debounceDeadline.Add(-time.Millisecond)) {
+			return *pending, autopilotWakeAction
+		}
+		if timerRunsPass {
+			return baseline, autopilotWakeTimer
 		}
 		if cfg == nil {
 			continue
 		}
 		result, completed := syncCloudStateWithTimeout(cfg, database, nil, NormalCloudSyncTimeout, false)
 		if !completed || result.Updated > 0 {
-			return false
+			snap, err := readAutopilotWakeSnapshot(database)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
+				return baseline, autopilotWakeAction
+			}
+			return snap, autopilotWakeAction
 		}
 	}
 }
