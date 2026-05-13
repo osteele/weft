@@ -131,10 +131,17 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 	if err != nil {
 		return nil, err
 	}
+	diskFailedLaunches, err := launchDiskFailureSet(database, launchIDs)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now()
 
 	var result []InstanceCapacity
 	for _, inst := range instances {
+		if diskFailedLaunches[inst.ID] {
+			continue
+		}
 		if ok, _ := instanceAcceptsReuseWithLiveState(inst, liveStates[inst.ID], now); !ok {
 			continue
 		}
@@ -143,6 +150,32 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 		}
 	}
 
+	return result, nil
+}
+
+func launchDiskFailureSet(database *sql.DB, launchIDs []int64) (map[int64]bool, error) {
+	result := make(map[int64]bool)
+	for _, launchID := range launchIDs {
+		var count int
+		err := database.QueryRow(
+			`SELECT COUNT(*)
+			   FROM job_attempts
+			  WHERE launch_id = ?
+			    AND (
+			      failure_reason = 'disk_full'
+			      OR lower(COALESCE(failure_reason, '')) LIKE '%edquot%'
+			      OR lower(COALESCE(error_message, '')) LIKE '%edquot%'
+			      OR lower(COALESCE(error_message, '')) LIKE '%os error 122%'
+			      OR lower(COALESCE(error_message, '')) LIKE '%filesystem quota%'
+			      OR lower(COALESCE(error_message, '')) LIKE '%quota exceeded%'
+			    )`,
+			launchID,
+		).Scan(&count)
+		if err != nil {
+			return nil, err
+		}
+		result[launchID] = count > 0
+	}
 	return result, nil
 }
 

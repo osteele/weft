@@ -121,6 +121,9 @@ func logMentionsDiskFull(logPath string) bool {
 	text := strings.ToLower(string(data))
 	return strings.Contains(text, "no space left on device") ||
 		strings.Contains(text, "enospc") ||
+		strings.Contains(text, "edquot") ||
+		strings.Contains(text, "os error 122") ||
+		strings.Contains(text, "filesystem quota") ||
 		strings.Contains(text, "quota exceeded") ||
 		strings.Contains(text, "disk quota exceeded")
 }

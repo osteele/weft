@@ -78,6 +78,44 @@ func TestMatchJobToInstance_BroadNVIDIADoesNotReusePremiumAccelerator(t *testing
 	}
 }
 
+func TestFindReusableInstances_SkipsLaunchAfterDiskFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	graceDeadline := now + 3600
+	_, err := database.Exec(
+		`INSERT INTO launches (id, status, provider, created_at, launched_at, gpu_class, gpu_mem_gb, disk_gb, grace_deadline)
+		 VALUES (1, 'grace', 'runpod', ?, ?, 'nvidia', 48, 120, ?)`,
+		now, now, graceDeadline,
+	)
+	if err != nil {
+		t.Fatalf("insert launch: %v", err)
+	}
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, working_dir, command, created_at, tombstoned)
+		 VALUES (10, '/workspace/project', 'uv run python train.py', ?, 0)`,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	_, err = database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, start_time, end_time, exit_code, failure_reason, cloud_outcome)
+		 VALUES (10, 1, 1, 'failed', ?, ?, 1, 'disk_full', 'failed')`,
+		now, now+10,
+	)
+	if err != nil {
+		t.Fatalf("insert attempt: %v", err)
+	}
+
+	instances, err := FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances: %v", err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("FindReusableInstances returned %d instances, want 0", len(instances))
+	}
+}
+
 func TestFormatReuseAssignmentsShowsEstimatedWait(t *testing.T) {
 	assignments := []ReuseAssignment{{
 		Job: &db.Job{ID: 1877},

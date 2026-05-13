@@ -566,6 +566,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		Samples:                  []int{},
 		GPUDevices:               gpuDevices,
 		GPUMemGB:                 gpuMemGB,
+		DiskPath:                 expandedDir,
 		TelemetryIntervalSeconds: int64(telemetryPolicy.Interval / time.Second),
 		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
 	})
@@ -616,7 +617,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	// On failure, detect the failure reason using signal-aware detection
 	var failureReason string
 	if ei.ExitCode != 0 {
-		failureReason = DetectFailureReasonFromExitInfo(ei)
+		failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
 		WriteFailureReasonFile(paths, failureReason)
 	}
 

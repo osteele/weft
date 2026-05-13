@@ -40,7 +40,7 @@ func SampleJob(pid, pgid int, cpuCount int, paths JobPaths, rs *RunningJobState,
 	// Timeseries sample
 	currentRSS := ProcCurrentRSSKB(rusagePID)
 	hostTotal, hostUsed := HostMemoryKB()
-	diskUsed, diskTotal := ProbeDiskUsage()
+	diskUsed, diskTotal := ProbeDiskUsageAtPath(rs.DiskPath)
 	gpuStats := HostGPUMetrics()
 	pressure := MemoryPressureFromUsage(hostTotal, hostUsed)
 

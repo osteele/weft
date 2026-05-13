@@ -165,8 +165,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 
 	// Cache probe (pre-job) should use the same HF env the job will run with.
+	probeEnv := mergeEnvVars(os.Environ(), envVars)
+	diskProbePath := resolveDiskProbePath(probeEnv, envValue(probeEnv, "HOME"), workingDir)
 	if !cfg.SkipProbes {
-		cachePre := ProbeCacheSizesForEnv(mergeEnvVars(os.Environ(), envVars))
+		cachePre := ProbeCacheSizesForEnvAtPath(probeEnv, diskProbePath)
 		phases.CachePre = &cachePre
 	}
 
@@ -277,6 +279,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	rs.StartedAt = phases.RunStart
 	rs.GPUDevices = gpuDevices
 	rs.GPUMemGB = GetJobGPUMem(job, DefaultGPUMemGB)
+	rs.DiskPath = diskProbePath
 	rs.TelemetryIntervalSeconds = int64(cfg.SampleInterval / time.Second)
 	rs.TelemetryAdvancedGPU = telemetryPolicy.CollectAdvancedGPU
 
@@ -483,7 +486,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// Failure detection
 	var failureReason string
 	if ei.ExitCode != 0 {
-		failureReason = DetectFailureReasonFromExitInfo(ei)
+		failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
 		WriteFailureReasonFile(paths, failureReason)
 	}
 
@@ -518,7 +521,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Cache probe (post-job) and write phases
 	if !cfg.SkipProbes {
-		cachePost := ProbeCacheSizesForEnv(mergeEnvVars(os.Environ(), envVars))
+		cachePost := ProbeCacheSizesForEnvAtPath(probeEnv, diskProbePath)
 		phases.CachePost = &cachePost
 	}
 	WritePhasesFile(paths, phases)

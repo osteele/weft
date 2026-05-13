@@ -105,16 +105,42 @@ func TestDetectFailureReasonFromExitInfoAndLog_DiskFullFromQuotaExceeded(t *test
 	writeFakeCommand(t, binDir, "df", "#!/bin/sh\necho 'Filesystem 1K-blocks Used Available Use% Mounted on'\necho '/dev/root 1000 100 900 10% /'\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	logPath := filepath.Join(t.TempDir(), "job.log")
-	if err := os.WriteFile(logPath, []byte(`error: Failed to install: sympy-1.13.1-py3-none-any.whl
+	tests := []struct {
+		name string
+		log  string
+	}{
+		{
+			name: "quota exceeded with os error",
+			log: `error: Failed to install: sympy-1.13.1-py3-none-any.whl
   Caused by: failed to copy file: Quota exceeded (os error 122)
-`), 0o644); err != nil {
-		t.Fatalf("write log: %v", err)
+`,
+		},
+		{
+			name: "bare EDQUOT",
+			log:  "failed to hardlink lm_eval wheel: EDQUOT\n",
+		},
+		{
+			name: "filesystem quota",
+			log:  "filesystem quota during hardlink of lm_eval wheel\n",
+		},
+		{
+			name: "os error 122 without quota text",
+			log:  "failed to install package: operation failed (os error 122)\n",
+		},
 	}
 
-	got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 2}, logPath)
-	if got != "disk_full" {
-		t.Fatalf("DetectFailureReasonFromExitInfoAndLog() = %q, want disk_full", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "job.log")
+			if err := os.WriteFile(logPath, []byte(tt.log), 0o644); err != nil {
+				t.Fatalf("write log: %v", err)
+			}
+
+			got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 2}, logPath)
+			if got != "disk_full" {
+				t.Fatalf("DetectFailureReasonFromExitInfoAndLog() = %q, want disk_full", got)
+			}
+		})
 	}
 }
 

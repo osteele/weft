@@ -40,6 +40,7 @@ type RunningJobState struct {
 	UnderHist      []int    `json:"under_hist,omitempty"`
 	GPUDevices     []string `json:"gpu_devices,omitempty"`
 	GPUMemGB       int      `json:"gpu_mem_gb,omitempty"`
+	DiskPath       string   `json:"disk_path,omitempty"`
 
 	// Resource usage tracking (updated during sampling)
 	RusageUserCPU string `json:"rusage_user_cpu,omitempty"`
