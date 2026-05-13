@@ -1366,16 +1366,8 @@ func TestListActiveJobsExcludesLaunchOwnedHostCorruption(t *testing.T) {
 		`UPDATE job_attempts SET host = ?, status = ?, start_time = ?
 		 WHERE job_id = ? AND end_time IS NULL`,
 		"cool100", StatusRunning, time.Now().Unix(), jobID,
-	); err != nil {
-		t.Fatalf("seed corrupt mixed target: %v", err)
-	}
-
-	jobs, err := ListActiveJobs(database, "cool100")
-	if err != nil {
-		t.Fatalf("ListActiveJobs: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Fatalf("ListActiveJobs returned %d job(s), want 0 for launch-owned attempt", len(jobs))
+	); err == nil {
+		t.Fatal("seed corrupt mixed target succeeded; want invariant failure")
 	}
 }
 

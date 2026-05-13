@@ -226,11 +226,7 @@ func TestJobStatusView_CanceledAttemptOnLiveLaunch(t *testing.T) {
 	}
 }
 
-// TestCleanupStaleAttempts_StampsCloudOutcomeOnSupersededDuplicate verifies
-// the wj1483 fix: when cleanupStaleAttempts closes a duplicate open cloud
-// attempt as 'canceled', it also records cloud_outcome='superseded' so the
-// view's cloud-job branch doesn't strand the job as 'dead'.
-func TestCleanupStaleAttempts_StampsCloudOutcomeOnSupersededDuplicate(t *testing.T) {
+func TestCleanupStaleAttempts_PreventsSupersededDuplicateOpenAttempts(t *testing.T) {
 	database := setupTestDB(t)
 
 	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
@@ -240,29 +236,12 @@ func TestCleanupStaleAttempts_StampsCloudOutcomeOnSupersededDuplicate(t *testing
 	const jobID = int64(7101)
 	insertTestJob(t, database, jobID, "echo hi", "/tmp", StatusQueued, withLaunch(launchID))
 
-	// Create a second open attempt on the same job + launch, simulating the
-	// duplicate-open-attempt state that triggers cleanupStaleAttempts.
 	if _, err := database.Exec(
 		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
 		 VALUES (?, 2, '', ?, ?, ?)`,
 		jobID, launchID, StatusQueued, time.Now().Unix(),
-	); err != nil {
-		t.Fatalf("insert duplicate attempt: %v", err)
-	}
-
-	if err := cleanupStaleAttempts(database); err != nil {
-		t.Fatalf("cleanupStaleAttempts: %v", err)
-	}
-
-	var outcome sql.NullString
-	if err := database.QueryRow(
-		`SELECT cloud_outcome FROM job_attempts WHERE job_id = ? AND attempt_number = 1`,
-		jobID,
-	).Scan(&outcome); err != nil {
-		t.Fatalf("read cloud_outcome on superseded attempt: %v", err)
-	}
-	if !outcome.Valid || outcome.String != AttemptOutcomeSuperseded {
-		t.Errorf("superseded attempt cloud_outcome = %v, want %q (regression: wj1483 wedge)", outcome, AttemptOutcomeSuperseded)
+	); err == nil {
+		t.Fatal("insert duplicate open attempt succeeded; want unique constraint failure")
 	}
 }
 

@@ -925,6 +925,9 @@ func CreateAttempt(db *sql.DB, jobID int64, host string, cloudInstanceID *int64,
 
 func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
 	now := time.Now().Unix()
+	if err := closeOpenAttempts(execer, jobID, now); err != nil {
+		return 0, err
+	}
 	var endTime any
 	if IsTerminalStatus(status) {
 		endTime = now
@@ -1149,23 +1152,7 @@ func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 // This re-links an orphaned job (whose attempt was reset without a launch_id)
 // back to the launch that is actually running it, as observed from R2 phase.
 func SetAttemptLaunch(database *sql.DB, jobID int64, launchID int64) error {
-	if err := EnsureRentalExecutionTarget(database, launchID); err != nil {
-		return err
-	}
-	_, err := database.Exec(`
-		UPDATE job_attempts
-		SET launch_id = ?, host = ?, target_id = (
-		        SELECT id FROM execution_targets
-		         WHERE kind = 'rental_instance' AND launch_id = ?
-		    ),
-		    pending_status = CASE
-		        WHEN pending_status = ? THEN ?
-		        ELSE pending_status
-		    END
-		WHERE id = `+latestOpenAttemptSubquery,
-		launchID, LaunchHost(launchID), launchID, StatusPendingPlacement, StatusQueued, jobID,
-	)
-	return err
+	return AttachOpenAttemptToLaunch(database, jobID, launchID)
 }
 
 // NormalizePendingPlacementForLaunch converts stale pending_placement markers

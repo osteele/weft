@@ -1,10 +1,85 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
 )
+
+// ClaimJobForLaunch creates a fresh open placement attempt for jobID on
+// launchID. It rejects jobs already owned by another active launch.
+func ClaimJobForLaunch(database *sql.DB, jobID, launchID int64) error {
+	return RetryOnDatabaseLocked(context.Background(), "claim job for launch", func() error {
+		return setJobLaunchIDOnce(database, jobID, launchID, false)
+	})
+}
+
+// TransferJobToLaunch creates a fresh open placement attempt for jobID on
+// launchID while deliberately superseding any prior active launch owner.
+func TransferJobToLaunch(database *sql.DB, jobID, launchID int64) error {
+	return RetryOnDatabaseLocked(context.Background(), "transfer job to launch", func() error {
+		return setJobLaunchIDOnce(database, jobID, launchID, true)
+	})
+}
+
+// AttachOpenAttemptToLaunch links the latest open attempt to a launch observed
+// from cloud state. This is narrower than ClaimJobForLaunch: it preserves the
+// existing attempt and only fills the launch target fields.
+func AttachOpenAttemptToLaunch(database *sql.DB, jobID int64, launchID int64) error {
+	if err := EnsureRentalExecutionTarget(database, launchID); err != nil {
+		return err
+	}
+	_, err := database.Exec(`
+		UPDATE job_attempts
+		SET launch_id = ?, host = ?, target_id = (
+		        SELECT id FROM execution_targets
+		         WHERE kind = 'rental_instance' AND launch_id = ?
+		    ),
+		    pending_status = CASE
+		        WHEN pending_status = ? THEN ?
+		        ELSE pending_status
+		    END
+		WHERE id = `+latestOpenAttemptSubquery,
+		launchID, LaunchHost(launchID), launchID, StatusPendingPlacement, StatusQueued, jobID,
+	)
+	return err
+}
+
+// AssignQueuedJobToInventoryHost moves the open non-rental attempt for jobID
+// to an inventory host. It rejects jobs already claimed by a rental launch.
+func AssignQueuedJobToInventoryHost(database *sql.DB, jobID int64, host string) error {
+	targetID, err := ensureExecutionTargetForAttempt(database, host, nil)
+	if err != nil {
+		return err
+	}
+	result, err := database.Exec(`
+		UPDATE job_attempts
+		   SET host = ?, target_id = ?
+		 WHERE job_id = ?
+		   AND end_time IS NULL
+		   AND launch_id IS NULL`,
+		host, targetID, jobID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows > 0 {
+		return nil
+	}
+	var launchID sql.NullInt64
+	err = database.QueryRow(`
+ 		SELECT launch_id FROM job_attempts
+ 		WHERE job_id = ? AND end_time IS NULL
+ 		ORDER BY attempt_number DESC LIMIT 1`, jobID).Scan(&launchID)
+	if err == nil && launchID.Valid {
+		return fmt.Errorf("job %d is already assigned to launch %d: %w", jobID, launchID.Int64, ErrJobAlreadyClaimed)
+	}
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	return err
+}
 
 // MoveTargetFailureResult reports how a failed move-to-new target was consumed.
 type MoveTargetFailureResult struct {

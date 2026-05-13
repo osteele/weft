@@ -285,42 +285,13 @@ var versionedMigrations = []migration{
 	{
 		Description: "add placement row invariants",
 		Apply: func(db *sql.DB) error {
-			stmts := []string{
-				`CREATE TRIGGER IF NOT EXISTS move_intents_open_new_requires_live_source_insert
-					BEFORE INSERT ON move_intents
-					FOR EACH ROW
-					WHEN NEW.state = 'open'
-					     AND NEW.target_kind = 'new'
-					     AND NEW.source_launch_id IS NOT NULL
-					     AND NOT EXISTS (
-					        SELECT 1 FROM launches
-					         WHERE id = NEW.source_launch_id
-					           AND status IN ('running','launching','paused','grace')
-					     )
-					BEGIN
-						SELECT RAISE(ABORT, 'open move-to-new intent requires live source launch');
-					END`,
-				`CREATE TRIGGER IF NOT EXISTS move_intents_open_new_requires_live_source_update
-					BEFORE UPDATE OF state, target_kind, source_launch_id ON move_intents
-					FOR EACH ROW
-					WHEN NEW.state = 'open'
-					     AND NEW.target_kind = 'new'
-					     AND NEW.source_launch_id IS NOT NULL
-					     AND NOT EXISTS (
-					        SELECT 1 FROM launches
-					         WHERE id = NEW.source_launch_id
-					           AND status IN ('running','launching','paused','grace')
-					     )
-					BEGIN
-						SELECT RAISE(ABORT, 'open move-to-new intent requires live source launch');
-					END`,
-			}
-			for _, stmt := range stmts {
-				if _, err := db.Exec(stmt); err != nil {
-					return err
-				}
-			}
-			return nil
+			return ensurePlacementRowInvariants(db)
+		},
+	},
+	{
+		Description: "enforce unique open placement state",
+		Apply: func(db *sql.DB) error {
+			return ensurePlacementRowInvariants(db)
 		},
 	},
 }
@@ -351,4 +322,131 @@ func runVersionedMigrations(db *sql.DB, fromVersion int, migrations []migration)
 		}
 	}
 	return nil
+}
+
+func ensurePlacementRowInvariants(db *sql.DB) error {
+	if err := normalizeAttemptEndTimes(db); err != nil {
+		return err
+	}
+	if err := resolveDuplicateOpenIntents(db, "move_intents", string(MoveIntentStateObsoleted)); err != nil {
+		return err
+	}
+	if err := resolveDuplicateOpenIntents(db, "placement_intents", string(PlacementIntentStateCanceled)); err != nil {
+		return err
+	}
+	if err := resolveDuplicateOpenAttempts(db); err != nil {
+		return err
+	}
+	stmts := []string{
+		`DROP INDEX IF EXISTS idx_move_intents_open`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_move_intents_open ON move_intents(job_id) WHERE state = 'open'`,
+		`DROP INDEX IF EXISTS idx_placement_intents_open`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_placement_intents_open ON placement_intents(job_id) WHERE state = 'open'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_attempts_one_open ON job_attempts(job_id) WHERE end_time IS NULL`,
+		`CREATE TRIGGER IF NOT EXISTS move_intents_open_new_requires_live_source_insert
+			BEFORE INSERT ON move_intents
+			FOR EACH ROW
+			WHEN NEW.state = 'open'
+			     AND NEW.target_kind = 'new'
+			     AND NEW.source_launch_id IS NOT NULL
+			     AND NOT EXISTS (
+			        SELECT 1 FROM launches
+			         WHERE id = NEW.source_launch_id
+			           AND status IN ('running','launching','paused','grace')
+			     )
+			BEGIN
+				SELECT RAISE(ABORT, 'open move-to-new intent requires live source launch');
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS move_intents_open_new_requires_live_source_update
+			BEFORE UPDATE OF state, target_kind, source_launch_id ON move_intents
+			FOR EACH ROW
+			WHEN NEW.state = 'open'
+			     AND NEW.target_kind = 'new'
+			     AND NEW.source_launch_id IS NOT NULL
+			     AND NOT EXISTS (
+			        SELECT 1 FROM launches
+			         WHERE id = NEW.source_launch_id
+			           AND status IN ('running','launching','paused','grace')
+			     )
+			BEGIN
+				SELECT RAISE(ABORT, 'open move-to-new intent requires live source launch');
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_prevent_mixed_host_launch_insert
+			BEFORE INSERT ON job_attempts
+			FOR EACH ROW
+			WHEN COALESCE(NEW.host, '') != '' AND NEW.launch_id IS NOT NULL
+			     AND COALESCE(NEW.host, '') NOT LIKE 'vastai:%'
+			     AND COALESCE(NEW.host, '') NOT LIKE 'runpod:%'
+			     AND COALESCE(NEW.host, '') NOT LIKE 'rental:%'
+			BEGIN
+				SELECT RAISE(ABORT, 'job_attempts cannot target both inventory host and launch');
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_prevent_mixed_host_launch_update
+			BEFORE UPDATE OF host, launch_id ON job_attempts
+			FOR EACH ROW
+			WHEN COALESCE(NEW.host, '') != '' AND NEW.launch_id IS NOT NULL
+			     AND COALESCE(NEW.host, '') NOT LIKE 'vastai:%'
+			     AND COALESCE(NEW.host, '') NOT LIKE 'runpod:%'
+			     AND COALESCE(NEW.host, '') NOT LIKE 'rental:%'
+			BEGIN
+				SELECT RAISE(ABORT, 'job_attempts cannot target both inventory host and launch');
+			END`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeAttemptEndTimes(db *sql.DB) error {
+	_, err := db.Exec(`
+		UPDATE job_attempts
+		   SET end_time = NULL
+		 WHERE end_time = 0
+		   AND status NOT IN ('canceled','failed','dead','killed','completed')`)
+	return err
+}
+
+func resolveDuplicateOpenIntents(db *sql.DB, tableName, resolvedState string) error {
+	_, err := db.Exec(fmt.Sprintf(`
+		WITH ranked AS (
+			SELECT id,
+			       ROW_NUMBER() OVER (
+			       	PARTITION BY job_id
+			       	ORDER BY created_at DESC, id DESC
+			       ) AS rn
+			  FROM %s
+			 WHERE state = 'open'
+		)
+		UPDATE %s
+		   SET state = ?,
+		       resolved_at = COALESCE(resolved_at, CAST(strftime('%%s','now') AS INTEGER)),
+		       resolution = COALESCE(NULLIF(resolution, ''), 'duplicate open intent auto-resolved')
+		 WHERE id IN (SELECT id FROM ranked WHERE rn > 1)`, tableName, tableName), resolvedState)
+	return err
+}
+
+func resolveDuplicateOpenAttempts(db *sql.DB) error {
+	_, err := db.Exec(`
+		WITH ranked AS (
+			SELECT id,
+			       ROW_NUMBER() OVER (
+			       	PARTITION BY job_id
+			       	ORDER BY attempt_number DESC, id DESC
+			       ) AS rn
+			  FROM job_attempts
+			 WHERE end_time IS NULL
+		)
+		UPDATE job_attempts
+		   SET end_time = CAST(strftime('%s','now') AS INTEGER),
+		       pending_status = NULL,
+		       pending_at = NULL,
+		       cloud_outcome = CASE
+		       	WHEN launch_id IS NOT NULL THEN COALESCE(cloud_outcome, 'superseded')
+		       	ELSE cloud_outcome
+		       END
+		 WHERE id IN (SELECT id FROM ranked WHERE rn > 1)`)
+	return err
 }

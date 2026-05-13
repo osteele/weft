@@ -753,6 +753,10 @@ func dropIntegrityViewsAndTriggers(db *sql.DB) error {
 		"launch_live_state_orphan_open_queued_attempts_on_insert",
 		"launch_live_state_orphan_open_queued_attempts_on_update",
 		"launches_clear_pending_placement_on_terminal",
+		"move_intents_open_new_requires_live_source_insert",
+		"move_intents_open_new_requires_live_source_update",
+		"job_attempts_prevent_mixed_host_launch_insert",
+		"job_attempts_prevent_mixed_host_launch_update",
 	} {
 		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 			return err
@@ -2631,29 +2635,7 @@ func SetJobCommand(db *sql.DB, id int64, command string) error {
 
 // UpdateJobHost updates the host for a job (only for queued jobs)
 func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
-	targetID, err := ensureExecutionTargetForAttempt(db, newHost, nil)
-	if err != nil {
-		return err
-	}
-	result, err := db.Exec(`UPDATE job_attempts SET host = ?, target_id = ? WHERE job_id = ? AND end_time IS NULL AND launch_id IS NULL`, newHost, targetID, id)
-	if err != nil {
-		return err
-	}
-	if rows, _ := result.RowsAffected(); rows > 0 {
-		return nil
-	}
-	var launchID sql.NullInt64
-	err = db.QueryRow(`
- 		SELECT launch_id FROM job_attempts
- 		WHERE job_id = ? AND end_time IS NULL
- 		ORDER BY attempt_number DESC LIMIT 1`, id).Scan(&launchID)
-	if err == nil && launchID.Valid {
-		return fmt.Errorf("job %d is already assigned to launch %d: %w", id, launchID.Int64, ErrJobAlreadyClaimed)
-	}
-	if err == sql.ErrNoRows {
-		return nil
-	}
-	return err
+	return AssignQueuedJobToInventoryHost(db, id, newHost)
 }
 
 // RecordCompletionByID updates a job by ID with its exit code and end time.

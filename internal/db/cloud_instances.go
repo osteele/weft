@@ -1160,9 +1160,7 @@ func parseLegacyLaunchHostInstanceID(host string) (int64, bool) {
 // ErrJobAlreadyClaimed if another active launch already owns the job; use
 // TransferJobLaunchID for a deliberate move that supersedes the prior owner.
 func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
-	return RetryOnDatabaseLocked(context.Background(), "set job launch id", func() error {
-		return setJobLaunchIDOnce(database, jobID, instanceID, false)
-	})
+	return ClaimJobForLaunch(database, jobID, instanceID)
 }
 
 // TransferJobLaunchID is like SetJobLaunchID but skips the
@@ -1171,9 +1169,7 @@ func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 // specs/job-move.allium); the source attempt is closed and a fresh attempt
 // is created on the new instance, just like SetJobLaunchID.
 func TransferJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
-	return RetryOnDatabaseLocked(context.Background(), "transfer job launch id", func() error {
-		return setJobLaunchIDOnce(database, jobID, instanceID, true)
-	})
+	return TransferJobToLaunch(database, jobID, instanceID)
 }
 
 func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64, allowSupersede bool) error {
@@ -1426,6 +1422,10 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	targetID, err := ensureExecutionTargetForAttempt(database, host, nil)
+	if err != nil {
+		return false, err
+	}
 	if attemptID == 0 {
 		if _, err := CreateAttempt(database, jobID, host, nil, StatusQueued); err != nil {
 			return false, err
@@ -1433,9 +1433,12 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	} else {
 		// Update host on the existing attempt (may be closed if pending retry)
 		result, err := database.Exec(
-			`UPDATE job_attempts SET host = ?
+			`UPDATE job_attempts
+			    SET host = ?,
+			        launch_id = NULL,
+			        target_id = ?
 			 WHERE id = `+latestAttemptSubquery+` AND host = ''`,
-			host, jobID)
+			host, targetID, jobID)
 		if err != nil {
 			return false, err
 		}
