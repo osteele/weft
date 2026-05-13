@@ -371,3 +371,44 @@ func TestListAllAssets(t *testing.T) {
 		t.Errorf("model entries should be grouped: got %s and %s", all[1].Asset.ID, all[2].Asset.ID)
 	}
 }
+
+func TestRecentAssetUseCounts(t *testing.T) {
+	db := setupTestDB(t)
+	_, err := db.Exec(`
+		CREATE TABLE jobs (
+			host TEXT,
+			inputs TEXT,
+			start_time INTEGER
+		)
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	_, err = db.Exec(`
+		INSERT INTO jobs (host, inputs, start_time) VALUES
+			('host-alpha', '["hf:model-a", "hf-dataset:data-a"]', ?),
+			('host-alpha', '["hf:model-a"]', ?),
+			('host-beta', '["hf:model-a"]', ?),
+			('host-alpha', '["hf:model-a"]', ?)
+	`, now.Unix(), now.Add(-time.Hour).Unix(), now.Unix(), now.Add(-48*time.Hour).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []HostDataEntryWithUsage{
+		{HostDataEntry: HostDataEntry{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFModel, ID: "model-a"}}},
+		{HostDataEntry: HostDataEntry{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFDataset, ID: "data-a"}}},
+	}
+
+	counts, err := RecentAssetUseCounts(db, entries, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := counts[evictionEntryKey(entries[0])]; got != 2 {
+		t.Fatalf("model count = %d, want 2", got)
+	}
+	if got := counts[evictionEntryKey(entries[1])]; got != 1 {
+		t.Fatalf("dataset count = %d, want 1", got)
+	}
+}

@@ -103,9 +103,10 @@ type rawOfferEvaluation struct {
 }
 
 type groupingEvaluation struct {
-	label   string
-	groups  []InstanceGroup
-	rawEval rawOfferEvaluation
+	label             string
+	groups            []InstanceGroup
+	rawEval           rawOfferEvaluation
+	overlapSavedHours float64
 }
 
 type planEvaluator struct {
@@ -845,9 +846,10 @@ func (e *planEvaluator) evaluateCandidateGroupings(candidates []GroupingCandidat
 			defer func() { <-sem }()
 
 			evaluations[idx] = groupingEvaluation{
-				label:   cand.Label,
-				groups:  cand.Groups,
-				rawEval: e.evaluateRawOffers(cand.Raw),
+				label:             cand.Label,
+				groups:            cand.Groups,
+				rawEval:           e.evaluateRawOffers(cand.Raw),
+				overlapSavedHours: assetOverlapSavedHours(cand.Groups),
 			}
 		}(idx, cand)
 	}
@@ -2172,6 +2174,10 @@ func ScoreEstimatesWithProfile(estimates []CostEstimate, profile bidding.ScorePr
 	return w.Cost*totalCost + w.Time*totalCompletionTime
 }
 
+func scoreGroupingWithOverlap(estimates []CostEstimate, profile bidding.ScoreProfile, overlapSavedHours float64) float64 {
+	return ScoreEstimatesWithProfile(estimates, profile) - profile.Weights().Time*overlapSavedHours
+}
+
 // BestCandidateForStrategy selects the candidate grouping with the lowest
 // estimate-based weighted score for the given strategy.
 func BestCandidateForStrategy(
@@ -2238,7 +2244,7 @@ func bestCandidateForProfileEvaluations(
 		reportPlanProgressForLane(onProgress, "Scoring candidate groupings", progressLabel, cand.label, i+1, len(candidates))
 		offers, selectedPredictions := evaluator.selectOffers(cand.rawEval, profile)
 		estimates := evaluator.estimateSelectedOffers(offers, selectedPredictions)
-		score := ScoreEstimatesWithProfile(estimates, profile)
+		score := scoreGroupingWithOverlap(estimates, profile, cand.overlapSavedHours)
 		if i == 0 || score < bestScore {
 			bestScore = score
 			best = CandidateResult{

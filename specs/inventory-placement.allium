@@ -80,6 +80,9 @@ config {
     default_setup_timeout: Duration = 20.minutes
     default_cpu_factor: Decimal = 1.0
     default_gpu_factor: Decimal = 1.0
+
+    data_cache_eviction_policy: String = "lru"        -- "lru" | "reuse_per_gb"
+    data_cache_reuse_window: Duration = 30.days
 }
 
 -- =========================================================================
@@ -586,6 +589,47 @@ rule EvictStaleRecords {
 
     ensures: for record in HostAssetRecords where record.last_seen < cutoff:
         HostAssetRecord.deleted(record)
+}
+
+rule SelectDataEvictionCandidates {
+    when: UserRunsDataEvict(host?, last_used_cutoff)
+
+    -- `weft data evict` selects HF cache entries whose last job usage is
+    -- older than the requested cutoff, or that have never appeared in a
+    -- job input. It then orders the selected entries according to the
+    -- configured policy before display, dry-run output, and deletion.
+
+    let candidates =
+      HostAssetRecords.filter(record =>
+        (host? = null or record.host = host?)
+        and LastJobUse(record.host, record.asset) < last_used_cutoff)
+
+    if config.data_cache_eviction_policy = "reuse_per_gb":
+      for candidate in candidates:
+        let recent_uses =
+          CountJobInputs(candidate.host, candidate.asset,
+                         since = now - config.data_cache_reuse_window)
+        let size_gb = max(candidate.size_bytes / 1000000000, 1)
+        let density = recent_uses / size_gb
+      ensures: candidates are ordered by density ascending,
+               LastJobUse ascending,
+               host ascending,
+               asset kind ascending,
+               asset id ascending
+    else:
+      ensures: candidates are ordered by LastJobUse ascending,
+               host ascending,
+               asset kind ascending,
+               asset id ascending
+
+    @guidance
+        -- Implementation: cmd/data.go runDataEvict plus
+        -- internal/dataloc/evict.go. Invalid or empty policy values fall
+        -- back to "lru"; invalid or empty reuse windows fall back to 30d.
+        -- Unknown sizes use a 1 GB denominator so reuse_per_gb never
+        -- divides by zero.
+        -- Deletion still requires --yes or interactive confirmation, and
+        -- dry-run never deletes remote paths or DB records.
 }
 
 -- =========================================================================

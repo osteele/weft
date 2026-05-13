@@ -224,6 +224,62 @@ backend = "queue-runner"
 	}
 }
 
+func TestDataCacheEvictionDefaultsAndOverrides(t *testing.T) {
+	var cfg Config
+	if got := cfg.CacheEvictionPolicy(); got != CacheEvictionPolicyLRU {
+		t.Fatalf("default policy = %q, want %q", got, CacheEvictionPolicyLRU)
+	}
+	if got := cfg.CacheReuseWindow(); got != 30*24*time.Hour {
+		t.Fatalf("default reuse window = %s, want 720h", got)
+	}
+
+	cfg.Data.CacheEvictionPolicy = "reuse_per_gb"
+	cfg.Data.CacheReuseWindow = "14d"
+	if got := cfg.CacheEvictionPolicy(); got != CacheEvictionPolicyReusePerGB {
+		t.Fatalf("policy = %q, want %q", got, CacheEvictionPolicyReusePerGB)
+	}
+	if got := cfg.CacheReuseWindow(); got != 14*24*time.Hour {
+		t.Fatalf("reuse window = %s, want 336h", got)
+	}
+
+	cfg.Data.CacheEvictionPolicy = "unknown"
+	cfg.Data.CacheReuseWindow = "bad"
+	if got := cfg.CacheEvictionPolicy(); got != CacheEvictionPolicyLRU {
+		t.Fatalf("invalid policy = %q, want %q", got, CacheEvictionPolicyLRU)
+	}
+	if got := cfg.CacheReuseWindow(); got != 30*24*time.Hour {
+		t.Fatalf("invalid reuse window = %s, want default", got)
+	}
+}
+
+func TestLoadTOMLDecodesDataCacheEvictionConfig(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+
+	content := `
+[data]
+cache_eviction_policy = "reuse_per_gb"
+cache_reuse_window = "14d"
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.CacheEvictionPolicy(); got != CacheEvictionPolicyReusePerGB {
+		t.Fatalf("policy = %q, want %q", got, CacheEvictionPolicyReusePerGB)
+	}
+	if got := cfg.CacheReuseWindow(); got != 14*24*time.Hour {
+		t.Fatalf("reuse window = %s, want 336h", got)
+	}
+}
+
 func TestLoadTOMLDecodesCampaignRetryLimits(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "config.toml")

@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
@@ -484,6 +486,62 @@ func TestMergeCompatibleGroups_DoesNotMutateOriginal(t *testing.T) {
 	// Original groups should still have 1 job each
 	if len(groups[0].Jobs) != 1 || len(groups[1].Jobs) != 1 {
 		t.Error("MergeCompatibleGroups mutated the original groups")
+	}
+}
+
+func TestAssetOverlapBytes_IncludesDeclaredAndObservedHFAssets(t *testing.T) {
+	groups := []InstanceGroup{
+		{
+			Jobs: []*db.Job{
+				{ID: 1, Inputs: []string{"hf:model-a", "hf-dataset:data-a", "checkpoint:ckpt-a"}},
+				{ID: 2, ObservedInputs: []string{"hf:model-a", "hf-dataset:data-a", "checkpoint:ckpt-a"}},
+			},
+		},
+	}
+
+	got := assetOverlapBytes(groups)
+	want := 2 * refCountWeight
+	if got != want {
+		t.Fatalf("assetOverlapBytes = %v, want %v", got, want)
+	}
+}
+
+func TestAssetOverlapDoesNotRelaxMergeCompatibility(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 24, Image: "ghcr.io/example/a:latest", Jobs: []*db.Job{{ID: 1, Inputs: []string{"hf:model-a"}}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 24, Image: "ghcr.io/example/b:latest", Jobs: []*db.Job{{ID: 2, Inputs: []string{"hf:model-a"}}}},
+	}
+
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 2 {
+		t.Fatalf("len(merged) = %d, want 2", len(merged))
+	}
+}
+
+func TestScoreGroupingWithOverlapCanPreferOverlapCandidate(t *testing.T) {
+	profile := bidding.ScoreProfile{
+		ID:               "test",
+		Weights_:         bidding.StrategyWeights{Cost: 1, Time: 10},
+		UseHappyPathTime: true,
+	}
+	offer := &cloud.Offer{ProviderID: "offer"}
+	noOverlap := []CostEstimate{{
+		Group:     InstanceGroup{Jobs: []*db.Job{{ID: 1}}},
+		Offer:     GroupOffer{Offer: offer},
+		TotalTime: time.Hour,
+		TotalCost: 1.00,
+	}}
+	withOverlap := []CostEstimate{{
+		Group:     InstanceGroup{Jobs: []*db.Job{{ID: 1}}},
+		Offer:     GroupOffer{Offer: offer},
+		TotalTime: time.Hour,
+		TotalCost: 1.05,
+	}}
+
+	noOverlapScore := scoreGroupingWithOverlap(noOverlap, profile, 0)
+	overlapScore := scoreGroupingWithOverlap(withOverlap, profile, 0.01)
+	if overlapScore >= noOverlapScore {
+		t.Fatalf("overlap score = %v, want less than no-overlap score %v", overlapScore, noOverlapScore)
 	}
 }
 

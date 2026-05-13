@@ -1530,6 +1530,41 @@ rule ExistingInstanceCPUFloor {
         -- plus the direct reuse guard in internal/orchestration/autopilot.go.
 }
 
+rule AssetOverlapLaunchGrouping {
+    when: RentalLaunchSelection(unplaced_jobs) or AutoPilotTick(unplaced_jobs)
+
+    -- Candidate launch groupings are still constrained first by hard
+    -- compatibility: GPU constraint/supremum, provider, VRAM tier,
+    -- preemptibility, image compatibility, disk, and compute-cap bounds.
+    -- Among compatible candidates, the planner applies an additional
+    -- setup-time benefit for groups whose jobs share declared or observed
+    -- HF model/dataset inputs.
+
+    let compatible_candidates = CandidateLaunchGroupings(unplaced_jobs)
+    for candidate in compatible_candidates:
+      let overlap_bytes =
+        sum over each group in candidate.groups:
+          sum over each unordered pair of jobs in group:
+            sum Weight(asset)
+              where asset in HFInputs(job_a) intersect HFInputs(job_b)
+      let overlap_saved_hours = overlap_bytes / config.asset_overlap_lan_bytes_per_second / 1.hour
+      let candidate_score =
+        ScoreCandidate(candidate)
+        - ScoreProfile(candidate.profile).time_weight * overlap_saved_hours
+
+    ensures: SelectedLaunchGrouping =
+        argmin candidate_score over compatible_candidates
+
+    @guidance
+        -- Implementation: internal/campaign/campaign.go computes pairwise
+        -- asset overlap for hf:* and hf-dataset:* refs from jobs.inputs and
+        -- jobs.observed_inputs. HF model weights use cached model size when
+        -- available; otherwise each shared ref uses a fixed 10 GB fallback.
+        -- The score term is applied in internal/campaign/strategy_plan.go.
+        -- This is only a scoring benefit; it must not merge incompatible
+        -- GPU/image/provider/preemptibility/VRAM groups.
+}
+
 -- ==========================================================================
 -- Queue re-balance across existing instances
 -- ==========================================================================
@@ -1591,6 +1626,8 @@ rule ExistingInstanceCPUFloor {
 --     accounts for uv disk feasibility, not setup-time reuse.
 
 config {
+    asset_overlap_lan_bytes_per_second: Decimal = 500000000
+
     rebalance_cost_ceiling: Decimal = 1.10    -- upper bound on dst/src $/hr
     rebalance_enabled: Bool = true
     rebalance_strategy: String = "fast"       -- "cheap" | "balanced" | "fast"

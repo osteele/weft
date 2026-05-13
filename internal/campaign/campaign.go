@@ -24,6 +24,8 @@ import (
 // jobs' memory requirements are in the same tier for grouping purposes.
 var vramTiers = []int{12, 16, 24, 48, 80, 141}
 
+const refCountWeight = 10e9 // 10 GB — fallback weight per shared ref when size unknown
+
 // vramTierOf returns the VRAM tier for a given memory requirement in GB.
 // Jobs in the same tier can share an instance without waste.
 func vramTierOf(memGB int) int {
@@ -241,8 +243,6 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 	}
 	var groups []groupState
 
-	const refCountWeight = 10e9 // 10 GB — fallback weight per shared ref when size unknown
-
 	for _, info := range infos {
 		mem := 0
 		if info.job.GPUMemGB != nil {
@@ -352,6 +352,72 @@ func sharedInputScore(groupIDs, jobIDs map[string]struct{}, sizeFunc ModelSizeFu
 		score += refWeight
 	}
 	return score
+}
+
+func assetOverlapSavedHours(groups []InstanceGroup) float64 {
+	overlapBytes := assetOverlapBytes(groups)
+	if overlapBytes <= 0 {
+		return 0
+	}
+	return overlapBytes / estimatedLANCopyRate / 3600
+}
+
+func assetOverlapBytes(groups []InstanceGroup) float64 {
+	var total float64
+	for _, group := range groups {
+		jobAssets := make([]map[dataloc.DataAsset]struct{}, 0, len(group.Jobs))
+		for _, job := range group.Jobs {
+			jobAssets = append(jobAssets, jobInputAssets(job))
+		}
+		for i := 0; i < len(jobAssets); i++ {
+			for j := i + 1; j < len(jobAssets); j++ {
+				total += pairwiseAssetOverlapBytes(jobAssets[i], jobAssets[j])
+			}
+		}
+	}
+	return total
+}
+
+func pairwiseAssetOverlapBytes(a, b map[dataloc.DataAsset]struct{}) float64 {
+	var total float64
+	for asset := range a {
+		if _, ok := b[asset]; !ok {
+			continue
+		}
+		total += assetOverlapWeight(asset)
+	}
+	return total
+}
+
+func assetOverlapWeight(asset dataloc.DataAsset) float64 {
+	if asset.Kind == dataloc.AssetHFModel {
+		if sz, ok := dataloc.LookupCachedModelSize(asset.ID); ok && sz > 0 {
+			return float64(sz)
+		}
+	}
+	return refCountWeight
+}
+
+func jobInputAssets(job *db.Job) map[dataloc.DataAsset]struct{} {
+	assets := make(map[dataloc.DataAsset]struct{})
+	if job == nil {
+		return assets
+	}
+	for _, ref := range job.Inputs {
+		if asset, ok := dataloc.ParseAssetRef(ref); ok && isOverlapAsset(asset) {
+			assets[asset] = struct{}{}
+		}
+	}
+	for _, ref := range job.ObservedInputs {
+		if asset, ok := dataloc.ParseAssetRef(ref); ok && isOverlapAsset(asset) {
+			assets[asset] = struct{}{}
+		}
+	}
+	return assets
+}
+
+func isOverlapAsset(asset dataloc.DataAsset) bool {
+	return asset.Kind == dataloc.AssetHFModel || asset.Kind == dataloc.AssetHFDataset
 }
 
 func sortGroups(groups []InstanceGroup) {

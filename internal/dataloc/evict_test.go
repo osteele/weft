@@ -78,3 +78,50 @@ func TestParseHFCacheAtimeOutput_Empty(t *testing.T) {
 		t.Errorf("got %d entries, want 0", len(entries))
 	}
 }
+
+func TestSortEvictionCandidates_ReusePerGB(t *testing.T) {
+	now := time.Now()
+	entries := []HostDataEntryWithUsage{
+		{
+			HostDataEntry: HostDataEntry{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFModel, ID: "hot-large"}, SizeBytes: 10 * bytesPerGB},
+			LastUsedAt:    now.Add(-time.Hour),
+		},
+		{
+			HostDataEntry: HostDataEntry{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFModel, ID: "warm-small"}, SizeBytes: bytesPerGB},
+			LastUsedAt:    now.Add(-2 * time.Hour),
+		},
+		{
+			HostDataEntry: HostDataEntry{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFModel, ID: "cold"}, SizeBytes: bytesPerGB},
+			LastUsedAt:    now.Add(-30 * time.Minute),
+		},
+	}
+	counts := map[string]int{
+		evictionEntryKey(entries[0]): 5, // 0.5 uses/GB
+		evictionEntryKey(entries[1]): 1, // 1.0 uses/GB
+		evictionEntryKey(entries[2]): 0,
+	}
+
+	SortEvictionCandidates(entries, "reuse_per_gb", counts)
+
+	got := []string{entries[0].Asset.ID, entries[1].Asset.ID, entries[2].Asset.ID}
+	want := []string{"cold", "hot-large", "warm-small"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestSortEvictionCandidates_LRU(t *testing.T) {
+	now := time.Now()
+	entries := []HostDataEntryWithUsage{
+		{HostDataEntry: HostDataEntry{Host: "b", Asset: DataAsset{Kind: AssetHFModel, ID: "new"}}, LastUsedAt: now},
+		{HostDataEntry: HostDataEntry{Host: "a", Asset: DataAsset{Kind: AssetHFModel, ID: "old"}}, LastUsedAt: now.Add(-time.Hour)},
+	}
+
+	SortEvictionCandidates(entries, "lru", nil)
+
+	if entries[0].Asset.ID != "old" {
+		t.Fatalf("first asset = %q, want old", entries[0].Asset.ID)
+	}
+}

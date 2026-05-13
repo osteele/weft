@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -410,6 +411,27 @@ func runDataEvict(_ *cobra.Command, _ []string) error {
 		fmt.Println("Nothing to evict.")
 		return nil
 	}
+
+	cfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: load config: %v\n", cfgErr)
+	}
+	policy := config.CacheEvictionPolicyLRU
+	reuseWindow := 30 * 24 * time.Hour
+	if cfg != nil {
+		policy = cfg.CacheEvictionPolicy()
+		reuseWindow = cfg.CacheReuseWindow()
+	}
+	recentCounts := map[string]int{}
+	if policy == config.CacheEvictionPolicyReusePerGB {
+		counts, err := dataloc.RecentAssetUseCounts(database, candidates, time.Now().Add(-reuseWindow))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: reuse-per-GB counts unavailable; using zero counts: %v\n", err)
+		} else {
+			recentCounts = counts
+		}
+	}
+	dataloc.SortEvictionCandidates(candidates, policy, recentCounts)
 
 	// Build map of asset -> other on-prem hosts that have it.
 	inventoryHosts, err := inventory.LoadHosts()

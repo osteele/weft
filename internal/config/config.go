@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,6 +109,9 @@ type Config struct {
 	// Sync holds source-sync defaults.
 	Sync SyncConfig `yaml:"sync" toml:"sync"`
 
+	// Data holds data locality and cache-management defaults.
+	Data DataConfig `yaml:"data" toml:"data"`
+
 	// Remediation holds auto-remediation configuration for failed jobs
 	Remediation RemediationConfig `yaml:"remediation" toml:"remediation"`
 
@@ -155,6 +159,16 @@ type SyncConfig struct {
 	// ExcludeDirs are additional path-component patterns excluded from source sync
 	// and campaign tarballs for all projects.
 	ExcludeDirs []string `yaml:"exclude_dirs" toml:"exclude_dirs"`
+}
+
+// DataConfig configures data locality and cache management.
+type DataConfig struct {
+	// CacheEvictionPolicy selects the ordering used by `weft data evict`.
+	// Valid values: "lru" and "reuse_per_gb". Empty defaults to "lru".
+	CacheEvictionPolicy string `yaml:"cache_eviction_policy" toml:"cache_eviction_policy"`
+	// CacheReuseWindow is the lookback window for reuse_per_gb recent-use counts.
+	// Empty defaults to 30d.
+	CacheReuseWindow string `yaml:"cache_reuse_window" toml:"cache_reuse_window"`
 }
 
 var defaultSourceExcludeDirs = []string{"runs", "wand", "wandb"}
@@ -1132,6 +1146,49 @@ func (c *Config) SourceExcludeDirs() []string {
 		}
 	}
 	return excludes
+}
+
+const (
+	CacheEvictionPolicyLRU        = "lru"
+	CacheEvictionPolicyReusePerGB = "reuse_per_gb"
+	defaultCacheReuseWindow       = 30 * 24 * time.Hour
+)
+
+func (c *Config) CacheEvictionPolicy() string {
+	if c == nil {
+		return CacheEvictionPolicyLRU
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Data.CacheEvictionPolicy)) {
+	case "", CacheEvictionPolicyLRU:
+		return CacheEvictionPolicyLRU
+	case CacheEvictionPolicyReusePerGB:
+		return CacheEvictionPolicyReusePerGB
+	default:
+		return CacheEvictionPolicyLRU
+	}
+}
+
+func (c *Config) CacheReuseWindow() time.Duration {
+	if c == nil || strings.TrimSpace(c.Data.CacheReuseWindow) == "" {
+		return defaultCacheReuseWindow
+	}
+	d, err := parseDurationWithDays(c.Data.CacheReuseWindow)
+	if err != nil || d <= 0 {
+		return defaultCacheReuseWindow
+	}
+	return d
+}
+
+func parseDurationWithDays(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasSuffix(raw, "d") && len(raw) > 1 {
+		days, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(raw)
 }
 
 // ValidateCommand checks if a command contains any blocked patterns.
