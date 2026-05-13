@@ -135,7 +135,17 @@ func OpenMoveOrPlacementIntentCreatedAt(database *sql.DB, jobIDs []int64) (map[i
 	}
 	query := `
 		WITH open_intents AS (
-			SELECT job_id, created_at FROM move_intents WHERE state = 'open'
+			SELECT mi.job_id,
+			       CASE
+			       	WHEN mi.target_launch_id IS NOT NULL
+			       	 AND l.created_at IS NOT NULL
+			       	 AND l.created_at > mi.created_at
+			       	THEN l.created_at
+			       	ELSE mi.created_at
+			       END AS created_at
+			  FROM move_intents mi
+			  LEFT JOIN launches l ON l.id = mi.target_launch_id
+			 WHERE mi.state = 'open'
 			UNION ALL
 			SELECT job_id, created_at FROM placement_intents WHERE state = 'open'
 		)
