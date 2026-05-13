@@ -124,6 +124,52 @@ rule MoveTargetSameAsSourceRejected {
         -- UI SHOULD not offer this option; rule is defense in depth.
 }
 
+rule MoveSelectorResolution {
+    when: UserInvokesMove(selector, target)
+
+    requires:
+        count([selector.job_ids.any(),
+               selector.project_name != null,
+               selector.from != null] where value = true) = 1
+
+    if selector.job_ids.any():
+        ensures: MoveCandidateJobs = JobsByID(selector.job_ids)
+
+    if selector.project_name != null:
+        ensures: MoveCandidateJobs =
+            Jobs where job.project = selector.project_name
+                 and job.status in {queued, pending_placement}
+
+    if selector.from != null:
+        if selector.from parses as CloudInstanceID:
+            ensures: MoveCandidateJobs =
+                Jobs where job.cloud_instance.id = selector.from
+                     and job.status in {queued, pending_placement}
+        else if exists Jobs where job.host = selector.from:
+            ensures: MoveCandidateJobs =
+                Jobs where job.host = selector.from
+                     and job.status in {queued, pending_placement}
+        else:
+            ensures: MoveCandidateJobs =
+                Jobs where job.project = selector.from
+                     and job.status in {queued, pending_placement}
+
+    ensures:
+        if MoveCandidateJobs.empty():
+            ShowError("no eligible queued jobs")
+        else:
+            for job in MoveCandidateJobs:
+                ExecuteMoveOption(job, target, MoveIntentFor(job, target))
+
+    @guidance
+        -- CLI selector precedence for `weft job move --from X` is:
+        -- instance id, then host name, then project name. The project
+        -- fallback is only used when there are no jobs at all for X as a
+        -- host, not merely when there are no currently queued host jobs.
+        -- Implementation: internal/orchestration/job_move.go
+        -- ResolveEligibleJobs.
+}
+
 rule MoveToNewLaunchAttachesIntent {
     -- Once the cloud launch has produced an instance, link it to the
     -- intent so the autopilot exclusion (which is keyed on JobID) is

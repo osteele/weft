@@ -1566,6 +1566,219 @@ rule AssetOverlapLaunchGrouping {
 }
 
 -- ==========================================================================
+-- Job explanation and inventory dispatch auto-replan
+-- ==========================================================================
+--
+-- Explanation is the shared source for user-facing "why is this job stuck?"
+-- surfaces: `weft job diagnose`, `weft job status`, `weft job info`, TUI
+-- project views, and narrative snapshots. It does not create state by itself;
+-- it interprets queue blockers, placement reasons, lifecycle events, and job
+-- failure metadata into a primary reason plus a suggested action.
+
+value JobExplanation {
+    job: Job
+    state: String
+    primary_reason: String
+    confidence: String              -- low | medium | high
+    suggested_action: String
+    auto_replan_allowed: Bool
+}
+
+rule ExplainInventoryDispatchBlock {
+    when: ExplainJob(job)
+    requires: job.status = queued
+    requires: job.target_kind = inventory_host
+    requires: LatestLifecycleEvent(job, ["queue.dispatch.failed",
+                                         "queue.dispatch.deferred",
+                                         "queue.dispatch.ok"])
+              is block_event
+    requires: block_event.kind in {"queue.dispatch.failed",
+                                   "queue.dispatch.deferred"}
+    requires: not exists fresher_ok:
+              LifecycleEvent(job, "queue.dispatch.ok") after block_event
+
+    let first_block = FirstConsecutiveDispatchBlock(job, block_event)
+    let blocked_for = now - first_block.occurred_at
+
+    ensures:
+        JobExplanation {
+            job = job
+            state = "blocked"
+            primary_reason = DispatchBlockReason(block_event)
+            confidence = "high"
+            suggested_action =
+                if blocked_for >= config.inventory_dispatch_auto_replan_after
+                then "replan: dispatch has been blocked for " + DurationText(blocked_for)
+                else "wait: auto-replan threshold is " + DurationText(config.inventory_dispatch_auto_replan_after)
+            auto_replan_allowed =
+                blocked_for >= config.inventory_dispatch_auto_replan_after
+        }
+
+    @guidance
+        -- Implementation: internal/explain/explain.go. The consecutive
+        -- window starts at the first failed/deferred dispatch event after
+        -- the job's queued floor (QueuedAt, or CreatedAt when QueuedAt is
+        -- absent), and is cleared by a fresher queue.dispatch.ok event.
+}
+
+rule AutoReplanStuckInventoryDispatch {
+    when: AutoPilotTick(_)
+
+    for job in Jobs:
+      requires: job.status = queued
+      requires: job.target_kind = inventory_host
+      requires: not exists(MoveIntent { job = job, state = open })
+      requires: not exists(PlacementIntent { job = job, state = open })
+      requires: ExplainJob(job).auto_replan_allowed
+
+      let old_target = job.target
+      ensures: UnplaceJob(job)
+      ensures: AppendPlacementReason(job,
+          "auto-replanned from " + old_target +
+          " after sustained dispatch block: " +
+          ExplainJob(job).primary_reason)
+      ensures: LifecycleEvent(job, "queue.dispatch.auto_replanned")
+
+    @guidance
+        -- Implementation: internal/orchestration/autopilot.go
+        -- autoReplanStuckInventoryJobs. Scoped autopilot runs only replan
+        -- jobs inside their scope. Jobs with open move/placement intents
+        -- remain protected by job-move.allium's AutopilotIgnoresMovingJobs
+        -- invariant.
+}
+
+config {
+    inventory_dispatch_auto_replan_after: Duration = 10.minutes
+}
+
+-- ==========================================================================
+-- Scheduling telemetry and launch recommendations
+-- ==========================================================================
+--
+-- Scheduling telemetry is durable instrumentation for retrospective
+-- analysis. It must not change placement outcomes when a write fails; failures
+-- are logged and the scheduler continues.
+
+entity PlacementDecision {
+    job: Job?
+    attempt: JobAttempt?
+    campaign: Campaign?
+    decision_kind: String          -- "acted", "blocked", etc.
+    operation: String
+    objective: String
+    placement_policy_version: String
+    selected_kind: String?
+    selected_target: String?
+    selected_score: Decimal?
+    sample_candidates: Bool
+    created_at: Timestamp
+}
+
+entity PlacementCandidate {
+    decision: PlacementDecision
+    rank: Integer
+    candidate_kind: String
+    target: String?
+    provider: String?
+    offer_id: String?
+    gpu_name: String?
+    score: Decimal?
+    est_time_s: Decimal?
+    est_cost: Decimal?
+    survival: Decimal?
+    selected: Bool
+}
+
+entity PredictionHistory {
+    job: Job
+    attempt: JobAttempt?
+    target: String                 -- e.g. "duration"
+    host: String?
+    gpu_class: String?
+    model_fingerprint: String?
+    prediction: JSON
+    created_at: Timestamp
+}
+
+rule RecordSchedulingTelemetry {
+    when: LaunchCampaign(campaign, groups) selects cloud_offer for group
+
+    for job in group.jobs:
+      ensures:
+        let decision = create PlacementDecision {
+            job = job
+            attempt = job.latest_attempt
+            campaign = campaign
+            decision_kind = "acted"
+            operation = "campaign_launch"
+            objective = ActiveScoreProfile().id
+            placement_policy_version = PlacementPolicyVersion
+            selected_kind = "cloud-offer"
+            selected_target = cloud_offer.key
+            sample_candidates = DeterministicSample(campaign, group)
+        }
+
+      if DeterministicSample(campaign, group):
+        ensures:
+          for candidate in TopKRankedOfferAlternatives(group):
+            create PlacementCandidate {
+                decision = PlacementDecisionFor(job, campaign, "campaign_launch")
+                rank = candidate.rank
+                candidate_kind = "cloud-offer"
+                selected = candidate.offer.key = cloud_offer.key
+            }
+
+      if RuntimePrediction(job, cloud_offer) exists:
+        ensures:
+            create PredictionHistory {
+                job = job
+                attempt = job.latest_attempt
+                target = "duration"
+                host = cloud_offer.key
+                gpu_class = cloud_offer.gpu_name
+                prediction = {"duration_s": RuntimePrediction(job, cloud_offer).seconds}
+            }
+
+    @guidance
+        -- Implementation: internal/campaign/telemetry.go and
+        -- internal/db/scheduling_telemetry.go. Candidate recording is
+        -- sampled by stable campaign/launch key and capped by configuration.
+        -- Telemetry write errors are warnings, not launch failures.
+}
+
+rule NewsvendorLaunchRecommendation {
+    when: UserRequestsLaunchEstimate(plan, score_profile)
+       or LaunchPlanRendered(plan, score_profile)
+    requires: plan.cost_estimates.any()
+
+    let critical_fractile =
+        clamp(score_profile.time_weight /
+              (score_profile.time_weight
+               + score_profile.cost_weight * AverageOfferRate(plan)),
+              0.05, 0.95)
+    let demand_hours =
+        PiecewiseQuantile(
+            sum(plan.cost_estimates.total_time.lower.hours),
+            sum(plan.cost_estimates.total_time.mean.hours),
+            sum(plan.cost_estimates.total_time.upper.hours),
+            critical_fractile)
+    let instance_hours =
+        max(plan.cost_estimates.total_time.mean.hours)
+    let recommended_count =
+        clamp(ceil(demand_hours / instance_hours),
+              1, count(plan.cost_estimates))
+
+    ensures: ShowRecommendation(
+        "launch " + recommended_count + " instance(s) now")
+
+    @guidance
+        -- Implementation: internal/campaign/newsvendor.go. This exposes
+        -- the count implied by uncertain demand and the active cost/time
+        -- score profile; launch planning still constrains the feasible
+        -- candidate set before this recommendation is computed.
+}
+
+-- ==========================================================================
 -- Queue re-balance across existing instances
 -- ==========================================================================
 --

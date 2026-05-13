@@ -549,6 +549,77 @@ rule PerArtifactUploadOutcomeRecorded {
 }
 
 -- ==========================================================================
+-- Artifact retrieval (coordinator)
+-- ==========================================================================
+-- Retrieval commands read the local artifact cache or cloud output objects and
+-- materialize files for the user. Upload behavior is specified above; this
+-- section captures the user-visible download contract.
+
+config {
+    artifact_get_parallel_default: Integer = 8
+}
+
+rule ArtifactGetAllDownloadsConcurrently {
+    when: UserRuns("weft artifact get --all", job, output, parallel)
+    requires: ArtifactList(job).any()
+
+    let requested_parallel =
+        if parallel is specified then parallel else config.artifact_get_parallel_default
+    let worker_count =
+        min(count(ArtifactList(job)),
+            max(1, requested_parallel))
+
+    ensures: StartAtMost(worker_count, ConcurrentArtifactDownloads(job))
+
+    for artifact in ArtifactList(job):
+        let destination = ArtifactGetDestination(job, artifact.path, output,
+                                                multiple = count(ArtifactList(job)) > 1)
+        ensures:
+            if DownloadArtifact(artifact, destination) succeeds:
+                WriteLine("Wrote " + destination)
+            else:
+                RecordArtifactDownloadError(artifact)
+
+    ensures:
+        if any RecordedArtifactDownloadError:
+            CommandFailsWith(join(RecordedArtifactDownloadError, "; "))
+        else:
+            CommandSucceeds()
+
+    @guidance
+        -- Implementation: cmd/artifact.go downloadCloudOutputFiles.
+        -- Downloads may complete and print in completion order, not manifest
+        -- order. A partial failure leaves successfully downloaded files in
+        -- place and returns a combined error after all workers report.
+}
+
+rule ArtifactGetAllOutputPath {
+    when: UserRuns("weft artifact get --all", job, output, _)
+
+    if output = "-":
+        requires: count(ArtifactList(job)) = 1
+        ensures: WriteArtifactToStdout(First(ArtifactList(job)))
+
+    if output != "-" and output is specified:
+        requires: output exists
+        requires: output is directory
+
+    for artifact in ArtifactList(job):
+        if count(ArtifactList(job)) > 1:
+            ensures: destination =
+                OutputDirectory(output) / job.id / artifact.relative_path
+        else:
+            ensures: destination =
+                OutputDirectory(output) / artifact.relative_path
+
+    @guidance
+        -- Multiple artifact retrieval refuses stdout and requires --output
+        -- to name an existing directory. For multiple artifacts, paths are
+        -- nested under the formatted job id (wj<N>) to avoid collisions.
+        -- Implementation: cmd/artifact.go resolveArtifactOutputPathForAll.
+}
+
+-- ==========================================================================
 -- Queue-runner dispatch and concurrency
 -- ==========================================================================
 -- The queue runner on each host dispatches queued jobs subject to a
