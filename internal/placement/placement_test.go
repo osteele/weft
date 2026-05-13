@@ -1262,7 +1262,8 @@ func TestScoreHosts_GPUClass_A100_MixedHost_OnlyCountsMatchingGPUs(t *testing.T)
 func TestNewJobPredictor_PropagatesDurationBounds(t *testing.T) {
 	predict := NewJobPredictor(func(host string) *RawPrediction {
 		return &RawPrediction{
-			DurationS: &RawPredictionField{Mean: 600, Lower: 500, Upper: 700},
+			DurationS:  &RawPredictionField{Mean: 600, Lower: 500, Upper: 700, EpistemicFactor: 2, NCalibration: 7},
+			OODReasons: []string{"novel-script-family"},
 		}
 	})
 	jp := predict("host-alpha")
@@ -1277,6 +1278,15 @@ func TestNewJobPredictor_PropagatesDurationBounds(t *testing.T) {
 	}
 	if jp.DurationSUpper == nil || *jp.DurationSUpper != 700 {
 		t.Errorf("DurationSUpper = %v, want 700", jp.DurationSUpper)
+	}
+	if jp.DurationEpistemicFactor != 2 {
+		t.Errorf("DurationEpistemicFactor = %v, want 2", jp.DurationEpistemicFactor)
+	}
+	if jp.DurationNCalibration != 7 {
+		t.Errorf("DurationNCalibration = %v, want 7", jp.DurationNCalibration)
+	}
+	if len(jp.DurationOODReasons) != 1 || jp.DurationOODReasons[0] != "novel-script-family" {
+		t.Errorf("DurationOODReasons = %v, want novel-script-family", jp.DurationOODReasons)
 	}
 }
 

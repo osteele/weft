@@ -570,13 +570,17 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 					DestroyProvider: true,
 				}
 			}
+			stageLabel := strings.TrimSpace(BootstrapStageLabel(p.BootstrapStage))
+			if stageLabel == "" || p.BootstrapStage == bootstrapStageReady {
+				stageLabel = "bootstrap"
+			}
 			if remaining <= 0 {
 				elapsed := termTimeout - remaining
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
 					TerminationReason: db.TerminationReasonBootstrapTimeout,
-					StallMessage:      fmt.Sprintf("bootstrap timeout after %s — terminating instance, jobs reset to queued", elapsed.Truncate(time.Second)),
+					StallMessage:      fmt.Sprintf("%s timeout after %s — terminating instance, jobs reset to queued", stageLabel, elapsed.Truncate(time.Second)),
 					DestroyProvider:   true,
 					ResetJobs:         true,
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
@@ -584,7 +588,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			}
 			return InstanceAction{
 				Kind:         ActionDisplayOnly,
-				StallMessage: fmt.Sprintf("bootstrap stalled — no activity (terminating in %s)", remaining.Truncate(time.Second)),
+				StallMessage: fmt.Sprintf("%s stalled — no activity (terminating in %s)", stageLabel, remaining.Truncate(time.Second)),
 			}
 		}
 	}

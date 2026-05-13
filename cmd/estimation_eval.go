@@ -10,6 +10,7 @@ import (
 )
 
 var estimationEvalJSON bool
+var estimationEvalMinFamilySize int
 
 var estimationEvalCmd = &cobra.Command{
 	Use:   "eval",
@@ -20,6 +21,7 @@ var estimationEvalCmd = &cobra.Command{
 func init() {
 	estimationCmd.AddCommand(estimationEvalCmd)
 	estimationEvalCmd.Flags().BoolVar(&estimationEvalJSON, "json", false, "Emit machine-readable JSON")
+	estimationEvalCmd.Flags().IntVar(&estimationEvalMinFamilySize, "min-family-size", 5, "Minimum script-family sample count to report separately")
 }
 
 func runEstimationEval(cmd *cobra.Command, args []string) error {
@@ -44,6 +46,9 @@ func runEstimationEval(cmd *cobra.Command, args []string) error {
 	}
 	if estimationEvalJSON {
 		cliArgs = append(cliArgs, "--json")
+	}
+	if estimationEvalMinFamilySize > 0 {
+		cliArgs = append(cliArgs, "--min-family-size", fmt.Sprintf("%d", estimationEvalMinFamilySize))
 	}
 	estimator := exec.Command("uv", cliArgs...)
 	var stderr bytes.Buffer

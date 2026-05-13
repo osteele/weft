@@ -132,8 +132,13 @@ type JobPrediction struct {
 	DurationS      *float64 // predicted wall-clock seconds (nil = unknown)
 	DurationSLower *float64 // p10 lower bound
 	DurationSUpper *float64 // p90 upper bound
-	PeakRSSKB      *float64 // predicted peak RSS in KB (nil = unknown)
-	MaxGPUMemMiB   *float64 // predicted peak GPU memory in MiB (nil = unknown)
+	// Calibration and epistemic metadata describe how much historical support
+	// backed the interval. Zero values mean the predictor did not report them.
+	DurationEpistemicFactor float64
+	DurationNCalibration    int
+	DurationOODReasons      []string
+	PeakRSSKB               *float64 // predicted peak RSS in KB (nil = unknown)
+	MaxGPUMemMiB            *float64 // predicted peak GPU memory in MiB (nil = unknown)
 	// Lower bounds (p10) for optimistic estimates
 	PeakRSSKBLower    *float64
 	MaxGPUMemMiBLower *float64
@@ -148,9 +153,11 @@ type JobPredictor func(host string) *JobPrediction
 
 // RawPredictionField holds a point estimate with uncertainty bounds.
 type RawPredictionField struct {
-	Mean  float64
-	Lower float64
-	Upper float64
+	Mean            float64
+	Lower           float64
+	Upper           float64
+	EpistemicFactor float64
+	NCalibration    int
 }
 
 // RawPrediction is a generic prediction result that can be converted to JobPrediction.
@@ -158,6 +165,7 @@ type RawPrediction struct {
 	DurationS    *RawPredictionField
 	PeakRSSKB    *RawPredictionField
 	MaxGPUMemMiB *RawPredictionField
+	OODReasons   []string
 }
 
 // NewJobPredictor builds a JobPredictor from a function that returns raw predictions.
@@ -176,6 +184,9 @@ func NewJobPredictor(predict func(host string) *RawPrediction) JobPredictor {
 			jp.DurationS = &raw.DurationS.Mean
 			jp.DurationSLower = &raw.DurationS.Lower
 			jp.DurationSUpper = &raw.DurationS.Upper
+			jp.DurationEpistemicFactor = raw.DurationS.EpistemicFactor
+			jp.DurationNCalibration = raw.DurationS.NCalibration
+			jp.DurationOODReasons = append([]string(nil), raw.OODReasons...)
 		}
 		if raw.PeakRSSKB != nil {
 			jp.PeakRSSKB = &raw.PeakRSSKB.Mean
@@ -546,6 +557,8 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		s.Reasons = append(s.Reasons, reasons...)
 	}
 
+	applyHistoricalFailureRisk(database, &s, host, c)
+
 	// Hard constraint: benchmark jobs require an idle host
 	if hasBenchmarkTag(c.Tags) {
 		if !db.HasInventoryTag(c.Tags) && cfg != nil && cfg.HostShared(host.Name) {
@@ -793,6 +806,44 @@ func displayGPUName(gpu inventory.GPUSpec) string {
 	return "matching"
 }
 
+func applyHistoricalFailureRisk(database *sql.DB, s *Score, host inventory.HostSpec, c Constraints) {
+	if database == nil || s == nil || !s.Eligible || strings.TrimSpace(c.Command) == "" {
+		return
+	}
+	gpuClass := c.GPUClass
+	if gpuClass == "" && len(host.GPUs) > 0 {
+		gpuClass = host.GPUs[0].Class
+	}
+	predictions, err := db.PredictFailureModes(database, c.Command, host.Name, gpuClass)
+	if err != nil || len(predictions) == 0 {
+		return
+	}
+
+	const (
+		minDisplayProbability = 0.15
+		maxFailurePenalty     = 3.0
+	)
+	totalPenalty := 0.0
+	shown := 0
+	for _, pred := range predictions {
+		if pred.Probability < minDisplayProbability {
+			continue
+		}
+		penalty := math.Min(maxFailurePenalty, pred.Probability*2.0)
+		totalPenalty += penalty
+		if shown < 2 {
+			s.Reasons = append(s.Reasons,
+				fmt.Sprintf("historical %s risk %.0f%% (%d/%d %s, -%.1f)",
+					pred.Mode, pred.Probability*100, pred.Failures, pred.Total, pred.Scope, penalty))
+			shown++
+		}
+	}
+	if totalPenalty == 0 {
+		return
+	}
+	s.Total -= math.Min(maxFailurePenalty, totalPenalty)
+}
+
 // applyDurationScoring adds a relative bonus to hosts with duration predictions.
 // The fastest host gets +3.0, the slowest gets 0, with linear interpolation.
 // When a predictor provides a duration, the static cpu_factor/gpu_factor penalty
@@ -841,13 +892,10 @@ func applyDurationScoring(scores []Score, predictions map[string]*JobPrediction)
 		// Linear: fastest gets maxBonus, slowest gets 0
 		rawBonus := (1.0 - (d.duration-minDur)/spread) * maxBonus
 
-		// Scale bonus by confidence: narrow CI → full bonus, wide CI → reduced bonus
+		// Scale bonus by confidence: narrow CI, calibrated support, and
+		// in-distribution intervals earn more influence than thin/OOD cells.
 		p := predictions[scores[d.index].Host]
-		weight := 1.0
-		if p.DurationSLower != nil && p.DurationSUpper != nil && d.duration > 0 {
-			intervalRatio := (*p.DurationSUpper - *p.DurationSLower) / d.duration
-			weight = math.Max(0, math.Min(1, 1-0.25*intervalRatio))
-		}
+		weight := durationPredictionWeight(p, d.duration)
 		bonus := rawBonus * weight
 
 		scores[d.index].Total += bonus
@@ -859,12 +907,59 @@ func applyDurationScoring(scores []Score, predictions map[string]*JobPrediction)
 		if p.DurationSLower != nil && p.DurationSUpper != nil {
 			halfSpread := (d.duration - *p.DurationSLower) / 60.0
 			scores[d.index].Reasons = append(scores[d.index].Reasons,
-				fmt.Sprintf("predicted %.0fm (\u00b1%.0fm, +%.1f)", durMin, halfSpread, bonus))
+				fmt.Sprintf("predicted %.0fm (\u00b1%.0fm, +%.1f%s)", durMin, halfSpread, bonus, durationPredictionReasonSuffix(p, weight)))
 		} else {
 			scores[d.index].Reasons = append(scores[d.index].Reasons,
-				fmt.Sprintf("predicted %.0fm (+%.1f)", durMin, bonus))
+				fmt.Sprintf("predicted %.0fm (+%.1f%s)", durMin, bonus, durationPredictionReasonSuffix(p, weight)))
 		}
 	}
+}
+
+func durationPredictionWeight(p *JobPrediction, duration float64) float64 {
+	weight := 1.0
+	if p == nil {
+		return 0
+	}
+	if p.DurationSLower != nil && p.DurationSUpper != nil && duration > 0 {
+		intervalRatio := (*p.DurationSUpper - *p.DurationSLower) / duration
+		weight = math.Min(weight, math.Max(0, math.Min(1, 1-0.25*intervalRatio)))
+	}
+	if p.DurationEpistemicFactor > 1 {
+		weight = math.Min(weight, 1/p.DurationEpistemicFactor)
+	}
+	switch n := p.DurationNCalibration; {
+	case n > 0 && n < 10:
+		weight = math.Min(weight, 0.35)
+	case n > 0 && n < 25:
+		weight = math.Min(weight, 0.60)
+	case n > 0 && n < 50:
+		weight = math.Min(weight, 0.80)
+	}
+	if len(p.DurationOODReasons) > 0 {
+		weight = math.Min(weight, math.Max(0.25, 1-0.15*float64(len(p.DurationOODReasons))))
+	}
+	return math.Max(0, math.Min(1, weight))
+}
+
+func durationPredictionReasonSuffix(p *JobPrediction, weight float64) string {
+	if p == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if p.DurationNCalibration > 0 {
+		parts = append(parts, fmt.Sprintf("n=%d", p.DurationNCalibration))
+	}
+	if p.DurationEpistemicFactor > 1 {
+		parts = append(parts, fmt.Sprintf("epistemic %.1fx", p.DurationEpistemicFactor))
+	}
+	if len(p.DurationOODReasons) > 0 {
+		parts = append(parts, "OOD")
+	}
+	if len(parts) == 0 && weight >= 0.99 {
+		return ""
+	}
+	parts = append(parts, fmt.Sprintf("confidence %.0f%%", weight*100))
+	return "; " + strings.Join(parts, ", ")
 }
 
 // applyPerfScoring adds a score contribution proportional to the host's

@@ -432,6 +432,9 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groupsToLaunch))
 	if len(estimates) > 0 {
 		fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
+		if line := campaign.FormatNewsvendorRecommendation(campaign.RecommendInstanceCount(estimates, opts.ScoringProfile())); line != "" {
+			fmt.Println(line)
+		}
 	}
 
 	if opts.ApplyAutoBudget(estimates) {
@@ -622,6 +625,9 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 
 	total := campaign.TotalEstimatedCostFromEstimates(estimates)
 	fmt.Printf("\nEstimated total: ~$%.2f\n", total)
+	if line := campaign.FormatNewsvendorRecommendation(campaign.RecommendInstanceCount(estimates, strategy.Profile())); line != "" {
+		fmt.Println(line)
+	}
 	fmt.Println("To launch interactively: weft launch instances")
 	return nil
 }

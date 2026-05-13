@@ -202,9 +202,14 @@ func RawPredictionFromResult(result *predictor.Result) *RawPrediction {
 	raw := &RawPrediction{}
 	if result.DurationS != nil {
 		raw.DurationS = &RawPredictionField{
-			Mean:  result.DurationS.Mean,
-			Lower: result.DurationS.Lower,
-			Upper: result.DurationS.Upper,
+			Mean:            result.DurationS.Mean,
+			Lower:           result.DurationS.Lower,
+			Upper:           result.DurationS.Upper,
+			EpistemicFactor: result.DurationS.EpistemicFactor,
+			NCalibration:    result.DurationS.NCalibration,
+		}
+		if result.DurationMetadata != nil {
+			raw.OODReasons = append([]string(nil), result.DurationMetadata.OODReasons...)
 		}
 	}
 	if result.PeakRSSKB != nil {
