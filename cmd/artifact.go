@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/x/term"
@@ -133,6 +134,7 @@ var (
 	artifactLatest   bool
 	artifactAll      bool
 	artifactTimeout  time.Duration
+	artifactParallel int
 	pruneLocalApply  bool
 	pruneLocalDryRun bool
 	pruneLocalDir    string
@@ -159,6 +161,7 @@ func init() {
 	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
 	artifactGetCmd.Flags().BoolVar(&artifactAll, "all", false, "Download all artifacts for the job")
 	artifactGetCmd.Flags().DurationVar(&artifactTimeout, "timeout", defaultArtifactTimeout, "Fail if no download progress occurs for this duration")
+	artifactGetCmd.Flags().IntVar(&artifactParallel, "parallel", 8, "Maximum concurrent downloads for --all")
 	artifactGetCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactGetCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
@@ -571,6 +574,16 @@ func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Jo
 		return err
 	}
 
+	if err := downloadSingleCloudFileToPath(cmd, r2Client, job, f, dest); err != nil {
+		return err
+	}
+	if dest != "-" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+	}
+	return nil
+}
+
+func downloadSingleCloudFileToPath(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, f runner.OutputFile, dest string) error {
 	var (
 		lastErr error
 	)
@@ -603,21 +616,62 @@ func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Jo
 		return fmt.Errorf("download from R2: %w", lastErr)
 	}
 
-	if dest != "-" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
-	}
 	return nil
 }
 
 // downloadCloudOutputFiles downloads all cloud output files for a job.
 func downloadCloudOutputFiles(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, files []runner.OutputFile) (int, error) {
-	multiple := len(files) > 1
-	downloaded := 0
-	for _, f := range files {
-		if err := downloadSingleCloudFile(cmd, r2Client, job, f, multiple); err != nil {
-			return downloaded, fmt.Errorf("download %s: %w", f.RelPath, err)
+	if len(files) == 0 {
+		return 0, nil
+	}
+	parallel := artifactParallel
+	if parallel <= 0 {
+		parallel = 1
+	}
+	if parallel > len(files) {
+		parallel = len(files)
+	}
+
+	type result struct {
+		file runner.OutputFile
+		dest string
+		err  error
+	}
+	jobs := make(chan runner.OutputFile)
+	results := make(chan result, len(files))
+	for i := 0; i < parallel; i++ {
+		go func() {
+			for f := range jobs {
+				dest, err := resolveArtifactOutputPathForAll(f.RelPath, artifactOutput, job.ID, len(files) > 1)
+				if err == nil {
+					err = downloadSingleCloudFileToPath(cmd, r2Client, job, f, dest)
+				}
+				results <- result{file: f, dest: dest, err: err}
+			}
+		}()
+	}
+	go func() {
+		for _, f := range files {
+			jobs <- f
+		}
+		close(jobs)
+	}()
+
+	var errorsList []string
+	var downloaded int
+	for range files {
+		res := <-results
+		if res.err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("download %s: %v", res.file.RelPath, res.err))
+			continue
 		}
 		downloaded++
+		if res.dest != "-" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", res.dest)
+		}
+	}
+	if len(errorsList) > 0 {
+		return downloaded, errors.New(strings.Join(errorsList, "; "))
 	}
 	return downloaded, nil
 }
@@ -668,9 +722,15 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), entry.Path, err))
 				continue
 			}
-			dest, err := resolveArtifactOutputPathForJob(localPath, artifactOutput, jobID, len(jobIDs) > 1)
+			dest, err := resolveArtifactOutputPathForAll(entry.Path, artifactOutput, jobID, len(entries) > 1 || len(jobIDs) > 1)
 			if err != nil {
 				return err
+			}
+			if dest == "-" {
+				if err := copyToWriter(localPath, cmd.OutOrStdout()); err != nil {
+					errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), entry.Path, err))
+				}
+				continue
 			}
 			if err := copyFile(localPath, dest); err != nil {
 				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), entry.Path, err))
@@ -845,6 +905,37 @@ func resolveArtifactOutputPathForJob(source, output string, jobID int64, multipl
 	return "", err
 }
 
+func resolveArtifactOutputPathForAll(source, output string, jobID int64, multiple bool) (string, error) {
+	rel, ok := normalizeLocalRelPath(source)
+	if !ok {
+		return "", fmt.Errorf("invalid artifact path %q", source)
+	}
+	if output == "-" {
+		if multiple {
+			return "", fmt.Errorf("cannot use stdout when retrieving multiple artifacts")
+		}
+		return "-", nil
+	}
+	base := "."
+	if strings.TrimSpace(output) != "" {
+		info, err := os.Stat(output)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", fmt.Errorf("output must be an existing directory when retrieving all artifacts")
+			}
+			return "", err
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("output must be a directory when retrieving all artifacts")
+		}
+		base = output
+	}
+	if multiple {
+		base = filepath.Join(base, ids.FormatJobID(jobID))
+	}
+	return filepath.Join(base, filepath.FromSlash(rel)), nil
+}
+
 func downloadR2ObjectToFileAtomic(r2Client *r2.Client, key, dest string, idleTimeout time.Duration) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
@@ -858,6 +949,15 @@ func downloadR2ObjectToFileAtomic(r2Client *r2.Client, key, dest string, idleTim
 }
 
 func copyFile(src, dest string) error {
+	tmpDest := dest + ".part"
+	if err := copyFileDirect(src, tmpDest); err != nil {
+		_ = os.Remove(tmpDest)
+		return err
+	}
+	return os.Rename(tmpDest, dest)
+}
+
+func copyFileDirect(src, dest string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -1990,10 +2090,13 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFile {
 	result := make([]runner.OutputFile, 0)
 	seen := make(map[string]struct{})
+	var mu sync.Mutex
 	appendFile := func(relPath string, sizeBytes int64) {
 		if relPath == "" {
 			return
 		}
+		mu.Lock()
+		defer mu.Unlock()
 		if _, ok := seen[relPath]; ok {
 			return
 		}
@@ -2004,29 +2107,42 @@ func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFi
 		})
 	}
 
+	var wg sync.WaitGroup
 	for _, runID := range jobAttemptRunIDs(job) {
 		// Convention-based outputs
 		outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		files, err := r2Client.ListObjects(ctx, outputsPrefix)
-		cancel()
-		if err == nil {
-			for _, f := range files {
-				appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			files, err := r2Client.ListObjects(ctx, outputsPrefix)
+			cancel()
+			if err == nil {
+				for _, f := range files {
+					appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes)
+				}
 			}
-		}
+		}()
 
 		// Artifact manifest entries
 		artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-		aFiles, err := r2Client.ListObjects(ctx2, artifactsPrefix)
-		cancel2()
-		if err == nil {
-			for _, f := range aFiles {
-				appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			aFiles, err := r2Client.ListObjects(ctx, artifactsPrefix)
+			cancel()
+			if err == nil {
+				for _, f := range aFiles {
+					appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes)
+				}
 			}
-		}
+		}()
 	}
+	wg.Wait()
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].RelPath < result[j].RelPath
+	})
 
 	return result
 }

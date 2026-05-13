@@ -61,6 +61,41 @@ func TestResolveArtifactOutputPath(t *testing.T) {
 	}
 }
 
+func TestResolveArtifactOutputPathForAllPreservesRelativePath(t *testing.T) {
+	dest, err := resolveArtifactOutputPathForAll("output/nested/result.json", "", 1941, false)
+	if err != nil {
+		t.Fatalf("resolve default: %v", err)
+	}
+	if dest != filepath.Join("output", "nested", "result.json") {
+		t.Fatalf("dest = %q, want preserved relative path", dest)
+	}
+}
+
+func TestResolveArtifactOutputPathForAllPrefixesMultipleJobs(t *testing.T) {
+	dest, err := resolveArtifactOutputPathForAll("output/nested/result.json", "", 1941, true)
+	if err != nil {
+		t.Fatalf("resolve default: %v", err)
+	}
+	want := filepath.Join("wj1941", "output", "nested", "result.json")
+	if dest != want {
+		t.Fatalf("dest = %q, want %q", dest, want)
+	}
+}
+
+func TestResolveArtifactOutputPathForAllRequiresDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "out.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if _, err := resolveArtifactOutputPathForAll("output/result.json", file, 1941, false); err == nil {
+		t.Fatal("expected output file rejection")
+	}
+	if _, err := resolveArtifactOutputPathForAll("output/result.json", filepath.Join(tmp, "missing"), 1941, false); err == nil {
+		t.Fatal("expected missing output directory rejection")
+	}
+}
+
 func TestCopyToWriter(t *testing.T) {
 	tmp := t.TempDir()
 	source := filepath.Join(tmp, "artifact.txt")
