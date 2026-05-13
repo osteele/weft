@@ -306,6 +306,12 @@ var versionedMigrations = []migration{
 			return createJobStatusView(db)
 		},
 	},
+	{
+		Description: "add structurally tracked open attempts",
+		Apply: func(db *sql.DB) error {
+			return ensureOpenAttemptState(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
@@ -347,6 +353,9 @@ func ensurePlacementRowInvariants(db *sql.DB) error {
 		return err
 	}
 	if err := resolveDuplicateOpenAttempts(db); err != nil {
+		return err
+	}
+	if err := ensureOpenAttemptState(db); err != nil {
 		return err
 	}
 	if err := createExecutionTargetShadowTriggers(db); err != nil {
@@ -552,5 +561,90 @@ func resolveDuplicateOpenAttempts(db *sql.DB) error {
 		       	ELSE cloud_outcome
 		       END
 		 WHERE id IN (SELECT id FROM ranked WHERE rn > 1)`)
+	return err
+}
+
+func ensureOpenAttemptState(db *sql.DB) error {
+	if err := normalizeAttemptEndTimes(db); err != nil {
+		return err
+	}
+	if err := resolveDuplicateOpenAttempts(db); err != nil {
+		return err
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS job_open_attempts (
+			job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+			attempt_id INTEGER NOT NULL UNIQUE REFERENCES job_attempts(id) ON DELETE CASCADE
+		)`,
+		`CREATE TRIGGER IF NOT EXISTS job_open_attempts_validate_insert
+			BEFORE INSERT ON job_open_attempts
+			FOR EACH ROW
+			WHEN NOT EXISTS (
+				SELECT 1 FROM job_attempts
+				 WHERE id = NEW.attempt_id
+				   AND job_id = NEW.job_id
+				   AND end_time IS NULL
+			)
+			BEGIN
+				SELECT RAISE(ABORT, 'job_open_attempts must reference an open attempt owned by the job');
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_open_attempts_validate_update
+			BEFORE UPDATE OF job_id, attempt_id ON job_open_attempts
+			FOR EACH ROW
+			WHEN NOT EXISTS (
+				SELECT 1 FROM job_attempts
+				 WHERE id = NEW.attempt_id
+				   AND job_id = NEW.job_id
+				   AND end_time IS NULL
+			)
+			BEGIN
+				SELECT RAISE(ABORT, 'job_open_attempts must reference an open attempt owned by the job');
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_open_state_insert
+			AFTER INSERT ON job_attempts
+			FOR EACH ROW
+			WHEN NEW.end_time IS NULL
+			BEGIN
+				INSERT INTO job_open_attempts(job_id, attempt_id) VALUES (NEW.job_id, NEW.id);
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_open_state_close_or_move
+			AFTER UPDATE OF job_id, end_time ON job_attempts
+			FOR EACH ROW
+			WHEN OLD.end_time IS NULL
+			     AND (NEW.end_time IS NOT NULL OR NEW.job_id != OLD.job_id)
+			BEGIN
+				DELETE FROM job_open_attempts WHERE attempt_id = OLD.id;
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_open_state_open_or_move
+			AFTER UPDATE OF job_id, end_time ON job_attempts
+			FOR EACH ROW
+			WHEN NEW.end_time IS NULL
+			     AND (OLD.end_time IS NOT NULL OR NEW.job_id != OLD.job_id)
+			BEGIN
+				INSERT INTO job_open_attempts(job_id, attempt_id) VALUES (NEW.job_id, NEW.id);
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_open_state_delete
+			AFTER DELETE ON job_attempts
+			FOR EACH ROW
+			WHEN OLD.end_time IS NULL
+			BEGIN
+				DELETE FROM job_open_attempts WHERE attempt_id = OLD.id;
+			END`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_attempts_one_open ON job_attempts(job_id) WHERE end_time IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_job_open_attempts_attempt ON job_open_attempts(attempt_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`DELETE FROM job_open_attempts`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`
+		INSERT INTO job_open_attempts(job_id, attempt_id)
+		SELECT job_id, id
+		  FROM job_attempts
+		 WHERE end_time IS NULL`)
 	return err
 }

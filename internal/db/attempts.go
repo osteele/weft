@@ -221,6 +221,9 @@ func initJobAttemptsSchema(db *sql.DB) error {
 			return fmt.Errorf("rebuild job_attempts: %w", err)
 		}
 	}
+	if err := ensureOpenAttemptState(db); err != nil {
+		return fmt.Errorf("ensure open attempt state: %w", err)
+	}
 	return nil
 }
 
@@ -913,9 +916,9 @@ func hasJobPhaseTimingsTable(db *sql.DB) bool {
 // SQLite doesn't support UPDATE ... ORDER BY ... LIMIT without SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
 // All UPDATE helpers use a subquery: WHERE id = (SELECT id ... ORDER BY ... LIMIT 1).
 
-// latestOpenAttemptSubquery returns a SQL subquery that selects the id of the
-// latest open (end_time IS NULL) attempt for the given job_id placeholder.
-const latestOpenAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`
+// latestOpenAttemptSubquery returns a SQL subquery that selects the structurally
+// tracked open attempt for the given job_id placeholder.
+const latestOpenAttemptSubquery = `(SELECT attempt_id FROM job_open_attempts WHERE job_id = ?)`
 
 // latestAttemptSubquery returns a SQL subquery for the latest attempt (open or closed).
 const latestAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`
