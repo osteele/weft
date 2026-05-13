@@ -14,7 +14,85 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	weftlogging "github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/runner"
 )
+
+func TestCompletionManifestCoversLaunchJobs(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	for _, jobID := range []int64{1, 2} {
+		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'echo ok', 0)`, jobID); err != nil {
+			t.Fatalf("create job %d: %v", jobID, err)
+		}
+		attemptID, err := db.CreateAttempt(database, jobID, "", &instanceID, db.StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateAttempt(%d): %v", jobID, err)
+		}
+		if _, err := database.Exec(`UPDATE job_attempts SET cloud_outcome = ?, end_time = ? WHERE id = ?`, db.AttemptOutcomeCompleted, time.Now().Unix(), attemptID); err != nil {
+			t.Fatalf("close attempt %d: %v", attemptID, err)
+		}
+	}
+
+	manifest := &runner.InstanceCompletionManifest{
+		Jobs: []runner.JobCompletionSummary{
+			{JobID: 1, ExitCode: 0, UploadStatus: "ok"},
+			{JobID: 2, ExitCode: 0, UploadStatus: "ok"},
+		},
+	}
+	if !completionManifestCoversLaunchJobs(database, instanceID, manifest) {
+		t.Fatal("expected manifest to cover launch jobs")
+	}
+}
+
+func TestCompletionManifestCoversLaunchJobs_MissingJob(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	for _, spec := range []struct {
+		jobID   int64
+		outcome string
+	}{
+		{jobID: 1, outcome: db.AttemptOutcomeCompleted},
+		{jobID: 2, outcome: db.AttemptOutcomeOrphaned},
+	} {
+		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'echo ok', 0)`, spec.jobID); err != nil {
+			t.Fatalf("create job %d: %v", spec.jobID, err)
+		}
+		attemptID, err := db.CreateAttempt(database, spec.jobID, "", &instanceID, db.StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateAttempt(%d): %v", spec.jobID, err)
+		}
+		if _, err := database.Exec(`UPDATE job_attempts SET cloud_outcome = ?, end_time = ? WHERE id = ?`, spec.outcome, time.Now().Unix(), attemptID); err != nil {
+			t.Fatalf("close attempt %d: %v", attemptID, err)
+		}
+	}
+
+	manifest := &runner.InstanceCompletionManifest{
+		Jobs: []runner.JobCompletionSummary{
+			{JobID: 1, ExitCode: 0, UploadStatus: "ok"},
+		},
+	}
+	if completionManifestCoversLaunchJobs(database, instanceID, manifest) {
+		t.Fatal("expected missing orphaned job to fail coverage")
+	}
+}
 
 func TestReconcileLaunches_DeadInstance(t *testing.T) {
 	database := setupTestDB(t)

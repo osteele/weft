@@ -2038,29 +2038,35 @@ func CloseLaunchAttempt(database *sql.DB, jobID int64, outcome string) error {
 	return err
 }
 
-// CloseLaunchAttempts sets cloud_outcome on all open attempts
-// associated with the given cloud instance.
+// CloseLaunchAttempts sets cloud_outcome on all open attempts associated with
+// the given cloud instance. Completed launches are conservative: per-job R2
+// completion sync is the only path that can mark an attempt successful, so any
+// still-open attempts are returned to the queue as orphaned work.
 func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) error {
+	if outcome == AttemptOutcomeCompleted {
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			    SET end_time = NULL
+			  WHERE launch_id = ?
+			    AND end_time = 0
+			    AND status NOT IN (?, ?, ?, ?, ?, ?)`,
+			instanceID,
+			StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+		); err != nil {
+			return err
+		}
+		_, err := ResetLaunchJobs(database, instanceID, AttemptOutcomeOrphaned)
+		return err
+	}
+
 	// Map cloud outcome to attempt status: "failed" → failed, "completed" → completed,
 	// everything else (orphaned, superseded) → canceled.
 	attemptStatus := StatusCanceled
 	switch outcome {
 	case AttemptOutcomeFailed:
 		attemptStatus = StatusFailed
-	case AttemptOutcomeCompleted:
-		attemptStatus = StatusCompleted
 	}
 	now := time.Now().Unix()
-	if outcome == AttemptOutcomeCompleted {
-		_, err := database.Exec(
-			`UPDATE job_attempts
-			 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?),
-			     exit_code = COALESCE(exit_code, 0), last_synced_status = ?, pending_status = NULL
-			 WHERE launch_id = ? AND (end_time IS NULL OR end_time = 0)`,
-			attemptStatus, outcome, now, StatusCompleted, instanceID,
-		)
-		return err
-	}
 	_, err := database.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?), pending_status = NULL
@@ -2104,6 +2110,94 @@ func repairCompletedCloudAttemptsMissingExitCode(database *sql.DB) error {
 		StatusCompleted,
 	)
 	return err
+}
+
+// repairCompletedCloudAttemptsWithoutEvidence repairs rows fabricated by older
+// completed-launch cleanup. Those rows have no start_time because no per-job R2
+// completion was ingested, but were nevertheless stamped as synced completed
+// attempts with exit_code=0. Return them to the queue instead.
+func repairCompletedCloudAttemptsWithoutEvidence(database *sql.DB) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(
+		`SELECT ja.id, ja.job_id, ja.launch_id
+		   FROM job_attempts ja
+		   JOIN jobs j ON j.id = ja.job_id
+		  WHERE ja.id = (
+				SELECT MAX(ja2.id) FROM job_attempts ja2 WHERE ja2.job_id = ja.job_id
+		  )
+		    AND ja.launch_id IS NOT NULL
+		    AND ja.status = ?
+		    AND ja.cloud_outcome = ?
+		    AND ja.exit_code = 0
+		    AND ja.start_time IS NULL
+		    AND ja.last_synced_status = ?
+		    AND COALESCE(j.requested_status, '') NOT IN (?, ?, ?)`,
+		StatusCompleted,
+		AttemptOutcomeCompleted,
+		StatusCompleted,
+		StatusCanceled,
+		StatusKilled,
+		StatusDraft,
+	)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer rows.Close()
+
+	type poisonedAttempt struct {
+		attemptID  int64
+		jobID      int64
+		instanceID int64
+	}
+	var attempts []poisonedAttempt
+	for rows.Next() {
+		var a poisonedAttempt
+		if err := rows.Scan(&a.attemptID, &a.jobID, &a.instanceID); err != nil {
+			tx.Rollback()
+			return err
+		}
+		attempts = append(attempts, a)
+	}
+	if err := rows.Err(); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	now := time.Now().Unix()
+	for _, a := range attempts {
+		if _, err := tx.Exec(
+			`UPDATE job_attempts
+			    SET status = ?, end_time = COALESCE(NULLIF(end_time, 0), ?),
+			        exit_code = NULL, last_synced_status = NULL,
+			        cloud_outcome = ?, pending_status = NULL
+			  WHERE id = ?`,
+			StatusCanceled, now, AttemptOutcomeOrphaned, a.attemptID,
+		); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := createAttemptTx(tx, a.jobID, "", nil, StatusQueued); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(
+			`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
+			encodeStringSlice([]string{fmt.Sprintf("cloud instance %d completed without job result; job returned to unplaced queue", a.instanceID)}),
+			a.jobID,
+		); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // CountLaunchAttempts returns the number of cloud-associated attempts for a job.

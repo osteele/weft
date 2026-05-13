@@ -907,7 +907,7 @@ func TestGetAttemptOutcomesByLaunch_NewerOpenAttemptHidesOlderOutcome(t *testing
 	}
 }
 
-func TestCloseLaunchAttempts_CompletedSetsExitCode(t *testing.T) {
+func TestCloseLaunchAttempts_CompletedRequeuesOpenAttempts(t *testing.T) {
 	database := setupTestDB(t)
 
 	instanceID, err := CreateLaunch(database, &Launch{
@@ -928,26 +928,26 @@ func TestCloseLaunchAttempts_CompletedSetsExitCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if job.Status != StatusCompleted {
-		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	if job.Status != StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
 	}
-	if job.ExitCode == nil || *job.ExitCode != 0 {
-		t.Fatalf("job exit_code = %v, want 0", job.ExitCode)
+	if job.ExitCode != nil {
+		t.Fatalf("job exit_code = %v, want nil", job.ExitCode)
 	}
 
-	var lastSynced string
+	var outcome string
 	if err := database.QueryRow(
-		`SELECT COALESCE(last_synced_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		`SELECT COALESCE(cloud_outcome, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number ASC LIMIT 1`,
 		1,
-	).Scan(&lastSynced); err != nil {
-		t.Fatalf("query last_synced_status: %v", err)
+	).Scan(&outcome); err != nil {
+		t.Fatalf("query cloud_outcome: %v", err)
 	}
-	if lastSynced != StatusCompleted {
-		t.Fatalf("last_synced_status = %q, want %q", lastSynced, StatusCompleted)
+	if outcome != AttemptOutcomeOrphaned {
+		t.Fatalf("cloud_outcome = %q, want %q", outcome, AttemptOutcomeOrphaned)
 	}
 }
 
-func TestCloseLaunchAttempts_EndTimeZero(t *testing.T) {
+func TestCloseLaunchAttempts_CompletedEndTimeZeroRequeues(t *testing.T) {
 	database := setupTestDB(t)
 
 	instanceID, err := CreateLaunch(database, &Launch{
@@ -971,22 +971,71 @@ func TestCloseLaunchAttempts_EndTimeZero(t *testing.T) {
 		t.Fatalf("CloseLaunchAttempts: %v", err)
 	}
 
-	var endTime int64
+	var endTime sql.NullInt64
 	if err := database.QueryRow(
-		`SELECT end_time FROM job_attempts WHERE job_id = 1 ORDER BY attempt_number DESC LIMIT 1`,
+		`SELECT end_time FROM job_attempts WHERE job_id = 1 ORDER BY attempt_number ASC LIMIT 1`,
 	).Scan(&endTime); err != nil {
 		t.Fatalf("query end_time: %v", err)
 	}
-	if endTime == 0 {
-		t.Fatal("end_time still 0 after CloseLaunchAttempts — WHERE clause missed end_time=0")
+	if !endTime.Valid || endTime.Int64 == 0 {
+		t.Fatalf("closed attempt end_time = %v, want non-zero", endTime)
 	}
 
 	job, err := GetJobByID(database, 1)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if job.Status != StatusCompleted {
-		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	if job.Status != StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
+	}
+}
+
+func TestRepairCompletedCloudAttemptsWithoutEvidence(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	insertTestJob(t, database, 1, "echo done", "/tmp", StatusCompleted, withLaunch(instanceID))
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		    SET status = ?, cloud_outcome = ?, exit_code = 0,
+		        start_time = NULL, end_time = ?, last_synced_status = ?
+		  WHERE job_id = ?`,
+		StatusCompleted, AttemptOutcomeCompleted, time.Now().Unix(), StatusCompleted, 1,
+	); err != nil {
+		t.Fatalf("poison attempt: %v", err)
+	}
+
+	if err := repairCompletedCloudAttemptsWithoutEvidence(database); err != nil {
+		t.Fatalf("repairCompletedCloudAttemptsWithoutEvidence: %v", err)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.ExitCode != nil {
+		t.Fatalf("job exit_code = %v, want nil", job.ExitCode)
+	}
+
+	var outcome string
+	if err := database.QueryRow(
+		`SELECT COALESCE(cloud_outcome, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number ASC LIMIT 1`,
+		1,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("query cloud_outcome: %v", err)
+	}
+	if outcome != AttemptOutcomeOrphaned {
+		t.Fatalf("cloud_outcome = %q, want %q", outcome, AttemptOutcomeOrphaned)
 	}
 }
 

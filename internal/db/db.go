@@ -2346,6 +2346,9 @@ func startupRepair(db *sql.DB) error {
 	if err := repairCompletedCloudAttemptsMissingExitCode(db); err != nil {
 		return err
 	}
+	if err := repairCompletedCloudAttemptsWithoutEvidence(db); err != nil {
+		return err
+	}
 
 	// Repair placeholder project values (e.g., ".") from older job submissions.
 	if err := repairPlaceholderProjects(db); err != nil {

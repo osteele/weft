@@ -531,7 +531,7 @@ func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int
 		// Legacy marker or missing — leave results_verified as NULL
 		return
 	}
-	verified := manifest.AllUploadsOK()
+	verified := manifest.AllUploadsOK() && completionManifestCoversLaunchJobs(database, instanceID, manifest)
 	if err := db.UpdateLaunchResultsVerified(database, instanceID, verified); err != nil {
 		slog.Warn("failed to update results_verified", "component", "reconcile", "instance", instanceID, "error", err)
 		return
@@ -539,6 +539,51 @@ func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int
 	if !verified {
 		slog.Warn("instance completed but uploads were partial/failed", "component", "reconcile", "instance", instanceID)
 	}
+}
+
+func completionManifestCoversLaunchJobs(database *sql.DB, instanceID int64, manifest *runner.InstanceCompletionManifest) bool {
+	if database == nil || manifest == nil {
+		return false
+	}
+	seen := make(map[int64]struct{}, len(manifest.Jobs))
+	for _, job := range manifest.Jobs {
+		seen[job.JobID] = struct{}{}
+	}
+
+	rows, err := database.Query(
+		`SELECT DISTINCT job_id
+		   FROM job_attempts
+		  WHERE launch_id = ?
+		    AND cloud_outcome IN (?, ?, ?, ?)`,
+		instanceID,
+		db.AttemptOutcomeCompleted,
+		db.AttemptOutcomeFailed,
+		db.AttemptOutcomeOrphaned,
+		db.AttemptOutcomePreempted,
+	)
+	if err != nil {
+		slog.Warn("failed to verify completion manifest coverage", "component", "reconcile", "instance", instanceID, "error", err)
+		return false
+	}
+	defer rows.Close()
+
+	required := 0
+	for rows.Next() {
+		var jobID int64
+		if err := rows.Scan(&jobID); err != nil {
+			slog.Warn("failed to scan launch job for completion manifest coverage", "component", "reconcile", "instance", instanceID, "error", err)
+			return false
+		}
+		required++
+		if _, ok := seen[jobID]; !ok {
+			return false
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("failed to verify completion manifest coverage", "component", "reconcile", "instance", instanceID, "error", err)
+		return false
+	}
+	return required > 0
 }
 
 func markTerminationIntentDestroyed(database *sql.DB, ci *db.Launch, confirmedAt time.Time) bool {
