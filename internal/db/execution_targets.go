@@ -224,6 +224,29 @@ func BackfillJobAttemptExecutionTargets(database *sql.DB) error {
 		   AND launch_id IS NOT NULL`); err != nil {
 		return err
 	}
+	if _, err := database.Exec(`
+		UPDATE job_attempts
+		   SET target_id = (
+		       SELECT et.id
+		         FROM execution_targets et
+		        WHERE et.kind = 'rental_instance'
+		          AND et.launch_id = CAST(SUBSTR(job_attempts.host, INSTR(job_attempts.host, ':') + 1) AS INTEGER)
+		   )
+		 WHERE target_id IS NULL
+		   AND launch_id IS NULL
+		   AND (
+		        host LIKE 'vastai:%'
+		        OR host LIKE 'runpod:%'
+		        OR host LIKE 'rental:%'
+		   )
+		   AND EXISTS (
+		       SELECT 1
+		         FROM execution_targets et
+		        WHERE et.kind = 'rental_instance'
+		          AND et.launch_id = CAST(SUBSTR(job_attempts.host, INSTR(job_attempts.host, ':') + 1) AS INTEGER)
+		   )`); err != nil {
+		return err
+	}
 	_, err := database.Exec(`
 		UPDATE job_attempts
 		   SET target_id = (

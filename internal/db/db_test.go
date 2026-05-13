@@ -3684,9 +3684,8 @@ func TestRepairOrphanedCompletedAttempts(t *testing.T) {
 	if job.LaunchID == nil || *job.LaunchID != goodLaunchID {
 		t.Errorf("expected launch_id=%d (good launch), got %v", goodLaunchID, job.LaunchID)
 	}
-	expectedHost := LaunchHost(goodLaunchID)
-	if job.Host != expectedHost {
-		t.Errorf("expected host=%s, got %q", expectedHost, job.Host)
+	if job.Host != "" {
+		t.Errorf("expected rental job host to be hidden, got %q", job.Host)
 	}
 }
 

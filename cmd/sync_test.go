@@ -287,9 +287,8 @@ func TestRecordCloudJobCompletion_InfersLaunchID(t *testing.T) {
 	if job.LaunchID == nil || *job.LaunchID != goodLaunchID {
 		t.Errorf("job launch_id = %v, want %d", job.LaunchID, goodLaunchID)
 	}
-	expectedHost := db.LaunchHost(goodLaunchID)
-	if job.Host != expectedHost {
-		t.Errorf("job host = %q, want %q", job.Host, expectedHost)
+	if job.Host != "" {
+		t.Errorf("job host = %q, want empty for rental job", job.Host)
 	}
 	if !job.IsLaunchJob() {
 		t.Error("expected IsLaunchJob() = true after launch inference")

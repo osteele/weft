@@ -757,6 +757,10 @@ func dropIntegrityViewsAndTriggers(db *sql.DB) error {
 		"move_intents_open_new_requires_live_source_update",
 		"job_attempts_prevent_mixed_host_launch_insert",
 		"job_attempts_prevent_mixed_host_launch_update",
+		"job_attempts_sync_target_shadow_insert",
+		"job_attempts_sync_target_shadow_update",
+		"job_attempts_reject_target_shadow_mismatch_insert",
+		"job_attempts_reject_target_shadow_mismatch_update",
 	} {
 		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
 			return err

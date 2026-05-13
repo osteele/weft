@@ -117,6 +117,76 @@ func TestJobAttemptExecutionTargetBackfill(t *testing.T) {
 	}
 }
 
+func TestJobStatusUsesExecutionTargetWhenPlacementShadowsAreMissing(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "", "/tmp/project", "echo rental", "rental")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET launch_id = NULL WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("clear launch shadow: %v", err)
+	}
+
+	var kind string
+	var gotLaunchID sql.NullInt64
+	if err := database.QueryRow(`SELECT effective_target_kind, launch_id FROM job_status WHERE id = ?`, jobID).Scan(&kind, &gotLaunchID); err != nil {
+		t.Fatalf("query job_status: %v", err)
+	}
+	if kind != string(JobTargetRentalInstance) {
+		t.Fatalf("effective_target_kind = %q, want %q", kind, JobTargetRentalInstance)
+	}
+	if !gotLaunchID.Valid || gotLaunchID.Int64 != launchID {
+		t.Fatalf("launch_id = %v, want %d from execution target", gotLaunchID, launchID)
+	}
+}
+
+func TestJobAttemptsRejectTargetShadowMismatch(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "echo host", "host")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	var targetID int64
+	if err := database.QueryRow(`SELECT target_id FROM job_attempts WHERE job_id = ?`, jobID).Scan(&targetID); err != nil {
+		t.Fatalf("query target_id: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET host = 'cool100' WHERE job_id = ?`, jobID); err == nil {
+		t.Fatal("inventory target host mismatch succeeded; want trigger failure")
+	}
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	rentalJobID, err := RecordQueued(database, "", "/tmp/project", "echo rental", "rental")
+	if err != nil {
+		t.Fatalf("RecordQueued rental: %v", err)
+	}
+	if err := SetJobLaunchID(database, rentalJobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET host = 'cool30' WHERE job_id = ?`, rentalJobID); err == nil {
+		t.Fatal("rental target inventory host shadow succeeded; want trigger failure")
+	}
+
+	var stillTargetID int64
+	if err := database.QueryRow(`SELECT target_id FROM job_attempts WHERE job_id = ?`, jobID).Scan(&stillTargetID); err != nil {
+		t.Fatalf("query final target_id: %v", err)
+	}
+	if stillTargetID != targetID {
+		t.Fatalf("target_id changed after rejected update: got %d want %d", stillTargetID, targetID)
+	}
+}
+
 func TestSetLaunchCordonedMirrorsExecutionTarget(t *testing.T) {
 	database := SetupTestDB(t)
 

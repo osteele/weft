@@ -508,7 +508,12 @@ func createJobStatusView(db *sql.DB) error {
 			          AND la.end_time IS NOT NULL
 			          AND COALESCE(la.status, '') != 'completed'
 			          AND COALESCE(la.exit_code, 1) != 0
-			     THEN '' ELSE COALESCE(la.host, '') END AS host,
+			     THEN ''
+			     WHEN et.kind = 'inventory_host' THEN et.host
+			     WHEN et.kind = 'rental_instance' THEN ''
+			     WHEN la.launch_id IS NOT NULL THEN ''
+			     ELSE COALESCE(la.host, '')
+			END AS host,
 			la.session_name,
 			j.working_dir,
 			j.command,
@@ -533,7 +538,7 @@ func createJobStatusView(db *sql.DB) error {
 					     ELSE 'draft'
 					END
 				-- Cloud jobs: derive status from attempt facts + instance lifecycle
-				WHEN la.launch_id IS NOT NULL THEN
+				WHEN COALESCE(et.launch_id, la.launch_id) IS NOT NULL THEN
 					CASE
 						WHEN j.requested_status = 'queued'
 						     AND la.end_time IS NOT NULL
@@ -603,10 +608,11 @@ func createJobStatusView(db *sql.DB) error {
 			          AND la.end_time IS NOT NULL
 			          AND COALESCE(la.status, '') != 'completed'
 			          AND COALESCE(la.exit_code, 1) != 0
-			     THEN NULL ELSE la.launch_id END AS launch_id,
+			     THEN NULL ELSE COALESCE(et.launch_id, la.launch_id) END AS launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
-			-- Target kind for placement queries.
+			-- Target kind for placement queries. Prefer execution_targets:
+			-- host and launch_id are compatibility shadows only.
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
@@ -615,6 +621,11 @@ func createJobStatusView(db *sql.DB) error {
 				     AND COALESCE(la.status, '') != 'completed'
 				     AND COALESCE(la.exit_code, 1) != 0
 				THEN 'unplaced'
+				WHEN et.kind = 'rental_instance'
+				     AND l.status IN ('launching', 'running', 'grace', 'completed')
+				THEN 'rental_instance'
+				WHEN et.kind = 'inventory_host'
+				THEN 'inventory_host'
 				WHEN la.launch_id IS NOT NULL
 				     AND l.status IN ('launching', 'running', 'grace', 'completed')
 				THEN 'rental_instance'
@@ -628,7 +639,8 @@ func createJobStatusView(db *sql.DB) error {
 			END AS effective_target_kind
 		FROM jobs j
 		LEFT JOIN latest_attempt la ON la.job_id = j.id AND la.rn = 1
-		LEFT JOIN launches l ON l.id = la.launch_id
+		LEFT JOIN execution_targets et ON et.id = la.target_id
+		LEFT JOIN launches l ON l.id = COALESCE(et.launch_id, la.launch_id)
 	`)
 	return err
 }

@@ -294,6 +294,18 @@ var versionedMigrations = []migration{
 			return ensurePlacementRowInvariants(db)
 		},
 	},
+	{
+		Description: "make execution target authoritative for placement reads",
+		Apply: func(db *sql.DB) error {
+			if err := createExecutionTargetShadowTriggers(db); err != nil {
+				return err
+			}
+			if err := BackfillJobAttemptExecutionTargets(db); err != nil {
+				return err
+			}
+			return createJobStatusView(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
@@ -335,6 +347,9 @@ func ensurePlacementRowInvariants(db *sql.DB) error {
 		return err
 	}
 	if err := resolveDuplicateOpenAttempts(db); err != nil {
+		return err
+	}
+	if err := createExecutionTargetShadowTriggers(db); err != nil {
 		return err
 	}
 	stmts := []string{
@@ -407,6 +422,95 @@ func normalizeAttemptEndTimes(db *sql.DB) error {
 		 WHERE end_time = 0
 		   AND status NOT IN ('canceled','failed','dead','killed','completed')`)
 	return err
+}
+
+func createExecutionTargetShadowTriggers(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_sync_target_shadow_insert
+			AFTER INSERT ON job_attempts
+			FOR EACH ROW
+			WHEN NEW.target_id IS NOT NULL
+			BEGIN
+				UPDATE job_attempts
+				   SET host = CASE
+				              WHEN (SELECT kind FROM execution_targets WHERE id = NEW.target_id) = 'inventory_host'
+				              THEN (SELECT host FROM execution_targets WHERE id = NEW.target_id)
+				              ELSE host
+				          END,
+				       launch_id = (SELECT launch_id FROM execution_targets WHERE id = NEW.target_id)
+				 WHERE id = NEW.id;
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_sync_target_shadow_update
+			AFTER UPDATE OF target_id ON job_attempts
+			FOR EACH ROW
+			WHEN NEW.target_id IS NOT NULL
+			BEGIN
+				UPDATE job_attempts
+				   SET host = CASE
+				              WHEN (SELECT kind FROM execution_targets WHERE id = NEW.target_id) = 'inventory_host'
+				              THEN (SELECT host FROM execution_targets WHERE id = NEW.target_id)
+				              ELSE host
+				          END,
+				       launch_id = (SELECT launch_id FROM execution_targets WHERE id = NEW.target_id)
+				 WHERE id = NEW.id;
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_reject_target_shadow_mismatch_insert
+			BEFORE INSERT ON job_attempts
+			FOR EACH ROW
+			WHEN NEW.target_id IS NOT NULL
+			 AND EXISTS (
+				SELECT 1
+				  FROM execution_targets et
+				 WHERE et.id = NEW.target_id
+				   AND (
+				        (et.kind = 'inventory_host'
+				         AND NEW.launch_id IS NOT NULL)
+				        OR (et.kind = 'inventory_host'
+				            AND COALESCE(NULLIF(NEW.host, ''), et.host) != et.host)
+				        OR (et.kind = 'rental_instance'
+				            AND COALESCE(NEW.launch_id, et.launch_id) != et.launch_id)
+				        OR (et.kind = 'rental_instance'
+				            AND COALESCE(NEW.host, '') != ''
+				            AND COALESCE(NEW.host, '') NOT LIKE 'vastai:%'
+				            AND COALESCE(NEW.host, '') NOT LIKE 'runpod:%'
+				            AND COALESCE(NEW.host, '') NOT LIKE 'rental:%')
+				   )
+			 )
+			BEGIN
+				SELECT RAISE(ABORT, 'job_attempts target_id disagrees with placement shadow columns');
+			END`,
+		`CREATE TRIGGER IF NOT EXISTS job_attempts_reject_target_shadow_mismatch_update
+			BEFORE UPDATE OF host, launch_id, target_id ON job_attempts
+			FOR EACH ROW
+			WHEN NEW.target_id IS NOT NULL
+			 AND EXISTS (
+				SELECT 1
+				  FROM execution_targets et
+				 WHERE et.id = NEW.target_id
+				   AND (
+				        (et.kind = 'inventory_host'
+				         AND NEW.launch_id IS NOT NULL)
+				        OR (et.kind = 'inventory_host'
+				            AND COALESCE(NULLIF(NEW.host, ''), et.host) != et.host)
+				        OR (et.kind = 'rental_instance'
+				            AND COALESCE(NEW.launch_id, et.launch_id) != et.launch_id)
+				        OR (et.kind = 'rental_instance'
+				            AND COALESCE(NEW.host, '') != ''
+				            AND COALESCE(NEW.host, '') NOT LIKE 'vastai:%'
+				            AND COALESCE(NEW.host, '') NOT LIKE 'runpod:%'
+				            AND COALESCE(NEW.host, '') NOT LIKE 'rental:%')
+				   )
+			 )
+			BEGIN
+				SELECT RAISE(ABORT, 'job_attempts target_id disagrees with placement shadow columns');
+			END`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func resolveDuplicateOpenIntents(db *sql.DB, tableName, resolvedState string) error {
