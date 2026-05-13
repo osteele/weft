@@ -182,7 +182,7 @@ Destinations:
 Flags:
   --each              With 'new'/'create': launch a separate instance per job
   --to, -t <dest>     Destination (alternative to positional final argument)
-  --from, -f <src>    Select queued jobs from source host or cloud instance (e.g., cool30, wi872)
+  --from, -f <src>    Select queued jobs from source instance, host, or project (e.g., wi872, cool30, myproj)
   --project <name>    Select all eligible queued jobs in the named project
 
 Examples:
@@ -196,6 +196,7 @@ Examples:
   weft job move 44:46 --to distinct     # Alias for --each --to new
   weft job move --from cool30 --to new  # Move queued jobs from host cool30 to new instance(s)
   weft job move --from wi872 --to wi900 # Move queued jobs from wi872 to wi900
+  weft job move --from myproj --to new  # Move queued jobs from project myproj to new instance(s)
   weft job move --project myproj new    # All queued myproj jobs → new instance`,
 	Args: usageArgs(cobra.ArbitraryArgs),
 	RunE: runJobMove,
@@ -535,7 +536,7 @@ func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destinatio
 		cmd.Flags().StringVarP(destination, "to", "t", "", "Destination host, instance (wi<N>), or 'new'/'create'/'distinct'")
 	}
 	if from != nil {
-		cmd.Flags().StringVarP(from, "from", "f", "", "Select queued jobs from source host or cloud instance (e.g., cool30, wi<N>)")
+		cmd.Flags().StringVarP(from, "from", "f", "", "Select queued jobs from source instance, host, or project (e.g., wi<N>, cool30, myproj)")
 	}
 }
 

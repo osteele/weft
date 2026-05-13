@@ -223,6 +223,56 @@ func TestResolveEligibleJobs_FromHostNoEligibleJobsReportsHost(t *testing.T) {
 	}
 }
 
+func TestResolveEligibleJobs_FromFallsBackToProject(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	projectJobID, err := db.RecordQueued(database, "", t.TempDir(), "echo queued", "queued")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobProject(database, projectJobID, "markov-attention"); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+
+	jobs, err := resolveEligibleJobs(database, nil, "", "markov-attention", false)
+	if err != nil {
+		t.Fatalf("resolveEligibleJobs returned error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("eligible jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].ID != projectJobID {
+		t.Fatalf("eligible job ID = %d, want %d", jobs[0].ID, projectJobID)
+	}
+}
+
+func TestResolveEligibleJobs_FromHostTakesPrecedenceOverSameNamedProject(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	hostJobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "echo host", "host")
+	if err != nil {
+		t.Fatalf("record host job: %v", err)
+	}
+	projectJobID, err := db.RecordQueued(database, "", t.TempDir(), "echo project", "project")
+	if err != nil {
+		t.Fatalf("record project job: %v", err)
+	}
+	if err := db.SetJobProject(database, projectJobID, "cool30"); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+
+	jobs, err := resolveEligibleJobs(database, nil, "", "cool30", false)
+	if err != nil {
+		t.Fatalf("resolveEligibleJobs returned error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("eligible jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].ID != hostJobID {
+		t.Fatalf("eligible job ID = %d, want host job %d", jobs[0].ID, hostJobID)
+	}
+}
+
 func TestMoveJobsVerbAlias_ExposesMoveFlags(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"move", "jobs"})
 	if err != nil {

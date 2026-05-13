@@ -43,6 +43,7 @@ func ResolveEligibleJobs(
 	eligibleStatuses := []string{db.StatusQueued, db.StatusPendingPlacement}
 	var sourceInstanceID int64
 	sourceHost := ""
+	sourceProject := ""
 	if from != "" {
 		trimmedFrom := strings.TrimSpace(from)
 		if parsedID, err := ids.ParseInstanceID(trimmedFrom); err == nil {
@@ -63,6 +64,21 @@ func ResolveEligibleJobs(
 				return nil, fmt.Errorf("list jobs on host %s: %w", sourceHost, err)
 			}
 			jobs = append(jobs, selected...)
+			if len(jobs) == 0 {
+				hostJobs, err := db.ListJobsByStatuses(database, nil, sourceHost, "", 1, nil, "")
+				if err != nil {
+					return nil, fmt.Errorf("list jobs on host %s: %w", sourceHost, err)
+				}
+				if len(hostJobs) == 0 {
+					sourceProject = trimmedFrom
+					sourceHost = ""
+					selected, err := db.ListJobsByStatuses(database, eligibleStatuses, "", sourceProject, 0, nil, "")
+					if err != nil {
+						return nil, fmt.Errorf("list queued jobs in project %s: %w", sourceProject, err)
+					}
+					jobs = append(jobs, selected...)
+				}
+			}
 		}
 	} else if project != "" {
 		selected, err := db.ListJobsByStatuses(database, eligibleStatuses, "", project, 0, nil, "")
@@ -106,6 +122,9 @@ func ResolveEligibleJobs(
 		}
 		if sourceHost != "" {
 			return nil, fmt.Errorf("no eligible queued jobs found on host %s", sourceHost)
+		}
+		if sourceProject != "" {
+			return nil, fmt.Errorf("no eligible queued jobs found on host or project %s", sourceProject)
 		}
 		if unplacedOnly {
 			return nil, fmt.Errorf("no eligible unplaced queued jobs")
