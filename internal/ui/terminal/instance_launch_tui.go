@@ -2346,6 +2346,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		sendCampaignPhase("preparing instance launch")
+		opts.PlacementAlternatives = campaign.PlacementAlternativesByLaunchGroup(launchGroupOffers)
 
 		result, err := campaign.LaunchCampaignWithAssetStager(
 			assetStager,

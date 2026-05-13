@@ -56,6 +56,7 @@ type RuntimeMetadata struct {
 	FeatureCoverage            map[string]int `json:"feature_coverage,omitempty"`
 	ResidualCorrectionFactor   float64        `json:"residual_correction_factor,omitempty"`
 	ResidualCorrectionSource   string         `json:"residual_correction_source,omitempty"`
+	ModelFingerprint           string         `json:"model_fingerprint,omitempty"`
 	Feasible                   *bool          `json:"feasible,omitempty"`
 	Bottleneck                 string         `json:"bottleneck,omitempty"`
 	MemoryHeadroomMiB          float64        `json:"memory_headroom_mib,omitempty"`
@@ -117,6 +118,11 @@ type Result struct {
 	DurationMetadata *RuntimeMetadata `json:"duration_metadata,omitempty"`
 	PeakRSSKB        *Prediction      `json:"peak_rss_kb"`
 	MaxGPUMemMiB     *Prediction      `json:"max_gpu_mem_mib"`
+	Levels           map[string]any   `json:"levels,omitempty"`
+	Level0           map[string]any   `json:"l0,omitempty"`
+	Level1           map[string]any   `json:"l1,omitempty"`
+	Level2           map[string]any   `json:"l2,omitempty"`
+	Level3           map[string]any   `json:"l3,omitempty"`
 }
 
 // Meta is the sidecar metadata written alongside trained models.
@@ -577,7 +583,23 @@ func cloneResult(result *Result) *Result {
 		DurationMetadata: metadata,
 		PeakRSSKB:        clonePrediction(result.PeakRSSKB),
 		MaxGPUMemMiB:     clonePrediction(result.MaxGPUMemMiB),
+		Levels:           cloneAnyMap(result.Levels),
+		Level0:           cloneAnyMap(result.Level0),
+		Level1:           cloneAnyMap(result.Level1),
+		Level2:           cloneAnyMap(result.Level2),
+		Level3:           cloneAnyMap(result.Level3),
 	}
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(values))
+	for k, v := range values {
+		cloned[k] = v
+	}
+	return cloned
 }
 
 func backgroundState(cfg Config) *backgroundRetrainState {

@@ -312,6 +312,92 @@ var versionedMigrations = []migration{
 			return ensureOpenAttemptState(db)
 		},
 	},
+	{
+		Description: "add scheduling telemetry tables",
+		Apply: func(db *sql.DB) error {
+			stmts := []string{
+				`CREATE TABLE IF NOT EXISTS prediction_history (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES jobs(id),
+					attempt_id INTEGER REFERENCES job_attempts(id),
+					target TEXT NOT NULL,
+					host TEXT,
+					gpu_class TEXT,
+					prediction_json TEXT,
+					level0_json TEXT,
+					level1_json TEXT,
+					level2_json TEXT,
+					level3_json TEXT,
+					model_fingerprint TEXT,
+					metadata_json TEXT,
+					created_at INTEGER NOT NULL
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_prediction_history_job ON prediction_history(job_id, attempt_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_prediction_history_target ON prediction_history(target, created_at)`,
+				`CREATE TABLE IF NOT EXISTS placement_decisions (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER REFERENCES jobs(id),
+					attempt_id INTEGER REFERENCES job_attempts(id),
+					campaign_id INTEGER REFERENCES campaigns(id),
+					decision_kind TEXT NOT NULL,
+					operation TEXT,
+					objective TEXT,
+					placement_policy_version TEXT,
+					model_fingerprint TEXT,
+					selected_kind TEXT,
+					selected_target TEXT,
+					selected_score REAL,
+					sample_candidates INTEGER NOT NULL DEFAULT 0,
+					created_at INTEGER NOT NULL
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_placement_decisions_job ON placement_decisions(job_id, attempt_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_placement_decisions_campaign ON placement_decisions(campaign_id)`,
+				`CREATE TABLE IF NOT EXISTS placement_candidates (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					decision_id INTEGER NOT NULL REFERENCES placement_decisions(id) ON DELETE CASCADE,
+					rank INTEGER NOT NULL,
+					candidate_kind TEXT NOT NULL,
+					target TEXT,
+					provider TEXT,
+					offer_id TEXT,
+					gpu_name TEXT,
+					score REAL,
+					est_time_s REAL,
+					est_cost REAL,
+					survival REAL,
+					selected INTEGER NOT NULL DEFAULT 0,
+					reasons_json TEXT,
+					details_json TEXT
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_placement_candidates_decision ON placement_candidates(decision_id, rank)`,
+				`CREATE TABLE IF NOT EXISTS donor_experiments (
+					campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
+					cohort TEXT NOT NULL,
+					sample_rate REAL NOT NULL,
+					donor_launch_id INTEGER REFERENCES launches(id),
+					reason TEXT,
+					assigned_at INTEGER NOT NULL
+				)`,
+				`CREATE TABLE IF NOT EXISTS failure_label_reviews (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER REFERENCES jobs(id),
+					attempt_id INTEGER REFERENCES job_attempts(id),
+					heuristic_label TEXT,
+					human_label TEXT,
+					reviewer TEXT,
+					notes TEXT,
+					reviewed_at INTEGER
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_failure_label_reviews_attempt ON failure_label_reviews(job_id, attempt_id)`,
+			}
+			for _, stmt := range stmts {
+				if _, err := db.Exec(stmt); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

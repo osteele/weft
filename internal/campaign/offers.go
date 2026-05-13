@@ -145,7 +145,20 @@ type GroupOffer struct {
 	SurvivalProb   float64      // 0 if no survival model available
 	RejectedGroups []bidding.RejectedGroup
 	FilterStats    OfferFilterStats
+	Alternatives   []RankedOfferAlternative
 	Err            error
+}
+
+// RankedOfferAlternative captures a scored cloud offer for retrospective
+// placement analysis.
+type RankedOfferAlternative struct {
+	Rank          int
+	Offer         cloud.Offer
+	Score         float64
+	CompletionHrs float64
+	Cost          float64
+	Survival      float64
+	Selected      bool
 }
 
 // snapshotOnDemandRefCents returns the cheapest on-demand $/hr (in cents) for
@@ -384,8 +397,41 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
 	}
+	result.Alternatives = rankNeutralOfferAlternatives(filtered, survivalModel, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, best)
 	result.FilterStats = stats
 	return result
+}
+
+func rankNeutralOfferAlternatives(offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, jobCount int, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, selected cloud.Offer) []RankedOfferAlternative {
+	w := profile.Weights()
+	alternatives := make([]RankedOfferAlternative, 0, len(offers))
+	for _, offer := range offers {
+		setup := setupOverhead(offer)
+		surv := 1.0
+		if survivalModel != nil {
+			surv = survivalModel.OfferSurvival(offer)
+		}
+		cost := bidding.ExpectedCost(offer.CostPerHour, jobDurationHrs, setup, surv)
+		completionHrs := float64(jobCount)*setup + jobDurationHrs
+		if !profile.UseHappyPathTime && surv > 0 && surv < 1 {
+			completionHrs /= surv
+		}
+		alternatives = append(alternatives, RankedOfferAlternative{
+			Offer:         offer,
+			Score:         w.Cost*cost + w.Time*completionHrs,
+			CompletionHrs: completionHrs,
+			Cost:          cost,
+			Survival:      surv,
+			Selected:      offer.Key() == selected.Key(),
+		})
+	}
+	sort.Slice(alternatives, func(i, j int) bool {
+		return alternatives[i].Score < alternatives[j].Score
+	})
+	for i := range alternatives {
+		alternatives[i].Rank = i + 1
+	}
+	return alternatives
 }
 
 // SearchBestOfferForGroup searches cloud providers for the best offer matching a
@@ -1000,6 +1046,7 @@ func MapOffersToSplitGroups(splitGroups []InstanceGroup, result CandidateResult)
 			mapped[si].SurvivalProb = result.Offers[ci].SurvivalProb
 			mapped[si].RejectedGroups = result.Offers[ci].RejectedGroups
 			mapped[si].FilterStats = result.Offers[ci].FilterStats
+			mapped[si].Alternatives = result.Offers[ci].Alternatives
 			mapped[si].Err = result.Offers[ci].Err
 		}
 	}

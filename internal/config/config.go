@@ -111,6 +111,9 @@ type Config struct {
 	// Remediation holds auto-remediation configuration for failed jobs
 	Remediation RemediationConfig `yaml:"remediation" toml:"remediation"`
 
+	// Telemetry controls durable scheduling-analysis logs.
+	Telemetry TelemetryConfig `yaml:"telemetry" toml:"telemetry"`
+
 	// AgentBuild holds on-demand remote builder configuration for agent binaries.
 	AgentBuild AgentBuildConfig `yaml:"agent_build" toml:"agent_build"`
 
@@ -163,6 +166,15 @@ type RemediationConfig struct {
 	CodingAgent string `yaml:"coding_agent" toml:"coding_agent"`
 	// CodingAgentDir is the working directory for the agent (defaults to job's working dir).
 	CodingAgentDir string `yaml:"coding_agent_dir" toml:"coding_agent_dir"`
+}
+
+// TelemetryConfig controls sampling and experiment assignment for scheduling
+// analysis logs.
+type TelemetryConfig struct {
+	PlacementAlternativeSampleRate float64 `yaml:"placement_alternative_sample_rate" toml:"placement_alternative_sample_rate"`
+	PlacementAlternativeTopK       int     `yaml:"placement_alternative_top_k" toml:"placement_alternative_top_k"`
+	DonorABEnabled                 *bool   `yaml:"donor_ab_enabled" toml:"donor_ab_enabled"`
+	DonorABSampleRate              float64 `yaml:"donor_ab_sample_rate" toml:"donor_ab_sample_rate"`
 }
 
 // CampaignConfig holds cloud campaign defaults.
@@ -885,6 +897,9 @@ func (c *Config) CampaignReliability() float64 {
 
 const (
 	defaultCampaignReliability   = 0.95
+	defaultPlacementAltSample    = 0.01
+	defaultPlacementAltTopK      = 10
+	defaultDonorABSample         = 0.05
 	defaultRetryFirstTimeLimit   = 45 * time.Minute
 	defaultRetryNextTimeLimit    = 45 * time.Minute
 	defaultRetryFirstCostUSD     = 1.00
@@ -897,6 +912,47 @@ const (
 	defaultAutoObjective         = "cost_first"
 	defaultOpportunityCostWeight = 1.0
 )
+
+// PlacementAlternativeSampleRate returns the fraction of decisions whose
+// ranked candidates should be persisted.
+func (c *Config) PlacementAlternativeSampleRate() float64 {
+	if c == nil || c.Telemetry.PlacementAlternativeSampleRate <= 0 {
+		return defaultPlacementAltSample
+	}
+	if c.Telemetry.PlacementAlternativeSampleRate > 1 {
+		return 1
+	}
+	return c.Telemetry.PlacementAlternativeSampleRate
+}
+
+// PlacementAlternativeTopK returns the maximum number of ranked candidates to
+// persist for sampled placement decisions.
+func (c *Config) PlacementAlternativeTopK() int {
+	if c == nil || c.Telemetry.PlacementAlternativeTopK <= 0 {
+		return defaultPlacementAltTopK
+	}
+	return c.Telemetry.PlacementAlternativeTopK
+}
+
+// DonorABEnabled reports whether donor-vs-hub control assignment is active.
+func (c *Config) DonorABEnabled() bool {
+	if c == nil || c.Telemetry.DonorABEnabled == nil {
+		return true
+	}
+	return *c.Telemetry.DonorABEnabled
+}
+
+// DonorABSampleRate returns the fraction of eligible campaigns assigned to
+// hub-direct control.
+func (c *Config) DonorABSampleRate() float64 {
+	if c == nil || c.Telemetry.DonorABSampleRate <= 0 {
+		return defaultDonorABSample
+	}
+	if c.Telemetry.DonorABSampleRate > 1 {
+		return 1
+	}
+	return c.Telemetry.DonorABSampleRate
+}
 
 func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
 	raw = strings.TrimSpace(raw)

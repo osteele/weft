@@ -105,6 +105,7 @@ func CollectLaunchExecution(result *CandidateResult) ([]InstanceGroup, []cloud.O
 			Offer:          &offerCopy,
 			SurvivalProb:   groupOffer.SurvivalProb,
 			RejectedGroups: append([]bidding.RejectedGroup(nil), groupOffer.RejectedGroups...),
+			Alternatives:   append([]RankedOfferAlternative(nil), groupOffer.Alternatives...),
 		})
 		if i < len(result.Estimates) {
 			estimateCopy := result.Estimates[i]

@@ -762,6 +762,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
 			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
 		}
+		recordRunPlacementTelemetry(database, cfg, jobID, "run", "fast", placementPlan, placementResult, predict)
 
 		// Store placement telemetry if auto-placement was used
 		if placementResult != nil {
@@ -923,6 +924,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
 			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
 		}
+		recordRunPlacementTelemetry(database, cfg, jobID, "run", "cheap", nil, placementResult, predict)
 		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
 			slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
 		} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
@@ -1163,6 +1165,141 @@ func buildPlacementMeta(result *placement.PlacementResult, predict placement.Job
 	}
 
 	return meta
+}
+
+func recordRunPlacementTelemetry(database *sql.DB, cfg *config.Config, jobID int64, operation, objective string, plan *placement.PlacementPlan, result *placement.PlacementResult, predict placement.JobPredictor) {
+	if database == nil || jobID <= 0 {
+		return
+	}
+	attemptID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		slog.Warn("failed to load attempt for placement telemetry", "job_id", jobID, "error", err)
+	}
+	var attemptPtr *int64
+	if attemptID > 0 {
+		attemptPtr = &attemptID
+	}
+
+	selectedKind := ""
+	selectedTarget := ""
+	var selectedScore *float64
+	if result != nil {
+		selectedKind = "on-prem"
+		selectedTarget = result.Host
+		for _, score := range result.Scores {
+			if score.Host == result.Host {
+				v := score.Total
+				selectedScore = &v
+				break
+			}
+		}
+	} else if plan != nil && plan.Fast != nil {
+		selectedKind = plan.Fast.Kind.String()
+		selectedTarget = plan.Fast.ID
+		v := -plan.Fast.EstTime.Mean.Seconds()
+		selectedScore = &v
+	}
+
+	sampleKey := fmt.Sprintf("run:%d:%d:%s", jobID, attemptID, operation)
+	sampled := db.ShouldSample(sampleKey, cfg.PlacementAlternativeSampleRate())
+	candidates := runPlacementCandidates(plan, result, cfg.PlacementAlternativeTopK(), selectedTarget)
+	_, err = db.RecordPlacementDecision(database, db.PlacementDecision{
+		JobID:                  &jobID,
+		AttemptID:              attemptPtr,
+		DecisionKind:           "acted",
+		Operation:              operation,
+		Objective:              objective,
+		PlacementPolicyVersion: placement.PolicyVersion,
+		SelectedKind:           selectedKind,
+		SelectedTarget:         selectedTarget,
+		SelectedScore:          selectedScore,
+		SampleCandidates:       sampled,
+	}, candidates)
+	if err != nil {
+		slog.Warn("failed to record placement telemetry", "job_id", jobID, "error", err)
+	}
+
+	if predict != nil && selectedTarget != "" {
+		if p := predict(selectedTarget); p != nil {
+			if err := db.RecordPredictionHistory(database, db.PredictionHistory{
+				JobID:     jobID,
+				AttemptID: attemptPtr,
+				Target:    "duration",
+				Host:      selectedTarget,
+				GPUClass:  selectedKind,
+				Prediction: map[string]any{
+					"duration_s":       p.DurationS,
+					"duration_s_lower": p.DurationSLower,
+					"duration_s_upper": p.DurationSUpper,
+				},
+				Metadata: map[string]any{
+					"ood_reasons":        p.DurationOODReasons,
+					"n_calibration":      p.DurationNCalibration,
+					"epistemic_factor":   p.DurationEpistemicFactor,
+					"placement_policy":   placement.PolicyVersion,
+					"prediction_serving": "placement.JobPredictor",
+				},
+			}); err != nil {
+				slog.Warn("failed to record prediction history", "job_id", jobID, "error", err)
+			}
+		}
+	}
+}
+
+func runPlacementCandidates(plan *placement.PlacementPlan, result *placement.PlacementResult, limit int, selectedTarget string) []db.PlacementCandidate {
+	if limit <= 0 {
+		return nil
+	}
+	var out []db.PlacementCandidate
+	if plan != nil {
+		for _, c := range plan.Candidates {
+			if len(out) >= limit {
+				break
+			}
+			score := -c.EstTime.Mean.Seconds()
+			estTime := c.EstTime.Mean.Seconds()
+			cost := c.EstCost
+			survival := c.Survival
+			out = append(out, db.PlacementCandidate{
+				Rank:          len(out) + 1,
+				CandidateKind: c.Kind.String(),
+				Target:        c.ID,
+				Score:         &score,
+				EstTimeS:      &estTime,
+				EstCost:       &cost,
+				Survival:      &survival,
+				Selected:      c.ID == selectedTarget,
+			})
+		}
+		return out
+	}
+	if result == nil {
+		return nil
+	}
+	for _, s := range result.Scores {
+		if len(out) >= limit {
+			break
+		}
+		score := s.Total
+		estTime := s.CompletionEst.Mean.Seconds()
+		out = append(out, db.PlacementCandidate{
+			Rank:          len(out) + 1,
+			CandidateKind: "on-prem",
+			Target:        s.Host,
+			Score:         &score,
+			EstTimeS:      &estTime,
+			Selected:      s.Host == selectedTarget,
+			Reasons:       s.Reasons,
+			Details: map[string]any{
+				"eligible":          s.Eligible,
+				"queue_drain_s":     s.QueueDrainEst.Mean.Seconds(),
+				"transfer_s":        s.TransferEst.Mean.Seconds(),
+				"run_s":             s.RunEst.Mean.Seconds(),
+				"contention_factor": s.ContentionFactor,
+			},
+		})
+	}
+	return out
 }
 
 // parseCdPrefix extracts "cd /path && " or "cd /path; " prefix from a command.

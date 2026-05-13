@@ -1482,6 +1482,7 @@ func rankOfferWithPredictedRuntime(
 	bestScore := math.Inf(1)
 	var best cloud.Offer
 	found := false
+	alternatives := make([]RankedOfferAlternative, 0, len(filtered))
 
 	for _, offer := range filtered {
 		runtime, ok := predicted[offerPredictionKey(offer)]
@@ -1511,6 +1512,13 @@ func rankOfferWithPredictedRuntime(
 		}
 
 		score := w.Cost*cost + w.Time*completionHrs
+		alternatives = append(alternatives, RankedOfferAlternative{
+			Offer:         offer,
+			Score:         score,
+			CompletionHrs: completionHrs,
+			Cost:          cost,
+			Survival:      surv,
+		})
 		if !found || score < bestScore {
 			bestScore = score
 			best = offer
@@ -1526,6 +1534,14 @@ func rankOfferWithPredictedRuntime(
 
 	result.Offer = &best
 	result.FilterStats = stats
+	sort.Slice(alternatives, func(i, j int) bool {
+		return alternatives[i].Score < alternatives[j].Score
+	})
+	for i := range alternatives {
+		alternatives[i].Rank = i + 1
+		alternatives[i].Selected = offerPredictionKey(alternatives[i].Offer) == offerPredictionKey(best)
+	}
+	result.Alternatives = alternatives
 	return result, true
 }
 

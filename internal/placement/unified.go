@@ -14,6 +14,10 @@ import (
 // so failure probability is low but nonzero.
 const DefaultReuseSurvival = 0.95
 
+// PolicyVersion stamps placement decisions for before/after retrospective
+// analysis across scheduler changes.
+const PolicyVersion = "weft-placement-v1"
+
 // CandidateKind identifies the type of placement candidate.
 type CandidateKind int
 

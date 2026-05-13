@@ -407,6 +407,7 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	groupsToLaunch := prep.LaunchGroups
 	offers := prep.Offers
 	estimates := prep.Estimates
+	opts.PlacementAlternatives = campaign.PlacementAlternativesByLaunchGroup(prep.LaunchGroupOffers)
 	totalJobs := 0
 	for _, g := range groupsToLaunch {
 		totalJobs += len(g.Jobs)

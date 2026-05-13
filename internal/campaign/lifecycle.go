@@ -63,6 +63,10 @@ type LaunchOpts struct {
 	// Probes pass the primary's launch id; the primary sets its own
 	// id via SetLaunchHedgeCohort after registration.
 	HedgeCohortID int64
+
+	// PlacementAlternatives carries ranked cloud-offer alternatives from the
+	// planning pass, keyed by LaunchGroupSignature.
+	PlacementAlternatives map[string][]RankedOfferAlternative
 }
 
 func (opts LaunchOpts) ScoringProfile() bidding.ScoreProfile {
@@ -818,10 +822,22 @@ func launchCampaignWithStager(
 	if c, err := db.GetCampaign(database, campaignID); err == nil && c != nil && c.CreatedAt > 0 {
 		campaignCreatedAt = time.Unix(c.CreatedAt, 0)
 	}
+	appCfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		appCfg = config.DefaultConfig()
+	}
+	donorABRate := appCfg.DonorABSampleRate()
+	donorControl := false
+	if opts.NoDonor {
+		_ = db.RecordDonorExperiment(database, campaignID, "manual_no_donor", 0, nil, "--no-donor")
+	} else if appCfg.DonorABEnabled() && db.ShouldSample(fmt.Sprintf("donor:%d", campaignID), donorABRate) {
+		donorControl = true
+		_ = db.RecordDonorExperiment(database, campaignID, "hub_direct_control", donorABRate, nil, "deterministic donor A/B control")
+	}
 
 	// Donor strategy: find a cheap collocated instance for cache seeding
 	var donorCfg *DonorConfig
-	if !opts.NoDonor && len(groups) >= 2 {
+	if !opts.NoDonor && !donorControl && len(groups) >= 2 {
 		client := clientForProvider(clients, offers[0].Provider)
 		if supportsDonorStrategy(client) {
 			if onEvent != nil {
@@ -836,6 +852,9 @@ func launchCampaignWithStager(
 				slog.Warn("donor offer search failed, proceeding without donor", "component", "donor", "error", err)
 			}
 		}
+	}
+	if !opts.NoDonor && !donorControl && donorCfg == nil {
+		_ = db.RecordDonorExperiment(database, campaignID, "donor_not_selected", donorABRate, nil, "no cost-effective donor")
 	}
 
 	// Launch donor instance if strategy is available
@@ -878,6 +897,7 @@ func launchCampaignWithStager(
 				donorCfg = nil
 			} else {
 				_ = db.SetLaunchRole(database, donorInstanceID, "donor")
+				_ = db.RecordDonorExperiment(database, campaignID, "donor_enabled", donorABRate, &donorInstanceID, "donor selected")
 
 				// Generate donor bootstrap script
 				if onEvent != nil {
@@ -1050,10 +1070,14 @@ func launchCampaignWithStager(
 
 	for i, g := range groups {
 		offer := offers[i]
+		var groupEstimate CostEstimate
+		if i < len(estimates) {
+			groupEstimate = estimates[i]
+		}
 		jobDurationHrs, setupOverheadHrs := launchCostInputs(estimates, i)
 
 		wg.Add(1)
-		go func(group InstanceGroup, ofr cloud.Offer, jobDurationHrs, setupOverheadHrs float64) {
+		go func(group InstanceGroup, ofr cloud.Offer, estimate CostEstimate, jobDurationHrs, setupOverheadHrs float64) {
 			defer wg.Done()
 
 			client := clientForProvider(clients, ofr.Provider)
@@ -1167,6 +1191,7 @@ func launchCampaignWithStager(
 				}
 			} else {
 				instanceIDs = append(instanceIDs, cID)
+				recordCampaignPlacementTelemetry(database, appCfg, campaignID, cID, group, ofr, estimate, opts.ScoringProfile(), opts.PlacementAlternatives)
 				if onEvent != nil {
 					onEvent(LaunchEvent{
 						Kind:       LaunchEventGroupDone,
@@ -1186,7 +1211,7 @@ func launchCampaignWithStager(
 					}
 				}
 			}
-		}(g, offer, jobDurationHrs, setupOverheadHrs)
+		}(g, offer, groupEstimate, jobDurationHrs, setupOverheadHrs)
 	}
 
 	wg.Wait()
