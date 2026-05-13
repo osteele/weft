@@ -195,6 +195,7 @@ type listMoveOptionsReadyMsg struct {
 	jobID     int64
 	options   []moveOption
 	err       error
+	newOnly   bool
 }
 
 var (
@@ -744,6 +745,25 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.moveLookupPending || msg.requestID != m.moveLookupRequestID {
 			return m, nil
 		}
+		if msg.newOnly {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+			if !m.movePicker.active || m.movePicker.jobID != msg.jobID || m.movePicker.requestID != msg.requestID {
+				return m, nil
+			}
+			if msg.err != nil {
+				m.movePicker.loadingNew = false
+				existingCount, newCount := countMoveOptions(m.movePicker.options)
+				m.movePicker.status = fmt.Sprintf("%s Cloud offers failed: %v", movePickerStatus(existingCount, newCount, false), msg.err)
+				m.statusMessage = "Move: cloud offer lookup failed"
+				return m, nil
+			}
+			m.movePicker.addNewOptions(msg.options)
+			existingCount, newCount := countMoveOptions(m.movePicker.options)
+			m.movePicker.status = movePickerStatus(existingCount, newCount, false)
+			m.statusMessage = m.movePicker.status
+			return m, nil
+		}
 		m.moveLookupPending = false
 		m.moveLookupRequestID = 0
 
@@ -757,10 +777,12 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.movePicker = movePickerModel{
-			active:  true,
-			jobID:   msg.jobID,
-			options: msg.options,
-			cursor:  0,
+			active:       true,
+			jobID:        msg.jobID,
+			requestID:    msg.requestID,
+			options:      msg.options,
+			cursor:       0,
+			existingDone: true,
 		}
 		return m, nil
 
@@ -1412,7 +1434,12 @@ func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
 func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
+		if m.moveLookupPending {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+		}
 		m.movePicker.reset()
+		m.statusMessage = "Move lookup canceled"
 		return m, nil
 	case "up", "k":
 		m.movePicker.moveCursor(-1)
@@ -1427,6 +1454,10 @@ func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		jobID := m.movePicker.jobID
 		selected := *opt
+		if m.moveLookupPending {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+		}
 		m.movePicker.reset()
 		targetDesc := fmt.Sprintf("instance %s", ids.FormatInstanceID(selected.instanceID))
 		if selected.isNew {
@@ -1551,8 +1582,60 @@ func (m listTUIModel) beginGroupedMove() (tea.Model, tea.Cmd) {
 	m.moveLookupPending = true
 	m.moveLookupRequestID = reqID
 	m.moveLookupJobID = job.ID
-	m.statusMessage = fmt.Sprintf("Searching move destinations for job #%d... (Esc to cancel)", job.ID)
-	return m, m.requestGroupedMoveOptions(reqID, job.ID)
+	sourceInstanceID := int64(0)
+	if job.LaunchID != nil {
+		sourceInstanceID = *job.LaunchID
+	}
+	options, err := m.groupedMoveExistingOptions(job, sourceInstanceID)
+	if err != nil {
+		m.moveLookupPending = false
+		m.moveLookupRequestID = 0
+		m.statusMessage = fmt.Sprintf("Move: %v", err)
+		return m, nil
+	}
+	loadingNew := true
+	existingCount, newCount := countMoveOptions(options)
+	m.movePicker = movePickerModel{
+		active:       true,
+		jobID:        job.ID,
+		requestID:    reqID,
+		options:      options,
+		cursor:       0,
+		loadingNew:   loadingNew,
+		status:       movePickerStatus(existingCount, newCount, loadingNew),
+		existingDone: true,
+	}
+	m.statusMessage = m.movePicker.status + " (Esc to cancel)"
+	if !loadingNew {
+		m.moveLookupPending = false
+		return m, nil
+	}
+	return m, m.requestGroupedMoveNewOptions(reqID, job.ID)
+}
+
+func (m listTUIModel) groupedMoveExistingOptions(job *db.Job, sourceInstanceID int64) ([]moveOption, error) {
+	launches, err := db.ListRunningLaunches(m.database)
+	if err != nil {
+		return nil, fmt.Errorf("list running launches: %w", err)
+	}
+	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
+	queuedCounts := make(map[int64]int, len(launches))
+	for _, ci := range launches {
+		liveJobs, jobsErr := db.GetLaunchJobsIncludingAttempts(m.database, ci.ID)
+		if jobsErr != nil {
+			continue
+		}
+		if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(liveJobs)); ok {
+			capacities = append(capacities, cap)
+		}
+		for _, j := range liveJobs {
+			if j != nil && j.EffectiveStatus() == db.StatusQueued {
+				queuedCounts[ci.ID]++
+			}
+		}
+	}
+	existing := orchestration.BuildExistingOptions(job, capacities, queuedCounts, sourceInstanceID)
+	return moveOptionsFromOrchestration(existing), nil
 }
 
 func (m listTUIModel) requestSelectedLaunchNew(jobID int64) tea.Cmd {
@@ -1695,6 +1778,42 @@ func (m listTUIModel) requestGroupedMoveOptions(requestID int64, jobID int64) te
 			options:   ready.options,
 			err:       ready.err,
 		}
+	}
+}
+
+func (m listTUIModel) requestGroupedMoveNewOptions(requestID int64, jobID int64) tea.Cmd {
+	appCfg := m.appConfig
+	cachedCloudClients := append([]cloud.Client(nil), m.cloudClients...)
+	return func() tea.Msg {
+		job, err := db.GetJobByID(m.database, jobID)
+		if err != nil {
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err), newOnly: true}
+		}
+		if job == nil {
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID)), newOnly: true}
+		}
+
+		cfg := appCfg
+		if cfg == nil {
+			var cfgErr error
+			cfg, cfgErr = config.Load()
+			if cfgErr != nil {
+				return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("load config: %w", cfgErr), newOnly: true}
+			}
+		}
+		cloudClients := cachedCloudClients
+		if len(cloudClients) == 0 {
+			var clientsErr error
+			cloudClients, clientsErr = buildCloudClients(cfg)
+			if clientsErr != nil {
+				return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("build cloud clients: %w", clientsErr), newOnly: true}
+			}
+		}
+		options, err := orchestration.BuildNewOptionsWithSurvival(cloudClients, job, cfg.CampaignReliability(), nil, 0, nil)
+		if err != nil {
+			return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: err, newOnly: true}
+		}
+		return listMoveOptionsReadyMsg{requestID: requestID, jobID: jobID, options: moveOptionsFromOrchestration(options), newOnly: true}
 	}
 }
 

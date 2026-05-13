@@ -168,9 +168,11 @@ type autoPilotBackoffReadyMsg struct{}
 
 // moveOptionsReadyMsg carries computed move destinations for the inline picker.
 type moveOptionsReadyMsg struct {
-	jobID   int64
-	options []moveOption
-	err     error
+	requestID int64
+	jobID     int64
+	options   []moveOption
+	err       error
+	newOnly   bool
 }
 
 type moveExecuteAction string

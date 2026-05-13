@@ -138,7 +138,10 @@ type watchModel struct {
 	autoDailyCapCents       int
 
 	// --- Move picker overlay ---
-	movePicker movePickerModel
+	movePicker          movePickerModel
+	moveLookupPending   bool
+	moveLookupRequestID int64
+	moveLookupSeq       int64
 
 	// --- Shared display state ---
 	unplacedJobs []*db.Job

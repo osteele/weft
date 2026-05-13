@@ -134,6 +134,35 @@ func TestBuildOptions_NewOffersRespectJobMaxComputeCap(t *testing.T) {
 	}
 }
 
+func TestBuildOptions_ExistingInstanceWaitIncludesActiveAndQueuedJobs(t *testing.T) {
+	job := &db.Job{
+		ID:       1933,
+		Status:   db.StatusQueued,
+		GPUClass: "nvidia",
+	}
+	capacity := campaign.InstanceCapacity{
+		Instance: &db.Launch{
+			ID:               2871,
+			Status:           db.LaunchStatusRunning,
+			GPUClass:         "nvidia",
+			ResolvedGPUName:  "RTX 4070S Ti",
+			CostPerHourCents: 10,
+		},
+		RunningJobCount: 1,
+	}
+
+	options, err := BuildOptions(nil, job, []campaign.InstanceCapacity{capacity}, map[int64]int{2871: 1}, 0, 0)
+	if err != nil {
+		t.Fatalf("BuildOptions: %v", err)
+	}
+	if len(options) != 1 {
+		t.Fatalf("options len = %d, want 1: %+v", len(options), options)
+	}
+	if got, want := options[0].WaitTime, time.Hour; got != want {
+		t.Fatalf("existing instance wait = %s, want %s", got, want)
+	}
+}
+
 func TestBuildOptionsWithSurvival_FiltersLowSurvivalMachine(t *testing.T) {
 	job := &db.Job{
 		ID:       1905,

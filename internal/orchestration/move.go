@@ -69,8 +69,22 @@ func BuildOptionsWithSurvival(
 	minSurvival float64,
 	excludedMachineIDs map[string]struct{},
 ) ([]Option, error) {
-	var options []Option
+	options := BuildExistingOptions(job, capacities, queuedCounts, sourceInstanceID)
+	newOptions, err := BuildNewOptionsWithSurvival(cloudClients, job, minReliability, survivalModel, minSurvival, excludedMachineIDs)
+	if err != nil {
+		return nil, err
+	}
+	options = append(options, newOptions...)
+	return options, nil
+}
 
+func BuildExistingOptions(
+	job *db.Job,
+	capacities []campaign.InstanceCapacity,
+	queuedCounts map[int64]int,
+	sourceInstanceID int64,
+) []Option {
+	var options []Option
 	var filtered []campaign.InstanceCapacity
 	for _, cap := range capacities {
 		if cap.Instance.ID == sourceInstanceID {
@@ -88,59 +102,80 @@ func BuildOptionsWithSurvival(
 			IsNew:       false,
 			InstanceID:  inst.ID,
 			GPUName:     gpuName,
-			WaitTime:    time.Duration(queuedCounts[inst.ID]) * 30 * time.Minute,
+			WaitTime:    existingInstanceMoveWait(cap, queuedCounts[inst.ID]),
 			CostPerHour: float64(inst.CostPerHourCents) / 100.0,
 		})
 	}
+	return options
+}
 
-	if len(cloudClients) > 0 {
-		provider, _ := db.RequestedProvider(job.Tags)
-		group := campaign.InstanceGroup{
-			GPUClass:      job.GPUClass,
-			Provider:      provider,
-			MaxComputeCap: campaign.GroupMaxComputeCap(nil, []*db.Job{job}),
-			MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
-			Jobs:          []*db.Job{job},
-		}
-		if job.GPUMemGB != nil {
-			group.GPUMemGB = *job.GPUMemGB
-		}
-		rawOffers := campaign.FetchGroupRawOffers(cloudClients, []campaign.InstanceGroup{group}, minReliability)
-		if len(rawOffers) > 0 && rawOffers[0].Err != nil {
-			return nil, rawOffers[0].Err
-		}
-		for i := range rawOffers {
-			rawOffers[i].Offers = filterOffersByMachine(rawOffers[i].Offers, excludedMachineIDs)
-		}
+func BuildNewOptionsWithSurvival(
+	cloudClients []cloud.Client,
+	job *db.Job,
+	minReliability float64,
+	survivalModel *bidding.SurvivalModel,
+	minSurvival float64,
+	excludedMachineIDs map[string]struct{},
+) ([]Option, error) {
+	if len(cloudClients) == 0 {
+		return nil, nil
+	}
 
-		strategies := []bidding.SelectionStrategy{
-			bidding.StrategyCheap,
-			bidding.StrategyFast,
-			bidding.StrategyFastest,
+	provider, _ := db.RequestedProvider(job.Tags)
+	group := campaign.InstanceGroup{
+		GPUClass:      job.GPUClass,
+		Provider:      provider,
+		MaxComputeCap: campaign.GroupMaxComputeCap(nil, []*db.Job{job}),
+		MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
+		Jobs:          []*db.Job{job},
+	}
+	if job.GPUMemGB != nil {
+		group.GPUMemGB = *job.GPUMemGB
+	}
+	rawOffers := campaign.FetchGroupRawOffers(cloudClients, []campaign.InstanceGroup{group}, minReliability)
+	if len(rawOffers) > 0 && rawOffers[0].Err != nil {
+		return nil, rawOffers[0].Err
+	}
+	for i := range rawOffers {
+		rawOffers[i].Offers = filterOffersByMachine(rawOffers[i].Offers, excludedMachineIDs)
+	}
+
+	strategies := []bidding.SelectionStrategy{
+		bidding.StrategyCheap,
+		bidding.StrategyFast,
+		bidding.StrategyFastest,
+	}
+	var options []Option
+	seen := make(map[string]bool)
+	for _, strategy := range strategies {
+		ranked := campaign.RankGroupOffers(rawOffers, survivalModel, 1.0, nil, strategy, minSurvival)
+		if len(ranked) == 0 || ranked[0].Offer == nil {
+			continue
 		}
-		seen := make(map[string]bool)
-		for _, strategy := range strategies {
-			ranked := campaign.RankGroupOffers(rawOffers, survivalModel, 1.0, nil, strategy, minSurvival)
-			if len(ranked) == 0 || ranked[0].Offer == nil {
-				continue
-			}
-			offer := ranked[0].Offer
-			key := offer.Key()
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			options = append(options, Option{
-				IsNew:       true,
-				Offer:       offer,
-				Strategy:    strategy,
-				GPUName:     offer.GPUName,
-				WaitTime:    8 * time.Minute,
-				CostPerHour: offer.CostPerHour,
-			})
+		offer := ranked[0].Offer
+		key := offer.Key()
+		if seen[key] {
+			continue
 		}
+		seen[key] = true
+		options = append(options, Option{
+			IsNew:       true,
+			Offer:       offer,
+			Strategy:    strategy,
+			GPUName:     offer.GPUName,
+			WaitTime:    8 * time.Minute,
+			CostPerHour: offer.CostPerHour,
+		})
 	}
 	return options, nil
+}
+
+func existingInstanceMoveWait(cap campaign.InstanceCapacity, queuedJobs int) time.Duration {
+	jobsAhead := cap.RunningJobCount + queuedJobs
+	if jobsAhead <= 0 {
+		return 0
+	}
+	return time.Duration(jobsAhead) * 30 * time.Minute
 }
 
 func filterOffersByMachine(offers []cloud.Offer, excludedMachineIDs map[string]struct{}) []cloud.Offer {
@@ -817,7 +852,11 @@ func createOptsForProvider(cfg *config.Config, provider cloud.Provider) (cloud.C
 func countRunningJobsForMove(jobs []*db.Job) int {
 	count := 0
 	for _, j := range jobs {
-		if j != nil && j.EffectiveStatus() == db.StatusRunning {
+		if j == nil {
+			continue
+		}
+		status := j.EffectiveStatus()
+		if status == db.StatusRunning || status == db.StatusStarting {
 			count++
 		}
 	}

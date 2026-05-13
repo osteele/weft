@@ -772,25 +772,8 @@ func requestMoveOptions(
 			logPhase("raw_offers", existingStarted, "", buildErr)
 			return moveOptionsReadyMsg{jobID: jobID, err: buildErr}
 		}
-		options := make([]moveOption, 0, len(jmOptions))
-		existingCount := 0
-		newCount := 0
-		for _, o := range jmOptions {
-			if o.IsNew {
-				newCount++
-			} else {
-				existingCount++
-			}
-			options = append(options, moveOption{
-				isNew:       o.IsNew,
-				instanceID:  o.InstanceID,
-				offer:       o.Offer,
-				strategy:    o.Strategy,
-				gpuName:     o.GPUName,
-				waitTime:    o.WaitTime,
-				costPerHour: o.CostPerHour,
-			})
-		}
+		options := moveOptionsFromOrchestration(jmOptions)
+		existingCount, newCount := countMoveOptions(options)
 		logPhase("existing_instances", existingStarted, fmt.Sprintf("count=%d", existingCount), nil)
 		logPhase("rank_offers", existingStarted, fmt.Sprintf("new_options=%d", newCount), nil)
 
@@ -801,6 +784,42 @@ func requestMoveOptions(
 		logPhase("complete", lookupStarted, fmt.Sprintf("options=%d", len(options)), nil)
 		slog.Debug("move lookup complete", "component", "tui", "job_id", jobID, "options", len(options), "elapsed", time.Since(lookupStarted).Truncate(time.Millisecond))
 		return moveOptionsReadyMsg{jobID: jobID, options: options}
+	}
+}
+
+func requestMoveNewOptions(
+	requestID int64,
+	cfg *config.Config,
+	cloudClients []cloud.Client,
+	job *db.Job,
+) tea.Cmd {
+	jobID := job.ID
+	jobHost := job.Host
+	return func() tea.Msg {
+		started := time.Now()
+		logPhase := func(detail string, err error) {
+			opts := []oplog.Option{
+				oplog.WithDetail(detail),
+				oplog.WithDuration(time.Since(started)),
+			}
+			if err != nil {
+				opts = append(opts, oplog.WithError(err))
+			}
+			oplog.LogJob(oplog.OpTUIAction, jobID, jobHost, opts...)
+		}
+		if cfg == nil {
+			err := fmt.Errorf("cloud config unavailable")
+			logPhase("phase=rank_offers", err)
+			return moveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: err, newOnly: true}
+		}
+		options, err := orchestration.BuildNewOptionsWithSurvival(cloudClients, job, cfg.CampaignReliability(), nil, 0, nil)
+		if err != nil {
+			logPhase("phase=rank_offers", err)
+			return moveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: err, newOnly: true}
+		}
+		moveOptions := moveOptionsFromOrchestration(options)
+		logPhase(fmt.Sprintf("phase=rank_offers new_options=%d", len(moveOptions)), nil)
+		return moveOptionsReadyMsg{requestID: requestID, jobID: jobID, options: moveOptions, newOnly: true}
 	}
 }
 

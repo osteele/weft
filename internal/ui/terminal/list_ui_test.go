@@ -1853,6 +1853,56 @@ func TestListTUIGroupedEscCancelsPendingMoveLookup(t *testing.T) {
 	}
 }
 
+func TestMovePickerViewShowsLoadingWithoutExistingOptions(t *testing.T) {
+	picker := movePickerModel{
+		active:       true,
+		jobID:        1933,
+		loadingNew:   true,
+		status:       movePickerStatus(0, 0, true),
+		existingDone: true,
+	}
+
+	out := picker.View(100, 30)
+	for _, want := range []string{
+		"Move job #1933 to:",
+		"EXISTING INSTANCES",
+		"none available",
+		"NEW INSTANCE",
+		"searching cloud offers",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("picker view missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestListTUIGroupedEscCancelsActiveMoveLookup(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:     true,
+		width:               100,
+		height:              20,
+		moveLookupPending:   true,
+		moveLookupRequestID: 7,
+		movePicker: movePickerModel{
+			active:    true,
+			jobID:     12,
+			requestID: 7,
+		},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := next.(listTUIModel)
+	if got.moveLookupPending {
+		t.Fatalf("moveLookupPending = true, want false")
+	}
+	if got.movePicker.active {
+		t.Fatalf("move picker should be closed")
+	}
+	if got.statusMessage != "Move lookup canceled" {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Move lookup canceled")
+	}
+}
+
 func TestListTUIGroupedIgnoresStaleMoveOptionsResult(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus:     true,
@@ -1874,6 +1924,48 @@ func TestListTUIGroupedIgnoresStaleMoveOptionsResult(t *testing.T) {
 	}
 	if got.movePicker.active {
 		t.Fatalf("stale response should not open move picker")
+	}
+}
+
+func TestListTUIGroupedAddsNewMoveOptionsToActivePicker(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:     true,
+		width:               100,
+		height:              20,
+		moveLookupPending:   true,
+		moveLookupRequestID: 9,
+		movePicker: movePickerModel{
+			active:       true,
+			jobID:        12,
+			requestID:    9,
+			options:      []moveOption{{instanceID: 2871, gpuName: "RTX 4070S Ti"}},
+			loadingNew:   true,
+			status:       movePickerStatus(1, 0, true),
+			existingDone: true,
+		},
+	}
+
+	next, _ := m.Update(listMoveOptionsReadyMsg{
+		requestID: 9,
+		jobID:     12,
+		options:   []moveOption{{isNew: true, gpuName: "A100"}},
+		newOnly:   true,
+	})
+	got := next.(listTUIModel)
+	if got.moveLookupPending {
+		t.Fatalf("moveLookupPending = true, want false")
+	}
+	if !got.movePicker.active {
+		t.Fatalf("move picker should remain open")
+	}
+	if got.movePicker.loadingNew {
+		t.Fatalf("loadingNew = true, want false")
+	}
+	if len(got.movePicker.options) != 2 {
+		t.Fatalf("options len = %d, want 2", len(got.movePicker.options))
+	}
+	if !strings.Contains(got.movePicker.status, "Found 1 existing and 1 new") {
+		t.Fatalf("status = %q", got.movePicker.status)
 	}
 }
 

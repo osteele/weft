@@ -192,14 +192,36 @@ func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd
 // ---------------------------------------------------------------------------
 
 func (m watchModel) handleMoveOptionsReady(msg moveOptionsReadyMsg) (tea.Model, tea.Cmd) {
+	if msg.newOnly {
+		if !m.moveLookupPending || msg.requestID != m.moveLookupRequestID {
+			return m, nil
+		}
+		m.moveLookupPending = false
+		m.moveLookupRequestID = 0
+		if !m.movePicker.active || m.movePicker.jobID != msg.jobID || m.movePicker.requestID != msg.requestID {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.movePicker.loadingNew = false
+			existingCount, newCount := countMoveOptions(m.movePicker.options)
+			m.movePicker.status = fmt.Sprintf("%s Cloud offers failed: %v", movePickerStatus(existingCount, newCount, false), msg.err)
+			return m, m.flash.Set("Move: cloud offer lookup failed", true)
+		}
+		m.movePicker.addNewOptions(msg.options)
+		existingCount, newCount := countMoveOptions(m.movePicker.options)
+		m.movePicker.status = movePickerStatus(existingCount, newCount, false)
+		return m, m.flash.Set(m.movePicker.status, false)
+	}
 	if msg.err != nil {
 		return m, m.flash.Set(fmt.Sprintf("Move: %v", msg.err), true)
 	}
 	m.movePicker = movePickerModel{
-		active:  true,
-		jobID:   msg.jobID,
-		options: msg.options,
-		cursor:  0,
+		active:       true,
+		jobID:        msg.jobID,
+		requestID:    msg.requestID,
+		options:      msg.options,
+		cursor:       0,
+		existingDone: true,
 	}
 	return m, nil
 }

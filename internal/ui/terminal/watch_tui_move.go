@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/orchestration"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 )
 
@@ -25,10 +26,14 @@ type moveOption struct {
 
 // movePickerModel is an inline overlay for selecting a move destination.
 type movePickerModel struct {
-	active  bool
-	jobID   int64
-	options []moveOption
-	cursor  int
+	active       bool
+	jobID        int64
+	requestID    int64
+	options      []moveOption
+	cursor       int
+	loadingNew   bool
+	status       string
+	existingDone bool
 }
 
 func (p *movePickerModel) reset() {
@@ -63,6 +68,14 @@ func (p *movePickerModel) selectedOption() *moveOption {
 	return nil
 }
 
+func (p *movePickerModel) addNewOptions(options []moveOption) {
+	p.loadingNew = false
+	p.options = append(p.options, options...)
+	if p.cursor >= len(p.options) {
+		p.cursor = max(0, len(p.options)-1)
+	}
+}
+
 var (
 	movePickerBorderStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
@@ -76,13 +89,18 @@ var (
 
 // View renders the move picker overlay.
 func (p *movePickerModel) View(width, height int) string {
-	if !p.active || len(p.options) == 0 {
+	if !p.active {
 		return ""
 	}
 
 	var b strings.Builder
 	b.WriteString(movePickerTitleStyle.Render(fmt.Sprintf("Move job #%d to:", p.jobID)))
 	b.WriteString("\n")
+	if strings.TrimSpace(p.status) != "" {
+		b.WriteString("\n")
+		b.WriteString(movePickerDimStyle.Render(p.status))
+		b.WriteString("\n")
+	}
 
 	// Separate existing vs new options
 	hasExisting := false
@@ -110,9 +128,15 @@ func (p *movePickerModel) View(width, height int) string {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
+	} else if p.existingDone {
+		b.WriteString("\n")
+		b.WriteString(movePickerSectionStyle.Render("EXISTING INSTANCES"))
+		b.WriteString("\n")
+		b.WriteString(movePickerDimStyle.Render("  none available"))
+		b.WriteString("\n")
 	}
 
-	if hasNew {
+	if hasNew || p.loadingNew {
 		b.WriteString("\n")
 		b.WriteString(movePickerSectionStyle.Render("NEW INSTANCE"))
 		b.WriteString("\n")
@@ -127,6 +151,16 @@ func (p *movePickerModel) View(width, height int) string {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
+		if p.loadingNew {
+			b.WriteString(movePickerDimStyle.Render("  searching cloud offers..."))
+			b.WriteString("\n")
+		}
+	}
+
+	if len(p.options) == 0 && !p.loadingNew {
+		b.WriteString("\n")
+		b.WriteString(movePickerDimStyle.Render("No compatible destinations found."))
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
@@ -145,4 +179,44 @@ func formatMoveOptionLine(o moveOption) string {
 	}
 	return fmt.Sprintf("  %-12s %-14s ~%s wait  $%.2f/hr",
 		ids.FormatInstanceID(o.instanceID), o.gpuName, dashboard.FormatCompactDuration(o.waitTime), o.costPerHour)
+}
+
+func movePickerStatus(existingCount, newCount int, loading bool) string {
+	switch {
+	case loading && existingCount > 0:
+		return fmt.Sprintf("%d existing destination(s) ready; searching cloud offers...", existingCount)
+	case loading:
+		return "No existing destinations; searching cloud offers..."
+	case existingCount > 0 || newCount > 0:
+		return fmt.Sprintf("Found %d existing and %d new destination(s).", existingCount, newCount)
+	default:
+		return "No compatible destinations found."
+	}
+}
+
+func countMoveOptions(options []moveOption) (existingCount, newCount int) {
+	for _, opt := range options {
+		if opt.isNew {
+			newCount++
+		} else {
+			existingCount++
+		}
+	}
+	return existingCount, newCount
+}
+
+func moveOptionsFromOrchestration(options []orchestration.Option) []moveOption {
+	moveOptions := make([]moveOption, 0, len(options))
+	for _, o := range options {
+		moveOptions = append(moveOptions, moveOption{
+			isNew:       o.IsNew,
+			instanceID:  o.InstanceID,
+			offer:       o.Offer,
+			strategy:    o.Strategy,
+			gpuName:     o.GPUName,
+			waitTime:    o.WaitTime,
+			costPerHour: o.CostPerHour,
+		})
+	}
+	return moveOptions
 }

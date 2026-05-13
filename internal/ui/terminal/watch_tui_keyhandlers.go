@@ -7,6 +7,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,10 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.clearAutoPilotPersistentState()
+		m.moveLookupSeq++
+		requestID := m.moveLookupSeq
+		m.moveLookupPending = true
+		m.moveLookupRequestID = requestID
 		sourceInstanceID := int64(0)
 		if job.LaunchID != nil {
 			sourceInstanceID = *job.LaunchID
@@ -216,11 +221,26 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		flashCmd := m.flash.Set(m.spinner.View()+" Searching for destinations...", false)
-		return m, tea.Batch(flashCmd, requestMoveOptions(
-			m.database, m.appConfig, m.cloudClients,
-			job, capacities, queuedCounts, sourceInstanceID,
-		))
+		existing := orchestration.BuildExistingOptions(job, capacities, queuedCounts, sourceInstanceID)
+		options := moveOptionsFromOrchestration(existing)
+		loadingNew := len(m.cloudClients) > 0
+		existingCount, newCount := countMoveOptions(options)
+		m.movePicker = movePickerModel{
+			active:       true,
+			jobID:        job.ID,
+			requestID:    requestID,
+			options:      options,
+			cursor:       0,
+			loadingNew:   loadingNew,
+			status:       movePickerStatus(existingCount, newCount, loadingNew),
+			existingDone: true,
+		}
+		flashCmd := m.flash.Set(m.movePicker.status, false)
+		if !loadingNew {
+			m.moveLookupPending = false
+			return m, flashCmd
+		}
+		return m, tea.Batch(flashCmd, requestMoveNewOptions(requestID, m.appConfig, m.cloudClients, job))
 	case "N":
 		job := m.selectedCloudJob()
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {
@@ -251,8 +271,12 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m watchModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
+		if m.moveLookupPending {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+		}
 		m.movePicker.reset()
-		return m, nil
+		return m, m.flash.Set("Move lookup canceled", false)
 	case "up", "k":
 		m.movePicker.moveCursor(-1)
 		return m, nil
@@ -266,6 +290,10 @@ func (m watchModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		jobID := m.movePicker.jobID
 		selected := *opt
+		if m.moveLookupPending {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+		}
 		m.movePicker.reset()
 		targetDesc := fmt.Sprintf("instance %s", ids.FormatInstanceID(selected.instanceID))
 		if selected.isNew {
