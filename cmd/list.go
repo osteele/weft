@@ -78,6 +78,8 @@ var (
 	listInventory   bool
 	listCloud       bool
 	listWatch       bool
+	listTUI         bool
+	listPlain       bool
 	listFormat      string
 	listNoTruncate  bool
 	listColumns     []string
@@ -126,9 +128,13 @@ func addListFlags(cmd *cobra.Command) {
 	addListQueryFlags(cmd)
 	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
-	cmd.Flags().BoolVarP(&listWatch, "watch", "w", false, "Watch mode: show live-updating TUI or poll for changes (same as 'weft job watch')")
+	cmd.Flags().BoolVar(&listTUI, "tui", false, "Force interactive TUI mode")
+	cmd.Flags().BoolVar(&listPlain, "plain", false, "Force plain one-shot output")
+	cmd.Flags().BoolVarP(&listWatch, "watch", "w", false, "Deprecated alias for --tui")
 	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start watch mode with auto-pilot enabled (grouped status views)")
 	cmd.Flags().StringVar(&listGroupBy, "group-by", "", `Group output: "status", "project"`)
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	cmd.MarkFlagsMutuallyExclusive("watch", "plain")
 }
 
 func init() {
@@ -139,10 +145,6 @@ func init() {
 func runList(cmd *cobra.Command, args []string) error {
 	if err := validateListGroupingOptions(); err != nil {
 		return err
-	}
-
-	if listWatch {
-		return runJobWatch(cmd, args)
 	}
 
 	database, err := db.OpenForReading()
@@ -166,6 +168,17 @@ func runList(cmd *cobra.Command, args []string) error {
 		return showJob(database, listShow)
 	}
 
+	useTUI, err := resolveListMode()
+	if err != nil {
+		return err
+	}
+	if useTUI {
+		return runListTUI(cmd, database, args)
+	}
+	return runListPlain(database, args)
+}
+
+func runListPlain(database *sql.DB, args []string) error {
 	// Render the table from the DB as soon as the sync finishes or a short
 	// soft deadline elapses, whichever comes first. The process always
 	// blocks on the sync before returning so in-flight DB writes aren't
@@ -204,6 +217,51 @@ func runList(cmd *cobra.Command, args []string) error {
 		printWarnings(dropCloudTimeoutWarnings(late))
 	}
 	return nil
+}
+
+func runListTUI(cmd *cobra.Command, readDB *sql.DB, args []string) error {
+	if listFormat != "" && listFormat != "table" {
+		return usageErrorf("--tui supports table output only (remove --format or use --plain)")
+	}
+	if listGroupBy == "project" {
+		return usageErrorf("--tui does not support --group-by project")
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	jobs, err := collectJobsForList(readDB, args)
+	if err != nil {
+		return err
+	}
+	autoMode := watchAuto
+	if listGroupBy == "status" && !cmd.Flags().Changed("auto") {
+		autoMode = true
+	}
+	return terminal.RunListTUI(database, args, jobs, buildListTitle(args), !listNoSync, listGroupBy == "status", autoMode, listProject)
+}
+
+func resolveListMode() (bool, error) {
+	forceTUI := listTUI || listWatch
+	if forceTUI && listPlain {
+		return false, usageErrorf("--tui/--watch and --plain are mutually exclusive")
+	}
+	if listFormat != "" && listFormat != "table" {
+		if forceTUI {
+			return false, usageErrorf("--tui supports table output only (remove --format or use --plain)")
+		}
+		return false, nil
+	}
+	if listGroupBy == "project" {
+		if forceTUI {
+			return false, usageErrorf("--tui does not support --group-by project")
+		}
+		return false, nil
+	}
+	return resolveTUIMode(forceTUI, listPlain, hasTerminalIO(), inAgentContext())
 }
 
 func writePendingRefreshNotice(w io.Writer, isTerminal bool) func() {
@@ -405,7 +463,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	return jobs, nil
 }
 
-func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter string) ([]*db.Job, error) {
+func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter, projectFilter string) ([]*db.Job, error) {
 	previousStatus := listStatus
 	previousProcessed := listProcessed
 	previousUnprocessed := listUnprocessed
@@ -413,6 +471,7 @@ func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter
 	previousCompleted := listCompleted
 	previousQueued := listQueued
 	previousDead := listDead
+	previousProject := listProject
 	defer func() {
 		listStatus = previousStatus
 		listProcessed = previousProcessed
@@ -421,6 +480,7 @@ func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter
 		listCompleted = previousCompleted
 		listQueued = previousQueued
 		listDead = previousDead
+		listProject = previousProject
 	}()
 
 	if statusFilter != "" {
@@ -438,6 +498,7 @@ func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter
 	case "unprocessed":
 		listUnprocessed = true
 	}
+	listProject = projectFilter
 	return collectJobsForList(database, args)
 }
 
@@ -909,6 +970,9 @@ func buildListTitle(args []string) string {
 	}
 	if listMine {
 		parts = append(parts, "mine")
+	}
+	if listProject != "" {
+		parts = append(parts, "project="+listProject)
 	}
 	if listActive {
 		parts = append(parts, "active")

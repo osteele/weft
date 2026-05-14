@@ -43,6 +43,11 @@ func handleListKeyBinding(m listTUIModel, key string, bindings []listKeyBinding)
 				return m, nil, true
 			}
 			next, cmd := binding.handler(m)
+			if nextList, ok := next.(listTUIModel); ok {
+				nextList.clampCursor()
+				nextList.adjustOffset()
+				next = nextList
+			}
 			return next, cmd, true
 		}
 	}
@@ -139,6 +144,8 @@ var (
 	listKeyListView          = listKeyBinding{keys: "v", action: "list view"}
 	listKeyInstances         = listKeyBinding{keys: "i", action: "instances"}
 	listKeyRefresh           = listKeyBinding{keys: "r", action: "refresh"}
+	listKeyProjectFilter     = listKeyBinding{keys: "/", action: "project filter"}
+	listKeyToggleStatusArea  = listKeyBinding{keys: "S", action: "status area"}
 	listKeyGroupedAuto       = listKeyBinding{keys: "A", action: "auto"}
 	listKeyLaunchQueued      = listKeyBinding{keys: "n", action: "new instance"}
 	listKeyRebalance         = listKeyBinding{keys: "R", action: "rebalance"}
@@ -152,6 +159,21 @@ func listFlatKeyBindings() []listKeyBinding {
 		listKeyBinding{keys: listKeyRefresh.keys, action: listKeyRefresh.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			next, cmd := m.triggerManualRefresh()
 			return next, cmd
+		}},
+		listKeyBinding{keys: listKeyProjectFilter.keys, action: listKeyProjectFilter.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return m.beginProjectFilterInput()
+		}},
+		listKeyBinding{keys: listKeyToggleStatusArea.keys, action: listKeyToggleStatusArea.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.hideStatusArea = !m.hideStatusArea
+			if m.hideStatusArea {
+				m.statusMessage = "Status area hidden"
+			} else {
+				m.statusMessage = "Status area shown"
+			}
+			m.rebuildLayout()
+			m.clampCursor()
+			m.adjustOffset()
+			return m, nil
 		}},
 		listKeyBinding{keys: listKeyToggleUnprocessed.keys, action: listKeyToggleUnprocessed.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			m.unprocessedView = !m.unprocessedView
@@ -247,6 +269,20 @@ func listGroupedKeyBindings() []listKeyBinding {
 		listKeyBinding{keys: listKeyRefresh.keys, action: listKeyRefresh.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			next, cmd := m.triggerManualRefresh()
 			return next, cmd
+		}},
+		listKeyBinding{keys: listKeyProjectFilter.keys, action: listKeyProjectFilter.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return m.beginProjectFilterInput()
+		}},
+		listKeyBinding{keys: listKeyToggleStatusArea.keys, action: listKeyToggleStatusArea.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.hideStatusArea = !m.hideStatusArea
+			if m.hideStatusArea {
+				m.statusMessage = "Status area hidden"
+			} else {
+				m.statusMessage = "Status area shown"
+			}
+			m.rebuildGroupedRows()
+			m.clampCursor()
+			return m, nil
 		}},
 		listKeyBinding{keys: listKeyAttempts.keys, action: listKeyAttempts.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			job := m.selectedGroupedJob()

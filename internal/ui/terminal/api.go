@@ -138,8 +138,8 @@ func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.
 	return nil
 }
 
-func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
-	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
+func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) error {
+	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode, projectFilter)
 }
 
 func ListOutputWidth() int {

@@ -557,7 +557,10 @@ weft job recommend --recent 100
 
 ### weft job list
 
-Query and search job history from the local database.
+Query and search job history from the local database. On an interactive
+terminal, table output opens the live job-list TUI. When stdout/stdin are not
+interactive (for example `weft job list | grep failed`) it renders one plain
+table frame and exits.
 
 ```bash
 weft job list [flags]
@@ -583,6 +586,9 @@ weft jobs list [flags]      # Alias
 - `--show ID`: Show detailed info for a specific job
 - `--cleanup DAYS`: Delete jobs older than N days
 - `--sync`: Sync job statuses from remote hosts before listing
+- `--tui`: Force the live interactive list
+- `--plain`: Force one-shot plain output
+- `--watch`: Deprecated compatibility alias for `--tui`
 - `--group-by status`: Group table output by status sections (`Running`, `Queued`, `Completions`, `Failures`, `Killed/Canceled`)
 
 `--group-by status` only supports table/plain output; combining it with
@@ -603,8 +609,9 @@ weft job list --inventory              # Inventory-only or inventory-assigned jo
 weft job list --tag exp-012            # Jobs with a tag
 weft job list --status unprocessed     # Jobs missing the processed tag
 weft job list --search training        # Search jobs
-weft job list --group-by status        # Grouped status view
-weft job list --group-by status --watch # Grouped live view (TUI on interactive terminals)
+weft job list --plain | grep failed    # One-shot output for shell pipelines
+weft job list --group-by status        # Grouped live/status view on a TTY, plain when piped
+weft job list --tui                    # Force the live list
 weft job list wj12::wj14                   # List jobs 12 through 14
 weft job list wj12...wj13                  # Alternative range syntax
 weft job list wj12,wj13,wj14                 # Comma-separated IDs

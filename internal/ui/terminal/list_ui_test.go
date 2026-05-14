@@ -161,6 +161,106 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 }
 
+func TestListTUIToggleStatusAreaIncreasesBodyRows(t *testing.T) {
+	m := listTUIModel{
+		width:  100,
+		height: 12,
+		jobs: []*db.Job{
+			{ID: 1, Host: "studio", Status: db.StatusRunning, Description: "job"},
+		},
+	}
+	m.rebuildLayout()
+
+	before := m.flatBodyRows()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")})
+	got := next.(listTUIModel)
+	if !got.hideStatusArea {
+		t.Fatal("expected status area to be hidden")
+	}
+	if after := got.flatBodyRows(); after <= before {
+		t.Fatalf("body rows after hiding status = %d, want > %d", after, before)
+	}
+}
+
+func TestListTUIProjectFilterPromptAppliesFilter(t *testing.T) {
+	oldDeps := deps
+	t.Cleanup(func() { deps = oldDeps })
+
+	var gotProject string
+	deps.CollectJobsForListWithFilters = func(_ *sql.DB, _ []string, _, _, projectFilter string) ([]*db.Job, error) {
+		gotProject = projectFilter
+		if projectFilter == "" {
+			return []*db.Job{
+				{ID: 40, Host: "studio", Status: db.StatusCompleted, Project: "alpha", Description: "alpha"},
+				{ID: 41, Host: "studio", Status: db.StatusCompleted, Project: "alpine", Description: "alpine"},
+				{ID: 42, Host: "studio", Status: db.StatusCompleted, Project: "beta", Description: "beta"},
+			}, nil
+		}
+		return []*db.Job{{ID: 42, Host: "studio", Status: db.StatusCompleted, Project: projectFilter, Description: "job"}}, nil
+	}
+
+	m := listTUIModel{database: db.SetupTestDB(t), width: 100, height: 12}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = next.(listTUIModel)
+	if cmd == nil {
+		t.Fatal("expected candidate load command")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(listTUIModel)
+	for _, r := range "alp" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(listTUIModel)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(listTUIModel)
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(listTUIModel)
+	if !strings.Contains(m.statusMessage, "alpine") {
+		t.Fatalf("statusMessage = %q, want project name", m.statusMessage)
+	}
+	if cmd == nil {
+		t.Fatal("expected reload command")
+	}
+	msg := cmd()
+	next, _ = m.Update(msg)
+	m = next.(listTUIModel)
+	if gotProject != "alpine" {
+		t.Fatalf("project filter = %q, want alpine", gotProject)
+	}
+	if len(m.jobs) != 1 || m.jobs[0].Project != "alpine" {
+		t.Fatalf("jobs = %+v, want filtered project job", m.jobs)
+	}
+}
+
+func TestListTUIPageDownScrollsFlatViewport(t *testing.T) {
+	jobs := make([]*db.Job, 20)
+	for i := range jobs {
+		jobs[i] = &db.Job{ID: int64(i + 1), Host: "studio", Status: db.StatusQueued, Description: "job"}
+	}
+	m := listTUIModel{
+		width:  100,
+		height: 12,
+		jobs:   jobs,
+	}
+	m.rebuildLayout()
+	bodyRows := m.flatBodyRows()
+	if bodyRows <= 1 {
+		t.Fatalf("bodyRows = %d, want enough rows for paging", bodyRows)
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	got := next.(listTUIModel)
+	if got.cursor != bodyRows {
+		t.Fatalf("cursor after page down = %d, want %d", got.cursor, bodyRows)
+	}
+	if got.offset == 0 {
+		t.Fatalf("offset after page down = %d, want viewport to scroll", got.offset)
+	}
+	if got.cursor < got.offset || got.cursor >= got.offset+bodyRows {
+		t.Fatalf("cursor %d not visible in offset %d bodyRows %d", got.cursor, got.offset, bodyRows)
+	}
+}
+
 func TestListHostSyncRequestPromotesUnsyncedQueuedInventoryJobs(t *testing.T) {
 	req := listHostSyncRequest("cool30", []*db.Job{
 		{ID: 1811, Host: "cool30", Status: db.StatusQueued},

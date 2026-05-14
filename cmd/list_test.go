@@ -329,6 +329,103 @@ func TestValidateListGroupingOptionsRejectsJSONForProject(t *testing.T) {
 	}
 }
 
+func TestResolveListModeRejectsTUIWithMachineFormat(t *testing.T) {
+	prevTUI := listTUI
+	prevWatch := listWatch
+	prevPlain := listPlain
+	prevFormat := listFormat
+	prevGroupBy := listGroupBy
+	listTUI = true
+	listWatch = false
+	listPlain = false
+	listFormat = "json"
+	listGroupBy = ""
+	t.Cleanup(func() {
+		listTUI = prevTUI
+		listWatch = prevWatch
+		listPlain = prevPlain
+		listFormat = prevFormat
+		listGroupBy = prevGroupBy
+	})
+
+	_, err := resolveListMode()
+	if err == nil {
+		t.Fatal("expected --tui with json format to fail")
+	}
+	if !strings.Contains(err.Error(), "table output only") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveListModePlainWinsForMachineFormat(t *testing.T) {
+	prevTUI := listTUI
+	prevWatch := listWatch
+	prevPlain := listPlain
+	prevFormat := listFormat
+	prevGroupBy := listGroupBy
+	listTUI = false
+	listWatch = false
+	listPlain = false
+	listFormat = "tsv"
+	listGroupBy = ""
+	t.Cleanup(func() {
+		listTUI = prevTUI
+		listWatch = prevWatch
+		listPlain = prevPlain
+		listFormat = prevFormat
+		listGroupBy = prevGroupBy
+	})
+
+	useTUI, err := resolveListMode()
+	if err != nil {
+		t.Fatalf("resolveListMode: %v", err)
+	}
+	if useTUI {
+		t.Fatal("machine format should use plain mode")
+	}
+}
+
+func TestCollectJobsForListWithFiltersOverridesProject(t *testing.T) {
+	database := db.SetupTestDB(t)
+	alphaID, err := db.RecordQueued(database, "studio", "/tmp/alpha", "echo alpha", "")
+	if err != nil {
+		t.Fatalf("record alpha: %v", err)
+	}
+	betaID, err := db.RecordQueued(database, "studio", "/tmp/beta", "echo beta", "")
+	if err != nil {
+		t.Fatalf("record beta: %v", err)
+	}
+	if err := db.SetJobProject(database, alphaID, "alpha"); err != nil {
+		t.Fatalf("project alpha: %v", err)
+	}
+	if err := db.SetJobProject(database, betaID, "beta"); err != nil {
+		t.Fatalf("project beta: %v", err)
+	}
+
+	prevProject := listProject
+	prevLimit := listLimit
+	prevAll := listAll
+	listProject = ""
+	listLimit = 0
+	listAll = true
+	t.Cleanup(func() {
+		listProject = prevProject
+		listLimit = prevLimit
+		listAll = prevAll
+	})
+
+	jobs, err := collectJobsForListWithFilters(database, nil, "", "", "alpha")
+	if err != nil {
+		t.Fatalf("collectJobsForListWithFilters: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != alphaID {
+		t.Fatalf("jobs = %+v, want alpha job %d", jobs, alphaID)
+	}
+	if listProject != "" {
+		t.Fatalf("listProject leaked as %q", listProject)
+	}
+}
+
 func TestPrintJobsGroupedStatus(t *testing.T) {
 	prevGroupBy := listGroupBy
 	prevFormat := listFormat

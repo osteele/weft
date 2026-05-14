@@ -66,6 +66,13 @@ type listTUIModel struct {
 	cancel                     context.CancelFunc
 	groupedByStatus            bool
 	groupedUnprocessedView     bool
+	projectFilter              string
+	projectInputActive         bool
+	projectInputValue          string
+	projectCandidates          []string
+	projectCandidateCursor     int
+	projectCandidatesLoading   bool
+	hideStatusArea             bool
 	groupedRows                []groupedStatusRow
 	groupedSelectableRows      []int
 	autoMode                   bool
@@ -179,6 +186,11 @@ type listQuickLaunchProgressMsg struct {
 	message string
 }
 
+type listProjectCandidatesLoadedMsg struct {
+	projects []string
+	err      error
+}
+
 type rebalancePreviewLoadedMsg struct {
 	moves []orchestration.QueueRebalanceMove
 	err   error
@@ -227,9 +239,9 @@ var (
 	graceAckKeyPattern = regexp.MustCompile(`grace/(\d+)/acks/`)
 )
 
-func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) error {
+func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) error {
 	cfg, _ := config.Load()
-	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
+	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, autoMode, projectFilter)
 
 	outputOpt, restore := InstallTUIStdioCapture()
 
@@ -247,7 +259,7 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	return nil
 }
 
-func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) listTUIModel {
+func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) listTUIModel {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg, _ := config.Load()
 	cloudClients, _ := buildCloudClients(cfg)
@@ -279,6 +291,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		cancel:                 cancel,
 		groupedByStatus:        groupedByStatus,
 		groupedUnprocessedView: unprocessedView,
+		projectFilter:          projectFilter,
 		autoMode:               groupedByStatus && autoMode,
 		autoLeaseOwner:         fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		autoLeaseScope:         buildListAutoLeaseScope(baseTitle),
@@ -362,6 +375,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.aiAssist != nil {
 			return m.handleAIAssistKey(msg)
+		}
+		if m.projectInputActive {
+			return m.handleProjectFilterInputKey(msg)
 		}
 		if m.showHelp {
 			switch msg.String() {
@@ -871,6 +887,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = status
 		m.quickLaunchStatusHoldUntil = time.Now().Add(10 * time.Second)
 		return m, m.reloadJobs()
+
+	case listProjectCandidatesLoadedMsg:
+		m.projectCandidatesLoading = false
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Project filter: %v", msg.err)
+			return m, nil
+		}
+		m.projectCandidates = msg.projects
+		m.clampProjectCandidateCursor()
+		return m, nil
 	}
 
 	return m, nil
@@ -937,6 +963,10 @@ func (m listTUIModel) View() string {
 	var b strings.Builder
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
 	selectedDetailLines := m.selectedJobDetailLines()
+	if m.hideStatusArea {
+		sharedStatusLines = nil
+		selectedDetailLines = nil
+	}
 
 	mateRows, matesActive := hostMatesForFlatView(m.jobs, m.cursor)
 	rowWidth := m.width
@@ -949,6 +979,9 @@ func (m listTUIModel) View() string {
 	b.WriteString("\n")
 
 	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
+	if m.projectInputActive {
+		footerBlockLines++
+	}
 	bodyRows := max(0, m.height-2-1-footerBlockLines)
 	bodyLinesWritten := 0
 	if len(m.jobs) == 0 {
@@ -986,6 +1019,12 @@ func (m listTUIModel) View() string {
 
 	// Always keep a visible separator above the status/footer block.
 	b.WriteString("\n")
+	if m.projectInputActive {
+		for _, line := range m.projectFilterPromptLines() {
+			b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
+			b.WriteString("\n")
+		}
+	}
 	for _, line := range selectedDetailLines {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
@@ -1000,6 +1039,9 @@ func (m listTUIModel) View() string {
 
 func (m listTUIModel) displayTitle() string {
 	title := m.title
+	if m.projectFilter != "" && !strings.Contains(title, "project="+m.projectFilter) {
+		title = strings.TrimSpace(title + " • project=" + m.projectFilter)
+	}
 	switch m.statusView {
 	case db.StatusQueued:
 		title = strings.TrimSpace(title + " • queued")
@@ -1038,7 +1080,17 @@ func (m listTUIModel) groupedView() string {
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
+	if m.hideStatusArea {
+		statusLine = ""
+		sharedStatusLines = nil
+		autoPilotLine = ""
+		errorDetailsLines = nil
+		selectedDetailLines = nil
+	}
 	baseFooterLines := 2 // blank separator + controls
+	if m.projectInputActive {
+		baseFooterLines += len(m.projectFilterPromptLines())
+	}
 	if statusLine != "" {
 		baseFooterLines++
 	}
@@ -1096,6 +1148,12 @@ func (m listTUIModel) groupedView() string {
 
 	// Visually separate grouped job rows from footer lines.
 	b.WriteString("\n")
+	if m.projectInputActive {
+		for _, line := range m.projectFilterPromptLines() {
+			b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
+			b.WriteString("\n")
+		}
+	}
 	for _, line := range errorDetailsLines {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
 		b.WriteString("\n")
@@ -1251,6 +1309,8 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		}
 	}
 	line += "  q:quit"
+	line += "  " + listKeyProjectFilter.footerToken()
+	line += "  " + listKeyToggleStatusArea.footerToken()
 	line += "  " + listKeyListView.footerToken()
 	line += "  " + listKeyInstances.footerToken()
 	line += "  ?:help"
@@ -1361,7 +1421,14 @@ func (m *listTUIModel) selectFlatMouseRow(y int) {
 func (m listTUIModel) flatBodyRows() int {
 	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
 	selectedDetailLines := m.selectedJobDetailLines()
+	if m.hideStatusArea {
+		sharedStatusLines = nil
+		selectedDetailLines = nil
+	}
 	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
+	if m.projectInputActive {
+		footerBlockLines += len(m.projectFilterPromptLines())
+	}
 	return max(0, m.height-2-1-footerBlockLines)
 }
 
@@ -1404,7 +1471,17 @@ func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
+	if m.hideStatusArea {
+		statusLine = ""
+		sharedStatusLines = nil
+		autoPilotLine = ""
+		errorDetailsLines = nil
+		selectedDetailLines = nil
+	}
 	baseFooterLines := 2
+	if m.projectInputActive {
+		baseFooterLines += len(m.projectFilterPromptLines())
+	}
 	if statusLine != "" {
 		baseFooterLines++
 	}
@@ -1523,6 +1600,163 @@ func (m listTUIModel) handleGroupedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	return m, nil
+}
+
+func (m listTUIModel) beginProjectFilterInput() (listTUIModel, tea.Cmd) {
+	m.projectInputActive = true
+	m.projectInputValue = m.projectFilter
+	m.projectCandidates = nil
+	m.projectCandidateCursor = 0
+	m.projectCandidatesLoading = true
+	m.statusMessage = "Enter project filter"
+	return m, m.loadProjectFilterCandidates()
+}
+
+func (m listTUIModel) projectFilterPromptLines() []string {
+	head := "project filter: " + m.projectInputValue
+	if m.projectCandidatesLoading {
+		return []string{head + "  loading..."}
+	}
+	matches := m.projectCandidateMatches()
+	if strings.TrimSpace(m.projectInputValue) == "" {
+		head += "  (empty clears)"
+	}
+	lines := []string{head}
+	if len(matches) == 0 {
+		if strings.TrimSpace(m.projectInputValue) != "" {
+			lines = append(lines, "  no matching projects")
+		}
+		return lines
+	}
+	const maxProjectPromptMatches = 5
+	start := 0
+	if m.projectCandidateCursor >= maxProjectPromptMatches {
+		start = m.projectCandidateCursor - maxProjectPromptMatches + 1
+	}
+	end := min(len(matches), start+maxProjectPromptMatches)
+	for i := start; i < end; i++ {
+		prefix := "  "
+		if i == m.projectCandidateCursor {
+			prefix = "> "
+		}
+		lines = append(lines, prefix+matches[i])
+	}
+	return lines
+}
+
+func (m listTUIModel) handleProjectFilterInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.projectInputActive = false
+		m.projectInputValue = ""
+		m.statusMessage = "Project filter unchanged"
+		return m, nil
+	case "up":
+		m.projectCandidateCursor--
+		m.clampProjectCandidateCursor()
+		return m, nil
+	case "down":
+		m.projectCandidateCursor++
+		m.clampProjectCandidateCursor()
+		return m, nil
+	case "enter":
+		project := strings.TrimSpace(m.projectInputValue)
+		matches := m.projectCandidateMatches()
+		if project != "" {
+			if len(matches) == 0 {
+				m.statusMessage = "No matching project"
+				return m, nil
+			}
+			m.clampProjectCandidateCursor()
+			project = matches[m.projectCandidateCursor]
+		}
+		m.projectInputActive = false
+		m.projectInputValue = ""
+		m.projectFilter = project
+		m.cursor = 0
+		m.offset = 0
+		if project == "" {
+			m.statusMessage = "Project filter cleared"
+		} else {
+			m.statusMessage = "Project filter: " + project
+		}
+		return m, m.reloadJobs()
+	case "backspace", "ctrl+h":
+		if m.projectInputValue != "" {
+			runes := []rune(m.projectInputValue)
+			m.projectInputValue = string(runes[:len(runes)-1])
+		}
+		m.projectCandidateCursor = 0
+		return m, nil
+	}
+	if len(msg.Runes) > 0 {
+		m.projectInputValue += string(msg.Runes)
+		m.projectCandidateCursor = 0
+	}
+	return m, nil
+}
+
+func (m listTUIModel) projectCandidateMatches() []string {
+	query := strings.ToLower(strings.TrimSpace(m.projectInputValue))
+	if query == "" {
+		return append([]string(nil), m.projectCandidates...)
+	}
+	matches := make([]string, 0, len(m.projectCandidates))
+	for _, project := range m.projectCandidates {
+		if strings.Contains(strings.ToLower(project), query) {
+			matches = append(matches, project)
+		}
+	}
+	return matches
+}
+
+func (m *listTUIModel) clampProjectCandidateCursor() {
+	matches := m.projectCandidateMatches()
+	if len(matches) == 0 {
+		m.projectCandidateCursor = 0
+		return
+	}
+	if m.projectCandidateCursor < 0 {
+		m.projectCandidateCursor = 0
+	}
+	if m.projectCandidateCursor >= len(matches) {
+		m.projectCandidateCursor = len(matches) - 1
+	}
+}
+
+func (m listTUIModel) loadProjectFilterCandidates() tea.Cmd {
+	database := m.database
+	args := append([]string(nil), m.args...)
+	processedFilter := ""
+	if m.unprocessedView {
+		processedFilter = "unprocessed"
+	}
+	statusFilter := m.statusView
+	return func() tea.Msg {
+		jobs, err := collectJobsForListWithFilters(database, args, statusFilter, processedFilter, "")
+		if err != nil {
+			return listProjectCandidatesLoadedMsg{err: err}
+		}
+		return listProjectCandidatesLoadedMsg{projects: projectCandidatesFromJobs(jobs)}
+	}
+}
+
+func projectCandidatesFromJobs(jobs []*db.Job) []string {
+	seen := map[string]struct{}{}
+	projects := make([]string, 0)
+	for _, job := range jobs {
+		project := strings.TrimSpace(projectGroupLabel(job))
+		if project == "" || project == "(no project)" {
+			continue
+		}
+		if _, ok := seen[project]; ok {
+			continue
+		}
+		seen[project] = struct{}{}
+		projects = append(projects, project)
+	}
+	sort.Strings(projects)
+	return projects
 }
 
 func (m listTUIModel) beginSelectedLaunchNew() (tea.Model, tea.Cmd) {
@@ -1870,6 +2104,8 @@ func (m listTUIModel) footerText(rows int) string {
 		listKeyToggleProcessed,
 		listKeyKillCancel,
 		listKeyPriority,
+		listKeyProjectFilter,
+		listKeyToggleStatusArea,
 		listKeyGroupedView,
 		listKeyInstances,
 	} {
@@ -1911,6 +2147,7 @@ func (m listTUIModel) renderListHelpView() string {
 				"  up/down (or j/k) move selection",
 				"  pgup/pgdown (or b/space) page up/down",
 				"  g/G jump top/bottom",
+				"  S hide/show status area",
 			},
 		},
 		{
@@ -1939,6 +2176,16 @@ func (m listTUIModel) renderListHelpView() string {
 				Lines: []string{
 					"  d toggle queued/draft",
 					"  U toggle unprocessed filter",
+					"  / filter by project",
+				},
+			},
+		)
+	} else {
+		sections = append(sections,
+			keyHelpSection{
+				Title: "List filters",
+				Lines: []string{
+					"  / filter by project",
 				},
 			},
 		)
@@ -2130,7 +2377,10 @@ func (m listTUIModel) pageSize() int {
 	if m.height <= 0 {
 		return 10
 	}
-	return max(1, m.height-3)
+	if m.groupedByStatus {
+		return max(1, len(m.groupedViewportRows()))
+	}
+	return max(1, m.flatBodyRows())
 }
 
 func (m listTUIModel) reloadJobs() tea.Cmd {
@@ -2141,8 +2391,9 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		processedFilter = "unprocessed"
 	}
 	statusFilter := m.statusView
+	projectFilter := m.projectFilter
 	return func() tea.Msg {
-		jobs, err := collectJobsForListWithFilters(database, args, statusFilter, processedFilter)
+		jobs, err := collectJobsForListWithFilters(database, args, statusFilter, processedFilter, projectFilter)
 		if err != nil {
 			return listJobsLoadedMsg{jobs: jobs, err: err}
 		}

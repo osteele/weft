@@ -247,17 +247,18 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 	return r.startBanners()
 }
 
-func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool) watchRouterModel {
-	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode)
+func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) watchRouterModel {
+	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode, projectFilter)
 	r := watchRouterModel{
-		active:    list,
-		database:  database,
-		config:    cfg,
-		homeMode:  watchModeSystem,
-		autoMode:  autoMode,
-		listArgs:  append([]string(nil), args...),
-		listTitle: title,
-		listSync:  syncEnabled,
+		active:        list,
+		database:      database,
+		config:        cfg,
+		homeMode:      watchModeSystem,
+		projectFilter: projectFilter,
+		autoMode:      autoMode,
+		listArgs:      append([]string(nil), args...),
+		listTitle:     title,
+		listSync:      syncEnabled,
 	}
 	return r.startBanners()
 }
@@ -450,6 +451,7 @@ func (m watchRouterModel) buildJobsList(groupedByStatus bool) listTUIModel {
 		m.listSync,
 		groupedByStatus,
 		m.autoMode,
+		m.projectFilter,
 	)
 }
 

@@ -40,7 +40,7 @@ type Dependencies struct {
 	BuildSurvivalModel                                func(*sql.DB) *bidding.SurvivalModel
 	CampaignActualCost                                func([]*db.Launch) string
 	CollectJobsForList                                func(*sql.DB, []string) ([]*db.Job, error)
-	CollectJobsForListWithFilters                     func(*sql.DB, []string, string, string) ([]*db.Job, error)
+	CollectJobsForListWithFilters                     func(*sql.DB, []string, string, string, string) ([]*db.Job, error)
 	CreateOptsForProvider                             func(*config.Config, cloud.Provider) (cloud.CreateOpts, error)
 	ExecuteReuseAssignments                           func(*sql.DB, *r2.Client, []campaign.ReuseAssignment) error
 	FilterLaunchJobsByProject                         func([]*db.Job) []*db.Job
@@ -118,9 +118,9 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	return deps.CollectJobsForList(database, args)
 }
 
-func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter string) ([]*db.Job, error) {
+func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter, projectFilter string) ([]*db.Job, error) {
 	if deps.CollectJobsForListWithFilters != nil {
-		return deps.CollectJobsForListWithFilters(database, args, statusFilter, processedFilter)
+		return deps.CollectJobsForListWithFilters(database, args, statusFilter, processedFilter, projectFilter)
 	}
 	jobs, err := collectJobsForList(database, args)
 	if err != nil {
@@ -135,7 +135,8 @@ func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter
 		}
 		jobs = filtered
 	}
-	return db.FilterJobsByTags(jobs, nil, processedFilter), nil
+	jobs = db.FilterJobsByTags(jobs, nil, processedFilter)
+	return db.FilterJobsByProject(jobs, projectFilter), nil
 }
 
 func createOptsForProvider(cfg *config.Config, provider cloud.Provider) (cloud.CreateOpts, error) {
