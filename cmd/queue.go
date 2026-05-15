@@ -177,7 +177,8 @@ Examples:
   weft edit wj1595 --command "python eval.py"
   weft edit wj1595 --env FOO=bar --env BAZ=qux
   weft edit wj1595 --tag benchmark --tag exp-012
-  weft edit wj1595 --input hf:meta-llama/Llama-3-8B`,
+  weft edit wj1595 --input hf:meta-llama/Llama-3-8B
+  weft edit wj1595 --needs output/run/ckpt.pt:wj1778`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runEdit,
 }
@@ -225,6 +226,8 @@ var (
 	editProvider        string
 	editInputs          []string
 	editClearInputs     bool
+	editNeeds           []string
+	editClearNeeds      bool
 	queueHost           string // Shared --host flag for queue subcommands
 )
 
@@ -865,14 +868,18 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	gpuMemChanged := cmd.Flags().Changed("gpu-mem")
 	providerChanged := cmd.Flags().Changed("provider")
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
+	needsChanged := cmd.Flags().Changed("needs") || editClearNeeds
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || providerChanged || inputsChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || providerChanged || inputsChanged || needsChanged
 	fieldChanged = fieldChanged || tagsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--gpu-mem/--provider/--input or dependency flags")
+		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--gpu-mem/--provider/--input/--needs or dependency flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
+	}
+	if editClearNeeds && cmd.Flags().Changed("needs") {
+		return fmt.Errorf("%w: cannot combine --needs and --clear-needs", errFlagConflict)
 	}
 	if queueEditClearDeps && dependsChanged {
 		return fmt.Errorf("%w: cannot combine --clear-depends with --depends-on flags", errFlagConflict)
@@ -1150,6 +1157,22 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "inputs cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("inputs: %s", strings.Join(newInputs, ", ")))
+		}
+	}
+
+	if needsChanged {
+		var newNeeds []string
+		if !editClearNeeds {
+			newNeeds = editNeeds
+		}
+		if err := db.SetJobNeeds(database, jobID, newNeeds); err != nil {
+			return fmt.Errorf("update needs: %w", err)
+		}
+		job.Needs = newNeeds
+		if len(newNeeds) == 0 {
+			updates = append(updates, "needs cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("needs: %s", strings.Join(newNeeds, ", ")))
 		}
 	}
 
@@ -1475,4 +1498,6 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
+	cmd.Flags().StringSliceVar(&editNeeds, "needs", nil, "Producer artifact dependency (e.g., output/foo.pt:wj1234), can be repeated; replaces existing --needs")
+	cmd.Flags().BoolVar(&editClearNeeds, "clear-needs", false, "Remove all --needs declarations")
 }
