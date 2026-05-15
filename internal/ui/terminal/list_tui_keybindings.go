@@ -74,7 +74,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, tea.Suspend
 		}},
 		{keys: "up", aliases: upAliases, action: "move up", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			if m.groupedByStatus {
+			if m.isGroupedView() {
 				if m.cursor > 0 {
 					m.cursor--
 				}
@@ -84,7 +84,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, nil
 		}},
 		{keys: "down", aliases: []string{"j"}, action: "move down", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			if m.groupedByStatus {
+			if m.isGroupedView() {
 				if m.cursor < len(m.groupedSelectableRows)-1 {
 					m.cursor++
 				}
@@ -98,7 +98,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, nil
 		}},
 		{keys: "G", aliases: []string{"end"}, action: "bottom", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			if m.groupedByStatus {
+			if m.isGroupedView() {
 				if len(m.groupedSelectableRows) > 0 {
 					m.cursor = len(m.groupedSelectableRows) - 1
 				}
@@ -109,7 +109,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 		}},
 		{keys: "pgdown", aliases: []string{"space"}, action: "page down", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			m.cursor += m.pageSize()
-			if m.groupedByStatus {
+			if m.isGroupedView() {
 				if m.cursor >= len(m.groupedSelectableRows) {
 					m.cursor = max(0, len(m.groupedSelectableRows)-1)
 				}
@@ -140,8 +140,8 @@ var (
 	listKeyLaunchSelected    = listKeyBinding{keys: "N", action: "new for selected"}
 	listKeyToggleQueuedDraft = listKeyBinding{keys: "d", action: "draft/queued"}
 	listKeyToggleUnprocessed = listKeyBinding{keys: "U", action: "unprocessed"}
-	listKeyGroupedView       = listKeyBinding{keys: "v", action: "grouped view"}
-	listKeyListView          = listKeyBinding{keys: "v", action: "list view"}
+	listKeyGroupedView       = listKeyBinding{keys: "v", action: "group"}
+	listKeyListView          = listKeyBinding{keys: "v", action: "group"}
 	listKeyInstances         = listKeyBinding{keys: "i", action: "instances"}
 	listKeyRefresh           = listKeyBinding{keys: "r", action: "refresh"}
 	listKeyProjectFilter     = listKeyBinding{keys: "/", action: "project filter"}
@@ -228,12 +228,9 @@ func listFlatKeyBindings() []listKeyBinding {
 				m.moveLookupPending = false
 				m.moveLookupRequestID = 0
 			}
-			m.groupedByStatus = true
-			m.rebuildLayout()
-			m.rebuildGroupedRows()
-			m.clampCursor()
-			m.adjustOffset()
-			m.statusMessage = "Grouped status view"
+			nextMode := m.nextGroupMode()
+			m.setGroupMode(nextMode)
+			m.statusMessage = "Grouped by " + listGroupModeLabel(nextMode)
 			return m, nil
 		}},
 		listKeyBinding{keys: listKeyInstances.keys, action: listKeyInstances.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
@@ -301,6 +298,10 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m, m.beginAIAssist(job)
 		}},
 		listKeyBinding{keys: listKeyGroupedAuto.keys, action: listKeyGroupedAuto.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Auto-pilot is available in grouped-by-status view"
+				return m, nil
+			}
 			m.autoMode = !m.autoMode
 			if m.autoMode {
 				m.clearAutoPilotPersistentState()
@@ -316,6 +317,10 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m, nil
 		}},
 		listKeyBinding{keys: "$", action: "budget", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Budget controls are available in grouped-by-status view"
+				return m, nil
+			}
 			return m.beginAutoRunRateInput()
 		}},
 		listKeyBinding{keys: listKeyListView.keys, action: listKeyListView.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
@@ -323,12 +328,13 @@ func listGroupedKeyBindings() []listKeyBinding {
 				m.moveLookupPending = false
 				m.moveLookupRequestID = 0
 			}
-			m.groupedByStatus = false
-			m.rebuildLayout()
-			m.rebuildGroupedRows()
-			m.clampCursor()
-			m.adjustOffset()
-			m.statusMessage = "Ungrouped list view"
+			nextMode := m.nextGroupMode()
+			m.setGroupMode(nextMode)
+			if nextMode == listGroupUngrouped {
+				m.statusMessage = "Ungrouped list view"
+			} else {
+				m.statusMessage = "Grouped by " + listGroupModeLabel(nextMode)
+			}
 			return m, nil
 		}},
 		listKeyBinding{keys: listKeyInstances.keys, action: listKeyInstances.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
@@ -347,6 +353,10 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m, nil
 		}},
 		listKeyBinding{keys: listKeyLaunchQueued.keys, action: listKeyLaunchQueued.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Launch controls are available in grouped-by-status view"
+				return m, nil
+			}
 			if m.quickLaunching {
 				m.statusMessage = "Launch already in progress..."
 				return m, nil
@@ -369,12 +379,24 @@ func listGroupedKeyBindings() []listKeyBinding {
 			)
 		}},
 		listKeyBinding{keys: listKeyLaunchSelected.keys, action: listKeyLaunchSelected.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Launch controls are available in grouped-by-status view"
+				return m, nil
+			}
 			return m.beginSelectedLaunchNew()
 		}},
 		listKeyBinding{keys: listKeyPriority.keys, action: listKeyPriority.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Priority controls are available in grouped-by-status view"
+				return m, nil
+			}
 			return m.toggleSelectedGroupedPriority()
 		}},
 		listKeyBinding{keys: listKeyRebalance.keys, action: listKeyRebalance.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Rebalance preview is available in grouped-by-status view"
+				return m, nil
+			}
 			m.clearAutoPilotPersistentState()
 			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 			m.rebalancePreview = rebalancePreviewModel{active: true, loading: true}
@@ -417,6 +439,10 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m, requestWatchJobToggleProcessed(m.database, job.ID)
 		}},
 		listKeyBinding{keys: listKeyMove.keys, action: listKeyMove.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.isStatusGroupedView() {
+				m.statusMessage = "Move controls are available in grouped-by-status view"
+				return m, nil
+			}
 			return m.beginGroupedMove()
 		}},
 	)

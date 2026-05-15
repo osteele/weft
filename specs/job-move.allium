@@ -87,9 +87,12 @@ value MoveIntentState = open | confirmed | canceled | obsoleted
 rule UserMovesQueuedJob {
     when: UserPressesMoveAndSelectsTarget(job, target)
     requires: job.status = queued
-    requires: not exists(MoveIntent { job = job, state = open })
-
     ensures:
+        for prior in MoveIntent { job = job, state = open }:
+            ResolveMoveIntent(prior, canceled, "superseded by explicit move")
+        for prior in PlacementIntent { job = job, state = open }:
+            ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
+
         let intent = create MoveIntent {
             job = job
             source_attempt = job.latest_attempt
@@ -105,13 +108,17 @@ rule UserMovesQueuedJob {
         ExecuteMoveOption(job, target, intent)
 }
 
-rule SecondMoveOnSameJobRejected {
+rule SecondMoveOnSameJobSupersedesPriorIntent {
     when: UserPressesMoveAndSelectsTarget(job, target)
     requires: exists(MoveIntent { job = job, state = open })
+              or exists(PlacementIntent { job = job, state = open })
 
     ensures:
-        ShowError("Move already in flight for job " + job.id)
-        -- No new intent created. The earlier intent runs to completion.
+        for prior in MoveIntent { job = job, state = open }:
+            ResolveMoveIntent(prior, canceled, "superseded by explicit move")
+        for prior in PlacementIntent { job = job, state = open }:
+            ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
+        ExecuteMoveOption(job, target, MoveIntentFor(job, target))
 }
 
 rule MoveTargetSameAsSourceRejected {
@@ -159,6 +166,10 @@ rule MoveSelectorResolution {
             ShowError("no eligible queued jobs")
         else:
             for job in MoveCandidateJobs:
+                for prior in MoveIntent { job = job, state = open }:
+                    ResolveMoveIntent(prior, canceled, "superseded by explicit move")
+                for prior in PlacementIntent { job = job, state = open }:
+                    ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
                 ExecuteMoveOption(job, target, MoveIntentFor(job, target))
 
     @guidance

@@ -246,6 +246,70 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 	return rows
 }
 
+func buildListGroupedRows(jobs []*db.Job, mode listGroupMode, width int, layout jobListLayout) []groupedStatusRow {
+	if len(jobs) == 0 {
+		return nil
+	}
+	groups := map[string][]*db.Job{}
+	order := make([]string, 0)
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		key := listGenericGroupKey(job, mode)
+		if _, ok := groups[key]; !ok {
+			groups[key] = nil
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], job)
+	}
+	sort.Strings(order)
+	rows := make([]groupedStatusRow, 0, len(jobs)+len(order)*3)
+	for groupIdx, key := range order {
+		if groupIdx > 0 {
+			rows = append(rows, groupedStatusRow{text: ""})
+		}
+		groupJobs := groups[key]
+		rows = append(rows, groupedStatusRow{
+			text:     fmt.Sprintf("%s (%d):", key, len(groupJobs)),
+			isHeader: true,
+			section:  string(mode),
+		})
+		header := "  " + formatJobListHeader(layout)
+		rows = append(rows, groupedStatusRow{text: header, section: string(mode)})
+		for _, job := range groupJobs {
+			rows = append(rows, groupedStatusRow{
+				text:    "  " + formatJobListRow(layout, job),
+				job:     job,
+				section: string(mode),
+			})
+		}
+	}
+	if width > 0 {
+		for i := range rows {
+			rows[i].text = truncateDisplayWidth(rows[i].text, width)
+		}
+	}
+	return rows
+}
+
+func listGenericGroupKey(job *db.Job, mode listGroupMode) string {
+	switch mode {
+	case listGroupProject:
+		return projectGroupLabel(job)
+	case listGroupHost:
+		if job == nil {
+			return "(no host/instance)"
+		}
+		if host := strings.TrimSpace(formatJobListHost(job)); host != "" && host != "-" && host != "—" {
+			return host
+		}
+		return "(unassigned)"
+	default:
+		return listGroupModeLabel(mode)
+	}
+}
+
 func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) map[int64]bool {
 	out := make(map[int64]bool)
 	for _, job := range jobs {

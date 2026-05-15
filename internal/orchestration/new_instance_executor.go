@@ -124,6 +124,10 @@ func openMoveIntentsForNewInstanceGroups(database *sql.DB, groups []campaign.Ins
 			if job == nil || job.ID <= 0 {
 				continue
 			}
+			if err := supersedeOpenPlacementForMove(database, job.ID); err != nil {
+				resolveMoveIntentIDs(database, intentIDs, db.MoveIntentStateCanceled, "new instance planning failed")
+				return nil, fmt.Errorf("replace prior move for job %s: %w", ids.FormatJobID(job.ID), err)
+			}
 			intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 				JobID:               job.ID,
 				SourceAttemptID:     job.LatestRunID,

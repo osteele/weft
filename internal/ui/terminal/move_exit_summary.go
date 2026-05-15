@@ -35,8 +35,6 @@ func FormatMoveExitSummaryAt(database *sql.DB, jobs []*db.Job, instanceIDs []int
 			writeSummaryLine(&b, width, line)
 		}
 	}
-	writeSummaryLine(&b, width, "")
-	writeSummaryLine(&b, width, "Next: weft watch instance | weft uj | weft log <job>")
 	return b.String()
 }
 

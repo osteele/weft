@@ -84,6 +84,119 @@ func TestResolveEligibleJobs_ExplicitJobIDsWarnOnSkippedStatus(t *testing.T) {
 	}
 }
 
+func TestResolveEligibleJobs_IncludesJobsWithOpenMoveIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	movingJobID, err := db.RecordQueued(database, "cool100", t.TempDir(), "echo moving", "moving")
+	if err != nil {
+		t.Fatalf("record moving job: %v", err)
+	}
+	queuedJobID, err := db.RecordQueued(database, "cool100", t.TempDir(), "echo queued", "queued")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:      movingJobID,
+		TargetKind: db.MoveTargetNew,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+
+	var warnings []string
+	jobs, err := ResolveEligibleJobs(database, nil, "", "cool100", false, JobMoveCallbacks{
+		OnWarning: func(message string) {
+			warnings = append(warnings, message)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveEligibleJobs returned error: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("eligible jobs len = %d, want 2", len(jobs))
+	}
+	got := map[int64]bool{jobs[0].ID: true, jobs[1].ID: true}
+	if !got[movingJobID] || !got[queuedJobID] {
+		t.Fatalf("eligible IDs = %v, want moving %d and queued %d", got, movingJobID, queuedJobID)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
+
+func TestMoveJobsToHost_SupersedesOpenMoveIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "cool100", t.TempDir(), "echo move", "move")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:      jobID,
+		TargetKind: db.MoveTargetNew,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	moved, err := MoveJobsToHost(database, []*db.Job{job}, "cool30", JobMoveCallbacks{})
+	if err != nil {
+		t.Fatalf("MoveJobsToHost: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("moved = %d, want 1", moved)
+	}
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != db.MoveIntentStateCanceled || gotIntent.Resolution != "superseded by explicit move" {
+		t.Fatalf("intent = (%s, %q), want canceled superseded", gotIntent.State, gotIntent.Resolution)
+	}
+	movedJob, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if movedJob.Host != "cool30" {
+		t.Fatalf("host = %q, want cool30", movedJob.Host)
+	}
+}
+
+func TestMoveJobsToHost_SupersedesOpenPlacementIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "cool100", t.TempDir(), "echo move", "move")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	intent, err := db.CreatePlacementIntent(database, jobID, "bulk_move")
+	if err != nil {
+		t.Fatalf("CreatePlacementIntent: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	moved, err := MoveJobsToHost(database, []*db.Job{job}, "cool30", JobMoveCallbacks{})
+	if err != nil {
+		t.Fatalf("MoveJobsToHost: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("moved = %d, want 1", moved)
+	}
+	gotIntent, err := db.GetPlacementIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetPlacementIntent: %v", err)
+	}
+	if gotIntent.State != db.PlacementIntentStateCanceled || gotIntent.Resolution != "superseded by explicit move" {
+		t.Fatalf("intent = (%s, %q), want canceled superseded", gotIntent.State, gotIntent.Resolution)
+	}
+}
+
 func TestResolveEligibleJobs_ProjectSelectsQueuedAndPendingPlacement(t *testing.T) {
 	database := db.SetupTestDB(t)
 

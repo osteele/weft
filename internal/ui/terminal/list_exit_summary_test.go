@@ -44,10 +44,16 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 		launchByID: map[int64]*db.Launch{
 			launchID: {ID: launchID, Status: db.LaunchStatusRunning, ResolvedGPUName: "RTX A6000", GPUMemGB: 48},
 		},
+		recentLaunchFailures: &recentLaunchFailures{
+			items: []*db.Launch{{ID: 9901, Status: db.LaunchStatusFailed, CreatedAt: now.Add(-time.Hour).Unix()}},
+		},
 	}
 
 	out := model.exitSummaryAt(now, 96)
 	for _, want := range []string{
+		"Group: status",
+		"Order: status, job id",
+		"Filter: none",
 		"Running (1):",
 		"wj707",
 		"baseline sweep",
@@ -62,10 +68,9 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 	}
 	for _, unwanted := range []string{
 		"weft uj ended",
-		"View:",
-		"Filter:",
 		"Selected:",
 		"Next:",
+		"Recent launch failures",
 	} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("summary should not include %q:\n%s", unwanted, out)

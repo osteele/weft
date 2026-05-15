@@ -137,6 +137,10 @@ func ResolveEligibleJobs(
 func MoveJobsToHost(database *sql.DB, jobs []*db.Job, host string, callbacks JobMoveCallbacks) (int, error) {
 	moved := 0
 	for _, job := range jobs {
+		if err := supersedeOpenPlacementForMove(database, job.ID); err != nil {
+			callbacks.warningf("Warning: replace prior move for job %s failed: %v", ids.FormatJobID(job.ID), err)
+			continue
+		}
 		if err := unplaceIfNeededForMove(database, job); err != nil {
 			callbacks.warningf("Warning: unplace job %s failed: %v", ids.FormatJobID(job.ID), err)
 			continue
@@ -169,6 +173,10 @@ func MoveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64, call
 
 	var ready []*db.Job
 	for _, job := range jobs {
+		if err := supersedeOpenPlacementForMove(database, job.ID); err != nil {
+			callbacks.warningf("Warning: replace prior move for job %s failed: %v", ids.FormatJobID(job.ID), err)
+			continue
+		}
 		if err := unplaceIfNeededForMove(database, job); err != nil {
 			callbacks.warningf("Warning: unplace job %s failed: %v", ids.FormatJobID(job.ID), err)
 			continue
@@ -195,4 +203,25 @@ func unplaceIfNeededForMove(database *sql.DB, job *db.Job) error {
 	}
 	_, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
 	return err
+}
+
+func supersedeOpenPlacementForMove(database *sql.DB, jobID int64) error {
+	if database == nil || jobID <= 0 {
+		return nil
+	}
+	if intent, err := db.GetOpenMoveIntent(database, jobID); err != nil {
+		return fmt.Errorf("get open move intent: %w", err)
+	} else if intent != nil {
+		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "superseded by explicit move"); err != nil {
+			return fmt.Errorf("cancel open move intent: %w", err)
+		}
+	}
+	if intent, err := db.GetOpenPlacementIntent(database, jobID); err != nil {
+		return fmt.Errorf("get open placement intent: %w", err)
+	} else if intent != nil {
+		if err := db.ResolvePlacementIntent(database, intent.ID, db.PlacementIntentStateCanceled, "superseded by explicit move"); err != nil {
+			return fmt.Errorf("cancel open placement intent: %w", err)
+		}
+	}
+	return nil
 }

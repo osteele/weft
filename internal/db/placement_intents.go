@@ -75,6 +75,13 @@ func GetPlacementIntent(database *sql.DB, id int64) (*PlacementIntent, error) {
 	return scanPlacementIntent(row)
 }
 
+// GetOpenPlacementIntent returns the open placement intent for a job, or nil
+// if none exists.
+func GetOpenPlacementIntent(database *sql.DB, jobID int64) (*PlacementIntent, error) {
+	row := database.QueryRow(placementIntentSelect+` WHERE job_id = ? AND state = 'open' LIMIT 1`, jobID)
+	return scanPlacementIntent(row)
+}
+
 // JobIDsWithOpenPlacementIntents returns the set of job ids that currently
 // have an open placement intent.
 func JobIDsWithOpenPlacementIntents(database *sql.DB) (map[int64]struct{}, error) {

@@ -382,6 +382,80 @@ func TestOpenBulkMoveIntentsRestoresRetryableNoStartFailureToSource(t *testing.T
 	}
 }
 
+func TestOpenBulkMoveIntentsSupersedesPriorOpenMoveIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "cool100", t.TempDir(), "python train.py", "rental job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	prior, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:      jobID,
+		TargetKind: db.MoveTargetNew,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent prior: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	intentIDs, err := openMoveIntentsForNewInstanceGroups(database, []campaign.InstanceGroup{{GPUClass: "A100", Jobs: []*db.Job{job}}}, []cloud.Offer{{Provider: cloud.ProviderVastai, ProviderID: "offer-2", GPUName: "A100"}})
+	if err != nil {
+		t.Fatalf("openMoveIntentsForNewInstanceGroups: %v", err)
+	}
+	if intentIDs[jobID] == 0 || intentIDs[jobID] == prior.ID {
+		t.Fatalf("new intent id = %d, prior = %d", intentIDs[jobID], prior.ID)
+	}
+	gotPrior, err := db.GetMoveIntent(database, prior.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent prior: %v", err)
+	}
+	if gotPrior.State != db.MoveIntentStateCanceled || gotPrior.Resolution != "superseded by explicit move" {
+		t.Fatalf("prior intent = (%s, %q), want canceled superseded", gotPrior.State, gotPrior.Resolution)
+	}
+	gotNew, err := db.GetMoveIntent(database, intentIDs[jobID])
+	if err != nil {
+		t.Fatalf("GetMoveIntent new: %v", err)
+	}
+	if gotNew.State != db.MoveIntentStateOpen {
+		t.Fatalf("new intent state = %q, want open", gotNew.State)
+	}
+}
+
+func TestOpenBulkMoveIntentsSupersedesPriorOpenPlacementIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "cool100", t.TempDir(), "python train.py", "rental job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	prior, err := db.CreatePlacementIntent(database, jobID, "bulk_move")
+	if err != nil {
+		t.Fatalf("CreatePlacementIntent prior: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	intentIDs, err := openMoveIntentsForNewInstanceGroups(database, []campaign.InstanceGroup{{GPUClass: "A100", Jobs: []*db.Job{job}}}, []cloud.Offer{{Provider: cloud.ProviderVastai, ProviderID: "offer-2", GPUName: "A100"}})
+	if err != nil {
+		t.Fatalf("openMoveIntentsForNewInstanceGroups: %v", err)
+	}
+	if intentIDs[jobID] == 0 {
+		t.Fatal("expected new move intent id")
+	}
+	gotPrior, err := db.GetPlacementIntent(database, prior.ID)
+	if err != nil {
+		t.Fatalf("GetPlacementIntent prior: %v", err)
+	}
+	if gotPrior.State != db.PlacementIntentStateCanceled || gotPrior.Resolution != "superseded by explicit move" {
+		t.Fatalf("prior intent = (%s, %q), want canceled superseded", gotPrior.State, gotPrior.Resolution)
+	}
+}
+
 func TestJobsForGrouping_ClonesPendingPlacementAsQueued(t *testing.T) {
 	pending := db.StatusPendingPlacement
 	original := &db.Job{ID: 1, Status: db.StatusQueued, PendingStatus: &pending}

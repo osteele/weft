@@ -19,11 +19,13 @@ func TestFormatMoveExitSummaryAt_PrintsReceipt(t *testing.T) {
 		"Moved: wj1862,wj1863 -> 1 new instance",
 		"Instances:",
 		"wi2672",
-		"Next: weft watch instance",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "Next:") {
+		t.Fatalf("summary should not include a Next line:\n%s", out)
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Fatalf("summary should be plain text, got ANSI:\n%q", out)

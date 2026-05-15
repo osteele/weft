@@ -64,6 +64,7 @@ type listTUIModel struct {
 	syncWorker                 *hostsync.Worker
 	ctx                        context.Context
 	cancel                     context.CancelFunc
+	groupMode                  listGroupMode
 	groupedByStatus            bool
 	groupedUnprocessedView     bool
 	projectFilter              string
@@ -123,6 +124,78 @@ type listTUIModel struct {
 	appConfig                  *config.Config
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
+}
+
+type listGroupMode string
+
+const (
+	listGroupUngrouped listGroupMode = "ungrouped"
+	listGroupStatus    listGroupMode = "status"
+	listGroupProject   listGroupMode = "project"
+	listGroupHost      listGroupMode = "host/instance"
+)
+
+func initialListGroupMode(groupedByStatus bool) listGroupMode {
+	if groupedByStatus {
+		return listGroupStatus
+	}
+	return listGroupUngrouped
+}
+
+func (m listTUIModel) effectiveGroupMode() listGroupMode {
+	if m.groupMode != "" {
+		return m.groupMode
+	}
+	if m.groupedByStatus {
+		return listGroupStatus
+	}
+	return listGroupUngrouped
+}
+
+func (m listTUIModel) isGroupedView() bool {
+	return m.effectiveGroupMode() != listGroupUngrouped
+}
+
+func (m listTUIModel) isStatusGroupedView() bool {
+	return m.effectiveGroupMode() == listGroupStatus
+}
+
+func (m *listTUIModel) setGroupMode(mode listGroupMode) {
+	if mode == "" {
+		mode = listGroupUngrouped
+	}
+	m.groupMode = mode
+	m.groupedByStatus = mode == listGroupStatus
+	m.rebuildLayout()
+	m.rebuildGroupedRows()
+	m.clampCursor()
+	m.adjustOffset()
+}
+
+func (m listTUIModel) nextGroupMode() listGroupMode {
+	switch m.effectiveGroupMode() {
+	case listGroupUngrouped:
+		return listGroupStatus
+	case listGroupStatus:
+		return listGroupProject
+	case listGroupProject:
+		return listGroupHost
+	default:
+		return listGroupUngrouped
+	}
+}
+
+func listGroupModeLabel(mode listGroupMode) string {
+	switch mode {
+	case listGroupStatus:
+		return "status"
+	case listGroupProject:
+		return "project"
+	case listGroupHost:
+		return "host/instance"
+	default:
+		return "ungrouped"
+	}
 }
 
 type listJobsLoadedMsg struct {
@@ -289,6 +362,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		syncWorker:             sw,
 		ctx:                    ctx,
 		cancel:                 cancel,
+		groupMode:              initialListGroupMode(groupedByStatus),
 		groupedByStatus:        groupedByStatus,
 		groupedUnprocessedView: unprocessedView,
 		projectFilter:          projectFilter,
@@ -387,7 +461,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.groupedByStatus {
+		if m.isGroupedView() {
 			return m.handleGroupedKey(msg)
 		}
 		if next, cmd, ok := handleListKeyBinding(m, msg.String(), listFlatKeyBindings()); ok {
@@ -395,7 +469,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "A":
-			if m.groupedByStatus {
+			if m.isGroupedView() {
 				m.autoMode = !m.autoMode
 				if m.autoMode {
 					m.clearAutoPilotPersistentState()
@@ -411,7 +485,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "n":
-			if !m.groupedByStatus {
+			if !m.isGroupedView() {
 				break
 			}
 			if m.quickLaunching {
@@ -951,7 +1025,7 @@ func (m listTUIModel) View() string {
 	if m.showHelp {
 		return m.renderListHelpView()
 	}
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		return m.groupedView()
 	}
 
@@ -1284,31 +1358,38 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.autoMode {
 		autoState = "ON"
 	}
-	line := fmt.Sprintf("%s (%s)", listKeyGroupedAuto.footerToken(), autoState)
+	line := "group:" + listGroupModeLabel(m.effectiveGroupMode())
+	if m.isStatusGroupedView() {
+		line += fmt.Sprintf("  %s (%s)", listKeyGroupedAuto.footerToken(), autoState)
+	}
 	line += "  " + listKeyRefresh.footerToken()
 	if m.selectedGroupedJob() != nil {
 		line += "  " + listKeyAttempts.footerToken()
 		line += "  " + listKeyKillCancel.footerToken()
 		line += "  " + listKeyUnplace.footerToken()
 		line += "  " + listKeyToggleProcessed.footerToken()
-		if selected := m.selectedGroupedJob(); selected != nil && selected.EffectiveStatus() == db.StatusQueued {
+		if selected := m.selectedGroupedJob(); m.isStatusGroupedView() && selected != nil && selected.EffectiveStatus() == db.StatusQueued {
 			line += "  " + listKeyMove.footerToken()
 			line += "  " + listKeyLaunchSelected.footerToken()
 		}
-		line += "  " + listKeyPriority.footerToken()
+		if m.isStatusGroupedView() {
+			line += "  " + listKeyPriority.footerToken()
+		}
 	}
-	if hasQueued {
+	if m.isStatusGroupedView() && hasQueued {
 		line += "  " + listKeyLaunchQueued.footerToken()
 	}
-	line += "  " + listKeyRebalance.footerToken()
-	if strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
+	line += "  q:quit"
+	if m.isStatusGroupedView() {
+		line += "  " + listKeyRebalance.footerToken()
+	}
+	if m.isStatusGroupedView() && strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
 		if m.showAutoPilotErrorDetails {
 			line += "  " + listKeyAutoHideError.footerToken()
 		} else {
 			line += "  " + listKeyAutoErrorDetails.footerToken()
 		}
 	}
-	line += "  q:quit"
 	line += "  " + listKeyProjectFilter.footerToken()
 	line += "  " + listKeyToggleStatusArea.footerToken()
 	line += "  " + listKeyListView.footerToken()
@@ -1319,13 +1400,13 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 
 func (m listTUIModel) selectedJobDetailLines() []string {
 	var job *db.Job
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		job = m.selectedGroupedJob()
 	} else if m.cursor >= 0 && m.cursor < len(m.jobs) {
 		job = m.jobs[m.cursor]
 	}
 	if job == nil {
-		if m.groupedByStatus {
+		if m.isGroupedView() {
 			return renderSelectedLaunchDetail(m.selectedGroupedLaunch(), m.width, time.Now())
 		}
 		return nil
@@ -1349,7 +1430,7 @@ func (m listTUIModel) selectedGroupedRow() int {
 // currentSelectedJob returns the job under the cursor in either grouped or
 // ungrouped view, or nil if no row is selected.
 func (m listTUIModel) currentSelectedJob() *db.Job {
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		return m.selectedGroupedJob()
 	}
 	if m.cursor >= 0 && m.cursor < len(m.jobs) {
@@ -1393,7 +1474,7 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.autoRunRateInputActive {
 		return m, nil
 	}
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		m.selectGroupedMouseRow(msg.Y)
 		return m, nil
 	}
@@ -2117,14 +2198,14 @@ func (m listTUIModel) footerText(rows int) string {
 
 func (m listTUIModel) renderListHelpView() string {
 	viewBinding := listKeyGroupedView
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		viewBinding = listKeyListView
 	}
 	selectedJobLines := []string{
 		"  a view attempts for selected job",
 		"  c coding-assistant (progress / review / remediate, status-dependent)",
 	}
-	if m.groupedByStatus {
+	if m.isStatusGroupedView() {
 		selectedJobLines = append(selectedJobLines,
 			"  N launch selected on new instance",
 			"  P toggle priority",
@@ -2132,6 +2213,12 @@ func (m listTUIModel) renderListHelpView() string {
 			"  u unplace selected",
 			"  p toggle processed tag",
 			"  m move selected",
+		)
+	} else if m.isGroupedView() {
+		selectedJobLines = append(selectedJobLines,
+			"  x kill/cancel selected",
+			"  u unplace selected",
+			"  p toggle processed tag",
 		)
 	} else {
 		selectedJobLines = append(selectedJobLines,
@@ -2169,7 +2256,7 @@ func (m listTUIModel) renderListHelpView() string {
 			},
 		},
 	}
-	if !m.groupedByStatus {
+	if !m.isGroupedView() {
 		sections = append(sections,
 			keyHelpSection{
 				Title: "List filters",
@@ -2190,7 +2277,7 @@ func (m listTUIModel) renderListHelpView() string {
 			},
 		)
 	}
-	if m.groupedByStatus {
+	if m.isStatusGroupedView() {
 		sections = append(sections,
 			keyHelpSection{
 				Title: "Queue and placement",
@@ -2247,29 +2334,33 @@ func (m *listTUIModel) rebuildLayout() {
 }
 
 func (m *listTUIModel) rebuildGroupedRows() {
-	if !m.groupedByStatus {
+	if !m.isGroupedView() {
 		m.groupedRows = nil
 		m.groupedSelectableRows = nil
 		return
 	}
-	groupedJobs := m.groupedJobsWithAutoReasons()
-	m.groupedRows = buildGroupedStatusRowsWithOptions(groupedJobs, m.width, groupedStatusRenderOptions{
-		launchLiveByID:         m.launchLiveByID,
-		launchStatusByID:       m.launchStatusByID,
-		placingJobIDs:          m.placingJobIDs,
-		placementQueuedAtByJob: m.placementQueuedAtByJob,
-		placementStatusByJob:   m.placementStatusByJob,
-		launchFailures:         m.recentLaunchFailures,
-		launchByID:             m.launchByID,
-		now:                    time.Now(),
-		launchSpinner:          m.launchSpinner.View(),
-		launchingETA: groupedStatusLaunchingETA{
-			totalP50:               m.launchBootstrapP50,
-			totalSamples:           m.launchBootstrapSamples,
-			stageByName:            m.launchStageETAByName,
-			stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
-		},
-	})
+	if m.isStatusGroupedView() {
+		groupedJobs := m.groupedJobsWithAutoReasons()
+		m.groupedRows = buildGroupedStatusRowsWithOptions(groupedJobs, m.width, groupedStatusRenderOptions{
+			launchLiveByID:         m.launchLiveByID,
+			launchStatusByID:       m.launchStatusByID,
+			placingJobIDs:          m.placingJobIDs,
+			placementQueuedAtByJob: m.placementQueuedAtByJob,
+			placementStatusByJob:   m.placementStatusByJob,
+			launchFailures:         m.recentLaunchFailures,
+			launchByID:             m.launchByID,
+			now:                    time.Now(),
+			launchSpinner:          m.launchSpinner.View(),
+			launchingETA: groupedStatusLaunchingETA{
+				totalP50:               m.launchBootstrapP50,
+				totalSamples:           m.launchBootstrapSamples,
+				stageByName:            m.launchStageETAByName,
+				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
+			},
+		})
+	} else {
+		m.groupedRows = buildListGroupedRows(m.jobs, m.effectiveGroupMode(), m.width, m.layout)
+	}
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
 		if (row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked {
@@ -2280,7 +2371,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 }
 
 func (m listTUIModel) hasActiveLaunchingSpinner() bool {
-	if !m.groupedByStatus {
+	if !m.isStatusGroupedView() {
 		return false
 	}
 	for _, job := range m.groupedJobsWithAutoReasons() {
@@ -2320,7 +2411,7 @@ func placementDisplayMaps(statusByJob map[int64]db.PlacementStatus) (map[int64]s
 }
 
 func (m *listTUIModel) clampCursor() {
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		m.clampGroupedCursor()
 		return
 	}
@@ -2350,7 +2441,7 @@ func (m *listTUIModel) clampGroupedCursor() {
 }
 
 func (m *listTUIModel) adjustOffset() {
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		return
 	}
 	pageSize := m.pageSize()
@@ -2377,7 +2468,7 @@ func (m listTUIModel) pageSize() int {
 	if m.height <= 0 {
 		return 10
 	}
-	if m.groupedByStatus {
+	if m.isGroupedView() {
 		return max(1, len(m.groupedViewportRows()))
 	}
 	return max(1, m.flatBodyRows())
@@ -2661,7 +2752,7 @@ func buildListAutoLeaseScope(title string) string {
 }
 
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
-	if !m.groupedByStatus || !m.autoMode || m.autoInProgress || m.database == nil {
+	if !m.isStatusGroupedView() || !m.autoMode || m.autoInProgress || m.database == nil {
 		return nil
 	}
 	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
@@ -2944,7 +3035,7 @@ func parseRunRateBlockedNeedCents(reason string) (int, bool) {
 
 func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 	baseJobs := m.jobs
-	if m.groupedByStatus && m.groupedUnprocessedView {
+	if m.isStatusGroupedView() && m.groupedUnprocessedView {
 		baseJobs = excludeJobsWithStatus(baseJobs, db.StatusCanceled)
 	}
 
@@ -3115,7 +3206,7 @@ func normalizeStatusLineText(msg string) string {
 }
 
 func (m listTUIModel) groupedErrorDetailsLines() []string {
-	if !m.groupedByStatus || !m.showAutoPilotErrorDetails {
+	if !m.isStatusGroupedView() || !m.showAutoPilotErrorDetails {
 		return nil
 	}
 	raw := strings.TrimSpace(m.lastAutoPilotErrorRaw)

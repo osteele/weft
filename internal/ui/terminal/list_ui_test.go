@@ -1523,11 +1523,11 @@ func TestListTUIHandleLaunchNewDoneMessages(t *testing.T) {
 	})
 }
 
-func TestListTUIKeyV_TogglesBetweenGroupedAndUngrouped(t *testing.T) {
+func TestListTUIKeyV_CyclesGroupMode(t *testing.T) {
 	m := listTUIModel{
-		groupedByStatus: false,
-		width:           100,
-		height:          20,
+		groupMode: listGroupUngrouped,
+		width:     100,
+		height:    20,
 		jobs: []*db.Job{
 			{ID: 1, Status: db.StatusQueued, Description: "queued"},
 		},
@@ -1535,17 +1535,32 @@ func TestListTUIKeyV_TogglesBetweenGroupedAndUngrouped(t *testing.T) {
 
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	got := next.(listTUIModel)
-	if !got.groupedByStatus {
-		t.Fatal("expected groupedByStatus=true after pressing v from ungrouped list")
+	if got.effectiveGroupMode() != listGroupStatus {
+		t.Fatalf("group mode = %q, want status", got.effectiveGroupMode())
 	}
-	if got.statusMessage != "Grouped status view" {
-		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Grouped status view")
+	if got.statusMessage != "Grouped by status" {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Grouped by status")
 	}
 
 	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	got = next.(listTUIModel)
-	if got.groupedByStatus {
-		t.Fatal("expected groupedByStatus=false after pressing v from grouped list")
+	if got.effectiveGroupMode() != listGroupProject {
+		t.Fatalf("group mode = %q, want project", got.effectiveGroupMode())
+	}
+	if got.statusMessage != "Grouped by project" {
+		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Grouped by project")
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	got = next.(listTUIModel)
+	if got.effectiveGroupMode() != listGroupHost {
+		t.Fatalf("group mode = %q, want host/instance", got.effectiveGroupMode())
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	got = next.(listTUIModel)
+	if got.effectiveGroupMode() != listGroupUngrouped {
+		t.Fatalf("group mode = %q, want ungrouped", got.effectiveGroupMode())
 	}
 	if got.statusMessage != "Ungrouped list view" {
 		t.Fatalf("statusMessage = %q, want %q", got.statusMessage, "Ungrouped list view")
@@ -2085,7 +2100,7 @@ func TestListTUIHelpOverlayOpensAndClosesInUngroupedView(t *testing.T) {
 	if !strings.Contains(out, "Jobs List Keybindings") {
 		t.Fatalf("expected list help title, got:\n%s", out)
 	}
-	if !strings.Contains(out, "v grouped view") {
+	if !strings.Contains(out, "v group") {
 		t.Fatalf("expected shared keybinding help text, got:\n%s", out)
 	}
 
