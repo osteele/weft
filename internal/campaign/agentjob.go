@@ -92,7 +92,7 @@ func resolveCloudNeedsForJob(
 	}
 	cloudNeeds, cloudAfter, onPrem, err := ClassifyNeedsForLaunch(ctx, database, client, job, targetInstanceID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("classify needs for job %s: %w", ids.FormatJobID(job.ID), err)
+		return nil, nil, err
 	}
 	if err := assertNeedsClassified(job, cloudNeeds, cloudAfter, onPrem); err != nil {
 		return nil, nil, err

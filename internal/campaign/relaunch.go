@@ -568,7 +568,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				closeRelaunchIntents(cfg.Database, intentIDs, false, "launch failed: "+err.Error())
+				closeRelaunchIntents(cfg.Database, intentIDs, false, err.Error())
 				slog.Warn("launch failed for group", "component", "relaunch", "gpu_spec", group.GPUSpec(), "error", err)
 				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 					EventKind: db.EventRelaunchLaunchFailed,
@@ -577,7 +577,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 					ErrorText: err.Error(),
 				})
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
-				recordGroupReasons(result, cfg.ResetJobs, group, "launch failed: "+err.Error())
+				recordGroupReasons(result, cfg.ResetJobs, group, err.Error())
 				return
 			}
 			closeRelaunchIntents(cfg.Database, intentIDs, true, "placement succeeded")

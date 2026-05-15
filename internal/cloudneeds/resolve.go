@@ -3,6 +3,7 @@ package cloudneeds
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -39,7 +40,10 @@ func ResolveSpecs(ctx context.Context, database *sql.DB, client *r2.Client, spec
 
 		key, err := r2resolve.NeedR2Key(ctx, client, producer.ID, producer.LatestRunID, parsed.Path)
 		if err != nil {
-			return nil, fmt.Errorf("%q: %w", spec, err)
+			if errors.Is(err, r2resolve.ErrArtifactMissing) {
+				return nil, fmt.Errorf("requires %q that %s did not produce", spec, ids.FormatJobID(parsed.Version))
+			}
+			return nil, fmt.Errorf("resolve %q: %w", spec, err)
 		}
 		resolved = append(resolved, cloud.CloudNeed{
 			Spec:  spec,

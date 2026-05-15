@@ -1614,7 +1614,7 @@ func LaunchInstance(
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
 			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, fmt.Errorf("resolve cloud needs for job %s: %w", ids.FormatJobID(job.ID), err)
+			return instanceID, err
 		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter

@@ -568,9 +568,9 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		if err != nil {
 			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
 			if rollbackErr != nil {
-				return fmt.Errorf("resolve cloud needs for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
+				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
 			}
-			return fmt.Errorf("resolve cloud needs for job %s: %w", ids.FormatJobID(job.ID), err)
+			return err
 		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter

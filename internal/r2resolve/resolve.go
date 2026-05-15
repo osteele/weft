@@ -9,6 +9,7 @@ package r2resolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,12 @@ import (
 )
 
 const objectExistsTimeout = 20 * time.Second
+
+// ErrArtifactMissing reports that no R2 key under the producer's prefixes
+// matches the requested artifact path. Callers that have producer/spec
+// context (e.g. cloudneeds.ResolveSpecs) can use errors.Is to discriminate
+// this from transient lookup errors and surface a user-facing message.
+var ErrArtifactMissing = errors.New("artifact not found in cloud outputs")
 
 // ObjectExistsFunc is the R2 existence-check used by NeedR2Key. Exported so
 // tests can stub the R2 round-trip without a live client.
@@ -124,5 +131,5 @@ func NeedR2Key(ctx context.Context, client *r2.Client, jobID int64, latestRunID 
 		}
 	}
 
-	return "", fmt.Errorf("artifact %q not found in cloud outputs", relPath)
+	return "", fmt.Errorf("%w: %q", ErrArtifactMissing, relPath)
 }

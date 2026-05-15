@@ -360,7 +360,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		oplog.Log("auto_pilot.launch_error",
 			oplog.WithError(err),
 			oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
-		launchReason := "launch failed: " + campaign.SanitizeBlockedReason(err.Error())
+		launchReason := campaign.SanitizeBlockedReason(err.Error())
 		for _, jobID := range rentalScope {
 			if _, exists := blockedReasons[jobID]; !exists {
 				blockedReasons[jobID] = launchReason
