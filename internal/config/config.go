@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -14,6 +15,11 @@ import (
 	toml "github.com/pelletier/go-toml"
 	"gopkg.in/yaml.v3"
 )
+
+// UnknownTOMLKeys is set by Load when the config file contains keys that don't
+// map to any struct field. Callers (the CLI bootstrap) can read this to surface
+// a single warning to the user without coupling config loading to stderr.
+var UnknownTOMLKeys []string
 
 // Config holds application configuration
 type Config struct {
@@ -834,8 +840,16 @@ func Load() (*Config, error) {
 
 	switch filepath.Ext(path) {
 	case ".toml":
-		if err := toml.Unmarshal(data, cfg); err != nil {
-			return cfg, err
+		// Decode in strict mode so unknown keys are reported. The decoder still
+		// populates known fields before returning the error, so we keep cfg and
+		// extract the undecoded key list for the caller to warn about.
+		dec := toml.NewDecoder(bytes.NewReader(data)).Strict(true)
+		if err := dec.Decode(cfg); err != nil {
+			if keys := parseUndecodedKeys(err); len(keys) > 0 {
+				UnknownTOMLKeys = keys
+			} else {
+				return cfg, err
+			}
 		}
 	default:
 		if err := yaml.Unmarshal(data, cfg); err != nil {
@@ -844,6 +858,33 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseUndecodedKeys extracts the key list from a go-toml strict-mode error of
+// the form `undecoded keys: ["foo" "bar.baz"]`. Returns nil for unrelated
+// errors so the caller can treat them as real failures.
+func parseUndecodedKeys(err error) []string {
+	if err == nil {
+		return nil
+	}
+	const prefix = "undecoded keys: "
+	msg := err.Error()
+	i := strings.Index(msg, prefix)
+	if i < 0 {
+		return nil
+	}
+	rest := msg[i+len(prefix):]
+	rest = strings.TrimSpace(rest)
+	rest = strings.TrimPrefix(rest, "[")
+	rest = strings.TrimSuffix(rest, "]")
+	var keys []string
+	for _, part := range strings.Fields(rest) {
+		k := strings.Trim(part, "\"")
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
 }
 
 func expandUserPath(path string) string {

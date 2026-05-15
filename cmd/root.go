@@ -45,6 +45,9 @@ func Execute() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if keys := config.UnknownTOMLKeys; len(keys) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: %s: unknown key(s): %s\n", config.ConfigPath(), strings.Join(keys, ", "))
+	}
 	os.Args = rewriteRootArgs(os.Args, cfg)
 
 	logging.Setup(os.Stderr, "text")
