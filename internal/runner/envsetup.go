@@ -191,6 +191,23 @@ func prepareUVSyncEnvironment(workingDir, setupCmd string, envVars []string) (st
 	return setupCmd + uvNoInstallPackagesArgs(), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), nil
 }
 
+func prepareUVRunCommand(workingDir, setupCmd, command string) (string, error) {
+	if setupCmd != "uv sync" {
+		return command, nil
+	}
+	if !strings.Contains(command, "uv run") || strings.Contains(command, "--no-sync") {
+		return command, nil
+	}
+	useSystem, err := shouldUseSystemTorchPackages(workingDir)
+	if err != nil {
+		return command, err
+	}
+	if !useSystem {
+		return command, nil
+	}
+	return dataloc.InjectUvArgs(command, []string{"--no-sync"}), nil
+}
+
 func shouldUseSystemTorchPackages(workingDir string) (bool, error) {
 	if setupPythonPath := strings.TrimSpace(uvSystemPythonPath); setupPythonPath == "" {
 		return false, nil

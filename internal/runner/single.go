@@ -242,8 +242,18 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 	phases.RunStart = time.Now().Unix()
 
+	runCommand, prepRunErr := prepareUVRunCommand(expandedDir, setupCmd, command)
+	if prepRunErr != nil {
+		slog.Warn("uv run preflight failed; continuing with original command",
+			"component", "runner", "job_id", cfg.JobID, "error", prepRunErr)
+		appendSetupLog(paths.Log, []byte("weft: uv run preflight failed; continuing with original command: "+prepRunErr.Error()+"\n"))
+	}
+	if runCommand != command {
+		appendSetupLog(paths.Log, []byte("weft: runtime command: "+runCommand+"\n"))
+	}
+
 	slog.Debug("launching process", "component", "runner", "job_id", cfg.JobID)
-	proc, err := StartProcess(command, workingDir, envVars, paths.Log)
+	proc, err := StartProcess(runCommand, workingDir, envVars, paths.Log)
 	if err != nil {
 		slog.Warn("job start failed", "component", "runner", "job_id", cfg.JobID, "error", err)
 		ei := ExitInfo{ExitCode: 1}

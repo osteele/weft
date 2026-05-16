@@ -239,3 +239,65 @@ func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) 
 		t.Fatalf("expected torch skip flag in command, got: %q", gotCmd)
 	}
 }
+
+func TestPrepareUVRunCommand_AddsNoSyncForTorchProject(t *testing.T) {
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	prev := uvSystemPythonPath
+	uvSystemPythonPath = pythonPath
+	t.Cleanup(func() { uvSystemPythonPath = prev })
+
+	got, err := prepareUVRunCommand(dir, "uv sync", "uv run python scripts/eval.py --limit 10")
+	if err != nil {
+		t.Fatalf("prepareUVRunCommand() error = %v", err)
+	}
+	want := "uv run --no-sync python scripts/eval.py --limit 10"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestPrepareUVRunCommand_DoesNotRewriteWhenNoReuse(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"numpy>=1.0\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+
+	command := "uv run python scripts/eval.py"
+	got, err := prepareUVRunCommand(dir, "uv sync", command)
+	if err != nil {
+		t.Fatalf("prepareUVRunCommand() error = %v", err)
+	}
+	if got != command {
+		t.Fatalf("got %q, want %q", got, command)
+	}
+}
+
+func TestPrepareUVRunCommand_DoesNotDuplicateNoSync(t *testing.T) {
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	prev := uvSystemPythonPath
+	uvSystemPythonPath = pythonPath
+	t.Cleanup(func() { uvSystemPythonPath = prev })
+
+	command := "uv run --no-sync python scripts/eval.py"
+	got, err := prepareUVRunCommand(dir, "uv sync", command)
+	if err != nil {
+		t.Fatalf("prepareUVRunCommand() error = %v", err)
+	}
+	if got != command {
+		t.Fatalf("got %q, want %q", got, command)
+	}
+}
