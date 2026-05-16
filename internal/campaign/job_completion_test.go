@@ -137,3 +137,72 @@ func TestFinalizeStuckJobsWithR2Check_NilR2Client(t *testing.T) {
 		t.Errorf("job status = %q, want %q", status, db.StatusDead)
 	}
 }
+
+func TestSyncJobCompletionsFromR2_BackfillsTerminalLaunchAttempt(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	completedLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create completed launch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, completedLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	completedRunID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID completed: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, cloud_outcome = ?, start_time = ?, end_time = ? WHERE id = ?`,
+		db.StatusCanceled, db.AttemptOutcomeOrphaned, int64(100), int64(180), completedRunID,
+	); err != nil {
+		t.Fatalf("seed orphaned attempt: %v", err)
+	}
+	retryLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create retry launch: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", &retryLaunchID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt retry: %v", err)
+	}
+
+	origSync := reconcileCheckAndSyncJobCompleteRun
+	t.Cleanup(func() { reconcileCheckAndSyncJobCompleteRun = origSync })
+	var gotRunID int64
+	reconcileCheckAndSyncJobCompleteRun = func(_ context.Context, _ *r2.Client, dbConn *sql.DB, gotJobID, runID int64) bool {
+		gotRunID = runID
+		if gotJobID != jobID {
+			t.Fatalf("jobID = %d, want %d", gotJobID, jobID)
+		}
+		if _, err := db.RecordCloudJobCompletion(dbConn, gotJobID, 0, 100, 200, "", time.Time{}, runID); err != nil {
+			t.Fatalf("RecordCloudJobCompletion: %v", err)
+		}
+		return true
+	}
+
+	syncJobCompletionsFromR2(database, &r2.Client{}, completedLaunchID)
+
+	if gotRunID != completedRunID {
+		t.Fatalf("synced runID = %d, want %d", gotRunID, completedRunID)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusCompleted)
+	}
+}

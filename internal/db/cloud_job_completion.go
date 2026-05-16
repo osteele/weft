@@ -129,6 +129,28 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			return 0, fmt.Errorf("finalize later same-launch attempts for job %d: %w", jobID, err)
 		}
 	}
+	if runID > 0 && exitCode == 0 {
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			 SET status = ?, exit_code = ?, start_time = COALESCE(start_time, ?),
+			     end_time = ?, last_synced_status = ?,
+			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
+			     cloud_outcome = ?
+			 WHERE job_id = ?
+			   AND launch_id IS NOT NULL
+			   AND id != ?
+			   AND attempt_number > (
+			       SELECT attempt_number FROM job_attempts WHERE id = ? AND job_id = ?
+			   )
+			   AND end_time IS NULL
+			   AND status IN (?, ?, ?)`,
+			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, AttemptOutcomeSuperseded,
+			jobID, runID, runID, jobID,
+			StatusQueued, StatusStarting, StatusRunning,
+		); err != nil {
+			return 0, fmt.Errorf("supersede later attempts after completed run for job %d: %w", jobID, err)
+		}
+	}
 
 	// If the latest attempt has no launch_id (e.g., a blank replacement from
 	// cleanupStaleAttempts), infer it by finding a sibling launch that ran

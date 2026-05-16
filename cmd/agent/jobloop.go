@@ -466,8 +466,10 @@ func (m *setupPrewarmManager) waitFor(job cloud.AgentJob) setupPrewarmResult {
 
 // jobSequenceResult holds the outcome of running a sequence of jobs.
 type jobSequenceResult struct {
-	FailedJobs []int64
-	AnyFailed  bool
+	FailedJobs      []int64
+	AnyFailed       bool
+	AnyCanceled     bool
+	StartedJobCount int
 }
 
 // runJobSequence runs a slice of agent jobs sequentially, overlapping post-job
@@ -500,6 +502,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		if _, canceled := canceledAttempts[job.RunID]; canceled {
 			fmt.Printf("--- Job %d (run %d) canceled by orchestrator; skipping ---\n", job.ID, job.RunID)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetailf("attempt %d canceled by orchestrator", job.RunID))
+			result.AnyCanceled = true
 			continue
 		}
 
@@ -570,6 +573,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// Write .started marker to R2
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", time.Now().Unix()))
+		result.StartedJobCount++
 		paths := runner.NewJobPaths(cfg.LogDir, job.ID)
 		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Timeseries)
 		stopTelemetryUploader := startTelemetryUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Telemetry)

@@ -70,7 +70,17 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	if latestRunID.Valid {
 		runID = latestRunID.Int64
 	}
+	return checkAndSyncJobCompleteRun(ctx, r2c, database, jobID, runID, terminalBackfill)
+}
 
+func CheckAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID, runID int64) bool {
+	if !r2c.IsConfigured() || runID <= 0 {
+		return false
+	}
+	return checkAndSyncJobCompleteRun(ctx, r2c, database, jobID, runID, false)
+}
+
+func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID, runID int64, allowAnyRunFallback bool) bool {
 	// Check for .complete marker at the latest_run_id; on miss, when the job
 	// is terminal and needs backfill, scan the job's prefix for any other
 	// run_id that has a marker (cleanupStaleAttempts may have advanced
@@ -78,7 +88,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	completeKey := r2keys.JobAttemptComplete(jobID, runID)
 	markerData, markerLastModified, markerErr := r2c.GetObjectWithMeta(ctx, completeKey)
 	if markerErr != nil || len(markerData) == 0 {
-		if !terminalBackfill {
+		if !allowAnyRunFallback {
 			return false
 		}
 		altRunID, ok := findAnyCompletedRunID(ctx, r2c, jobID)

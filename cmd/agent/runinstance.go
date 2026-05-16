@@ -265,12 +265,7 @@ func runInstance(args []string) {
 			SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 		})
 	} else {
-		terminalStatus := db.LaunchStatusCompleted
-		terminationReason := db.TerminationReasonCompleted
-		if anyFailed {
-			terminalStatus = db.LaunchStatusFailed
-			terminationReason = db.TerminationReasonJobFailure
-		}
+		terminalStatus, terminationReason := terminalOutcomeForSequence(seqResult)
 		cm := collectCompletionManifest(logDir, manifest.Jobs)
 		selfDestruct(selfDestructOpts{
 			Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: manifest.SelfDestructCmd,
@@ -278,6 +273,16 @@ func runInstance(args []string) {
 			Phase: currentPhase.Get(), CompletionManifest: cm,
 		})
 	}
+}
+
+func terminalOutcomeForSequence(seqResult jobSequenceResult) (string, string) {
+	if seqResult.AnyFailed {
+		return db.LaunchStatusFailed, db.TerminationReasonJobFailure
+	}
+	if seqResult.AnyCanceled && seqResult.StartedJobCount == 0 {
+		return db.LaunchStatusCancelled, db.TerminationReasonCancelled
+	}
+	return db.LaunchStatusCompleted, db.TerminationReasonCompleted
 }
 
 func campaignDiskPath(jobs []cloud.AgentJob) string {

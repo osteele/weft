@@ -6,7 +6,52 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/db"
 )
+
+func TestTerminalOutcomeForSequence(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     jobSequenceResult
+		wantStatus string
+		wantReason string
+	}{
+		{
+			name:       "successful run",
+			result:     jobSequenceResult{StartedJobCount: 1},
+			wantStatus: db.LaunchStatusCompleted,
+			wantReason: db.TerminationReasonCompleted,
+		},
+		{
+			name:       "failed run",
+			result:     jobSequenceResult{StartedJobCount: 1, AnyFailed: true},
+			wantStatus: db.LaunchStatusFailed,
+			wantReason: db.TerminationReasonJobFailure,
+		},
+		{
+			name:       "canceled before any job started",
+			result:     jobSequenceResult{AnyCanceled: true},
+			wantStatus: db.LaunchStatusCancelled,
+			wantReason: db.TerminationReasonCancelled,
+		},
+		{
+			name:       "canceled after at least one job started",
+			result:     jobSequenceResult{StartedJobCount: 1, AnyCanceled: true},
+			wantStatus: db.LaunchStatusCompleted,
+			wantReason: db.TerminationReasonCompleted,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStatus, gotReason := terminalOutcomeForSequence(tt.result)
+			if gotStatus != tt.wantStatus || gotReason != tt.wantReason {
+				t.Fatalf("terminalOutcomeForSequence() = (%q, %q), want (%q, %q)",
+					gotStatus, gotReason, tt.wantStatus, tt.wantReason)
+			}
+		})
+	}
+}
 
 func TestRcloneTimeoutForBytes(t *testing.T) {
 	tests := []struct {

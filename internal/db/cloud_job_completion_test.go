@@ -355,6 +355,87 @@ func TestRecordCloudJobCompletion_FinalizesLaterSameLaunchOpenAttempt(t *testing
 	}
 }
 
+func TestRecordCloudJobCompletion_SupersedesLaterOpenRetryAfterSuccess(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	firstLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch first: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, firstLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID first: %v", err)
+	}
+	firstRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID first: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ?, end_time = ?, cloud_outcome = ? WHERE id = ?`,
+		StatusCanceled, int64(100), int64(180), AttemptOutcomeOrphaned, firstRunID,
+	); err != nil {
+		t.Fatalf("seed orphaned first attempt: %v", err)
+	}
+	secondLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch second: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", &secondLaunchID, StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt second: %v", err)
+	}
+	secondRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID second: %v", err)
+	}
+
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", time.Time{}, firstRunID); err != nil {
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
+	}
+
+	var firstStatus string
+	var firstExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, exit_code FROM job_attempts WHERE id = ?`,
+		firstRunID,
+	).Scan(&firstStatus, &firstExit); err != nil {
+		t.Fatalf("query first attempt: %v", err)
+	}
+	if firstStatus != StatusCompleted || !firstExit.Valid || firstExit.Int64 != 0 {
+		t.Fatalf("first attempt = status %q exit %v, want completed/0", firstStatus, firstExit)
+	}
+
+	var secondStatus, secondOutcome string
+	var secondExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, cloud_outcome, exit_code FROM job_attempts WHERE id = ?`,
+		secondRunID,
+	).Scan(&secondStatus, &secondOutcome, &secondExit); err != nil {
+		t.Fatalf("query second attempt: %v", err)
+	}
+	if secondStatus != StatusCompleted || secondOutcome != AttemptOutcomeSuperseded || !secondExit.Valid || secondExit.Int64 != 0 {
+		t.Fatalf("second attempt = status %q outcome %q exit %v, want completed/superseded/0", secondStatus, secondOutcome, secondExit)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusCompleted)
+	}
+}
+
 // TestNeedsCloudCompletionBackfill_StartTimeZero is a regression guard for the
 // case where an earlier marker-only sync wrote start_time=0 alongside a
 // fabricated end_time. NeedsCloudCompletionBackfill must still return true so

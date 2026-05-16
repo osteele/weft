@@ -80,9 +80,10 @@ var (
 		}
 		return strings.TrimSpace(out) != "", nil
 	}
-	fetchReconcileTerminationIntent  = fetchTerminationIntentFromR2
-	reconcileCheckR2GraceStatus      = checkR2GraceStatus
-	reconcileCheckAndSyncJobComplete = CheckAndSyncJobComplete
+	fetchReconcileTerminationIntent     = fetchTerminationIntentFromR2
+	reconcileCheckR2GraceStatus         = checkR2GraceStatus
+	reconcileCheckAndSyncJobComplete    = CheckAndSyncJobComplete
+	reconcileCheckAndSyncJobCompleteRun = CheckAndSyncJobCompleteRun
 	// reconcileObjectExists is the R2 existence check used by the
 	// dud-Vast watchdog. Stubbable so tests can drive it without a
 	// real S3 backend (mirrors the fetchReconcileHeartbeat pattern).
@@ -478,11 +479,18 @@ func syncJobCompletionsFromR2(database *sql.DB, r2Client *r2.Client, instanceID 
 	ctx := context.Background()
 	var synced, remaining int
 	for _, j := range jobs {
-		if !IsJobTerminal(AttemptDisplayStatus(j, attemptOutcomes)) {
+		status := AttemptDisplayStatus(j, attemptOutcomes)
+		if !IsJobTerminal(status) {
 			if reconcileCheckAndSyncJobComplete(ctx, r2Client, database, j.ID) {
 				synced++
 			} else {
 				remaining++
+			}
+			continue
+		}
+		if j.LatestRunID != nil && (j.ExitCode == nil || j.StartTime == 0 || j.EndTime == nil || *j.EndTime == 0) {
+			if reconcileCheckAndSyncJobCompleteRun(ctx, r2Client, database, j.ID, *j.LatestRunID) {
+				synced++
 			}
 		}
 	}
