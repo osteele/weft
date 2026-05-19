@@ -64,7 +64,7 @@ func (m listTUIModel) exitSummaryAt(now time.Time, width int) string {
 func (m listTUIModel) exitSummaryOrder() string {
 	switch m.effectiveGroupMode() {
 	case listGroupStatus:
-		return "status, job id"
+		return "job id"
 	case listGroupProject:
 		return "project, current list order"
 	case listGroupHost:

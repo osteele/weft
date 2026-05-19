@@ -52,7 +52,7 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 	out := model.exitSummaryAt(now, 96)
 	for _, want := range []string{
 		"Group: status",
-		"Order: status, job id",
+		"Order: job id",
 		"Filter: none",
 		"Running (1):",
 		"wj707",
