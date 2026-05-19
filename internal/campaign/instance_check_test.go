@@ -566,6 +566,37 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_ProviderDead_MissingLaunchedInstanceIsProviderFailure(t *testing.T) {
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	launchedAt := time.Now().Add(-10 * time.Minute).Unix()
+	agentReadyAt := time.Now().Add(-8 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReadyAt,
+		},
+		ProviderInst: nil,
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionProviderDead {
+		t.Fatalf("action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
+	}
+	if action.TerminationReason != db.TerminationReasonProviderFailure {
+		t.Fatalf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonProviderFailure)
+	}
+	if action.AttemptOutcome != db.AttemptOutcomeOrphaned {
+		t.Fatalf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeOrphaned)
+	}
+}
+
 func TestCheckInstance_PauseTolerant_Exited_Preempted(t *testing.T) {
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),

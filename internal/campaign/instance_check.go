@@ -839,8 +839,8 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	// R2 markers may override below with a more specific reason.
 	reason := db.TerminationReasonUnknown
 	outcome := db.AttemptOutcomeOrphaned
-	if ci.LaunchedAt != nil && inst != nil && inst.Status != "" {
-		if pauseTolerant && inst.Status == cloud.ProviderStatusExited {
+	if ci.LaunchedAt != nil {
+		if pauseTolerant && inst != nil && inst.Status == cloud.ProviderStatusExited {
 			reason = db.TerminationReasonPreempted
 			outcome = db.AttemptOutcomePreempted
 		} else {
