@@ -899,6 +899,48 @@ func TestAppendRecentFailedLaunchRows_NilOrEmptyEmitsNothing(t *testing.T) {
 	}
 }
 
+func TestAppendRecentFailedLaunchRows_HeaderCountsRenderableFailures(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentLaunchFailures{
+		items: []*db.Launch{
+			nil,
+			{
+				ID:                100,
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonUnknown,
+				TerminationDetail: "provider dead",
+				EndedAt:           testInt64Ptr(9_500),
+			},
+			{
+				ID:                101,
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonUnknown,
+				TerminationDetail: "provider dead",
+				EndedAt:           testInt64Ptr(9_600),
+			},
+		},
+		recoveredIDs: map[int64]bool{
+			999: true,
+			101: true,
+		},
+		windowSince: now.Add(-30 * time.Minute),
+	}
+
+	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
+	stripped := stripANSI(out)
+	for _, want := range []string{
+		"Recent launch failures (2 in last 30m, 1 already replaced):",
+		"reason: unknown failure (2)",
+	} {
+		if !strings.Contains(stripped, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(stripped, "Recent launch failures (0") {
+		t.Fatalf("header used a stale zero count:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_RecentLaunchFailuresSection(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	failures := &recentLaunchFailures{

@@ -1015,25 +1015,9 @@ func appendRecentFailedLaunchRows(
 	projectWidth, width int,
 	now time.Time,
 ) []groupedStatusRow {
-	if failures == nil || len(failures.items) == 0 {
+	if failures == nil {
 		return rows
 	}
-
-	total := len(failures.items)
-	windowText := ""
-	if !failures.windowSince.IsZero() {
-		windowText = " in last " + formatProjectRecentWindow(now.Sub(failures.windowSince))
-	}
-	headerText := fmt.Sprintf("Recent launch failures (%d%s", total, windowText)
-	if recovered := len(failures.recoveredIDs); recovered > 0 {
-		headerText += fmt.Sprintf(", %d already replaced", recovered)
-	}
-	headerText += "):"
-	rows = append(rows, groupedStatusRow{
-		text:     headerText,
-		isHeader: true,
-		section:  launchFailuresSectionKey,
-	})
 
 	type bucket struct {
 		reason string
@@ -1041,9 +1025,15 @@ func appendRecentFailedLaunchRows(
 	}
 	bucketIdx := make(map[string]int)
 	buckets := make([]bucket, 0, 4)
+	total := 0
+	recovered := 0
 	for _, f := range failures.items {
 		if f == nil {
 			continue
+		}
+		total++
+		if failures.recoveredIDs[f.ID] {
+			recovered++
 		}
 		reason := strings.TrimSpace(db.HumanizeTerminationReason(f.TerminationReason))
 		if reason == "" {
@@ -1056,6 +1046,25 @@ func appendRecentFailedLaunchRows(
 		bucketIdx[reason] = len(buckets)
 		buckets = append(buckets, bucket{reason: reason, items: []*db.Launch{f}})
 	}
+	if total == 0 {
+		return rows
+	}
+
+	windowText := ""
+	if !failures.windowSince.IsZero() {
+		windowText = " in last " + formatProjectRecentWindow(now.Sub(failures.windowSince))
+	}
+	headerText := fmt.Sprintf("Recent launch failures (%d%s", total, windowText)
+	if recovered > 0 {
+		headerText += fmt.Sprintf(", %d already replaced", recovered)
+	}
+	headerText += "):"
+	rows = append(rows, groupedStatusRow{
+		text:     headerText,
+		isHeader: true,
+		section:  launchFailuresSectionKey,
+	})
+
 	sort.SliceStable(buckets, func(i, j int) bool {
 		if len(buckets[i].items) != len(buckets[j].items) {
 			return len(buckets[i].items) > len(buckets[j].items)
