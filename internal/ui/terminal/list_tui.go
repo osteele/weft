@@ -3243,7 +3243,7 @@ type groupedViewportLine struct {
 type groupedViewportSection struct {
 	title          string
 	headerRowIndex int
-	jobCount       int
+	itemCount      int
 	rows           []groupedStatusRow
 	shownRows      int
 	ellipsis       bool
@@ -3280,8 +3280,8 @@ func parseGroupedViewportSections(rows []groupedStatusRow) []groupedViewportSect
 			continue
 		}
 		current.rows = append(current.rows, row)
-		if row.job != nil && !row.isBlocked {
-			current.jobCount++
+		if (row.job != nil || row.launch != nil) && !row.isBlocked {
+			current.itemCount++
 		}
 	}
 	if active {
@@ -3332,9 +3332,9 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []group
 				out = append(out, groupedViewportLine{text: "", rowIdx: -1})
 			}
 			if section.summaryOnly {
-				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d)", section.title, section.jobCount), rowIdx: -1})
+				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d)", section.title, section.itemCount), rowIdx: -1})
 			} else {
-				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d):", section.title, section.jobCount), rowIdx: section.headerRowIndex})
+				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d):", section.title, section.itemCount), rowIdx: section.headerRowIndex})
 				for i := 0; i < section.shownRows && i < len(section.rows) && i < len(section.rowIdxs); i++ {
 					out = append(out, groupedViewportLine{text: section.rows[i].text, rowIdx: section.rowIdxs[i]})
 				}

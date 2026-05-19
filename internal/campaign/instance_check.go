@@ -343,10 +343,15 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			if status == "" {
 				status = "terminal"
 			}
+			reason := db.TerminationReasonInfraFailure
+			switch status {
+			case db.StatusFailed, db.StatusDead, db.StatusKilled:
+				reason = db.TerminationReasonJobFailure
+			}
 			return InstanceAction{
 				Kind:              ActionTerminalLivePhase,
 				TerminalStatus:    db.LaunchStatusFailed,
-				TerminationReason: db.TerminationReasonInfraFailure,
+				TerminationReason: reason,
 				StallMessage:      fmt.Sprintf("live phase reports wj%d running, but its attempt is %s for %s — terminating instance", p.RunningPhaseJobID, status, age.Truncate(time.Second)),
 				DestroyProvider:   true,
 				ResetJobs:         true,

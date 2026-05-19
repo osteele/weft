@@ -30,6 +30,9 @@ func TestCheckInstance_GraceExpired_ForceDestroyAfterTimeout(t *testing.T) {
 	if action.TerminalStatus != db.LaunchStatusFailed {
 		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
 	}
+	if action.TerminationReason != db.TerminationReasonJobFailure {
+		t.Errorf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonJobFailure)
+	}
 	if !action.DestroyProvider {
 		t.Error("DestroyProvider should be true")
 	}

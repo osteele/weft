@@ -798,6 +798,74 @@ func TestGetLaunchJobsIncludingAttemptsUsesHistoricalAttemptTiming(t *testing.T)
 	}
 }
 
+func TestGetLaunchJobsIncludingAttemptsDoesNotUseLaterAttemptState(t *testing.T) {
+	database := setupTestDB(t)
+
+	firstInstanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(first): %v", err)
+	}
+	secondInstanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "runpod",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(second): %v", err)
+	}
+
+	insertTestJob(t, database, 402, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 402, firstInstanceID); err != nil {
+		t.Fatalf("SetJobLaunchID(first): %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, 402); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(first): %v", err)
+	}
+	if _, err := ResetLaunchJobs(database, firstInstanceID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs(first): %v", err)
+	}
+
+	if err := SetJobLaunchID(database, 402, secondInstanceID); err != nil {
+		t.Fatalf("SetJobLaunchID(second): %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, 402); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(second): %v", err)
+	}
+	if _, err := database.Exec(`
+		UPDATE job_attempts
+		   SET status = ?, end_time = strftime('%s','now'), exit_code = 1,
+		       error_message = ?, failure_reason = ?
+		 WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+		StatusFailed, "later attempt failed", "error", 402, secondInstanceID,
+	); err != nil {
+		t.Fatalf("fail second attempt: %v", err)
+	}
+
+	jobs, err := GetLaunchJobsIncludingAttempts(database, firstInstanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchJobsIncludingAttempts(first): %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	if jobs[0].LaunchID == nil || *jobs[0].LaunchID != firstInstanceID {
+		t.Fatalf("LaunchID = %v, want %d", jobs[0].LaunchID, firstInstanceID)
+	}
+	if jobs[0].Status != StatusQueued {
+		t.Fatalf("historical status = %q, want %q", jobs[0].Status, StatusQueued)
+	}
+	if jobs[0].ExitCode != nil {
+		t.Fatalf("historical exit code = %v, want nil", *jobs[0].ExitCode)
+	}
+	if strings.Contains(jobs[0].ErrorMessage, "later attempt failed") {
+		t.Fatalf("historical error message used later attempt: %q", jobs[0].ErrorMessage)
+	}
+}
+
 func TestResetOrphanedCloudJobsSetsPlacementReasons(t *testing.T) {
 	database := setupTestDB(t)
 

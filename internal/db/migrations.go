@@ -411,6 +411,12 @@ var versionedMigrations = []migration{
 			return addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0`)
 		},
 	},
+	{
+		Description: "recreate launch job membership view",
+		Apply: func(db *sql.DB) error {
+			return createJobStateViews(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

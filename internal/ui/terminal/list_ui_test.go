@@ -857,6 +857,34 @@ func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
 	}
 }
 
+func TestGroupedViewportCountsLaunchFailureRows(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentLaunchFailures{
+		items: []*db.Launch{
+			{ID: 81, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonUnknown, TerminationDetail: "provider dead", EndedAt: testInt64Ptr(9_900)},
+			{ID: 82, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure, TerminationDetail: "job failed", EndedAt: testInt64Ptr(9_901)},
+			{ID: 83, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "infra failed", EndedAt: testInt64Ptr(9_902)},
+		},
+		windowSince: now.Add(-30 * time.Minute),
+	}
+	rows := buildGroupedStatusRowsWithOptions(nil, 100, groupedStatusRenderOptions{
+		launchFailures: failures,
+		now:            now,
+	})
+
+	lines := selectGroupedRowsForViewport(rows, 20)
+	if len(lines) == 0 {
+		t.Fatal("selectGroupedRowsForViewport returned no lines")
+	}
+	got := stripANSI(lines[0].text)
+	if !strings.Contains(got, "Recent launch failures (3):") {
+		t.Fatalf("header = %q, want launch failure count", got)
+	}
+	if strings.Contains(got, "(0)") {
+		t.Fatalf("header counted jobs instead of launch failures: %q", got)
+	}
+}
+
 func TestListTUIUngroupedViewShowsSelectedJobDetail(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: false,

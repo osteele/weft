@@ -550,7 +550,33 @@ func createJobStateViews(db *sql.DB) error {
 	currentMembershipColumns := qualifiedJobSelectColumnsWithOverrides("js", map[string]string{
 		"launch_id": "current_memberships.membership_launch_id",
 	})
-	historicalMembershipColumns := qualifiedJobSelectColumns("js")
+	historicalMembershipColumns := qualifiedJobSelectColumnsWithOverrides("js", map[string]string{
+		"queued_at":  "ja.queued_at",
+		"start_time": "ja.start_time",
+		"end_time":   "ja.end_time",
+		"exit_code":  "ja.exit_code",
+		"status": `CASE
+			WHEN COALESCE(ja.cloud_outcome, '') IN ('orphaned', 'canceled')
+			     THEN 'queued'
+			WHEN ja.exit_code = 0 THEN 'completed'
+			WHEN ja.exit_code IS NOT NULL THEN 'failed'
+			ELSE ja.status
+		END`,
+		"error_message":      "ja.error_message",
+		"backend":            "COALESCE(ja.backend, js.backend)",
+		"remote_id":          "ja.remote_id",
+		"remote_state":       "ja.remote_state",
+		"failure_reason":     "ja.failure_reason",
+		"last_synced_status": "ja.last_synced_status",
+		"pending_status":     "ja.pending_status",
+		"pending_at":         "ja.pending_at",
+		"job_metadata":       "ja.job_metadata",
+		"cost":               "ja.cost",
+		"error_diagnosis":    "ja.error_diagnosis",
+		"placement_meta":     "ja.placement_meta",
+		"observed_inputs":    "ja.observed_inputs",
+		"launch_id":          "historical_memberships.membership_launch_id",
+	})
 	if _, err := db.Exec(fmt.Sprintf(`
 		CREATE VIEW launch_job_membership AS
 		WITH current_memberships AS (
@@ -561,14 +587,22 @@ func createJobStateViews(db *sql.DB) error {
 			WHERE js.launch_id IS NOT NULL
 		),
 		historical_memberships AS (
-			SELECT DISTINCT
-			       ja.job_id AS job_id,
-			       ja.launch_id AS membership_launch_id
-			FROM job_attempts ja
-			JOIN job_status js ON js.id = ja.job_id
-			WHERE ja.launch_id IS NOT NULL
-			  AND ja.end_time IS NOT NULL
-			  AND (js.launch_id IS NULL OR ja.launch_id != js.launch_id)
+			SELECT job_id, membership_launch_id, attempt_id
+			FROM (
+				SELECT ja.job_id AS job_id,
+				       ja.launch_id AS membership_launch_id,
+				       ja.id AS attempt_id,
+				       ROW_NUMBER() OVER (
+					       PARTITION BY ja.job_id, ja.launch_id
+					       ORDER BY ja.attempt_number DESC
+				       ) AS rn
+				FROM job_attempts ja
+				JOIN job_status js ON js.id = ja.job_id
+				WHERE ja.launch_id IS NOT NULL
+				  AND ja.end_time IS NOT NULL
+				  AND (js.launch_id IS NULL OR ja.launch_id != js.launch_id)
+			)
+			WHERE rn = 1
 		)
 		SELECT %s,
 		       current_memberships.membership_launch_id,
@@ -583,6 +617,7 @@ func createJobStateViews(db *sql.DB) error {
 		       1 AS membership_rank
 		FROM job_status js
 		JOIN historical_memberships ON historical_memberships.job_id = js.id
+		JOIN job_attempts ja ON ja.id = historical_memberships.attempt_id
 	`, currentMembershipColumns, historicalMembershipColumns)); err != nil {
 		return err
 	}
