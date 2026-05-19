@@ -345,6 +345,11 @@ safety margin for placement and queue admission checks. For example,
 `gpu-mem = 8` is treated as an effective `10GB` requirement. Use strict mode
 (`gpu-mem-strict = true` or `--gpu-mem-strict`) to keep exact matching.
 
+Memory inside a GPU selector is different. `gpu = "a100>=80GB"` or
+`--gpu a100>=80GB` means "use an A100-class GPU whose advertised capacity is at
+least 80GB"; weft does not add `+2GB` to that hardware floor. Use separate
+`gpu-mem` / `--gpu-mem` when the number is the workload's expected VRAM use.
+
 The default floor is 20GB when any GPU flag is used and no explicit `gpu-mem`
 is provided. For lightweight workloads, this default causes the bidding system
 to consider all GPU tiers including expensive H100 and H200 instances that

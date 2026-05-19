@@ -44,19 +44,21 @@ func parseGPUFlag(value string) (gpuClass string, gpuMemGB int, err error) {
 // inputs; receivers consume the expanded triple. Leaves numeric gpu (CUDA
 // device index) and empty gpu untouched. Existing non-empty class or mem are
 // not overwritten by the expansion.
-func expandGPUFlag(gpu, gpuClass string, gpuMemGB int) (string, string, int, error) {
+func expandGPUFlag(gpu, gpuClass string, gpuMemGB int) (string, string, int, bool, error) {
 	if gpu == "" || isNumericGPU(gpu) {
-		return gpu, gpuClass, gpuMemGB, nil
+		return gpu, gpuClass, gpuMemGB, false, nil
 	}
 	parsedClass, parsedMem, err := parseGPUFlag(gpu)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, false, err
 	}
 	if gpuClass == "" {
 		gpuClass = parsedClass
 	}
+	memFromGPUSelector := false
 	if gpuMemGB == 0 && parsedMem > 0 {
 		gpuMemGB = parsedMem
+		memFromGPUSelector = true
 	}
-	return "", gpuClass, gpuMemGB, nil
+	return "", gpuClass, gpuMemGB, memFromGPUSelector, nil
 }

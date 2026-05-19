@@ -513,8 +513,38 @@ func TestParseRestartOverrides_ParsesGPUAndMem(t *testing.T) {
 	if overrides.GPUClass != "nvidia" {
 		t.Fatalf("GPUClass = %q, want nvidia", overrides.GPUClass)
 	}
+	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24", overrides.GPUMemGB)
+	}
+	if !overrides.GPUMemHardwareFloor {
+		t.Fatalf("GPUMemHardwareFloor = false, want true")
+	}
+}
+
+func TestParseRestartOverrides_SeparateGPUMemAddsHeadroom(t *testing.T) {
+	restartGPU = ""
+	restartGPUClass = "nvidia"
+	restartGPUMem = 24
+	restartGPUMemStrict = false
+
+	cmd := &cobra.Command{Use: "retry"}
+	addRestartFlags(cmd)
+	if err := cmd.Flags().Set("gpu-class", "nvidia"); err != nil {
+		t.Fatalf("set gpu-class flag: %v", err)
+	}
+	if err := cmd.Flags().Set("gpu-mem", "24"); err != nil {
+		t.Fatalf("set gpu-mem flag: %v", err)
+	}
+
+	overrides, err := parseRestartOverrides(cmd)
+	if err != nil {
+		t.Fatalf("parseRestartOverrides: %v", err)
+	}
 	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 26 {
 		t.Fatalf("GPUMemGB = %v, want 26 (24 + headroom)", overrides.GPUMemGB)
+	}
+	if overrides.GPUMemHardwareFloor {
+		t.Fatalf("GPUMemHardwareFloor = true, want false")
 	}
 }
 
@@ -551,6 +581,9 @@ func TestRestartQueuedJob_UpdatesGPUOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
+	if err := db.SetJobPlacementReasons(database, jobID, []string{"planner: no offers from providers for gpu=A100 vram>=82GB"}); err != nil {
+		t.Fatalf("set placement reasons: %v", err)
+	}
 	overrides := restartOverrides{
 		GPUClass:  "nvidia",
 		GPUMemGB:  intPtrRestart(24),
@@ -570,6 +603,9 @@ func TestRestartQueuedJob_UpdatesGPUOverrides(t *testing.T) {
 	}
 	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
 		t.Fatalf("GPUMemGB = %v, want 24", job.GPUMemGB)
+	}
+	if len(job.PlacementReasons) != 0 {
+		t.Fatalf("PlacementReasons = %v, want cleared", job.PlacementReasons)
 	}
 }
 

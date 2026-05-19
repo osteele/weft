@@ -941,6 +941,10 @@ weft retry wj548 wj549 --gpu-class nvidia --gpu-mem 24
 weft retry wj548 wj549 --gpu-class nvidia --gpu-mem 24 --gpu-mem-strict
 ```
 
+Memory embedded in `--gpu` (for example `a100>=80GB`) is treated as an
+exact hardware capacity floor. It does not receive the `+2GB` workload
+headroom that applies to separate `--gpu-mem` values.
+
 `retry` re-syncs project-derived inputs/outputs and re-reads `[tool.weft]`
 script metadata for GPU defaults. Explicit `retry` flags (`--gpu`,
 `--gpu-class`, `--gpu-mem`, `--gpu-mem-strict`) take precedence over script

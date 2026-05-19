@@ -51,19 +51,20 @@ var (
 )
 
 type restartOverrides struct {
-	GPU             string
-	GPUClass        string
-	Provider        *string
-	GPUMemGB        *int
-	GPUMemStrict    bool
-	HasAny          bool
-	HasGPUMem       bool
-	HasGPUMemStrict bool
-	HasProvider     bool
-	HasDisk         bool
-	DiskGB          *int
-	HasRuntimeDisk  bool
-	RuntimeDiskGB   *int
+	GPU                 string
+	GPUClass            string
+	Provider            *string
+	GPUMemGB            *int
+	GPUMemStrict        bool
+	GPUMemHardwareFloor bool
+	HasAny              bool
+	HasGPUMem           bool
+	HasGPUMemStrict     bool
+	HasProvider         bool
+	HasDisk             bool
+	DiskGB              *int
+	HasRuntimeDisk      bool
+	RuntimeDiskGB       *int
 }
 
 func init() {
@@ -193,6 +194,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 			restartGPUMem = parsedMem
 			hasGPUMem = true
 			out.HasGPUMem = true
+			out.GPUMemHardwareFloor = true
 		}
 		gpuValue = ""
 	}
@@ -200,7 +202,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	if hasGPUMem {
 		mem := restartGPUMem
 		if mem > 0 {
-			effective := applyGPUMemHeadroom(mem, true, out.GPUMemStrict)
+			effective := applyGPUMemHeadroom(mem, true, out.GPUMemStrict, out.GPUMemHardwareFloor)
 			out.GPUMemGB = &effective
 		} else {
 			out.GPUMemGB = nil
@@ -363,7 +365,7 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 		return nil, nil
 	}
 
-	metaGPU, metaGPUClass, metaGPUMem, err := expandGPUFlag(meta.GPU, meta.GPUClass, meta.GPUMemGB)
+	metaGPU, metaGPUClass, metaGPUMem, metaMemHardware, err := expandGPUFlag(meta.GPU, meta.GPUClass, meta.GPUMemGB)
 	if err != nil {
 		return nil, fmt.Errorf("parse script metadata gpu: %w", err)
 	}
@@ -375,6 +377,7 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 	}
 
 	cliGPU, cliGPUClass, cliGPUMem := "", "", 0
+	cliMemHardware := false
 	cliGPUMemSet, cliStrict, cliStrictSet := false, false, false
 	if o := job.CLIResourceOverrides; o != nil {
 		cliGPU, cliGPUClass = o.GPU, o.GPUClass
@@ -387,7 +390,7 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 			cliStrictSet = true
 		}
 		var err error
-		cliGPU, cliGPUClass, cliGPUMem, err = expandGPUFlag(cliGPU, cliGPUClass, cliGPUMem)
+		cliGPU, cliGPUClass, cliGPUMem, cliMemHardware, err = expandGPUFlag(cliGPU, cliGPUClass, cliGPUMem)
 		if err != nil {
 			return nil, fmt.Errorf("parse cli gpu override: %w", err)
 		}
@@ -417,10 +420,13 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 		effStrict = metaStrict
 	}
 	effGPUMemRaw := 0
+	effMemHardware := false
 	if cliGPUMemSet {
 		effGPUMemRaw = cliGPUMem
+		effMemHardware = cliMemHardware
 	} else if metaGPUMem > 0 {
 		effGPUMemRaw = metaGPUMem
+		effMemHardware = metaMemHardware
 	}
 
 	var updates []string
@@ -450,7 +456,7 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 
 	var effMem *int
 	if effGPUMemRaw > 0 {
-		m := applyGPUMemHeadroom(effGPUMemRaw, true, effStrict)
+		m := applyGPUMemHeadroom(effGPUMemRaw, true, effStrict, effMemHardware)
 		effMem = &m
 	}
 	memChanged := (effMem == nil) != (job.GPUMemGB == nil) ||
@@ -463,6 +469,8 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 		switch {
 		case effMem == nil:
 			updates = append(updates, "gpu-mem: cleared")
+		case effMemHardware:
+			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (hardware floor)", *effMem))
 		case effStrict:
 			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB (strict)", *effMem))
 		default:
@@ -665,6 +673,12 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
 			return err
+		}
+		if len(updates) > 0 {
+			if err := db.SetJobPlacementReasons(database, job.ID, nil); err != nil {
+				return fmt.Errorf("clear stale placement reasons: %w", err)
+			}
+			job.PlacementReasons = nil
 		}
 		queuedEnded := job.EndTime != nil && *job.EndTime > 0
 		cloudAttemptCount, err := db.CountLaunchAttempts(database, jobID)

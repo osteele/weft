@@ -55,6 +55,10 @@ GPU class matching supports exact models (`a100`, `rtx3090`), generations
 (`ampere`), minimum generations (`ampere+`), and families (`nvidia`, `apple`).
 Bare RTX model numbers such as `3090` are normalized to `rtx3090`.
 
+The `>=NGB` form on `--gpu` is a hardware capacity floor. For example,
+`--gpu a100>=80GB` matches 80GB A100 offers exactly; it does not add the
+`+2GB` workload headroom used by separate `--gpu-mem` reservations.
+
 Use `--input` to declare data the job needs:
 
 ```bash

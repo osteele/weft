@@ -580,7 +580,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve --gpu into --gpu-class (and optionally --gpu-mem)
+	gpuMemHardwareFloor := false
+	// Resolve --gpu into --gpu-class (and optionally a hardware memory floor).
 	if runGPU != "" {
 		if runGPUClass != "" {
 			return fmt.Errorf("--gpu and --gpu-class cannot be used together")
@@ -595,6 +596,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("--gpu with >=NGB and --gpu-mem cannot be used together")
 			}
 			runGPUMem = parsedMem
+			gpuMemHardwareFloor = true
 		}
 	}
 
@@ -633,7 +635,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if !predictorNeeded {
 		gpuMemCfg = nil // Skip predictor shell-out; use explicit value or fallback.
 	}
-	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(gpuMemCfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict, host, projectName, command, oomFloor)
+	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(gpuMemCfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict || gpuMemHardwareFloor, host, projectName, command, oomFloor)
 	diskMeta := buildDiskMetadata(runDiskGB, runRuntimeDiskGB)
 
 	// Placement scoring (used for auto-placement and dry-run)

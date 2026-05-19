@@ -267,6 +267,9 @@ func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
 	if job.GPUClass != "a100" {
 		t.Fatalf("gpu_class = %q, want a100", job.GPUClass)
 	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 80 {
+		t.Fatalf("gpu_mem_gb = %v, want 80", job.GPUMemGB)
+	}
 	if !strings.Contains(out.String(), "Draft job #") {
 		t.Fatalf("output missing draft confirmation:\n%s", out.String())
 	}

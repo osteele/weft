@@ -26,7 +26,7 @@ func resolveEffectiveGPUMemAndCeiling(cfg *config.Config, explicit *int, gpu str
 	needsGPU := gpu != "" || gpuClass != ""
 	floor, _, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB)
 	if floor != nil {
-		effective := applyGPUMemHeadroom(*floor, explicit != nil, strict)
+		effective := applyGPUMemHeadroom(*floor, explicit != nil, strict, false)
 		if effective != *floor {
 			floor = &effective
 			predicted = false
@@ -40,8 +40,8 @@ func resolveEffectiveGPUMem(explicit *int, gpu string, gpuClass string, host str
 	return resolveEffectiveGPUMemWithConfig(cfg, explicit, gpu, gpuClass, false, host, project, command, 0)
 }
 
-func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool) int {
-	if !hasExplicitRequest || strict || memGB <= 0 {
+func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool, hardwareFloor bool) int {
+	if !hasExplicitRequest || strict || hardwareFloor || memGB <= 0 {
 		return memGB
 	}
 	return memGB + defaultGPUMemHeadroomGB
