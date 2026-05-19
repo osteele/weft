@@ -54,6 +54,28 @@ version = "12.8.90"
 	if pin.CudaVariant != "cu128" {
 		t.Errorf("CudaVariant = %q, want cu128", pin.CudaVariant)
 	}
+	if got := TorchMinCUDAVersion(dir); got != "12.8" {
+		t.Errorf("TorchMinCUDAVersion = %q, want 12.8", got)
+	}
+}
+
+func TestCUDAVariantVersion(t *testing.T) {
+	tests := []struct {
+		variant string
+		want    string
+	}{
+		{"cu118", "11.8"},
+		{"cu121", "12.1"},
+		{"cu128", "12.8"},
+		{"CU129", "12.9"},
+		{"cpu", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := CUDAVariantVersion(tt.variant); got != tt.want {
+			t.Errorf("CUDAVariantVersion(%q) = %q, want %q", tt.variant, got, tt.want)
+		}
+	}
 }
 
 func TestScanTorchPin_UVLockNvidiaCUDADeps(t *testing.T) {

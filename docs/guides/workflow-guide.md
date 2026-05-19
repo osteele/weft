@@ -273,6 +273,12 @@ CUDA compatibility filter instead, so weft passes `min-cuda` to RunPod pod
 creation. `image-pull-secret` names a configured `[registry]` entry; if it is
 omitted, weft matches by the image registry hostname.
 
+When `uv.lock` or `pyproject.toml` pins torch/CUDA wheels, weft also infers a
+provider CUDA floor from the wheel variant and NVIDIA CUDA package versions
+(for example `nvidia-cusparse-cu12==12.8.x` implies `min-cuda = "12.8"`).
+Explicit `min-cuda` values are still useful when the lockfile is unavailable or
+when custom runtime packages require a stricter floor.
+
 The `vast-cap-add` key requests extra Linux capabilities on Vast.ai
 instances. Example:
 

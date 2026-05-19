@@ -958,6 +958,40 @@ func TestSplitGroupsByImage_ReadsCloudRequirementsFromTildeWorkingDir(t *testing
 	}
 }
 
+func TestSplitGroupsByImage_InferMinCUDAFromTorchLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cusparse-cu12"
+version = "12.8.1.170"
+
+[[package]]
+name = "nvidia-nvjitlink-cu12"
+version = "12.8.93"
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "NVIDIA",
+		Jobs: []*db.Job{{
+			ID:         1995,
+			WorkingDir: dir,
+			Command:    "uv run python scripts/profile_inference.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].MinCUDAVersion != "12.8" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.8", groups[0].MinCUDAVersion)
+	}
+}
+
 func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",

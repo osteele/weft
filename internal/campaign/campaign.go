@@ -790,6 +790,9 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 			imagePullSecret = meta.ImagePullSecret
 		}
 	}
+	if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
+		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
+	}
 	return img, req, imagePullSecret
 }
 

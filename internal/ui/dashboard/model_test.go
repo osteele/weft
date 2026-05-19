@@ -1,10 +1,14 @@
 package dashboard
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -33,6 +37,44 @@ func TestGetTargetJobPrefersHighlightedInDetailsTab(t *testing.T) {
 	m.detailTab = DetailTabLogs
 	if got := m.getTargetJob(); got == nil || got.ID != 2 {
 		t.Fatalf("expected selected log job 2 in Logs tab, got %+v", got)
+	}
+}
+
+func TestFetchCloudOffersUsesTorchCUDAFloor(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cusparse-cu12"
+version = "12.8.1.170"
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	var got cloud.OfferConstraints
+	m := &Model{
+		appConfig: &config.Config{},
+		cloudClients: []cloud.Client{
+			&cloud.MockClient{
+				ProviderVal: cloud.ProviderVastai,
+				SearchOffersFunc: func(c cloud.OfferConstraints) ([]cloud.Offer, error) {
+					got = c
+					return []cloud.Offer{{Provider: cloud.ProviderVastai, ProviderID: "offer-1", GPUName: "RTX 4090", CostPerHour: 1}}, nil
+				},
+			},
+		},
+	}
+	job := &db.Job{ID: 1995, WorkingDir: dir, Command: "uv run python train.py", GPUClass: "nvidia"}
+
+	msg := m.fetchCloudOffers(job)()
+	if loaded, ok := msg.(cloudOffersLoadedMsg); !ok || loaded.err != nil {
+		t.Fatalf("fetchCloudOffers msg = %#v", msg)
+	}
+	if got.MinCUDAVersion != "12.8" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.8", got.MinCUDAVersion)
 	}
 }
 

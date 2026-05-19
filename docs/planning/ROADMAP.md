@@ -12,6 +12,7 @@ instead of maintaining its own provisioning infrastructure.
 | Persistent volumes | High | Reuse caches across instances to avoid repeated dependency/model downloads and shorten time-to-first-job. | `vastai_provision.sh`: volume create/find/attach |
 | Phone-tree copy | High | Fan out warm caches from one seeded machine to many targets so campaigns scale faster with less redundant network work. | `run_campaign.py`: copy loop with seeded/unprovisioned sets |
 | Copy failure fallback | High | Keep launch robust: if copy fails repeatedly, targets should still proceed via direct setup instead of stalling the campaign. | `run_campaign.py`: `--copy-retries` flag |
+| On-prem CUDA inventory | High | Record host CUDA/driver compatibility during inventory discovery so jobs with pinned CUDA wheels are not placed on incompatible local hosts. Cloud placement already has provider CUDA filters; on-prem needs comparable host metadata. | — |
 
 ## Tier 2: High Value
 

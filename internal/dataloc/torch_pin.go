@@ -76,6 +76,33 @@ var cudaBearingNvidiaPackages = map[string]bool{
 	"nvidia-nvjitlink-cu12":    true,
 }
 
+// CUDAVariantVersion converts a torch CUDA wheel tag such as "cu128" or
+// "cu121" to a provider CUDA version floor such as "12.8" or "12.1".
+func CUDAVariantVersion(cudaVariant string) string {
+	cu := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(cudaVariant)), "cu")
+	if len(cu) < 3 {
+		return ""
+	}
+	major := cu[:len(cu)-1]
+	minor := cu[len(cu)-1:]
+	for _, r := range major + minor {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return major + "." + minor
+}
+
+// TorchMinCUDAVersion returns the provider CUDA compatibility floor implied by
+// the project's pinned torch/CUDA packages.
+func TorchMinCUDAVersion(dir string) string {
+	pin := ScanTorchPin(dir)
+	if pin == nil {
+		return ""
+	}
+	return CUDAVariantVersion(pin.CudaVariant)
+}
+
 // scanUVLock scans uv.lock for a torch pin. Returns nil if the file is missing
 // or torch is not present.
 func scanUVLock(path string) *TorchPin {
