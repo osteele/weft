@@ -1336,7 +1336,10 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		return "Auto-pilot: failed — " + m.autoPersistentError
 	}
 	if strings.TrimSpace(m.autoPersistentBlocked) != "" {
-		return fmt.Sprintf("Auto-pilot: paused — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
+		return fmt.Sprintf("Auto-pilot: blocked — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
+	}
+	if summary := autoPilotBlockSummary(m.visibleUnplacedBlockedReasons()); summary != "" {
+		return fmt.Sprintf("Auto-pilot: blocked — %s", summary)
 	}
 	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
 		return formatAutoPilotNextPass(m.autoNextPassAt, unplaced)
@@ -3039,7 +3042,8 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 		baseJobs = excludeJobsWithStatus(baseJobs, db.StatusCanceled)
 	}
 
-	if len(m.autoBlockReasons) == 0 {
+	blockReasons := m.visibleUnplacedBlockedReasonsForJobs(baseJobs)
+	if len(blockReasons) == 0 {
 		return baseJobs
 	}
 	decorated := make([]*db.Job, 0, len(baseJobs))
@@ -3048,7 +3052,7 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 			decorated = append(decorated, nil)
 			continue
 		}
-		reason, ok := m.autoBlockReasons[job.ID]
+		reason, ok := blockReasons[job.ID]
 		if !ok || strings.TrimSpace(reason) == "" || !job.IsUnplacedAwaitingPlacement() {
 			decorated = append(decorated, job)
 			continue
@@ -3058,6 +3062,39 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 		decorated = append(decorated, &copyJob)
 	}
 	return decorated
+}
+
+func (m listTUIModel) visibleUnplacedBlockedReasons() map[int64]string {
+	return m.visibleUnplacedBlockedReasonsForJobs(m.jobs)
+}
+
+func (m listTUIModel) visibleUnplacedBlockedReasonsForJobs(jobs []*db.Job) map[int64]string {
+	reasons := make(map[int64]string)
+	for _, job := range jobs {
+		if job == nil || !job.IsUnplacedAwaitingPlacement() {
+			continue
+		}
+		reason := strings.TrimSpace(m.autoBlockReasons[job.ID])
+		if reason == "" {
+			reason = latestPlacementReason(job)
+		}
+		if reason != "" {
+			reasons[job.ID] = reason
+		}
+	}
+	return reasons
+}
+
+func latestPlacementReason(job *db.Job) string {
+	if job == nil {
+		return ""
+	}
+	for i := len(job.PlacementReasons) - 1; i >= 0; i-- {
+		if reason := strings.TrimSpace(job.PlacementReasons[i]); reason != "" {
+			return campaign.SanitizeBlockedReason(reason)
+		}
+	}
+	return ""
 }
 
 func groupedStatusUnprocessedView(title string) bool {

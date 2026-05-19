@@ -443,6 +443,35 @@ func TestGroupedJobsWithAutoReasonsOnlyAppliesToUnplacedQueuedJobs(t *testing.T)
 	}
 }
 
+func TestGroupedJobsWithAutoReasonsUsesPersistedPlacementReason(t *testing.T) {
+	unplaced := &db.Job{
+		ID:               10,
+		Status:           db.StatusQueued,
+		PlacementReasons: []string{"older reason", "planner: no offers from providers for gpu=A100 vram>=82GB"},
+	}
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		jobs:            []*db.Job{unplaced},
+	}
+
+	decorated := m.groupedJobsWithAutoReasons()
+	if len(decorated) != 1 {
+		t.Fatalf("decorated len = %d, want 1", len(decorated))
+	}
+	if decorated[0] == unplaced {
+		t.Fatal("expected unplaced job to be copied with persisted block reason")
+	}
+	if got := decorated[0].QueueBlockedReason; got != "planner: no offers from providers for gpu=A100 vram>=82GB" {
+		t.Fatalf("QueueBlockedReason = %q", got)
+	}
+
+	line := m.groupedAutoPilotStatusText(0)
+	if !strings.Contains(line, "Auto-pilot: blocked") || !strings.Contains(line, "no offers from providers") {
+		t.Fatalf("auto-pilot line = %q, want persisted block reason", line)
+	}
+}
+
 func TestGroupedJobsWithAutoReasons_UnprocessedGroupedViewExcludesCanceledKeepsKilled(t *testing.T) {
 	killed := &db.Job{ID: 21, Status: db.StatusKilled}
 	canceled := &db.Job{ID: 22, Status: db.StatusCanceled}

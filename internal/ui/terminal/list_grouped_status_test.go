@@ -241,6 +241,32 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_UsesPersistedPlacementReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          1986,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs placement",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"planner: older reason",
+				"planner: no offers from providers for gpu=A100 vram>=82GB disk>=50GB reliability>=0.85",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	blockedWant := "  blocked: planner: no offers from providers for gpu=A100 vram>=82GB disk>=50GB reliability>=0.85 (1)"
+	if !strings.Contains(out, blockedWant) {
+		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
+	}
+	if strings.Contains(out, "older reason") {
+		t.Fatalf("used stale placement reason in output:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	reasonAmpere := "planner: no offers from providers for gpu=AMPERE+ vram>=26GB reliability>=0.95"
