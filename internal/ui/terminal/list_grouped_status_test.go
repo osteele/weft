@@ -267,6 +267,95 @@ func TestRenderJobListGroupedStatusPlainAt_UsesPersistedPlacementReason(t *testi
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_HidesOnPremOnlyPlacementReasonForRentalEligibleJob(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          1997,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs placement",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"no local host matched gpu-class=nvidia, gpu-mem>=8GB",
+				"3 hosts: host is opt-in only (specify with --host)",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if strings.Contains(out, "blocked:") {
+		t.Fatalf("unexpected blocked reason for rental-eligible job:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_DoesNotFallBackToOlderPersistedPlacementReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          1997,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs placement",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"planner: no offers from providers for gpu=A100 vram>=82GB disk>=50GB",
+				"3 hosts: host is opt-in only (specify with --host)",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if strings.Contains(out, "blocked:") {
+		t.Fatalf("unexpected fallback to stale blocked reason:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_HidesUnplacedResetPlacementReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          2006,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs relaunch",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"cloud instance 2968 unavailable; job reset to unplaced queue",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if strings.Contains(out, "blocked:") {
+		t.Fatalf("unexpected blocked reason for unplaced reset:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_ShowsOnPremOnlyPlacementReasonForInventoryJob(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          1997,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs placement",
+			CreatedAt:   4_400,
+			Tags:        []string{db.TagInventory},
+			PlacementReasons: []string{
+				"no local host matched gpu-class=nvidia, gpu-mem>=8GB",
+				"3 hosts: host is opt-in only (specify with --host)",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	blockedWant := "  blocked: 3 hosts: host is opt-in only (specify with --host) (1)"
+	if !strings.Contains(out, blockedWant) {
+		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	reasonAmpere := "planner: no offers from providers for gpu=AMPERE+ vram>=26GB reliability>=0.95"

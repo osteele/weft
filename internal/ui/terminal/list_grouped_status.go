@@ -481,7 +481,7 @@ func groupedStatusBlockedReason(job *db.Job, sectionKey string) string {
 	if sectionKey != "queued" && sectionKey != "unplaced" {
 		return ""
 	}
-	if reason := campaign.SanitizeBlockedReason(job.QueueBlockedReason); reason != "" {
+	if reason := visiblePlacementBlockReason(job, job.QueueBlockedReason); reason != "" {
 		return reason
 	}
 	return latestPlacementReason(job)

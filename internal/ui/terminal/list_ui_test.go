@@ -472,6 +472,34 @@ func TestGroupedJobsWithAutoReasonsUsesPersistedPlacementReason(t *testing.T) {
 	}
 }
 
+func TestGroupedJobsWithAutoReasonsHidesOnPremOnlyAutoReasonForRentalEligibleJob(t *testing.T) {
+	unplaced := &db.Job{
+		ID:     10,
+		Status: db.StatusQueued,
+	}
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		jobs:            []*db.Job{unplaced},
+		autoBlockReasons: map[int64]string{
+			10: "3 hosts: host is opt-in only (specify with --host)",
+		},
+	}
+
+	decorated := m.groupedJobsWithAutoReasons()
+	if len(decorated) != 1 {
+		t.Fatalf("decorated len = %d, want 1", len(decorated))
+	}
+	if decorated[0] != unplaced {
+		t.Fatalf("expected unplaced job to remain undecorated, got %#v", decorated[0])
+	}
+
+	line := m.groupedAutoPilotStatusText(0)
+	if strings.Contains(line, "blocked") {
+		t.Fatalf("auto-pilot line = %q, want no transient local-host block", line)
+	}
+}
+
 func TestGroupedJobsWithAutoReasons_UnprocessedGroupedViewExcludesCanceledKeepsKilled(t *testing.T) {
 	killed := &db.Job{ID: 21, Status: db.StatusKilled}
 	canceled := &db.Job{ID: 22, Status: db.StatusCanceled}

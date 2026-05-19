@@ -3074,7 +3074,7 @@ func (m listTUIModel) visibleUnplacedBlockedReasonsForJobs(jobs []*db.Job) map[i
 		if job == nil || !job.IsUnplacedAwaitingPlacement() {
 			continue
 		}
-		reason := strings.TrimSpace(m.autoBlockReasons[job.ID])
+		reason := visiblePlacementBlockReason(job, m.autoBlockReasons[job.ID])
 		if reason == "" {
 			reason = latestPlacementReason(job)
 		}
@@ -3090,11 +3090,25 @@ func latestPlacementReason(job *db.Job) string {
 		return ""
 	}
 	for i := len(job.PlacementReasons) - 1; i >= 0; i-- {
-		if reason := strings.TrimSpace(job.PlacementReasons[i]); reason != "" {
-			return campaign.SanitizeBlockedReason(reason)
+		if reason := campaign.SanitizeBlockedReason(job.PlacementReasons[i]); reason != "" {
+			return visiblePlacementBlockReason(job, reason)
 		}
 	}
 	return ""
+}
+
+func visiblePlacementBlockReason(job *db.Job, reason string) string {
+	reason = campaign.SanitizeBlockedReason(reason)
+	if reason == "" {
+		return ""
+	}
+	if isUnplacedResetReason(reason) {
+		return ""
+	}
+	if job != nil && !job.HasTag(db.TagInventory) && isOnPremRejectionReason(reason) {
+		return ""
+	}
+	return reason
 }
 
 func groupedStatusUnprocessedView(title string) bool {

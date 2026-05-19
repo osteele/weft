@@ -159,7 +159,7 @@ func TestSelectedJobDetail_Unplaced(t *testing.T) {
 	}
 }
 
-func TestSelectedJobDetail_UnplacedShowsAllBlockedReasons(t *testing.T) {
+func TestSelectedJobDetail_UnplacedHidesResetReasonWithLiveBlocker(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	memGB := 34
 	job := &db.Job{
@@ -176,13 +176,11 @@ func TestSelectedJobDetail_UnplacedShowsAllBlockedReasons(t *testing.T) {
 		t.Fatalf("expected 1 line, got %d: %v", len(lines), lines)
 	}
 	line := lines[0]
-	for _, want := range []string{
-		`waiting for "output/model.pt" from wj1570 (running)`,
-		"cloud instance 1778 unavailable",
-	} {
-		if !strings.Contains(line, want) {
-			t.Errorf("expected %q in line, got: %s", want, line)
-		}
+	if want := `waiting for "output/model.pt" from wj1570 (running)`; !strings.Contains(line, want) {
+		t.Errorf("expected %q in line, got: %s", want, line)
+	}
+	if strings.Contains(line, "cloud instance 1778 unavailable") {
+		t.Errorf("unexpected reset reason in line: %s", line)
 	}
 }
 

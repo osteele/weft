@@ -390,6 +390,9 @@ func combinedBlockedReasons(job *db.Job, cloudConfigured bool) []string {
 		placement = filterOutOnPremRejectionReasons(placement)
 	}
 	for _, r := range placement {
+		if isUnplacedResetReason(r) {
+			continue
+		}
 		add(r)
 	}
 	return out
@@ -425,6 +428,14 @@ func isOnPremRejectionReason(reason string) bool {
 }
 
 var onPremHostsRejectionPattern = regexp.MustCompile(`^\d+ hosts?: `)
+
+func isUnplacedResetReason(reason string) bool {
+	r := strings.TrimSpace(reason)
+	return strings.Contains(r, "unplaced queue") &&
+		(strings.Contains(r, "job reset to unplaced queue") ||
+			strings.Contains(r, "job returned to unplaced queue") ||
+			strings.Contains(r, "returned from cloud instance to unplaced queue"))
+}
 
 func formatResourceRequest(job *db.Job) string {
 	var parts []string
