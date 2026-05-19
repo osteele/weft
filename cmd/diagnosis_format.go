@@ -13,6 +13,9 @@ func formatDiagnosisSummary(d *remediation.ErrorDiagnosis) string {
 	}
 	msg := strings.TrimSpace(d.Message)
 	if d.Pattern != "gpu_oom" {
+		if d.Solution != "" && msg != "" {
+			return msg + "; solution: " + strings.TrimSpace(d.Solution)
+		}
 		return msg
 	}
 
@@ -39,6 +42,9 @@ func formatDiagnosisSummary(d *remediation.ErrorDiagnosis) string {
 	}
 	if d.GPUOOMHintDeltaGB > 0 {
 		parts = append(parts, fmt.Sprintf("hint: increase --gpu-mem by ~%dGB on retry", d.GPUOOMHintDeltaGB))
+	}
+	if d.Solution != "" {
+		parts = append(parts, "solution: "+strings.TrimSpace(d.Solution))
 	}
 
 	return strings.Join(parts, "; ")

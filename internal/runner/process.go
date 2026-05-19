@@ -106,6 +106,27 @@ func mergeEnvVars(base, overlay []string) []string {
 	return result
 }
 
+func ensureWritableTMPDIR(envVars []string, workingDir, logDir string, jobID int64) []string {
+	if envValue(envVars, "TMPDIR") != "" {
+		return envVars
+	}
+
+	candidates := make([]string, 0, 2)
+	if workingDir != "" {
+		candidates = append(candidates, filepath.Join(workingDir, "output", "tmp"))
+	}
+	if logDir != "" {
+		candidates = append(candidates, filepath.Join(logDir, "tmp", strconv.FormatInt(jobID, 10)))
+	}
+
+	for _, dir := range candidates {
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			return append(envVars, "TMPDIR="+dir)
+		}
+	}
+	return envVars
+}
+
 func envValue(env []string, key string) string {
 	prefix := key + "="
 	for _, ev := range env {

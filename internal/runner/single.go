@@ -146,6 +146,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	if setupCmd == "" {
 		WarnIfWorkdirMissingEnv(expandedDir, cfg.JobID, paths.Log)
 	}
+	envVars = ensureWritableTMPDIR(envVars, expandedDir, cfg.LogDir, cfg.JobID)
 	envVars = append(envVars, job.Env...)
 	envVars = artifacts.MergeEnvVars(envVars, cfg.JobID)
 

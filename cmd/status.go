@@ -889,6 +889,9 @@ func printDiagnosisSummary(job *db.Job) {
 	}
 
 	fmt.Printf("Diagnosis: %s (%s)\n", d.Message, d.Pattern)
+	if d.Solution != "" {
+		fmt.Printf("Solution:  %s\n", d.Solution)
+	}
 	if d.Remediable {
 		if job.RetryCount > 0 {
 			fmt.Printf("Remediation: auto-retried (retry #%d)\n", job.RetryCount)

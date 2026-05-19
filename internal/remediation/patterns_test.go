@@ -196,6 +196,45 @@ func TestEnvPatterns_DiskFull_NoSpaceLeft(t *testing.T) {
 	}
 }
 
+func TestDiagnoseFailedAttempt_RuntimeGuidance(t *testing.T) {
+	cases := []struct {
+		name        string
+		log         string
+		wantPattern string
+	}{
+		{
+			name:        "unusable temp dir",
+			log:         "FileNotFoundError: No usable temporary directory found in ['/tmp', '/var/tmp', '/workspace/project']",
+			wantPattern: "tempdir_unusable",
+		},
+		{
+			name:        "sglang setup",
+			log:         "ImportError: libnuma.so.1: cannot open shared object file while importing sglang",
+			wantPattern: "sglang_setup",
+		},
+		{
+			name:        "vllm setup",
+			log:         "ModuleNotFoundError: No module named 'vllm'",
+			wantPattern: "vllm_setup",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DiagnoseFailedAttemptFromLog(tc.log, "post")
+			if d == nil {
+				t.Fatal("expected diagnosis")
+			}
+			if d.Pattern != tc.wantPattern {
+				t.Fatalf("pattern = %q, want %q", d.Pattern, tc.wantPattern)
+			}
+			if d.Solution == "" {
+				t.Fatal("expected solution guidance")
+			}
+		})
+	}
+}
+
 func TestNoMatch(t *testing.T) {
 	log := `Training completed successfully in 3h 42m`
 

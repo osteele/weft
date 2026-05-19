@@ -27,12 +27,43 @@ type failurePatternRule struct {
 	patternID  string
 	category   string
 	message    string
+	solution   string
 	confidence float64
 	re         *regexp.Regexp
 	details    func([]string, string) map[string]any
 }
 
 var failurePatternRules = []failurePatternRule{
+	{
+		patternID:  "tempdir_unusable",
+		category:   "environment",
+		message:    "No writable temporary directory",
+		solution:   "Run with TMPDIR set to a writable project path such as $PWD/output/tmp. Current weft agents create this automatically for new runs unless TMPDIR is already set.",
+		confidence: 0.95,
+		re:         regexp.MustCompile(`(?is)No usable temporary directory found|could not find a usable temporary directory`),
+	},
+	{
+		patternID:  "sglang_setup",
+		category:   "environment",
+		message:    "SGLang runtime setup is incomplete",
+		solution:   "Use the documented SGLang path: a script PEP 723 block or .weft.toml image override with ghcr.io/osteele/sglang-runtime:v0.5.10.post1 plus the required CUDA/driver floors.",
+		confidence: 0.9,
+		re:         regexp.MustCompile(`(?is)(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma).*(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file)|(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file).*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)`),
+		details: func(match []string, logContent string) map[string]any {
+			return map[string]any{"framework": "sglang"}
+		},
+	},
+	{
+		patternID:  "vllm_setup",
+		category:   "environment",
+		message:    "vLLM runtime setup is incomplete",
+		solution:   "Use the documented vLLM path: declare the vLLM dependency in PEP 723 or pyproject.toml, run through uv, and let weft select a PyTorch CUDA image and disk headroom.",
+		confidence: 0.9,
+		re:         regexp.MustCompile(`(?is)(vllm|flashinfer).*(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file)|(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file).*(vllm|flashinfer)`),
+		details: func(match []string, logContent string) map[string]any {
+			return map[string]any{"framework": "vllm"}
+		},
+	},
 	{
 		patternID:  "preempted",
 		category:   "environment",
@@ -171,6 +202,7 @@ func matchFailurePattern(logContent, detectedBy string) *ErrorDiagnosis {
 			Pattern:    rule.patternID,
 			Category:   rule.category,
 			Message:    rule.message,
+			Solution:   rule.solution,
 			Remediable: false,
 			Details:    match[0],
 		}

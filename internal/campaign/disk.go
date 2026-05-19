@@ -77,7 +77,7 @@ var cudaPackages = []string{
 	"nvidia-cuda-runtime", "nvidia-cudnn", "nvidia-cufft",
 	"nvidia-curand", "nvidia-cusolver", "nvidia-cusparse",
 	"nvidia-nccl", "nvidia-nvjitlink", "nvidia-nvtx",
-	"jax", "jaxlib", "tensorflow", "vllm",
+	"jax", "jaxlib", "tensorflow", "vllm", "sglang",
 }
 
 // EstimateGroupDisk computes the required disk space in GB for an instance group

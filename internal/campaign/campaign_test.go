@@ -891,6 +891,45 @@ func TestResolveJobImageSettings_OverlappingPatternsTieBreakLexically(t *testing
 	}
 }
 
+func TestResolveJobImageSettings_SGLangCommandUsesRuntimeImage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "profile_inference_sglang.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python profile_inference_sglang.py")
+	if img != sglangRuntimeImage {
+		t.Fatalf("image = %q, want %q", img, sglangRuntimeImage)
+	}
+}
+
+func TestResolveJobImageSettings_ProjectImageBeatsSGLangInference(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/example/custom-sglang:latest\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "profile_inference_sglang.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python profile_inference_sglang.py")
+	if img != "ghcr.io/example/custom-sglang:latest" {
+		t.Fatalf("image = %q, want explicit project image", img)
+	}
+}
+
+func TestResolveJobImageSettings_SGLangPyprojectUsesRuntimeImage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"sglang[srt]>=0.4\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python infer.py")
+	if img != sglangRuntimeImage {
+		t.Fatalf("image = %q, want %q", img, sglangRuntimeImage)
+	}
+}
+
 func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
 	dir := t.TempDir()
 	withCap := filepath.Join(dir, "with_cap.py")

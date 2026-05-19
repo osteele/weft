@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,8 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/workdir"
 )
+
+const sglangRuntimeImage = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
 
 // vramTiers lists standard GPU VRAM sizes in GB, used to determine whether two
 // jobs' memory requirements are in the same tier for grouping purposes.
@@ -644,6 +647,9 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 			if img == "" && hasTorch && autoTorchImage != "" {
 				img = autoTorchImage
 			}
+			if img == "" && jobUsesFramework(localDir, job.Command, "sglang") {
+				img = sglangRuntimeImage
+			}
 
 			// Auto-upgrade CUDA images when the GPU constraint requires a newer
 			// toolkit (e.g., Blackwell needs CUDA >= 12.8). This applies to both
@@ -769,10 +775,12 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 	if err != nil {
 		slog.Warn("project cloud image requirement error", "component", "campaign", "error", err)
 	}
-
 	img := strings.TrimSpace(projectCloud.Image)
 	if override := resolveProjectImageOverride(projectCloud.ImageOverrides, projectDir, localDir, command); override != "" {
 		img = override
+	}
+	if img == "" && jobUsesFramework(localDir, command, "sglang") {
+		img = sglangRuntimeImage
 	}
 	imagePullSecret := projectCloud.ImagePullSecret
 
@@ -795,6 +803,35 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
 	}
 	return img, req, imagePullSecret
+}
+
+func jobUsesFramework(localDir, command, framework string) bool {
+	framework = strings.ToLower(framework)
+	if strings.Contains(strings.ToLower(command), framework) {
+		return true
+	}
+	if localDir != "" {
+		if fileContains(filepath.Join(localDir, "pyproject.toml"), framework) {
+			return true
+		}
+		for _, script := range dataloc.ExtractPythonScripts(command) {
+			if !filepath.IsAbs(script) {
+				script = filepath.Join(localDir, script)
+			}
+			if fileContains(script, framework) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func fileContains(path, needle string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), needle)
 }
 
 func resolveProjectImageOverride(overrides map[string]string, projectDir, localDir, command string) string {

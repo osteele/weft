@@ -107,6 +107,10 @@ declared inputs, cached uv-lock estimates, Docker image overhead, and prior
 observed disk peaks when available, but runtime setup caches are explicit:
 add `--runtime-disk` when command startup needs extra scratch space.
 
+Weft sets `TMPDIR` to a writable per-job directory under `output/tmp` when the
+environment does not already define it. Override it with `-e TMPDIR=...` only
+when a job needs a different scratch location.
+
 ### Declaring outputs
 
 Use `--output` to declare what a job produces. This lets downstream jobs find
@@ -247,6 +251,42 @@ need packages from custom PyPI indexes (e.g., CUDA-specific wheels):
 
 Explicit `[tool.weft.env]` entries for `UV_INDEX_URL` or `UV_EXTRA_INDEX_URL`
 take precedence over `[tool.uv]` values.
+
+#### vLLM and SGLang
+
+For vLLM, keep the dependency in PEP 723 or `pyproject.toml` and run through
+`uv`. Weft treats `vllm` as a CUDA-heavy dependency, adds disk headroom, and can
+select a PyTorch CUDA image when no image is configured:
+
+```python
+# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = ["vllm>=0.6", "transformers"]
+# [tool.weft]
+# gpu = "ampere+>=24GB"
+# inputs = ["hf:gpt2"]
+# ///
+```
+
+For SGLang, use the project runtime image path unless you have a known-good
+custom image. Weft infers this image for commands whose script name clearly
+contains `sglang`, but declaring it in script metadata is more robust:
+
+```python
+# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = ["sglang[srt]>=0.4", "pynvml>=12.0"]
+# [tool.weft]
+# gpu = "ampere+>=24GB"
+# image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+# min-driver = "535"
+# min-cuda = "12.9"
+# ///
+```
+
+If a vLLM or SGLang job fails with a missing framework package, missing
+`libnuma`, or missing `flashinfer`, `weft status` and `weft info` include the
+diagnosis and the runtime path to use on retry.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
 (highest to lowest): script `image` > matching `.weft.toml [cloud.image-overrides]`

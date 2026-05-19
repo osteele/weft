@@ -19,6 +19,7 @@ type ErrorDiagnosis struct {
 	Pattern           string         `json:"pattern"`                // e.g., "gpu_oom", "module_not_found"
 	Category          string         `json:"category"`               // "data", "code", "environment"
 	Message           string         `json:"message"`                // human-readable summary
+	Solution          string         `json:"solution,omitempty"`     // next action to make the job runnable
 	MissingAssets     []string       `json:"missing_assets"`         // for data errors: ["hf:meta-llama/Llama-3-8B"]
 	Remediable        bool           `json:"remediable"`             // can the coordinator auto-fix this?
 	Details           string         `json:"-"`                      // raw error text that matched
@@ -42,6 +43,7 @@ type errorDiagnosisJSON struct {
 	Pattern           string          `json:"pattern"`
 	Category          string          `json:"category,omitempty"`
 	Message           string          `json:"message,omitempty"`
+	Solution          string          `json:"solution,omitempty"`
 	MissingAssets     []string        `json:"missing_assets,omitempty"`
 	Remediable        bool            `json:"remediable,omitempty"`
 	Details           json.RawMessage `json:"details,omitempty"`
@@ -69,6 +71,7 @@ func (d ErrorDiagnosis) MarshalJSON() ([]byte, error) {
 		Pattern:           d.Pattern,
 		Category:          d.Category,
 		Message:           d.Message,
+		Solution:          d.Solution,
 		MissingAssets:     d.MissingAssets,
 		Remediable:        d.Remediable,
 		DetectedBy:        d.DetectedBy,
@@ -105,6 +108,7 @@ func (d *ErrorDiagnosis) UnmarshalJSON(data []byte) error {
 		Pattern:           raw.Pattern,
 		Category:          raw.Category,
 		Message:           raw.Message,
+		Solution:          raw.Solution,
 		MissingAssets:     raw.MissingAssets,
 		Remediable:        raw.Remediable,
 		DetectedBy:        raw.DetectedBy,

@@ -99,6 +99,58 @@ func TestRunSingleJob_EchoHello(t *testing.T) {
 	}
 }
 
+func TestRunSingleJob_DefaultTMPDIR(t *testing.T) {
+	logDir := t.TempDir()
+	workingDir := t.TempDir()
+	t.Setenv("TMPDIR", "")
+
+	cfg := SingleJobConfig{
+		JobID:          43,
+		Job:            opsqueue.CommandJob{Cmd: `test -d "$TMPDIR" && case "$TMPDIR" in */output/tmp) echo "$TMPDIR";; *) exit 2;; esac`},
+		LogDir:         logDir,
+		WorkingDir:     workingDir,
+		SampleInterval: 100 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		paths := NewJobPaths(logDir, 43)
+		log, _ := os.ReadFile(paths.Log)
+		t.Fatalf("exit code = %d, want 0\n%s", ei.ExitCode, log)
+	}
+}
+
+func TestRunSingleJob_ExplicitTMPDIRWins(t *testing.T) {
+	logDir := t.TempDir()
+	workingDir := t.TempDir()
+	explicit := filepath.Join(workingDir, "explicit-tmp")
+	if err := os.MkdirAll(explicit, 0o755); err != nil {
+		t.Fatalf("mkdir explicit tmp: %v", err)
+	}
+	t.Setenv("TMPDIR", "")
+
+	cfg := SingleJobConfig{
+		JobID:          44,
+		Job:            opsqueue.CommandJob{Cmd: `test -d "$TMPDIR" && case "$TMPDIR" in */explicit-tmp) echo "$TMPDIR";; *) exit 2;; esac`, Env: []string{"TMPDIR=" + explicit}},
+		LogDir:         logDir,
+		WorkingDir:     workingDir,
+		SampleInterval: 100 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", ei.ExitCode)
+	}
+}
+
 func TestRunSingleJob_AppendsPrewarmLogWithoutSkippingSetup(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "pyproject.toml"), []byte("[project]\nname='p'\nversion='0.1.0'\n"), 0o644); err != nil {

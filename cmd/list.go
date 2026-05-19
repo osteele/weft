@@ -753,6 +753,9 @@ func showJob(database *sql.DB, id int64) error {
 		d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
 		if err == nil && d != nil {
 			fmt.Printf("Diagnosis:    %s (%s/%s)\n", d.Message, d.Category, d.Pattern)
+			if d.Solution != "" {
+				fmt.Printf("Solution:     %s\n", d.Solution)
+			}
 			if job.RetryCount > 0 {
 				fmt.Printf("Retried:      %d time(s)\n", job.RetryCount)
 			}
