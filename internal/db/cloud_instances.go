@@ -115,6 +115,17 @@ func InfrastructureTerminationReasons() []string {
 	}
 }
 
+// IsNormalInstanceTermination reports whether a termination reason represents a
+// normal instance lifecycle outcome rather than an operational failure.
+func IsNormalInstanceTermination(reason string) bool {
+	switch reason {
+	case TerminationReasonCompleted, TerminationReasonJobFailure, TerminationReasonCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // Launch represents a single cloud GPU deployment (e.g. one Vast.ai instance).
 type Launch struct {
 	ID                 int64
@@ -576,18 +587,27 @@ func GetLaunchByProviderID(database *sql.DB, providerID string) (*Launch, error)
 	return c, err
 }
 
-// ListRecentFailedCloudLaunches returns failed launches whose ended_at is at
-// or after sinceUnix, ordered by ended_at descending. Used by the grouped
-// jobs list TUI to surface a "Recent launch failures" bucket.
-func ListRecentFailedCloudLaunches(database *sql.DB, sinceUnix int64) ([]*Launch, error) {
+// ListRecentAbnormalFailedInstances returns failed instances whose ended_at is
+// at or after sinceUnix, excluding normal lifecycle outcomes such as user job
+// failures. Used by the grouped jobs list TUI to surface recent operational
+// failures.
+func ListRecentAbnormalFailedInstances(database *sql.DB, sinceUnix int64) ([]*Launch, error) {
 	rows, err := database.Query(
 		`SELECT `+launchSelectColumns+`
 		   FROM launches
 		  WHERE status = ?
 		    AND ended_at IS NOT NULL
 		    AND ended_at >= ?
+		    AND (
+		      termination_reason IS NULL
+		      OR termination_reason = ''
+		      OR termination_reason NOT IN (?, ?, ?)
+		    )
 		  ORDER BY ended_at DESC`,
 		LaunchStatusFailed, sinceUnix,
+		TerminationReasonCompleted,
+		TerminationReasonJobFailure,
+		TerminationReasonCancelled,
 	)
 	if err != nil {
 		return nil, err

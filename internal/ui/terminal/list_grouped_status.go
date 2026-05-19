@@ -36,7 +36,7 @@ type groupedStatusRenderOptions struct {
 	placingJobIDs          map[int64]struct{}
 	placementQueuedAtByJob map[int64]int64
 	placementStatusByJob   map[int64]db.PlacementStatus
-	launchFailures         *recentLaunchFailures
+	failedInstances        *recentFailedInstances
 	launchByID             map[int64]*db.Launch
 	now                    time.Time
 	launchSpinner          string
@@ -56,9 +56,9 @@ type groupedStatusLaunchingStageETA struct {
 	oldest  int64
 }
 
-// recentLaunchFailures feeds the "Recent launch failures" section. recoveredIDs
+// recentFailedInstances feeds the "Recent failed instances" section. recoveredIDs
 // holds the subset of items whose successor is alive — those rows render dim.
-type recentLaunchFailures struct {
+type recentFailedInstances struct {
 	items             []*db.Launch
 	recoveredIDs      map[int64]bool
 	projectByLaunchID map[int64]string
@@ -66,8 +66,8 @@ type recentLaunchFailures struct {
 }
 
 const (
-	recentFailedLaunchMaxRows = 6
-	launchFailuresSectionKey  = "launch_failures"
+	recentFailedInstanceMaxRows = 6
+	failedInstancesSectionKey   = "failed_instances"
 )
 
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
@@ -82,7 +82,7 @@ func renderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, l
 	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, nil, time.Now())
 }
 
-func renderJobListGroupedStatusPlainWithLaunchFailures(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, failures *recentLaunchFailures) string {
+func renderJobListGroupedStatusPlainWithFailedInstances(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, failures *recentFailedInstances) string {
 	return renderJobListGroupedStatusPlainAt(jobs, width, launchLiveByID, launchStatusByID, nil, nil, failures, time.Now())
 }
 
@@ -98,8 +98,8 @@ func renderJobListGroupedStatusPlainWithOptions(jobs []*db.Job, width int, opts 
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, launchFailures *recentLaunchFailures, now time.Time) string {
-	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, placementQueuedAtByJob, launchFailures, now)
+func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, failedInstances *recentFailedInstances, now time.Time) string {
+	rows := buildGroupedStatusRowsAt(jobs, width, launchLiveByID, launchStatusByID, placingJobIDs, placementQueuedAtByJob, failedInstances, now)
 	if len(rows) == 0 {
 		return "None\n"
 	}
@@ -130,13 +130,13 @@ func groupedStatusLaunchIDs(jobs []*db.Job) []int64 {
 	return launchIDs
 }
 
-func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, launchFailures *recentLaunchFailures, now time.Time) []groupedStatusRow {
+func buildGroupedStatusRowsAt(jobs []*db.Job, width int, launchLiveByID map[int64]*db.LaunchLiveState, launchStatusByID map[int64]string, placingJobIDs map[int64]struct{}, placementQueuedAtByJob map[int64]int64, failedInstances *recentFailedInstances, now time.Time) []groupedStatusRow {
 	return buildGroupedStatusRowsWithOptions(jobs, width, groupedStatusRenderOptions{
 		launchLiveByID:         launchLiveByID,
 		launchStatusByID:       launchStatusByID,
 		placingJobIDs:          placingJobIDs,
 		placementQueuedAtByJob: placementQueuedAtByJob,
-		launchFailures:         launchFailures,
+		failedInstances:        failedInstances,
 		now:                    now,
 	})
 }
@@ -226,7 +226,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		rows = append(rows, groupedStatusRow{text: ""})
 	}
 
-	rows = appendRecentFailedLaunchRows(rows, opts.launchFailures, projectWidth, width, now)
+	rows = appendRecentFailedInstanceRows(rows, opts.failedInstances, projectWidth, width, now)
 
 	if len(rows) == 0 {
 		return nil
@@ -1012,9 +1012,9 @@ func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
 // being hidden — the count in the section header stays honest.
 var failureDimStyle = lipgloss.NewStyle().Faint(true)
 
-func appendRecentFailedLaunchRows(
+func appendRecentFailedInstanceRows(
 	rows []groupedStatusRow,
-	failures *recentLaunchFailures,
+	failures *recentFailedInstances,
 	projectWidth, width int,
 	now time.Time,
 ) []groupedStatusRow {
@@ -1032,6 +1032,9 @@ func appendRecentFailedLaunchRows(
 	recovered := 0
 	for _, f := range failures.items {
 		if f == nil {
+			continue
+		}
+		if db.IsNormalInstanceTermination(f.TerminationReason) {
 			continue
 		}
 		total++
@@ -1057,7 +1060,7 @@ func appendRecentFailedLaunchRows(
 	if !failures.windowSince.IsZero() {
 		windowText = " in last " + formatProjectRecentWindow(now.Sub(failures.windowSince))
 	}
-	headerText := fmt.Sprintf("Recent launch failures (%d%s", total, windowText)
+	headerText := fmt.Sprintf("Recent failed instances (%d%s", total, windowText)
 	if recovered > 0 {
 		headerText += fmt.Sprintf(", %d already replaced", recovered)
 	}
@@ -1065,7 +1068,7 @@ func appendRecentFailedLaunchRows(
 	rows = append(rows, groupedStatusRow{
 		text:     headerText,
 		isHeader: true,
-		section:  launchFailuresSectionKey,
+		section:  failedInstancesSectionKey,
 	})
 
 	sort.SliceStable(buckets, func(i, j int) bool {
@@ -1081,16 +1084,16 @@ emit:
 		rows = append(rows, groupedStatusRow{
 			text:      fmt.Sprintf("  reason: %s (%d)", b.reason, len(b.items)),
 			isBlocked: true,
-			section:   launchFailuresSectionKey,
+			section:   failedInstancesSectionKey,
 		})
 		for _, item := range b.items {
-			if emitted >= recentFailedLaunchMaxRows {
+			if emitted >= recentFailedInstanceMaxRows {
 				break emit
 			}
 			rows = append(rows, groupedStatusRow{
 				text:    formatLaunchFailureRow(item, failures, projectWidth, width, now),
 				launch:  item,
-				section: launchFailuresSectionKey,
+				section: failedInstancesSectionKey,
 			})
 			emitted++
 		}
@@ -1099,7 +1102,7 @@ emit:
 	if total > emitted {
 		rows = append(rows, groupedStatusRow{
 			text:    fmt.Sprintf("  + %d more (weft instance list --status failed)", total-emitted),
-			section: launchFailuresSectionKey,
+			section: failedInstancesSectionKey,
 		})
 	}
 	rows = append(rows, groupedStatusRow{text: ""})
@@ -1108,7 +1111,7 @@ emit:
 
 func formatLaunchFailureRow(
 	f *db.Launch,
-	failures *recentLaunchFailures,
+	failures *recentFailedInstances,
 	projectWidth, width int,
 	now time.Time,
 ) string {

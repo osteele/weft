@@ -44,7 +44,7 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 		launchByID: map[int64]*db.Launch{
 			launchID: {ID: launchID, Status: db.LaunchStatusRunning, ResolvedGPUName: "RTX A6000", GPUMemGB: 48},
 		},
-		recentLaunchFailures: &recentLaunchFailures{
+		recentFailedInstances: &recentFailedInstances{
 			items: []*db.Launch{{ID: 9901, Status: db.LaunchStatusFailed, CreatedAt: now.Add(-time.Hour).Unix()}},
 		},
 	}
@@ -70,7 +70,7 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 		"weft uj ended",
 		"Selected:",
 		"Next:",
-		"Recent launch failures",
+		"Recent failed instances",
 	} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("summary should not include %q:\n%s", unwanted, out)

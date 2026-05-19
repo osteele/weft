@@ -170,19 +170,19 @@ func RenderJobListGroupedStatusPlainWithLaunchState(jobs []*db.Job, width int, l
 	return renderJobListGroupedStatusPlainWithLaunchState(jobs, width, launchLiveByID, launchStatusByID)
 }
 
-func RenderJobListGroupedStatusPlainWithLaunchFailures(
+func RenderJobListGroupedStatusPlainWithFailedInstances(
 	database *sql.DB,
 	jobs []*db.Job,
 	width int,
 	launchLiveByID map[int64]*db.LaunchLiveState,
 	launchStatusByID map[int64]string,
 ) string {
-	failures := loadRecentLaunchFailures(database, recentLaunchFailureWindow, time.Now())
+	failures := loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now())
 	launchByID, _ := db.GetLaunchesByIDs(database, groupedStatusLaunchIDs(jobs))
 	return renderJobListGroupedStatusPlainWithOptions(jobs, width, groupedStatusRenderOptions{
 		launchLiveByID:   launchLiveByID,
 		launchStatusByID: launchStatusByID,
-		launchFailures:   failures,
+		failedInstances:  failures,
 		launchByID:       launchByID,
 		now:              time.Now(),
 	})

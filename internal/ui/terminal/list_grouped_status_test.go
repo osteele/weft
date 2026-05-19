@@ -914,20 +914,20 @@ func TestRenderJobListGroupedStatusPlainWithOptions_UsesPlacementStatusReadModel
 	}
 }
 
-func TestAppendRecentFailedLaunchRows_NilOrEmptyEmitsNothing(t *testing.T) {
+func TestAppendRecentFailedInstanceRows_NilOrEmptyEmitsNothing(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	if got := appendRecentFailedLaunchRows(nil, nil, 0, 0, now); got != nil {
+	if got := appendRecentFailedInstanceRows(nil, nil, 0, 0, now); got != nil {
 		t.Fatalf("nil failures should produce no rows, got %d", len(got))
 	}
-	empty := &recentLaunchFailures{items: nil, windowSince: time.Unix(9_000, 0)}
-	if got := appendRecentFailedLaunchRows(nil, empty, 0, 0, now); got != nil {
+	empty := &recentFailedInstances{items: nil, windowSince: time.Unix(9_000, 0)}
+	if got := appendRecentFailedInstanceRows(nil, empty, 0, 0, now); got != nil {
 		t.Fatalf("empty items should produce no rows, got %d", len(got))
 	}
 }
 
-func TestAppendRecentFailedLaunchRows_HeaderCountsRenderableFailures(t *testing.T) {
+func TestAppendRecentFailedInstanceRows_HeaderCountsRenderableFailures(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	failures := &recentLaunchFailures{
+	failures := &recentFailedInstances{
 		items: []*db.Launch{
 			nil,
 			{
@@ -944,6 +944,13 @@ func TestAppendRecentFailedLaunchRows_HeaderCountsRenderableFailures(t *testing.
 				TerminationDetail: "provider dead",
 				EndedAt:           testInt64Ptr(9_600),
 			},
+			{
+				ID:                102,
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonJobFailure,
+				TerminationDetail: "job failed",
+				EndedAt:           testInt64Ptr(9_700),
+			},
 		},
 		recoveredIDs: map[int64]bool{
 			999: true,
@@ -955,21 +962,24 @@ func TestAppendRecentFailedLaunchRows_HeaderCountsRenderableFailures(t *testing.
 	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
 	stripped := stripANSI(out)
 	for _, want := range []string{
-		"Recent launch failures (2 in last 30m, 1 already replaced):",
+		"Recent failed instances (2 in last 30m, 1 already replaced):",
 		"reason: unknown failure (2)",
 	} {
 		if !strings.Contains(stripped, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
 	}
-	if strings.Contains(stripped, "Recent launch failures (0") {
+	if strings.Contains(stripped, "Recent failed instances (0") {
 		t.Fatalf("header used a stale zero count:\n%s", out)
+	}
+	if strings.Contains(stripped, "job failed") {
+		t.Fatalf("normal job failure should be hidden:\n%s", out)
 	}
 }
 
-func TestRenderJobListGroupedStatusPlainAt_RecentLaunchFailuresSection(t *testing.T) {
+func TestRenderJobListGroupedStatusPlainAt_RecentFailedInstancesSection(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	failures := &recentLaunchFailures{
+	failures := &recentFailedInstances{
 		items: []*db.Launch{
 			{
 				ID:                100,
@@ -1009,7 +1019,7 @@ func TestRenderJobListGroupedStatusPlainAt_RecentLaunchFailuresSection(t *testin
 	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
 
 	for _, want := range []string{
-		"Recent launch failures (3 in last 30m, 1 already replaced):",
+		"Recent failed instances (3 in last 30m, 1 already replaced):",
 		"reason: provider-side failure (2)",
 		"reason: bootstrap timeout (1)",
 		"container exit 1",
@@ -1027,7 +1037,7 @@ func TestRenderJobListGroupedStatusPlainAt_RecentLaunchFailuresSection(t *testin
 	}
 }
 
-func TestAppendRecentFailedLaunchRows_OverflowAddsMoreLine(t *testing.T) {
+func TestAppendRecentFailedInstanceRows_OverflowAddsMoreLine(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	items := make([]*db.Launch, 0, 10)
 	for i := 0; i < 10; i++ {
@@ -1039,7 +1049,7 @@ func TestAppendRecentFailedLaunchRows_OverflowAddsMoreLine(t *testing.T) {
 			EndedAt:           testInt64Ptr(9_500 + int64(i)),
 		})
 	}
-	failures := &recentLaunchFailures{
+	failures := &recentFailedInstances{
 		items:       items,
 		windowSince: now.Add(-30 * time.Minute),
 	}
@@ -1049,7 +1059,7 @@ func TestAppendRecentFailedLaunchRows_OverflowAddsMoreLine(t *testing.T) {
 	if !strings.Contains(stripped, "+ 4 more (weft instance list --status failed)") {
 		t.Fatalf("missing overflow line in output:\n%s", out)
 	}
-	if !strings.Contains(stripped, "Recent launch failures (10 in last 30m):") {
+	if !strings.Contains(stripped, "Recent failed instances (10 in last 30m):") {
 		t.Fatalf("expected total of 10 in header, got:\n%s", out)
 	}
 }

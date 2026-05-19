@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestListRecentFailedCloudLaunches_WindowCutoff(t *testing.T) {
+func TestListRecentAbnormalFailedInstances_WindowCutoff(t *testing.T) {
 	database := SetupTestDB(t)
 	defer database.Close()
 
@@ -15,9 +15,9 @@ func TestListRecentFailedCloudLaunches_WindowCutoff(t *testing.T) {
 	insertFailedLaunch(t, database, now-50, TerminationReasonBootstrapTimeout)  // in window
 	insertFailedLaunch(t, database, now-3600, TerminationReasonProviderFailure) // outside window
 
-	out, err := ListRecentFailedCloudLaunches(database, now-300)
+	out, err := ListRecentAbnormalFailedInstances(database, now-300)
 	if err != nil {
-		t.Fatalf("ListRecentFailedCloudLaunches: %v", err)
+		t.Fatalf("ListRecentAbnormalFailedInstances: %v", err)
 	}
 	if len(out) != 2 {
 		t.Fatalf("expected 2 in-window launches, got %d", len(out))
@@ -27,6 +27,47 @@ func TestListRecentFailedCloudLaunches_WindowCutoff(t *testing.T) {
 	}
 	if *out[0].EndedAt < *out[1].EndedAt {
 		t.Fatalf("expected ended_at desc, got %d before %d", *out[0].EndedAt, *out[1].EndedAt)
+	}
+}
+
+func TestListRecentAbnormalFailedInstances_FiltersNormalTerminations(t *testing.T) {
+	database := SetupTestDB(t)
+	defer database.Close()
+
+	now := time.Now().Unix()
+	for _, reason := range []string{
+		TerminationReasonProviderFailure,
+		TerminationReasonInfraFailure,
+		TerminationReasonBootstrapTimeout,
+		TerminationReasonPhaseStall,
+		TerminationReasonPreempted,
+		TerminationReasonDiskFull,
+		TerminationReasonWeftBug,
+		TerminationReasonUnknown,
+	} {
+		insertFailedLaunch(t, database, now-100, reason)
+	}
+	insertFailedLaunchWithNullReason(t, database, now-100)
+	for _, reason := range []string{
+		TerminationReasonCompleted,
+		TerminationReasonJobFailure,
+		TerminationReasonCancelled,
+	} {
+		insertFailedLaunch(t, database, now-90, reason)
+	}
+
+	out, err := ListRecentAbnormalFailedInstances(database, now-300)
+	if err != nil {
+		t.Fatalf("ListRecentAbnormalFailedInstances: %v", err)
+	}
+	if len(out) != 9 {
+		t.Fatalf("expected 9 abnormal failed instances, got %d", len(out))
+	}
+	for _, inst := range out {
+		switch inst.TerminationReason {
+		case TerminationReasonCompleted, TerminationReasonJobFailure, TerminationReasonCancelled:
+			t.Fatalf("normal termination reason %q should be excluded", inst.TerminationReason)
+		}
 	}
 }
 
@@ -79,6 +120,23 @@ func insertFailedLaunch(t *testing.T, database *sql.DB, endedAt int64, reason st
 		`INSERT INTO launches (status, provider, created_at, ended_at, termination_reason)
 		 VALUES (?, ?, ?, ?, ?)`,
 		LaunchStatusFailed, "vastai", endedAt-10, endedAt, reason,
+	)
+	if err != nil {
+		t.Fatalf("insert failed launch: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId: %v", err)
+	}
+	return id
+}
+
+func insertFailedLaunchWithNullReason(t *testing.T, database *sql.DB, endedAt int64) int64 {
+	t.Helper()
+	res, err := database.Exec(
+		`INSERT INTO launches (status, provider, created_at, ended_at, termination_reason)
+		 VALUES (?, ?, ?, ?, NULL)`,
+		LaunchStatusFailed, "vastai", endedAt-10, endedAt,
 	)
 	if err != nil {
 		t.Fatalf("insert failed launch: %v", err)

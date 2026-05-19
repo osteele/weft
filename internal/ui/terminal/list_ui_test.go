@@ -809,7 +809,7 @@ func TestListTUIGroupedViewSelectsRecentLaunchFailure(t *testing.T) {
 		width:           140,
 		height:          20,
 		title:           "Jobs",
-		recentLaunchFailures: &recentLaunchFailures{
+		recentFailedInstances: &recentFailedInstances{
 			items: []*db.Launch{
 				{
 					ID:                 77,
@@ -858,7 +858,7 @@ func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
 		jobs: []*db.Job{
 			{ID: 101, Status: db.StatusRunning, Description: "running"},
 		},
-		recentLaunchFailures: &recentLaunchFailures{
+		recentFailedInstances: &recentFailedInstances{
 			items: []*db.Launch{
 				{
 					ID:                88,
@@ -886,9 +886,9 @@ func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
 	}
 }
 
-func TestGroupedViewportCountsLaunchFailureRows(t *testing.T) {
+func TestGroupedViewportCountsFailedInstanceRows(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	failures := &recentLaunchFailures{
+	failures := &recentFailedInstances{
 		items: []*db.Launch{
 			{ID: 81, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonUnknown, TerminationDetail: "provider dead", EndedAt: testInt64Ptr(9_900)},
 			{ID: 82, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure, TerminationDetail: "job failed", EndedAt: testInt64Ptr(9_901)},
@@ -897,8 +897,8 @@ func TestGroupedViewportCountsLaunchFailureRows(t *testing.T) {
 		windowSince: now.Add(-30 * time.Minute),
 	}
 	rows := buildGroupedStatusRowsWithOptions(nil, 100, groupedStatusRenderOptions{
-		launchFailures: failures,
-		now:            now,
+		failedInstances: failures,
+		now:             now,
 	})
 
 	lines := selectGroupedRowsForViewport(rows, 20)
@@ -906,11 +906,16 @@ func TestGroupedViewportCountsLaunchFailureRows(t *testing.T) {
 		t.Fatal("selectGroupedRowsForViewport returned no lines")
 	}
 	got := stripANSI(lines[0].text)
-	if !strings.Contains(got, "Recent launch failures (3):") {
-		t.Fatalf("header = %q, want launch failure count", got)
+	if !strings.Contains(got, "Recent failed instances (2):") {
+		t.Fatalf("header = %q, want failed instance count", got)
+	}
+	for _, line := range lines {
+		if strings.Contains(stripANSI(line.text), "job failed") {
+			t.Fatalf("normal job failure should be hidden from failed instances: %q", line.text)
+		}
 	}
 	if strings.Contains(got, "(0)") {
-		t.Fatalf("header counted jobs instead of launch failures: %q", got)
+		t.Fatalf("header counted jobs instead of failed instances: %q", got)
 	}
 }
 
@@ -1236,9 +1241,9 @@ func TestListTUIRunawayResetClearsCachedBlockedRows(t *testing.T) {
 		width:                  120,
 		height:                 40,
 		autoBlockReasons: map[int64]string{
-			10: "paused: repeated launch failures without progress",
+			10: "paused: repeated failed instances without progress",
 		},
-		autoPersistentBlocked:  "paused: repeated launch failures without progress",
+		autoPersistentBlocked:  "paused: repeated failed instances without progress",
 		autoPersistentBlockedN: 1,
 		autoRunRateInputActive: true,
 		autoRunRateInputPhase:  autoBudgetPhaseMenu,
@@ -1262,7 +1267,7 @@ func TestListTUIRunawayResetClearsCachedBlockedRows(t *testing.T) {
 		t.Fatalf("active runaway breaker infos = %v, want none", infos)
 	}
 	for _, row := range got.groupedRows {
-		if strings.Contains(row.text, "paused: repeated launch failures") {
+		if strings.Contains(row.text, "paused: repeated failed instances") {
 			t.Fatalf("stale blocked reason survived in row %q", row.text)
 		}
 	}

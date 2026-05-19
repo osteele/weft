@@ -106,7 +106,7 @@ type listTUIModel struct {
 	launchStageEnteredAtByID   map[int64]int64
 	launchSpinner              spinner.Model
 	launchSpinnerRunning       bool
-	recentLaunchFailures       *recentLaunchFailures
+	recentFailedInstances      *recentFailedInstances
 	hostInfoByName             map[string]*db.CachedHostInfo
 	quickLaunching             bool
 	quickLaunchScope           string
@@ -210,7 +210,7 @@ type listJobsLoadedMsg struct {
 	launchBootstrapSamples   int
 	launchStageETAByName     map[string]groupedStatusLaunchingStageETA
 	launchStageEnteredAtByID map[int64]int64
-	recentLaunchFailures     *recentLaunchFailures
+	recentFailedInstances    *recentFailedInstances
 	hostInfoByName           map[string]*db.CachedHostInfo
 	autoPassPhase            autoPilotPhaseHint
 	err                      error
@@ -566,7 +566,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchBootstrapSamples = msg.launchBootstrapSamples
 		m.launchStageETAByName = msg.launchStageETAByName
 		m.launchStageEnteredAtByID = msg.launchStageEnteredAtByID
-		m.recentLaunchFailures = msg.recentLaunchFailures
+		m.recentFailedInstances = msg.recentFailedInstances
 		m.hostInfoByName = msg.hostInfoByName
 		m.autoPassPhase = msg.autoPassPhase
 		m.pruneAutoBlockReasons()
@@ -2350,7 +2350,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			placingJobIDs:          m.placingJobIDs,
 			placementQueuedAtByJob: m.placementQueuedAtByJob,
 			placementStatusByJob:   m.placementStatusByJob,
-			launchFailures:         m.recentLaunchFailures,
+			failedInstances:        m.recentFailedInstances,
 			launchByID:             m.launchByID,
 			now:                    time.Now(),
 			launchSpinner:          m.launchSpinner.View(),
@@ -2540,14 +2540,14 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			launchBootstrapSamples:   bootstrapSamples,
 			launchStageETAByName:     stageETAByName,
 			launchStageEnteredAtByID: stageEnteredAtByID,
-			recentLaunchFailures:     loadRecentLaunchFailures(database, recentLaunchFailureWindow, time.Now()),
+			recentFailedInstances:    loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now()),
 			hostInfoByName:           hostInfoByName,
 			autoPassPhase:            loadLatestAutoPilotPhase(database),
 		}
 	}
 }
 
-const recentLaunchFailureWindow = 24 * time.Hour
+const recentFailedInstanceWindow = 24 * time.Hour
 
 func loadLaunchingStageETA(database *sql.DB, jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) (map[string]groupedStatusLaunchingStageETA, map[int64]int64) {
 	stageByName := make(map[string]groupedStatusLaunchingStageETA)
@@ -2588,14 +2588,14 @@ func loadLaunchingStageETA(database *sql.DB, jobs []*db.Job, launchLiveByID map[
 	return stageByName, enteredAtByLaunch
 }
 
-func loadRecentLaunchFailures(database *sql.DB, window time.Duration, now time.Time) *recentLaunchFailures {
+func loadRecentFailedInstances(database *sql.DB, window time.Duration, now time.Time) *recentFailedInstances {
 	if database == nil || window <= 0 {
 		return nil
 	}
 	since := now.Add(-window)
-	items, err := db.ListRecentFailedCloudLaunches(database, since.Unix())
+	items, err := db.ListRecentAbnormalFailedInstances(database, since.Unix())
 	if err != nil {
-		slog.Warn("load recent failed launches", "component", "ui.list", "error", err)
+		slog.Warn("load recent failed instances", "component", "ui.list", "error", err)
 		return nil
 	}
 	if len(items) == 0 {
@@ -2617,7 +2617,7 @@ func loadRecentLaunchFailures(database *sql.DB, window time.Duration, now time.T
 		slog.Warn("load launch projects", "component", "ui.list", "error", err)
 		projects = map[int64]string{}
 	}
-	return &recentLaunchFailures{
+	return &recentFailedInstances{
 		items:             items,
 		recoveredIDs:      recovered,
 		projectByLaunchID: projects,

@@ -787,7 +787,7 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 		}
 		liveByLaunchID := loadLaunchLiveStateForJobs(database, jobs)
 		launchStatusByID := loadLaunchStatusForJobs(database, jobs)
-		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithLaunchFailures(database, jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID))
+		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithFailedInstances(database, jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID))
 	}
 	if listGroupBy == "project" {
 		return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
