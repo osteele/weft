@@ -137,6 +137,96 @@ func submitJobToCloudReuse(database *sql.DB, r2Client *r2.Client, instanceID int
 	return cloudReuseSubmitFailed, duration, err
 }
 
+type draftRunParams struct {
+	Config        *config.Config
+	Host          string
+	WorkingDir    string
+	Command       string
+	Description   string
+	ProjectName   string
+	EnvVars       []string
+	Tags          []string
+	GPU           string
+	GPUClass      string
+	GPUMemGB      *int
+	GPUMemMaxGB   *int
+	MaxComputeCap string
+	CLIOverrides  *db.CLIResourceOverrides
+	Inputs        []string
+	Outputs       []string
+	OutputDirs    []string
+	Produces      []string
+	Needs         []string
+	Disk          *db.JobDiskMetadata
+}
+
+func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunParams) error {
+	jobID, err := db.RecordDraftJobWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, params.GPU)
+	if err != nil {
+		return fmt.Errorf("record draft job: %w", err)
+	}
+	if err := db.SetJobCLIResourceOverrides(database, jobID, params.CLIOverrides); err != nil {
+		slog.Warn("failed to save cli overrides", "error", err)
+	}
+	backend := ""
+	if params.Config != nil && params.Host != "" {
+		backend = params.Config.HostBackend(params.Host)
+	}
+	if err := db.SetJobBackend(database, jobID, backend); err != nil {
+		return fmt.Errorf("set job backend: %w", err)
+	}
+	if err := db.SetJobTags(database, jobID, params.Tags); err != nil {
+		return fmt.Errorf("set job tags: %w", err)
+	}
+	if params.GPUClass != "" {
+		if err := db.SetJobGPUClass(database, jobID, params.GPUClass); err != nil {
+			return fmt.Errorf("set GPU class: %w", err)
+		}
+	}
+	if params.GPUMemGB != nil {
+		if err := db.SetJobGPUMemGB(database, jobID, params.GPUMemGB); err != nil {
+			return fmt.Errorf("set GPU memory: %w", err)
+		}
+	}
+	if params.GPUMemMaxGB != nil {
+		if err := db.SetJobGPUMemMaxGB(database, jobID, params.GPUMemMaxGB); err != nil {
+			return fmt.Errorf("set legacy GPU memory upper metadata: %w", err)
+		}
+	}
+	if err := db.SetJobMaxComputeCap(database, jobID, params.MaxComputeCap); err != nil {
+		slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
+	}
+	if params.ProjectName != "" {
+		if err := db.SetJobProject(database, jobID, params.ProjectName); err != nil {
+			return fmt.Errorf("set project: %w", err)
+		}
+	}
+	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
+		return fmt.Errorf("set env vars: %w", err)
+	}
+	if err := persistDraftArtifactFields(database, jobID, params.Inputs, params.Outputs, params.OutputDirs, params.Produces, params.Needs); err != nil {
+		return err
+	}
+	if params.Disk != nil {
+		if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Disk: params.Disk}); err != nil {
+			return fmt.Errorf("set disk metadata: %w", err)
+		}
+	}
+
+	w := cmd.OutOrStdout()
+	if params.Host != "" {
+		fmt.Fprintf(w, "Draft job #%d saved for %s\n\n", jobID, params.Host)
+	} else {
+		fmt.Fprintf(w, "Draft job #%d saved\n\n", jobID)
+	}
+	fmt.Fprintf(w, "  Working dir: %s\n", params.WorkingDir)
+	fmt.Fprintf(w, "  Command: %s\n", params.Command)
+	if params.Description != "" {
+		fmt.Fprintf(w, "  Description: %s\n", params.Description)
+	}
+	return nil
+}
+
 func init() {
 	rootCmd.AddCommand(runCmd)
 
@@ -875,6 +965,31 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Below: --draft or dependency modes only
 
+	if runDraft {
+		return recordDraftRunJob(cmd, database, draftRunParams{
+			Config:        cfg,
+			Host:          host,
+			WorkingDir:    workingDir,
+			Command:       command,
+			Description:   runDescription,
+			ProjectName:   projectName,
+			EnvVars:       runEnvVars,
+			Tags:          runTags,
+			GPU:           gpu,
+			GPUClass:      gpuClass,
+			GPUMemGB:      resolvedGPUMemGB,
+			GPUMemMaxGB:   resolvedGPUMemMaxGB,
+			MaxComputeCap: persistMaxComputeCap,
+			CLIOverrides:  cliOverrides,
+			Inputs:        runInputs,
+			Outputs:       runOutputs,
+			OutputDirs:    outputDirs,
+			Produces:      runProduces,
+			Needs:         resolvedNeeds,
+			Disk:          diskMeta,
+		})
+	}
+
 	// Placement for non-scheduler paths (--draft, --after)
 	var placementResult *placement.PlacementResult
 	if host == "" {
@@ -940,64 +1055,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if err := validatePinnedHostQueueGate(host, gpuClass, resolvedGPUMemGB); err != nil {
 		return err
-	}
-
-	if runDraft {
-		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, gpu)
-		if err != nil {
-			return fmt.Errorf("record draft job: %w", err)
-		}
-		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
-			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		backend, err := ops.ResolveBackend(host, 5*time.Second)
-		if err != nil {
-			return fmt.Errorf("resolve backend: %w", err)
-		}
-		if err := db.SetJobBackend(database, jobID, backend); err != nil {
-			return fmt.Errorf("set job backend: %w", err)
-		}
-		if err := db.SetJobTags(database, jobID, runTags); err != nil {
-			return fmt.Errorf("set job tags: %w", err)
-		}
-		if gpuClass != "" {
-			if err := db.SetJobGPUClass(database, jobID, gpuClass); err != nil {
-				return fmt.Errorf("set GPU class: %w", err)
-			}
-		}
-		if resolvedGPUMemGB != nil {
-			if err := db.SetJobGPUMemGB(database, jobID, resolvedGPUMemGB); err != nil {
-				return fmt.Errorf("set GPU memory: %w", err)
-			}
-		}
-		if resolvedGPUMemMaxGB != nil {
-			if err := db.SetJobGPUMemMaxGB(database, jobID, resolvedGPUMemMaxGB); err != nil {
-				return fmt.Errorf("set legacy GPU memory upper metadata: %w", err)
-			}
-		}
-		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
-			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
-		}
-		if projectName != "" {
-			if err := db.SetJobProject(database, jobID, projectName); err != nil {
-				return fmt.Errorf("set project: %w", err)
-			}
-		}
-		if err := persistDraftArtifactFields(database, jobID, runInputs, runOutputs, outputDirs, runProduces, resolvedNeeds); err != nil {
-			return err
-		}
-		if diskMeta != nil {
-			if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Disk: diskMeta}); err != nil {
-				return fmt.Errorf("set disk metadata: %w", err)
-			}
-		}
-		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
-		fmt.Printf("  Working dir: %s\n", workingDir)
-		fmt.Printf("  Command: %s\n", command)
-		if runDescription != "" {
-			fmt.Printf("  Description: %s\n", runDescription)
-		}
-		return nil
 	}
 
 	// Handle --after/--depends-on and --after-any dependencies (always uses remote queue)

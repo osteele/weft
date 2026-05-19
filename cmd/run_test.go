@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/spf13/cobra"
 )
 
 func TestParseCdPrefix(t *testing.T) {
@@ -218,4 +220,97 @@ func TestPersistDraftArtifactFields(t *testing.T) {
 	if !reflect.DeepEqual(job.Needs, needs) {
 		t.Fatalf("Needs = %v, want %v", job.Needs, needs)
 	}
+}
+
+func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	resetRunGlobals(t)
+	runDraft = true
+	runDir = dir
+	runDescription = "draft without host"
+	runGPU = "a100>=80GB"
+
+	cmd := newRunTestCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runRun(cmd, []string{"python train.py"}); err != nil {
+		t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(jobs))
+	}
+	job := jobs[0]
+	if job.Status != db.StatusDraft {
+		t.Fatalf("status = %q, want %q", job.Status, db.StatusDraft)
+	}
+	if job.Host != "" {
+		t.Fatalf("host = %q, want empty", job.Host)
+	}
+	if job.Project != filepath.Base(dir) {
+		t.Fatalf("project = %q, want %q", job.Project, filepath.Base(dir))
+	}
+	if job.GPUClass != "a100" {
+		t.Fatalf("gpu_class = %q, want a100", job.GPUClass)
+	}
+	if !strings.Contains(out.String(), "Draft job #") {
+		t.Fatalf("output missing draft confirmation:\n%s", out.String())
+	}
+}
+
+func newRunTestCommand() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("provider", "", "")
+	cmd.Flags().Bool("gpu-mem-strict", false, "")
+	cmd.Flags().Int("disk", 0, "")
+	cmd.Flags().Int("runtime-disk", 0, "")
+	return cmd
+}
+
+func resetRunGlobals(t *testing.T) {
+	t.Helper()
+	runHost = ""
+	runDir = ""
+	runDescription = ""
+	runProject = ""
+	runDraft = false
+	runFollow = false
+	runWait = false
+	runNoWait = false
+	runKillJobID = 0
+	runFrom = 0
+	runEnvVars = nil
+	runTags = nil
+	runAfter = 0
+	runAfterAny = 0
+	runGPU = ""
+	runGPUMem = 0
+	runGPUMemStrict = false
+	runDiskGB = 0
+	runRuntimeDiskGB = 0
+	runGPUClass = ""
+	runProvider = ""
+	runInputs = nil
+	runOutputs = nil
+	runProduces = nil
+	runNeeds = nil
+	runDryRun = false
+	runNoSync = false
+	runHFToken = false
+	runHFTokenFrom = ""
+	runSecretVars = nil
 }
