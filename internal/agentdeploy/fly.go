@@ -82,13 +82,17 @@ func BuildViaFlyBuilderWithProgress(version, goos, goarch, outputPath string, bu
 	prepare := fmt.Sprintf(`set -euo pipefail
 mkdir -p /data/bin /data/lib
 NEED_APT=0
-if [ -f /data/bin/rsync ]; then
+if command -v rsync >/dev/null 2>&1; then
+    :
+elif [ -f /data/bin/rsync ]; then
     cp /data/bin/rsync /usr/bin/rsync
     cp /data/lib/libpopt.so.0* /lib/x86_64-linux-gnu/ 2>/dev/null || true
 else
     NEED_APT=1
 fi
-if [ -f /data/bin/xz ]; then
+if command -v xz >/dev/null 2>&1; then
+    :
+elif [ -f /data/bin/xz ]; then
     cp /data/bin/xz /usr/bin/xz
 else
     NEED_APT=1

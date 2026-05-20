@@ -8,55 +8,100 @@ default:
 build:
     #!/usr/bin/env bash
     set -euo pipefail
+    prewarm_pid=""
+    start_agent_prewarm() {
+        local label="$1"
+        if command -v weft >/dev/null 2>&1; then
+            PREWARM_LOG="${HOME}/.cache/weft/agent-prewarm.log"
+            mkdir -p "$(dirname "${PREWARM_LOG}")"
+            echo "Starting background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
+            (
+                printf '[%s] prewarm start (%s)\n' "$(date -u +%FT%TZ)" "${label}"
+                if weft build-agents --targets linux-amd64; then
+                    printf '[%s] prewarm ok (%s)\n' "$(date -u +%FT%TZ)" "${label}"
+                else
+                    status=$?
+                    printf '[%s] prewarm failed (%s, exit=%s)\n' "$(date -u +%FT%TZ)" "${label}" "${status}"
+                fi
+            ) >>"${PREWARM_LOG}" 2>&1 &
+            prewarm_pid=$!
+        else
+            echo "info: installed weft not found; skipping agent prewarm"
+        fi
+    }
+    wait_agent_prewarm() {
+        if [ -n "${prewarm_pid}" ]; then
+            echo "Waiting for background agent prewarm..."
+            wait "${prewarm_pid}" || true
+        fi
+    }
+    cleanup() {
+        status=$?
+        wait_agent_prewarm
+        exit "${status}"
+    }
+    trap cleanup EXIT
     echo "Scheduling predictor schema check (non-blocking)..."
     (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
     echo "Building weft binary..."
-    if command -v weft >/dev/null 2>&1; then
-        PREWARM_LOG="${HOME}/.cache/weft/agent-prewarm.log"
-        mkdir -p "$(dirname "${PREWARM_LOG}")"
-        echo "Starting non-blocking background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
-        (
-            printf '[%s] prewarm start (build)\n' "$(date -u +%FT%TZ)"
-            weft build-agents --targets linux-amd64
-            printf '[%s] prewarm ok (build)\n' "$(date -u +%FT%TZ)"
-        ) >>"${PREWARM_LOG}" 2>&1 || (
-            printf '[%s] prewarm failed (build)\n' "$(date -u +%FT%TZ)" >>"${PREWARM_LOG}"
-        ) &
-    else
-        echo "info: installed weft not found; skipping agent prewarm"
-    fi
+    start_agent_prewarm "build"
     go build -o weft .
+    wait_agent_prewarm
+    trap - EXIT
     echo "Build complete."
 
 # Install to $GOPATH/bin (also builds agents so they are ready to deploy)
 install:
     #!/usr/bin/env bash
     set -euo pipefail
+    prewarm_pid=""
+    start_agent_prewarm() {
+        local label="$1"
+        if command -v weft >/dev/null 2>&1; then
+            PREWARM_LOG="${HOME}/.cache/weft/agent-prewarm.log"
+            mkdir -p "$(dirname "${PREWARM_LOG}")"
+            # Starts before go install to overlap work with install. The
+            # recipe waits for it before exit so chained commands see a quiet
+            # build cache and no old weft child process.
+            echo "Starting background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
+            (
+                printf '[%s] prewarm start (%s)\n' "$(date -u +%FT%TZ)" "${label}"
+                if weft build-agents --targets linux-amd64; then
+                    printf '[%s] prewarm ok (%s)\n' "$(date -u +%FT%TZ)" "${label}"
+                else
+                    status=$?
+                    printf '[%s] prewarm failed (%s, exit=%s)\n' "$(date -u +%FT%TZ)" "${label}" "${status}"
+                fi
+            ) >>"${PREWARM_LOG}" 2>&1 &
+            prewarm_pid=$!
+        else
+            echo "info: installed weft not found; skipping agent prewarm"
+        fi
+    }
+    wait_agent_prewarm() {
+        if [ -n "${prewarm_pid}" ]; then
+            echo "Waiting for background agent prewarm..."
+            wait "${prewarm_pid}" || true
+        fi
+    }
+    cleanup() {
+        status=$?
+        wait_agent_prewarm
+        exit "${status}"
+    }
+    trap cleanup EXIT
     echo "Scheduling predictor schema check (non-blocking)..."
     (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
     echo "Installing weft..."
-    if command -v weft >/dev/null 2>&1; then
-        PREWARM_LOG="${HOME}/.cache/weft/agent-prewarm.log"
-        mkdir -p "$(dirname "${PREWARM_LOG}")"
-        # Intentionally starts before go install to overlap work with install.
-        # This is a latency optimization and remains best-effort.
-        echo "Starting non-blocking background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
-        (
-            printf '[%s] prewarm start (install)\n' "$(date -u +%FT%TZ)"
-            weft build-agents --targets linux-amd64
-            printf '[%s] prewarm ok (install)\n' "$(date -u +%FT%TZ)"
-        ) >>"${PREWARM_LOG}" 2>&1 || (
-            printf '[%s] prewarm failed (install)\n' "$(date -u +%FT%TZ)" >>"${PREWARM_LOG}"
-        ) &
-    else
-        echo "info: installed weft not found; skipping agent prewarm"
-    fi
+    start_agent_prewarm "install"
     go install .
     WEFT_DOCS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/weft/docs"
     mkdir -p "${WEFT_DOCS_DIR}"
     rsync -a --delete docs/ "${WEFT_DOCS_DIR}/"
     cp CLAUDE.md "${WEFT_DOCS_DIR}/CLAUDE.md" 2>/dev/null || true
     cp AGENTS.md "${WEFT_DOCS_DIR}/AGENTS.md" 2>/dev/null || true
+    wait_agent_prewarm
+    trap - EXIT
     echo "Docs installed to ${WEFT_DOCS_DIR}"
     echo "Install complete."
 

@@ -33,7 +33,7 @@ ssh titan 'tmux kill-session -t weft-runner 2>/dev/null; true'
 
 ## Background prewarm notes
 
-`just build` and `just install` start an asynchronous best-effort prewarm (`weft build-agents --targets linux-amd64`) before the main command completes. This is intentional for latency and does not block install/build success.
+`just build` and `just install` start a best-effort prewarm (`weft build-agents --targets linux-amd64`) before the local build/install work, then wait for the prewarm before the recipe exits. This overlaps local work with agent preparation while ensuring chained commands do not race an old background `weft` process.
 
 If you suspect prewarm/build issues, inspect:
 

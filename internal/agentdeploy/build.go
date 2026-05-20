@@ -110,11 +110,6 @@ func acquireBuildLock(outputPath string) (func(), error) {
 	const (
 		waitInterval = 200 * time.Millisecond
 		waitTimeout  = 10 * time.Minute
-		// Reclaim a lock older than this even if the recorded PID is still
-		// alive (cheap defence against PID reuse on long-lived systems).
-		// Must be < waitTimeout so a stuck holder is reclaimed rather than
-		// timing out the waiter.
-		staleAfter = 5 * time.Minute
 	)
 	deadline := time.Now().Add(waitTimeout)
 
@@ -134,8 +129,7 @@ func acquireBuildLock(outputPath string) (func(), error) {
 			return func() {}, nil
 		}
 
-		// Reclaim if the holder is gone or the lock is too old.
-		if shouldReclaimBuildLock(lockFile, staleAfter) {
+		if shouldReclaimBuildLock(lockFile) {
 			_ = os.Remove(lockFile)
 			continue
 		}
@@ -148,15 +142,13 @@ func acquireBuildLock(outputPath string) (func(), error) {
 }
 
 // shouldReclaimBuildLock reports whether a held lock can be safely taken over.
-// True when (a) the recorded PID is no longer a running process or (b) the
-// lock file is older than staleAfter (defensive against PID reuse).
-func shouldReclaimBuildLock(lockFile string, staleAfter time.Duration) bool {
+// A live recorded PID always owns the lock, even if the lock file is old. Slow
+// remote agent builds can legitimately take several minutes; reclaiming by age
+// starts duplicate builders that fight over the same cache path and remote VM.
+func shouldReclaimBuildLock(lockFile string) bool {
 	info, err := os.Stat(lockFile)
 	if err != nil {
 		return false // disappeared on its own; loop will try OpenFile again
-	}
-	if time.Since(info.ModTime()) > staleAfter {
-		return true
 	}
 	data, err := os.ReadFile(lockFile)
 	if err != nil {
