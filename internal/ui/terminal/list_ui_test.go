@@ -416,6 +416,124 @@ func TestListTUIPruneAutoBlockReasonsKeepsCurrentRunRateHeadroom(t *testing.T) {
 	}
 }
 
+func TestListTUIPrunesPersistedStaleRunRateHeadroom(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		CostPerHourCents: 45,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	reason := "run-rate headroom exhausted ($0.53/hr free, this group needs $1.17/hr)"
+	if err := db.SetJobPlacementReasons(database, jobID, []string{reason}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	m := listTUIModel{
+		database:               database,
+		autoRunRateTargetCents: 350,
+	}
+
+	reasons := m.visibleUnplacedBlockedReasonsForJobs([]*db.Job{job})
+
+	if got := reasons[jobID]; got != "" {
+		t.Fatalf("visible reason = %q, want none", got)
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	if len(refreshed.PlacementReasons) != 1 || refreshed.PlacementReasons[0] != reason {
+		t.Fatalf("placement reasons mutated during display: %#v", refreshed.PlacementReasons)
+	}
+}
+
+func TestListTUIPrunesPersistedStaleRunRateSegment(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		CostPerHourCents: 45,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	reuseReason := "reuse blocked: wi3020 A40 45GB: GPU memory insufficient: job=48GB instance=45GB"
+	reason := "run-rate headroom exhausted ($0.53/hr free, this group needs $1.17/hr); " + reuseReason
+	if err := db.SetJobPlacementReasons(database, jobID, []string{reason}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	m := listTUIModel{
+		database:               database,
+		autoRunRateTargetCents: 350,
+	}
+
+	reasons := m.visibleUnplacedBlockedReasonsForJobs([]*db.Job{job})
+
+	if got := reasons[jobID]; got != reuseReason {
+		t.Fatalf("visible reason = %q, want %q", got, reuseReason)
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	if len(refreshed.PlacementReasons) != 1 || refreshed.PlacementReasons[0] != reason {
+		t.Fatalf("placement reasons mutated during display: %#v", refreshed.PlacementReasons)
+	}
+}
+
+func TestListTUIKeepsPersistedCurrentRunRateHeadroom(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		CostPerHourCents: 300,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	reason := "run-rate headroom exhausted ($0.53/hr free, this group needs $1.17/hr)"
+	if err := db.SetJobPlacementReasons(database, jobID, []string{reason}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	m := listTUIModel{
+		database:               database,
+		autoRunRateTargetCents: 350,
+	}
+
+	reasons := m.visibleUnplacedBlockedReasonsForJobs([]*db.Job{job})
+
+	if got := reasons[jobID]; got != reason {
+		t.Fatalf("visible reason = %q, want %q", got, reason)
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	if len(refreshed.PlacementReasons) != 1 || refreshed.PlacementReasons[0] != reason {
+		t.Fatalf("placement reasons = %#v, want [%q]", refreshed.PlacementReasons, reason)
+	}
+}
+
 func TestGroupedJobsWithAutoReasonsOnlyAppliesToUnplacedQueuedJobs(t *testing.T) {
 	unplaced := &db.Job{ID: 10, Status: db.StatusQueued}
 	placed := &db.Job{ID: 11, Status: db.StatusQueued, Host: "cool30"}

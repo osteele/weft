@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/app/hostsync"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -3026,56 +3026,47 @@ func (m listTUIModel) visibleUnplacedBlockedReasons() map[int64]string {
 
 func (m listTUIModel) visibleUnplacedBlockedReasonsForJobs(jobs []*db.Job) map[int64]string {
 	reasons := make(map[int64]string)
+	headroom, hasRunRateHeadroom := m.currentRunRateHeadroomCents()
 	for _, job := range jobs {
 		if job == nil || !job.IsUnplacedAwaitingPlacement() {
 			continue
 		}
-		reason := visiblePlacementBlockReason(job, m.autoBlockReasons[job.ID])
-		if reason == "" {
-			reason = latestPlacementReason(job)
-		}
-		if reason != "" {
-			reasons[job.ID] = reason
+		displayJob := jobWithDisplayPlacementReasons(job, headroom, hasRunRateHeadroom)
+		result := blockreason.Resolve(displayJob, blockreason.Options{
+			AutoPilotReason: m.autoBlockReasons[job.ID],
+			Compact:         true,
+		})
+		if result.Blocked {
+			reasons[job.ID] = result.Reason
 		}
 	}
 	return reasons
 }
 
-func latestPlacementReason(job *db.Job) string {
-	if job == nil {
-		return ""
+func jobWithDisplayPlacementReasons(job *db.Job, headroomCents int, hasRunRateHeadroom bool) *db.Job {
+	if job == nil || !hasRunRateHeadroom || len(job.PlacementReasons) == 0 {
+		return job
 	}
-	for i := len(job.PlacementReasons) - 1; i >= 0; i-- {
-		if reason := campaign.SanitizeBlockedReason(job.PlacementReasons[i]); reason != "" {
-			return visiblePlacementBlockReason(job, reason)
+	reasons := make([]string, 0, len(job.PlacementReasons))
+	changed := false
+	for _, reason := range job.PlacementReasons {
+		pruned, prunedChanged := pruneStaleRunRateBlockReason(reason, headroomCents)
+		if prunedChanged {
+			changed = true
+			if strings.TrimSpace(pruned) == "" {
+				continue
+			}
+			reasons = append(reasons, pruned)
+			continue
 		}
+		reasons = append(reasons, reason)
 	}
-	return ""
-}
-
-// contractRefPattern matches a trailing or inline provider contract reference
-// such as " (contract 37151723)". The contract number identifies an orphaned
-// provider instance and is retained in CLI output and placement history, but
-// is stripped from the compact one-line TUI blocked-reason rendering.
-var contractRefPattern = regexp.MustCompile(`\s*\(contract \d+\)`)
-
-func stripContractRef(reason string) string {
-	return strings.TrimSpace(contractRefPattern.ReplaceAllString(reason, ""))
-}
-
-func visiblePlacementBlockReason(job *db.Job, reason string) string {
-	reason = campaign.SanitizeBlockedReason(reason)
-	reason = stripContractRef(reason)
-	if reason == "" {
-		return ""
+	if !changed {
+		return job
 	}
-	if isUnplacedResetReason(reason) {
-		return ""
-	}
-	if job != nil && !job.HasTag(db.TagInventory) && isOnPremRejectionReason(reason) {
-		return ""
-	}
-	return reason
+	copyJob := *job
+	copyJob.PlacementReasons = reasons
+	return &copyJob
 }
 
 func groupedStatusUnprocessedView(title string) bool {

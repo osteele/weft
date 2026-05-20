@@ -1,0 +1,124 @@
+package blockreason
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/osteele/weft/internal/db"
+)
+
+func TestResolveCompactBlockerSources(t *testing.T) {
+	launchID := int64(3022)
+	tests := []struct {
+		name   string
+		job    *db.Job
+		opts   Options
+		want   string
+		source Source
+	}{
+		{
+			name: "live queue reason wins",
+			job: &db.Job{
+				ID:                 1,
+				Status:             db.StatusQueued,
+				Host:               "cool30",
+				QueueBlockedReason: "gpu gate: no GPU with 26GB free",
+				PlacementReasons:   []string{"planner: no offers"},
+			},
+			want:   "gpu gate: no GPU with 26GB free",
+			source: SourceLive,
+		},
+		{
+			name: "autopilot reason beats placement history",
+			job: &db.Job{
+				ID:               2,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"planner: older reason"},
+			},
+			opts:   Options{AutoPilotReason: "planner: current reason", Compact: true},
+			want:   "planner: current reason",
+			source: SourceAutoPilot,
+		},
+		{
+			name: "unplaced uses latest persisted placement reason",
+			job: &db.Job{
+				ID:               3,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"planner: older reason", "planner: no offers"},
+			},
+			want:   "planner: no offers",
+			source: SourcePlacement,
+		},
+		{
+			name: "placed queued ignores stale reuse failure history",
+			job: &db.Job{
+				ID:       2031,
+				Status:   db.StatusQueued,
+				LaunchID: &launchID,
+				PlacementReasons: []string{
+					"reuse instance wi3022 failed: claim job wj2031 for instance wi3022: set launch_id for job wj2031: job 2031: job already claimed by another launch",
+				},
+			},
+		},
+		{
+			name: "reset history is hidden",
+			job: &db.Job{
+				ID:               4,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"cloud instance 3025 failed (infra_failure)"},
+			},
+		},
+		{
+			name: "on-prem rejection hidden for rental eligible compact label",
+			job: &db.Job{
+				ID:               5,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"3 hosts: host is opt-in only (specify with --host)"},
+			},
+		},
+		{
+			name: "on-prem rejection shown for inventory job",
+			job: &db.Job{
+				ID:               6,
+				Status:           db.StatusQueued,
+				Tags:             []string{db.TagInventory},
+				PlacementReasons: []string{"3 hosts: host is opt-in only (specify with --host)"},
+			},
+			want:   "3 hosts: host is opt-in only (specify with --host)",
+			source: SourcePlacement,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := tc.opts
+			opts.Compact = true
+			got := Resolve(tc.job, opts)
+			if got.Reason != tc.want || got.Source != tc.source {
+				t.Fatalf("Resolve() = (%q, %q), want (%q, %q)", got.Reason, got.Source, tc.want, tc.source)
+			}
+			if got.Blocked != (tc.want != "") {
+				t.Fatalf("Blocked = %v, want %v", got.Blocked, tc.want != "")
+			}
+		})
+	}
+}
+
+func TestReasonsDetailFiltersHistory(t *testing.T) {
+	job := &db.Job{
+		ID:                 10,
+		Status:             db.StatusQueued,
+		QueueBlockedReason: `waiting for "output/model.pt" from wj1570 (running)`,
+		PlacementReasons: []string{
+			"cloud instance 3025 failed (infra_failure)",
+			"no local host matched gpu-class=nvidia",
+			"planner: no offers",
+			"planner: no offers",
+		},
+	}
+	reasons := Reasons(job, Options{CloudConfigured: true})
+	got := strings.Join(reasons, "; ")
+	want := `waiting for "output/model.pt" from wj1570 (running); planner: no offers`
+	if got != want {
+		t.Fatalf("Reasons() = %q, want %q", got, want)
+	}
+}

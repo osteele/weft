@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/jobview"
 )
@@ -365,6 +366,32 @@ func TestRenderJobListGroupedStatusPlainAt_DoesNotFallBackToOlderPersistedPlacem
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_HidesStaleReuseFailureForPlacedQueuedJob(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(3022)
+	jobs := []*db.Job{
+		{
+			ID:          2031,
+			Status:      db.StatusQueued,
+			LaunchID:    &launchID,
+			Project:     "contour-pareto",
+			Description: "EXP-110 HMC-marginalized hyperparameter search",
+			QueuedAt:    4_900,
+			PlacementReasons: []string{
+				"reuse instance wi3022 failed: claim job wj2031 for instance wi3022: set launch_id for job wj2031: job 2031: job already claimed by another launch",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if strings.Contains(out, "blocked:") {
+		t.Fatalf("unexpected stale reuse blocker for placed queued job:\n%s", out)
+	}
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("missing queued section:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_HidesUnplacedResetPlacementReason(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{
@@ -383,6 +410,54 @@ func TestRenderJobListGroupedStatusPlainAt_HidesUnplacedResetPlacementReason(t *
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	if strings.Contains(out, "blocked:") {
 		t.Fatalf("unexpected blocked reason for unplaced reset:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_HidesFailedCloudResetPlacementReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          2025,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs relaunch",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"cloud instance 3025 failed (infra_failure)",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if strings.Contains(out, "blocked:") {
+		t.Fatalf("unexpected blocked reason for failed cloud reset:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_UsesActionableReasonAfterFailedCloudReset(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	actionable := "planner: no offers from providers for gpu=A100 vram>=82GB"
+	jobs := []*db.Job{
+		{
+			ID:          2028,
+			Status:      db.StatusQueued,
+			Project:     "proj",
+			Description: "needs placement",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"cloud instance 3025 failed (infra_failure)",
+				actionable,
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	blockedWant := "  blocked: " + actionable + " (1)"
+	if !strings.Contains(out, blockedWant) {
+		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
+	}
+	if strings.Contains(out, "cloud instance 3025 failed") {
+		t.Fatalf("unexpected failed cloud reset reason:\n%s", out)
 	}
 }
 
@@ -1231,8 +1306,8 @@ func TestStripContractRef(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := stripContractRef(tc.in); got != tc.want {
-				t.Fatalf("stripContractRef(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := blockreason.StripContractRef(tc.in); got != tc.want {
+				t.Fatalf("StripContractRef(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

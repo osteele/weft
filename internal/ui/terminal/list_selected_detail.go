@@ -2,12 +2,12 @@ package terminal
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -355,86 +355,11 @@ func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool) []st
 	if req := formatResourceRequest(job); req != "" {
 		parts = append(parts, "wants "+req)
 	}
-	// Surface every legitimate block reason. QueueBlockedReason is the live,
-	// hydrated reason (e.g. waiting on a producer); PlacementReasons records
-	// reasons attached at past placement attempts (e.g. instance reset). Both
-	// can apply at once — the producer wait blocks fresh placement while a
-	// prior placement constraint is still on file.
-	reasons := combinedBlockedReasons(job, cloudConfigured)
+	reasons := blockreason.Reasons(job, blockreason.Options{CloudConfigured: cloudConfigured})
 	if len(reasons) > 0 {
 		parts = append(parts, "blocked: "+strings.Join(reasons, "; "))
 	}
 	return parts
-}
-
-func combinedBlockedReasons(job *db.Job, cloudConfigured bool) []string {
-	if job == nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	var out []string
-	add := func(reason string) {
-		reason = strings.TrimSpace(reason)
-		if reason == "" {
-			return
-		}
-		if _, dup := seen[reason]; dup {
-			return
-		}
-		seen[reason] = struct{}{}
-		out = append(out, reason)
-	}
-	add(job.QueueBlockedReason)
-	placement := job.PlacementReasons
-	if cloudConfigured {
-		placement = filterOutOnPremRejectionReasons(placement)
-	}
-	for _, r := range placement {
-		if isUnplacedResetReason(r) {
-			continue
-		}
-		add(r)
-	}
-	return out
-}
-
-// filterOutOnPremRejectionReasons drops PlacementReasons that describe purely
-// on-prem rejection (no host matched, per-host non-eligibility). When cloud is
-// available these are normal handoff state, not blockers worth surfacing.
-// Other reasons (e.g. dependency gates, retry budget exhausted, "no offers
-// from providers") are kept.
-func filterOutOnPremRejectionReasons(reasons []string) []string {
-	filtered := reasons[:0:0]
-	for _, r := range reasons {
-		if isOnPremRejectionReason(r) {
-			continue
-		}
-		filtered = append(filtered, r)
-	}
-	return filtered
-}
-
-func isOnPremRejectionReason(reason string) bool {
-	r := strings.TrimSpace(reason)
-	if strings.HasPrefix(r, "no local host matched ") {
-		return true
-	}
-	// Per-host rejection summary emitted by placement.go alongside the
-	// "no local host matched ..." line (e.g. "2 hosts: no L40s GPU").
-	if onPremHostsRejectionPattern.MatchString(r) {
-		return true
-	}
-	return false
-}
-
-var onPremHostsRejectionPattern = regexp.MustCompile(`^\d+ hosts?: `)
-
-func isUnplacedResetReason(reason string) bool {
-	r := strings.TrimSpace(reason)
-	return strings.Contains(r, "unplaced queue") &&
-		(strings.Contains(r, "job reset to unplaced queue") ||
-			strings.Contains(r, "job returned to unplaced queue") ||
-			strings.Contains(r, "returned from cloud instance to unplaced queue"))
 }
 
 func formatResourceRequest(job *db.Job) string {

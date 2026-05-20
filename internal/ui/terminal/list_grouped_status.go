@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -463,10 +464,7 @@ func groupedStatusBlockedReason(job *db.Job, sectionKey string) string {
 	if sectionKey != "queued" && sectionKey != "unplaced" {
 		return ""
 	}
-	if reason := visiblePlacementBlockReason(job, job.QueueBlockedReason); reason != "" {
-		return reason
-	}
-	return latestPlacementReason(job)
+	return blockreason.Resolve(job, blockreason.Options{Compact: true}).Reason
 }
 
 func appendGroupedStatusJobRow(
