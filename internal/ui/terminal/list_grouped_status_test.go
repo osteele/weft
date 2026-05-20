@@ -196,6 +196,59 @@ func TestRenderJobListGroupedStatusPlainAt_CompletionsFallbackToPlacedWhenEndMis
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_FailuresUseEndTime(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	end := int64(4_940)
+	jobs := []*db.Job{
+		{
+			ID:          54,
+			Status:      db.StatusFailed,
+			Project:     "proj",
+			Description: "failed run",
+			QueuedAt:    4_000,
+			EndTime:     &end,
+		},
+		{
+			ID:          55,
+			Status:      db.StatusCompleted,
+			Project:     "proj",
+			Description: "bad exit",
+			QueuedAt:    4_000,
+			EndTime:     &end,
+			ExitCode:    testIntPtr(2),
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	for _, want := range []string{
+		"-   wj54 — proj failed run — failed 1m ago — failed",
+		"-   wj55 — proj bad exit — failed 1m ago — completed (exit 2)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_FailuresFallbackToPlacedWhenEndMissing(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          56,
+			Status:      db.StatusFailed,
+			Project:     "proj",
+			Description: "legacy failure",
+			QueuedAt:    4_700,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	want := "-   wj56 — proj legacy failure — placed 5m ago — failed"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_QueuedUsesHydratedPlacementTime(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	launchID := int64(44)
