@@ -286,19 +286,9 @@ func (m *watchModel) autoLaunchForUnplacedJobs(hasPlaceable bool) (tea.Cmd, stri
 	if planErr == nil && len(plan.LaunchJobIDs) > 0 {
 		scopeJobIDs = append([]int64(nil), plan.LaunchJobIDs...)
 	}
-	if m.autoRunRateTargetCents > 0 && planErr == nil && len(scopeJobIDs) > 0 && plan.LaunchRateCentsPerHour > 0 {
-		currentRateCents, err := db.SumActiveLaunchCostPerHourCents(database)
-		if err == nil {
-			projectedRate := currentRateCents + plan.LaunchRateCentsPerHour
-			if projectedRate > m.autoRunRateTargetCents {
-				return nil, fmt.Sprintf(
-					"auto-launch: run-rate target exceeded: target %s, current %s + planned %s = %s",
-					formatAutoRunRateTarget(m.autoRunRateTargetCents),
-					formatAutoRunRateTarget(currentRateCents),
-					formatAutoRunRateTarget(plan.LaunchRateCentsPerHour),
-					formatAutoRunRateTarget(projectedRate),
-				)
-			}
+	if planErr == nil && len(scopeJobIDs) > 0 {
+		if reason, blocked := orchestration.CheckRunRateProjection(database, m.autoRunRateTargetCents, plan.LaunchRateCentsPerHour); blocked {
+			return nil, reason
 		}
 	}
 	return func() tea.Msg {

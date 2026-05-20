@@ -430,6 +430,18 @@ var versionedMigrations = []migration{
 			return addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN job_metadata TEXT`)
 		},
 	},
+	{
+		Description: "derive job status target kind from execution targets",
+		Apply: func(db *sql.DB) error {
+			if err := BackfillJobAttemptExecutionTargets(db); err != nil {
+				return err
+			}
+			if err := ValidateExecutionTargetPlacement(db); err != nil {
+				return err
+			}
+			return createJobStatusView(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived
@@ -552,6 +564,16 @@ func normalizeAttemptEndTimes(db *sql.DB) error {
 }
 
 func createExecutionTargetShadowTriggers(db *sql.DB) error {
+	for _, name := range []string{
+		"job_attempts_sync_target_shadow_insert",
+		"job_attempts_sync_target_shadow_update",
+		"job_attempts_reject_target_shadow_mismatch_insert",
+		"job_attempts_reject_target_shadow_mismatch_update",
+	} {
+		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
+			return err
+		}
+	}
 	stmts := []string{
 		`CREATE TRIGGER IF NOT EXISTS job_attempts_sync_target_shadow_insert
 			AFTER INSERT ON job_attempts

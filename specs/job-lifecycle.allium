@@ -41,6 +41,11 @@ external entity CloudInstance {
     live_state: status_sync/InstanceLiveState?
 }
 
+-- Canonical placement identity owned by inventory-placement.allium.
+external entity ExecutionTarget {
+    kind: TargetKind
+}
+
 entity Job {
     -- Immutable spec (set at submission)
     command: String
@@ -230,8 +235,11 @@ entity JobAttempt {
     job: Job
     attempt_number: Integer
     status: Status              -- same status enum as Job
-    host: Host?
-    cloud_instance: CloudInstance?
+    target: ExecutionTarget?
+    host: Host?                 -- compatibility shadow of target for
+                                -- estimator and research SQL consumers
+    cloud_instance: CloudInstance? -- compatibility shadow of target for
+                                   -- estimator and research SQL consumers
     backend: Backend
     start_time: Timestamp?
     end_time: Timestamp?
@@ -271,6 +279,7 @@ entity JobAttempt {
 
 value Tag = exclusive | benchmark | rental | inventory | compute_intensive
 
+-- unplaced is represented as target = null on the attempt.
 value TargetKind = unplaced | inventory_host | rental_instance
 
 value Backend = queue_runner | slurm | vastai
@@ -293,7 +302,7 @@ value Status = draft | queued | starting | running
 
 -- Placement scoring result
 value PlacementResult {
-    host: Host
+    target: ExecutionTarget?
     score: Decimal
     estimated_queue_drain: Duration?
     estimated_transfer_time: Duration?
@@ -1074,10 +1083,10 @@ invariant AttemptNumbersAreSequential {
             job.attempts.any(a => a.attempt_number = i)
 }
 
-invariant PlacedJobsHaveHost {
+invariant PlacedJobsHaveTarget {
     for job in Jobs:
         if job.target_kind != unplaced:
-            job.host != null
+            job.latest_attempt.target != null
 }
 
 invariant RunningJobsAreNotTerminal {

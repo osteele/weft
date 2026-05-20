@@ -884,7 +884,7 @@ func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Cl
 				oplog.WithError(err),
 				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
 			recordAutoPilotBlockedReason(database, blockedReasons, assignment.Job.ID,
-				fmt.Sprintf("reuse instance %s failed: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), summarizeAutoPilotError(err)))
+				fmt.Sprintf("reuse instance %s failed: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), SummarizeAutoPilotError(err)))
 			continue
 		}
 		placed++
@@ -1102,23 +1102,6 @@ func launchedClassFromResult(database *sql.DB, instanceIDs []int64) string {
 		return label
 	}
 	return ""
-}
-
-func summarizeAutoPilotError(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := strings.TrimSpace(err.Error())
-	if msg == "" {
-		return ""
-	}
-	msg = strings.ReplaceAll(msg, "\n", " ")
-	msg = strings.Join(strings.Fields(msg), " ")
-	const maxLen = 140
-	if len(msg) <= maxLen {
-		return msg
-	}
-	return strings.TrimSpace(msg[:maxLen-1]) + "…"
 }
 
 func sampleBlockedReason(reasons map[int64]string) string {

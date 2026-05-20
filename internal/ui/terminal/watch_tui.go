@@ -242,8 +242,8 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		failedReplaceReason:    map[int64]string{},
 		budgetBlockedFailed:    map[int64]bool{},
 		autoNoopReasons:        map[int64]string{},
-		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(cfg),
-		autoDailyCapCents:      loadAutoRunawaySpendDailyCapCents(cfg),
+		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
+		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		focused:                true,
 	}
 	m.rebuildReplacementCache()
@@ -277,8 +277,8 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		preservedJobAttachment: map[int64]bool{},
 		flash:                  flash.State{Message: flashMessage},
 		autoNoopReasons:        map[int64]string{},
-		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(cfg),
-		autoDailyCapCents:      loadAutoRunawaySpendDailyCapCents(cfg),
+		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
+		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		focused:                true,
 	}
 
@@ -344,8 +344,8 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 		projectFilter:          projectFilter,
 		projectRecent:          recentWindow,
 		projectSyncing:         syncEnabled,
-		autoRunRateTargetCents: loadAutoRunRateSoftTargetCentsPerHour(cfg),
-		autoDailyCapCents:      loadAutoRunawaySpendDailyCapCents(cfg),
+		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
+		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		focused:                true,
 	}
 

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -261,7 +262,100 @@ func BackfillJobAttemptExecutionTargets(database *sql.DB) error {
 		   AND host NOT LIKE 'vastai:%'
 		   AND host NOT LIKE 'runpod:%'
 		   AND host NOT LIKE 'rental:%'`)
+	if err != nil {
+		return err
+	}
+	if err := normalizeJobAttemptTargetShadows(database); err != nil {
+		return err
+	}
+	if err := ValidateExecutionTargetPlacement(database); err != nil {
+		slog.Warn("execution target placement validation failed after backfill", "error", err)
+	}
+	return nil
+}
+
+func normalizeJobAttemptTargetShadows(database *sql.DB) error {
+	if database == nil {
+		return nil
+	}
+	if _, err := database.Exec(`
+		UPDATE job_attempts
+		   SET host = ''
+		 WHERE target_id IS NOT NULL
+		   AND COALESCE(host, '') != ''
+		   AND host NOT LIKE 'vastai:%'
+		   AND host NOT LIKE 'runpod:%'
+		   AND host NOT LIKE 'rental:%'
+		   AND (SELECT kind FROM execution_targets WHERE id = job_attempts.target_id) = 'rental_instance'`); err != nil {
+		return err
+	}
+	_, err := database.Exec(`
+		UPDATE job_attempts
+		   SET host = CASE
+		              WHEN (SELECT kind FROM execution_targets WHERE id = job_attempts.target_id) = 'inventory_host'
+		              THEN (SELECT host FROM execution_targets WHERE id = job_attempts.target_id)
+		              ELSE host
+		          END,
+		       launch_id = (SELECT launch_id FROM execution_targets WHERE id = job_attempts.target_id)
+		 WHERE target_id IS NOT NULL`)
 	return err
+}
+
+// ValidateExecutionTargetPlacement checks that job_attempts.target_id is the
+// authoritative placement pointer and agrees with the compatibility shadows.
+func ValidateExecutionTargetPlacement(database *sql.DB) error {
+	if database == nil {
+		return nil
+	}
+	var missing int
+	if err := database.QueryRow(`
+		SELECT COUNT(*)
+		  FROM job_attempts ja
+		 WHERE ja.target_id IS NULL
+		   AND (
+		        ja.launch_id IS NOT NULL
+		        OR (
+		            COALESCE(ja.host, '') != ''
+		            AND ja.host NOT LIKE 'vastai:%'
+		            AND ja.host NOT LIKE 'runpod:%'
+		            AND ja.host NOT LIKE 'rental:%'
+		        )
+		   )`).Scan(&missing); err != nil {
+		return fmt.Errorf("check missing execution targets: %w", err)
+	}
+	if missing > 0 {
+		return fmt.Errorf("%d placed job_attempts rows have no target_id", missing)
+	}
+	var mismatched int
+	if err := database.QueryRow(`
+		SELECT COUNT(*)
+		  FROM job_attempts ja
+		  JOIN execution_targets et ON et.id = ja.target_id
+		 WHERE (
+		        et.kind = 'inventory_host'
+		        AND (
+		             ja.launch_id IS NOT NULL
+		             OR COALESCE(NULLIF(ja.host, ''), et.host) != et.host
+		        )
+		   )
+		    OR (
+		        et.kind = 'rental_instance'
+		        AND (
+		             COALESCE(ja.launch_id, et.launch_id) != et.launch_id
+		             OR (
+		                 COALESCE(ja.host, '') != ''
+		                 AND ja.host NOT LIKE 'vastai:%'
+		                 AND ja.host NOT LIKE 'runpod:%'
+		                 AND ja.host NOT LIKE 'rental:%'
+		             )
+		        )
+		   )`).Scan(&mismatched); err != nil {
+		return fmt.Errorf("check execution target shadow agreement: %w", err)
+	}
+	if mismatched > 0 {
+		return fmt.Errorf("%d job_attempts rows disagree with execution target shadows", mismatched)
+	}
+	return nil
 }
 
 func SyncExecutionTargets(database *sql.DB) error {

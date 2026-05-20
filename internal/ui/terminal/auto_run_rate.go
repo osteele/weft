@@ -11,39 +11,11 @@ import (
 	"github.com/osteele/weft/internal/config"
 )
 
-// loadAutoRunRateSoftTargetCentsPerHour returns the configured run-rate
-// target in cents/hour. cfg may be nil; only then is the global config
-// re-read from disk.
-func loadAutoRunRateSoftTargetCentsPerHour(cfg *config.Config) int {
-	if cfg == nil {
-		loaded, err := config.Load()
-		if err != nil || loaded == nil {
-			return 0
-		}
-		cfg = loaded
-	}
-	return cfg.AutoRunRateSoftTargetCentsPerHour()
-}
-
 func saveAutoRunRateSoftTargetCentsPerHour(cents int) error {
 	if cents < 0 {
 		cents = 0
 	}
 	return config.SetAutoRunRateSoftTarget(float64(cents) / 100)
-}
-
-// loadAutoRunawaySpendDailyCapCents returns the runaway-breaker daily-cap
-// threshold in cents. cfg may be nil; only then is the global config re-read
-// from disk.
-func loadAutoRunawaySpendDailyCapCents(cfg *config.Config) int {
-	if cfg == nil {
-		loaded, err := config.Load()
-		if err != nil || loaded == nil {
-			return 0
-		}
-		cfg = loaded
-	}
-	return cfg.AutoRunawaySpendNoProgressLimitCents()
 }
 
 func saveAutoRunawaySpendDailyCapCents(cents int) error {

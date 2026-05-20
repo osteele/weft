@@ -618,8 +618,8 @@ func createJobStatusView(db *sql.DB) error {
 			     THEN NULL ELSE COALESCE(et.launch_id, la.launch_id) END AS launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
-			-- Target kind for placement queries. Prefer execution_targets:
-			-- host and launch_id are compatibility shadows only.
+			-- Target kind for placement queries. execution_targets is
+			-- authoritative; host and launch_id are compatibility shadows.
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE

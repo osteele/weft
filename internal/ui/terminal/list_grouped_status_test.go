@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/jobview"
 )
 
 func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
@@ -1042,8 +1043,8 @@ func TestRenderJobListGroupedStatusPlainWithOptions_UsesPlacementStatusReadModel
 		{ID: 1801, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "moving"},
 	}
 	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
-		placementStatusByJob: map[int64]db.PlacementStatus{
-			1801: {JobID: 1801, Bucket: db.PlacementBucketPlacing, DisplayAt: 4_000, HasOpenIntent: true, LaunchID: &launchID},
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			1801: {JobID: 1801, Bucket: jobview.BucketPlacing, DisplayAt: 4_000, HasOpenIntent: true, LaunchID: &launchID},
 		},
 		placementQueuedAtByJob: map[int64]int64{1801: 4_000},
 		now:                    now,

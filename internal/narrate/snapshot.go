@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/explain"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/status"
 )
 
@@ -111,7 +112,7 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load launch live states: %w", err)
 	}
-	placementStatusByJob, err := db.PlacementStatusForJobs(database, jobs, now)
+	placementStatusByJob, err := jobview.PlacementStatusForJobs(database, jobs, now)
 	if err != nil {
 		return nil, fmt.Errorf("load placement status: %w", err)
 	}
@@ -136,7 +137,7 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	return snap, nil
 }
 
-func jobToView(database *sql.DB, j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementStatus db.PlacementStatus) JobView {
+func jobToView(database *sql.DB, j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementStatus jobview.PlacementStatus) JobView {
 	view := JobView{
 		ID:                 j.ID,
 		Status:             j.Status,
@@ -148,7 +149,7 @@ func jobToView(database *sql.DB, j *db.Job, liveByLaunch map[int64]*db.LaunchLiv
 		EndTime:            j.EndTime,
 		LaunchID:           j.LaunchID,
 		Tags:               append([]string(nil), j.Tags...),
-		PlacementBucket:    placementStatus.Bucket,
+		PlacementBucket:    string(placementStatus.Bucket),
 		PlacementAt:        placementStatus.DisplayAt,
 		PlacementReasons:   append([]string(nil), j.PlacementReasons...),
 		QueueBlockedReason: j.QueueBlockedReason,
@@ -299,7 +300,7 @@ func (d *Delta) ResolveRemovedJobs(database *sql.DB) error {
 	}
 	for _, id := range d.JobRemoved {
 		if j, ok := jobs[id]; ok {
-			d.JobFinished = append(d.JobFinished, jobToView(database, j, nil, db.PlacementStatus{}))
+			d.JobFinished = append(d.JobFinished, jobToView(database, j, nil, jobview.PlacementStatus{}))
 		}
 	}
 	d.JobRemoved = nil

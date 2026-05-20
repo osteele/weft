@@ -255,7 +255,7 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 		m.autoPassInFlight = false
 	}
 	if msg.err != nil {
-		m.autoPersistentError = summarizeAutoPilotError(msg.err)
+		m.autoPersistentError = orchestration.SummarizeAutoPilotError(msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-place failed: %v", msg.err), true)
 	}
 	if msg.jobID > 0 {
@@ -292,7 +292,7 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 		m.autoLaunchBackoffReason = "launch error"
 		m.autoLaunchBackoffUntil = time.Now().Add(retrypolicy.BackoffDelayClamped(m.autoLaunchBackoffStep))
 		m.autoLaunchBackoffStep++
-		m.autoPersistentError = summarizeAutoPilotError(msg.err)
+		m.autoPersistentError = orchestration.SummarizeAutoPilotError(msg.err)
 		return m, m.flash.Set(fmt.Sprintf("Auto-launch failed: %v", msg.err), true)
 	}
 	if len(msg.instanceIDs) > 0 {

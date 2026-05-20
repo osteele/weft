@@ -117,6 +117,104 @@ func TestJobAttemptExecutionTargetBackfill(t *testing.T) {
 	}
 }
 
+func TestValidateExecutionTargetPlacement(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "", "/tmp/project", "echo rental", "rental")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	if err := ValidateExecutionTargetPlacement(database); err != nil {
+		t.Fatalf("ValidateExecutionTargetPlacement clean row: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE job_attempts SET target_id = NULL WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("clear target_id: %v", err)
+	}
+	if err := ValidateExecutionTargetPlacement(database); err == nil {
+		t.Fatal("ValidateExecutionTargetPlacement succeeded with missing target_id")
+	}
+}
+
+func TestValidateExecutionTargetPlacementDetectsShadowMismatch(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "echo host", "host")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	for _, trigger := range []string{
+		"job_attempts_prevent_mixed_host_launch_insert",
+		"job_attempts_prevent_mixed_host_launch_update",
+		"job_attempts_reject_target_shadow_mismatch_insert",
+		"job_attempts_reject_target_shadow_mismatch_update",
+	} {
+		if _, err := database.Exec(`DROP TRIGGER IF EXISTS ` + trigger); err != nil {
+			t.Fatalf("drop trigger %s: %v", trigger, err)
+		}
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET host = 'cool100' WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("force stale shadow: %v", err)
+	}
+	if err := ValidateExecutionTargetPlacement(database); err == nil {
+		t.Fatal("ValidateExecutionTargetPlacement succeeded with mismatched shadow")
+	}
+}
+
+func TestBackfillJobAttemptExecutionTargetsNormalizesLegacyMixedRentalShadow(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "", "/tmp/project", "echo rental", "rental")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	for _, trigger := range []string{
+		"job_attempts_prevent_mixed_host_launch_insert",
+		"job_attempts_prevent_mixed_host_launch_update",
+		"job_attempts_reject_target_shadow_mismatch_insert",
+		"job_attempts_reject_target_shadow_mismatch_update",
+	} {
+		if _, err := database.Exec(`DROP TRIGGER IF EXISTS ` + trigger); err != nil {
+			t.Fatalf("drop trigger %s: %v", trigger, err)
+		}
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET host = 'cool100' WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("force legacy mixed shadow: %v", err)
+	}
+
+	if err := BackfillJobAttemptExecutionTargets(database); err != nil {
+		t.Fatalf("BackfillJobAttemptExecutionTargets: %v", err)
+	}
+	if err := ValidateExecutionTargetPlacement(database); err != nil {
+		t.Fatalf("ValidateExecutionTargetPlacement: %v", err)
+	}
+
+	var host string
+	var gotLaunchID int64
+	if err := database.QueryRow(`SELECT host, launch_id FROM job_attempts WHERE job_id = ?`, jobID).Scan(&host, &gotLaunchID); err != nil {
+		t.Fatalf("query normalized attempt: %v", err)
+	}
+	if host != "" || gotLaunchID != launchID {
+		t.Fatalf("normalized shadow = host %q launch_id %d, want empty host and launch_id %d", host, gotLaunchID, launchID)
+	}
+}
+
 func TestJobStatusUsesExecutionTargetWhenPlacementShadowsAreMissing(t *testing.T) {
 	database := SetupTestDB(t)
 
@@ -146,6 +244,75 @@ func TestJobStatusUsesExecutionTargetWhenPlacementShadowsAreMissing(t *testing.T
 	if !gotLaunchID.Valid || gotLaunchID.Int64 != launchID {
 		t.Fatalf("launch_id = %v, want %d from execution target", gotLaunchID, launchID)
 	}
+}
+
+func TestJobStatusUsesExecutionTargetWhenPlacementShadowsAreStale(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "echo host", "host")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	for _, trigger := range []string{
+		"job_attempts_reject_target_shadow_mismatch_insert",
+		"job_attempts_reject_target_shadow_mismatch_update",
+	} {
+		if _, err := database.Exec(`DROP TRIGGER IF EXISTS ` + trigger); err != nil {
+			t.Fatalf("drop trigger %s: %v", trigger, err)
+		}
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET host = '' WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("clear host shadow: %v", err)
+	}
+
+	var kind string
+	if err := database.QueryRow(`SELECT effective_target_kind FROM job_status WHERE id = ?`, jobID).Scan(&kind); err != nil {
+		t.Fatalf("query job_status: %v", err)
+	}
+	if kind != string(JobTargetInventoryHost) {
+		t.Fatalf("effective_target_kind = %q, want %q from target_id", kind, JobTargetInventoryHost)
+	}
+}
+
+func TestEstimatorCompatibilityColumnsRemain(t *testing.T) {
+	database := SetupTestDB(t)
+
+	for _, table := range []string{"job_attempts", "training_examples", "job_run_training_examples"} {
+		if ok, err := relationExists(database, table); err != nil || !ok {
+			t.Fatalf("relationExists(%s) = %v, %v", table, ok, err)
+		}
+	}
+	for _, col := range []string{"host", "launch_id", "target_id"} {
+		if !columnExistsForTest(t, database, "job_attempts", col) {
+			t.Fatalf("missing job_attempts.%s compatibility column", col)
+		}
+	}
+}
+
+func columnExistsForTest(t *testing.T, database *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := database.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	return false
 }
 
 func TestJobAttemptsRejectTargetShadowMismatch(t *testing.T) {

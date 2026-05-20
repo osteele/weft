@@ -76,6 +76,39 @@ value GPUSpec {
     memory_gb: parse_memory_gb(memory)
 }
 
+-- A normalized execution target is the durable placement identity for a job
+-- attempt. Inventory targets reference a Host; rental targets reference a
+-- CloudInstance from campaign-lifecycle.allium.
+value ExecutionTargetKind = inventory_host | rental_instance
+
+value ExecutionTargetStatus = provisioning | ready | running | draining | terminated
+
+entity ExecutionTarget {
+    kind: ExecutionTargetKind
+    status: ExecutionTargetStatus
+
+    host: Host?
+    instance: campaign/CloudInstance?
+
+    gpu_class: String?
+    gpu_mem_gb: Integer
+    num_gpus: Integer
+
+    cordoned: Boolean
+    cordon_reason: String?
+    current_job: jobs/Job?
+    queue_depth: Integer
+
+    @guidance
+        -- Persistent rows live in the execution_targets table. The Go
+        -- struct is internal/db.ExecutionTarget in
+        -- internal/db/execution_targets.go. job_attempts.target_id is the
+        -- authoritative placement pointer; job_attempts.host and
+        -- job_attempts.launch_id remain compatibility shadows for
+        -- estimator and lab-notebook consumers until those contracts are
+        -- migrated.
+}
+
 config {
     default_setup_timeout: Duration = 20.minutes
     default_cpu_factor: Decimal = 1.0
@@ -83,6 +116,14 @@ config {
 
     data_cache_eviction_policy: String = "lru"        -- "lru" | "reuse_per_gb"
     data_cache_reuse_window: Duration = 30.days
+}
+
+invariant ExecutionTargetShapeIsExclusive {
+    for target in ExecutionTargets:
+        if target.kind = inventory_host:
+            target.host != null and target.instance = null
+        if target.kind = rental_instance:
+            target.host = null and target.instance != null
 }
 
 -- =========================================================================
@@ -374,7 +415,10 @@ rule SelectBestHost {
     let best = eligible.max_by(s => -s.completion_minutes)
 
     if best != null:
-        ensures: PlacementResult.selected(host: best.host, score: best)
+        ensures: PlacementResult.selected(
+            target: ExecutionTarget{kind: inventory_host, host: best.host},
+            score: best
+        )
     else:
         ensures: PlacementResult.unplaced(reasons: candidates.flat_map(s => s.reasons))
 
@@ -394,6 +438,8 @@ rule PlaceWithFallback {
 
     -- If no rental tag, prefer on-prem. Spill to rental only when the
     -- on-prem estimate exceeds the rental estimate by a material margin.
+    -- The on-prem branch yields an inventory_host ExecutionTarget; the
+    -- spill branch yields a rental_instance ExecutionTarget.
     -- The threshold and rental estimation are owned by
     -- campaign-lifecycle.allium; this rule only names that the
     -- comparison happens.
@@ -724,7 +770,7 @@ invariant PlacementReasonsExplainUnplaced {
     -- When SelectBestHost returns unplaced, the aggregate reasons list
     -- must be non-empty. A silent "no host available" with no
     -- explanation is a UX regression.
-    for result in PlacementResults where result.host = null:
+    for result in PlacementResults where result.target = null:
         result.reasons.length > 0
 }
 

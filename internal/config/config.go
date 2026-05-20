@@ -1122,6 +1122,12 @@ func (c *Config) AutoRunawaySpendNoProgressLimitCents() int {
 	return costUSDToCents(c.Campaign.AutoRunawaySpendNoProgressLimit, defaultAutoRunawaySpendUSD)
 }
 
+// AutoRunawaySpendDailyCapCents returns the TUI daily cap for the unattended
+// runaway spend breaker.
+func (c *Config) AutoRunawaySpendDailyCapCents() int {
+	return c.AutoRunawaySpendNoProgressLimitCents()
+}
+
 // AutoObjective returns the unattended auto-planner objective profile id.
 func (c *Config) AutoObjective() string {
 	if c == nil {
@@ -1160,6 +1166,12 @@ func (c *Config) AutoRunRateSoftTargetCentsPerHour() int {
 		return 0
 	}
 	return rateUSDToCentsPerHour(c.Campaign.AutoRunRateSoftTarget)
+}
+
+// AutoRunRateSoftTargetCents returns the unattended autopilot launch-rate
+// target in cents per hour. A zero value disables launch-rate gating.
+func (c *Config) AutoRunRateSoftTargetCents() int {
+	return c.AutoRunRateSoftTargetCentsPerHour()
 }
 
 // SourceExcludeDirs returns the effective global source exclude patterns.

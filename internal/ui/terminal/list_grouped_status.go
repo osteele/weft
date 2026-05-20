@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ui/dashboard"
@@ -35,7 +36,7 @@ type groupedStatusRenderOptions struct {
 	launchStatusByID       map[int64]string
 	placingJobIDs          map[int64]struct{}
 	placementQueuedAtByJob map[int64]int64
-	placementStatusByJob   map[int64]db.PlacementStatus
+	placementStatusByJob   map[int64]jobview.PlacementStatus
 	failedInstances        *recentFailedInstances
 	launchByID             map[int64]*db.Launch
 	now                    time.Time
@@ -164,23 +165,23 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 			continue
 		}
 		switch groupedStatusBucketWithOptions(job, launchesWithActiveJob, opts) {
-		case db.PlacementBucketRunning:
+		case string(jobview.BucketRunning):
 			running = append(running, job)
-		case db.PlacementBucketPaused:
+		case string(jobview.BucketPaused):
 			paused = append(paused, job)
-		case db.PlacementBucketPlacing:
+		case string(jobview.BucketPlacing):
 			placing = append(placing, job)
-		case db.PlacementBucketLaunching:
+		case string(jobview.BucketLaunching):
 			launching = append(launching, job)
-		case db.PlacementBucketQueued:
+		case string(jobview.BucketQueued):
 			queued = append(queued, job)
-		case db.PlacementBucketUnplaced:
+		case string(jobview.BucketUnplaced):
 			unplaced = append(unplaced, job)
-		case db.PlacementBucketCompletions:
+		case string(jobview.BucketCompletions):
 			completions = append(completions, job)
-		case db.PlacementBucketFailures:
+		case string(jobview.BucketFailures):
 			failedJobs = append(failedJobs, job)
-		case db.PlacementBucketKilledCanceled:
+		case string(jobview.BucketKilledCanceled):
 			killedCanceled = append(killedCanceled, job)
 		}
 	}
@@ -311,26 +312,7 @@ func listGenericGroupKey(job *db.Job, mode listGroupMode) string {
 }
 
 func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) map[int64]bool {
-	out := make(map[int64]bool)
-	for _, job := range jobs {
-		if job == nil || job.LaunchID == nil {
-			continue
-		}
-		switch job.EffectiveStatus() {
-		case db.StatusRunning, db.StatusStarting:
-			out[*job.LaunchID] = true
-		}
-	}
-	for launchID, live := range launchLiveByID {
-		if live == nil {
-			continue
-		}
-		verb, phaseJobID, ok := campaign.ParsePhaseJobID(live.InstancePhase)
-		if ok && verb == campaign.PhaseRunning && phaseJobID > 0 {
-			out[launchID] = true
-		}
-	}
-	return out
+	return jobview.LaunchesWithActiveJob(jobs, launchLiveByID)
 }
 
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
@@ -852,78 +834,18 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 }
 
 func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, placingJobIDs map[int64]struct{}, now time.Time) string {
-	status := job.EffectiveStatus()
-	// Launch-level pause overrides the job-status bucket for any non-terminal
-	// job: the job is not actually progressing while the rental is paused.
-	if launchStatusForJob(job, launchStatusByID) == db.LaunchStatusPaused {
-		switch status {
-		case db.StatusRunning, db.StatusStarting, db.StatusQueued, db.StatusPendingPlacement, db.StatusPaused:
-			return "paused"
-		}
-	}
-	// An open MoveIntent / PlacementIntent surfaces as Placing so the job
-	// does not flicker through Unplaced/Launching while the move runs.
-	// See specs/job-move.allium § AutopilotIgnoresMovingJobs.
-	if _, placing := placingJobIDs[job.ID]; placing {
-		switch status {
-		case db.StatusQueued, db.StatusPendingPlacement:
-			return "placing"
-		}
-	}
-	switch status {
-	case db.StatusRunning, db.StatusStarting:
-		return "running"
-	case db.StatusPaused:
-		return "paused"
-	case db.StatusPendingPlacement:
-		if job.TargetKind() == db.JobTargetUnplaced {
-			return "unplaced"
-		}
-		switch launchStatusForJob(job, launchStatusByID) {
-		case db.LaunchStatusRunning, db.LaunchStatusGrace, db.LaunchStatusCompleted:
-			return "queued"
-		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
-			return "unplaced"
-		}
-		return "launching"
-	case db.StatusQueued:
-		if job.TargetKind() == db.JobTargetUnplaced {
-			return "unplaced"
-		}
-		switch launchStatusForJob(job, launchStatusByID) {
-		case db.LaunchStatusPlanned, db.LaunchStatusLaunching:
-			return "launching"
-		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
-			return "unplaced"
-		case db.LaunchStatusRunning:
-			// Instance VM is up. If a sibling job on this launch is
-			// genuinely Running/Starting, this job is queued behind it;
-			// otherwise the agent hasn't dispatched any job yet, so
-			// classify as still launching.
-			if job.LaunchID != nil && launchesWithActiveJob[*job.LaunchID] {
-				return "queued"
-			}
-			return "launching"
-		}
-		return "queued"
-	case db.StatusKilled, db.StatusCanceled:
-		return "killed_canceled"
-	case db.StatusFailed, db.StatusDead:
-		return "failures"
-	case db.StatusCompleted:
-		if job.ExitCode != nil && *job.ExitCode != 0 {
-			return "failures"
-		}
-		return "completions"
-	default:
-		return ""
-	}
+	_, placing := placingJobIDs[job.ID]
+	return string(jobview.ClassifyBucket(job, jobview.ClassifyInput{
+		LaunchStatusByID:     launchStatusByID,
+		LaunchesWithActive:   launchesWithActiveJob,
+		HasOpenPlacingIntent: placing,
+	}))
 }
 
 func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, opts groupedStatusRenderOptions) string {
 	if opts.placementStatusByJob != nil && job != nil {
 		if ps, ok := opts.placementStatusByJob[job.ID]; ok && ps.Bucket != "" {
-			return ps.Bucket
+			return string(ps.Bucket)
 		}
 	}
 	return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, opts.placingJobIDs, opts.now)

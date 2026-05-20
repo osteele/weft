@@ -150,26 +150,39 @@ no worse than before.
 
 ## Execution target normalization
 
-Phase one is in place: `execution_targets` stores inventory hosts and rental
+Current state: `execution_targets` stores inventory hosts and rental
 instances, `launches.target_id` links rental rows, and
-`job_attempts.target_id` is now backfilled as a compatibility shadow for the
-existing `host` / `launch_id` placement columns.
+`job_attempts.target_id` is now the authoritative placement pointer. The
+legacy `host` / `launch_id` columns remain as compatibility shadows for
+estimator exports, lab-notebook analysis, and ad hoc SQL.
 
 Remaining work:
 
-- Make `job_attempts.target_id` the only placement pointer used by new code.
-- Replace `job_status.effective_target_kind` derivation from parallel
-  `host` / `launch_id` columns with a join through `execution_targets`.
 - Move host-sync, rental-sync, placement, and TUI queries to target-kind
   filters instead of ad hoc `host` / `launch_id` predicates.
-- Add integrity validation that rejects mixed placement state
-  (`target_id` disagrees with `host` or `launch_id`).
-- Once callers no longer depend on the shadow fields, rebuild
-  `job_attempts` without duplicated placement columns or keep them as
-  generated/compatibility columns with one-way writes from `target_id`.
+- Keep `job_attempts.host` and `job_attempts.launch_id` as compatibility
+  shadows while the stable estimator/research contracts (`training_examples`,
+  `job_run_training_examples`, and lab-notebook SQL) still consume them.
+  Physical removal is deferred until those consumers have a replacement
+  contract.
 
 The goal is to make "inventory host plus rental launch on the same attempt"
-impossible by schema shape rather than by scattered update guards.
+impossible by a single authoritative target plus validation, while preserving
+the current analytics surfaces.
+
+Deferred compatibility-contract work:
+
+- Define the replacement SQL contract for estimator and research consumers
+  before any physical removal of `job_attempts.host` or
+  `job_attempts.launch_id`. The likely shape is a stable analysis view that
+  projects `host`, `launch_id`, `target_id`, `target_kind`, provider, and
+  hardware fields from `execution_targets`, `launches`, and host inventory.
+- Update `docs/reference/estimation.md`, lab-notebook scripts, and export
+  tests to consume that contract instead of raw `job_attempts` placement
+  columns.
+- Only after that migration is complete, consider rebuilding `job_attempts`
+  without compatibility columns. Until then, keep the columns synchronized and
+  validated.
 
 ## Placement correctness by construction
 

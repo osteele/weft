@@ -1,21 +1,26 @@
-package db
+package jobview
 
 import (
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestPlacementStatusForJobs_OpenIntentUsesPlacingBucketAndIntentTime(t *testing.T) {
-	database := SetupTestDB(t)
-	insertTestJob(t, database, 5101, "python train.py", "/tmp", StatusQueued)
-	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
 	if err != nil {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := SetJobLaunchID(database, 5101, launchID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	intent, err := CreatePlacementIntent(database, 5101, "auto_relaunch")
+	intent, err := db.CreatePlacementIntent(database, jobID, "auto_relaunch")
 	if err != nil {
 		t.Fatalf("CreatePlacementIntent: %v", err)
 	}
@@ -24,17 +29,17 @@ func TestPlacementStatusForJobs_OpenIntentUsesPlacingBucketAndIntentTime(t *test
 		t.Fatalf("backdate placement intent: %v", err)
 	}
 
-	job, err := GetJobByID(database, 5101)
+	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	got, err := PlacementStatusForJobs(database, []*Job{job}, time.Unix(10_000, 0))
+	got, err := PlacementStatusForJobs(database, []*db.Job{job}, time.Unix(10_000, 0))
 	if err != nil {
 		t.Fatalf("PlacementStatusForJobs: %v", err)
 	}
-	ps := got[5101]
-	if ps.Bucket != PlacementBucketPlacing {
-		t.Fatalf("bucket = %q, want %q", ps.Bucket, PlacementBucketPlacing)
+	ps := got[jobID]
+	if ps.Bucket != BucketPlacing {
+		t.Fatalf("bucket = %q, want %q", ps.Bucket, BucketPlacing)
 	}
 	if !ps.HasOpenIntent {
 		t.Fatalf("HasOpenIntent = false, want true")
@@ -45,18 +50,21 @@ func TestPlacementStatusForJobs_OpenIntentUsesPlacingBucketAndIntentTime(t *test
 }
 
 func TestPlacementStatusForJobs_OpenMoveIntentUsesReplacementLaunchTime(t *testing.T) {
-	database := SetupTestDB(t)
-	insertTestJob(t, database, 5103, "python train.py", "/tmp", StatusQueued)
-	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod"})
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "runpod"})
 	if err != nil {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := SetJobLaunchID(database, 5103, launchID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:          5103,
-		TargetKind:     MoveTargetNew,
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
 		TargetLaunchID: &launchID,
 	})
 	if err != nil {
@@ -72,17 +80,17 @@ func TestPlacementStatusForJobs_OpenMoveIntentUsesReplacementLaunchTime(t *testi
 		t.Fatalf("set launch created_at: %v", err)
 	}
 
-	job, err := GetJobByID(database, 5103)
+	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	got, err := PlacementStatusForJobs(database, []*Job{job}, time.Unix(10_000, 0))
+	got, err := PlacementStatusForJobs(database, []*db.Job{job}, time.Unix(10_000, 0))
 	if err != nil {
 		t.Fatalf("PlacementStatusForJobs: %v", err)
 	}
-	ps := got[5103]
-	if ps.Bucket != PlacementBucketPlacing {
-		t.Fatalf("bucket = %q, want %q", ps.Bucket, PlacementBucketPlacing)
+	ps := got[jobID]
+	if ps.Bucket != BucketPlacing {
+		t.Fatalf("bucket = %q, want %q", ps.Bucket, BucketPlacing)
 	}
 	if ps.DisplayAt != launchCreatedAt {
 		t.Fatalf("DisplayAt = %d, want %d", ps.DisplayAt, launchCreatedAt)
@@ -90,25 +98,28 @@ func TestPlacementStatusForJobs_OpenMoveIntentUsesReplacementLaunchTime(t *testi
 }
 
 func TestPlacementStatusForJobs_LaunchingUntilTargetInstanceHasActiveJob(t *testing.T) {
-	database := SetupTestDB(t)
-	insertTestJob(t, database, 5102, "python train.py", "/tmp", StatusQueued)
-	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
 	if err != nil {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := SetJobLaunchID(database, 5102, launchID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
-	job, err := GetJobByID(database, 5102)
+	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	got, err := PlacementStatusForJobs(database, []*Job{job}, time.Unix(10_000, 0))
+	got, err := PlacementStatusForJobs(database, []*db.Job{job}, time.Unix(10_000, 0))
 	if err != nil {
 		t.Fatalf("PlacementStatusForJobs: %v", err)
 	}
-	if ps := got[5102]; ps.Bucket != PlacementBucketLaunching {
-		t.Fatalf("bucket = %q, want %q", ps.Bucket, PlacementBucketLaunching)
+	if ps := got[jobID]; ps.Bucket != BucketLaunching {
+		t.Fatalf("bucket = %q, want %q", ps.Bucket, BucketLaunching)
 	}
 }
