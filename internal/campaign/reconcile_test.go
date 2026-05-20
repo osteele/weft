@@ -94,6 +94,131 @@ func TestCompletionManifestCoversLaunchJobs_MissingJob(t *testing.T) {
 	}
 }
 
+// attemptStateForJob returns the latest attempt's status, cloud_outcome, and
+// exit_code for a job, plus the total number of attempts.
+func attemptStateForJob(t *testing.T, database *sql.DB, jobID int64) (status, outcome string, exitCode sql.NullInt64, attemptCount int) {
+	t.Helper()
+	if err := database.QueryRow(
+		`SELECT status, COALESCE(cloud_outcome, ''), exit_code
+		   FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&status, &outcome, &exitCode); err != nil {
+		t.Fatalf("query latest attempt for job %d: %v", jobID, err)
+	}
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID,
+	).Scan(&attemptCount); err != nil {
+		t.Fatalf("count attempts for job %d: %v", jobID, err)
+	}
+	return status, outcome, exitCode, attemptCount
+}
+
+// TestCreditManifestCompletions_CreditsRunningAttempt is a regression test for
+// the provider_dead race where an instance self-destructs after writing its
+// instance-level completion manifest but before the per-job .complete marker
+// sync observes the per-job markers. The successful attempt must be credited
+// from the manifest so CloseLaunchAttempts' completed-branch does not orphan
+// and re-run the job.
+func TestCreditManifestCompletions_CreditsRunningAttempt(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python eval.py', 0)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 1 AND end_time IS NULL`, time.Now().Unix()); err != nil {
+		t.Fatalf("set start_time: %v", err)
+	}
+
+	manifest := &runner.InstanceCompletionManifest{
+		CompletedAtUnix: time.Now().Unix(),
+		Jobs: []runner.JobCompletionSummary{
+			{JobID: 1, ExitCode: 0, UploadStatus: "ok"},
+		},
+	}
+	creditManifestCompletions(database, instanceID, manifest)
+
+	status, outcome, exitCode, _ := attemptStateForJob(t, database, 1)
+	if status != db.StatusCompleted {
+		t.Fatalf("attempt status = %q, want %q", status, db.StatusCompleted)
+	}
+	if outcome != db.AttemptOutcomeCompleted {
+		t.Fatalf("attempt cloud_outcome = %q, want %q", outcome, db.AttemptOutcomeCompleted)
+	}
+	if !exitCode.Valid || exitCode.Int64 != 0 {
+		t.Fatalf("attempt exit_code = %v, want 0", exitCode)
+	}
+
+	// CloseLaunchAttempts' completed-branch must now skip the credited job
+	// instead of orphaning and requeuing it.
+	if err := db.CloseLaunchAttempts(database, instanceID, db.AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("CloseLaunchAttempts: %v", err)
+	}
+	status, outcome, _, attemptCount := attemptStateForJob(t, database, 1)
+	if attemptCount != 1 {
+		t.Fatalf("job 1 has %d attempts after CloseLaunchAttempts, want 1 (no re-run)", attemptCount)
+	}
+	if status != db.StatusCompleted || outcome != db.AttemptOutcomeCompleted {
+		t.Fatalf("after CloseLaunchAttempts: status=%q outcome=%q, want completed/completed", status, outcome)
+	}
+}
+
+// TestCreditManifestCompletions_SkipsFailedAndUnlistedJobs verifies that only
+// exit-0 manifest jobs are credited: a job the manifest reports as failed and a
+// job absent from the manifest are both left non-terminal for the normal
+// orphan/failure path.
+func TestCreditManifestCompletions_SkipsFailedAndUnlistedJobs(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	for _, jobID := range []int64{1, 2} {
+		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python eval.py', 0)`, jobID); err != nil {
+			t.Fatalf("create job %d: %v", jobID, err)
+		}
+		if _, err := db.CreateAttempt(database, jobID, "", &instanceID, db.StatusRunning); err != nil {
+			t.Fatalf("CreateAttempt(%d): %v", jobID, err)
+		}
+		if _, err := database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = ? AND end_time IS NULL`, time.Now().Unix(), jobID); err != nil {
+			t.Fatalf("set start_time for job %d: %v", jobID, err)
+		}
+	}
+
+	// Job 1 failed per the manifest; job 2 is absent from the manifest.
+	manifest := &runner.InstanceCompletionManifest{
+		CompletedAtUnix: time.Now().Unix(),
+		Jobs: []runner.JobCompletionSummary{
+			{JobID: 1, ExitCode: 1, UploadStatus: "ok"},
+		},
+	}
+	creditManifestCompletions(database, instanceID, manifest)
+
+	for _, jobID := range []int64{1, 2} {
+		status, _, _, _ := attemptStateForJob(t, database, jobID)
+		if status == db.StatusCompleted {
+			t.Fatalf("job %d attempt status = %q, want non-completed", jobID, status)
+		}
+	}
+}
+
 func TestReconcileLaunches_DeadInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

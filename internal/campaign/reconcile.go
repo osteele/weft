@@ -420,6 +420,15 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		// jobs that completed successfully may be marked "dead" or re-queued.
 		if IsInstanceTerminal(action.TerminalStatus) && r2Client != nil {
 			syncJobCompletionsFromR2(database, r2Client, ci.ID)
+			// The per-job marker sync above can miss a job whose .complete
+			// marker is keyed by a run_id that no longer matches the DB's
+			// latest attempt, or that landed after the marker scan. For a
+			// completing launch the instance-level manifest is authoritative;
+			// credit its exit-0 jobs so CloseLaunchAttempts does not orphan
+			// and re-run work that already finished.
+			if action.TerminalStatus == db.LaunchStatusCompleted {
+				CreditManifestCompletions(database, r2Client, ci.ID)
+			}
 		}
 
 		reconciled, terminated := ExecuteAction(database, client, ci, action)

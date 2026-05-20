@@ -8,11 +8,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/runner"
 )
 
 // Sync source labels reported in completion logs and used to gate post-sync
@@ -187,6 +189,87 @@ func findAnyCompletedRunID(ctx context.Context, r2c *r2.Client, jobID int64) (in
 		return 0, false
 	}
 	return r2keys.ExtractRunID(key), true
+}
+
+// SourceManifest labels a completion ingested from the instance-level
+// completion manifest rather than a per-job .complete marker.
+const SourceManifest = "manifest"
+
+// CreditManifestCompletions records successful per-job completions from the
+// instance-level completion manifest (campaigns/<instanceID>/.complete) for any
+// launch job still non-terminal in the DB.
+//
+// The agent writes the instance manifest only at self-destruct, strictly after
+// each job's own .complete marker, so its presence is authoritative evidence
+// that every job it lists with exit code 0 actually finished. Crediting those
+// jobs here — before ExecuteAction runs CloseLaunchAttempts — closes a race:
+// when an instance self-destructs quickly, the reconciler can see the
+// instance-level marker before the per-job marker sync observes the per-job
+// markers. Without this, CloseLaunchAttempts' completed-branch orphans and
+// re-runs a job that already succeeded.
+//
+// Jobs the manifest reports with a non-zero exit code are left untouched for
+// the normal failure/orphan path.
+func CreditManifestCompletions(database *sql.DB, r2Client *r2.Client, instanceID int64) {
+	if r2Client == nil {
+		return
+	}
+	manifest := readR2CompletionManifest(r2Client, instanceID)
+	if manifest == nil {
+		return
+	}
+	creditManifestCompletions(database, instanceID, manifest)
+}
+
+// creditManifestCompletions is the DB-only core of CreditManifestCompletions,
+// split out so it can be exercised without an R2 client.
+func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *runner.InstanceCompletionManifest) {
+	if manifest == nil {
+		return
+	}
+	jobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID)
+	if err != nil {
+		slog.Warn("credit manifest completions: load launch jobs",
+			"component", "reconcile", "instance", instanceID, "error", err)
+		return
+	}
+	outcomes, _ := db.GetAttemptOutcomesByLaunch(database, instanceID)
+	jobByID := make(map[int64]*db.Job, len(jobs))
+	for _, j := range jobs {
+		jobByID[j.ID] = j
+	}
+	for _, summary := range manifest.Jobs {
+		if summary.ExitCode != 0 {
+			continue
+		}
+		j, ok := jobByID[summary.JobID]
+		if !ok {
+			continue
+		}
+		if IsJobTerminal(AttemptDisplayStatus(j, outcomes)) {
+			continue
+		}
+		runID := int64(0)
+		if j.LatestRunID != nil {
+			runID = *j.LatestRunID
+		}
+		var marker time.Time
+		if manifest.CompletedAtUnix > 0 {
+			marker = time.Unix(manifest.CompletedAtUnix, 0)
+		}
+		// endTimeUnix == 0: leave last_synced_status NULL so the full sync
+		// pass can still backfill authoritative phase timings.
+		if _, err := db.RecordCloudJobCompletion(database, summary.JobID, 0, 0, 0, "", marker, runID); err != nil {
+			slog.Warn("credit manifest completion failed",
+				"component", "reconcile", "instance", instanceID,
+				"job_id", summary.JobID, "error", err)
+			continue
+		}
+		oplog.LogJob(oplog.OpJobComplete, summary.JobID, db.LaunchHost(instanceID),
+			oplog.WithDetailf("cloud exit=0 source=%s", SourceManifest))
+		slog.Debug("credited job completion from instance manifest",
+			"component", "reconcile", "instance", instanceID, "job_id", summary.JobID)
+	}
 }
 
 // FinalizeStuckJobsWithR2Check finds non-terminal jobs on completed launches
