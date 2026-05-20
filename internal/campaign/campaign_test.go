@@ -1149,6 +1149,46 @@ version = "12.8.93"
 	}
 }
 
+func TestSplitGroupsByImage_TorchPinGovernsImageCUDA(t *testing.T) {
+	// Regression: a project pinned to torch cu124 must get a cuda12.4 image,
+	// even when the GPU family constraint (nvidia) admits Blackwell and would
+	// otherwise upgrade the image to cuda12.8 — the pinned wheel cannot use a
+	// newer CUDA runtime, and a cu128 image's torch crashes against the
+	// lockfile's cu124 CUDA libraries.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"),
+		[]byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "nvidia",
+		GPUMemGB: 48,
+		Jobs: []*db.Job{{
+			ID:         1,
+			WorkingDir: dir,
+			Command:    "uv run python train.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].Image != "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime" {
+		t.Fatalf("Image = %q, want pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", groups[0].Image)
+	}
+}
+
 func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",

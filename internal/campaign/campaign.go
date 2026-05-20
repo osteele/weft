@@ -625,9 +625,10 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 		jobs             []*db.Job
 	}
 
-	// Pre-compute the auto-selected PyTorch image (constant across all jobs).
+	// Fallback PyTorch image for torch projects whose pinned CUDA cannot be
+	// resolved; pin-aware selection in the loop below is preferred.
 	defaultCUDA, _, _ := parseCUDAImage(cloud.DefaultImage)
-	autoTorchImage := torchImageForCUDAVersion(defaultCUDA)
+	fallbackTorchImage := torchImageForCUDAVersion(defaultCUDA)
 
 	var result []InstanceGroup
 	for _, g := range groups {
@@ -641,22 +642,41 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 
 			hasTorch := localDir != "" && hasCUDAPackages([]string{localDir})
 
+			// Resolve the project's pinned torch CUDA (e.g. "12.4"). When set,
+			// it governs the image's CUDA: a pinned torch wheel cannot use a
+			// different CUDA runtime, so the GPU-constraint upgrade below is
+			// skipped for pinned projects.
+			pinCUDA := ""
+			if hasTorch {
+				if pin := dataloc.ScanTorchPin(localDir); pin != nil {
+					pinCUDA = dataloc.CUDAVariantVersion(pin.CudaVariant)
+				}
+			}
+
 			// Auto-select a PyTorch image when the project depends on torch
 			// but no explicit image is configured. This avoids a ~5min cold
-			// uv sync of torch + CUDA wheels on every instance launch.
-			if img == "" && hasTorch && autoTorchImage != "" {
-				img = autoTorchImage
+			// uv sync of torch + CUDA wheels on every instance launch. The
+			// image's CUDA must match the project's torch pin; fall back to the
+			// default image when the pin's CUDA cannot be resolved.
+			if img == "" && hasTorch {
+				if pinned := torchImageForCUDAVersion(pinCUDA); pinned != "" {
+					img = pinned
+				} else if fallbackTorchImage != "" {
+					img = fallbackTorchImage
+				}
 			}
 			if img == "" && jobUsesFramework(localDir, job.Command, "sglang") {
 				img = sglangRuntimeImage
 			}
 
 			// Auto-upgrade CUDA images when the GPU constraint requires a newer
-			// toolkit (e.g., Blackwell needs CUDA >= 12.8). This applies to both
-			// inferred and explicit CUDA images; explicit non-CUDA images are left
-			// unchanged and will fail later with a clear compatibility reason.
+			// toolkit (e.g., Blackwell needs CUDA >= 12.8). Skipped when the
+			// project pins a torch CUDA: the pinned wheel cannot use a newer
+			// runtime, and arch-max filtering already keeps such jobs off GPUs
+			// that would need one. Explicit non-CUDA images are left unchanged
+			// and will fail later with a clear compatibility reason.
 			requiredCUDA := placement.MinCUDAForConstraint(g.GPUClass)
-			if requiredCUDA > 0 {
+			if requiredCUDA > 0 && pinCUDA == "" {
 				effectiveImage := img
 				if effectiveImage == "" {
 					effectiveImage = cloud.DefaultImage

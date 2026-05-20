@@ -62,7 +62,25 @@ var (
 	uvLockVersionRe      = regexp.MustCompile(`^version\s*=\s*"([^"]+)"`)
 	uvLockWhlCudaRe      = regexp.MustCompile(`/whl/(cu\d+)\b`)
 	cudaRuntimeVersionRe = regexp.MustCompile(`^(\d+)\.(\d+)\.`)
+	// cudaRuntimePackageRe matches uv.lock package names that ship native CUDA
+	// runtime libraries bundled with a PyTorch wheel (the nvidia-*-cu12 family,
+	// e.g. nvidia-cusparse-cu12, nvidia-nvjitlink-cu12). Pure-Python nvidia
+	// packages such as nvidia-ml-py have no -cu12 suffix and do not match.
+	cudaRuntimePackageRe = regexp.MustCompile(`^nvidia-.+-cu12$`)
 )
+
+// extraReusablePackages names non-nvidia packages that a PyTorch base image
+// also provides bundled with its torch, and which must therefore not be
+// reinstalled from the project lockfile when reusing the image's torch.
+var extraReusablePackages = map[string]bool{
+	"triton":         true,
+	"pytorch-triton": true,
+}
+
+// torchImageBundledPackages are the torch packages a PyTorch base image
+// provides directly. They are always excluded when reusing the image's torch,
+// independent of the project's uv.lock.
+var torchImageBundledPackages = []string{"torch", "torchaudio", "torchvision"}
 
 var cudaBearingNvidiaPackages = map[string]bool{
 	"nvidia-cublas-cu12":       true,
@@ -101,6 +119,58 @@ func TorchMinCUDAVersion(dir string) string {
 		return ""
 	}
 	return CUDAVariantVersion(pin.CudaVariant)
+}
+
+// CUDARuntimePackages returns the names of CUDA runtime packages pinned in the
+// uv.lock at uvLockPath — the nvidia-*-cu12 family plus triton. These ship
+// native libraries bundled with a PyTorch wheel; when a job reuses an
+// image-provided torch they must come from the image, not the lockfile, or a
+// CUDA-version skew can shadow the image's libraries and break `import torch`.
+// Returns nil if the file is missing or contains no such packages.
+func CUDARuntimePackages(uvLockPath string) []string {
+	data, err := os.ReadFile(uvLockPath)
+	if err != nil {
+		return nil
+	}
+	var pkgs []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		m := uvLockNameRe.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		if cudaRuntimePackageRe.MatchString(name) || extraReusablePackages[name] {
+			seen[name] = true
+			pkgs = append(pkgs, name)
+		}
+	}
+	return pkgs
+}
+
+// ImageProvidedTorchPackages returns the full set of packages to exclude from
+// `uv sync` when reusing a PyTorch base image's torch: the torch packages
+// themselves, plus the CUDA runtime packages (nvidia-*-cu12, triton) pinned in
+// the uv.lock at uvLockPath. The torch packages are always included even when
+// the lockfile is absent.
+func ImageProvidedTorchPackages(uvLockPath string) []string {
+	pkgs := append([]string(nil), torchImageBundledPackages...)
+	return append(pkgs, CUDARuntimePackages(uvLockPath)...)
+}
+
+// UVNoInstallPackageFlags renders a ` --no-install-package <name>` flag for
+// each package, ready to append to a `uv sync` command. Returns "" for an
+// empty list.
+func UVNoInstallPackageFlags(pkgs []string) string {
+	var b strings.Builder
+	for _, pkg := range pkgs {
+		b.WriteString(" --no-install-package ")
+		b.WriteString(pkg)
+	}
+	return b.String()
 }
 
 // scanUVLock scans uv.lock for a torch pin. Returns nil if the file is missing

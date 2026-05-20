@@ -3,6 +3,7 @@ package dataloc
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -168,6 +169,91 @@ version = "12.4.0"
 	}
 	if pin.Version != "2.5.1" || pin.CudaVariant != "cu124" {
 		t.Errorf("got %+v", pin)
+	}
+}
+
+func TestCUDARuntimePackages(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "uv.lock")
+	mustWrite(t, lock, `
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "numpy"
+version = "2.1.0"
+
+[[package]]
+name = "nvidia-cusparse-cu12"
+version = "12.3.1.170"
+
+[[package]]
+name = "nvidia-nvjitlink-cu12"
+version = "12.4.127"
+
+[[package]]
+name = "nvidia-cudnn-cu12"
+version = "9.1.0.70"
+
+[[package]]
+name = "nvidia-ml-py"
+version = "13.590.48"
+
+[[package]]
+name = "triton"
+version = "3.2.0"
+`)
+	got := CUDARuntimePackages(lock)
+	// nvidia-*-cu12 libs and triton are returned; torch, numpy, and the
+	// pure-Python nvidia-ml-py (no -cu12 suffix) are not.
+	want := []string{"nvidia-cusparse-cu12", "nvidia-nvjitlink-cu12", "nvidia-cudnn-cu12", "triton"}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("CUDARuntimePackages = %v, want %v", got, want)
+	}
+}
+
+func TestCUDARuntimePackages_MissingFile(t *testing.T) {
+	if got := CUDARuntimePackages(filepath.Join(t.TempDir(), "uv.lock")); got != nil {
+		t.Errorf("expected nil for missing uv.lock, got %v", got)
+	}
+}
+
+func TestImageProvidedTorchPackages(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "uv.lock")
+	mustWrite(t, lock, `
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cusparse-cu12"
+version = "12.3.1.170"
+`)
+	got := ImageProvidedTorchPackages(lock)
+	for _, want := range []string{"torch", "torchaudio", "torchvision", "nvidia-cusparse-cu12"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("ImageProvidedTorchPackages missing %q; got %v", want, got)
+		}
+	}
+
+	// A missing lockfile still yields the torch base packages.
+	if bare := ImageProvidedTorchPackages(filepath.Join(dir, "absent.lock")); len(bare) != 3 {
+		t.Errorf("ImageProvidedTorchPackages(missing) = %v, want 3 torch packages", bare)
+	}
+}
+
+func TestUVNoInstallPackageFlags(t *testing.T) {
+	if got := UVNoInstallPackageFlags(nil); got != "" {
+		t.Errorf("UVNoInstallPackageFlags(nil) = %q, want empty", got)
+	}
+	got := UVNoInstallPackageFlags([]string{"torch", "nvidia-cusparse-cu12"})
+	want := " --no-install-package torch --no-install-package nvidia-cusparse-cu12"
+	if got != want {
+		t.Errorf("UVNoInstallPackageFlags = %q, want %q", got, want)
 	}
 }
 

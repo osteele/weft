@@ -924,6 +924,7 @@ func launchCampaignWithStager(
 						donorSources = append(donorSources, SourceMapping{
 							R2Key:     r2Key,
 							RemoteDir: path.Join(cloud.ProjectRootDir, path.Base(localDir)),
+							LocalDir:  localDir,
 						})
 					}
 				}
@@ -1837,6 +1838,7 @@ func LaunchInstance(
 			sources = append(sources, SourceMapping{
 				R2Key:     r2Key,
 				RemoteDir: remoteDir,
+				LocalDir:  localDir,
 			})
 		}
 	}

@@ -240,6 +240,41 @@ func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) 
 	}
 }
 
+func TestPrepareUVSyncEnvironment_ExcludesCUDARuntimePackages(t *testing.T) {
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cusparse-cu12"
+version = "12.3.1.170"
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	prev := uvSystemPythonPath
+	uvSystemPythonPath = pythonPath
+	t.Cleanup(func() { uvSystemPythonPath = prev })
+
+	gotCmd, _, err := prepareUVSyncEnvironment(dir, "uv sync", nil)
+	if err != nil {
+		t.Fatalf("prepareUVSyncEnvironment() error = %v", err)
+	}
+	for _, want := range []string{"--no-install-package torch", "--no-install-package nvidia-cusparse-cu12"} {
+		if !strings.Contains(gotCmd, want) {
+			t.Fatalf("expected %q in command, got: %q", want, gotCmd)
+		}
+	}
+}
+
 func TestPrepareUVRunCommand_AddsNoSyncForTorchProject(t *testing.T) {
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {

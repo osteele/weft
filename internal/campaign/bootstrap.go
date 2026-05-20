@@ -2,7 +2,10 @@ package campaign
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
+
+	"github.com/osteele/weft/internal/dataloc"
 )
 
 // BootstrapManifest describes everything an instance needs to self-start.
@@ -24,6 +27,7 @@ type BootstrapManifest struct {
 type SourceMapping struct {
 	R2Key     string // e.g. "sources/sha256abc.tar.gz"
 	RemoteDir string // e.g. "/workspace/my-project"
+	LocalDir  string // local source directory, used to read the project uv.lock
 }
 
 // writeStageMarker emits a bash command to write a bootstrap stage marker to R2.
@@ -179,7 +183,9 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 	for _, src := range manifest.Sources {
 		b.WriteString(fmt.Sprintf("# Run uv sync in %s\n", src.RemoteDir))
 		if isPyTorchImage(manifest.Image) {
-			b.WriteString(fmt.Sprintf("cd %q && ([ -d .venv ] || ([ -n \"${UV_PYTHON:-}\" ] && \"$UV_PYTHON\" -m venv --system-site-packages .venv)) && uv sync --no-install-package torch --no-install-package torchaudio --no-install-package torchvision 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
+			skipFlags := dataloc.UVNoInstallPackageFlags(
+				dataloc.ImageProvidedTorchPackages(filepath.Join(src.LocalDir, "uv.lock")))
+			b.WriteString(fmt.Sprintf("cd %q && ([ -d .venv ] || ([ -n \"${UV_PYTHON:-}\" ] && \"$UV_PYTHON\" -m venv --system-site-packages .venv)) && uv sync%s 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, skipFlags, src.RemoteDir))
 		} else {
 			b.WriteString(fmt.Sprintf("cd %q && uv sync 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
 		}

@@ -19,8 +19,6 @@ const direnvSetupCommand = `direnv allow && eval "$(direnv export bash)"`
 
 var uvSystemPythonPath = "/opt/conda/bin/python"
 
-var uvSkipSystemPackages = []string{"torch", "torchaudio", "torchvision"}
-
 // DetectSetupCommand checks for environment manager marker files in the
 // working directory and returns the appropriate setup command to run before
 // the job command. Returns "" if no environment manager is detected.
@@ -188,7 +186,8 @@ func prepareUVSyncEnvironment(workingDir, setupCmd string, envVars []string) (st
 	if err := ensureSystemSitePackagesVenv(workingDir); err != nil {
 		return setupCmd, envVars, err
 	}
-	return setupCmd + uvNoInstallPackagesArgs(), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), nil
+	skip := dataloc.ImageProvidedTorchPackages(filepath.Join(workingDir, "uv.lock"))
+	return setupCmd + dataloc.UVNoInstallPackageFlags(skip), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), nil
 }
 
 func prepareUVRunCommand(workingDir, setupCmd, command string) (string, error) {
@@ -248,15 +247,6 @@ func ensureSystemSitePackagesVenv(workingDir string) error {
 		return fmt.Errorf("create .venv with system site packages: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
-}
-
-func uvNoInstallPackagesArgs() string {
-	var b strings.Builder
-	for _, pkg := range uvSkipSystemPackages {
-		b.WriteString(" --no-install-package ")
-		b.WriteString(pkg)
-	}
-	return b.String()
 }
 
 // ResolveDirenvEnv evaluates .envrc and returns the exported environment.
