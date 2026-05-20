@@ -18,6 +18,10 @@ var ErrOfferUnavailable = errors.New("offer unavailable")
 // Like ErrOfferUnavailable, the remedy is to try a different offer.
 var ErrProviderRejected = errors.New("provider rejected instance creation")
 
+// ErrProviderCommandTimeout is returned when a provider CLI/API command exceeds
+// weft's local timeout before returning a provider response.
+var ErrProviderCommandTimeout = errors.New("provider command timed out")
+
 // ProjectRootDir is the default root directory used for synced project trees on
 // cloud instances.
 const ProjectRootDir = "/workspace"

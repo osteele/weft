@@ -529,7 +529,9 @@ const (
 
 // isRetryableCreateError returns true if the error warrants trying a different offer.
 func isRetryableCreateError(err error) bool {
-	return errors.Is(err, cloud.ErrOfferUnavailable) || errors.Is(err, cloud.ErrProviderRejected)
+	return errors.Is(err, cloud.ErrOfferUnavailable) ||
+		errors.Is(err, cloud.ErrProviderRejected) ||
+		errors.Is(err, cloud.ErrProviderCommandTimeout)
 }
 
 func runpodObservedBootstrapPhase(phase string) string {

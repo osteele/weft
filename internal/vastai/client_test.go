@@ -195,6 +195,27 @@ func TestCreateInstanceProviderErrorJSONIsProviderRejected(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceCLITimeoutIsProviderCommandTimeout(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nsleep 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub, CLITimeout: 10 * time.Millisecond}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Fatalf("CreateInstance error = %v, want provider command timeout", err)
+	}
+	if errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, must not be provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "vastai create instance 12345 timed out") {
+		t.Fatalf("CreateInstance error = %v, want timeout detail", err)
+	}
+}
+
 func TestAvailableRejectsProviderErrorJSON(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -528,9 +549,10 @@ func TestIsProviderRejectedCreateError(t *testing.T) {
 		want bool
 	}{
 		{err: nil, want: false},
-		{err: errors.New("create instance 27681642: exit -1 (no stderr)"), want: true},
+		{err: errors.New("create instance 27681642: exit -1 (no stderr)"), want: false},
 		{err: errors.New("search offers --raw: exit -1 (no stderr)"), want: false},
 		{err: errors.New("create instance 123: insufficient balance"), want: false},
+		{err: errors.New("provider command timed out: vastai create instance 123 timed out after 30s"), want: false},
 	}
 
 	for _, tt := range tests {

@@ -51,11 +51,20 @@ var _ VastaiClient = (*Client)(nil)
 type Client struct {
 	// CLIPath is the path to the vastai binary. Defaults to "vastai".
 	CLIPath string
+	// CLITimeout overrides the default timeout for tests and slow provider calls.
+	CLITimeout time.Duration
 }
 
 // NewClient creates a Client that uses the vastai CLI from PATH.
 func NewClient() *Client {
 	return &Client{CLIPath: "vastai"}
+}
+
+func (c *Client) cliTimeout() time.Duration {
+	if c != nil && c.CLITimeout > 0 {
+		return c.CLITimeout
+	}
+	return cliTimeout
 }
 
 // Available checks that the vastai CLI is installed and authenticated.
@@ -392,11 +401,7 @@ func isUnavailableOfferError(err error) bool {
 }
 
 func isProviderRejectedCreateError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "create instance") && strings.Contains(msg, "exit -1 (no stderr)")
+	return false
 }
 
 // ShowInstance fetches the current state of an instance.
@@ -502,17 +507,21 @@ var cliSemaphore = make(chan struct{}, 4)
 func (c *Client) run(args ...string) ([]byte, error) {
 	cliSemaphore <- struct{}{}
 	defer func() { <-cliSemaphore }()
-	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	timeout := c.cliTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.CLIPath, args...)
 	out, err := cmd.Output()
 	if err != nil {
+		prefix := args
+		if len(prefix) > 3 {
+			prefix = args[:3]
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("%w: vastai %s timed out after %s", cloud.ErrProviderCommandTimeout, strings.Join(prefix, " "), timeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			// Only include the first 3 args (subcommand + ID) — later args may be large scripts.
-			prefix := args
-			if len(prefix) > 3 {
-				prefix = args[:3]
-			}
 			stderr := strings.TrimSpace(string(exitErr.Stderr))
 			if stderr == "" {
 				stderr = fmt.Sprintf("exit %d (no stderr)", exitErr.ExitCode())
