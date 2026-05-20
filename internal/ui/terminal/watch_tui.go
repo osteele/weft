@@ -120,8 +120,10 @@ type watchModel struct {
 	autoPassInFlight  bool
 	autoPassStartedAt time.Time // set when autoPassInFlight flips to true
 	autoPassPhase     autoPilotPhaseHint
+	// Singleton autopilot pause state, refreshed by runAutoPilot.
+	autopilotPaused       bool
+	autopilotPausedReason string
 	// Auto-pilot diagnostics and relaunch backoff.
-	autoStatusLine          string
 	autoNoopReasons         map[int64]string
 	autoLastUnplacedSig     string
 	autoLaunchBackoffUntil  time.Time

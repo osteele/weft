@@ -89,6 +89,8 @@ type listTUIModel struct {
 	autoBlockReasons           map[int64]string
 	lastAutoPilotErrorRaw      string
 	showAutoPilotErrorDetails  bool
+	autopilotPaused            bool
+	autopilotPausedReason      string
 	launchLiveByID             map[int64]*db.LaunchLiveState
 	launchStatusByID           map[int64]string
 	placingJobIDs              map[int64]struct{}
@@ -208,6 +210,8 @@ type listJobsLoadedMsg struct {
 	recentFailedInstances    *recentFailedInstances
 	hostInfoByName           map[string]*db.CachedHostInfo
 	autoPassPhase            autoPilotPhaseHint
+	autopilotPaused          bool
+	autopilotPausedReason    string
 	err                      error
 }
 
@@ -563,6 +567,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recentFailedInstances = msg.recentFailedInstances
 		m.hostInfoByName = msg.hostInfoByName
 		m.autoPassPhase = msg.autoPassPhase
+		m.autopilotPaused = msg.autopilotPaused
+		m.autopilotPausedReason = msg.autopilotPausedReason
 		m.pruneAutoBlockReasons()
 		if m.countUnplacedQueuedJobs() == 0 {
 			m.autoPersistentBlocked = ""
@@ -726,9 +732,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showAutoPilotErrorDetails = false
 		m.autoPersistentError = ""
 		if msg.paused {
-			if !m.quickLaunchStatusProtected() {
-				m.statusMessage = "Auto-pilot: paused (resume with `weft autopilot resume`)"
-			}
+			// The auto-pilot status line already reports the paused state
+			// from autopilot_state (loaded in reloadJobs); don't duplicate
+			// it in statusMessage.
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
 			return m, nil
 		}
@@ -1301,47 +1307,37 @@ func (m listTUIModel) countUnplacedQueuedJobs() int {
 }
 
 func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
-	if !m.autoMode {
-		return ""
-	}
-	if m.autoRunRateInputActive {
-		// Prompt is rendered in the controls line; keep this line empty
-		// so the prompt does not appear twice in slightly different forms.
-		return ""
-	}
-	if line := formatAgentBuildStatus(); line != "" {
-		return line
-	}
-	unplaced := m.countUnplacedQueuedJobs()
-	target := formatAutoRunRateTarget(m.autoRunRateTargetCents)
-	if m.syncInProgress() {
-		hosts := m.pendingHostList()
-		if len(hosts) > 0 {
-			return fmt.Sprintf("Auto-pilot: syncing %s... (target %s)", strings.Join(hosts, ", "), target)
+	// The list TUI has two blocked-reason sources: the persistent summary
+	// from the last pass, and reasons hydrated onto the visible unplaced
+	// jobs. Prefer the former (it carries a job count); fall back to the
+	// latter. The shared formatter renders whichever the caller supplies.
+	blockedSummary := strings.TrimSpace(m.autoPersistentBlocked)
+	blockedJobs := m.autoPersistentBlockedN
+	if blockedSummary == "" {
+		if summary := orchestration.AutoPilotBlockSummary(m.visibleUnplacedBlockedReasons()); summary != "" {
+			blockedSummary = summary
+			blockedJobs = 0
 		}
-		return "Auto-pilot: syncing cloud state... (target " + target + ")"
 	}
-	if m.autoInProgress {
-		elapsed := time.Since(m.autoPassStartedAt).Round(time.Second)
-		phase := activePassPhase(m.autoPassPhase, m.autoPassStartedAt)
-		return fmt.Sprintf("Auto-pilot: evaluating %s%s (%s)... (target %s)", pluralize(unplaced, "unplaced job", "unplaced jobs"), phase, elapsed, target)
-	}
-	if strings.TrimSpace(m.autoPersistentError) != "" {
-		return "Auto-pilot: failed — " + m.autoPersistentError
-	}
-	if strings.TrimSpace(m.autoPersistentBlocked) != "" {
-		return fmt.Sprintf("Auto-pilot: blocked — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
-	}
-	if summary := orchestration.AutoPilotBlockSummary(m.visibleUnplacedBlockedReasons()); summary != "" {
-		return fmt.Sprintf("Auto-pilot: blocked — %s", summary)
-	}
-	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
-		return formatAutoPilotNextPass(m.autoNextPassAt, unplaced)
-	}
-	if !m.nextSyncTickAt.IsZero() && time.Now().Before(m.nextSyncTickAt) {
-		return fmt.Sprintf("Auto-pilot: idle — next sync in %s · watching DB (%d unplaced, %d running, target %s)", waitUntil(m.nextSyncTickAt), unplaced, visibleRunning, target)
-	}
-	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running, target %s)", unplaced, visibleRunning, target)
+	return autopilotStatusLine(autopilotDisplayInput{
+		autoMode:        m.autoMode,
+		inputActive:     m.autoRunRateInputActive,
+		paused:          m.autopilotPaused,
+		pausedReason:    m.autopilotPausedReason,
+		syncing:         m.syncInProgress(),
+		syncHosts:       m.pendingHostList(),
+		inFlight:        m.autoInProgress,
+		passPhase:       m.autoPassPhase,
+		passStartedAt:   m.autoPassStartedAt,
+		persistentError: m.autoPersistentError,
+		blockedSummary:  blockedSummary,
+		blockedJobs:     blockedJobs,
+		nextPassAt:      m.autoNextPassAt,
+		nextSyncAt:      m.nextSyncTickAt,
+		unplaced:        m.countUnplacedQueuedJobs(),
+		running:         visibleRunning,
+		targetCents:     m.autoRunRateTargetCents,
+	})
 }
 
 func (m listTUIModel) groupedControlsText(hasQueued bool) string {
@@ -1351,10 +1347,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		// muddle the picture.
 		return ""
 	}
-	autoState := "OFF"
-	if m.autoMode {
-		autoState = "ON"
-	}
+	autoState := autopilotFooterState(m.autoMode, m.autopilotPaused)
 	line := "group:" + listGroupModeLabel(m.effectiveGroupMode())
 	if m.isStatusGroupedView() {
 		line += fmt.Sprintf("  %s (%s)", listKeyGroupedAuto.footerToken(), autoState)
@@ -2522,6 +2515,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		}
 		placingJobIDs, placementQueuedAtByJob := placementDisplayMaps(placementStatusByJob)
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
+		autopilotPaused, autopilotPausedReason := autopilotPauseState(database)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
 			launchLiveByID:           launchLiveByID,
@@ -2537,6 +2531,8 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			recentFailedInstances:    loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now()),
 			hostInfoByName:           hostInfoByName,
 			autoPassPhase:            loadLatestAutoPilotPhase(database),
+			autopilotPaused:          autopilotPaused,
+			autopilotPausedReason:    autopilotPausedReason,
 		}
 	}
 }

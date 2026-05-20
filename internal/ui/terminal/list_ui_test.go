@@ -618,6 +618,50 @@ func TestGroupedJobsWithAutoReasonsHidesOnPremOnlyAutoReasonForRentalEligibleJob
 	}
 }
 
+func TestGroupedAutoPilotStatusTextShowsPausedState(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:       true,
+		autoMode:              true,
+		autopilotPaused:       true,
+		autopilotPausedReason: "manual relaunch",
+		autoInProgress:        true,
+		jobs:                  []*db.Job{{ID: 10, Status: db.StatusQueued}},
+	}
+
+	line := m.groupedAutoPilotStatusText(0)
+	if !strings.Contains(line, "paused") {
+		t.Fatalf("auto-pilot line = %q, want paused state", line)
+	}
+	if !strings.Contains(line, "manual relaunch") {
+		t.Fatalf("auto-pilot line = %q, want pause reason", line)
+	}
+	// The paused branch must win over the transient autoInProgress state,
+	// which would otherwise render a misleading "evaluating" line.
+	if strings.Contains(line, "evaluating") {
+		t.Fatalf("auto-pilot line = %q, want paused to override evaluating", line)
+	}
+}
+
+func TestGroupedControlsTextShowsPausedAutoState(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoMode:        true,
+		autopilotPaused: true,
+		width:           100,
+		height:          20,
+		jobs:            []*db.Job{{ID: 202, Status: db.StatusQueued, Description: "queued"}},
+	}
+	m.rebuildGroupedRows()
+
+	line := m.groupedControlsText(true)
+	if !strings.Contains(line, "(PAUSED)") {
+		t.Fatalf("controls line = %q, want auto state PAUSED", line)
+	}
+	if strings.Contains(line, "(ON)") {
+		t.Fatalf("controls line = %q, want PAUSED not ON", line)
+	}
+}
+
 func TestGroupedJobsWithAutoReasons_UnprocessedGroupedViewExcludesCanceledKeepsKilled(t *testing.T) {
 	killed := &db.Job{ID: 21, Status: db.StatusKilled}
 	canceled := &db.Job{ID: 22, Status: db.StatusCanceled}

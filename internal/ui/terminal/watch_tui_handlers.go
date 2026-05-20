@@ -264,7 +264,6 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 		m.removeUnplacedJob(msg.jobID)
 		delete(m.autoNoopReasons, msg.jobID)
 		m.clampCursor()
-		m.autoStatusLine = fmt.Sprintf("auto-place: job #%d submitted to instance %s", msg.jobID, ids.FormatInstanceID(msg.instanceID))
 
 		// Continue placing remaining jobs
 		var cmds []tea.Cmd
@@ -331,7 +330,6 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 	m.autoLaunchBackoffReason = reason
 	m.autoLaunchBackoffUntil = time.Now().Add(delay)
 	m.autoLaunchBackoffStep++
-	m.autoStatusLine = fmt.Sprintf("auto-launch skipped: %s", reason)
 	m.autoPersistentBlocked = reason
 	m.autoPersistentBlockedN = m.autoPilotUnplacedCount()
 	if m.autoNoopReasons == nil {

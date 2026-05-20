@@ -1036,11 +1036,11 @@ func TestWatchModelRunAutoPilot_NoReusableInventoryJobsShowsNoopReason(t *testin
 	if got := m.autoNoopReasons[91]; !strings.Contains(got, "no active reusable instances") {
 		t.Fatalf("autoNoopReasons[91] = %q, want reusable-instance reason", got)
 	}
-	if !strings.Contains(m.autoStatusLine, "no active reusable instances") {
-		t.Fatalf("autoStatusLine = %q, want no active reusable instances", m.autoStatusLine)
+	if !strings.Contains(m.autoPersistentBlocked, "no active reusable instances") {
+		t.Fatalf("autoPersistentBlocked = %q, want no active reusable instances", m.autoPersistentBlocked)
 	}
-	if !strings.Contains(m.autoStatusLine, "no rental-eligible unplaced jobs") {
-		t.Fatalf("autoStatusLine = %q, want no rental-eligible unplaced jobs", m.autoStatusLine)
+	if !strings.Contains(m.autoPersistentBlocked, "no rental-eligible unplaced jobs") {
+		t.Fatalf("autoPersistentBlocked = %q, want no rental-eligible unplaced jobs", m.autoPersistentBlocked)
 	}
 }
 
@@ -1076,9 +1076,6 @@ func TestHandleAutoLaunchDone_SetsBackoffAndNoopReasonsOnSkip(t *testing.T) {
 	if got.autoLaunchBackoffStep != 1 {
 		t.Fatalf("autoLaunchBackoffStep = %d, want 1", got.autoLaunchBackoffStep)
 	}
-	if !strings.Contains(got.autoStatusLine, "auto-launch skipped") {
-		t.Fatalf("autoStatusLine = %q, want skip message", got.autoStatusLine)
-	}
 	if reason := got.autoNoopReasons[596]; !strings.Contains(reason, "auto-launch skipped") {
 		t.Fatalf("autoNoopReasons[596] = %q, want auto-launch skipped reason", reason)
 	}
@@ -1087,3 +1084,25 @@ func TestHandleAutoLaunchDone_SetsBackoffAndNoopReasonsOnSkip(t *testing.T) {
 func watchTestInt64Ptr(v int64) *int64 { return &v }
 
 func watchTestIntPtr(v int) *int { return &v }
+
+func TestWatchAutoPilotStatusLineShowsPausedState(t *testing.T) {
+	m := watchModel{
+		autoMode:              true,
+		autopilotPaused:       true,
+		autopilotPausedReason: "manual relaunch",
+		autoPassInFlight:      true,
+		autoPersistentBlocked: "no offers from providers",
+	}
+
+	line := m.autoPilotStatusLine()
+	if !strings.Contains(line, "paused") || !strings.Contains(line, "manual relaunch") {
+		t.Fatalf("auto-pilot line = %q, want paused state with reason", line)
+	}
+	if strings.Contains(line, "evaluating") || strings.Contains(line, "blocked") {
+		t.Fatalf("auto-pilot line = %q, want paused to override transient states", line)
+	}
+
+	if hint := m.autoModeHint(); !strings.Contains(hint, "PAUSED") {
+		t.Fatalf("auto mode hint = %q, want PAUSED", hint)
+	}
+}

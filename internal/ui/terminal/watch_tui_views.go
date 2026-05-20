@@ -721,11 +721,7 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 func (m watchModel) autoModeHint() string {
 	// The target value lives on the Auto-pilot status line; keep only the
 	// `[$]` key hint here so the binding is still discoverable.
-	state := "OFF"
-	if m.autoMode {
-		state = "ON"
-	}
-	return fmt.Sprintf("[A] auto: %s  [$] target", state)
+	return fmt.Sprintf("[A] auto: %s  [$] target", autopilotFooterState(m.autoMode, m.autopilotPaused))
 }
 
 func (m watchModel) autoPilotUnplacedCount() int {
@@ -813,43 +809,24 @@ func formatAgentBuildStatus() string {
 }
 
 func (m watchModel) autoPilotStatusLine() string {
-	if !m.autoMode {
-		return ""
-	}
-	if m.autoRunRateInputActive {
-		// Prompt is rendered in the controls line; keep this line empty
-		// so the prompt does not appear twice in slightly different forms.
-		return ""
-	}
-	if line := formatAgentBuildStatus(); line != "" {
-		return line
-	}
-	unplaced := m.autoPilotUnplacedCount()
-	target := formatAutoRunRateTarget(m.autoRunRateTargetCents)
-	if m.autoPilotSyncInProgress() {
-		return "Auto-pilot: syncing cloud state... (target " + target + ")"
-	}
-	if m.autoPassInFlight || m.autoPlacing {
-		elapsed := ""
-		if !m.autoPassStartedAt.IsZero() {
-			elapsed = fmt.Sprintf(" (%s)", time.Since(m.autoPassStartedAt).Round(time.Second))
-		}
-		phase := activePassPhase(m.autoPassPhase, m.autoPassStartedAt)
-		return fmt.Sprintf("Auto-pilot: evaluating %s%s%s... (target %s)", pluralize(unplaced, "unplaced job", "unplaced jobs"), phase, elapsed, target)
-	}
-	if m.autoLaunching {
-		return "Auto-pilot: launching instance... (target " + target + ")"
-	}
-	if strings.TrimSpace(m.autoPersistentError) != "" {
-		return "Auto-pilot: failed — " + m.autoPersistentError
-	}
-	if strings.TrimSpace(m.autoPersistentBlocked) != "" {
-		return fmt.Sprintf("Auto-pilot: paused — %s (%d jobs)", m.autoPersistentBlocked, m.autoPersistentBlockedN)
-	}
-	if !m.autoLaunchBackoffUntil.IsZero() && time.Now().Before(m.autoLaunchBackoffUntil) {
-		return formatAutoPilotNextPass(m.autoLaunchBackoffUntil, unplaced)
-	}
-	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running, target %s)", unplaced, m.autoPilotRunningCount(), target)
+	return autopilotStatusLine(autopilotDisplayInput{
+		autoMode:        m.autoMode,
+		inputActive:     m.autoRunRateInputActive,
+		paused:          m.autopilotPaused,
+		pausedReason:    m.autopilotPausedReason,
+		syncing:         m.autoPilotSyncInProgress(),
+		inFlight:        m.autoPassInFlight || m.autoPlacing,
+		passPhase:       m.autoPassPhase,
+		passStartedAt:   m.autoPassStartedAt,
+		launching:       m.autoLaunching,
+		persistentError: m.autoPersistentError,
+		blockedSummary:  m.autoPersistentBlocked,
+		blockedJobs:     m.autoPersistentBlockedN,
+		nextPassAt:      m.autoLaunchBackoffUntil,
+		unplaced:        m.autoPilotUnplacedCount(),
+		running:         m.autoPilotRunningCount(),
+		targetCents:     m.autoRunRateTargetCents,
+	})
 }
 
 // ---------------------------------------------------------------------------
