@@ -964,6 +964,10 @@ laptop$ weft run \
 For rental producers, weft waits for completion and artifact upload, then
 stages needed files from cloud artifact storage before the consumer starts.
 
+Each `--needs` spec names a single file (`path:<job-id>`), not a directory.
+Directory targets such as `--needs output/:1046` are not supported — give each
+file its own `--needs` flag.
+
 `--needs` resolves against the producer's recorded artifacts, not its live
 state. A rental producer that already completed (hours or days ago) works the
 same as one still running — weft looks up the job in the DB and stages the

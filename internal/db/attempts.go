@@ -603,7 +603,7 @@ func createJobStatusView(db *sql.DB) error {
 			la.last_synced_status,
 			la.pending_status,
 			la.pending_at,
-			la.job_metadata,
+			COALESCE(la.job_metadata, j.job_metadata) AS job_metadata,
 			la.cost,
 			la.error_diagnosis,
 			-- retry_count = number of prior attempts (attempt_count - 1), or 0

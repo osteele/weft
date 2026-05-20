@@ -417,6 +417,19 @@ var versionedMigrations = []migration{
 			return createJobStateViews(db)
 		},
 	},
+	{
+		// Fallback metadata store for jobs submitted while unplaced (no
+		// job_attempts row yet); SetJobMetadata writes here and the
+		// job_status view COALESCEs jobs.job_metadata with the attempt
+		// column. Must be a versioned migration: the job_status view is
+		// recreated by startupRepair on every Open, so an existing DB at
+		// the current schema version (which fast-paths past initSchema's
+		// legacy body) needs the version bump to receive the column.
+		Description: "add jobs.job_metadata fallback column",
+		Apply: func(db *sql.DB) error {
+			return addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN job_metadata TEXT`)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

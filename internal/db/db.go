@@ -435,7 +435,8 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		placement_reasons TEXT,
 		cli_overrides TEXT,
 		campaign_job_index INTEGER,
-		requested_status TEXT
+		requested_status TEXT,
+		job_metadata TEXT
 	)`, ifClause, table)
 }
 
@@ -1429,8 +1430,9 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Migration: add spec columns that may be missing on old databases.
-	// Execution-state columns (error_message, remote_id, remote_state, failure_reason,
-	// job_metadata) are no longer on the jobs table; they live on job_attempts.
+	// Execution-state columns (error_message, remote_id, remote_state,
+	// failure_reason) live on job_attempts. jobs.job_metadata is a fallback
+	// store for jobs that have no attempt row yet (see SetJobMetadata).
 	for _, stmt := range []string{
 		`ALTER TABLE jobs ADD COLUMN queue_name TEXT`,
 		`ALTER TABLE jobs ADD COLUMN backend TEXT DEFAULT 'queue-runner'`,
@@ -1498,6 +1500,17 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN needs TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add the job_metadata fallback column. SetJobMetadata stores
+	// submission metadata here for jobs with no job_attempts row yet; the
+	// job_status view COALESCEs it with the attempt column. This must run in
+	// the legacy body — before runVersionedMigrations re-applies migrations
+	// that query job_status — and is ALSO registered in versionedMigrations
+	// so currentSchemaVersion bumps and existing DBs do not skip the column
+	// via the initSchema fast path.
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN job_metadata TEXT`); err != nil {
 		return err
 	}
 
@@ -3492,14 +3505,44 @@ func SetJobTags(db *sql.DB, jobID int64, tags []string) error {
 }
 
 // SetJobMetadata updates the stored metadata JSON for a job (nil clears it).
+//
+// Metadata normally lives on the latest job_attempts row. A job submitted
+// while unplaced has no attempt row yet, so its metadata is stored on the
+// jobs table instead; the job_status view COALESCEs the two. Once the job
+// gets an attempt, later SetJobMetadata calls (telemetry, resource usage)
+// read-modify-write the full struct and carry the submission metadata onto
+// the attempt row.
 func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
 	value, err := encodeJobMetadata(meta)
 	if err != nil {
 		return err
 	}
-	// Update latest attempt (open or not — metadata can be set after completion)
-	_, err = db.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = `+latestAttemptSubquery, value, jobID)
-	return err
+	// Update latest attempt (open or not — metadata can be set after completion).
+	res, err := db.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = `+latestAttemptSubquery, value, jobID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	// No attempt row: the job is still unplaced. Persist on the jobs table so
+	// submission metadata (cloud dependencies, disk floor) is not silently lost.
+	res, err = db.Exec(`UPDATE jobs SET job_metadata = ? WHERE id = ?`, value, jobID)
+	if err != nil {
+		return err
+	}
+	n, err = res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("SetJobMetadata: job %d not found", jobID)
+	}
+	return nil
 }
 
 // AddJobTag adds a tag to a job if it doesn't already exist.

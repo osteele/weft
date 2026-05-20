@@ -369,6 +369,58 @@ func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
 	}
 }
 
+// TestSetJobMetadata_PersistsForUnplacedJob is a regression test for the bug
+// where submission metadata (cloud dependencies, disk floor) was silently
+// dropped for jobs submitted without a host: an unplaced job has no
+// job_attempts row, so the attempt-scoped UPDATE matched zero rows and
+// succeeded silently. SetJobMetadata now falls back to the jobs table.
+func TestSetJobMetadata_PersistsForUnplacedJob(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Unplaced job: no host, so recordQueuedWithGPU creates no attempt row.
+	jobID, err := RecordQueued(database, "", "/tmp/project", "echo consume", "consumer")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	meta := &JobMetadata{
+		Dependencies: &JobDependencyMetadata{
+			CloudNeeds: []string{"output/model.pt:1046"},
+			CloudAfter: []JobDependencyRef{{JobID: 1046}},
+		},
+		Disk: &JobDiskMetadata{DiskGB: 120},
+	}
+	if err := SetJobMetadata(database, jobID, meta); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.Metadata == nil || job.Metadata.Dependencies == nil {
+		t.Fatalf("expected metadata to survive for unplaced job, got %+v", job)
+	}
+	if got := job.Metadata.Dependencies.CloudNeeds; len(got) != 1 || got[0] != "output/model.pt:1046" {
+		t.Fatalf("cloud_needs = %v, want [output/model.pt:1046]", got)
+	}
+	if job.Metadata.Disk == nil || job.Metadata.Disk.DiskGB != 120 {
+		t.Fatalf("disk metadata lost: %+v", job.Metadata.Disk)
+	}
+}
+
+// TestSetJobMetadata_UnknownJob verifies SetJobMetadata reports an error
+// instead of silently succeeding when the job does not exist.
+func TestSetJobMetadata_UnknownJob(t *testing.T) {
+	database := setupTestDB(t)
+	err := SetJobMetadata(database, 999999, &JobMetadata{
+		Dependencies: &JobDependencyMetadata{CloudNeeds: []string{"output/x.pt:1"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown job")
+	}
+}
+
 // Covers spec invariant PendingPlacementClearedOnTerminalLaunch: once a launch
 // reaches a terminal status, any pending_placement on attempts referencing it
 // must be cleared, otherwise AssignJobHost will refuse to re-place the job.

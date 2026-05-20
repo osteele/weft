@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -94,6 +95,58 @@ func TestRunVersionedMigrations_AppliesOnlyNewerThanFromVersion(t *testing.T) {
 	}
 	if v != baseSchemaVersion+3 {
 		t.Fatalf("user_version after run = %d, want %d", v, baseSchemaVersion+3)
+	}
+}
+
+// TestOpen_RestoresJobMetadataColumnOnUpgrade is a regression test for a
+// wedged-schema bug: jobs.job_metadata — which the job_status view selects via
+// COALESCE(la.job_metadata, j.job_metadata) — was added only in the legacy
+// initSchema body with no matching versioned migration, so currentSchemaVersion
+// never bumped. Existing DBs at the prior version fast-pathed past initSchema
+// and never received the column, while startupRepair still recreated the
+// job_status view that references it, wedging `weft jobs list` with
+// "no such column: j.job_metadata". The column is now also a versioned
+// migration, so the version bump routes existing DBs through the upgrade path.
+func TestOpen_RestoresJobMetadataColumnOnUpgrade(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	cleanup := SetDBPath(dbFile)
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Simulate a DB that predates the job_metadata column, reporting the
+	// schema version that shipped just before it was added. SQLite re-validates
+	// dependent views on DROP COLUMN, so drop them first; the reopen below
+	// recreates them.
+	for _, v := range []string{"training_examples", "job_run_training_examples", "job_status", "launch_job_membership"} {
+		if _, err := database.Exec(`DROP VIEW IF EXISTS ` + v); err != nil {
+			t.Fatalf("drop view %s: %v", v, err)
+		}
+	}
+	if _, err := database.Exec(`ALTER TABLE jobs DROP COLUMN job_metadata`); err != nil {
+		t.Fatalf("drop job_metadata column: %v", err)
+	}
+	if _, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion-1)); err != nil {
+		t.Fatalf("rewind user_version: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopening must run the upgrade path and re-add jobs.job_metadata so the
+	// job_status view startupRepair recreates is queryable.
+	database, err = Open()
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer database.Close()
+
+	var meta sql.NullString
+	if err := database.QueryRow(`SELECT job_metadata FROM job_status LIMIT 1`).Scan(&meta); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("query job_status after reopen: %v", err)
 	}
 }
 
