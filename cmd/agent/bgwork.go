@@ -29,6 +29,7 @@ type bgWorkManager struct {
 	wg           sync.WaitGroup
 	mu           sync.Mutex
 	errors       []bgWorkError
+	summaries    map[int64]runner.JobCompletionSummary
 	workdirs     map[string]struct{} // resolved absolute paths touched this campaign
 	skipDeletion bool
 }
@@ -68,6 +69,7 @@ type maintenanceReport struct {
 
 func newBGWorkManager(jobs []cloud.AgentJob, skipDeletion bool) *bgWorkManager {
 	m := &bgWorkManager{
+		summaries:    make(map[int64]runner.JobCompletionSummary),
 		workdirs:     make(map[string]struct{}),
 		skipDeletion: skipDeletion,
 	}
@@ -125,6 +127,9 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 			uploadEndedUnix = resultsUpload.CompletedAtUnix
 		}
 		_ = patchPhaseUploadWindow(pw.logSnapshot, pw.jobID, pw.uploadStartedUnix, uploadEndedUnix)
+		if summary, _ := summarizeJobCompletion(pw.logSnapshot, pw.jobID); summary.JobID != 0 {
+			m.recordSummary(summary)
+		}
 
 		reuploadCompletion(pw.r2Bucket, pw.jobID, pw.runID, pw.logSnapshot)
 		repairR2Markers(pw)
@@ -158,6 +163,22 @@ func (m *bgWorkManager) recordError(jobID int64, op string, err error) {
 	m.mu.Lock()
 	m.errors = append(m.errors, bgWorkError{JobID: jobID, Op: op, Err: err})
 	m.mu.Unlock()
+}
+
+func (m *bgWorkManager) recordSummary(summary runner.JobCompletionSummary) {
+	m.mu.Lock()
+	m.summaries[summary.JobID] = summary
+	m.mu.Unlock()
+}
+
+func (m *bgWorkManager) CompletionSummaries() []runner.JobCompletionSummary {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	summaries := make([]runner.JobCompletionSummary, 0, len(m.summaries))
+	for _, summary := range m.summaries {
+		summaries = append(summaries, summary)
+	}
+	return summaries
 }
 
 // CleanupWorkdirs deletes every workdir touched during the campaign. Call

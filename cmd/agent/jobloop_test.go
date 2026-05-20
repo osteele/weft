@@ -62,6 +62,97 @@ func TestPatchCompletionUpload(t *testing.T) {
 	}
 }
 
+func TestCollectCompletionManifestIncludesPriorGraceJob(t *testing.T) {
+	logDir := t.TempDir()
+	writeCompletionRecordForTest(t, logDir, 2002, runner.CompletionRecord{
+		ExitCode: 1,
+		OutputUpload: &runner.OutputUploadResult{
+			Status: "ok",
+		},
+		ResultsUpload: &runner.UploadSummary{
+			Status: "ok",
+		},
+	})
+	writeCompletionRecordForTest(t, logDir, 2003, runner.CompletionRecord{
+		ExitCode: 0,
+		OutputUpload: &runner.OutputUploadResult{
+			Status: "ok",
+			Bytes:  1454311849,
+		},
+		ResultsUpload: &runner.UploadSummary{
+			Status: "ok",
+		},
+	})
+
+	manifest := collectCompletionManifest(logDir, []cloud.AgentJob{{ID: 2003}})
+
+	if manifest.ExitCode != 1 {
+		t.Fatalf("manifest exit_code = %d, want 1 because prior job failed", manifest.ExitCode)
+	}
+	if got, want := len(manifest.Jobs), 2; got != want {
+		t.Fatalf("manifest job count = %d, want %d: %#v", got, want, manifest.Jobs)
+	}
+	if manifest.Jobs[0].JobID != 2003 {
+		t.Fatalf("first job = %d, want current grace job 2003", manifest.Jobs[0].JobID)
+	}
+	if manifest.Jobs[1].JobID != 2002 {
+		t.Fatalf("second job = %d, want prior job 2002 from log dir", manifest.Jobs[1].JobID)
+	}
+	for _, job := range manifest.Jobs {
+		if job.UploadStatus != "ok" {
+			t.Fatalf("job %d upload_status = %q, want ok", job.JobID, job.UploadStatus)
+		}
+	}
+}
+
+func TestCollectCompletionManifestIncludesBackgroundSummaries(t *testing.T) {
+	logDir := t.TempDir()
+	writeCompletionRecordForTest(t, logDir, 2, runner.CompletionRecord{
+		ExitCode: 0,
+		OutputUpload: &runner.OutputUploadResult{
+			Status: "ok",
+			Bytes:  20,
+		},
+		ResultsUpload: &runner.UploadSummary{
+			Status: "ok",
+		},
+	})
+	prior := runner.JobCompletionSummary{
+		JobID:        1,
+		ExitCode:     0,
+		UploadStatus: "ok",
+		OutputBytes:  10,
+	}
+
+	manifest := collectCompletionManifest(logDir, []cloud.AgentJob{{ID: 1}, {ID: 2}}, prior)
+
+	if got, want := len(manifest.Jobs), 2; got != want {
+		t.Fatalf("manifest job count = %d, want %d: %#v", got, want, manifest.Jobs)
+	}
+	if manifest.Jobs[0].JobID != 1 || manifest.Jobs[0].OutputBytes != 10 {
+		t.Fatalf("first summary = %#v, want background summary for job 1", manifest.Jobs[0])
+	}
+	if manifest.Jobs[1].JobID != 2 || manifest.Jobs[1].OutputBytes != 20 {
+		t.Fatalf("second summary = %#v, want log-dir summary for job 2", manifest.Jobs[1])
+	}
+	if manifest.ExitCode != 0 {
+		t.Fatalf("manifest exit_code = %d, want 0", manifest.ExitCode)
+	}
+}
+
+func writeCompletionRecordForTest(t *testing.T, logDir string, jobID int64, rec runner.CompletionRecord) {
+	t.Helper()
+	paths := runner.NewJobPaths(logDir, jobID)
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(paths.Completion, data, 0o644); err != nil {
+		t.Fatalf("write completion: %v", err)
+	}
+}
+
 func TestHasOutputDirs(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		if hasOutputDirs(t.TempDir()) {

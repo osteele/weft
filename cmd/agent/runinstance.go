@@ -266,11 +266,10 @@ func runInstance(args []string) {
 		})
 	} else {
 		terminalStatus, terminationReason := terminalOutcomeForSequence(seqResult)
-		cm := collectCompletionManifest(logDir, manifest.Jobs)
 		selfDestruct(selfDestructOpts{
 			Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: manifest.SelfDestructCmd,
 			TerminalStatus: terminalStatus, TerminationReason: terminationReason,
-			Phase: currentPhase.Get(), CompletionManifest: cm,
+			Phase: currentPhase.Get(), CompletionManifest: seqResult.CompletionManifest,
 		})
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -466,10 +468,11 @@ func (m *setupPrewarmManager) waitFor(job cloud.AgentJob) setupPrewarmResult {
 
 // jobSequenceResult holds the outcome of running a sequence of jobs.
 type jobSequenceResult struct {
-	FailedJobs      []int64
-	AnyFailed       bool
-	AnyCanceled     bool
-	StartedJobCount int
+	FailedJobs         []int64
+	AnyFailed          bool
+	AnyCanceled        bool
+	StartedJobCount    int
+	CompletionManifest *runner.InstanceCompletionManifest
 }
 
 // runJobSequence runs a slice of agent jobs sequentially, overlapping post-job
@@ -734,6 +737,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	if lastPostJobID > 0 {
 		setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
 	}
+	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, bgm.CompletionSummaries()...)
 	bgm.CleanupWorkdirs()
 	return result
 }
@@ -828,17 +832,50 @@ func patchCompletionResultsUpload(logDir string, jobID int64, upload *runner.Upl
 	})
 }
 
-// collectCompletionManifest reads per-job completion records from the log
-// directory and assembles an InstanceCompletionManifest suitable for writing
-// to the R2 completion marker.
-func collectCompletionManifest(logDir string, jobs []cloud.AgentJob) *runner.InstanceCompletionManifest {
+// collectCompletionManifest assembles an InstanceCompletionManifest suitable
+// for writing to the R2 completion marker. Summaries from background upload
+// workers cover jobs whose shared log directory was cleaned before later jobs;
+// scanning logDir covers failures that entered grace before self-destruct.
+func collectCompletionManifest(logDir string, jobs []cloud.AgentJob, extra ...runner.JobCompletionSummary) *runner.InstanceCompletionManifest {
 	manifest := &runner.InstanceCompletionManifest{
 		CompletedAtUnix: time.Now().Unix(),
 	}
+	summaries := map[int64]runner.JobCompletionSummary{}
+	for _, summary := range extra {
+		if summary.JobID != 0 {
+			summaries[summary.JobID] = summary
+		}
+	}
+	for _, summary := range scanCompletionSummaries(logDir) {
+		if summary.JobID != 0 {
+			summaries[summary.JobID] = summary
+		}
+	}
+
+	seen := map[int64]struct{}{}
 	allOK := true
 	for _, job := range jobs {
-		summary, ok := summarizeJobCompletion(logDir, job.ID)
+		summary, ok := summaries[job.ID]
 		if !ok {
+			summary, ok = summarizeJobCompletion(logDir, job.ID)
+		}
+		if !completionSummaryOK(summary, ok) {
+			allOK = false
+		}
+		manifest.Jobs = append(manifest.Jobs, summary)
+		seen[job.ID] = struct{}{}
+	}
+
+	var remaining []int64
+	for jobID := range summaries {
+		if _, ok := seen[jobID]; !ok {
+			remaining = append(remaining, jobID)
+		}
+	}
+	sort.Slice(remaining, func(i, j int) bool { return remaining[i] < remaining[j] })
+	for _, jobID := range remaining {
+		summary := summaries[jobID]
+		if !completionSummaryOK(summary, true) {
 			allOK = false
 		}
 		manifest.Jobs = append(manifest.Jobs, summary)
@@ -847,6 +884,37 @@ func collectCompletionManifest(logDir string, jobs []cloud.AgentJob) *runner.Ins
 		manifest.ExitCode = 1
 	}
 	return manifest
+}
+
+func completionSummaryOK(summary runner.JobCompletionSummary, readable bool) bool {
+	return readable && summary.ExitCode == 0
+}
+
+func scanCompletionSummaries(logDir string) []runner.JobCompletionSummary {
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return nil
+	}
+	summaries := make([]runner.JobCompletionSummary, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		jobIDText, ok := strings.CutSuffix(name, ".completion.json")
+		if !ok || strings.Contains(jobIDText, "-") {
+			continue
+		}
+		jobID, err := strconv.ParseInt(jobIDText, 10, 64)
+		if err != nil || jobID <= 0 {
+			continue
+		}
+		summary, _ := summarizeJobCompletion(logDir, jobID)
+		if summary.JobID != 0 {
+			summaries = append(summaries, summary)
+		}
+	}
+	return summaries
 }
 
 // summarizeJobCompletion reads a job's completion record and returns a summary.
