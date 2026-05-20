@@ -161,6 +161,28 @@ func TestProjectCloudRequirements(t *testing.T) {
 	}
 }
 
+func TestProjectCloudImageOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgContent := "[cloud.image-overrides]\n\"train*.py\" = \"ghcr.io/example/train:cuda129\"\n\"scripts/infer.py\" = \"ghcr.io/example/infer:cuda124\"\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".weft.toml"), []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadProjectConfig(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil {
+		t.Fatal("expected project config")
+	}
+	if got := cfg.Cloud.ImageOverrides["train*.py"]; got != "ghcr.io/example/train:cuda129" {
+		t.Fatalf("train override = %q", got)
+	}
+	if got := cfg.Cloud.ImageOverrides["scripts/infer.py"]; got != "ghcr.io/example/infer:cuda124" {
+		t.Fatalf("infer override = %q", got)
+	}
+}
+
 func TestProjectOutputsConfig_EffectiveDirs(t *testing.T) {
 	t.Run("empty config returns defaults", func(t *testing.T) {
 		cfg := ProjectOutputsConfig{}

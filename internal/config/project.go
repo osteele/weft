@@ -31,6 +31,8 @@ type ProjectConfig struct {
 type ProjectCloudConfig struct {
 	// Image overrides the default Docker image for cloud instances.
 	Image string `yaml:"image" toml:"image"`
+	// ImageOverrides maps script glob patterns to Docker image defaults.
+	ImageOverrides map[string]string `yaml:"image_overrides" toml:"image-overrides"`
 	// MinDriver is the minimum NVIDIA driver version required by the image.
 	MinDriver string `yaml:"min_driver" toml:"min_driver"`
 	// MinCUDA is the minimum provider CUDA compatibility required by the image.
@@ -109,13 +111,20 @@ type ProjectSyncConfig struct {
 // starting from dir and walking up to the filesystem root. Returns nil (no
 // error) if no config file is found.
 func LoadProjectConfig(dir string) (*ProjectConfig, error) {
+	cfg, _, err := LoadProjectConfigWithPath(dir)
+	return cfg, err
+}
+
+// LoadProjectConfigWithPath searches for a project config and returns both the
+// parsed config and the path it was loaded from.
+func LoadProjectConfigWithPath(dir string) (*ProjectConfig, string, error) {
 	if dir == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	dir, err := filepath.Abs(dir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve directory %s: %w", dir, err)
+		return nil, "", fmt.Errorf("resolve directory %s: %w", dir, err)
 	}
 
 	for {
@@ -127,17 +136,17 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 				switch filepath.Ext(path) {
 				case ".toml":
 					if err := toml.Unmarshal(data, &cfg); err != nil {
-						return nil, err
+						return nil, "", err
 					}
 				default:
 					if err := yaml.Unmarshal(data, &cfg); err != nil {
-						return nil, err
+						return nil, "", err
 					}
 				}
-				return &cfg, nil
+				return &cfg, path, nil
 			}
 			if !os.IsNotExist(err) {
-				return nil, err
+				return nil, "", err
 			}
 		}
 
@@ -148,7 +157,7 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 		dir = parent
 	}
 
-	return nil, nil
+	return nil, "", nil
 }
 
 // ProjectExtraPaths returns the extra sync paths from the project config at

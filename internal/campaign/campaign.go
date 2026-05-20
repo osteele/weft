@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -45,7 +47,7 @@ type InstanceGroup struct {
 	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
 	MaxGPUMemGB      int      // Legacy metadata retained for old rows; not used for placement
 	DiskGB           int      // Estimated disk space needed (0 = use default)
-	Image            string   // Per-project Docker image override ("" = use global default)
+	Image            string   // Docker image override/default for this group ("" = use global default)
 	MinDriverVersion int      // Minimum NVIDIA driver version required by the image
 	MinCUDAVersion   string   // Minimum provider CUDA compatibility required by the image
 	ImagePullSecret  string   // Registry config key for private image pulls
@@ -601,10 +603,10 @@ func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
 }
 
 // SplitGroupsByImage further subdivides instance groups so that all jobs in a
-// group use a compatible Docker image. Each job's image is resolved from its
-// project config (.weft.toml [cloud] image). Compatible CUDA images with the
-// same version and OS but different variants (base/runtime/devel) are merged
-// using the most capable variant.
+// group use a compatible Docker image. Each job's image is resolved from script
+// metadata and project config. Compatible CUDA images with the same version and
+// OS but different variants (base/runtime/devel) are merged using the most
+// capable variant.
 //
 // `database` is used to lazily backfill jobs.max_compute_cap rows that are
 // NULL (legacy rows or post-refresh) so the resulting group's MaxComputeCap
@@ -743,10 +745,9 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 	return result
 }
 
-// ResolveJobImage returns the Docker image for a job by checking the project
-// config (.weft.toml [cloud] image) first, then falling back to PEP 723
-// [tool.weft] script metadata. Returns empty string if neither source specifies
-// an image.
+// ResolveJobImage returns the Docker image for a job from script metadata,
+// per-script project defaults, or the project image. Returns empty string if no
+// source specifies an image.
 func ResolveJobImage(localDir, command string) string {
 	img, _, _ := ResolveJobImageSettings(localDir, command)
 	return img
@@ -755,32 +756,32 @@ func ResolveJobImage(localDir, command string) string {
 // ResolveJobImageSettings returns the Docker image and explicit image
 // requirements from project config and PEP 723 metadata.
 func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequirements, string) {
-	img := config.ProjectCloudImage(localDir)
-	projectDriver, projectCUDA := config.ProjectCloudRequirements(localDir)
-	imagePullSecret := config.ProjectImagePullSecret(localDir)
-	req, err := imagereq.Explicit(projectDriver, projectCUDA)
+	var projectCloud config.ProjectCloudConfig
+	var projectDir string
+	if cfg, path, err := config.LoadProjectConfigWithPath(localDir); err != nil {
+		slog.Warn("error loading project config for image resolution", "component", "campaign", "dir", localDir, "error", err)
+	} else if cfg != nil {
+		projectCloud = cfg.Cloud
+		projectDir = filepath.Dir(path)
+	}
+
+	req, err := imagereq.Explicit(projectCloud.MinDriver, projectCloud.MinCUDA)
 	if err != nil {
 		slog.Warn("project cloud image requirement error", "component", "campaign", "error", err)
 	}
-	if img == "" {
-		if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
-			slog.Warn("script metadata error in image resolution", "component", "campaign", "error", err)
-		} else if meta != nil {
-			if meta.Image != "" {
-				img = meta.Image
-			}
-			if scriptReq, reqErr := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); reqErr != nil {
-				slog.Warn("script image requirement error", "component", "campaign", "error", reqErr)
-			} else {
-				req = imagereq.Merge(req, scriptReq)
-			}
-			if imagePullSecret == "" {
-				imagePullSecret = meta.ImagePullSecret
-			}
-		}
-	} else if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
-		slog.Warn("script metadata error in image requirement resolution", "component", "campaign", "error", err)
+
+	img := strings.TrimSpace(projectCloud.Image)
+	if override := resolveProjectImageOverride(projectCloud.ImageOverrides, projectDir, localDir, command); override != "" {
+		img = override
+	}
+	imagePullSecret := projectCloud.ImagePullSecret
+
+	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
+		slog.Warn("script metadata error in image resolution", "component", "campaign", "error", err)
 	} else if meta != nil {
+		if meta.Image != "" {
+			img = meta.Image
+		}
 		if scriptReq, reqErr := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); reqErr != nil {
 			slog.Warn("script image requirement error", "component", "campaign", "error", reqErr)
 		} else {
@@ -794,6 +795,48 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
 	}
 	return img, req, imagePullSecret
+}
+
+func resolveProjectImageOverride(overrides map[string]string, projectDir, localDir, command string) string {
+	if len(overrides) == 0 || projectDir == "" {
+		return ""
+	}
+	scripts := dataloc.ExtractPythonScripts(command)
+	if len(scripts) == 0 {
+		return ""
+	}
+
+	script := scripts[0]
+	if !filepath.IsAbs(script) {
+		script = filepath.Join(localDir, script)
+	}
+	rel, err := filepath.Rel(projectDir, script)
+	if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return ""
+	}
+	rel = filepath.ToSlash(filepath.Clean(rel))
+
+	var bestPattern, bestImage string
+	for pattern, image := range overrides {
+		image = strings.TrimSpace(image)
+		if image == "" {
+			continue
+		}
+		normalizedPattern := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(pattern)), "./")
+		matched, err := path.Match(normalizedPattern, rel)
+		if err != nil {
+			slog.Warn("invalid cloud image override pattern", "component", "campaign", "pattern", pattern, "error", err)
+			continue
+		}
+		if !matched {
+			continue
+		}
+		if bestPattern == "" || len(normalizedPattern) > len(bestPattern) || (len(normalizedPattern) == len(bestPattern) && normalizedPattern < bestPattern) {
+			bestPattern = normalizedPattern
+			bestImage = image
+		}
+	}
+	return bestImage
 }
 
 func maxInt(a, b int) int {

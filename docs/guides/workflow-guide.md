@@ -249,10 +249,11 @@ Explicit `[tool.weft.env]` entries for `UV_INDEX_URL` or `UV_EXTRA_INDEX_URL`
 take precedence over `[tool.uv]` values.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
-(highest to lowest): `.weft.toml [cloud] image` > script `image` > auto-selected
-PyTorch image > global default. Script metadata works with any command that
-references a `.py` file, including `uv run script.py`, `python script.py`, and
-compound commands like `pip install foo && python script.py`.
+(highest to lowest): script `image` > matching `.weft.toml [cloud.image-overrides]`
+entry > `.weft.toml [cloud] image` > auto-selected PyTorch image > global
+default. Script metadata works with any command that references a `.py` file,
+including `uv run script.py`, `python script.py`, and compound commands like
+`pip install foo && python script.py`.
 
 For custom or vendor-curated images, weft reads OCI image metadata and applies
 NVIDIA `NVIDIA_REQUIRE_CUDA` constraints during cloud placement when it can

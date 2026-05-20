@@ -174,7 +174,7 @@ func ScanScriptMeta(dir, command string) (*ScriptMeta, error) {
 // readFirstPythonScript reads and returns the content of the first readable
 // .py file referenced in a shell command. Returns "" if none is found.
 func readFirstPythonScript(dir, command string) string {
-	for _, script := range extractPythonScripts(command) {
+	for _, script := range ExtractPythonScripts(command) {
 		abs := script
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(dir, abs)

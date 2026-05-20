@@ -635,6 +635,19 @@ When a launch contains jobs from multiple projects with different images,
 weft automatically splits instances so each one uses the correct image.
 Jobs with no `[cloud] image` setting share the global default.
 
+Projects can also set script-specific image defaults with glob patterns
+relative to the `.weft.toml` directory:
+
+```toml
+[cloud.image-overrides]
+"train*.py" = "ghcr.io/example/train:cuda129"
+"scripts/infer.py" = "ghcr.io/example/infer:cuda124"
+```
+
+An image declared in a script's PEP 723 `[tool.weft]` block takes precedence
+over a matching pattern. A matching pattern takes precedence over the project
+`[cloud] image`.
+
 Custom images can also declare explicit driver/CUDA requirements and private
 registry credentials:
 

@@ -773,6 +773,124 @@ func TestResolveJobVastCapAdd(t *testing.T) {
 	}
 }
 
+func TestResolveJobImageSettings_ImageOverridePattern(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte(`[cloud]
+image = "ghcr.io/example/project:latest"
+
+[cloud.image-overrides]
+"train*.py" = "ghcr.io/example/train:cuda129"
+`), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "train_model.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "uv run python train_model.py")
+	if img != "ghcr.io/example/train:cuda129" {
+		t.Fatalf("image = %q, want pattern override", img)
+	}
+}
+
+func TestResolveJobImageSettings_ScriptImageBeatsPattern(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte(`[cloud.image-overrides]
+"train.py" = "ghcr.io/example/train:cuda129"
+`), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(`# /// script
+# [tool.weft]
+# image = "ghcr.io/example/script:cuda130"
+# ///
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python train.py")
+	if img != "ghcr.io/example/script:cuda130" {
+		t.Fatalf("image = %q, want script image", img)
+	}
+}
+
+func TestResolveJobImageSettings_UnmatchedPatternFallsBackToProjectImage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte(`[cloud]
+image = "ghcr.io/example/project:latest"
+
+[cloud.image-overrides]
+"train*.py" = "ghcr.io/example/train:cuda129"
+`), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "eval.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python eval.py")
+	if img != "ghcr.io/example/project:latest" {
+		t.Fatalf("image = %q, want project image", img)
+	}
+}
+
+func TestResolveJobImageSettings_NestedPatternMatchesRelativeToProject(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte(`[cloud.image-overrides]
+"scripts/infer.py" = "ghcr.io/example/infer:cuda124"
+`), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "infer.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(subdir, "python infer.py")
+	if img != "ghcr.io/example/infer:cuda124" {
+		t.Fatalf("image = %q, want nested pattern image", img)
+	}
+}
+
+func TestResolveJobImageSettings_OverlappingPatternsChooseLongest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte(`[cloud.image-overrides]
+"train*.py" = "ghcr.io/example/generic:latest"
+"train_big.py" = "ghcr.io/example/big:latest"
+`), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "train_big.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python train_big.py")
+	if img != "ghcr.io/example/big:latest" {
+		t.Fatalf("image = %q, want longest pattern image", img)
+	}
+}
+
+func TestResolveJobImageSettings_OverlappingPatternsTieBreakLexically(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte(`[cloud.image-overrides]
+"train_*.py" = "ghcr.io/example/first:latest"
+"train_?.py" = "ghcr.io/example/second:latest"
+`), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "train_a.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python train_a.py")
+	if img != "ghcr.io/example/first:latest" {
+		t.Fatalf("image = %q, want lexical tie-break image", img)
+	}
+}
+
 func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
 	dir := t.TempDir()
 	withCap := filepath.Join(dir, "with_cap.py")

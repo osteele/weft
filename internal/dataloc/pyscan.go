@@ -309,7 +309,7 @@ var (
 // (and their local imports) for HF model/dataset references. Falls back to empty
 // if no .py files are found in the command.
 func ScanPythonHFRefsForCommand(dir, command string) []string {
-	scripts := extractPythonScripts(command)
+	scripts := ExtractPythonScripts(command)
 	if len(scripts) == 0 {
 		return nil
 	}
@@ -348,9 +348,9 @@ func ScanPythonHFRefsForCommand(dir, command string) []string {
 	return refs
 }
 
-// extractPythonScripts returns .py file paths from a shell command string.
+// ExtractPythonScripts returns .py file paths from a shell command string.
 // Handles patterns like "python foo.py", "uv run python -u foo.py", etc.
-func extractPythonScripts(command string) []string {
+func ExtractPythonScripts(command string) []string {
 	tokens := strings.Fields(command)
 	var scripts []string
 	for _, tok := range tokens {

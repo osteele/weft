@@ -1631,7 +1631,7 @@ func LaunchInstance(
 		createOpts.InstanceType = cloud.InstanceTypeInterruptible
 	}
 
-	// Override image if the group has a per-project image
+	// Override image if the group resolved a job-specific image.
 	if group.Image != "" {
 		createOpts.Image = group.Image
 	}
