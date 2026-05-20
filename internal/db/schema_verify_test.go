@@ -133,3 +133,26 @@ func TestOpenForReading_RefusesStaleSchema(t *testing.T) {
 		t.Fatalf("expected ErrSchemaMismatch, got %T: %v", err, err)
 	}
 }
+
+func TestOpenForReading_PreservesOpenNonLockError(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	cleanup := SetDBPath(dbFile)
+	defer cleanup()
+
+	origStartupRepair := startupRepairFn
+	startupRepairFn = func(*sql.DB) error {
+		return errors.New("startup repair exploded")
+	}
+	t.Cleanup(func() { startupRepairFn = origStartupRepair })
+
+	_, err := OpenForReading()
+	if err == nil {
+		t.Fatal("expected OpenForReading error, got nil")
+	}
+	if strings.Contains(err.Error(), "database schema is at version") {
+		t.Fatalf("OpenForReading hid the real Open error behind schema mismatch: %v", err)
+	}
+	if !strings.Contains(err.Error(), "startup repair exploded") {
+		t.Fatalf("OpenForReading error = %v, want startup repair failure", err)
+	}
+}

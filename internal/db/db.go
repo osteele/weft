@@ -1333,9 +1333,9 @@ func Open() (*sql.DB, error) {
 	return db, nil
 }
 
-// OpenForReading tries Open() first; on any failure it falls back to
-// OpenReadOnly() so that read-only commands still work when the database
-// file is locked or read-only.
+// OpenForReading tries Open() first; when the database cannot be opened
+// writable because it is locked or read-only, it falls back to OpenReadOnly()
+// so that read-only commands can still display data.
 //
 // After either path, the on-disk schema version (PRAGMA user_version) is
 // compared against this binary's currentSchemaVersion. A mismatch in
@@ -1356,7 +1356,7 @@ func OpenForReading() (*sql.DB, error) {
 		if IsDatabaseLocked(err) || IsDatabaseReadOnly(err) {
 			slog.Debug("database not writable, opening read-only (startup repair deferred)", "error", err)
 		} else {
-			slog.Warn("database not writable, opening read-only (startup repair deferred)", "error", err)
+			return nil, err
 		}
 		database, err = OpenReadOnly()
 		if err != nil {
@@ -2437,6 +2437,54 @@ func startupRepair(db *sql.DB) error {
 		return err
 	}
 
+	// Verify every view compiles against the current table schema. A view
+	// that references a missing column — typically a schema change that is
+	// missing its versioned migration — fails here with a clear message
+	// instead of surfacing later as a cryptic query error.
+	if err := validateViews(db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateViews verifies that every view compiles against the current table
+// schema. SQLite creates views lazily: CREATE VIEW accepts a body that
+// references a missing column, and the error only surfaces when the view is
+// queried. Probing each view with a zero-row SELECT forces SQLite to compile
+// the full view body, so a column/view desync — typically a schema change
+// that is missing its versioned migration — fails Open() with a clear message
+// instead of deep in a later query.
+func validateViews(db *sql.DB) error {
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name`)
+	if err != nil {
+		return fmt.Errorf("list views: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan view name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate views: %w", err)
+	}
+	rows.Close()
+
+	for _, name := range names {
+		// View names come from sqlite_master and are controlled by this
+		// package, so direct interpolation is safe.
+		probe, err := db.Query(`SELECT * FROM "` + name + `" LIMIT 0`)
+		if err != nil {
+			return fmt.Errorf("view %q is not queryable after schema init — "+
+				"likely a missing column or a pending migration: %w", name, err)
+		}
+		probe.Close()
+	}
 	return nil
 }
 

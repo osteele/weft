@@ -28,9 +28,10 @@ func (e *ErrSchemaMismatch) Error() string {
 	if e.DBVersion < e.BinaryVersion {
 		return fmt.Sprintf(
 			"database schema is at version %d but this weft binary expects %d; "+
-				"migration was deferred because the database is held by another process. "+
-				"Stop other weft processes and rerun. To find the holder: `lsof %s` "+
-				"(look for `weft uj` / `weft autopilot`).",
+				"migration was deferred because the database could not be opened writable. "+
+				"Stop other weft processes and rerun. If the holder is the daemon, use "+
+				"`weft daemon stop` rather than killing the PID directly because launchd may restart it. "+
+				"To find the holder: `lsof %s` (look for `weft uj`, `weft autopilot`, or `weft daemon`).",
 			e.DBVersion, e.BinaryVersion, e.DBPath,
 		)
 	}
