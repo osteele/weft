@@ -1066,24 +1066,178 @@ func TestFillReusableInstancesRecordsRejectionReason(t *testing.T) {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	blocked := map[int64]string{}
-	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, blocked)
+	diagnostics := map[int64]string{}
+	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, diagnostics)
 	if err != nil {
 		t.Fatalf("fillReusableInstances: %v", err)
 	}
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0", placed)
 	}
-	if got := blocked[jobID]; !strings.Contains(got, "reuse blocked") || !strings.Contains(got, "GPU memory insufficient") {
-		t.Fatalf("blocked reason = %q, want reuse GPU memory reason", got)
+	if got := diagnostics[jobID]; !strings.Contains(got, "could not reuse") || !strings.Contains(got, "GPU memory insufficient") {
+		t.Fatalf("reuse diagnostic = %q, want a could-not-reuse GPU memory reason", got)
 	}
-	persistBlockedReasonsForUnplaced(database, blocked)
+}
+
+func TestRunGroupedAutoPilotPass_ReuseDiagnosticAppendedNotMasking(t *testing.T) {
+	// Regression: an opportunistic reuse-rejection diagnostic must not mask
+	// the authoritative launch-path reason. The launch reason leads; the
+	// reuse diagnostic is appended as trailing detail.
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "needs-big-gpu", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	gpuMem := 80
+	if err := db.SetJobGPUMemGB(database, jobID, &gpuMem); err != nil {
+		t.Fatalf("SetJobGPUMemGB: %v", err)
+	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if len(job.PlacementReasons) != 1 || job.PlacementReasons[0] != blocked[jobID] {
-		t.Fatalf("placement reasons = %#v, want [%q]", job.PlacementReasons, blocked[jobID])
+	// A running instance far too small to host the job: reuse is rejected.
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "NVIDIA",
+		ResolvedGPUName: "GTX 1660 S",
+		GPUMemGB:        6,
+		DiskGB:          100,
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalPlace := autoPilotPlaceComputeIntensive
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotPlaceComputeIntensive = originalPlace
+	})
+	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+		return jobs, 0
+	}
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchJobIDs:   []int64{job.ID},
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+	// The launch attempt places nothing.
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	reason := result.BlockedReasons[jobID]
+	if reason == "" {
+		t.Fatalf("blocked reason empty, want an authoritative launch reason")
+	}
+	if !strings.HasPrefix(reason, "no offers available") {
+		t.Fatalf("blocked reason = %q, want it to lead with the launch-path reason", reason)
+	}
+	if !strings.Contains(reason, "could not reuse") {
+		t.Fatalf("blocked reason = %q, want the reuse diagnostic appended as detail", reason)
+	}
+}
+
+func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *testing.T) {
+	// Regression: a job the planner classified as neither launch nor blocked
+	// (here, an incompatible reuse assignment) must still end the tick with an
+	// authoritative primary reason — never silently dropped, never left with
+	// only a reuse diagnostic.
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "reuse-target", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{db.TagComputeIntensive}); err != nil {
+		t.Fatalf("SetJobTags: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	// A running instance whose CPU count is below the cpu-intensive floor, so
+	// the reuse assignment is rejected without a successful submit.
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "A100",
+		ResolvedGPUName: "A100",
+		GPUMemGB:        80,
+		CPUCores:        8,
+		DiskGB:          200,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	originalPlace := autoPilotPlaceComputeIntensive
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+		autoPilotPlaceComputeIntensive = originalPlace
+	})
+	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+		return jobs, 0
+	}
+	// The job under test appears only as an (incompatible) reuse assignment.
+	// A blocked reason for an unrelated job id makes the planner count as
+	// having made decisions, which keeps the job under test out of the rental
+	// scope — exercising the non-rental-scope safety net.
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			ReuseAssignments: []campaign.ReuseAssignment{{
+				Job:      job,
+				Instance: campaign.InstanceCapacity{Instance: inst, DiskFreeGB: 80},
+			}},
+			BlockedReasons: map[int64]string{int64(999999): "planner: no compatible offers"},
+		}, nil
+	}
+	submitCalls := 0
+	autoPilotSubmitJobsToInstance = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ int64, _ []*db.Job) error {
+		submitCalls++
+		return nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if submitCalls != 0 {
+		t.Fatalf("submit calls = %d, want 0 (reuse assignment is incompatible)", submitCalls)
+	}
+	reason := result.BlockedReasons[jobID]
+	if reason == "" {
+		t.Fatalf("job left with no blocked reason")
+	}
+	if strings.HasPrefix(reason, "could not reuse") {
+		t.Fatalf("blocked reason = %q, want an authoritative reason before the reuse detail", reason)
+	}
+	if !strings.Contains(reason, "no rental headroom") {
+		t.Fatalf("blocked reason = %q, want a noRentalHeadroomReason primary", reason)
 	}
 }
 

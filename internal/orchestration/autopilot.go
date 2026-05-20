@@ -182,6 +182,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
+	// Reuse-rejection diagnostics are kept separate from blockedReasons so an
+	// opportunistic "could not reuse" note never masks the authoritative
+	// launch-path reason. They are appended as detail by
+	// finalizeUnplacedBlockedReasons once primary reasons are settled.
+	reuseDiagnostics := map[int64]string{}
 	planDetail := fmt.Sprintf("unplaced=%d capacities=%d reuse=%d launch=%d blocked=%d",
 		len(unplaced), len(capacities), len(plan.ReuseAssignments), len(plan.LaunchJobIDs), len(blockedReasons))
 	if sampleReason := sampleBlockedReason(blockedReasons); sampleReason != "" {
@@ -278,7 +283,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 
 	placed := prePlaced
-	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, blockedReasons)
+	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, reuseDiagnostics)
 
 	rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 		Apply:      true,
@@ -291,7 +296,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	rebalanced := len(rebalanceResult.Moves)
 
-	reuseFilled, err := fillReusableInstances(ctx, database, r2Client, scoped, movingJobs, blockedReasons)
+	reuseFilled, err := fillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics)
 	if err != nil {
 		oplog.Log("auto_pilot.reuse_fill_error", oplog.WithError(err))
 	}
@@ -302,6 +307,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		return nil, err
 	}
 	rentalScope := make([]int64, 0, len(remaining))
+	allCandidates := make([]int64, 0, len(remaining))
 	launchScope := make(map[int64]struct{}, len(plan.LaunchJobIDs))
 	for _, jobID := range plan.LaunchJobIDs {
 		launchScope[jobID] = struct{}{}
@@ -326,6 +332,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 				continue
 			}
 		}
+		allCandidates = append(allCandidates, job.ID)
 		if len(launchScope) == 0 {
 			if plannerMadeDecisions {
 				continue
@@ -340,7 +347,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if len(rentalScope) == 0 {
 		oplog.Log("auto_pilot.no_rental_scope",
 			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
-		persistBlockedReasonsForUnplaced(database, blockedReasons)
+		finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
 			Placed:         placed,
 			Rebalanced:     rebalanced,
@@ -366,7 +373,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 				blockedReasons[jobID] = launchReason
 			}
 		}
-		persistBlockedReasonsForUnplaced(database, blockedReasons)
+		finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
 			Placed:         placed,
 			Rebalanced:     rebalanced,
@@ -378,7 +385,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}, err
 	}
 	if result == nil {
-		persistBlockedReasonsForUnplaced(database, blockedReasons)
+		finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
 			Placed:         placed,
 			Rebalanced:     rebalanced,
@@ -400,7 +407,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			retryOptions.PreferReuse = true
 			retryPlan, retryErr := autoPilotBuildPlanWithOptions(database, cfg, fallbackJobs, capacities, retryOptions)
 			if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
-				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, blockedReasons)
+				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, reuseDiagnostics)
 				if fallbackPlaced > 0 {
 					placed += fallbackPlaced
 					for _, assignment := range retryPlan.ReuseAssignments {
@@ -460,7 +467,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			}
 		}
 	}
-	persistBlockedReasonsForUnplaced(database, blockedReasons)
+	finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 
 	return &GroupedAutoPilotResult{
 		Placed:         placed,
@@ -479,7 +486,7 @@ func fillReusableInstances(
 	r2Client *r2.Client,
 	scoped map[int64]struct{},
 	movingJobs map[int64]struct{},
-	blockedReasons map[int64]string,
+	reuseDiagnostics map[int64]string,
 ) (int, error) {
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
@@ -511,13 +518,13 @@ func fillReusableInstances(
 		return 0, nil
 	}
 	assignments, remaining := campaign.PlanReuse(candidates, capacities)
-	placed := submitAutoPilotReuseAssignments(ctx, database, r2Client, assignments, blockedReasons)
+	placed := submitAutoPilotReuseAssignments(ctx, database, r2Client, assignments, reuseDiagnostics)
 	if placed > 0 {
 		oplog.Log("auto_pilot.reuse_fill", oplog.WithDetailf("placed=%d candidates=%d reusable=%d", placed, len(candidates), len(capacities)))
 	}
 	for _, job := range remaining {
 		if reason := reuseRejectionReason(job, capacities, r2Client); reason != "" {
-			addAutoPilotBlockedReason(blockedReasons, job.ID, reason)
+			addAutoPilotBlockedReason(reuseDiagnostics, job.ID, reason)
 			oplog.LogJob("auto_pilot.reuse_fill_blocked", job.ID, "",
 				oplog.WithDetail(reason))
 		}
@@ -548,18 +555,7 @@ func reuseRejectionReason(job *db.Job, capacities []campaign.InstanceCapacity, r
 	if len(capacities) > len(reasons) {
 		reasons = append(reasons, fmt.Sprintf("+%d more", len(capacities)-len(reasons)))
 	}
-	return "reuse blocked: " + strings.Join(reasons, "; ")
-}
-
-func recordAutoPilotBlockedReason(database *sql.DB, blockedReasons map[int64]string, jobID int64, reason string) {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return
-	}
-	if blockedReasons != nil {
-		addAutoPilotBlockedReason(blockedReasons, jobID, reason)
-	}
-	appendPlacementReason(database, jobID, reason)
+	return "could not reuse running instances: " + strings.Join(reasons, "; ")
 }
 
 func addAutoPilotBlockedReason(blockedReasons map[int64]string, jobID int64, reason string) {
@@ -599,6 +595,44 @@ func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64
 		}
 		appendPlacementReason(database, jobID, reason)
 	}
+}
+
+// finalizeUnplacedBlockedReasons settles the blocked reason for every
+// still-unplaced candidate, then persists. It guarantees each candidate carries
+// an authoritative launch-path reason before appending reuse-rejection
+// diagnostics as detail — opportunistic reuse failures are never the primary
+// reason and never mask why a job could not be launched. See
+// specs/campaign-lifecycle.allium § AutoPilotBlockedReasonIsAuthoritative.
+func finalizeUnplacedBlockedReasons(
+	database *sql.DB,
+	blockedReasons map[int64]string,
+	reuseDiagnostics map[int64]string,
+	remainingByID map[int64]*db.Job,
+	candidateIDs []int64,
+	capacities []campaign.InstanceCapacity,
+	r2Client *r2.Client,
+) {
+	// Safety net: a candidate the planner classified as neither launch nor
+	// blocked (e.g. a failed reuse assignment) would otherwise end the tick
+	// with no reason. Give it an authoritative launch-path reason.
+	for _, jobID := range candidateIDs {
+		job, ok := remainingByID[jobID]
+		if !ok || job == nil {
+			continue
+		}
+		if _, has := blockedReasons[jobID]; has {
+			continue
+		}
+		blockedReasons[jobID] = noRentalHeadroomReason(job, capacities, r2Client)
+	}
+	// Append reuse-rejection diagnostics after the authoritative reason.
+	for jobID, diag := range reuseDiagnostics {
+		if _, ok := remainingByID[jobID]; !ok {
+			continue
+		}
+		addAutoPilotBlockedReason(blockedReasons, jobID, diag)
+	}
+	persistBlockedReasonsForUnplaced(database, blockedReasons)
 }
 
 func autoReplanStuckInventoryJobs(database *sql.DB, scoped map[int64]struct{}, movingJobs map[int64]struct{}) (int, error) {
@@ -866,15 +900,15 @@ func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Confi
 	return remaining, placed
 }
 
-func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment, blockedReasons map[int64]string) int {
+func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment, reuseDiagnostics map[int64]string) int {
 	placed := 0
 	for _, assignment := range assignments {
 		if assignment.Job == nil || assignment.Instance.Instance == nil {
 			continue
 		}
 		if ok, reason := campaign.MatchJobToInstanceWithUV(assignment.Job, assignment.Instance, r2Client); !ok {
-			recordAutoPilotBlockedReason(database, blockedReasons, assignment.Job.ID,
-				fmt.Sprintf("reuse blocked on %s: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), reason))
+			addAutoPilotBlockedReason(reuseDiagnostics, assignment.Job.ID,
+				fmt.Sprintf("could not reuse %s: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), reason))
 			oplog.LogJob("auto_pilot.reuse_skipped", assignment.Job.ID, "",
 				oplog.WithDetailf("instance=%d reason=%s", assignment.Instance.Instance.ID, reason))
 			continue
@@ -883,8 +917,8 @@ func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Cl
 			oplog.LogJob("auto_pilot.reuse_failed", assignment.Job.ID, "",
 				oplog.WithError(err),
 				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
-			recordAutoPilotBlockedReason(database, blockedReasons, assignment.Job.ID,
-				fmt.Sprintf("reuse instance %s failed: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), SummarizeAutoPilotError(err)))
+			addAutoPilotBlockedReason(reuseDiagnostics, assignment.Job.ID,
+				fmt.Sprintf("could not reuse %s: submit failed: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), SummarizeAutoPilotError(err)))
 			continue
 		}
 		placed++

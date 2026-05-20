@@ -1206,3 +1206,34 @@ func TestAppendRecentFailedInstanceRows_OverflowAddsMoreLine(t *testing.T) {
 		t.Fatalf("expected total of 10 in header, got:\n%s", out)
 	}
 }
+
+func TestStripContractRef(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "trailing contract reference removed",
+			in:   "machine busy: provider rejected instance creation (contract 37151723)",
+			want: "machine busy: provider rejected instance creation",
+		},
+		{
+			name: "inline contract reference removed",
+			in:   "rejected (contract 5) by provider",
+			want: "rejected by provider",
+		},
+		{
+			name: "reason without a contract reference is unchanged",
+			in:   "no offers available",
+			want: "no offers available",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripContractRef(tc.in); got != tc.want {
+				t.Fatalf("stripContractRef(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

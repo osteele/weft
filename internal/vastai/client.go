@@ -286,11 +286,11 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		Msg         string          `json:"msg"`
 	}
 	if strings.TrimSpace(string(out)) == "" {
-		return nil, fmt.Errorf("create instance failed: %w: provider returned empty response", cloud.ErrProviderRejected)
+		return nil, fmt.Errorf("provider returned empty response: %w", cloud.ErrProviderRejected)
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		if msg := extractProviderErrorMessage(out); msg != "" {
-			return nil, fmt.Errorf("create instance failed: %w: %s", cloud.ErrProviderRejected, msg)
+			return nil, fmt.Errorf("%s: %w", msg, cloud.ErrProviderRejected)
 		}
 		if msg := extractCLIError(out); msg != "" {
 			return nil, fmt.Errorf("create instance: %s", msg)
@@ -309,9 +309,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
 				slog.Warn("failed to destroy orphaned instance", "component", "vastai", "instance", resp.NewContract, "error", destroyErr)
 			}
-			return nil, fmt.Errorf("create instance failed (contract %d): %w: %s", resp.NewContract, cloud.ErrProviderRejected, reason)
+			return nil, fmt.Errorf("%s: %w (contract %d)", reason, cloud.ErrProviderRejected, resp.NewContract)
 		}
-		return nil, fmt.Errorf("create instance failed: %w: %s", cloud.ErrProviderRejected, reason)
+		return nil, fmt.Errorf("%s: %w", reason, cloud.ErrProviderRejected)
 	}
 
 	if opts.PublicKeyFile != "" {

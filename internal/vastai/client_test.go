@@ -195,6 +195,33 @@ func TestCreateInstanceProviderErrorJSONIsProviderRejected(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceProviderRejectionLeadsWithReason(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": false, \"msg\": \"error 404/3603: no_such_ask\"}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, want provider rejected", err)
+	}
+	// The actionable provider reason must lead so it survives one-line
+	// truncation in compact views; the boilerplate trails it.
+	msg := err.Error()
+	reasonIdx := strings.Index(msg, "no_such_ask")
+	boilerplateIdx := strings.Index(msg, "provider rejected instance creation")
+	if reasonIdx < 0 || boilerplateIdx < 0 {
+		t.Fatalf("CreateInstance error = %q, want both provider reason and boilerplate", msg)
+	}
+	if reasonIdx > boilerplateIdx {
+		t.Fatalf("CreateInstance error = %q, want provider reason before boilerplate", msg)
+	}
+}
+
 func TestCreateInstanceCLITimeoutIsProviderCommandTimeout(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")

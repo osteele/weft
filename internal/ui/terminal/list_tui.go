@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -3052,8 +3053,19 @@ func latestPlacementReason(job *db.Job) string {
 	return ""
 }
 
+// contractRefPattern matches a trailing or inline provider contract reference
+// such as " (contract 37151723)". The contract number identifies an orphaned
+// provider instance and is retained in CLI output and placement history, but
+// is stripped from the compact one-line TUI blocked-reason rendering.
+var contractRefPattern = regexp.MustCompile(`\s*\(contract \d+\)`)
+
+func stripContractRef(reason string) string {
+	return strings.TrimSpace(contractRefPattern.ReplaceAllString(reason, ""))
+}
+
 func visiblePlacementBlockReason(job *db.Job, reason string) string {
 	reason = campaign.SanitizeBlockedReason(reason)
+	reason = stripContractRef(reason)
 	if reason == "" {
 		return ""
 	}

@@ -2038,6 +2038,40 @@ rule AutoPilotReusePreferredFallback {
         -- plus the first available MatchJobToInstance diagnostic.
 }
 
+rule AutoPilotBlockedReasonIsAuthoritative {
+    when: AutoPilotTick(unplaced_jobs)
+
+    ensures:
+        for job in unplaced_jobs where job still unplaced after the pass:
+            job.blocked_reason != null and job.blocked_reason != ""
+        -- The primary (leading) blocked reason is always an authoritative
+        -- launch-path reason: no compatible offers, launch error, retry
+        -- cooldown, or run-rate headroom exhaustion. An opportunistic
+        -- reuse-rejection diagnostic is never the primary reason.
+
+    @guidance
+        -- Reuse-rejection diagnostics ("could not reuse running instances:
+        -- ...") report why a job could not opportunistically piggyback on an
+        -- existing rental. Reuse is opportunistic, so a reuse failure is
+        -- expected and is not on its own a reason a job is unplaced.
+        --
+        -- fillReusableInstances and submitAutoPilotReuseAssignments collect
+        -- these diagnostics into a separate map (reuse_diagnostics), never the
+        -- blocked_reasons map directly. Were they written into blocked_reasons
+        -- ahead of the launch path, the launch path's "set reason only if
+        -- absent" guards would skip — masking the real reason.
+        --
+        -- finalizeUnplacedBlockedReasons settles every still-unplaced
+        -- candidate: it first guarantees an authoritative launch-path reason
+        -- (including for jobs the planner classified as neither launch nor
+        -- blocked, e.g. a failed reuse assignment, via noRentalHeadroomReason),
+        -- then appends the reuse diagnostic as trailing detail. Reuse
+        -- diagnostics are also recorded to the oplog
+        -- (auto_pilot.reuse_fill_blocked / reuse_skipped / reuse_failed).
+        -- Implementation: internal/orchestration/autopilot.go
+        -- RunGroupedAutoPilotPass, finalizeUnplacedBlockedReasons.
+}
+
 -- ==========================================================================
 -- Reconciliation (safety-net cleanup)
 -- ==========================================================================
