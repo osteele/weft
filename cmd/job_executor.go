@@ -352,7 +352,7 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 			return "", nil, fmt.Errorf("artifact producer job %s not found", ids.FormatJobID(parsed.Version))
 		}
 
-		if err := validateNeedsPathAgainstProduces(spec, parsed.Path, job); err != nil {
+		if err := validateNeedsPath(spec, parsed.Path, job, database); err != nil {
 			return "", nil, err
 		}
 
@@ -376,25 +376,86 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 	return resolvedHost, out, nil
 }
 
-// validateNeedsPathAgainstProduces rejects a --needs spec whose path does not
-// match any of the producer's --produces declarations. When the producer did
-// not declare any --produces, the spec is accepted (we cannot tell whether the
-// path is a typo or a convention-collected output). This catches consumer
-// path typos at submit time instead of letting them surface as missing-file
-// errors on a rental instance.
-func validateNeedsPathAgainstProduces(spec, needsPath string, producer *db.Job) error {
-	if len(producer.Produces) == 0 {
+// validateNeedsPath rejects a --needs spec whose path the producer job could
+// not plausibly have produced, catching consumer path typos at submit time
+// instead of letting them surface as missing-file errors on a rental instance.
+//
+// It uses the best information available about the producer:
+//   - If the producer has completed, the path must match one of its actually
+//     recorded output artifacts.
+//   - Otherwise the path must match a declared --produces path or fall under
+//     one of the producer's conventional output directories (output/, outputs/,
+//     or custom dirs from .weft.toml).
+//
+// A producer that declared neither --produces nor any output directory (legacy
+// jobs predating the output-dirs column) accepts any path.
+func validateNeedsPath(spec, needsPath string, producer *db.Job, database *sql.DB) error {
+	want := normalizeNeedsPath(needsPath)
+
+	if producer.Status == db.StatusCompleted {
+		arts, err := db.ListArtifactsByJob(database, producer.ID)
+		if err != nil {
+			return fmt.Errorf("look up recorded outputs for producer job %s: %w", ids.FormatJobID(producer.ID), err)
+		}
+		if len(arts) > 0 {
+			recorded := make([]string, 0, len(arts))
+			for _, a := range arts {
+				got := normalizeNeedsPath(a.Path)
+				if got == want {
+					return nil
+				}
+				if got != "" {
+					recorded = append(recorded, got)
+				}
+			}
+			return fmt.Errorf(
+				"--needs %q: producer job %s completed and recorded outputs %v, which do not include %q (typo? correct the --needs path)",
+				spec, ids.FormatJobID(producer.ID), recorded, needsPath,
+			)
+		}
+		// Completed but no artifacts recorded locally yet (sync lag): fall
+		// through to the declared/conventional check rather than reject.
+	}
+
+	if needsPathDeclaredOrConventional(producer, want) {
 		return nil
 	}
-	want := strings.TrimPrefix(strings.TrimSpace(needsPath), "/")
+	return fmt.Errorf(
+		"--needs %q: producer job %s declares --produces %v and writes outputs to %v, none of which cover %q (typo? add the path to --produces, or correct the --needs path)",
+		spec, ids.FormatJobID(producer.ID), producer.Produces, producer.OutputDirs, needsPath,
+	)
+}
+
+// needsPathDeclaredOrConventional reports whether want (a normalized path)
+// matches a declared --produces path or falls under a conventional output
+// directory of the producer. A producer with neither --produces nor output
+// directories matches any path.
+func needsPathDeclaredOrConventional(producer *db.Job, want string) bool {
+	if len(producer.Produces) == 0 && len(producer.OutputDirs) == 0 {
+		return true
+	}
 	for _, raw := range producer.Produces {
-		got := strings.TrimPrefix(strings.TrimSpace(runner.ParseProducesSpec(raw).Path), "/")
-		if got != "" && got == want {
-			return nil
+		if got := normalizeNeedsPath(runner.ParseProducesSpec(raw).Path); got != "" && got == want {
+			return true
 		}
 	}
-	return fmt.Errorf(
-		"--needs %q: producer job %s declares --produces %v, which does not include %q (typo? add the path to --produces, or correct the --needs path)",
-		spec, ids.FormatJobID(producer.ID), producer.Produces, needsPath,
-	)
+	for _, dir := range producer.OutputDirs {
+		d := normalizeNeedsPath(dir)
+		if d == "" {
+			continue
+		}
+		if !strings.HasSuffix(d, "/") {
+			d += "/"
+		}
+		if strings.HasPrefix(want, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeNeedsPath trims surrounding whitespace and a leading slash so
+// artifact paths compare consistently regardless of how they were written.
+func normalizeNeedsPath(p string) string {
+	return strings.TrimPrefix(strings.TrimSpace(p), "/")
 }

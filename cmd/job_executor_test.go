@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"testing"
 
@@ -143,6 +144,125 @@ func TestResolveArtifactNeedsPlacement(t *testing.T) {
 			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
 		}
 	})
+
+	t.Run("accept conventional output path before producer completes", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobProduces(database, producerID, []string{"model.pt"}); err != nil {
+			t.Fatalf("SetJobProduces: %v", err)
+		}
+		if err := db.SetJobOutputDirs(database, producerID, []string{"output/"}); err != nil {
+			t.Fatalf("SetJobOutputDirs: %v", err)
+		}
+		// output/metrics.json is not in --produces but falls under a conventional
+		// output dir, so it is accepted while the producer has not yet completed.
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("output/metrics.json:%d", producerID),
+		}, "")
+		if err != nil {
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
+		}
+	})
+
+	t.Run("reject path outside declared and conventional outputs", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobProduces(database, producerID, []string{"model.pt"}); err != nil {
+			t.Fatalf("SetJobProduces: %v", err)
+		}
+		if err := db.SetJobOutputDirs(database, producerID, []string{"output/"}); err != nil {
+			t.Fatalf("SetJobOutputDirs: %v", err)
+		}
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("results/model.pt:%d", producerID),
+		}, "")
+		if err == nil {
+			t.Fatal("expected error for path outside declared and conventional outputs")
+		}
+	})
+
+	t.Run("accept recorded artifact path after producer completes", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "host-a", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		completeJob(t, database, producerID)
+		if err := db.UpsertArtifact(database, db.Artifact{
+			JobID:      producerID,
+			Name:       "probe.txt",
+			Path:       "output/probe.txt",
+			StoredPath: fmt.Sprintf("%d/output/probe.txt", producerID),
+		}); err != nil {
+			t.Fatalf("UpsertArtifact: %v", err)
+		}
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("output/probe.txt:%d", producerID),
+		}, "")
+		if err != nil {
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
+		}
+	})
+
+	t.Run("reject path not recorded after producer completes", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "host-a", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobOutputDirs(database, producerID, []string{"output/"}); err != nil {
+			t.Fatalf("SetJobOutputDirs: %v", err)
+		}
+		completeJob(t, database, producerID)
+		if err := db.UpsertArtifact(database, db.Artifact{
+			JobID:      producerID,
+			Name:       "probe.txt",
+			Path:       "output/probe.txt",
+			StoredPath: fmt.Sprintf("%d/output/probe.txt", producerID),
+		}); err != nil {
+			t.Fatalf("UpsertArtifact: %v", err)
+		}
+		// output/missing.txt would pass the conventional-dir check, but the
+		// producer has completed and did not record it, so it is rejected.
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("output/missing.txt:%d", producerID),
+		}, "")
+		if err == nil {
+			t.Fatal("expected error for path not recorded by completed producer")
+		}
+	})
+
+	t.Run("fall back to conventional check when completed producer has no recorded artifacts", func(t *testing.T) {
+		producerID, err := db.RecordQueued(database, "host-a", "/tmp/project", "echo p", "p")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobOutputDirs(database, producerID, []string{"output/"}); err != nil {
+			t.Fatalf("SetJobOutputDirs: %v", err)
+		}
+		completeJob(t, database, producerID)
+		// No artifacts recorded (sync lag): fall through to the conventional
+		// check, which accepts a path under output/.
+		_, _, err = resolveArtifactNeedsPlacement(database, []string{
+			fmt.Sprintf("output/result.json:%d", producerID),
+		}, "")
+		if err != nil {
+			t.Fatalf("resolveArtifactNeedsPlacement: %v", err)
+		}
+	})
+}
+
+// completeJob transitions a queued job through running to completed.
+func completeJob(t *testing.T, database *sql.DB, jobID int64) {
+	t.Helper()
+	if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusRunning); err != nil {
+		t.Fatalf("UpdateStatusAndLastSynced running: %v", err)
+	}
+	if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusCompleted); err != nil {
+		t.Fatalf("UpdateStatusAndLastSynced completed: %v", err)
+	}
 }
 
 func TestResolveDependencyForTarget(t *testing.T) {
