@@ -3,6 +3,7 @@ package campaign
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -35,8 +36,13 @@ type OfferFilterStats struct {
 	RawCount       int // offers returned by provider search
 	AfterVRAM      int // remaining after VRAM requirement filter
 	AfterCUDA      int // remaining after CUDA compatibility filter
+	AfterProvider  int // remaining after provider CUDA/driver compatibility filter
 	AfterTorchArch int // remaining after torch arch compute-cap filter
 	AfterSurvival  int // remaining after survival probability filter
+	// UnknownCompatibility tracks offers whose provider did not report
+	// CUDA/driver compatibility even though the group requires a floor.
+	UnknownCompatibility          int
+	ProviderCompatibilityFiltered int
 	// CUDA filter diagnostics (set when CUDA filtering removed offers).
 	CUDAImage        string
 	CUDAImageVersion float64
@@ -71,6 +77,8 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 			return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", found, offerCount(s.AfterVRAM), s.CUDAImageVersion, s.CUDAMinRequired)
 		}
 		return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility", found, offerCount(s.AfterVRAM))
+	case s.ProviderCompatibilityFiltered > 0 && s.AfterProvider == 0:
+		return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered by provider CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
 	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
 		bounds := formatTorchArchBounds(s.TorchArchMinCap, s.TorchArchMaxCap)
 		if s.TorchArchExampleGPU != "" && s.TorchArchExampleCap != "" {
@@ -78,7 +86,10 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		}
 		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s", found, offerCount(s.AfterCUDA), bounds)
 	case s.AfterSurvival == 0:
-		passed := s.AfterCUDA
+		passed := s.AfterProvider
+		if passed == 0 {
+			passed = s.AfterCUDA
+		}
 		if s.TorchArchMinCap != "" || s.TorchArchMaxCap != "" {
 			passed = s.AfterTorchArch
 		}
@@ -158,6 +169,7 @@ type RankedOfferAlternative struct {
 	CompletionHrs float64
 	Cost          float64
 	Survival      float64
+	Compatibility string
 	Selected      bool
 }
 
@@ -264,6 +276,66 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 	return compatible, filtered, imageCUDA, maxRequired, exampleGPU, image
 }
 
+const unknownCompatibilityPenalty = 1_000_000_000
+
+func groupRequiresProviderCompatibility(group InstanceGroup) bool {
+	return strings.TrimSpace(group.MinCUDAVersion) != "" || group.MinDriverVersion > 0
+}
+
+func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
+	if !groupRequiresProviderCompatibility(group) {
+		return "not_required"
+	}
+	if minCUDA := strings.TrimSpace(group.MinCUDAVersion); minCUDA != "" && offer.CUDAVersion > 0 {
+		min, err := strconv.ParseFloat(minCUDA, 64)
+		if err == nil && offer.CUDAVersion+0.0001 < min {
+			return "incompatible"
+		}
+	}
+	switch offer.Provider {
+	case cloud.ProviderVastai:
+		// Vast.ai search applies driver_version/cuda_vers predicates before
+		// returning offers, so a returned offer is known compatible even though
+		// the provider-neutral Offer does not carry driver_version.
+		return "known"
+	case cloud.ProviderRunpod:
+		return "unknown"
+	default:
+		if offer.CUDAVersion > 0 && strings.TrimSpace(group.MinCUDAVersion) != "" {
+			return "known"
+		}
+		return "unknown"
+	}
+}
+
+func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int, int) {
+	if !groupRequiresProviderCompatibility(group) {
+		return offers, 0, 0
+	}
+	filtered := make([]cloud.Offer, 0, len(offers))
+	incompatible := 0
+	unknown := 0
+	for _, offer := range offers {
+		switch offerCompatibilityStatus(group, offer) {
+		case "incompatible":
+			incompatible++
+		case "unknown":
+			unknown++
+			filtered = append(filtered, offer)
+		default:
+			filtered = append(filtered, offer)
+		}
+	}
+	return filtered, incompatible, unknown
+}
+
+func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {
+	if offerCompatibilityStatus(group, offer) == "unknown" {
+		return unknownCompatibilityPenalty
+	}
+	return 0
+}
+
 // filterOffersByTorchArch removes offers whose GPU compute capability is
 // outside the bounds implied by the group's torch pin (or explicit
 // gpu-arch-max).
@@ -366,6 +438,18 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		result.FilterStats = stats
 		return result
 	}
+	offers, providerCompatFiltered, providerCompatUnknown := filterOffersByProviderCompatibility(group, offers)
+	if providerCompatFiltered > 0 {
+		slog.Debug("filtered offers by provider CUDA compatibility",
+			"filtered", providerCompatFiltered, "remaining", len(offers))
+	}
+	stats.UnknownCompatibility = providerCompatUnknown
+	stats.ProviderCompatibilityFiltered = providerCompatFiltered
+	stats.AfterProvider = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
 	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
 		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
 		stats.TorchArchMinCap = group.MinComputeCap
@@ -392,17 +476,44 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	if len(group.Jobs) > 1 {
 		totalJobDurationHrs *= float64(len(group.Jobs))
 	}
-	_, best := bidding.BestOfferForJobGroupWithProfile(survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, 0)
+	_, best := bestOfferWithCompatibilityProfile(group, survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
 	}
-	result.Alternatives = rankNeutralOfferAlternatives(filtered, survivalModel, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, best)
+	result.Alternatives = rankNeutralOfferAlternatives(group, filtered, survivalModel, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, best)
 	result.FilterStats = stats
 	return result
 }
 
-func rankNeutralOfferAlternatives(offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, jobCount int, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, selected cloud.Offer) []RankedOfferAlternative {
+func bestOfferWithCompatibilityProfile(group InstanceGroup, model *bidding.SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile) (int, cloud.Offer) {
+	bestIdx := -1
+	bestScore := math.Inf(1)
+	w := profile.Weights()
+	for i, offer := range offers {
+		setup := setupOverhead(offer)
+		surv := 1.0
+		if model != nil {
+			surv = model.OfferSurvival(offer)
+		}
+		cost := bidding.ExpectedCost(offer.CostPerHour, totalRunHrs, setup, surv)
+		completionHrs := float64(jobCount)*setup + totalRunHrs
+		if !profile.UseHappyPathTime && surv > 0 && surv < 1 {
+			completionHrs /= surv
+		}
+		score := w.Cost*cost + w.Time*completionHrs + compatibilityScorePenalty(group, offer)
+		if bestIdx < 0 || score < bestScore {
+			bestIdx = i
+			bestScore = score
+		}
+	}
+	if bestIdx < 0 {
+		return -1, cloud.Offer{}
+	}
+	return bestIdx, offers[bestIdx]
+}
+
+func rankNeutralOfferAlternatives(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, jobCount int, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, selected cloud.Offer) []RankedOfferAlternative {
 	w := profile.Weights()
 	alternatives := make([]RankedOfferAlternative, 0, len(offers))
 	for _, offer := range offers {
@@ -416,12 +527,14 @@ func rankNeutralOfferAlternatives(offers []cloud.Offer, survivalModel *bidding.S
 		if !profile.UseHappyPathTime && surv > 0 && surv < 1 {
 			completionHrs /= surv
 		}
+		compatibility := offerCompatibilityStatus(group, offer)
 		alternatives = append(alternatives, RankedOfferAlternative{
 			Offer:         offer,
-			Score:         w.Cost*cost + w.Time*completionHrs,
+			Score:         w.Cost*cost + w.Time*completionHrs + compatibilityScorePenalty(group, offer),
 			CompletionHrs: completionHrs,
 			Cost:          cost,
 			Survival:      surv,
+			Compatibility: compatibility,
 			Selected:      offer.Key() == selected.Key(),
 		})
 	}

@@ -364,6 +364,17 @@ config {
 -- Implementation: internal/vastai/client.go buildSearchFilter.
 -- Regression: internal/vastai/client_test.go TestBuildSearchFilter_NoGPUFrac.
 
+-- CUDA / driver floors are hard compatibility requirements when a provider
+-- reports enough metadata to evaluate them. They come from explicit
+-- min_driver/min_cuda image metadata, image NVIDIA_REQUIRE_CUDA, or inferred
+-- torch/CUDA wheel pins. Vast.ai offers are filtered at search time with
+-- driver_version/cuda_vers predicates. Providers that do not expose driver or
+-- CUDA compatibility for search results (currently RunPod) are
+-- compatibility-unknown: they must lose to any known-compatible offer, but may
+-- still be selected if no known-compatible offer exists. This fallback is
+-- intentionally scored as very risky, not treated as proven compatibility.
+-- Implementation: internal/campaign/offers.go provider compatibility penalty.
+
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil
 -- AND Err != nil; checking Offer == nil before Err mis-classifies provider
@@ -1535,7 +1546,10 @@ rule AssetOverlapLaunchGrouping {
 
     -- Candidate launch groupings are still constrained first by hard
     -- compatibility: GPU constraint/supremum, provider, VRAM tier,
-    -- preemptibility, image compatibility, disk, and compute-cap bounds.
+    -- preemptibility, image compatibility, disk, compute-cap bounds, and
+    -- known CUDA/driver compatibility. Provider-unknown CUDA/driver
+    -- compatibility is allowed only as a high-penalty fallback when no
+    -- known-compatible offer is available.
     -- Among compatible candidates, the planner applies an additional
     -- setup-time benefit for groups whose jobs share declared or observed
     -- HF model/dataset inputs.

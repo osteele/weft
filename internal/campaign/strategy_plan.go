@@ -1455,6 +1455,14 @@ func rankOfferWithPredictedRuntime(
 		result.FilterStats = stats
 		return result, true
 	}
+	offers, providerCompatFiltered, providerCompatUnknown := filterOffersByProviderCompatibility(group, offers)
+	stats.UnknownCompatibility = providerCompatUnknown
+	stats.ProviderCompatibilityFiltered = providerCompatFiltered
+	stats.AfterProvider = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result, true
+	}
 
 	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
 		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
@@ -1513,13 +1521,14 @@ func rankOfferWithPredictedRuntime(
 			completionHrs /= surv
 		}
 
-		score := w.Cost*cost + w.Time*completionHrs
+		score := w.Cost*cost + w.Time*completionHrs + compatibilityScorePenalty(group, offer)
 		alternatives = append(alternatives, RankedOfferAlternative{
 			Offer:         offer,
 			Score:         score,
 			CompletionHrs: completionHrs,
 			Cost:          cost,
 			Survival:      surv,
+			Compatibility: offerCompatibilityStatus(group, offer),
 		})
 		if !found || score < bestScore {
 			bestScore = score

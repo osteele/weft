@@ -936,6 +936,58 @@ func TestNoOffersDetail_CUDAIncludesImageAndRequiredVersion(t *testing.T) {
 	}
 }
 
+func TestRankOffer_KnownCompatibleBeatsUnknownCompatibility(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "12.8"}
+	offers := []cloud.Offer{
+		{ProviderID: "unknown", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.01},
+		{ProviderID: "known", Provider: cloud.ProviderVastai, GPUName: "RTX A6000", CUDAVersion: 12.8, CostPerHour: 5.00},
+	}
+
+	got := rankOfferWithProfile(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyCheap.Profile(), 0)
+	if got.Offer == nil {
+		t.Fatal("expected an offer")
+	}
+	if got.Offer.ProviderID != "known" {
+		t.Fatalf("selected %q, want known-compatible offer", got.Offer.ProviderID)
+	}
+	if got.FilterStats.UnknownCompatibility != 1 {
+		t.Fatalf("UnknownCompatibility = %d, want 1", got.FilterStats.UnknownCompatibility)
+	}
+}
+
+func TestRankOffer_AllowsUnknownCompatibilityFallback(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "12.8"}
+	offers := []cloud.Offer{
+		{ProviderID: "unknown", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.01},
+	}
+
+	got := rankOfferWithProfile(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyCheap.Profile(), 0)
+	if got.Offer == nil {
+		t.Fatal("expected unknown-compatible fallback offer")
+	}
+	if got.Offer.ProviderID != "unknown" {
+		t.Fatalf("selected %q, want unknown fallback", got.Offer.ProviderID)
+	}
+	if got.FilterStats.UnknownCompatibility != 1 {
+		t.Fatalf("UnknownCompatibility = %d, want 1", got.FilterStats.UnknownCompatibility)
+	}
+}
+
+func TestRankOffer_FiltersKnownIncompatibleCUDA(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "12.8"}
+	offers := []cloud.Offer{
+		{ProviderID: "old", Provider: cloud.ProviderVastai, GPUName: "RTX A6000", CUDAVersion: 12.4, CostPerHour: 0.01},
+	}
+
+	got := rankOfferWithProfile(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyCheap.Profile(), 0)
+	if got.Offer != nil {
+		t.Fatalf("selected known-incompatible offer: %#v", got.Offer)
+	}
+	if got.FilterStats.ProviderCompatibilityFiltered != 1 {
+		t.Fatalf("ProviderCompatibilityFiltered = %d, want 1", got.FilterStats.ProviderCompatibilityFiltered)
+	}
+}
+
 func TestFormatOfferConstraints(t *testing.T) {
 	c := cloud.OfferConstraints{
 		GPUClass:       "ampere+",

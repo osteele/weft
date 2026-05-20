@@ -22,6 +22,44 @@ laptop$ weft run --gpu-class a100 'uv run python train.py'
 # Auto-placed on atlas (gpu_class match, 2 queued jobs)
 ```
 
+## Source sync: the working tree, not commits
+
+When you submit a job, weft tarballs the project's **working directory** and
+ships it to the remote host. The sync reflects the *filesystem state* of your
+working tree — **not** the committed state of the underlying git or
+Jujutsu repository.
+
+Three consequences worth internalizing:
+
+- **Uncommitted edits are synced.** Edit a file, skip the commit, run
+  `weft run` — the remote job sees the edit. There is no "commit before you
+  submit" step.
+- **A file that exists only in another commit/revision is not synced.** If a
+  file is present in some branch or revision but not checked out into the
+  current working tree, weft cannot see it. This bites hardest in Jujutsu,
+  where every revision is its own filesystem snapshot and the working copy
+  tracks whichever revision `@` points at: a `jj edit`, `jj new`, `jj abandon`,
+  or `jj restore` that moves files in or out of the working copy changes what
+  the next sync captures. The git equivalents are `git checkout`,
+  `git stash`, and `git restore`.
+- **Between two submissions, a VCS operation can change what gets synced.**
+  For inventory hosts, weft re-syncs on every job, so the second job can see a
+  different snapshot than the first. For cloud instances the tarball is built
+  once at instance launch, but a resubmission onto a freshly launched instance
+  picks up whatever the working tree contains *at resubmission time*.
+
+The sync respects `.gitignore` (and `.weft.toml` `[sync] exclude_dirs`):
+ignored paths such as `cache/`, `build/`, `__pycache__/`, and `.venv/` are
+excluded from the tarball. On the remote host, extraction is additive —
+files already present that are not in the tarball are left untouched, so
+`.gitignore`'d caches written by prior jobs persist across syncs.
+
+Run `weft sync inspect` to see exactly what the tarball will contain. When a
+job fails with `bash: <script>: No such file or directory` or a
+`ModuleNotFoundError` on a file you believe exists, check the working tree
+(`ls`, `jj status`, `git status`) before suspecting a sync bug — the usual
+cause is that the working copy was moved off the revision that holds the file.
+
 ## Declaring data dependencies
 
 Jobs that need HuggingFace models, datasets, or other data assets should declare
@@ -309,10 +347,13 @@ fetch the image config. You can also declare explicit floors:
 # ///
 ```
 
-`min-driver` filters Vast.ai offers by NVIDIA driver version. RunPod exposes a
-CUDA compatibility filter instead, so weft passes `min-cuda` to RunPod pod
-creation. `image-pull-secret` names a configured `[registry]` entry; if it is
-omitted, weft matches by the image registry hostname.
+`min-driver` filters Vast.ai offers by NVIDIA driver version. `min-cuda`
+filters providers that report CUDA compatibility; providers that do not expose
+CUDA/driver compatibility are treated as unknown and lose to any
+known-compatible offer. If every available offer is unknown, weft may still use
+one and will diagnose driver/runtime incompatibility if the job fails.
+`image-pull-secret` names a configured `[registry]` entry; if it is omitted,
+weft matches by the image registry hostname.
 
 When `uv.lock` or `pyproject.toml` pins torch/CUDA wheels, weft also infers a
 provider CUDA floor from the wheel variant and NVIDIA CUDA package versions

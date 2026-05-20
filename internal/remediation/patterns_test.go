@@ -217,6 +217,12 @@ func TestDiagnoseFailedAttempt_RuntimeGuidance(t *testing.T) {
 			log:         "ModuleNotFoundError: No module named 'vllm'",
 			wantPattern: "vllm_setup",
 		},
+		{
+			name: "cuda driver too old",
+			log: `RuntimeError: The NVIDIA driver on your system is too old (found version 12040).
+Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx`,
+			wantPattern: "cuda_driver_too_old",
+		},
 	}
 
 	for _, tc := range cases {
@@ -230,6 +236,9 @@ func TestDiagnoseFailedAttempt_RuntimeGuidance(t *testing.T) {
 			}
 			if d.Solution == "" {
 				t.Fatal("expected solution guidance")
+			}
+			if tc.wantPattern == "cuda_driver_too_old" && d.StructuredDetails["found_cuda_compatibility"] != "12.4" {
+				t.Fatalf("found_cuda_compatibility = %#v, want 12.4", d.StructuredDetails["found_cuda_compatibility"])
 			}
 		})
 	}

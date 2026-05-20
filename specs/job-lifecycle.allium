@@ -281,6 +281,7 @@ value Backend = queue_runner | slurm | vastai
 value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
+                    | cuda_driver_too_old
 
 -- The in-flight "this job is being placed" signal lives on
 -- PlacementIntent (specs/job-move.allium § PlacementIntent), not in
@@ -732,6 +733,9 @@ rule DetectFailureReason {
     -- Exit code 126 → killed_stdout_silence (log-silence watchdog)
     -- Disk exhaustion detected via system probes → disk_full
     -- GPU OOM detected via nvidia-smi → gpu_oom
+    -- PyTorch/CUDA logs that report an insufficient NVIDIA driver →
+    -- cuda_driver_too_old, with solution guidance to retry on known-compatible
+    -- CUDA/driver capacity or choose a runtime built for the older driver.
     -- Otherwise → error or exit_N
 
     @guidance

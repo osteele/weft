@@ -1,6 +1,7 @@
 package remediation
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -34,6 +35,31 @@ type failurePatternRule struct {
 }
 
 var failurePatternRules = []failurePatternRule{
+	{
+		patternID:  "cuda_driver_too_old",
+		category:   "environment",
+		message:    "NVIDIA driver is too old for the selected CUDA runtime",
+		solution:   "Retry with placement restricted to a provider/host that reports compatible CUDA support, or use a PyTorch/runtime image built for the host's older CUDA driver.",
+		confidence: 0.98,
+		re:         regexp.MustCompile(`(?is)NVIDIA driver on your system is too old\s*\(found version\s+([0-9]+)\)|driver version is insufficient for CUDA runtime version`),
+		details: func(match []string, logContent string) map[string]any {
+			details := map[string]any{}
+			found := ""
+			if len(match) > 1 {
+				found = strings.TrimSpace(match[1])
+			}
+			if found == "" {
+				found = firstSubmatch(`(?i)found version\s+([0-9]+)`, logContent)
+			}
+			if found != "" {
+				details["found_driver_api_version"] = found
+				if compat := cudaCompatFromDriverAPIVersion(found); compat != "" {
+					details["found_cuda_compatibility"] = compat
+				}
+			}
+			return details
+		},
+	},
 	{
 		patternID:  "tempdir_unusable",
 		category:   "environment",
@@ -190,6 +216,22 @@ var failurePatternRules = []failurePatternRule{
 		confidence: 0.75,
 		re:         regexp.MustCompile(`(?is)subprocess\.(?:CalledProcessError|run|check_call|check_output)|Command .* returned non-zero exit status|returned non-zero exit status \d+`),
 	},
+}
+
+func cudaCompatFromDriverAPIVersion(version string) string {
+	if len(version) < 4 {
+		return ""
+	}
+	n, err := strconv.Atoi(version)
+	if err != nil {
+		return ""
+	}
+	major := n / 1000
+	minor := (n % 1000) / 10
+	if major == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d.%d", major, minor)
 }
 
 func matchFailurePattern(logContent, detectedBy string) *ErrorDiagnosis {
@@ -354,6 +396,13 @@ var envPatterns = []*pattern{
 		patternID: "disk_full",
 		category:  "environment",
 		message:   "Disk full — if HF models were downloaded at runtime, declare them with --input hf:<model-id> so the disk estimator accounts for their size",
+	},
+	{
+		re:             regexp.MustCompile(`(?i)NVIDIA driver on your system is too old|driver version is insufficient for CUDA runtime version`),
+		patternID:      "cuda_driver_too_old",
+		category:       "environment",
+		message:        "NVIDIA driver is too old for the selected CUDA runtime",
+		fatalAtRuntime: true,
 	},
 }
 
