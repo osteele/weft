@@ -142,6 +142,45 @@ func TestRunJobInfoFormatsJobIDWithPrefix(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoUnplacedQueuedStatusIsDisambiguated(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Unplaced job: no host, no launch. Bare "queued" next to an attempt
+	// table reads as "queued on <last attempt's instance>"; the status
+	// line must spell out that the job is not placed.
+	unplacedID, err := db.RecordQueued(database, "", "/tmp", "echo hi", "unplaced job")
+	if err != nil {
+		t.Fatalf("RecordQueued (unplaced): %v", err)
+	}
+	// Placed job: queued on an inventory host. "queued" is unambiguous
+	// here because the Host line names the target, so it stays bare.
+	placedID, err := db.RecordQueued(database, "cool30", "/tmp", "echo hi", "placed job")
+	if err != nil {
+		t.Fatalf("RecordQueued (placed): %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	unplacedOut := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(unplacedID)}); err != nil {
+			t.Fatalf("runJobInfo (unplaced): %v", err)
+		}
+	})
+	if !strings.Contains(unplacedOut, "Status:      queued (unplaced — awaiting placement)") {
+		t.Fatalf("unplaced job: status line not disambiguated, got:\n%s", unplacedOut)
+	}
+
+	placedOut := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(placedID)}); err != nil {
+			t.Fatalf("runJobInfo (placed): %v", err)
+		}
+	})
+	if !strings.Contains(placedOut, "Status:      queued\n") {
+		t.Fatalf("placed job: status line should stay bare, got:\n%s", placedOut)
+	}
+}
+
 func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")

@@ -1055,7 +1055,15 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			fmt.Printf("Status:      %s%s\n", job.EffectiveStatus(), tombstone)
+			statusText := job.EffectiveStatus()
+			if statusText == db.StatusQueued && job.TargetKind() == db.JobTargetUnplaced {
+				// Bare "queued" reads as "queued on <last attempt's
+				// instance>" when an attempt table follows. Spell out
+				// that the job is not placed and is waiting for the
+				// autopilot to assign a target.
+				statusText = "queued (unplaced — awaiting placement)"
+			}
+			fmt.Printf("Status:      %s%s\n", statusText, tombstone)
 		}
 		if job.Priority > 0 {
 			fmt.Printf("Priority:    %d\n", job.Priority)
