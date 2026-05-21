@@ -42,8 +42,8 @@ type LaunchResult struct {
 	InlineWatchUsed bool
 }
 
-func RunWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
-	router := newWatchRouterModel(database, cfg, "", autoMode)
+func RunWatchLoop(database *sql.DB, cfg *config.Config) error {
+	router := newWatchRouterModel(database, cfg, "")
 
 	outputOpt, restore := InstallTUIStdioCapture()
 	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
@@ -100,8 +100,8 @@ func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 	}, nil
 }
 
-func WatchInstances(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool, projectFilter string) ([]int64, error) {
-	return watchInstances(database, mode, instanceIDs, estimateSummary, autoMode, projectFilter)
+func WatchInstances(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, projectFilter string) ([]int64, error) {
+	return watchInstances(database, mode, instanceIDs, estimateSummary, projectFilter)
 }
 
 func WatchInstancesPlain(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, projectFilter string) error {
@@ -120,8 +120,8 @@ func RunCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 	return runCampaignListTUI(database, campaigns)
 }
 
-func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string, autoMode bool) error {
-	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled, projectFilter, autoMode)
+func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string) error {
+	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled, projectFilter)
 
 	outputOpt, restore := InstallTUIStdioCapture()
 	defer restore()
@@ -138,8 +138,8 @@ func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.
 	return nil
 }
 
-func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) error {
-	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode, projectFilter)
+func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, projectFilter string) error {
+	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 }
 
 func ListOutputWidth() int {

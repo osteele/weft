@@ -8,12 +8,11 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestAutopilotStatusLinePausedBeatsTransientStates(t *testing.T) {
-	// A paused autopilot must report "paused" even when a doomed pass is
+func TestAutopilotStatusLineDisabledBeatsTransientStates(t *testing.T) {
+	// A disabled autopilot must report "off" even when a doomed pass is
 	// in flight and jobs are blocked — both of which would otherwise
 	// render lines that imply the autopilot is working.
 	line := autopilotStatusLine(autopilotDisplayInput{
-		autoMode:       true,
 		paused:         true,
 		pausedReason:   "manual relaunch",
 		inFlight:       true,
@@ -21,24 +20,23 @@ func TestAutopilotStatusLinePausedBeatsTransientStates(t *testing.T) {
 		blockedSummary: "waiting for output from wj2037",
 		blockedJobs:    1,
 	})
-	if !strings.Contains(line, "paused") {
-		t.Fatalf("status line = %q, want paused", line)
+	if !strings.Contains(line, "off") {
+		t.Fatalf("status line = %q, want off", line)
 	}
 	if !strings.Contains(line, "manual relaunch") {
 		t.Fatalf("status line = %q, want pause reason", line)
 	}
 	for _, banned := range []string{"evaluating", "blocked"} {
 		if strings.Contains(line, banned) {
-			t.Fatalf("status line = %q, want paused to override %q", line, banned)
+			t.Fatalf("status line = %q, want off to override %q", line, banned)
 		}
 	}
 }
 
 func TestAutopilotStatusLineBlockedUsesBlockedWording(t *testing.T) {
 	// The blocked state must say "blocked", not "paused" — the watch TUI
-	// historically mislabeled it, colliding with the singleton pause.
+	// historically mislabeled it, colliding with the global enabled state.
 	line := autopilotStatusLine(autopilotDisplayInput{
-		autoMode:       true,
 		blockedSummary: "no offers from providers",
 		blockedJobs:    2,
 	})
@@ -50,27 +48,21 @@ func TestAutopilotStatusLineBlockedUsesBlockedWording(t *testing.T) {
 	}
 }
 
-func TestAutopilotStatusLineEmptyWhenAutoModeOff(t *testing.T) {
-	if line := autopilotStatusLine(autopilotDisplayInput{autoMode: false, paused: true}); line != "" {
-		t.Fatalf("status line = %q, want empty when auto mode off", line)
+func TestAutopilotStatusLineEmptyOnlyWhileBudgetPromptOpen(t *testing.T) {
+	if line := autopilotStatusLine(autopilotDisplayInput{inputActive: true}); line != "" {
+		t.Fatalf("status line = %q, want empty while the budget prompt is open", line)
+	}
+	if line := autopilotStatusLine(autopilotDisplayInput{paused: true}); line == "" {
+		t.Fatal("a disabled autopilot must still render an off line")
 	}
 }
 
 func TestAutopilotFooterState(t *testing.T) {
-	cases := []struct {
-		autoMode bool
-		paused   bool
-		want     string
-	}{
-		{false, false, "OFF"},
-		{false, true, "OFF"},
-		{true, false, "ON"},
-		{true, true, "PAUSED"},
+	if got := autopilotFooterState(false); got != "ON" {
+		t.Fatalf("autopilotFooterState(false) = %q, want ON", got)
 	}
-	for _, tc := range cases {
-		if got := autopilotFooterState(tc.autoMode, tc.paused); got != tc.want {
-			t.Fatalf("autopilotFooterState(%v, %v) = %q, want %q", tc.autoMode, tc.paused, got, tc.want)
-		}
+	if got := autopilotFooterState(true); got != "OFF" {
+		t.Fatalf("autopilotFooterState(true) = %q, want OFF", got)
 	}
 }
 

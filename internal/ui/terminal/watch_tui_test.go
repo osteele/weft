@@ -841,9 +841,15 @@ func TestWatchModelHandleKey_BudgetRetryDoublesInstanceMultiplier(t *testing.T) 
 func TestWatchModelHandleToggleAutoPilot_TriggersImmediateRetryForExistingRetryableFailures(t *testing.T) {
 	retryableID := int64(465)
 	nonRetryableID := int64(464)
+	database := db.SetupTestDB(t)
+	if _, err := db.PauseAutopilot(database, "tester", ""); err != nil {
+		t.Fatalf("PauseAutopilot: %v", err)
+	}
 	m := watchModel{
-		mode:        watchModeInstances,
-		instanceIDs: []int64{retryableID, nonRetryableID},
+		mode:            watchModeInstances,
+		database:        database,
+		autopilotPaused: true,
+		instanceIDs:     []int64{retryableID, nonRetryableID},
 		updates: map[int64]campaign.InstanceUpdate{
 			retryableID: {
 				Launch: &db.Launch{
@@ -865,8 +871,8 @@ func TestWatchModelHandleToggleAutoPilot_TriggersImmediateRetryForExistingRetrya
 	updated, cmd := m.handleToggleAutoPilot()
 	got := updated.(watchModel)
 
-	if !got.autoMode {
-		t.Fatal("expected autoMode=true after toggle")
+	if got.autopilotPaused {
+		t.Fatal("expected autopilot enabled after toggle")
 	}
 	if !got.retrying {
 		t.Fatal("expected retrying=true when retryable failures already exist")
@@ -1047,10 +1053,9 @@ func TestWatchModelRunAutoPilot_NoReusableInventoryJobsShowsNoopReason(t *testin
 func TestHandleAutoLaunchDone_SetsBackoffAndNoopReasonsOnSkip(t *testing.T) {
 	now := time.Now()
 	m := watchModel{
-		mode:     watchModeInstances,
-		autoMode: true,
-		width:    120,
-		height:   20,
+		mode:   watchModeInstances,
+		width:  120,
+		height: 20,
 		unplacedJobs: []*db.Job{
 			{ID: 596, Status: db.StatusQueued},
 			{ID: 614, Status: db.StatusQueued},
@@ -1085,9 +1090,8 @@ func watchTestInt64Ptr(v int64) *int64 { return &v }
 
 func watchTestIntPtr(v int) *int { return &v }
 
-func TestWatchAutoPilotStatusLineShowsPausedState(t *testing.T) {
+func TestWatchAutoPilotStatusLineShowsDisabledState(t *testing.T) {
 	m := watchModel{
-		autoMode:              true,
 		autopilotPaused:       true,
 		autopilotPausedReason: "manual relaunch",
 		autoPassInFlight:      true,
@@ -1095,14 +1099,14 @@ func TestWatchAutoPilotStatusLineShowsPausedState(t *testing.T) {
 	}
 
 	line := m.autoPilotStatusLine()
-	if !strings.Contains(line, "paused") || !strings.Contains(line, "manual relaunch") {
-		t.Fatalf("auto-pilot line = %q, want paused state with reason", line)
+	if !strings.Contains(line, "off") || !strings.Contains(line, "manual relaunch") {
+		t.Fatalf("auto-pilot line = %q, want off state with reason", line)
 	}
 	if strings.Contains(line, "evaluating") || strings.Contains(line, "blocked") {
-		t.Fatalf("auto-pilot line = %q, want paused to override transient states", line)
+		t.Fatalf("auto-pilot line = %q, want disabled to override transient states", line)
 	}
 
-	if hint := m.autoModeHint(); !strings.Contains(hint, "PAUSED") {
-		t.Fatalf("auto mode hint = %q, want PAUSED", hint)
+	if hint := m.autoModeHint(); !strings.Contains(hint, "OFF") {
+		t.Fatalf("auto mode hint = %q, want OFF", hint)
 	}
 }

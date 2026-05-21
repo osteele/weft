@@ -82,7 +82,7 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 
 	if useTUI {
 		cfg, _ := config.Load()
-		return terminal.RunProjectWatchTUI(database, cfg, projectWatchRecent, !projectWatchNoSync, project, watchAuto)
+		return terminal.RunProjectWatchTUI(database, cfg, projectWatchRecent, !projectWatchNoSync, project)
 	}
 
 	opts := watchPlainOptions()

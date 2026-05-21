@@ -64,7 +64,6 @@ var campaignShowCmd = &cobra.Command{
 var (
 	campaignWatchTUI   bool
 	campaignWatchPlain bool
-	campaignWatchAuto  bool
 	campaignListTUI    bool
 	campaignListPlain  bool
 )
@@ -87,7 +86,6 @@ func init() {
 func addCampaignWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Force interactive TUI display")
 	cmd.Flags().BoolVar(&campaignWatchPlain, "plain", false, "Force plain text output")
-	cmd.Flags().BoolVar(&campaignWatchAuto, "auto", false, "Start with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
@@ -142,7 +140,7 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	return watchAndReport(database, useTUI, terminal.ModeCampaign, instanceIDs, nil, campaignWatchAuto, "")
+	return watchAndReport(database, useTUI, terminal.ModeCampaign, instanceIDs, nil, "")
 }
 
 func runCampaignTerminate(cmd *cobra.Command, args []string) error {

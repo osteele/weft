@@ -569,7 +569,6 @@ func TestGroupedJobsWithAutoReasonsUsesPersistedPlacementReason(t *testing.T) {
 	}
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		jobs:            []*db.Job{unplaced},
 	}
 
@@ -597,7 +596,6 @@ func TestGroupedJobsWithAutoReasonsHidesOnPremOnlyAutoReasonForRentalEligibleJob
 	}
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		jobs:            []*db.Job{unplaced},
 		autoBlockReasons: map[int64]string{
 			10: "3 hosts: host is opt-in only (specify with --host)",
@@ -618,10 +616,9 @@ func TestGroupedJobsWithAutoReasonsHidesOnPremOnlyAutoReasonForRentalEligibleJob
 	}
 }
 
-func TestGroupedAutoPilotStatusTextShowsPausedState(t *testing.T) {
+func TestGroupedAutoPilotStatusTextShowsDisabledState(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus:       true,
-		autoMode:              true,
 		autopilotPaused:       true,
 		autopilotPausedReason: "manual relaunch",
 		autoInProgress:        true,
@@ -629,23 +626,22 @@ func TestGroupedAutoPilotStatusTextShowsPausedState(t *testing.T) {
 	}
 
 	line := m.groupedAutoPilotStatusText(0)
-	if !strings.Contains(line, "paused") {
-		t.Fatalf("auto-pilot line = %q, want paused state", line)
+	if !strings.Contains(line, "off") {
+		t.Fatalf("auto-pilot line = %q, want off state", line)
 	}
 	if !strings.Contains(line, "manual relaunch") {
 		t.Fatalf("auto-pilot line = %q, want pause reason", line)
 	}
-	// The paused branch must win over the transient autoInProgress state,
+	// The disabled branch must win over the transient autoInProgress state,
 	// which would otherwise render a misleading "evaluating" line.
 	if strings.Contains(line, "evaluating") {
-		t.Fatalf("auto-pilot line = %q, want paused to override evaluating", line)
+		t.Fatalf("auto-pilot line = %q, want disabled to override evaluating", line)
 	}
 }
 
-func TestGroupedControlsTextShowsPausedAutoState(t *testing.T) {
+func TestGroupedControlsTextShowsDisabledAutoState(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		autopilotPaused: true,
 		width:           100,
 		height:          20,
@@ -654,11 +650,11 @@ func TestGroupedControlsTextShowsPausedAutoState(t *testing.T) {
 	m.rebuildGroupedRows()
 
 	line := m.groupedControlsText(true)
-	if !strings.Contains(line, "(PAUSED)") {
-		t.Fatalf("controls line = %q, want auto state PAUSED", line)
+	if !strings.Contains(line, "(OFF)") {
+		t.Fatalf("controls line = %q, want auto state OFF", line)
 	}
 	if strings.Contains(line, "(ON)") {
-		t.Fatalf("controls line = %q, want PAUSED not ON", line)
+		t.Fatalf("controls line = %q, want OFF not ON", line)
 	}
 }
 
@@ -682,7 +678,6 @@ func TestGroupedJobsWithAutoReasons_UnprocessedGroupedViewExcludesCanceledKeepsK
 
 func TestListTUIJobsLoadedClearsStalePersistentBlockedSummaryWhenNoUnplacedJobs(t *testing.T) {
 	m := listTUIModel{
-		autoMode:               true,
 		autoPersistentBlocked:  "no offers available",
 		autoPersistentBlockedN: 2,
 	}
@@ -747,9 +742,7 @@ func TestListTUIQuickLaunchProgressUpdatesStatus(t *testing.T) {
 }
 
 func TestListTUIQuickLaunchDonePinsStatusAgainstAutoPilotNoise(t *testing.T) {
-	m := listTUIModel{
-		autoMode: true,
-	}
+	m := listTUIModel{}
 	next, _ := m.Update(listQuickLaunchDoneMsg{
 		instanceIDs:  []int64{675},
 		runningJobID: 702,
@@ -771,7 +764,6 @@ func TestListTUIQuickLaunchDonePinsStatusAgainstAutoPilotNoise(t *testing.T) {
 
 func TestListTUIQuickLaunchInFlightProtectsStatusFromAutoPilotNoise(t *testing.T) {
 	m := listTUIModel{
-		autoMode:       true,
 		quickLaunching: true,
 		statusMessage:  "Launching new instance...",
 	}
@@ -785,7 +777,6 @@ func TestListTUIQuickLaunchInFlightProtectsStatusFromAutoPilotNoise(t *testing.T
 func TestListTUIGroupedViewShowsBudgetPromptAfterDollarKey(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		width:           120,
 		height:          24,
 		title:           "Jobs",
@@ -819,7 +810,6 @@ func TestListTUIGroupedViewShowsBudgetPromptAfterDollarKey(t *testing.T) {
 func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		width:           90,
 		height:          12,
 		title:           "Jobs",
@@ -847,7 +837,6 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		width:           64,
 		height:          12,
 		title:           "Jobs",
@@ -938,7 +927,7 @@ func TestListTUIGroupedViewShortViewportPreservesAllSectionHeaders(t *testing.T)
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           100,
-		height:          9,
+		height:          10,
 		title:           "Jobs",
 		jobs: []*db.Job{
 			{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "run", Project: "proj"},
@@ -1206,7 +1195,7 @@ func TestSelectGroupedRowsForViewport_RemovesBlankLinesBetweenAbbreviatedGroups(
 	}
 }
 
-func TestListTUIGroupedViewPinsFooterAtBottomWithSeparator(t *testing.T) {
+func TestListTUIGroupedViewPinsFooterAtBottom(t *testing.T) {
 	resetProviderCreditWarningCacheForTest(t)
 	m := listTUIModel{
 		groupedByStatus: true,
@@ -1225,8 +1214,9 @@ func TestListTUIGroupedViewPinsFooterAtBottomWithSeparator(t *testing.T) {
 	if !strings.Contains(lines[len(lines)-1], "q:quit") {
 		t.Fatalf("last line = %q, want controls footer", lines[len(lines)-1])
 	}
-	if strings.TrimSpace(lines[len(lines)-2]) != "" {
-		t.Fatalf("expected blank separator above footer, got %q", lines[len(lines)-2])
+	// The auto-pilot status line sits directly above the controls footer.
+	if !strings.Contains(lines[len(lines)-2], "Auto-pilot:") {
+		t.Fatalf("expected auto-pilot status line above footer, got %q", lines[len(lines)-2])
 	}
 }
 
@@ -1235,7 +1225,6 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 	m := listTUIModel{
 		database:        database,
 		groupedByStatus: true,
-		autoMode:        true,
 		width:           90,
 		height:          12,
 		title:           "Jobs",
@@ -1268,7 +1257,6 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 func TestListTUIAutoPilotFailureSchedulesCooldown(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		autoInProgress:  true,
 		database:        &sql.DB{},
 		jobs: []*db.Job{
@@ -1345,7 +1333,6 @@ func TestListTUIAutoPilotOutcomeCooldowns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := listTUIModel{
 				groupedByStatus: true,
-				autoMode:        true,
 				autoInProgress:  true,
 				database:        &sql.DB{},
 			}
@@ -1368,19 +1355,26 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 	makeModel := func() listTUIModel {
 		return listTUIModel{
 			groupedByStatus: true,
-			autoMode:        true,
 			database:        &sql.DB{},
 			autoNextPassAt:  time.Now().Add(30 * time.Second),
 		}
 	}
 
 	t.Run("toggle auto on", func(t *testing.T) {
-		m := makeModel()
-		m.autoMode = false
+		database := db.SetupTestDB(t)
+		if _, err := db.PauseAutopilot(database, "tester", ""); err != nil {
+			t.Fatalf("PauseAutopilot: %v", err)
+		}
+		m := listTUIModel{
+			groupedByStatus: true,
+			database:        database,
+			autopilotPaused: true,
+			autoNextPassAt:  time.Now().Add(30 * time.Second),
+		}
 		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
 		got := next.(listTUIModel)
-		if !got.autoMode {
-			t.Fatal("expected autoMode ON after 'A' toggle")
+		if got.autopilotPaused {
+			t.Fatal("expected autopilot enabled after 'A' toggle")
 		}
 		if !got.autoNextPassAt.IsZero() {
 			t.Fatalf("expected cooldown cleared, got %v", got.autoNextPassAt)
@@ -1425,7 +1419,6 @@ func TestListTUIRunawayResetClearsCachedBlockedRows(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus:        true,
 		groupedUnprocessedView: true,
-		autoMode:               true,
 		database:               database,
 		jobs:                   jobs,
 		width:                  120,
@@ -1469,7 +1462,6 @@ func TestListTUIAutoPilotFailureRebuildsGroupedRowsWithBlockReasons(t *testing.T
 	}
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		autoInProgress:  true,
 		database:        &sql.DB{},
 		jobs:            jobs,
@@ -1508,7 +1500,6 @@ func TestListTUIAutoPilotFailureRebuildsGroupedRowsWithBlockReasons(t *testing.T
 func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		autoInProgress:  true,
 		database:        &sql.DB{},
 	}
@@ -1537,7 +1528,6 @@ func TestNormalizeStatusLineTextCollapsesMultilineIndentedText(t *testing.T) {
 func TestListTUIAutoPilotFailureStoresRawErrorAndShowsNormalizedStatus(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		autoInProgress:  true,
 		database:        &sql.DB{},
 	}
@@ -1567,7 +1557,6 @@ func TestListTUIRunAutoPilotKeepsSessionRunRateTarget(t *testing.T) {
 
 	m := listTUIModel{
 		groupedByStatus:        false, // early-return path is enough to verify target stability.
-		autoMode:               false,
 		database:               nil,
 		autoRunRateTargetCents: 250,
 	}
@@ -1612,7 +1601,6 @@ func TestListTUIGroupedKeyETogglesErrorDetailsPanel(t *testing.T) {
 func TestListTUIAutoPilotStatusUsesSingularInstanceWordingAndClass(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 	}
 
 	next, _ := m.Update(listAutoPilotDoneMsg{
@@ -1628,7 +1616,6 @@ func TestListTUIAutoPilotStatusUsesSingularInstanceWordingAndClass(t *testing.T)
 func TestListTUIAutoPilotStatusUsesPluralInstancesWording(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 	}
 
 	next, _ := m.Update(listAutoPilotDoneMsg{launched: 2})
@@ -1670,7 +1657,6 @@ func TestListTUIGroupedSelectionSkipsHeaders(t *testing.T) {
 func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
-		autoMode:        true,
 		width:           100,
 		height:          20,
 		jobs: []*db.Job{

@@ -3,6 +3,7 @@ package terminal
 import (
 	"database/sql"
 	"fmt"
+	"os/user"
 	"strings"
 	"time"
 
@@ -12,12 +13,10 @@ import (
 // autopilotDisplayInput is the normalized per-surface autopilot state the
 // shared status formatter needs. Both the list and watch TUIs build this
 // from their own model and call autopilotStatusLine / autopilotFooterState,
-// so the pause-first precedence and the "blocked" vs "paused" wording cannot
-// drift between the two surfaces.
+// so the precedence and the "off"/"blocked" wording cannot drift between
+// the two surfaces. The autopilot is a single global concept; there is no
+// per-surface toggle.
 type autopilotDisplayInput struct {
-	// autoMode is the per-TUI A-key toggle. When false there is no
-	// autopilot line and the footer reads OFF.
-	autoMode bool
 	// inputActive suppresses the line while the run-rate budget prompt is
 	// open (the prompt is rendered on the controls line instead).
 	inputActive bool
@@ -50,16 +49,16 @@ type autopilotDisplayInput struct {
 	targetCents int
 }
 
-// autopilotStatusLine renders the "Auto-pilot: ..." status line, or "" when
-// the surface should show no line. The singleton pause is checked before
-// every transient state so a paused autopilot never renders as "evaluating"
-// or "blocked" — both of which imply it is working.
+// autopilotStatusLine renders the "Auto-pilot: ..." status line, or "" only
+// while the budget prompt is open. The disabled state is checked before every
+// transient state so a disabled autopilot never renders as "evaluating" or
+// "blocked" — both of which imply it is working.
 func autopilotStatusLine(in autopilotDisplayInput) string {
-	if !in.autoMode || in.inputActive {
+	if in.inputActive {
 		return ""
 	}
 	if in.paused {
-		line := "Auto-pilot: paused — resume with `weft autopilot resume`"
+		line := "Auto-pilot: off — press A to enable"
 		if reason := strings.TrimSpace(in.pausedReason); reason != "" {
 			line += " (" + reason + ")"
 		}
@@ -106,18 +105,22 @@ func autopilotStatusLine(in autopilotDisplayInput) string {
 	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running, target %s)", in.unplaced, in.running, target)
 }
 
-// autopilotFooterState returns the A-key footer token. PAUSED is shown when
-// the local toggle is on but the singleton autopilot is paused, so the
-// footer never claims this TUI is placing jobs while it cannot.
-func autopilotFooterState(autoMode, paused bool) string {
-	switch {
-	case !autoMode:
+// autopilotFooterState returns the A-key footer token for the single global
+// autopilot enabled/disabled state.
+func autopilotFooterState(paused bool) string {
+	if paused {
 		return "OFF"
-	case paused:
-		return "PAUSED"
-	default:
-		return "ON"
 	}
+	return "ON"
+}
+
+// autopilotActor identifies who toggled the autopilot, recorded as paused_by.
+// Empty is acceptable — db.PauseAutopilot tolerates it.
+func autopilotActor() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return ""
 }
 
 // autopilotPauseState reads the singleton autopilot_state row and reports

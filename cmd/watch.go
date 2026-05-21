@@ -38,7 +38,6 @@ var (
 	watchTUI              bool
 	watchPlain            bool
 	watchFollow           bool
-	watchAuto             bool
 	watchTransitionsOnly  bool
 	watchJSONLines        bool
 	watchUntilAnyTerminal bool
@@ -53,7 +52,6 @@ func configureWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&watchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&watchPlain, "plain", false, "Force plain text mode")
 	cmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing summaries even when nothing is active")
-	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
 	addWatchEventFlags(cmd)
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
@@ -120,7 +118,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	if useTUI {
-		return runWatchLoop(database, cfg, watchAuto)
+		return runWatchLoop(database, cfg)
 	}
 	return terminal.WatchAllPlain(database, cfg, watchPlainOptions())
 }
@@ -153,8 +151,8 @@ func printWatchJobSummary(database *sql.DB, jobIDs []int64) error {
 	return nil
 }
 
-func runWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
-	return terminal.RunWatchLoop(database, cfg, autoMode)
+func runWatchLoop(database *sql.DB, cfg *config.Config) error {
+	return terminal.RunWatchLoop(database, cfg)
 }
 
 func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, jobIDFilter map[int64]bool, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (terminal.LaunchResult, error) {

@@ -56,7 +56,7 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 	// Auto-relaunch on retryable infrastructure failure (instance-based modes)
 	ci := msg.update.Launch
 	ch := m.channels[msg.instanceID]
-	if m.autoMode && ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
+	if m.autopilotEnabled() && ci != nil && db.IsRetryableTermination(ci) && !m.retrying {
 		m.logRetryAutoTriggered(ci)
 		m.retrying = true
 		m.retryResult = ""
@@ -268,7 +268,7 @@ func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cm
 		// Continue placing remaining jobs
 		var cmds []tea.Cmd
 		cmds = append(cmds, flashCmd)
-		if m.autoMode && len(m.unplacedJobs) > 0 {
+		if len(m.unplacedJobs) > 0 {
 			if cmd := m.runAutoPilot(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -340,7 +340,7 @@ func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.
 			m.autoNoopReasons[job.ID] = "auto-launch skipped: " + reason
 		}
 	}
-	if !m.autoLaunchBackoffArmed && m.autoMode && len(m.unplacedJobs) > 0 {
+	if !m.autoLaunchBackoffArmed && len(m.unplacedJobs) > 0 {
 		m.autoLaunchBackoffArmed = true
 		return m, tea.Tick(delay, func(time.Time) tea.Msg { return autoPilotBackoffReadyMsg{} })
 	}
@@ -423,10 +423,11 @@ func (m watchModel) handleJobsRefreshed(msg watchJobsRefreshedMsg) (tea.Model, t
 	m.ensurePreservedJobAttachmentMap()
 	// Track instances that transitioned to retryable-failed via reconciliation,
 	// so we can trigger auto-relaunch (handleWatchUpdate handles the watch-channel path).
+	enabled := m.autopilotEnabled()
 	var newlyFailed *db.Launch
 	for id, ci := range msg.cloudInstances {
 		u := m.updates[id]
-		if m.autoMode && !m.retrying {
+		if enabled && !m.retrying {
 			prev := u.Launch
 			wasTerminal := prev != nil && campaign.IsInstanceTerminal(prev.Status)
 			if !wasTerminal && db.IsRetryableTermination(ci) {
@@ -630,11 +631,9 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 	}
 	m.clampCursor()
 
-	// Trigger auto-pilot if enabled
-	if m.autoMode {
-		if cmd := m.runAutoPilot(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+	// Trigger an auto-pilot pass; runAutoPilot self-gates on the global state.
+	if cmd := m.runAutoPilot(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -657,11 +656,9 @@ func (m watchModel) handleProjectLoaded(msg watchProjectLoadedMsg) (tea.Model, t
 	m.clampCursor()
 	m.adjustProjectOffset()
 
-	// Trigger auto-pilot if enabled
-	if m.autoMode {
-		if cmd := m.runAutoPilot(); cmd != nil {
-			return m, cmd
-		}
+	// Trigger an auto-pilot pass; runAutoPilot self-gates on the global state.
+	if cmd := m.runAutoPilot(); cmd != nil {
+		return m, cmd
 	}
 	return m, nil
 }

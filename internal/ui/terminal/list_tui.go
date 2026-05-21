@@ -71,7 +71,6 @@ type listTUIModel struct {
 	hideStatusArea             bool
 	groupedRows                []groupedStatusRow
 	groupedSelectableRows      []int
-	autoMode                   bool
 	autoInProgress             bool
 	autoPassStartedAt          time.Time
 	autoPassPhase              autoPilotPhaseHint
@@ -310,9 +309,9 @@ var (
 	listTUIEmptyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
 )
 
-func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) error {
+func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, projectFilter string) error {
 	cfg, _ := config.Load()
-	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, autoMode, projectFilter)
+	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 
 	outputOpt, restore := InstallTUIStdioCapture()
 
@@ -330,7 +329,7 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	return nil
 }
 
-func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) listTUIModel {
+func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, projectFilter string) listTUIModel {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg, _ := config.Load()
 	cloudClients, _ := buildCloudClients(cfg)
@@ -364,7 +363,6 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		groupedByStatus:        groupedByStatus,
 		groupedUnprocessedView: unprocessedView,
 		projectFilter:          projectFilter,
-		autoMode:               groupedByStatus && autoMode,
 		autoLeaseOwner:         fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		autoLeaseScope:         buildListAutoLeaseScope(baseTitle),
 		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
@@ -468,19 +466,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "A":
 			if m.isGroupedView() {
-				m.autoMode = !m.autoMode
-				if m.autoMode {
-					m.clearAutoPilotPersistentState()
-					m.resumeAutoPilotNow()
-					m.statusMessage = "Auto-pilot ON"
-					return m, m.runAutoPilot()
-				}
-				m.autoInProgress = false
-				m.autoBlockReasons = nil
-				m.clearAutoPilotPersistentState()
-				_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-				m.statusMessage = "Auto-pilot OFF"
-				return m, nil
+				return m.toggleAutopilot()
 			}
 		case "n":
 			if !m.isGroupedView() {
@@ -713,7 +699,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.autoInProgress = false
-		if !m.autoMode {
+		if m.autopilotPaused {
+			// Autopilot was disabled while this pass was in flight; drop
+			// the result rather than acting on it.
 			return m, nil
 		}
 		m.autoBlockReasons = msg.blockedReasons
@@ -1320,7 +1308,6 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		}
 	}
 	return autopilotStatusLine(autopilotDisplayInput{
-		autoMode:        m.autoMode,
 		inputActive:     m.autoRunRateInputActive,
 		paused:          m.autopilotPaused,
 		pausedReason:    m.autopilotPausedReason,
@@ -1347,7 +1334,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		// muddle the picture.
 		return ""
 	}
-	autoState := autopilotFooterState(m.autoMode, m.autopilotPaused)
+	autoState := autopilotFooterState(m.autopilotPaused)
 	line := "group:" + listGroupModeLabel(m.effectiveGroupMode())
 	if m.isStatusGroupedView() {
 		line += fmt.Sprintf("  %s (%s)", listKeyGroupedAuto.footerToken(), autoState)
@@ -2744,8 +2731,40 @@ func buildListAutoLeaseScope(title string) string {
 	return "list_grouped_status:" + scope
 }
 
+// toggleAutopilot flips the singleton autopilot enabled/disabled state. The
+// A key is a control for the one global flag — there is no per-surface
+// toggle — so it writes autopilot_state, which every surface then reflects.
+func (m listTUIModel) toggleAutopilot() (tea.Model, tea.Cmd) {
+	if m.database == nil {
+		return m, nil
+	}
+	if m.autopilotPaused {
+		if _, err := db.ResumeAutopilot(m.database); err != nil {
+			m.statusMessage = "Auto-pilot: resume failed: " + err.Error()
+			return m, nil
+		}
+		m.autopilotPaused = false
+		m.autopilotPausedReason = ""
+		m.clearAutoPilotPersistentState()
+		m.resumeAutoPilotNow()
+		m.statusMessage = "Auto-pilot enabled"
+		return m, tea.Batch(m.runAutoPilot(), m.reloadJobs())
+	}
+	if _, err := db.PauseAutopilot(m.database, autopilotActor(), ""); err != nil {
+		m.statusMessage = "Auto-pilot: pause failed: " + err.Error()
+		return m, nil
+	}
+	m.autopilotPaused = true
+	m.autoInProgress = false
+	m.autoBlockReasons = nil
+	m.clearAutoPilotPersistentState()
+	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+	m.statusMessage = "Auto-pilot paused"
+	return m, m.reloadJobs()
+}
+
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
-	if !m.isStatusGroupedView() || !m.autoMode || m.autoInProgress || m.database == nil {
+	if !m.isStatusGroupedView() || m.autopilotPaused || m.autoInProgress || m.database == nil {
 		return nil
 	}
 	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {

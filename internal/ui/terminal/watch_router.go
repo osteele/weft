@@ -87,7 +87,6 @@ type watchRouterModel struct {
 	projectSync   bool          // preserve project watch sync mode across launch round-trips
 	instanceIDs   []int64       // instance IDs for instance-based modes
 	r2Client      *r2.Client    // R2 client for instance-based modes
-	autoMode      bool          // initial auto-pilot state for new watch models
 	listArgs      []string      // list query args (nil = default recent jobs)
 	listTitle     string        // list title
 	listSync      bool          // list sync mode
@@ -135,15 +134,13 @@ func (m routerLoadingModel) View() string {
 	return watchDimStyle.Render(truncateDisplayWidth(message, width)) + "\n"
 }
 
-func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, autoMode bool) watchRouterModel {
+func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) watchRouterModel {
 	watch := newSystemWatchModel(database, cfg, flash)
-	watch.autoMode = autoMode
 	r := watchRouterModel{
 		active:    watch,
 		database:  database,
 		config:    cfg,
 		homeMode:  watchModeSystem,
-		autoMode:  autoMode,
 		listArgs:  nil,
 		listTitle: "Jobs",
 		listSync:  true,
@@ -207,11 +204,10 @@ func (m *watchRouterModel) stopBanners() {
 	}
 }
 
-func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client, autoMode bool, projectFilter string) watchRouterModel {
+func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client, projectFilter string) watchRouterModel {
 	watch := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
 	watch.projectFilter = projectFilter
 	watch.unplacedJobs = filterInstanceModeUnplacedJobs(watch.unplacedJobs, projectFilter)
-	watch.autoMode = autoMode
 	r := watchRouterModel{
 		active:        watch,
 		database:      database,
@@ -220,7 +216,6 @@ func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watc
 		instanceIDs:   instanceIDs,
 		r2Client:      r2Client,
 		projectFilter: projectFilter,
-		autoMode:      autoMode,
 		listArgs:      nil,
 		listTitle:     "Jobs",
 		listSync:      true,
@@ -228,9 +223,8 @@ func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watc
 	return r.startBanners()
 }
 
-func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string, autoMode bool) watchRouterModel {
+func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string) watchRouterModel {
 	watch := newProjectWatchModel(database, cfg, recentWindow, syncEnabled, projectFilter)
-	watch.autoMode = autoMode
 	r := watchRouterModel{
 		active:        watch,
 		database:      database,
@@ -239,7 +233,6 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 		projectFilter: projectFilter,
 		projectRecent: recentWindow,
 		projectSync:   syncEnabled,
-		autoMode:      autoMode,
 		listArgs:      nil,
 		listTitle:     "Jobs",
 		listSync:      true,
@@ -247,15 +240,14 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 	return r.startBanners()
 }
 
-func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, autoMode bool, projectFilter string) watchRouterModel {
-	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, autoMode, projectFilter)
+func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, projectFilter string) watchRouterModel {
+	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 	r := watchRouterModel{
 		active:        list,
 		database:      database,
 		config:        cfg,
 		homeMode:      watchModeSystem,
 		projectFilter: projectFilter,
-		autoMode:      autoMode,
 		listArgs:      append([]string(nil), args...),
 		listTitle:     title,
 		listSync:      syncEnabled,
@@ -342,7 +334,6 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case switchToLaunchMsg:
 		// Clean up watch model and sync auto-pilot state
 		if w, ok := m.active.(watchModel); ok {
-			m.autoMode = w.autoMode
 			if m.homeMode.isInstanceBased() {
 				m.instanceIDs = append([]int64(nil), w.instanceIDs...)
 			}
@@ -351,9 +342,6 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.prepareLaunch()
 
 	case switchToSystemWatchMsg:
-		if l, ok := m.active.(listTUIModel); ok {
-			m.autoMode = l.autoMode && l.groupedByStatus
-		}
 		m.homeMode = watchModeSystem
 		m.cleanupActive()
 		m.active = routerLoadingModel{message: "Opening instances watch..."}
@@ -368,9 +356,6 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.switchTo(msg.model)
 
 	case switchToListMsg:
-		if w, ok := m.active.(watchModel); ok {
-			m.autoMode = w.autoMode
-		}
 		m.cleanupActive()
 		list := m.buildJobsList(msg.groupedByStatus)
 		return m.switchTo(list)
@@ -426,10 +411,8 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m watchRouterModel) prepareSystemWatch() tea.Cmd {
 	database := m.database
 	cfg := m.config
-	autoMode := m.autoMode
 	return func() tea.Msg {
 		w := newSystemWatchModel(database, cfg, "")
-		w.autoMode = autoMode
 		return systemWatchReadyMsg{model: w}
 	}
 }
@@ -450,7 +433,6 @@ func (m watchRouterModel) buildJobsList(groupedByStatus bool) listTUIModel {
 		m.listTitle,
 		m.listSync,
 		groupedByStatus,
-		m.autoMode,
 		m.projectFilter,
 	)
 }
@@ -463,16 +445,13 @@ func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
 		w.projectFilter = m.projectFilter
 		w.unplacedJobs = filterInstanceModeUnplacedJobs(w.unplacedJobs, m.projectFilter)
 		w.flash = flashmsg.State{Message: flash}
-		w.autoMode = m.autoMode
 		return w
 	case m.homeMode == watchModeProject:
 		w := newProjectWatchModel(m.database, m.config, m.projectRecent, m.projectSync, m.projectFilter)
 		w.projectStatus = flash
-		w.autoMode = m.autoMode
 		return w
 	default:
 		w := newSystemWatchModel(m.database, m.config, flash)
-		w.autoMode = m.autoMode
 		return w
 	}
 }

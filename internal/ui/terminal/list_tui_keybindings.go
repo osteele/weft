@@ -302,19 +302,7 @@ func listGroupedKeyBindings() []listKeyBinding {
 				m.statusMessage = "Auto-pilot is available in grouped-by-status view"
 				return m, nil
 			}
-			m.autoMode = !m.autoMode
-			if m.autoMode {
-				m.clearAutoPilotPersistentState()
-				m.resumeAutoPilotNow()
-				m.statusMessage = "Auto-pilot ON"
-				return m, m.runAutoPilot()
-			}
-			m.autoInProgress = false
-			m.autoBlockReasons = nil
-			m.clearAutoPilotPersistentState()
-			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-			m.statusMessage = "Auto-pilot OFF"
-			return m, nil
+			return m.toggleAutopilot()
 		}},
 		listKeyBinding{keys: "$", action: "budget", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if !m.isStatusGroupedView() {

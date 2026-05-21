@@ -1,11 +1,13 @@
 # Autopilot
 
 The **autopilot** is the engine that drives auto-placement and auto-launch
-decisions. Any TUI with auto-mode enabled (`weft list`, `weft watch`, `weft
-project watch`) takes a turn driving it; an unattended process can run it
-directly with `weft autopilot run`. This guide covers the operator surfaces:
-how to see what the autopilot is doing, how to interpret its blocked-state
-diagnostics, and how to clear stuck state.
+decisions. It is either globally enabled or disabled — a single state shared
+by every weft process; there is no per-window toggle. While enabled, whichever
+process is around drives the passes: any open TUI (`weft list`, `weft watch`,
+`weft project watch`) takes a turn, or an unattended process runs it directly
+with `weft autopilot run`. This guide covers the operator surfaces: how to see
+what the autopilot is doing, how to interpret its blocked-state diagnostics,
+and how to clear stuck state.
 
 ## Inspecting state
 
@@ -20,10 +22,12 @@ commands without racing. `running` means a TUI or `autopilot run` loop is
 currently driving a pass — wait or pause before issuing manual launches.
 `stale` means a runner claimed the slot but its heartbeat has aged out
 (usually a crashed TUI); the next runner will reclaim. `paused` is sticky
-across restarts and means every runner is skipping its pass — see "Pause /
-resume" below.
+across restarts and means the autopilot is disabled — every runner is skipping
+its pass — see "Enabling and disabling" below.
 
-## Pause and resume
+## Enabling and disabling
+
+The autopilot is enabled or disabled globally. Toggle it from the CLI:
 
 ```bash
 weft autopilot pause --reason "manual launch run"
@@ -31,9 +35,12 @@ weft autopilot pause --reason "manual launch run"
 weft autopilot resume
 ```
 
-Pause is the right tool when you need to launch instances or restart jobs by
-hand without the autopilot picking the same work in parallel. It is sticky:
-restart and reboot do not clear it. Always remember to resume.
+or press `A` in any grouped-status or instance TUI — the `A` key toggles the
+same global state, and the footer (`A:auto (ON)` / `A:auto (OFF)`) reflects it.
+
+Disable the autopilot when you need to launch instances or restart jobs by
+hand without it picking the same work in parallel. The disabled state is
+sticky: restart and reboot do not clear it. Always remember to re-enable.
 
 ## Why is a job paused? — the runaway breaker
 
@@ -128,8 +135,8 @@ budget reset only manages the global scope.
 
 ### TUI
 
-In any TUI with auto-mode enabled (`weft list`, `weft watch`, `weft project
-watch`):
+In any TUI's grouped-status or instance view (`weft list`, `weft watch`,
+`weft project watch`):
 
 1. Press `$` to open the run-rate / daily-cap prompt.
 2. Press `h` or `d` to edit the hourly target or daily cap. `Enter` saves and

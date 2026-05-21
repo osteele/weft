@@ -279,7 +279,7 @@ weft instance info <instance-id>        # Alias for status
 
 ### Unattended runaway protection
 
-When `--auto` is enabled, weft includes a runaway breaker to prevent
+While the autopilot is enabled, weft includes a runaway breaker to prevent
 launch/die loops from running unattended for long periods.
 
 The breaker watches relaunch behavior at the campaign/project scope and

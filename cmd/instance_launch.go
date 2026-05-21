@@ -51,7 +51,6 @@ var (
 	instanceLaunchProject           string
 	instanceLaunchTUI               bool
 	instanceLaunchPlain             bool
-	instanceLaunchAuto              bool
 )
 
 func addInstanceLaunchFlags(cmd *cobra.Command) {
@@ -72,7 +71,6 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&instanceLaunchProject, "project", "", "Filter unplaced jobs by project name")
 	cmd.Flags().BoolVar(&instanceLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&instanceLaunchPlain, "plain", false, "Force plain non-interactive mode")
-	cmd.Flags().BoolVar(&instanceLaunchAuto, "auto", false, "Start watch with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
 }
@@ -204,7 +202,7 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return watchAndReport(database, useTUI, mode, watchIDs, campaign.SummarizeEstimates(finalModel.CostEstimates), instanceLaunchAuto, projectFilter)
+		return watchAndReport(database, useTUI, mode, watchIDs, campaign.SummarizeEstimates(finalModel.CostEstimates), projectFilter)
 	}
 
 	// Inline watch already ran inside the TUI — print the exit report
@@ -522,7 +520,7 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 		if err != nil {
 			return err
 		}
-		return watchAndReport(database, watchTUI, mode, watchIDs, campaign.SummarizeEstimates(estimates), instanceLaunchAuto, projectFilter)
+		return watchAndReport(database, watchTUI, mode, watchIDs, campaign.SummarizeEstimates(estimates), projectFilter)
 	}
 
 	return nil

@@ -38,7 +38,7 @@ func TestProjectWatchRouterPrepareLaunchFiltersToProject(t *testing.T) {
 			},
 		},
 	}
-	router := newProjectWatchRouterModel(database, cfg, 24*time.Hour, false, "ALPHA", false)
+	router := newProjectWatchRouterModel(database, cfg, 24*time.Hour, false, "ALPHA")
 
 	msg, ok := router.prepareLaunch()().(launchPlanReadyMsg)
 	if !ok {

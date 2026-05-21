@@ -14,11 +14,21 @@ import (
 // Key handling
 // ---------------------------------------------------------------------------
 
+// handleToggleAutoPilot flips the singleton autopilot enabled/disabled state.
+// The A key is a control for the one global flag — there is no per-surface
+// toggle — so it writes autopilot_state, which every surface then reflects.
 func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
-	m.autoMode = !m.autoMode
-	if m.autoMode {
+	if m.database == nil {
+		return m, nil
+	}
+	if m.autopilotPaused {
+		if _, err := db.ResumeAutopilot(m.database); err != nil {
+			return m, m.flash.Set("Auto-pilot resume failed: "+err.Error(), true)
+		}
+		m.autopilotPaused = false
+		m.autopilotPausedReason = ""
 		m.clearAutoPilotPersistentState()
-		cmds := []tea.Cmd{m.flash.Set("Auto-pilot ON", false)}
+		cmds := []tea.Cmd{m.flash.Set("Auto-pilot enabled", false)}
 		if cmd := m.runAutoPilot(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -30,11 +40,15 @@ func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	}
+	if _, err := db.PauseAutopilot(m.database, autopilotActor(), ""); err != nil {
+		return m, m.flash.Set("Auto-pilot pause failed: "+err.Error(), true)
+	}
+	m.autopilotPaused = true
 	m.autoNoopReasons = map[int64]string{}
 	m.resetAutoLaunchBackoff()
 	m.autoPassInFlight = false
 	m.clearAutoPilotPersistentState()
-	return m, m.flash.Set("Auto-pilot OFF", false)
+	return m, m.flash.Set("Auto-pilot paused", false)
 }
 
 func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -440,7 +454,7 @@ func (m watchModel) handleAutoRunRateInputKey(msg tea.KeyMsg) (tea.Model, tea.Cm
 	if eff.StatusText != "" {
 		flashCmd = m.flash.Set(eff.StatusText, eff.StatusIsError)
 	}
-	if eff.RetriggerPilot && m.autoMode && len(m.unplacedJobs) > 0 {
+	if eff.RetriggerPilot && len(m.unplacedJobs) > 0 {
 		if cmd := m.runAutoPilot(); cmd != nil {
 			if flashCmd != nil {
 				return m, tea.Batch(flashCmd, cmd)

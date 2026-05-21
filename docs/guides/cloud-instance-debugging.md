@@ -210,7 +210,7 @@ subject to retry budget), re-launch with `weft instance launch`, or adjust
 
 ### Auto-relaunch blocked by runaway breaker
 
-In unattended `--auto` mode, Weft can halt relaunches when it detects repeated
+While the autopilot is enabled, Weft can halt relaunches when it detects repeated
 no-progress churn (for example, repeated orphaned retries and spend growth with
 no completions in the same campaign/project scope).
 

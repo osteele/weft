@@ -131,7 +131,6 @@ func addListFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&listPlain, "plain", false, "Force plain one-shot output")
 	cmd.Flags().BoolVarP(&listWatch, "watch", "w", false, "Deprecated alias for --tui")
-	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start watch mode with auto-pilot enabled (grouped status views)")
 	cmd.Flags().StringVar(&listGroupBy, "group-by", "", `Group output: "status", "project"`)
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("watch", "plain")
@@ -237,11 +236,7 @@ func runListTUI(cmd *cobra.Command, readDB *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	autoMode := watchAuto
-	if listGroupBy == "status" && !cmd.Flags().Changed("auto") {
-		autoMode = true
-	}
-	return terminal.RunListTUI(database, args, jobs, buildListTitle(args), !listNoSync, listGroupBy == "status", autoMode, listProject)
+	return terminal.RunListTUI(database, args, jobs, buildListTitle(args), !listNoSync, listGroupBy == "status", listProject)
 }
 
 func resolveListMode() (bool, error) {

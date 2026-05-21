@@ -328,23 +328,15 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 	var b strings.Builder
 	switch view.State {
 	case stateRunning:
-		fmt.Fprintf(&b, "autopilot: RUNNING — %s (pid %d on %s), pass started %s ago, heartbeat %s ago",
-			defaultStr(view.ActiveRunnerLabel, "unknown"),
-			view.ActiveRunnerPID,
-			defaultStr(view.ActiveRunnerHost, "?"),
-			db.FormatDuration(view.PassAgeSeconds),
-			db.FormatDuration(view.HeartbeatAgeS))
+		// The runner's identity (which process drives the pass) is an
+		// internal detail — surface only that a pass is in progress.
+		fmt.Fprintf(&b, "autopilot: RUNNING — pass in progress, started %s ago",
+			db.FormatDuration(view.PassAgeSeconds))
 	case stateStale:
 		if view.ActiveBinaryStale {
-			fmt.Fprintf(&b, "autopilot: STALE — %s (pid %d on %s) is running an old weft binary; restart autopilot",
-				defaultStr(view.ActiveRunnerLabel, "unknown"),
-				view.ActiveRunnerPID,
-				defaultStr(view.ActiveRunnerHost, "?"))
+			fmt.Fprint(&b, "autopilot: STALE — autopilot is running an old weft binary; restart it")
 		} else {
-			fmt.Fprintf(&b, "autopilot: STALE — %s (pid %d on %s) claimed pass but heartbeat is %s old (>%ds); next runner will reclaim",
-				defaultStr(view.ActiveRunnerLabel, "unknown"),
-				view.ActiveRunnerPID,
-				defaultStr(view.ActiveRunnerHost, "?"),
+			fmt.Fprintf(&b, "autopilot: STALE — pass claim is %s old (>%ds) and will be reclaimed",
 				db.FormatDuration(view.HeartbeatAgeS),
 				view.StaleAfterSeconds)
 		}

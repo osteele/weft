@@ -1240,8 +1240,8 @@ rule AttemptsViewIsReadOnly {
         -- Entry from TUIs: pressing `a` on a selected job row in the
         -- jobs list, system/project/instance watches, or any future
         -- job-listing TUI pushes this view and restores the caller on
-        -- return. The `A` key (shift-a) remains the auto-pilot toggle
-        -- in watches and the grouped jobs list.
+        -- return. The `A` key (shift-a) remains the global auto-pilot
+        -- enable/disable toggle in watches and the grouped jobs list.
         --
         -- Implementation:
         --   internal/db/attempts.go               — ListAttempts query

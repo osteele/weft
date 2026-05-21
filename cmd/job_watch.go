@@ -63,11 +63,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		autoMode := watchAuto
-		if listGroupBy == "status" && !cmd.Flags().Changed("auto") {
-			autoMode = true
-		}
-		return terminal.RunListTUI(database, nil, jobs, buildListTitle(nil), !listNoSync, listGroupBy == "status", autoMode, listProject)
+		return terminal.RunListTUI(database, nil, jobs, buildListTitle(nil), !listNoSync, listGroupBy == "status", listProject)
 	}
 	return watchJobsPlainAll(database, watchPlainOptions())
 }

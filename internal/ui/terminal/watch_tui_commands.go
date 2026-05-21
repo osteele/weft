@@ -92,6 +92,18 @@ func (m watchModel) countRetryableFailedInstances() int {
 // Auto-pilot commands
 // ---------------------------------------------------------------------------
 
+// autopilotEnabled reports whether the singleton autopilot is enabled,
+// reading the authoritative DB state and refreshing the cached display
+// fields. Used by action gates (auto-relaunch) that do not flow through
+// runAutoPilot's own pause check.
+func (m *watchModel) autopilotEnabled() bool {
+	if m.database == nil {
+		return false
+	}
+	m.autopilotPaused, m.autopilotPausedReason = autopilotPauseState(m.database)
+	return !m.autopilotPaused
+}
+
 // runAutoPilot fires auto-placement and auto-launch commands if applicable.
 // It sets autoPlacing/autoLaunching flags on m (caller must use the returned
 // model state, as in Bubble Tea's value-receiver pattern).

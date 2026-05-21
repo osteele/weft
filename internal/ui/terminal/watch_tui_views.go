@@ -721,7 +721,7 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 func (m watchModel) autoModeHint() string {
 	// The target value lives on the Auto-pilot status line; keep only the
 	// `[$]` key hint here so the binding is still discoverable.
-	return fmt.Sprintf("[A] auto: %s  [$] target", autopilotFooterState(m.autoMode, m.autopilotPaused))
+	return fmt.Sprintf("[A] auto: %s  [$] target", autopilotFooterState(m.autopilotPaused))
 }
 
 func (m watchModel) autoPilotUnplacedCount() int {
@@ -810,7 +810,6 @@ func formatAgentBuildStatus() string {
 
 func (m watchModel) autoPilotStatusLine() string {
 	return autopilotStatusLine(autopilotDisplayInput{
-		autoMode:        m.autoMode,
 		inputActive:     m.autoRunRateInputActive,
 		paused:          m.autopilotPaused,
 		pausedReason:    m.autopilotPausedReason,
