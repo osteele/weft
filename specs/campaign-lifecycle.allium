@@ -89,6 +89,14 @@ entity Campaign {
     active_instances: instances where status not in {completed, failed, canceled}
     is_terminal: status in {completed, failed, canceled}
 
+    -- Jobs that have run on any of this campaign's instances, found via
+    -- their attempts. A job requeued for relaunch has its current
+    -- cloud_instance cleared, but the prior JobAttempt still links it
+    -- here — so requeued jobs are included and keep the campaign open.
+    -- Implementation: internal/campaign/reconcile.go allCampaignJobsTerminal,
+    -- via db.GetLaunchJobsIncludingAttempts (launch_job_membership view).
+    jobs: jobs/Job with attempts.any(a => a.cloud_instance in instances)
+
     transitions status {
         planned -> launching
         launching -> running
@@ -1285,10 +1293,16 @@ rule CampaignRunning {
     ensures: instance.campaign.status = running
 }
 
+-- A terminal instance can leave a job requeued for relaunch. Both rules
+-- below hold the campaign open until every job that ran on it is terminal,
+-- so the autopilot's relaunch lands on a still-running campaign instead of
+-- being stranded on one that has already ended.
+
 rule CampaignCompleted {
     when: campaign: Campaign.instances.all(i => i.is_terminal)
     requires: campaign.status in {launching, running}
     requires: campaign.instances.all(i => i.status = completed)
+    requires: campaign.jobs.all(j => j.is_terminal)
 
     ensures: campaign.status = completed
     ensures: campaign.ended_at = now
@@ -1298,6 +1312,7 @@ rule CampaignFailed {
     when: campaign: Campaign.instances.all(i => i.is_terminal)
     requires: campaign.status in {launching, running}
     requires: campaign.instances.any(i => i.status != completed)
+    requires: campaign.jobs.all(j => j.is_terminal)
 
     ensures: campaign.status = failed
     ensures: campaign.ended_at = now

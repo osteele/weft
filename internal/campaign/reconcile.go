@@ -756,6 +756,15 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 			continue
 		}
 
+		// A terminal instance can leave behind a job that was requeued for
+		// relaunch. Don't end the campaign while any job that ran on its
+		// instances is still non-terminal: the autopilot will relaunch it
+		// into this campaign, and ending now would strand that relaunch on
+		// an already-terminal campaign.
+		if !allCampaignJobsTerminal(database, instances) {
+			continue
+		}
+
 		// All instances are terminal; only an all-completed campaign counts as
 		// successful. Any failed/cancelled/mixed terminal outcome is a failure.
 		allCompleted := true
@@ -779,6 +788,36 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 		}
 	}
 	return completed, nil
+}
+
+// allCampaignJobsTerminal reports whether every job that has run on any of
+// the given launches has reached a terminal status. Membership is read via
+// GetLaunchJobsIncludingAttempts, which unions current and historical
+// launch_job_membership rows, so a job requeued off a terminal instance
+// (its launch_id cleared) still surfaces. A non-terminal job keeps the
+// campaign open.
+func allCampaignJobsTerminal(database *sql.DB, instances []*db.Launch) bool {
+	seen := make(map[int64]struct{})
+	for _, inst := range instances {
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
+		if err != nil {
+			// Treat an unreadable launch as still-pending so a transient
+			// DB error never ends a campaign on incomplete information.
+			slog.Warn("reconcile campaigns: load launch jobs",
+				"component", "reconcile", "instance", inst.ID, "error", err)
+			return false
+		}
+		for _, j := range jobs {
+			if _, ok := seen[j.ID]; ok {
+				continue
+			}
+			seen[j.ID] = struct{}{}
+			if !db.IsTerminalStatus(j.EffectiveStatus()) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // graceStatusPayload is the JSON structure written by the agent's grace-wait to R2.

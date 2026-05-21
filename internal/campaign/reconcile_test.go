@@ -1442,3 +1442,82 @@ func TestReconcileCampaigns_MixedTerminalInstancesBecomeFailed(t *testing.T) {
 		t.Fatalf("campaign status = %q, want %q", completed[0].Status, db.CampaignStatusFailed)
 	}
 }
+
+// TestReconcileCampaigns_StaysRunningWhileJobAwaitsRelaunch is a regression
+// test for the premature-end bug: a campaign whose instances are all terminal
+// must NOT be marked terminal while a job that ran on one of them has been
+// requeued for relaunch — otherwise the autopilot relaunches that job into an
+// already-ended campaign.
+func TestReconcileCampaigns_StaysRunningWhileJobAwaitsRelaunch(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	// A job that ran on the failed instance and was requeued for relaunch:
+	// requested_status='queued', with a closed orphaned attempt on the launch.
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned, requested_status) VALUES (1, '/tmp', 'python eval.py', 0, 'queued')`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, cloud_outcome = ?, end_time = ? WHERE id = ?`,
+		db.StatusCanceled, db.AttemptOutcomeOrphaned, time.Now().Unix(), attemptID,
+	); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+
+	// Phase 1: all instances terminal, but job 1 awaits relaunch.
+	// The campaign must stay running.
+	completed, err := ReconcileCampaigns(database)
+	if err != nil {
+		t.Fatalf("ReconcileCampaigns (phase 1): %v", err)
+	}
+	if len(completed) != 0 {
+		t.Fatalf("phase 1: completed campaigns = %d, want 0 (job awaits relaunch)", len(completed))
+	}
+	c, err := db.GetCampaign(database, campaignID)
+	if err != nil {
+		t.Fatalf("GetCampaign: %v", err)
+	}
+	if c.Status != db.CampaignStatusRunning {
+		t.Fatalf("phase 1: campaign status = %q, want %q", c.Status, db.CampaignStatusRunning)
+	}
+
+	// Phase 2: the job finishes. The campaign now ends — failed, because its
+	// instance was failed.
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = NULL WHERE id = 1`); err != nil {
+		t.Fatalf("clear requested_status: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, exit_code = 0, cloud_outcome = ? WHERE id = ?`,
+		db.StatusCompleted, db.AttemptOutcomeCompleted, attemptID,
+	); err != nil {
+		t.Fatalf("complete attempt: %v", err)
+	}
+	completed, err = ReconcileCampaigns(database)
+	if err != nil {
+		t.Fatalf("ReconcileCampaigns (phase 2): %v", err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("phase 2: completed campaigns = %d, want 1", len(completed))
+	}
+	if completed[0].Status != db.CampaignStatusFailed {
+		t.Fatalf("phase 2: campaign status = %q, want %q", completed[0].Status, db.CampaignStatusFailed)
+	}
+}
