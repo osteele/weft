@@ -3,27 +3,26 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// jobsTableViews lists the views that reference jobs columns and must be
-// dropped before any test ALTER TABLE jobs ... DROP COLUMN. The next Open()
-// recreates them via createJobStateViews.
-var jobsTableViews = []string{
-	"launch_job_membership", "job_status", "job_run_training_examples",
-	"training_examples", "job_effective_state", "all_runs",
-	"cloud_instance_job_membership",
-}
-
-func dropJobsViewsForTest(t *testing.T, database *sql.DB) {
+// setGooseVersionForTest forces the goose-recorded schema version of database
+// to v. v <= 0 removes the version table entirely, modelling a pre-goose
+// database that owes the baseline migration.
+func setGooseVersionForTest(t *testing.T, database *sql.DB, v int) {
 	t.Helper()
-	for _, v := range jobsTableViews {
-		if _, err := database.Exec(`DROP VIEW IF EXISTS ` + v); err != nil {
-			t.Fatalf("drop view %s: %v", v, err)
+	if v <= 0 {
+		if _, err := database.Exec(`DROP TABLE IF EXISTS goose_db_version`); err != nil {
+			t.Fatalf("drop goose_db_version: %v", err)
 		}
+		return
+	}
+	if _, err := database.Exec(
+		`INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`, v,
+	); err != nil {
+		t.Fatalf("set goose version %d: %v", v, err)
 	}
 }
 
@@ -54,20 +53,16 @@ func TestVerifySchemaVersion_DetectsBinaryNewerThanDB(t *testing.T) {
 	}
 	defer database.Close()
 
-	if _, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion-1)); err != nil {
-		t.Fatalf("set user_version: %v", err)
-	}
+	// Remove goose's version record: the DB now looks unmigrated.
+	setGooseVersionForTest(t, database, 0)
 
 	err = verifySchemaVersion(database)
-	if err == nil {
-		t.Fatal("expected ErrSchemaMismatch, got nil")
-	}
 	var e *ErrSchemaMismatch
 	if !errors.As(err, &e) {
 		t.Fatalf("expected ErrSchemaMismatch, got %T: %v", err, err)
 	}
-	if e.DBVersion != currentSchemaVersion-1 || e.BinaryVersion != currentSchemaVersion {
-		t.Fatalf("got DBVersion=%d BinaryVersion=%d", e.DBVersion, e.BinaryVersion)
+	if e.DBVersion >= e.BinaryVersion {
+		t.Fatalf("got DBVersion=%d BinaryVersion=%d, want DB behind binary", e.DBVersion, e.BinaryVersion)
 	}
 	if !strings.Contains(err.Error(), "Stop other weft processes") {
 		t.Fatalf("error message lacks recovery hint for owed-migration case: %s", err.Error())
@@ -85,20 +80,16 @@ func TestVerifySchemaVersion_DetectsDBNewerThanBinary(t *testing.T) {
 	}
 	defer database.Close()
 
-	if _, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion+5)); err != nil {
-		t.Fatalf("set user_version: %v", err)
-	}
+	// Record a migration version far beyond what this binary knows.
+	setGooseVersionForTest(t, database, 999)
 
 	err = verifySchemaVersion(database)
-	if err == nil {
-		t.Fatal("expected ErrSchemaMismatch, got nil")
-	}
 	var e *ErrSchemaMismatch
 	if !errors.As(err, &e) {
 		t.Fatalf("expected ErrSchemaMismatch, got %T: %v", err, err)
 	}
-	if e.DBVersion != currentSchemaVersion+5 || e.BinaryVersion != currentSchemaVersion {
-		t.Fatalf("got DBVersion=%d BinaryVersion=%d", e.DBVersion, e.BinaryVersion)
+	if e.DBVersion != 999 || e.DBVersion <= e.BinaryVersion {
+		t.Fatalf("got DBVersion=%d BinaryVersion=%d, want DB ahead of binary", e.DBVersion, e.BinaryVersion)
 	}
 	if !strings.Contains(err.Error(), "Upgrade weft") {
 		t.Fatalf("error message lacks upgrade hint for binary-outdated case: %s", err.Error())
@@ -110,27 +101,19 @@ func TestOpenForReading_RefusesStaleSchema(t *testing.T) {
 	cleanup := SetDBPath(dbFile)
 	defer cleanup()
 
-	// Force user_version *forward* past currentSchemaVersion. initSchema's
-	// fast-path then skips migrations (the schema is already "ahead"), so
-	// the post-Open verify must catch the mismatch. Rolling backward
-	// instead would just make migrations re-run and clear the mismatch
-	// before verify gets a chance to look.
+	// Record a version ahead of this binary; initSchema then has nothing
+	// pending, so the post-Open verify must catch the mismatch.
 	database, err := Open()
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if _, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion+1)); err != nil {
-		t.Fatalf("set user_version: %v", err)
-	}
+	setGooseVersionForTest(t, database, 999)
 	database.Close()
 
 	_, err = OpenForReading()
-	if err == nil {
-		t.Fatal("expected ErrSchemaMismatch from OpenForReading, got nil")
-	}
 	var e *ErrSchemaMismatch
 	if !errors.As(err, &e) {
-		t.Fatalf("expected ErrSchemaMismatch, got %T: %v", err, err)
+		t.Fatalf("expected ErrSchemaMismatch from OpenForReading, got %T: %v", err, err)
 	}
 }
 

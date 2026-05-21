@@ -43,17 +43,17 @@ type SchemaDriftConfig struct {
 	RelaunchSignal chan<- struct{}
 }
 
-// WatchSchemaDrift polls PRAGMA user_version every cfg.Interval and
-// reacts to drift:
+// WatchSchemaDrift polls the database's applied migration version every
+// cfg.Interval and reacts to drift:
 //
-//   - If user_version > currentSchemaVersion AND the on-disk binary has
+//   - If the DB version is ahead of this binary AND the on-disk binary has
 //     been modified since this process started, the binary on disk is
 //     "newer" and re-execing it will let it pick up the schema. Calls
 //     cfg.OnRelaunchEligible (or ExecSelf directly).
 //
-//   - If user_version > currentSchemaVersion BUT the on-disk binary is
-//     not newer, re-exec would just hit the same drift. Push a banner so
-//     the user knows the situation is stuck and needs manual intervention.
+//   - If the DB version is ahead BUT the on-disk binary is not newer,
+//     re-exec would just hit the same drift. Push a banner so the user
+//     knows the situation is stuck and needs manual intervention.
 //
 // Runs until ctx is cancelled. All errors are logged at debug level —
 // transient read failures should not produce user-visible noise.

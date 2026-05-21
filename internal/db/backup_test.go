@@ -113,19 +113,14 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 	cleanup := SetDBPath(dbFile)
 	defer cleanup()
 
-	// First Open creates the schema and writes user_version=current.
+	// First Open creates the schema and records the goose version.
 	database, err := Open()
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	// Drop a column and roll user_version back to simulate "old DB".
-	dropJobsViewsForTest(t, database)
-	if _, err := database.Exec(`ALTER TABLE jobs DROP COLUMN max_compute_cap`); err != nil {
-		t.Fatalf("drop column: %v", err)
-	}
-	if _, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion-1)); err != nil {
-		t.Fatalf("set user_version: %v", err)
-	}
+	// Remove goose's version table so the next Open sees the baseline as a
+	// pending migration on a populated database.
+	setGooseVersionForTest(t, database, 0)
 	database.Close()
 
 	// Snapshot directory must be empty before second Open.

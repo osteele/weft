@@ -117,11 +117,11 @@ test-all:
 test-verbose:
     go test -short -v ./...
 
-# Append the current table schema to internal/db/testdata/schema_history.txt.
-# Only succeeds after a new versionedMigrations entry has bumped the schema
-# version (regeneration is create-only; it never rewrites a recorded version).
+# Regenerate internal/db/testdata/schema.txt, the table-schema golden the
+# schema-guard test compares against. Run after a goose migration intentionally
+# changes the schema.
 regen-schema-golden:
-    WEFT_UPDATE_SCHEMA_HISTORY=1 go test ./internal/db -run TestTableSchemaMatchesHistory -count=1 -v
+    WEFT_UPDATE_SCHEMA_GOLDEN=1 go test ./internal/db -run TestSchemaMatchesGolden -count=1 -v
 
 # Run integration tests (requires .env with SSH_TEST_HOST)
 # Note: SLURM tests skipped due to SLURM scheduler issues on test server

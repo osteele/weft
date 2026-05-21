@@ -5,28 +5,24 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-// schemaHistoryPath is the append-only record of the table schema at each
-// schema version, relative to this package directory (the test CWD).
-const schemaHistoryPath = "testdata/schema_history.txt"
+// schemaGoldenPath is the recorded fingerprint of the table schema produced by
+// the squashed baseline (plus any later migrations), relative to this package
+// directory (the test CWD).
+const schemaGoldenPath = "testdata/schema.txt"
 
-// TestTableSchemaMatchesHistory enforces that every change to a persistent
-// table's columns or constraints is recorded against a fresh schema version.
+// TestSchemaMatchesGolden fingerprints the tables of a freshly-migrated
+// database and compares the result to testdata/schema.txt. Any unintended
+// schema change — a column, constraint, foreign key or unique index that
+// drifted without a corresponding migration — fails the test.
 //
-// It fingerprints the tables of a freshly-initialized database and compares
-// the result to the last section of testdata/schema_history.txt. The history
-// file is append-only with create-only regeneration (see updateSchemaHistory):
-// the only way to record a changed table schema is a new currentSchemaVersion,
-// which can only come from appending a versionedMigrations entry. This closes
-// the recurring bug where a column was added without a migration, so existing
-// databases fast-pathed past the migration and broke at runtime.
+// When a migration legitimately changes the schema, regenerate the golden:
 //
-// Regenerate with: just regen-schema-golden
-func TestTableSchemaMatchesHistory(t *testing.T) {
+//	WEFT_UPDATE_SCHEMA_GOLDEN=1 go test ./internal/db/ -run TestSchemaMatchesGolden
+func TestSchemaMatchesGolden(t *testing.T) {
 	db := SetupTestDB(t)
 
 	live, err := fingerprintTableSchema(db)
@@ -35,45 +31,25 @@ func TestTableSchemaMatchesHistory(t *testing.T) {
 	}
 	live = strings.TrimSpace(live)
 
-	sections, err := readSchemaHistory(schemaHistoryPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", schemaHistoryPath, err)
-	}
-
-	if os.Getenv("WEFT_UPDATE_SCHEMA_HISTORY") != "" {
-		updated, err := updateSchemaHistory(schemaHistoryPath, sections, currentSchemaVersion, live)
-		if err != nil {
-			t.Fatalf("update schema history: %v", err)
+	if os.Getenv("WEFT_UPDATE_SCHEMA_GOLDEN") != "" {
+		if err := os.WriteFile(schemaGoldenPath, []byte(live+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", schemaGoldenPath, err)
 		}
-		if updated {
-			t.Logf("appended [version %d] to %s", currentSchemaVersion, schemaHistoryPath)
-		} else {
-			t.Logf("%s already current at version %d", schemaHistoryPath, currentSchemaVersion)
-		}
+		t.Logf("updated %s", schemaGoldenPath)
 		return
 	}
 
-	if len(sections) == 0 {
-		t.Fatalf("%s is empty — run `just regen-schema-golden` to create the first section", schemaHistoryPath)
+	want, err := os.ReadFile(schemaGoldenPath)
+	if err != nil {
+		t.Fatalf("read %s (regenerate with WEFT_UPDATE_SCHEMA_GOLDEN=1): %v", schemaGoldenPath, err)
 	}
-	last := sections[len(sections)-1]
-
-	if last.version != currentSchemaVersion {
-		t.Fatalf("%s last records version %d but currentSchemaVersion is %d.\n"+
-			"If you added a versionedMigrations entry, run `just regen-schema-golden` "+
-			"to append a [version %d] section.",
-			schemaHistoryPath, last.version, currentSchemaVersion, currentSchemaVersion)
-	}
-
-	if last.body != live {
-		t.Fatalf("table schema for version %d changed but currentSchemaVersion did not bump.\n\n"+
-			"A table column or constraint changed. Add a versionedMigrations entry "+
-			"(this bumps currentSchemaVersion via migrations.go), then run "+
-			"`just regen-schema-golden`.\n"+
-			"Do NOT edit the existing [version %d] section of %s.\n\n"+
-			"schema diff (recorded -> live):\n%s",
-			currentSchemaVersion, currentSchemaVersion, schemaHistoryPath,
-			diffLines(last.body, live))
+	wantStr := strings.TrimSpace(string(want))
+	if wantStr != live {
+		t.Fatalf("table schema drifted from %s.\n\n"+
+			"If this is an intended migration, regenerate the golden:\n"+
+			"  WEFT_UPDATE_SCHEMA_GOLDEN=1 go test ./internal/db/ -run TestSchemaMatchesGolden\n\n"+
+			"schema diff (golden -> live):\n%s",
+			schemaGoldenPath, diffLines(wantStr, live))
 	}
 }
 
@@ -106,7 +82,8 @@ func TestValidateViews_DetectsBrokenView(t *testing.T) {
 // extracted from the stored CREATE TABLE text and whitespace-normalized.
 func fingerprintTableSchema(db *sql.DB) (string, error) {
 	rows, err := db.Query(`SELECT name, sql FROM sqlite_master
-		WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+		WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+		  AND name != 'goose_db_version' ORDER BY name`)
 	if err != nil {
 		return "", fmt.Errorf("list tables: %w", err)
 	}
@@ -320,98 +297,6 @@ func isSpace(c byte) bool {
 
 func normalizeWS(s string) string {
 	return strings.Join(strings.Fields(s), " ")
-}
-
-// --- append-only schema history file -------------------------------------
-
-type schemaSection struct {
-	version int
-	body    string
-}
-
-// readSchemaHistory parses the version-delimited history file. A missing file
-// yields an empty slice so the first regeneration can create it.
-func readSchemaHistory(path string) ([]schemaSection, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var sections []schemaSection
-	var cur *schemaSection
-	var body []string
-	flush := func() {
-		if cur != nil {
-			cur.body = strings.TrimSpace(strings.Join(body, "\n"))
-			sections = append(sections, *cur)
-		}
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if v, ok := parseVersionHeader(line); ok {
-			flush()
-			cur = &schemaSection{version: v}
-			body = nil
-			continue
-		}
-		if cur != nil {
-			body = append(body, line)
-		}
-	}
-	flush()
-	return sections, nil
-}
-
-func parseVersionHeader(line string) (int, bool) {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "[version ") || !strings.HasSuffix(line, "]") {
-		return 0, false
-	}
-	v, err := strconv.Atoi(strings.TrimSpace(line[len("[version ") : len(line)-1]))
-	if err != nil {
-		return 0, false
-	}
-	return v, true
-}
-
-// updateSchemaHistory appends a new [version] section for the current schema
-// version. Regeneration is create-only: an existing section is never
-// rewritten. If the schema changed but the version did not bump, this refuses
-// — forcing the developer to add a versionedMigrations entry first. Returns
-// true if a section was appended.
-func updateSchemaHistory(path string, sections []schemaSection, version int, body string) (bool, error) {
-	if len(sections) > 0 {
-		last := sections[len(sections)-1]
-		if last.version > version {
-			return false, fmt.Errorf("%s records version %d, newer than currentSchemaVersion %d",
-				path, last.version, version)
-		}
-		if last.version == version {
-			if last.body == body {
-				return false, nil
-			}
-			return false, fmt.Errorf("version %d is already recorded in %s and is frozen; "+
-				"a table changed — add a versionedMigrations entry (which bumps "+
-				"currentSchemaVersion) before regenerating", version, path)
-		}
-	}
-	sections = append(sections, schemaSection{version: version, body: body})
-	return true, writeSchemaHistory(path, sections)
-}
-
-func writeSchemaHistory(path string, sections []schemaSection) error {
-	var b strings.Builder
-	b.WriteString("# Append-only record of the table schema at each schema version.\n")
-	b.WriteString("# Generated by TestTableSchemaMatchesHistory; regenerate with `just regen-schema-golden`.\n")
-	b.WriteString("# Never edit an existing [version N] section by hand.\n")
-	for _, s := range sections {
-		b.WriteString("\n")
-		fmt.Fprintf(&b, "[version %d]\n", s.version)
-		b.WriteString(strings.TrimSpace(s.body))
-		b.WriteString("\n")
-	}
-	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 // diffLines renders a compact set-difference of two multi-line strings.

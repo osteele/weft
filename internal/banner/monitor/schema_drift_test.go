@@ -20,9 +20,11 @@ func TestCheckSchemaDriftOnce_PushesBannerWhenDBIsAheadAndBinaryNotNewer(t *test
 	}
 	defer database.Close()
 
-	// Force user_version forward to simulate "DB ahead of this binary".
-	if _, err := database.Exec(`PRAGMA user_version = 999`); err != nil {
-		t.Fatalf("set user_version: %v", err)
+	// Record a migration version ahead of this binary to simulate "DB ahead".
+	if _, err := database.Exec(
+		`INSERT INTO goose_db_version (version_id, is_applied) VALUES (999, 1)`,
+	); err != nil {
+		t.Fatalf("set goose version: %v", err)
 	}
 
 	bus := banner.NewBus()
@@ -60,8 +62,10 @@ func TestCheckSchemaDriftOnce_RelaunchesWhenBinaryIsNewer(t *testing.T) {
 	}
 	defer database.Close()
 
-	if _, err := database.Exec(`PRAGMA user_version = 999`); err != nil {
-		t.Fatalf("set user_version: %v", err)
+	if _, err := database.Exec(
+		`INSERT INTO goose_db_version (version_id, is_applied) VALUES (999, 1)`,
+	); err != nil {
+		t.Fatalf("set goose version: %v", err)
 	}
 
 	bus := banner.NewBus()

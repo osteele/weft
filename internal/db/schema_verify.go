@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/osteele/weft/internal/db/migrations"
 )
 
 // ErrSchemaMismatch signals an incompatibility between this binary's
@@ -43,41 +46,25 @@ func (e *ErrSchemaMismatch) Error() string {
 	)
 }
 
-// verifySchemaVersion compares the on-disk PRAGMA user_version with this
-// binary's currentSchemaVersion. Returns ErrSchemaMismatch if they differ
-// in either direction.
+// verifySchemaVersion compares the migration version applied to the database
+// (tracked by goose) against the highest version this binary knows about.
+// Returns ErrSchemaMismatch if they differ in either direction.
 func verifySchemaVersion(database *sql.DB) error {
-	v, err := readUserVersion(database)
-	if err != nil {
-		return fmt.Errorf("read user_version: %w", err)
-	}
-	if v == currentSchemaVersion {
+	dbVersion := int(migrations.Version(context.Background(), database))
+	target := int(migrations.Target())
+	if dbVersion == target {
 		return nil
 	}
 	return &ErrSchemaMismatch{
-		DBVersion:     v,
-		BinaryVersion: currentSchemaVersion,
+		DBVersion:     dbVersion,
+		BinaryVersion: target,
 		DBPath:        dbPath,
 	}
 }
 
-// readUserVersion returns the on-disk schema version recorded in
-// PRAGMA user_version. Cheap; safe on read-only connections.
-func readUserVersion(database *sql.DB) (int, error) {
-	var v int
-	if err := database.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
-		return 0, err
-	}
-	return v, nil
-}
-
-// ObservedSchemaVersions returns (currentSchemaVersion, on-disk user_version)
-// in one call. Used by schema-drift monitors to compare what the binary
+// ObservedSchemaVersions returns (version this binary expects, version applied
+// to the database). Used by schema-drift monitors to compare what the binary
 // expects against what the DB reports.
 func ObservedSchemaVersions(database *sql.DB) (current int, observed int, err error) {
-	observed, err = readUserVersion(database)
-	if err != nil {
-		return 0, 0, err
-	}
-	return currentSchemaVersion, observed, nil
+	return int(migrations.Target()), int(migrations.Version(context.Background(), database)), nil
 }
