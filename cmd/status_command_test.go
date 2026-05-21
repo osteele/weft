@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ssh"
@@ -178,6 +179,58 @@ func TestRunJobInfoUnplacedQueuedStatusIsDisambiguated(t *testing.T) {
 	})
 	if !strings.Contains(placedOut, "Status:      queued\n") {
 		t.Fatalf("placed job: status line should stay bare, got:\n%s", placedOut)
+	}
+}
+
+func TestRunJobInfoShowsStructuredPlacementBreakdown(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "blocked unplaced")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	flat := "no rental headroom; running instances couldn't accept this job: disk insufficient"
+	if err := db.SetJobPlacementReasons(database, jobID, []string{flat}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+	// A relaunch.skipped event makes the job render as blocked (queueblock
+	// hydration), which is the gate for the Reason breakdown.
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchSkippedNoOffers,
+		JobID:     jobID,
+		Detail:    flat,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+	structured := (&blockreason.Structured{
+		Summary: flat,
+		Launch:  "no rental headroom",
+		Reuse: []blockreason.ReuseRejection{
+			{Instance: "wi1023", Reason: "disk insufficient: need=42GB free=12GB"},
+			{Instance: "wi1044", Reason: "GPU class mismatch: job=ampere instance=ada"},
+		},
+	}).Marshal()
+	if err := db.SetJobPlacementBlocked(database, jobID, structured); err != nil {
+		t.Fatalf("SetJobPlacementBlocked: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Reason:      " + flat,
+		"new instance  no rental headroom",
+		"reuse wi1023  disk insufficient: need=42GB free=12GB",
+		"reuse wi1044  GPU class mismatch: job=ampere instance=ada",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -20,13 +21,20 @@ import (
 )
 
 type GroupedAutoPilotResult struct {
-	Placed         int
-	Rebalanced     int
-	Launched       int
-	AutoReplanned  int
-	ReuseFilled    int
-	LaunchedClass  string
+	Placed        int
+	Rebalanced    int
+	Launched      int
+	AutoReplanned int
+	ReuseFilled   int
+	LaunchedClass string
+	// BlockedReasons holds the authoritative one-line reason per still-unplaced
+	// job (back-compat flat form).
 	BlockedReasons map[int64]string
+	// StructuredBlocked holds the full launch/reuse breakdown for jobs whose
+	// blocker is a placement-avenue failure. Single-cause blockers
+	// (preconditions, cooldowns) are absent — their BlockedReasons entry is
+	// already the whole story.
+	StructuredBlocked map[int64]*blockreason.Structured
 }
 
 var autoPilotBuildPlan = buildAutoPlacementPlan
@@ -177,6 +185,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		return nil, err
 	}
 	blockedReasons := map[int64]string{}
+	structuredBlocked := map[int64]*blockreason.Structured{}
 	for jobID, reason := range plan.BlockedReasons {
 		if strings.TrimSpace(reason) != "" {
 			blockedReasons[jobID] = reason
@@ -270,11 +279,12 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 							blockedReasons[jobID] = reason
 						}
 						return &GroupedAutoPilotResult{
-							Placed:         0,
-							Launched:       moveRetryLaunches,
-							AutoReplanned:  autoReplanned,
-							LaunchedClass:  "",
-							BlockedReasons: blockedReasons,
+							Placed:            0,
+							Launched:          moveRetryLaunches,
+							AutoReplanned:     autoReplanned,
+							LaunchedClass:     "",
+							BlockedReasons:    blockedReasons,
+							StructuredBlocked: structuredBlocked,
 						}, nil
 					}
 				}
@@ -347,15 +357,16 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if len(rentalScope) == 0 {
 		oplog.Log("auto_pilot.no_rental_scope",
 			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
-		finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
+		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
-			Placed:         placed,
-			Rebalanced:     rebalanced,
-			Launched:       moveRetryLaunches,
-			AutoReplanned:  autoReplanned,
-			ReuseFilled:    reuseFilled,
-			LaunchedClass:  "",
-			BlockedReasons: blockedReasons,
+			Placed:            placed,
+			Rebalanced:        rebalanced,
+			Launched:          moveRetryLaunches,
+			AutoReplanned:     autoReplanned,
+			ReuseFilled:       reuseFilled,
+			LaunchedClass:     "",
+			BlockedReasons:    blockedReasons,
+			StructuredBlocked: structuredBlocked,
 		}, nil
 	}
 	oplog.Log("auto_pilot.launching",
@@ -373,27 +384,29 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 				blockedReasons[jobID] = launchReason
 			}
 		}
-		finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
+		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
-			Placed:         placed,
-			Rebalanced:     rebalanced,
-			Launched:       moveRetryLaunches,
-			AutoReplanned:  autoReplanned,
-			ReuseFilled:    reuseFilled,
-			LaunchedClass:  "",
-			BlockedReasons: blockedReasons,
+			Placed:            placed,
+			Rebalanced:        rebalanced,
+			Launched:          moveRetryLaunches,
+			AutoReplanned:     autoReplanned,
+			ReuseFilled:       reuseFilled,
+			LaunchedClass:     "",
+			BlockedReasons:    blockedReasons,
+			StructuredBlocked: structuredBlocked,
 		}, err
 	}
 	if result == nil {
-		finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
+		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
-			Placed:         placed,
-			Rebalanced:     rebalanced,
-			Launched:       moveRetryLaunches,
-			AutoReplanned:  autoReplanned,
-			ReuseFilled:    reuseFilled,
-			LaunchedClass:  "",
-			BlockedReasons: blockedReasons,
+			Placed:            placed,
+			Rebalanced:        rebalanced,
+			Launched:          moveRetryLaunches,
+			AutoReplanned:     autoReplanned,
+			ReuseFilled:       reuseFilled,
+			LaunchedClass:     "",
+			BlockedReasons:    blockedReasons,
+			StructuredBlocked: structuredBlocked,
 		}, nil
 	}
 	placedAfterLaunchBlock := map[int64]struct{}{}
@@ -467,16 +480,17 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			}
 		}
 	}
-	finalizeUnplacedBlockedReasons(database, blockedReasons, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
+	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
 
 	return &GroupedAutoPilotResult{
-		Placed:         placed,
-		Rebalanced:     rebalanced,
-		Launched:       moveRetryLaunches + len(result.InstanceIDs),
-		AutoReplanned:  autoReplanned,
-		ReuseFilled:    reuseFilled,
-		LaunchedClass:  launchedClassFromResult(database, result.InstanceIDs),
-		BlockedReasons: blockedReasons,
+		Placed:            placed,
+		Rebalanced:        rebalanced,
+		Launched:          moveRetryLaunches + len(result.InstanceIDs),
+		AutoReplanned:     autoReplanned,
+		ReuseFilled:       reuseFilled,
+		LaunchedClass:     launchedClassFromResult(database, result.InstanceIDs),
+		BlockedReasons:    blockedReasons,
+		StructuredBlocked: structuredBlocked,
 	}, nil
 }
 
@@ -574,7 +588,7 @@ func addAutoPilotBlockedReason(blockedReasons map[int64]string, jobID int64, rea
 	blockedReasons[jobID] = existing + "; " + reason
 }
 
-func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64]string) {
+func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64]string, structuredBlocked map[int64]*blockreason.Structured) {
 	if database == nil || len(blockedReasons) == 0 {
 		return
 	}
@@ -594,6 +608,10 @@ func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64
 			continue
 		}
 		appendPlacementReason(database, jobID, reason)
+		// Refresh the structured breakdown every pass. A single-cause
+		// blocker has no entry in structuredBlocked; Marshal of a nil
+		// reason is the empty string, which clears any stale value.
+		_ = db.SetJobPlacementBlocked(database, jobID, structuredBlocked[jobID].Marshal())
 	}
 }
 
@@ -606,6 +624,7 @@ func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64
 func finalizeUnplacedBlockedReasons(
 	database *sql.DB,
 	blockedReasons map[int64]string,
+	structuredBlocked map[int64]*blockreason.Structured,
 	reuseDiagnostics map[int64]string,
 	remainingByID map[int64]*db.Job,
 	candidateIDs []int64,
@@ -623,7 +642,11 @@ func finalizeUnplacedBlockedReasons(
 		if _, has := blockedReasons[jobID]; has {
 			continue
 		}
-		blockedReasons[jobID] = noRentalHeadroomReason(job, capacities, r2Client)
+		s := noRentalHeadroomStructured(job, capacities, r2Client)
+		blockedReasons[jobID] = s.Flat()
+		if structuredBlocked != nil && s.IsPlacementFailure() {
+			structuredBlocked[jobID] = s
+		}
 	}
 	// Append reuse-rejection diagnostics after the authoritative reason.
 	for jobID, diag := range reuseDiagnostics {
@@ -632,7 +655,27 @@ func finalizeUnplacedBlockedReasons(
 		}
 		addAutoPilotBlockedReason(blockedReasons, jobID, diag)
 	}
-	persistBlockedReasonsForUnplaced(database, blockedReasons)
+	// Attach the structured launch/reuse breakdown to any still-unplaced job
+	// whose authoritative reason is the no-rental-headroom family but was
+	// settled before this call (so the safety-net loop above skipped it).
+	if structuredBlocked != nil {
+		for jobID, flat := range blockedReasons {
+			if _, done := structuredBlocked[jobID]; done {
+				continue
+			}
+			if !strings.HasPrefix(flat, noRentalHeadroomBase) {
+				continue
+			}
+			job, ok := remainingByID[jobID]
+			if !ok || job == nil {
+				continue
+			}
+			if s := noRentalHeadroomStructured(job, capacities, r2Client); s.IsPlacementFailure() {
+				structuredBlocked[jobID] = s
+			}
+		}
+	}
+	persistBlockedReasonsForUnplaced(database, blockedReasons, structuredBlocked)
 }
 
 func autoReplanStuckInventoryJobs(database *sql.DB, scoped map[int64]struct{}, movingJobs map[int64]struct{}) (int, error) {
@@ -1072,10 +1115,29 @@ func minLaunchGroupJobID(group campaign.LaunchGroup) int64 {
 	return minID
 }
 
+// noRentalHeadroomBase is the launch+reuse combined headline for a job the
+// autopilot could neither launch a new instance for nor reuse onto a running
+// one. finalizeUnplacedBlockedReasons keys structured-detail attachment off
+// this prefix.
+const noRentalHeadroomBase = "no rental headroom; running instances couldn't accept this job"
+
 func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {
-	const base = "no rental headroom; running instances couldn't accept this job"
+	return noRentalHeadroomStructured(job, capacities, r2Client).Flat()
+}
+
+// noRentalHeadroomStructured builds the full launch/reuse breakdown for a job
+// the autopilot could neither launch a new instance for nor reuse onto a
+// running one. Launch is the authoritative primary reason; each running
+// instance that refused the job contributes a secondary reuse-rejection entry.
+// When any running instance is compatible, headroom is the whole story and no
+// reuse detail is attached — mirroring the original flat-string behavior.
+func noRentalHeadroomStructured(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) *blockreason.Structured {
+	s := &blockreason.Structured{
+		Summary: noRentalHeadroomBase,
+		Launch:  "no rental headroom",
+	}
 	if job == nil || len(capacities) == 0 {
-		return base
+		return s
 	}
 	sorted := append([]campaign.InstanceCapacity(nil), capacities...)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -1090,6 +1152,7 @@ func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity,
 		return a < b
 	})
 	firstReason := ""
+	rejections := make([]blockreason.ReuseRejection, 0, len(sorted))
 	for _, cap := range sorted {
 		ok := false
 		reason := ""
@@ -1099,16 +1162,25 @@ func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity,
 			ok, reason = campaign.MatchJobToInstance(job, cap)
 		}
 		if ok {
-			return base
+			// A running instance is compatible; reuse was blocked elsewhere,
+			// so launch headroom is the whole story.
+			return &blockreason.Structured{Summary: noRentalHeadroomBase, Launch: "no rental headroom"}
 		}
-		if firstReason == "" && strings.TrimSpace(reason) != "" {
+		instLabel := ""
+		if cap.Instance != nil {
+			instLabel = ids.FormatInstanceID(cap.Instance.ID)
+		}
+		reason = strings.TrimSpace(reason)
+		rejections = append(rejections, blockreason.ReuseRejection{Instance: instLabel, Reason: reason})
+		if firstReason == "" && reason != "" {
 			firstReason = reason
 		}
 	}
+	s.Reuse = rejections
 	if firstReason != "" {
-		return base + ": " + firstReason
+		s.Summary = noRentalHeadroomBase + ": " + firstReason
 	}
-	return base
+	return s
 }
 
 func countRunningJobs(jobs []*db.Job) int {

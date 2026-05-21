@@ -88,6 +88,7 @@ type Job struct {
 	PlacementMeta        *PlacementMeta        // Placement telemetry (predictions, scores)
 	CLIResourceOverrides *CLIResourceOverrides // Current explicit CLI resource intent, replayed on retry
 	PlacementReasons     []string              // Why the job is currently unplaced
+	PlacementBlockedJSON string                // JSON blockreason.Structured: launch/reuse breakdown for an unplaced job
 	LaunchID             *int64                // Cloud instance ID if this job is part of a cloud instance
 	CampaignJobIndex     *int                  // Position within a cloud campaign sequence, if assigned
 	LatestRunID          *int64                // Latest execution attempt row for this logical job
@@ -293,7 +294,7 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id, placement_blocked`
 
 const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, priority, created_at, backend, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
@@ -433,6 +434,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		tombstoned INTEGER NOT NULL DEFAULT 0,
 		placement_host TEXT,
 		placement_reasons TEXT,
+		placement_blocked TEXT,
 		cli_overrides TEXT,
 		campaign_job_index INTEGER,
 		requested_status TEXT,
@@ -1511,6 +1513,17 @@ func initSchema(db *sql.DB) error {
 	// so currentSchemaVersion bumps and existing DBs do not skip the column
 	// via the initSchema fast path.
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN job_metadata TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add the placement_blocked column. The job_status view
+	// references j.placement_blocked, and a pre-existing versioned migration
+	// queries job_status — so the column must exist before
+	// runVersionedMigrations re-applies migrations, i.e. here in the legacy
+	// body. It is ALSO a versionedMigrations entry so currentSchemaVersion
+	// bumps and current-version DBs do not skip it via the fast path. Same
+	// dual registration as job_metadata above.
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_blocked TEXT`); err != nil {
 		return err
 	}
 
@@ -2791,6 +2804,18 @@ func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
 func SetJobPlacementReasons(db *sql.DB, jobID int64, reasons []string) error {
 	encoded := encodeStringSlice(reasons)
 	_, err := db.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`, encoded, jobID)
+	return err
+}
+
+// SetJobPlacementBlocked stores the structured launch/reuse breakdown for an
+// unplaced job (JSON-encoded blockreason.Structured). An empty string clears
+// the column.
+func SetJobPlacementBlocked(db *sql.DB, jobID int64, encoded string) error {
+	if strings.TrimSpace(encoded) == "" {
+		_, err := db.Exec(`UPDATE jobs SET placement_blocked = NULL WHERE id = ?`, jobID)
+		return err
+	}
+	_, err := db.Exec(`UPDATE jobs SET placement_blocked = ? WHERE id = ?`, encoded, jobID)
 	return err
 }
 
@@ -4157,6 +4182,7 @@ type jobScanFields struct {
 	cloudInstanceID  sql.NullInt64
 	campaignJobIndex sql.NullInt64
 	latestRunID      sql.NullInt64
+	placementBlocked sql.NullString
 }
 
 // scanDests returns pointers to all scan targets in jobSelectColumns order.
@@ -4177,6 +4203,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 		&f.jobMetadata, &f.cost, &f.errorDiagnosis, &f.retryCount,
 		&f.placementMeta, &f.placementReasons, &f.cliOverrides,
 		&f.cloudInstanceID, &f.campaignJobIndex, &f.latestRunID,
+		&f.placementBlocked,
 	}
 }
 
@@ -4287,6 +4314,7 @@ func (f *jobScanFields) populateJob(j *Job) {
 	}
 	j.PlacementMeta = decodePlacementMeta(f.placementMeta)
 	j.PlacementReasons = decodeStringSlice(f.placementReasons)
+	j.PlacementBlockedJSON = f.placementBlocked.String
 	j.CLIResourceOverrides = decodeCLIResourceOverrides(f.cliOverrides)
 	if f.cloudInstanceID.Valid {
 		j.LaunchID = &f.cloudInstanceID.Int64

@@ -545,6 +545,104 @@ func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *test
 	}
 }
 
+func groupedRowsText(rows []groupedStatusRow) string {
+	var b strings.Builder
+	for _, r := range rows {
+		b.WriteString(r.text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func TestBuildGroupedStatusRows_HoistsLaunchAndExpandsDisclosure(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	mkJob := func(id int64, desc string) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        desc,
+			QueuedAt:           4_000,
+			QueueBlockedReason: "no rental headroom; running instances couldn't accept this job",
+		}
+	}
+	jobs := []*db.Job{
+		mkJob(2030, "continuous-thought EXP-051"),
+		mkJob(2029, "adaptive-escalation EXP-011"),
+	}
+	detail := map[int64]*blockreason.Structured{
+		2030: {
+			Summary: "no rental headroom; running instances couldn't accept this job: disk insufficient",
+			Launch:  "no rental headroom",
+			Reuse: []blockreason.ReuseRejection{
+				{Instance: "wi1023", Reason: "disk insufficient: need=42GB free=12GB"},
+				{Instance: "wi1044", Reason: "GPU class mismatch: job=ampere instance=ada"},
+			},
+		},
+		2029: {
+			Summary: "no rental headroom; running instances couldn't accept this job",
+			Launch:  "no rental headroom",
+			Reuse: []blockreason.ReuseRejection{
+				{Instance: "wi1023", Reason: "grace period too short: 40s remaining"},
+			},
+		},
+	}
+	opts := groupedStatusRenderOptions{
+		now:             now,
+		blockedDetail:   detail,
+		expandedBlocked: map[int64]bool{2030: true},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, opts))
+
+	if c := strings.Count(out, "launch blocked for all: no rental headroom"); c != 1 {
+		t.Fatalf("expected launch blocker hoisted to exactly one line, got %d:\n%s", c, out)
+	}
+	if !strings.Contains(out, "▾") || !strings.Contains(out, "▸") {
+		t.Fatalf("expected both expanded (▾) and collapsed (▸) disclosure markers:\n%s", out)
+	}
+	for _, want := range []string{
+		"reuse wi1023  disk insufficient: need=42GB free=12GB",
+		"reuse wi1044  GPU class mismatch: job=ampere instance=ada",
+		"new instance  no rental headroom",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing expanded detail line %q:\n%s", want, out)
+		}
+	}
+	// The collapsed job's per-instance disclosure detail must not be rendered.
+	// Its reuse headline still appears on the bucket subheader; only the
+	// indented "reuse <instance>  ..." detail line should be absent.
+	if strings.Contains(out, "reuse wi1023  grace period") {
+		t.Fatalf("collapsed job disclosure detail leaked into output:\n%s", out)
+	}
+}
+
+func TestBuildGroupedStatusRows_NoHoistWhenLaunchBlockersDiffer(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	mkJob := func(id int64) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "desc",
+			QueuedAt:           4_000,
+			QueueBlockedReason: "blocked",
+		}
+	}
+	jobs := []*db.Job{mkJob(1), mkJob(2)}
+	detail := map[int64]*blockreason.Structured{
+		1: {Summary: "a", Launch: "no rental headroom", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "disk insufficient"}}},
+		2: {Summary: "b", Launch: "no compatible offers", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "disk insufficient"}}},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+	if strings.Contains(out, "launch blocked for all:") {
+		t.Fatalf("launch blocker should not be hoisted when blockers differ:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngrouped(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	reason := "planner: no offers from providers for gpu=3090 vram>=20GB reliability>=0.95"

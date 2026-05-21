@@ -43,6 +43,11 @@ type groupedStatusRenderOptions struct {
 	now                    time.Time
 	launchSpinner          string
 	launchingETA           groupedStatusLaunchingETA
+	// blockedDetail carries the structured launch/reuse breakdown for unplaced
+	// jobs, keyed by job ID. expandedBlocked records which of those rows the
+	// user has opened for an in-place per-avenue disclosure.
+	blockedDetail   map[int64]*blockreason.Structured
+	expandedBlocked map[int64]bool
 }
 
 type groupedStatusLaunchingETA struct {
@@ -217,7 +222,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 			section:  section.key,
 		})
 		if section.key == "unplaced" || section.key == "queued" {
-			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, now)
+			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, opts, now)
 		} else if section.key == "launching" {
 			rows = appendLaunchingGroupedJobRows(rows, section, projectWidth, width, opts)
 		} else {
@@ -316,22 +321,39 @@ func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.L
 	return jobview.LaunchesWithActiveJob(jobs, launchLiveByID)
 }
 
+// blockedDetailStyle dims the per-avenue disclosure lines so they recede
+// beneath the job row they belong to.
+var blockedDetailStyle = lipgloss.NewStyle().Faint(true)
+
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
 // jobs by their blocked reason. Each distinct reason becomes a subheader
 // ("  blocked: <reason> (N)") followed by indented job rows. Jobs with no
 // blocked reason are emitted last without a subheader at the normal indent.
+//
+// When every placement-failure job in the section shares the same launch
+// blocker, that blocker is hoisted to a single section-level line and the
+// per-job subheaders carry only the reuse-side headline. A job with a
+// structured launch/reuse breakdown gains a disclosure marker; when expanded,
+// its full per-avenue detail is emitted as dim, non-selectable rows.
 func appendBlockedGroupedJobRows(
 	rows []groupedStatusRow,
 	section groupedStatusSection,
 	projectWidth, width int,
-	launchLiveByID map[int64]*db.LaunchLiveState,
-	placementQueuedAtByJob map[int64]int64,
+	opts groupedStatusRenderOptions,
 	now time.Time,
 ) []groupedStatusRow {
+	sharedLaunch := commonLaunchBlocker(section.jobs, opts.blockedDetail)
+	if sharedLaunch != "" {
+		rows = append(rows, groupedStatusRow{
+			text:      fmt.Sprintf("  launch blocked for all: %s", sharedLaunch),
+			isBlocked: true,
+			section:   section.key,
+		})
+	}
 	order := make([]string, 0, len(section.jobs))
 	buckets := make(map[string][]*db.Job, len(section.jobs))
 	for _, job := range section.jobs {
-		reason := groupedStatusBlockedReason(job, section.key)
+		reason := blockedBucketKey(job, section.key, opts.blockedDetail, sharedLaunch != "")
 		if _, ok := buckets[reason]; !ok {
 			order = append(order, reason)
 		}
@@ -348,13 +370,108 @@ func appendBlockedGroupedJobRows(
 			section:   section.key,
 		})
 		for _, job := range jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true)
+			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 		}
 	}
 	for _, job := range buckets[""] {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, launchLiveByID, placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false)
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false)
+		rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 	}
 	return rows
+}
+
+// commonLaunchBlocker returns the launch-side blocker shared by every
+// placement-failure job in the section, or "" if the jobs disagree or none
+// have a structured breakdown. Single-cause jobs (preconditions) are ignored —
+// they carry no launch blocker and do not prevent hoisting.
+func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structured) string {
+	if len(detail) == 0 {
+		return ""
+	}
+	launch := ""
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		d := detail[job.ID]
+		if d == nil || !d.IsPlacementFailure() {
+			continue
+		}
+		l := strings.TrimSpace(d.Launch)
+		if l == "" {
+			return ""
+		}
+		if launch == "" {
+			launch = l
+			continue
+		}
+		if l != launch {
+			return ""
+		}
+	}
+	return launch
+}
+
+// blockedBucketKey is the subheader grouping key for a blocked job. Once the
+// shared launch blocker is hoisted, placement-failure jobs group by their
+// reuse-side headline; everything else keeps the resolved one-line reason.
+func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockreason.Structured, launchHoisted bool) string {
+	if launchHoisted && job != nil {
+		if d := detail[job.ID]; d != nil && d.IsPlacementFailure() {
+			return d.ReuseHeadline()
+		}
+	}
+	return groupedStatusBlockedReason(job, sectionKey)
+}
+
+// appendBlockedDisclosureRows marks an expandable blocked job row with a
+// disclosure triangle and, when the row is expanded, emits its full
+// per-avenue breakdown as dim, non-selectable detail rows.
+func appendBlockedDisclosureRows(
+	rows []groupedStatusRow,
+	job *db.Job,
+	opts groupedStatusRenderOptions,
+	sectionKey string,
+	width int,
+) []groupedStatusRow {
+	if job == nil || len(rows) == 0 {
+		return rows
+	}
+	d := opts.blockedDetail[job.ID]
+	if d == nil || !d.IsPlacementFailure() {
+		return rows
+	}
+	expanded := opts.expandedBlocked[job.ID]
+	last := len(rows) - 1
+	rows[last].text = applyDisclosureMarker(rows[last].text, expanded)
+	if !expanded {
+		return rows
+	}
+	for _, line := range d.DetailLines() {
+		text := "        " + line
+		if width > 0 {
+			text = truncateDisplayWidth(text, width)
+		}
+		rows = append(rows, groupedStatusRow{
+			text:    blockedDetailStyle.Render(text),
+			section: sectionKey,
+		})
+	}
+	return rows
+}
+
+// applyDisclosureMarker swaps the two-space indent of an expandable blocked
+// job row for a disclosure triangle, preserving display width.
+func applyDisclosureMarker(text string, expanded bool) string {
+	marker := "▸ "
+	if expanded {
+		marker = "▾ "
+	}
+	if strings.HasPrefix(text, "  ") {
+		return marker + text[2:]
+	}
+	return marker + text
 }
 
 type launchingJobBucket struct {

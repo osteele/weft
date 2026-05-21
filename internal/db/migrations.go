@@ -442,6 +442,19 @@ var versionedMigrations = []migration{
 			return createJobStatusView(db)
 		},
 	},
+	{
+		// Structured launch/reuse breakdown for an unplaced job's blocker.
+		// Must be versioned: the job_status view (recreated on every Open)
+		// references j.placement_blocked, so existing DBs at the current
+		// schema version need the column without re-running initSchema.
+		Description: "add jobs.placement_blocked column",
+		Apply: func(db *sql.DB) error {
+			if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_blocked TEXT`); err != nil {
+				return err
+			}
+			return createJobStatusView(db)
+		},
+	},
 }
 
 // currentSchemaVersion is the version this binary expects on disk. Derived

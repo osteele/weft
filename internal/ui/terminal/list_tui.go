@@ -86,6 +86,8 @@ type listTUIModel struct {
 	autoLeaseOwner             string
 	autoLeaseScope             string
 	autoBlockReasons           map[int64]string
+	autoBlockDetail            map[int64]*blockreason.Structured
+	expandedBlocked            map[int64]bool
 	lastAutoPilotErrorRaw      string
 	showAutoPilotErrorDetails  bool
 	autopilotPaused            bool
@@ -234,14 +236,15 @@ type listSyncWorkerResultMsg struct {
 	result hostsync.Result
 }
 type listAutoPilotDoneMsg struct {
-	placed         int
-	rebalanced     int
-	launched       int
-	launchedClass  string
-	blockedReasons map[int64]string
-	anotherHolding bool
-	paused         bool
-	err            error
+	placed            int
+	rebalanced        int
+	launched          int
+	launchedClass     string
+	blockedReasons    map[int64]string
+	structuredBlocked map[int64]*blockreason.Structured
+	anotherHolding    bool
+	paused            bool
+	err               error
 	// deferred marks a redelivery after the minimum-display hold so the handler
 	// knows to apply the result rather than schedule another tick.
 	deferred bool
@@ -705,6 +708,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.autoBlockReasons = msg.blockedReasons
+		m.autoBlockDetail = msg.structuredBlocked
 		if msg.err != nil {
 			m.lastAutoPilotErrorRaw = msg.err.Error()
 			m.showAutoPilotErrorDetails = false
@@ -2334,6 +2338,8 @@ func (m *listTUIModel) rebuildGroupedRows() {
 				stageByName:            m.launchStageETAByName,
 				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
 			},
+			blockedDetail:   m.effectiveBlockedDetail(),
+			expandedBlocked: m.expandedBlocked,
 		})
 	} else {
 		m.groupedRows = buildListGroupedRows(m.jobs, m.effectiveGroupMode(), m.width, m.layout)
@@ -2798,7 +2804,7 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 			return listAutoPilotDoneMsg{anotherHolding: true}
 		}
 		defer db.ReleaseAutoLease(database, scope, owner)
-		placed, rebalanced, launched, launchedClass, blockedReasons, runErr := runGatedAutoPilotPass(ctx, database, jobs, "list-tui")
+		placed, rebalanced, launched, launchedClass, blockedReasons, structuredBlocked, runErr := runGatedAutoPilotPass(ctx, database, jobs, "list-tui")
 		if runErr != nil {
 			if errors.Is(runErr, orchestration.ErrAutopilotPaused) {
 				return listAutoPilotDoneMsg{paused: true}
@@ -2808,12 +2814,13 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 			}
 		}
 		return listAutoPilotDoneMsg{
-			placed:         placed,
-			rebalanced:     rebalanced,
-			launched:       launched,
-			launchedClass:  launchedClass,
-			blockedReasons: blockedReasons,
-			err:            runErr,
+			placed:            placed,
+			rebalanced:        rebalanced,
+			launched:          launched,
+			launchedClass:     launchedClass,
+			blockedReasons:    blockedReasons,
+			structuredBlocked: structuredBlocked,
+			err:               runErr,
 		}
 	}
 }
@@ -2847,17 +2854,17 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 // runGatedAutoPilotPass wraps the orchestration pass with the singleton
 // pause/active-runner gate. It returns ErrAutopilotPaused or ErrAutopilotBusy
 // (via the runner package) without running a pass when those conditions hold.
-func runGatedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string) (int, int, int, string, map[int64]string, error) {
+func runGatedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string) (int, int, int, string, map[int64]string, map[int64]*blockreason.Structured, error) {
 	result, err := orchestration.RunGroupedAutoPilotPassGatedWithOptions(ctx, database, scopedJobs, label, orchestration.AutopilotRunnerOptions{
 		AllowStaleBinary: true,
 	})
 	if result != nil {
-		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, err
+		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, result.StructuredBlocked, err
 	}
 	if err != nil {
-		return 0, 0, 0, "", nil, err
+		return 0, 0, 0, "", nil, nil, err
 	}
-	return 0, 0, 0, "", nil, nil
+	return 0, 0, 0, "", nil, nil, nil
 }
 
 func launchedClassFromResult(database *sql.DB, instanceIDs []int64) string {
@@ -2948,8 +2955,30 @@ func formatQuickLaunchEventLine(event campaign.LaunchEvent) string {
 	return ""
 }
 
+// effectiveBlockedDetail merges the freshest structured blocked breakdown for
+// every unplaced job. The in-memory result of this session's last autopilot
+// pass takes precedence; the persisted placement_blocked column covers jobs no
+// local pass has seen yet (before the first pass, or when the coordinator ran
+// the pass).
+func (m listTUIModel) effectiveBlockedDetail() map[int64]*blockreason.Structured {
+	detail := make(map[int64]*blockreason.Structured)
+	for _, job := range m.jobs {
+		if job == nil || !job.IsUnplacedAwaitingPlacement() {
+			continue
+		}
+		if d := m.autoBlockDetail[job.ID]; d != nil {
+			detail[job.ID] = d
+			continue
+		}
+		if d := blockreason.ForJob(job); d != nil && d.IsPlacementFailure() {
+			detail[job.ID] = d
+		}
+	}
+	return detail
+}
+
 func (m *listTUIModel) pruneAutoBlockReasons() {
-	if len(m.autoBlockReasons) == 0 {
+	if len(m.autoBlockReasons) == 0 && len(m.autoBlockDetail) == 0 && len(m.expandedBlocked) == 0 {
 		return
 	}
 	visibleUnplaced := make(map[int64]struct{}, len(m.jobs))
@@ -2957,6 +2986,19 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 		if job.IsUnplacedAwaitingPlacement() {
 			visibleUnplaced[job.ID] = struct{}{}
 		}
+	}
+	for jobID := range m.autoBlockDetail {
+		if _, ok := visibleUnplaced[jobID]; !ok {
+			delete(m.autoBlockDetail, jobID)
+		}
+	}
+	for jobID := range m.expandedBlocked {
+		if _, ok := visibleUnplaced[jobID]; !ok {
+			delete(m.expandedBlocked, jobID)
+		}
+	}
+	if len(m.autoBlockReasons) == 0 {
+		return
 	}
 	headroom, hasRunRateHeadroom := m.currentRunRateHeadroomCents()
 	changed := false

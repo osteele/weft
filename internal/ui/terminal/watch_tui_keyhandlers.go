@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -272,6 +273,41 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleToggleAutoPilot()
 	case "$":
 		return m.beginAutoRunRateInput()
+	case "enter":
+		job := m.selectedUnplacedJob()
+		if job == nil {
+			return m, nil
+		}
+		d := blockreason.ForJob(job)
+		if d == nil || !d.IsPlacementFailure() {
+			return m, nil
+		}
+		if m.expandedBlocked == nil {
+			m.expandedBlocked = map[int64]bool{}
+		}
+		m.expandedBlocked[job.ID] = !m.expandedBlocked[job.ID]
+		return m, nil
+	case "O":
+		anyExpanded := false
+		for _, open := range m.expandedBlocked {
+			if open {
+				anyExpanded = true
+				break
+			}
+		}
+		next := map[int64]bool{}
+		if !anyExpanded {
+			for _, job := range m.unplacedJobs {
+				if job == nil {
+					continue
+				}
+				if d := blockreason.ForJob(job); d != nil && d.IsPlacementFailure() {
+					next[job.ID] = true
+				}
+			}
+		}
+		m.expandedBlocked = next
+		return m, nil
 	case "?":
 		m.projectHelp = true
 		return m, nil

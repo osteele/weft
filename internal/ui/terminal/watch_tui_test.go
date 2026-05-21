@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -488,6 +489,52 @@ func TestSystemWatchModelUnplaceDoneMovesJobImmediately(t *testing.T) {
 	}
 	if got.unplacedJobs[0].Host != "" {
 		t.Fatalf("unplaced job host = %q, want empty", got.unplacedJobs[0].Host)
+	}
+}
+
+func TestSystemWatchModelViewExpandsBlockedDisclosure(t *testing.T) {
+	detail := (&blockreason.Structured{
+		Summary: "no rental headroom; running instances couldn't accept this job: disk insufficient",
+		Launch:  "no rental headroom",
+		Reuse: []blockreason.ReuseRejection{
+			{Instance: "wi1023", Reason: "disk insufficient: need=42GB free=12GB"},
+		},
+	}).Marshal()
+	newModel := func(expanded map[int64]bool) watchModel {
+		return watchModel{
+			mode:   watchModeSystem,
+			width:  180,
+			height: 24,
+			cursor: 0,
+			unplacedJobs: []*db.Job{
+				{
+					ID:                   189,
+					Status:               db.StatusQueued,
+					Description:          "benchmark",
+					GPUClass:             "L40s",
+					PlacementBlockedJSON: detail,
+				},
+			},
+			updates:         map[int64]campaign.InstanceUpdate{},
+			jobProgressHWM:  map[int64]int{},
+			expandedBlocked: expanded,
+		}
+	}
+
+	expanded := stripANSI(newModel(map[int64]bool{189: true}).View())
+	if !strings.Contains(expanded, "▾") {
+		t.Fatalf("expected expanded disclosure marker, got:\n%s", expanded)
+	}
+	if !strings.Contains(expanded, "reuse wi1023  disk insufficient: need=42GB free=12GB") {
+		t.Fatalf("expected expanded reuse detail, got:\n%s", expanded)
+	}
+
+	collapsed := stripANSI(newModel(map[int64]bool{}).View())
+	if !strings.Contains(collapsed, "▸") {
+		t.Fatalf("expected collapsed disclosure marker, got:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "reuse wi1023  disk insufficient") {
+		t.Fatalf("collapsed view leaked disclosure detail, got:\n%s", collapsed)
 	}
 }
 

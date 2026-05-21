@@ -363,6 +363,37 @@ func TestNoRentalHeadroomReason_IncludesMatchDiagnostic(t *testing.T) {
 	}
 }
 
+func TestNoRentalHeadroomStructured_BuildsLaunchAndReuseBreakdown(t *testing.T) {
+	mem := 80
+	job := &db.Job{GPUClass: "A100", GPUMemGB: &mem}
+	caps := []campaign.InstanceCapacity{
+		{Instance: &db.Launch{ID: 11, GPUClass: "A100", GPUMemGB: 40}},
+		{Instance: &db.Launch{ID: 12, GPUClass: "A100", GPUMemGB: 24}},
+	}
+	s := noRentalHeadroomStructured(job, caps, nil)
+	if !s.IsPlacementFailure() {
+		t.Fatalf("expected a placement failure, got %+v", s)
+	}
+	if s.Launch == "" {
+		t.Fatalf("expected a launch blocker, got empty")
+	}
+	// Every rejecting instance is listed — not just the first.
+	if len(s.Reuse) != 2 {
+		t.Fatalf("expected 2 reuse rejections, got %d: %+v", len(s.Reuse), s.Reuse)
+	}
+	for _, r := range s.Reuse {
+		if r.Instance == "" {
+			t.Fatalf("reuse rejection missing instance label: %+v", r)
+		}
+		if !strings.Contains(r.Reason, "GPU memory insufficient") {
+			t.Fatalf("reuse rejection reason = %q, want GPU memory diagnostic", r.Reason)
+		}
+	}
+	if s.Flat() != noRentalHeadroomReason(job, caps, nil) {
+		t.Fatalf("Flat() = %q, want parity with noRentalHeadroomReason", s.Flat())
+	}
+}
+
 func TestRunGroupedAutoPilotPass_NoSubsetFitsTriggersPreferReuseRetry(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "job", "A100")

@@ -611,6 +611,7 @@ func createJobStatusView(db *sql.DB) error {
 			la.placement_meta,
 			j.placement_reasons,
 			j.cli_overrides,
+			j.placement_blocked,
 			CASE WHEN j.requested_status = 'queued'
 			          AND la.end_time IS NOT NULL
 			          AND COALESCE(la.status, '') != 'completed'

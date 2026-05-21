@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/agentdeploy"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
@@ -185,10 +186,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 	// Unplaced jobs section (instance-based modes)
 	if !m.launchPending && len(m.unplacedJobs) > 0 {
 		addLine(watchTitleStyle.Render(fmt.Sprintf("Unplaced Jobs (%d)", len(m.unplacedJobs))))
-		formattedRows := m.formatUnplacedJobRows(m.unplacedJobs, max(width-4, 40))
-		for i := range m.unplacedJobs {
-			addSelectable("  " + truncate(formattedRows[i], max(width-2, 40)))
-		}
+		m.appendUnplacedJobRows(addSelectable, addLine, width)
 		addLine("")
 	}
 
@@ -330,10 +328,7 @@ func (m watchModel) renderSystemView() (string, int) {
 	if len(m.unplacedJobs) == 0 {
 		addPlain(watchDimStyle.Render("  no unplaced jobs"))
 	} else {
-		formattedRows := m.formatUnplacedJobRows(m.unplacedJobs, max(width-4, 40))
-		for i := range m.unplacedJobs {
-			addSelectable("  " + truncate(formattedRows[i], width-2))
-		}
+		m.appendUnplacedJobRows(addSelectable, addPlain, width)
 	}
 
 	// Build footer
@@ -625,6 +620,30 @@ func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 		row += "  " + watchDimStyle.Render(display.Reason)
 	}
 	return row
+}
+
+// appendUnplacedJobRows renders the unplaced-jobs table. A job carrying a
+// persisted structured launch/reuse breakdown is marked with a disclosure
+// triangle; when the user has opened it, its full per-avenue detail follows as
+// dim, non-selectable rows. addPlain appends a non-selectable row.
+func (m watchModel) appendUnplacedJobRows(addSelectable, addPlain func(string), width int) {
+	formattedRows := m.formatUnplacedJobRows(m.unplacedJobs, max(width-4, 40))
+	rowWidth := max(width-2, 40)
+	for i := range m.unplacedJobs {
+		job := m.unplacedJobs[i]
+		text := "  " + truncate(formattedRows[i], rowWidth)
+		d := blockreason.ForJob(job)
+		expandable := d != nil && d.IsPlacementFailure()
+		if expandable {
+			text = applyDisclosureMarker(text, m.expandedBlocked[job.ID])
+		}
+		addSelectable(text)
+		if expandable && m.expandedBlocked[job.ID] {
+			for _, line := range d.DetailLines() {
+				addPlain(watchDimStyle.Render(truncate("      "+line, rowWidth)))
+			}
+		}
+	}
 }
 
 // formatUnplacedJobRows formats all unplaced jobs as a table with dynamically

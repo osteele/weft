@@ -2085,6 +2085,23 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- (auto_pilot.reuse_fill_blocked / reuse_skipped / reuse_failed).
         -- Implementation: internal/orchestration/autopilot.go
         -- RunGroupedAutoPilotPass, finalizeUnplacedBlockedReasons.
+        --
+        -- Structured form: a job blocked because no placement avenue is
+        -- available (no new instance could be launched AND no running
+        -- instance could be reused) also carries a blockreason.Structured
+        -- value. It splits the one-line reason into its primary launch
+        -- blocker and a secondary per-instance list of reuse rejections, so
+        -- a display surface can show every avenue rather than the truncated
+        -- head of a joined string. It is carried on the pass result
+        -- (GroupedAutoPilotResult.StructuredBlocked) and also persisted to
+        -- the jobs.placement_blocked column by finalizeUnplacedBlockedReasons
+        -- so consumers that did not run the pass (watch TUIs, weft job info)
+        -- can read it via blockreason.ForJob. The flat BlockedReasons string
+        -- remains the authoritative, back-compat reason and equals
+        -- Structured.Flat(). Single-cause blockers (preconditions,
+        -- cooldowns) have no structured entry — their flat reason is already
+        -- the whole story, and their placement_blocked column is cleared.
+        -- Built by noRentalHeadroomStructured.
 }
 
 -- ==========================================================================

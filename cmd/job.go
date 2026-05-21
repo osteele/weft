@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
@@ -1046,12 +1047,23 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		if display.Blocked {
 			fmt.Printf("Status:      %s%s\n", display.Status, tombstone)
-			reasons := mergeBlockedReasons(display.Reason, job.PlacementReasons)
-			for i, reason := range reasons {
-				if i == 0 {
-					fmt.Printf("Reason:      %s\n", reason)
-				} else {
-					fmt.Printf("             %s\n", reason)
+			// A placement-avenue failure carries a structured launch/reuse
+			// breakdown — print every avenue, not just the truncated head of
+			// the joined flat string. Single-cause blockers fall through to
+			// the merged flat reasons.
+			if s := blockreason.ForJob(job); s.IsPlacementFailure() {
+				fmt.Printf("Reason:      %s\n", s.Summary)
+				for _, line := range s.DetailLines() {
+					fmt.Printf("             %s\n", line)
+				}
+			} else {
+				reasons := mergeBlockedReasons(display.Reason, job.PlacementReasons)
+				for i, reason := range reasons {
+					if i == 0 {
+						fmt.Printf("Reason:      %s\n", reason)
+					} else {
+						fmt.Printf("             %s\n", reason)
+					}
 				}
 			}
 		} else {

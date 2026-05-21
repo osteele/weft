@@ -122,6 +122,9 @@ type watchModel struct {
 	// Singleton autopilot pause state, refreshed by runAutoPilot.
 	autopilotPaused       bool
 	autopilotPausedReason string
+	// expandedBlocked records which unplaced job rows the user has opened for
+	// an in-place structured launch/reuse disclosure.
+	expandedBlocked map[int64]bool
 	// Auto-pilot diagnostics and relaunch backoff.
 	autoNoopReasons         map[int64]string
 	autoLastUnplacedSig     string

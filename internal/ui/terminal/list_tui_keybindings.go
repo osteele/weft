@@ -311,6 +311,53 @@ func listGroupedKeyBindings() []listKeyBinding {
 			}
 			return m.beginAutoRunRateInput()
 		}},
+		listKeyBinding{keys: "enter", action: "expand blocker", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			job := m.selectedGroupedJob()
+			if job == nil {
+				return m, nil
+			}
+			d := m.autoBlockDetail[job.ID]
+			if d == nil || !d.IsPlacementFailure() {
+				m.statusMessage = "No placement breakdown for this job"
+				return m, nil
+			}
+			if m.expandedBlocked == nil {
+				m.expandedBlocked = map[int64]bool{}
+			}
+			m.expandedBlocked[job.ID] = !m.expandedBlocked[job.ID]
+			m.rebuildGroupedRows()
+			return m, nil
+		}},
+		listKeyBinding{keys: "O", action: "expand all blockers", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			expandable := 0
+			for _, d := range m.autoBlockDetail {
+				if d != nil && d.IsPlacementFailure() {
+					expandable++
+				}
+			}
+			if expandable == 0 {
+				m.statusMessage = "No placement breakdowns to expand"
+				return m, nil
+			}
+			anyExpanded := false
+			for _, open := range m.expandedBlocked {
+				if open {
+					anyExpanded = true
+					break
+				}
+			}
+			next := map[int64]bool{}
+			if !anyExpanded {
+				for jobID, d := range m.autoBlockDetail {
+					if d != nil && d.IsPlacementFailure() {
+						next[jobID] = true
+					}
+				}
+			}
+			m.expandedBlocked = next
+			m.rebuildGroupedRows()
+			return m, nil
+		}},
 		listKeyBinding{keys: listKeyListView.keys, action: listKeyListView.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if m.moveLookupPending {
 				m.moveLookupPending = false

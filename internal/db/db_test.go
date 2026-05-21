@@ -1031,6 +1031,39 @@ func TestSetJobPlacementReasonsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSetJobPlacementBlockedRoundTrip(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "unplaced", "")
+	if err != nil {
+		t.Fatalf("record unplaced: %v", err)
+	}
+	encoded := `{"summary":"no rental headroom","launch":"no rental headroom","reuse":[{"instance":"wi1023","reason":"disk insufficient"}]}`
+	if err := SetJobPlacementBlocked(database, jobID, encoded); err != nil {
+		t.Fatalf("SetJobPlacementBlocked: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.PlacementBlockedJSON != encoded {
+		t.Fatalf("PlacementBlockedJSON = %q, want %q", job.PlacementBlockedJSON, encoded)
+	}
+
+	// An empty string clears the column.
+	if err := SetJobPlacementBlocked(database, jobID, ""); err != nil {
+		t.Fatalf("SetJobPlacementBlocked clear: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after clear: %v", err)
+	}
+	if job.PlacementBlockedJSON != "" {
+		t.Fatalf("PlacementBlockedJSON after clear = %q, want empty", job.PlacementBlockedJSON)
+	}
+}
+
 func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	database := SetupTestDB(t)
 
