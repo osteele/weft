@@ -209,7 +209,11 @@ func workerDownloadTime(est CostEstimate) time.Duration {
 	return downloadTime
 }
 
-// collectHFAssets extracts HF model and dataset IDs from all jobs across all groups.
+// collectHFAssets extracts HF model and dataset IDs from all jobs across all
+// groups. Only hf:/hf-dataset: inputs are collected: those are the asset kinds
+// the bootstrap script can download from the Hub. checkpoint:/corpus: inputs
+// have no cloud provisioning path and are rejected before launch by
+// validateGroupCloudProvisionable; job-output: inputs are handled via --needs.
 func collectHFAssets(groups []InstanceGroup) ([]string, []string) {
 	seenModels := make(map[string]bool)
 	seenDatasets := make(map[string]bool)

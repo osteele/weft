@@ -1436,6 +1436,12 @@ func LaunchInstance(
 		return 0, ErrR2ClientRequired
 	}
 
+	// Reject before spending: a job declaring a checkpoint:/corpus: input has
+	// no provisioning path onto a rental and would fail inside the job.
+	if err := validateGroupCloudProvisionable(group); err != nil {
+		return 0, err
+	}
+
 	ctx := context.Background()
 
 	// The container's disk allocation is what the provider grants on create
