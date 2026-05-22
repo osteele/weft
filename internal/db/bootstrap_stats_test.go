@@ -10,7 +10,7 @@ import (
 
 func setupBootstrapTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	return setupStatsTestDB(t)
+	return SetupTestDB(t)
 }
 
 // insertBootstrapLaunch inserts a launch that either bootstrapped or failed.
@@ -111,6 +111,13 @@ func TestBootstrapStagePercentile(t *testing.T) {
 	base := int64(1000000)
 	for i, duration := range []int64{30, 60, 90, 120, 150} {
 		launchID := int64(i + 1)
+		// bootstrap_transitions.launch_id is a foreign key into launches.
+		if _, err := database.Exec(
+			`INSERT INTO launches (id, status, created_at) VALUES (?, 'running', ?)`,
+			launchID, base,
+		); err != nil {
+			t.Fatal(err)
+		}
 		_, err := database.Exec(
 			`INSERT INTO bootstrap_transitions (launch_id, stage, entered_at) VALUES (?, ?, ?), (?, ?, ?)`,
 			launchID, "deps_installing", base, launchID, "agent_starting", base+duration,

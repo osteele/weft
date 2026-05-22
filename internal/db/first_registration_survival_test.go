@@ -36,7 +36,7 @@ func insertWorkerLaunch(t *testing.T, database *sql.DB, id int64, campaignID int
 }
 
 func TestComputeFirstRegistrationSurvival_EmptyUsesDefaults(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	s, err := ComputeFirstRegistrationSurvival(database, FirstRegistrationScope{})
@@ -58,7 +58,7 @@ func TestComputeFirstRegistrationSurvival_EmptyUsesDefaults(t *testing.T) {
 }
 
 func TestComputeFirstRegistrationSurvival_ScopeFallback(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(1_000_000)
@@ -93,7 +93,7 @@ func TestComputeFirstRegistrationSurvival_ScopeFallback(t *testing.T) {
 }
 
 func TestComputeFirstRegistrationSurvival_IncludesTerminalNoLaunchFailures(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(2_000_000)
@@ -129,7 +129,7 @@ func TestComputeFirstRegistrationSurvival_IncludesTerminalNoLaunchFailures(t *te
 }
 
 func TestFirstRegistrationSurvival_ConditionalSuccessMonotonic(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(3_000_000)

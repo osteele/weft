@@ -132,7 +132,36 @@ func fingerprintTableSchema(db *sql.DB) (string, error) {
 			b.WriteString("  check " + c + "\n")
 		}
 	}
+	viewLines, err := viewFingerprintLines(db)
+	if err != nil {
+		return "", err
+	}
+	for _, l := range viewLines {
+		b.WriteString(l + "\n")
+	}
 	return b.String(), nil
+}
+
+// viewFingerprintLines renders each view's definition, whitespace-normalized
+// so DDL formatting does not register as drift. Views are now owned by the
+// goose baseline (no Go generator recreates them), so this is their guard.
+func viewFingerprintLines(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT name, sql FROM sqlite_master
+		WHERE type = 'view' ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list views: %w", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var name string
+		var createSQL sql.NullString
+		if err := rows.Scan(&name, &createSQL); err != nil {
+			return nil, fmt.Errorf("scan view row: %w", err)
+		}
+		lines = append(lines, "view "+name, "  sql "+normalizeWS(createSQL.String))
+	}
+	return lines, rows.Err()
 }
 
 func tableColumnLines(db *sql.DB, table string) ([]string, error) {

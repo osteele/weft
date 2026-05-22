@@ -9,7 +9,7 @@ import (
 )
 
 func TestComputeSetupSurvival_Empty(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	s, err := ComputeSetupSurvival(database, "uv run pytest", "/tmp/project")
@@ -48,7 +48,7 @@ func insertSetupJob(t *testing.T, database *sql.DB, jobID, launchID int64, comma
 }
 
 func TestComputeSetupSurvival_SufficientData(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(1000000)
@@ -104,7 +104,7 @@ func TestComputeSetupSurvival_SufficientData(t *testing.T) {
 }
 
 func TestComputeSetupSurvival_FallbackToAllJobs(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(1000000)
@@ -131,7 +131,7 @@ func TestComputeSetupSurvival_FallbackToAllJobs(t *testing.T) {
 }
 
 func TestComputeSetupSurvival_InsufficientData(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(1000000)
@@ -153,7 +153,7 @@ func TestComputeSetupSurvival_InsufficientData(t *testing.T) {
 }
 
 func TestComputeSetupSurvival_WorkspaceFallback(t *testing.T) {
-	database := setupStatsTestDB(t)
+	database := SetupTestDB(t)
 	defer database.Close()
 
 	base := int64(1000000)

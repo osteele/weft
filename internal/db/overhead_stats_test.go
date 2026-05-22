@@ -9,7 +9,7 @@ import (
 
 func setupOverheadTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	return setupStatsTestDB(t)
+	return SetupTestDB(t)
 }
 
 func TestQueryOverheadObservations_Empty(t *testing.T) {
