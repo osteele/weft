@@ -132,24 +132,27 @@ func fingerprintTableSchema(db *sql.DB) (string, error) {
 			b.WriteString("  check " + c + "\n")
 		}
 	}
-	viewLines, err := viewFingerprintLines(db)
-	if err != nil {
-		return "", err
-	}
-	for _, l := range viewLines {
-		b.WriteString(l + "\n")
+	for _, kind := range []string{"view", "trigger"} {
+		objLines, err := objectFingerprintLines(db, kind)
+		if err != nil {
+			return "", err
+		}
+		for _, l := range objLines {
+			b.WriteString(l + "\n")
+		}
 	}
 	return b.String(), nil
 }
 
-// viewFingerprintLines renders each view's definition, whitespace-normalized
-// so DDL formatting does not register as drift. Views are now owned by the
-// goose baseline (no Go generator recreates them), so this is their guard.
-func viewFingerprintLines(db *sql.DB) ([]string, error) {
+// objectFingerprintLines renders each schema object of the given type (view
+// or trigger), whitespace-normalized so DDL formatting does not register as
+// drift. Views and triggers are owned by the goose baseline — no Go generator
+// recreates them — so this is their schema guard.
+func objectFingerprintLines(db *sql.DB, objType string) ([]string, error) {
 	rows, err := db.Query(`SELECT name, sql FROM sqlite_master
-		WHERE type = 'view' ORDER BY name`)
+		WHERE type = ? ORDER BY name`, objType)
 	if err != nil {
-		return nil, fmt.Errorf("list views: %w", err)
+		return nil, fmt.Errorf("list %ss: %w", objType, err)
 	}
 	defer rows.Close()
 	var lines []string
@@ -157,9 +160,9 @@ func viewFingerprintLines(db *sql.DB) ([]string, error) {
 		var name string
 		var createSQL sql.NullString
 		if err := rows.Scan(&name, &createSQL); err != nil {
-			return nil, fmt.Errorf("scan view row: %w", err)
+			return nil, fmt.Errorf("scan %s row: %w", objType, err)
 		}
-		lines = append(lines, "view "+name, "  sql "+normalizeWS(createSQL.String))
+		lines = append(lines, objType+" "+name, "  sql "+normalizeWS(createSQL.String))
 	}
 	return lines, rows.Err()
 }

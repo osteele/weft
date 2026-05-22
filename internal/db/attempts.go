@@ -245,25 +245,6 @@ const inferSiblingLaunchSQL = `
 	  AND ja_prior.launch_id IS NOT NULL
 	ORDER BY ja_sibling.launch_id DESC LIMIT 1`
 
-// createJobsToAttemptsSync creates a trigger that mirrors execution-state
-// columns from jobs to job_attempts on every UPDATE. This ensures backward
-// compatibility: code and tests that update jobs directly automatically
-// propagate to attempts, which is where the job_status view reads from.
-// createJobsToAttemptsSyncTrigger drops the legacy sync trigger. Execution-state
-// writes now go directly to job_attempts; no trigger needed.
-func createJobsToAttemptsSyncTrigger(db *sql.DB) error {
-	_, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_sync_exec_to_attempts`)
-	return err
-}
-
-// dropJobsInsertTrigger removes the legacy trigger that auto-created an
-// attempt row on job insert. Attempts are now only created when a job is
-// placed on a host/instance.
-func dropJobsInsertTrigger(db *sql.DB) error {
-	_, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_insert_create_attempt`)
-	return err
-}
-
 func hasJobPhaseTimingsTable(db *sql.DB) bool {
 	var name string
 	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'job_phase_timings'`).Scan(&name)
