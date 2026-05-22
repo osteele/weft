@@ -226,6 +226,52 @@ func TestJobStatusView_CanceledAttemptOnLiveLaunch(t *testing.T) {
 	}
 }
 
+func TestJobOutcomesByLaunchIDs(t *testing.T) {
+	database := setupTestDB(t)
+
+	// A launch whose job completed.
+	doneLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusCompleted, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const doneJob = int64(8100)
+	insertTestJob(t, database, doneJob, "echo hi", "/tmp", StatusQueued, withLaunch(doneLaunch))
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = 'completed', end_time = ?, exit_code = 0 WHERE job_id = ?`,
+		time.Now().Unix(), doneJob,
+	); err != nil {
+		t.Fatalf("close attempt as completed: %v", err)
+	}
+
+	// A launch whose job is still queued.
+	queuedLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const queuedJob = int64(8101)
+	insertTestJob(t, database, queuedJob, "echo hi", "/tmp", StatusQueued, withLaunch(queuedLaunch))
+
+	// A launch that never carried a job — a dud.
+	dudLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	got, err := JobOutcomesByLaunchIDs(database, []int64{doneLaunch, queuedLaunch, dudLaunch})
+	if err != nil {
+		t.Fatalf("JobOutcomesByLaunchIDs: %v", err)
+	}
+	if got[doneLaunch].JobID != doneJob || got[doneLaunch].Status != StatusCompleted {
+		t.Fatalf("done launch outcome = %+v, want job %d status %q", got[doneLaunch], doneJob, StatusCompleted)
+	}
+	if got[queuedLaunch].JobID != queuedJob || got[queuedLaunch].Status != StatusQueued {
+		t.Fatalf("queued launch outcome = %+v, want job %d status %q", got[queuedLaunch], queuedJob, StatusQueued)
+	}
+	if _, ok := got[dudLaunch]; ok {
+		t.Fatalf("launch with no job should be omitted (a dud), got %+v", got[dudLaunch])
+	}
+}
+
 func TestCleanupStaleAttempts_PreventsSupersededDuplicateOpenAttempts(t *testing.T) {
 	database := setupTestDB(t)
 

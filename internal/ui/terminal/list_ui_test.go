@@ -1003,7 +1003,9 @@ func TestListTUIGroupedViewSelectsRecentLaunchFailure(t *testing.T) {
 					CostPerHourCents:   120,
 				},
 			},
-			windowSince: now.Add(-30 * time.Minute),
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+				77: {JobID: 1, Status: db.StatusFailed},
+			},
 		},
 	}
 	m.rebuildGroupedRows()
@@ -1048,7 +1050,9 @@ func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
 					EndedAt:           testInt64Ptr(now.Add(-time.Minute).Unix()),
 				},
 			},
-			windowSince: now.Add(-30 * time.Minute),
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+				88: {JobID: 1, Status: db.StatusFailed},
+			},
 		},
 	}
 	m.rebuildGroupedRows()
@@ -1073,7 +1077,6 @@ func TestGroupedViewportCountsFailedInstanceRows(t *testing.T) {
 			{ID: 82, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure, TerminationDetail: "job failed", EndedAt: testInt64Ptr(9_901)},
 			{ID: 83, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "infra failed", EndedAt: testInt64Ptr(9_902)},
 		},
-		windowSince: now.Add(-30 * time.Minute),
 	}
 	rows := buildGroupedStatusRowsWithOptions(nil, 100, groupedStatusRenderOptions{
 		failedInstances: failures,
@@ -1085,8 +1088,8 @@ func TestGroupedViewportCountsFailedInstanceRows(t *testing.T) {
 		t.Fatal("selectGroupedRowsForViewport returned no lines")
 	}
 	got := stripANSI(lines[0].text)
-	if !strings.Contains(got, "Recent failed instances (2):") {
-		t.Fatalf("header = %q, want failed instance count", got)
+	if !strings.HasPrefix(got, "Recent failed instances") || !strings.Contains(got, "(2):") {
+		t.Fatalf("header = %q, want failed instance count of 2", got)
 	}
 	for _, line := range lines {
 		if strings.Contains(stripANSI(line.text), "job failed") {
@@ -1095,6 +1098,47 @@ func TestGroupedViewportCountsFailedInstanceRows(t *testing.T) {
 	}
 	if strings.Contains(got, "(0)") {
 		t.Fatalf("header counted jobs instead of failed instances: %q", got)
+	}
+}
+
+func TestListTUIExpandsFailedInstancesToggle(t *testing.T) {
+	now := time.Now()
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           120,
+		height:          24,
+		title:           "Jobs",
+		recentFailedInstances: &recentFailedInstances{
+			items: []*db.Launch{
+				{ID: 91, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-5 * time.Minute).Unix())},
+				{ID: 92, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-6 * time.Minute).Unix())},
+				{ID: 93, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "no agent", EndedAt: testInt64Ptr(now.Add(-7 * time.Minute).Unix())},
+			},
+			// 91/92 succeeded, 93 is a dud — all FYI buckets, collapsed by default.
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+				91: {JobID: 1, Status: db.StatusCompleted},
+				92: {JobID: 2, Status: db.StatusCompleted},
+			},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	if strings.Contains(failedInstanceRowText(m.groupedRows), "succeeded (2)") {
+		t.Fatalf("FYI buckets should be collapsed by default:\n%s", failedInstanceRowText(m.groupedRows))
+	}
+	if len(m.groupedSelectableRows) != 1 {
+		t.Fatalf("expected the expand toggle as the only selectable row, got %d", len(m.groupedSelectableRows))
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(listTUIModel)
+	if !got.expandedFailedInstances {
+		t.Fatal("Enter on the toggle row should set expandedFailedInstances")
+	}
+	for _, want := range []string{"succeeded (2)", "dud (1)"} {
+		if !strings.Contains(failedInstanceRowText(got.groupedRows), want) {
+			t.Fatalf("expanded view should reveal %q:\n%s", want, failedInstanceRowText(got.groupedRows))
+		}
 	}
 }
 

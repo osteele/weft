@@ -98,6 +98,38 @@ func TestLaunchSuccessorsRecovered(t *testing.T) {
 	}
 }
 
+func TestLaunchChainTerminalStatuses(t *testing.T) {
+	database := SetupTestDB(t)
+	defer database.Close()
+	now := time.Now().Unix()
+
+	// Chain A -> B -> C, terminal launch C completed.
+	a := insertFailedLaunch(t, database, now-300, TerminationReasonProviderFailure)
+	b := insertSuccessorLaunch(t, database, a, LaunchStatusFailed, now-200)
+	insertSuccessorLaunch(t, database, b, LaunchStatusCompleted, now-100)
+
+	// Standalone failed launch with no successor — terminal is itself.
+	d := insertFailedLaunch(t, database, now-90, TerminationReasonProviderFailure)
+
+	// Chain E -> F, terminal launch F still running.
+	e := insertFailedLaunch(t, database, now-80, TerminationReasonProviderFailure)
+	insertSuccessorLaunch(t, database, e, LaunchStatusRunning, now-70)
+
+	got, err := LaunchChainTerminalStatuses(database, []int64{a, d, e})
+	if err != nil {
+		t.Fatalf("LaunchChainTerminalStatuses: %v", err)
+	}
+	if got[a] != LaunchStatusCompleted {
+		t.Fatalf("chain A terminal = %q, want %q", got[a], LaunchStatusCompleted)
+	}
+	if got[d] != LaunchStatusFailed {
+		t.Fatalf("standalone D terminal = %q, want %q", got[d], LaunchStatusFailed)
+	}
+	if got[e] != LaunchStatusRunning {
+		t.Fatalf("chain E terminal = %q, want %q", got[e], LaunchStatusRunning)
+	}
+}
+
 func insertSuccessorLaunch(t *testing.T, database *sql.DB, predecessorID int64, status string, createdAt int64) int64 {
 	t.Helper()
 	res, err := database.Exec(

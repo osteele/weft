@@ -706,6 +706,64 @@ func LaunchSuccessorsRecovered(database *sql.DB, failedIDs []int64) (map[int64]b
 	return out, rows.Err()
 }
 
+// LaunchChainTerminalStatuses walks replaced_instance_id successor links forward
+// from each seed launch and returns the status of the chain's terminal (newest)
+// launch, keyed by seed launch ID. A seed with no successor maps to its own
+// status. Successors always have a higher id than the launch they replace, so
+// the walk is acyclic and terminates.
+func LaunchChainTerminalStatuses(database *sql.DB, seedIDs []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(seedIDs))
+	if len(seedIDs) == 0 {
+		return out, nil
+	}
+	seen := make(map[int64]struct{}, len(seedIDs))
+	args := make([]any, 0, len(seedIDs))
+	for _, id := range seedIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return out, nil
+	}
+	rows, err := database.Query(
+		`WITH RECURSIVE chain(seed, id, status) AS (
+		   SELECT id, id, status FROM launches WHERE id IN (`+sqlPlaceholders(len(args))+`)
+		   UNION ALL
+		   SELECT chain.seed, l.id, l.status
+		     FROM launches l JOIN chain ON l.replaced_instance_id = chain.id
+		 )
+		 SELECT seed, id, status FROM chain`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	terminalID := make(map[int64]int64, len(args))
+	for rows.Next() {
+		var (
+			seed   int64
+			id     int64
+			status string
+		)
+		if err := rows.Scan(&seed, &id, &status); err != nil {
+			return nil, err
+		}
+		// The terminal launch of a chain is the newest (highest id).
+		if id >= terminalID[seed] {
+			terminalID[seed] = id
+			out[seed] = status
+		}
+	}
+	return out, rows.Err()
+}
+
 // ProjectsByLaunchIDs returns one project name per launch (the most recent
 // non-empty project across the launch's job_attempts). Empty values and
 // missing launches are omitted.
@@ -757,6 +815,70 @@ func ProjectsByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]string,
 			continue
 		}
 		out[launchID] = project
+	}
+	return out, rows.Err()
+}
+
+// LaunchJobOutcome summarizes the current state of the job that ran on a
+// launch. Status is the job's effective status (from the job_status view, which
+// derives it from the latest attempt), used to classify a failed instance's
+// series outcome.
+type LaunchJobOutcome struct {
+	JobID  int64
+	Status string
+	Host   string
+}
+
+// JobOutcomesByLaunchIDs returns the most recent job per launch (highest
+// job_attempts id), with that job's current effective status and host. Launches
+// with no job_attempts row are omitted — callers treat their absence as a
+// "dud": the instance failed before any job ran on it. Status comes from the
+// job_status view because the jobs table has no status column; status is
+// derived from the latest attempt.
+func JobOutcomesByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]LaunchJobOutcome, error) {
+	out := make(map[int64]LaunchJobOutcome, len(launchIDs))
+	if len(launchIDs) == 0 {
+		return out, nil
+	}
+	seen := make(map[int64]struct{}, len(launchIDs))
+	args := make([]any, 0, len(launchIDs))
+	for _, id := range launchIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return out, nil
+	}
+	rows, err := database.Query(
+		`SELECT ja.launch_id, j.id, j.status, COALESCE(j.host, '')
+		   FROM job_attempts ja
+		   JOIN job_status j ON j.id = ja.job_id
+		  WHERE ja.launch_id IN (`+sqlPlaceholders(len(args))+`)
+		  ORDER BY ja.launch_id, ja.id DESC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			launchID int64
+			outcome  LaunchJobOutcome
+		)
+		if err := rows.Scan(&launchID, &outcome.JobID, &outcome.Status, &outcome.Host); err != nil {
+			return nil, err
+		}
+		if _, ok := out[launchID]; ok {
+			continue
+		}
+		out[launchID] = outcome
 	}
 	return out, rows.Err()
 }

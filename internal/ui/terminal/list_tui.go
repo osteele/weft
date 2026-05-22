@@ -88,6 +88,7 @@ type listTUIModel struct {
 	autoBlockReasons           map[int64]string
 	autoBlockDetail            map[int64]*blockreason.Structured
 	expandedBlocked            map[int64]bool
+	expandedFailedInstances    bool
 	lastAutoPilotErrorRaw      string
 	showAutoPilotErrorDetails  bool
 	autopilotPaused            bool
@@ -1508,7 +1509,7 @@ func (m *listTUIModel) selectGroupedMouseRow(y int) {
 		return
 	}
 	row := m.groupedRows[rowIdx]
-	if (row.job == nil && row.launch == nil) || row.isHeader || row.isBlocked {
+	if (row.job == nil && row.launch == nil && row.expandToggle == "") || row.isHeader || row.isBlocked {
 		return
 	}
 	for i, selectableRow := range m.groupedSelectableRows {
@@ -2338,15 +2339,17 @@ func (m *listTUIModel) rebuildGroupedRows() {
 				stageByName:            m.launchStageETAByName,
 				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
 			},
-			blockedDetail:   m.effectiveBlockedDetail(),
-			expandedBlocked: m.expandedBlocked,
+			blockedDetail:           m.effectiveBlockedDetail(),
+			expandedBlocked:         m.expandedBlocked,
+			interactive:             true,
+			expandedFailedInstances: m.expandedFailedInstances,
 		})
 	} else {
 		m.groupedRows = buildListGroupedRows(m.jobs, m.effectiveGroupMode(), m.width, m.layout)
 	}
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
-		if (row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked {
+		if (row.job != nil || row.launch != nil || row.expandToggle != "") && !row.isHeader && !row.isBlocked {
 			m.groupedSelectableRows = append(m.groupedSelectableRows, i)
 		}
 	}
@@ -2590,21 +2593,26 @@ func loadRecentFailedInstances(database *sql.DB, window time.Duration, now time.
 			ids = append(ids, it.ID)
 		}
 	}
-	recovered, err := db.LaunchSuccessorsRecovered(database, ids)
-	if err != nil {
-		slog.Warn("load launch successors", "component", "ui.list", "error", err)
-		recovered = map[int64]bool{}
-	}
 	projects, err := db.ProjectsByLaunchIDs(database, ids)
 	if err != nil {
 		slog.Warn("load launch projects", "component", "ui.list", "error", err)
 		projects = map[int64]string{}
 	}
+	outcomes, err := db.JobOutcomesByLaunchIDs(database, ids)
+	if err != nil {
+		slog.Warn("load launch job outcomes", "component", "ui.list", "error", err)
+		outcomes = map[int64]db.LaunchJobOutcome{}
+	}
+	chainTerminals, err := db.LaunchChainTerminalStatuses(database, ids)
+	if err != nil {
+		slog.Warn("load launch chain terminals", "component", "ui.list", "error", err)
+		chainTerminals = map[int64]string{}
+	}
 	return &recentFailedInstances{
-		items:             items,
-		recoveredIDs:      recovered,
-		projectByLaunchID: projects,
-		windowSince:       since,
+		items:                   items,
+		projectByLaunchID:       projects,
+		jobOutcomeByLaunchID:    outcomes,
+		chainTerminalByLaunchID: chainTerminals,
 	}
 }
 

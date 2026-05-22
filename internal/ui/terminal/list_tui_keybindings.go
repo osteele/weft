@@ -311,7 +311,13 @@ func listGroupedKeyBindings() []listKeyBinding {
 			}
 			return m.beginAutoRunRateInput()
 		}},
-		listKeyBinding{keys: "enter", action: "expand blocker", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+		listKeyBinding{keys: "enter", action: "expand", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if rowIdx := m.selectedGroupedRow(); rowIdx >= 0 && rowIdx < len(m.groupedRows) &&
+				m.groupedRows[rowIdx].expandToggle == failedInstancesSectionKey {
+				m.expandedFailedInstances = !m.expandedFailedInstances
+				m.rebuildGroupedRows()
+				return m, nil
+			}
 			job := m.selectedGroupedJob()
 			if job == nil {
 				return m, nil

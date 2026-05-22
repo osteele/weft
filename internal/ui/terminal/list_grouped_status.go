@@ -30,6 +30,10 @@ type groupedStatusRow struct {
 	job       *db.Job
 	launch    *db.Launch
 	section   string
+	// expandToggle, when non-empty, marks a selectable row that toggles an
+	// in-place disclosure. The value identifies what it toggles (e.g.
+	// failedInstancesSectionKey).
+	expandToggle string
 }
 
 type groupedStatusRenderOptions struct {
@@ -48,6 +52,12 @@ type groupedStatusRenderOptions struct {
 	// user has opened for an in-place per-avenue disclosure.
 	blockedDetail   map[int64]*blockreason.Structured
 	expandedBlocked map[int64]bool
+	// interactive is true for the live TUI render and false for plain text
+	// output. The failed-instances section uses it to decide whether to
+	// collapse the FYI buckets behind an expand toggle (TUI) or render all
+	// buckets unconditionally (plain output).
+	interactive             bool
+	expandedFailedInstances bool
 }
 
 type groupedStatusLaunchingETA struct {
@@ -63,19 +73,19 @@ type groupedStatusLaunchingStageETA struct {
 	oldest  int64
 }
 
-// recentFailedInstances feeds the "Recent failed instances" section. recoveredIDs
-// holds the subset of items whose successor is alive — those rows render dim.
+// recentFailedInstances feeds the "Recent failed instances" section.
+//   - chainTerminalByLaunchID maps each failed launch to the status of the
+//     terminal launch in its relaunch chain (db.LaunchChainTerminalStatuses).
+//   - jobOutcomeByLaunchID maps each failed launch to the current state of the
+//     job it carried; absence means the instance never carried a job (a dud).
 type recentFailedInstances struct {
-	items             []*db.Launch
-	recoveredIDs      map[int64]bool
-	projectByLaunchID map[int64]string
-	windowSince       time.Time
+	items                   []*db.Launch
+	projectByLaunchID       map[int64]string
+	jobOutcomeByLaunchID    map[int64]db.LaunchJobOutcome
+	chainTerminalByLaunchID map[int64]string
 }
 
-const (
-	recentFailedInstanceMaxRows = 6
-	failedInstancesSectionKey   = "failed_instances"
-)
+const failedInstancesSectionKey = "failed_instances"
 
 func renderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
 	return renderJobListGroupedStatusPlainAt(jobs, width, nil, nil, nil, nil, nil, time.Now())
@@ -233,7 +243,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		rows = append(rows, groupedStatusRow{text: ""})
 	}
 
-	rows = appendRecentFailedInstanceRows(rows, opts.failedInstances, projectWidth, width, now)
+	rows = appendRecentFailedInstanceRows(rows, opts.failedInstances, projectWidth, width, opts.interactive, opts.expandedFailedInstances, now)
 
 	if len(rows) == 0 {
 		return nil
@@ -1052,106 +1062,322 @@ func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
 // being hidden — the count in the section header stays honest.
 var failureDimStyle = lipgloss.NewStyle().Faint(true)
 
+// failureOutcome classifies how the relaunch series of a failed instance
+// turned out. The user cares about the fate of the work, not which instance
+// IDs died.
+type failureOutcome int
+
+const (
+	// failureSeriesFailed: the relaunch chain is exhausted and the job ended
+	// in failure (e.g. retry budget exhausted).
+	failureSeriesFailed failureOutcome = iota
+	// failureAwaitingPlacement: the chain is exhausted but the job is
+	// re-queued and waiting for placement — the bucket that needs attention.
+	failureAwaitingPlacement
+	// failureOngoing: the chain is still live, or the job is running again.
+	failureOngoing
+	// failureSeriesSucceeded: the chain/job ultimately completed.
+	failureSeriesSucceeded
+	// failureDud: the instance never carried a job — it failed before it
+	// could do work.
+	failureDud
+)
+
+// failureOutcomeOrder lists buckets in attention-first display order.
+var failureOutcomeOrder = []failureOutcome{
+	failureSeriesFailed, failureAwaitingPlacement, failureOngoing,
+	failureSeriesSucceeded, failureDud,
+}
+
+// failureFYIOutcomes are the buckets collapsed behind an expand toggle in the
+// interactive TUI: the work either finished or never started.
+var failureFYIOutcomes = []failureOutcome{failureSeriesSucceeded, failureDud}
+
+func failureGroupLabel(o failureOutcome) string {
+	switch o {
+	case failureSeriesFailed:
+		return "failed"
+	case failureAwaitingPlacement:
+		return "awaiting placement"
+	case failureOngoing:
+		return "ongoing"
+	case failureSeriesSucceeded:
+		return "succeeded"
+	default:
+		return "dud"
+	}
+}
+
+// failureCountPhrase renders a count for one bucket, e.g. "3 failed" or
+// "2 duds".
+func failureCountPhrase(o failureOutcome, n int) string {
+	if o == failureDud {
+		return pluralize(n, "dud", "duds")
+	}
+	return fmt.Sprintf("%d %s", n, failureGroupLabel(o))
+}
+
+// classifyFailureOutcome follows the relaunch chain to its terminal launch and,
+// when that chain is exhausted, consults the job's current status — the chain
+// alone cannot distinguish an abandoned job from one re-queued for a fresh
+// attempt.
+func classifyFailureOutcome(f *db.Launch, failures *recentFailedInstances) failureOutcome {
+	if _, hasJob := failures.jobOutcomeByLaunchID[f.ID]; !hasJob {
+		return failureDud
+	}
+	switch failures.chainTerminalByLaunchID[f.ID] {
+	case db.LaunchStatusCompleted:
+		return failureSeriesSucceeded
+	case db.LaunchStatusFailed, db.LaunchStatusCancelled, "":
+		// Chain exhausted (or unknown) — fall through to the job's status.
+	default:
+		// running / paused / grace / launching — the chain is still live.
+		return failureOngoing
+	}
+	switch failures.jobOutcomeByLaunchID[f.ID].Status {
+	case db.StatusCompleted:
+		return failureSeriesSucceeded
+	case db.StatusRunning, db.StatusStarting:
+		return failureOngoing
+	case db.StatusQueued, db.StatusPendingPlacement, "orphaned":
+		// "orphaned" is a job_status-view value: the job's instance died and
+		// it is waiting to be re-placed.
+		return failureAwaitingPlacement
+	default:
+		return failureSeriesFailed
+	}
+}
+
+func launchEndedAt(f *db.Launch) int64 {
+	if f != nil && f.EndedAt != nil {
+		return *f.EndedAt
+	}
+	return 0
+}
+
+// formatFailureSpan describes the time range a roll-up of failed launches
+// covers: a single item as "<age> ago", multiple as "last <span>". Both forms
+// use shortRelativeTime's coarse rounding so the output stays clean.
+func formatFailureSpan(items []*db.Launch, now time.Time) string {
+	var oldest int64
+	count := 0
+	for _, f := range items {
+		e := launchEndedAt(f)
+		if e <= 0 {
+			continue
+		}
+		count++
+		if oldest == 0 || e < oldest {
+			oldest = e
+		}
+	}
+	if count == 0 {
+		return ""
+	}
+	age := shortRelativeTime(now.Unix() - oldest)
+	if count == 1 {
+		return age
+	}
+	return "last " + strings.TrimSuffix(age, " ago")
+}
+
+// dominantFailureFactor reports a host/provider attribute shared by a strong
+// majority (>=60%, at least 3) of the failed instances, most specific first.
+// A shared machine or data center points at a localized provider fault; a
+// shared GPU or provider points at a bad offer class. Empty when the failures
+// have no common factor — likely independent transient noise.
+func dominantFailureFactor(items []*db.Launch) string {
+	dims := []struct {
+		label string
+		get   func(*db.Launch) string
+	}{
+		{"machine", func(l *db.Launch) string { return strings.TrimSpace(l.MachineID) }},
+		{"data center", func(l *db.Launch) string { return strings.TrimSpace(l.DataCenter) }},
+		{"GPU", func(l *db.Launch) string { return strings.TrimSpace(l.ResolvedGPUName) }},
+		{"provider", func(l *db.Launch) string { return strings.TrimSpace(l.Provider) }},
+	}
+	n := len(items)
+	for _, d := range dims {
+		counts := make(map[string]int)
+		for _, it := range items {
+			if v := d.get(it); v != "" {
+				counts[v]++
+			}
+		}
+		best, bestN := "", 0
+		for v, c := range counts {
+			if c > bestN {
+				best, bestN = v, c
+			}
+		}
+		if bestN >= 3 && bestN*5 >= n*3 {
+			return d.label + " " + best
+		}
+	}
+	return ""
+}
+
 func appendRecentFailedInstanceRows(
 	rows []groupedStatusRow,
 	failures *recentFailedInstances,
 	projectWidth, width int,
+	interactive, expanded bool,
 	now time.Time,
 ) []groupedStatusRow {
 	if failures == nil {
 		return rows
 	}
 
-	type bucket struct {
-		reason string
-		items  []*db.Launch
-	}
-	bucketIdx := make(map[string]int)
-	buckets := make([]bucket, 0, 4)
-	total := 0
-	recovered := 0
+	renderable := make([]*db.Launch, 0, len(failures.items))
 	for _, f := range failures.items {
-		if f == nil {
+		if f == nil || db.IsNormalInstanceTermination(f.TerminationReason) {
 			continue
 		}
-		if db.IsNormalInstanceTermination(f.TerminationReason) {
-			continue
-		}
-		total++
-		if failures.recoveredIDs[f.ID] {
-			recovered++
-		}
-		reason := strings.TrimSpace(db.HumanizeTerminationReason(f.TerminationReason))
-		if reason == "" {
-			reason = "unknown"
-		}
-		if i, ok := bucketIdx[reason]; ok {
-			buckets[i].items = append(buckets[i].items, f)
-			continue
-		}
-		bucketIdx[reason] = len(buckets)
-		buckets = append(buckets, bucket{reason: reason, items: []*db.Launch{f}})
+		renderable = append(renderable, f)
 	}
+	total := len(renderable)
 	if total == 0 {
 		return rows
 	}
 
-	windowText := ""
-	if !failures.windowSince.IsZero() {
-		windowText = " in last " + formatProjectRecentWindow(now.Sub(failures.windowSince))
+	byOutcome := make(map[failureOutcome][]*db.Launch)
+	outcomeOf := make(map[int64]failureOutcome, total)
+	wastedCents := 0
+	for _, f := range renderable {
+		o := classifyFailureOutcome(f, failures)
+		byOutcome[o] = append(byOutcome[o], f)
+		outcomeOf[f.ID] = o
+		if f.ActualSpendCents > 0 {
+			wastedCents += f.ActualSpendCents
+		}
 	}
-	headerText := fmt.Sprintf("Recent failed instances (%d%s", total, windowText)
-	if recovered > 0 {
-		headerText += fmt.Sprintf(", %d already replaced", recovered)
+	for o := range byOutcome {
+		items := byOutcome[o]
+		sort.SliceStable(items, func(i, j int) bool {
+			return launchEndedAt(items[i]) > launchEndedAt(items[j])
+		})
 	}
-	headerText += "):"
+
+	// Header. The span is placed before the count so the viewport's header
+	// reconstruction — which strips text from the first " (" onward — keeps it.
+	headerSpan := formatFailureSpan(renderable, now)
+	headerText := "Recent failed instances"
+	if headerSpan != "" {
+		headerText += " — " + headerSpan
+	}
+	headerText += fmt.Sprintf(" (%d):", total)
 	rows = append(rows, groupedStatusRow{
 		text:     headerText,
 		isHeader: true,
 		section:  failedInstancesSectionKey,
 	})
 
-	sort.SliceStable(buckets, func(i, j int) bool {
-		if len(buckets[i].items) != len(buckets[j].items) {
-			return len(buckets[i].items) > len(buckets[j].items)
+	// Summary line: full breakdown, overall span, wasted spend.
+	summaryParts := make([]string, 0, len(failureOutcomeOrder))
+	for _, o := range failureOutcomeOrder {
+		if n := len(byOutcome[o]); n > 0 {
+			summaryParts = append(summaryParts, failureCountPhrase(o, n))
 		}
-		return buckets[i].reason < buckets[j].reason
+	}
+	summary := "  " + strings.Join(summaryParts, " · ")
+	if headerSpan != "" {
+		summary += " — " + headerSpan
+	}
+	if wastedCents > 0 {
+		summary += fmt.Sprintf(" · $%.2f wasted", float64(wastedCents)/100)
+	}
+	rows = append(rows, groupedStatusRow{
+		text:      summary,
+		isBlocked: true,
+		section:   failedInstancesSectionKey,
 	})
 
-	emitted := 0
-emit:
-	for _, b := range buckets {
+	// Cluster line: a run of failures sharing a machine/provider/GPU is
+	// almost never independent bad luck.
+	if total >= 3 {
+		if factor := dominantFailureFactor(renderable); factor != "" {
+			rows = append(rows, groupedStatusRow{
+				text:      "  ⚠ clustered failures — common factor: " + factor,
+				isBlocked: true,
+				section:   failedInstancesSectionKey,
+			})
+		}
+	}
+
+	appendGroup := func(rows []groupedStatusRow, o failureOutcome) []groupedStatusRow {
+		items := byOutcome[o]
+		if len(items) == 0 {
+			return rows
+		}
+		header := fmt.Sprintf("  %s (%d)", failureGroupLabel(o), len(items))
+		if span := formatFailureSpan(items, now); span != "" {
+			header += " — " + span
+		}
 		rows = append(rows, groupedStatusRow{
-			text:      fmt.Sprintf("  reason: %s (%d)", b.reason, len(b.items)),
+			text:      header + ":",
 			isBlocked: true,
 			section:   failedInstancesSectionKey,
 		})
-		for _, item := range b.items {
-			if emitted >= recentFailedInstanceMaxRows {
-				break emit
-			}
+		for _, item := range items {
 			rows = append(rows, groupedStatusRow{
-				text:    formatLaunchFailureRow(item, failures, projectWidth, width, now),
+				text:    formatLaunchFailureRow(item, failures, outcomeOf[item.ID], projectWidth, width, now),
 				launch:  item,
 				section: failedInstancesSectionKey,
 			})
-			emitted++
+		}
+		return rows
+	}
+
+	// Attention buckets always render in full.
+	for _, o := range []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureOngoing} {
+		rows = appendGroup(rows, o)
+	}
+
+	// FYI buckets (succeeded, dud): rendered in full in plain output;
+	// collapsed behind an in-place expand toggle in the interactive TUI.
+	fyiItems := make([]*db.Launch, 0)
+	fyiParts := make([]string, 0, len(failureFYIOutcomes))
+	for _, o := range failureFYIOutcomes {
+		if n := len(byOutcome[o]); n > 0 {
+			fyiItems = append(fyiItems, byOutcome[o]...)
+			fyiParts = append(fyiParts, failureCountPhrase(o, n))
+		}
+	}
+	switch {
+	case len(fyiItems) == 0:
+		// Nothing to show or collapse.
+	case !interactive:
+		for _, o := range failureFYIOutcomes {
+			rows = appendGroup(rows, o)
+		}
+	default:
+		toggle := fmt.Sprintf("  + %d more: %s", len(fyiItems), strings.Join(fyiParts, ", "))
+		if span := formatFailureSpan(fyiItems, now); span != "" {
+			toggle += " — " + span
+		}
+		rows = append(rows, groupedStatusRow{
+			text:         applyDisclosureMarker(toggle, expanded),
+			section:      failedInstancesSectionKey,
+			expandToggle: failedInstancesSectionKey,
+		})
+		if expanded {
+			for _, o := range failureFYIOutcomes {
+				rows = appendGroup(rows, o)
+			}
 		}
 	}
 
-	if total > emitted {
-		rows = append(rows, groupedStatusRow{
-			text:    fmt.Sprintf("  + %d more (weft instance list --status failed)", total-emitted),
-			section: failedInstancesSectionKey,
-		})
-	}
 	rows = append(rows, groupedStatusRow{text: ""})
 	return rows
 }
 
+// formatLaunchFailureRow renders one failed-instance row. The failure reason is
+// the triage-critical content, so it gets priority over the width budget; the
+// short age suffix is dropped first when space is tight.
 func formatLaunchFailureRow(
 	f *db.Launch,
 	failures *recentFailedInstances,
+	outcome failureOutcome,
 	projectWidth, width int,
 	now time.Time,
 ) string {
@@ -1167,53 +1393,41 @@ func formatLaunchFailureRow(
 	}
 	projectCol := formatProjectColumn(project, projectWidth)
 
-	gpuBrief := strings.TrimSpace(f.DisplayGPUBrief())
-	costPart := ""
-	if f.CostPerHourCents > 0 {
-		costPart = fmt.Sprintf(" @ $%.2f/hr", float64(f.CostPerHourCents)/100)
-	}
-	hardware := strings.TrimSpace(gpuBrief + costPart)
-
 	detail := strings.TrimSpace(f.TerminationDetail)
 	if detail == "" {
 		detail = strings.TrimSpace(db.HumanizeTerminationReason(f.TerminationReason))
 	}
+	if detail == "" {
+		detail = "unknown failure"
+	}
+	if outcome == failureOngoing {
+		detail += ", relaunching"
+	}
 
-	suffixParts := make([]string, 0, 2)
-	if detail != "" {
-		suffixParts = append(suffixParts, detail)
-	}
-	if f.EndedAt != nil && *f.EndedAt > 0 {
-		suffixParts = append(suffixParts, "failed "+shortRelativeTime(now.Unix()-*f.EndedAt))
-	}
 	suffix := ""
-	if len(suffixParts) > 0 {
-		suffix = " — " + strings.Join(suffixParts, " — ")
+	if f.EndedAt != nil && *f.EndedAt > 0 {
+		suffix = " — " + shortRelativeTime(now.Unix()-*f.EndedAt)
 	}
 
-	prefix := fmt.Sprintf("    - %s %s — %s ", rentalGlyphCloud, idStyled, projectCol)
-	desc := hardware
-	line := prefix + desc + suffix
+	prefix := fmt.Sprintf("    - %s %s  %s  ", rentalGlyphCloud, idStyled, projectCol)
+	line := prefix + detail + suffix
 
 	if width > 0 {
 		prefixWidth := lipgloss.Width(prefix)
-		suffixWidth := lipgloss.Width(suffix)
-		descWidth := width - prefixWidth - suffixWidth
-		if descWidth < 0 {
-			descWidth = 0
+		detailWidth := width - prefixWidth - lipgloss.Width(suffix)
+		if detailWidth < 24 {
+			// Drop the age suffix so the failure reason stays readable.
+			suffix = ""
+			detailWidth = width - prefixWidth
 		}
-		desc = truncateDisplayWidth(desc, descWidth)
-		line = prefix + desc
-		if suffix != "" {
-			padding := descWidth - lipgloss.Width(desc)
-			if padding < 0 {
-				padding = 0
-			}
-			line += strings.Repeat(" ", padding) + suffix
+		if detailWidth < 0 {
+			detailWidth = 0
 		}
+		line = prefix + truncateDisplayWidth(detail, detailWidth) + suffix
 	}
 
-	if failures.recoveredIDs[f.ID] {
+	switch outcome {
+	case failureOngoing, failureSeriesSucceeded, failureDud:
 		line = failureDimStyle.Render(line)
 	}
 	return line

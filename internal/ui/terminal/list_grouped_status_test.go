@@ -1230,18 +1230,26 @@ func TestRenderJobListGroupedStatusPlainWithOptions_UsesPlacementStatusReadModel
 	}
 }
 
+func failedInstanceRowText(rows []groupedStatusRow) string {
+	parts := make([]string, 0, len(rows))
+	for _, r := range rows {
+		parts = append(parts, stripANSI(r.text))
+	}
+	return strings.Join(parts, "\n")
+}
+
 func TestAppendRecentFailedInstanceRows_NilOrEmptyEmitsNothing(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	if got := appendRecentFailedInstanceRows(nil, nil, 0, 0, now); got != nil {
+	if got := appendRecentFailedInstanceRows(nil, nil, 0, 0, false, false, now); got != nil {
 		t.Fatalf("nil failures should produce no rows, got %d", len(got))
 	}
-	empty := &recentFailedInstances{items: nil, windowSince: time.Unix(9_000, 0)}
-	if got := appendRecentFailedInstanceRows(nil, empty, 0, 0, now); got != nil {
+	empty := &recentFailedInstances{items: nil}
+	if got := appendRecentFailedInstanceRows(nil, empty, 0, 0, false, false, now); got != nil {
 		t.Fatalf("empty items should produce no rows, got %d", len(got))
 	}
 }
 
-func TestAppendRecentFailedInstanceRows_HeaderCountsRenderableFailures(t *testing.T) {
+func TestAppendRecentFailedInstanceRows_FiltersNormalTerminationsAndClassifies(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	failures := &recentFailedInstances{
 		items: []*db.Launch{
@@ -1268,27 +1276,28 @@ func TestAppendRecentFailedInstanceRows_HeaderCountsRenderableFailures(t *testin
 				EndedAt:           testInt64Ptr(9_700),
 			},
 		},
-		recoveredIDs: map[int64]bool{
-			999: true,
-			101: true,
+		// 100 has no job outcome — a dud. 101's job completed — a succeeded
+		// series. 102 is a normal job failure and is filtered out.
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			101: {JobID: 1, Status: db.StatusCompleted},
 		},
-		windowSince: now.Add(-30 * time.Minute),
 	}
 
-	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
-	stripped := stripANSI(out)
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
 	for _, want := range []string{
-		"Recent failed instances (2 in last 30m, 1 already replaced):",
-		"reason: unknown failure (2)",
+		"Recent failed instances — last 8m (2):",
+		"1 succeeded · 1 dud — last 8m",
+		"succeeded (1) — 6m ago:",
+		"dud (1) — 8m ago:",
 	} {
-		if !strings.Contains(stripped, want) {
+		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
 	}
-	if strings.Contains(stripped, "Recent failed instances (0") {
+	if strings.Contains(out, "(0)") {
 		t.Fatalf("header used a stale zero count:\n%s", out)
 	}
-	if strings.Contains(stripped, "job failed") {
+	if strings.Contains(out, "job failed") {
 		t.Fatalf("normal job failure should be hidden:\n%s", out)
 	}
 }
@@ -1303,8 +1312,6 @@ func TestRenderJobListGroupedStatusPlainAt_RecentFailedInstancesSection(t *testi
 				TerminationReason: db.TerminationReasonProviderFailure,
 				TerminationDetail: "container exit 1",
 				EndedAt:           testInt64Ptr(9_400),
-				ResolvedGPUName:   "RTX 4090",
-				CostPerHourCents:  42,
 			},
 			{
 				ID:                101,
@@ -1321,62 +1328,156 @@ func TestRenderJobListGroupedStatusPlainAt_RecentFailedInstancesSection(t *testi
 				EndedAt:           testInt64Ptr(9_600),
 			},
 		},
-		recoveredIDs: map[int64]bool{
-			101: true,
+		projectByLaunchID: map[int64]string{100: "augur", 101: "augur", 102: "augur"},
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			100: {JobID: 1, Status: db.StatusFailed},
+			101: {JobID: 2, Status: db.StatusRunning},
+			102: {JobID: 3, Status: db.StatusQueued},
 		},
-		projectByLaunchID: map[int64]string{
-			100: "augur",
-			101: "augur",
-			102: "augur",
-		},
-		windowSince: now.Add(-30 * time.Minute),
 	}
 
-	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
 
 	for _, want := range []string{
-		"Recent failed instances (3 in last 30m, 1 already replaced):",
-		"reason: provider-side failure (2)",
-		"reason: bootstrap timeout (1)",
+		"Recent failed instances — last 10m (3):",
+		"1 failed · 1 awaiting placement · 1 ongoing — last 10m",
+		"failed (1) — 10m ago:",
+		"awaiting placement (1) — 6m ago:",
+		"ongoing (1) — 8m ago:",
 		"container exit 1",
 		"agent never reached ready",
+		// An ongoing series annotates the row so the user knows work continues.
+		"ssh handshake refused, relaunching",
 	} {
-		if !strings.Contains(stripANSI(out), want) {
+		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
 	}
+}
 
-	// Recovered failure (id 101) renders dim — verify by checking the
-	// styled output retains an ANSI faint sequence for that line.
-	if !strings.Contains(out, "ssh handshake refused") {
-		t.Fatalf("missing recovered failure detail in output:\n%s", out)
+func TestAppendRecentFailedInstanceRows_ExpandTogglesFYIBuckets(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentFailedInstances{
+		items: []*db.Launch{
+			{ID: 400, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "boom", EndedAt: testInt64Ptr(9_700)},
+			{ID: 401, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(9_600)},
+			{ID: 402, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(9_500)},
+			{ID: 403, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "no agent", EndedAt: testInt64Ptr(9_400)},
+		},
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			400: {JobID: 1, Status: db.StatusFailed},
+			401: {JobID: 2, Status: db.StatusCompleted},
+			402: {JobID: 3, Status: db.StatusCompleted},
+			// 403 has no job outcome — a dud.
+		},
+	}
+
+	collapsed := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, true, false, now))
+	if !strings.Contains(collapsed, "failed (1)") {
+		t.Fatalf("collapsed view should always show the failed bucket:\n%s", collapsed)
+	}
+	if !strings.Contains(collapsed, "+ 3 more: 2 succeeded, 1 dud") {
+		t.Fatalf("collapsed view should roll up the FYI buckets:\n%s", collapsed)
+	}
+	if !strings.Contains(collapsed, "▸") {
+		t.Fatalf("collapsed toggle should carry a ▸ marker:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "succeeded (2)") || strings.Contains(collapsed, "dud (1)") {
+		t.Fatalf("collapsed view should hide the FYI bucket sub-headers:\n%s", collapsed)
+	}
+
+	expanded := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, true, true, now))
+	if !strings.Contains(expanded, "▾") {
+		t.Fatalf("expanded toggle should carry a ▾ marker:\n%s", expanded)
+	}
+	for _, want := range []string{"succeeded (2)", "dud (1)"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded view should reveal %q:\n%s", want, expanded)
+		}
 	}
 }
 
-func TestAppendRecentFailedInstanceRows_OverflowAddsMoreLine(t *testing.T) {
+func TestAppendRecentFailedInstanceRows_ChainTerminalOverridesJobStatus(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	items := make([]*db.Launch, 0, 10)
-	for i := 0; i < 10; i++ {
-		items = append(items, &db.Launch{
-			ID:                int64(200 + i),
-			Status:            db.LaunchStatusFailed,
-			TerminationReason: db.TerminationReasonProviderFailure,
-			TerminationDetail: "boom",
-			EndedAt:           testInt64Ptr(9_500 + int64(i)),
-		})
-	}
 	failures := &recentFailedInstances{
-		items:       items,
-		windowSince: now.Add(-30 * time.Minute),
+		items: []*db.Launch{
+			{ID: 500, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "x", EndedAt: testInt64Ptr(9_600)},
+			{ID: 501, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "y", EndedAt: testInt64Ptr(9_500)},
+		},
+		// Both jobs are currently queued, but the relaunch chain's terminal
+		// launch is authoritative: a live successor ⇒ ongoing, a completed
+		// successor ⇒ succeeded.
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			500: {JobID: 1, Status: db.StatusQueued},
+			501: {JobID: 2, Status: db.StatusQueued},
+		},
+		chainTerminalByLaunchID: map[int64]string{
+			500: db.LaunchStatusRunning,
+			501: db.LaunchStatusCompleted,
+		},
 	}
 
-	out := renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now)
-	stripped := stripANSI(out)
-	if !strings.Contains(stripped, "+ 4 more (weft instance list --status failed)") {
-		t.Fatalf("missing overflow line in output:\n%s", out)
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
+	for _, want := range []string{"ongoing (1)", "succeeded (1)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
 	}
-	if !strings.Contains(stripped, "Recent failed instances (10 in last 30m):") {
-		t.Fatalf("expected total of 10 in header, got:\n%s", out)
+	if strings.Contains(out, "awaiting placement") {
+		t.Fatalf("chain terminal status should override the queued job status:\n%s", out)
+	}
+}
+
+func TestAppendRecentFailedInstanceRows_OutcomesClusterAndCost(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentFailedInstances{
+		items: []*db.Launch{
+			{
+				ID:                300,
+				Status:            db.LaunchStatusFailed,
+				Provider:          "vastai",
+				TerminationReason: db.TerminationReasonInfraFailure,
+				TerminationDetail: "provider instance stuck in loading",
+				EndedAt:           testInt64Ptr(9_700),
+				ActualSpendCents:  11,
+			},
+			{
+				ID:                301,
+				Status:            db.LaunchStatusFailed,
+				Provider:          "vastai",
+				TerminationReason: db.TerminationReasonInfraFailure,
+				TerminationDetail: "dud provider: no agent activity",
+				EndedAt:           testInt64Ptr(9_600),
+				ActualSpendCents:  20,
+			},
+			{
+				ID:                302,
+				Status:            db.LaunchStatusFailed,
+				Provider:          "vastai",
+				TerminationReason: db.TerminationReasonProviderFailure,
+				TerminationDetail: "container exit 1",
+				EndedAt:           testInt64Ptr(9_500),
+			},
+		},
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			300: {JobID: 1, Status: db.StatusQueued},
+			// 301 has no job outcome — a dud.
+			302: {JobID: 2, Status: db.StatusCompleted},
+		},
+	}
+
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
+	for _, want := range []string{
+		"Recent failed instances — last 8m (3):",
+		"1 awaiting placement · 1 succeeded · 1 dud — last 8m · $0.31 wasted",
+		"⚠ clustered failures — common factor: provider vastai",
+		"awaiting placement (1)",
+		"succeeded (1)",
+		"dud (1)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
 	}
 }
 
