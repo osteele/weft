@@ -143,6 +143,7 @@ var (
 	listKeyGroupedView       = listKeyBinding{keys: "v", action: "group"}
 	listKeyListView          = listKeyBinding{keys: "v", action: "group"}
 	listKeyInstances         = listKeyBinding{keys: "i", action: "instances"}
+	listKeyHosts             = listKeyBinding{keys: "H", action: "hosts"}
 	listKeyRefresh           = listKeyBinding{keys: "r", action: "refresh"}
 	listKeyProjectFilter     = listKeyBinding{keys: "/", action: "project filter"}
 	listKeyToggleStatusArea  = listKeyBinding{keys: "S", action: "status area"}
@@ -235,6 +236,9 @@ func listFlatKeyBindings() []listKeyBinding {
 		}},
 		listKeyBinding{keys: listKeyInstances.keys, action: listKeyInstances.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
+		}},
+		listKeyBinding{keys: listKeyHosts.keys, action: listKeyHosts.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return m, func() tea.Msg { return switchToHostsMsg{} }
 		}},
 		listKeyBinding{keys: "?", action: "help", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			m.showHelp = true
@@ -380,6 +384,9 @@ func listGroupedKeyBindings() []listKeyBinding {
 		}},
 		listKeyBinding{keys: listKeyInstances.keys, action: listKeyInstances.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
+		}},
+		listKeyBinding{keys: listKeyHosts.keys, action: listKeyHosts.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return m, func() tea.Msg { return switchToHostsMsg{} }
 		}},
 		listKeyBinding{keys: "?", action: "help", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			m.showHelp = true

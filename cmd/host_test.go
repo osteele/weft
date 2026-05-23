@@ -155,6 +155,60 @@ func TestHostListIncludesActiveOnPremHostsWithoutRecentSyncOrCache(t *testing.T)
 	}
 }
 
+func TestHostListIncludesRunningRentals(t *testing.T) {
+	setTestHostInventory(t, nil)
+	database := db.SetupTestDB(t)
+
+	originalFlag := hostListRentalsFlag
+	t.Cleanup(func() { hostListRentalsFlag = originalFlag })
+
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "1x RTX 4090 24GB",
+	}); err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	hostListRentalsFlag = "on"
+	out := captureStdout(t, func() {
+		if err := runHostList(nil, nil); err != nil {
+			t.Fatalf("runHostList: %v", err)
+		}
+	})
+	if !strings.Contains(out, "rental") || !strings.Contains(out, "wi1") {
+		t.Fatalf("expected rental row for wi1 in default output:\n%s", out)
+	}
+	if !strings.Contains(out, "1x RTX 4090") {
+		t.Fatalf("expected rental GPU spec in row:\n%s", out)
+	}
+
+	hostListRentalsFlag = "off"
+	out = captureStdout(t, func() {
+		if err := runHostList(nil, nil); err != nil {
+			t.Fatalf("runHostList: %v", err)
+		}
+	})
+	if strings.Contains(out, "wi1") {
+		t.Fatalf("--rentals=off should omit rental rows:\n%s", out)
+	}
+
+	hostListRentalsFlag = "only"
+	out = captureStdout(t, func() {
+		if err := runHostList(nil, nil); err != nil {
+			t.Fatalf("runHostList: %v", err)
+		}
+	})
+	if !strings.Contains(out, "wi1") {
+		t.Fatalf("--rentals=only should include rental rows:\n%s", out)
+	}
+
+	hostListRentalsFlag = "bogus"
+	if err := runHostList(nil, nil); err == nil {
+		t.Fatalf("expected error for invalid --rentals value")
+	}
+}
+
 func TestHostListExcludesCloudHosts(t *testing.T) {
 	setTestHostInventory(t, nil)
 	database := db.SetupTestDB(t)
@@ -242,7 +296,10 @@ func setTestHostInventory(t *testing.T, hosts []inventory.HostSpec) {
 func scanHostLines(output, host string) []string {
 	var matches []string
 	for _, line := range strings.Split(output, "\n") {
-		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == host {
+		fields := strings.Fields(line)
+		// Rows are prefixed with a TYPE column ("host" or "rental"); the
+		// name lives in fields[1]. Skip the header (TYPE NAME ...).
+		if len(fields) >= 2 && (fields[0] == "host" || fields[0] == "rental") && fields[1] == host {
 			matches = append(matches, line)
 		}
 	}

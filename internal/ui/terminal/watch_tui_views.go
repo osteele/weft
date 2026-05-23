@@ -212,11 +212,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	if !m.done && !m.launchPending {
-		hint := "u unplace  x kill  t terminate  s submit  m move  J jobs  U grouped jobs  ? help  q quit (instances run in background)"
+		hint := "u unplace  x kill  t terminate  s submit  m move  J jobs  U grouped jobs  H hosts  ? help  q quit (instances run in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  B budget+retry  J jobs  U grouped jobs  ? help  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  B budget+retry  J jobs  U grouped jobs  H hosts  ? help  q quit (instances run in background)"
 		} else if len(m.unplacedJobs) > 0 {
-			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  J jobs  U grouped jobs  ? help  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  J jobs  U grouped jobs  H hosts  ? help  q quit (instances run in background)"
 		}
 		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))

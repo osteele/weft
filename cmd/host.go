@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
@@ -18,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
@@ -81,13 +83,25 @@ var hostDataScan bool
 var hostListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all known hosts and their capabilities",
-	Long: `List all known on-prem hosts from inventory and recent local state, with OS, architecture, and GPU specs.
+	Long: `List on-prem inventory hosts and currently-running cloud rental instances,
+with OS, architecture, and GPU specs.
 
-Example:
-  weft host list`,
+Examples:
+  weft host list
+  weft host list --rentals=only
+  weft host list --rentals=off`,
 	Args: cobra.NoArgs,
 	RunE: runHostList,
 }
+
+// hostListRentalsFlag controls whether cloud rentals appear in `host list`.
+// Accepted values: "on" (default), "off", "only".
+var hostListRentalsFlag = "on"
+
+// hostListTUIFlag, when set, opens an interactive hosts panel instead of
+// printing the text table. Routes through the same watch-router used by
+// `weft uj` so the same key bindings (J jobs, i instances, q quit) work.
+var hostListTUIFlag bool
 
 var hostLoadCmd = &cobra.Command{
 	Use:   "load <host>",
@@ -123,6 +137,10 @@ func init() {
 	hostCmd.AddCommand(hostSetupCmd)
 
 	hostDataCmd.Flags().BoolVar(&hostDataScan, "scan", false, "Scan remote HF cache and update local database")
+	hostListCmd.Flags().StringVar(&hostListRentalsFlag, "rentals", "on",
+		"Whether to include cloud rentals in the list: on (default), off, only")
+	hostListCmd.Flags().BoolVar(&hostListTUIFlag, "tui", false,
+		"Open an interactive hosts panel with live CPU/MEM/GPU bars")
 }
 
 func runHostInfo(cmd *cobra.Command, args []string) error {
@@ -631,21 +649,66 @@ func runHostDataMap(database *sql.DB) error {
 }
 
 func runHostList(cmd *cobra.Command, args []string) error {
-	rows, err := loadHostListRows(time.Now())
+	mode, err := parseHostListRentalsMode(hostListRentalsFlag)
+	if err != nil {
+		return err
+	}
+
+	if hostListTUIFlag {
+		return runHostListTUI()
+	}
+
+	rows, err := loadHostListRows(time.Now(), mode)
 	if err != nil {
 		return err
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "NAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
+	fmt.Fprintf(w, "TYPE\tNAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
 	for _, row := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			row.Name, row.OSArch, row.CPU, row.Memory, row.GPUs)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			row.Type, row.Name, row.OSArch, row.CPU, row.Memory, row.GPUs)
 	}
 	return w.Flush()
 }
 
+// runHostListTUI opens the interactive hosts panel.
+func runHostListTUI() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+	return terminal.RunHostsTUI(database, cfg)
+}
+
+type hostListRentalsMode int
+
+const (
+	rentalsOn hostListRentalsMode = iota
+	rentalsOff
+	rentalsOnly
+)
+
+func parseHostListRentalsMode(s string) (hostListRentalsMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "on":
+		return rentalsOn, nil
+	case "off":
+		return rentalsOff, nil
+	case "only":
+		return rentalsOnly, nil
+	default:
+		return 0, fmt.Errorf("invalid --rentals value %q: want on, off, or only", s)
+	}
+}
+
 type hostListRow struct {
+	Type   string // "host" or "rental"
 	Name   string
 	OSArch string
 	CPU    string
@@ -653,7 +716,7 @@ type hostListRow struct {
 	GPUs   string
 }
 
-func loadHostListRows(now time.Time) ([]hostListRow, error) {
+func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, error) {
 	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
@@ -715,23 +778,61 @@ func loadHostListRows(now time.Time) ([]hostListRow, error) {
 	util.NaturalSortStrings(names)
 
 	rows := make([]hostListRow, 0, len(names))
-	for _, name := range names {
-		if spec, ok := specByName[name]; ok {
-			rows = append(rows, hostListRowFromSpec(spec))
-			continue
-		}
-		if cached := cachedByName[name]; cached != nil {
-			host := hostinfo.HostFromCachedInfo(cached)
-			if host != nil {
-				host.Name = name
-				rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host, "")))
+	if mode != rentalsOnly {
+		for _, name := range names {
+			if spec, ok := specByName[name]; ok {
+				rows = append(rows, hostListRowFromSpec(spec))
 				continue
 			}
+			if cached := cachedByName[name]; cached != nil {
+				host := hostinfo.HostFromCachedInfo(cached)
+				if host != nil {
+					host.Name = name
+					rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host, "")))
+					continue
+				}
+			}
+			rows = append(rows, hostListUnknownRow(name))
 		}
-		rows = append(rows, hostListUnknownRow(name))
+	}
+
+	if mode != rentalsOff && database != nil {
+		launches, lerr := db.ListRunningLaunches(database)
+		if lerr == nil {
+			rentalRows := make([]hostListRow, 0, len(launches))
+			for _, launch := range launches {
+				if launch == nil || launch.ID <= 0 {
+					continue
+				}
+				rentalRows = append(rentalRows, hostListRowFromLaunch(launch))
+			}
+			sort.SliceStable(rentalRows, func(i, j int) bool {
+				return util.NaturalLess(rentalRows[i].Name, rentalRows[j].Name)
+			})
+			rows = append(rows, rentalRows...)
+		}
 	}
 
 	return rows, nil
+}
+
+func hostListRowFromLaunch(launch *db.Launch) hostListRow {
+	provider := strings.TrimSpace(launch.Provider)
+	if provider == "" {
+		provider = "rental"
+	}
+	gpus := strings.TrimSpace(launch.DisplayGPUSpec())
+	if gpus == "" {
+		gpus = "unknown"
+	}
+	return hostListRow{
+		Type:   "rental",
+		Name:   ids.FormatInstanceID(launch.ID),
+		OSArch: provider,
+		CPU:    "—",
+		Memory: "—",
+		GPUs:   gpus,
+	}
 }
 
 func listRecentHostNames(database *sql.DB, since time.Time) []string {
@@ -772,6 +873,7 @@ func hostListRowFromSpec(spec inventory.HostSpec) hostListRow {
 	}
 
 	return hostListRow{
+		Type:   "host",
 		Name:   spec.Name,
 		OSArch: osArch,
 		CPU:    cpu,
@@ -782,6 +884,7 @@ func hostListRowFromSpec(spec inventory.HostSpec) hostListRow {
 
 func hostListUnknownRow(name string) hostListRow {
 	return hostListRow{
+		Type:   "host",
 		Name:   name,
 		OSArch: "unknown/unknown",
 		CPU:    "unknown",

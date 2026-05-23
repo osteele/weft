@@ -142,6 +142,26 @@ func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 }
 
+// RunHostsTUI launches the hosts TUI as the initial panel of a watchRouter,
+// so the user can navigate to jobs/instances views via the usual switch keys.
+func RunHostsTUI(database *sql.DB, cfg *config.Config) error {
+	router := newHostsWatchRouterModel(database, cfg)
+
+	outputOpt, restore := InstallTUIStdioCapture()
+	defer restore()
+
+	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus()).Run()
+	if r, ok := finalModel.(watchRouterModel); ok {
+		if h, ok := r.active.(hostsTUIModel); ok {
+			h.shutdown()
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("run hosts TUI: %w", err)
+	}
+	return nil
+}
+
 func ListOutputWidth() int {
 	return listOutputWidth()
 }

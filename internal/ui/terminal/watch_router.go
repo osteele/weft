@@ -41,6 +41,11 @@ type switchToWatchMsg struct {
 	flash string
 }
 
+// switchToHostsMsg is emitted by listTUIModel (and other panels) when the
+// user wants to view the hosts panel. The router responds by building a
+// fresh hostsTUIModel.
+type switchToHostsMsg struct{}
+
 // switchToAttemptsMsg is emitted by a job-listing TUI when the user presses 'a'
 // on a selected job row. The router pushes the attempts drill-down screen and
 // remembers the caller so it can be restored on switchBackFromAttemptsMsg.
@@ -240,6 +245,19 @@ func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWind
 	return r.startBanners()
 }
 
+func newHostsWatchRouterModel(database *sql.DB, cfg *config.Config) watchRouterModel {
+	hosts := newHostsTUIModel(database)
+	r := watchRouterModel{
+		active:    hosts,
+		database:  database,
+		config:    cfg,
+		homeMode:  watchModeSystem,
+		listSync:  true,
+		listTitle: "Hosts",
+	}
+	return r.startBanners()
+}
+
 func newListWatchRouterModel(database *sql.DB, cfg *config.Config, args []string, jobs []*db.Job, title string, syncEnabled bool, groupedByStatus bool, projectFilter string) watchRouterModel {
 	list := newListTUIModel(database, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 	r := watchRouterModel{
@@ -290,6 +308,8 @@ func (m *watchRouterModel) cleanupActive() {
 			active.syncWorker.Stop()
 		}
 	case listTUIModel:
+		active.shutdown()
+	case hostsTUIModel:
 		active.shutdown()
 	}
 }
@@ -359,6 +379,10 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupActive()
 		list := m.buildJobsList(msg.groupedByStatus)
 		return m.switchTo(list)
+
+	case switchToHostsMsg:
+		m.cleanupActive()
+		return m.switchTo(newHostsTUIModel(m.database))
 
 	case launchPlanReadyMsg:
 		if msg.err != nil {
