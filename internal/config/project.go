@@ -69,17 +69,10 @@ type ProjectOutputsConfig struct {
 	// Dirs lists relative directory patterns to collect as outputs.
 	// Default: ["output/", "outputs/"]
 	Dirs []string `yaml:"dirs" toml:"dirs"`
-	// MaxAutoSyncMB is the max total size (MB) to auto-sync back on completion.
-	// Outputs larger than this are tracked but only synced on demand.
-	// Default: 100
-	MaxAutoSyncMB int `yaml:"max_auto_sync_mb" toml:"max_auto_sync_mb"`
 }
 
 // DefaultOutputDirs is the default list of output directories to scan.
 var DefaultOutputDirs = []string{"output/", "outputs/"}
-
-// DefaultMaxAutoSyncMB is the default max total size (MB) to auto-sync back on completion.
-const DefaultMaxAutoSyncMB = 100
 
 // EffectiveDirs returns the configured output dirs or defaults.
 func (c *ProjectOutputsConfig) EffectiveDirs() []string {
@@ -87,14 +80,6 @@ func (c *ProjectOutputsConfig) EffectiveDirs() []string {
 		return c.Dirs
 	}
 	return DefaultOutputDirs
-}
-
-// EffectiveMaxAutoSyncMB returns the configured max auto-sync size or the default.
-func (c *ProjectOutputsConfig) EffectiveMaxAutoSyncMB() int {
-	if c.MaxAutoSyncMB > 0 {
-		return c.MaxAutoSyncMB
-	}
-	return DefaultMaxAutoSyncMB
 }
 
 // ProjectSyncConfig holds sync-related per-project settings.
@@ -182,12 +167,6 @@ func ProjectExcludeDirs(localDir string) []string {
 // config at localDir. Returns the defaults if no config is found.
 func ProjectOutputDirs(localDir string) []string {
 	return projectOutputsConfig(localDir).EffectiveDirs()
-}
-
-// ProjectMaxAutoSyncMB returns the max auto-sync size from the project config
-// at localDir. Returns the default if no config is found.
-func ProjectMaxAutoSyncMB(localDir string) int {
-	return projectOutputsConfig(localDir).EffectiveMaxAutoSyncMB()
 }
 
 // ProjectInputs returns the input data assets from the project config at

@@ -510,6 +510,23 @@ rule ProducesPreRegisteredAtJobStart {
         -- paths to $WEFT_ARTIFACT_MANIFEST during the run).
 }
 
+rule ArtifactUploadHasNoSizeCap {
+    when: cloud_agent uploads outputs
+
+    ensures: every file in convention-based output dirs is uploaded
+    ensures: every spec in $WEFT_ARTIFACT_MANIFEST is uploaded
+    ensures: no size threshold short-circuits the upload
+
+    @guidance
+        -- Neither cloud agent path (uploadOutputDirs,
+        -- uploadArtifactManifestEntries) consults any size threshold, and
+        -- the on-prem SyncOutputsBack caller passes maxMB=0. Consumers
+        -- (--needs path:<job-id>) can rely on multi-GB --produces artifacts
+        -- (checkpoints, representation tensors) being available, subject to
+        -- the per-invocation timeout below and to disk available on the
+        -- rental.
+}
+
 rule ArtifactUploadTimeoutScalesWithSize {
     when: rclone_invocation(payload_bytes)
 

@@ -201,22 +201,6 @@ func TestProjectOutputsConfig_EffectiveDirs(t *testing.T) {
 	})
 }
 
-func TestProjectOutputsConfig_EffectiveMaxAutoSyncMB(t *testing.T) {
-	t.Run("zero returns default", func(t *testing.T) {
-		cfg := ProjectOutputsConfig{}
-		if mb := cfg.EffectiveMaxAutoSyncMB(); mb != 100 {
-			t.Errorf("expected 100, got %d", mb)
-		}
-	})
-
-	t.Run("custom value used", func(t *testing.T) {
-		cfg := ProjectOutputsConfig{MaxAutoSyncMB: 50}
-		if mb := cfg.EffectiveMaxAutoSyncMB(); mb != 50 {
-			t.Errorf("expected 50, got %d", mb)
-		}
-	})
-}
-
 func TestProjectOutputDirs(t *testing.T) {
 	t.Run("no config file returns defaults", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -228,17 +212,12 @@ func TestProjectOutputDirs(t *testing.T) {
 
 	t.Run("config with outputs section", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		cfgContent := "[outputs]\ndirs = [\"results/\"]\nmax_auto_sync_mb = 200\n"
+		cfgContent := "[outputs]\ndirs = [\"results/\"]\n"
 		os.WriteFile(filepath.Join(tmpDir, ".weft.toml"), []byte(cfgContent), 0644)
 
 		dirs := ProjectOutputDirs(tmpDir)
 		if len(dirs) != 1 || dirs[0] != "results/" {
 			t.Errorf("unexpected dirs: %v", dirs)
-		}
-
-		mb := ProjectMaxAutoSyncMB(tmpDir)
-		if mb != 200 {
-			t.Errorf("expected 200, got %d", mb)
 		}
 	})
 

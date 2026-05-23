@@ -963,6 +963,8 @@ laptop$ weft run \
 
 For rental producers, weft waits for completion and artifact upload, then
 stages needed files from cloud artifact storage before the consumer starts.
+`--produces` paths are uploaded to R2 with no size cap, so multi-GB
+checkpoints, representation pkls, etc. are supported as artifact edges.
 
 Each `--needs` spec names a single file (`path:<job-id>`), not a directory.
 Directory targets such as `--needs output/:1046` are not supported — give each

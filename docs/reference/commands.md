@@ -350,18 +350,20 @@ Jobs automatically track files written to `output/` or `outputs/` in the
 working directory. On successful completion, the runner records discovered files
 in the completion record and syncs them back:
 
-- **On-prem jobs**: Auto-syncs outputs via rsync if total size is under the
-  configured limit (default: 100 MB). Larger outputs must be retrieved manually
-  with `weft artifact sync`.
-- **Cloud jobs**: All outputs are uploaded to R2 regardless of size.
+- **On-prem jobs**: Auto-syncs outputs via rsync, with no size cap. If you
+  need to retrieve outputs explicitly, use `weft artifact sync`.
+- **Cloud jobs**: All outputs are uploaded to R2 regardless of size. Both
+  convention-based output directories (`output/`, `outputs/`) and explicit
+  `--produces` paths are uploaded with no size gate. The per-rclone-invocation
+  timeout scales with payload size at a 1 MB/s floor (5-minute minimum), so
+  multi-GB checkpoints are supported.
 
-Customize output directories, auto-sync behavior, cloud image, and
-project-specific source excludes in `.weft.toml`:
+Customize output directories, cloud image, and project-specific source
+excludes in `.weft.toml`:
 
 ```toml
 [outputs]
 dirs = ["results/"]          # Default: ["output/", "outputs/"]
-max_auto_sync_mb = 200       # Default: 100
 
 [sync]
 exclude_dirs = ["data"]      # Additional project-specific source excludes
