@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
@@ -127,9 +128,13 @@ func init() {
 func runHostInfo(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	// Handle rental:NN format — delegate to instance status
+	// Cloud instances are managed via `weft instance status`; accept both
+	// `rental:NN` (legacy) and the canonical `wiNNN` form here and delegate.
 	if instanceID, ok := strings.CutPrefix(host, "rental:"); ok {
 		return runInstanceStatus(cmd, []string{instanceID})
+	}
+	if isInstanceIDArg(host) {
+		return runInstanceStatus(cmd, []string{host})
 	}
 
 	database, err := db.OpenForReading()
@@ -318,10 +323,17 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Get all active jobs for this host
-	jobs, err := db.ListActiveJobs(database, host)
-	if err != nil {
-		return fmt.Errorf("list jobs: %w", err)
+	// Cloud instance: list jobs associated with the launch instead of jobs
+	// keyed by hostname (cloud jobs don't carry a real host string).
+	var jobs []*db.Job
+	if isInstanceIDArg(host) {
+		id, perr := ids.ParseInstanceID(host)
+		if perr != nil {
+			return fmt.Errorf("parse instance ID %q: %w", host, perr)
+		}
+		jobs, err = db.GetLaunchJobs(database, id)
+	} else {
+		jobs, err = db.ListActiveJobs(database, host)
 	}
 
 	if len(jobs) == 0 {
@@ -355,24 +367,26 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 }
 
 func runHostLoad(cmd *cobra.Command, args []string) error {
-	host := args[0]
+	target := args[0]
 
-	fmt.Printf("Fetching current load for %s...\n", host)
+	fmt.Printf("Fetching current load for %s...\n", target)
+
+	run, label, err := loadTargetRunner(target)
+	if err != nil {
+		return err
+	}
 
 	// Get uptime and load average
-	uptimeCmd := "uptime"
-	stdout, _, err := ssh.Run(host, uptimeCmd)
+	stdout, err := run("uptime")
 	if err != nil {
 		return fmt.Errorf("get uptime: %w", err)
 	}
 
-	fmt.Printf("\nHost: %s\n", host)
+	fmt.Printf("\n%s\n", label)
 	fmt.Printf("Uptime: %s\n", strings.TrimSpace(stdout))
 
 	// Get memory info
-	memCmd := "free -h | grep Mem"
-	stdout, _, err = ssh.Run(host, memCmd)
-	if err == nil {
+	if stdout, err := run("free -h | grep Mem"); err == nil {
 		parts := strings.Fields(stdout)
 		if len(parts) >= 3 {
 			fmt.Printf("\nMemory:\n")
@@ -386,8 +400,7 @@ func runHostLoad(cmd *cobra.Command, args []string) error {
 
 	// Get GPU info if nvidia-smi is available
 	gpuCmd := "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo ''"
-	stdout, _, err = ssh.Run(host, gpuCmd)
-	if err == nil && strings.TrimSpace(stdout) != "" {
+	if stdout, err := run(gpuCmd); err == nil && strings.TrimSpace(stdout) != "" {
 		fmt.Printf("\nGPUs:\n")
 		for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
 			parts := strings.Split(line, ", ")
@@ -403,6 +416,74 @@ func runHostLoad(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// isInstanceIDArg reports whether s looks like a CLI instance ID token (wiNNN).
+// A bare numeric value is ambiguous (could be a hostname) and is treated as a
+// host name.
+func isInstanceIDArg(s string) bool {
+	return len(s) > 2 && strings.EqualFold(s[:2], "wi") && s[2] >= '0' && s[2] <= '9'
+}
+
+// runOnTarget runs a shell command against an on-prem host or a cloud
+// instance (when target is wiNNN). Callers receive only stdout; stderr is
+// folded into the returned error on failure. Use loadTargetRunner when
+// dispatching several commands in a row to avoid repeated DB/provider lookups.
+func runOnTarget(target string, command string) (string, error) {
+	run, _, err := loadTargetRunner(target)
+	if err != nil {
+		return "", err
+	}
+	return run(command)
+}
+
+// loadTargetRunner returns a function that runs a shell command on the named
+// target, which may be an on-prem host (from the inventory) or a cloud
+// instance ID (wiNNN). The returned label is the heading to display in CLI
+// output (e.g. "Host: cool30" or "Instance: wi3122 (vastai 12345678)").
+//
+// For cloud instances the function holds a resolved *cloud.Instance, so
+// subsequent calls reuse the same SSH coordinates without re-querying the
+// provider.
+func loadTargetRunner(target string) (func(string) (string, error), string, error) {
+	if !isInstanceIDArg(target) {
+		run := func(c string) (string, error) {
+			stdout, _, err := ssh.Run(target, c)
+			return stdout, err
+		}
+		return run, "Host: " + target, nil
+	}
+
+	id, err := ids.ParseInstanceID(target)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse instance ID %q: %w", target, err)
+	}
+	database, err := db.OpenForReading()
+	if err != nil {
+		return nil, "", fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+	ci, err := db.GetLaunch(database, id)
+	if err != nil {
+		return nil, "", fmt.Errorf("get instance: %w", err)
+	}
+	if ci == nil {
+		return nil, "", fmt.Errorf("instance %s not found", ids.FormatInstanceID(id))
+	}
+	providerID := ci.EffectiveProviderID()
+	if providerID == "" {
+		return nil, "", fmt.Errorf("instance %s has no provider ID yet (status=%s)", ids.FormatInstanceID(id), ci.Status)
+	}
+	client := cloudClientForDBInstance(ci.Provider)
+	inst, err := client.ShowInstance(providerID)
+	if err != nil {
+		return nil, "", fmt.Errorf("show instance: %w", err)
+	}
+	label := fmt.Sprintf("Instance: %s (%s %s)", ids.FormatInstanceID(id), ci.Provider, providerID)
+	run := func(c string) (string, error) {
+		return cloud.RunOnInstance(inst, c, 30*time.Second)
+	}
+	return run, label, nil
+}
+
 func runHostData(cmd *cobra.Command, args []string) error {
 	database, err := db.Open()
 	if err != nil {
@@ -416,6 +497,11 @@ func runHostData(cmd *cobra.Command, args []string) error {
 	}
 
 	host := args[0]
+
+	if isInstanceIDArg(host) {
+		return fmt.Errorf("weft host data is for inventory hosts; cloud instance data is ephemeral. "+
+			"To list HF/corpus assets on a cloud instance, SSH in with 'weft instance ssh %s' and run 'ls ~/.cache/huggingface/hub' or 'huggingface-cli scan-cache'", host)
+	}
 
 	if hostDataScan {
 		fmt.Printf("Scanning HuggingFace cache on %s...\n", host)
@@ -706,6 +792,10 @@ func hostListUnknownRow(name string) hostListRow {
 
 func runHostDiscover(cmd *cobra.Command, args []string) error {
 	host := args[0]
+
+	if isInstanceIDArg(host) {
+		return fmt.Errorf("weft host discover writes inventory YAMLs for on-prem hosts; cloud instances are ephemeral and not persisted to the inventory")
+	}
 
 	fmt.Fprintf(os.Stderr, "Probing %s via SSH...\n", host)
 	_, yamlPath, err := discoverHost(host)

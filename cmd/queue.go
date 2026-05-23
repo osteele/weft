@@ -258,8 +258,8 @@ func resolveQueueHost(args []string) (string, error) {
 	} else {
 		return "", fmt.Errorf("host is required (provide as argument or use --host)")
 	}
-	if db.IsLaunchHost(host) {
-		return "", fmt.Errorf("queue commands are not supported for rental instances; use 'weft campaign' commands instead")
+	if db.IsLaunchHost(host) || isInstanceIDArg(host) {
+		return "", fmt.Errorf("queue commands are not supported for cloud instances; use 'weft instance status %s' (or 'weft campaign' commands) instead", host)
 	}
 	return host, nil
 }

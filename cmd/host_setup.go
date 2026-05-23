@@ -47,6 +47,10 @@ func init() {
 func runHostSetup(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
+	if isInstanceIDArg(host) {
+		return fmt.Errorf("weft host setup is for on-prem inventory hosts. Cloud instances are provisioned by 'weft start instance' (see 'weft instance --help')")
+	}
+
 	// Count total steps (adjust for skipped steps)
 	totalSteps := 6
 	if hostSetupSkipPrereqs {
