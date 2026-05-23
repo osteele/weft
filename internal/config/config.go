@@ -489,7 +489,29 @@ type SSHConfig struct {
 
 // CloudConfig holds settings shared across cloud providers.
 type CloudConfig struct {
-	SSH CloudSSHConfig `yaml:"ssh" toml:"ssh"`
+	SSH   CloudSSHConfig   `yaml:"ssh" toml:"ssh"`
+	Drain CloudDrainConfig `yaml:"drain" toml:"drain"`
+}
+
+// CloudDrainConfig tunes the agent's upload-drain gate. All fields are
+// optional; zero values fall back to the r2upload package defaults. The
+// shape mirrors r2upload.Options so each knob has one meaning.
+type CloudDrainConfig struct {
+	// StallTimeoutSeconds: kill rclone after this many seconds of no
+	// bytes-progress. Default: 30.
+	StallTimeoutSeconds int `yaml:"stall_timeout_seconds" toml:"stall_timeout_seconds"`
+	// FloorThroughputBytesPerSec: bytes/sec used to compute the size-derived
+	// ceiling. Default: 262144 (256 KiB/s).
+	FloorThroughputBytesPerSec int64 `yaml:"floor_throughput_bytes_per_sec" toml:"floor_throughput_bytes_per_sec"`
+	// MaxDrainSeconds: absolute ceiling regardless of size. Default: 900 (15 min).
+	MaxDrainSeconds int `yaml:"max_drain_seconds" toml:"max_drain_seconds"`
+	// BaselineSeconds added to the ceiling for rclone startup + flush.
+	// Default: 60.
+	BaselineSeconds int `yaml:"baseline_seconds" toml:"baseline_seconds"`
+	// MarkerTimeoutSeconds caps how long WriteFailureMarker is allowed to
+	// take. Default: 10. Intentionally short so it can't recurse into a
+	// long-running drain right before self-destruct.
+	MarkerTimeoutSeconds int `yaml:"marker_timeout_seconds" toml:"marker_timeout_seconds"`
 }
 
 // CloudSSHConfig holds cloud-rental SSH identity settings.

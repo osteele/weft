@@ -173,6 +173,24 @@ func InstanceTerminationIntent(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/termination-intent.json", instanceID)
 }
 
+// InstanceUploadFailure is written by the agent when an instance-wide
+// upload drain (opslog, maintenance report, etc.) hit the stall watchdog
+// or the bytes-derived ceiling. JSON shape is r2upload.FailureMarker.
+func InstanceUploadFailure(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/upload-failure.json", instanceID)
+}
+
+// JobAttemptUploadFailure is written when a per-attempt drain (logs,
+// output dirs, artifacts, or results) hit the watchdog or ceiling. The
+// presence of this object means "some bytes were lost — see reason
+// inside" and is surfaced by `weft job show` and `weft instance diagnose`.
+func JobAttemptUploadFailure(jobID, runID int64) string {
+	if runID <= 0 {
+		return fmt.Sprintf("jobs/%d/upload-failure.json", jobID)
+	}
+	return fmt.Sprintf("%s/upload-failure.json", JobRunPrefix(jobID, runID))
+}
+
 func InstanceKillJob(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/kill-job", instanceID)
 }

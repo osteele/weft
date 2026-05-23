@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -45,6 +46,10 @@ type instanceDiagnoseReport struct {
 	Obs               terminal.CloudInstanceObservability
 	Diagnosis         instanceDiagnosis
 	Timeline          []timelineEntry
+	// UploadFailures maps job ID → marker. Populated best-effort from R2;
+	// missing entries either had a successful upload or no marker (e.g.
+	// agent never reached the upload step).
+	UploadFailures map[int64]r2upload.FailureMarker
 }
 
 // timelineEntry is a single event in the chronological timeline.
@@ -142,6 +147,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 	bootstrapStage := ""
 	onStartProbe := ""
 	onStartStage := ""
+	uploadFailures := map[int64]r2upload.FailureMarker{}
 	if r2Client, err := newR2ClientFromConfig(); err == nil && r2Client != nil {
 		fetch := func(key string) string {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -155,6 +161,19 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		bootstrapStage = fetch(r2keys.BootstrapStage(inst.ID))
 		onStartProbe = fetch(r2keys.InstanceOnStartProbe(inst.ID))
 		onStartStage = fetch(r2keys.InstanceOnStartStage(inst.ID))
+
+		// Upload-failure markers per job (best-effort; missing is normal).
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		for _, j := range jobs {
+			runID := int64(0)
+			if attempts, err := db.ListAttempts(database, j.ID); err == nil && len(attempts) > 0 {
+				runID = attempts[0].ID
+			}
+			if m, ok := fetchJobUploadFailureMarker(ctx, r2Client, j.ID, runID); ok {
+				uploadFailures[j.ID] = m
+			}
+		}
 	}
 
 	report := &instanceDiagnoseReport{
@@ -174,6 +193,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		Obs:               obs,
 		Diagnosis:         diagnosis,
 		Timeline:          timeline,
+		UploadFailures:    uploadFailures,
 	}
 
 	fmt.Print(formatInstanceDiagnoseReport(report))
@@ -406,6 +426,10 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 
 			if summary != "" {
 				fmt.Fprintf(&b, "    Diagnosis: %s\n", summary)
+			}
+			if uf, ok := report.UploadFailures[j.ID]; ok {
+				fmt.Fprintf(&b, "    Upload:    truncated — %s (%s); %d/%d bytes in %.0fs\n",
+					uf.KilledBy, uf.Reason, uf.BytesUploaded, uf.BytesTotal, uf.ElapsedSeconds)
 			}
 			if desc := jobDescription(j); desc != "" {
 				fmt.Fprintf(&b, "    Command:   %s\n", desc)

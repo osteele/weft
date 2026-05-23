@@ -58,4 +58,19 @@ type CampaignManifest struct {
 	// fails fast (infra_failure) if the provider silently delivered
 	// substantially less.
 	RequestedDiskGB int `json:"requested_disk_gb,omitempty"`
+	// Drain holds the upload-drain gate tunables. Zero fields fall back
+	// to the r2upload package defaults.
+	Drain DrainSettings `json:"drain,omitempty"`
+}
+
+// DrainSettings mirrors the user-facing config.CloudDrainConfig in a form
+// that travels in the campaign manifest. Seconds-valued ints (rather than
+// time.Duration) keep the JSON cleanly readable for humans inspecting the
+// manifest in R2.
+type DrainSettings struct {
+	StallTimeoutSeconds        int   `json:"stall_timeout_seconds,omitempty"`
+	FloorThroughputBytesPerSec int64 `json:"floor_throughput_bytes_per_sec,omitempty"`
+	MaxDrainSeconds            int   `json:"max_drain_seconds,omitempty"`
+	BaselineSeconds            int   `json:"baseline_seconds,omitempty"`
+	MarkerTimeoutSeconds       int   `json:"marker_timeout_seconds,omitempty"`
 }

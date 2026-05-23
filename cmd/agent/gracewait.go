@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/retry"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -229,22 +230,23 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 		StartedAtUnix: time.Now().Unix(),
 	}
 	summary.FileCount, summary.Bytes = measureUploadTree(logDir)
-	// Upload per-job results
-	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobAttemptResultsPrefix(jobID, runID))
-	rcloneCmd.Stderr = os.Stderr
+
 	start := time.Now()
-	if err := rcloneCmd.Run(); err != nil {
-		summary.Status = "failed"
-		summary.Error = err.Error()
-		fmt.Fprintf(os.Stderr, "upload results for job %d: %v\n", jobID, err)
-		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-			oplog.WithDetailf("results dir=%s", logDir), oplog.WithError(err),
-			oplog.WithDuration(time.Since(start)))
-	}
+	opts := drainOptionsFromConfig()
+	opts.Source = logDir + "/"
+	opts.DestRemote = "r2:" + bucket + "/" + r2keys.JobAttemptResultsPrefix(jobID, runID)
+	opts.Command = "copy"
+	opts.TotalBytes = summary.Bytes
+
+	result := drainAndMark(context.Background(), bucket, drainTarget{
+		JobID: jobID, RunID: runID, Label: fmt.Sprintf("results dir=%s", logDir),
+	}, opts)
 	summary.DurationMS = time.Since(start).Milliseconds()
 	summary.CompletedAtUnix = time.Now().Unix()
-	copyCancel()
+	if result.Status != r2upload.StatusOK {
+		summary.Status = "failed"
+		summary.Error = fmt.Sprintf("%s: %s", result.Status, result.Reason)
+	}
 
 	// The .complete marker is written synchronously in runJobSequence
 	// (before background uploads start) so the coordinator sees jobs

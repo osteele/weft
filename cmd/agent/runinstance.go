@@ -25,7 +25,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
-	"github.com/osteele/weft/internal/retry"
+	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -111,6 +111,10 @@ func runInstance(args []string) {
 	for k, v := range manifest.Env {
 		os.Setenv(k, v)
 	}
+
+	// Apply drain tunables from manifest. Zero fields fall back to the
+	// r2upload package defaults (already set as the var initializers).
+	applyDrainSettings(manifest.Drain)
 
 	// R2 key for instance phase tracking
 	phaseKey := r2keys.InstancePhase(instanceIDInt)
@@ -329,29 +333,6 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)
 	}
 }
 
-// rcloneMinTimeout is the floor for any single rclone invocation. Even small
-// uploads should tolerate brief network stalls.
-const rcloneMinTimeout = 5 * time.Minute
-
-// rcloneBytesPerSecondFloor is the assumed worst-case sustained throughput
-// used to scale per-call rclone timeouts. ~1 MB/s is conservative for cloud
-// rental networks where R2 uploads can be bursty.
-const rcloneBytesPerSecondFloor = 1 << 20
-
-// rcloneTimeoutForBytes returns a per-rclone-call deadline that scales with
-// the payload size, so a 500 MB checkpoint is not killed by a fixed 5-minute
-// ceiling on a slow link. Callers pass 0 if size is unknown to get the floor.
-func rcloneTimeoutForBytes(bytes int64) time.Duration {
-	if bytes <= 0 {
-		return rcloneMinTimeout
-	}
-	scaled := time.Duration(bytes/rcloneBytesPerSecondFloor) * time.Second
-	if scaled < rcloneMinTimeout {
-		return rcloneMinTimeout
-	}
-	return scaled
-}
-
 // uploadOutputDirs uploads convention-based output directories to R2.
 func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.OutputUploadResult {
 	startedAt := time.Now()
@@ -370,35 +351,24 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		}
 		attempted++
 		fileCount, bytes := measureUploadTree(dirPath)
-		timeout := rcloneTimeoutForBytes(bytes)
 		start := time.Now()
 		retryCount := 0
-		lastErr := retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "rclone", "copy",
-				"--update",
-				dirPath+"/",
-				"r2:"+bucket+"/"+r2keys.JobAttemptOutputDir(jobID, runID, dir),
-			)
-			cmd.Stderr = os.Stderr
-			return cmd.Run()
-		}, retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
-			retryCount++
-			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d (attempt %d/3): %v; retrying in %s\n",
-				dir, jobID, attempt, err, delay)
-		}))
-		if lastErr != nil {
+		opts := drainOptionsFromConfig()
+		opts.Source = dirPath + "/"
+		opts.DestRemote = "r2:" + bucket + "/" + r2keys.JobAttemptOutputDir(jobID, runID, dir)
+		opts.Command = "copy"
+		opts.Extra = []string{"--update"}
+		opts.TotalBytes = bytes
+		drainResult := drainAndMarkWithRetry(context.Background(), bucket, drainTarget{
+			JobID: jobID, RunID: runID, Label: fmt.Sprintf("output dir=%s", dir),
+		}, opts)
+		if drainResult.Status != r2upload.StatusOK {
 			duration := time.Since(start)
 			totalDuration += duration
-			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d failed: %v\n", dir, jobID, lastErr)
-			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-				oplog.WithDetailf("output dir=%s", dir), oplog.WithError(lastErr),
-				oplog.WithDuration(duration))
 			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
 				Dir:        dir,
 				Status:     runner.UploadStatusFailed,
-				Error:      lastErr.Error(),
+				Error:      fmt.Sprintf("%s: %s", drainResult.Status, drainResult.Reason),
 				FileCount:  fileCount,
 				Bytes:      bytes,
 				RetryCount: retryCount,
@@ -486,7 +456,7 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 			src, dest, rcloneCmd = remotePath, filesPrefix+localRel, "copyto"
 		}
 		start := time.Now()
-		uploadErr := rcloneUploadWithRetry(bucket, src, dest, rcloneCmd, jobID, spec.Path, bytes)
+		uploadErr := rcloneUploadWithRetry(bucket, src, dest, rcloneCmd, jobID, runID, spec.Path, bytes)
 		duration := time.Since(start)
 		totalDuration += duration
 		status := runner.UploadStatusOK
@@ -508,25 +478,25 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 	return result
 }
 
-// rcloneUploadWithRetry runs an rclone command with retries on transient failures.
-// sizeBytes scales the per-call timeout; pass 0 if unknown.
-func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, label string, sizeBytes int64) error {
-	timeout := rcloneTimeoutForBytes(sizeBytes)
-	return retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		args := []string{rcloneCmd}
-		if rcloneCmd == "copy" {
-			args = append(args, "--update")
-		}
-		args = append(args, src, "r2:"+bucket+"/"+r2Key)
-		cmd := exec.CommandContext(ctx, "rclone", args...)
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}, retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
-		fmt.Fprintf(os.Stderr, "upload %s for job %d (attempt %d/3): %v; retrying in %s\n",
-			label, jobID, attempt, err, delay)
-	}))
+// rcloneUploadWithRetry runs an rclone command with retries on transient
+// failures, using the shared stall-watchdog + ceiling drain gate so the
+// upload-failure marker lands on stall/ceiling kills.
+func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID, runID int64, label string, sizeBytes int64) error {
+	opts := drainOptionsFromConfig()
+	opts.Source = src
+	opts.DestRemote = "r2:" + bucket + "/" + r2Key
+	opts.Command = rcloneCmd
+	if rcloneCmd == "copy" {
+		opts.Extra = []string{"--update"}
+	}
+	opts.TotalBytes = sizeBytes
+	result := drainAndMarkWithRetry(context.Background(), bucket, drainTarget{
+		JobID: jobID, RunID: runID, Label: label,
+	}, opts)
+	if result.Status != r2upload.StatusOK {
+		return fmt.Errorf("%s: %s", result.Status, result.Reason)
+	}
+	return nil
 }
 
 // finalizeUploadResult sets status and timing fields on an OutputUploadResult.

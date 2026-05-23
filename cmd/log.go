@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/status"
@@ -776,7 +777,44 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 		}, nil
 	}
 
+	// Before giving up, check whether the agent left an upload-failure
+	// marker — that turns "no log" into a real diagnosis (stall / ceiling
+	// / error) instead of the boilerplate "may not have produced output"
+	// guess.
+	if marker, ok := fetchUploadFailureMarker(ctx, r2Client, jobID, runID); ok {
+		return nil, fmt.Errorf("log not in R2 for job %s — upload truncated: %s (%s, %d/%d bytes in %.0fs)",
+			ids.FormatJobID(jobID), marker.KilledBy, marker.Reason,
+			marker.BytesUploaded, marker.BytesTotal, marker.ElapsedSeconds)
+	}
 	return nil, fmt.Errorf("log not found in R2 for job %s (the job may not have produced output, or the instance was terminated before log upload)", ids.FormatJobID(jobID))
+}
+
+// fetchUploadFailureMarker reads jobs/<id>/runs/<run>/upload-failure.json,
+// falling back to the run_id=0 key, and returns the decoded marker. ok ==
+// false when no marker exists (or it can't be decoded — degraded markers
+// should not block log fetch errors).
+func fetchUploadFailureMarker(ctx context.Context, r2Client *r2.Client, jobID, runID int64) (r2upload.FailureMarker, bool) {
+	ids := []int64{runID}
+	if runID != 0 {
+		ids = append(ids, 0)
+	}
+	for _, id := range ids {
+		key := r2keys.JobAttemptUploadFailure(jobID, id)
+		exists, err := r2Client.ObjectExists(ctx, key)
+		if err != nil || !exists {
+			continue
+		}
+		data, err := r2Client.GetObject(ctx, key)
+		if err != nil {
+			continue
+		}
+		var m r2upload.FailureMarker
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		return m, true
+	}
+	return r2upload.FailureMarker{}, false
 }
 
 func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {

@@ -457,3 +457,49 @@ func TestCampaignReliability_InvalidFallsBack(t *testing.T) {
 func float64Ptr(v float64) *float64 {
 	return &v
 }
+
+func TestLoadTOMLDecodesCloudDrainConfig(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+
+	content := `[cloud.drain]
+stall_timeout_seconds = 45
+floor_throughput_bytes_per_sec = 524288
+max_drain_seconds = 1200
+baseline_seconds = 90
+marker_timeout_seconds = 15
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := configPath
+	origLegacy := legacyConfigPath
+	configPath = tomlPath
+	legacyConfigPath = filepath.Join(dir, "config.yaml")
+	defer func() {
+		configPath = origPath
+		legacyConfigPath = origLegacy
+	}()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.Cloud.Drain
+	if d.StallTimeoutSeconds != 45 {
+		t.Errorf("stall_timeout_seconds = %d, want 45", d.StallTimeoutSeconds)
+	}
+	if d.FloorThroughputBytesPerSec != 524288 {
+		t.Errorf("floor_throughput_bytes_per_sec = %d, want 524288", d.FloorThroughputBytesPerSec)
+	}
+	if d.MaxDrainSeconds != 1200 {
+		t.Errorf("max_drain_seconds = %d, want 1200", d.MaxDrainSeconds)
+	}
+	if d.BaselineSeconds != 90 {
+		t.Errorf("baseline_seconds = %d, want 90", d.BaselineSeconds)
+	}
+	if d.MarkerTimeoutSeconds != 15 {
+		t.Errorf("marker_timeout_seconds = %d, want 15", d.MarkerTimeoutSeconds)
+	}
+}

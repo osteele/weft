@@ -124,6 +124,14 @@ func InstanceTerminationIntent(instanceID int64) string {
 	return controlplane.InstanceTerminationIntent(instanceID)
 }
 
+func InstanceUploadFailure(instanceID int64) string {
+	return controlplane.InstanceUploadFailure(instanceID)
+}
+
+func JobAttemptUploadFailure(jobID, runID int64) string {
+	return controlplane.JobAttemptUploadFailure(jobID, runID)
+}
+
 func InstanceKillJob(instanceID int64) string { return controlplane.InstanceKillJob(instanceID) }
 func BootstrapScript(instanceID int64) string { return dataplane.BootstrapScript(instanceID) }
 func BootstrapStage(instanceID int64) string  { return controlplane.BootstrapStage(instanceID) }

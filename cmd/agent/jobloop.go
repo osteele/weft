@@ -607,6 +607,39 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
 			recordPrewarmFailure(cfg, job, prewarm)
+
+			// Schedule the same post-job background work the normal path
+			// uses so the prewarm log (now under LogDir for this job)
+			// reaches R2. Without this the prewarm traceback dies with
+			// the instance — see r2upload.Drain for the upload gate.
+			uploadOpslog(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir)
+			uploadStartedUnix := time.Now().Unix()
+			logSnapshot, snapErr := snapshotLogDir(cfg.LogDir, job.ID)
+			if snapErr != nil {
+				fmt.Fprintf(os.Stderr, "snapshot log dir for prewarm-failed job %d: %v\n", job.ID, snapErr)
+			}
+			uploadingPhase := fmt.Sprintf("uploading:%d", job.ID)
+			bgm.StartPostJobWork(postJobWork{
+				r2Bucket:          cfg.R2Bucket,
+				instanceID:        cfg.InstanceID,
+				jobID:             job.ID,
+				runID:             job.RunID,
+				exitCode:          1,
+				workDir:           runner.ExpandTilde(workDir),
+				logSnapshot:       logSnapshot,
+				diskPath:          cfg.DiskPath,
+				phase:             uploadingPhase,
+				uploadStartedUnix: uploadStartedUnix,
+			})
+			if cfg.OnPhase != nil {
+				cfg.OnPhase(uploadingPhase)
+			}
+			writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
+			lastPostJobID = job.ID
+			if i < len(jobs)-1 {
+				cleanLogDir(cfg.LogDir)
+				oplog.Init(filepath.Join(cfg.LogDir, agentOpslogFile), 0)
+			}
 			continue
 		}
 		originalOnPhase := jobCfg.OnPhase

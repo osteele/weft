@@ -1865,6 +1865,7 @@ func LaunchInstance(
 		Provider:            string(client.Provider()),
 		InstanceType:        instance.InstanceType,
 		RequestedDiskGB:     requestedDiskGB,
+		Drain:               drainSettingsFromConfig(),
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
@@ -1964,5 +1965,24 @@ func destroyLeakedInstance(client cloud.Client, providerInstID string, launchID 
 			oplog.WithDetailf("provider=%s provider_instance_id=%s launch_id=%d context=cleanup_after_launch_failure",
 				client.Provider(), providerInstID, launchID),
 		)
+	}
+}
+
+// drainSettingsFromConfig returns the upload-drain tunables that travel in
+// the campaign manifest, sourced from the user's ~/.config/weft/config.toml
+// [cloud.drain] section. Empty fields are left zero so the agent falls
+// back to the r2upload package defaults.
+func drainSettingsFromConfig() cloud.DrainSettings {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return cloud.DrainSettings{}
+	}
+	d := cfg.Cloud.Drain
+	return cloud.DrainSettings{
+		StallTimeoutSeconds:        d.StallTimeoutSeconds,
+		FloorThroughputBytesPerSec: d.FloorThroughputBytesPerSec,
+		MaxDrainSeconds:            d.MaxDrainSeconds,
+		BaselineSeconds:            d.BaselineSeconds,
+		MarkerTimeoutSeconds:       d.MarkerTimeoutSeconds,
 	}
 }

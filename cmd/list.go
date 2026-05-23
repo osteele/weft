@@ -741,6 +741,7 @@ func showJob(database *sql.DB, id int64) error {
 	if job.ExitCode != nil {
 		fmt.Printf("Exit Code:    %d\n", *job.ExitCode)
 	}
+	printUploadFailureForJob(database, job)
 	if progress := jobProgressSummary(database, job); progress != "" {
 		fmt.Printf("Progress:     %s\n", progress)
 	}

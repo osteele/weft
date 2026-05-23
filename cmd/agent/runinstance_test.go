@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -53,32 +52,10 @@ func TestTerminalOutcomeForSequence(t *testing.T) {
 	}
 }
 
-func TestRcloneTimeoutForBytes(t *testing.T) {
-	tests := []struct {
-		name  string
-		bytes int64
-		want  time.Duration
-	}{
-		{"unknown", 0, rcloneMinTimeout},
-		{"tiny file", 1024, rcloneMinTimeout},
-		{"sub-floor", 100 * (1 << 20), rcloneMinTimeout},          // 100 MB → still floor
-		{"500 MB checkpoint", 500 * (1 << 20), 500 * time.Second}, // ~8.3 min, well past 5min ceiling
-		{"1 GB", 1024 * (1 << 20), 1024 * time.Second},
-		{"negative", -1, rcloneMinTimeout},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := rcloneTimeoutForBytes(tt.bytes)
-			if got != tt.want {
-				t.Errorf("rcloneTimeoutForBytes(%d) = %v, want %v", tt.bytes, got, tt.want)
-			}
-			// Regression guard: a 500 MB upload must NOT inherit the old 5-min ceiling.
-			if tt.bytes >= 500*(1<<20) && got <= 5*time.Minute {
-				t.Errorf("rcloneTimeoutForBytes(%d) = %v; must exceed 5m for large files", tt.bytes, got)
-			}
-		})
-	}
-}
+// rcloneTimeoutForBytes was the legacy size-derived timeout helper. It has
+// been superseded by the stall-watchdog + ceiling drain gate in
+// internal/r2upload; see TestComputeCeiling there for the equivalent
+// regression coverage.
 
 func TestUploadLiveFileSnapshotUsesRcatFromSnapshot(t *testing.T) {
 	dir := t.TempDir()
