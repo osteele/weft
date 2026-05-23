@@ -110,6 +110,14 @@ already-running instances must meet the CPU floor. Existing rental instances
 with unknown CPU metadata are skipped for cpu-intensive reuse and rebalance.
 Set `WEFT_COMPUTE_CPU_CORES` to raise or lower the default 16-core floor.
 
+`cpu-intensive` does **not** exclude offers that have a GPU — Vast.ai is a
+GPU marketplace and every offer ships with at least one card. A CPU-only
+script that lands on a rental still gets a GPU attached, and a script that
+auto-detects CUDA will use it. To pin a CPU-only script to CPU regardless
+of the rental's hardware, set `CUDA_VISIBLE_DEVICES = ""` in the script's
+PEP 723 `[tool.weft.env]` (or pass `--env CUDA_VISIBLE_DEVICES=`). See
+[Running CPU-only scripts on cloud rentals](workflow-guide.md#running-cpu-only-scripts-on-cloud-rentals).
+
 ## Reading Score Reasons
 
 Use `--dry-run` to inspect placement without creating a job:

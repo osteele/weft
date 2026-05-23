@@ -461,6 +461,87 @@ For example, GPT-2 small (124M params) training uses ~3GB of VRAM. Declaring
 placement on GPUs like the T4 (16GB), while avoiding exact-capacity 8GB cards.
 If you need exact 8GB matching, set `gpu-mem-strict = true`.
 
+### Running CPU-only scripts on cloud rentals
+
+Vast.ai is a GPU marketplace — every offer ships with at least one GPU
+attached. A "CPU-only" job that spills to a rental will still land on a
+machine with a GPU, and a script that auto-detects CUDA
+(`device = "cuda" if torch.cuda.is_available() else "cpu"` is the common
+idiom) will happily start using it. Three failure modes follow:
+
+1. **Old GPU rejects the workload.** Cheap offers often have Pascal (sm_61)
+   or Volta (sm_70) cards. Recent PyTorch wheels (2.5+) drop support for
+   sm_60/sm_61 and surface as
+   `CUDA error: no kernel image is available for execution on the device`
+   on the first tensor allocation. The `gpu-arch-max` weft auto-infers from
+   your torch pin is an *upper* bound; it does not exclude too-old offers.
+2. **CUDA wheel download eats the budget.** Linux torch wheels from PyPI
+   include CUDA runtime and weigh ~2.5 GB. On a slow rental (Vietnam,
+   intermittent peering) `uv sync` can blow past your max-time before the
+   script ever starts. The job exits with code 124 and you pay for nothing.
+3. **GPU rental wasted on CPU work.** Even when the script runs, you are
+   paying GPU `$/hr` for code that never touches the GPU.
+
+The `cpu-intensive` tag does NOT prevent GPU placement on rentals — it only
+filters offers for adequate CPU cores (see [placement.md](placement.md)). To
+actually run on CPU, hide the GPU from the script:
+
+```python
+# /// script
+# [tool.weft]
+# tags = ["cpu-intensive"]
+# [tool.weft.env]
+# CUDA_VISIBLE_DEVICES = ""
+# ///
+```
+
+An empty `CUDA_VISIBLE_DEVICES` makes `torch.cuda.is_available()` return
+`False`, so the standard auto-detect idiom falls through to CPU. This works
+regardless of which GPU the rental ships with — Pascal, Volta, or H100. The
+equivalent on the CLI is `--env CUDA_VISIBLE_DEVICES=`.
+
+For a *one-off* CPU run inside a normally-GPU project, the CLI form is fine.
+For a script whose intent is permanently CPU-only, put it in PEP 723 so
+retries and re-submissions inherit it. If you want to be doubly explicit,
+also override the device in the script itself:
+
+```python
+import os
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+import torch
+DEVICE = torch.device("cpu")
+```
+
+This still pays the CUDA wheel download cost. To avoid that as well, pin
+torch to the CPU index in `pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+```
+
+That cuts the wheel from ~2.5 GB to ~200 MB, which is what makes the slow-
+rental scenario tolerable. It changes the lockfile though — if other
+collaborators or environments need CUDA torch, isolate this in a CPU-only
+lock or a uv group. `UV_TORCH_BACKEND=cpu` alone is **not** enough: uv
+honors the lockfile over the env var, so a CUDA-pinned `uv.lock` will still
+download the CUDA wheel.
+
+**Steering placement toward a small instance.** The submission path will
+reuse any rental whose GPU satisfies the job's constraints. A CPU-only job
+with no GPU flag will happily queue behind big jobs on an existing A100.
+Either let the autopilot pick this up (the cheapest instance wins on
+$/hr), or pass `--gpu rtx_3090 --gpu-mem 4 --gpu-mem-strict` (or another
+cheap class) plus `--tag rental` to force `weft start instance` onto a
+fresh small box. Pick whichever cheap GPU class your provider has plenty
+of offers for; the constraint exists only to lose the placement competition
+with an expensive idle instance.
+
 ### Project-relative data inputs
 
 Use the `local:` prefix to declare project-relative directories that should be
