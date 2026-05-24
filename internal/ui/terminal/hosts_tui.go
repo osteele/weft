@@ -15,25 +15,32 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/ops"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 	"github.com/osteele/weft/internal/util"
 )
 
 // hostsTUIModel renders a single-screen list of on-prem inventory hosts and
 // currently-running cloud rentals. It reuses the dashboard's row rendering
-// (status glyph + CPU/MEM/GPU bars) and shares the same hostsync.Worker for
-// background refresh.
+// (status glyph + CPU/MEM/GPU bars).
+//
+// Refresh sources:
+//   - Inventory rows: hostsync.Worker probes hosts on demand and pushes results
+//     via hostsSyncResultMsg.
+//   - Rental rows: the agent's heartbeat sidecar uploads metrics to R2 every
+//     30s; hostsync.Worker's reconciler pulls those into launch_live_state.
+//     We render rental rows directly from launch_live_state via
+//     ops.FetchLaunchHostStatusFromDB on every tick. No SSH involved.
 type hostsTUIModel struct {
 	database   *sql.DB
 	appConfig  *config.Config
 	syncWorker *hostsync.Worker
 
-	rows     []hostsRow
-	cursor   int
-	width    int
-	height   int
-	refresh  time.Duration
-	lastTick time.Time
+	rows    []hostsRow
+	cursor  int
+	width   int
+	height  int
+	refresh time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -47,6 +54,7 @@ type hostsRow struct {
 	provider string // for rentals: "vastai" / "runpod"
 	gpuSpec  string // canonical GPU summary
 	jobs     int    // running jobs known on this row
+	launchID int64  // for rentals: the db.Launch ID
 }
 
 type hostsRowKind int
@@ -62,6 +70,8 @@ func newHostsTUIModel(database *sql.DB) hostsTUIModel {
 	cloudClients, _ := buildCloudClients(cfg)
 	r2Client, _ := buildR2Client(cfg)
 
+	// The worker is what pulls heartbeats from R2 into launch_live_state.
+	// Without it, rental rows would stop updating as their heartbeats age out.
 	worker := hostsync.New(database, cloudClients, r2Client, cfg)
 	worker.Start()
 
@@ -121,7 +131,9 @@ func (m hostsTUIModel) loadRows() tea.Cmd {
 }
 
 // buildHostsRows assembles one row per inventory host and per running rental.
-// On-prem hosts are hydrated from cached host info; rentals use launch fields.
+// Inventory rows hydrate from cached host info; rental rows hydrate from
+// launch_live_state via ops.FetchLaunchHostStatusFromDB, which decodes the
+// agent's most recent heartbeat (GPU util/mem, host MEM total/used, disk).
 func buildHostsRows(database *sql.DB) ([]hostsRow, error) {
 	// Inventory + cached hosts.
 	cachedByName := map[string]*db.CachedHostInfo{}
@@ -180,10 +192,11 @@ func buildHostsRows(database *sql.DB) ([]hostsRow, error) {
 			rentRows = append(rentRows, hostsRow{
 				kind:     hostsRowRental,
 				name:     ids.FormatInstanceID(launch.ID),
-				host:     hostFromLaunch(launch),
+				host:     hostFromLaunchLiveState(database, launch),
 				provider: strings.TrimSpace(launch.Provider),
 				gpuSpec:  strings.TrimSpace(launch.DisplayGPUSpec()),
 				jobs:     jobs,
+				launchID: launch.ID,
 			})
 		}
 	}
@@ -217,9 +230,9 @@ func buildHostsRows(database *sql.DB) ([]hostsRow, error) {
 	return rows, nil
 }
 
-// hostFromCache constructs a dashboard.Host suitable for rendering from a
-// CachedHostInfo row. Returns a placeholder Host (unknown status) when the
-// host isn't in the cache yet, so the row still renders.
+// hostFromCache constructs a dashboard.Host from a CachedHostInfo row.
+// Returns a placeholder Host (unknown status) when the host isn't in the
+// cache yet so the row still renders.
 func hostFromCache(name string, cached *db.CachedHostInfo) *dashboard.Host {
 	if cached == nil {
 		return &dashboard.Host{Name: name, Status: dashboard.HostStatusUnknown}
@@ -232,10 +245,30 @@ func hostFromCache(name string, cached *db.CachedHostInfo) *dashboard.Host {
 	return host
 }
 
-// hostFromLaunch builds a placeholder Host for a rental. We don't yet probe
-// rentals live, so CPU/MEM/GPU percentages render as "--"; the status glyph
-// reflects the launch's lifecycle.
-func hostFromLaunch(launch *db.Launch) *dashboard.Host {
+// hostFromLaunchLiveState renders a rental row from the agent's most recent
+// heartbeat (stored in launch_live_state). Heartbeats are uploaded every 30s
+// by the heartbeat sidecar on the cloud instance and pulled into the local DB
+// by the hostsync.Worker's cloud reconciler — no per-tick SSH needed.
+//
+// Known gap: the heartbeat does not include CPU load average, so the CPU bar
+// renders as "--" for rentals. Adding load1 to HeartbeatSample would close
+// this gap without any extra TUI work.
+func hostFromLaunchLiveState(database *sql.DB, launch *db.Launch) *dashboard.Host {
+	hostName := db.LaunchHost(launch.ID)
+	if result, err := ops.FetchLaunchHostStatusFromDB(database, hostName); err == nil && result != nil && result.Host != nil {
+		h := result.Host
+		// Display name should be the canonical wiNNNN form, not the
+		// legacy synthetic host (vastai:NN). All other fields stay.
+		h.Name = ids.FormatInstanceID(launch.ID)
+		return h
+	}
+	return hostFromLaunchFallback(launch)
+}
+
+// hostFromLaunchFallback builds a placeholder when launch_live_state isn't
+// available yet (e.g. the first heartbeat hasn't been pulled into the DB).
+// CPU/MEM/GPU render as dashes; the status glyph still reflects lifecycle.
+func hostFromLaunchFallback(launch *db.Launch) *dashboard.Host {
 	h := &dashboard.Host{Name: ids.FormatInstanceID(launch.ID)}
 	switch launch.Status {
 	case db.LaunchStatusRunning:
@@ -291,7 +324,9 @@ func (m hostsTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.syncWorker != nil {
 				// Kick a refresh for every inventory row so the metrics bars
-				// fill in. Rentals are skipped — we don't yet probe them.
+				// fill in. Rentals get their live data from launch_live_state
+				// in buildHostsRows; the next tick will pick up fresher
+				// heartbeats automatically.
 				for _, r := range m.rows {
 					if r.kind == hostsRowInventory && r.name != "" {
 						m.syncWorker.Request(hostsync.Request{
@@ -305,10 +340,9 @@ func (m hostsTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case hostsSyncResultMsg:
-		// Replace the cached Host for the affected row so the next render
-		// shows fresh metrics. The worker also persists to the cache table,
-		// so a full reload would pick this up — but updating in-place is
-		// cheaper and keeps the cursor stable.
+		// Inventory: drop the fresh Host into the matching row so the next
+		// render reflects up-to-date metrics without waiting for the next
+		// full reload.
 		if msg.result.Host != "" && msg.result.HostFull != nil {
 			for i := range m.rows {
 				if m.rows[i].kind == hostsRowInventory && m.rows[i].name == msg.result.Host {
@@ -406,8 +440,8 @@ func (m hostsTUIModel) View() string {
 	return b.String()
 }
 
-// styles — small wrappers so we don't import dashboard's private styles. Kept
-// local to keep the new panel self-contained.
+// styles — small local wrappers (the dashboard's private styles aren't
+// exported). Kept here to keep the new panel self-contained.
 func headerStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 }
