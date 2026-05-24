@@ -184,6 +184,32 @@ var failurePatternRules = []failurePatternRule{
 		},
 	},
 	{
+		// CUDA / NVIDIA shared-library symbol mismatch. Fires before the
+		// generic module_not_found rule below: the failure surfaces as a
+		// Python ImportError, but the cause is an incoherent CUDA stack
+		// (e.g. image-provided torch + lockfile-installed nvidia-* wheels
+		// disagreeing on the CUDA toolkit version), not a missing module.
+		patternID:  "cuda_lib_symbol_mismatch",
+		category:   "environment",
+		message:    "CUDA/NVIDIA shared library symbol mismatch",
+		solution:   "The Python torch stack and its bundled NVIDIA libraries (cusparse, cublas, cudnn, nvJitLink, etc.) are from incompatible CUDA toolkit versions. This typically happens when an image-provided torch coexists with lockfile-installed nvidia-* wheels at a different CUDA version. Fix by either (a) pinning a Docker image whose CUDA matches the project's torch pin, or (b) letting uv reinstall torch from the lockfile so all CUDA libs come from one coherent source.",
+		confidence: 0.95,
+		re:         regexp.MustCompile(`(?is)ImportError:[^\n]*\.so(?:\.\d+)*[^\n]*undefined symbol:[^\n]*(?:__nv|libnv|libcu|cublas|cusparse|cudnn|cufft|curand|cusolver|nccl|nvJitLink)`),
+		details: func(match []string, logContent string) map[string]any {
+			details := map[string]any{}
+			if sym := firstSubmatch(`(?i)undefined symbol:\s*([A-Za-z0-9_]+)`, logContent); sym != "" {
+				details["undefined_symbol"] = sym
+			}
+			if lib := firstSubmatch(`(?i)version\s+(lib[A-Za-z0-9_.+-]+\.so(?:\.\d+)*)`, logContent); lib != "" {
+				details["expected_in_library"] = lib
+			}
+			if soFile := firstSubmatch(`(?i)(/[^\s:]+\.so(?:\.\d+)*):\s*undefined symbol`, logContent); soFile != "" {
+				details["loaded_library"] = soFile
+			}
+			return details
+		},
+	},
+	{
 		patternID:  "module_not_found",
 		category:   "code",
 		message:    "Missing Python module or import",

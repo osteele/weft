@@ -33,6 +33,37 @@ ModuleNotFoundError: No module named 'transformers'`
 	}
 }
 
+func TestDiagnoseFromLog_CUDALibSymbolMismatch(t *testing.T) {
+	// Regression: a CUDA toolkit / nvidia-* wheel coherency bug surfaces
+	// as a Python ImportError, but should NOT be classified as a missing
+	// module. Real-world failure from wi3026 (job 2025) — image-provided
+	// torch 2.7.0+cu128 vs lockfile-installed nvidia-cusparse-cu12.
+	log := `Traceback (most recent call last):
+  File "/workspace/adaptive-escalation/scripts/run_prefix_framing.py", line 27, in <module>
+    import torch
+  File "/opt/conda/lib/python3.11/site-packages/torch/__init__.py", line 409, in <module>
+    from torch._C import *  # noqa: F403
+    ^^^^^^^^^^^^^^^^^^^^^^
+ImportError: /opt/conda/lib/python3.11/site-packages/torch/lib/../../nvidia/cusparse/lib/libcusparse.so.12: undefined symbol: __nvJitLinkCreate_12_8, version libnvJitLink.so.12`
+
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected a diagnosis")
+	}
+	if d.Pattern != "cuda_lib_symbol_mismatch" {
+		t.Errorf("expected cuda_lib_symbol_mismatch, got %s", d.Pattern)
+	}
+	if d.Category != "environment" {
+		t.Errorf("expected category environment, got %s", d.Category)
+	}
+	if sym, _ := d.StructuredDetails["undefined_symbol"].(string); sym != "__nvJitLinkCreate_12_8" {
+		t.Errorf("expected undefined_symbol __nvJitLinkCreate_12_8, got %q", sym)
+	}
+	if lib, _ := d.StructuredDetails["expected_in_library"].(string); lib != "libnvJitLink.so.12" {
+		t.Errorf("expected expected_in_library libnvJitLink.so.12, got %q", lib)
+	}
+}
+
 func TestDiagnoseFromLog_NoMatch(t *testing.T) {
 	log := `epoch 1/10: loss=2.34
 epoch 2/10: loss=1.89
