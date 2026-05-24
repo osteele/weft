@@ -13,15 +13,17 @@ import (
 )
 
 type launchHeartbeatSample struct {
-	Ts             int64 `json:"ts"`
-	GPUUtilPct     int   `json:"gpu_util_pct"`
-	GPUMemUsedMiB  int   `json:"gpu_mem_used_mib"`
-	GPUMemTotalMiB int   `json:"gpu_mem_total_mib"`
-	GPUTempC       int   `json:"gpu_temp_c"`
-	HostRSSKB      int64 `json:"host_rss_kb"`
-	HostMemTotalKB int64 `json:"host_mem_total_kb"`
-	DiskFreeBytes  int64 `json:"disk_free_bytes"`
-	DiskTotalBytes int64 `json:"disk_total_bytes"`
+	Ts             int64   `json:"ts"`
+	GPUUtilPct     int     `json:"gpu_util_pct"`
+	GPUMemUsedMiB  int     `json:"gpu_mem_used_mib"`
+	GPUMemTotalMiB int     `json:"gpu_mem_total_mib"`
+	GPUTempC       int     `json:"gpu_temp_c"`
+	HostRSSKB      int64   `json:"host_rss_kb"`
+	HostMemTotalKB int64   `json:"host_mem_total_kb"`
+	LoadAvg1       float64 `json:"load_avg_1,omitempty"`
+	CPUCount       int     `json:"cpu_count,omitempty"`
+	DiskFreeBytes  int64   `json:"disk_free_bytes"`
+	DiskTotalBytes int64   `json:"disk_total_bytes"`
 }
 
 // FetchLaunchHostStatusFromDB builds rental-host status from local DB state
@@ -93,6 +95,15 @@ func applyLaunchLiveState(host *hostinfo.Host, live *db.LaunchLiveState, launch 
 	}
 	if hb.HostRSSKB > 0 {
 		host.MemUsed = formatKBAsG(hb.HostRSSKB)
+	}
+	// CPU load average + CPU count let hostinfo.HostCPULoadPercent compute a
+	// CPU % bar. Both must be present; the load average alone is meaningless
+	// without knowing the core count to normalize against.
+	if hb.CPUCount > 0 {
+		host.CPUs = hb.CPUCount
+	}
+	if hb.LoadAvg1 > 0 {
+		host.LoadAvg = strconv.FormatFloat(hb.LoadAvg1, 'f', 2, 64)
 	}
 	if hb.DiskFreeBytes > 0 {
 		host.DiskFree = hb.DiskFreeBytes

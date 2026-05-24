@@ -220,6 +220,45 @@ func HostMemoryStatsKB() (totalKB, usedKB, availableKB int64) {
 	return 0, 0, 0
 }
 
+// HostLoadAvg1 returns the system 1-minute load average (the same value
+// surfaced by `uptime`). Returns 0 if it cannot be determined. Used by the
+// agent heartbeat so the dashboard can render a CPU bar for cloud rentals.
+func HostLoadAvg1() float64 {
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/proc/loadavg")
+		if err != nil {
+			return 0
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) == 0 {
+			return 0
+		}
+		v, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil {
+			return 0
+		}
+		return v
+	}
+	if runtime.GOOS == "darwin" {
+		// sysctl -n vm.loadavg → "{ 1.23 4.56 7.89 }"
+		out, err := exec.Command("sysctl", "-n", "vm.loadavg").Output()
+		if err != nil {
+			return 0
+		}
+		s := strings.ReplaceAll(strings.ReplaceAll(string(out), "{", ""), "}", "")
+		fields := strings.Fields(s)
+		if len(fields) == 0 {
+			return 0
+		}
+		v, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil {
+			return 0
+		}
+		return v
+	}
+	return 0
+}
+
 // MemPressureLevel represents system memory pressure.
 type MemPressureLevel string
 

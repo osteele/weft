@@ -95,19 +95,21 @@ const (
 
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.
 type HeartbeatSample struct {
-	Ts             int64  `json:"ts"`
-	Phase          string `json:"phase"`
-	GPUUtilPct     int    `json:"gpu_util_pct"`
-	GPUMemUsedMiB  int    `json:"gpu_mem_used_mib"`
-	GPUMemTotalMiB int    `json:"gpu_mem_total_mib"`
-	GPUTempC       int    `json:"gpu_temp_c"`
-	HostRSSKB      int64  `json:"host_rss_kb"`
-	HostMemTotalKB int64  `json:"host_mem_total_kb"`
-	DiskFreeBytes  int64  `json:"disk_free_bytes"`
-	DiskTotalBytes int64  `json:"disk_total_bytes"`
-	AgentPID       int    `json:"agent_pid,omitempty"`
-	AgentAlive     *bool  `json:"agent_alive,omitempty"`
-	AgentFatal     string `json:"agent_fatal,omitempty"`
+	Ts             int64   `json:"ts"`
+	Phase          string  `json:"phase"`
+	GPUUtilPct     int     `json:"gpu_util_pct"`
+	GPUMemUsedMiB  int     `json:"gpu_mem_used_mib"`
+	GPUMemTotalMiB int     `json:"gpu_mem_total_mib"`
+	GPUTempC       int     `json:"gpu_temp_c"`
+	HostRSSKB      int64   `json:"host_rss_kb"`
+	HostMemTotalKB int64   `json:"host_mem_total_kb"`
+	LoadAvg1       float64 `json:"load_avg_1,omitempty"`
+	CPUCount       int     `json:"cpu_count,omitempty"`
+	DiskFreeBytes  int64   `json:"disk_free_bytes"`
+	DiskTotalBytes int64   `json:"disk_total_bytes"`
+	AgentPID       int     `json:"agent_pid,omitempty"`
+	AgentAlive     *bool   `json:"agent_alive,omitempty"`
+	AgentFatal     string  `json:"agent_fatal,omitempty"`
 }
 
 // InstanceUpdate is a snapshot of cloud instance + job state.
