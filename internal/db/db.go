@@ -1123,11 +1123,21 @@ func UpdateJobRunning(db *sql.DB, id int64) error {
 	return err
 }
 
-// UpdateJobFailed marks a starting job as failed to start
+// UpdateJobFailed marks a starting job as failed to start. Stamps
+// cloud_outcome in the same UPDATE for cloud rows (launch_id NOT NULL),
+// matching ClosedCloudAttemptHasOutcome (campaign-lifecycle.allium).
 func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 	endTime := time.Now().Unix()
-	_, err := db.Exec(`UPDATE job_attempts SET status = ?, end_time = ?, error_message = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
-		StatusDead, endTime, errorMsg, id, StatusStarting)
+	_, err := db.Exec(`
+		UPDATE job_attempts
+		SET status = ?, end_time = ?, error_message = ?,
+		    cloud_outcome = CASE
+		        WHEN launch_id IS NULL THEN cloud_outcome
+		        WHEN cloud_outcome IS NULL THEN ?
+		        ELSE cloud_outcome
+		    END
+		WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+		StatusDead, endTime, errorMsg, AttemptOutcomeFailed, id, StatusStarting)
 	return err
 }
 

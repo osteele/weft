@@ -583,12 +583,28 @@ func NormalizeStalePendingPlacementNoLaunch(database *sql.DB) (int64, error) {
 // authoritative — it can override a previous "failed" status from a race
 // condition (e.g., job was marked dead locally but status file shows completion).
 func UpdateAttemptCompletion(execer dbExecer, jobID int64, exitCode int, endTime int64) error {
+	// Stamp cloud_outcome in the same UPDATE for cloud rows
+	// (launch_id NOT NULL). Mirrors the derivation the
+	// cloud_attempts_auto_derive_outcome_* trigger would do in 00006;
+	// keeping the writer explicit here keeps the intent visible at the
+	// call site and makes the trigger fire only for genuine leaks. The
+	// CASE preserves any explicit cloud_outcome that was already set
+	// (e.g., 'preempted', 'orphaned') by an earlier path.
+	cloudOutcome := AttemptOutcomeCompleted
+	if exitCode != 0 {
+		cloudOutcome = AttemptOutcomeFailed
+	}
 	_, err := execer.Exec(`
 		UPDATE job_attempts
 		SET status = ?, exit_code = ?, end_time = ?,
-		    last_synced_status = ?, pending_status = NULL, session_name = NULL
+		    last_synced_status = ?, pending_status = NULL, session_name = NULL,
+		    cloud_outcome = CASE
+		        WHEN launch_id IS NULL THEN cloud_outcome
+		        WHEN cloud_outcome IS NULL THEN ?
+		        ELSE cloud_outcome
+		    END
 		WHERE id = `+latestAttemptSubquery,
-		StatusCompleted, exitCode, endTime, StatusCompleted, jobID,
+		StatusCompleted, exitCode, endTime, StatusCompleted, cloudOutcome, jobID,
 	)
 	return err
 }
@@ -599,9 +615,14 @@ func UpdateAttemptDead(execer dbExecer, jobID int64) error {
 	_, err := execer.Exec(`
 		UPDATE job_attempts
 		SET status = ?, end_time = ?,
-		    last_synced_status = ?, pending_status = NULL, session_name = NULL
+		    last_synced_status = ?, pending_status = NULL, session_name = NULL,
+		    cloud_outcome = CASE
+		        WHEN launch_id IS NULL THEN cloud_outcome
+		        WHEN cloud_outcome IS NULL THEN ?
+		        ELSE cloud_outcome
+		    END
 		WHERE id = `+latestOpenAttemptSubquery,
-		StatusFailed, endTime, StatusFailed, jobID,
+		StatusFailed, endTime, StatusFailed, AttemptOutcomeFailed, jobID,
 	)
 	return err
 }

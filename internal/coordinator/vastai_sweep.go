@@ -136,10 +136,19 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	// Update job in DB — always StatusCompleted; exit code stored separately.
 	// Clear pending_status: the job already ran on the cloud instance, so any
 	// pending intent (e.g. pending_status=queued set before this run) is moot.
+	// Stamp cloud_outcome in the same UPDATE per
+	// ClosedCloudAttemptHasOutcome (campaign-lifecycle.allium): exit_code=0
+	// → 'completed', non-zero → 'failed' (the same derivation the
+	// cloud_attempts_auto_derive_outcome_* trigger uses in 00006).
+	cloudOutcome := db.AttemptOutcomeCompleted
+	if exitCode != 0 {
+		cloudOutcome = db.AttemptOutcomeFailed
+	}
 	_, err = c.db.Exec(
-		`UPDATE job_attempts SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL
+		`UPDATE job_attempts SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL,
+		    cloud_outcome = CASE WHEN cloud_outcome IS NULL THEN ? ELSE cloud_outcome END
 		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
-		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, jobID,
+		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, cloudOutcome, jobID,
 	)
 	if err != nil {
 		c.logger.Warn("failed to update job", "job_id", jobID, "error", err)

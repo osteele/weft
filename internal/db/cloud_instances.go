@@ -1019,7 +1019,20 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
 				return err
 			}
-			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ? WHERE id = ?`, status, now, id)
+			// Caller didn't specify a reason. Mirror the trigger's
+			// derivation (00007 launches_terminal_auto_derive_reason*) at the
+			// call site so the row's reason matches its status the moment
+			// the writer commits, not after a follow-up trigger fires.
+			// 'unknown' is the documented sentinel for "writer didn't know"
+			// and is treated as overridable by the skip-check above.
+			derivedReason := TerminationReasonUnknown
+			switch status {
+			case LaunchStatusCancelled:
+				derivedReason = TerminationReasonCancelled
+			case LaunchStatusCompleted:
+				derivedReason = TerminationReasonCompleted
+			}
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, derivedReason, id)
 			return err
 		default:
 			_, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ?`, status, id)
