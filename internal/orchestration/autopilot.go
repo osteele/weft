@@ -62,24 +62,25 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
-	// Sweep stale placement rows whose orchestrator died before resolving
-	// them; otherwise leaked intents exclude jobs from future passes
-	// indefinitely.
-	if reconciled, err := db.ReconcilePlacementRows(database, db.PlacementReconcileOptions{ProtectionWindow: placementIntentProtectionWindow}); err != nil {
-		oplog.Log("auto_pilot.placement_reconcile_error", oplog.WithError(err))
-	} else if len(reconciled.Actions) > 0 {
-		jobIDs := make([]int64, 0, len(reconciled.Actions))
-		for _, action := range reconciled.Actions {
+	// Requeue jobs stranded on dead cloud-instance host references. Intent
+	// drift is now resolved by DB triggers (see 00004 + 00005); the old
+	// imperative reconciler that swept open MoveIntent / PlacementIntent
+	// rows is gone, because every placement-landing event closes the
+	// intent in the same transaction.
+	if stale, err := db.ReconcileStaleCloudHostJobs(database, db.ReconcileStaleCloudHostJobsOptions{}); err != nil {
+		oplog.Log("auto_pilot.stale_cloud_host_reconcile_error", oplog.WithError(err))
+	} else if len(stale.Actions) > 0 {
+		jobIDs := make([]int64, 0, len(stale.Actions))
+		for _, action := range stale.Actions {
 			jobIDs = append(jobIDs, action.JobID)
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: db.EventPlacementIntentPruned,
 				JobID:     action.JobID,
-				LaunchID:  action.LaunchID,
-				Detail:    fmt.Sprintf("kind=%s intent_id=%d detail=%s", action.Kind, action.IntentID, action.Detail),
+				Detail:    fmt.Sprintf("stale_cloud_host detail=%s", action.Detail),
 			})
 		}
-		oplog.Log("auto_pilot.placement_reconciled",
-			oplog.WithDetailf("actions=%d job_ids=%v", len(reconciled.Actions), jobIDs))
+		oplog.Log("auto_pilot.stale_cloud_host_requeued",
+			oplog.WithDetailf("actions=%d job_ids=%v", len(stale.Actions), jobIDs))
 	}
 	moveRetryLaunches, err := fulfillOpenMoveToNewIntents(ctx, database, scoped)
 	if err != nil {
