@@ -84,10 +84,18 @@ func insertTestJob(t *testing.T, db *sql.DB, id int64, command, workingDir, stat
 		cloudInstanceIDPtr = &o.cloudInstanceID
 	}
 	now := time.Now().Unix()
+	// Stamp end_time at INSERT time for terminal-status attempts so the
+	// TerminalJobsHaveEndTime invariant (enforced by triggers in 00006)
+	// isn't violated mid-INSERT. The subsequent UPDATE below may override
+	// end_time with an explicit value from opts.
+	var initialEndTime any
+	if IsTerminalStatus(status) {
+		initialEndTime = now
+	}
 	result, err := db.Exec(
-		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
-		 VALUES (?, 1, ?, ?, ?, ?)`,
-		id, o.host, cloudInstanceIDPtr, status, now,
+		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at, end_time)
+		 VALUES (?, 1, ?, ?, ?, ?, ?)`,
+		id, o.host, cloudInstanceIDPtr, status, now, initialEndTime,
 	)
 	if err != nil {
 		t.Fatalf("insertTestJob: create attempt: %v", err)

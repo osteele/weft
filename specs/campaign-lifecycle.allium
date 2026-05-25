@@ -2160,8 +2160,22 @@ invariant ClosedCloudAttemptHasOutcome {
     -- A closed cloud attempt with cloud_outcome=null is wedged: the
     -- job_status view derives it as 'dead' and the orphan-recovery
     -- exclusion filter then skips it, so the job can never re-enter
-    -- placement. Closing paths MUST stamp cloud_outcome in the same
-    -- UPDATE rather than via a follow-up predicated on end_time.
+    -- placement.
+    --
+    -- ENFORCEMENT (00006, 2026-05-26): the invariant is enforced by DB
+    -- triggers
+    --   cloud_attempts_auto_derive_outcome_insert
+    --   cloud_attempts_auto_derive_outcome_update
+    -- which auto-derive cloud_outcome from status (+ exit_code for
+    -- completed) when an attempt closes (end_time set on a
+    -- launch_id-NOT-NULL row) without one. Explicit cloud_outcome
+    -- values that aren't derivable from status — 'orphaned',
+    -- 'superseded', 'preempted' — are preserved by the trigger's
+    -- WHEN cloud_outcome IS NULL gate. A prod scan before the
+    -- migration found 837 wedged rows that the backfill resolved.
+    -- Per-call-site "closing paths MUST stamp cloud_outcome" discipline
+    -- remains correct (visible at the call site) but is no longer
+    -- load-bearing. See internal/db/terminal_attempt_triggers_test.go.
     for ja in JobAttempts where ja.launch_id != null and ja.end_time != null:
         ja.cloud_outcome != null
 }

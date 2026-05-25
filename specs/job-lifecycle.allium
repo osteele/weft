@@ -1088,10 +1088,22 @@ invariant TerminalJobsHaveEndTime {
         -- status='canceled' without stamping end_time. The reconciler
         -- treated that "terminal but open" attempt as still in flight,
         -- which silenced rule IdleAfterReadyTimeout (gated on
-        -- not has_started_job) on the surrounding instance. The fix:
-        -- every writer that transitions an attempt to a terminal status
-        -- MUST stamp end_time in the same statement. See StampAttemptStatus
-        -- in specs/status-sync.allium.
+        -- not has_started_job) on the surrounding instance.
+        --
+        -- ENFORCEMENT (00006, 2026-05-26): the invariant is now also
+        -- enforced by DB triggers
+        --   job_attempts_terminal_auto_stamp_end_time_insert
+        --   job_attempts_terminal_auto_stamp_end_time_update
+        -- which auto-stamp end_time = strftime('%s','now') when an
+        -- attempt transitions to a terminal status with end_time NULL.
+        -- The cloud-backfill carve-out (launch_id NOT NULL AND
+        -- last_synced_status IS NULL) is respected so the eventual sync
+        -- can rewrite from the agent's authoritative timestamps.
+        -- Per-call-site "writer MUST stamp end_time" discipline remains
+        -- correct (it makes the rationale visible at the call site) but
+        -- is no longer load-bearing — a future regression like wi2317
+        -- would be caught by the table itself. See
+        -- internal/db/terminal_attempt_triggers_test.go.
 }
 
 invariant AttemptNumbersAreSequential {
