@@ -514,6 +514,23 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 		if c.OnDemandRefCents != nil {
 			onDemandRefCents = *c.OnDemandRefCents
 		}
+		// Include grace_started_at / grace_deadline in the initial INSERT
+		// when set on the struct, so callers that construct a Launch in
+		// grace status (typically tests) satisfy the GraceRequiresDeadline
+		// invariant enforced by triggers in 00007. When status is grace and
+		// neither was set explicitly, default to (now, now + 5min) so the
+		// common pattern (test setup) doesn't have to spell them out. The
+		// trigger still catches UPDATE leaks on the transition path.
+		if c.Status == LaunchStatusGrace {
+			if c.GraceStartedAt == nil {
+				v := now
+				c.GraceStartedAt = &v
+			}
+			if c.GraceDeadline == nil {
+				v := now + 300
+				c.GraceDeadline = &v
+			}
+		}
 		result, err := db.Exec(
 			`INSERT INTO launches (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 			 max_spend_cents, max_time_seconds, created_at,
@@ -521,8 +538,9 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			 inet_down_mbps, inet_up_mbps, cuda_version,
 			 cpu_cores_effective, cpu_name, ram_gb,
 			 disk_gb, provisioned_inputs, machine_id, docker_image,
-			 instance_type, max_bid_price_cents, on_demand_ref_cents)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 instance_type, max_bid_price_cents, on_demand_ref_cents,
+			 grace_started_at, grace_deadline)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 			c.MaxSpendCents, c.MaxTimeSeconds, now,
 			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
@@ -530,6 +548,7 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			c.CPUCores, c.CPUName, c.RAMGB,
 			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
 			instanceType, maxBidPriceCents, onDemandRefCents,
+			c.GraceStartedAt, c.GraceDeadline,
 		)
 		if err != nil {
 			return 0, err
@@ -979,12 +998,16 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 			_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ?`, status, now, id)
 			return err
 		case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
-			// Don't overwrite an already-terminal instance that has a termination
-			// reason set (e.g., bootstrap_timeout → job_failure on next pass).
+			// Don't overwrite an already-terminal instance that has a SPECIFIC
+			// termination reason set (e.g., bootstrap_timeout → job_failure on
+			// next pass). 'unknown' is the placeholder set by the auto-derive
+			// trigger (00007) when a launch was inserted/transitioned to
+			// terminal without a reason — treat it as overridable so callers
+			// that DO know the specific reason can still record it.
 			var currentStatus, currentReason string
 			if err := db.QueryRow(`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`, id).Scan(&currentStatus, &currentReason); err == nil {
 				isTerminal := currentStatus == LaunchStatusCompleted || currentStatus == LaunchStatusFailed || currentStatus == LaunchStatusCancelled
-				if isTerminal && currentReason != "" {
+				if isTerminal && currentReason != "" && currentReason != TerminationReasonUnknown {
 					return nil
 				}
 			}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -14,9 +15,13 @@ import (
 func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
 	database := db.SetupTestDB(t)
 
+	now := time.Now().Unix()
+	graceDeadline := now + 300
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
-		Status:   db.LaunchStatusGrace,
-		Provider: "vastai",
+		Status:         db.LaunchStatusGrace,
+		Provider:       "vastai",
+		GraceStartedAt: &now,
+		GraceDeadline:  &graceDeadline,
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)

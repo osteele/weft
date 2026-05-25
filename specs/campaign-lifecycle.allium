@@ -2203,12 +2203,36 @@ invariant BenchmarkIncompatibleWithInterruptible {
 }
 
 invariant TerminalInstancesHaveEndTime {
+    -- ENFORCEMENT (00007, 2026-05-26): DB triggers
+    --   launches_terminal_auto_stamp_ended_at
+    --   launches_terminal_auto_stamp_ended_at_insert
+    -- auto-stamp ended_at = strftime('%s','now') when a launch
+    -- transitions (or is inserted) into {failed, canceled, completed}
+    -- with ended_at NULL. A prod scan before the migration found 5
+    -- such rows; backfill resolved them using the latest available
+    -- wall-clock anchor on the row (provider_running_at >
+    -- launched_at > ready_at > created_at).
     for instance in Instances:
         if instance.is_terminal:
             instance.ended_at != null
 }
 
 invariant TerminalInstancesHaveReason {
+    -- ENFORCEMENT (00007, 2026-05-26): DB triggers
+    --   launches_terminal_auto_derive_reason
+    --   launches_terminal_auto_derive_reason_insert
+    -- auto-derive termination_reason from status when missing:
+    -- canceled → 'canceled', completed → 'completed', failed →
+    -- 'unknown' (the sentinel already in
+    -- launches_termination_reason_check). Writers that DO know the
+    -- specific reason are preserved by the WHEN
+    -- termination_reason IS NULL gate. The leaker was the fallback
+    -- branch of internal/db/cloud_instances.go:999 that updated
+    -- status + ended_at without a reason; a prod scan found 49
+    -- such rows, backfilled by the same migration. The companion
+    -- UpdateLaunchStatus guard now treats 'unknown' as overridable
+    -- so a writer that learns the specific reason later can still
+    -- record it over the trigger-set placeholder.
     for instance in Instances:
         if instance.status in {failed, canceled}:
             instance.termination_reason != null
@@ -2235,6 +2259,21 @@ invariant InstanceEventuallyTerminal {
 }
 
 invariant GraceRequiresDeadline {
+    -- ENFORCEMENT (00007, 2026-05-26): DB triggers
+    --   launches_grace_requires_deadline_update
+    --   launches_grace_requires_deadline_insert
+    -- RAISE (BEFORE INSERT / BEFORE UPDATE OF status) when a launch
+    -- transitions to grace status without both grace_started_at and
+    -- grace_deadline. RAISE rather than auto-derive because the
+    -- deadline is operationally load-bearing — the agent's R2
+    -- grace-poll loop uses it to decide self-destruct — and no sane
+    -- auto-derived value exists at the table layer (the default
+    -- grace period is a config value, not a schema fact). Forces
+    -- writers to pass them explicitly. CreateLaunch defaults to
+    -- (now, now + 5min) when a Launch struct is constructed in
+    -- grace status without them, so the common test-setup pattern
+    -- works without ceremony; the trigger still catches all UPDATE
+    -- leaks.
     for instance in Instances:
         if instance.status = grace:
             instance.grace_deadline != null

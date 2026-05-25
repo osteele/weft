@@ -83,9 +83,9 @@ func TestFindReusableInstances_SkipsLaunchAfterDiskFailure(t *testing.T) {
 	now := time.Now().Unix()
 	graceDeadline := now + 3600
 	_, err := database.Exec(
-		`INSERT INTO launches (id, status, provider, created_at, launched_at, gpu_class, gpu_mem_gb, disk_gb, grace_deadline)
-		 VALUES (1, 'grace', 'runpod', ?, ?, 'nvidia', 48, 120, ?)`,
-		now, now, graceDeadline,
+		`INSERT INTO launches (id, status, provider, created_at, launched_at, gpu_class, gpu_mem_gb, disk_gb, grace_started_at, grace_deadline)
+		 VALUES (1, 'grace', 'runpod', ?, ?, 'nvidia', 48, 120, ?, ?)`,
+		now, now, now, graceDeadline,
 	)
 	if err != nil {
 		t.Fatalf("insert launch: %v", err)

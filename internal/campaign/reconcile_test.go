@@ -975,11 +975,16 @@ func TestReconcileLaunches_GraceExpiry_DestroysProvider(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	// Create a grace-period instance with an expired deadline
+	// Create a grace-period instance with an expired deadline.
+	// GraceRequiresDeadline (00007) needs both fields at INSERT time.
+	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
+	graceStarted := pastDeadline
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
-		Status:   db.LaunchStatusGrace,
-		Provider: "vastai",
-		GPUSpec:  "RTX_4090",
+		Status:         db.LaunchStatusGrace,
+		Provider:       "vastai",
+		GPUSpec:        "RTX_4090",
+		GraceStartedAt: &graceStarted,
+		GraceDeadline:  &pastDeadline,
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
@@ -987,8 +992,6 @@ func TestReconcileLaunches_GraceExpiry_DestroysProvider(t *testing.T) {
 	if err := db.SetLaunchProviderID(database, instanceID, "99999"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
-	// Set grace deadline in the past
-	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
 	if err := db.SetLaunchGraceStarted(database, instanceID, pastDeadline); err != nil {
 		t.Fatalf("set grace started: %v", err)
 	}
