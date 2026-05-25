@@ -1481,6 +1481,92 @@ func TestAppendRecentFailedInstanceRows_OutcomesClusterAndCost(t *testing.T) {
 	}
 }
 
+// TestAppendRecentFailedInstanceRows_ProviderTimeoutDoesNotCluster ensures
+// that transient provider CLI/API timeouts are excluded from the
+// clustered-failures banner. A slow vast.ai API hour produces many
+// provider_timeout rows; they must still appear in the recent-failed table
+// (so cost/postmortem accounting works), but they must not drive the banner
+// to flag "common factor: provider vastai" — that signal is reserved for
+// real systemic provider trouble.
+func TestAppendRecentFailedInstanceRows_ProviderTimeoutDoesNotCluster(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentFailedInstances{
+		items: []*db.Launch{
+			{
+				ID:                400,
+				Status:            db.LaunchStatusFailed,
+				Provider:          "vastai",
+				TerminationReason: db.TerminationReasonProviderTimeout,
+				TerminationDetail: "instance creation failed: create instance: provider command timed out: vastai create instance 30s",
+				EndedAt:           testInt64Ptr(9_700),
+			},
+			{
+				ID:                401,
+				Status:            db.LaunchStatusFailed,
+				Provider:          "vastai",
+				TerminationReason: db.TerminationReasonProviderTimeout,
+				TerminationDetail: "instance creation failed: attach SSH key to instance 37326566: attach ssh: provider command timed out",
+				EndedAt:           testInt64Ptr(9_650),
+			},
+			{
+				ID:                402,
+				Status:            db.LaunchStatusFailed,
+				Provider:          "vastai",
+				TerminationReason: db.TerminationReasonProviderTimeout,
+				TerminationDetail: "instance creation failed: create instance: provider command timed out: vastai create instance 30s",
+				EndedAt:           testInt64Ptr(9_600),
+			},
+		},
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			400: {JobID: 1, Status: db.StatusQueued},
+			401: {JobID: 2, Status: db.StatusQueued},
+			402: {JobID: 3, Status: db.StatusQueued},
+		},
+	}
+
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
+
+	// Rows must still appear in the table — only the cluster signal is suppressed.
+	if !strings.Contains(out, "Recent failed instances") {
+		t.Fatalf("expected recent failed instances section, got:\n%s", out)
+	}
+	if strings.Contains(out, "clustered failures") {
+		t.Fatalf("provider_timeout failures must not trigger clustered-failures banner; output:\n%s", out)
+	}
+}
+
+// TestAppendRecentFailedInstanceRows_RealFailuresStillClusterWhenMixedWithTimeouts
+// confirms the filter is narrow: a mix of provider_timeout and real
+// infra_failure rows should still surface a cluster on the genuine failures
+// alone (when ≥3 of them share a factor). This guards against
+// over-aggressive filtering swallowing legitimate clustering signals.
+func TestAppendRecentFailedInstanceRows_RealFailuresStillClusterWhenMixedWithTimeouts(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentFailedInstances{
+		items: []*db.Launch{
+			// 3 real infra failures on vastai → should cluster.
+			{ID: 500, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, EndedAt: testInt64Ptr(9_700)},
+			{ID: 501, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, EndedAt: testInt64Ptr(9_650)},
+			{ID: 502, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonProviderFailure, EndedAt: testInt64Ptr(9_600)},
+			// 2 timeouts mixed in — must not dilute the cluster.
+			{ID: 503, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonProviderTimeout, EndedAt: testInt64Ptr(9_550)},
+			{ID: 504, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonProviderTimeout, EndedAt: testInt64Ptr(9_500)},
+		},
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			500: {JobID: 1, Status: db.StatusQueued},
+			501: {JobID: 2, Status: db.StatusQueued},
+			502: {JobID: 3, Status: db.StatusQueued},
+			503: {JobID: 4, Status: db.StatusQueued},
+			504: {JobID: 5, Status: db.StatusQueued},
+		},
+	}
+
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
+	if !strings.Contains(out, "clustered failures — common factor: provider vastai") {
+		t.Fatalf("expected vastai cluster banner from real failures, got:\n%s", out)
+	}
+}
+
 func TestStripContractRef(t *testing.T) {
 	tests := []struct {
 		name string

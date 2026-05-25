@@ -1757,8 +1757,15 @@ func LaunchInstance(
 		replacementOffer,
 	)
 	if err != nil {
+		// Distinguish provider CLI/API timeouts from genuine create failures so
+		// the clustered-failures banner can ignore them — see
+		// db.IsTransientInstanceTermination and internal/ui/terminal/list_grouped_status.go.
+		reason := db.TerminationReasonInfraFailure
+		if errors.Is(err, cloud.ErrProviderCommandTimeout) {
+			reason = db.TerminationReasonProviderTimeout
+		}
 		detail := "instance creation failed: " + err.Error()
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, reason, detail)
 		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 			"launch_id=%d provider=%s offer_id=%s error=%s",

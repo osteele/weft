@@ -65,6 +65,13 @@ const (
 	// Excluded from the survival model so a class of self-inflicted
 	// failures doesn't poison machine-level priors.
 	TerminationReasonWeftBug = "weft_bug"
+	// TerminationReasonProviderTimeout labels failures where weft's CLI call
+	// to the provider exceeded its per-command deadline (cloud.ErrProviderCommandTimeout).
+	// These reflect transient provider-API slowness, not a real machine or
+	// workload failure, so they are excluded from the clustered-failures
+	// signal (see IsTransientInstanceTermination) while remaining visible
+	// in the recent-failed-instances table for cost/postmortem accounting.
+	TerminationReasonProviderTimeout = "provider_timeout"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be
@@ -77,7 +84,7 @@ func IsRetryableTermination(ci *Launch) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonUnknown, "":
+	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonProviderTimeout, TerminationReasonUnknown, "":
 		return true
 	default:
 		return false
@@ -95,7 +102,8 @@ func IsInfrastructureTermination(reason string) bool {
 		TerminationReasonInfraFailure,
 		TerminationReasonBootstrapTimeout,
 		TerminationReasonPhaseStall,
-		TerminationReasonPreempted:
+		TerminationReasonPreempted,
+		TerminationReasonProviderTimeout:
 		return true
 	default:
 		return false
@@ -112,7 +120,17 @@ func InfrastructureTerminationReasons() []string {
 		TerminationReasonBootstrapTimeout,
 		TerminationReasonPhaseStall,
 		TerminationReasonPreempted,
+		TerminationReasonProviderTimeout,
 	}
+}
+
+// IsTransientInstanceTermination reports whether a termination reason reflects
+// a transient provider-side condition (provider CLI/API timeouts) rather than
+// a real machine, network, or workload failure. Such terminations should not
+// contribute to the clustered-failures common-factor signal — a slow vast.ai
+// API hour does not constitute a "provider outage" worth flagging.
+func IsTransientInstanceTermination(reason string) bool {
+	return reason == TerminationReasonProviderTimeout
 }
 
 // IsNormalInstanceTermination reports whether a termination reason represents a

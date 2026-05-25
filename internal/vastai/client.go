@@ -19,8 +19,22 @@ import (
 	"github.com/osteele/weft/internal/util"
 )
 
-// cliTimeout is the maximum time to wait for a vastai CLI command to complete.
+// cliTimeout is the default maximum time to wait for a vastai CLI command to
+// complete. Commands known to take longer when vast.ai's API is slow opt in
+// to a longer per-call timeout via runWithTimeout — see createInstanceTimeout
+// and attachSSHTimeout below.
 const cliTimeout = 30 * time.Second
+
+// createInstanceTimeout bounds `vastai create instance`. Vast.ai's create API
+// occasionally takes well over 30s under load; a 30s ceiling turned slow
+// successes into hard `provider_timeout` failures. Matches the analogous
+// runpod CreateInstance timeout in internal/runpod/client.go.
+const createInstanceTimeout = 2 * time.Minute
+
+// attachSSHTimeout bounds `vastai attach ssh`. Same rationale as
+// createInstanceTimeout: under load this call can exceed the default 30s.
+const attachSSHTimeout = 2 * time.Minute
+
 const availabilityGracePeriod = 2 * time.Minute
 const userAPITimeout = 10 * time.Second
 
@@ -58,13 +72,6 @@ type Client struct {
 // NewClient creates a Client that uses the vastai CLI from PATH.
 func NewClient() *Client {
 	return &Client{CLIPath: "vastai"}
-}
-
-func (c *Client) cliTimeout() time.Duration {
-	if c != nil && c.CLITimeout > 0 {
-		return c.CLITimeout
-	}
-	return cliTimeout
 }
 
 // Available checks that the vastai CLI is installed and authenticated.
@@ -267,7 +274,7 @@ func filterOffersByMinCUDA(offers []Offer, minCUDA string) []Offer {
 func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error) {
 	args := buildCreateArgs(offerID, opts)
 
-	out, err := c.run(args...)
+	out, err := c.runWithTimeout(createInstanceTimeout, args...)
 	if err != nil {
 		if isUnavailableOfferError(err) {
 			return nil, fmt.Errorf("%w: %v", cloud.ErrOfferUnavailable, err)
@@ -332,7 +339,7 @@ func (c *Client) AttachSSH(instanceID int, publicKeyFile string) error {
 	if strings.TrimSpace(publicKeyFile) == "" {
 		return nil
 	}
-	if _, err := c.run("attach", "ssh", strconv.Itoa(instanceID), publicKeyFile); err != nil {
+	if _, err := c.runWithTimeout(attachSSHTimeout, "attach", "ssh", strconv.Itoa(instanceID), publicKeyFile); err != nil {
 		return fmt.Errorf("attach ssh: %w", err)
 	}
 	return nil
@@ -503,11 +510,26 @@ func (c *Client) CopyBetweenInstances(srcInstanceID int, srcPath string, dstInst
 // process exhaustion when multiple goroutines query the API simultaneously.
 var cliSemaphore = make(chan struct{}, 4)
 
-// run executes a vastai CLI command and returns stdout.
+// run executes a vastai CLI command at the default timeout and returns stdout.
+// Use runWithTimeout for commands whose tail-latency exceeds the default.
 func (c *Client) run(args ...string) ([]byte, error) {
+	return c.runWithTimeout(0, args...)
+}
+
+// runWithTimeout executes a vastai CLI command with a per-call timeout
+// override. A commandTimeout of 0 means "use the default cliTimeout". The
+// Client.CLITimeout field (set by tests or manual configuration) always wins
+// when non-zero, so tests can squeeze any command to a tight bound.
+func (c *Client) runWithTimeout(commandTimeout time.Duration, args ...string) ([]byte, error) {
 	cliSemaphore <- struct{}{}
 	defer func() { <-cliSemaphore }()
-	timeout := c.cliTimeout()
+	timeout := commandTimeout
+	if timeout <= 0 {
+		timeout = cliTimeout
+	}
+	if c != nil && c.CLITimeout > 0 {
+		timeout = c.CLITimeout
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.CLIPath, args...)

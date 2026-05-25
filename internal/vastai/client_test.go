@@ -243,6 +243,58 @@ func TestCreateInstanceCLITimeoutIsProviderCommandTimeout(t *testing.T) {
 	}
 }
 
+// TestRunWithTimeoutHonorsPerCallTimeout verifies that runWithTimeout's
+// commandTimeout parameter actually governs the deadline when the test-only
+// CLITimeout override is not set. This is the mechanism CreateInstance and
+// AttachSSH rely on for their 2-minute per-call timeouts.
+func TestRunWithTimeoutHonorsPerCallTimeout(t *testing.T) {
+	dir := t.TempDir()
+	stubSleep := filepath.Join(dir, "vastai_sleep")
+	if err := os.WriteFile(stubSleep, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	stubFast := filepath.Join(dir, "vastai_fast")
+	if err := os.WriteFile(stubFast, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	// Per-call timeout shorter than the stub's sleep should fire as a provider
+	// command timeout, even though the default cliTimeout (30s) would not.
+	c := &Client{CLIPath: stubSleep}
+	if _, err := c.runWithTimeout(50*time.Millisecond, "create", "instance", "12345"); !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Fatalf("runWithTimeout(short) err = %v, want ErrProviderCommandTimeout", err)
+	}
+
+	// A fast-exit stub completes well within the per-call timeout. Confirms
+	// runWithTimeout does not impose extra delay beyond the deadline. Generous
+	// budget keeps the test stable under CI load and -race overhead.
+	c = &Client{CLIPath: stubFast}
+	if _, err := c.runWithTimeout(5*time.Second, "anything"); err != nil {
+		t.Fatalf("runWithTimeout(fast) err = %v, want nil", err)
+	}
+
+	// CLITimeout always wins over commandTimeout — required for tests like
+	// TestCreateInstanceCLITimeoutIsProviderCommandTimeout to keep working
+	// now that CreateInstance opts into a 2-minute commandTimeout.
+	c = &Client{CLIPath: stubSleep, CLITimeout: 10 * time.Millisecond}
+	if _, err := c.runWithTimeout(10*time.Second, "create", "instance", "12345"); !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Fatalf("runWithTimeout with CLITimeout override err = %v, want ErrProviderCommandTimeout (CLITimeout must take precedence)", err)
+	}
+}
+
+// TestCreateInstanceAndAttachSSHUseLongerTimeoutConstants asserts that the
+// long-timeout opt-in is real: the createInstanceTimeout and attachSSHTimeout
+// constants must be strictly greater than the default cliTimeout so a slow
+// vast.ai API hour doesn't convert into a hard provider_timeout.
+func TestCreateInstanceAndAttachSSHUseLongerTimeoutConstants(t *testing.T) {
+	if createInstanceTimeout <= cliTimeout {
+		t.Errorf("createInstanceTimeout = %s, want > cliTimeout (%s)", createInstanceTimeout, cliTimeout)
+	}
+	if attachSSHTimeout <= cliTimeout {
+		t.Errorf("attachSSHTimeout = %s, want > cliTimeout (%s)", attachSSHTimeout, cliTimeout)
+	}
+}
+
 func TestAvailableRejectsProviderErrorJSON(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

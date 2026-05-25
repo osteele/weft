@@ -37,8 +37,8 @@ func TestUpAppliesBaseline(t *testing.T) {
 	if pending {
 		t.Fatal("no migrations should be pending after Up")
 	}
-	if v := Version(ctx, db); v != 1 {
-		t.Fatalf("Version = %d, want 1", v)
+	if got, want := Version(ctx, db), Target(); got != want {
+		t.Fatalf("Version = %d, want %d (Target)", got, want)
 	}
 
 	// The baseline created the schema.
@@ -80,7 +80,7 @@ func TestUpIsIdempotentOnPopulatedSchema(t *testing.T) {
 	if err := Up(ctx, db); err != nil {
 		t.Fatalf("Up on populated schema: %v", err)
 	}
-	if v := Version(ctx, db); v != 1 {
-		t.Fatalf("Version = %d, want 1", v)
+	if got, want := Version(ctx, db), Target(); got != want {
+		t.Fatalf("Version = %d, want %d (Target)", got, want)
 	}
 }

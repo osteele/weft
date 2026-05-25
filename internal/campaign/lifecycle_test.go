@@ -211,6 +211,69 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	}
 }
 
+func TestLaunchInstanceCreateTimesOutMarksProviderTimeout(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Wrap the timeout sentinel the way vastai/client.go:521 does at runtime,
+	// so the launch-failure site sees it through errors.Is.
+	errTimeout := fmt.Errorf("%w: vastai create instance 12345 timed out after 2m0s", cloud.ErrProviderCommandTimeout)
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, errTimeout
+		},
+	}
+
+	job := &db.Job{
+		ID:      102,
+		Status:  db.StatusQueued,
+		Command: "python train.py",
+	}
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{job},
+	}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
+	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	instanceID, err := LaunchInstance(
+		mockClient, database, nil, group, offer,
+		LaunchOpts{},
+		r2Cfg, createOpts,
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(phase string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Errorf("expected ErrProviderCommandTimeout, got: %v", err)
+	}
+
+	ci, getErr := db.GetLaunch(database, instanceID)
+	if getErr != nil {
+		t.Fatalf("get cloud instance: %v", getErr)
+	}
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
+	}
+	if ci.TerminationReason != db.TerminationReasonProviderTimeout {
+		t.Fatalf("termination reason = %q, want %q (provider timeouts must not be tagged as generic infra_failure — they drive the clustered-failures banner filter)", ci.TerminationReason, db.TerminationReasonProviderTimeout)
+	}
+}
+
 func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

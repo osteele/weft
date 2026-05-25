@@ -1293,14 +1293,26 @@ func appendRecentFailedInstanceRows(
 	})
 
 	// Cluster line: a run of failures sharing a machine/provider/GPU is
-	// almost never independent bad luck.
+	// almost never independent bad luck. Exclude transient provider-side
+	// terminations (e.g. CLI timeouts) so a slow-API hour doesn't masquerade
+	// as a systemic provider failure — the rows still appear above for
+	// cost/postmortem accounting, they just don't contribute to clustering.
 	if total >= 3 {
-		if factor := dominantFailureFactor(renderable); factor != "" {
-			rows = append(rows, groupedStatusRow{
-				text:      "  ⚠ clustered failures — common factor: " + factor,
-				isBlocked: true,
-				section:   failedInstancesSectionKey,
-			})
+		clusterItems := make([]*db.Launch, 0, len(renderable))
+		for _, f := range renderable {
+			if db.IsTransientInstanceTermination(f.TerminationReason) {
+				continue
+			}
+			clusterItems = append(clusterItems, f)
+		}
+		if len(clusterItems) >= 3 {
+			if factor := dominantFailureFactor(clusterItems); factor != "" {
+				rows = append(rows, groupedStatusRow{
+					text:      "  ⚠ clustered failures — common factor: " + factor,
+					isBlocked: true,
+					section:   failedInstancesSectionKey,
+				})
+			}
 		}
 	}
 
