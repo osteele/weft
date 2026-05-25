@@ -62,8 +62,34 @@ func TestParseNeedsSpec(t *testing.T) {
 			if spec.Version != tt.version {
 				t.Errorf("version = %d, want %d", spec.Version, tt.version)
 			}
+			if spec.IsAsset() {
+				t.Errorf("IsAsset() = true for non-asset spec %q", tt.spec)
+			}
 		})
 	}
+}
+
+func TestParseNeedsSpec_Asset(t *testing.T) {
+	t.Run("valid asset", func(t *testing.T) {
+		spec, err := ParseNeedsSpec("asset:exp207-eval-llama8b")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !spec.IsAsset() {
+			t.Fatalf("IsAsset() = false; want true")
+		}
+		if spec.AssetName != "exp207-eval-llama8b" {
+			t.Errorf("AssetName = %q, want %q", spec.AssetName, "exp207-eval-llama8b")
+		}
+		if spec.Version != 0 {
+			t.Errorf("Version = %d, want 0 for asset form", spec.Version)
+		}
+	})
+	t.Run("empty asset name", func(t *testing.T) {
+		if _, err := ParseNeedsSpec("asset:"); err == nil {
+			t.Fatalf("expected error for asset: with empty name")
+		}
+	})
 }
 
 func TestArtifactSatisfiedFile(t *testing.T) {

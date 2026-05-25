@@ -25,6 +25,10 @@ func WaitingOnProducerReason(database *sql.DB, job *db.Job) (string, bool) {
 			// surface it.
 			continue
 		}
+		// Named assets are not produced by another job; nothing to wait on.
+		if parsed.IsAsset() {
+			continue
+		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil || producer == nil {
 			return formatProducerWait(parsed.Path, parsed.Version, "producer not found"), true

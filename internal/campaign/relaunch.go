@@ -1769,6 +1769,11 @@ func PreferredInstanceIDsFromNeeds(database *sql.DB, needs []string) []int64 {
 		if err != nil {
 			continue
 		}
+		if parsed.IsAsset() {
+			// Named assets don't bias placement toward any instance; they're
+			// staged from R2 wherever the consumer lands.
+			continue
+		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil || producer == nil {
 			continue

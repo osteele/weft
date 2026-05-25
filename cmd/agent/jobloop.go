@@ -260,7 +260,7 @@ func jobDependencyGraph(jobs []cloud.AgentJob) (map[int64][]int64, map[int64]int
 		}
 		for _, spec := range job.Needs {
 			parsed, err := runner.ParseNeedsSpec(spec)
-			if err == nil {
+			if err == nil && !parsed.IsAsset() {
 				addEdge(parsed.Version, job.ID)
 			}
 		}

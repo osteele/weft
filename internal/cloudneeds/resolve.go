@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -29,6 +30,18 @@ func ResolveSpecs(ctx context.Context, database *sql.DB, client *r2.Client, spec
 		parsed, err := runner.ParseNeedsSpec(spec)
 		if err != nil {
 			return nil, fmt.Errorf("parse cloud need %q: %w", spec, err)
+		}
+		if parsed.IsAsset() {
+			asset, err := db.GetNamedAssetByName(database, parsed.AssetName)
+			if err != nil {
+				return nil, fmt.Errorf("resolve %q: %w", spec, err)
+			}
+			resolved = append(resolved, cloud.CloudNeed{
+				Spec:  spec,
+				Path:  asset.TargetPath,
+				R2Key: r2keys.NamedAsset(asset.ContentHash),
+			})
+			continue
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {

@@ -149,6 +149,49 @@ Weft sets `TMPDIR` to a writable per-job directory under `output/tmp` when the
 environment does not already define it. Override it with `-e TMPDIR=...` only
 when a job needs a different scratch location.
 
+### Named assets — `asset:NAME`
+
+When a file needs to be available to jobs on any host but isn't on Hugging
+Face Hub and wasn't produced by another weft job (e.g. a hand-curated
+evaluation corpus, a preprocessed pickle on your laptop), publish it as a
+**named asset**. The file is uploaded to R2 once and staged onto whichever
+host the consumer lands on.
+
+```
+# Publish a local file under a stable name:
+laptop$ weft data publish output/exp207_eval_texts.pkl \
+  --name exp207-eval-llama8b
+# Published asset:exp207-eval-llama8b — uploaded, 187 MB (target path output/exp207_eval_texts.pkl)
+
+# Consume from any cloud rental or on-prem host with R2 access:
+laptop$ weft run --gpu a100 \
+  --input asset:exp207-eval-llama8b \
+  -m "EXP-207 Phase 2" \
+  'uv run python scripts/exp207_phase2_slicegpt_only.py'
+```
+
+At launch time weft stages the asset into the consumer's working directory
+at the path recorded when you published (or the path given by
+`--target-path`). The consumer script reads it the same way it would in the
+producer's workspace.
+
+**`asset:NAME` vs `checkpoint:NAME`.** `checkpoint:` is a placement-scoring
+hint that pins the consumer to a host where the file is already present
+(registered via `weft data add`). It does not transport bytes. `asset:`
+transports the bytes through R2 and works from any host. Use `checkpoint:`
+when the file is already on a specific GPU host (e.g. a fine-tuned model on
+cool100) and you want to avoid re-copying it. Use `asset:` when the file is
+on your laptop or you want any-host availability.
+
+**`asset:NAME` vs `--needs path:<job-id>`.** Use `--needs` when the file is
+the output of another weft job — weft already auto-tracks files in
+`output/` and pulls them from the producer's R2 artifacts. Use `asset:` for
+files you publish explicitly (no producer job).
+
+Republishing under the same name overwrites the name → hash mapping.
+Identical bytes skip the upload (content-addressed). v1 is single-file only;
+directory publishing is planned. R2 must be configured.
+
 ### Declaring outputs
 
 Use `--output` to declare what a job produces. This lets downstream jobs find

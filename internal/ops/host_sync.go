@@ -25,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/prestage"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
@@ -780,6 +781,10 @@ type pendingNeed struct {
 	latestRun  *int64
 	markerName string
 	remotePath string
+	// preResolvedR2Key is set for named-asset needs whose R2 key is known at
+	// parse time (assets/<content_hash>). When set, stageMissingNeeds skips
+	// r2resolve.NeedR2Key and uses this key directly.
+	preResolvedR2Key string
 }
 
 // collectPendingNeeds parses one job's --needs and returns a pendingNeed for
@@ -795,6 +800,22 @@ func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 	}
 	var pending []pendingNeed
 	for _, spec := range job.Needs {
+		// Named-asset form: resolve to a pre-computed R2 key from named_assets.
+		// Path comes from the asset's target_path recorded at publish time.
+		if name, ok := parseAssetNeedSpec(spec); ok {
+			asset, err := db.GetNamedAssetByName(database, name)
+			if err != nil {
+				return nil, fmt.Errorf("resolve --needs %q: %w", spec, err)
+			}
+			pending = append(pending, pendingNeed{
+				spec:             spec,
+				path:             asset.TargetPath,
+				markerName:       "asset-" + url.PathEscape(name) + ".satisfied",
+				remotePath:       strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(asset.TargetPath, "/"),
+				preResolvedR2Key: r2keys.NamedAsset(asset.ContentHash),
+			})
+			continue
+		}
 		parsed, err := parseCloudNeedSpec(spec)
 		if err != nil {
 			return nil, fmt.Errorf("parse --needs %q: %w", spec, err)
@@ -819,6 +840,15 @@ func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 		})
 	}
 	return pending, nil
+}
+
+// parseAssetNeedSpec returns (name, true) if spec matches "asset:NAME".
+func parseAssetNeedSpec(spec string) (string, bool) {
+	const prefix = "asset:"
+	if !strings.HasPrefix(spec, prefix) {
+		return "", false
+	}
+	return spec[len(prefix):], true
 }
 
 // stageArtifactNeedsForHost ensures rental-produced --needs artifacts for
@@ -991,10 +1021,16 @@ func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state 
 			return fmt.Errorf("%q: %w", n.spec, err)
 		}
 
-		key, err := r2resolve.NeedR2Key(context.Background(), r2Client, n.producerID, n.latestRun, n.path)
-		if err != nil {
-			releaseLease()
-			return fmt.Errorf("%q: %w", n.spec, err)
+		var key string
+		if n.preResolvedR2Key != "" {
+			key = n.preResolvedR2Key
+		} else {
+			resolved, err := r2resolve.NeedR2Key(context.Background(), r2Client, n.producerID, n.latestRun, n.path)
+			if err != nil {
+				releaseLease()
+				return fmt.Errorf("%q: %w", n.spec, err)
+			}
+			key = resolved
 		}
 		stagingPath := n.remotePath + ".weft-staging"
 		ent := state[n.markerName]

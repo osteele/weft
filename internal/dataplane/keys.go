@@ -172,3 +172,11 @@ func AgentBinary(version, goos, goarch string) string {
 func SourceTarball(hash string) string {
 	return fmt.Sprintf("sources/%s.tar.gz", hash)
 }
+
+// NamedAsset returns the R2 key for a named asset published via
+// `weft data publish`. The bytes are content-addressed by SHA256 to keep
+// dedup honest across renames, but the name → hash mapping lives in the
+// named_assets table; this key embeds the hash for direct staging.
+func NamedAsset(sha256Hex string) string {
+	return fmt.Sprintf("assets/%s", sha256Hex)
+}

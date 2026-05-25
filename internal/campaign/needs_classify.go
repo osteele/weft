@@ -61,6 +61,11 @@ func ClassifyNeedsForLaunch(
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("parse --needs %q: %w", spec, err)
 		}
+		// Named assets are not bound to a producer job: always R2-staged.
+		if parsed.IsAsset() {
+			r2Specs = append(r2Specs, spec)
+			continue
+		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("lookup producer job %s for %q: %w", ids.FormatJobID(parsed.Version), spec, err)

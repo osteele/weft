@@ -308,3 +308,45 @@ const (
 
 would let UI surfaces format consistently and let any future fourth
 shutdown signal slot in cleanly. Mechanical refactor; small surface.
+
+## Unified asset graph (post-named-assets)
+
+`asset:NAME` (named assets, shipped 2026-05-25) unblocks the laptop → any-host
+data flow that `checkpoint:` could not. It does so by carrying a parallel
+`named_assets` table and a parallel resolution path next to the producer-job
+`--needs path:JOB` form. Long-term these should converge into a single asset
+graph that subsumes `hf:`, `hf-dataset:`, `checkpoint:`, `corpus:`,
+`job-output:`/`--needs`, and `asset:` under one record type:
+
+```
+Asset {
+  Name         string
+  ContentHash  string
+  Locations    []Location  // (host, path) | (r2, key) | (hf, repo@rev) | (peer-host, path)
+}
+```
+
+Benefits:
+
+- Placement scoring becomes "find the min-cost reachable copy" — no per-kind
+  branching. Resolves the current footgun where users pick the wrong kind
+  (`checkpoint:` for a laptop file) and the job blocks instead of staging.
+- Eviction (RQ-F1) and proactive pre-staging (RQ-F2) become uniform across
+  HF caches, on-prem named assets, and R2-backed named assets.
+- Peer-to-peer staging between inventory hosts (cool30 ↔ cool100) becomes a
+  natural extension of the donor mechanism (§sec:exec:donor) rather than a
+  separate code path.
+- The asset-overlap batching mechanism (RQ-F3) extends naturally: `asset:`
+  joins `hf:` as a co-batching key without bespoke handling.
+
+This is a multi-PR data-model change touching placement, prewarm, donor,
+cloud_provision_guard, eviction, and at least the cloud and on-prem staging
+paths. The shipped `named_assets` table is shaped to extend additively: an
+`asset_locations(asset_id, transport, path, host)` table sits on top of it
+without migrating existing rows.
+
+Bears on **RQ-F4** (where intermediate artifacts should be materialized) and
+extends **§sec:planes:data** in the systems paper. Sequencing: defer until
+named-assets usage in the lab notebook surfaces concrete cases where the
+fixed `assets/<hash>` R2 location is the wrong choice (e.g. an on-prem
+producer where R2 round-trips dominate).

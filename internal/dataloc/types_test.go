@@ -16,6 +16,7 @@ func TestParseAssetRef(t *testing.T) {
 		{"checkpoint:run-42/best", DataAsset{AssetCheckpoint, "run-42/best"}, true},
 		{"corpus:penn-treebank/conllu", DataAsset{AssetCorpus, "penn-treebank/conllu"}, true},
 		{"corpus:universal-dependencies/en_ewt", DataAsset{AssetCorpus, "universal-dependencies/en_ewt"}, true},
+		{"asset:exp207-eval-llama8b", DataAsset{AssetNamed, "exp207-eval-llama8b"}, true},
 		// Invalid cases
 		{"", DataAsset{}, false},
 		{"hf:", DataAsset{}, false},
@@ -46,6 +47,7 @@ func TestDataAsset_String(t *testing.T) {
 		{DataAsset{AssetHFDataset, "wikitext"}, "hf-dataset:wikitext"},
 		{DataAsset{AssetCheckpoint, "llama-ft-v1"}, "checkpoint:llama-ft-v1"},
 		{DataAsset{AssetCorpus, "penn-treebank/conllu"}, "corpus:penn-treebank/conllu"},
+		{DataAsset{AssetNamed, "exp207-eval-llama8b"}, "asset:exp207-eval-llama8b"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {

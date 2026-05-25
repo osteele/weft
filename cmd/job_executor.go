@@ -344,6 +344,13 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 			return "", nil, err
 		}
 
+		// Named assets are R2-staged at launch time and do not pin placement
+		// to any specific host. Skip the producer-job resolution path.
+		if parsed.IsAsset() {
+			out = append(out, spec)
+			continue
+		}
+
 		job, err := db.GetJobByID(database, parsed.Version)
 		if err != nil {
 			return "", nil, fmt.Errorf("lookup artifact producer job %s: %w", ids.FormatJobID(parsed.Version), err)

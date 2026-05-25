@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
@@ -29,6 +32,9 @@ var (
 
 	dataAddHost string
 	dataAddName string
+
+	dataPublishName       string
+	dataPublishTargetPath string
 
 	dataEvictHost     string
 	dataEvictLastUsed string
@@ -93,6 +99,31 @@ Examples:
 	RunE: runDataAdd,
 }
 
+var dataPublishCmd = &cobra.Command{
+	Use:   "publish <local-path>",
+	Short: "Publish a local file as a named asset usable from any host",
+	Long: `Upload a local file to R2 under a stable name and register it in the
+named_assets table. Jobs can then declare ` + "`--input asset:<name>`" + ` to consume
+the file from any host (cloud rental or on-prem with R2 access), without
+pinning placement to a particular host the way ` + "`checkpoint:`" + ` does.
+
+The asset is content-addressed (assets/<sha256>) so republishing identical
+bytes is a no-op upload. Republishing under the same name with different
+bytes overwrites the name → hash mapping; the previous blob is left in R2.
+
+At consumer-job launch time the file is staged into the working dir at the
+relative path the local file lived at (or the path given by --target-path),
+so the consumer script reads it the same way it would in the producer's
+workspace.
+
+Examples:
+  weft data publish output/exp207_eval_texts.pkl --name exp207-eval-llama8b
+  weft data publish ~/data/grads.bin --name lm2-grads-v3 --target-path data/grads.bin
+`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runDataPublish,
+}
+
 var dataEvictCmd = &cobra.Command{
 	Use:   "evict",
 	Short: "Evict HuggingFace cache items not accessed recently",
@@ -116,10 +147,15 @@ func init() {
 	dataCmd.AddCommand(dataFetchCmd)
 	dataCmd.AddCommand(dataRequestsCmd)
 	dataCmd.AddCommand(dataAddCmd)
+	dataCmd.AddCommand(dataPublishCmd)
 	dataCmd.AddCommand(dataEvictCmd)
 
 	dataAddCmd.Flags().StringVar(&dataAddHost, "host", "", "Host where the data lives (default: local hostname)")
 	dataAddCmd.Flags().StringVar(&dataAddName, "name", "", "Asset name (default: derived from repo-relative path)")
+
+	dataPublishCmd.Flags().StringVar(&dataPublishName, "name", "", "Stable name to publish under (required)")
+	dataPublishCmd.Flags().StringVar(&dataPublishTargetPath, "target-path", "", "Workspace-relative path to stage into at consumer launch time (default: derived from local path)")
+	_ = dataPublishCmd.MarkFlagRequired("name")
 
 	dataFetchCmd.Flags().StringVar(&dataFetchHost, "host", "", "On-prem host that should cache the asset")
 	dataFetchCmd.Flags().StringVar(&dataFetchRev, "revision", "main", "HF revision to download")
@@ -596,4 +632,136 @@ func formatBytes(size int64) string {
 	formatted := fmt.Sprintf("%.1f", value)
 	formatted = strings.TrimSuffix(formatted, ".0")
 	return formatted + unit
+}
+
+func runDataPublish(cmd *cobra.Command, args []string) error {
+	srcPath := filepath.Clean(runner.ExpandTilde(args[0]))
+	name := strings.TrimSpace(dataPublishName)
+	if name == "" {
+		return fmt.Errorf("--name is required")
+	}
+	if strings.ContainsAny(name, " \t\n/") {
+		return fmt.Errorf("--name %q: must not contain whitespace or slashes", name)
+	}
+
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", srcPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("publish %s: directories are not supported in v1 (publish a single file)", srcPath)
+	}
+
+	targetPath := strings.TrimSpace(dataPublishTargetPath)
+	if targetPath == "" {
+		targetPath = derivePublishTargetPath(srcPath)
+	}
+	targetPath = strings.TrimPrefix(targetPath, "/")
+	if targetPath == "" {
+		return fmt.Errorf("could not derive a workspace-relative target path; pass --target-path")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		return fmt.Errorf("build R2 client: %w", err)
+	}
+	if r2Client == nil {
+		return fmt.Errorf("R2 is not configured; named assets require R2 to stage onto consumer hosts")
+	}
+
+	sumHex, size, err := sha256File(srcPath)
+	if err != nil {
+		return fmt.Errorf("hash %s: %w", srcPath, err)
+	}
+	key := r2keys.NamedAsset(sumHex)
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Skip the upload if the content is already in R2 (content-addressed).
+	exists, err := r2Client.ObjectExists(ctx, key)
+	if err != nil {
+		return fmt.Errorf("probe R2 for existing %s: %w", key, err)
+	}
+	if !exists {
+		if err := uploadFileToR2(ctx, r2Client, srcPath, key); err != nil {
+			return fmt.Errorf("upload %s to R2: %w", srcPath, err)
+		}
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        name,
+		ContentHash: sumHex,
+		SizeBytes:   size,
+		TargetPath:  targetPath,
+	}); err != nil {
+		return err
+	}
+
+	action := "uploaded"
+	if exists {
+		action = "registered (bytes already in R2)"
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Published asset:%s — %s, %s (target path %s)\n",
+		name, action, formatBytes(size), targetPath)
+	fmt.Fprintf(cmd.OutOrStdout(), "Consumers: weft run --input asset:%s ...\n", name)
+	return nil
+}
+
+func sha256File(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), size, nil
+}
+
+func uploadFileToR2(ctx context.Context, client r2Uploader, path, key string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return client.PutObject(ctx, key, f, "application/octet-stream")
+}
+
+// r2Uploader is the minimal R2 surface uploadFileToR2 needs (allows tests to
+// substitute without dragging in the real S3 client).
+type r2Uploader interface {
+	PutObject(ctx context.Context, key string, body io.Reader, contentType string) error
+}
+
+// derivePublishTargetPath chooses where the asset stages into a consumer's
+// workdir when --target-path is not given. Inside a repo: the path relative
+// to the repo root, so a file at <repo>/output/X.pkl stages back to
+// output/X.pkl on the consumer. Outside a repo: just the basename.
+func derivePublishTargetPath(srcPath string) string {
+	root := workdir.DetectRepoRoot(srcPath)
+	if root == "" {
+		root = workdir.DetectRepoRoot(filepath.Dir(srcPath))
+	}
+	if root != "" {
+		rel, err := filepath.Rel(root, srcPath)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(srcPath)
 }

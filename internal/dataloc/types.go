@@ -16,6 +16,11 @@ const (
 	AssetCheckpoint AssetKind = "checkpoint"
 	AssetJobOutput  AssetKind = "job-output"
 	AssetCorpus     AssetKind = "corpus"
+	// AssetNamed is a content-addressed asset published via `weft data publish`
+	// and resolved through the named_assets table. The asset bytes live in R2
+	// under the assets/<name> key and can be staged onto any host with R2
+	// access, regardless of which host originally produced or uploaded them.
+	AssetNamed AssetKind = "named-asset"
 )
 
 // DataAsset represents a data asset that exists on one or more hosts.
@@ -46,6 +51,8 @@ func ParseAssetRef(ref string) (DataAsset, bool) {
 				return DataAsset{Kind: AssetJobOutput, ID: id}, true
 			case "corpus":
 				return DataAsset{Kind: AssetCorpus, ID: id}, true
+			case "asset":
+				return DataAsset{Kind: AssetNamed, ID: id}, true
 			default:
 				return DataAsset{}, false
 			}
@@ -67,6 +74,8 @@ func (a DataAsset) Ref() string {
 		return "job-output:" + a.ID
 	case AssetCorpus:
 		return "corpus:" + a.ID
+	case AssetNamed:
+		return "asset:" + a.ID
 	default:
 		return string(a.Kind) + ":" + a.ID
 	}

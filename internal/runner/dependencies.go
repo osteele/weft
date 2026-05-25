@@ -76,6 +76,13 @@ func CheckDependencies(depsSpec string, needs []string, logDir string) DepCheckR
 			return DepCheckResult{Result: DepWaiting}
 		}
 
+		// Named assets are staged from R2 at launch time (cloud) or by the
+		// host syncer (on-prem) before the job runs; there is no producer
+		// satisfied-marker to wait on.
+		if parsed.IsAsset() {
+			continue
+		}
+
 		satisfiedPath := ArtifactSatisfiedFile(logDir, parsed.Path, parsed.Version)
 		exitCode, found := ReadStatusFile(satisfiedPath)
 		if !found {

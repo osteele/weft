@@ -142,7 +142,8 @@ func UVManifest(lockHash, platform string) string {
 func AgentBinary(version, goos, goarch string) string {
 	return dataplane.AgentBinary(version, goos, goarch)
 }
-func SourceTarball(hash string) string { return dataplane.SourceTarball(hash) }
+func SourceTarball(hash string) string   { return dataplane.SourceTarball(hash) }
+func NamedAsset(sha256Hex string) string { return dataplane.NamedAsset(sha256Hex) }
 
 func CoordinatorRelayRequest(requestID string) string {
 	return controlplane.CoordinatorRelayRequest(requestID)
