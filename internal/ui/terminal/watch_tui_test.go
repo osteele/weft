@@ -20,6 +20,13 @@ import (
 )
 
 func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
+	// View() reads provider-credit and shared-status from package-level
+	// caches that other tests in this run can populate (via async refresh
+	// goroutines). When the cache holds a "credits low" warning, the extra
+	// line displaces expected rows from the fixed 20-line viewport — a
+	// known order-dependent flake. Pin both caches to a clean state.
+	SuppressProviderCreditWarningForTesting(t)
+
 	cloudInstance := &db.Launch{
 		ID:       5,
 		Status:   db.LaunchStatusRunning,
