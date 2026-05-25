@@ -122,6 +122,11 @@ func runInstance(args []string) {
 	// Track current phase for heartbeat reporting
 	var currentPhase syncString
 	currentPhase.Set("starting")
+
+	// Wire instance identity into the upload-drain layer so that persistent
+	// R2 stalls can trigger an instance self-destruct without each upload
+	// call site needing to thread it through manually.
+	setUploadStallSelfDestructContext(instanceIDInt, manifest.SelfDestructCmd, currentPhase.Get)
 	diskPath := campaignDiskPath(manifest.Jobs)
 	phaseFile := filepath.Join(logDir, "instance-phase.txt")
 	fatalFile := filepath.Join(logDir, "agent-fatal.txt")

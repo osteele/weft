@@ -72,6 +72,12 @@ const (
 	// signal (see IsTransientInstanceTermination) while remaining visible
 	// in the recent-failed-instances table for cost/postmortem accounting.
 	TerminationReasonProviderTimeout = "provider_timeout"
+	// TerminationReasonUploadStall labels self-destructs triggered by the
+	// agent's upload-drain layer when R2 uploads stall repeatedly with no
+	// progress, indicating that this instance has lost effective R2
+	// connectivity even though SSH/heartbeat may still appear healthy.
+	// Retryable: a fresh instance on a different network path usually works.
+	TerminationReasonUploadStall = "upload_stall"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be
@@ -84,7 +90,7 @@ func IsRetryableTermination(ci *Launch) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonProviderTimeout, TerminationReasonUnknown, "":
+	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonProviderTimeout, TerminationReasonUploadStall, TerminationReasonUnknown, "":
 		return true
 	default:
 		return false
@@ -103,7 +109,8 @@ func IsInfrastructureTermination(reason string) bool {
 		TerminationReasonBootstrapTimeout,
 		TerminationReasonPhaseStall,
 		TerminationReasonPreempted,
-		TerminationReasonProviderTimeout:
+		TerminationReasonProviderTimeout,
+		TerminationReasonUploadStall:
 		return true
 	default:
 		return false
@@ -121,6 +128,7 @@ func InfrastructureTerminationReasons() []string {
 		TerminationReasonPhaseStall,
 		TerminationReasonPreempted,
 		TerminationReasonProviderTimeout,
+		TerminationReasonUploadStall,
 	}
 }
 
@@ -469,6 +477,8 @@ func HumanizeTerminationReason(reason string) string {
 		return "bootstrap timeout"
 	case TerminationReasonPhaseStall:
 		return "setup phase stalled"
+	case TerminationReasonUploadStall:
+		return "R2 uploads stalled"
 	case TerminationReasonPreempted:
 		return "preempted (interruptible lost bid)"
 	case TerminationReasonCancelled:

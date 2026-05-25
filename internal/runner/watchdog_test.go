@@ -118,6 +118,83 @@ func TestStdoutActivityResetsSilenceTimer(t *testing.T) {
 	}
 }
 
+// TestOutputFileActivityResetsSilenceTimer: a job that is silent on stdout
+// but writes to a file under outputs/ at a steady cadence must NOT be killed
+// by the stdout-silence watchdog. This is the wj2131-style case in reverse:
+// "I'm producing files, just not chatty on stdout."
+func TestOutputFileActivityResetsSilenceTimer(t *testing.T) {
+	workDir := t.TempDir()
+	logDir := t.TempDir()
+	if err := os.MkdirAll(workDir+"/outputs", 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := SingleJobConfig{
+		JobID: 750,
+		Job: opsqueue.CommandJob{
+			// One stdout line early (well within grace), then a 3-second run
+			// that only touches a file under outputs/ every 300ms. 1s stdout
+			// silence threshold would fire ~3x without the keepalive.
+			Cmd: "echo started; for i in 1 2 3 4 5 6 7 8 9 10; do touch outputs/keepalive; sleep 0.3; done",
+		},
+		LogDir:               logDir,
+		WorkingDir:           workDir,
+		SampleInterval:       50 * time.Millisecond,
+		StdoutSilenceTimeout: 1 * time.Second,
+		WatchdogInitialGrace: 50 * time.Millisecond,
+		SkipProbes:           true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (output-file writes should reset silence timer)", ei.ExitCode)
+	}
+}
+
+// TestSilentJobWithNoOutputFilesIsKilled: the wj2131 failure mode — a job
+// that emits one stdout line during setup and then writes neither stdout
+// nor any file under outputs/ for the entire silence window — must be
+// killed by the watchdog. This is the case that should have fired on
+// wi3165 (and didn't), so we lock the invariant in with a regression test.
+func TestSilentJobWithNoOutputFilesIsKilled(t *testing.T) {
+	workDir := t.TempDir()
+	logDir := t.TempDir()
+	if err := os.MkdirAll(workDir+"/outputs", 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	start := time.Now()
+	cfg := SingleJobConfig{
+		JobID: 751,
+		Job: opsqueue.CommandJob{
+			// Burn CPU silently with no stdout and no output file writes —
+			// mimics a CPU-bound deadlock where the GPU/CPU stays busy but
+			// the job produces nothing observable.
+			Cmd: "echo starting; while :; do :; done",
+		},
+		LogDir:               logDir,
+		WorkingDir:           workDir,
+		SampleInterval:       50 * time.Millisecond,
+		StdoutSilenceTimeout: 2 * time.Second,
+		WatchdogInitialGrace: 100 * time.Millisecond,
+		SkipProbes:           true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if time.Since(start) > 30*time.Second {
+		t.Fatalf("watchdog did not fire promptly for silent no-output job; elapsed=%s", time.Since(start))
+	}
+	if ei.ExitCode != ExitCodeStdoutSilenceKill {
+		t.Errorf("exit code = %d, want %d (stdout-silence)", ei.ExitCode, ExitCodeStdoutSilenceKill)
+	}
+}
+
 // TestGPUActivityResetsIdleTimer: a probe that flips true every few ticks
 // should keep the GPU watchdog armed without killing.
 func TestGPUActivityResetsIdleTimer(t *testing.T) {

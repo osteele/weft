@@ -6,9 +6,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2upload"
@@ -70,7 +73,13 @@ func drainAndMarkWithRetry(ctx context.Context, bucket string, target drainTarge
 // Shared between the one-shot and retry variants.
 func recordDrainOutcome(bucket string, target drainTarget, opts r2upload.Options, result r2upload.Result) {
 	if result.Status == r2upload.StatusOK {
+		uploadHealth.recordSuccess()
 		return
+	}
+	if result.KilledBy == r2upload.KilledByStall {
+		if decision := uploadHealth.recordStall(); decision.shouldSelfDestruct {
+			triggerUploadStallSelfDestruct(bucket, target, decision, result)
+		}
 	}
 	slog.Warn("upload drain failed",
 		"label", target.Label,
@@ -151,6 +160,160 @@ var (
 	drainBaseline        = r2upload.DefaultBaseline
 	drainMarkerTimeout   = r2upload.DefaultMarkerTimeout
 )
+
+// Upload-stall self-destruct: when R2 uploads stall repeatedly with no
+// successful traffic in between, this instance has lost effective R2
+// connectivity. The wrapper writes failure markers (best-effort, also via
+// R2), but those markers may never reach the coordinator. Rather than wait
+// for the heartbeat-staleness reconciler to notice (which can take hours),
+// the agent triggers its own teardown so the coordinator can place jobs on
+// a fresh instance with working network.
+//
+// Trigger policy (both must be true):
+//   - At least uploadStallMinStalls drain calls in a row have ended in
+//     stall (KilledByStall), with no successful upload between them.
+//   - Time since the last successful upload (or since this tracker was
+//     constructed) exceeds uploadStallMinSinceSuccess.
+//
+// Both gates exist because either alone would mis-fire: a single stall
+// burst from a transient blip shouldn't tear down the instance, and a long
+// idle period with no uploads (e.g. a job that hasn't produced output yet)
+// shouldn't either.
+const (
+	uploadStallMinStalls       = 5
+	uploadStallMinSinceSuccess = 30 * time.Minute
+)
+
+type uploadHealthDecision struct {
+	consecutiveStalls  int
+	sinceLastSuccess   time.Duration
+	shouldSelfDestruct bool
+}
+
+type uploadHealthTracker struct {
+	mu                sync.Mutex
+	consecutiveStalls int
+	lastSuccessAt     time.Time
+	selfDestructFired atomic.Bool
+
+	// Test seams.
+	minStalls       int
+	minSinceSuccess time.Duration
+}
+
+func newUploadHealthTracker() *uploadHealthTracker {
+	return &uploadHealthTracker{
+		lastSuccessAt:   time.Now(),
+		minStalls:       uploadStallMinStalls,
+		minSinceSuccess: uploadStallMinSinceSuccess,
+	}
+}
+
+func (t *uploadHealthTracker) recordSuccess() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.consecutiveStalls = 0
+	t.lastSuccessAt = time.Now()
+}
+
+func (t *uploadHealthTracker) recordStall() uploadHealthDecision {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.consecutiveStalls++
+	since := time.Since(t.lastSuccessAt)
+	d := uploadHealthDecision{
+		consecutiveStalls: t.consecutiveStalls,
+		sinceLastSuccess:  since,
+	}
+	if t.consecutiveStalls >= t.minStalls && since >= t.minSinceSuccess {
+		// CompareAndSwap ensures only the first qualifying caller triggers
+		// teardown; later calls in a flurry of stalls are no-ops.
+		if t.selfDestructFired.CompareAndSwap(false, true) {
+			d.shouldSelfDestruct = true
+		}
+	}
+	return d
+}
+
+// uploadHealth is the package-level tracker shared by all upload sites.
+// Reset for tests via resetUploadHealth.
+var uploadHealth = newUploadHealthTracker()
+
+func resetUploadHealth() { uploadHealth = newUploadHealthTracker() }
+
+// uploadStallSelfDestructContext is set once at agent startup so the
+// drain layer can call into the self-destruct path without threading
+// instance state through every upload call site.
+var (
+	uploadStallCtxMu       sync.RWMutex
+	uploadStallInstanceID  int64
+	uploadStallSelfDestCmd string
+	uploadStallPhaseGetter func() string
+)
+
+// setUploadStallSelfDestructContext wires the agent's instance identity and
+// self-destruct command into the upload-drain layer. Called once near the
+// top of runInstance, before any uploads can run.
+func setUploadStallSelfDestructContext(instanceID int64, selfDestructCmd string, phase func() string) {
+	uploadStallCtxMu.Lock()
+	defer uploadStallCtxMu.Unlock()
+	uploadStallInstanceID = instanceID
+	uploadStallSelfDestCmd = selfDestructCmd
+	uploadStallPhaseGetter = phase
+}
+
+func uploadStallContext() (int64, string, func() string) {
+	uploadStallCtxMu.RLock()
+	defer uploadStallCtxMu.RUnlock()
+	return uploadStallInstanceID, uploadStallSelfDestCmd, uploadStallPhaseGetter
+}
+
+// uploadStallSelfDestructHook lets tests intercept the terminate call.
+// Production code leaves this nil and the real terminate path runs.
+var uploadStallSelfDestructHook func(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64, lastError string)
+
+func triggerUploadStallSelfDestruct(bucket string, target drainTarget, decision uploadHealthDecision, result r2upload.Result) {
+	instanceID, selfDestructCmd, phaseGetter := uploadStallContext()
+	if instanceID == 0 {
+		instanceID = target.InstanceID
+	}
+	phase := "upload_stall"
+	if phaseGetter != nil {
+		if p := phaseGetter(); p != "" {
+			phase = p
+		}
+	}
+	lastError := fmt.Sprintf("persistent R2 upload stalls: %d consecutive, no successful upload for %s (last: %s %s, bytes=%d/%d)",
+		decision.consecutiveStalls,
+		decision.sinceLastSuccess.Round(time.Second),
+		result.Status, result.KilledBy,
+		result.BytesUploaded, result.BytesTotal)
+	slog.Warn("upload stall threshold exceeded; triggering instance self-destruct",
+		"consecutive_stalls", decision.consecutiveStalls,
+		"since_last_success", decision.sinceLastSuccess.Round(time.Second),
+		"instance_id", instanceID,
+		"phase", phase,
+		"job_id", target.JobID,
+	)
+	oplog.Log(oplog.OpPhaseTransition,
+		oplog.WithJobID(target.JobID),
+		oplog.WithDetailf("upload_stall_self_destruct stalls=%d since_success=%s",
+			decision.consecutiveStalls, decision.sinceLastSuccess.Round(time.Second)),
+	)
+	if hook := uploadStallSelfDestructHook; hook != nil {
+		hook(bucket, instanceID, selfDestructCmd, phase, target.JobID, lastError)
+		return
+	}
+	if selfDestructCmd == "" {
+		// Not configured (non-cloud agent, tests, etc.). The marker has
+		// already been written by recordDrainOutcome's caller; nothing more
+		// to do here.
+		slog.Warn("upload stall self-destruct skipped: no self-destruct command configured",
+			"instance_id", instanceID)
+		return
+	}
+	terminateInstanceWithReason(bucket, instanceID, selfDestructCmd, phase, target.JobID, db.TerminationReasonUploadStall, lastError)
+}
 
 // applyDrainSettings overrides the package-level drain tunables from a
 // manifest. Each zero/unset field leaves its current value (the default)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/r2keys"
@@ -125,5 +126,158 @@ func TestRecordDrainOutcomeSerializesFailureMarker(t *testing.T) {
 	}
 	if !strings.Contains(got.Reason, "no progress") {
 		t.Errorf("Reason = %q, want 'no progress' phrase", got.Reason)
+	}
+}
+
+// newTestTracker returns an uploadHealthTracker tuned for fast tests:
+// fire on 3 stalls and 0 elapsed (gate only on count, not wall-clock).
+func newTestTracker(stalls int, sinceSuccess time.Duration) *uploadHealthTracker {
+	return &uploadHealthTracker{
+		lastSuccessAt:   time.Now(),
+		minStalls:       stalls,
+		minSinceSuccess: sinceSuccess,
+	}
+}
+
+func TestUploadHealthTrackerDoesNotFireBelowStallThreshold(t *testing.T) {
+	tr := newTestTracker(5, 0)
+	for i := 1; i < 5; i++ {
+		d := tr.recordStall()
+		if d.shouldSelfDestruct {
+			t.Fatalf("stall #%d fired self-destruct prematurely (consecutive=%d)", i, d.consecutiveStalls)
+		}
+	}
+}
+
+func TestUploadHealthTrackerDoesNotFireWithinMinSinceSuccess(t *testing.T) {
+	// Require 3 stalls AND 1 hour since last success. Tracker just started,
+	// so even after 100 stalls it shouldn't fire.
+	tr := newTestTracker(3, time.Hour)
+	for i := 0; i < 100; i++ {
+		d := tr.recordStall()
+		if d.shouldSelfDestruct {
+			t.Fatalf("fired despite sinceLastSuccess=%v < threshold %v",
+				d.sinceLastSuccess, time.Hour)
+		}
+	}
+}
+
+func TestUploadHealthTrackerFiresWhenBothThresholdsMet(t *testing.T) {
+	tr := newTestTracker(3, 0)
+	// First 2 stalls: no fire.
+	for i := 1; i < 3; i++ {
+		if d := tr.recordStall(); d.shouldSelfDestruct {
+			t.Fatalf("stall #%d fired prematurely", i)
+		}
+	}
+	// Third stall: fires.
+	d := tr.recordStall()
+	if !d.shouldSelfDestruct {
+		t.Fatalf("third stall did not fire: %+v", d)
+	}
+	// Fourth and later: do not re-fire (single-shot).
+	d2 := tr.recordStall()
+	if d2.shouldSelfDestruct {
+		t.Fatal("self-destruct fired more than once")
+	}
+}
+
+func TestUploadHealthTrackerSuccessResetsConsecutiveStalls(t *testing.T) {
+	tr := newTestTracker(3, 0)
+	tr.recordStall()
+	tr.recordStall()
+	tr.recordSuccess()
+	d := tr.recordStall()
+	if d.consecutiveStalls != 1 {
+		t.Errorf("consecutiveStalls = %d, want 1 (success should reset)", d.consecutiveStalls)
+	}
+	if d.shouldSelfDestruct {
+		t.Error("self-destruct fired after success reset")
+	}
+}
+
+func TestRecordDrainOutcomeStallTriggersSelfDestruct(t *testing.T) {
+	// Save and restore package-level state.
+	origTracker := uploadHealth
+	origHook := uploadStallSelfDestructHook
+	origMarkerTimeout := drainMarkerTimeout
+	t.Cleanup(func() {
+		uploadHealth = origTracker
+		uploadStallSelfDestructHook = origHook
+		drainMarkerTimeout = origMarkerTimeout
+		setUploadStallSelfDestructContext(0, "", nil)
+	})
+
+	// 1ms marker timeout so the marker-write side effect (which shells out
+	// to rclone) bails out immediately instead of blocking the test.
+	drainMarkerTimeout = time.Millisecond
+	uploadHealth = newTestTracker(2, 0)
+	setUploadStallSelfDestructContext(4242, "echo stub", func() string { return "running:99" })
+
+	var hookCalls []string
+	uploadStallSelfDestructHook = func(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64, lastError string) {
+		hookCalls = append(hookCalls, lastError)
+		if instanceID != 4242 {
+			t.Errorf("instanceID = %d, want 4242", instanceID)
+		}
+		if phase != "running:99" {
+			t.Errorf("phase = %q, want running:99", phase)
+		}
+	}
+
+	stall := r2upload.Result{
+		Status: r2upload.StatusStalled, KilledBy: r2upload.KilledByStall,
+		Reason: "no progress for 30s", BytesUploaded: 0, BytesTotal: 1000000,
+	}
+	target := drainTarget{JobID: 99, RunID: 1, Label: "test"}
+	opts := r2upload.Options{Source: "/tmp/x/", DestRemote: "r2:bucket/x/"}
+
+	// First stall: no fire.
+	recordDrainOutcome("bucket", target, opts, stall)
+	if len(hookCalls) != 0 {
+		t.Fatalf("first stall fired hook prematurely: %v", hookCalls)
+	}
+	// Second stall: fires.
+	recordDrainOutcome("bucket", target, opts, stall)
+	if len(hookCalls) != 1 {
+		t.Fatalf("second stall did not fire hook (got %d calls)", len(hookCalls))
+	}
+	if !strings.Contains(hookCalls[0], "2 consecutive") {
+		t.Errorf("lastError missing consecutive count: %q", hookCalls[0])
+	}
+	// Third stall: does not re-fire.
+	recordDrainOutcome("bucket", target, opts, stall)
+	if len(hookCalls) != 1 {
+		t.Fatalf("third stall re-fired hook (got %d calls, want 1)", len(hookCalls))
+	}
+}
+
+func TestRecordDrainOutcomeOnlyStallsCount(t *testing.T) {
+	// A non-stall failure (error, ceiling, etc.) should NOT advance the
+	// upload-stall counter — only stalls do.
+	origTracker := uploadHealth
+	origHook := uploadStallSelfDestructHook
+	origMarkerTimeout := drainMarkerTimeout
+	t.Cleanup(func() {
+		uploadHealth = origTracker
+		uploadStallSelfDestructHook = origHook
+		drainMarkerTimeout = origMarkerTimeout
+	})
+
+	drainMarkerTimeout = time.Millisecond
+	uploadHealth = newTestTracker(1, 0)
+	fired := false
+	uploadStallSelfDestructHook = func(string, int64, string, string, int64, string) {
+		fired = true
+	}
+
+	errResult := r2upload.Result{
+		Status: r2upload.StatusError, KilledBy: "", Reason: "rclone error",
+	}
+	recordDrainOutcome("bucket", drainTarget{JobID: 1}, r2upload.Options{
+		Source: "/tmp/y/", DestRemote: "r2:bucket/y/",
+	}, errResult)
+	if fired {
+		t.Error("non-stall error fired upload-stall self-destruct")
 	}
 }
