@@ -400,6 +400,18 @@ config {
 --   * relaunch.skipped.offer_error — provider call itself failed
 -- Implementation: internal/campaign/relaunch.go (Err checked before Offer).
 
+-- R2 source-tarball upload failures must be isolated per-group, not
+-- bubbled as a single error that fails the whole relaunch pass. Each
+-- InstanceGroup has its own source directory; one project exceeding the
+-- MaxSourceTarballBytes limit (or any other per-dir upload error) must
+-- record a blocked reason against only that group's jobs (via
+-- recordGroupReasons → JobReasons), not against unrelated jobs sharing
+-- the same pass. The agent binary upload remains a fatal outer error —
+-- without an agent no group can launch.
+-- Implementation: PrepareR2AssetsPerDir / R2AssetStager.AwaitAllPerDir
+-- in internal/campaign/lifecycle.go; per-group filtering in
+-- internal/campaign/relaunch.go before the launch loop.
+
 -- --------------------------------------------------------------------------
 -- Dependency-gated launch selection
 -- --------------------------------------------------------------------------
