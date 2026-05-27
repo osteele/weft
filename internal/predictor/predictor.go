@@ -221,6 +221,22 @@ func ResolvePredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error)
 	return predictBatchFunc(cfg, jobs)
 }
 
+// ResolvePredictBatchWithProgress is the progress-aware variant. The callback,
+// if non-nil, is invoked with short user-facing status strings as prediction
+// advances (prepare/schema-rebuild, cache check, subprocess start/end). Nil is
+// a no-op. The callback runs on the calling goroutine (or on a short-lived
+// ticker goroutine while the subprocess is running) — it must not block.
+func ResolvePredictBatchWithProgress(cfg Config, jobs []BatchJob, progress func(string)) (map[int64]*Result, error) {
+	return PredictBatchWithProgress(cfg, jobs, progress)
+}
+
+func emitPredictorProgress(fn func(string), message string) {
+	if fn == nil {
+		return
+	}
+	fn(message)
+}
+
 // Configured returns true if the predictor has a project path set.
 func (c *Config) Configured() bool {
 	return c.ProjectPath != ""
@@ -707,13 +723,20 @@ type batchResultEntry struct {
 // PredictBatch shells out to job-estimator predict-batch, sending all jobs
 // in a single subprocess invocation. Returns a map from job ID to Result.
 func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
+	return PredictBatchWithProgress(cfg, jobs, nil)
+}
+
+// PredictBatchWithProgress is the progress-aware variant of PredictBatch.
+// See ResolvePredictBatchWithProgress for callback semantics.
+func PredictBatchWithProgress(cfg Config, jobs []BatchJob, progress func(string)) (map[int64]*Result, error) {
 	if cfg.ProjectPath == "" {
 		return nil, fmt.Errorf("predictor: project_path not configured")
 	}
 	if len(jobs) == 0 {
 		return nil, nil
 	}
-	if err := preparePredictorForUse(cfg); err != nil {
+	emitPredictorProgress(progress, "Checking prediction model…")
+	if err := preparePredictorForUseWithProgress(cfg, progress); err != nil {
 		return nil, err
 	}
 
@@ -733,13 +756,20 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 		}
 		idsByKey[key] = append(idsByKey[key], job.ID)
 	}
+	cached := len(jobs) - len(missingJobs)
 	if len(missingJobs) == 0 {
+		emitPredictorProgress(progress, fmt.Sprintf("All %d prediction(s) cached", cached))
 		return results, nil
+	}
+	if cached > 0 {
+		emitPredictorProgress(progress, fmt.Sprintf("Cached %d/%d; predicting %d more…", cached, len(jobs), len(missingJobs)))
+	} else {
+		emitPredictorProgress(progress, fmt.Sprintf("Starting prediction subprocess (uv) for %d job(s)…", len(missingJobs)))
 	}
 
 	state := backgroundState(cfg)
 	state.useMu.RLock()
-	out, err := runPredictBatchCLI(cfg, missingJobs)
+	out, err := runPredictBatchCLIWithProgress(cfg, missingJobs, progress)
 	state.useMu.RUnlock()
 	if err != nil {
 		return nil, err
@@ -765,7 +795,12 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 }
 
 func preparePredictorForUse(cfg Config) error {
+	return preparePredictorForUseWithProgress(cfg, nil)
+}
+
+func preparePredictorForUseWithProgress(cfg Config, progress func(string)) error {
 	if status := CheckModelSchema(cfg); status.Changed {
+		emitPredictorProgress(progress, "Rebuilding prediction model (schema changed)…")
 		if err := rebuildSchemaMismatchSynchronously(cfg, status.Reason); err != nil {
 			blocked := GetStatus(cfg)
 			blocked.SchemaIncompatible = true
@@ -1102,6 +1137,41 @@ func runPredictCLIImpl(cfg Config, host, project, gpuClass, command string) ([]b
 		return nil, fmt.Errorf("predictor predict: %w", err)
 	}
 	return out, nil
+}
+
+// runPredictBatchCLIWithProgress invokes the package-level seam
+// `runPredictBatchCLI` and, when a progress callback is provided, ticks every
+// second with a "Predicting durations… (Ns)" message so the user sees the
+// uv-subprocess phase is alive.
+func runPredictBatchCLIWithProgress(cfg Config, jobs []BatchJob, progress func(string)) ([]byte, error) {
+	if progress == nil {
+		return runPredictBatchCLI(cfg, jobs)
+	}
+	start := nowFunc()
+	resultCh := make(chan struct {
+		out []byte
+		err error
+	}, 1)
+	go func() {
+		out, err := runPredictBatchCLI(cfg, jobs)
+		resultCh <- struct {
+			out []byte
+			err error
+		}{out, err}
+	}()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case r := <-resultCh:
+			elapsed := nowFunc().Sub(start).Round(time.Second)
+			emitPredictorProgress(progress, fmt.Sprintf("Predictions ready (%s)", elapsed))
+			return r.out, r.err
+		case <-ticker.C:
+			elapsed := nowFunc().Sub(start).Round(time.Second)
+			emitPredictorProgress(progress, fmt.Sprintf("Predicting durations… (%s elapsed)", elapsed))
+		}
+	}
 }
 
 func runPredictBatchCLIImpl(cfg Config, jobs []BatchJob) ([]byte, error) {

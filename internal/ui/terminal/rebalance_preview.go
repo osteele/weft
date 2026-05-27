@@ -11,12 +11,13 @@ import (
 
 // rebalancePreviewModel renders the grouped-list rebalance preview modal.
 type rebalancePreviewModel struct {
-	active     bool
-	loading    bool
-	applying   bool
-	moves      []orchestration.QueueRebalanceMove
-	errMessage string
-	cursor     int
+	active          bool
+	loading         bool
+	applying        bool
+	moves           []orchestration.QueueRebalanceMove
+	errMessage      string
+	cursor          int
+	progressMessage string
 }
 
 func (p *rebalancePreviewModel) reset() {
@@ -26,6 +27,7 @@ func (p *rebalancePreviewModel) reset() {
 	p.moves = nil
 	p.errMessage = ""
 	p.cursor = 0
+	p.progressMessage = ""
 }
 
 func (p *rebalancePreviewModel) moveCursor(delta int) {
@@ -63,10 +65,18 @@ func (p rebalancePreviewModel) View(width, height int) string {
 	switch {
 	case p.loading:
 		b.WriteString(rebalancePreviewLoadingDotStyle.Render("⠋"))
-		b.WriteString(" Planning rebalance moves...")
+		b.WriteString(" Planning rebalance moves…")
+		if msg := strings.TrimSpace(p.progressMessage); msg != "" {
+			b.WriteString("\n  ")
+			b.WriteString(rebalancePreviewDimStyle.Render(msg))
+		}
 	case p.applying:
 		b.WriteString(rebalancePreviewLoadingDotStyle.Render("⠋"))
-		b.WriteString(" Applying rebalance moves...")
+		b.WriteString(" Applying rebalance moves…")
+		if msg := strings.TrimSpace(p.progressMessage); msg != "" {
+			b.WriteString("\n  ")
+			b.WriteString(rebalancePreviewDimStyle.Render(msg))
+		}
 	case strings.TrimSpace(p.errMessage) != "":
 		b.WriteString(rebalancePreviewErrorStyle.Render("Rebalance failed: " + p.errMessage))
 		b.WriteString("\n\n")

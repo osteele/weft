@@ -112,6 +112,7 @@ type listTUIModel struct {
 	quickLaunchProgress        <-chan listQuickLaunchProgressMsg
 	quickLaunchDone            <-chan listQuickLaunchDoneMsg
 	quickLaunchStatusHoldUntil time.Time
+	rebalanceProgress          <-chan rebalanceProgressMsg
 	movePicker                 movePickerModel
 	rebalancePreview           rebalancePreviewModel
 	showHelp                   bool
@@ -269,6 +270,10 @@ type listProjectCandidatesLoadedMsg struct {
 type rebalancePreviewLoadedMsg struct {
 	moves []orchestration.QueueRebalanceMove
 	err   error
+}
+
+type rebalanceProgressMsg struct {
+	message string
 }
 
 type rebalanceAppliedMsg struct {
@@ -890,6 +895,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.rebalancePreview.loading = false
+		m.rebalancePreview.progressMessage = ""
+		m.rebalanceProgress = nil
 		if msg.err != nil {
 			m.rebalancePreview.errMessage = msg.err.Error()
 			m.statusMessage = "Rebalance preview failed"
@@ -908,6 +915,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.rebalancePreview.active || !m.rebalancePreview.applying {
 			return m, nil
 		}
+		m.rebalanceProgress = nil
 		m.rebalancePreview.reset()
 		m.resumeAutoPilotNow()
 		if msg.err != nil {
@@ -926,6 +934,12 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = msg.message
 		}
 		return m, m.waitForQuickLaunchProgress()
+
+	case rebalanceProgressMsg:
+		if strings.TrimSpace(msg.message) != "" {
+			m.rebalancePreview.progressMessage = msg.message
+		}
+		return m, m.waitForRebalanceProgress()
 
 	case listQuickLaunchDoneMsg:
 		m.quickLaunching = false
@@ -1649,8 +1663,14 @@ func (m listTUIModel) handleRebalancePreviewKey(msg tea.KeyMsg) (tea.Model, tea.
 			return m, nil
 		}
 		m.rebalancePreview.applying = true
-		m.statusMessage = "Applying rebalance moves..."
-		return m, requestRebalanceApply(m.database)
+		m.rebalancePreview.progressMessage = ""
+		progressCh := make(chan rebalanceProgressMsg, 16)
+		m.rebalanceProgress = progressCh
+		m.statusMessage = "Applying rebalance moves…"
+		return m, tea.Batch(
+			requestRebalanceApply(m.database, progressCh),
+			m.waitForRebalanceProgress(),
+		)
 	}
 	return m, nil
 }
@@ -2114,13 +2134,18 @@ func (m listTUIModel) requestGroupedMoveNewOptions(requestID int64, jobID int64)
 	}
 }
 
-func requestRebalancePreview(database *sql.DB) tea.Cmd {
+func requestRebalancePreview(database *sql.DB, progress chan<- rebalanceProgressMsg) tea.Cmd {
 	return func() tea.Msg {
-		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, orchestration.QueueRebalanceOptions{
+		opts := orchestration.QueueRebalanceOptions{
 			Apply:               false,
 			CostCeilingOverride: 1e6,
 			Operation:           "tui.rebalance",
-		})
+			Progress:            makeRebalanceProgressFn(progress),
+		}
+		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, opts)
+		if progress != nil {
+			close(progress)
+		}
 		if err != nil {
 			return rebalancePreviewLoadedMsg{err: err}
 		}
@@ -2128,13 +2153,18 @@ func requestRebalancePreview(database *sql.DB) tea.Cmd {
 	}
 }
 
-func requestRebalanceApply(database *sql.DB) tea.Cmd {
+func requestRebalanceApply(database *sql.DB, progress chan<- rebalanceProgressMsg) tea.Cmd {
 	return func() tea.Msg {
-		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, orchestration.QueueRebalanceOptions{
+		opts := orchestration.QueueRebalanceOptions{
 			Apply:               true,
 			CostCeilingOverride: 1e6,
 			Operation:           "tui.rebalance",
-		})
+			Progress:            makeRebalanceProgressFn(progress),
+		}
+		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, opts)
+		if progress != nil {
+			close(progress)
+		}
 		if err != nil {
 			return rebalanceAppliedMsg{err: err}
 		}
@@ -2142,6 +2172,36 @@ func requestRebalanceApply(database *sql.DB) tea.Cmd {
 			count:      len(result.Moves),
 			overBudget: countOverBudgetRebalanceMoves(result.Moves),
 		}
+	}
+}
+
+// makeRebalanceProgressFn returns a progress callback that non-blocking-sends
+// to the given channel. Nil channel returns a nil callback.
+func makeRebalanceProgressFn(ch chan<- rebalanceProgressMsg) func(string) {
+	if ch == nil {
+		return nil
+	}
+	return func(message string) {
+		select {
+		case ch <- rebalanceProgressMsg{message: message}:
+		default:
+			// Drop progress messages if the TUI hasn't drained the channel
+			// yet — progress is best-effort, not ordered delivery.
+		}
+	}
+}
+
+func (m listTUIModel) waitForRebalanceProgress() tea.Cmd {
+	ch := m.rebalanceProgress
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
 	}
 }
 

@@ -12,12 +12,35 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/r2"
 )
+
+type capturedRebalanceSubmit struct {
+	job    *db.Job
+	intent *db.MoveIntent
+	move   QueueRebalanceMove
+}
+
+// captureRebalanceSubmits redirects the async submission to a recorder so
+// tests can assert that a move opened an intent without actually performing
+// R2 work. Returns a pointer to a slice the test can inspect.
+func captureRebalanceSubmits(t *testing.T) *[]capturedRebalanceSubmit {
+	t.Helper()
+	var captured []capturedRebalanceSubmit
+	orig := submitRebalanceMoveAsyncFn
+	submitRebalanceMoveAsyncFn = func(_ *sql.DB, _ *r2.Client, job *db.Job, intent *db.MoveIntent, move QueueRebalanceMove) {
+		captured = append(captured, capturedRebalanceSubmit{job: job, intent: intent, move: move})
+	}
+	t.Cleanup(func() {
+		submitRebalanceMoveAsyncFn = orig
+	})
+	return &captured
+}
 
 func withDefaultRebalanceDurations(t *testing.T) {
 	t.Helper()
 	orig := estimateRebalanceDurationsDetailed
-	estimateRebalanceDurationsDetailed = func(_ *predictor.Config, batchJobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
+	estimateRebalanceDurationsDetailed = func(_ *predictor.Config, batchJobs []predictor.BatchJob, _ func(string)) map[int64]estimate.DurationPrediction {
 		out := make(map[int64]estimate.DurationPrediction, len(batchJobs))
 		for _, job := range batchJobs {
 			out[job.ID] = estimate.DurationPrediction{Estimate: estimate.DefaultJobDuration}
@@ -320,6 +343,116 @@ func createRebalanceLaunch(t *testing.T, database *sql.DB, gpuClass string, gpuM
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 	return id
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_ApplyOpensMoveIntent(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	captured := captureRebalanceSubmits(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+	}
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:    true,
+		R2Client: &r2.Client{},
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances apply: %v", err)
+	}
+	if len(result.Moves) != 1 {
+		t.Fatalf("moves len = %d, want 1", len(result.Moves))
+	}
+
+	// Apply must write exactly one open MoveIntent for the queued job.
+	intent, err := db.GetOpenMoveIntent(database, queuedJob)
+	if err != nil {
+		t.Fatalf("GetOpenMoveIntent: %v", err)
+	}
+	if intent == nil {
+		t.Fatalf("expected an open MoveIntent for job %d, got none", queuedJob)
+	}
+	if intent.TargetKind != db.MoveTargetExisting {
+		t.Fatalf("intent.TargetKind = %q, want %q", intent.TargetKind, db.MoveTargetExisting)
+	}
+	if intent.TargetLaunchID == nil || *intent.TargetLaunchID != dstID {
+		t.Fatalf("intent.TargetLaunchID = %v, want %d", intent.TargetLaunchID, dstID)
+	}
+	if intent.SourceLaunchID == nil || *intent.SourceLaunchID != srcID {
+		t.Fatalf("intent.SourceLaunchID = %v, want %d", intent.SourceLaunchID, srcID)
+	}
+	if intent.State != db.MoveIntentStateOpen {
+		t.Fatalf("intent.State = %q, want open", intent.State)
+	}
+
+	// And the async submit must have been dispatched exactly once with that
+	// intent and the planned destination.
+	if len(*captured) != 1 {
+		t.Fatalf("captured submits = %d, want 1", len(*captured))
+	}
+	got := (*captured)[0]
+	if got.intent.ID != intent.ID {
+		t.Fatalf("captured intent id = %d, want %d", got.intent.ID, intent.ID)
+	}
+	if got.move.ToInstanceID != dstID {
+		t.Fatalf("captured move.ToInstanceID = %d, want %d", got.move.ToInstanceID, dstID)
+	}
+	if got.job == nil || got.job.ID != queuedJob {
+		t.Fatalf("captured job mismatch")
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_ApplySkipsJobWithOpenIntent(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	captured := captureRebalanceSubmits(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+	}
+
+	// Open an intent on the job out-of-band; rebalance must skip it.
+	src := srcID
+	dst := dstID
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          queuedJob,
+		SourceLaunchID: &src,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dst,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:    true,
+		R2Client: &r2.Client{},
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances apply: %v", err)
+	}
+	if len(result.Moves) != 0 {
+		t.Fatalf("moves len = %d, want 0 (job is already moving)", len(result.Moves))
+	}
+	if len(*captured) != 0 {
+		t.Fatalf("captured submits = %d, want 0", len(*captured))
+	}
 }
 
 func createQueuedLaunchJob(t *testing.T, database *sql.DB, launchID int64, gpuClass string, dir string) int64 {

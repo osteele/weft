@@ -10,13 +10,16 @@
 -- while a move is in flight.
 --
 -- Excludes:
---   - QueueRebalanceJob (campaign-lifecycle.allium): autopilot-driven cost
---     re-balancing across already-running instances. Re-balance reads the
---     same MoveIntent open-set to skip jobs the user is already moving, but
---     does not itself open intents.
 --   - PlaceJob and ReuseAssignment (job-lifecycle.allium /
 --     campaign-lifecycle.allium): initial placement of an unplaced job.
 --   - Mid-execution attempts (running jobs are never moved by this spec).
+--
+-- Note on QueueRebalanceJob (campaign-lifecycle.allium): cost rebalancing
+-- across already-running instances now opens MoveIntent { target_kind =
+-- existing } per move and detaches the R2 submission to a background
+-- worker that calls SubmitJobsToInstanceForMove. The user-initiated move
+-- path and the rebalance path share the same mechanism. The autopilot
+-- exclusion (AutopilotIgnoresMovingJobs) covers both equally.
 --
 -- Authoritative source for the move protocol design rationale.
 
@@ -542,7 +545,9 @@ invariant ResolvedIntentHasResolutionTime {
 --   from its candidate set (already implemented at autopilot.go's unplaced
 --   filter and in the rentalScope construction).
 -- campaign-lifecycle.allium: QueueRebalanceJob MUST exclude jobs with open
---   intents (implemented at rebalance.go's candidates filter).
+--   intents (implemented at rebalance.go's candidates filter) AND now opens
+--   its own MoveIntent { target_kind = existing } per planned move, with the
+--   R2 submission performed asynchronously by a background goroutine.
 -- status-sync.allium: TUI views that display "moving..." status SHOULD
 --   read from MoveIntent.state, not infer move-in-progress from
 --   pending_placement (which is also used by initial placement).

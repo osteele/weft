@@ -41,11 +41,20 @@ func EstimateJobDurationDetailed(predCfg *predictor.Config, gpuClass string, job
 // EstimateJobDurationsDetailed predicts durations for multiple jobs in a single
 // subprocess call and preserves runtime metadata for each prediction.
 func EstimateJobDurationsDetailed(predCfg *predictor.Config, batchJobs []predictor.BatchJob) map[int64]DurationPrediction {
+	return EstimateJobDurationsDetailedWithProgress(predCfg, batchJobs, nil)
+}
+
+// EstimateJobDurationsDetailedWithProgress is the progress-aware variant of
+// EstimateJobDurationsDetailed. The progress callback, if non-nil, is invoked
+// with short user-facing status strings as prediction advances (cache check,
+// subprocess start, completion). Safe to call from the calling goroutine;
+// nil progress is a no-op.
+func EstimateJobDurationsDetailedWithProgress(predCfg *predictor.Config, batchJobs []predictor.BatchJob, progress func(string)) map[int64]DurationPrediction {
 	if predCfg == nil || !predCfg.Configured() || len(batchJobs) == 0 {
 		return nil
 	}
 
-	results, err := predictor.ResolvePredictBatch(*predCfg, batchJobs)
+	results, err := predictor.ResolvePredictBatchWithProgress(*predCfg, batchJobs, progress)
 	if err != nil || results == nil {
 		return nil
 	}

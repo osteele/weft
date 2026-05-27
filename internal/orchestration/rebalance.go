@@ -3,7 +3,9 @@ package orchestration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -16,7 +18,6 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/workdir"
@@ -26,7 +27,11 @@ const (
 	defaultRebalanceCostCeiling = 1.10
 )
 
-var estimateRebalanceDurationsDetailed = estimate.EstimateJobDurationsDetailed
+var estimateRebalanceDurationsDetailed = estimate.EstimateJobDurationsDetailedWithProgress
+
+// submitRebalanceMoveAsyncFn is the package seam used by tests to observe or
+// replace the goroutine launched after a rebalance MoveIntent is opened.
+var submitRebalanceMoveAsyncFn = submitRebalanceMoveAsync
 
 type QueueRebalanceOptions struct {
 	Apply bool
@@ -49,6 +54,18 @@ type QueueRebalanceOptions struct {
 	// table. Callers that already loaded the open-intent set (e.g. the
 	// autopilot pass) thread it through to avoid repeating the query.
 	MovingJobs map[int64]struct{}
+	// Progress, if non-nil, is invoked with short user-facing status
+	// strings as planning advances through its phases (DB load, prediction,
+	// scoring, apply). The callback must be safe to call from the calling
+	// goroutine; planning is single-threaded. Nil is fine and is the default.
+	Progress func(message string)
+}
+
+func emitRebalanceProgress(fn func(string), message string) {
+	if fn == nil {
+		return
+	}
+	fn(message)
 }
 
 type QueueRebalanceMove struct {
@@ -116,6 +133,7 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 	if database == nil {
 		return QueueRebalanceResult{}, nil
 	}
+	emitRebalanceProgress(opts.Progress, "Loading queue state…")
 	instanceState, err := buildRebalanceInstanceState(database)
 	if err != nil {
 		return QueueRebalanceResult{}, err
@@ -182,11 +200,13 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		scoreEpsilon = 0.01
 	}
 	profile := bidding.ScoreProfileForRebalanceStrategy(selectedStrategy)
-	runtimes := loadRuntimePredictions(database, plan.allJobs())
+	runtimes := loadRuntimePredictions(database, plan.allJobs(), opts.Progress)
+	emitRebalanceProgress(opts.Progress, fmt.Sprintf("Scoring %d candidate job(s) across %d instance(s)…", len(candidates), len(instanceState)))
 	baseMean, baseLower, baseUpper := plan.score(profile, runtimes)
 
 	var r2Client *r2.Client
 	if opts.Apply {
+		emitRebalanceProgress(opts.Progress, "Preparing R2 client…")
 		r2Client = opts.R2Client
 		if r2Client == nil {
 			cfg, err := config.Load()
@@ -263,6 +283,10 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		logRebalanceDecision(move)
 
 		if opts.Apply {
+			emitRebalanceProgress(opts.Progress, fmt.Sprintf("Submitting move %d: %s → %s…",
+				len(result.Moves)+1,
+				ids.FormatInstanceID(move.FromInstanceID),
+				ids.FormatInstanceID(move.ToInstanceID)))
 			if err := applyRebalanceMove(ctx, database, r2Client, move); err != nil {
 				return result, err
 			}
@@ -298,6 +322,7 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 			op = "rebalance"
 		}
 		oplog.Log(op, oplog.WithDetailf("moved=%d", len(result.Moves)))
+		emitRebalanceProgress(opts.Progress, fmt.Sprintf("Submitted %d move(s); transfers running in background…", len(result.Moves)))
 	}
 	return result, nil
 }
@@ -659,7 +684,7 @@ func runningElapsed(job *db.Job) time.Duration {
 	return elapsed
 }
 
-func loadRuntimePredictions(database *sql.DB, jobs []*db.Job) runtimeBook {
+func loadRuntimePredictions(database *sql.DB, jobs []*db.Job, progress func(string)) runtimeBook {
 	out := make(runtimeBook, len(jobs))
 	if len(jobs) == 0 {
 		return out
@@ -688,7 +713,8 @@ func loadRuntimePredictions(database *sql.DB, jobs []*db.Job) runtimeBook {
 			WorkingDir: job.WorkingDir,
 		})
 	}
-	predictions := estimateRebalanceDurationsDetailed(&predCfg, batch)
+	emitRebalanceProgress(progress, fmt.Sprintf("Predicting durations for %d job(s)…", len(batch)))
+	predictions := estimateRebalanceDurationsDetailed(&predCfg, batch, progress)
 	for _, job := range jobs {
 		if job == nil {
 			continue
@@ -936,7 +962,10 @@ func (s *rebalanceInstanceState) reindexQueued() {
 	}
 }
 
-func applyRebalanceMove(ctx context.Context, database *sql.DB, r2Client *r2.Client, move QueueRebalanceMove) error {
+// applyRebalanceMove opens a MoveIntent and detaches the R2 submission to a
+// goroutine so the caller (TUI or autopilot pass) is not blocked on per-move
+// source uploads. See specs/job-move.allium for the intent lifecycle.
+func applyRebalanceMove(_ context.Context, database *sql.DB, r2Client *r2.Client, move QueueRebalanceMove) error {
 	job, err := db.GetJobByID(database, move.JobID)
 	if err != nil {
 		return fmt.Errorf("load rebalance job %s: %w", formatRebalanceJobID(move.JobID), err)
@@ -949,21 +978,64 @@ func applyRebalanceMove(ctx context.Context, database *sql.DB, r2Client *r2.Clie
 		return nil
 	}
 
-	if _, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
-		return fmt.Errorf("unplace job %s for rebalance: %w", formatRebalanceJobID(move.JobID), err)
+	sourceLaunchID := move.FromInstanceID
+	targetLaunchID := move.ToInstanceID
+	params := db.CreateMoveIntentParams{
+		JobID:          job.ID,
+		SourceLaunchID: &sourceLaunchID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &targetLaunchID,
 	}
-	refreshed, err := db.GetJobByID(database, move.JobID)
+	intent, err := db.CreateMoveIntent(database, params)
 	if err != nil {
-		return fmt.Errorf("reload rebalance job %s: %w", formatRebalanceJobID(move.JobID), err)
+		if errors.Is(err, db.ErrMoveIntentAlreadyOpen) {
+			slog.Info("rebalance: skipping job with open move intent",
+				"component", "rebalance", "job_id", job.ID)
+			return nil
+		}
+		return fmt.Errorf("open move intent for job %s: %w", formatRebalanceJobID(move.JobID), err)
 	}
-	if refreshed == nil {
-		return fmt.Errorf("reload rebalance job %s: not found", formatRebalanceJobID(move.JobID))
-	}
-	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, move.ToInstanceID, []*db.Job{refreshed}); err != nil {
-		return fmt.Errorf("submit rebalance job %s to %s: %w",
-			formatRebalanceJobID(move.JobID), ids.FormatInstanceID(move.ToInstanceID), err)
-	}
+
+	submitRebalanceMoveAsyncFn(database, r2Client, job, intent, move)
 	return nil
+}
+
+// submitRebalanceMoveAsync uses a fresh 10-minute context (matching
+// submitJobsToInstanceImpl) so the work survives the TUI command handler
+// returning. ResolveMoveIntent on success is usually redundant — DB triggers
+// resolve the intent on attempt landing — but is kept for parity with the
+// user-initiated move path.
+func submitRebalanceMoveAsync(database *sql.DB, r2Client *r2.Client, job *db.Job, intent *db.MoveIntent, move QueueRebalanceMove) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		err := campaign.SubmitJobsToInstanceForMove(ctx, database, r2Client, move.ToInstanceID, []*db.Job{job})
+		if err != nil {
+			slog.Warn("rebalance: submit-for-move failed",
+				"component", "rebalance",
+				"job_id", job.ID,
+				"src_instance_id", move.FromInstanceID,
+				"dst_instance_id", move.ToInstanceID,
+				"error", err)
+			restored := tryRestoreJobToSource(database, job.ID, move.FromInstanceID)
+			resolution := "rebalance submit failed"
+			if restored {
+				resolution = "rebalance submit failed; restored to source"
+			}
+			if rerr := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, resolution); rerr != nil {
+				slog.Warn("rebalance: resolve move intent canceled",
+					"component", "rebalance", "intent_id", intent.ID, "error", rerr)
+			}
+			return
+		}
+		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed,
+			fmt.Sprintf("rebalanced to %s", ids.FormatInstanceID(move.ToInstanceID))); err != nil {
+			// DB triggers may have already resolved the intent — that's the
+			// expected case. Log only at debug.
+			slog.Debug("rebalance: resolve move intent confirmed",
+				"component", "rebalance", "intent_id", intent.ID, "error", err)
+		}
+	}()
 }
 
 func appendPlacementReason(database *sql.DB, jobID int64, reason string) {

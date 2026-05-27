@@ -447,9 +447,14 @@ func listGroupedKeyBindings() []listKeyBinding {
 			}
 			m.clearAutoPilotPersistentState()
 			_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
+			progressCh := make(chan rebalanceProgressMsg, 16)
+			m.rebalanceProgress = progressCh
 			m.rebalancePreview = rebalancePreviewModel{active: true, loading: true}
-			m.statusMessage = "Planning rebalance moves..."
-			return m, requestRebalancePreview(m.database)
+			m.statusMessage = "Planning rebalance moves…"
+			return m, tea.Batch(
+				requestRebalancePreview(m.database, progressCh),
+				m.waitForRebalanceProgress(),
+			)
 		}},
 		listKeyBinding{keys: listKeyKillCancel.keys, aliases: listKeyKillCancel.aliases, action: listKeyKillCancel.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			job := m.selectedGroupedJob()
