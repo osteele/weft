@@ -350,3 +350,42 @@ extends **§sec:planes:data** in the systems paper. Sequencing: defer until
 named-assets usage in the lab notebook surfaces concrete cases where the
 fixed `assets/<hash>` R2 location is the wrong choice (e.g. an on-prem
 producer where R2 round-trips dominate).
+
+## Reconciler hardening (consult on recurrence)
+
+Triggered by an `upload_stall` termination_reason that the Go agent wrote but
+the schema CHECK constraint did not allow, leaving wi3226 stuck in
+status='running' with six queued jobs unable to re-place. Migration 00008 and
+`TestTerminationReasonConstantsMatchSchema` close the specific bug; the items
+below would have caught the failure mode itself, not just this instance of
+the enum drift. Consult if a similar silent-stuck-instance pattern recurs.
+
+- **Table-driven reconciler integration test over every termination reason.**
+  `TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed` covers the
+  full marker → `UpdateLaunchStatus` path but only with `disk_full`. Make it
+  table-driven (or reflection-driven) over every exported `TerminationReason*`
+  constant, so any reason that round-trips the reconciler is exercised
+  end-to-end against a real SQLite. Catches drift the constants/schema test
+  cannot — e.g. a new constraint, trigger, or status transition that rejects
+  a particular reason.
+- **Loud CHECK-constraint handling in `ExecuteAction`.**
+  `internal/campaign/instance_check.go:946` emits a `slog.Warn` on
+  `UpdateLaunchStatus` failure and returns `(false, false)`, then the
+  autopilot retries forever with no oplog entry, metric, or narrative event.
+  Detect SQLite constraint violations (error code 275 / message-prefix match)
+  in `ExecuteAction` and: (a) emit a distinct oplog entry
+  (e.g. `OpReconcileBlocked`) once per launch_id+reason pair so the failure
+  shows up in `weft list events` and narratives, (b) optionally re-attempt
+  with `TerminationReasonWeftBug` after N retries so the instance still
+  drains and jobs are reset — the original reason gets recorded in
+  `termination_detail` for postmortem.
+- **Audit the agent ↔ schema seam.** The agent writes termination intents to
+  R2 with reason strings that the coordinator later inserts into SQLite.
+  `cmd/agent/upload_drain_test.go::TestRecordDrainOutcomeStallTriggersSelfDestruct`
+  stops at the `uploadStallSelfDestructHook` boundary because the real path
+  shells out to rclone. Either (a) drive the post-hook path with a fake
+  `r2Put` and a fake reconciler, or (b) add a contract test that asserts
+  every reason string passed to `terminateInstanceWithReason` is in
+  `IsRetryableTermination`'s switch (and, transitively, in the schema). The
+  current test suite never crosses the agent → DB boundary for any reason
+  the agent emits.

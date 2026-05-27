@@ -388,7 +388,7 @@ table launches
   fk campaign_id -> campaigns(id) on_update=NO ACTION on_delete=NO ACTION
   fk host_id -> hosts(id) on_update=NO ACTION on_delete=NO ACTION
   check (status IN ('planned', 'launching', 'running', 'paused', 'grace', 'completed', 'failed', 'canceled'))
-  check (termination_reason IS NULL OR termination_reason IN ('completed', 'provider_failure', 'job_failure', 'disk_full', 'infra_failure', 'bootstrap_timeout', 'phase_stall', 'preempted', 'canceled', 'unknown', 'weft_bug', 'provider_timeout'))
+  check (termination_reason IS NULL OR termination_reason IN ('completed', 'provider_failure', 'job_failure', 'disk_full', 'infra_failure', 'bootstrap_timeout', 'phase_stall', 'preempted', 'canceled', 'unknown', 'weft_bug', 'provider_timeout', 'upload_stall'))
 table lifecycle_events
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 occurred_at INTEGER notnull=1 default=<none> pk=0
