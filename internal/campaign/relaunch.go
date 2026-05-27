@@ -435,10 +435,46 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		return result, nil
 	}
 
-	// Prepare R2 assets (agent binary + source tarballs)
-	r2Assets, err := PrepareR2Assets(cfg.R2Cfg, launchGroups)
+	// Prepare R2 assets (agent binary + source tarballs). Per-source-dir
+	// upload failures (e.g., one project exceeds the source-tarball size
+	// limit) must not poison sibling groups in the same pass — they get
+	// recorded against the failing group's jobs and the surviving groups
+	// proceed. The outer error is reserved for fatal failures (agent
+	// upload, stager init) where no launch is possible.
+	r2Assets, perDirErr, err := PrepareR2AssetsPerDir(cfg.R2Cfg, launchGroups)
 	if err != nil {
 		return result, fmt.Errorf("prepare R2 assets: %w", err)
+	}
+	if len(perDirErr) > 0 {
+		survivingGroups := launchGroups[:0]
+		survivingOffers := launchOffers[:0]
+		for i, group := range launchGroups {
+			groupErr := groupSourceUploadError(group, perDirErr)
+			if groupErr == nil {
+				survivingGroups = append(survivingGroups, group)
+				survivingOffers = append(survivingOffers, launchOffers[i])
+				continue
+			}
+			reason := fmt.Sprintf("prepare R2 assets: %s", groupErr.Error())
+			slog.Warn("skipping group: R2 source upload failed",
+				"component", "relaunch",
+				"gpu_spec", group.GPUSpec(),
+				"job_count", len(group.Jobs),
+				"error", groupErr)
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchSkippedNoOffers,
+				GPUSpec:   group.GPUSpec(),
+				JobCount:  len(group.Jobs),
+				Detail:    reason,
+			})
+			result.Skipped += len(group.Jobs)
+			recordGroupReasons(result, cfg.ResetJobs, group, reason)
+		}
+		launchGroups = survivingGroups
+		launchOffers = survivingOffers
+		if len(launchGroups) == 0 {
+			return result, nil
+		}
 	}
 
 	// Determine campaign ID from most recent attempt
@@ -755,6 +791,22 @@ func recordNotReplacedReason(result *RelaunchResult, failedInstanceID int64, rea
 		}
 	}
 	result.NotReplacedReasons[failedInstanceID] = "multiple reasons (" + inner + "; " + reason + ")"
+}
+
+// groupSourceUploadError returns the first non-nil source-upload error
+// that applies to a group's source directories, or nil if all uploads
+// succeeded. The returned error wraps the local directory so the
+// downstream skip reason carries enough context to be actionable.
+func groupSourceUploadError(group InstanceGroup, perDirErr map[string]error) error {
+	if len(perDirErr) == 0 {
+		return nil
+	}
+	for _, dir := range group.SourceDirs() {
+		if uploadErr, ok := perDirErr[dir]; ok && uploadErr != nil {
+			return fmt.Errorf("upload source %s: %w", dir, uploadErr)
+		}
+	}
+	return nil
 }
 
 // recordGroupReasons records reason for every job in the group: both in

@@ -991,3 +991,100 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 		t.Errorf("cancel-attempts to source = %v, want exactly one entry from the TransferClaim path", canceledByLaunch)
 	}
 }
+
+func TestAwaitAllPerDir_PartialSuccess(t *testing.T) {
+	stager := &R2AssetStager{
+		Client:         &r2.Client{},
+		AgentVersion:   "test",
+		agentKey:       newStringPromise(),
+		sourcePromises: map[string]*stringPromise{},
+	}
+	defer stager.Close()
+	stager.agentKey.resolve("agent-r2-key", nil)
+	ok1 := newStringPromise()
+	ok1.resolve("source-key-1", nil)
+	ok2 := newStringPromise()
+	ok2.resolve("source-key-2", nil)
+	bad := newStringPromise()
+	bad.resolve("", errors.New("source directory exceeds 500 MB limit"))
+	stager.sourcePromises["/projects/good-1"] = ok1
+	stager.sourcePromises["/projects/good-2"] = ok2
+	stager.sourcePromises["/projects/too-big"] = bad
+
+	assets, perDirErr, err := stager.AwaitAllPerDir()
+	if err != nil {
+		t.Fatalf("AwaitAllPerDir returned fatal error: %v", err)
+	}
+	if assets == nil {
+		t.Fatal("assets should not be nil when agent upload succeeded")
+	}
+	if assets.AgentR2Key != "agent-r2-key" {
+		t.Fatalf("AgentR2Key = %q, want %q", assets.AgentR2Key, "agent-r2-key")
+	}
+	if got := assets.SourceR2Keys["/projects/good-1"]; got != "source-key-1" {
+		t.Fatalf("good-1 key = %q, want %q", got, "source-key-1")
+	}
+	if got := assets.SourceR2Keys["/projects/good-2"]; got != "source-key-2" {
+		t.Fatalf("good-2 key = %q, want %q", got, "source-key-2")
+	}
+	if _, present := assets.SourceR2Keys["/projects/too-big"]; present {
+		t.Error("too-big key should NOT be in SourceR2Keys")
+	}
+	if len(perDirErr) != 1 {
+		t.Fatalf("perDirErr has %d entries, want 1", len(perDirErr))
+	}
+	if perDirErr["/projects/too-big"] == nil {
+		t.Error("perDirErr should contain /projects/too-big")
+	}
+}
+
+func TestAwaitAllPerDir_AgentFailureIsFatal(t *testing.T) {
+	stager := &R2AssetStager{
+		Client:         &r2.Client{},
+		AgentVersion:   "test",
+		agentKey:       newStringPromise(),
+		sourcePromises: map[string]*stringPromise{},
+	}
+	defer stager.Close()
+	stager.agentKey.resolve("", errors.New("R2 network failure"))
+	ok := newStringPromise()
+	ok.resolve("source-key", nil)
+	stager.sourcePromises["/projects/foo"] = ok
+
+	assets, perDirErr, err := stager.AwaitAllPerDir()
+	if err == nil {
+		t.Fatal("expected fatal error from agent upload failure")
+	}
+	if assets != nil {
+		t.Errorf("assets = %#v, want nil when agent upload fails", assets)
+	}
+	if perDirErr != nil {
+		t.Errorf("perDirErr = %v, want nil when agent upload fails", perDirErr)
+	}
+}
+
+func TestGroupSourceUploadError(t *testing.T) {
+	group := InstanceGroup{
+		Jobs: []*db.Job{
+			{ID: 1, WorkingDir: "/projects/alpha"},
+			{ID: 2, WorkingDir: "/projects/alpha"},
+		},
+	}
+	if err := groupSourceUploadError(group, nil); err != nil {
+		t.Errorf("nil map: got %v, want nil", err)
+	}
+	if err := groupSourceUploadError(group, map[string]error{"/other/project": errors.New("x")}); err != nil {
+		t.Errorf("unrelated dir error: got %v, want nil", err)
+	}
+	upErr := errors.New("source directory exceeds 500 MB limit")
+	got := groupSourceUploadError(group, map[string]error{"/projects/alpha": upErr})
+	if got == nil {
+		t.Fatal("expected non-nil error for matching dir")
+	}
+	if !strings.Contains(got.Error(), "/projects/alpha") {
+		t.Errorf("error %v should include the failing dir path", got)
+	}
+	if !errors.Is(got, upErr) {
+		t.Errorf("error %v should wrap underlying upload error", got)
+	}
+}

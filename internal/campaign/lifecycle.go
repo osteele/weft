@@ -438,6 +438,41 @@ func (s *R2AssetStager) AwaitAll() (*R2Assets, error) {
 	return &assets, nil
 }
 
+// AwaitAllPerDir is the partial-success variant of AwaitAll. The agent
+// upload is still treated as fatal — without an agent no group can launch.
+// Per-source-dir upload failures are returned in perDirErr instead of
+// aborting the wait, so callers can isolate the failed groups and proceed
+// with the rest. SourceR2Keys in the returned assets is populated only for
+// dirs whose upload succeeded.
+func (s *R2AssetStager) AwaitAllPerDir() (*R2Assets, map[string]error, error) {
+	if s == nil {
+		return nil, nil, fmt.Errorf("R2 asset stager is not initialized")
+	}
+	agentR2Key, err := s.agentKey.await()
+	if err != nil {
+		return nil, nil, fmt.Errorf("upload agent to R2: %w", err)
+	}
+	assets := &R2Assets{
+		Client:       s.Client,
+		AgentVersion: s.AgentVersion,
+		AgentR2Key:   agentR2Key,
+		SourceR2Keys: make(map[string]string),
+	}
+	var perDirErr map[string]error
+	for localDir, promise := range s.sourcePromises {
+		key, err := promise.await()
+		if err != nil {
+			if perDirErr == nil {
+				perDirErr = make(map[string]error)
+			}
+			perDirErr[localDir] = err
+			continue
+		}
+		assets.SourceR2Keys[localDir] = key
+	}
+	return assets, perDirErr, nil
+}
+
 // PrepareR2Assets uploads the agent binary and source tarballs to R2,
 // returning the pre-staged assets for use by LaunchInstance. This is
 // extracted from LaunchCampaign so that RelaunchOrphanedJobs can reuse it.
@@ -448,6 +483,19 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 	}
 	defer stager.Close()
 	return stager.AwaitAll()
+}
+
+// PrepareR2AssetsPerDir is the partial-success variant of PrepareR2Assets.
+// It returns whatever assets it was able to stage plus a map of per-dir
+// upload errors. The outer error is reserved for failures that prevent any
+// launch (agent upload, stager init). See AwaitAllPerDir.
+func PrepareR2AssetsPerDir(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, map[string]error, error) {
+	stager, err := StartR2AssetStaging(r2Cfg, groups)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer stager.Close()
+	return stager.AwaitAllPerDir()
 }
 
 type replacementOfferFunc func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error)
