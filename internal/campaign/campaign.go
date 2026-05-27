@@ -637,6 +637,14 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 			img, req, imagePullSecret := ResolveJobImageSettings(localDir, job.Command)
+			// Apply per-job CLI overrides (e.g. --cuda-driver-min) on top of
+			// project / script / lockfile-derived requirements. The CLI flag
+			// is the only place where the operator can express a constraint
+			// the lockfile and PEP 723 can't see — e.g. an isolated venv
+			// built on the rental with a known torch CUDA tag.
+			if job.CLIResourceOverrides != nil && job.CLIResourceOverrides.MinCUDAVersion != "" {
+				req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: job.CLIResourceOverrides.MinCUDAVersion})
+			}
 			explicitImage := img != ""
 			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
 
@@ -821,6 +829,8 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 	}
 	if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
 		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
+		slog.Debug("auto-derived CUDA driver floor from torch pin",
+			"component", "campaign", "cuda_floor", torchCUDA, "local_dir", localDir)
 	}
 	return img, req, imagePullSecret
 }

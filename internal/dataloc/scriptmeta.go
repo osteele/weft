@@ -95,7 +95,9 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 				meta.Image = v
 			}
 			meta.MinDriver = firstStringValue(wt, "min-driver", "min_driver")
-			meta.MinCUDA = firstStringValue(wt, "min-cuda", "min_cuda")
+			// `cuda-driver-min` is the canonical key (matches the CLI flag);
+			// `min-cuda` / `min_cuda` are accepted as legacy synonyms.
+			meta.MinCUDA = firstStringValue(wt, "cuda-driver-min", "cuda_driver_min", "min-cuda", "min_cuda")
 			meta.ImagePullSecret = firstStringValue(wt, "image-pull-secret", "image_pull_secret")
 			meta.VastCapAdd = normalizeCaps(tomlStringSlice(wt, "vast-cap-add"))
 			meta.UvArgs = tomlStringSlice(wt, "uv-args")

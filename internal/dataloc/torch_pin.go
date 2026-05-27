@@ -1,6 +1,7 @@
 package dataloc
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -54,6 +55,68 @@ func findProjectRoot(dir string) (string, bool) {
 		}
 		abs = parent
 	}
+}
+
+// ProjectRoot returns the nearest ancestor directory of dir containing
+// uv.lock or pyproject.toml. Returns "" if not found. Exported for callers
+// outside this package that need the same project-root semantics
+// ScanTorchPin uses.
+func ProjectRoot(dir string) string {
+	root, ok := findProjectRoot(dir)
+	if !ok {
+		return ""
+	}
+	return root
+}
+
+// ProjectUsesTorch returns true when the project containing dir declares a
+// torch-family dependency. It walks up to find pyproject.toml (the same
+// root semantics as ScanTorchPin) and does a substring scan. The check is
+// intentionally cheap and heuristic — false positives cost a torch
+// preflight (~3s) and false negatives skip it. Returns false when no
+// project root is found.
+func ProjectUsesTorch(dir string) bool {
+	root := ProjectRoot(dir)
+	if root == "" {
+		return false
+	}
+	for _, name := range []string{"pyproject.toml", "requirements.txt"} {
+		path := filepath.Join(root, name)
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		hit := scanFileForTorch(f)
+		_ = f.Close()
+		if hit {
+			return true
+		}
+	}
+	return false
+}
+
+// HasUVLock reports whether the project containing dir has a uv.lock at
+// its root. Walks upward to match ScanTorchPin's semantics — calling
+// hasUVLock on a subdir of a uv-managed project should still return true.
+func HasUVLock(dir string) bool {
+	root := ProjectRoot(dir)
+	if root == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(root, "uv.lock"))
+	return err == nil
+}
+
+func scanFileForTorch(f *os.File) bool {
+	const maxLines = 500
+	scanner := bufio.NewScanner(f)
+	for i := 0; i < maxLines && scanner.Scan(); i++ {
+		line := strings.ToLower(scanner.Text())
+		if strings.Contains(line, "torch") || strings.Contains(line, "pytorch") {
+			return true
+		}
+	}
+	return false
 }
 
 // uvLockTorchHeader matches the start of the [[package]] block for torch.

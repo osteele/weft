@@ -366,3 +366,48 @@ func TestMinCUDAForConstraint(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCUDADriverFloor(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		// Empty / sentinel
+		{"", "", false},
+		{"any", "", false},
+		{"none", "", false},
+		// Numeric versions
+		{"12", "12.0", false},
+		{"12.4", "12.4", false},
+		{"12.8", "12.8", false},
+		{"12.8.1", "12.8", false},
+		{"  12.4  ", "12.4", false},
+		// Generation names
+		{"hopper", "12.0", false},
+		{"Hopper", "12.0", false},
+		{"blackwell", "12.8", false},
+		{"ada", "11.8", false},
+		{"adalovelace", "11.8", false},
+		{"ampere", "11.0", false},
+		{"turing", "10.0", false},
+		// Wheel tags
+		{"cu128", "12.8", false},
+		{"cu121", "12.1", false},
+		{"cu118", "11.8", false},
+		// Invalid
+		{"hopperish", "", true},
+		{"12.x", "", true},
+		{"abc", "", true},
+	}
+	for _, tt := range tests {
+		got, err := ParseCUDADriverFloor(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ParseCUDADriverFloor(%q) err=%v, wantErr=%v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParseCUDADriverFloor(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

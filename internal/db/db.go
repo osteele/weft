@@ -276,12 +276,13 @@ func (j *Job) UsesPreemptiblePlacement() bool {
 // a fresh `weft run`. Later edit/retry commands store the effective
 // reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
-	GPU           string `json:"gpu,omitempty"`
-	GPUClass      string `json:"gpu_class,omitempty"`
-	GPUMemGB      *int   `json:"gpu_mem_gb,omitempty"`
-	GPUMemStrict  *bool  `json:"gpu_mem_strict,omitempty"`
-	DiskGB        *int   `json:"disk_gb,omitempty"`
-	RuntimeDiskGB *int   `json:"runtime_disk_gb,omitempty"`
+	GPU            string `json:"gpu,omitempty"`
+	GPUClass       string `json:"gpu_class,omitempty"`
+	GPUMemGB       *int   `json:"gpu_mem_gb,omitempty"`
+	GPUMemStrict   *bool  `json:"gpu_mem_strict,omitempty"`
+	DiskGB         *int   `json:"disk_gb,omitempty"`
+	RuntimeDiskGB  *int   `json:"runtime_disk_gb,omitempty"`
+	MinCUDAVersion string `json:"min_cuda_version,omitempty"`
 }
 
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
@@ -1323,7 +1324,7 @@ func SetJobCLIResourceOverrides(db *sql.DB, jobID int64, snap *CLIResourceOverri
 // IsEmpty reports whether no fields are populated.
 func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.GPU == "" && o.GPUClass == "" && o.GPUMemGB == nil && o.GPUMemStrict == nil &&
-		o.DiskGB == nil && o.RuntimeDiskGB == nil
+		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinCUDAVersion == ""
 }
 
 // ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID

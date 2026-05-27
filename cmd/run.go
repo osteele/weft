@@ -92,6 +92,7 @@ var (
 	runDiskGB        int
 	runRuntimeDiskGB int
 	runGPUClass      string
+	runCUDADriverMin string
 	runProvider      string
 	runInputs        []string
 	runOutputs       []string
@@ -253,6 +254,9 @@ func init() {
 	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	runCmd.Flags().StringVar(&runCUDADriverMin, "cuda-driver-min", "", "Minimum NVIDIA driver CUDA support required (e.g., 12.4, 12.8, hopper, blackwell). Filters cloud offers by cuda_max_good; the parallel PEP 723 key is `min-cuda` / `cuda-driver-min`")
+	runCmd.Flags().StringVar(&runCUDADriverMin, "min-cuda", "", "Alias for --cuda-driver-min")
+	_ = runCmd.Flags().MarkHidden("min-cuda")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "Cloud provider for rental placement (vastai or runpod)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
@@ -457,6 +461,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		runtimeDisk := runRuntimeDiskGB
 		cliOverrides.RuntimeDiskGB = &runtimeDisk
 	}
+	if runCUDADriverMin != "" {
+		canonical, parseErr := placement.ParseCUDADriverFloor(runCUDADriverMin)
+		if parseErr != nil {
+			return fmt.Errorf("--cuda-driver-min: %w", parseErr)
+		}
+		if canonical != "" {
+			cliOverrides.MinCUDAVersion = canonical
+		}
+	}
 
 	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
 	scriptMeta, scriptMetaErr := scanRunScriptMeta(localDir, command)
@@ -539,6 +552,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	maybeWarnHFOfflineEnv(runInputs, runEnvVars)
+
+	// Warn when the job appears torch-using and cloud-bound but the lockfile
+	// has no torch pin to derive a driver floor from. Without a pin, weft
+	// can't tell whether the rental's driver will satisfy the eventual
+	// `uv sync` (or an in-script `uv venv` that resolves torch on-instance).
+	// Most likely failure is `cuda_driver_too_old` 2-3 minutes into the run.
+	maybeWarnNoTorchPinForCloud(cmd, localDir, runHost, runCUDADriverMin)
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
@@ -1490,6 +1510,38 @@ func pathHasHomePrefix(dir, home string) bool {
 	dirClean := filepath.Clean(dir)
 	homeClean := filepath.Clean(home)
 	return dirClean == homeClean || strings.HasPrefix(dirClean, homeClean+string(os.PathSeparator))
+}
+
+// maybeWarnNoTorchPinForCloud prints a one-liner when a cloud-bound job
+// looks torch-using but the project lockfile has no torch pin from which
+// weft could derive a CUDA driver floor. Skipped when:
+//   - usage hints are disabled,
+//   - the user has already specified --cuda-driver-min,
+//   - --host targets an inventory host (driver floor is set there at boot),
+//   - the project has a torch pin (the auto-floor will fire).
+func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverMin string) {
+	if !usageHintsEnabled() || cudaDriverMin != "" || localDir == "" {
+		return
+	}
+	if host != "" {
+		// Submission targets a specific host (inventory or named). Driver
+		// floor matters only for auto-placed cloud rentals.
+		return
+	}
+	pin := dataloc.ScanTorchPin(localDir)
+	if pin != nil && pin.CudaVariant != "" {
+		// Auto-floor will fire; no warning needed.
+		return
+	}
+	if !dataloc.ProjectUsesTorch(localDir) {
+		return
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(),
+		"Tip: this project looks torch-using but has no torch pin in uv.lock / pyproject.toml. "+
+			"Cloud rentals may have older CUDA drivers than the wheel an in-script `uv venv` "+
+			"resolves on the rental. Add `--cuda-driver-min 12.4` (or whatever your wheel needs) "+
+			"to gate placement on driver version. See docs/guides/cloud-instance-debugging.md "+
+			"§ \"Torch driver too old\".")
 }
 
 func maybeWarnHFOfflineEnv(inputs, envVars []string) {

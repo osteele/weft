@@ -243,6 +243,84 @@ and the failure is closer to `infra_failure` than over-provisioning. New
 instances catch this proactively at boot via the disk-cap probe; pre-fix
 runs need this manual check.
 
+### Torch driver too old (`cuda_driver_too_old`)
+
+Job fails seconds into the run with:
+
+```
+RuntimeError: The NVIDIA driver on your system is too old (found version NNNNN).
+```
+
+`NNNNN` is the driver's CUDA API version × 1000 (e.g. `12040` = driver
+supports CUDA 12.4). The resolved torch wheel needs a newer CUDA runtime
+than the rental's driver provides. Common cause: a dependency (extra,
+upstream package, transitive pin) leaves torch unpinned, so `uv sync` on
+the rental resolves to the latest torch — currently shipping `cu128`
+wheels that require a driver supporting CUDA ≳12.8. Older Vast.ai hosts
+still run drivers in the 12.2–12.4 range.
+
+Weft already classifies this signature. The runner's live log scanner
+(`internal/runner/single.go`) treats it as `fatalAtRuntime` and SIGTERMs
+the job rather than letting it spin. The coordinator's remediator then
+writes an `error_diagnosis` row with pattern `cuda_driver_too_old` and
+the driver's inferred CUDA compatibility, which surfaces in:
+
+- `weft status <id>` — "Diagnosis:" + "Solution:" lines
+- `weft log <id>` — appended `--- diagnosis ---` footer
+- `weft list` — `(diagnosed)` indicator on the failed row
+
+**Diagnosis commands:**
+
+```bash
+weft status <job-id>                        # show diagnosis + solution
+weft instance ssh <id> -- nvidia-smi | head -3
+weft instance ssh <id> -- "cd /workspace && uv pip show torch | head -3"
+```
+
+Cross-reference the torch wheel tag (`cu118` / `cu121` / `cu124` / `cu128`)
+against the driver's CUDA compatibility.
+
+**Recovery (instance is in grace period, default 5m):**
+
+1. **Pin torch and resubmit to the same instance** — reuses the rental,
+   skips another launch + `uv sync` cycle:
+   ```bash
+   # edit pyproject.toml to pin a compatible torch (e.g. torch==2.4.1)
+   weft instance extend <id> 15m
+   weft instance submit <id> <new-job-id>
+   ```
+2. **Release and relaunch** — let Vast pick a different (often
+   newer-driver) host:
+   ```bash
+   weft instance release <id>
+   weft start instance --gpu nvidia>=24GB ...
+   ```
+
+**Prevention (before submit):**
+
+- **Pin torch in your project.** Add `torch==<version>` to
+  `[project.dependencies]` and run `uv lock`. Weft's `ScanTorchPin()`
+  reads the lock and auto-derives both `gpu-arch-max` (compute capability
+  cap) and `cuda-driver-min` (driver floor from the wheel's `cuXXX` tag).
+  Vast.ai offers are then filtered by `cuda_vers>=X.Y` at search time.
+- **If the project can't pin torch** (the script orchestrates an isolated
+  venv that resolves torch on the rental — see workflow-guide.md
+  § "Pinning torch inside an isolated venv"), declare the floor in the
+  script's PEP 723 block:
+  ```python
+  # [tool.weft]
+  # cuda-driver-min = "12.4"   # matches the cu124 wheel the venv installs
+  ```
+  This is the **permanent** property of the script and should ride with
+  it. Use `--cuda-driver-min 12.4` on `weft run` only for ad-hoc
+  overrides.
+- **`gpu-arch-max` and `cuda-driver-min` are different axes.**
+  `gpu-arch-max` catches "torch wheel was built for sm_90 but this GPU
+  is sm_80". `cuda-driver-min` catches "torch needs CUDA runtime 12.8 but
+  driver only supports 12.4". Both fire automatically from a project
+  torch pin; both can be set explicitly when the auto-derivation can't
+  see the relevant torch.
+
 ### Provider delivered less disk than requested (`infra_failure:disk-cap`)
 
 At agent startup, weft probes `df` against the disk it asked the provider

@@ -373,15 +373,23 @@ config {
 -- Regression: internal/vastai/client_test.go TestBuildSearchFilter_NoGPUFrac.
 
 -- CUDA / driver floors are hard compatibility requirements when a provider
--- reports enough metadata to evaluate them. They come from explicit
--- min_driver/min_cuda image metadata, image NVIDIA_REQUIRE_CUDA, or inferred
--- torch/CUDA wheel pins. Vast.ai offers are filtered at search time with
--- driver_version/cuda_vers predicates. Providers that do not expose driver or
--- CUDA compatibility for search results (currently RunPod) are
--- compatibility-unknown: they must lose to any known-compatible offer, but may
--- still be selected if no known-compatible offer exists. This fallback is
--- intentionally scored as very risky, not treated as proven compatibility.
--- Implementation: internal/campaign/offers.go provider compatibility penalty.
+-- reports enough metadata to evaluate them. Floors come from four sources,
+-- merged via imagereq.Merge (max wins):
+--   1. Project [cloud] min_driver / min_cuda in .weft.toml
+--   2. PEP 723 [tool.weft] cuda-driver-min (legacy synonym: min-cuda)
+--   3. CLI --cuda-driver-min on `weft run` (stored on CLIResourceOverrides)
+--   4. Auto-derived from a project's torch pin via TorchMinCUDAVersion —
+--      reads the cuXXX wheel tag from uv.lock or [tool.uv] index URLs
+-- Image metadata (NVIDIA_REQUIRE_CUDA from the Docker image) is also merged.
+-- Vast.ai offers are filtered at search time with driver_version/cuda_vers
+-- predicates. Providers that do not expose driver or CUDA compatibility for
+-- search results (currently RunPod) are compatibility-unknown: they must lose
+-- to any known-compatible offer, but may still be selected if no
+-- known-compatible offer exists. This fallback is intentionally scored as
+-- very risky, not treated as proven compatibility.
+-- Implementation: internal/campaign/campaign.go ResolveJobImageSettings (sources
+-- 1, 2, 4) and SplitGroupsByImage (source 3); internal/campaign/offers.go
+-- provider compatibility penalty.
 
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil

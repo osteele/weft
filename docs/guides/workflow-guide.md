@@ -251,7 +251,7 @@ Supported keys (all optional):
 | `interruptible` | bool        | `--tag interruptible` |
 | `image`     | string           | `.weft.toml [cloud] image` |
 | `min-driver` / `min_driver` | string or int | `.weft.toml [cloud] min_driver` |
-| `min-cuda` / `min_cuda` | string | `.weft.toml [cloud] min_cuda` |
+| `cuda-driver-min` (or legacy `min-cuda` / `min_cuda`) | string | `--cuda-driver-min` |
 | `image-pull-secret` / `image_pull_secret` | string | `.weft.toml [cloud] image_pull_secret` |
 | `vast-cap-add` | list of strings | Vast.ai `--cap-add` (cloud instance launch) |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
@@ -385,24 +385,32 @@ fetch the image config. You can also declare explicit floors:
 # [tool.weft]
 # image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
 # min-driver = "535"
-# min-cuda = "12.9"
+# cuda-driver-min = "12.9"
 # image-pull-secret = "ghcr.io"
 # ///
 ```
 
-`min-driver` filters Vast.ai offers by NVIDIA driver version. `min-cuda`
-filters providers that report CUDA compatibility; providers that do not expose
-CUDA/driver compatibility are treated as unknown and lose to any
-known-compatible offer. If every available offer is unknown, weft may still use
-one and will diagnose driver/runtime incompatibility if the job fails.
-`image-pull-secret` names a configured `[registry]` entry; if it is omitted,
-weft matches by the image registry hostname.
+`min-driver` filters Vast.ai offers by NVIDIA driver version. `cuda-driver-min`
+filters providers that report CUDA compatibility (`cuda_vers>=X.Y` on Vast.ai);
+providers that do not expose CUDA/driver compatibility are treated as unknown
+and lose to any known-compatible offer. If every available offer is unknown,
+weft may still use one and will diagnose driver/runtime incompatibility if the
+job fails. `image-pull-secret` names a configured `[registry]` entry; if it is
+omitted, weft matches by the image registry hostname.
+
+`cuda-driver-min` accepts a CUDA version (`"12.9"`), a torch wheel tag
+(`"cu128"`), or a generation name (`"hopper"`, `"blackwell"`). Legacy key names
+`min-cuda` / `min_cuda` remain accepted as synonyms; the equivalent CLI flag is
+`--cuda-driver-min` on `weft run`.
 
 When `uv.lock` or `pyproject.toml` pins torch/CUDA wheels, weft also infers a
 provider CUDA floor from the wheel variant and NVIDIA CUDA package versions
-(for example `nvidia-cusparse-cu12==12.8.x` implies `min-cuda = "12.8"`).
-Explicit `min-cuda` values are still useful when the lockfile is unavailable or
-when custom runtime packages require a stricter floor.
+(for example `nvidia-cusparse-cu12==12.8.x` implies `cuda-driver-min = "12.8"`).
+Explicit `cuda-driver-min` values are still useful when the lockfile is
+unavailable, when a script orchestrates an isolated venv that resolves torch on
+the rental, or when custom runtime packages require a stricter floor. Prefer
+the PEP 723 declaration over `--cuda-driver-min` on the CLI when the floor is
+a permanent property of the script.
 
 The `vast-cap-add` key requests extra Linux capabilities on Vast.ai
 instances. Example:

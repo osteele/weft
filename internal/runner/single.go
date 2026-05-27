@@ -237,6 +237,29 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	setupSecs := phases.SetupEnd - phases.SetupStart
 	phases.SetupSeconds = &setupSecs
 
+	// Torch CUDA preflight: when the project pins torch and a CUDA device was
+	// assigned, run a 3-second `python -c "import torch; torch.cuda.init()"`
+	// before the user command. This catches driver-too-old / CUDA library
+	// mismatches in setup phase rather than after the user script has spent
+	// minutes loading weights. The remediator's existing pattern registry
+	// will classify the log on a hit; the gain here is wall-clock and a
+	// clearer phase attribution.
+	if len(gpuDevices) > 0 && dataloc.ProjectUsesTorch(expandedDir) {
+		ei, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, envVars, paths, cfg.SetupTimeout)
+		if preflightErr != nil {
+			now := time.Now().Unix()
+			phases.SetupEnd = now
+			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+			if failureReason == "" {
+				failureReason = FailureReasonTorchPreflight
+			}
+			WriteFailureReasonFile(paths, failureReason)
+			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
+			WritePhasesFile(paths, phases)
+			return ei, preflightErr
+		}
+	}
+
 	// Start the process
 	if cfg.OnPhase != nil {
 		cfg.OnPhase("running")

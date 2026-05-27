@@ -162,6 +162,25 @@ import torch
 			},
 		},
 		{
+			name: "cuda-driver-min canonical key",
+			content: `# /// script
+# [tool.weft]
+# cuda-driver-min = "12.4"
+# ///
+`,
+			want: &ScriptMeta{MinCUDA: "12.4"},
+		},
+		{
+			name: "cuda-driver-min wins over legacy min-cuda",
+			content: `# /// script
+# [tool.weft]
+# cuda-driver-min = "12.8"
+# min-cuda = "12.1"
+# ///
+`,
+			want: &ScriptMeta{MinCUDA: "12.8"},
+		},
+		{
 			name: "image with gpu-mem",
 			content: `# /// script
 # [tool.weft]

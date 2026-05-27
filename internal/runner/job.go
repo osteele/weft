@@ -56,12 +56,15 @@ func (ei ExitInfo) SignalName() string {
 // Hang-watchdog exit codes and labels. See specs/job-lifecycle.allium
 // rules GPUIdleKillsJob and StdoutSilenceKillsJob.
 const (
-	ExitCodeGPUIdleKill        = 125
-	ExitCodeStdoutSilenceKill  = 126
-	KillReasonGPUIdle          = "gpu-idle"
-	KillReasonStdoutSilence    = "stdout-silence"
-	FailureReasonGPUIdle       = "killed_gpu_idle"
-	FailureReasonStdoutSilence = "killed_stdout_silence"
+	ExitCodeGPUIdleKill           = 125
+	ExitCodeStdoutSilenceKill     = 126
+	KillReasonGPUIdle             = "gpu-idle"
+	KillReasonStdoutSilence       = "stdout-silence"
+	FailureReasonGPUIdle          = "killed_gpu_idle"
+	FailureReasonStdoutSilence    = "killed_stdout_silence"
+	FailureReasonCUDADriverTooOld = "cuda_driver_too_old"
+	FailureReasonTorchPreflight   = "torch_preflight_failed"
+	FailureReasonDiskFull         = "disk_full"
 )
 
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.
@@ -98,34 +101,48 @@ func DetectFailureReasonFromExitInfo(ei ExitInfo) string {
 }
 
 // DetectFailureReasonFromExitInfoAndLog also checks the job log for textual
-// disk exhaustion errors that may not appear in dmesg before the process exits.
+// patterns that may not appear in dmesg / exit codes — disk exhaustion and
+// torch's "NVIDIA driver is too old" signature. See
+// specs/job-lifecycle.allium § DetectFailureReason.
 func DetectFailureReasonFromExitInfoAndLog(ei ExitInfo, logPath string) string {
-	if logMentionsDiskFull(logPath) {
-		return "disk_full"
+	tail := readLogTailLower(logPath)
+	if logTailMentionsDiskFull(tail) {
+		return FailureReasonDiskFull
+	}
+	if logTailMentionsCUDADriverTooOld(tail) {
+		return FailureReasonCUDADriverTooOld
 	}
 	return DetectFailureReasonFromExitInfo(ei)
 }
 
-func logMentionsDiskFull(logPath string) bool {
+func readLogTailLower(logPath string) string {
 	if logPath == "" {
-		return false
+		return ""
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		return false
+		return ""
 	}
 	const maxScanBytes = 1 << 20
 	if len(data) > maxScanBytes {
 		data = data[len(data)-maxScanBytes:]
 	}
-	text := strings.ToLower(string(data))
-	return strings.Contains(text, "no space left on device") ||
-		strings.Contains(text, "enospc") ||
-		strings.Contains(text, "edquot") ||
-		strings.Contains(text, "os error 122") ||
-		strings.Contains(text, "filesystem quota") ||
-		strings.Contains(text, "quota exceeded") ||
-		strings.Contains(text, "disk quota exceeded")
+	return strings.ToLower(string(data))
+}
+
+func logTailMentionsDiskFull(tail string) bool {
+	return strings.Contains(tail, "no space left on device") ||
+		strings.Contains(tail, "enospc") ||
+		strings.Contains(tail, "edquot") ||
+		strings.Contains(tail, "os error 122") ||
+		strings.Contains(tail, "filesystem quota") ||
+		strings.Contains(tail, "quota exceeded") ||
+		strings.Contains(tail, "disk quota exceeded")
+}
+
+func logTailMentionsCUDADriverTooOld(tail string) bool {
+	return strings.Contains(tail, "nvidia driver on your system is too old") ||
+		strings.Contains(tail, "driver version is insufficient for cuda runtime version")
 }
 
 // JobPaths holds all file paths for a job.

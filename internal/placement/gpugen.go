@@ -1,6 +1,8 @@
 package placement
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
@@ -113,6 +115,57 @@ func MinCUDAForGPU(gpuName string) float64 {
 		return 0
 	}
 	return generationMinCUDA[gen]
+}
+
+// ParseCUDADriverFloor parses a user-supplied driver/CUDA floor and returns
+// it canonicalized as a "MAJOR.MINOR" version string. Accepted inputs:
+//   - bare numeric versions: "12", "12.4", "12.8.1" → "12.0", "12.4", "12.8"
+//   - torch wheel tags: "cu128", "cu121" → "12.8", "12.1"
+//   - generation names: "hopper", "blackwell", "ada", "ampere" → mapped via
+//     generationMinCUDA (e.g., "blackwell" → "12.8")
+//   - "any" / "none" / "" → empty string (no floor)
+func ParseCUDADriverFloor(raw string) (string, error) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	if s == "" || s == "any" || s == "none" {
+		return "", nil
+	}
+	if strings.HasPrefix(s, "cu") {
+		rest := strings.TrimPrefix(s, "cu")
+		if n, err := strconv.Atoi(rest); err == nil && n >= 100 {
+			return fmt.Sprintf("%d.%d", n/10, n%10), nil
+		}
+	}
+	if v, ok := parseSemverPair(s); ok {
+		return v, nil
+	}
+	if gen, ok := nvidiaGenerationNames[strings.ReplaceAll(s, " ", "")]; ok {
+		if v, ok := generationMinCUDA[gen]; ok {
+			major := int(v)
+			minor := int((v-float64(major))*10 + 0.5)
+			return fmt.Sprintf("%d.%d", major, minor), nil
+		}
+		return "", nil
+	}
+	return "", fmt.Errorf("unrecognized CUDA driver floor: %s (expected version like \"12.4\" or generation name like \"hopper\")", raw)
+}
+
+// parseSemverPair parses "12", "12.4", or "12.4.1" into "MAJOR.MINOR".
+// Returns the canonical string and ok=true; ok=false signals "not a version".
+func parseSemverPair(s string) (string, bool) {
+	parts := strings.SplitN(s, ".", 3)
+	major, err := strconv.Atoi(parts[0])
+	if err != nil || major < 0 {
+		return "", false
+	}
+	minor := 0
+	if len(parts) >= 2 && parts[1] != "" {
+		m, err := strconv.Atoi(parts[1])
+		if err != nil || m < 0 {
+			return "", false
+		}
+		minor = m
+	}
+	return fmt.Sprintf("%d.%d", major, minor), true
 }
 
 // MinCUDAForConstraint returns the minimum CUDA toolkit version implied by a

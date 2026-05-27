@@ -1011,6 +1011,64 @@ func TestSplitGroupsByImage_UpgradesExplicitOlderCUDAForBlackwell(t *testing.T) 
 	}
 }
 
+func TestSplitGroupsByImage_AppliesCLIMinCUDAOverride(t *testing.T) {
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
+		{
+			GPUClass: "A100",
+			GPUMemGB: 40,
+			Jobs: []*db.Job{
+				{
+					ID:      1,
+					Command: "python train.py",
+					CLIResourceOverrides: &db.CLIResourceOverrides{
+						MinCUDAVersion: "12.8",
+					},
+				},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].MinCUDAVersion != "12.8" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.8 (from CLI override)", groups[0].MinCUDAVersion)
+	}
+}
+
+func TestSplitGroupsByImage_CLIMinCUDAMergesWithImageRequirement(t *testing.T) {
+	// CLI override 12.4 + project image whose own floor is 12.6 → max wins.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, ".weft.toml")
+	// MinCUDA in [cloud] reaches imagereq.Explicit as the project floor.
+	if err := os.WriteFile(cfg, []byte("[cloud]\nmin_cuda = \"12.6\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
+		{
+			GPUClass: "A100",
+			GPUMemGB: 40,
+			Jobs: []*db.Job{
+				{
+					ID:         1,
+					Command:    "python train.py",
+					WorkingDir: dir,
+					CLIResourceOverrides: &db.CLIResourceOverrides{
+						MinCUDAVersion: "12.4",
+					},
+				},
+			},
+		},
+	})
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].MinCUDAVersion != "12.6" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.6 (max of CLI 12.4 and project 12.6)", groups[0].MinCUDAVersion)
+	}
+}
+
 func TestSplitGroupsByImage_LeavesExplicitNonCUDAImageUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, ".weft.toml")

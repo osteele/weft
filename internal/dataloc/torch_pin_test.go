@@ -263,3 +263,89 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestProjectUsesTorch(t *testing.T) {
+	tests := []struct {
+		name      string
+		pyproject string
+		want      bool
+	}{
+		{"torch in dependencies", `[project]
+dependencies = ["torch==2.4.1", "numpy"]
+`, true},
+		{"torchvision", `[project]
+dependencies = ["torchvision"]
+`, true},
+		{"pytorch-lightning", `[project]
+dependencies = ["pytorch-lightning"]
+`, true},
+		{"no torch", `[project]
+dependencies = ["numpy", "pandas"]
+`, false},
+		{"empty file", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeProjectPyproject(t, dir, tt.pyproject)
+			if got := ProjectUsesTorch(dir); got != tt.want {
+				t.Errorf("ProjectUsesTorch(%q) = %v, want %v", dir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectUsesTorch_NoPyproject(t *testing.T) {
+	dir := t.TempDir()
+	if ProjectUsesTorch(dir) {
+		t.Error("ProjectUsesTorch(empty dir) = true, want false")
+	}
+}
+
+func TestProjectUsesTorch_AncestorPyproject(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectPyproject(t, dir, `[project]
+dependencies = ["torch"]
+`)
+	sub := filepath.Join(dir, "experiments", "phase2")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if !ProjectUsesTorch(sub) {
+		t.Error("ProjectUsesTorch(sub) = false, want true (should walk up)")
+	}
+}
+
+func TestHasUVLock(t *testing.T) {
+	dir := t.TempDir()
+	if HasUVLock(dir) {
+		t.Error("HasUVLock(empty dir) = true, want false")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	if !HasUVLock(dir) {
+		t.Error("HasUVLock(dir with uv.lock) = false, want true")
+	}
+}
+
+func TestHasUVLock_AncestorWalk(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	sub := filepath.Join(dir, "experiments")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if !HasUVLock(sub) {
+		t.Error("HasUVLock(sub) = false, want true (should walk up to find ancestor uv.lock)")
+	}
+}
+
+func writeProjectPyproject(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+}
