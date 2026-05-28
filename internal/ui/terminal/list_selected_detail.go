@@ -322,7 +322,7 @@ func appendJobStatusParts(parts []string, job *db.Job, ctx selectedJobContext, n
 		if job.ExitCode != nil {
 			parts = append(parts, fmt.Sprintf("exit %d", *job.ExitCode))
 		}
-		if r := strings.TrimSpace(job.FailureReason); r != "" {
+		if r := firstLine(job.FailureReason); r != "" {
 			parts = append(parts, r)
 		} else if m := firstLine(job.ErrorMessage); m != "" {
 			parts = append(parts, m)

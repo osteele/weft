@@ -126,6 +126,12 @@ type setupPrewarmResult struct {
 	// at this boundary almost always indicate infrastructure problems
 	// (rental network throughput, provider issues) rather than user code.
 	exitInfo runner.ExitInfo
+	// logTail captures the trailing lines of the prewarm log for live
+	// stderr output to the operator. It is intentionally kept separate
+	// from err so the err message stays single-line; failure_reason is a
+	// classification column and must not carry a multi-line script dump
+	// (corrupts the TUI footer line and the `Reason:` line of weft info).
+	logTail string
 }
 
 type setupPrewarm struct {
@@ -368,7 +374,8 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 				didWork:  true,
 				logPath:  paths.Log,
 				exitInfo: ei,
-				err:      fmt.Errorf("hf prewarm failed exit %d: %w%s", ei.ExitCode, err, prewarmLogTail(paths.Log)),
+				err:      fmt.Errorf("hf prewarm failed exit %d: %w", ei.ExitCode, err),
+				logTail:  prewarmLogTail(paths.Log),
 			}
 		}
 	}
@@ -394,7 +401,8 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 			didWork:  true,
 			logPath:  paths.Log,
 			exitInfo: ei,
-			err:      fmt.Errorf("%w%s", err, prewarmLogTail(paths.Log)),
+			err:      err,
+			logTail:  prewarmLogTail(paths.Log),
 		}
 	}
 	if ei.ExitCode != 0 {
@@ -628,7 +636,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 				jobCfg.SetupPrewarmLog = prewarm.logPath
 			}
 		} else if prewarm.err != nil {
-			fmt.Fprintf(os.Stderr, "prewarm for job %d failed: %v\n", job.ID, prewarm.err)
+			fmt.Fprintf(os.Stderr, "prewarm for job %d failed: %v%s\n", job.ID, prewarm.err, prewarm.logTail)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(prewarm.err))
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)

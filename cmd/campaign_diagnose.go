@@ -274,6 +274,12 @@ func diagnosisMessageForJob(job *db.Job) string {
 }
 
 func humanizeFailureReason(reason string) string {
+	// failure_reason is conceptually a one-line classification (see the
+	// FailureReason enum in specs/job-lifecycle.allium). Defend against
+	// older or buggy writers that may have stuffed multi-line content
+	// here — the callers print this on single-line `Reason:` / TUI
+	// footer rows, and embedded newlines corrupt the surrounding layout.
+	reason = firstLine(reason)
 	switch reason {
 	case "":
 		return ""
@@ -285,6 +291,8 @@ func humanizeFailureReason(reason string) string {
 		return "disk full"
 	case "timeout":
 		return "timed out"
+	case "setup_timeout":
+		return "setup phase timed out (likely slow rental network); will retry on a different rental"
 	case "killed_stdout_silence":
 		return "killed: no stdout output for the silence-watchdog timeout"
 	case "killed_gpu_idle":

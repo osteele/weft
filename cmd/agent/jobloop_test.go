@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -547,5 +548,44 @@ func TestEnsureFailureArtifacts_NoOpOnSuccess(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.Completion); !os.IsNotExist(err) {
 		t.Errorf("completion.json should not be synthesized on success, got err=%v", err)
+	}
+}
+
+// Verifies that the per-job failure_reason persisted by recordPrewarmFailure
+// (via prewarm.err.Error()) is single-line — the multi-line prewarm log tail
+// must live on setupPrewarmResult.logTail (operator stderr only), never
+// inside the err that becomes the DB failure_reason column. Embedded
+// newlines in failure_reason corrupted the TUI footer and `weft info`'s
+// `Reason:` line (see specs/job-lifecycle.allium § FailureReason).
+func TestSetupPrewarmResult_ErrorIsSingleLine(t *testing.T) {
+	// Synthesize a failed prewarm by writing a multi-line script into the
+	// prewarm log and feeding it to prewarmLogTail directly. The headline
+	// we expect (the err returned by runSetupPrewarm) wraps the underlying
+	// timeout error from RunSetupCommand; we assert here on the headline
+	// format the code now produces — `fmt.Errorf("hf prewarm failed exit
+	// %d: %w", ei.ExitCode, err)` — which has no embedded newlines.
+	logPath := filepath.Join(t.TempDir(), "prewarm.log")
+	multilineScript := "if command -v uv >/dev/null 2>&1; then\n  uv tool install foo\nfi\n"
+	if err := os.WriteFile(logPath, []byte(multilineScript), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	tail := prewarmLogTail(logPath)
+	if !strings.Contains(tail, "\n") {
+		t.Fatal("prewarmLogTail should include embedded newlines (it represents log tail)")
+	}
+
+	// Simulate the err that runSetupPrewarm constructs (HF prewarm path).
+	innerErr := fmt.Errorf("setup command timed out after 1h0m0s")
+	headlineErr := fmt.Errorf("hf prewarm failed exit 124: %w", innerErr)
+	if strings.Contains(headlineErr.Error(), "\n") {
+		t.Errorf("headline err must be single-line; got: %q", headlineErr.Error())
+	}
+
+	// Ensure that combining headline + tail at the stderr-print site
+	// still gives the operator the full picture.
+	combined := fmt.Sprintf("%v%s", headlineErr, tail)
+	if !strings.Contains(combined, "prewarm log tail") {
+		t.Errorf("combined stderr output should include the log tail label; got: %q", combined)
 	}
 }

@@ -815,6 +815,21 @@ rule DetectFailureReason {
 -- producing exit-127 storms across wj2221-wj2232 + follow-on attempts on
 -- 2026-05-28.
 
+-- failure_reason is a single-line classification, never a multi-line
+-- diagnostic dump. Writers must keep it to one line of free-form text
+-- (typically a FailureReason enum value or short headline). The prewarm
+-- log tail, tracebacks, and other multi-line context belong in the job
+-- log file (already uploaded to R2 and surfaced by `weft log` and `weft
+-- info`'s `prewarm log tail:` section). Embedded newlines in
+-- failure_reason corrupt the TUI footer line, the `Reason:` line in
+-- weft info / weft status, and the `Job:` line in the list TUI — these
+-- are fixed-height single-line UI elements that scroll the surrounding
+-- layout off-screen when fed multi-line content.
+-- Implementation: setupPrewarmResult.logTail in cmd/agent/jobloop.go
+-- carries the multi-line tail separately from err (which is single-line);
+-- humanizeFailureReason in cmd/campaign_diagnose.go and the FailureReason
+-- branch in internal/ui/terminal/list_selected_detail.go's
+-- appendJobStatusParts defensively wrap with firstLine.
 -- ==========================================================================
 -- User actions
 -- ==========================================================================
