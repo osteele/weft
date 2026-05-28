@@ -251,6 +251,12 @@ value Constraints {
                                 -- (e.g. "9.0", "12.0"); inferred from the
                                 -- project's torch pin or an explicit
                                 -- [tool.weft] gpu-arch-max
+    min_compute_cap: String?    -- lower bound on CUDA compute capability
+                                -- (e.g. "7.5"); inferred from the project's
+                                -- torch pin — modern torch wheels drop sm_<7
+                                -- kernels entirely, so a pin like torch 2.10
+                                -- on cu128 implies sm_75+. No explicit user
+                                -- override exists yet.
     provider: String?           -- rental provider name ("" = on-prem first)
     inputs: List<String>        -- asset refs (see Data locality below)
     tags: Set<Tag>              -- rental/inventory/benchmark/compute_intensive
@@ -315,7 +321,27 @@ rule EvaluateEligibility {
             ComputeCapForGPU(g.class) == null
             or ComputeCapForGPU(g.class) <= c.max_compute_cap)
 
-    -- 5. Benchmark jobs must land on an idle host.
+    -- 5. GPU compute-capability lower bound (torch wheel compatibility).
+    --    Eligible if at least one GPU on the host has a known cap at or
+    --    above the bound. The bound is inferred from the project's pinned
+    --    torch + CUDA wheel variant (TorchMinComputeCap). The asymmetry
+    --    with #4 is deliberate: for the LOWER bound, unknown-to-weft GPUs
+    --    must be REJECTED, not passed. "Unknown" means weft's catalog has
+    --    no compute-cap for the model — silently treating that as
+    --    "probably fine" produced the EXP-179 wj2240 regression in which
+    --    Vast.ai offered GTX 1080 Tis (Pascal, sm_61) that weft did not
+    --    recognize and dispatched the job onto them despite a torch-derived
+    --    sm_75 floor. The cloud-offer filter
+    --    (campaign.filterOffersByTorchArch) implements the same fail-closed
+    --    rule. weft's GPU catalog must include Pascal and Maxwell so this
+    --    rejection is grounded in actual cap data wherever Vast.ai can
+    --    offer those cards.
+    if c.min_compute_cap != null:
+        requires: host.gpus.any(g =>
+            ComputeCapForGPU(g.class) != null
+            and ComputeCapForGPU(g.class) >= c.min_compute_cap)
+
+    -- 6. Benchmark jobs must land on an idle host.
     if benchmark in c.tags:
         requires: metrics.is_idle
 
@@ -328,12 +354,15 @@ rule EvaluateEligibility {
         --   "no GPU with >=24GB"         (fail on memory)
         --   "no GPU matching ampere+"    (fail on class)
         --   "no GPU with compute cap <= 9.0" (fail on torch arch ceiling)
+        --   "no GPU with compute cap >= 7.5" (fail on torch arch floor)
         --   "not idle (2 jobs running)"  (fail on benchmark idleness)
         -- Implementation: placement.scoreHost, applyResourceHardConstraints.
         -- Compute-cap inference: dataloc.ScanTorchPin reads uv.lock /
-        -- pyproject.toml, placement.TorchMaxComputeCap maps (version,
-        -- cu-variant) to cap, placement.MaxComputeCapForJob applies the
-        -- script-metadata override.
+        -- pyproject.toml, placement.TorchMaxComputeCap and TorchMinComputeCap
+        -- map (version, cu-variant) to caps, placement.MaxComputeCapForJob /
+        -- MinComputeCapForJob apply them. Cloud-offer arch filtering:
+        -- campaign.filterOffersByTorchArch — same fail-closed-on-unknown
+        -- rule for the lower bound, fail-open for the upper bound.
 }
 
 -- =========================================================================

@@ -1990,12 +1990,21 @@ func TestScoreHosts_MaxComputeCap_Ampere(t *testing.T) {
 
 func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 	// Bound at sm_7.5: host-alpha eligible via A100/2080Ti; host-beta eligible
-	// via 3090; host-gamma eligible because unknown caps are not rejected.
+	// via 3090; host-gamma is an M2 Max (Apple Silicon, no CUDA cap) and is
+	// correctly rejected — MinComputeCap fails closed on unknown CUDA caps,
+	// matching the cloud-offer filter and the EXP-179 regression fix.
 	db := setupTestDB(t)
 	scores := scoreTestHosts(db, Constraints{MinComputeCap: "7.5"})
 	for _, s := range scores {
-		if !s.Eligible {
-			t.Errorf("host %s should be eligible at min cap 7.5: %v", s.Host, s.Reasons)
+		switch s.Host {
+		case "host-alpha", "host-beta":
+			if !s.Eligible {
+				t.Errorf("host %s should be eligible at min cap 7.5: %v", s.Host, s.Reasons)
+			}
+		case "host-gamma":
+			if s.Eligible {
+				t.Errorf("host-gamma (M2 Max) should be ineligible for CUDA min cap 7.5; got eligible")
+			}
 		}
 	}
 
@@ -2009,5 +2018,15 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 	}
 	if got := strings.Join(reasons, "; "); !strings.Contains(got, "compute cap >= 7.5") {
 		t.Fatalf("reasons = %v, want min cap detail", reasons)
+	}
+
+	// EXP-179 regression on the on-prem path: a Pascal host must be
+	// rejected when the torch pin implies a sm_75 floor.
+	pascalHost := inventory.HostSpec{
+		Name: "pascal-host",
+		GPUs: []inventory.GPUSpec{{Name: "GTX 1080 Ti", Class: "gtx1080ti", Memory: "11GB"}},
+	}
+	if ok, _ := CheckHostGPUConstraints(pascalHost, Constraints{MinComputeCap: "7.5"}); ok {
+		t.Fatalf("GTX 1080 Ti host should be ineligible for min cap 7.5 (sm_6.1 below floor)")
 	}
 }

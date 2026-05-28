@@ -62,6 +62,13 @@ var modelComputeCap = map[string]string{
 // the highest cap we'd reasonably encounter on a Vast offer, since that is
 // the conservative choice for an upper-bound filter.
 var generationDefaultComputeCap = map[GPUGeneration]string{
+	// Maxwell: GTX 9-series (5.2), Tesla M40 (5.2), Tesla M60 (5.2). GM20x.
+	// The Tegra/Jetson SoCs at 5.3 are not relevant for Vast.ai offers.
+	GenMaxwell: "5.2",
+	// Pascal: GTX 10-series + Titan Xp (6.1), Tesla P40/P4 (6.1). GP100
+	// datacenter (Tesla P100 / Quadro GP100) is 6.0 but those rarely appear
+	// on Vast; 6.1 is the conservative default for the family.
+	GenPascal:      "6.1",
 	GenVolta:       "7.0",
 	GenTuring:      "7.5",
 	GenAmpere:      "8.6", // most consumer Ampere; A100 is 8.0

@@ -79,6 +79,18 @@ func TestComputeCapForGPU(t *testing.T) {
 		{"RTX PRO 4500 Blackwell", "12.0"},
 		{"RTX PRO 6000 WS", "12.0"},
 		{"RTX 5090", "12.0"},
+		// Pascal and Maxwell — regression for EXP-179 wj2240 on 2026-05-28,
+		// where Vast.ai offered GTX 1080 Tis and weft's catalog didn't
+		// recognize them, letting the torch-min compute-cap filter
+		// fail-open and dispatching the job onto sm_61 (below torch 2.10's
+		// sm_75 floor).
+		{"GTX 1080 Ti", "6.1"},
+		{"GTX 1080", "6.1"},
+		{"GTX 1070", "6.1"},
+		{"Tesla P100", "6.1"},
+		{"TITAN Xp", "6.1"},
+		{"Tesla M40", "5.2"},
+		{"GTX 980 Ti", "5.2"},
 		{"unknown-gpu-name", ""},
 		{"", ""},
 	}

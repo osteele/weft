@@ -17,7 +17,12 @@ type GPUGeneration int
 const (
 	GenUnknown GPUGeneration = iota
 
-	// NVIDIA generations (ordered oldest to newest)
+	// NVIDIA generations (ordered oldest to newest). Pre-Volta generations
+	// are listed for compute-cap recognition only; torch >= 2.5 cu118+ no
+	// longer ships kernels for sm < 7.0, so placement uses these mainly to
+	// REJECT Maxwell/Pascal offers when a torch-derived min-cap is set.
+	GenMaxwell
+	GenPascal
 	GenVolta
 	GenTuring
 	GenAmpere
@@ -33,7 +38,7 @@ const (
 )
 
 func (g GPUGeneration) isNVIDIA() bool {
-	return g >= GenVolta && g <= GenBlackwell
+	return g >= GenMaxwell && g <= GenBlackwell
 }
 
 func (g GPUGeneration) isApple() bool {
@@ -61,6 +66,8 @@ var appleClassToGeneration = map[string]GPUGeneration{
 }
 
 var nvidiaGenerationNames = map[string]GPUGeneration{
+	"maxwell":     GenMaxwell,
+	"pascal":      GenPascal,
 	"volta":       GenVolta,
 	"turing":      GenTuring,
 	"ampere":      GenAmpere,
@@ -81,6 +88,8 @@ var knownGPUClasses = func() []string {
 
 // generationNames maps user-facing generation names to their generation.
 var generationNames = map[string]GPUGeneration{
+	"maxwell":     GenMaxwell,
+	"pascal":      GenPascal,
 	"volta":       GenVolta,
 	"turing":      GenTuring,
 	"ampere":      GenAmpere,
@@ -97,6 +106,8 @@ var generationNames = map[string]GPUGeneration{
 // generationMinCUDA maps GPU generations to the minimum CUDA toolkit version
 // required to compile kernels for that architecture.
 var generationMinCUDA = map[GPUGeneration]float64{
+	GenMaxwell:     6.5,
+	GenPascal:      8.0,
 	GenVolta:       9.0,
 	GenTuring:      10.0,
 	GenAmpere:      11.0,

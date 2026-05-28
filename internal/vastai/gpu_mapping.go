@@ -17,6 +17,12 @@ type gpuGeneration int
 
 const (
 	genUnknown gpuGeneration = iota
+	// Pre-Volta generations: present so torch arch-min filtering can REJECT
+	// these GPUs when a torch-derived min-cap is set (e.g. torch 2.10
+	// requires sm_75+, so 1080 Ti at sm_61 must be filtered out — but only
+	// if weft can name the generation first).
+	genMaxwell
+	genPascal
 	genVolta
 	genTuring
 	genAmpere
@@ -26,6 +32,8 @@ const (
 )
 
 var generationNameToGen = map[string]gpuGeneration{
+	"maxwell":     genMaxwell,
+	"pascal":      genPascal,
 	"volta":       genVolta,
 	"turing":      genTuring,
 	"ampere":      genAmpere,
@@ -36,6 +44,8 @@ var generationNameToGen = map[string]gpuGeneration{
 }
 
 var genToGenerationName = map[gpuGeneration]string{
+	genMaxwell:     "maxwell",
+	genPascal:      "pascal",
 	genVolta:       "volta",
 	genTuring:      "turing",
 	genAmpere:      "ampere",
@@ -46,6 +56,33 @@ var genToGenerationName = map[gpuGeneration]string{
 
 // vastaiGPUCatalog is the single source of truth for Vast.ai gpu_name values.
 var vastaiGPUCatalog = []vastaiGPU{
+	// Maxwell (sm_52). Listed so torch-arch min filtering can reject
+	// them. Tegra/Jetson variants at sm_53 are not relevant here.
+	{"Tesla M40", genMaxwell},
+	{"Tesla M60", genMaxwell},
+	{"GTX TITAN X", genMaxwell},
+	{"GTX 980 Ti", genMaxwell},
+	{"GTX 980", genMaxwell},
+	{"GTX 970", genMaxwell},
+	{"GTX 960", genMaxwell},
+	{"GTX 950", genMaxwell},
+
+	// Pascal (sm_61, except GP100 at sm_60). Listed so torch-arch min
+	// filtering can reject them — these are what triggered EXP-179
+	// wj2240 landing on a GTX 1080 Ti despite torch 2.10's sm_75+ floor.
+	{"Tesla P100", genPascal},
+	{"Tesla P40", genPascal},
+	{"Tesla P4", genPascal},
+	{"Quadro GP100", genPascal},
+	{"TITAN Xp", genPascal},
+	{"GTX 1080 Ti", genPascal},
+	{"GTX 1080", genPascal},
+	{"GTX 1070 Ti", genPascal},
+	{"GTX 1070", genPascal},
+	{"GTX 1060", genPascal},
+	{"GTX 1050 Ti", genPascal},
+	{"GTX 1050", genPascal},
+
 	// Volta
 	{"Tesla V100", genVolta},
 	{"V100", genVolta},

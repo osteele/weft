@@ -1046,12 +1046,14 @@ func TestFilterOffersByTorchArch_MinBound(t *testing.T) {
 		{ProviderID: "a100", GPUName: "A100"},
 		{ProviderID: "unknown", GPUName: "weird-future-gpu"},
 	}
+	// minCap=7.5: V100 (7.0) below floor → rejected; unknown rejected because
+	// fail-closed under a min-cap (see EXP-179 regression).
 	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "7.5", "")
-	if filtered != 1 {
-		t.Errorf("filtered = %d, want 1", filtered)
+	if filtered != 2 {
+		t.Errorf("filtered = %d, want 2", filtered)
 	}
-	if exGPU == "" || exCap != "7.0" {
-		t.Errorf("expected V100 example with sm_7.0, got %q %q", exGPU, exCap)
+	if exGPU == "" || exCap == "" {
+		t.Errorf("expected example GPU and cap to be set, got %q %q", exGPU, exCap)
 	}
 	keepIDs := map[string]bool{}
 	for _, o := range got {
@@ -1060,7 +1062,52 @@ func TestFilterOffersByTorchArch_MinBound(t *testing.T) {
 	if keepIDs["v100"] {
 		t.Errorf("expected v100 to be filtered; got %+v", keepIDs)
 	}
-	if !keepIDs["t4"] || !keepIDs["a100"] || !keepIDs["unknown"] {
-		t.Errorf("expected t4, a100, unknown to survive; got %+v", keepIDs)
+	if keepIDs["unknown"] {
+		t.Errorf("expected unknown GPU to be filtered (fail-closed under min-cap); got %+v", keepIDs)
+	}
+	if !keepIDs["t4"] || !keepIDs["a100"] {
+		t.Errorf("expected t4, a100 to survive; got %+v", keepIDs)
+	}
+}
+
+// TestFilterOffersByTorchArch_RejectsPascalForTorch210 is the EXP-179 wj2240
+// regression: torch 2.10 requires sm_75+, Vast.ai offered GTX 1080 Tis (sm_61),
+// weft's catalog didn't recognize them, ComputeCapForGPU returned "" and the
+// filter let them through. Job dispatched, then failed with
+// cudaErrorNoKernelImageForDevice on first CUDA allocation.
+func TestFilterOffersByTorchArch_RejectsPascalForTorch210(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "1080ti", GPUName: "GTX 1080 Ti"},
+		{ProviderID: "p100", GPUName: "Tesla P100"},
+		{ProviderID: "m40", GPUName: "Tesla M40"},
+		{ProviderID: "3090", GPUName: "RTX 3090"},
+		{ProviderID: "a5000", GPUName: "RTX A5000"},
+	}
+	// torch 2.10 on cu128 → MinComputeCap "7.5".
+	got, filtered, _, _ := filterOffersByTorchArch(offers, "7.5", "")
+	if filtered != 3 {
+		t.Errorf("filtered = %d, want 3 (Pascal 1080 Ti + Pascal P100 + Maxwell M40)", filtered)
+	}
+	keepIDs := map[string]bool{}
+	for _, o := range got {
+		keepIDs[o.ProviderID] = true
+	}
+	if keepIDs["1080ti"] || keepIDs["p100"] || keepIDs["m40"] {
+		t.Errorf("expected Pascal/Maxwell offers rejected by sm_75 floor; got %+v", keepIDs)
+	}
+	if !keepIDs["3090"] || !keepIDs["a5000"] {
+		t.Errorf("expected RTX 3090 and A5000 (Ampere, sm_86) to survive; got %+v", keepIDs)
+	}
+}
+
+// TestFilterOffersByTorchArch_UnknownGPUFailOpenOnMaxOnly verifies the
+// asymmetry: with no min-cap, an unknown GPU is treated as "probably older
+// than the cap" rather than "newer than the cap allows", so it passes. This
+// preserves the existing fail-open behavior for upper-bound-only filtering.
+func TestFilterOffersByTorchArch_UnknownGPUFailOpenOnMaxOnly(t *testing.T) {
+	offers := []cloud.Offer{{ProviderID: "unknown", GPUName: "weird-future-gpu"}}
+	got, filtered, _, _ := filterOffersByTorchArch(offers, "", "9.0")
+	if filtered != 0 || len(got) != 1 {
+		t.Errorf("max-only filter should fail open on unknown GPU; filtered=%d remaining=%d", filtered, len(got))
 	}
 }

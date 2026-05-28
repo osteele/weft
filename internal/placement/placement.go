@@ -747,7 +747,11 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 		if c.MaxComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MaxComputeCap) <= 0) {
 			capMatched = true
 		}
-		if c.MinComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MinComputeCap) >= 0) {
+		// MinComputeCap fails closed on unknown GPUs (gpuCap == ""): if weft
+		// can't name the cap of the host's GPU, we cannot prove it satisfies
+		// the torch-derived lower bound. Symmetric with the cloud-offer
+		// filter (campaign.filterOffersByTorchArch).
+		if c.MinComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MinComputeCap) >= 0 {
 			minCapMatched = true
 		}
 
@@ -790,7 +794,9 @@ func gpuMatchesConstraints(gpu inventory.GPUSpec, gc GPUConstraint, c Constraint
 	if c.MaxComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MaxComputeCap) > 0 {
 		return false
 	}
-	if c.MinComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MinComputeCap) < 0 {
+	// Fail closed on unknown gpuCap when MinComputeCap is set — same
+	// rationale as the eligibility check above.
+	if c.MinComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MinComputeCap) < 0) {
 		return false
 	}
 	return true

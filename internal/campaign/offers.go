@@ -351,6 +351,22 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 	for _, o := range offers {
 		gpuCap := placement.ComputeCapForGPU(o.GPUName)
 		if gpuCap == "" {
+			// Fail closed when a minimum compute cap is required and the
+			// offer's GPU is unknown to weft. Otherwise we'd silently
+			// dispatch to a card the torch pin cannot run on — the EXP-179
+			// regression on wj2240, where Vast.ai offered GTX 1080 Tis that
+			// weft's catalog didn't recognize and the torch-derived
+			// MinComputeCap=7.5 was never checked. maxCap-only is left
+			// fail-open: "unknown" there could mean "older and probably
+			// fine" rather than "newer than the cap allows".
+			if minCap != "" {
+				filtered++
+				if exampleGPU == "" {
+					exampleGPU = o.GPUName
+					exampleCap = "unknown"
+				}
+				continue
+			}
 			compatible = append(compatible, o)
 			continue
 		}
