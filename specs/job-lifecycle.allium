@@ -790,6 +790,31 @@ rule DetectFailureReason {
 -- that exit code; the prewarm-failure branch terminates the instance
 -- with TerminationReasonInfraFailure when exitInfo.ExitCode is 124.
 
+-- Setup-phase subprocesses (uv sync, torch preflight, direnv resolution,
+-- pre-job disk probes, and similar helpers that run user tooling before
+-- the job command itself) must execute with an environment that includes
+-- the agent's parent-process environment. Concretely, when such a
+-- subprocess assigns cmd.Env explicitly, it must merge os.Environ() under
+-- the job's constructed envVars (last-writer-wins, so job-level env still
+-- overrides parent). Without this, HOME is absent, `bash -lc` cannot
+-- resolve ~/.profile, the Debian snippet that adds ~/.local/bin to PATH
+-- never runs, and `uv` — installed at $HOME/.local/bin/uv on the cloud
+-- pytorch image by DefaultOnStartCmd — becomes unreachable. The
+-- preflight then exits 127 even though uv is on disk, and every GPU job
+-- on a fresh rental fails for an infrastructure reason that looks like
+-- a missing tool. Job envVars carries dotenv + job.Env + artifact env;
+-- it deliberately does not carry HOME/PATH because those come from the
+-- agent process itself.
+-- Implementation: internal/runner/torch_preflight.go preflightEnv,
+-- internal/runner/process.go StartProcess, internal/runner/single.go
+-- disk-probe call site (mergeEnvVars(os.Environ(), envVars)). New
+-- setup-phase subprocesses that set cmd.Env must follow the same
+-- pattern; relying on the exec.Command default (which is os.Environ
+-- alone) is only correct when the job's envVars contribute nothing.
+-- Regression: torch_preflight added in 03f93ba3b without this merge,
+-- producing exit-127 storms across wj2221-wj2232 + follow-on attempts on
+-- 2026-05-28.
+
 -- ==========================================================================
 -- User actions
 -- ==========================================================================

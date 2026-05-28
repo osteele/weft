@@ -20,6 +20,18 @@ const torchPreflightCommand = `python -c "import torch; torch.cuda.init() if tor
 // venv interpreter starts don't false-positive as failures.
 const torchPreflightTimeout = 30 * time.Second
 
+// preflightEnv builds the env for the `bash -lc` preflight invocation. It
+// merges os.Environ() under the job's envVars so HOME (and other
+// parent-process env) reaches the login shell. Without HOME, bash -lc
+// cannot resolve ~/.profile, the snippet that adds ~/.local/bin to PATH
+// never runs, and `uv` — installed at $HOME/.local/bin/uv on the cloud
+// pytorch image — is unreachable, producing a spurious exit 127 even
+// though uv is on disk. Job-specified env still overrides parent env
+// (mergeEnvVars is last-writer-wins, and envVars is the overlay).
+func preflightEnv(envVars []string) []string {
+	return mergeEnvVars(os.Environ(), envVars)
+}
+
 // runTorchPreflight runs a small Python snippet that imports torch and
 // initializes CUDA. On failure, the command's stderr is appended to the
 // job log so the post-hoc remediator can classify it. Returns (ExitInfo,
@@ -46,7 +58,7 @@ func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths J
 
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
 	cmd.Dir = workingDir
-	cmd.Env = envVars
+	cmd.Env = preflightEnv(envVars)
 	logFile, openErr := os.OpenFile(paths.Log, os.O_APPEND|os.O_WRONLY, 0o644)
 	if openErr == nil {
 		defer logFile.Close()
