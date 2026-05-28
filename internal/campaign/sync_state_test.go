@@ -661,3 +661,446 @@ func TestSyncInstanceState_RemembersBootstrapActivityAcrossEmptyFetch(t *testing
 		t.Fatal("CheckParams BootstrapActivitySeen = false, want true")
 	}
 }
+
+// TestSyncInstanceState_OnStartProbePresumesPresentOnError: probe-check
+// errors yield OnStartProbePresent=true. Rule 4d gates on positive
+// absence, not unobserved. Regression for EXP-021.
+func TestSyncInstanceState_OnStartProbePresumesPresentOnError(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchedAt := time.Now().Add(-9 * time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+	if ci.LaunchedAt == nil {
+		t.Fatalf("LaunchedAt not persisted")
+	}
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origProbe := syncCheckOnStartProbe
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckOnStartProbe = origProbe
+	})
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if !synced.OnStartProbePresent {
+		t.Fatalf("OnStartProbePresent = false on R2 error; defensive policy requires true so the dud watchdog cannot fire on a missed read")
+	}
+
+	// Successful "exists=false" must still pass through honestly — only
+	// the *error* case is treated as presumed-present.
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return false, nil
+	}
+	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if synced.OnStartProbePresent {
+		t.Fatalf("OnStartProbePresent = true on confirmed-absent probe; want false so the dud watchdog can fire on a real dud")
+	}
+
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return true, nil
+	}
+	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if !synced.OnStartProbePresent {
+		t.Fatalf("OnStartProbePresent = false on confirmed-present probe; want true")
+	}
+}
+
+// TestSyncInstanceState_OnStartProbeSkippedOutsideDudWindow verifies that the
+// R2 round-trip for the OnStart probe is skipped once the agent has reached
+// ready (AgentReadyAtUnix set), since the dud watchdog only cares about the
+// post-running, pre-ready window. This keeps reconcile passes cheap on
+// healthy fleets — see the comment block on the live binding.
+func TestSyncInstanceState_OnStartProbeSkippedOutsideDudWindow(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchedAt := time.Now().Add(-1 * time.Hour).Unix()
+	readyAt := time.Now().Add(-30 * time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+	_ = db.SetLaunchAgentReadyAtIfUnset(database, instanceID, time.Unix(readyAt, 0))
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	probeCalls := 0
+	origProbe := syncCheckOnStartProbe
+	t.Cleanup(func() { syncCheckOnStartProbe = origProbe })
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		probeCalls++
+		return true, nil
+	}
+
+	_ = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{HasStartedJob: true}, SyncInstanceStateOpts{})
+
+	if probeCalls != 0 {
+		t.Fatalf("syncCheckOnStartProbe called %d times for ready instance; want 0", probeCalls)
+	}
+}
+
+// TestSyncInstanceState_HeartbeatFetchedInDudWindow: heartbeat must be
+// fetched in the dud window so the agent's synchronous-at-startup first
+// heartbeat is visible to the watchdog. Regression for EXP-021.
+func TestSyncInstanceState_HeartbeatFetchedInDudWindow(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	hbCalls := 0
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origProbe := syncCheckOnStartProbe
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckOnStartProbe = origProbe
+	})
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "agent_starting" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		hbCalls++
+		return &HeartbeatSample{Ts: time.Now().Unix()}, 1 * time.Second
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return true, nil
+	}
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{HasStartedJob: false}, SyncInstanceStateOpts{})
+
+	if hbCalls == 0 {
+		t.Fatalf("heartbeat not fetched inside dud-detection window; previous gating left the watchdog blind to the agent's first heartbeat")
+	}
+	if synced.Heartbeat == nil {
+		t.Fatalf("synced.Heartbeat = nil, want non-nil from fetch")
+	}
+	if synced.HeartbeatAge == 0 {
+		t.Fatalf("synced.HeartbeatAge = 0, want > 0 (fresh heartbeat)")
+	}
+}
+
+// TestDudWatchdogSurvivesFlakyR2: cross-cutting fault-injection regression
+// for EXP-021. A /3-cycle flaky R2 on a healthy instance must not false-fire
+// rule 4d across 60 sync+check ticks.
+func TestDudWatchdogSurvivesFlakyR2(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchedAt := time.Now().Add(-10 * time.Minute).Unix() // past dud timeout
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+
+	// Healthy-bootstrap baseline: agent has reached agent_starting and is
+	// emitting heartbeats. Without R2 flakiness, rule 4d's `BootstrapStage
+	// == ""` and `HeartbeatAge == 0` conjuncts would each be false.
+	const healthyStage = "agent_starting"
+	healthyHB := func() (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Unix()}, 1 * time.Second
+	}
+
+	// Deterministic "flaky" decorator: every Nth call returns the failure
+	// path. Using a counter rather than rand keeps the test reproducible
+	// across CI runs.
+	const flakeEvery = 3 // ~33% failure rate
+	calls := 0
+	flake := func() bool {
+		calls++
+		return calls%flakeEvery == 0
+	}
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origProbe := syncCheckOnStartProbe
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckOnStartProbe = origProbe
+	})
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		if flake() {
+			return ""
+		}
+		return ""
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+		if flake() {
+			return ""
+		}
+		return healthyStage
+	}
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		if flake() {
+			return nil, 0
+		}
+		return healthyHB()
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		if flake() {
+			return nil, context.DeadlineExceeded
+		}
+		return nil, nil
+	}
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		if flake() {
+			return false, context.DeadlineExceeded
+		}
+		return true, nil
+	}
+
+	// Loop enough times to hit every flake combination across all
+	// fetchers. With 6 fetchers and a /3 cycle the combination space
+	// repeats inside ~18 ticks; we run 60 to leave wide margin.
+	rec := NewReconciler()
+	ci, _ := db.GetLaunch(database, instanceID)
+	for i := 0; i < 60; i++ {
+		synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+		params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+		action := rec.CheckInstance(params)
+		if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
+			t.Fatalf("tick %d: rule 4d false-fired on a healthy-but-R2-flaky instance:\n  stall=%q\n  params=%+v",
+				i, action.StallMessage, params)
+		}
+	}
+}
+
+// TestDudWatchdogFiresOnRealDud: confirms the defensive policy did not
+// over-defend. On a confirmed dud (honest R2, no probe, no heartbeat, no
+// bootstrap activity) rule 4d still fires after the timeout.
+func TestDudWatchdogFiresOnRealDud(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchedAt := time.Now().Add(-10 * time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origProbe := syncCheckOnStartProbe
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckOnStartProbe = origProbe
+	})
+	// Honest R2: every read confirms absence with no errors.
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return false, nil // confirmed-absent
+	}
+
+	rec := NewReconciler()
+	ci, _ := db.GetLaunch(database, instanceID)
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+	action := rec.CheckInstance(params)
+
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("rule 4d did NOT fire on a confirmed dud (action=%v, msg=%q); over-defended", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "dud provider") {
+		t.Fatalf("fired action is not the dud watchdog: %q", action.StallMessage)
+	}
+}
+
+// TestSyncInstanceState_PersistsFirstOnStartProbeSeen: first confirmed
+// probe observation persists to launches.first_onstart_probe_seen_unix
+// (set-once); presumed-present-on-error observations must NOT persist
+// (uncontaminated survival training data). See EXP-021.
+func TestSyncInstanceState_PersistsFirstOnStartProbeSeen(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchedAt := time.Now().Add(-3 * time.Minute).Unix() // inside dud window
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+	if ci.FirstOnStartProbeSeenUnix != nil {
+		t.Fatalf("FirstOnStartProbeSeenUnix should start NULL, got %v", *ci.FirstOnStartProbeSeenUnix)
+	}
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origProbe := syncCheckOnStartProbe
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckOnStartProbe = origProbe
+	})
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	// First check returns "exists=true" with no error: probe is present.
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return true, nil
+	}
+
+	t0 := time.Now()
+	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+
+	got, _ := db.GetLaunch(database, instanceID)
+	if got.FirstOnStartProbeSeenUnix == nil {
+		t.Fatalf("FirstOnStartProbeSeenUnix not persisted after first observation")
+	}
+	if delta := time.Unix(*got.FirstOnStartProbeSeenUnix, 0).Sub(t0); delta < -5*time.Second || delta > 5*time.Second {
+		t.Errorf("FirstOnStartProbeSeenUnix = %v, want close to %v (delta %v)", *got.FirstOnStartProbeSeenUnix, t0, delta)
+	}
+
+	// A subsequent observation must NOT overwrite (set-once semantics).
+	originalTs := *got.FirstOnStartProbeSeenUnix
+	time.Sleep(1100 * time.Millisecond)
+	SyncInstanceState(context.Background(), database, got, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+
+	again, _ := db.GetLaunch(database, instanceID)
+	if again.FirstOnStartProbeSeenUnix == nil || *again.FirstOnStartProbeSeenUnix != originalTs {
+		t.Fatalf("second observation overwrote first-seen: was %d, now %v",
+			originalTs, again.FirstOnStartProbeSeenUnix)
+	}
+
+	// A presumed-present-on-error observation must NOT persist (we only
+	// want true positives in the training data).
+	another, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create second instance: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, another); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+		return false, context.DeadlineExceeded // R2 errored; presumed-present
+	}
+	ci2, _ := db.GetLaunch(database, another)
+	SyncInstanceState(context.Background(), database, ci2, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+
+	got2, _ := db.GetLaunch(database, another)
+	if got2.FirstOnStartProbeSeenUnix != nil {
+		t.Fatalf("R2-errored 'presumed-present' must not persist a first-seen time; corrupts survival training data. got %v", *got2.FirstOnStartProbeSeenUnix)
+	}
+}

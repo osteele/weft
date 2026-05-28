@@ -16,6 +16,12 @@ import (
 )
 
 // Test-mockable fetch functions for SyncInstanceState.
+//
+// syncCheckOnStartProbe checks whether the OnStart probe key exists in R2.
+// The live binding is reconcileObjectExists from reconcile.go, which already
+// handles nil clients and recovers from stub-client panics in tests. We share
+// that binding so the watch and reconcile paths agree on what "probe present"
+// means.
 var (
 	syncFetchInstancePhase  = fetchInstancePhase
 	syncFetchBootstrapStage = fetchBootstrapStage
@@ -23,6 +29,9 @@ var (
 	syncFetchJobProgress    = fetchJobProgress
 	syncFetchTermIntent     = fetchTerminationIntentFromR2
 	syncCheckR2GraceStatus  = checkR2GraceStatus
+	syncCheckOnStartProbe   = func(ctx context.Context, c *r2.Client, key string) (bool, error) {
+		return reconcileObjectExists(ctx, c, key)
+	}
 )
 
 // SyncedState holds the observation state collected from R2 and the provider,
@@ -40,7 +49,13 @@ type SyncedState struct {
 	AgentVersion          string
 	PhaseChangedAt        *time.Time
 	BootstrapActivitySeen bool
-	JobsUpdated           int // count of job status transitions (e.g. queued→running)
+	// OnStartProbePresent reports whether the OnStart probe key was seen
+	// in R2 during the dud-detection window. True on R2 error (presumed
+	// present) so a hiccup cannot combine with other empty signals to
+	// false-fire rule 4d. See instance_check.go § rule 4d for the wider
+	// absence-conjunction contract and lab-notebook EXP-021 for context.
+	OnStartProbePresent bool
+	JobsUpdated         int // count of job status transitions (e.g. queued→running)
 }
 
 // SyncInstanceStateOpts configures optional behaviors for SyncInstanceState.
@@ -141,14 +156,49 @@ func SyncInstanceState(
 			s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
 		}()
 	}
-	if phaseNonEmpty || jobState.HasStartedJob {
+	// In the dud-detection window we also fetch the heartbeat and OnStart
+	// probe — both are positive "agent alive" signals the watchdog needs
+	// to weigh against its absence-conjunction. See EXP-021.
+	inDudWindow := ci.InDudDetectionWindow()
+	if phaseNonEmpty || jobState.HasStartedJob || inDudWindow {
 		wave2.Add(1)
 		go func() {
 			defer wave2.Done()
 			s.Heartbeat, s.HeartbeatAge = syncFetchHeartbeat(ctx, r2Client, instanceID)
 		}()
 	}
+	var probeExists bool
+	var probeErr error
+	probeChecked := r2Client != nil && inDudWindow
+	if probeChecked {
+		wave2.Add(1)
+		go func() {
+			defer wave2.Done()
+			probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			probeExists, probeErr = syncCheckOnStartProbe(probeCtx, r2Client, r2keys.InstanceOnStartProbe(instanceID))
+		}()
+	}
 	wave2.Wait()
+	if probeChecked {
+		// Presume present on R2 error (see OnStartProbePresent doc).
+		// Only confirmed-present observations are persisted, so the
+		// future survival training data stays uncontaminated.
+		if probeErr != nil {
+			s.OnStartProbePresent = true
+		} else {
+			s.OnStartProbePresent = probeExists
+			if probeExists && ci.FirstOnStartProbeSeenUnix == nil {
+				now := time.Now()
+				if persistErr := db.SetLaunchFirstOnStartProbeSeenIfUnset(database, instanceID, now); persistErr != nil {
+					slog.Warn("persist first onstart-probe-seen", "component", "sync", "instance", instanceID, "error", persistErr)
+				} else {
+					t := now.Unix()
+					ci.FirstOnStartProbeSeenUnix = &t
+				}
+			}
+		}
+	}
 
 	if hbPhase := freshHeartbeatPhase(ci, s.Heartbeat, s.HeartbeatAge); hbPhase != "" && hbPhase != s.InstancePhase {
 		if phase, _ := displayPhase(jobStatuses, jobs, hbPhase); phase != "" {
@@ -254,9 +304,14 @@ func SyncInstanceState(
 		seen, err := db.HasBootstrapTransitions(database, ci.ID)
 		if err != nil {
 			slog.Warn("check bootstrap transitions", "component", "sync", "instance", instanceID, "error", err)
+			// Presume seen on DB error — rule 4d's absence conjunction
+			// must not fire on a SQLite hiccup. Mirrors OnStart probe.
+			s.BootstrapActivitySeen = true
+		} else {
+			s.BootstrapActivitySeen = seen
 		}
-		s.BootstrapActivitySeen = seen
 	}
+
 	if syncObservedR2State(s) {
 		phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
 			LaunchID:         instanceID,
@@ -362,5 +417,6 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		TerminationIntent:     s.TerminationIntent,
 		PhaseChangedAt:        s.PhaseChangedAt,
 		BootstrapActivitySeen: s.BootstrapActivitySeen,
+		OnStartProbePresent:   s.OnStartProbePresent,
 	}
 }

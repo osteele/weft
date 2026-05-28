@@ -391,18 +391,8 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		}
 		params.HedgeCohortHasReadySibling = hasWinner
 	}
-	// Probe presence is only relevant in the dud-detection window: post-
-	// running, pre-ready. Skipping the R2 round-trip otherwise keeps the
-	// reconcile pass cheap on healthy fleets.
-	if r2Client != nil && ci.Status == db.LaunchStatusRunning &&
-		ci.LaunchedAt != nil && *ci.LaunchedAt > 0 && ci.AgentReadyAtUnix == nil {
-		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		exists, err := reconcileObjectExists(probeCtx, r2Client, r2keys.InstanceOnStartProbe(ci.ID))
-		cancel()
-		if err == nil {
-			params.OnStartProbePresent = exists
-		}
-	}
+	// OnStartProbePresent comes from SyncInstanceState above (shared
+	// across watch and reconcile).
 	resolveLastProviderStatusChange(database, &params, ci.ID)
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival

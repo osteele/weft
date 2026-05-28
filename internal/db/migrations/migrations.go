@@ -49,13 +49,70 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyBaseline},
 		&goose.GoFunc{RunDB: dropBaseline},
 	)
+	// 00009 lives as a .sql file too (so the migration index is contiguous
+	// and grep-able), but its body is an inert no-op. The real work is
+	// done by this Go migration, which is idempotent on the test path that
+	// resets goose to 0 and re-runs every migration against an already-
+	// current DB. See applyAddOnStartProbeSeenColumn.
+	addProbeSeen := goose.NewGoMigration(
+		9,
+		&goose.GoFunc{RunDB: applyAddOnStartProbeSeenColumn},
+		&goose.GoFunc{RunDB: dropAddOnStartProbeSeenColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline),
+		goose.WithGoMigrations(baseline, addProbeSeen),
 		goose.WithDisableGlobalRegistry(true),
 	)
+}
+
+// applyAddOnStartProbeSeenColumn adds launches.first_onstart_probe_seen_unix
+// and its partial index. SQLite has no ALTER TABLE ... ADD COLUMN IF NOT
+// EXISTS, so we ask pragma_table_info first and skip the ALTER if the column
+// is already there (true for any DB that picked up the column from the
+// baseline). This keeps the migration idempotent on the test path that resets
+// goose to 0 and re-runs every migration against an already-current DB.
+//
+// See migration sql/00009_launches_onstart_probe_seen_at.sql for the
+// commentary; the .sql file is intentionally a no-op so the migration index
+// stays contiguous and greppable.
+func applyAddOnStartProbeSeenColumn(ctx context.Context, db *sql.DB) error {
+	var exists int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('launches') WHERE name = 'first_onstart_probe_seen_unix'`,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("inspect launches columns: %w", err)
+	}
+	if exists == 0 {
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE launches ADD COLUMN first_onstart_probe_seen_unix INTEGER`,
+		); err != nil {
+			return fmt.Errorf("add first_onstart_probe_seen_unix column: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_launches_first_onstart_probe_seen
+		    ON launches(first_onstart_probe_seen_unix)
+		    WHERE first_onstart_probe_seen_unix IS NOT NULL`,
+	); err != nil {
+		return fmt.Errorf("create first_onstart_probe_seen index: %w", err)
+	}
+	return nil
+}
+
+func dropAddOnStartProbeSeenColumn(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx,
+		`DROP INDEX IF EXISTS idx_launches_first_onstart_probe_seen`,
+	); err != nil {
+		return err
+	}
+	// SQLite ALTER TABLE DROP COLUMN exists since 3.35 but is brittle in
+	// the presence of indexes and FKs. Down is best-effort; the index
+	// drop above is the load-bearing part for a clean re-up.
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN first_onstart_probe_seen_unix`)
+	return nil
 }
 
 // HasPending reports whether any migration has not yet been applied to db.
@@ -81,14 +138,22 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 	return v
 }
 
+// goMigrationVersions enumerates the versions implemented as Go migrations
+// (versions whose work is not in sql/NNNNN_*.sql because they need column-
+// existence checks or other logic SQL alone can't express idempotently).
+// Keep in sync with the goose.WithGoMigrations call in newProvider.
+var goMigrationVersions = []int64{9}
+
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus
-// any higher-numbered .sql migration under sql/.
+// any higher-numbered .sql migration under sql/ and any Go-migration version
+// registered in goMigrationVersions.
 func Target() int64 {
 	target := int64(1) // the squashed baseline
 	entries, err := fs.ReadDir(sqlMigrations, "sql")
 	if err != nil {
-		return target
+		// Fall through to Go-migration scan; baseline + goMigrationVersions
+		// still gives a meaningful Target even without the embed.
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
@@ -99,6 +164,11 @@ func Target() int64 {
 			continue
 		}
 		if v, err := strconv.ParseInt(prefix, 10, 64); err == nil && v > target {
+			target = v
+		}
+	}
+	for _, v := range goMigrationVersions {
+		if v > target {
 			target = v
 		}
 	}

@@ -1039,6 +1039,10 @@ rule DudVastDetection {
             and instance.launched_at != null
             and instance.agent_ready_at = null
             and not OnStartProbeWritten(instance)
+            and not BootstrapActivitySeen(instance)
+            and not HeartbeatObserved(instance)
+            and InstancePhase(instance) = ""
+            and BootstrapStage(instance) = ""
             and now - instance.launched_at >= config.dud_vast_timeout
 
     ensures: instance.status = failed
@@ -1060,6 +1064,30 @@ rule DudVastDetection {
         -- means an 8-minute window catches dud rentals without false-
         -- killing slow-but-progressing legitimate ones.
         --
+        -- Defense-in-depth absence signals. The rule conjoins six
+        -- absence signals rather than the single OnStart probe because
+        -- each individual R2 read can return an indistinguishable
+        -- "empty" for *confirmed-empty* and *couldn't-ask* (R2 5xx,
+        -- transient timeout, stale list). Requiring all six to be empty
+        -- raises the bar for false-firing on a single flaky read. Every
+        -- predicate carries the same correctness obligation: it MUST
+        -- distinguish a confirmed-absent observation from a failed
+        -- check, and on failure return the safe value (present/seen)
+        -- so the conjunction cannot fire on the back of missed reads.
+        -- Specifically:
+        --   - OnStartProbeWritten: R2 ObjectExists; on R2 error,
+        --     returns true (presumed present).
+        --   - BootstrapActivitySeen: live_state || R2 stage || DB
+        --     transitions; on DB error, returns true.
+        --   - HeartbeatObserved: heartbeat key fetched in the dud
+        --     window (status=running, pre-ready); on fetch error, the
+        --     synced state retains no heartbeat-absent claim.
+        --   - InstancePhase, BootstrapStage: same R2 fetch path.
+        -- Incident 2026-05-28 (wi3273, wi3280): a transient R2 5xx
+        -- during the OnStart probe existence check caused a healthy
+        -- instance to be classified as dud and terminated at the 9
+        -- minute mark. The defensive policy above is the response.
+        --
         -- Reason is infra_failure (retryable): the orphaned jobs reset
         -- to unplaced and RelaunchAfterInfraFailure picks them up on a
         -- fresh offer (preferably on a different host, since the
@@ -1067,9 +1095,19 @@ rule DudVastDetection {
         --
         -- Implementation: internal/campaign/instance_check.go §4d
         -- (ActionEmptyStatusTimeout with "dud Vast" stall message).
-        -- The reconciler pre-fetches OnStartProbePresent only when
-        -- LaunchedAt != nil and AgentReadyAtUnix == nil — the dud
-        -- window — to keep healthy-fleet reconcile passes cheap.
+        -- SyncInstanceState populates the absence signals for both the
+        -- watch and reconcile paths via internal/campaign/sync_state.go,
+        -- where the on-error defaults above are enforced. The dud
+        -- window (LaunchedAt != nil and AgentReadyAtUnix == nil) gates
+        -- the OnStart probe and heartbeat fetches to keep healthy-
+        -- fleet reconcile passes cheap.
+        --
+        -- Open: the 8-minute fixed threshold is at odds with P2's
+        -- adaptive-threshold thesis. RQ-E2 covers tuning the
+        -- bootstrap/first-registration survival cutoffs; the dud
+        -- timeout is a sibling fixed threshold that should be moved
+        -- onto the same survival framework, stratified by
+        -- (provider, data_center). Tracked separately.
 }
 
 rule HeartbeatStaleAfterReady {

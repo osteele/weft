@@ -30,15 +30,40 @@ type SourceMapping struct {
 	LocalDir  string // local source directory, used to read the project uv.lock
 }
 
-// writeStageMarker emits a bash command to write a bootstrap stage marker to R2.
+// writeStageMarker emits a bash command to write a bootstrap stage marker
+// through the _weft_mark_stage helper, which retries the rcat and swallows
+// failure so a transient R2 5xx cannot abort the bootstrap under set -e.
+// Markers are advisory; see lab-notebook EXP-021.
 func writeStageMarker(b *strings.Builder, instanceID int64, stage string) {
 	if instanceID == 0 {
 		return
 	}
 	b.WriteString(fmt.Sprintf(
-		"echo \"%s\" | rclone rcat \"r2:$R2_BUCKET/bootstrap/%d/stage\"\n",
-		stage, instanceID,
+		"_weft_mark_stage %d %q\n",
+		instanceID, stage,
 	))
+}
+
+// writeStageHelper emits the bash function that all stage-marker writes go
+// through. It retries a small number of times to ride out brief R2 hiccups,
+// then unconditionally returns success so the caller cannot abort the
+// bootstrap on a marker-write failure.
+func writeStageHelper(b *strings.Builder) {
+	b.WriteString(`_weft_mark_stage() {
+  # Best-effort bootstrap stage marker: retry briefly, then give up cleanly.
+  # Markers are advisory; bootstrap must continue even if R2 is flaking.
+  local _id="$1" _stage="$2" _i
+  for _i in 1 2 3 4 5; do
+    if echo "${_stage}" | rclone rcat "r2:${R2_BUCKET}/bootstrap/${_id}/stage" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "weft: failed to write stage marker '${_stage}' after retries (continuing)" >&2
+  return 0
+}
+
+`)
 }
 
 // GenerateBootstrapScript produces a bash script that downloads assets from R2
@@ -56,6 +81,7 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 	b.WriteString("export HF_HUB_CACHE=/workspace/.cache/huggingface/hub\n")
 	b.WriteString("export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub\n")
 	b.WriteString("export UV_CACHE_DIR=/workspace/.cache/uv\n\n")
+	writeStageHelper(&b)
 	writeFailureTrap(&b, manifest.DBInstanceID)
 	writeHFDownloadHelpers(&b)
 
@@ -133,8 +159,10 @@ func writeFailureTrap(b *strings.Builder, instanceID int64) {
 	if instanceID == 0 {
 		return
 	}
+	// Trailing `|| true` keeps the trap itself crash-proof if the helper
+	// ever changes shape.
 	b.WriteString(fmt.Sprintf(
-		"trap '_weft_rc=$?; echo \"failed:${_weft_rc}\" | rclone rcat \"r2:$R2_BUCKET/bootstrap/%d/stage\" >/dev/null 2>&1 || true; exit ${_weft_rc}' ERR\n\n",
+		"trap '_weft_rc=$?; _weft_mark_stage %d \"failed:${_weft_rc}\" >/dev/null 2>&1 || true; exit ${_weft_rc}' ERR\n\n",
 		instanceID,
 	))
 }

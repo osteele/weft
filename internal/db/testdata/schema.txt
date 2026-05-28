@@ -385,6 +385,7 @@ table launches
   col 56 agent_ready_at_unix INTEGER notnull=0 default=<none> pk=0
   col 57 target_id INTEGER notnull=0 default=<none> pk=0
   col 58 hedge_cohort_id INTEGER notnull=0 default=<none> pk=0
+  col 59 first_onstart_probe_seen_unix INTEGER notnull=0 default=<none> pk=0
   fk campaign_id -> campaigns(id) on_update=NO ACTION on_delete=NO ACTION
   fk host_id -> hosts(id) on_update=NO ACTION on_delete=NO ACTION
   check (status IN ('planned', 'launching', 'running', 'paused', 'grace', 'completed', 'failed', 'canceled'))

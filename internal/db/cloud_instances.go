@@ -34,7 +34,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		provider_running_at,
 		instance_type, max_bid_price_cents, on_demand_ref_cents,
 		cordoned, cordon_reason, cordoned_at,
-		hedge_cohort_id`
+		hedge_cohort_id, first_onstart_probe_seen_unix`
 
 // Launch status constants (same values used for both Launch and Campaign).
 const (
@@ -181,13 +181,20 @@ type Launch struct {
 	// the first job starts running). It stays set across restarts and
 	// gives the move-to-new "claim after agent ready" path a concrete
 	// per-launch signal to consult.
-	AgentReadyAtUnix   *int64
-	DataCenter         string // data center / geolocation of the instance
-	InstanceRole       string // "worker" or "donor"
-	DonorInstanceID    *int64 // DB ID of the donor instance that seeded this worker (data locality)
-	SeedDownloadSecs   *int   // on donor: total download duration (HF + uv)
-	SeedCopySecs       *int   // on worker: copy-from-donor duration
-	ReplacedInstanceID *int64 // DB ID of the failed instance this one replaces (relaunch chain)
+	AgentReadyAtUnix *int64
+	// FirstOnStartProbeSeenUnix is set the first time sync observes the
+	// instance's OnStart probe key in R2. It is the closest signal we
+	// have to "the container actually executed and had network", and
+	// the input data to a future per-provider survival fit that will
+	// replace the fixed dudVastTimeout. See migration 00009 and the
+	// "Open" note in specs/campaign-lifecycle.allium § DudVastDetection.
+	FirstOnStartProbeSeenUnix *int64
+	DataCenter                string // data center / geolocation of the instance
+	InstanceRole              string // "worker" or "donor"
+	DonorInstanceID           *int64 // DB ID of the donor instance that seeded this worker (data locality)
+	SeedDownloadSecs          *int   // on donor: total download duration (HF + uv)
+	SeedCopySecs              *int   // on worker: copy-from-donor duration
+	ReplacedInstanceID        *int64 // DB ID of the failed instance this one replaces (relaunch chain)
 	// HedgeCohortID, when non-nil, is the launch ID of the primary in a
 	// hedged-launch cohort. All members of a cohort (primary + probes)
 	// share the same value, which by convention is the primary's own
@@ -1137,11 +1144,32 @@ func SetLaunchAgentReadyAtIfUnset(db *sql.DB, id int64, t time.Time) error {
 	return err
 }
 
+// SetLaunchFirstOnStartProbeSeenIfUnset records the first OnStart-probe
+// observation for this launch. Idempotent. See EXP-021.
+func SetLaunchFirstOnStartProbeSeenIfUnset(db *sql.DB, id int64, t time.Time) error {
+	_, err := db.Exec(
+		`UPDATE launches SET first_onstart_probe_seen_unix = ? WHERE id = ? AND first_onstart_probe_seen_unix IS NULL`,
+		t.Unix(), id,
+	)
+	return err
+}
+
 // IsAgentReady reports whether the agent on this launch has signaled
 // readiness at least once. Used by the move-to-new speculative confirm
 // path to decide when it is safe to claim the job onto this instance.
 func (c *Launch) IsAgentReady() bool {
 	return c != nil && c.AgentReadyAtUnix != nil
+}
+
+// InDudDetectionWindow reports whether this launch is in the window where
+// the dud-provider watchdog applies: provider reports running, but the
+// agent has not yet signaled ready. Used by both sync_state to decide
+// which R2 fetches to issue and by instance_check rule 4d to gate firing.
+func (c *Launch) InDudDetectionWindow() bool {
+	return c != nil &&
+		c.Status == LaunchStatusRunning &&
+		c.LaunchedAt != nil && *c.LaunchedAt > 0 &&
+		c.AgentReadyAtUnix == nil
 }
 
 // BootstrapDeadlineExceeded reports whether `now` is past the launch's
@@ -1984,6 +2012,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var cordonReason sql.NullString
 	var cordonedAt sql.NullInt64
 	var hedgeCohortID sql.NullInt64
+	var firstOnStartProbeSeen sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -2004,7 +2033,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&providerRunningAt,
 		&instanceType, &maxBidPriceCents, &onDemandRefCents,
 		&cordoned, &cordonReason, &cordonedAt,
-		&hedgeCohortID,
+		&hedgeCohortID, &firstOnStartProbeSeen,
 	)
 	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
@@ -2168,6 +2197,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if hedgeCohortID.Valid {
 		c.HedgeCohortID = &hedgeCohortID.Int64
+	}
+	if firstOnStartProbeSeen.Valid {
+		c.FirstOnStartProbeSeenUnix = &firstOnStartProbeSeen.Int64
 	}
 	return &c, nil
 }

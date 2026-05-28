@@ -522,8 +522,25 @@ rule ParallelR2MarkerFetch {
     -- Wave 2 (phase-dependent): issued after the phase is known.
     --   phase non-empty → job progress + heartbeat (concurrent)
     --   phase empty and not has_started_job → bootstrap stage
-    --   has_started_job → heartbeat
+    --   has_started_job OR in_dud_window → heartbeat
+    --
+    -- in_dud_window = status = running and launched_at != null and
+    -- agent_ready_at = null. We fetch heartbeat there too so the
+    -- agent's first synchronous heartbeat — written at startup, well
+    -- before any instance phase appears — is visible to DudVastDetection.
+    -- Without it, an alive agent looked dead to the watchdog
+    -- (incident wi3280, 2026-05-28; see lab-notebook EXP-021).
     ensures: R2PhaseDependentMarkersFetched(instance)
+
+    -- The OnStart probe existence check (instance/<id>/onstart-probe)
+    -- runs in the same wave when in_dud_window holds. On R2 error the
+    -- observation is set to "presumed present" rather than "absent",
+    -- so a transient hiccup cannot combine with other empty signals
+    -- to false-fire DudVastDetection. The first confirmed-present
+    -- observation is persisted to launches.first_onstart_probe_seen_unix
+    -- as training data for a future per-provider survival fit; presumed-
+    -- present-on-error observations are NOT persisted.
+    -- Implementation: internal/campaign/sync_state.go SyncInstanceState.
 
     @guidance
         -- Fanning out these reads reduces per-instance R2 latency from
