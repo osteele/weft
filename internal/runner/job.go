@@ -56,6 +56,7 @@ func (ei ExitInfo) SignalName() string {
 // Hang-watchdog exit codes and labels. See specs/job-lifecycle.allium
 // rules GPUIdleKillsJob and StdoutSilenceKillsJob.
 const (
+	ExitCodeSetupTimeout          = 124 // matches timeout(1) convention; see RunSetupCommand
 	ExitCodeGPUIdleKill           = 125
 	ExitCodeStdoutSilenceKill     = 126
 	KillReasonGPUIdle             = "gpu-idle"
@@ -65,6 +66,7 @@ const (
 	FailureReasonCUDADriverTooOld = "cuda_driver_too_old"
 	FailureReasonTorchPreflight   = "torch_preflight_failed"
 	FailureReasonDiskFull         = "disk_full"
+	FailureReasonSetupTimeout     = "setup_timeout"
 )
 
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.
@@ -72,6 +74,8 @@ func DetectFailureReasonFromExitInfo(ei ExitInfo) string {
 	// Watchdog kills synthesize a specific exit code alongside SIGTERM;
 	// check exit code first so they aren't misclassified as killed_sigterm.
 	switch ei.ExitCode {
+	case ExitCodeSetupTimeout:
+		return FailureReasonSetupTimeout
 	case ExitCodeGPUIdleKill:
 		return FailureReasonGPUIdle
 	case ExitCodeStdoutSilenceKill:

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -46,6 +48,13 @@ type jobSequenceConfig struct {
 	Provider     string
 	InstanceType string
 	Resumed      bool
+
+	// SelfDestructCmd is the provider-specific shell command that terminates
+	// this instance from inside the container (e.g. `vastai destroy ...`).
+	// Used by infra-failure handlers (setup-timeout prewarm, disk-cap probe,
+	// etc.) to terminate the rental and let the coordinator's reconciler
+	// retry the affected jobs on a fresh instance.
+	SelfDestructCmd string
 }
 
 // agentRentalEnv builds the rental-context env vars set by the agent for
@@ -111,6 +120,12 @@ type setupPrewarmResult struct {
 	setupRan bool
 	didWork  bool
 	err      error
+	// exitInfo carries the underlying RunSetupCommand exit info when the
+	// prewarm failed. Specifically used downstream to distinguish setup-
+	// phase timeouts (exit 124) from generic prewarm failures — timeouts
+	// at this boundary almost always indicate infrastructure problems
+	// (rental network throughput, provider issues) rather than user code.
+	exitInfo runner.ExitInfo
 }
 
 type setupPrewarm struct {
@@ -349,7 +364,12 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
 		didWork = true
 		if ei, err := runner.RunSetupCommand(hfDownloadScript(assets), job.ID, workDir, env, paths, pickSetupTimeout(cfg)); err != nil {
-			return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("hf prewarm failed exit %d: %w%s", ei.ExitCode, err, prewarmLogTail(paths.Log))}
+			return setupPrewarmResult{
+				didWork:  true,
+				logPath:  paths.Log,
+				exitInfo: ei,
+				err:      fmt.Errorf("hf prewarm failed exit %d: %w%s", ei.ExitCode, err, prewarmLogTail(paths.Log)),
+			}
 		}
 	}
 
@@ -370,10 +390,20 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	didWork = true
 	ei, err := runner.RunSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg))
 	if err != nil {
-		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("%w%s", err, prewarmLogTail(paths.Log))}
+		return setupPrewarmResult{
+			didWork:  true,
+			logPath:  paths.Log,
+			exitInfo: ei,
+			err:      fmt.Errorf("%w%s", err, prewarmLogTail(paths.Log)),
+		}
 	}
 	if ei.ExitCode != 0 {
-		return setupPrewarmResult{didWork: true, logPath: paths.Log, err: fmt.Errorf("setup prewarm exit %d", ei.ExitCode)}
+		return setupPrewarmResult{
+			didWork:  true,
+			logPath:  paths.Log,
+			exitInfo: ei,
+			err:      fmt.Errorf("setup prewarm exit %d", ei.ExitCode),
+		}
 	}
 	return setupPrewarmResult{ok: true, didWork: true, setupRan: true, logPath: paths.Log}
 }
@@ -608,6 +638,27 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
 			recordPrewarmFailure(cfg, job, prewarm)
 
+			// Setup-phase timeout (exit 124) at this boundary almost always
+			// indicates infrastructure trouble (rental network throughput,
+			// HF/PyPI reachability) rather than user code. Mark the instance
+			// infra_failure and self-destruct so the coordinator's reconciler
+			// resets affected jobs to queued and the autopilot re-places them
+			// on a different rental. See specs/job-lifecycle.allium.
+			if prewarm.exitInfo.ExitCode == runner.ExitCodeSetupTimeout && cfg.SelfDestructCmd != "" {
+				slog.Warn("prewarm setup-timeout: terminating instance as infra_failure",
+					"component", "agent",
+					"job_id", job.ID,
+					"instance_id", cfg.InstanceID,
+					"error", prewarm.err)
+				terminateInstanceWithReason(
+					cfg.R2Bucket, cfg.InstanceID, cfg.SelfDestructCmd,
+					fmt.Sprintf("prewarm_setup_timeout:%d", job.ID),
+					job.ID,
+					db.TerminationReasonInfraFailure,
+					prewarm.err.Error(),
+				)
+			}
+
 			// Schedule the same post-job background work the normal path
 			// uses so the prewarm log (now under LogDir for this job)
 			// reaches R2. Without this the prewarm traceback dies with
@@ -797,7 +848,13 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 	if prewarm.err != nil {
 		reason = prewarm.err.Error()
 	}
-	ei := runner.ExitInfo{ExitCode: 1}
+	// Preserve the underlying RunSetupCommand exit code when present so
+	// downstream classification can distinguish exit 124 (setup-phase
+	// timeout, infrastructure-side) from a generic exit 1 (code error).
+	ei := prewarm.exitInfo
+	if ei.ExitCode == 0 {
+		ei.ExitCode = 1
+	}
 	_ = runner.WriteStatusFile(paths, ei)
 	_ = runner.WriteFailureReasonFile(paths, reason)
 	_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", reason, now, now, nil)

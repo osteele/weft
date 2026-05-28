@@ -30,6 +30,14 @@ func TestDetectFailureReason(t *testing.T) {
 	}
 }
 
+func TestDetectFailureReasonFromExitInfo_SetupTimeout(t *testing.T) {
+	got := DetectFailureReasonFromExitInfo(ExitInfo{ExitCode: ExitCodeSetupTimeout})
+	if got != FailureReasonSetupTimeout {
+		t.Errorf("DetectFailureReasonFromExitInfo(exit %d) = %q, want %q",
+			ExitCodeSetupTimeout, got, FailureReasonSetupTimeout)
+	}
+}
+
 func TestWriteAndReadFailureReasonFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	paths := NewJobPaths(tmpDir, 123)

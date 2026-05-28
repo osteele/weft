@@ -291,6 +291,7 @@ value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
                     | cuda_driver_too_old
+                    | setup_timeout
 
 -- The in-flight "this job is being placed" signal lives on
 -- PlacementIntent (specs/job-move.allium § PlacementIntent), not in
@@ -754,7 +755,8 @@ rule DetectFailureReason {
 
     -- Exit code 137 (SIGKILL) → OOM
     -- Exit code 139 (SIGSEGV) → segfault
-    -- Exit code 124 → timeout
+    -- Exit code 124 → setup_timeout (setup-phase watchdog fired before
+    --   the user command started — usually a slow rental network)
     -- Exit code 125 → killed_gpu_idle (GPU watchdog)
     -- Exit code 126 → killed_stdout_silence (log-silence watchdog)
     -- Disk exhaustion detected via system probes → disk_full
@@ -769,6 +771,24 @@ rule DetectFailureReason {
         -- nvidia-smi for GPU memory exhaustion, and df for disk full
         -- conditions. These system probes run on the remote host.
 }
+
+-- Setup-phase timeouts on cloud rentals must be classified as infrastructure
+-- failures, not terminal code failures. When a prewarm RunSetupCommand
+-- exceeds setup_timeout (default 1h), the agent exit code is 124. The agent
+-- must:
+--   1. Preserve the 124 exit code through recordPrewarmFailure into the
+--      R2 .complete marker (do not collapse to 1).
+--   2. Mark the rental instance as TerminationReasonInfraFailure and
+--      self-destruct, so the coordinator's reconciler resets affected jobs
+--      to queued and the autopilot re-places them on a different rental.
+-- Justification: a 1-hour HF/PyPI download timeout almost always signals
+-- rental network throughput problems, not user error. Collapsing 124 to 1
+-- and marking the job permanently failed strands the user on a stuck
+-- rental instead of moving on to a healthy one.
+-- Implementation: cmd/agent/jobloop.go runSetupPrewarm preserves
+-- ExitInfo on setupPrewarmResult.exitInfo; recordPrewarmFailure uses
+-- that exit code; the prewarm-failure branch terminates the instance
+-- with TerminationReasonInfraFailure when exitInfo.ExitCode is 124.
 
 -- ==========================================================================
 -- User actions

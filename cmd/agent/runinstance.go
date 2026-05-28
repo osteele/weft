@@ -238,6 +238,7 @@ func runInstance(args []string) {
 					OnPhase:             onPhase,
 					SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 					GPUWarmup:           manifest.GPUWarmup,
+					SelfDestructCmd:     manifest.SelfDestructCmd,
 				})
 				return
 			}
@@ -259,6 +260,7 @@ func runInstance(args []string) {
 		Provider:            manifest.Provider,
 		InstanceType:        manifest.InstanceType,
 		Resumed:             resumed,
+		SelfDestructCmd:     manifest.SelfDestructCmd,
 	})
 	anyFailed = seqResult.AnyFailed
 
