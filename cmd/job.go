@@ -1182,6 +1182,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if job.ErrorMessage != "" {
 			fmt.Printf("Error:       %s\n", job.ErrorMessage)
 		}
+		printJobLocalDiagnostics(database, job)
 		if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
 			fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
 		}

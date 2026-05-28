@@ -10,8 +10,6 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
-	"github.com/osteele/weft/internal/logcache"
-	"github.com/osteele/weft/internal/remediation"
 	"github.com/spf13/cobra"
 )
 
@@ -259,18 +257,7 @@ func summarizeJobIssue(job *db.Job, outcome string) string {
 }
 
 func diagnosisMessageForJob(job *db.Job) string {
-	if job.ErrorDiagnosis != "" {
-		d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
-		if err == nil && d != nil {
-			return formatDiagnosisSummary(d)
-		}
-	}
-	if cached, err := logcache.Read(job.ID); err == nil {
-		if d := remediation.DiagnoseFromLog(cached); d != nil {
-			return formatDiagnosisSummary(d)
-		}
-	}
-	return ""
+	return formatDiagnosisSummary(ResolveJobDiagnosis(job))
 }
 
 func humanizeFailureReason(reason string) string {

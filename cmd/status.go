@@ -18,7 +18,6 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/status"
 	"github.com/spf13/cobra"
@@ -693,10 +692,7 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 		fmt.Printf("          You can also write checkpoints to the job's output dir so the run can be resumed.\n")
 	}
 
-	// Show remediation info for failed jobs
-	if job.ErrorDiagnosis != "" {
-		printDiagnosisSummary(job)
-	}
+	printJobLocalDiagnostics(database, job)
 
 	fmt.Printf("Details:  weft info %s  # Show directory, command, env vars\n", ids.FormatJobID(job.ID))
 
@@ -881,10 +877,12 @@ func printFailedJobSummary(job *db.Job) {
 	fmt.Printf("  %-8s  %-10s  %-14s  %s\n", ids.FormatJobID(job.ID), job.TargetDisplay(), reason, desc)
 }
 
-// printDiagnosisSummary prints the auto-remediation diagnosis for a failed job.
+// printDiagnosisSummary prints the structured diagnosis for a failed job.
+// Resolves via ResolveJobDiagnosis (stored → log-cache fallback) so the
+// summary appears regardless of whether the remediation pipeline ran.
 func printDiagnosisSummary(job *db.Job) {
-	d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
-	if err != nil || d == nil {
+	d := ResolveJobDiagnosis(job)
+	if d == nil {
 		return
 	}
 

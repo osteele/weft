@@ -830,6 +830,38 @@ rule DetectFailureReason {
 -- humanizeFailureReason in cmd/campaign_diagnose.go and the FailureReason
 -- branch in internal/ui/terminal/list_selected_detail.go's
 -- appendJobStatusParts defensively wrap with firstLine.
+
+-- `weft job info` and `weft job status` must surface every locally
+-- derivable diagnostic signal for a failed job. "Locally derivable"
+-- means: the SQLite DB plus the local log cache at
+-- ~/.cache/weft/logs/<id>.log — no SSH, no R2 fetch, no provider call.
+-- The required surface includes, at minimum, when each is available:
+--   - structured Diagnosis (and Solution when the matched pattern
+--     defines one), resolved from job_attempts.error_diagnosis OR by
+--     scanning the cached log live when the column is empty;
+--   - launch termination_detail for the latest attempt's rental,
+--     restricted to failed/grace launches (completed adds no signal);
+--   - phase breakdown (setup / run / upload) from job_phase_timings;
+--   - GPU peak memory + mean/peak utilization from job_phase_timings.
+-- The motivation is symmetry with `weft instance diagnose`, which
+-- agents and operators already trust to derive everything from local
+-- state. Without the fallback to live log scanning, jobs that never
+-- invoke the remediation pipeline — benchmark / `processed` / no-retry
+-- failures — leave the DB column empty and the job-noun surfaces show
+-- only "Reason: error", forcing the reader to escalate to the
+-- instance-noun command. The 2026-05-28 EXP-179 wj2041 report (CUDA
+-- OOM in torch.compile, exit 1) was the named instance: `instance
+-- diagnose` surfaced "GPU out of memory" and "peak mem 81910 MiB" on
+-- an 80 GB device; `job info` and `job status` surfaced "Reason:
+-- error" and nothing else, hiding the smoking gun.
+-- Implementation: cmd/diagnosis_format.go ResolveJobDiagnosis does the
+-- stored-then-log-cache resolution; cmd/job_diagnostics.go
+-- printJobLocalDiagnostics renders all four signals; both `weft job
+-- info` (cmd/job.go printJobInfo loop) and `weft job status`
+-- (cmd/status.go printJobStatus) invoke it. New diagnostic surfaces
+-- that can be derived without network access SHOULD extend
+-- printJobLocalDiagnostics so both verbs grow together.
+
 -- ==========================================================================
 -- User actions
 -- ==========================================================================

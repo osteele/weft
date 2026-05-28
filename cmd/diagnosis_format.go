@@ -4,8 +4,30 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
 )
+
+// ResolveJobDiagnosis falls back to a live log-cache scan when the
+// stored diagnosis is empty so jobs that never invoked the remediation
+// pipeline (benchmark / processed / no-retry failures) still surface a
+// pattern. See specs/job-lifecycle.allium.
+func ResolveJobDiagnosis(job *db.Job) *remediation.ErrorDiagnosis {
+	if job == nil {
+		return nil
+	}
+	if job.ErrorDiagnosis != "" {
+		if d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis); err == nil && d != nil {
+			return d
+		}
+	}
+	cached, err := logcache.Read(job.ID)
+	if err != nil || cached == "" {
+		return nil
+	}
+	return remediation.DiagnoseFromLog(cached)
+}
 
 func formatDiagnosisSummary(d *remediation.ErrorDiagnosis) string {
 	if d == nil {
