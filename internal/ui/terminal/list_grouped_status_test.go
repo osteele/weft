@@ -739,6 +739,32 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsRetryPendingTimingForUnplacedRet
 	}
 }
 
+// Regression: the runaway breaker pause used to display as "retry pending",
+// which implies a backoff timer counting down. The pause is actually
+// conditional on a successful auto-probe; "breaker paused" tells the user
+// the autopilot has stepped back deliberately.
+func TestRenderJobListGroupedStatusPlainAt_ShowsBreakerPausedTimingForRunawayBreaker(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	end := int64(4_940)
+	jobs := []*db.Job{
+		{
+			ID:                 53,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "infra breaker",
+			QueuedAt:           4_000,
+			EndTime:            &end,
+			QueueBlockedReason: "new-instance retry blocked: paused: repeated infrastructure failures without progress",
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	want := "-   wj53 — proj infra breaker — breaker paused 1m ago"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_ShowsRetryRejectedTimingForBudgetGate(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	end := int64(4_940)

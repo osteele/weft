@@ -909,6 +909,16 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAt
 		if strings.Contains(reason, "retry budget exceeded") || strings.Contains(reason, "max attempts") {
 			return "retry rejected " + shortRelativeTime(now.Unix()-*job.EndTime)
 		}
+		// Runaway-breaker pause: the autopilot has stepped back from
+		// re-placing this job because the project's recent attempts
+		// produced too many infra failures (or, separately, too many
+		// launch failures) without forward progress. "retry pending"
+		// implies a backoff timer is counting down — misleading when
+		// the pause is conditional on a successful auto-probe rather
+		// than a clock. See internal/campaign/relaunch.go § runaway.
+		if strings.Contains(reason, "paused: repeated") || strings.Contains(reason, "retry blocked") {
+			return "breaker paused " + shortRelativeTime(now.Unix()-*job.EndTime)
+		}
 		return "retry pending " + shortRelativeTime(now.Unix()-*job.EndTime)
 	}
 	var placedAt int64
