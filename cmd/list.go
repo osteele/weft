@@ -15,7 +15,6 @@ import (
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
-	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/osteele/weft/internal/ui/terminal"
@@ -745,18 +744,7 @@ func showJob(database *sql.DB, id int64) error {
 	if progress := jobProgressSummary(database, job); progress != "" {
 		fmt.Printf("Progress:     %s\n", progress)
 	}
-	if job.ErrorDiagnosis != "" {
-		d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
-		if err == nil && d != nil {
-			fmt.Printf("Diagnosis:    %s (%s/%s)\n", d.Message, d.Category, d.Pattern)
-			if d.Solution != "" {
-				fmt.Printf("Solution:     %s\n", d.Solution)
-			}
-			if job.RetryCount > 0 {
-				fmt.Printf("Retried:      %d time(s)\n", job.RetryCount)
-			}
-		}
-	}
+	printJobLocalDiagnostics(database, job)
 	printJobAttemptSummary(database, job)
 
 	return nil

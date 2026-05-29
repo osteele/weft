@@ -831,14 +831,22 @@ rule DetectFailureReason {
 -- branch in internal/ui/terminal/list_selected_detail.go's
 -- appendJobStatusParts defensively wrap with firstLine.
 
--- `weft job info` and `weft job status` must surface every locally
--- derivable diagnostic signal for a failed job. "Locally derivable"
--- means: the SQLite DB plus the local log cache at
+-- `weft job info`, `weft job status`, and `weft list --show` must
+-- surface every locally derivable diagnostic signal for a failed job.
+-- "Locally derivable" means: the SQLite DB plus the local log cache at
 -- ~/.cache/weft/logs/<id>.log — no SSH, no R2 fetch, no provider call.
 -- The required surface includes, at minimum, when each is available:
 --   - structured Diagnosis (and Solution when the matched pattern
 --     defines one), resolved from job_attempts.error_diagnosis OR by
 --     scanning the cached log live when the column is empty;
+--   - for diagnoses with pattern=gpu_oom and parsed per-process VRAM
+--     attribution, a continuation block with main GPU process pid +
+--     memory, optional additional process, notes, and the
+--     `hint: increase --gpu-mem by ~NGB on retry` line. These signals
+--     are already surfaced by `weft instance diagnose` and one-line
+--     contexts via formatDiagnosisSummary; multi-line job-noun
+--     surfaces MUST render them via ErrorDiagnosis.GPUOOMDetailLines()
+--     so the per-process root cause is visible without an extra hop;
 --   - launch termination_detail for the latest attempt's rental,
 --     restricted to failed/grace launches (completed adds no signal);
 --   - phase breakdown (setup / run / upload) from job_phase_timings;
@@ -855,12 +863,17 @@ rule DetectFailureReason {
 -- an 80 GB device; `job info` and `job status` surfaced "Reason:
 -- error" and nothing else, hiding the smoking gun.
 -- Implementation: cmd/diagnosis_format.go ResolveJobDiagnosis does the
--- stored-then-log-cache resolution; cmd/job_diagnostics.go
--- printJobLocalDiagnostics renders all four signals; both `weft job
--- info` (cmd/job.go printJobInfo loop) and `weft job status`
--- (cmd/status.go printJobStatus) invoke it. New diagnostic surfaces
--- that can be derived without network access SHOULD extend
--- printJobLocalDiagnostics so both verbs grow together.
+-- stored-then-log-cache resolution;
+-- internal/remediation/diagnosis.go (*ErrorDiagnosis).GPUOOMDetailLines()
+-- returns the per-process / notes / hint fragments and is the shared
+-- source used by both formatDiagnosisSummary (one-line) and
+-- printDiagnosisSummary (multi-line); cmd/job_diagnostics.go
+-- printJobLocalDiagnostics renders all signals; `weft job info`
+-- (cmd/job.go printJobInfo loop), `weft job status` (cmd/status.go
+-- printJobStatus), and `weft list --show` / `weft jobs list --show`
+-- (cmd/list.go showJob) all invoke it. New diagnostic surfaces that
+-- can be derived without network access SHOULD extend
+-- printJobLocalDiagnostics so all three verbs grow together.
 
 -- ==========================================================================
 -- User actions

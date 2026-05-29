@@ -890,6 +890,10 @@ func printDiagnosisSummary(job *db.Job) {
 	if d.Solution != "" {
 		fmt.Printf("Solution:  %s\n", d.Solution)
 	}
+	for _, line := range d.GPUOOMDetailLines() {
+		// 11-space hang indent matches the value column of "Diagnosis: ".
+		fmt.Printf("           %s\n", line)
+	}
 	if d.Remediable {
 		if job.RetryCount > 0 {
 			fmt.Printf("Remediation: auto-retried (retry #%d)\n", job.RetryCount)

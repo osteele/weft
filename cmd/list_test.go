@@ -1,13 +1,17 @@
 package cmd
 
 import (
+	"database/sql"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/remediation"
 )
 
 func TestFilterJobsByEffectiveStatusExcludesHostlessRunningFromRunning(t *testing.T) {
@@ -545,4 +549,98 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read pipe: %v", err)
 	}
 	return string(data)
+}
+
+// recordFailedJob opens a fresh temp DB for the test, records a job, and
+// marks its latest attempt failed with exit 1. Returns the DB handle and
+// the new job ID. The DB and temp file are cleaned up via t.Cleanup.
+func recordFailedJob(t *testing.T, namePrefix string) (*sql.DB, int64) {
+	t.Helper()
+	tmpfile, err := os.CreateTemp("", namePrefix+"-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	tmpfile.Close()
+	t.Cleanup(func() { os.Remove(tmpfile.Name()) })
+
+	t.Cleanup(db.SetDBPath(tmpfile.Name()))
+
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	jobID, err := db.RecordJobStarting(database, "cool100", "/tmp/proj", "uv run job.py", "test job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	exit := 1
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, exit_code = ?, end_time = ? WHERE job_id = ?`,
+		db.StatusFailed, exit, time.Now().Unix(), jobID,
+	); err != nil {
+		t.Fatalf("mark attempt failed: %v", err)
+	}
+	return database, jobID
+}
+
+func TestShowJob_SurfacesStoredDiagnosis(t *testing.T) {
+	database, jobID := recordFailedJob(t, "showjob-stored")
+
+	diagJSON := mustMarshalDiagnosis(t, &remediation.ErrorDiagnosis{
+		Pattern:           "gpu_oom",
+		Message:           "GPU out of memory",
+		Solution:          "Reduce batch size or request more GPU memory",
+		GPUOOMMainPID:     12345,
+		GPUOOMProcesses:   []remediation.GPUOOMProcess{{PID: 12345, MemoryGiB: 78.42}},
+		GPUOOMHintDeltaGB: 8,
+	})
+	if err := db.SetAttemptErrorDiagnosis(database, jobID, diagJSON); err != nil {
+		t.Fatalf("set diagnosis: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := showJob(database, jobID); err != nil {
+			t.Fatalf("showJob: %v", err)
+		}
+	})
+
+	for _, want := range []string{
+		"Diagnosis: GPU out of memory (gpu_oom)",
+		"Solution:  Reduce batch size or request more GPU memory",
+		"           main GPU process pid=12345 using 78.42 GiB",
+		"           hint: increase --gpu-mem by ~8GB on retry",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("showJob output missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestShowJob_LogCacheFallback covers the EXP-179 regression: a job whose
+// remediation pipeline never ran (benchmark / processed / no-retry) leaves
+// error_diagnosis empty, so the diagnostic must come from a live scan of
+// the local log cache.
+func TestShowJob_LogCacheFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	database, jobID := recordFailedJob(t, "showjob-fallback")
+
+	logPath := logcache.CachePath(jobID)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	if err := logcache.Write(jobID, "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.70 GiB.\n"); err != nil {
+		t.Fatalf("write log cache: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := showJob(database, jobID); err != nil {
+			t.Fatalf("showJob: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "(gpu_oom)") {
+		t.Errorf("showJob did not surface gpu_oom pattern via log-cache fallback, got:\n%s", out)
+	}
 }

@@ -5,6 +5,7 @@ package remediation
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -195,6 +196,33 @@ func MarshalDiagnosis(d *ErrorDiagnosis) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// GPUOOMDetailLines returns the per-process VRAM line, optional additional-process
+// line, notes, and remediation hint for a gpu_oom diagnosis. Returns nil for
+// non-gpu_oom patterns or when no process attribution was parsed. Each entry is
+// a standalone fragment with no leading label, suitable for either "; "-joining
+// (one-line summary) or newline-printing (verbose continuation).
+func (d *ErrorDiagnosis) GPUOOMDetailLines() []string {
+	if d == nil || d.Pattern != "gpu_oom" || len(d.GPUOOMProcesses) == 0 {
+		return nil
+	}
+	mainPID := d.GPUOOMMainPID
+	mainGiB := d.GPUOOMProcesses[0].MemoryGiB
+	if mainPID == 0 {
+		mainPID = d.GPUOOMProcesses[0].PID
+	}
+	lines := []string{fmt.Sprintf("main GPU process pid=%d using %.2f GiB", mainPID, mainGiB)}
+	if d.GPUOOMExtraPID > 0 && d.GPUOOMExtraGiB > 0 {
+		lines = append(lines, fmt.Sprintf("additional GPU process pid=%d using %.2f GiB", d.GPUOOMExtraPID, d.GPUOOMExtraGiB))
+	}
+	if d.GPUOOMNotes != "" {
+		lines = append(lines, d.GPUOOMNotes)
+	}
+	if d.GPUOOMHintDeltaGB > 0 {
+		lines = append(lines, fmt.Sprintf("hint: increase --gpu-mem by ~%dGB on retry", d.GPUOOMHintDeltaGB))
+	}
+	return lines
 }
 
 // UnmarshalDiagnosis deserializes an ErrorDiagnosis from JSON.

@@ -295,3 +295,91 @@ func TestCheckFatalAtRuntime_GPUOOMNotFatal(t *testing.T) {
 		t.Errorf("GPU OOM should not be fatal-at-runtime, got %+v", d)
 	}
 }
+
+func TestGPUOOMDetailLines(t *testing.T) {
+	tests := []struct {
+		name string
+		d    *ErrorDiagnosis
+		want []string
+	}{
+		{
+			name: "nil receiver",
+			d:    nil,
+			want: nil,
+		},
+		{
+			name: "non-gpu_oom pattern returns nil",
+			d: &ErrorDiagnosis{
+				Pattern:         "module_not_found",
+				GPUOOMProcesses: []GPUOOMProcess{{PID: 1234, MemoryGiB: 12.5}},
+			},
+			want: nil,
+		},
+		{
+			name: "gpu_oom with empty process list returns nil",
+			d: &ErrorDiagnosis{
+				Pattern: "gpu_oom",
+			},
+			want: nil,
+		},
+		{
+			name: "main only — falls back to first process PID when MainPID unset",
+			d: &ErrorDiagnosis{
+				Pattern:         "gpu_oom",
+				GPUOOMProcesses: []GPUOOMProcess{{PID: 4321, MemoryGiB: 22.10}},
+			},
+			want: []string{"main GPU process pid=4321 using 22.10 GiB"},
+		},
+		{
+			name: "main with explicit MainPID",
+			d: &ErrorDiagnosis{
+				Pattern:         "gpu_oom",
+				GPUOOMMainPID:   12345,
+				GPUOOMProcesses: []GPUOOMProcess{{PID: 12345, MemoryGiB: 78.42}},
+			},
+			want: []string{"main GPU process pid=12345 using 78.42 GiB"},
+		},
+		{
+			name: "main + additional + notes + hint, in order",
+			d: &ErrorDiagnosis{
+				Pattern:           "gpu_oom",
+				GPUOOMMainPID:     12345,
+				GPUOOMProcesses:   []GPUOOMProcess{{PID: 12345, MemoryGiB: 78.42}},
+				GPUOOMExtraPID:    67890,
+				GPUOOMExtraGiB:    2.10,
+				GPUOOMNotes:       "shared workspace VRAM contention",
+				GPUOOMHintDeltaGB: 8,
+			},
+			want: []string{
+				"main GPU process pid=12345 using 78.42 GiB",
+				"additional GPU process pid=67890 using 2.10 GiB",
+				"shared workspace VRAM contention",
+				"hint: increase --gpu-mem by ~8GB on retry",
+			},
+		},
+		{
+			name: "additional process omitted when only PID is set",
+			d: &ErrorDiagnosis{
+				Pattern:         "gpu_oom",
+				GPUOOMProcesses: []GPUOOMProcess{{PID: 1, MemoryGiB: 1.0}},
+				GPUOOMExtraPID:  2,
+				// GPUOOMExtraGiB == 0
+			},
+			want: []string{"main GPU process pid=1 using 1.00 GiB"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.d.GPUOOMDetailLines()
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d (%v), want %d (%v)", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("line %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
