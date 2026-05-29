@@ -180,7 +180,9 @@ entity Instance {
 
     -- Cordon (drain): when true, autopilot/reuse skips this instance. The
     -- instance keeps running and its current job continues — only new
-    -- placement is suppressed. Cleared via `weft instance uncordon`.
+    -- placement is suppressed. Set/cleared via `weft cordon` /
+    -- `weft uncordon` (or the canonical `weft instance cordon|uncordon`,
+    -- or by pressing `C` on the selected job in the jobs-list TUI).
     cordoned: Boolean
     cordon_reason: String?
     cordoned_at: Timestamp?

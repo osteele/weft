@@ -18,9 +18,30 @@ import (
 )
 
 type jobListLayout struct {
-	width   int
-	columns []columnDef
+	width    int
+	columns  []columnDef
+	cordoned cordonedTargets
 }
+
+type cordonedTargets struct {
+	launches map[int64]bool
+	hosts    map[string]bool
+}
+
+func (c cordonedTargets) IsCordoned(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	switch job.TargetKind() {
+	case db.JobTargetRentalInstance:
+		return job.LaunchID != nil && c.launches[*job.LaunchID]
+	case db.JobTargetInventoryHost:
+		return c.hosts[job.Host]
+	}
+	return false
+}
+
+const cordonMarker = "⊘"
 
 func renderJobListPlain(jobs []*db.Job, width int) string {
 	return renderJobListPlainWithOptions(jobs, width, nil, false)
@@ -144,6 +165,10 @@ func responsiveColumnKeys(width int) []string {
 }
 
 func newJobListLayout(width int, jobs []*db.Job, columnKeys []string, noTruncate bool) jobListLayout {
+	return newJobListLayoutWithCordon(width, jobs, columnKeys, noTruncate, cordonedTargets{})
+}
+
+func newJobListLayoutWithCordon(width int, jobs []*db.Job, columnKeys []string, noTruncate bool, cordoned cordonedTargets) jobListLayout {
 	if width <= 0 {
 		width = 120
 	}
@@ -169,6 +194,9 @@ func newJobListLayout(width int, jobs []*db.Job, columnKeys []string, noTruncate
 			hasDescription = true
 			continue
 		}
+		if key == "host" {
+			cd = decorateHostColumnForCordon(cd, cordoned)
+		}
 		columns = append(columns, cd)
 	}
 
@@ -179,7 +207,22 @@ func newJobListLayout(width int, jobs []*db.Job, columnKeys []string, noTruncate
 		columns = append(columns, descDef)
 	}
 
-	return jobListLayout{width: width, columns: columns}
+	return jobListLayout{width: width, columns: columns, cordoned: cordoned}
+}
+
+func decorateHostColumnForCordon(cd columnDef, cordoned cordonedTargets) columnDef {
+	if len(cordoned.launches) == 0 && len(cordoned.hosts) == 0 {
+		return cd
+	}
+	inner := cd.value
+	cd.value = func(job *db.Job) string {
+		s := inner(job)
+		if cordoned.IsCordoned(job) {
+			return s + " " + cordonMarker
+		}
+		return s
+	}
+	return cd
 }
 
 // computeProjectWidth calculates the project column width from actual data.

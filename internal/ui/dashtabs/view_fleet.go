@@ -224,6 +224,9 @@ func instanceCard(l *db.Launch, jobs []*db.Job) string {
 	default:
 		statusLine = completedStyle.Render(displayStatus)
 	}
+	if l.Cordoned {
+		statusLine += " " + dimStyle.Render("[cordoned]")
+	}
 	rate := dimStyle.Render(fmt.Sprintf("$%.2f/hr", float64(l.CostPerHourCents)/100.0))
 	uptime := dimStyle.Render(launchUptime(l))
 

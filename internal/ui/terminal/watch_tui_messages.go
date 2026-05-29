@@ -105,6 +105,13 @@ type watchProcessDoneMsg struct {
 	err     error
 }
 
+type watchCordonDoneMsg struct {
+	jobID       int64
+	targetLabel string
+	cordoned    bool
+	err         error
+}
+
 // ---------------------------------------------------------------------------
 // Project-mode messages
 // ---------------------------------------------------------------------------

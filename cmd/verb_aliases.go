@@ -186,4 +186,12 @@ func init() {
 	rootCmd.AddCommand(terminateCmd)
 	terminateCmd.AddCommand(terminateCampaignCmd)
 	terminateCmd.AddCommand(terminateInstanceCmd)
+
+	// cordon / uncordon (top-level shortcuts; positional arg disambiguates
+	// instance vs host).
+	cordonAliasCmd := verbAlias("cordon <instance-id|host> [id|host...]", instanceCordonCmd)
+	uncordonAliasCmd := verbAlias("uncordon <instance-id|host> [id|host...]", instanceUncordonCmd)
+	cordonAliasCmd.Flags().StringVar(&instanceCordonReason, "reason", "", "Optional human-readable reason (recorded with the cordon)")
+	rootCmd.AddCommand(cordonAliasCmd)
+	rootCmd.AddCommand(uncordonAliasCmd)
 }

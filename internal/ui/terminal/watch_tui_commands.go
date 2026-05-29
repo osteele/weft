@@ -533,6 +533,42 @@ func requestWatchJobKill(database *sql.DB, jobID int64) tea.Cmd {
 	}
 }
 
+func requestWatchJobCordon(database *sql.DB, job *db.Job, cordon bool) tea.Cmd {
+	jobID := int64(0)
+	if job != nil {
+		jobID = job.ID
+	}
+	return func() tea.Msg {
+		if job == nil {
+			return watchCordonDoneMsg{err: fmt.Errorf("no job selected")}
+		}
+		switch job.TargetKind() {
+		case db.JobTargetRentalInstance:
+			if job.LaunchID == nil {
+				return watchCordonDoneMsg{jobID: jobID, err: fmt.Errorf("rental job has no launch id")}
+			}
+			if err := db.SetLaunchCordoned(database, *job.LaunchID, cordon, ""); err != nil {
+				return watchCordonDoneMsg{jobID: jobID, err: err}
+			}
+			return watchCordonDoneMsg{
+				jobID:       jobID,
+				targetLabel: "instance " + job.TargetDisplay(),
+				cordoned:    cordon,
+			}
+		case db.JobTargetInventoryHost:
+			if err := db.SetInventoryExecutionTargetCordoned(database, job.Host, cordon, ""); err != nil {
+				return watchCordonDoneMsg{jobID: jobID, err: err}
+			}
+			return watchCordonDoneMsg{
+				jobID:       jobID,
+				targetLabel: "host " + job.TargetDisplay(),
+				cordoned:    cordon,
+			}
+		}
+		return watchCordonDoneMsg{jobID: jobID, err: fmt.Errorf("job has no placement target")}
+	}
+}
+
 func requestWatchInstanceTerminate(database *sql.DB, instanceID int64) tea.Cmd {
 	return func() tea.Msg {
 		_, errs := terminateInstancesParallel(database, []int64{instanceID})

@@ -107,6 +107,7 @@ type listTUIModel struct {
 	launchSpinnerRunning       bool
 	recentFailedInstances      *recentFailedInstances
 	hostInfoByName             map[string]*db.CachedHostInfo
+	cordonedHostsByName        map[string]bool
 	quickLaunching             bool
 	quickLaunchScope           string
 	quickLaunchProgress        <-chan listQuickLaunchProgressMsg
@@ -212,6 +213,7 @@ type listJobsLoadedMsg struct {
 	launchStageEnteredAtByID map[int64]int64
 	recentFailedInstances    *recentFailedInstances
 	hostInfoByName           map[string]*db.CachedHostInfo
+	cordonedHostsByName      map[string]bool
 	autoPassPhase            autoPilotPhaseHint
 	autopilotPaused          bool
 	autopilotPausedReason    string
@@ -561,6 +563,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchStageEnteredAtByID = msg.launchStageEnteredAtByID
 		m.recentFailedInstances = msg.recentFailedInstances
 		m.hostInfoByName = msg.hostInfoByName
+		m.cordonedHostsByName = msg.cordonedHostsByName
 		m.autoPassPhase = msg.autoPassPhase
 		m.autopilotPaused = msg.autopilotPaused
 		m.autopilotPausedReason = msg.autopilotPausedReason
@@ -789,6 +792,18 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMessage = fmt.Sprintf("Job #%d killed", msg.jobID)
 		}
+		return m, m.reloadJobs()
+
+	case watchCordonDoneMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Cordon failed: %v", msg.err)
+			return m, nil
+		}
+		verb := "Uncordoned"
+		if msg.cordoned {
+			verb = "Cordoned"
+		}
+		m.statusMessage = fmt.Sprintf("%s %s", verb, msg.targetLabel)
 		return m, m.reloadJobs()
 
 	case watchUnplaceDoneMsg:
@@ -1408,11 +1423,12 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		return nil
 	}
 	return renderSelectedJobDetail(job, selectedJobContext{
-		launchLiveByID:  m.launchLiveByID,
-		launchByID:      m.launchByID,
-		hostInfoByName:  m.hostInfoByName,
-		siblingJobs:     m.jobs,
-		cloudConfigured: len(m.cloudClients) > 0,
+		launchLiveByID:      m.launchLiveByID,
+		launchByID:          m.launchByID,
+		hostInfoByName:      m.hostInfoByName,
+		cordonedHostsByName: m.cordonedHostsByName,
+		siblingJobs:         m.jobs,
+		cloudConfigured:     len(m.cloudClients) > 0,
 	}, time.Now())
 }
 
@@ -1445,6 +1461,28 @@ func listJobCanKillOrCancel(job *db.Job) bool {
 	default:
 		return false
 	}
+}
+
+func handleCordonToggle(m listTUIModel, job *db.Job) (tea.Model, tea.Cmd) {
+	kind := db.JobTargetUnplaced
+	if job != nil {
+		kind = job.TargetKind()
+	}
+	if kind != db.JobTargetRentalInstance && kind != db.JobTargetInventoryHost {
+		m.statusMessage = "Select a placed job to cordon its target"
+		return m, nil
+	}
+	target := "host"
+	if kind == db.JobTargetRentalInstance {
+		target = "instance"
+	}
+	verb := "Cordoning"
+	if m.cordonedTargets().IsCordoned(job) {
+		verb = "Uncordoning"
+	}
+	m.clearAutoPilotPersistentState()
+	m.statusMessage = fmt.Sprintf("%s %s %s...", verb, target, job.TargetDisplay())
+	return m, requestWatchJobCordon(m.database, job, verb == "Cordoning")
 }
 
 func (m listTUIModel) selectedGroupedJob() *db.Job {
@@ -2226,6 +2264,7 @@ func (m listTUIModel) footerText(rows int) string {
 		listKeyToggleUnprocessed,
 		listKeyToggleProcessed,
 		listKeyKillCancel,
+		listKeyToggleCordon,
 		listKeyPriority,
 		listKeyProjectFilter,
 		listKeyToggleStatusArea,
@@ -2252,14 +2291,14 @@ func (m listTUIModel) renderListHelpView() string {
 		selectedJobLines = append(selectedJobLines,
 			"  N launch selected on new instance",
 			"  P toggle priority",
-			"  x kill/cancel selected",
+			"  x kill/cancel  C cordon target",
 			"  u unplace selected",
 			"  p toggle processed tag",
 			"  m move selected",
 		)
 	} else if m.isGroupedView() {
 		selectedJobLines = append(selectedJobLines,
-			"  x kill/cancel selected",
+			"  x kill/cancel  C cordon target",
 			"  u unplace selected",
 			"  p toggle processed tag",
 		)
@@ -2267,6 +2306,7 @@ func (m listTUIModel) renderListHelpView() string {
 		selectedJobLines = append(selectedJobLines,
 			listKeyToggleProcessed.helpLine()+" tag",
 			listKeyKillCancel.helpLine()+" selected job",
+			listKeyToggleCordon.helpLine()+" selected job's target",
 		)
 	}
 
@@ -2374,7 +2414,23 @@ func (m listTUIModel) emptyStateText() string {
 }
 
 func (m *listTUIModel) rebuildLayout() {
-	m.layout = newJobListLayout(max(20, m.width-2), m.jobs, nil, false)
+	m.layout = newJobListLayoutWithCordon(max(20, m.width-2), m.jobs, nil, false, m.cordonedTargets())
+}
+
+func (m listTUIModel) cordonedTargets() cordonedTargets {
+	out := cordonedTargets{hosts: m.cordonedHostsByName}
+	if len(m.launchByID) > 0 {
+		launches := map[int64]bool{}
+		for id, l := range m.launchByID {
+			if l != nil && l.Cordoned {
+				launches[id] = true
+			}
+		}
+		if len(launches) > 0 {
+			out.launches = launches
+		}
+	}
+	return out
 }
 
 func (m *listTUIModel) rebuildGroupedRows() {
@@ -2573,6 +2629,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		}
 		placingJobIDs, placementQueuedAtByJob := placementDisplayMaps(placementStatusByJob)
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
+		cordonedHostsByName := loadCordonedHostsByName(database, jobs)
 		autopilotPaused, autopilotPausedReason := autopilotPauseState(database)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
@@ -2588,6 +2645,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			launchStageEnteredAtByID: stageEnteredAtByID,
 			recentFailedInstances:    loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now()),
 			hostInfoByName:           hostInfoByName,
+			cordonedHostsByName:      cordonedHostsByName,
 			autoPassPhase:            loadLatestAutoPilotPhase(database),
 			autopilotPaused:          autopilotPaused,
 			autopilotPausedReason:    autopilotPausedReason,
@@ -2710,6 +2768,50 @@ func loadInventoryHostInfo(database *sql.DB, jobs []*db.Job) map[string]*db.Cach
 		if _, want := names[info.Name]; want {
 			out[info.Name] = info
 		}
+	}
+	return out
+}
+
+func loadCordonedHostsByName(database *sql.DB, jobs []*db.Job) map[string]bool {
+	want := map[string]struct{}{}
+	for _, job := range jobs {
+		if job == nil || !job.HasInventoryHost() {
+			continue
+		}
+		host := strings.TrimSpace(job.Host)
+		if host != "" {
+			want[host] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	// Targeted read — db.ListExecutionTargets runs SyncExecutionTargets
+	// (multi-write upsert) and we're on the snapshot tick.
+	placeholders := make([]string, 0, len(want))
+	args := make([]any, 0, len(want)+1)
+	args = append(args, db.ExecutionTargetInventoryHost)
+	for h := range want {
+		placeholders = append(placeholders, "?")
+		args = append(args, h)
+	}
+	query := fmt.Sprintf(
+		`SELECT host FROM execution_targets
+		 WHERE kind = ? AND cordoned = 1 AND host IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil
+		}
+		out[host] = true
 	}
 	return out
 }

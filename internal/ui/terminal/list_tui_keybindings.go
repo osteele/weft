@@ -134,6 +134,7 @@ var (
 	listKeyAIAssist          = listKeyBinding{keys: "c", action: "coding-assistant"}
 	listKeyToggleProcessed   = listKeyBinding{keys: "p", action: "toggle processed"}
 	listKeyKillCancel        = listKeyBinding{keys: "x", aliases: []string{"k"}, action: "kill/cancel"}
+	listKeyToggleCordon      = listKeyBinding{keys: "C", action: "cordon"}
 	listKeyUnplace           = listKeyBinding{keys: "u", action: "unplace"}
 	listKeyPriority          = listKeyBinding{keys: "P", action: "priority"}
 	listKeyMove              = listKeyBinding{keys: "m", action: "move"}
@@ -210,6 +211,9 @@ func listFlatKeyBindings() []listKeyBinding {
 				m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
 			}
 			return m, requestWatchJobKill(m.database, job.ID)
+		}},
+		listKeyBinding{keys: listKeyToggleCordon.keys, action: listKeyToggleCordon.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return handleCordonToggle(m, m.currentSelectedJob())
 		}},
 		listKeyBinding{keys: listKeyToggleProcessed.keys, action: listKeyToggleProcessed.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			job := m.currentSelectedJob()
@@ -471,6 +475,9 @@ func listGroupedKeyBindings() []listKeyBinding {
 			m.clearAutoPilotPersistentState()
 			m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
 			return m, requestWatchJobKill(m.database, job.ID)
+		}},
+		listKeyBinding{keys: listKeyToggleCordon.keys, action: listKeyToggleCordon.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return handleCordonToggle(m, m.selectedGroupedJob())
 		}},
 		listKeyBinding{keys: listKeyUnplace.keys, action: listKeyUnplace.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			job := m.selectedGroupedJob()
