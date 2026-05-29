@@ -190,21 +190,47 @@ func prepareUVSyncEnvironment(workingDir, setupCmd string, envVars []string) (st
 	return setupCmd + dataloc.UVNoInstallPackageFlags(skip), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), nil
 }
 
-func prepareUVRunCommand(workingDir, setupCmd, command string) (string, error) {
+// uvRunEnvAdditions returns env vars that suppress uv's implicit sync on every
+// `uv run` invocation reachable from the job. Returned when the project is a
+// torch project using the system-provided pytorch environment (i.e. setup was
+// `uv sync --no-install-package torch ...` against an image-managed venv); the
+// implicit sync would otherwise refetch the CUDA wheels that were intentionally
+// skipped at setup time.
+//
+// UV_NO_SYNC is set in the process env rather than as a `--no-sync` command
+// flag so it covers compound shell commands, loop bodies, justfile recipes,
+// and nested scripts — anywhere uv may be invoked, not just the top-level
+// command string.
+func uvRunEnvAdditions(workingDir, setupCmd string) ([]string, error) {
 	if setupCmd != "uv sync" {
-		return command, nil
-	}
-	if !strings.Contains(command, "uv run") || strings.Contains(command, "--no-sync") {
-		return command, nil
+		return nil, nil
 	}
 	useSystem, err := shouldUseSystemTorchPackages(workingDir)
 	if err != nil {
-		return command, err
+		return nil, err
 	}
 	if !useSystem {
-		return command, nil
+		return nil, nil
 	}
-	return dataloc.InjectUvArgs(command, []string{"--no-sync"}), nil
+	return []string{"UV_NO_SYNC=1"}, nil
+}
+
+// applyUVRunEnvAdditions calls uvRunEnvAdditions and merges the result into
+// envVars. Preflight errors are logged but non-fatal; the job continues with
+// the unmodified env.
+func applyUVRunEnvAdditions(workingDir, setupCmd string, envVars []string, jobID int64, logPath string) []string {
+	uvEnv, err := uvRunEnvAdditions(workingDir, setupCmd)
+	if err != nil {
+		slog.Warn("uv run env-vars preflight failed; continuing without UV_NO_SYNC",
+			"component", "runner", "job_id", jobID, "error", err)
+		appendSetupLog(logPath, []byte("weft: uv run env-vars preflight failed; continuing without UV_NO_SYNC: "+err.Error()+"\n"))
+		return envVars
+	}
+	if len(uvEnv) == 0 {
+		return envVars
+	}
+	appendSetupLog(logPath, []byte("weft: UV_NO_SYNC=1 set; uv run will skip implicit sync\n"))
+	return mergeEnvVars(envVars, uvEnv)
 }
 
 func shouldUseSystemTorchPackages(workingDir string) (bool, error) {

@@ -275,7 +275,7 @@ version = "12.3.1.170"
 	}
 }
 
-func TestPrepareUVRunCommand_AddsNoSyncForTorchProject(t *testing.T) {
+func TestUVRunEnvAdditions_SetsNoSyncForTorchProject(t *testing.T) {
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
@@ -288,33 +288,32 @@ func TestPrepareUVRunCommand_AddsNoSyncForTorchProject(t *testing.T) {
 	uvSystemPythonPath = pythonPath
 	t.Cleanup(func() { uvSystemPythonPath = prev })
 
-	got, err := prepareUVRunCommand(dir, "uv sync", "uv run python scripts/eval.py --limit 10")
+	got, err := uvRunEnvAdditions(dir, "uv sync")
 	if err != nil {
-		t.Fatalf("prepareUVRunCommand() error = %v", err)
+		t.Fatalf("uvRunEnvAdditions() error = %v", err)
 	}
-	want := "uv run --no-sync python scripts/eval.py --limit 10"
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
+	want := []string{"UV_NO_SYNC=1"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 
-func TestPrepareUVRunCommand_DoesNotRewriteWhenNoReuse(t *testing.T) {
+func TestUVRunEnvAdditions_EmptyWhenNoSystemTorch(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"numpy>=1.0\"]\n"), 0o644); err != nil {
 		t.Fatalf("write pyproject: %v", err)
 	}
 
-	command := "uv run python scripts/eval.py"
-	got, err := prepareUVRunCommand(dir, "uv sync", command)
+	got, err := uvRunEnvAdditions(dir, "uv sync")
 	if err != nil {
-		t.Fatalf("prepareUVRunCommand() error = %v", err)
+		t.Fatalf("uvRunEnvAdditions() error = %v", err)
 	}
-	if got != command {
-		t.Fatalf("got %q, want %q", got, command)
+	if len(got) != 0 {
+		t.Fatalf("got %v, want empty", got)
 	}
 }
 
-func TestPrepareUVRunCommand_DoesNotDuplicateNoSync(t *testing.T) {
+func TestUVRunEnvAdditions_EmptyWhenSetupNotUVSync(t *testing.T) {
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
@@ -327,12 +326,13 @@ func TestPrepareUVRunCommand_DoesNotDuplicateNoSync(t *testing.T) {
 	uvSystemPythonPath = pythonPath
 	t.Cleanup(func() { uvSystemPythonPath = prev })
 
-	command := "uv run --no-sync python scripts/eval.py"
-	got, err := prepareUVRunCommand(dir, "uv sync", command)
+	// Non-uv setup (e.g. pixi, conda) leaves UV_NO_SYNC unset because the
+	// project venv is not managed by uv.
+	got, err := uvRunEnvAdditions(dir, "pixi install")
 	if err != nil {
-		t.Fatalf("prepareUVRunCommand() error = %v", err)
+		t.Fatalf("uvRunEnvAdditions() error = %v", err)
 	}
-	if got != command {
-		t.Fatalf("got %q, want %q", got, command)
+	if len(got) != 0 {
+		t.Fatalf("got %v, want empty", got)
 	}
 }

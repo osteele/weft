@@ -51,7 +51,9 @@ func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths J
 	cmdStr := torchPreflightCommand
 	if dataloc.HasUVLock(workingDir) {
 		// `uv run` arranges the project's resolved interpreter without
-		// re-running setup. --no-sync mirrors prepareUVRunCommand.
+		// re-running setup. --no-sync is set explicitly here in case the
+		// preflight runs before uvRunEnvAdditions has appended UV_NO_SYNC=1
+		// to the job env; the two are redundant when both are present.
 		cmdStr = `uv run --no-sync ` + cmdStr
 	}
 	appendSetupLog(paths.Log, []byte("weft: torch preflight: "+cmdStr+"\n"))

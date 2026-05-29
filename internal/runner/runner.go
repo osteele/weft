@@ -528,19 +528,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 
-	runCommand, prepRunErr := prepareUVRunCommand(expandedDir, setupCmd, command)
-	if prepRunErr != nil {
-		slog.Warn("uv run preflight failed; continuing with original command",
-			"component", "runner", "job_id", jobID, "error", prepRunErr)
-		appendSetupLog(paths.Log, []byte("weft: uv run preflight failed; continuing with original command: "+prepRunErr.Error()+"\n"))
-	}
-	if runCommand != command {
-		appendSetupLog(paths.Log, []byte("weft: runtime command: "+runCommand+"\n"))
-	}
+	envVars = applyUVRunEnvAdditions(expandedDir, setupCmd, envVars, jobID, paths.Log)
 
 	// Wrap the command so bash writes the exit code and log footer even if
 	// the Go runner crashes mid-job (e.g., during a runner restart).
-	wrappedCommand := WrapCommandWithExitCapture(runCommand, paths.Status)
+	wrappedCommand := WrapCommandWithExitCapture(command, paths.Status)
 
 	// Start the process
 	slog.Debug("launching process", "component", "runner", "job_id", jobID)
