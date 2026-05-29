@@ -31,6 +31,8 @@ type Keys struct {
 	CycleSlower key.Binding
 	Autopilot   key.Binding
 	Refresh     key.Binding
+	Unprocessed key.Binding // 'U' — toggle "show only unprocessed jobs"
+	LaunchTUI   key.Binding // 'L' — spawn `weft tui` (list view)
 }
 
 func defaultKeys() Keys {
@@ -39,10 +41,10 @@ func defaultKeys() Keys {
 		Suspend:     key.NewBinding(key.WithKeys("ctrl+z"), key.WithHelp("ctrl-z", "suspend")),
 		NextTab:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
 		PrevTab:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧tab", "prev tab")),
-		RightInRow:  key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next in row")),
-		LeftInRow:   key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "prev in row")),
-		DownRow:     key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "row below")),
-		UpRow:       key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "row above")),
+		RightInRow:  key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "next in row")),
+		LeftInRow:   key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "prev in row")),
+		DownRow:     key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "row below")),
+		UpRow:       key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "row above")),
 		Tab1:        key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "Pulse")),
 		Tab2:        key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "Timeline")),
 		Tab3:        key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "Fleet")),
@@ -60,5 +62,7 @@ func defaultKeys() Keys {
 		CycleSlower: key.NewBinding(key.WithKeys("-", "_"), key.WithHelp("-", "slower cycle")),
 		Autopilot:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause/resume autopilot")),
 		Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "force refresh")),
+		Unprocessed: key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "toggle unprocessed-only filter")),
+		LaunchTUI:   key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "open weft tui")),
 	}
 }

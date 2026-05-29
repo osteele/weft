@@ -379,6 +379,52 @@ the enum drift. Consult if a similar silent-stuck-instance pattern recurs.
   with `TerminationReasonWeftBug` after N retries so the instance still
   drains and jobs are reset — the original reason gets recorded in
   `termination_detail` for postmortem.
+## Dashboard: persistent system-state snapshots
+
+`weft dashboard`'s Pulse sparklines (queue depth, running count, $/hr,
+failures) currently accumulate in-process, which means each freshly launched
+dashboard starts cold and shows a "warming up · N/5" placeholder until enough
+samples land. The accumulation should move into the daemon so sparklines
+reflect real history the moment the dashboard starts.
+
+- **New table `system_snapshots`** (one row per ~30s tick) — columns: `ts`,
+  `queue_depth`, `running_count`, `spend_usd_per_hour`, `failure_count_since`,
+  plus a few more derived counters (unplaced, paused). Rough volume:
+  ~60 bytes × 2880 samples/day = ~170 KB/day. Optional rollups (`hourly`,
+  `daily`) for longer retention without growing the per-second table.
+- **Recorder in the daemon**: a small goroutine alongside the existing
+  autopilot tick that samples the same `LoadSnapshot` aggregates the
+  dashboard already computes, then writes one row per tick.
+- **Reader in dashtabs**: replace the in-process `RecentHistory` accumulator
+  with `db.ListRecentSystemSnapshots(60)`. Removes the warm-up state and the
+  ring-buffer code in `internal/ui/dashtabs/snapshot.go`.
+- **Reusable beyond sparklines**: weekly/monthly spend trend reports;
+  anomaly detection ("queue depth spiked 3σ above baseline"); post-mortems
+  and lab notebooks ("what was queue depth when EXP-079 started failing");
+  regression detection on placement decisions.
+- **Schema-drift considerations**: standard `goose` migration with
+  appropriate indexes (`ts DESC`); also a rollup migration that derives
+  hourly/daily means from the per-second table so old rows can be pruned.
+- **Degraded UX when daemon not running**: the dashboard's existing
+  in-process accumulator stays as fallback for users who don't run autopilot.
+
+## Dashboard: per-job CPU/GPU sparklines in Focus
+
+The Focus tab's running-job cards currently show progress, ETA, host, GPU,
+elapsed, and cost. We already have rich per-job telemetry in
+`job_telemetry_samples` (CPU user/sys, RSS, host CPU util, disk IO) and
+`job_timeseries` (cpu_pct, gpu_util_pct, gpu_mem_used_mib). Adding small
+sparklines to each Focus card from this existing data would make the view
+genuinely useful for "is wj2257 making progress or stuck."
+
+- **Read path**: `internal/jobtelemetry/` package with
+  `LoadSamples(database, jobID, window)`; called once per Focus render for
+  each running job. Indexes on `(job_id, ts DESC)` exist.
+- **Render**: stack 2-3 mini-sparklines (GPU util, host CPU, progress %) at
+  the bottom of each focusCard.
+- **Cost**: cheap — telemetry table is per-job-indexed; reading the last
+  hour of samples for ≤5 running jobs is sub-millisecond.
+
 - **Audit the agent ↔ schema seam.** The agent writes termination intents to
   R2 with reason strings that the coordinator later inserts into SQLite.
   `cmd/agent/upload_drain_test.go::TestRecordDrainOutcomeStallTriggersSelfDestruct`

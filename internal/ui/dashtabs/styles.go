@@ -2,18 +2,19 @@ package dashtabs
 
 import "github.com/charmbracelet/lipgloss"
 
-// Palette mirrors internal/ui/terminal/tui_styles.go so the dashboard reads
-// as part of the same product. We duplicate rather than import to avoid
-// pulling the whole terminal package's transitive deps into this leaf TUI.
+// Palette chosen to read well on light terminal backgrounds: every coloured
+// text token uses a darker, less saturated variant than the standard ANSI
+// brights. Each comment notes the 6×6×6 RGB cube coordinate (R G B in 0..5)
+// so future adjustments stay perceptually aligned.
 var (
-	colorAccent    = lipgloss.Color("39")  // cyan — headers, cursors, active tab
-	colorRunning   = lipgloss.Color("10")  // green — running, OK
-	colorQueued    = lipgloss.Color("214") // orange — queued, attention
-	colorCompleted = lipgloss.Color("243") // gray — completed, dim
-	colorFailed    = lipgloss.Color("196") // red — errors, failures
+	colorAccent    = lipgloss.Color("25")  // darker cyan/blue — R0 G2 B4
+	colorRunning   = lipgloss.Color("28")  // darker green — R0 G3 B0
+	colorQueued    = lipgloss.Color("166") // burnt orange — R4 G2 B0
+	colorCompleted = lipgloss.Color("243") // medium gray — slightly darker than 245
+	colorFailed    = lipgloss.Color("124") // darker red — R3 G0 B0
 	colorDim       = lipgloss.Color("242") // dim gray — secondary
-	colorSelectBg  = lipgloss.Color("240") // row highlight
-	colorPaused    = lipgloss.Color("178") // amber — paused
+	colorSelectBg  = lipgloss.Color("238") // darker row highlight bg
+	colorPaused    = lipgloss.Color("136") // burnt amber — R3 G2 B0
 )
 
 var (

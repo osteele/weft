@@ -23,6 +23,7 @@ type Snapshot struct {
 	LaunchLiveByID  map[int64]*db.LaunchLiveState // live progress per launch (for ETA)
 	LiveInstances   []*db.Launch                  // actually live (running + transient setup)
 	StaleInstances  []*db.Launch                  // non-terminal but not live (e.g. old "planned")
+	RecentInstances []*db.Launch                  // terminated within the last 24h (newest first)
 	AutopilotState  *db.AutopilotState
 	SpendUSDPerHour float64 // sum across LiveInstances only
 	SpendTargetUSD  float64
@@ -87,6 +88,12 @@ var liveLaunchStatuses = map[string]bool{
 	db.LaunchStatusGrace:     true, // grace period after failure; still billing
 }
 
+// LoadOpts controls what gets loaded into a Snapshot.
+type LoadOpts struct {
+	SpendTargetUSD  float64
+	ProcessedFilter string // "", "processed", or "unprocessed" — matches db.ListJobsByStatuses
+}
+
 // LoadSnapshot reads the current state from the DB. It does no caching and is
 // safe to call from a tea.Tick handler.
 //
@@ -94,22 +101,24 @@ var liveLaunchStatuses = map[string]bool{
 // because the dashboard is its own program; sharing the monitor would require
 // starting it, which adds host sync side-effects we don't want for a read-only
 // dashboard.
-func LoadSnapshot(database *sql.DB, cfgSpendTarget float64, logger *slog.Logger) Snapshot {
+func LoadSnapshot(database *sql.DB, opts LoadOpts, logger *slog.Logger) Snapshot {
 	if logger == nil {
 		logger = logging.Discard()
 	}
 	now := time.Now()
 	snap := Snapshot{
 		LoadedAt:       now,
-		SpendTargetUSD: cfgSpendTarget,
+		SpendTargetUSD: opts.SpendTargetUSD,
 	}
 
 	// Active jobs: running + queued + pending_placement + starting. Plus
-	// recent terminal jobs for context (Pulse, Tree, History).
+	// recent terminal jobs for context (Pulse, Tree, History). The
+	// processed filter, when non-empty, hides processed (or unprocessed)
+	// jobs to match the uj TUI's filter.
 	activeStatuses := []string{
 		db.StatusRunning, db.StatusStarting, db.StatusQueued, db.StatusPendingPlacement,
 	}
-	if active, err := db.ListJobsByStatuses(database, activeStatuses, "", "", 0, nil, ""); err != nil {
+	if active, err := db.ListJobsByStatuses(database, activeStatuses, "", "", 0, nil, opts.ProcessedFilter); err != nil {
 		logger.Debug("dashtabs: list active jobs", "err", err)
 	} else {
 		snap.Jobs = append(snap.Jobs, active...)
@@ -118,6 +127,9 @@ func LoadSnapshot(database *sql.DB, cfgSpendTarget float64, logger *slog.Logger)
 	if recent, err := db.ListRecentTerminalJobs(database, now.Add(-6*time.Hour).Unix()); err != nil {
 		logger.Debug("dashtabs: list recent terminal jobs", "err", err)
 	} else {
+		if opts.ProcessedFilter != "" {
+			recent = db.FilterJobsByTags(recent, nil, opts.ProcessedFilter)
+		}
 		snap.Jobs = append(snap.Jobs, recent...)
 	}
 	snap.Counts = deriveCounts(snap.Jobs)
@@ -145,6 +157,14 @@ func LoadSnapshot(database *sql.DB, cfgSpendTarget float64, logger *slog.Logger)
 	}
 
 	snap.RecentFailures = recentFailures(snap.CloudInstances(), snap.Jobs, now)
+
+	// Recently-terminated cloud instances (24h window) — surfaced as the
+	// "RECENT" section in the Fleet view when there's room.
+	if rec, err := db.ListRecentlyTerminalLaunches(database, 24*time.Hour); err != nil {
+		logger.Debug("dashtabs: list recently terminal launches", "err", err)
+	} else {
+		snap.RecentInstances = rec
+	}
 
 	// Live-state rows feed the ETA estimator's progress-based blend.
 	if live, err := jobeta.LoadLaunchLiveStatesForJobs(database, snap.Jobs); err != nil {
@@ -188,8 +208,8 @@ func LoadSnapshot(database *sql.DB, cfgSpendTarget float64, logger *slog.Logger)
 // LoadSnapshotWithHosts is like LoadSnapshot but also takes a host list (e.g.
 // from a Monitor) since the DB doesn't store full host inventory. Pass nil to
 // load without host data — the Fleet view will fall back to "(no host info)".
-func LoadSnapshotWithHosts(database *sql.DB, hosts []*hostinfo.Host, cfgSpendTarget float64, logger *slog.Logger) Snapshot {
-	snap := LoadSnapshot(database, cfgSpendTarget, logger)
+func LoadSnapshotWithHosts(database *sql.DB, hosts []*hostinfo.Host, opts LoadOpts, logger *slog.Logger) Snapshot {
+	snap := LoadSnapshot(database, opts, logger)
 	snap.Hosts = hosts
 	return snap
 }

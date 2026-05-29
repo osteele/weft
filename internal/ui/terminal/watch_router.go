@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/ui/dashtabs"
 	"github.com/osteele/weft/internal/vastai"
 )
 
@@ -52,6 +53,11 @@ type switchToHostsMsg struct{}
 type switchToAttemptsMsg struct {
 	jobID int64
 }
+
+// switchToDashboardMsg is emitted by listTUIModel when the user presses 'D'.
+// The router responds by building a fresh dashtabs.Model and swapping it in,
+// keeping one tea.Program (and one alt-screen) across the transition.
+type switchToDashboardMsg struct{}
 
 // switchBackFromAttemptsMsg is emitted by attemptsListModel when the user
 // presses esc/q to leave the drill-down.
@@ -298,20 +304,40 @@ func waitForSchemaRelaunch(signal <-chan struct{}) tea.Cmd {
 }
 
 func (m *watchRouterModel) cleanupActive() {
-	switch active := m.active.(type) {
+	cleanupModel(m.active)
+}
+
+// cleanupModel tears down a tea.Model's background resources. Pulled out of
+// cleanupActive so it can be invoked on a captured reference from a
+// goroutine (see cleanupActiveAsync) without racing against m.active being
+// replaced by the new view.
+func cleanupModel(active tea.Model) {
+	switch a := active.(type) {
 	case watchModel:
-		if active.dbWatcher != nil {
-			_ = active.dbWatcher.Close()
+		if a.dbWatcher != nil {
+			_ = a.dbWatcher.Close()
 		}
-		active.cancel()
-		if active.syncWorker != nil {
-			active.syncWorker.Stop()
+		a.cancel()
+		if a.syncWorker != nil {
+			a.syncWorker.Stop()
 		}
 	case listTUIModel:
-		active.shutdown()
+		a.shutdown()
 	case hostsTUIModel:
-		active.shutdown()
+		a.shutdown()
+	case *dashtabs.Model:
+		a.Close()
 	}
+}
+
+// cleanupActiveAsync runs cleanupModel in a goroutine on a captured
+// reference. Used by switches whose departing model has slow teardown
+// (e.g. listTUIModel.shutdown waits for syncWorker.Stop, which can block
+// for seconds while in-flight SSH calls finish). Running it off the event
+// loop lets the new view render immediately.
+func (m *watchRouterModel) cleanupActiveAsync() {
+	old := m.active
+	go cleanupModel(old)
 }
 
 // switchTo replaces the active model with a new one, returning the Init cmd
@@ -384,6 +410,14 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupActive()
 		return m.switchTo(newHostsTUIModel(m.database))
 
+	case switchToDashboardMsg:
+		m.cleanupActiveAsync()
+		return m.switchTo(m.buildDashboard())
+
+	case dashtabs.LeaveToListMsg:
+		m.cleanupActiveAsync()
+		return m.switchTo(m.buildJobsList(true))
+
 	case launchPlanReadyMsg:
 		if msg.err != nil {
 			return m.switchTo(m.buildHomeWatch(fmt.Sprintf("Launch error: %v", msg.err)))
@@ -447,6 +481,45 @@ func (m watchRouterModel) View() string {
 		return body
 	}
 	return m.bannerView.Render() + "\n" + body
+}
+
+// buildDashboard constructs a fresh dashtabs.Model sharing the router's DB
+// handle. On-prem hosts aren't hydrated here (the dashboard's Fleet view
+// falls back gracefully); a future pass can plumb them through if the host
+// inventory is wanted there too.
+func (m watchRouterModel) buildDashboard() *dashtabs.Model {
+	return m.buildDashboardWithOpts(DashboardOptions{})
+}
+
+func (m watchRouterModel) buildDashboardWithOpts(o DashboardOptions) *dashtabs.Model {
+	opts := dashtabs.DefaultOptions()
+	if m.config != nil {
+		opts.SpendTargetUSD = float64(m.config.AutoRunRateSoftTargetCents()) / 100.0
+	}
+	if o.StartTabIndex > 0 {
+		opts.StartTabIndex = o.StartTabIndex
+	}
+	if o.StartCycle > 0 {
+		opts.StartCycle = o.StartCycle
+	}
+	return dashtabs.NewModel(m.database, nil, opts)
+}
+
+// newDashboardWatchRouterModel constructs a router with the dashboard mounted
+// as the initial child. Used by `weft dashboard` so that pressing 'L' from
+// the dashboard transitions seamlessly into the list TUI (same alt-screen,
+// no flash) — and vice versa via 'D' from the list.
+func newDashboardWatchRouterModel(database *sql.DB, cfg *config.Config, opts DashboardOptions) watchRouterModel {
+	r := watchRouterModel{
+		database:  database,
+		config:    cfg,
+		homeMode:  watchModeSystem,
+		listArgs:  nil,
+		listTitle: "Jobs",
+		listSync:  true,
+	}
+	r.active = r.buildDashboardWithOpts(opts)
+	return r.startBanners()
 }
 
 func (m watchRouterModel) buildJobsList(groupedByStatus bool) listTUIModel {

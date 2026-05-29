@@ -142,6 +142,33 @@ func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	return runListTUI(database, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 }
 
+// DashboardOptions controls initial state of the dashboard view (start tab,
+// auto-rotate interval). All fields are optional.
+type DashboardOptions struct {
+	StartTabIndex int
+	StartCycle    time.Duration
+}
+
+// RunDashboardTUI launches the tabbed dashboard as the initial panel of a
+// watchRouter so the user can press 'L' to seamlessly swap to the list TUI
+// (and 'D' from the list to come back) without re-entering alt-screen.
+func RunDashboardTUI(database *sql.DB, cfg *config.Config, opts DashboardOptions) error {
+	router := newDashboardWatchRouterModel(database, cfg, opts)
+
+	outputOpt, restore := InstallTUIStdioCapture()
+	defer restore()
+
+	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus()).Run()
+	if r, ok := finalModel.(watchRouterModel); ok {
+		r.cleanupActive()
+		r.stopBanners()
+	}
+	if err != nil {
+		return fmt.Errorf("run dashboard TUI: %w", err)
+	}
+	return nil
+}
+
 // RunHostsTUI launches the hosts TUI as the initial panel of a watchRouter,
 // so the user can navigate to jobs/instances views via the usual switch keys.
 func RunHostsTUI(database *sql.DB, cfg *config.Config) error {

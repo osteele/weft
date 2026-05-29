@@ -23,16 +23,19 @@ func (v *pulseView) Render(width, height int, snap Snapshot, focused bool) strin
 		return dimStyle.Render("(window too small)")
 	}
 	lines := []string{
-		titleStyle.Render("Pulse — at-a-glance system state"),
+		titleStyle.Render("Pulse — job counts, spend rate, recent failures"),
 		"",
 		statusDonut(snap.Counts, width),
 		"",
-		titleStyle.Render("Sparklines (most-recent → older)"),
+		titleStyle.Render("Trends (sparkline = older → newer)"),
 	}
-	lines = append(lines, sparklineRow("queue depth", intsToFloats(snap.History.QueueDepth), width-14, "%.0f"))
-	lines = append(lines, sparklineRow("running   ", intsToFloats(snap.History.RunningCnt), width-14, "%.0f"))
-	lines = append(lines, sparklineRow("$/hr      ", snap.History.SpendPerHr, width-14, "$%.2f"))
-	lines = append(lines, sparklineRow("failures  ", intsToFloats(snap.History.FailureCnt), width-14, "%.0f"))
+	// Labels are pre-padded to a common width so the sparkline column and
+	// the latest-value column line up across all rows.
+	const labelW = 12
+	lines = append(lines, sparklineRow(padRight("queue depth", labelW), intsToFloats(snap.History.QueueDepth), width-14, "%.0f"))
+	lines = append(lines, sparklineRow(padRight("running", labelW), intsToFloats(snap.History.RunningCnt), width-14, "%.0f"))
+	lines = append(lines, sparklineRow(padRight("$/hr", labelW), snap.History.SpendPerHr, width-14, "$%.2f"))
+	lines = append(lines, sparklineRow(padRight("failures", labelW), intsToFloats(snap.History.FailureCnt), width-14, "%.0f"))
 
 	if len(snap.RecentFailures) > 0 {
 		lines = append(lines, "")
@@ -91,18 +94,43 @@ func statusDonut(c StatusCounts, width int) string {
 	return strings.Join(parts, "")
 }
 
-// sparklineRow renders a labeled Unicode block sparkline.
+// sparklineMinSamples is the smallest sample count we'll render as a
+// sparkline. Below this, the line lacks enough variation to read as a trend
+// and a single full-height block reads as misleading. We show the current
+// value prominently in that warm-up window and use a "warming up" hint.
+const sparklineMinSamples = 5
+
+// sparklineRow renders a labeled value with an optional Unicode block
+// sparkline as a faint trail behind it (Option 2 layout). When there are
+// fewer than sparklineMinSamples in the history, the sparkline is replaced
+// by a dim "(warming up · N/5)" tag so the user knows it'll fill in.
 //
-// We use the eight block characters (one through eight eighths) rather than
-// braille — they're simpler and render reliably across terminal fonts.
-// History is most-recent-first; we reverse it for left-to-right reading.
+// History is most-recent-first; we reverse it for left-to-right reading
+// (oldest sample at the left, newest at the right, matching the column
+// header "most-recent → older" we abandoned).
 func sparklineRow(label string, values []float64, width int, valueFmt string) string {
 	if width < 8 {
 		width = 8
 	}
-	if len(values) == 0 {
-		return fmt.Sprintf("  %s  %s", dimStyle.Render(label), dimStyle.Render("(no data)"))
+	// Determine current value (most-recent sample), independent of whether
+	// we have enough for a sparkline.
+	current := ""
+	if len(values) > 0 {
+		current = fmt.Sprintf(valueFmt, values[0])
+	} else {
+		current = "—"
 	}
+
+	// Warm-up state: emphasize the value, show a dim hint about progress.
+	if len(values) < sparklineMinSamples {
+		hint := fmt.Sprintf("(warming up · %d/%d)", len(values), sparklineMinSamples)
+		return fmt.Sprintf("  %s  %s  %s",
+			dimStyle.Render(label),
+			accentStyle.Bold(true).Render(current),
+			dimStyle.Render(hint),
+		)
+	}
+
 	// Trim to fit and reverse for left→right time order.
 	if len(values) > width {
 		values = values[:width]
@@ -133,10 +161,11 @@ func sparklineRow(label string, values []float64, width int, valueFmt string) st
 		}
 		sb.WriteRune(bs[idx])
 	}
-	latest := rev[len(rev)-1]
+	// Render the sparkline in the dim style so it reads as a trail behind
+	// the bolded current value, per Option 2.
 	return fmt.Sprintf("  %s  %s  %s",
 		dimStyle.Render(label),
-		accentStyle.Render(sb.String()),
-		accentStyle.Render(fmt.Sprintf(valueFmt, latest)),
+		dimStyle.Render(sb.String()),
+		accentStyle.Bold(true).Render(current),
 	)
 }

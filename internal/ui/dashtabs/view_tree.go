@@ -45,6 +45,13 @@ func (v *treeView) Render(width, height int, snap Snapshot, _ bool) string {
 		totalExps += len(projects[p])
 	}
 	b.WriteString(titleStyle.Render(fmt.Sprintf("Tree — %d projects, %d experiments", len(projectKeys), totalExps)))
+	b.WriteString("  ")
+	// Legend so '✓' is read as "completed" rather than a checkbox.
+	b.WriteString(dimStyle.Render("legend: "))
+	b.WriteString(runningStyle.Render("Nr") + dimStyle.Render("=running "))
+	b.WriteString(queuedStyle.Render("Nq") + dimStyle.Render("=queued "))
+	b.WriteString(completedStyle.Render("N✓") + dimStyle.Render("=done "))
+	b.WriteString(failedStyle.Render("N✗") + dimStyle.Render("=failed"))
 	b.WriteString("\n\n")
 
 	// Column widths: experiment label + counts + description.

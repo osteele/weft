@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/hostinfo"
 )
 
@@ -51,6 +52,7 @@ func (v *fleetView) Render(width, height int, snap Snapshot, _ bool) string {
 		b.WriteString(dimStyle.Render("(no hosts or live instances visible)"))
 		return b.String()
 	}
+	cardRows := 0
 	for row := 0; row < len(cards); row += cols {
 		end := row + cols
 		if end > len(cards) {
@@ -58,9 +60,100 @@ func (v *fleetView) Render(width, height int, snap Snapshot, _ bool) string {
 		}
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cards[row:end]...))
 		b.WriteString("\n")
+		// Each card is fleetCellHeight rows tall plus 2 for the border.
+		cardRows += fleetCellHeight + 2
 	}
-	_ = height
+
+	// Recently-terminated instances section — shown when there's room below
+	// the live grid. Threshold: at least 4 rows free (header + 3 entries).
+	titleH := 4 // "Fleet — ..." line + blank + "RECENT" header + spacer
+	used := titleH + cardRows
+	if remaining := height - used; remaining >= 4 && len(snap.RecentInstances) > 0 {
+		b.WriteString("\n")
+		b.WriteString(titleStyle.Render(fmt.Sprintf("RECENT — %d terminated in last 24h", len(snap.RecentInstances))))
+		b.WriteString("\n")
+		shown := remaining - 2
+		if shown > len(snap.RecentInstances) {
+			shown = len(snap.RecentInstances)
+		}
+		for i := 0; i < shown; i++ {
+			b.WriteString(recentInstanceLine(snap.RecentInstances[i]))
+			b.WriteString("\n")
+		}
+		if more := len(snap.RecentInstances) - shown; more > 0 {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  … %d more", more)))
+			b.WriteString("\n")
+		}
+	}
 	return b.String()
+}
+
+// recentInstanceLine renders one terminated-instance row: id, provider,
+// status, duration, cost, when, optional ⚠ for abnormal terminations.
+func recentInstanceLine(l *db.Launch) string {
+	if l == nil {
+		return ""
+	}
+	id := fmt.Sprintf("wi%d", l.ID)
+	statusStyle := completedStyle
+	switch l.Status {
+	case db.LaunchStatusFailed:
+		statusStyle = failedStyle
+	case db.LaunchStatusCompleted:
+		statusStyle = runningStyle
+	}
+	var when string
+	if l.EndedAt != nil {
+		when = estimate.FormatDurationShort(time.Since(time.Unix(*l.EndedAt, 0))) + " ago"
+	} else {
+		when = "—"
+	}
+	dur := "—"
+	if l.LaunchedAt != nil && l.EndedAt != nil {
+		dur = estimate.FormatDurationShort(time.Unix(*l.EndedAt, 0).Sub(time.Unix(*l.LaunchedAt, 0)))
+	}
+	cost := "—"
+	if l.ActualSpendCents > 0 {
+		cost = fmt.Sprintf("$%.2f", float64(l.ActualSpendCents)/100.0)
+	}
+	flag := ""
+	if db.IsInfrastructureTermination(l.TerminationReason) {
+		flag = "  ⚠ " + l.TerminationReason
+	}
+	// Right-justify dur/cost/when in a fixed-width trailing column so the
+	// times line up across rows even when content differs in length.
+	const tailColW = 32 // "dur Xh00m   $XX.XX   Xh00m ago" + room for flag
+	tailRaw := fmt.Sprintf("dur %s  %s  %s%s",
+		padRight(dur, 8),
+		padRight(cost, 8),
+		when,
+		flag,
+	)
+	tailVisible := len(tailRaw)
+	if pad := tailColW - tailVisible; pad > 0 {
+		tailRaw = strings.Repeat(" ", pad) + tailRaw
+	}
+	return fmt.Sprintf("  %s  %s  %s  %s",
+		accentStyle.Render(id),
+		dimStyle.Render(shortStr(l.Provider, 8)),
+		statusStyle.Render(padRight(l.Status, 9)),
+		styledTail(tailRaw, flag),
+	)
+}
+
+// styledTail renders the dim trailing column. The optional warning flag
+// (when present) is colored failedStyle to draw attention; the rest stays
+// dim. tailRaw already contains the leading pad and the flag substring.
+func styledTail(tailRaw, flag string) string {
+	if flag == "" {
+		return dimStyle.Render(tailRaw)
+	}
+	// Split off the flag for separate styling.
+	idx := strings.LastIndex(tailRaw, flag)
+	if idx < 0 {
+		return dimStyle.Render(tailRaw)
+	}
+	return dimStyle.Render(tailRaw[:idx]) + failedStyle.Render(flag)
 }
 
 func hostCard(h *hostinfo.Host, jobs []*db.Job) string {

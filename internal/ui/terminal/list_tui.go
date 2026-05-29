@@ -2231,6 +2231,7 @@ func (m listTUIModel) footerText(rows int) string {
 		listKeyToggleStatusArea,
 		listKeyGroupedView,
 		listKeyInstances,
+		listKeyDashboard,
 	} {
 		state += "  " + binding.footerToken()
 	}
@@ -2284,6 +2285,7 @@ func (m listTUIModel) renderListHelpView() string {
 			Lines: []string{
 				viewBinding.helpLine(),
 				listKeyInstances.helpLine(),
+				listKeyDashboard.helpLine(),
 			},
 		},
 		{

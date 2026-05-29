@@ -5,10 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/ui/dashtabs"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -56,10 +54,7 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	outputOpt, restore := terminal.InstallTUIStdioCapture()
-	defer restore()
-
-	opts := dashtabs.DefaultOptions()
+	var opts terminal.DashboardOptions
 	if dashboardStartTab != "" {
 		opts.StartTabIndex = parseStartTab(dashboardStartTab)
 	}
@@ -68,18 +63,7 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 			opts.StartCycle = d
 		}
 	}
-	opts.SpendTargetUSD = float64(cfg.AutoRunRateSoftTargetCents()) / 100.0
-	// Hosts: pass nil for now — the Fleet view falls back gracefully. A
-	// future pass can hydrate from inventory if/when we want on-prem hosts
-	// in this view.
-	model := dashtabs.NewModel(database, nil, opts)
-	defer model.Close()
-
-	prog := tea.NewProgram(model, outputOpt, tea.WithAltScreen(), tea.WithReportFocus())
-	if _, err := prog.Run(); err != nil {
-		return fmt.Errorf("run dashboard: %w", err)
-	}
-	return nil
+	return terminal.RunDashboardTUI(database, cfg, opts)
 }
 
 func parseStartTab(s string) int {

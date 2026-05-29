@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/logging"
@@ -37,11 +38,12 @@ func DefaultOptions() Options {
 // Model is the parent Bubble Tea model that owns tab state, cycling, help,
 // focus, snapshot accumulation, and dispatch to the active view.
 type Model struct {
-	database *sql.DB
-	hosts    []*hostinfo.Host // optional static host inventory for Fleet view
-	logger   *slog.Logger
-	usage    *Logger
-	loading  bool // true while a snapshot reload is in flight
+	database        *sql.DB
+	hosts           []*hostinfo.Host // optional static host inventory for Fleet view
+	logger          *slog.Logger
+	usage           *Logger
+	loading         bool   // true while a snapshot reload is in flight
+	processedFilter string // "", "processed", or "unprocessed" — toggled by 'u'
 
 	views        []View
 	active       int
@@ -173,9 +175,12 @@ func (m *Model) startSnapshotLoad() tea.Cmd {
 	database := m.database
 	hosts := m.hosts
 	logger := m.logger
-	target := m.snapshot.SpendTargetUSD
+	opts := LoadOpts{
+		SpendTargetUSD:  m.snapshot.SpendTargetUSD,
+		ProcessedFilter: m.processedFilter,
+	}
 	return func() tea.Msg {
-		snap := LoadSnapshotWithHosts(database, hosts, target, logger)
+		snap := LoadSnapshotWithHosts(database, hosts, opts, logger)
 		return snapshotLoadedMsg{snap: snap}
 	}
 }
@@ -355,6 +360,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Autopilot):
 			return m, m.toggleAutopilot()
+		case key.Matches(msg, m.keys.Unprocessed):
+			if m.processedFilter == "unprocessed" {
+				m.processedFilter = ""
+				m.setStatus("showing all jobs")
+			} else {
+				m.processedFilter = "unprocessed"
+				m.setStatus("filter: unprocessed only")
+			}
+			return m, m.startSnapshotLoad()
+		case key.Matches(msg, m.keys.LaunchTUI):
+			return m, emitLeaveToList()
 		}
 	}
 
@@ -422,7 +438,7 @@ func (m *Model) View() string {
 	if m.statusMessage != "" && time.Now().Before(m.statusMsgUntil) {
 		transient = m.statusMessage
 	}
-	statusLine := renderStatusLine(m.snapshot, m.cycle, m.loading, transient, true)
+	statusLine := renderStatusLine(m.snapshot, m.cycle, m.loading, transient)
 	helpLine := renderHelpLine(m.snapshot)
 
 	// Reserve one blank line between the tab strip and the view body so
@@ -441,6 +457,14 @@ func (m *Model) View() string {
 
 	if m.help {
 		body = overlay(body, renderHelp(m.keys, m.cycle, usageLogPath(m.usage)), m.width, bodyH)
+	}
+
+	// Pad the body to exactly bodyH lines so the bottom bar (weather +
+	// status + keys) lands at the actual bottom of the terminal rather
+	// than floating up against the body content.
+	bodyLines := lipgloss.Height(body)
+	if bodyLines < bodyH {
+		body += strings.Repeat("\n", bodyH-bodyLines)
 	}
 
 	return header + "\n\n" + body + "\n" + weatherLine + "\n" + statusLine + "\n" + helpLine
@@ -483,6 +507,20 @@ func usageLogPath(l *Logger) string {
 type autopilotResultMsg struct {
 	paused bool
 	err    error
+}
+
+// LeaveToListMsg is emitted when the user presses the dashboard's "back to
+// list" key (currently 'L'). A hosting router (e.g. internal/ui/terminal's
+// watchRouterModel) translates this into its own switchToListMsg to mount
+// the list TUI in place of the dashboard, sharing one alt-screen across
+// the transition. Standalone invocations of `weft dashboard` without a
+// host treat the message as a no-op.
+type LeaveToListMsg struct{}
+
+// emitLeaveToList returns a Cmd that produces a LeaveToListMsg. Used by the
+// 'L' keybinding.
+func emitLeaveToList() tea.Cmd {
+	return func() tea.Msg { return LeaveToListMsg{} }
 }
 
 func (m *Model) toggleAutopilot() tea.Cmd {

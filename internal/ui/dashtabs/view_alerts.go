@@ -152,10 +152,14 @@ func collectAlerts(snap Snapshot, now time.Time) []alert {
 		}
 	}
 	if failedRecent > 0 {
+		noun := "failures"
+		if failedRecent == 1 {
+			noun = "failure"
+		}
 		out = append(out, alert{
 			severity: AttentionInfo,
 			since:    lastFail,
-			text:     fmt.Sprintf("%d job failures in the last hour", failedRecent),
+			text:     fmt.Sprintf("%d job %s in the last hour", failedRecent, noun),
 		})
 	}
 

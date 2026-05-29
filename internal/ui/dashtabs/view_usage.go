@@ -53,14 +53,18 @@ func (v *usageView) Render(width, height int, snap Snapshot, _ bool) string {
 	b.WriteString("\n")
 	b.WriteString(titleStyle.Render("Compute · GPU-hours"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("  (not tracked yet — the jobs table has cost but not GPU-hours;\n"))
-	b.WriteString(dimStyle.Render("   compute by multiplying job duration × GPU count when added)\n"))
+	b.WriteString(dimStyle.Render("  (not tracked yet — the jobs table has cost but not GPU-hours;"))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("   compute by multiplying job duration × GPU count when added)"))
+	b.WriteString("\n")
 
 	b.WriteString("\n")
 	b.WriteString(titleStyle.Render("Data transfer · HF + R2"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("  (not tracked yet — the sync layer has byte counters per\n"))
-	b.WriteString(dimStyle.Render("   transfer, but they aren't persisted to the DB)\n"))
+	b.WriteString(dimStyle.Render("  (not tracked yet — the sync layer has byte counters per"))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("   transfer, but they aren't persisted to the DB)"))
+	b.WriteString("\n")
 
 	_ = height
 	return b.String()

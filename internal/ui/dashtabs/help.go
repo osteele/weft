@@ -17,13 +17,14 @@ func renderHelp(keys Keys, cycle CycleState, logPath string) string {
 	}
 
 	addRow("1 … 9, 0", "switch to numbered tab (0 = Usage)")
-	addRow("← / →", "prev / next tab on the same row (wraps)")
-	addRow("↑ / ↓", "row above / below at nearest column (wraps)")
+	addRow("←  →", "prev / next tab on the same row (wraps)")
+	addRow("↑  ↓", "row above / below at nearest column (wraps)")
 	addRow("Tab / ⇧Tab", "linear next / previous through all tabs")
 	addRow("?", "toggle this help")
 	addRow("c", fmt.Sprintf("toggle cycle mode (currently %s)", cycleStateStr(cycle)))
 	addRow("+ / -", "faster / slower cycle interval")
 	addRow("p", "pause/resume autopilot")
+	addRow("u", "toggle unprocessed-only filter")
 	addRow("r", "force refresh")
 	addRow("q / ctrl-c", "quit")
 	addRow("ctrl-z", "suspend (fg to resume)")

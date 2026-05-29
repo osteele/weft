@@ -17,20 +17,16 @@ func (v *sankeyView) ShortKey() string                 { return "8" }
 func (v *sankeyView) Init() tea.Cmd                    { return nil }
 func (v *sankeyView) Update(_ tea.Msg) (View, tea.Cmd) { return v, nil }
 
-// Render shows job flow as a left-to-right tree:
+// Render shows job flow merged by destination — each instance appears once
+// with running + queued + unplaced counts shown inline. Reads as a single
+// left-to-right Sankey: destination · counts → provider.
 //
-//	running (2)
-//	  ├─→ rental wi3289 (1) ──→ vastai · $1.94/hr
-//	  └─→ rental wi3294 (1) ──→ vastai · $0.33/hr
-//	queued (9)
-//	  ├─→ rental wi3297 (3) ──→ vastai (launching)
-//	  ├─→ rental wi3294 (2)
-//	  └─→ (unplaced)   (1)
+//	rental wi3300  · 1r + 5q   ──▶ vastai · $0.93/hr
+//	(unplaced)     · 1u
 //
-// Source on the left branches into destinations, which chain to provider +
-// $/hr on the right. Each source row keeps its sub-tree of destinations
-// indented under it; tree connectors are real Unicode box-drawing chars so
-// it reads as a single graph rather than three independent columns.
+// Merging by destination (rather than splitting by source) matches the
+// brainstorm mockup and removes the redundant double-listing of an instance
+// that's both running one job and queued for several more.
 func (v *sankeyView) Render(width, height int, snap Snapshot, _ bool) string {
 	flow := buildFlow(snap)
 	if flow.totalJobs == 0 && len(flow.providers) == 0 {
@@ -38,83 +34,54 @@ func (v *sankeyView) Render(width, height int, snap Snapshot, _ bool) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Flow — status → destination → provider"))
+	b.WriteString(titleStyle.Render("Flow — destination · jobs (Nr/Nq/Nu) → provider"))
 	b.WriteString("\n\n")
 
-	type srcRow struct {
-		name  string
-		count int
-		style func(...string) string
-	}
-	sources := []srcRow{
-		{"running", flow.running, runningStyle.Render},
-		{"queued", flow.queued, queuedStyle.Render},
-	}
-	if flow.unplaced > 0 {
-		// "unplaced" is a subset of queued, but worth surfacing as its own
-		// source row because it implies "no destination at all yet".
-		sources = append(sources, srcRow{"unplaced", flow.unplaced, failedStyle.Render})
-	}
-
-	// Auto-size the destination column to the longest label across all
-	// sources, plus a small fixed buffer. Avoids the "valley" that comes
+	// Auto-size the destination label column to the longest label, plus
+	// breathing room before the connector. Avoids the "valley" that comes
 	// from always reserving a worst-case width.
 	destColW := 0
-	for _, dests := range flow.bySource {
-		for dest, count := range dests {
-			w := len(fmt.Sprintf("%s (%d)", dest, count))
-			if w > destColW {
-				destColW = w
-			}
+	for dest := range flow.byDest {
+		if w := len(dest); w > destColW {
+			destColW = w
 		}
 	}
-	destColW += 2 // breathing room before the connector
+	destColW += 2
 
-	for _, src := range sources {
-		if src.count == 0 {
-			continue
+	// Sort destinations: rental first, on-prem next, unplaced last.
+	// Within a kind, by total job count descending.
+	dests := make([]string, 0, len(flow.byDest))
+	for d := range flow.byDest {
+		dests = append(dests, d)
+	}
+	sort.Slice(dests, func(i, j int) bool {
+		a, c := dests[i], dests[j]
+		da, dc := flow.byDest[a], flow.byDest[c]
+		ka, kc := destKind(a), destKind(c)
+		if ka != kc {
+			return ka < kc
 		}
-		b.WriteString(fmt.Sprintf("%s\n", src.style(fmt.Sprintf("%s (%d)", src.name, src.count))))
+		ta := da.Running + da.Queued + da.Unplaced
+		tc := dc.Running + dc.Queued + dc.Unplaced
+		if ta != tc {
+			return ta > tc
+		}
+		return a < c
+	})
 
-		dests := flow.bySource[src.name]
-		if len(dests) == 0 {
-			b.WriteString(dimStyle.Render("    └─→ (no routing info)"))
-			b.WriteString("\n\n")
-			continue
+	for _, dest := range dests {
+		jc := flow.byDest[dest]
+		breakdown := jobCountsLabel(jc)
+		line := fmt.Sprintf("    %s %s %s %s",
+			dimStyle.Render("└─▶"),
+			accentStyle.Render(padRight(dest, destColW)),
+			dimStyle.Render("·"),
+			breakdown,
+		)
+		if provLabel := providerLabelForDest(dest, snap); provLabel != "" {
+			line += "  " + dimStyle.Render("──▶") + "  " + provLabel
 		}
-		destKeys := make([]string, 0, len(dests))
-		for k := range dests {
-			destKeys = append(destKeys, k)
-		}
-		// Sort: rentals before on-prem before unplaced, then by count desc.
-		sort.Slice(destKeys, func(i, j int) bool {
-			a, c := destKeys[i], destKeys[j]
-			if dests[a] != dests[c] {
-				return dests[a] > dests[c]
-			}
-			return a < c
-		})
-
-		// Per the design mockup, every leaf uses the corner glyph (└─→)
-		// rather than mixing ├─→ / └─→ — visually it reads cleaner and
-		// makes each destination feel like an independent branch.
-		for _, dest := range destKeys {
-			destLabel := fmt.Sprintf("%s (%d)", dest, dests[dest])
-			// `─` (U+2500) and `→` (U+2192) come from different Unicode
-			// blocks and rarely share a vertical centerline in monospace
-			// fonts. The black right-pointing triangle (U+25B6) is in the
-			// geometric-shapes block, which most fonts position to match
-			// box-drawing characters — so `──▶` reads as a continuous
-			// connector rather than two staggered glyphs.
-			line := fmt.Sprintf("    %s %s",
-				dimStyle.Render("└─▶"),
-				accentStyle.Render(padRight(destLabel, destColW)))
-			if provLabel := providerLabelForDest(dest, snap); provLabel != "" {
-				line += "  " + dimStyle.Render("──▶") + "  " + provLabel
-			}
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 
@@ -123,56 +90,80 @@ func (v *sankeyView) Render(width, height int, snap Snapshot, _ bool) string {
 	return b.String()
 }
 
+// destKind orders rental → on-prem → unplaced when sorting destinations.
+func destKind(dest string) int {
+	switch {
+	case strings.HasPrefix(dest, "rental "):
+		return 0
+	case strings.HasPrefix(dest, "on-prem "):
+		return 1
+	default:
+		return 2
+	}
+}
+
+// jobCountsLabel formats running/queued/unplaced counts as "Nr + Nq + Nu",
+// omitting zero terms.
+func jobCountsLabel(j jobCounts) string {
+	parts := []string{}
+	if j.Running > 0 {
+		parts = append(parts, runningStyle.Render(fmt.Sprintf("%dr", j.Running)))
+	}
+	if j.Queued > 0 {
+		parts = append(parts, queuedStyle.Render(fmt.Sprintf("%dq", j.Queued)))
+	}
+	if j.Unplaced > 0 {
+		parts = append(parts, failedStyle.Render(fmt.Sprintf("%du", j.Unplaced)))
+	}
+	if len(parts) == 0 {
+		return dimStyle.Render("—")
+	}
+	return strings.Join(parts, dimStyle.Render(" + "))
+}
+
 type providerInfo struct {
 	count int
 	rate  float64 // $/hr across live instances on this provider
 }
 
+// jobCounts is the per-destination breakdown shown in the Flow view.
+type jobCounts struct {
+	Running  int
+	Queued   int
+	Unplaced int // sub-category of queued; jobs not yet assigned to anything
+}
+
 type flowData struct {
-	totalJobs       int
-	running, queued int
-	unplaced        int
-	// bySource[srcName][destLabel] = job count
-	bySource  map[string]map[string]int
+	totalJobs int
+	byDest    map[string]jobCounts
 	providers map[string]providerInfo
 }
 
 func buildFlow(snap Snapshot) flowData {
 	out := flowData{
-		bySource:  map[string]map[string]int{},
+		byDest:    map[string]jobCounts{},
 		providers: map[string]providerInfo{},
-	}
-	addEdge := func(src, dest string) {
-		if _, ok := out.bySource[src]; !ok {
-			out.bySource[src] = map[string]int{}
-		}
-		out.bySource[src][dest]++
 	}
 	for _, j := range snap.Jobs {
 		if j == nil {
 			continue
 		}
-		es := j.EffectiveStatus()
-		var srcName string
-		switch es {
+		dest := destLabelForJob(j)
+		jc := out.byDest[dest]
+		switch j.EffectiveStatus() {
 		case db.StatusRunning, db.StatusStarting:
-			out.running++
-			srcName = "running"
+			jc.Running++
 		case db.StatusQueued, db.StatusPendingPlacement:
-			out.queued++
 			if j.TargetKind() == db.JobTargetUnplaced {
-				out.unplaced++
-				srcName = "unplaced"
+				jc.Unplaced++
 			} else {
-				srcName = "queued"
+				jc.Queued++
 			}
 		default:
 			continue
 		}
+		out.byDest[dest] = jc
 		out.totalJobs++
-
-		dest := destLabelForJob(j)
-		addEdge(srcName, dest)
 	}
 	for _, l := range snap.LiveInstances {
 		if l == nil {
@@ -207,7 +198,6 @@ func providerLabelForDest(dest string, snap Snapshot) string {
 	if !strings.HasPrefix(dest, "rental wi") {
 		return ""
 	}
-	// Parse the launch ID out of "rental wiNNN".
 	idStr := strings.TrimPrefix(dest, "rental wi")
 	var launchID int64
 	if _, err := fmt.Sscanf(idStr, "%d", &launchID); err != nil {
@@ -234,13 +224,4 @@ func providerLabelForDest(dest string, snap Snapshot) string {
 			statusTag)
 	}
 	return dimStyle.Render("(launch not found)")
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

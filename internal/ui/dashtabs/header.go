@@ -18,6 +18,9 @@ func renderHeader(width int, _ Snapshot, tabs []View, active int, attn []Attenti
 	return renderTabStrip(tabs, active, attn, cycle, width)
 }
 
+// renderWeatherLine produces TWO lines: counts+spend on the first, autopilot
+// on the second. The autopilot line tends to be long (paused-by + reason)
+// and used to wrap into the status line; it now gets its own row.
 func renderWeatherLine(snap Snapshot, now time.Time) string {
 	c := snap.Counts
 	parts := []string{
@@ -50,12 +53,13 @@ func renderWeatherLine(snap Snapshot, now time.Time) string {
 		for _, f := range snap.RecentFailures {
 			total += f.Count
 		}
-		parts = append(parts, failedStyle.Render(fmt.Sprintf("⚠ %d failures/24h", total)))
+		noun := "failures"
+		if total == 1 {
+			noun = "failure"
+		}
+		parts = append(parts, failedStyle.Render(fmt.Sprintf("⚠ %d %s/24h", total, noun)))
 	}
-
-	parts = append(parts, autopilotLabel(snap))
-
-	return strings.Join(parts, "  ·  ")
+	return strings.Join(parts, "  ·  ") + "\n" + autopilotLabel(snap)
 }
 
 func autopilotLabel(snap Snapshot) string {
@@ -326,7 +330,7 @@ func abs(x int) int {
 // shows snapshot freshness, loading state, any transient status message,
 // and the auto-rotate state when off (since the tab strip only shows
 // auto-rotate when it's on).
-func renderStatusLine(snap Snapshot, cycle CycleState, loading bool, transient string, transientStyleAccent bool) string {
+func renderStatusLine(snap Snapshot, cycle CycleState, loading bool, transient string) string {
 	parts := []string{}
 	if loading && snap.LoadedAt.IsZero() {
 		parts = append(parts, queuedStyle.Render("loading…"))
@@ -335,7 +339,7 @@ func renderStatusLine(snap Snapshot, cycle CycleState, loading bool, transient s
 		if snap.LoadedAt.IsZero() {
 			ts = "—"
 		}
-		label := "loaded " + ts
+		label := "data as of " + ts
 		if loading {
 			label += " (refreshing)"
 		}
@@ -345,11 +349,7 @@ func renderStatusLine(snap Snapshot, cycle CycleState, loading bool, transient s
 		parts = append(parts, dimStyle.Render("auto-rotate: off"))
 	}
 	if transient != "" {
-		if transientStyleAccent {
-			parts = append(parts, accentStyle.Render(transient))
-		} else {
-			parts = append(parts, dimStyle.Render(transient))
-		}
+		parts = append(parts, accentStyle.Render(transient))
 	}
 	return statusLineStyle.Render(strings.Join(parts, "   ·   "))
 }
@@ -362,6 +362,8 @@ func renderHelpLine(_ Snapshot) string {
 		"←/→:row",
 		"↑/↓:rows",
 		"Tab:linear",
+		"L:open uj",
+		"U:unproc",
 		"c:auto-rotate",
 		"p:autopilot",
 		"r:refresh",
