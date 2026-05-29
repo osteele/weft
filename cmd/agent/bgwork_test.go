@@ -110,6 +110,61 @@ func TestBGWorkManager_Barrier(t *testing.T) {
 	}
 }
 
+// Regression for wj2226/wj2227 cross-attribution (2026-05-28). See rule
+// SharedWorkdirUploadBarrierBeforeNextJob in specs/job-lifecycle.allium.
+func TestBGWorkManager_WaitForUploadsInWorkdir_BlocksUntilSameWorkdirUploadFinishes(t *testing.T) {
+	m := newBGWorkManager(nil, true)
+	dir := runner.ExpandTilde("/tmp/test-shared-wd")
+
+	m.registerUpload(dir)
+
+	released := atomic.Bool{}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		released.Store(true)
+		m.completeUpload(dir)
+	}()
+
+	m.WaitForUploadsInWorkdir(dir)
+	if !released.Load() {
+		t.Fatalf("WaitForUploadsInWorkdir returned before upload completed")
+	}
+}
+
+func TestBGWorkManager_WaitForUploadsInWorkdir_DifferentWorkdirsDoNotBlock(t *testing.T) {
+	m := newBGWorkManager(nil, true)
+	dirA := runner.ExpandTilde("/tmp/test-wd-a")
+	dirB := runner.ExpandTilde("/tmp/test-wd-b")
+
+	m.registerUpload(dirA)
+
+	doneB := make(chan struct{})
+	go func() {
+		m.WaitForUploadsInWorkdir(dirB)
+		close(doneB)
+	}()
+
+	select {
+	case <-doneB:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("WaitForUploadsInWorkdir for dirB blocked on unrelated dirA upload")
+	}
+}
+
+func TestBGWorkManager_WaitForUploadsInWorkdir_NoUploadsReturnsImmediately(t *testing.T) {
+	m := newBGWorkManager(nil, true)
+	done := make(chan struct{})
+	go func() {
+		m.WaitForUploadsInWorkdir("/tmp/no-uploads-here")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatalf("WaitForUploadsInWorkdir blocked on a workdir with no in-flight uploads")
+	}
+}
+
 func TestBGWorkManager_BarrierLogsErrors(t *testing.T) {
 	m := newBGWorkManager(nil, true)
 	m.recordError(42, "test-op", errForTest("test error"))

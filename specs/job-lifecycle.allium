@@ -576,6 +576,46 @@ rule PerArtifactUploadOutcomeRecorded {
         -- appends one result.Dirs entry per artifact regardless of kind.
 }
 
+rule SharedWorkdirUploadBarrierBeforeNextJob {
+    when: agent prepares to start job_next on a rental
+    requires: any prior job's post-job upload is in flight for workdir = job_next.working_dir
+
+    ensures: agent waits for those uploads to complete before job_next runs
+
+    @guidance
+        -- Convention-based output upload (uploadOutputDirs) walks the
+        -- `output/` and `outputs/` subtrees of the prior job's working
+        -- directory and rclone-copies them under that prior job's R2 key
+        -- prefix. The walk has no per-job source-side filter: it copies
+        -- whatever exists in those subtrees at scan time. If the next job
+        -- shares the same working directory and starts writing into
+        -- `output/...` while the prior upload is still walking, those
+        -- new files get attributed to the prior job's R2 prefix.
+        --
+        -- This is the wj2226/wj2227 cross-attribution incident
+        -- (2026-05-28): wj2226 finished at 17:17:41 on rental wi3283;
+        -- its background uploadOutputDirs goroutine kept walking
+        -- `~/code/research/role-encoding-injection/output/` for the
+        -- next ~2 minutes; wj2227 (same workdir) started at 17:19:23 and
+        -- wrote to `output/exp_079_multiseed_n2000_s7_dp/`; those files
+        -- were picked up by wj2226's still-running walk and uploaded
+        -- under r2:.../jobs/2226/.../output/exp_079_multiseed_n2000_s7_dp/.
+        -- `weft artifact cat wj2226 results` then returned wj2227's data.
+        --
+        -- Cross-workdir overlap is preserved: jobs on different working
+        -- directories do not share `output/` and cannot collide, so the
+        -- barrier scopes per-workdir rather than draining all uploads
+        -- (the benchmark barrier, which calls bgm.Barrier() globally,
+        -- remains the broader gate for benchmarks).
+        --
+        -- Implementation: cmd/agent/bgwork.go bgWorkManager tracks an
+        -- in-flight upload set keyed by resolved workdir
+        -- (uploadsByWorkdir); StartPostJobWork registers a done channel
+        -- on entry and closes it on exit; cmd/agent/jobloop.go
+        -- runJobSequence calls bgm.WaitForUploadsInWorkdir(job.Dir)
+        -- at the top of each iteration after the benchmark barrier.
+}
+
 -- ==========================================================================
 -- Artifact retrieval (coordinator)
 -- ==========================================================================

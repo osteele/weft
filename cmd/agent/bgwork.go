@@ -26,12 +26,13 @@ const staleLogSnapshotAge = 6 * time.Hour
 // Workdir deletion is deferred until CleanupWorkdirs() so a later job in the
 // same campaign cannot race a per-job cleanup for a shared source tree.
 type bgWorkManager struct {
-	wg           sync.WaitGroup
-	mu           sync.Mutex
-	errors       []bgWorkError
-	summaries    map[int64]runner.JobCompletionSummary
-	workdirs     map[string]struct{} // resolved absolute paths touched this campaign
-	skipDeletion bool
+	wg               sync.WaitGroup
+	mu               sync.Mutex
+	errors           []bgWorkError
+	summaries        map[int64]runner.JobCompletionSummary
+	workdirs         map[string]struct{} // resolved absolute paths touched this campaign
+	uploadsByWorkdir map[string]*sync.WaitGroup
+	skipDeletion     bool
 }
 
 type bgWorkError struct {
@@ -69,9 +70,10 @@ type maintenanceReport struct {
 
 func newBGWorkManager(jobs []cloud.AgentJob, skipDeletion bool) *bgWorkManager {
 	m := &bgWorkManager{
-		summaries:    make(map[int64]runner.JobCompletionSummary),
-		workdirs:     make(map[string]struct{}),
-		skipDeletion: skipDeletion,
+		summaries:        make(map[int64]runner.JobCompletionSummary),
+		workdirs:         make(map[string]struct{}),
+		uploadsByWorkdir: make(map[string]*sync.WaitGroup),
+		skipDeletion:     skipDeletion,
 	}
 	for _, job := range jobs {
 		dir := runner.ExpandTilde(job.Dir)
@@ -99,8 +101,10 @@ func (m *bgWorkManager) RegisterNewJobs(jobs []cloud.AgentJob) {
 // result uploads, completion patching, and workdir cleanup.
 func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 	m.wg.Add(1)
+	m.registerUpload(pw.workDir)
 	fatalAgentGo("post-job-work", func() {
 		defer m.wg.Done()
+		defer m.completeUpload(pw.workDir)
 
 		uploadResult := uploadOutputDirs(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir)
 		if uploadResult.Status != "ok" {
@@ -156,6 +160,47 @@ func (m *bgWorkManager) Barrier() {
 	m.mu.Unlock()
 	for _, e := range errs {
 		slog.Warn("background work error", "job_id", e.JobID, "op", e.Op, "error", e.Err)
+	}
+}
+
+// WaitForUploadsInWorkdir blocks until every post-job upload currently in
+// flight for workdir has completed. See rule
+// SharedWorkdirUploadBarrierBeforeNextJob in specs/job-lifecycle.allium.
+func (m *bgWorkManager) WaitForUploadsInWorkdir(workdir string) {
+	if workdir == "" {
+		return
+	}
+	m.mu.Lock()
+	wg := m.uploadsByWorkdir[workdir]
+	m.mu.Unlock()
+	if wg != nil {
+		wg.Wait()
+	}
+}
+
+func (m *bgWorkManager) registerUpload(workdir string) {
+	if workdir == "" {
+		return
+	}
+	m.mu.Lock()
+	wg, ok := m.uploadsByWorkdir[workdir]
+	if !ok {
+		wg = &sync.WaitGroup{}
+		m.uploadsByWorkdir[workdir] = wg
+	}
+	wg.Add(1)
+	m.mu.Unlock()
+}
+
+func (m *bgWorkManager) completeUpload(workdir string) {
+	if workdir == "" {
+		return
+	}
+	m.mu.Lock()
+	wg := m.uploadsByWorkdir[workdir]
+	m.mu.Unlock()
+	if wg != nil {
+		wg.Done()
 	}
 }
 

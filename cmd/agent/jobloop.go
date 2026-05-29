@@ -555,6 +555,10 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			}
 		}
 
+		// See rule SharedWorkdirUploadBarrierBeforeNextJob in
+		// specs/job-lifecycle.allium.
+		bgm.WaitForUploadsInWorkdir(runner.ExpandTilde(job.Dir))
+
 		// GPU warmup (opt-in via config): prime system-level CUDA caches
 		// before the first benchmark job to avoid cold-start bias.
 		if cfg.GPUWarmup && job.UsesGPU && slices.Contains(job.Tags, "benchmark") && !gpuWarmedUp {
