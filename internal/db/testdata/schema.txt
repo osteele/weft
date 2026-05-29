@@ -404,6 +404,20 @@ table lifecycle_events
   col 10 attempt_number INTEGER notnull=0 default=<none> pk=0
   col 11 max_attempts INTEGER notnull=0 default=<none> pk=0
   col 12 disk_gb INTEGER notnull=0 default=<none> pk=0
+table llm_calls
+  col 0 id INTEGER notnull=0 default=<none> pk=1
+  col 1 ts_unix INTEGER notnull=1 default=<none> pk=0
+  col 2 provider TEXT notnull=1 default=<none> pk=0
+  col 3 model TEXT notnull=1 default=<none> pk=0
+  col 4 feature TEXT notnull=1 default=<none> pk=0
+  col 5 input_tokens INTEGER notnull=1 default=0 pk=0
+  col 6 output_tokens INTEGER notnull=1 default=0 pk=0
+  col 7 cache_creation_tokens INTEGER notnull=1 default=0 pk=0
+  col 8 cache_read_tokens INTEGER notnull=1 default=0 pk=0
+  col 9 latency_ms INTEGER notnull=1 default=0 pk=0
+  col 10 cost_micros INTEGER notnull=1 default=0 pk=0
+  col 11 job_id INTEGER notnull=0 default=<none> pk=0
+  col 12 error TEXT notnull=0 default=<none> pk=0
 table move_intents
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 job_id INTEGER notnull=1 default=<none> pk=0

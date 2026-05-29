@@ -6,6 +6,7 @@ detail quickly.
 ## Start Here
 
 - [Workflow Guide](guides/workflow-guide.md) for common end-to-end usage
+- [Dashboard](guides/dashboard.md) for `weft dashboard`, the tabbed at-a-glance view set
 - [Cloud GPU Instances](guides/instances.md) for rental GPU workflows (launching, monitoring, grace periods, configuration)
 - [Campaigns](guides/campaigns.md) for the batching concept that groups instances launched together
 - [Placement](guides/placement.md) for automatic host selection, reserved placement tags, and score reasons

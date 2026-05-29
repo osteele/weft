@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/llmusage"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/orchestration"
@@ -158,13 +159,6 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start session: %w", err)
 	}
 
-	client := narrate.NewClient(narrate.ClientConfig{
-		Provider:        provider,
-		APIKey:          apiKey,
-		Model:           model,
-		MaxOutputTokens: cfg.NarrateMaxOutputTokens(),
-	})
-
 	// narrate runs a writable DB connection because it drives sync and an
 	// autopilot pass each tick (gated by the singleton claim, so it's safe
 	// to run alongside other TUIs / `--wait` jobs).
@@ -173,6 +167,34 @@ func runNarrate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	usageRec := llmusage.NewRecorder(database)
+	client := narrate.NewClient(narrate.ClientConfig{
+		Provider:        provider,
+		APIKey:          apiKey,
+		Model:           model,
+		MaxOutputTokens: cfg.NarrateMaxOutputTokens(),
+		OnUsage: func(feature string, u narrate.Usage, latency time.Duration, err error) {
+			// Only Anthropic is wired right now; the OnUsage callback
+			// fires from narrateAnthropic and compactRecapsAnthropic.
+			// Record the row but never fail the surrounding call.
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			_ = usageRec.Record(llmusage.Call{
+				Provider:            llmusage.ProviderAnthropic,
+				Model:               model,
+				Feature:             feature,
+				InputTokens:         u.InputTokens,
+				OutputTokens:        u.OutputTokens,
+				CacheCreationTokens: u.CacheCreationTokens,
+				CacheReadTokens:     u.CacheReadTokens,
+				Latency:             latency,
+				Error:               errStr,
+			})
+		},
+	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer cancel()

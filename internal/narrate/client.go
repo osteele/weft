@@ -20,6 +20,14 @@ const (
 	defaultTimeout      = 60 * time.Second
 )
 
+// Feature tags passed to ClientConfig.OnUsage. Bound to stable strings so
+// downstream recorders (e.g. internal/llmusage) can group calls by feature
+// across releases.
+const (
+	FeatureNarrate = "narrate"
+	FeatureCompact = "compact"
+)
+
 const (
 	ProviderAnthropic  = "anthropic"
 	ProviderOpenRouter = "openrouter"
@@ -32,6 +40,12 @@ type ClientConfig struct {
 	Model           string
 	MaxOutputTokens int
 	HTTPClient      *http.Client
+
+	// OnUsage, if set, is invoked once per API call (success or failure)
+	// so observability layers can record token/latency/cost. The callback
+	// is best-effort: any error it raises is ignored. err is non-nil only
+	// when the call failed; usage may still carry partial data.
+	OnUsage func(feature string, usage Usage, latency time.Duration, err error)
 }
 
 // Client wraps LLM API calls for narration. It deliberately keeps a minimal
@@ -237,7 +251,13 @@ func narrationBlocks(tick Tick) ([]map[string]any, []map[string]any) {
 
 // narrateAnthropic calls Anthropic Messages once and returns the structured
 // report and usage stats.
-func (c *Client) narrateAnthropic(ctx context.Context, tick Tick) (*Report, Usage, error) {
+func (c *Client) narrateAnthropic(ctx context.Context, tick Tick) (rep *Report, usage Usage, retErr error) {
+	start := time.Now()
+	defer func() {
+		if c.cfg.OnUsage != nil {
+			c.cfg.OnUsage(FeatureNarrate, usage, time.Since(start), retErr)
+		}
+	}()
 	systemBlocks, userBlocks := narrationBlocks(tick)
 
 	body := map[string]any{
@@ -306,7 +326,7 @@ func (c *Client) narrateAnthropic(ctx context.Context, tick Tick) (*Report, Usag
 		return nil, Usage{}, fmt.Errorf("decode response: %w", err)
 	}
 
-	usage := Usage{
+	usage = Usage{
 		InputTokens:         parsed.Usage.InputTokens,
 		OutputTokens:        parsed.Usage.OutputTokens,
 		CacheCreationTokens: parsed.Usage.CacheCreationInputTokens,
@@ -472,7 +492,13 @@ func (c *Client) CompactRecaps(ctx context.Context, priorRecap string) (string, 
 	return c.compactRecapsAnthropic(ctx, priorRecap)
 }
 
-func (c *Client) compactRecapsAnthropic(ctx context.Context, priorRecap string) (string, Usage, error) {
+func (c *Client) compactRecapsAnthropic(ctx context.Context, priorRecap string) (out string, usage Usage, retErr error) {
+	start := time.Now()
+	defer func() {
+		if c.cfg.OnUsage != nil {
+			c.cfg.OnUsage(FeatureCompact, usage, time.Since(start), retErr)
+		}
+	}()
 	system := "You compact a chain of weft operations recaps into a single fresh recap. Output one terse bulleted recap that preserves all open threads and current state. Do not invent. No prose."
 	user := "<prior_state_recap>\n" + priorRecap + "\n</prior_state_recap>\n\nReturn only the compacted recap text."
 
@@ -523,7 +549,7 @@ func (c *Client) compactRecapsAnthropic(ctx context.Context, priorRecap string) 
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", Usage{}, err
 	}
-	usage := Usage{
+	usage = Usage{
 		InputTokens:         parsed.Usage.InputTokens,
 		OutputTokens:        parsed.Usage.OutputTokens,
 		CacheCreationTokens: parsed.Usage.CacheCreationInputTokens,

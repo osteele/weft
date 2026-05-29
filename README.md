@@ -125,6 +125,7 @@ Weft provides several views depending on what you need to watch:
 | Command | Use |
 | --- | --- |
 | `weft tui` | Full-screen jobs and hosts dashboard |
+| `weft dashboard` | Tabbed at-a-glance dashboard (Pulse, Timeline, Fleet, Focus, Tree, Alerts, History, Flow, Cost, Usage) — see [Dashboard](docs/guides/dashboard.md) |
 | `weft watch` | System-wide view of cloud instances, on-prem jobs, and unplaced jobs |
 | `weft instance watch [id]` | Live cost, phase, and job progress for a cloud launch batch |
 | `weft project watch [name]` | Project-scoped instances and unplaced jobs |
