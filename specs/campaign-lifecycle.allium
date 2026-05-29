@@ -340,6 +340,17 @@ config {
     self_destruct_backoff: Duration = 5.seconds
     reconcile_cleanup_window: Duration = 30.minutes
 
+    -- Minimum age of a launch left in 'planned' status with no provider
+    -- instance ID before it is reaped as abandoned. A normal LaunchInstance
+    -- call transitions through planned within seconds; a row older than
+    -- this threshold means the call returned before the provider instance
+    -- was ever created (provider error, asset staging failure, panic, etc.)
+    -- and the row was left orphaned. Generous so a legitimately slow
+    -- planned -> launching transition never trips the reaper, but short
+    -- enough that orphans don't block CampaignCompleted/CampaignFailed
+    -- for long.
+    stale_planned_launch_age: Duration = 24.hours
+
     -- Runaway breaker thresholds
     runaway_enabled: Boolean = true
     runaway_lookback_window: Duration = 24.hours
@@ -1230,6 +1241,34 @@ rule ProviderInstanceResumes {
         -- launch, not the resume time.
 }
 
+rule StalePlannedLaunchReap {
+    -- A launch left in 'planned' status with no provider instance ID
+    -- past the configured threshold is an abandoned LaunchInstance call
+    -- (provider error or panic before CreateInstance returned). Reap it
+    -- so CampaignCompleted/CampaignFailed can settle. The reaper never
+    -- touches a provider — by definition these rows have no provider
+    -- instance to destroy.
+    when: instance: Instance.status = planned
+    requires: instance.provider_instance_id = ""
+    requires: (now - instance.created_at) > config.stale_planned_launch_age
+
+    ensures: instance.status = canceled
+    ensures: instance.termination_reason = canceled
+    ensures: instance.termination_detail contains "reaped"
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Implementation: internal/campaign/orphan_sweep.go
+        -- (SweepStalePlannedLaunches), invoked alongside the orphan sweep
+        -- in the reconcile loop. Counterpart to SweepOrphanedInstances:
+        -- orphan sweep covers the case where a provider instance exists
+        -- but weft's DB row is gone or terminal; this reaper covers the
+        -- opposite case where weft has a DB row but no provider instance
+        -- was ever created. Surfaced as a dashboard alert ("X planned
+        -- cloud launches stuck") via stalePlannedLaunches() in
+        -- internal/ui/dashtabs/view_alerts.go.
+}
+
 rule PausedInstanceStale {
     -- A launch that has been paused since before
     -- now - config.stale_pause_timeout has almost certainly lost its bid
@@ -1374,6 +1413,26 @@ rule CampaignFailed {
 
     ensures: campaign.status = failed
     ensures: campaign.ended_at = now
+
+    @guidance
+        -- The jobs.all(j => j.is_terminal) condition is evaluated against
+        -- the canonical per-job effective status, NOT the per-attempt status
+        -- echoed by historical launch_job_membership rows. A job whose
+        -- latest attempt completed elsewhere is terminal even if a
+        -- historical attempt on one of this campaign's launches was
+        -- closed with status='queued' (e.g. the orphaned/superseded
+        -- attempt-status rewrite paths). Implementation:
+        -- allCampaignJobsTerminal in internal/campaign/reconcile.go
+        -- queries the job_status view by job ID rather than reading
+        -- attempt-level status off the membership row.
+        --
+        -- LaunchInstance failure paths that stamp campaign.status=failed
+        -- directly (no-instance-launched, first-worker-registration
+        -- timeout) MUST first cancel any non-terminal launches in the
+        -- campaign, or the instances.all(i => i.is_terminal) when-clause
+        -- is violated. Implementation:
+        -- cancelNonTerminalCampaignInstances in
+        -- internal/campaign/lifecycle.go.
 }
 
 -- ==========================================================================

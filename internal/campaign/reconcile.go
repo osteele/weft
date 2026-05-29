@@ -281,6 +281,19 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 		result.Reconciled += swept
 	}
 
+	// Counterpart to the orphan sweep above: retire 'planned' rows that
+	// never reached the provider.
+	if reaped, reapErr := MaybeSweepStalePlannedLaunches(database); reapErr != nil {
+		slog.Warn("stale planned reap error", "component", "reconcile", "error", reapErr)
+	} else if reaped > 0 {
+		slog.Debug("stale planned reap retired launches", "component", "reconcile", "count", reaped)
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventReconcileStalePlannedReap,
+			JobCount:  reaped,
+		})
+		result.Reconciled += reaped
+	}
+
 	return result, nil
 }
 
@@ -782,31 +795,48 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 	return completed, nil
 }
 
-// allCampaignJobsTerminal reports whether every job that has run on any of
-// the given launches has reached a terminal status. Membership is read via
-// GetLaunchJobsIncludingAttempts, which unions current and historical
-// launch_job_membership rows, so a job requeued off a terminal instance
-// (its launch_id cleared) still surfaces. A non-terminal job keeps the
-// campaign open.
+// allCampaignJobsTerminal reports whether every job that ran on any of
+// the given launches has reached a terminal job-effective status. Uses
+// job_status (the canonical per-job view) so a historical attempt's
+// orphaned/canceled/superseded status — which the launch_job_membership
+// view can echo as 'queued' — doesn't block a campaign whose jobs have
+// since completed elsewhere.
 func allCampaignJobsTerminal(database *sql.DB, instances []*db.Launch) bool {
-	seen := make(map[int64]struct{})
+	jobIDs := make(map[int64]struct{})
 	for _, inst := range instances {
 		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
 		if err != nil {
-			// Treat an unreadable launch as still-pending so a transient
-			// DB error never ends a campaign on incomplete information.
 			slog.Warn("reconcile campaigns: load launch jobs",
 				"component", "reconcile", "instance", inst.ID, "error", err)
 			return false
 		}
 		for _, j := range jobs {
-			if _, ok := seen[j.ID]; ok {
-				continue
-			}
-			seen[j.ID] = struct{}{}
-			if !db.IsTerminalStatus(j.EffectiveStatus()) {
-				return false
-			}
+			jobIDs[j.ID] = struct{}{}
+		}
+	}
+	if len(jobIDs) == 0 {
+		return true
+	}
+	ids := make([]int64, 0, len(jobIDs))
+	for id := range jobIDs {
+		ids = append(ids, id)
+	}
+	jobs, err := db.GetJobsByIDs(database, ids)
+	if err != nil {
+		slog.Warn("reconcile campaigns: read job_status",
+			"component", "reconcile", "error", err)
+		return false
+	}
+	// Missing rows (tombstoned) keep the campaign open — surfacing the
+	// divergence is safer than silently terminating.
+	if len(jobs) < len(jobIDs) {
+		slog.Warn("reconcile campaigns: job_status missing some campaign jobs",
+			"component", "reconcile", "want", len(jobIDs), "got", len(jobs))
+		return false
+	}
+	for _, j := range jobs {
+		if !db.IsTerminalStatus(j.EffectiveStatus()) {
+			return false
 		}
 	}
 	return true

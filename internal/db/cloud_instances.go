@@ -941,6 +941,34 @@ func JobOutcomesByLaunchIDs(database *sql.DB, launchIDs []int64) (map[int64]Laun
 // terminal set (completed/failed/canceled), ordered by creation time
 // descending. Equivalent to filtering ListLaunches by !IsTerminal(), but
 // keeps the per-tick read cost bounded as the launches table grows.
+// ListStalePlannedLaunches returns launches stuck in 'planned' status
+// with no provider instance ID and created at or before cutoff. Used by
+// the planned-launch reaper; pushes the filter into SQL so a busy
+// reconcile loop doesn't scan every live launch every interval.
+func ListStalePlannedLaunches(database *sql.DB, cutoff int64) ([]*Launch, error) {
+	rows, err := database.Query(
+		`SELECT `+launchSelectColumns+` FROM launches
+		 WHERE status = ?
+		   AND (provider_instance_id IS NULL OR provider_instance_id = '')
+		   AND created_at <= ?
+		 ORDER BY created_at ASC`,
+		LaunchStatusPlanned, cutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Launch
+	for rows.Next() {
+		l, err := scanLaunchFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 func ListNonTerminalLaunches(database *sql.DB) ([]*Launch, error) {
 	rows, err := database.Query(
 		`SELECT `+launchSelectColumns+` FROM launches WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,

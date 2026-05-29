@@ -1524,3 +1524,94 @@ func TestReconcileCampaigns_StaysRunningWhileJobAwaitsRelaunch(t *testing.T) {
 		t.Fatalf("phase 2: campaign status = %q, want %q", completed[0].Status, db.CampaignStatusFailed)
 	}
 }
+
+// TestReconcileCampaigns_IgnoresStaleHistoricalAttemptStatus guards that
+// a job with a completed final attempt is treated as terminal, even when
+// a historical attempt on one of the campaign's launches still echoes
+// a non-terminal status via launch_job_membership.
+func TestReconcileCampaigns_IgnoresStaleHistoricalAttemptStatus(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	// One terminal launch in this campaign; the job's first attempt ran here.
+	failedLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create failed launch: %v", err)
+	}
+	// A separate, completed launch outside this campaign where the job's
+	// later attempt eventually ran to completion.
+	otherCampaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusCompleted})
+	if err != nil {
+		t.Fatalf("create other campaign: %v", err)
+	}
+	otherLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &otherCampaignID,
+		Status:     db.LaunchStatusCompleted,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create other launch: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, command, tombstoned, requested_status) VALUES (1, '/tmp', 'echo', 0, NULL)`,
+	); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	// Prior attempt: marked superseded with stale status='queued'. The
+	// historical membership view echoes this as status='queued'.
+	priorAttemptID, err := db.CreateAttempt(database, 1, "", &failedLaunchID, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("create prior attempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET cloud_outcome = ?, end_time = ? WHERE id = ?`,
+		db.AttemptOutcomeSuperseded, time.Now().Unix()-3600, priorAttemptID,
+	); err != nil {
+		t.Fatalf("supersede prior attempt: %v", err)
+	}
+	// Second attempt: on the other (completed) launch, the job actually
+	// finished. job_status will report status='completed'.
+	finalAttemptID, err := db.CreateAttempt(database, 1, "", &otherLaunchID, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("create final attempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, exit_code = 0, end_time = ?, cloud_outcome = ? WHERE id = ?`,
+		db.StatusCompleted, time.Now().Unix(), db.AttemptOutcomeCompleted, finalAttemptID,
+	); err != nil {
+		t.Fatalf("complete final attempt: %v", err)
+	}
+
+	completed, err := ReconcileCampaigns(database)
+	if err != nil {
+		t.Fatalf("ReconcileCampaigns: %v", err)
+	}
+	// Campaign should now be terminal — the stale historical 'queued'
+	// must not block it because the job has a completed final attempt.
+	found := false
+	for _, c := range completed {
+		if c.ID == campaignID {
+			found = true
+			if c.Status != db.CampaignStatusFailed {
+				t.Errorf("campaign %d status = %q, want %q (instance failed, job completed elsewhere)",
+					campaignID, c.Status, db.CampaignStatusFailed)
+			}
+		}
+	}
+	if !found {
+		c, _ := db.GetCampaign(database, campaignID)
+		t.Fatalf("campaign %d not transitioned (status still %q); historical 'queued' attempt is wedging reconcile",
+			campaignID, c.Status)
+	}
+}

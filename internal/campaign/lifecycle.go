@@ -949,6 +949,14 @@ func launchCampaignWithStager(
 				_ = db.SetLaunchRole(database, donorInstanceID, "donor")
 				_ = db.RecordDonorExperiment(database, campaignID, "donor_enabled", donorABRate, &donorInstanceID, "donor selected")
 
+				abortDonor := func(detail string) {
+					_ = db.UpdateLaunchStatus(database, donorInstanceID,
+						db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail)
+					oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+						"launch_id=%d reason=infra_failure detail=%s", donorInstanceID, detail))
+					donorCfg = nil
+				}
+
 				// Generate donor bootstrap script
 				if onEvent != nil {
 					onEvent(LaunchEvent{
@@ -960,7 +968,7 @@ func launchCampaignWithStager(
 				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs, nil)
 				if donorAssetErr != nil {
 					slog.Warn("donor staging assets failed", "component", "donor", "error", donorAssetErr)
-					donorCfg = nil
+					abortDonor("donor staging assets failed: " + donorAssetErr.Error())
 				}
 				if donorCfg == nil {
 					goto donorDisabled
@@ -982,7 +990,7 @@ func launchCampaignWithStager(
 					donorCreateOpts, donorErr = createOptsForProvider(donorCfg.Offer.Provider)
 					if donorErr != nil {
 						slog.Warn("unsupported donor provider config", "component", "donor", "error", donorErr)
-						donorCfg = nil
+						abortDonor("unsupported donor provider config: " + donorErr.Error())
 					}
 				}
 				if donorCfg == nil {
@@ -1012,7 +1020,7 @@ func launchCampaignWithStager(
 				defer donorUploadCancel()
 				if uploadErr := donorAssets.Client.PutObject(donorUploadCtx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
 					slog.Warn("failed to upload donor bootstrap", "component", "donor", "error", uploadErr)
-					donorCfg = nil
+					abortDonor("failed to upload donor bootstrap: " + uploadErr.Error())
 				} else {
 					// Build env vars and create opts for donor
 					if donorCfg != nil {
@@ -1037,7 +1045,7 @@ func launchCampaignWithStager(
 						}
 						if err := configureBootstrapCreateOpts(donorClient, &donorCreateOpts, bootstrapKey); err != nil {
 							slog.Warn("donor bootstrap config failed", "component", "donor", "error", err)
-							donorCfg = nil
+							abortDonor("donor bootstrap config failed: " + err.Error())
 						}
 					}
 					if donorCfg != nil {
@@ -1053,10 +1061,7 @@ func launchCampaignWithStager(
 						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 						if createErr != nil {
 							slog.Warn("failed to create donor instance", "component", "donor", "error", createErr)
-							_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "donor instance creation failed: "+createErr.Error())
-							oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-								"launch_id=%d reason=infra_failure detail=donor instance creation failed: %s", donorInstanceID, createErr))
-							donorCfg = nil
+							abortDonor("donor instance creation failed: " + createErr.Error())
 						} else {
 							donorProviderID = inst.ProviderID
 							_ = db.SetLaunchProviderID(database, donorInstanceID, donorProviderID)
@@ -1271,6 +1276,8 @@ func launchCampaignWithStager(
 	timedOut := firstRegistrationTimedOut
 	mu.Unlock()
 	if timedOut {
+		cancelNonTerminalCampaignInstances(database, campaignID,
+			"campaign failed: first worker registration timeout")
 		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
 		return nil, fmt.Errorf(
 			"first worker registration timed out after %s (scope=%s sample=%d)",
@@ -1353,6 +1360,8 @@ func launchCampaignWithStager(
 
 	// Update campaign status
 	if len(instanceIDs) == 0 && len(launchErrors) > 0 {
+		cancelNonTerminalCampaignInstances(database, campaignID,
+			"campaign failed: no instances launched")
 		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
 	} else {
 		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
@@ -1363,6 +1372,38 @@ func launchCampaignWithStager(
 		InstanceIDs: instanceIDs,
 		Errors:      launchErrors,
 	}, nil
+}
+
+// cancelNonTerminalCampaignInstances marks every non-terminal launch in
+// a campaign canceled, so CampaignFailed's "all instances terminal"
+// invariant holds before the campaign itself is stamped failed.
+func cancelNonTerminalCampaignInstances(database *sql.DB, campaignID int64, detail string) {
+	instances, err := db.GetCampaignInstances(database, campaignID)
+	if err != nil {
+		slog.Warn("cancel non-terminal instances: list campaign launches",
+			"component", "lifecycle", "campaign_id", campaignID, "error", err)
+		return
+	}
+	for _, inst := range instances {
+		if inst == nil || IsInstanceTerminal(inst.Status) {
+			continue
+		}
+		if err := db.UpdateLaunchStatus(database, inst.ID,
+			db.LaunchStatusCancelled, db.TerminationReasonCancelled, detail); err != nil {
+			slog.Warn("cancel non-terminal instance",
+				"component", "lifecycle",
+				"campaign_id", campaignID,
+				"launch_id", inst.ID,
+				"prior_status", inst.Status,
+				"error", err)
+			continue
+		}
+		slog.Info("canceled non-terminal launch before campaign failed",
+			"component", "lifecycle",
+			"campaign_id", campaignID,
+			"launch_id", inst.ID,
+			"prior_status", inst.Status)
+	}
 }
 
 // clientForProvider finds the client matching a provider from a list.

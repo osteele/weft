@@ -2,7 +2,9 @@ package campaign
 
 import (
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -442,4 +444,123 @@ func TestSweepOrphanedInstances_DestroysTrackedTerminalInActiveCampaign(t *testi
 
 func labelForCampaign(id int64) string {
 	return "weft/c" + strconv.FormatInt(id, 10)
+}
+
+func TestSweepStalePlannedLaunches_ReapsOldPlanned(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID:         &campaignID,
+		Status:             db.LaunchStatusPlanned,
+		Provider:           string(cloud.ProviderVastai),
+		GPUSpec:            "donor",
+		ProviderInstanceID: "",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	// CreateLaunch stamps created_at = now; age it past the threshold.
+	old := time.Now().Add(-48 * time.Hour).Unix()
+	if _, err := database.Exec(`UPDATE launches SET created_at = ? WHERE id = ?`, old, launchID); err != nil {
+		t.Fatalf("age launch: %v", err)
+	}
+
+	reaped, err := SweepStalePlannedLaunches(database)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if reaped != 1 {
+		t.Fatalf("reaped = %d, want 1", reaped)
+	}
+
+	got, err := db.GetLaunch(database, launchID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if got.Status != db.LaunchStatusCancelled {
+		t.Errorf("status = %q, want %q", got.Status, db.LaunchStatusCancelled)
+	}
+	if got.TerminationReason != db.TerminationReasonCancelled {
+		t.Errorf("termination_reason = %q, want %q", got.TerminationReason, db.TerminationReasonCancelled)
+	}
+	if !strings.Contains(got.TerminationDetail, "reaped") {
+		t.Errorf("termination_detail = %q, want it to mention 'reaped'", got.TerminationDetail)
+	}
+}
+
+func TestSweepStalePlannedLaunches_SkipsFreshPlanned(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	recent := time.Now().Add(-1 * time.Minute).Unix()
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusPlanned,
+		Provider:   string(cloud.ProviderVastai),
+		CreatedAt:  recent,
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	reaped, err := SweepStalePlannedLaunches(database)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0", reaped)
+	}
+
+	got, err := db.GetLaunch(database, launchID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if got.Status != db.LaunchStatusPlanned {
+		t.Errorf("status = %q, want still planned", got.Status)
+	}
+}
+
+// TestSweepStalePlannedLaunches_SkipsPlannedWithProviderID — a row with
+// a stamped provider_instance_id may still have a billable instance and
+// belongs to the orphan sweep, not the planned reaper.
+func TestSweepStalePlannedLaunches_SkipsPlannedWithProviderID(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusPlanned,
+		Provider:   string(cloud.ProviderVastai),
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, launchID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	old := time.Now().Add(-48 * time.Hour).Unix()
+	if _, err := database.Exec(`UPDATE launches SET created_at = ? WHERE id = ?`, old, launchID); err != nil {
+		t.Fatalf("age launch: %v", err)
+	}
+
+	reaped, err := SweepStalePlannedLaunches(database)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0 (provider ID is set)", reaped)
+	}
 }

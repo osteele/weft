@@ -144,3 +144,55 @@ func MaybeSweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (int,
 
 	return SweepOrphanedInstances(database, clients)
 }
+
+const stalePlannedLaunchAge = 24 * time.Hour
+
+// SweepStalePlannedLaunches retires launch rows abandoned in 'planned'
+// status before the provider instance was ever created. See the
+// StalePlannedLaunchReap rule in specs/campaign-lifecycle.allium.
+func SweepStalePlannedLaunches(database *sql.DB) (reaped int, err error) {
+	cutoff := time.Now().Add(-stalePlannedLaunchAge).Unix()
+	launches, err := db.ListStalePlannedLaunches(database, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("list stale planned launches: %w", err)
+	}
+	for _, l := range launches {
+		detail := fmt.Sprintf("reaped: planned launch never created on provider (age %s)",
+			time.Since(time.Unix(l.CreatedAt, 0)).Round(time.Hour))
+		if err := db.UpdateLaunchStatus(database, l.ID,
+			db.LaunchStatusCancelled, db.TerminationReasonCancelled, detail); err != nil {
+			slog.Warn("failed to reap stale planned launch",
+				"component", "planned-reap", "launch_id", l.ID, "error", err)
+			continue
+		}
+		slog.Info("reaped stale planned launch",
+			"component", "planned-reap",
+			"launch_id", l.ID,
+			"campaign_id", l.CampaignID,
+			"created_at", time.Unix(l.CreatedAt, 0),
+			"gpu_spec", l.GPUSpec)
+		reaped++
+	}
+	return reaped, nil
+}
+
+const plannedReapInterval = 5 * time.Minute
+
+var (
+	lastPlannedReapMu sync.Mutex
+	lastPlannedReap   time.Time
+)
+
+// MaybeSweepStalePlannedLaunches runs SweepStalePlannedLaunches if at least
+// plannedReapInterval has elapsed since the last sweep.
+func MaybeSweepStalePlannedLaunches(database *sql.DB) (int, error) {
+	lastPlannedReapMu.Lock()
+	if time.Since(lastPlannedReap) < plannedReapInterval {
+		lastPlannedReapMu.Unlock()
+		return 0, nil
+	}
+	lastPlannedReap = time.Now()
+	lastPlannedReapMu.Unlock()
+
+	return SweepStalePlannedLaunches(database)
+}

@@ -1088,3 +1088,69 @@ func TestGroupSourceUploadError(t *testing.T) {
 		t.Errorf("error %v should wrap underlying upload error", got)
 	}
 }
+
+// TestCancelNonTerminalCampaignInstances guards CampaignFailed's
+// "all instances terminal" invariant: every campaign launch must be
+// terminal before the campaign itself is stamped failed.
+func TestCancelNonTerminalCampaignInstances(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusPlanned})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	plannedID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusPlanned,
+		Provider:   "vastai",
+		GPUSpec:    "donor",
+	})
+	if err != nil {
+		t.Fatalf("create planned launch: %v", err)
+	}
+	launchingID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusLaunching,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launching launch: %v", err)
+	}
+	terminalID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create terminal launch: %v", err)
+	}
+
+	cancelNonTerminalCampaignInstances(database, campaignID, "test detail")
+
+	cases := []struct {
+		name string
+		id   int64
+		want string
+	}{
+		{"planned -> canceled", plannedID, db.LaunchStatusCancelled},
+		{"launching -> canceled", launchingID, db.LaunchStatusCancelled},
+		{"failed -> failed (unchanged)", terminalID, db.LaunchStatusFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := db.GetLaunch(database, tc.id)
+			if err != nil {
+				t.Fatalf("GetLaunch: %v", err)
+			}
+			if got.Status != tc.want {
+				t.Errorf("status = %q, want %q", got.Status, tc.want)
+			}
+			if tc.want == db.LaunchStatusCancelled && got.TerminationDetail != "test detail" {
+				t.Errorf("termination_detail = %q, want \"test detail\"", got.TerminationDetail)
+			}
+		})
+	}
+}
