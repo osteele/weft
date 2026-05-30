@@ -1,0 +1,380 @@
+-- allium: 3
+-- upload-drain.allium
+--
+-- Scope: Agent-side R2 upload watchdog and self-destruct policy.
+-- Includes:
+--   - rclone-backed upload draining with four orthogonal gates
+--     (heartbeat, initial stall, mid-transfer stall, slow pace) plus
+--     a size-derived absolute ceiling
+--   - StallKind discrimination embedded in failure markers
+--   - Best-effort upload-failure marker writes to R2
+--   - Cross-Drain UploadHealth tracker and the consecutive-stall
+--     self-destruct policy
+-- Excludes:
+--   - What gets uploaded (job outputs, logs, heartbeats —
+--     see status-sync.allium)
+--   - Instance lifecycle after self-destruct
+--     (see campaign-lifecycle.allium)
+--   - R2 key conventions (see internal/r2keys/keys.go)
+--   - rclone invocation details and progress-line parsing
+--     (implementation detail of internal/r2upload)
+
+use "./campaign-lifecycle.allium" as cloud
+
+-- ==========================================================================
+-- Value types
+-- ==========================================================================
+
+value DrainStatus = ok | stalled | ceiling | error
+
+-- KilledBy distinguishes who terminated the rclone subprocess. Empty
+-- when rclone exited on its own (success or its own error).
+value KilledBy = stall | ceiling | canceled | slow_pace
+
+-- StallKind discriminates which gate fired. Populated only when
+-- DrainStatus == stalled. The marker writer surfaces this to the
+-- coordinator so failure-pattern analysis can distinguish auth/DNS
+-- problems (never_started) from transient network blips (mid_transfer)
+-- from sustained underperformance (slow_pace) from process hangs
+-- (heartbeat).
+value StallKind = never_started | mid_transfer | heartbeat | slow_pace
+
+-- Outcome of one Drain call. Returned to the caller; serialized to
+-- the upload-failure marker when status != ok.
+value DrainResult {
+    status: DrainStatus
+    killed_by: KilledBy?
+    stall_kind: StallKind?              -- non-null iff status == stalled
+    reason: String                      -- human-readable explanation
+    bytes_uploaded: Integer
+    bytes_total: Integer
+    elapsed: Duration
+    throughput_bytes_per_sec: Decimal   -- avg over the drain lifetime
+    ceiling: Duration                   -- size-derived cap actually used
+    stall_timeout: Duration             -- gate window in effect
+    initial_stall_timeout: Duration
+    heartbeat_timeout: Duration
+    stderr_tail: String                 -- last ~20 lines, for post-mortem
+}
+
+-- Marker written to R2 when a drain ends non-OK. Best-effort: marker
+-- write failures do not chain into another drain. Coordinator reads
+-- this to render "upload truncated: <kind>" in instance diagnose.
+value UploadFailureMarker {
+    kind: StallKind
+    reason: String
+    bytes_uploaded: Integer
+    bytes_total: Integer
+    source_path: String
+    dest_remote: String
+    job_id: Integer?       -- null for instance-level uploads
+    run_id: Integer?
+    instance_id: Integer?
+}
+
+-- ==========================================================================
+-- Entities
+-- ==========================================================================
+
+-- Per-instance tracker that aggregates outcomes across every Drain call
+-- the agent makes. Drives the self-destruct gate. Reset only by a
+-- successful drain.
+entity UploadHealth {
+    instance: cloud/Instance
+    consecutive_stalls: Integer      -- reset to 0 on every StatusOK drain
+    last_success_at: Timestamp       -- initialized at instance start
+    self_destruct_fired: Boolean     -- one-shot; CAS-protected in code
+}
+
+-- ==========================================================================
+-- Configuration
+-- ==========================================================================
+
+config {
+    -- Per-Drain watchdog windows.
+    -- stall_timeout applies once bytes have flowed; initial_stall_timeout
+    -- applies before the first byte; heartbeat_timeout applies always.
+    stall_timeout: Duration = 30.seconds
+    initial_stall_timeout: Duration = 5.minutes
+    heartbeat_timeout: Duration = 60.seconds
+
+    -- Size-derived absolute ceiling: baseline + bytes/floor, clamped at max.
+    drain_baseline: Duration = 60.seconds
+    drain_max: Duration = 15.minutes
+    floor_throughput_bps: Integer = 262144   -- 256 KiB/s
+
+    -- Slow-pace gate: kill drains whose sustained avg throughput is
+    -- too low to be economical on a paid cloud instance. Disabled
+    -- when either field is non-positive.
+    pace_check_after: Duration = 2.minutes
+    min_throughput_fraction: Decimal = 0.25
+
+    -- Marker write timeout. Short so it cannot recurse into another
+    -- long drain right before self-destruct.
+    marker_write_timeout: Duration = 10.seconds
+
+    -- Cross-Drain self-destruct policy. Both gates must trip together;
+    -- either alone would mis-fire.
+    self_destruct_min_stalls: Integer = 5
+    self_destruct_min_since_success: Duration = 30.minutes
+}
+
+-- ==========================================================================
+-- Per-Drain invariants
+-- ==========================================================================
+
+-- Regression invariant: pre-fix, this was violated. The mid-transfer
+-- watchdog reset only on byte-count increase, so rclone's pre-transfer
+-- stats lines ("Transferred: 0 B / X GiB" during HEAD / multipart-init /
+-- hashing) failed the n > bytesUploaded check and never advanced
+-- lastProgressAt. Instances wi3333 and wi3334 self-destructed 30s into
+-- a 1.49 GiB upload with bytes_uploaded == 0 each time, identical
+-- signatures — clearly timer expiry, not real R2 failure.
+--
+-- The fix decouples the alive signal from the progress signal: any
+-- stderr line advances lastHeartbeatAt; only a byte-count increase
+-- advances lastProgressAt. The mid-transfer stall watchdog now applies
+-- only once bytes_uploaded > 0; the initial_stall_timeout governs the
+-- pre-first-byte window with a much larger threshold.
+invariant HeartbeatResetsOnAnyStderrLine {
+    for line in RcloneStderrLines(drain):
+        drain.lastHeartbeatAt >= TimeOf(line)
+}
+
+-- bytesUploaded is updated only when n > bytesUploaded, so it never
+-- regresses. Consumers may treat `bytes_uploaded > 0` as equivalent to
+-- "bytes have ever flowed in this drain" — there is no separate boolean.
+invariant ByteCounterMonotonic {
+    for tick in DrainTicks(drain):
+        tick.bytes_uploaded >= tick.previous.bytes_uploaded
+}
+
+-- Every Drain call returns exactly one DrainResult and kills the rclone
+-- subprocess at most once. Two finalize calls would leak the subprocess
+-- or double-write the failure marker; zero would leave rclone running.
+invariant FinalizeCalledOnce {
+    for drain in DrainInvocations:
+        count(FinalizeCalled(drain)) == 1
+}
+
+-- DrainResult.stall_kind is populated if and only if status == stalled.
+-- The four StallKind values are exhaustive for that status; the absence
+-- of a kind on a stalled result is a bug.
+invariant StallKindMatchesStatus {
+    for result in DrainResults:
+        (result.status == stalled) == (result.stall_kind != null)
+}
+
+-- ==========================================================================
+-- Per-Drain rules: watchdog gates
+-- ==========================================================================
+
+-- Heartbeat: rclone stopped emitting stderr lines entirely. Catches
+-- process hangs (kernel wedge, OOM kill, syscall block) without
+-- conflating them with "no bytes flowing yet". This gate runs
+-- independently of byte progress and is checked first on every tick.
+rule HeartbeatStallFires {
+    when:
+        HeartbeatElapsed(drain) > config.heartbeat_timeout
+
+    ensures:
+        drain.result.status == stalled
+        drain.result.killed_by == stall
+        drain.result.stall_kind == heartbeat
+}
+
+-- Mid-transfer stall: bytes were flowing, then stopped. Catches
+-- transient network blips and per-connection rate-limiting after the
+-- upload has started moving data. The tight 30s threshold is acceptable
+-- here because rclone has already proved it can talk to R2.
+rule MidTransferStallFires {
+    when:
+        drain.bytes_uploaded > 0
+        StallElapsed(drain) > config.stall_timeout
+        HeartbeatElapsed(drain) <= config.heartbeat_timeout
+
+    ensures:
+        drain.result.status == stalled
+        drain.result.killed_by == stall
+        drain.result.stall_kind == mid_transfer
+}
+
+-- Initial stall: no first byte yet, generous window. Without this gate
+-- the mid-transfer 30s would mis-fire during rclone's pre-transfer
+-- setup (HEAD, multipart-upload init, chunk hashing) for multi-GB
+-- sources on high-latency providers. The window is sized for the
+-- worst case where every operation in setup makes one transatlantic
+-- round-trip.
+rule InitialStallFires {
+    when:
+        drain.bytes_uploaded == 0
+        StallElapsed(drain) > config.initial_stall_timeout
+        HeartbeatElapsed(drain) <= config.heartbeat_timeout
+
+    ensures:
+        drain.result.status == stalled
+        drain.result.killed_by == stall
+        drain.result.stall_kind == never_started
+        drain.result.bytes_uploaded == 0
+}
+
+-- Slow pace: bytes are flowing but the sustained average is so far
+-- below the floor that finishing under the ceiling would still burn
+-- substantial cloud-instance $/hr. Active only after pace_check_after
+-- so TCP slow-start and rclone chunk pipelining have a chance to ramp.
+-- Disabled when either pace_check_after or min_throughput_fraction is
+-- non-positive — on-prem hosts where the operator pays no per-hour cost
+-- typically disable this.
+rule SlowPaceFires {
+    when:
+        drain.bytes_uploaded > 0
+        ElapsedSinceStart(drain) > config.pace_check_after
+        config.pace_check_after > 0
+        config.min_throughput_fraction > 0
+        AvgThroughputBps(drain) < config.min_throughput_fraction * config.floor_throughput_bps
+        not HeartbeatStallFires(drain)
+        not MidTransferStallFires(drain)
+
+    ensures:
+        drain.result.status == stalled
+        drain.result.killed_by == slow_pace
+        drain.result.stall_kind == slow_pace
+}
+
+-- Ceiling: absolute time cap = drain_baseline + bytes_total / floor,
+-- clamped at drain_max. Backstop for cases where every other gate
+-- would just barely tolerate the upload — eventually we must give up.
+-- Distinct DrainStatus (not stalled) because it indicates "this upload
+-- ran to its budget", not "rclone misbehaved".
+rule CeilingFires {
+    when:
+        ElapsedSinceStart(drain) > drain.computed_ceiling
+
+    ensures:
+        drain.result.status == ceiling
+        drain.result.killed_by == ceiling
+        drain.result.stall_kind == null
+}
+
+-- Happy path: rclone exits with code 0 before any gate fires.
+rule DrainSucceeds {
+    when:
+        RcloneExitsCleanly(drain)
+        not HeartbeatStallFires(drain)
+        not MidTransferStallFires(drain)
+        not InitialStallFires(drain)
+        not SlowPaceFires(drain)
+        not CeilingFires(drain)
+
+    ensures:
+        drain.result.status == ok
+        drain.result.killed_by == null
+        drain.result.stall_kind == null
+}
+
+-- Context cancellation (parent gave up). Bookkeeping only — not a
+-- judgment about rclone's health, so it does not interact with
+-- UploadHealth.
+rule ContextCanceled {
+    when:
+        DrainContextDone(drain)
+
+    ensures:
+        drain.result.status == error
+        drain.result.killed_by == canceled
+}
+
+-- ==========================================================================
+-- Failure marker (best-effort R2 write)
+-- ==========================================================================
+
+-- Every non-OK drain writes a structured marker so the coordinator can
+-- distinguish "instance terminated cleanly without uploading X" from
+-- "agent crashed before reporting anything". The marker write uses a
+-- short bounded context so it cannot recurse into another long drain
+-- at self-destruct time.
+rule FailureMarkerWritten {
+    when:
+        drain.result.status != ok
+        drain.target.is_known     -- skip when caller didn't identify a target
+
+    ensures:
+        R2FailureMarkerExists(drain.target, drain.result.stall_kind)
+        MarkerWriteBoundedBy(config.marker_write_timeout)
+
+    @guidance
+        -- Implementation anchor: cmd/agent/upload_drain.go
+        --   drainAndMark / drainAndMarkWithRetry → recordDrainOutcome
+        --   r2upload.WriteFailureMarker
+        --
+        -- R2 keys (see internal/r2keys/keys.go):
+        --   jobs/<jobID>/runs/<runID>/upload-failure.json — per-attempt
+        --   instance/<instanceID>/upload-failure.json     — instance-level
+}
+
+-- ==========================================================================
+-- Cross-Drain self-destruct policy
+-- ==========================================================================
+
+-- A single stalled drain doesn't tear down the instance — rclone
+-- errors are common and recover. But repeated stalls with no successful
+-- upload between them mean R2 connectivity is effectively gone for
+-- this instance, and the coordinator should re-place the work on a
+-- fresh instance with working network rather than wait for the
+-- heartbeat-staleness reconciler to notice (which can take hours).
+--
+-- Both gates must trip together. Either alone would mis-fire:
+--   - A burst of stalls in a transient blip shouldn't tear down the
+--     instance (covered by min_since_success).
+--   - A long idle period with no uploads (the job hasn't produced any
+--     output yet) shouldn't either (covered by min_stalls).
+rule SelfDestructOnPersistentStalls {
+    when:
+        drain.result.killed_by in [stall, slow_pace]
+        upload_health.consecutive_stalls >= config.self_destruct_min_stalls
+        TimeSince(upload_health.last_success_at) >= config.self_destruct_min_since_success
+        not upload_health.self_destruct_fired
+
+    ensures:
+        upload_health.self_destruct_fired == true
+        AgentTerminatesSelf(upload_health.instance, cloud/upload_stall)
+
+    @guidance
+        -- Implementation anchor: cmd/agent/upload_drain.go
+        --   uploadHealthTracker.recordStall / recordSuccess
+        --   triggerUploadStallSelfDestruct
+        --   terminateInstanceWithReason(... db.TerminationReasonUploadStall ...)
+}
+
+-- A successful drain resets both counters atomically. Without this,
+-- a long-running job that uploads once an hour would accumulate
+-- "consecutive stalls" across unrelated transient blips.
+rule UploadSuccessResetsTracker {
+    when:
+        drain.result.status == ok
+
+    ensures:
+        upload_health.consecutive_stalls == 0
+        upload_health.last_success_at == Now
+}
+
+-- Slow_pace kills are semantically distinct from a true stall (bytes
+-- ARE flowing) but signal the same underlying condition: this instance
+-- can't move bytes to R2 well enough to be worth keeping alive. Both
+-- count toward the self-destruct gate; the StallKind on the marker is
+-- the only post-mortem indicator of which kind triggered termination.
+invariant SlowPaceCountsAsStall {
+    for drain in DrainInvocations:
+        drain.result.killed_by == slow_pace
+            implies UploadHealthRecordedAsStall(drain)
+}
+
+-- The self-destruct fire is a one-shot per UploadHealth lifetime. CAS
+-- in the implementation ensures that a flurry of simultaneous stall
+-- callbacks (rare but possible — concurrent background-drain goroutines)
+-- triggers terminate-instance at most once. Subsequent qualifying
+-- callbacks are no-ops.
+invariant SelfDestructFiresAtMostOnce {
+    for upload_health in UploadHealthInstances:
+        count(SelfDestructFired(upload_health)) <= 1
+}

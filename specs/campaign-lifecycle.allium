@@ -51,6 +51,12 @@ value OfferSnapshot {
 value TerminationReason = completed | provider_failure | job_failure
                         | disk_full | infra_failure | bootstrap_timeout
                         | canceled | phase_stall | preempted | unknown
+                        | provider_timeout | upload_stall | weft_bug
+-- upload_stall: agent self-destructed after persistent R2 upload failures.
+--               See upload-drain.allium for the gate that triggers it.
+-- provider_timeout: provider create/destroy/show command exceeded its
+--                   bounded timeout (typically a Vast.ai API hang).
+-- weft_bug: reserved for internal invariant violations the agent detected.
 
 -- AttemptOutcome classifies how a single Job attempt on a Launch ended.
 -- "preempted" specifically indicates the attempt was running on an

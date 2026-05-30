@@ -435,3 +435,55 @@ genuinely useful for "is wj2257 making progress or stuck."
   `IsRetryableTermination`'s switch (and, transitively, in the schema). The
   current test suite never crosses the agent → DB boundary for any reason
   the agent emits.
+
+## Spec coverage for agent subsystems
+
+`specs/upload-drain.allium` is the first Allium spec that covers an
+agent-internal subsystem rather than coordinator-visible lifecycle. It was
+written after the wi3333 / wi3334 upload-stall regression, which would have
+been prevented by the spec's `HeartbeatResetsOnAnyStderrLine` invariant.
+The agent has accumulated several other subsystems whose behavior currently
+lives only in code comments and which would benefit from the same
+treatment. Each is small enough (~300-500 spec lines) to be written and
+kept current.
+
+- **`specs/agent-jobloop.allium`** — per-job phase transitions inside the
+  agent (setup → running → finalizing → uploading), how the agent decides
+  to pull the next job vs. enter grace, prior-job-upload barrier behavior
+  before workdir reuse (`eec0475c9`), exit-code → DB-status mapping.
+  Implementation anchors: `cmd/agent/jobloop.go`, `cmd/agent/runinstance.go`.
+- **`specs/agent-grace-wait.allium`** — the R2-polling grace period after
+  job failures, the `submit` / `extend` / `release` control-message
+  protocol, the deadline / extend-default semantics, what counts as a
+  terminal state for the grace loop. Implementation anchors:
+  `cmd/agent/gracewait.go`, `cmd/agent/r2ops.go`,
+  `internal/r2keys/keys.go` (grace/ keyspace).
+- **`specs/agent-heartbeat.allium`** — the three trigger conditions for
+  `AgentHeartbeatTick` (startup, phase transition, 30s tick), the
+  separate `last-seen` liveness key that survives nvidia-smi hangs,
+  what fields are sampled vs. skipped on disk-full or GPU-probe
+  failures. The current `AgentReportsHeartbeat` rule in
+  `status-sync.allium` documents the *contract* but not the *policy*.
+- **`specs/agent-prewarm.allium`** — cloud-job prewarm pipeline
+  (`518bd4d9c`), setup-timeout classification as `infra_failure`
+  vs. `job_failure` (`4d14ac08e`), HF input bootstrap on cloud
+  (`d24dab851`). Particularly worth a spec because failure
+  classification here gates whether the autopilot retries on a
+  different instance or marks the job as user-broken.
+- **`specs/agent-onstart-probe.allium`** — the OnStart probe path
+  (`cf49c7766`), what disambiguates "OnStart never ran" from "OnStart
+  ran but bootstrap failed", the bootstrap-stage progression
+  surfaced in `weft instance diagnose`.
+
+Priority order is roughly the order of past production surprises:
+jobloop and grace-wait first (most cross-coupling with coordinator
+state), then heartbeat (rarely changes, well-understood), then
+prewarm (newer, still evolving), then onstart-probe.
+
+Each new spec should follow the upload-drain template: header noting
+what the spec is *for* and what it explicitly excludes, value types
+for the subsystem's public surface, invariants captured as regression
+guards (referencing the incident that exposed them when applicable),
+rules with `when:` / `ensures:` blocks, `@guidance` blocks pointing
+to implementation anchors. Cross-reference via `use "./other.allium"
+as alias`.
