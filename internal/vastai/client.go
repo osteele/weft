@@ -276,6 +276,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 
 	out, err := c.runWithTimeout(createInstanceTimeout, args...)
 	if err != nil {
+		if isAccountCreditError(err.Error()) {
+			return nil, fmt.Errorf("%w: %v", cloud.ErrAccountCreditExhausted, err)
+		}
 		if isUnavailableOfferError(err) {
 			return nil, fmt.Errorf("%w: %v", cloud.ErrOfferUnavailable, err)
 		}
@@ -293,13 +296,26 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		Msg         string          `json:"msg"`
 	}
 	if strings.TrimSpace(string(out)) == "" {
+		// Vast.ai's create endpoint returns an empty body when the account is
+		// out of credit instead of a structured error. Probe ShowUser before
+		// surfacing the generic provider-rejected message so the autopilot
+		// stops retrying against a dead provider.
+		if credit, probeErr := c.probeCreditBalance(); probeErr == nil && credit <= 0 {
+			return nil, fmt.Errorf("provider returned empty response while account credit was exhausted ($%.2f): %w", credit, cloud.ErrAccountCreditExhausted)
+		}
 		return nil, fmt.Errorf("provider returned empty response: %w", cloud.ErrProviderRejected)
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		if msg := extractProviderErrorMessage(out); msg != "" {
+			if isAccountCreditError(msg) {
+				return nil, fmt.Errorf("%s: %w", msg, cloud.ErrAccountCreditExhausted)
+			}
 			return nil, fmt.Errorf("%s: %w", msg, cloud.ErrProviderRejected)
 		}
 		if msg := extractCLIError(out); msg != "" {
+			if isAccountCreditError(msg) {
+				return nil, fmt.Errorf("%s: %w", msg, cloud.ErrAccountCreditExhausted)
+			}
 			return nil, fmt.Errorf("create instance: %s", msg)
 		}
 		return nil, fmt.Errorf("parse create response: %w (output: %s)", err, truncate(string(out), 200))
@@ -309,6 +325,10 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		if reason == "" {
 			reason = "provider returned success=false"
 		}
+		sentinel := cloud.ErrProviderRejected
+		if isAccountCreditError(reason) {
+			sentinel = cloud.ErrAccountCreditExhausted
+		}
 		if resp.NewContract != 0 {
 			// Vast.ai sometimes allocates an instance even when reporting failure.
 			// Destroy it to avoid an orphaned billing instance.
@@ -316,9 +336,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
 				slog.Warn("failed to destroy orphaned instance", "component", "vastai", "instance", resp.NewContract, "error", destroyErr)
 			}
-			return nil, fmt.Errorf("%s: %w (contract %d)", reason, cloud.ErrProviderRejected, resp.NewContract)
+			return nil, fmt.Errorf("%s: %w (contract %d)", reason, sentinel, resp.NewContract)
 		}
-		return nil, fmt.Errorf("%s: %w", reason, cloud.ErrProviderRejected)
+		return nil, fmt.Errorf("%s: %w", reason, sentinel)
 	}
 
 	if opts.PublicKeyFile != "" {
@@ -409,6 +429,48 @@ func isUnavailableOfferError(err error) bool {
 
 func isProviderRejectedCreateError(err error) bool {
 	return false
+}
+
+// isAccountCreditError returns true when a provider message indicates the
+// authenticated account is out of credit. Vast.ai surfaces this as a CLI
+// "failed with error 400: Your account lacks credit" message, but the create
+// endpoint sometimes responds with an empty body instead — see the empty-body
+// branch in CreateInstance for the ShowUser fallback.
+func isAccountCreditError(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	s := strings.ToLower(msg)
+	switch {
+	case strings.Contains(s, "account lacks credit"):
+		return true
+	case strings.Contains(s, "insufficient balance"):
+		return true
+	case strings.Contains(s, "insufficient credit"):
+		return true
+	case strings.Contains(s, "account credit"):
+		return true
+	default:
+		return false
+	}
+}
+
+// probeCreditBalance is overridable in tests; in production it calls ShowUser
+// and returns the account credit (in dollars) or an error. Used by
+// CreateInstance to attribute empty-body responses to credit exhaustion.
+var probeCreditBalance = func(c *Client) (float64, error) {
+	user, err := c.ShowUser()
+	if err != nil || user == nil {
+		if err == nil {
+			err = fmt.Errorf("show user: nil response")
+		}
+		return 0, err
+	}
+	return user.Credit, nil
+}
+
+func (c *Client) probeCreditBalance() (float64, error) {
+	return probeCreditBalance(c)
 }
 
 // ShowInstance fetches the current state of an instance.

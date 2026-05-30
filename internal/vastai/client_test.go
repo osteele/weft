@@ -158,7 +158,8 @@ func TestParseCreateInstance(t *testing.T) {
 }
 
 func TestCreateInstanceEmptyOutputIsProviderRejected(t *testing.T) {
-	t.Parallel()
+	// Cannot run in parallel: shares package-level probeCreditBalance with
+	// TestCreateInstanceEmptyResponse* below.
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nexit 0\n"
@@ -192,6 +193,112 @@ func TestCreateInstanceProviderErrorJSONIsProviderRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no_such_ask") {
 		t.Fatalf("CreateInstance error = %v, want provider message", err)
+	}
+}
+
+func TestCreateInstanceAccountCreditExhaustedFromCLIMessage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	// vastai surfaces credit-exhaustion as a plain-text CLI error on stdout
+	// even though the CLI exits non-zero. Simulate the exit-1 + stderr path.
+	script := "#!/bin/sh\necho 'failed with error 400: Your account lacks credit; see the billing page.' >&2\nexit 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrAccountCreditExhausted) {
+		t.Fatalf("CreateInstance error = %v, want account credit exhausted", err)
+	}
+	if errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, must not also be provider rejected", err)
+	}
+}
+
+func TestCreateInstanceEmptyResponseWithExhaustedCreditIsAccountCreditExhausted(t *testing.T) {
+	// Cannot run in parallel: modifies package-level probeCreditBalance.
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	prev := probeCreditBalance
+	probeCreditBalance = func(_ *Client) (float64, error) { return 0, nil }
+	t.Cleanup(func() { probeCreditBalance = prev })
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrAccountCreditExhausted) {
+		t.Fatalf("CreateInstance error = %v, want account credit exhausted", err)
+	}
+	if !strings.Contains(err.Error(), "$0.00") {
+		t.Fatalf("CreateInstance error = %v, want balance in detail", err)
+	}
+}
+
+func TestCreateInstanceEmptyResponseWithProbeFailureFallsBackToProviderRejected(t *testing.T) {
+	// Cannot run in parallel: modifies package-level probeCreditBalance.
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	prev := probeCreditBalance
+	probeCreditBalance = func(_ *Client) (float64, error) {
+		return 0, errors.New("show user: network unreachable")
+	}
+	t.Cleanup(func() { probeCreditBalance = prev })
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, want provider rejected (probe failed, unknown credit)", err)
+	}
+	if errors.Is(err, cloud.ErrAccountCreditExhausted) {
+		t.Fatalf("CreateInstance error = %v, must not attribute to credit when probe failed", err)
+	}
+}
+
+func TestCreateInstanceSuccessFalseWithCreditMessageIsAccountCreditExhausted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": false, \"msg\": \"Your account lacks credit\"}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrAccountCreditExhausted) {
+		t.Fatalf("CreateInstance error = %v, want account credit exhausted", err)
+	}
+}
+
+func TestIsAccountCreditError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"", false},
+		{"some random error", false},
+		{"failed with error 400: Your account lacks credit", true},
+		{"YOUR ACCOUNT LACKS CREDIT; SEE THE BILLING PAGE", true},
+		{"insufficient balance for offer 12345", true},
+		{"Insufficient credit", true},
+		{"account credit was exhausted", true},
+		{"no_such_ask", false},
+		{"machine busy", false},
+	}
+	for _, tc := range cases {
+		if got := isAccountCreditError(tc.msg); got != tc.want {
+			t.Errorf("isAccountCreditError(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
 	}
 }
 

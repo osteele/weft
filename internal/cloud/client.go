@@ -18,6 +18,14 @@ var ErrOfferUnavailable = errors.New("offer unavailable")
 // Like ErrOfferUnavailable, the remedy is to try a different offer.
 var ErrProviderRejected = errors.New("provider rejected instance creation")
 
+// ErrAccountCreditExhausted is returned when a provider request fails because
+// the authenticated account has insufficient credit/balance. Unlike
+// ErrProviderRejected, retrying against another offer will not help — the
+// operator needs to top up before any further placement attempts succeed.
+// Schedulers should treat this as a provider-wide outage and stop attempting
+// new instance creations on the affected provider until credit is restored.
+var ErrAccountCreditExhausted = errors.New("account credit exhausted")
+
 // ErrProviderCommandTimeout is returned when a provider CLI/API command exceeds
 // weft's local timeout before returning a provider response.
 var ErrProviderCommandTimeout = errors.New("provider command timed out")

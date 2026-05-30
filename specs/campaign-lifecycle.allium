@@ -486,6 +486,54 @@ rule DependencyGatesRentalLaunch {
 }
 
 -- --------------------------------------------------------------------------
+-- Provider credit gate
+-- --------------------------------------------------------------------------
+
+-- A provider's create-instance endpoint is unreachable in a structural sense
+-- when the authenticated account is out of credit. Vast.ai surfaces this
+-- specifically as an empty HTTP body (not a structured error), which the
+-- raw provider client wraps as ErrProviderRejected — but retrying against
+-- another offer of the same provider will not help. Without a gate, every
+-- autopilot pass mints a fresh failed-instance row per rental-scope job,
+-- pollutes the failure list, and seeds the survival model with non-signal
+-- noise that has to be filtered out retrospectively
+-- (internal/bidding/build.go excludes outcomes whose termination_detail
+-- matches "%provider returned empty response%" / "%insufficient balance%" /
+-- "%account credit%" precisely because of this).
+--
+-- The gate is a pre-launch guard: before calling RelaunchOrphanedJobs the
+-- autopilot probes each enabled provider's account balance and, when every
+-- enabled provider is exhausted, short-circuits with a blocked reason that
+-- names the cause and prompts the operator to top up.
+
+rule ProviderCreditGate {
+    when: AutoPilotTick(unplaced_jobs) with rental_scope nonempty
+
+    let statuses = CheckProviderCreditHealth(enabled_providers)
+    if every status in statuses has status.exhausted = true:
+        ensures: rental launch is skipped this pass
+        ensures: each job in rental_scope receives blocked_reason of the form
+                 "<provider> credit exhausted ($<balance>) — top up before
+                 instances can launch"
+
+    @guidance
+        -- Threshold: balance <= $0 is treated as exhausted. The wider
+        -- "credits low" UI warning ($10 default) is a soft operator signal
+        -- and is intentionally NOT applied as a hard gate — credit between
+        -- $0 and the warning threshold is still spendable.
+        --
+        -- Probe failures (network errors, transient provider API hiccups)
+        -- are treated as "unknown, attempt anyway" so a momentary outage
+        -- of the user endpoint does not block the queue.
+        --
+        -- The provider client must also translate empty-response and
+        -- "account lacks credit" failures from CreateInstance to the
+        -- ErrAccountCreditExhausted sentinel, so the truthful cause
+        -- surfaces from any caller — manual instance launches, direct
+        -- campaign launches, future schedulers — not only the autopilot.
+}
+
+-- --------------------------------------------------------------------------
 -- Interruptible placement
 -- --------------------------------------------------------------------------
 

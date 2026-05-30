@@ -40,6 +40,11 @@ type GroupedAutoPilotResult struct {
 var autoPilotBuildPlan = buildAutoPlacementPlan
 var autoPilotBuildPlanWithOptions = buildAutoPlacementPlanWithOptions
 
+// autoPilotCheckProviderCreditHealth is overridable in tests; it gates the
+// pre-launch path so the autopilot stops calling provider create endpoints
+// when all enabled provider accounts are out of credit.
+var autoPilotCheckProviderCreditHealth = CheckProviderCreditHealth
+
 var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
 var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
@@ -370,6 +375,33 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			StructuredBlocked: structuredBlocked,
 		}, nil
 	}
+
+	// Pre-launch credit gate: if every enabled provider's account credit is
+	// exhausted, every CreateInstance call below would fail with a cryptic
+	// "provider returned empty response" / "account lacks credit" error, mint
+	// a failed-instance row per attempt, and pollute the survival model with
+	// non-signal noise. Skip the launch and attribute the blocked reason to
+	// the actual cause.
+	creditStatuses := autoPilotCheckProviderCreditHealth(cfg)
+	logProviderCreditGate(creditStatuses, len(rentalScope))
+	if AllEnabledProvidersExhausted(creditStatuses) {
+		reason := FormatCreditExhaustionReason(creditStatuses)
+		for _, jobID := range rentalScope {
+			blockedReasons[jobID] = reason
+		}
+		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
+		return &GroupedAutoPilotResult{
+			Placed:            placed,
+			Rebalanced:        rebalanced,
+			Launched:          moveRetryLaunches,
+			AutoReplanned:     autoReplanned,
+			ReuseFilled:       reuseFilled,
+			LaunchedClass:     "",
+			BlockedReasons:    blockedReasons,
+			StructuredBlocked: structuredBlocked,
+		}, nil
+	}
+
 	oplog.Log("auto_pilot.launching",
 		oplog.WithDetailf("rental_scope=%d", len(rentalScope)))
 
