@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -139,16 +140,17 @@ func TestDrainHappyPath(t *testing.T) {
 }
 
 func TestDrainStallKill(t *testing.T) {
-	// One progress line then nothing — should trigger stall watchdog.
+	// One progress line then nothing — should trigger mid-transfer stall.
 	proc := newStubProcess([]scriptedLine{
 		{delay: 5 * time.Millisecond, text: statsLine("1 MiB")},
 	}, 0, nil) // exitDelay=0 → process holds until killed
 	r := Drain(context.Background(), Options{
 		Source: "/tmp/x", DestRemote: "r2:b/k", TotalBytes: 1 << 30,
-		Runner:       &stubRunner{proc: proc},
-		StallTimeout: 80 * time.Millisecond,
-		TickInterval: 10 * time.Millisecond,
-		MaxDrain:     5 * time.Second,
+		Runner:           &stubRunner{proc: proc},
+		StallTimeout:     80 * time.Millisecond,
+		HeartbeatTimeout: 5 * time.Second,
+		TickInterval:     10 * time.Millisecond,
+		MaxDrain:         5 * time.Second,
 	})
 	if r.Status != StatusStalled {
 		t.Fatalf("status = %q (reason=%q), want stalled", r.Status, r.Reason)
@@ -156,12 +158,184 @@ func TestDrainStallKill(t *testing.T) {
 	if r.KilledBy != KilledByStall {
 		t.Errorf("KilledBy = %q, want %q", r.KilledBy, KilledByStall)
 	}
+	if r.StallKind != StallKindMidTransfer {
+		t.Errorf("StallKind = %q, want %q", r.StallKind, StallKindMidTransfer)
+	}
 	if r.BytesUploaded != 1024*1024 {
 		t.Errorf("BytesUploaded = %d, want 1 MiB (the last observed)", r.BytesUploaded)
 	}
-	if !strings.Contains(r.Reason, "no progress") {
-		t.Errorf("Reason = %q, want 'no progress' phrase", r.Reason)
+	if !strings.Contains(r.Reason, "mid-transfer stall") {
+		t.Errorf("Reason = %q, want 'mid-transfer stall' phrase", r.Reason)
 	}
+}
+
+// TestDrainZeroByteStatsResetHeartbeat: when rclone emits "Transferred: 0 B / X"
+// stats lines during pre-transfer setup, the heartbeat must keep resetting so
+// the watchdog doesn't fire just because the byte counter is stuck at zero.
+// This is the regression test for the bug where wi3333/wi3334 self-destructed
+// after 30s with 0/1.5GiB uploaded — rclone was alive but had not started
+// streaming bytes yet.
+func TestDrainZeroByteStatsResetHeartbeat(t *testing.T) {
+	// rclone emits 0-byte stats every 20ms for 200ms, then bytes start
+	// flowing. The 50ms StallTimeout would fire if we were tracking only
+	// byte progress, but the InitialStallTimeout is generous and the
+	// heartbeat keeps resetting because every line counts as activity.
+	lines := []scriptedLine{}
+	for i := 0; i < 10; i++ {
+		lines = append(lines, scriptedLine{delay: 20 * time.Millisecond, text: statsLine("0 B")})
+	}
+	lines = append(lines,
+		scriptedLine{delay: 20 * time.Millisecond, text: statsLine("1 MiB")},
+		scriptedLine{delay: 20 * time.Millisecond, text: statsLine("100 MiB")},
+	)
+	proc := newStubProcess(lines, 10*time.Millisecond, nil)
+	r := Drain(context.Background(), Options{
+		Source: "/tmp/x", DestRemote: "r2:b/k", TotalBytes: 100 * 1024 * 1024,
+		Runner:              &stubRunner{proc: proc},
+		StallTimeout:        100 * time.Millisecond, // tight, would mis-fire on byte-only tracking
+		InitialStallTimeout: 2 * time.Second,        // generous pre-first-byte window
+		HeartbeatTimeout:    500 * time.Millisecond, // slack for CI scheduling jitter
+		TickInterval:        10 * time.Millisecond,
+	})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %q (reason=%q stderr=%q), want ok — 0-byte stats lines should keep watchdog alive",
+			r.Status, r.Reason, r.StderrTail)
+	}
+}
+
+// TestDrainHeartbeatStall: rclone is silent — no lines at all — and bytes
+// never flow. Heartbeat fires first (it's shorter than InitialStallTimeout).
+func TestDrainHeartbeatStall(t *testing.T) {
+	// No scripted lines: rclone emits nothing.
+	proc := newStubProcess(nil, 0, nil)
+	r := Drain(context.Background(), Options{
+		Source: "/tmp/x", DestRemote: "r2:b/k", TotalBytes: 1 << 30,
+		Runner:              &stubRunner{proc: proc},
+		StallTimeout:        5 * time.Second,
+		InitialStallTimeout: 5 * time.Second,
+		HeartbeatTimeout:    200 * time.Millisecond,
+		TickInterval:        10 * time.Millisecond,
+		MaxDrain:            5 * time.Second,
+	})
+	if r.Status != StatusStalled {
+		t.Fatalf("status = %q (reason=%q), want stalled", r.Status, r.Reason)
+	}
+	if r.StallKind != StallKindHeartbeat {
+		t.Errorf("StallKind = %q, want %q", r.StallKind, StallKindHeartbeat)
+	}
+	if !strings.Contains(r.Reason, "rclone silent") {
+		t.Errorf("Reason = %q, want 'rclone silent' phrase", r.Reason)
+	}
+}
+
+// TestDrainNeverStartedStall: rclone keeps emitting 0-byte stats (so heartbeat
+// stays alive) but bytes never start flowing. InitialStallTimeout fires.
+func TestDrainNeverStartedStall(t *testing.T) {
+	lines := []scriptedLine{}
+	for i := 0; i < 30; i++ {
+		lines = append(lines, scriptedLine{delay: 10 * time.Millisecond, text: statsLine("0 B")})
+	}
+	proc := newStubProcess(lines, 0, nil)
+	r := Drain(context.Background(), Options{
+		Source: "/tmp/x", DestRemote: "r2:b/k", TotalBytes: 1 << 30,
+		Runner:              &stubRunner{proc: proc},
+		StallTimeout:        5 * time.Second,
+		InitialStallTimeout: 200 * time.Millisecond,
+		HeartbeatTimeout:    5 * time.Second,
+		TickInterval:        10 * time.Millisecond,
+		MaxDrain:            5 * time.Second,
+	})
+	if r.Status != StatusStalled {
+		t.Fatalf("status = %q (reason=%q), want stalled", r.Status, r.Reason)
+	}
+	if r.StallKind != StallKindNeverStarted {
+		t.Errorf("StallKind = %q, want %q", r.StallKind, StallKindNeverStarted)
+	}
+	if !strings.Contains(r.Reason, "no bytes uploaded") {
+		t.Errorf("Reason = %q, want 'no bytes uploaded' phrase", r.Reason)
+	}
+	if r.BytesUploaded != 0 {
+		t.Errorf("BytesUploaded = %d, want 0", r.BytesUploaded)
+	}
+}
+
+// TestDrainSlowPaceKill: bytes flow steadily but at a rate far below the
+// floor. After the pace-check warmup, abort with KilledBySlowPace so the
+// instance doesn't burn $/hr waiting for a glacial upload.
+func TestDrainSlowPaceKill(t *testing.T) {
+	// 1 KiB every 20ms = 50 KiB/s. Floor 1 MiB/s × 0.25 fraction = 256 KiB/s
+	// threshold → 50 KiB/s is well under and should fail.
+	lines := []scriptedLine{}
+	for i := 1; i <= 50; i++ {
+		lines = append(lines, scriptedLine{
+			delay: 20 * time.Millisecond,
+			text:  kibLine(i),
+		})
+	}
+	proc := newStubProcess(lines, 0, nil)
+	r := Drain(context.Background(), Options{
+		Source: "/tmp/x", DestRemote: "r2:b/k", TotalBytes: 10 * 1024 * 1024,
+		Runner:                &stubRunner{proc: proc},
+		StallTimeout:          5 * time.Second,
+		InitialStallTimeout:   5 * time.Second,
+		HeartbeatTimeout:      5 * time.Second,
+		FloorThroughput:       1 << 20, // 1 MiB/s
+		MinThroughputFraction: 0.25,    // require 256 KiB/s
+		PaceCheckAfter:        150 * time.Millisecond,
+		MaxDrain:              5 * time.Second,
+		TickInterval:          10 * time.Millisecond,
+	})
+	if r.Status != StatusStalled {
+		t.Fatalf("status = %q (reason=%q), want stalled", r.Status, r.Reason)
+	}
+	if r.KilledBy != KilledBySlowPace {
+		t.Errorf("KilledBy = %q, want %q", r.KilledBy, KilledBySlowPace)
+	}
+	if r.StallKind != StallKindSlowPace {
+		t.Errorf("StallKind = %q, want %q", r.StallKind, StallKindSlowPace)
+	}
+	if !strings.Contains(r.Reason, "sustained slow throughput") {
+		t.Errorf("Reason = %q, want 'sustained slow throughput' phrase", r.Reason)
+	}
+	if r.ThroughputBytesPerSec <= 0 {
+		t.Errorf("ThroughputBytesPerSec = %f, want > 0", r.ThroughputBytesPerSec)
+	}
+}
+
+// TestDrainPaceCheckDisabled: with MinThroughputFraction < 0, a slow upload
+// should NOT trigger the pace gate, even if it would otherwise.
+func TestDrainPaceCheckDisabled(t *testing.T) {
+	// Same scenario as TestDrainSlowPaceKill but with pace check disabled.
+	// The ceiling will fire eventually, but pace check should not.
+	lines := []scriptedLine{}
+	for i := 1; i <= 5; i++ {
+		lines = append(lines, scriptedLine{
+			delay: 20 * time.Millisecond,
+			text:  kibLine(i),
+		})
+	}
+	proc := newStubProcess(lines, 5*time.Millisecond, nil)
+	r := Drain(context.Background(), Options{
+		Source: "/tmp/x", DestRemote: "r2:b/k", TotalBytes: 1 * 1024 * 1024,
+		Runner:                &stubRunner{proc: proc},
+		StallTimeout:          5 * time.Second,
+		InitialStallTimeout:   5 * time.Second,
+		HeartbeatTimeout:      5 * time.Second,
+		FloorThroughput:       1 << 20,
+		MinThroughputFraction: -1, // disabled
+		PaceCheckAfter:        10 * time.Millisecond,
+		MaxDrain:              5 * time.Second,
+		TickInterval:          10 * time.Millisecond,
+	})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %q (reason=%q), want ok with pace check disabled", r.Status, r.Reason)
+	}
+}
+
+// kibLine returns a stats line with N KiB transferred. Helper so tests can
+// produce ascending byte counts that extractBytes parses as n * 1024.
+func kibLine(n int) string {
+	return statsLine(strconv.Itoa(n) + " KiB")
 }
 
 func TestDrainCeilingKill(t *testing.T) {

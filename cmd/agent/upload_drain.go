@@ -76,7 +76,10 @@ func recordDrainOutcome(bucket string, target drainTarget, opts r2upload.Options
 		uploadHealth.recordSuccess()
 		return
 	}
-	if result.KilledBy == r2upload.KilledByStall {
+	if result.KilledBy == r2upload.KilledByStall || result.KilledBy == r2upload.KilledBySlowPace {
+		// Both signal "this instance can't move bytes to R2 well enough to
+		// be worth keeping alive". Count them together against the
+		// consecutive-stalls + idle-since-success threshold.
 		if decision := uploadHealth.recordStall(); decision.shouldSelfDestruct {
 			triggerUploadStallSelfDestruct(bucket, target, decision, result)
 		}
@@ -142,10 +145,14 @@ func (w agentMarkerWriter) Put(ctx context.Context, key string, body io.Reader, 
 // responsibility.
 func drainOptionsFromConfig() r2upload.Options {
 	return r2upload.Options{
-		StallTimeout:    drainStallTimeout,
-		FloorThroughput: drainFloorThroughput,
-		MaxDrain:        drainMaxDrain,
-		Baseline:        drainBaseline,
+		StallTimeout:          drainStallTimeout,
+		InitialStallTimeout:   drainInitialStallTimeout,
+		HeartbeatTimeout:      drainHeartbeatTimeout,
+		FloorThroughput:       drainFloorThroughput,
+		MaxDrain:              drainMaxDrain,
+		Baseline:              drainBaseline,
+		PaceCheckAfter:        drainPaceCheckAfter,
+		MinThroughputFraction: drainMinThroughputFraction,
 	}
 }
 
@@ -154,11 +161,15 @@ func drainOptionsFromConfig() r2upload.Options {
 // from applyDrainSettings before the job loop starts; goroutine-safe by
 // virtue of being immutable after that.
 var (
-	drainStallTimeout    = r2upload.DefaultStallTimeout
-	drainFloorThroughput = int64(r2upload.DefaultFloorThroughput)
-	drainMaxDrain        = r2upload.DefaultMaxDrain
-	drainBaseline        = r2upload.DefaultBaseline
-	drainMarkerTimeout   = r2upload.DefaultMarkerTimeout
+	drainStallTimeout          = r2upload.DefaultStallTimeout
+	drainInitialStallTimeout   = r2upload.DefaultInitialStallTimeout
+	drainHeartbeatTimeout      = r2upload.DefaultHeartbeatTimeout
+	drainFloorThroughput       = int64(r2upload.DefaultFloorThroughput)
+	drainMaxDrain              = r2upload.DefaultMaxDrain
+	drainBaseline              = r2upload.DefaultBaseline
+	drainMarkerTimeout         = r2upload.DefaultMarkerTimeout
+	drainPaceCheckAfter        = r2upload.DefaultPaceCheckAfter
+	drainMinThroughputFraction = r2upload.DefaultMinThroughputFraction
 )
 
 // Upload-stall self-destruct: when R2 uploads stall repeatedly with no
@@ -317,10 +328,16 @@ func triggerUploadStallSelfDestruct(bucket string, target drainTarget, decision 
 
 // applyDrainSettings overrides the package-level drain tunables from a
 // manifest. Each zero/unset field leaves its current value (the default)
-// in place.
+// in place. Negative values for the pace-check fields disable that gate.
 func applyDrainSettings(s cloud.DrainSettings) {
 	if s.StallTimeoutSeconds > 0 {
 		drainStallTimeout = time.Duration(s.StallTimeoutSeconds) * time.Second
+	}
+	if s.InitialStallTimeoutSeconds > 0 {
+		drainInitialStallTimeout = time.Duration(s.InitialStallTimeoutSeconds) * time.Second
+	}
+	if s.HeartbeatTimeoutSeconds > 0 {
+		drainHeartbeatTimeout = time.Duration(s.HeartbeatTimeoutSeconds) * time.Second
 	}
 	if s.FloorThroughputBytesPerSec > 0 {
 		drainFloorThroughput = s.FloorThroughputBytesPerSec
@@ -333,5 +350,11 @@ func applyDrainSettings(s cloud.DrainSettings) {
 	}
 	if s.MarkerTimeoutSeconds > 0 {
 		drainMarkerTimeout = time.Duration(s.MarkerTimeoutSeconds) * time.Second
+	}
+	if s.PaceCheckAfterSeconds != 0 {
+		drainPaceCheckAfter = time.Duration(s.PaceCheckAfterSeconds) * time.Second
+	}
+	if s.MinThroughputFraction != 0 {
+		drainMinThroughputFraction = s.MinThroughputFraction
 	}
 }

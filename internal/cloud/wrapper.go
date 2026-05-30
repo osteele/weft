@@ -69,8 +69,16 @@ type CampaignManifest struct {
 // manifest in R2.
 type DrainSettings struct {
 	StallTimeoutSeconds        int   `json:"stall_timeout_seconds,omitempty"`
+	InitialStallTimeoutSeconds int   `json:"initial_stall_timeout_seconds,omitempty"`
+	HeartbeatTimeoutSeconds    int   `json:"heartbeat_timeout_seconds,omitempty"`
 	FloorThroughputBytesPerSec int64 `json:"floor_throughput_bytes_per_sec,omitempty"`
 	MaxDrainSeconds            int   `json:"max_drain_seconds,omitempty"`
 	BaselineSeconds            int   `json:"baseline_seconds,omitempty"`
 	MarkerTimeoutSeconds       int   `json:"marker_timeout_seconds,omitempty"`
+	// PaceCheckAfterSeconds: warmup before slow-pace gate activates. Negative
+	// disables. Zero → r2upload default.
+	PaceCheckAfterSeconds int `json:"pace_check_after_seconds,omitempty"`
+	// MinThroughputFraction: required fraction of FloorThroughput (avg over
+	// drain lifetime) after warmup. Negative disables. Zero → r2upload default.
+	MinThroughputFraction float64 `json:"min_throughput_fraction,omitempty"`
 }

@@ -497,11 +497,19 @@ type CloudConfig struct {
 // optional; zero values fall back to the r2upload package defaults. The
 // shape mirrors r2upload.Options so each knob has one meaning.
 type CloudDrainConfig struct {
-	// StallTimeoutSeconds: kill rclone after this many seconds of no
-	// bytes-progress. Default: 30.
+	// StallTimeoutSeconds: once bytes start flowing, kill rclone after this
+	// many seconds of no further byte progress. Default: 30.
 	StallTimeoutSeconds int `yaml:"stall_timeout_seconds" toml:"stall_timeout_seconds"`
+	// InitialStallTimeoutSeconds: before the first byte is observed, allow
+	// this much time for rclone to complete pre-transfer setup (HEAD,
+	// multipart init, chunk hashing) before declaring a never-started stall.
+	// Default: 300 (5 min).
+	InitialStallTimeoutSeconds int `yaml:"initial_stall_timeout_seconds" toml:"initial_stall_timeout_seconds"`
+	// HeartbeatTimeoutSeconds: if rclone produces no stderr output for this
+	// long, declare the process hung independent of byte progress. Default: 60.
+	HeartbeatTimeoutSeconds int `yaml:"heartbeat_timeout_seconds" toml:"heartbeat_timeout_seconds"`
 	// FloorThroughputBytesPerSec: bytes/sec used to compute the size-derived
-	// ceiling. Default: 262144 (256 KiB/s).
+	// ceiling and the pace-check threshold. Default: 262144 (256 KiB/s).
 	FloorThroughputBytesPerSec int64 `yaml:"floor_throughput_bytes_per_sec" toml:"floor_throughput_bytes_per_sec"`
 	// MaxDrainSeconds: absolute ceiling regardless of size. Default: 900 (15 min).
 	MaxDrainSeconds int `yaml:"max_drain_seconds" toml:"max_drain_seconds"`
@@ -512,6 +520,15 @@ type CloudDrainConfig struct {
 	// take. Default: 10. Intentionally short so it can't recurse into a
 	// long-running drain right before self-destruct.
 	MarkerTimeoutSeconds int `yaml:"marker_timeout_seconds" toml:"marker_timeout_seconds"`
+	// PaceCheckAfterSeconds: warmup before the slow-pace gate activates.
+	// Lets TCP slow-start and rclone chunk pipelining ramp before we judge
+	// average throughput. Negative disables. Default: 120 (2 min).
+	PaceCheckAfterSeconds int `yaml:"pace_check_after_seconds" toml:"pace_check_after_seconds"`
+	// MinThroughputFraction: after the pace-check warmup, the drain must
+	// sustain at least this fraction of FloorThroughputBytesPerSec on
+	// average (since drain start) or be killed for uneconomic pace.
+	// Negative disables. Default: 0.25 (25%, so 64 KiB/s at the 256 KiB/s floor).
+	MinThroughputFraction float64 `yaml:"min_throughput_fraction" toml:"min_throughput_fraction"`
 }
 
 // CloudSSHConfig holds cloud-rental SSH identity settings.

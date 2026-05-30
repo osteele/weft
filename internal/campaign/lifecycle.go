@@ -2076,9 +2076,13 @@ func drainSettingsFromConfig() cloud.DrainSettings {
 	d := cfg.Cloud.Drain
 	return cloud.DrainSettings{
 		StallTimeoutSeconds:        d.StallTimeoutSeconds,
+		InitialStallTimeoutSeconds: d.InitialStallTimeoutSeconds,
+		HeartbeatTimeoutSeconds:    d.HeartbeatTimeoutSeconds,
 		FloorThroughputBytesPerSec: d.FloorThroughputBytesPerSec,
 		MaxDrainSeconds:            d.MaxDrainSeconds,
 		BaselineSeconds:            d.BaselineSeconds,
 		MarkerTimeoutSeconds:       d.MarkerTimeoutSeconds,
+		PaceCheckAfterSeconds:      d.PaceCheckAfterSeconds,
+		MinThroughputFraction:      d.MinThroughputFraction,
 	}
 }
