@@ -669,32 +669,93 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	logPhase("prepare_groups", groupStarted, fmt.Sprintf("groups=%d jobs=%d", len(groups), countGroupJobs(groups)), nil)
 
 	offersStarted := time.Now()
-	groupOffers := campaign.FetchGroupOffers(clients, groups, nil, 1.0, nil, bidding.StrategyCheap, cfg.CampaignReliability(), 0.4)
-	logPhase("fetch_offers", offersStarted, fmt.Sprintf("group_offers=%d", len(groupOffers)), nil)
-
-	selectStarted := time.Now()
 	var launchGroups []campaign.InstanceGroup
 	var launchOffers []cloud.Offer
-	for _, gOffer := range groupOffers {
-		if gOffer.Offer == nil || gOffer.Err != nil {
-			detail := "no offers"
-			if gOffer.Err != nil {
-				detail = gOffer.Err.Error()
+	planLabel := "none"
+	if separateEach {
+		// User explicitly asked for one instance per job. Skip the planner so
+		// MergeCompatibleGroups can't undo that intent; resolve offers directly.
+		groupOffers := campaign.FetchGroupOffers(clients, groups, nil, 1.0, nil, bidding.StrategyCheap, cfg.CampaignReliability(), 0.4)
+		logPhase("fetch_offers", offersStarted, fmt.Sprintf("group_offers=%d mode=each", len(groupOffers)), nil)
+
+		for _, gOffer := range groupOffers {
+			if gOffer.Offer == nil || gOffer.Err != nil {
+				detail := "no offers"
+				if gOffer.Err != nil {
+					detail = gOffer.Err.Error()
+				}
+				if cb.OnWarning != nil {
+					cb.OnWarning(fmt.Sprintf("Warning: %s for %s (%d jobs) — skipping", detail, gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs)))
+				}
+				continue
 			}
-			if cb.OnWarning != nil {
-				cb.OnWarning(fmt.Sprintf("Warning: %s for %s (%d jobs) — skipping", detail, gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs)))
-			}
-			continue
+			launchGroups = append(launchGroups, gOffer.Group)
+			launchOffers = append(launchOffers, *gOffer.Offer)
 		}
-		launchGroups = append(launchGroups, gOffer.Group)
-		launchOffers = append(launchOffers, *gOffer.Offer)
+		planLabel = "each"
+	} else {
+		// Route through the planner so the split/merged/parallel candidate
+		// evaluation runs. This is what makes overlap-aware grouping per
+		// specs/campaign-lifecycle.allium § AssetOverlapLaunchGrouping apply
+		// to `weft move --to new`. Reuse is force-disabled by the
+		// PrepareNewInstanceLaunchPlan wrapper.
+		profile := bidding.StrategyCheap.Profile()
+		predCfg := buildPredictorConfig(cfg)
+		overheadModel := buildOverheadModel(database)
+		survivalModel := buildSurvivalModel(database)
+		prep, planErr := campaign.PrepareNewInstanceLaunchPlan(
+			database, clients, nil, groups, nil,
+			profile, 0.4, cfg.CampaignReliability(),
+			&predCfg, overheadModel, survivalModel, nil,
+		)
+		if planErr != nil {
+			logPhase("plan", offersStarted, "", planErr)
+			return BulkResult{}, planErr
+		}
+		if prep.StrategyPlan.NewCandidate != nil {
+			planLabel = prep.StrategyPlan.NewCandidate.Label
+		}
+		logPhase("plan", offersStarted, fmt.Sprintf("candidate=%s launch_groups=%d", planLabel, len(prep.LaunchGroups)), nil)
+
+		launchGroups = prep.LaunchGroups
+		launchOffers = prep.Offers
+
+		// Surface offer failures to the user so they know which jobs were
+		// dropped from the launch (and why). Map the winning candidate's
+		// per-group results back to the original split groups so the warning
+		// names the user-visible job grouping rather than a synthetic
+		// merged/parallel group identity. When the planner picked no
+		// candidate at all, emit one warning per split group: no candidate
+		// means no offers anywhere.
+		if cb.OnWarning != nil {
+			if prep.StrategyPlan.NewCandidate == nil {
+				for _, sg := range groups {
+					cb.OnWarning(fmt.Sprintf("Warning: no offers for %s (%d jobs) — skipping", sg.GPUSpec(), len(sg.Jobs)))
+				}
+			} else {
+				projected := campaign.MapOffersToSplitGroups(groups, *prep.StrategyPlan.NewCandidate)
+				for i, sg := range groups {
+					if i >= len(projected) {
+						break
+					}
+					po := projected[i]
+					if po.Offer != nil && po.Err == nil {
+						continue
+					}
+					detail := "no offers"
+					if po.Err != nil {
+						detail = po.Err.Error()
+					}
+					cb.OnWarning(fmt.Sprintf("Warning: %s for %s (%d jobs) — skipping", detail, sg.GPUSpec(), len(sg.Jobs)))
+				}
+			}
+		}
 	}
 	if len(launchGroups) == 0 {
 		noOffersErr := fmt.Errorf("no cloud offers found for any GPU group")
-		logPhase("select_offers", selectStarted, "launch_groups=0", noOffersErr)
+		logPhase("select", offersStarted, fmt.Sprintf("launch_groups=0 candidate=%s", planLabel), noOffersErr)
 		return BulkResult{}, noOffersErr
 	}
-	logPhase("select_offers", selectStarted, fmt.Sprintf("launch_groups=%d", len(launchGroups)), nil)
 
 	if cb.OnStatus != nil {
 		cb.OnStatus(fmt.Sprintf("Launching %d instance(s) for %d job(s)...", len(launchGroups), countGroupJobs(launchGroups)))

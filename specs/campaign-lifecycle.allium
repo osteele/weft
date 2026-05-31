@@ -1730,7 +1730,9 @@ rule ExistingInstanceCPUFloor {
 }
 
 rule AssetOverlapLaunchGrouping {
-    when: RentalLaunchSelection(unplaced_jobs) or AutoPilotTick(unplaced_jobs)
+    when: RentalLaunchSelection(unplaced_jobs)
+          or AutoPilotTick(unplaced_jobs)
+          or MoveToNewLaunchSelection(jobs)
 
     -- Candidate launch groupings are still constrained first by hard
     -- compatibility: GPU constraint/supremum, provider, VRAM tier,
@@ -1764,7 +1766,20 @@ rule AssetOverlapLaunchGrouping {
         -- available; otherwise each shared ref uses a fixed 10 GB fallback.
         -- The score term is applied in internal/campaign/strategy_plan.go.
         -- This is only a scoring benefit; it must not merge incompatible
-        -- GPU/image/provider/preemptibility/VRAM groups.
+        -- GPU/image/provider/preemptibility/VRAM groups. It must NOT be
+        -- promoted to a hard merge gate (such as requiring a non-zero
+        -- overlap before two otherwise-compatible jobs may share a group);
+        -- such a gate diverges from this rule and over-splits launches.
+
+        -- Move-to-new (MoveToNewLaunchSelection): bulk `weft move --to new`
+        -- selects a launch grouping for queued jobs but forces fresh
+        -- instances (no reuse path). The same candidate-grouping evaluation
+        -- runs as for RentalLaunchSelection / AutoPilotTick; reuse decisions
+        -- are simply skipped. Implementation:
+        -- internal/orchestration/move.go MoveQueuedJobsToNewInstances calls
+        -- internal/campaign/launch_execution.go
+        -- PrepareNewInstanceLaunchPlan, which passes an empty reusable set
+        -- to BuildProfilePlansWithProgress.
 }
 
 -- ==========================================================================

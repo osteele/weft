@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/osteele/weft/internal/campaign"
@@ -44,18 +45,37 @@ func ResolveEligibleJobs(
 	var sourceInstanceID int64
 	sourceHost := ""
 	sourceProject := ""
+	// Per-source diagnostics for sharper "no eligible jobs" errors when the
+	// user supplied --from <instance>. Distinguishes "instance unknown",
+	// "instance has only historical jobs", and "instance has jobs but none
+	// movable".
+	var instanceMembershipTotal int
+	var instanceCurrentlyAssigned []*db.Job
 	if from != "" {
 		trimmedFrom := strings.TrimSpace(from)
 		if parsedID, err := ids.ParseInstanceID(trimmedFrom); err == nil {
 			sourceInstanceID = parsedID
-			selected, err := db.GetLaunchJobsIncludingAttempts(database, sourceInstanceID)
+			// `GetLaunchJobsIncludingAttempts` returns rows for both current
+			// and historical memberships, with a view-projected launch_id
+			// that always matches sourceInstanceID. To distinguish "currently
+			// assigned" from "only historical", read the membership-aware
+			// list for the total and the strict launch-id-matched list for
+			// the currently-assigned subset.
+			membership, err := db.GetLaunchJobsIncludingAttempts(database, sourceInstanceID)
 			if err != nil {
 				return nil, fmt.Errorf("list jobs on instance %s: %w", ids.FormatInstanceID(sourceInstanceID), err)
 			}
-			for _, job := range selected {
-				if job != nil && job.LaunchID != nil && *job.LaunchID == sourceInstanceID {
-					jobs = append(jobs, job)
+			instanceMembershipTotal = len(membership)
+			currentlyAssigned, err := db.GetLaunchJobs(database, sourceInstanceID)
+			if err != nil {
+				return nil, fmt.Errorf("list currently-assigned jobs on instance %s: %w", ids.FormatInstanceID(sourceInstanceID), err)
+			}
+			for _, job := range currentlyAssigned {
+				if job == nil {
+					continue
 				}
+				instanceCurrentlyAssigned = append(instanceCurrentlyAssigned, job)
+				jobs = append(jobs, job)
 			}
 		} else {
 			sourceHost = trimmedFrom
@@ -118,7 +138,7 @@ func ResolveEligibleJobs(
 	}
 	if len(eligible) == 0 {
 		if sourceInstanceID > 0 {
-			return nil, fmt.Errorf("no eligible queued jobs found on %s", ids.FormatInstanceID(sourceInstanceID))
+			return nil, instanceSelectorError(sourceInstanceID, instanceMembershipTotal, instanceCurrentlyAssigned)
 		}
 		if sourceHost != "" {
 			return nil, fmt.Errorf("no eligible queued jobs found on host %s", sourceHost)
@@ -132,6 +152,39 @@ func ResolveEligibleJobs(
 		return nil, fmt.Errorf("no eligible queued jobs to move")
 	}
 	return eligible, nil
+}
+
+// instanceSelectorError produces an actionable error for `--from wi<N>` when
+// no eligible jobs were found, distinguishing three failure modes:
+//
+//  1. Instance is unknown to the local DB (no rows in launch_job_membership).
+//  2. Instance has rows, but none are currently assigned to it (all jobs
+//     were moved elsewhere or only attempted historically).
+//  3. Instance has currently-assigned jobs, but none are queued or
+//     pending_placement (so `move` cannot relocate them).
+func instanceSelectorError(instanceID int64, membershipTotal int, assigned []*db.Job) error {
+	label := ids.FormatInstanceID(instanceID)
+	if membershipTotal == 0 {
+		return fmt.Errorf("instance %s not found or has no associated jobs", label)
+	}
+	if len(assigned) == 0 {
+		return fmt.Errorf("instance %s has %d historical job attempt(s) but no currently-assigned jobs", label, membershipTotal)
+	}
+	statusCounts := make(map[string]int, len(assigned))
+	for _, job := range assigned {
+		statusCounts[job.EffectiveStatus()]++
+	}
+	keys := make([]string, 0, len(statusCounts))
+	for k := range statusCounts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %d", k, statusCounts[k]))
+	}
+	return fmt.Errorf("instance %s has %d job(s) but none are queued or pending_placement (%s)",
+		label, len(assigned), strings.Join(parts, ", "))
 }
 
 func MoveJobsToHost(database *sql.DB, jobs []*db.Job, host string, callbacks JobMoveCallbacks) (int, error) {

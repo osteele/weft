@@ -84,6 +84,67 @@ func SelectLaunchGroups(groups []InstanceGroup, selected map[int64]bool) ([]Inst
 	return selectedGroups, requestedJobs
 }
 
+// PrepareNewInstanceLaunchPlan is PrepareLaunchExecutionPlan's
+// force-new-instances variant: it never considers reusing an existing
+// rental. The split/merged/parallel candidate-grouping evaluation still
+// runs, so `AssetOverlapLaunchGrouping`'s overlap scoring (see
+// specs/campaign-lifecycle.allium) still applies. Used by
+// `weft move --to new`, whose user contract requires fresh instances even
+// when a reuse target would be cheaper.
+//
+// `reusable` is intentionally passed as an empty (non-nil) slice so
+// BuildProfilePlansWithProgress skips its `FindReusableInstances` fetch and
+// chooseReuseGroups returns no decisions; the full set of split groups then
+// proceeds through new-candidate evaluation.
+func PrepareNewInstanceLaunchPlan(
+	database *sql.DB,
+	clients []cloud.Client,
+	providerErr error,
+	groups []InstanceGroup,
+	selected map[int64]bool,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+	minReliability float64,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	onProgress PlanProgressFunc,
+) (LaunchExecutionPlan, error) {
+	selectedGroups, requestedJobs := SelectLaunchGroups(groups, selected)
+	plan := LaunchExecutionPlan{RequestedJobs: requestedJobs}
+	if requestedJobs == 0 {
+		return plan, nil
+	}
+	if providerErr != nil {
+		return plan, providerErr
+	}
+
+	effectiveMinSurvival := survivalModel.HealthFloor(minSurvival)
+	plans, _ := BuildProfilePlansWithProgress(
+		database,
+		clients,
+		selectedGroups,
+		[]InstanceCapacity{},
+		predCfg,
+		overheadModel,
+		survivalModel,
+		[]bidding.ScoreProfile{profile},
+		minReliability,
+		effectiveMinSurvival,
+		onProgress,
+	)
+	strategyPlan, ok := plans[profile.ID]
+	if !ok {
+		return plan, fmt.Errorf("could not build launch plan for profile %s", profile.ID)
+	}
+	plan.StrategyPlan = strategyPlan
+	if strategyPlan.NewCandidate == nil {
+		return plan, nil
+	}
+	plan.LaunchGroups, plan.Offers, plan.LaunchGroupOffers, plan.Estimates = CollectLaunchExecution(strategyPlan.NewCandidate)
+	return plan, nil
+}
+
 func CollectLaunchExecution(result *CandidateResult) ([]InstanceGroup, []cloud.Offer, []GroupOffer, []CostEstimate) {
 	if result == nil {
 		return nil, nil, nil, nil

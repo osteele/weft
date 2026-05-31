@@ -261,3 +261,102 @@ func TestResolveEligibleJobs_ProjectSelectsQueuedAndPendingPlacement(t *testing.
 		t.Fatalf("warnings = %v, want none", warnings)
 	}
 }
+
+func TestResolveEligibleJobs_FromInstanceUnknownReportsNotFound(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	_, err := ResolveEligibleJobs(database, nil, "", "wi9999", false, JobMoveCallbacks{})
+	if err == nil {
+		t.Fatalf("ResolveEligibleJobs: want error, got nil")
+	}
+	want := "instance " + ids.FormatInstanceID(9999) + " not found or has no associated jobs"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestResolveEligibleJobs_FromInstanceOnlyHistoricalReportsHistorical(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "echo historical", "historical")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	// ResetLaunchJobs clears LaunchID on the job and the attempt, leaving only
+	// the launch_job_membership row — i.e. a historical attempt with no
+	// currently-assigned job.
+	if _, err := db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+
+	_, err = ResolveEligibleJobs(database, nil, "", ids.FormatInstanceID(instanceID), false, JobMoveCallbacks{})
+	if err == nil {
+		t.Fatalf("ResolveEligibleJobs: want error, got nil")
+	}
+	want := "instance " + ids.FormatInstanceID(instanceID) + " has 1 historical job attempt(s) but no currently-assigned jobs"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestResolveEligibleJobs_FromInstanceNonQueuedReportsStatusBreakdown(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "cool30", t.TempDir(), "echo completed", "completed")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	// Mark the open attempt completed so the job's effective status is no
+	// longer queued/pending_placement, but the job remains currently assigned
+	// to the instance (LaunchID still points there via the open attempt was
+	// closed; job_status reads from the latest attempt). Using completed
+	// rather than running keeps the test independent of the view's
+	// transient-state remapping logic.
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusCompleted, time.Now().Unix(), jobID,
+	); err != nil {
+		t.Fatalf("mark completed attempt: %v", err)
+	}
+
+	_, err = ResolveEligibleJobs(database, nil, "", ids.FormatInstanceID(instanceID), false, JobMoveCallbacks{})
+	if err == nil {
+		t.Fatalf("ResolveEligibleJobs: want error, got nil")
+	}
+	got := err.Error()
+	wantPrefix := "instance " + ids.FormatInstanceID(instanceID) + " has 1 job(s) but none are queued or pending_placement"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("error = %q, want prefix %q", got, wantPrefix)
+	}
+	// The status breakdown is parenthesized; require it to be present and
+	// non-trivial. The exact status label is what the job_status view
+	// projects (e.g. "completed" → "dead" for an instance whose launch is
+	// not in a terminal state); this test does not pin that mapping.
+	if !strings.Contains(got, "(") || !strings.Contains(got, ": 1)") {
+		t.Fatalf("error = %q, want a `(<status>: 1)` breakdown", got)
+	}
+}
