@@ -2792,3 +2792,29 @@ func TestIsReclassifyEligibleReason(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyCreditSignal(t *testing.T) {
+	cases := []struct {
+		detail string
+		want   CreditSignal
+	}{
+		{"instance creation failed: provider returned empty response: provider rejected", CreditSignalStrong},
+		{"instance creation failed: insufficient credit for offer", CreditSignalStrong},
+		{"instance creation failed: insufficient balance to start", CreditSignalStrong},
+		{"vastai cli: account lacks credit", CreditSignalStrong},
+		{"create failed: account credit was exhausted", CreditSignalStrong},
+		{"PROVIDER RETURNED EMPTY RESPONSE", CreditSignalStrong}, // case-insensitive
+		{"provider dead with no completion or intent marker; provider status=destroyed", CreditSignalCluster},
+		{"dud provider: 8m20s post-running with no agent activity — terminating", CreditSignalNone},
+		{"bootstrap timeout after 1h41m49s", CreditSignalNone},
+		{"jobs reached terminal state but self-destruct failed", CreditSignalNone},
+		{"create instance: provider command timed out", CreditSignalNone},
+		{"", CreditSignalNone},
+	}
+	for _, tc := range cases {
+		got := ClassifyCreditSignal(tc.detail)
+		if got != tc.want {
+			t.Errorf("ClassifyCreditSignal(%q) = %v, want %v", tc.detail, got, tc.want)
+		}
+	}
+}

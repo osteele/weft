@@ -1376,6 +1376,71 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 	return err
 }
 
+// CreditSignal classifies the strength of evidence that a launch failed
+// because of provider-account credit exhaustion, based on substrings in
+// termination_detail.
+type CreditSignal int
+
+const (
+	// CreditSignalNone — no credit-related substring found. The launch
+	// failed for an unrelated reason (dud detection, bootstrap timeout,
+	// upload stall, RunPod SSH-key error, etc.) and should not be
+	// reclassified as credit-exhausted regardless of how recently it ended.
+	CreditSignalNone CreditSignal = iota
+	// CreditSignalStrong — detail explicitly names a credit-out condition
+	// observed by the runtime classifier (CreateInstance returning an empty
+	// response, or an explicit "insufficient balance / credit" error from
+	// the provider). Always credit-related; safe to reclassify automatically.
+	CreditSignalStrong
+	// CreditSignalCluster — generic "provider dead with no completion or
+	// intent marker" detail produced by the reconciler when a running
+	// instance unexpectedly disappears from the provider. Could be
+	// credit-related (rentals destroyed when funds went to zero) or could
+	// be ordinary provider-side death. Reclassify only when clustered in
+	// time with strong signals.
+	CreditSignalCluster
+)
+
+// strongCreditDetailPhrases match termination_detail substrings produced
+// by the runtime credit-out classifier in internal/vastai/client.go
+// isAccountCreditError and the CreateInstance empty-response branch.
+//
+// Drift warning: keep in sync with isAccountCreditError, with the LIKE
+// patterns in internal/bidding/build.go LoadInstanceOutcomes, and with
+// the corresponding lines in the campaign-lifecycle spec.
+var strongCreditDetailPhrases = []string{
+	"provider returned empty response",
+	"insufficient balance",
+	"insufficient credit",
+	"account lacks credit",
+	"account credit",
+}
+
+// clusterCreditDetailPhrases match termination_detail substrings produced
+// when the reconciler observes a running instance disappear. These
+// signatures are credit-related only when clustered with strong signals.
+var clusterCreditDetailPhrases = []string{
+	"provider dead with no completion or intent marker",
+}
+
+// ClassifyCreditSignal returns the credit-exhaustion signal strength for
+// a launch's termination_detail. Matching is case-insensitive substring
+// against the canonical phrase lists.
+func ClassifyCreditSignal(detail string) CreditSignal {
+	lower := strings.ToLower(detail)
+	for _, p := range strongCreditDetailPhrases {
+		if strings.Contains(lower, p) {
+			return CreditSignalStrong
+		}
+	}
+	for _, p := range clusterCreditDetailPhrases {
+		if strings.Contains(lower, p) {
+			return CreditSignalCluster
+		}
+	}
+	return CreditSignalNone
+}
+
 // IsReclassifyEligibleReason reports whether a launch's current
 // termination_reason can be overwritten by ReclassifyLaunchTerminationReason.
 // The eligible set is the generic infrastructure/unknown reasons; specific

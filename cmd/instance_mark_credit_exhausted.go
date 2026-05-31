@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -16,9 +17,22 @@ import (
 )
 
 var (
-	instanceMarkCreditExhaustedSince  time.Duration
-	instanceMarkCreditExhaustedDryRun bool
-	instanceMarkCreditExhaustedYes    bool
+	instanceMarkCreditExhaustedSince          time.Duration
+	instanceMarkCreditExhaustedDryRun         bool
+	instanceMarkCreditExhaustedYes            bool
+	instanceMarkCreditExhaustedIncludeGeneric bool
+)
+
+// creditClusterBeforeWindow / creditClusterAfterWindow define how far
+// before/after the strong-signal time range a generic "provider dead"
+// row may sit and still be counted as part of the credit-exhaustion
+// cluster. Vast destroys running rentals at the moment funds cross zero
+// and the subsequent CreateInstance calls begin returning empty
+// responses, so destroys precede strong signals by seconds-to-minutes —
+// 15 minutes back is generous, 5 minutes forward covers tick jitter.
+const (
+	creditClusterBeforeWindow = 15 * time.Minute
+	creditClusterAfterWindow  = 5 * time.Minute
 )
 
 var instanceMarkCreditExhaustedCmd = &cobra.Command{
@@ -34,17 +48,25 @@ The reclassified rows are excluded from the bidding survival model so that
 credit-exhaustion failures don't poison machine/SKU/region priors.
 
 Selection:
-  - Positional arguments: one or more instance IDs.
-  - --since DURATION: every failed/canceled launch whose ended_at falls
-    within the window and whose current termination_reason is generic
-    (provider_failure, infra_failure, unknown, or empty).
-  - Both can be combined; the union is reclassified.
+  - Positional arguments: one or more instance IDs (always reclassified
+    if eligible — operator is explicitly naming them).
+  - --since DURATION: failed/canceled launches whose ended_at falls within
+    the window. By default, only launches whose termination_detail matches
+    a credit-exhaustion signature are included: explicit credit-out
+    phrases from the provider, plus generic 'provider dead' rows that
+    cluster in time with the explicit signals (within ~15 min before /
+    ~5 min after). Unrelated failures in the window (dud detection,
+    bootstrap timeout, upload stall, etc.) are skipped.
+  - --include-generic: also reclassify --since rows that match no credit
+    signature but have a generic termination_reason. Use when you know
+    every eligible row in the window was credit-related and the detail
+    strings are sparse.
 
 Eligibility:
   - Status must be 'failed' or 'canceled'.
-  - Current termination_reason must be generic (see above). Specific reasons
-    such as disk_full, job_failure, weft_bug, or completed cannot be
-    overwritten.
+  - Current termination_reason must be generic (provider_failure,
+    infra_failure, unknown, or empty). Specific reasons such as
+    disk_full, job_failure, weft_bug, or completed cannot be overwritten.
 
 The previous termination_detail is preserved (prefixed with a timestamped
 note recording the manual reclassification).
@@ -60,11 +82,13 @@ Examples:
 
 func init() {
 	instanceMarkCreditExhaustedCmd.Flags().DurationVar(&instanceMarkCreditExhaustedSince, "since", 0,
-		"Reclassify every eligible instance whose ended_at falls within this window (e.g. 1h, 24h)")
+		"Reclassify rows ended within this window (e.g. 1h, 24h). By default only signature-matching rows are included; see --include-generic.")
 	instanceMarkCreditExhaustedCmd.Flags().BoolVar(&instanceMarkCreditExhaustedDryRun, "dry-run", false,
 		"Print the rows that would be reclassified without writing anything")
 	instanceMarkCreditExhaustedCmd.Flags().BoolVarP(&instanceMarkCreditExhaustedYes, "yes", "y", false,
 		"Skip interactive confirmation when reclassifying multiple rows")
+	instanceMarkCreditExhaustedCmd.Flags().BoolVar(&instanceMarkCreditExhaustedIncludeGeneric, "include-generic", false,
+		"With --since, also reclassify rows whose detail does not match a credit signature")
 }
 
 func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
@@ -78,22 +102,35 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	targets, err := collectMarkCreditExhaustedTargets(database, args, instanceMarkCreditExhaustedSince)
+	plan, err := collectMarkCreditExhaustedTargets(database, args,
+		instanceMarkCreditExhaustedSince, instanceMarkCreditExhaustedIncludeGeneric)
 	if err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	if len(targets) == 0 {
+	if len(plan.targets) == 0 && len(plan.rejected) == 0 {
 		fmt.Fprintln(out, "No eligible instances found.")
 		return nil
 	}
 
-	printMarkCreditExhaustedPreview(out, targets)
+	if len(plan.targets) > 0 {
+		printMarkCreditExhaustedPreview(out, plan.targets)
+	}
+	if len(plan.rejected) > 0 {
+		fmt.Fprintf(out, "\nExcluded %d row(s) from --since window (no credit signature in detail).\n",
+			len(plan.rejected))
+		fmt.Fprintln(out, "Pass --include-generic to reclassify these anyway, or name specific IDs to override.")
+		printMarkCreditExhaustedRejections(out, plan.rejected)
+	}
+
+	if len(plan.targets) == 0 {
+		return nil
+	}
 
 	if instanceMarkCreditExhaustedDryRun {
 		fmt.Fprintln(out, "")
 		fmt.Fprintf(out, "Dry run: %d instance(s) would be reclassified as %s.\n",
-			len(targets), db.TerminationReasonAccountCreditExhausted)
+			len(plan.targets), db.TerminationReasonAccountCreditExhausted)
 		return nil
 	}
 
@@ -102,9 +139,9 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 	// undo. Skip the prompt only when the operator named all IDs by hand
 	// (no --since) and a single target was found, or when --yes was given.
 	needsPrompt := !instanceMarkCreditExhaustedYes &&
-		(instanceMarkCreditExhaustedSince > 0 || len(targets) > 1)
+		(instanceMarkCreditExhaustedSince > 0 || len(plan.targets) > 1)
 	if needsPrompt {
-		if !confirmMarkCreditExhausted(cmd.InOrStdin(), out, len(targets)) {
+		if !confirmMarkCreditExhausted(cmd.InOrStdin(), out, len(plan.targets)) {
 			fmt.Fprintln(out, "Aborted.")
 			return nil
 		}
@@ -116,7 +153,7 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 
 	var failures []string
 	updated := 0
-	for _, t := range targets {
+	for _, t := range plan.targets {
 		if err := db.ReclassifyLaunchTerminationReason(database, t.ID,
 			db.TerminationReasonAccountCreditExhausted, detailPrefix); err != nil {
 			failures = append(failures,
@@ -139,9 +176,29 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// collectMarkCreditExhaustedTargets builds the deduplicated list of launches
-// to reclassify, validating explicit IDs and merging in the --since window.
-func collectMarkCreditExhaustedTargets(database *sql.DB, args []string, since time.Duration) ([]*db.Launch, error) {
+// markCreditExhaustedPlan is the result of validating CLI inputs and
+// running the credit-signature filter against the --since window.
+type markCreditExhaustedPlan struct {
+	targets  []*db.Launch         // rows that will be reclassified
+	rejected []rejectedReclassify // rows excluded by signature filter (--since only)
+}
+
+// rejectedReclassify carries a launch the smart filter excluded and the
+// human-readable reason — surfaced in the preview so the operator can see
+// why a row in the time window was skipped.
+type rejectedReclassify struct {
+	launch *db.Launch
+	reason string
+}
+
+// collectMarkCreditExhaustedTargets builds the reclassify plan. Explicit
+// IDs are always included after eligibility checks. The --since window is
+// filtered by credit signature unless includeGeneric is true: strong
+// signatures (CreateInstance credit errors) are always included; generic
+// "provider dead" rows are included only when clustered in time with the
+// strong signals.
+func collectMarkCreditExhaustedTargets(database *sql.DB, args []string, since time.Duration, includeGeneric bool) (*markCreditExhaustedPlan, error) {
+	plan := &markCreditExhaustedPlan{}
 	seen := make(map[int64]*db.Launch)
 
 	for _, arg := range args {
@@ -173,31 +230,183 @@ func collectMarkCreditExhaustedTargets(database *sql.DB, args []string, since ti
 		if err != nil {
 			return nil, fmt.Errorf("query eligible launches: %w", err)
 		}
-		for _, l := range launches {
+		included, rejected := filterCreditExhaustionCandidates(launches, includeGeneric)
+		for _, l := range included {
 			if _, ok := seen[l.ID]; !ok {
 				seen[l.ID] = l
 			}
 		}
+		// Surface rejections only for rows the operator didn't also name
+		// explicitly — those are already going through.
+		for _, r := range rejected {
+			if _, named := seen[r.launch.ID]; !named {
+				plan.rejected = append(plan.rejected, r)
+			}
+		}
 	}
 
-	out := make([]*db.Launch, 0, len(seen))
+	plan.targets = make([]*db.Launch, 0, len(seen))
 	for _, l := range seen {
-		out = append(out, l)
+		plan.targets = append(plan.targets, l)
 	}
-	sort.Slice(out, func(i, j int) bool {
+	sortLaunchesNewestFirst(plan.targets)
+	sort.Slice(plan.rejected, func(i, j int) bool {
 		ai, aj := int64(0), int64(0)
-		if out[i].EndedAt != nil {
-			ai = *out[i].EndedAt
+		if plan.rejected[i].launch.EndedAt != nil {
+			ai = *plan.rejected[i].launch.EndedAt
 		}
-		if out[j].EndedAt != nil {
-			aj = *out[j].EndedAt
+		if plan.rejected[j].launch.EndedAt != nil {
+			aj = *plan.rejected[j].launch.EndedAt
 		}
 		if ai != aj {
 			return ai > aj
 		}
-		return out[i].ID > out[j].ID
+		return plan.rejected[i].launch.ID > plan.rejected[j].launch.ID
 	})
-	return out, nil
+	return plan, nil
+}
+
+// filterCreditExhaustionCandidates partitions eligible launches into
+// reclassify targets and rejections based on credit-detail signatures.
+// When includeGeneric is true, every launch is included unconditionally.
+func filterCreditExhaustionCandidates(launches []*db.Launch, includeGeneric bool) (included []*db.Launch, rejected []rejectedReclassify) {
+	if includeGeneric {
+		included = append(included, launches...)
+		return included, nil
+	}
+
+	var strong []*db.Launch
+	var cluster []*db.Launch
+	var none []*db.Launch
+	for _, l := range launches {
+		switch db.ClassifyCreditSignal(l.TerminationDetail) {
+		case db.CreditSignalStrong:
+			strong = append(strong, l)
+		case db.CreditSignalCluster:
+			cluster = append(cluster, l)
+		default:
+			none = append(none, l)
+		}
+	}
+	included = append(included, strong...)
+
+	if len(strong) == 0 {
+		for _, l := range cluster {
+			rejected = append(rejected, rejectedReclassify{
+				launch: l,
+				reason: "provider-dead row, but no credit signature in window to anchor a cluster",
+			})
+		}
+		for _, l := range none {
+			rejected = append(rejected, rejectedReclassify{
+				launch: l,
+				reason: "no credit signature in termination_detail",
+			})
+		}
+		return included, rejected
+	}
+
+	// Anchor the cluster window on the strong-signal min/max ended_at.
+	var minStrong, maxStrong int64 = math.MaxInt64, math.MinInt64
+	for _, l := range strong {
+		if l.EndedAt == nil {
+			continue
+		}
+		if *l.EndedAt < minStrong {
+			minStrong = *l.EndedAt
+		}
+		if *l.EndedAt > maxStrong {
+			maxStrong = *l.EndedAt
+		}
+	}
+	if minStrong == math.MaxInt64 {
+		// All strong rows lack ended_at — refuse to anchor.
+		for _, l := range cluster {
+			rejected = append(rejected, rejectedReclassify{
+				launch: l,
+				reason: "no anchorable strong signal (missing ended_at)",
+			})
+		}
+		for _, l := range none {
+			rejected = append(rejected, rejectedReclassify{
+				launch: l,
+				reason: "no credit signature in termination_detail",
+			})
+		}
+		return included, rejected
+	}
+	windowStart := minStrong - int64(creditClusterBeforeWindow.Seconds())
+	windowEnd := maxStrong + int64(creditClusterAfterWindow.Seconds())
+	for _, l := range cluster {
+		if l.EndedAt == nil {
+			rejected = append(rejected, rejectedReclassify{
+				launch: l,
+				reason: "missing ended_at; cannot place in cluster window",
+			})
+			continue
+		}
+		if *l.EndedAt >= windowStart && *l.EndedAt <= windowEnd {
+			included = append(included, l)
+		} else {
+			delta := time.Duration(0)
+			if *l.EndedAt < windowStart {
+				delta = time.Duration(windowStart-*l.EndedAt) * time.Second
+			} else {
+				delta = time.Duration(*l.EndedAt-windowEnd) * time.Second
+			}
+			rejected = append(rejected, rejectedReclassify{
+				launch: l,
+				reason: fmt.Sprintf("provider-dead %s outside credit-cluster window", delta.Truncate(time.Second)),
+			})
+		}
+	}
+	for _, l := range none {
+		rejected = append(rejected, rejectedReclassify{
+			launch: l,
+			reason: "no credit signature in termination_detail",
+		})
+	}
+	return included, rejected
+}
+
+func sortLaunchesNewestFirst(launches []*db.Launch) {
+	sort.Slice(launches, func(i, j int) bool {
+		ai, aj := int64(0), int64(0)
+		if launches[i].EndedAt != nil {
+			ai = *launches[i].EndedAt
+		}
+		if launches[j].EndedAt != nil {
+			aj = *launches[j].EndedAt
+		}
+		if ai != aj {
+			return ai > aj
+		}
+		return launches[i].ID > launches[j].ID
+	})
+}
+
+func printMarkCreditExhaustedRejections(w io.Writer, rejected []rejectedReclassify) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "INSTANCE\tENDED\tREASON\tWHY EXCLUDED\tDETAIL")
+	for _, r := range rejected {
+		t := r.launch
+		ended := "-"
+		if t.EndedAt != nil {
+			ended = time.Unix(*t.EndedAt, 0).Local().Format("2006-01-02 15:04")
+		}
+		reason := t.TerminationReason
+		if reason == "" {
+			reason = "(empty)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			ids.FormatInstanceID(t.ID),
+			ended,
+			reason,
+			r.reason,
+			truncateDetail(t.TerminationDetail, 60),
+		)
+	}
+	_ = tw.Flush()
 }
 
 func printMarkCreditExhaustedPreview(w io.Writer, targets []*db.Launch) {
