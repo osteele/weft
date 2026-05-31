@@ -183,16 +183,24 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			Deadline: deadline.Format(time.RFC3339),
 		})
 
-		// Run resubmitted jobs using the shared job loop
+		// Run resubmitted jobs using the shared job loop. Time spent
+		// running these jobs must not count against the grace deadline —
+		// otherwise a resubmitted job that runs longer than the
+		// remaining grace causes self-destruction the instant it
+		// finishes (and leaves grace_deadline < grace_started_at on
+		// the coordinator side once the next grace entry refreshes
+		// grace_started_at against a stale R2 deadline).
+		jobStart := time.Now()
 		seqResult := runJobSequence(jobs, jobSequenceConfig{
 			R2Bucket:            r2Bucket,
 			InstanceID:          instanceIDInt,
 			PhaseKey:            phaseKey,
 			LogDir:              logDir,
-			StartTime:           time.Now(),
+			StartTime:           jobStart,
 			SkipWorkdirDeletion: cfg.SkipWorkdirDeletion,
 		})
 		failedJobs := seqResult.FailedJobs
+		deadline = extendGraceDeadlineForJobs(deadline, jobStart, time.Now())
 
 		if len(failedJobs) == 0 {
 			// All jobs succeeded — self-destruct
@@ -206,14 +214,17 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			return
 		}
 
-		// Some jobs failed — resume waiting
-		writePhase(r2Bucket, phaseKey, "grace")
+		// Some jobs failed — resume waiting. Write the refreshed
+		// status (with extended deadline) BEFORE writing phase=grace
+		// so the coordinator can't observe phase=grace with a stale
+		// deadline still in R2.
 		fmt.Printf("Some jobs failed. Resuming grace period until %s\n", deadline.Format(time.RFC3339))
 		writeGraceStatus(r2Bucket, prefix, graceStatus{
 			State:      "waiting",
 			Deadline:   deadline.Format(time.RFC3339),
 			FailedJobs: failedJobs,
 		})
+		writePhase(r2Bucket, phaseKey, "grace")
 	}
 }
 
@@ -222,6 +233,20 @@ func writeGraceStatus(bucket, prefix string, status graceStatus) {
 	if err := r2Put(bucket, prefix+"/status", string(data)); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write grace status: %v\n", err)
 	}
+}
+
+// extendGraceDeadlineForJobs returns deadline shifted forward by the elapsed
+// time spent running resubmitted jobs (jobEnd - jobStart). Resubmitted-job
+// execution must not consume the post-failure recovery window: a user who
+// resubmits a 20-minute job into a 15-minute grace would otherwise lose the
+// instance the instant the job finishes, even when no further action is
+// pending. Returns deadline unchanged if jobEnd is not after jobStart
+// (clock skew or zero-duration runs).
+func extendGraceDeadlineForJobs(deadline, jobStart, jobEnd time.Time) time.Time {
+	if !jobEnd.After(jobStart) {
+		return deadline
+	}
+	return deadline.Add(jobEnd.Sub(jobStart))
 }
 
 func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.UploadSummary {

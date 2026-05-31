@@ -2549,6 +2549,31 @@ invariant GraceRequiresDeadline {
             instance.grace_started_at != null
 }
 
+invariant ResubmittedJobRuntimeDoesNotConsumeGrace {
+    -- grace_deadline represents idle wait time after a failure, not a
+    -- total wall-clock budget. When a resubmitted job runs and then
+    -- fails (instance re-enters grace), the deadline must remain at
+    -- or after grace_started_at so the post-failure idle window
+    -- matches the pre-submission one, regardless of how many resubmit
+    -- cycles preceded it.
+    --
+    -- Implementation: agent at cmd/agent/gracewait.go captures
+    -- jobStart before runJobSequence and calls
+    -- extendGraceDeadlineForJobs(deadline, jobStart, now) after.
+    -- The refreshed deadline is written to R2 BEFORE phase=grace
+    -- so the coordinator never reads phase=grace alongside a
+    -- stale deadline.
+    --
+    -- Violating this invariant produces the wj2297 failure mode
+    -- (2026-05-31): a 21-min resubmitted job inside a 15-min
+    -- grace window caused the agent to self-destruct the instant
+    -- the job finished, and left grace_deadline < grace_started_at
+    -- on the coordinator side after the next reconcile refresh.
+    for instance in Instances:
+        if instance.status = grace:
+            instance.grace_deadline >= instance.grace_started_at
+}
+
 invariant TerminalCampaignsHaveEndTime {
     for campaign in Campaigns:
         if campaign.is_terminal:
