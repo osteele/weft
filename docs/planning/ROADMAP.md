@@ -121,6 +121,58 @@ on-prem hosts ever become first-class table-backed entities, and avoids
 collisions with Go's pervasive use of "instance" for type/struct instances
 when grepping.
 
+## Structured termination reasons for credit exhaustion
+
+Failures caused by provider account credit exhaustion are currently
+identified by substring matching in two unrelated places:
+
+- `internal/vastai/client.go` `isAccountCreditError` — runtime classifier
+  that wraps `CreateInstance` errors with `cloud.ErrAccountCreditExhausted`
+  when the message contains `"account lacks credit"`, `"insufficient
+  balance"`, `"insufficient credit"`, or `"account credit"`.
+- `internal/bidding/build.go` — the survival-model load query excludes
+  outcomes whose `termination_detail` matches the same substring set
+  (`%provider returned empty response%`, `%insufficient balance%`,
+  `%account lacks credit%`, `%account credit%`) so credit-exhaustion
+  failures do not poison provider reliability priors.
+
+The two lists currently match but can drift silently. A future credit-error
+phrase added to the runtime classifier won't be picked up by the bidding
+filter (and vice versa), so an undecayed bad outcome would seep into the
+survival model.
+
+Proper fix: add a structured `TerminationReason` value (e.g.
+`TerminationReasonAccountCreditExhausted`) and record it at every
+`UpdateLaunchStatus` write site that observes `errors.Is(err,
+cloud.ErrAccountCreditExhausted)`. The bidding filter then becomes
+`WHERE termination_reason != ?` — one filter, no phrase list, no drift.
+
+Why deferred:
+
+- No active drift today; both lists list the same four phrases.
+- Drift consequence is bounded — a single missed outcome decays 50% every
+  21 days via `SurvivalDecayHalfLife`.
+- Migration is non-trivial: existing rows have credit-exhaustion outcomes
+  stored as `termination_reason = 'infra_failure'` + a substring-matching
+  `termination_detail`. Filtering by new reason requires either a backfill
+  migration (`UPDATE launches SET termination_reason = …`), or a long-lived
+  dual-filter that *expands* the duplication instead of eliminating it,
+  or accepting a 21-day window where the model has known wrong data.
+- Call-site survey is error-prone — every `UpdateLaunchStatus(..., TerminationReasonInfraFailure, ...)`
+  caller has to learn the new reason. Miss one path and you're back to
+  substring-or-nothing.
+
+Right trigger to do the work:
+
+- A new credit-error variant lands and someone notices the two-place edit.
+- Bidding needs richer outcome typing for *other* reasons (OOM, user
+  cancellation, etc.) — at which point a single typed-reason refactor
+  covers credit exhaustion for free.
+- A drift bug actually fires.
+
+Until then: keep the substring lists in sync by hand, with the
+cross-references documented in both files.
+
 ## Banner monitors (deferred)
 
 The `internal/banner/` system already surfaces schema drift, autopilot

@@ -32,6 +32,13 @@ type InstanceOutcome struct {
 // provider/SKU/region priors without saying anything about machine survival.
 // Rows without machine attribution still contribute to provider/SKU buckets,
 // while geoAdjustment naturally skips their per-machine cache.
+//
+// Drift warning: the credit-exhaustion termination_detail patterns below
+// duplicate the substring list in internal/vastai/client.go
+// isAccountCreditError. The two must stay in sync until the proper fix
+// lands — see docs/planning/ROADMAP.md § "Structured termination reasons
+// for credit exhaustion" — which replaces both with a typed
+// TerminationReason.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
@@ -46,6 +53,8 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		  AND provider != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
+		  -- Credit-exhaustion phrase list — keep in sync with
+		  -- internal/vastai/client.go isAccountCreditError.
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%provider returned empty response%'
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%insufficient balance%'
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account lacks credit%'

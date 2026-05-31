@@ -436,6 +436,13 @@ func isProviderRejectedCreateError(err error) bool {
 // "failed with error 400: Your account lacks credit" message, but the create
 // endpoint sometimes responds with an empty body instead — see the empty-body
 // branch in CreateInstance for the ShowUser fallback.
+//
+// Drift warning: internal/bidding/build.go has a SQL LIKE filter that
+// excludes credit-exhaustion outcomes from the survival model using the
+// SAME phrase list. If you add a phrase here, add it there too. The
+// roadmap entry "Structured termination reasons for credit exhaustion"
+// (docs/planning/ROADMAP.md) covers the proper fix — typed termination
+// reasons replacing both substring lists.
 func isAccountCreditError(msg string) bool {
 	if msg == "" {
 		return false
