@@ -119,6 +119,73 @@ func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T)
 	}
 }
 
+func TestRunGroupedAutoPilotPass_InventoryTaggedJobsBypassCloudPlanner(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	invID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "inventory job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU inventory: %v", err)
+	}
+	if err := db.SetJobTags(database, invID, []string{db.TagInventory}); err != nil {
+		t.Fatalf("SetJobTags inventory: %v", err)
+	}
+	cloudID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "cloud job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU cloud: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+	})
+
+	var plannerSawJobs []int64
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, jobs []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		plannerSawJobs = nil
+		for _, j := range jobs {
+			plannerSawJobs = append(plannerSawJobs, j.ID)
+		}
+		// Planner blocks the cloud job so the pass returns cleanly without
+		// trying to relaunch.
+		return campaign.AutoPlacementPlan{
+			BlockedReasons: map[int64]string{cloudID: "planner: capacity unavailable"},
+		}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		t.Fatal("autopilot should not invoke relaunch when only inventory jobs are awaiting")
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+	for _, id := range plannerSawJobs {
+		if id == invID {
+			t.Fatalf("planner saw inventory-tagged job %d; cloud planner must not see inventory jobs", invID)
+		}
+	}
+	if got := result.BlockedReasons[invID]; got != inventoryAwaitingReason {
+		t.Fatalf("inventory job blocked reason = %q, want %q", got, inventoryAwaitingReason)
+	}
+	if got := result.BlockedReasons[cloudID]; got != "planner: capacity unavailable" {
+		t.Fatalf("cloud job blocked reason = %q, want %q", got, "planner: capacity unavailable")
+	}
+
+	job, err := db.GetJobByID(database, invID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if len(job.PlacementReasons) == 0 || job.PlacementReasons[len(job.PlacementReasons)-1] != inventoryAwaitingReason {
+		t.Fatalf("inventory placement_reasons did not end with %q: %v", inventoryAwaitingReason, job.PlacementReasons)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_SkipsComputeIntensiveReuseBelowCPUFloor(t *testing.T) {
 	// Hermetic inventory so this test doesn't depend on the developer's
 	// ~/.config/weft/hosts/*.yaml. Without this, when a developer has

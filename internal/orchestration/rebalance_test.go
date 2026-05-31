@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -452,6 +453,61 @@ func TestRebalanceQueuedJobsAcrossInstances_ApplySkipsJobWithOpenIntent(t *testi
 	}
 	if len(*captured) != 0 {
 		t.Fatalf("captured submits = %d, want 0", len(*captured))
+	}
+}
+
+func TestAppendPlacementReason_RunRateReasonSupersedesPrior(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "rrtest", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	initial := []string{
+		"cloud instance 3342 failed (provider_failure)",
+		"run-rate headroom exhausted ($1.17/hr free, this group needs $1.27/hr)",
+	}
+	if err := db.SetJobPlacementReasons(database, jobID, initial); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+
+	appendPlacementReason(database, jobID, "run-rate headroom exhausted ($0.51/hr free, this group needs $1.60/hr)")
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	want := []string{
+		"cloud instance 3342 failed (provider_failure)",
+		"run-rate headroom exhausted ($0.51/hr free, this group needs $1.60/hr)",
+	}
+	if strings.Join(job.PlacementReasons, "|") != strings.Join(want, "|") {
+		t.Fatalf("placement_reasons = %v, want %v", job.PlacementReasons, want)
+	}
+}
+
+func TestAppendPlacementReason_NonRunRateDoesNotEvictRunRate(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "rrtest", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	initial := []string{
+		"run-rate headroom exhausted ($0.51/hr free, this group needs $1.60/hr)",
+	}
+	if err := db.SetJobPlacementReasons(database, jobID, initial); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+
+	appendPlacementReason(database, jobID, "no rental headroom")
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	want := []string{
+		"run-rate headroom exhausted ($0.51/hr free, this group needs $1.60/hr)",
+		"no rental headroom",
+	}
+	if strings.Join(job.PlacementReasons, "|") != strings.Join(want, "|") {
+		t.Fatalf("placement_reasons = %v, want %v", job.PlacementReasons, want)
 	}
 }
 

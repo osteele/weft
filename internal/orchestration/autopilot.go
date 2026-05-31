@@ -56,10 +56,19 @@ var autoReplanUnplaceQueuedJob = ops.UnplaceQueuedJob
 // instance-create window (a few seconds typically, up to ~90s under load).
 const placementIntentProtectionWindow = 5 * time.Minute
 
-func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (*GroupedAutoPilotResult, error) {
+func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (out *GroupedAutoPilotResult, outErr error) {
 	if database == nil {
 		return &GroupedAutoPilotResult{}, nil
 	}
+	// Inventory-tagged unplaced jobs are surfaced via this map so every return
+	// path can attach a fresh "waiting for on-prem host" reason to them
+	// without each path needing to know about the inventory partition.
+	var inventoryAwaitingReasons map[int64]string
+	defer func() {
+		if out != nil && len(inventoryAwaitingReasons) > 0 {
+			mergeInventoryReasons(out, inventoryAwaitingReasons)
+		}
+	}()
 	scoped := make(map[int64]struct{}, len(scopedJobs))
 	for _, job := range scopedJobs {
 		if job != nil {
@@ -109,6 +118,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		return nil, err
 	}
 	unplaced := make([]*db.Job, 0, len(unplacedJobs))
+	inventoryAwaiting := make([]*db.Job, 0)
 	for _, job := range unplacedJobs {
 		// IsUnplacedAwaitingPlacement (rather than IsUnplacedQueued) so jobs
 		// stuck in pending_placement still get a blocked reason — see
@@ -127,16 +137,29 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 				continue
 			}
 		}
+		// Inventory-tagged jobs belong on on-prem hosts; the cloud planner
+		// must not see them. Otherwise it builds phantom launch groups that
+		// inflate run-rate projections (triggering spurious "run-rate
+		// headroom exhausted" reasons on cloud-eligible jobs) and never
+		// execute because the rentalScope filter at line 337 — and
+		// relaunch.go:1756/2041 — correctly exclude inventory jobs from
+		// cloud launches. Placement onto on-prem hosts happens in
+		// internal/app/hostsync/worker.go.
+		if job.HasTag(db.TagInventory) {
+			inventoryAwaiting = append(inventoryAwaiting, job)
+			continue
+		}
 		unplaced = append(unplaced, job)
 	}
+	inventoryAwaitingReasons = persistInventoryAwaitingReasons(database, inventoryAwaiting)
 	if len(unplaced) == 0 {
-		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+		rebalanceResult, rebErr := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,
 			Operation:  "auto_pilot.rebalance",
 			MovingJobs: movingJobs,
 		})
-		if err != nil {
-			return nil, err
+		if rebErr != nil {
+			return nil, rebErr
 		}
 		return &GroupedAutoPilotResult{
 			Rebalanced:    len(rebalanceResult.Moves),
@@ -361,6 +384,35 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 	if len(rentalScope) == 0 {
+		// Detail capture: when launchScope > 0 but rentalScope drops to 0, the
+		// planner picked jobs that the rentalScope filter rejected — log enough
+		// state to identify which filter (remaining/launchScope/scoped/moving)
+		// is responsible without re-running the pass.
+		if len(launchScope) > 0 {
+			remainingIDs := make([]int64, 0, len(remaining))
+			for _, j := range remaining {
+				if j != nil {
+					remainingIDs = append(remainingIDs, j.ID)
+				}
+			}
+			launchScopeIDs := make([]int64, 0, len(launchScope))
+			for id := range launchScope {
+				launchScopeIDs = append(launchScopeIDs, id)
+			}
+			sort.Slice(launchScopeIDs, func(i, j int) bool { return launchScopeIDs[i] < launchScopeIDs[j] })
+			scopedIDs := make([]int64, 0, len(scoped))
+			for id := range scoped {
+				scopedIDs = append(scopedIDs, id)
+			}
+			sort.Slice(scopedIDs, func(i, j int) bool { return scopedIDs[i] < scopedIDs[j] })
+			movingIDs := make([]int64, 0, len(movingJobs))
+			for id := range movingJobs {
+				movingIDs = append(movingIDs, id)
+			}
+			oplog.Log("auto_pilot.no_rental_scope.detail",
+				oplog.WithDetailf("remaining=%v launch_scope_ids=%v scoped_ids=%v moving_ids=%v all_candidates=%v",
+					remainingIDs, launchScopeIDs, scopedIDs, movingIDs, allCandidates))
+		}
 		oplog.Log("auto_pilot.no_rental_scope",
 			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
 		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, remainingByID, allCandidates, capacities, r2Client)
@@ -603,6 +655,51 @@ func reuseRejectionReason(job *db.Job, capacities []campaign.InstanceCapacity, r
 		reasons = append(reasons, fmt.Sprintf("+%d more", len(capacities)-len(reasons)))
 	}
 	return "could not reuse running instances: " + strings.Join(reasons, "; ")
+}
+
+// inventoryAwaitingReason is the authoritative blocked reason for an
+// inventory-tagged unplaced job. Inventory jobs belong on on-prem hosts,
+// not cloud rentals; placement onto an inventory host happens in
+// internal/app/hostsync/worker.go. The autopilot's job here is just to
+// surface the wait, not to act on it.
+const inventoryAwaitingReason = "inventory-tagged: waiting for on-prem host"
+
+// persistInventoryAwaitingReasons writes the "waiting for on-prem host"
+// reason to placement_reasons for each inventory-tagged unplaced job and
+// returns the same map for inclusion in the autopilot result so the TUI's
+// in-memory autoBlockReasons is consistent with what was just persisted.
+func persistInventoryAwaitingReasons(database *sql.DB, jobs []*db.Job) map[int64]string {
+	if len(jobs) == 0 {
+		return nil
+	}
+	reasons := make(map[int64]string, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		reasons[job.ID] = inventoryAwaitingReason
+		appendPlacementReason(database, job.ID, inventoryAwaitingReason)
+	}
+	return reasons
+}
+
+// mergeInventoryReasons folds inventory-awaiting reasons into an
+// autopilot result. Existing entries are not overwritten — the cloud
+// path's reason wins if (somehow) the same job appears in both.
+func mergeInventoryReasons(result *GroupedAutoPilotResult, inventory map[int64]string) *GroupedAutoPilotResult {
+	if result == nil || len(inventory) == 0 {
+		return result
+	}
+	if result.BlockedReasons == nil {
+		result.BlockedReasons = make(map[int64]string, len(inventory))
+	}
+	for jobID, reason := range inventory {
+		if _, exists := result.BlockedReasons[jobID]; exists {
+			continue
+		}
+		result.BlockedReasons[jobID] = reason
+	}
+	return result
 }
 
 func addAutoPilotBlockedReason(blockedReasons map[int64]string, jobID int64, reason string) {

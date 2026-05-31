@@ -1050,12 +1050,34 @@ func appendPlacementReason(database *sql.DB, jobID int64, reason string) {
 	if err != nil || job == nil {
 		return
 	}
-	for _, existing := range job.PlacementReasons {
-		if strings.TrimSpace(existing) == reason {
-			return
+	// Run-rate-exhausted reasons are snapshots of headroom at one moment.
+	// Each pass with different active launches yields different "$X/hr free,
+	// this group needs $Y/hr" text, so naive dedup would let them accumulate
+	// indefinitely. Keep at most one run-rate reason per job — the new one
+	// supersedes the prior snapshot.
+	_, newIsRunRate := ParseRunRateBlockedNeedCents(reason)
+	if !newIsRunRate {
+		for _, existing := range job.PlacementReasons {
+			if strings.TrimSpace(existing) == reason {
+				return
+			}
 		}
+		reasons := append([]string(nil), job.PlacementReasons...)
+		reasons = append(reasons, reason)
+		_ = db.SetJobPlacementReasons(database, jobID, reasons)
+		return
 	}
-	reasons := append([]string(nil), job.PlacementReasons...)
+	reasons := make([]string, 0, len(job.PlacementReasons)+1)
+	for _, existing := range job.PlacementReasons {
+		trimmed := strings.TrimSpace(existing)
+		if trimmed == "" || trimmed == reason {
+			continue
+		}
+		if _, isOldRunRate := ParseRunRateBlockedNeedCents(trimmed); isOldRunRate {
+			continue
+		}
+		reasons = append(reasons, existing)
+	}
 	reasons = append(reasons, reason)
 	_ = db.SetJobPlacementReasons(database, jobID, reasons)
 }

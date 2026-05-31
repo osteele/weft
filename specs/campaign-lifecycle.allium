@@ -1680,16 +1680,26 @@ rule RunawayBreakerClears {
 -- The unplaced_jobs input is defined by jobs.is_unplaced_awaiting_placement
 -- (target_kind = unplaced AND status = queued AND no open MoveIntent or
 -- PlacementIntent — see specs/job-move.allium).
+--
+-- Inventory-tagged jobs are partitioned off before the planner runs (see
+-- InventoryTaggedJobsBypassCloudPlanner). The cloud planner sees only
+-- cloud-eligible jobs; inventory-tagged jobs get an authoritative
+-- "waiting for on-prem host" blocked reason merged into the pass result.
 
 rule AutoPilotPass {
     when: AutoPilotTick(unplaced_jobs)
     requires: for job in unplaced_jobs: job.is_unplaced_awaiting_placement
 
-    let plan: AutoPlacementPlan = BuildAutoPlacementPlan(unplaced_jobs)
+    -- Partition: inventory-tagged jobs are handled by on-prem dispatch
+    -- (internal/app/hostsync/worker.go), not by the cloud planner.
+    let cloud_candidates = unplaced_jobs where not ("inventory" in job.tags)
+    let inventory_awaiting = unplaced_jobs where "inventory" in job.tags
+
+    let plan: AutoPlacementPlan = BuildAutoPlacementPlan(cloud_candidates)
     let planner_made_decisions = plan.launch_job_ids.any()
                                  or plan.blocked_reasons.any()
 
-    for job in unplaced_jobs where job.tags contains "cpu-intensive"
+    for job in cloud_candidates where job.tags contains "cpu-intensive"
                           and not job.tags contains "rental"
                           and job.provider = null:
         if OnPremPlacement(job) != null
@@ -1699,19 +1709,33 @@ rule AutoPilotPass {
             ensures: job.id not in plan.launch_job_ids
 
     ensures:
-        for job in unplaced_jobs where job.id in plan.launch_job_ids:
+        for job in cloud_candidates where job.id in plan.launch_job_ids:
             LaunchInstance(job.campaign, [job], job.gpu_spec, job.launch_options)
 
+    -- Inventory-tagged jobs do not flow through the cloud planner. They
+    -- receive the inventory-awaiting reason and are merged into the
+    -- pass's BlockedReasons via a deferred merge so every return path
+    -- (early-exit, planner error, normal completion) surfaces them.
+    ensures:
+        for job in inventory_awaiting:
+            AppendPlacementReason(job,
+                "inventory-tagged: waiting for on-prem host")
+
     -- Fallback: only when the planner returned nothing at all do we
-    -- launch the remaining unplaced jobs individually.
+    -- launch the remaining cloud-eligible jobs individually. Inventory-
+    -- tagged jobs are never picked up by this fallback.
     if not planner_made_decisions:
         ensures:
-            for job in unplaced_jobs:
+            for job in cloud_candidates:
                 LaunchInstance(job.campaign, [job], job.gpu_spec, job.launch_options)
 
     @guidance
         -- Planner: internal/campaign/auto_planner.go BuildAutoPlacementPlan.
         -- Pass driver: internal/orchestration/autopilot.go RunGroupedAutoPilotPass.
+        -- The inventory partition is implemented in RunGroupedAutoPilotPass
+        -- itself (the per-job check on db.TagInventory before the planner
+        -- call) plus persistInventoryAwaitingReasons and the deferred
+        -- mergeInventoryReasons that runs on every return path.
         -- When the run-rate soft target would be exceeded, autopilot now keeps a
         -- subset of launch groups that fit remaining headroom instead of blocking
         -- the entire launch plan.
@@ -2311,6 +2335,44 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- Built by noRentalHeadroomStructured.
 }
 
+rule RunRateBlockedReasonDedup {
+    when: AppendPlacementReason(job, new_reason)
+
+    -- Run-rate-exhausted reasons are snapshots of headroom at one moment:
+    -- each pass with different active launches produces a different
+    -- "$X/hr free, this group needs $Y/hr" string, so naive equality
+    -- dedup lets them accumulate indefinitely on a long-blocked job.
+    -- When the new reason is a run-rate-exhausted reason, evict every
+    -- existing run-rate-exhausted reason on the job before appending;
+    -- the new snapshot supersedes older ones. Non-run-rate appends
+    -- preserve any existing run-rate entry untouched.
+    --
+    -- A reason is "run-rate-exhausted" iff it parses as one via
+    -- ParseRunRateBlockedNeedCents (the canonical recognizer for the
+    -- "run-rate headroom exhausted (... free, this group needs ...)"
+    -- shape emitted by the planner).
+
+    let new_is_run_rate = ParseRunRateBlockedNeedCents(new_reason).ok
+
+    if new_is_run_rate:
+        ensures:
+            job.placement_reasons =
+                job.placement_reasons.filter(r =>
+                    not ParseRunRateBlockedNeedCents(r).ok)
+                + [new_reason]
+    else:
+        ensures:
+            new_reason in job.placement_reasons
+                or job.placement_reasons = job.placement_reasons + [new_reason]
+
+    @guidance
+        -- Implementation: internal/orchestration/rebalance.go
+        -- appendPlacementReason. At most one run-rate reason per job is
+        -- kept; the newest snapshot wins. Non-run-rate appends use the
+        -- prior equality-dedup behaviour and never displace a run-rate
+        -- entry.
+}
+
 -- ==========================================================================
 -- Reconciliation (safety-net cleanup)
 -- ==========================================================================
@@ -2515,6 +2577,32 @@ invariant BlockedJobsNotRelaunchedInSamePass {
         -- blocked_reasons is non-empty.
 }
 
+invariant InventoryTaggedJobsBypassCloudPlanner {
+    -- Inventory-tagged unplaced jobs must never be visible to
+    -- BuildAutoPlacementPlan. They belong on on-prem hosts (placement
+    -- happens in internal/app/hostsync/worker.go); routing them through
+    -- the cloud planner builds phantom launch groups that:
+    --   * inflate the projected launch rate, producing spurious
+    --     "run-rate headroom exhausted" reasons on cloud-eligible jobs,
+    --     and
+    --   * never execute, because rentalScope (relaunch.go:1756/2041)
+    --     correctly rejects inventory jobs at launch time.
+    -- Instead, each inventory-tagged unplaced job receives the reason
+    -- "inventory-tagged: waiting for on-prem host" and that reason is
+    -- merged into the pass's BlockedReasons.
+    for plan in AutoPlacementPlans:
+        plan.considered_job_ids.all(job_id =>
+            not ("inventory" in Job(job_id).tags))
+
+    @guidance
+        -- Implementation: internal/orchestration/autopilot.go
+        -- RunGroupedAutoPilotPass — the per-job check on db.TagInventory
+        -- partitions inventoryAwaiting before the planner call;
+        -- persistInventoryAwaitingReasons writes the structured reason;
+        -- mergeInventoryReasons is deferred so it runs on every return
+        -- path (early exit, planner error, normal completion).
+}
+
 invariant AutoPilotFallbackRequiresNoDecisions {
     -- The "launch all remaining unplaced jobs" fallback path in the
     -- autopilot pass may fire only when the planner returned no
@@ -2531,6 +2619,18 @@ invariant AutoPilotFallbackRequiresNoDecisions {
         -- The fallback exists to preserve behavior when a planner is
         -- unavailable or returns an empty plan; it is not a bypass for
         -- blocked jobs.
+}
+
+invariant AtMostOneRunRateReasonPerJob {
+    -- A job's placement_reasons must contain at most one run-rate-
+    -- exhausted reason at any time. Without this guard, every pass
+    -- through AppendPlacementReason for a still-blocked job would
+    -- accumulate another headroom snapshot and the list would grow
+    -- unbounded across passes. See RunRateBlockedReasonDedup for the
+    -- eviction rule that maintains this property.
+    for job in Jobs:
+        job.placement_reasons.filter(r =>
+            ParseRunRateBlockedNeedCents(r).ok).count <= 1
 }
 
 -- ==========================================================================

@@ -804,6 +804,28 @@ invariant PlacementReasonsExplainUnplaced {
 }
 
 -- =========================================================================
+-- Autopilot interaction
+-- =========================================================================
+
+-- The cloud autopilot (specs/campaign-lifecycle.allium § AutoPilotPass) is
+-- hands-off for inventory-tagged unplaced jobs. Each autopilot pass:
+--   1. Partitions unplaced jobs by the "inventory" tag before invoking
+--      the cloud planner (BuildAutoPlacementPlan).
+--   2. Routes inventory-tagged jobs to on-prem dispatch
+--      (internal/app/hostsync/worker.go), which is responsible for
+--      assigning them to a host queue.
+--   3. Surfaces "inventory-tagged: waiting for on-prem host" as the
+--      authoritative blocked reason on each such job, both in
+--      job.placement_reasons and in the pass's BlockedReasons map.
+--
+-- Letting the cloud planner see inventory-tagged jobs would build phantom
+-- launch groups (since rental_scope correctly rejects them at launch time),
+-- which then inflate run-rate projections and produce spurious "run-rate
+-- headroom exhausted" reasons on cloud-eligible jobs. The invariant that
+-- guards this is InventoryTaggedJobsBypassCloudPlanner in
+-- specs/campaign-lifecycle.allium.
+
+-- =========================================================================
 -- Cross-references
 -- =========================================================================
 --
