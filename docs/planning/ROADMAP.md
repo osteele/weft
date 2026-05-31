@@ -121,57 +121,38 @@ on-prem hosts ever become first-class table-backed entities, and avoids
 collisions with Go's pervasive use of "instance" for type/struct instances
 when grepping.
 
-## Structured termination reasons for credit exhaustion
+## Structured termination reasons for credit exhaustion (partially landed)
 
-Failures caused by provider account credit exhaustion are currently
-identified by substring matching in two unrelated places:
+The `TerminationReasonAccountCreditExhausted` constant now exists in
+`internal/db/cloud_instances.go`, the bidding filter excludes it via the
+`NOT IN` list (`internal/bidding/build.go`), and operators can apply it
+retroactively via `weft instance mark-credit-exhausted` (see
+`cmd/instance_mark_credit_exhausted.go`). This was triggered by a Vast.ai
+credit-exhaustion incident that destroyed running instances — the operator
+needed a way to label those rows as credit-related so they didn't poison
+the survival model.
 
-- `internal/vastai/client.go` `isAccountCreditError` — runtime classifier
-  that wraps `CreateInstance` errors with `cloud.ErrAccountCreditExhausted`
-  when the message contains `"account lacks credit"`, `"insufficient
-  balance"`, `"insufficient credit"`, or `"account credit"`.
-- `internal/bidding/build.go` — the survival-model load query excludes
-  outcomes whose `termination_detail` matches the same substring set
-  (`%provider returned empty response%`, `%insufficient balance%`,
-  `%account lacks credit%`, `%account credit%`) so credit-exhaustion
-  failures do not poison provider reliability priors.
+Still pending (the original deferral): wire CreateInstance-time
+credit-exhaustion failures through the new constant. Today every
+`UpdateLaunchStatus` write site that observes
+`errors.Is(err, cloud.ErrAccountCreditExhausted)` still writes
+`TerminationReasonInfraFailure` (or `TerminationReasonProviderFailure`)
+plus a substring-matching detail. The bidding filter's LIKE patterns on
+`termination_detail` remain as the safety net for those rows until the
+call-site survey is done.
 
-The two lists currently match but can drift silently. A future credit-error
-phrase added to the runtime classifier won't be picked up by the bidding
-filter (and vice versa), so an undecayed bad outcome would seep into the
-survival model.
+Right trigger to finish the work:
 
-Proper fix: add a structured `TerminationReason` value (e.g.
-`TerminationReasonAccountCreditExhausted`) and record it at every
-`UpdateLaunchStatus` write site that observes `errors.Is(err,
-cloud.ErrAccountCreditExhausted)`. The bidding filter then becomes
-`WHERE termination_reason != ?` — one filter, no phrase list, no drift.
+- A new credit-error variant lands and the substring lists drift.
+- The two phrase lists in `internal/vastai/client.go isAccountCreditError`
+  and `internal/bidding/build.go` LoadInstanceOutcomes diverge.
+- Bidding gains richer outcome typing for other reasons (OOM, user
+  cancellation, etc.) — at which point auditing the existing
+  `cloud.ErrAccountCreditExhausted` call sites becomes cheap.
 
-Why deferred:
-
-- No active drift today; both lists list the same four phrases.
-- Drift consequence is bounded — a single missed outcome decays 50% every
-  21 days via `SurvivalDecayHalfLife`.
-- Migration is non-trivial: existing rows have credit-exhaustion outcomes
-  stored as `termination_reason = 'infra_failure'` + a substring-matching
-  `termination_detail`. Filtering by new reason requires either a backfill
-  migration (`UPDATE launches SET termination_reason = …`), or a long-lived
-  dual-filter that *expands* the duplication instead of eliminating it,
-  or accepting a 21-day window where the model has known wrong data.
-- Call-site survey is error-prone — every `UpdateLaunchStatus(..., TerminationReasonInfraFailure, ...)`
-  caller has to learn the new reason. Miss one path and you're back to
-  substring-or-nothing.
-
-Right trigger to do the work:
-
-- A new credit-error variant lands and someone notices the two-place edit.
-- Bidding needs richer outcome typing for *other* reasons (OOM, user
-  cancellation, etc.) — at which point a single typed-reason refactor
-  covers credit exhaustion for free.
-- A drift bug actually fires.
-
-Until then: keep the substring lists in sync by hand, with the
-cross-references documented in both files.
+Until then: the structured constant + the LIKE-pattern net cover both the
+retroactive-reclassification path and the legacy `provider_failure` +
+detail path. Keep the two phrase lists in sync by hand.
 
 ## Banner monitors (deferred)
 

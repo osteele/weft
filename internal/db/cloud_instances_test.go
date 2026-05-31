@@ -2597,3 +2597,198 @@ func TestJobsWithOrphanStreaks(t *testing.T) {
 		t.Fatalf("got %+v, want job_id=5001 count=3", streaks[0])
 	}
 }
+
+func TestReclassifyLaunchTerminationReason_HappyPath(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed,
+		TerminationReasonProviderFailure, "provider dead with no completion marker"); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	const prefix = "reclassified as account_credit_exhausted at 2026-05-31T00:00:00Z"
+	if err := ReclassifyLaunchTerminationReason(database, instanceID,
+		TerminationReasonAccountCreditExhausted, prefix); err != nil {
+		t.Fatalf("ReclassifyLaunchTerminationReason: %v", err)
+	}
+
+	var reason, detail string
+	if err := database.QueryRow(
+		`SELECT termination_reason, COALESCE(termination_detail, '') FROM launches WHERE id = ?`,
+		instanceID,
+	).Scan(&reason, &detail); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if reason != TerminationReasonAccountCreditExhausted {
+		t.Fatalf("termination_reason = %q, want %q", reason, TerminationReasonAccountCreditExhausted)
+	}
+	if !strings.HasPrefix(detail, prefix) {
+		t.Fatalf("termination_detail = %q, want prefix %q", detail, prefix)
+	}
+	if !strings.Contains(detail, "provider dead with no completion marker") {
+		t.Fatalf("termination_detail = %q, want original detail preserved", detail)
+	}
+}
+
+func TestReclassifyLaunchTerminationReason_RefusesNonTerminal(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	err = ReclassifyLaunchTerminationReason(database, instanceID,
+		TerminationReasonAccountCreditExhausted, "manual")
+	if err == nil {
+		t.Fatalf("expected error reclassifying a running launch, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed/canceled") {
+		t.Fatalf("error = %v, want message about failed/canceled", err)
+	}
+}
+
+func TestReclassifyLaunchTerminationReason_RefusesIneligibleReason(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed,
+		TerminationReasonDiskFull, "out of disk"); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	err = ReclassifyLaunchTerminationReason(database, instanceID,
+		TerminationReasonAccountCreditExhausted, "manual")
+	if err == nil {
+		t.Fatalf("expected error reclassifying disk_full row, got nil")
+	}
+	if !strings.Contains(err.Error(), "disk_full") {
+		t.Fatalf("error = %v, want message naming disk_full", err)
+	}
+
+	// Verify the row was not modified.
+	var reason string
+	if err := database.QueryRow(
+		`SELECT termination_reason FROM launches WHERE id = ?`, instanceID,
+	).Scan(&reason); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if reason != TerminationReasonDiskFull {
+		t.Fatalf("termination_reason = %q, want unchanged %q", reason, TerminationReasonDiskFull)
+	}
+}
+
+func TestReclassifyLaunchTerminationReason_NoLaunch(t *testing.T) {
+	database := setupTestDB(t)
+
+	err := ReclassifyLaunchTerminationReason(database, 999999,
+		TerminationReasonAccountCreditExhausted, "manual")
+	if err != sql.ErrNoRows {
+		t.Fatalf("error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestListReclassifyEligibleLaunches_FiltersByWindowAndReason(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().Unix()
+
+	type fixture struct {
+		id     int64
+		ended  int64
+		reason string
+	}
+	mk := func(reason string, endedDelta time.Duration) fixture {
+		id, err := CreateLaunch(database, &Launch{
+			Status:   LaunchStatusPlanned,
+			Provider: "vastai",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		ended := now + int64(endedDelta.Seconds())
+		if _, err := database.Exec(
+			`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`,
+			LaunchStatusFailed, ended, reason, id,
+		); err != nil {
+			t.Fatalf("update fixture: %v", err)
+		}
+		return fixture{id: id, ended: ended, reason: reason}
+	}
+
+	recentEligible := mk(TerminationReasonProviderFailure, -10*time.Minute)
+	recentIneligible := mk(TerminationReasonDiskFull, -10*time.Minute)
+	oldEligible := mk(TerminationReasonInfraFailure, -48*time.Hour)
+	recentUnknown := mk(TerminationReasonUnknown, -1*time.Hour)
+
+	sinceUnix := now - int64((6 * time.Hour).Seconds())
+	got, err := ListReclassifyEligibleLaunches(database, sinceUnix)
+	if err != nil {
+		t.Fatalf("ListReclassifyEligibleLaunches: %v", err)
+	}
+
+	gotIDs := map[int64]bool{}
+	for _, l := range got {
+		gotIDs[l.ID] = true
+	}
+	if !gotIDs[recentEligible.id] {
+		t.Errorf("recent eligible launch %d missing from result", recentEligible.id)
+	}
+	if !gotIDs[recentUnknown.id] {
+		t.Errorf("recent unknown-reason launch %d missing from result", recentUnknown.id)
+	}
+	if gotIDs[recentIneligible.id] {
+		t.Errorf("recent ineligible (disk_full) launch %d should be filtered out", recentIneligible.id)
+	}
+	if gotIDs[oldEligible.id] {
+		t.Errorf("old eligible launch %d outside window should be filtered out", oldEligible.id)
+	}
+}
+
+func TestIsReclassifyEligibleReason(t *testing.T) {
+	eligible := []string{
+		"",
+		TerminationReasonProviderFailure,
+		TerminationReasonInfraFailure,
+		TerminationReasonUnknown,
+	}
+	ineligible := []string{
+		TerminationReasonDiskFull,
+		TerminationReasonJobFailure,
+		TerminationReasonCompleted,
+		TerminationReasonCancelled,
+		TerminationReasonWeftBug,
+		TerminationReasonBootstrapTimeout,
+		TerminationReasonPhaseStall,
+		TerminationReasonPreempted,
+		TerminationReasonProviderTimeout,
+		TerminationReasonUploadStall,
+		TerminationReasonAccountCreditExhausted,
+	}
+	for _, r := range eligible {
+		if !IsReclassifyEligibleReason(r) {
+			t.Errorf("IsReclassifyEligibleReason(%q) = false, want true", r)
+		}
+	}
+	for _, r := range ineligible {
+		if IsReclassifyEligibleReason(r) {
+			t.Errorf("IsReclassifyEligibleReason(%q) = true, want false", r)
+		}
+	}
+}

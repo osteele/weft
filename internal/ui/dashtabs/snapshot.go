@@ -261,7 +261,7 @@ func recentFailures(launches []*db.Launch, jobs []*db.Job, now time.Time) []Fail
 			continue
 		}
 		switch l.TerminationReason {
-		case "provider_failure", "infra_failure", "disk_full":
+		case "provider_failure", "infra_failure", "disk_full", "account_credit_exhausted":
 			s, ok := byProvider[l.Provider]
 			if !ok {
 				s = &FailureSummary{Provider: l.Provider}

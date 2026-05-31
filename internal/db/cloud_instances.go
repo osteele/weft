@@ -78,6 +78,22 @@ const (
 	// connectivity even though SSH/heartbeat may still appear healthy.
 	// Retryable: a fresh instance on a different network path usually works.
 	TerminationReasonUploadStall = "upload_stall"
+	// TerminationReasonAccountCreditExhausted labels failures attributable to
+	// the operator's provider account running out of credit — either a
+	// CreateInstance call rejected with an explicit "account lacks credit"
+	// error, or a running instance destroyed mid-flight when the provider
+	// stopped billing. Excluded from the survival model because these
+	// failures say nothing about the machine, SKU, or provider region.
+	//
+	// The runtime-destruction case has no programmatic signal in the
+	// provider response (Vast.ai just reports the instance as destroyed),
+	// so the only path to this reason today is the operator running
+	// `weft instance mark-credit-exhausted` after the fact. The
+	// CreateInstance-time path still records `provider_failure` plus a
+	// substring-matched detail; wiring that path through this constant
+	// requires the call-site survey described in docs/planning/ROADMAP.md
+	// § "Structured termination reasons for credit exhaustion".
+	TerminationReasonAccountCreditExhausted = "account_credit_exhausted"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be
@@ -90,7 +106,7 @@ func IsRetryableTermination(ci *Launch) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonProviderTimeout, TerminationReasonUploadStall, TerminationReasonUnknown, "":
+	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonPreempted, TerminationReasonProviderTimeout, TerminationReasonUploadStall, TerminationReasonAccountCreditExhausted, TerminationReasonUnknown, "":
 		return true
 	default:
 		return false
@@ -110,7 +126,8 @@ func IsInfrastructureTermination(reason string) bool {
 		TerminationReasonPhaseStall,
 		TerminationReasonPreempted,
 		TerminationReasonProviderTimeout,
-		TerminationReasonUploadStall:
+		TerminationReasonUploadStall,
+		TerminationReasonAccountCreditExhausted:
 		return true
 	default:
 		return false
@@ -129,6 +146,7 @@ func InfrastructureTerminationReasons() []string {
 		TerminationReasonPreempted,
 		TerminationReasonProviderTimeout,
 		TerminationReasonUploadStall,
+		TerminationReasonAccountCreditExhausted,
 	}
 }
 
@@ -486,6 +504,8 @@ func HumanizeTerminationReason(reason string) string {
 		return "setup phase stalled"
 	case TerminationReasonUploadStall:
 		return "R2 uploads stalled"
+	case TerminationReasonAccountCreditExhausted:
+		return "account credit exhausted"
 	case TerminationReasonPreempted:
 		return "preempted (interruptible lost bid)"
 	case TerminationReasonCancelled:
@@ -1352,6 +1372,108 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 		 SET termination_reason = ?
 		 WHERE id = ? AND termination_reason = ?`,
 		TerminationReasonDiskFull, instanceID, TerminationReasonJobFailure,
+	)
+	return err
+}
+
+// IsReclassifyEligibleReason reports whether a launch's current
+// termination_reason can be overwritten by ReclassifyLaunchTerminationReason.
+// The eligible set is the generic infrastructure/unknown reasons; specific
+// reasons (disk_full, job_failure, completed, weft_bug, etc.) are protected
+// from manual overwrite so the operator can't accidentally lose more
+// specific information.
+func IsReclassifyEligibleReason(reason string) bool {
+	switch reason {
+	case "",
+		TerminationReasonProviderFailure,
+		TerminationReasonInfraFailure,
+		TerminationReasonUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// ListReclassifyEligibleLaunches returns failed/canceled launches whose
+// ended_at is at or after sinceUnix and whose current termination_reason is
+// eligible for reclassification (see IsReclassifyEligibleReason). Returned
+// in reverse-chronological order by ended_at so the CLI preview shows the
+// most recent first.
+func ListReclassifyEligibleLaunches(database *sql.DB, sinceUnix int64) ([]*Launch, error) {
+	rows, err := database.Query(
+		`SELECT `+launchSelectColumns+`
+		   FROM launches
+		  WHERE status IN (?, ?)
+		    AND ended_at IS NOT NULL
+		    AND ended_at >= ?
+		    AND (
+		      termination_reason IS NULL
+		      OR termination_reason = ''
+		      OR termination_reason IN (?, ?, ?)
+		    )
+		  ORDER BY ended_at DESC, id DESC`,
+		LaunchStatusFailed, LaunchStatusCancelled,
+		sinceUnix,
+		TerminationReasonProviderFailure,
+		TerminationReasonInfraFailure,
+		TerminationReasonUnknown,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Launch
+	for rows.Next() {
+		c, err := scanLaunchFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ReclassifyLaunchTerminationReason overwrites termination_reason (and
+// optionally prepends to termination_detail) on an already-terminal launch.
+// Unlike UpdateLaunchStatus, this is allowed to overwrite a non-unknown
+// reason, but only when the current reason is in the eligible set (see
+// IsReclassifyEligibleReason). It does not touch status, ended_at,
+// attempt_outcome, or any other column.
+//
+// Used by `weft instance mark-credit-exhausted` to retroactively label
+// instances destroyed by the provider for non-payment, after the operator
+// confirms the incident — there is no programmatic signal that distinguishes
+// these from generic provider failures.
+//
+// Returns sql.ErrNoRows if the launch does not exist. Returns a typed error
+// if the launch is not terminal, or if the current termination_reason is
+// not eligible for reclassification.
+func ReclassifyLaunchTerminationReason(database *sql.DB, launchID int64, newReason, detailPrefix string) error {
+	var currentStatus, currentReason, currentDetail string
+	err := database.QueryRow(
+		`SELECT status, COALESCE(termination_reason, ''), COALESCE(termination_detail, '') FROM launches WHERE id = ?`,
+		launchID,
+	).Scan(&currentStatus, &currentReason, &currentDetail)
+	if err != nil {
+		return err
+	}
+	if currentStatus != LaunchStatusFailed && currentStatus != LaunchStatusCancelled {
+		return fmt.Errorf("launch %d has status %q; reclassify is only allowed on failed/canceled launches", launchID, currentStatus)
+	}
+	if !IsReclassifyEligibleReason(currentReason) {
+		return fmt.Errorf("launch %d has termination_reason %q; reclassify is only allowed when the current reason is generic (provider_failure, infra_failure, unknown, or empty)", launchID, currentReason)
+	}
+	newDetail := currentDetail
+	if detailPrefix != "" {
+		if currentDetail != "" {
+			newDetail = detailPrefix + "; " + currentDetail
+		} else {
+			newDetail = detailPrefix
+		}
+	}
+	_, err = database.Exec(
+		`UPDATE launches SET termination_reason = ?, termination_detail = ? WHERE id = ?`,
+		newReason, newDetail, launchID,
 	)
 	return err
 }

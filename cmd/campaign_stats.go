@@ -91,7 +91,12 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 			inst.TerminationReason == db.TerminationReasonJobFailure ||
 			inst.TerminationReason == db.TerminationReasonDiskFull ||
 			inst.TerminationReason == "exited"
-		wasted := !survived && inst.TerminationReason != db.TerminationReasonCancelled
+		// Wasted = infra/provider failure that lost the operator money.
+		// Credit exhaustion is operator-side (not provider unreliability),
+		// so exclude it from the wasted bucket alongside user-cancellation.
+		wasted := !survived &&
+			inst.TerminationReason != db.TerminationReasonCancelled &&
+			inst.TerminationReason != db.TerminationReasonAccountCreditExhausted
 		if wasted {
 			wastedSpend += spend
 		}
@@ -127,6 +132,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 		db.TerminationReasonProviderFailure,
 		db.TerminationReasonInfraFailure,
 		db.TerminationReasonJobFailure,
+		db.TerminationReasonAccountCreditExhausted,
 		db.TerminationReasonCancelled,
 	}
 	for _, key := range reasonKeys {

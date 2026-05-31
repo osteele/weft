@@ -21,19 +21,20 @@ import (
 // 00008_add_upload_stall_reason.sql for the pattern).
 func TestTerminationReasonConstantsMatchSchema(t *testing.T) {
 	want := map[string]struct{}{
-		TerminationReasonCompleted:        {},
-		TerminationReasonProviderFailure:  {},
-		TerminationReasonJobFailure:       {},
-		TerminationReasonDiskFull:         {},
-		TerminationReasonInfraFailure:     {},
-		TerminationReasonBootstrapTimeout: {},
-		TerminationReasonCancelled:        {},
-		TerminationReasonPhaseStall:       {},
-		TerminationReasonPreempted:        {},
-		TerminationReasonUnknown:          {},
-		TerminationReasonWeftBug:          {},
-		TerminationReasonProviderTimeout:  {},
-		TerminationReasonUploadStall:      {},
+		TerminationReasonCompleted:              {},
+		TerminationReasonProviderFailure:        {},
+		TerminationReasonJobFailure:             {},
+		TerminationReasonDiskFull:               {},
+		TerminationReasonInfraFailure:           {},
+		TerminationReasonBootstrapTimeout:       {},
+		TerminationReasonCancelled:              {},
+		TerminationReasonPhaseStall:             {},
+		TerminationReasonPreempted:              {},
+		TerminationReasonUnknown:                {},
+		TerminationReasonWeftBug:                {},
+		TerminationReasonProviderTimeout:        {},
+		TerminationReasonUploadStall:            {},
+		TerminationReasonAccountCreditExhausted: {},
 	}
 
 	database := setupTestDB(t)

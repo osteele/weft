@@ -52,11 +52,22 @@ value TerminationReason = completed | provider_failure | job_failure
                         | disk_full | infra_failure | bootstrap_timeout
                         | canceled | phase_stall | preempted | unknown
                         | provider_timeout | upload_stall | weft_bug
+                        | account_credit_exhausted
 -- upload_stall: agent self-destructed after persistent R2 upload failures.
 --               See upload-drain.allium for the gate that triggers it.
 -- provider_timeout: provider create/destroy/show command exceeded its
 --                   bounded timeout (typically a Vast.ai API hang).
 -- weft_bug: reserved for internal invariant violations the agent detected.
+-- account_credit_exhausted: the operator's provider account ran out of
+--                   credit. Excluded from the survival model — these
+--                   failures say nothing about the machine, SKU, or
+--                   region. Applied retroactively by `weft instance
+--                   mark-credit-exhausted` because the runtime-destruction
+--                   case (provider destroys a running instance for
+--                   non-payment) has no programmatic signal; the
+--                   CreateInstance-time case still records provider_failure
+--                   + detail until the call-site survey in
+--                   docs/planning/ROADMAP.md is done.
 
 -- AttemptOutcome classifies how a single Job attempt on a Launch ended.
 -- "preempted" specifically indicates the attempt was running on an
@@ -220,7 +231,8 @@ entity Instance {
         or (j.latest_attempt.end_time != null and j.latest_attempt.end_time > 0))
     is_retryable: termination_reason in {provider_failure, infra_failure,
                                           bootstrap_timeout, phase_stall,
-                                          preempted, unknown}
+                                          preempted, account_credit_exhausted,
+                                          unknown}
 
     -- Status
     --
@@ -496,10 +508,17 @@ rule DependencyGatesRentalLaunch {
 -- another offer of the same provider will not help. Without a gate, every
 -- autopilot pass mints a fresh failed-instance row per rental-scope job,
 -- pollutes the failure list, and seeds the survival model with non-signal
--- noise that has to be filtered out retrospectively
--- (internal/bidding/build.go excludes outcomes whose termination_detail
--- matches "%provider returned empty response%" / "%insufficient balance%" /
--- "%account credit%" precisely because of this).
+-- noise that has to be filtered out retrospectively. The survival query
+-- in internal/bidding/build.go excludes outcomes via two layers: the
+-- structured TerminationReason value account_credit_exhausted (preferred,
+-- written retroactively by `weft instance mark-credit-exhausted`), and a
+-- termination_detail substring filter
+-- ("%provider returned empty response%" / "%insufficient balance%" /
+-- "%account credit%") that remains as a safety net for legacy rows where
+-- CreateInstance failures recorded provider_failure + detail. Both layers
+-- stay in place until the call-site survey described in
+-- docs/planning/ROADMAP.md routes CreateInstance-time failures through
+-- the structured reason.
 --
 -- The gate is a pre-launch guard: before calling RelaunchOrphanedJobs the
 -- autopilot probes each enabled provider's account balance and, when every

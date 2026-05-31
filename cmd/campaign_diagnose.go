@@ -192,6 +192,8 @@ func summarizeInstanceCause(inst *db.Launch, findings []jobFinding, outcomes map
 			return "completed but results upload was partial/failed"
 		}
 		return "completed successfully"
+	case db.TerminationReasonAccountCreditExhausted:
+		return "provider account credit exhausted"
 	}
 
 	switch inst.Status {

@@ -194,6 +194,7 @@ func init() {
 	instanceCmd.AddCommand(instanceNewCmd)
 	instanceCmd.AddCommand(instanceDiagnoseCmd)
 	instanceCmd.AddCommand(instanceDiskReportCmd)
+	instanceCmd.AddCommand(instanceMarkCreditExhaustedCmd)
 
 	instanceSSHCmd.Flags().BoolVar(&instanceSSHPrint, "print", false, "Print the SSH command instead of connecting")
 	instanceSubmitCmd.Flags().StringVar(&instanceSubmitCommand, "command", "", "Override the job command")

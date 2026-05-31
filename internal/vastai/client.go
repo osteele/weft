@@ -440,9 +440,11 @@ func isProviderRejectedCreateError(err error) bool {
 // Drift warning: internal/bidding/build.go has a SQL LIKE filter that
 // excludes credit-exhaustion outcomes from the survival model using the
 // SAME phrase list. If you add a phrase here, add it there too. The
-// roadmap entry "Structured termination reasons for credit exhaustion"
-// (docs/planning/ROADMAP.md) covers the proper fix — typed termination
-// reasons replacing both substring lists.
+// bidding query also excludes the structured TerminationReasonAccountCreditExhausted
+// constant, which is the long-term replacement, but CreateInstance-time
+// failures still flow through the substring path until the call-site
+// audit in docs/planning/ROADMAP.md § "Structured termination reasons
+// for credit exhaustion" is done.
 func isAccountCreditError(msg string) bool {
 	if msg == "" {
 		return false

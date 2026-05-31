@@ -109,6 +109,57 @@ func TestLoadInstanceOutcomes_IncludesPreCreationFailures(t *testing.T) {
 	}
 }
 
+func TestLoadInstanceOutcomes_ExcludesAccountCreditExhausted(t *testing.T) {
+	database := jobdb.SetupTestDB(t)
+
+	creditID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+		Status:           jobdb.LaunchStatusLaunching,
+		Provider:         "vastai",
+		ResolvedGPUName:  "RTX 4090",
+		CostPerHourCents: 100,
+		Reliability:      0.9,
+		MachineID:        "machine-credit",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(credit): %v", err)
+	}
+	if err := jobdb.UpdateLaunchStatus(database, creditID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonProviderFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(credit, initial): %v", err)
+	}
+	if err := jobdb.ReclassifyLaunchTerminationReason(database, creditID,
+		jobdb.TerminationReasonAccountCreditExhausted,
+		"reclassified as account_credit_exhausted at 2026-05-31T00:00:00Z"); err != nil {
+		t.Fatalf("ReclassifyLaunchTerminationReason: %v", err)
+	}
+
+	survivingID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+		Status:           jobdb.LaunchStatusLaunching,
+		Provider:         "vastai",
+		ResolvedGPUName:  "RTX 4090",
+		CostPerHourCents: 100,
+		Reliability:      0.9,
+		MachineID:        "machine-real",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(survivor): %v", err)
+	}
+	if err := jobdb.UpdateLaunchStatus(database, survivingID, jobdb.LaunchStatusFailed, jobdb.TerminationReasonProviderFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(survivor): %v", err)
+	}
+
+	outcomes, err := LoadInstanceOutcomes(database)
+	if err != nil {
+		t.Fatalf("LoadInstanceOutcomes: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("LoadInstanceOutcomes returned %d outcomes, want 1 (account_credit_exhausted must be excluded)", len(outcomes))
+	}
+	if outcomes[0].TerminationReason != jobdb.TerminationReasonProviderFailure {
+		t.Fatalf("outcome.TerminationReason = %q, want %q",
+			outcomes[0].TerminationReason, jobdb.TerminationReasonProviderFailure)
+	}
+}
+
 func TestBuildSurvivalModel_RecencyDecay(t *testing.T) {
 	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	old := now.Add(-90 * 24 * time.Hour) // ~4 half-lives ago: weight ≈ 1/16

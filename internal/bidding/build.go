@@ -33,12 +33,18 @@ type InstanceOutcome struct {
 // Rows without machine attribution still contribute to provider/SKU buckets,
 // while geoAdjustment naturally skips their per-machine cache.
 //
-// Drift warning: the credit-exhaustion termination_detail patterns below
-// duplicate the substring list in internal/vastai/client.go
-// isAccountCreditError. The two must stay in sync until the proper fix
-// lands — see docs/planning/ROADMAP.md § "Structured termination reasons
-// for credit exhaustion" — which replaces both with a typed
-// TerminationReason.
+// Credit exhaustion is excluded two ways:
+//   - The structured `account_credit_exhausted` termination reason is the
+//     preferred signal. Operators apply it retroactively via
+//     `weft instance mark-credit-exhausted`; future CreateInstance-time
+//     wiring will write it directly (see docs/planning/ROADMAP.md
+//     § "Structured termination reasons for credit exhaustion").
+//   - The substring list on termination_detail remains as a
+//     backwards-compatibility net for legacy rows that still carry
+//     `provider_failure` plus a credit-error detail string. Keep these
+//     patterns in sync with the runtime classifier in
+//     internal/vastai/client.go isAccountCreditError until all legacy
+//     rows have been reclassified.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
@@ -48,7 +54,7 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
-		  AND termination_reason NOT IN (?, ?)
+		  AND termination_reason NOT IN (?, ?, ?)
 		  AND provider IS NOT NULL
 		  AND provider != ''
 		  AND resolved_gpu_name IS NOT NULL
@@ -57,10 +63,11 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		  -- internal/vastai/client.go isAccountCreditError.
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%provider returned empty response%'
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%insufficient balance%'
+		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%insufficient credit%'
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account lacks credit%'
 		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account credit%'
 		ORDER BY id
-	`, jobdb.TerminationReasonCancelled, jobdb.TerminationReasonWeftBug)
+	`, jobdb.TerminationReasonCancelled, jobdb.TerminationReasonWeftBug, jobdb.TerminationReasonAccountCreditExhausted)
 	if err != nil {
 		return nil, err
 	}
