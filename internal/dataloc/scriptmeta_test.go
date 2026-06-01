@@ -80,6 +80,10 @@ import torch
 # dependencies = ["torch"]
 # ///
 `,
+			// PEP 723 top-level `dependencies` alone (no [tool.weft] block)
+			// must not produce a non-nil meta — ScanScriptMeta returns nil
+			// via isEmpty(), and dependency consumers go through
+			// ScanScriptDependencies instead.
 			want: nil,
 		},
 		{

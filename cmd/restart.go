@@ -358,9 +358,10 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 		slog.Warn("script metadata error", "error", err)
 		return nil, nil
 	}
-	// When there's no script PEP 723 block at all, leave the job's resource
-	// fields alone. The script provides no new information to merge, and the
-	// existing values may have come from CLI or from a path we can't infer.
+	// When there's no script PEP 723 [tool.weft] block, leave the job's
+	// resource fields alone. The script provides no new information to merge,
+	// and the existing values may have come from CLI or from a path we can't
+	// infer.
 	if meta == nil {
 		return nil, nil
 	}

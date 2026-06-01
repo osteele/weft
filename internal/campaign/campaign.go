@@ -96,6 +96,18 @@ func ApplyImageMetadataRequirements(cfg *config.Config, groups []InstanceGroup) 
 		groups[i].MinDriverVersion = maxInt(groups[i].MinDriverVersion, req.MinDriverVersion)
 		groups[i].MinCUDAVersion = maxCUDAVersionString(groups[i].MinCUDAVersion, req.MinCUDAVersion)
 	}
+	// Back-fill driver floors from CUDA floors for every group, not just the
+	// label-fetched ones — `shouldFetchImageRequirements` skips the very
+	// auto-selected pytorch/* and nvidia/cuda images that motivate the
+	// back-fill, so doing it inside the label-fetch branch would be dead code
+	// for the primary use case.
+	for i := range groups {
+		merged := imagereq.BackfillDriverFromCUDA(cloud.ImageRequirements{
+			MinCUDAVersion:   groups[i].MinCUDAVersion,
+			MinDriverVersion: groups[i].MinDriverVersion,
+		})
+		groups[i].MinDriverVersion = merged.MinDriverVersion
+	}
 	return groups
 }
 
@@ -524,21 +536,29 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			}
 			merged[i].MaxComputeCap = mergeMaxComputeCap(merged[i].MaxComputeCap, g.MaxComputeCap)
 			merged[i].MinComputeCap = mergeMinComputeCap(merged[i].MinComputeCap, g.MinComputeCap)
+			// Preserve hard CUDA/driver floors across the merge — they're
+			// later read by offerConstraintsForGroup to filter Vast offers,
+			// and dropping them would defeat the back-fill set up in
+			// SplitGroupsByImage / ResolveJobImageSettings.
+			merged[i].MinDriverVersion = maxInt(merged[i].MinDriverVersion, g.MinDriverVersion)
+			merged[i].MinCUDAVersion = maxCUDAVersionString(merged[i].MinCUDAVersion, g.MinCUDAVersion)
 			found = true
 			break
 		}
 		if !found {
 			// Copy the group to avoid mutating the original
 			merged = append(merged, InstanceGroup{
-				GPUClass:      g.GPUClass,
-				Provider:      g.Provider,
-				GPUMemGB:      g.GPUMemGB,
-				DiskGB:        g.DiskGB,
-				Image:         g.Image,
-				Preemptible:   g.Preemptible,
-				MaxComputeCap: g.MaxComputeCap,
-				MinComputeCap: g.MinComputeCap,
-				Jobs:          append([]*db.Job(nil), g.Jobs...),
+				GPUClass:         g.GPUClass,
+				Provider:         g.Provider,
+				GPUMemGB:         g.GPUMemGB,
+				DiskGB:           g.DiskGB,
+				Image:            g.Image,
+				Preemptible:      g.Preemptible,
+				MaxComputeCap:    g.MaxComputeCap,
+				MinComputeCap:    g.MinComputeCap,
+				MinDriverVersion: g.MinDriverVersion,
+				MinCUDAVersion:   g.MinCUDAVersion,
+				Jobs:             append([]*db.Job(nil), g.Jobs...),
 			})
 		}
 	}
@@ -556,15 +576,17 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 	for _, g := range groups {
 		if len(g.Jobs) <= 1 {
 			result = append(result, InstanceGroup{
-				GPUClass:      g.GPUClass,
-				Provider:      g.Provider,
-				GPUMemGB:      g.GPUMemGB,
-				DiskGB:        g.DiskGB,
-				Image:         g.Image,
-				Preemptible:   g.Preemptible,
-				MaxComputeCap: g.MaxComputeCap,
-				MinComputeCap: g.MinComputeCap,
-				Jobs:          append([]*db.Job(nil), g.Jobs...),
+				GPUClass:         g.GPUClass,
+				Provider:         g.Provider,
+				GPUMemGB:         g.GPUMemGB,
+				DiskGB:           g.DiskGB,
+				Image:            g.Image,
+				Preemptible:      g.Preemptible,
+				MaxComputeCap:    g.MaxComputeCap,
+				MinComputeCap:    g.MinComputeCap,
+				MinDriverVersion: g.MinDriverVersion,
+				MinCUDAVersion:   g.MinCUDAVersion,
+				Jobs:             append([]*db.Job(nil), g.Jobs...),
 			})
 			continue
 		}
@@ -574,15 +596,17 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 				mem = *job.GPUMemGB
 			}
 			result = append(result, InstanceGroup{
-				GPUClass:      g.GPUClass,
-				Provider:      g.Provider,
-				GPUMemGB:      mem,
-				DiskGB:        g.DiskGB,
-				Image:         g.Image,
-				Preemptible:   g.Preemptible,
-				MaxComputeCap: groupMaxComputeCap(nil, []*db.Job{job}),
-				MinComputeCap: groupMinComputeCap([]*db.Job{job}),
-				Jobs:          []*db.Job{job},
+				GPUClass:         g.GPUClass,
+				Provider:         g.Provider,
+				GPUMemGB:         mem,
+				DiskGB:           g.DiskGB,
+				Image:            g.Image,
+				Preemptible:      g.Preemptible,
+				MaxComputeCap:    groupMaxComputeCap(nil, []*db.Job{job}),
+				MinComputeCap:    groupMinComputeCap([]*db.Job{job}),
+				MinDriverVersion: g.MinDriverVersion,
+				MinCUDAVersion:   g.MinCUDAVersion,
+				Jobs:             []*db.Job{job},
 			})
 		}
 	}
@@ -644,6 +668,7 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 			// built on the rental with a known torch CUDA tag.
 			if job.CLIResourceOverrides != nil && job.CLIResourceOverrides.MinCUDAVersion != "" {
 				req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: job.CLIResourceOverrides.MinCUDAVersion})
+				req = imagereq.BackfillDriverFromCUDA(req)
 			}
 			explicitImage := img != ""
 			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
@@ -827,11 +852,35 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 			imagePullSecret = meta.ImagePullSecret
 		}
 	}
+	// PEP 723 top-level `dependencies = [...]` is read independently of
+	// [tool.weft]: a script may declare standard deps without configuring
+	// weft, and we still want those deps to drive CUDA-floor inference.
+	scriptDeps := dataloc.ScanScriptDependencies(localDir, command)
 	if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
 		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
 		slog.Debug("auto-derived CUDA driver floor from torch pin",
 			"component", "campaign", "cuda_floor", torchCUDA, "local_dir", localDir)
 	}
+	// Inline deps that the project's uv.lock doesn't see: `uv run --with X`
+	// and PEP 723 `dependencies = [...]`. vLLM 0.17+ is the motivating case —
+	// it bundles flash-attention 4, which needs CUDA 12.8 / driver 570
+	// regardless of the torch wheel in the project lockfile (the lockfile
+	// may pin torch+cu124, but `--with "vllm>=0.17"` resolves a fresh stack
+	// on the rental that overrides it).
+	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
+	deps = append(deps, dataloc.ParseDepSpecs(scriptDeps)...)
+	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
+		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: libCUDA})
+		slog.Debug("auto-derived CUDA driver floor from inline library deps",
+			"component", "campaign", "cuda_floor", libCUDA, "local_dir", localDir)
+	}
+	// Back-fill a driver floor from the CUDA floor when nothing else supplied
+	// one. Auto-selected pytorch/nvidia base images bypass label fetching
+	// (shouldFetchImageRequirements), so a project pinned at e.g. torch+cu128
+	// would otherwise emit `cuda>=12.8` without the matching `driver>=570`,
+	// and Vast can return offers whose advertised cuda_max_good clears the
+	// CUDA gate while driver_version is too old for the wheel at runtime.
+	req = imagereq.BackfillDriverFromCUDA(req)
 	return img, req, imagePullSecret
 }
 

@@ -1135,3 +1135,41 @@ func TestRestartQueuedJob_NoScriptMetaLeavesFieldsAlone(t *testing.T) {
 		t.Fatalf("GPUClass = %q, want ampere+ (preserved when no script meta)", job.GPUClass)
 	}
 }
+
+// Regression: a script with only PEP 723 `dependencies = [...]` (no
+// [tool.weft] GPU block) must not clear the job's GPU fields on restart.
+// Before the fix, ScanScriptMeta returned a non-nil meta with empty GPU fields,
+// and applyScriptGPUDefaults' `meta == nil` guard no longer fired, so the
+// effective GPU values fell back to empty and the job's GPUClass was cleared.
+func TestRestartQueuedJob_DepsOnlyMetaLeavesGPUAlone(t *testing.T) {
+	database := db.SetupTestDB(t)
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "train.py")
+	script := `# /// script
+# requires-python = ">=3.10"
+# dependencies = ["torch"]
+# ///
+import torch
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", dir, "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobGPUClass(database, jobID, "ampere+"); err != nil {
+		t.Fatalf("set gpu class: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob queued failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("GPUClass = %q, want ampere+ (preserved when script has only PEP 723 dependencies)", job.GPUClass)
+	}
+}

@@ -39,6 +39,14 @@ type ScriptMeta struct {
 	Preemptible     bool              // Allow interruptible cloud placement (also accepts legacy "preemptible" key)
 }
 
+// isEmpty reports whether the [tool.weft] block carries any user intent.
+// Dependencies are intentionally excluded: they come from PEP 723's standard
+// top-level `dependencies = [...]` field, not from [tool.weft], so a script
+// that only declares standard PEP 723 deps must not look like "the user
+// configured weft." Callers that use `meta == nil` as a proxy for "no
+// [tool.weft] block" (e.g. cmd/restart.go applyScriptGPUDefaults) rely on
+// this; counting Dependencies here would cause restart to clear GPU fields
+// for any deps-only script.
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
 		m.DiskGB == 0 && m.RuntimeDiskGB == 0 &&
@@ -171,6 +179,40 @@ func ScanScriptMeta(dir, command string) (*ScriptMeta, error) {
 		return nil, nil
 	}
 	return ParseScriptMeta(content)
+}
+
+// ScanScriptDependencies returns the PEP 723 standard top-level
+// `dependencies = [...]` list from the first Python script referenced in a
+// shell command. Unlike ScanScriptMeta this does NOT short-circuit when the
+// [tool.weft] block is empty — callers (e.g. ResolveJobImageSettings)
+// specifically want the standard PEP 723 deps for CUDA-floor inference even
+// when the script declares no weft-specific settings.
+func ScanScriptDependencies(dir, command string) []string {
+	content := readFirstPythonScript(dir, command)
+	if content == "" {
+		return nil
+	}
+	block := extractPEP723Block(content)
+	if block == "" {
+		return nil
+	}
+	tree, err := toml.Load(block)
+	if err != nil {
+		return nil
+	}
+	deps, ok := tree.Get("dependencies").([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(deps))
+	for _, d := range deps {
+		if s, ok := d.(string); ok {
+			if t := strings.TrimSpace(s); t != "" {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 // readFirstPythonScript reads and returns the content of the first readable

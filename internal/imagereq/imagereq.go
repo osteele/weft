@@ -104,6 +104,63 @@ func Merge(a, b cloud.ImageRequirements) cloud.ImageRequirements {
 	return a
 }
 
+// cudaDriverFloors is the NVIDIA Linux x86_64 minimum driver version per CUDA
+// toolkit version, from the CUDA toolkit release notes. Used to derive a
+// driver floor when a CUDA floor is known but no image label supplied one.
+var cudaDriverFloors = []struct {
+	cuda   float64
+	driver int
+}{
+	{12.0, 525},
+	{12.1, 530},
+	{12.2, 535},
+	{12.3, 545},
+	{12.4, 550},
+	{12.5, 555},
+	{12.6, 560},
+	{12.8, 570},
+	{13.0, 580},
+}
+
+// MinDriverForCUDA returns the minimum NVIDIA Linux x86_64 driver version
+// required for the given CUDA toolkit version (e.g. "12.8" → 570). For values
+// between known tiers it returns the floor entry (e.g. "12.7" → 560 from the
+// 12.6 row). Returns 0 when cuda is empty, unparsable, or below the lowest
+// tabled version (12.0).
+func MinDriverForCUDA(cuda string) int {
+	cuda = strings.TrimSpace(cuda)
+	if cuda == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(cuda, 64)
+	if err != nil {
+		return 0
+	}
+	driver := 0
+	for _, row := range cudaDriverFloors {
+		if v+0.0001 < row.cuda {
+			break
+		}
+		driver = row.driver
+	}
+	return driver
+}
+
+// BackfillDriverFromCUDA returns req with MinDriverVersion populated from
+// MinCUDAVersion via [MinDriverForCUDA] when MinDriverVersion is zero. A
+// non-zero existing MinDriverVersion (from an image label, .weft.toml, PEP 723
+// `min-driver`, or CLI flag) is never overwritten. Returns req unchanged when
+// no CUDA floor is known or no driver mapping is found.
+func BackfillDriverFromCUDA(req cloud.ImageRequirements) cloud.ImageRequirements {
+	if req.MinDriverVersion > 0 || req.MinCUDAVersion == "" {
+		return req
+	}
+	if d := MinDriverForCUDA(req.MinCUDAVersion); d > 0 {
+		req.MinDriverVersion = d
+	}
+	return req
+}
+
 func Explicit(minDriver, minCUDA string) (cloud.ImageRequirements, error) {
 	var req cloud.ImageRequirements
 	minDriver = strings.TrimSpace(minDriver)

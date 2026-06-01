@@ -414,23 +414,36 @@ config {
 -- Regression: internal/vastai/client_test.go TestBuildSearchFilter_NoGPUFrac.
 
 -- CUDA / driver floors are hard compatibility requirements when a provider
--- reports enough metadata to evaluate them. Floors come from four sources,
+-- reports enough metadata to evaluate them. Floors come from five sources,
 -- merged via imagereq.Merge (max wins):
 --   1. Project [cloud] min_driver / min_cuda in .weft.toml
 --   2. PEP 723 [tool.weft] cuda-driver-min (legacy synonym: min-cuda)
 --   3. CLI --cuda-driver-min on `weft run` (stored on CLIResourceOverrides)
 --   4. Auto-derived from a project's torch pin via TorchMinCUDAVersion —
 --      reads the cuXXX wheel tag from uv.lock or [tool.uv] index URLs
+--   5. Auto-derived from inline library deps (uv run --with X and PEP 723
+--      top-level `dependencies = [...]`) when a known library version pin
+--      implies a stricter CUDA floor than the project lockfile would. Catches
+--      the case where `--with "vllm>=0.17"` resolves a fresh stack at runtime
+--      that the project's locked torch does not reflect.
 -- Image metadata (NVIDIA_REQUIRE_CUDA from the Docker image) is also merged.
+-- After all merges, the driver floor is back-filled from the CUDA floor via
+-- the NVIDIA Linux x86_64 CUDA→driver table (12.0→525, 12.4→550, 12.6→560,
+-- 12.8→570, 13.0→580) whenever the CUDA floor is set but the driver floor is
+-- zero. Required because auto-selected pytorch/* and nvidia/* base images
+-- bypass image-label fetching (shouldFetchImageRequirements skip-list); a
+-- non-zero driver floor from any other source is never overwritten.
 -- Vast.ai offers are filtered at search time with driver_version/cuda_vers
 -- predicates. Providers that do not expose driver or CUDA compatibility for
 -- search results (currently RunPod) are compatibility-unknown: they must lose
 -- to any known-compatible offer, but may still be selected if no
 -- known-compatible offer exists. This fallback is intentionally scored as
 -- very risky, not treated as proven compatibility.
--- Implementation: internal/campaign/campaign.go ResolveJobImageSettings (sources
--- 1, 2, 4) and SplitGroupsByImage (source 3); internal/campaign/offers.go
--- provider compatibility penalty.
+-- Implementation: internal/campaign/campaign.go ResolveJobImageSettings
+-- (sources 1, 2, 4, 5 + back-fill) and SplitGroupsByImage (source 3);
+-- internal/dataloc/library_cuda.go (source 5 lookup table);
+-- internal/imagereq/imagereq.go (Merge, MinDriverForCUDA, BackfillDriverFromCUDA);
+-- internal/campaign/offers.go provider compatibility penalty.
 
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil

@@ -489,6 +489,57 @@ func TestMergeCompatibleGroups_DoesNotMutateOriginal(t *testing.T) {
 	}
 }
 
+// Regression: MergeCompatibleGroups previously dropped MinCUDAVersion and
+// MinDriverVersion when constructing merged/new groups, defeating the CUDA
+// back-fill set up by SplitGroupsByImage / ResolveJobImageSettings. The merged
+// candidate would then search Vast with no driver_version predicate.
+func TestMergeCompatibleGroups_PreservesCUDADriverFloors(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 24, MinCUDAVersion: "12.4", MinDriverVersion: 550, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 24, MinCUDAVersion: "12.8", MinDriverVersion: 570, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("len(merged) = %d, want 1", len(merged))
+	}
+	if merged[0].MinCUDAVersion != "12.8" {
+		t.Errorf("MinCUDAVersion = %q, want 12.8 (max of merged groups)", merged[0].MinCUDAVersion)
+	}
+	if merged[0].MinDriverVersion != 570 {
+		t.Errorf("MinDriverVersion = %d, want 570 (max of merged groups)", merged[0].MinDriverVersion)
+	}
+}
+
+// Regression: SplitToParallel previously dropped MinCUDAVersion and
+// MinDriverVersion when expanding a multi-job group into per-job groups, so
+// the parallel candidate would search with no driver filter.
+func TestSplitToParallel_PreservesCUDADriverFloors(t *testing.T) {
+	groups := []InstanceGroup{
+		{
+			GPUClass:         "NVIDIA",
+			GPUMemGB:         24,
+			MinCUDAVersion:   "12.8",
+			MinDriverVersion: 570,
+			Jobs: []*db.Job{
+				{ID: 1},
+				{ID: 2},
+			},
+		},
+	}
+	result := SplitToParallel(groups)
+	if len(result) != 2 {
+		t.Fatalf("len(result) = %d, want 2", len(result))
+	}
+	for i, g := range result {
+		if g.MinCUDAVersion != "12.8" {
+			t.Errorf("result[%d].MinCUDAVersion = %q, want 12.8", i, g.MinCUDAVersion)
+		}
+		if g.MinDriverVersion != 570 {
+			t.Errorf("result[%d].MinDriverVersion = %d, want 570", i, g.MinDriverVersion)
+		}
+	}
+}
+
 func TestAssetOverlapBytes_IncludesDeclaredAndObservedHFAssets(t *testing.T) {
 	groups := []InstanceGroup{
 		{
@@ -1204,6 +1255,55 @@ version = "12.8.93"
 	}
 	if groups[0].MinCUDAVersion != "12.8" {
 		t.Fatalf("MinCUDAVersion = %q, want 12.8", groups[0].MinCUDAVersion)
+	}
+	// Auto-selected pytorch/* base images are skipped by image-label fetching
+	// (shouldFetchImageRequirements), so weft must back-fill the driver floor
+	// from the CUDA floor itself. Without this, Vast can return offers whose
+	// advertised cuda_max_good clears `cuda>=12.8` while driver_version is
+	// 525, and the actually-installed wheel fails at runtime with
+	// cuda_driver_too_old.
+	if groups[0].MinDriverVersion != 570 {
+		t.Fatalf("MinDriverVersion = %d, want 570 (back-filled from CUDA 12.8)", groups[0].MinDriverVersion)
+	}
+}
+
+func TestSplitGroupsByImage_InferMinCUDAFromUVRunWith(t *testing.T) {
+	// Models the wj2305-family failure: project lockfile pins torch+cu124
+	// (driver floor 550), but the submitted command uses
+	// `uv run --with "vllm>=0.17"` which resolves a fresh vLLM 0.17 at
+	// runtime on the rental. vLLM 0.17 needs CUDA 12.8 / driver 570 via its
+	// flash-attention 4 submodule. Without inline-deps inference, weft would
+	// only emit driver>=550 and Vast would return an offer that fails at
+	// runtime with cuda_driver_too_old.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.4.5.8"
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "NVIDIA",
+		Jobs: []*db.Job{{
+			ID:         2305,
+			WorkingDir: dir,
+			Command:    `uv run --with "vllm>=0.17" --with "pynvml>=12.0" python scripts/profile_inference_vllm.py`,
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].MinCUDAVersion != "12.8" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.8 (from --with vllm>=0.17)", groups[0].MinCUDAVersion)
+	}
+	if groups[0].MinDriverVersion != 570 {
+		t.Fatalf("MinDriverVersion = %d, want 570 (back-filled from CUDA 12.8)", groups[0].MinDriverVersion)
 	}
 }
 
