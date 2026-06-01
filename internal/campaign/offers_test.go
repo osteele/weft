@@ -955,6 +955,40 @@ func TestRankOffer_KnownCompatibleBeatsUnknownCompatibility(t *testing.T) {
 	}
 }
 
+func TestFilterOffersByProviderCompatibility_DropsUnknownWhenKnownExists(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "12.8"}
+	offers := []cloud.Offer{
+		{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.50},
+		{ProviderID: "va1", Provider: cloud.ProviderVastai, GPUName: "RTX A6000", CUDAVersion: 12.8, CostPerHour: 2.00},
+		{ProviderID: "rp2", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.40},
+	}
+	got, incompatible, unknown := filterOffersByProviderCompatibility(group, offers)
+	if incompatible != 0 {
+		t.Fatalf("incompatible = %d, want 0", incompatible)
+	}
+	if unknown != 2 {
+		t.Fatalf("unknown count = %d, want 2 (both RunPod offers dropped)", unknown)
+	}
+	if len(got) != 1 || got[0].ProviderID != "va1" {
+		t.Fatalf("filtered offers = %+v, want only va1", got)
+	}
+}
+
+func TestFilterOffersByProviderCompatibility_KeepsUnknownWhenNoKnown(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "12.8"}
+	offers := []cloud.Offer{
+		{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.50},
+		{ProviderID: "rp2", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.40},
+	}
+	got, _, unknown := filterOffersByProviderCompatibility(group, offers)
+	if unknown != 2 {
+		t.Fatalf("unknown = %d, want 2", unknown)
+	}
+	if len(got) != 2 {
+		t.Fatalf("filtered offers = %d, want 2 (fallback when no known-compatible alternative)", len(got))
+	}
+}
+
 func TestRankOffer_AllowsUnknownCompatibilityFallback(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{

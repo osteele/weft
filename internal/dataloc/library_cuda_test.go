@@ -108,11 +108,22 @@ func TestSpecAdmitsMinVersion(t *testing.T) {
 		{"==0.16.0", "0.17.0", false},
 		{"==0.17", "0.17.0", true}, // 0.17 ≡ 0.17.0 for our purposes
 		{"!=0.17", "0.17.0", true}, // != excludes one version; others still admit
-		{"~=0.17", "0.17.0", true}, // compatible release matches 0.17.x
-		{"~=0.16", "0.17.0", true}, // ~= admitted unconditionally; over-applies rather than under-applies
-		{"", "0.17.0", true},       // unpinned → assume could resolve to latest
+		// PEP 440 compatible-release `~=` upper bound:
+		//   ~=X.Y    → [X.Y, (X+1).0)
+		//   ~=X.Y.Z  → [X.Y.Z, X.(Y+1).0)
+		{"~=0.17", "0.17.0", true},    // ~=0.17 → [0.17, 1.0) admits 0.17
+		{"~=0.16", "0.17.0", true},    // ~=0.16 → [0.16, 1.0) admits 0.17
+		{"~=0.17.0", "0.17.0", true},  // ~=0.17.0 → [0.17.0, 0.18) admits 0.17.0
+		{"~=0.17.0", "0.18.0", false}, // ~=0.17.0 → [0.17.0, 0.18) excludes 0.18
+		{"~=0.17.0", "0.20.0", false}, // regression: was unconditionally true
+		{"", "0.17.0", true},          // unpinned → assume could resolve to latest
 		{">=0.16,<0.18", "0.17.0", true},
 		{">=0.16,<0.17", "0.17.0", false},
+		// Bare version (no operator) — matches the `==` branch: admits any
+		// version ≥ minVersion (regression for cmp == 0 → cmp >= 0 fix).
+		{"0.17", "0.17.0", true},  // bare 0.17 == 0.17.0 → admits
+		{"0.18", "0.17.0", true},  // bare 0.18 ≥ 0.17.0 → admits (was incorrectly false)
+		{"0.16", "0.17.0", false}, // bare 0.16 < 0.17.0 → excludes
 	}
 	for _, tc := range cases {
 		got := specAdmitsMinVersion(tc.spec, tc.minVersion)
@@ -129,9 +140,24 @@ func TestLibraryMinCUDAFromDeps(t *testing.T) {
 		want string
 	}{
 		{
-			name: "vllm 0.17 triggers 12.8",
-			deps: []DepSpec{{Name: "vllm", Spec: ">=0.17"}},
+			name: "vllm 0.17 exact triggers 12.8 (0.20 row excluded by spec)",
+			deps: []DepSpec{{Name: "vllm", Spec: "==0.17.0"}},
 			want: "12.8",
+		},
+		{
+			name: "vllm >=0.17 admits 0.20+, escalates to 13.0",
+			deps: []DepSpec{{Name: "vllm", Spec: ">=0.17"}},
+			want: "13.0",
+		},
+		{
+			name: "vllm pinned to 0.17.x range stays at 12.8",
+			deps: []DepSpec{{Name: "vllm", Spec: ">=0.17,<0.18"}},
+			want: "12.8",
+		},
+		{
+			name: "vllm >=0.20 triggers 13.0",
+			deps: []DepSpec{{Name: "vllm", Spec: ">=0.20"}},
+			want: "13.0",
 		},
 		{
 			name: "vllm pinned below 0.17 does not trigger",
@@ -146,7 +172,7 @@ func TestLibraryMinCUDAFromDeps(t *testing.T) {
 		{
 			name: "bare vllm name is conservatively treated as latest",
 			deps: []DepSpec{{Name: "vllm", Spec: ""}},
-			want: "12.8",
+			want: "13.0",
 		},
 		{
 			name: "unknown library returns empty",

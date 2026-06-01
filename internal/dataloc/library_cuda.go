@@ -28,12 +28,22 @@ type LibraryFloor struct {
 
 // libraryCudaFloors lists libraries with CUDA requirements that go beyond what
 // their torch dependency would imply. Keep small and well-cited.
+//
+// LibraryMinCUDAFromDeps applies the highest CUDA across all entries that the
+// dep spec admits, so multiple entries per library form a stepped floor as
+// versions bump their CUDA requirement.
 var libraryCudaFloors = []LibraryFloor{
 	{
 		Name:        "vllm",
 		MinVersion:  "0.17.0",
 		CudaVersion: "12.8",
 		Reason:      "vLLM 0.17 integrates flash-attention 4 which requires CUDA 12.8 / driver 570",
+	},
+	{
+		Name:        "vllm",
+		MinVersion:  "0.20.0",
+		CudaVersion: "13.0",
+		Reason:      "vLLM 0.20 switched default to CUDA 13.0 (PyTorch 2.11 upgrade, manylinux_2_28); needs driver 580+",
 	},
 }
 
@@ -94,8 +104,10 @@ func partAdmitsMinVersion(part, minVersion string) bool {
 	}
 	m := specOpRe.FindStringSubmatch(part)
 	if m == nil {
-		// Bare version like "0.17" — treat as ==.
-		return cmpPEP440(stripLocal(part), minVersion) == 0
+		// Bare version like "0.17" — treat as ==. Matches the `==` branch
+		// below: admits any version ≥ minVersion (e.g. bare "0.18" admits
+		// minVersion "0.17.0" because 0.18 ≥ 0.17.0).
+		return cmpPEP440(stripLocal(part), minVersion) >= 0
 	}
 	op, ver := m[1], stripLocal(m[2])
 	cmp := cmpPEP440(ver, minVersion)
@@ -118,13 +130,37 @@ func partAdmitsMinVersion(part, minVersion string) bool {
 		return cmp >= 0
 	case "~=":
 		// PEP 440 compatible-release: `~=X.Y` is `[X.Y, (X+1).0)`, and
-		// `~=X.Y.Z` is `[X.Y.Z, X.(Y+1).0)`. A precise implementation would
-		// compute that upper bound; for the library-floor use case we just
-		// admit unconditionally, which over-applies the floor in rare edge
-		// cases but never under-applies it.
-		return true
+		// `~=X.Y.Z` is `[X.Y.Z, X.(Y+1).0)`. The admitted set intersects
+		// [minVersion, ∞) iff the upper exclusive bound is > minVersion.
+		upper := compatibleReleaseUpperBound(ver)
+		if upper == "" {
+			// Malformed (single-component version like ~=1) — over-apply
+			// rather than under-apply.
+			return true
+		}
+		return cmpPEP440(upper, minVersion) > 0
 	}
 	return true
+}
+
+// compatibleReleaseUpperBound computes the upper exclusive bound for a PEP 440
+// compatible-release spec (`~=ver`). For `~=X.Y`, returns `(X+1)`. For
+// `~=X.Y.Z` (and longer), returns `X.(Y+1)`. Returns "" when ver has fewer
+// than two components or the bump component is non-numeric.
+func compatibleReleaseUpperBound(ver string) string {
+	parts := strings.Split(ver, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	bumpIdx := len(parts) - 2
+	bumpVal, err := strconv.Atoi(parts[bumpIdx])
+	if err != nil {
+		return ""
+	}
+	upper := make([]string, bumpIdx+1)
+	copy(upper, parts[:bumpIdx])
+	upper[bumpIdx] = strconv.Itoa(bumpVal + 1)
+	return strings.Join(upper, ".")
 }
 
 // stripLocal removes a PEP 440 local version segment ("+cu128") and any
@@ -185,19 +221,11 @@ func cmpPEP440(a, b string) int {
 	return 0
 }
 
+// cmpCUDAVersion compares two CUDA toolkit version strings like "12.8", "13.0".
+// Component-wise integer comparison so "12.10" correctly sorts after "12.8"
+// (float parsing would treat "12.10" as 12.1).
 func cmpCUDAVersion(a, b string) int {
-	af, aerr := strconv.ParseFloat(a, 64)
-	bf, berr := strconv.ParseFloat(b, 64)
-	if aerr != nil || berr != nil {
-		return strings.Compare(a, b)
-	}
-	if af < bf {
-		return -1
-	}
-	if af > bf {
-		return 1
-	}
-	return 0
+	return cmpPEP440(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // ScanUVRunWith extracts inline dependencies from `--with`/`--with=...`

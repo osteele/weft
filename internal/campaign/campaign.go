@@ -971,18 +971,64 @@ func maxCUDAVersionString(a, b string) string {
 	if b == "" {
 		return a
 	}
-	af, aerr := strconv.ParseFloat(a, 64)
-	bf, berr := strconv.ParseFloat(b, 64)
-	if aerr != nil || berr != nil {
-		if b > a {
+	// Component-wise integer compare so "12.10" > "12.8" (float parsing would
+	// treat "12.10" as 12.1, silently mis-ordering future CUDA versions).
+	ac := cudaVersionComponents(a)
+	bc := cudaVersionComponents(b)
+	if ac != nil && bc != nil {
+		if cmpVersionComponents(bc, ac) > 0 {
 			return b
 		}
 		return a
 	}
-	if bf > af {
+	// Fallback to string compare for malformed input.
+	if b > a {
 		return b
 	}
 	return a
+}
+
+// cudaVersionComponents splits a CUDA-style "major.minor[.patch]" string into
+// integer components. Returns nil when any component is empty or non-numeric.
+func cudaVersionComponents(s string) []int {
+	parts := strings.Split(s, ".")
+	out := make([]int, len(parts))
+	for i, p := range parts {
+		if p == "" {
+			return nil
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil
+		}
+		out[i] = n
+	}
+	return out
+}
+
+// cmpVersionComponents returns -1/0/+1 comparing two component slices.
+// Missing trailing components compare as 0.
+func cmpVersionComponents(a, b []int) int {
+	n := len(a)
+	if len(b) > n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		ai, bi := 0, 0
+		if i < len(a) {
+			ai = a[i]
+		}
+		if i < len(b) {
+			bi = b[i]
+		}
+		if ai != bi {
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // groupMaxComputeCap reduces per-job arch caps into the most restrictive

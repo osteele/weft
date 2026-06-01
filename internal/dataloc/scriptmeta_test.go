@@ -689,6 +689,32 @@ func TestParseScriptMeta_Isolated(t *testing.T) {
 	}
 }
 
+// Regression: ScanScriptDependencies must merge PEP 723 deps across EVERY
+// script in a composite command, not just the first one. The wj2305 failure
+// mode reappears whenever only a later script declares the deps that imply
+// the CUDA floor (e.g. `python preprocess.py && python serve.py` where only
+// serve.py imports vllm).
+func TestScanScriptDependencies_MergesAcrossMultipleScripts(t *testing.T) {
+	dir := t.TempDir()
+	// First script has no PEP 723 block.
+	if err := os.WriteFile(filepath.Join(dir, "preprocess.py"), []byte("import json\n"), 0o644); err != nil {
+		t.Fatalf("write preprocess.py: %v", err)
+	}
+	// Second script declares the vllm dep that drives the CUDA floor.
+	serveScript := `# /// script
+# requires-python = ">=3.10"
+# dependencies = ["vllm>=0.17", "pynvml>=12.0"]
+# ///
+import vllm
+`
+	if err := os.WriteFile(filepath.Join(dir, "serve.py"), []byte(serveScript), 0o644); err != nil {
+		t.Fatalf("write serve.py: %v", err)
+	}
+	got := ScanScriptDependencies(dir, "python preprocess.py && python serve.py")
+	want := []string{"vllm>=0.17", "pynvml>=12.0"}
+	assertStringSlice(t, "deps", got, want)
+}
+
 func assertStringSlice(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

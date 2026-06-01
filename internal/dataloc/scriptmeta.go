@@ -182,33 +182,42 @@ func ScanScriptMeta(dir, command string) (*ScriptMeta, error) {
 }
 
 // ScanScriptDependencies returns the PEP 723 standard top-level
-// `dependencies = [...]` list from the first Python script referenced in a
-// shell command. Unlike ScanScriptMeta this does NOT short-circuit when the
-// [tool.weft] block is empty — callers (e.g. ResolveJobImageSettings)
-// specifically want the standard PEP 723 deps for CUDA-floor inference even
-// when the script declares no weft-specific settings.
+// `dependencies = [...]` list, merged across EVERY Python script referenced
+// in the shell command. Reading every script (not just the first) catches
+// composite commands like `python preprocess.py && python serve.py` where
+// only a later script declares the deps that determine the CUDA floor.
+// Unlike ScanScriptMeta this does NOT short-circuit when the [tool.weft]
+// block is empty — callers (e.g. ResolveJobImageSettings) specifically want
+// the standard PEP 723 deps for CUDA-floor inference even when the script
+// declares no weft-specific settings.
 func ScanScriptDependencies(dir, command string) []string {
-	content := readFirstPythonScript(dir, command)
-	if content == "" {
-		return nil
-	}
-	block := extractPEP723Block(content)
-	if block == "" {
-		return nil
-	}
-	tree, err := toml.Load(block)
-	if err != nil {
-		return nil
-	}
-	deps, ok := tree.Get("dependencies").([]interface{})
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(deps))
-	for _, d := range deps {
-		if s, ok := d.(string); ok {
-			if t := strings.TrimSpace(s); t != "" {
-				out = append(out, t)
+	var out []string
+	for _, script := range ExtractPythonScripts(command) {
+		abs := script
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(dir, abs)
+		}
+		content, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		block := extractPEP723Block(string(content))
+		if block == "" {
+			continue
+		}
+		tree, err := toml.Load(block)
+		if err != nil {
+			continue
+		}
+		deps, ok := tree.Get("dependencies").([]interface{})
+		if !ok {
+			continue
+		}
+		for _, d := range deps {
+			if s, ok := d.(string); ok {
+				if t := strings.TrimSpace(s); t != "" {
+					out = append(out, t)
+				}
 			}
 		}
 	}

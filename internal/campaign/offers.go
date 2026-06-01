@@ -312,21 +312,30 @@ func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Off
 	if !groupRequiresProviderCompatibility(group) {
 		return offers, 0, 0
 	}
-	filtered := make([]cloud.Offer, 0, len(offers))
+	known := make([]cloud.Offer, 0, len(offers))
+	unknown := make([]cloud.Offer, 0)
 	incompatible := 0
-	unknown := 0
 	for _, offer := range offers {
 		switch offerCompatibilityStatus(group, offer) {
 		case "incompatible":
 			incompatible++
 		case "unknown":
-			unknown++
-			filtered = append(filtered, offer)
+			unknown = append(unknown, offer)
 		default:
-			filtered = append(filtered, offer)
+			known = append(known, offer)
 		}
 	}
-	return filtered, incompatible, unknown
+	// Hard-exclude unknown-compatibility offers (currently: RunPod, which
+	// doesn't expose driver_version / cuda_max_good at offer search) whenever
+	// at least one known-compatible offer survives. Falling back to
+	// unknown-compat was costing us runtime cuda_driver_too_old failures on
+	// hosts that score well on price/runtime but happen to have an old driver.
+	// The unknown-compat penalty in compatibilityScorePenalty remains as a
+	// last-resort tiebreaker when ONLY unknowns are available.
+	if len(known) > 0 {
+		return known, incompatible, len(unknown)
+	}
+	return append(known, unknown...), incompatible, len(unknown)
 }
 
 func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {

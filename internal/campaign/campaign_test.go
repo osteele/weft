@@ -1268,13 +1268,13 @@ version = "12.8.93"
 }
 
 func TestSplitGroupsByImage_InferMinCUDAFromUVRunWith(t *testing.T) {
-	// Models the wj2305-family failure: project lockfile pins torch+cu124
+	// Models the wj2305/wj2349 failure: project lockfile pins torch+cu124
 	// (driver floor 550), but the submitted command uses
-	// `uv run --with "vllm>=0.17"` which resolves a fresh vLLM 0.17 at
-	// runtime on the rental. vLLM 0.17 needs CUDA 12.8 / driver 570 via its
-	// flash-attention 4 submodule. Without inline-deps inference, weft would
-	// only emit driver>=550 and Vast would return an offer that fails at
-	// runtime with cuda_driver_too_old.
+	// `uv run --with "vllm>=0.17"` which resolves a fresh vLLM at runtime.
+	// The library-floor table escalates `vllm>=0.17` to the highest matching
+	// row (vllm 0.20+ → CUDA 13.0), because the spec admits 0.20+; the
+	// back-fill then sets driver to 580. A spec like `==0.17.0` would stay
+	// at 12.8 / driver 570.
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
 [[package]]
@@ -1299,11 +1299,11 @@ version = "12.4.5.8"
 	if len(groups) != 1 {
 		t.Fatalf("len(groups) = %d, want 1", len(groups))
 	}
-	if groups[0].MinCUDAVersion != "12.8" {
-		t.Fatalf("MinCUDAVersion = %q, want 12.8 (from --with vllm>=0.17)", groups[0].MinCUDAVersion)
+	if groups[0].MinCUDAVersion != "13.0" {
+		t.Fatalf("MinCUDAVersion = %q, want 13.0 (vllm>=0.17 admits 0.20+, which needs CUDA 13)", groups[0].MinCUDAVersion)
 	}
-	if groups[0].MinDriverVersion != 570 {
-		t.Fatalf("MinDriverVersion = %d, want 570 (back-filled from CUDA 12.8)", groups[0].MinDriverVersion)
+	if groups[0].MinDriverVersion != 580 {
+		t.Fatalf("MinDriverVersion = %d, want 580 (back-filled from CUDA 13.0)", groups[0].MinDriverVersion)
 	}
 }
 
@@ -1492,5 +1492,20 @@ version = "12.4.5.8"
 	got := groupMaxComputeCap(nil, jobs)
 	if got != "9.0" {
 		t.Errorf("groupMaxComputeCap = %q, want refreshed cap 9.0", got)
+	}
+}
+
+// Regression: maxCUDAVersionString must compare components as integers, not
+// floats — float parsing treats "12.10" as 12.1, which would silently mis-
+// order future CUDA minor versions ≥ 10 below 12.8.
+func TestMaxCUDAVersionString_TwoDigitMinor(t *testing.T) {
+	if got := maxCUDAVersionString("12.8", "12.10"); got != "12.10" {
+		t.Errorf("max(12.8, 12.10) = %q, want 12.10", got)
+	}
+	if got := maxCUDAVersionString("12.10", "12.8"); got != "12.10" {
+		t.Errorf("max(12.10, 12.8) = %q, want 12.10", got)
+	}
+	if got := maxCUDAVersionString("12.10", "13.0"); got != "13.0" {
+		t.Errorf("max(12.10, 13.0) = %q, want 13.0", got)
 	}
 }

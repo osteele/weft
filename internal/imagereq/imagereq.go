@@ -107,38 +107,47 @@ func Merge(a, b cloud.ImageRequirements) cloud.ImageRequirements {
 // cudaDriverFloors is the NVIDIA Linux x86_64 minimum driver version per CUDA
 // toolkit version, from the CUDA toolkit release notes. Used to derive a
 // driver floor when a CUDA floor is known but no image label supplied one.
+// CUDA values are strings so component-wise compare orders future versions
+// like "12.10" correctly (float parsing would treat "12.10" as 12.1).
 var cudaDriverFloors = []struct {
-	cuda   float64
+	cuda   string
 	driver int
 }{
-	{12.0, 525},
-	{12.1, 530},
-	{12.2, 535},
-	{12.3, 545},
-	{12.4, 550},
-	{12.5, 555},
-	{12.6, 560},
-	{12.8, 570},
-	{13.0, 580},
+	{"12.0", 525},
+	{"12.1", 530},
+	{"12.2", 535},
+	{"12.3", 545},
+	{"12.4", 550},
+	{"12.5", 555},
+	{"12.6", 560},
+	{"12.8", 570},
+	{"13.0", 580},
 }
 
 // MinDriverForCUDA returns the minimum NVIDIA Linux x86_64 driver version
 // required for the given CUDA toolkit version (e.g. "12.8" → 570). For values
 // between known tiers it returns the floor entry (e.g. "12.7" → 560 from the
-// 12.6 row). Returns 0 when cuda is empty, unparsable, or below the lowest
-// tabled version (12.0).
+// 12.6 row). Returns 0 when cuda is empty, unparsable, below the lowest
+// tabled version (12.0), or STRICTLY ABOVE the highest tabled version (so a
+// future CUDA toolkit doesn't silently get the highest-known driver, which
+// would under-constrain placement).
 func MinDriverForCUDA(cuda string) int {
 	cuda = strings.TrimSpace(cuda)
 	if cuda == "" {
 		return 0
 	}
-	v, err := strconv.ParseFloat(cuda, 64)
-	if err != nil {
+	if !isCUDAVersion(cuda) {
+		return 0
+	}
+	highest := cudaDriverFloors[len(cudaDriverFloors)-1].cuda
+	if cmpCUDAVersion(cuda, highest) > 0 {
+		// Above the highest tabled CUDA — refuse to guess. Caller (back-fill)
+		// will leave MinDriverVersion at 0 and surface the unknown.
 		return 0
 	}
 	driver := 0
 	for _, row := range cudaDriverFloors {
-		if v+0.0001 < row.cuda {
+		if cmpCUDAVersion(cuda, row.cuda) < 0 {
 			break
 		}
 		driver = row.driver
@@ -146,19 +155,73 @@ func MinDriverForCUDA(cuda string) int {
 	return driver
 }
 
-// BackfillDriverFromCUDA returns req with MinDriverVersion populated from
-// MinCUDAVersion via [MinDriverForCUDA] when MinDriverVersion is zero. A
-// non-zero existing MinDriverVersion (from an image label, .weft.toml, PEP 723
-// `min-driver`, or CLI flag) is never overwritten. Returns req unchanged when
-// no CUDA floor is known or no driver mapping is found.
+// BackfillDriverFromCUDA returns req with MinDriverVersion raised to at least
+// the value implied by MinCUDAVersion via [MinDriverForCUDA]. Takes the max
+// of any existing MinDriverVersion and the CUDA-implied floor, so:
+//   - An empty MinDriverVersion is populated (the original "back-fill" sense).
+//   - A previously back-filled driver gets raised when MinCUDAVersion goes up
+//     later in the pipeline (e.g. via an image-label merge in
+//     ApplyImageMetadataRequirements).
+//   - An explicit pin that already satisfies the CUDA floor is preserved.
+//
+// An explicit pin that does NOT satisfy the CUDA floor is raised. That's
+// intentional: an under-constrained driver against a known CUDA floor would
+// pick offers the job cannot actually run on. Returns req unchanged when no
+// CUDA floor is set or no driver mapping is known.
 func BackfillDriverFromCUDA(req cloud.ImageRequirements) cloud.ImageRequirements {
-	if req.MinDriverVersion > 0 || req.MinCUDAVersion == "" {
+	if req.MinCUDAVersion == "" {
 		return req
 	}
-	if d := MinDriverForCUDA(req.MinCUDAVersion); d > 0 {
+	d := MinDriverForCUDA(req.MinCUDAVersion)
+	if d > req.MinDriverVersion {
 		req.MinDriverVersion = d
 	}
 	return req
+}
+
+// cmpCUDAVersion compares two CUDA-style version strings ("12.8", "13.0",
+// "12.10") component-wise as integers. Avoids the float-parse pitfall where
+// "12.10" parses to 12.1.
+func cmpCUDAVersion(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		ai, bi := 0, 0
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// isCUDAVersion reports whether s parses as a CUDA-style "major.minor[.patch]"
+// version (all components numeric).
+func isCUDAVersion(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, part := range strings.Split(s, ".") {
+		if part == "" {
+			return false
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func Explicit(minDriver, minCUDA string) (cloud.ImageRequirements, error) {
@@ -182,21 +245,23 @@ func Explicit(minDriver, minCUDA string) (cloud.ImageRequirements, error) {
 }
 
 func maxCUDAVersion(a, b string) string {
-	if strings.TrimSpace(a) == "" {
-		return strings.TrimSpace(b)
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" {
+		return b
 	}
-	if strings.TrimSpace(b) == "" {
-		return strings.TrimSpace(a)
+	if b == "" {
+		return a
 	}
-	af, aerr := strconv.ParseFloat(a, 64)
-	bf, berr := strconv.ParseFloat(b, 64)
-	if aerr != nil || berr != nil {
-		if b > a {
+	// Component-wise integer compare so "12.10" > "12.8".
+	if isCUDAVersion(a) && isCUDAVersion(b) {
+		if cmpCUDAVersion(b, a) > 0 {
 			return b
 		}
 		return a
 	}
-	if bf > af {
+	// Fallback to string compare for malformed input.
+	if b > a {
 		return b
 	}
 	return a

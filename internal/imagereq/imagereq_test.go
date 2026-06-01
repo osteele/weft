@@ -69,10 +69,21 @@ func TestBackfillDriverFromCUDA(t *testing.T) {
 			t.Fatalf("got %+v, want driver 570 cuda 12.8", out)
 		}
 	})
-	t.Run("does not clobber existing driver", func(t *testing.T) {
-		out := BackfillDriverFromCUDA(cloud.ImageRequirements{MinCUDAVersion: "12.8", MinDriverVersion: 565})
-		if out.MinDriverVersion != 565 {
-			t.Fatalf("MinDriverVersion = %d, want 565 (unchanged)", out.MinDriverVersion)
+	t.Run("preserves driver that already satisfies CUDA floor", func(t *testing.T) {
+		out := BackfillDriverFromCUDA(cloud.ImageRequirements{MinCUDAVersion: "12.8", MinDriverVersion: 580})
+		if out.MinDriverVersion != 580 {
+			t.Fatalf("MinDriverVersion = %d, want 580 (preserved, ≥ CUDA-implied 570)", out.MinDriverVersion)
+		}
+	})
+	t.Run("raises driver that does not satisfy CUDA floor", func(t *testing.T) {
+		// Regression: a previously back-filled or stale driver below the
+		// current CUDA floor must be raised, otherwise an image-label
+		// merge that bumps MinCUDAVersion leaves the driver stuck at the
+		// old value and Vast returns offers that fail at runtime with
+		// cuda_driver_too_old.
+		out := BackfillDriverFromCUDA(cloud.ImageRequirements{MinCUDAVersion: "12.8", MinDriverVersion: 550})
+		if out.MinDriverVersion != 570 {
+			t.Fatalf("MinDriverVersion = %d, want 570 (raised from stale 550 to satisfy CUDA 12.8)", out.MinDriverVersion)
 		}
 	})
 	t.Run("no cuda floor leaves req unchanged", func(t *testing.T) {
@@ -81,10 +92,29 @@ func TestBackfillDriverFromCUDA(t *testing.T) {
 			t.Fatalf("got %+v, want zero value", out)
 		}
 	})
-	t.Run("unknown cuda value leaves driver zero", func(t *testing.T) {
+	t.Run("cuda below lowest tabled leaves driver zero", func(t *testing.T) {
 		out := BackfillDriverFromCUDA(cloud.ImageRequirements{MinCUDAVersion: "11.8"})
 		if out.MinDriverVersion != 0 {
 			t.Fatalf("MinDriverVersion = %d, want 0", out.MinDriverVersion)
 		}
 	})
+	t.Run("cuda above highest tabled refuses to guess driver", func(t *testing.T) {
+		// Future CUDA toolkits must not silently get the highest-known
+		// driver — that would under-constrain placement. Caller should
+		// see 0 and surface the unknown.
+		out := BackfillDriverFromCUDA(cloud.ImageRequirements{MinCUDAVersion: "14.0"})
+		if out.MinDriverVersion != 0 {
+			t.Fatalf("MinDriverVersion = %d, want 0 (refuse to guess for future CUDA 14.0)", out.MinDriverVersion)
+		}
+	})
+}
+
+func TestMinDriverForCUDA_TwoDigitMinor(t *testing.T) {
+	// Component-wise compare: a hypothetical CUDA 12.10 must sort AFTER
+	// 12.8, not before (the old float-parse path treated "12.10" as 12.1).
+	// We don't have a 12.10 row yet, so the function returns the next-lower
+	// (12.8 row = 570), NOT the 12.1 row = 530.
+	if got := MinDriverForCUDA("12.10"); got != 570 {
+		t.Errorf("MinDriverForCUDA(\"12.10\") = %d, want 570 (between 12.8 and 13.0, takes 12.8 floor)", got)
+	}
 }
