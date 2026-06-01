@@ -224,9 +224,12 @@ func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) 
 	uvSystemPythonPath = pythonPath
 	t.Cleanup(func() { uvSystemPythonPath = prev })
 
-	gotCmd, gotEnv, err := prepareUVSyncEnvironment(dir, "uv sync", []string{"A=1"})
+	gotCmd, gotEnv, gotReason, err := prepareUVSyncEnvironment(dir, "uv sync", []string{"A=1"}, "")
 	if err != nil {
 		t.Fatalf("prepareUVSyncEnvironment() error = %v", err)
+	}
+	if gotReason != "" {
+		t.Fatalf("expected empty fallback reason, got: %q", gotReason)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".venv")); err != nil {
 		t.Fatalf("expected .venv to be created: %v", err)
@@ -264,7 +267,7 @@ version = "12.3.1.170"
 	uvSystemPythonPath = pythonPath
 	t.Cleanup(func() { uvSystemPythonPath = prev })
 
-	gotCmd, _, err := prepareUVSyncEnvironment(dir, "uv sync", nil)
+	gotCmd, _, _, err := prepareUVSyncEnvironment(dir, "uv sync", nil, "")
 	if err != nil {
 		t.Fatalf("prepareUVSyncEnvironment() error = %v", err)
 	}
@@ -335,4 +338,248 @@ func TestUVRunEnvAdditions_EmptyWhenSetupNotUVSync(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("got %v, want empty", got)
 	}
+}
+
+// writeTorchPyproject writes a minimal torch-using pyproject.toml.
+func writeTorchPyproject(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+}
+
+// setSystemPython points uvSystemPythonPath at the given interpreter for
+// the duration of the test. Returns the resolved interpreter path.
+func setSystemPython(t *testing.T) string {
+	t.Helper()
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	prev := uvSystemPythonPath
+	uvSystemPythonPath = pythonPath
+	t.Cleanup(func() { uvSystemPythonPath = prev })
+	return pythonPath
+}
+
+func TestEnsureSystemSitePackagesVenv_RebuildsWhenSystemSitePackagesFalse(t *testing.T) {
+	pythonPath := setSystemPython(t)
+	dir := t.TempDir()
+	venvDir := filepath.Join(dir, ".venv")
+	if err := os.MkdirAll(venvDir, 0o755); err != nil {
+		t.Fatalf("mkdir .venv: %v", err)
+	}
+	// Pre-existing venv with the wrong flag — simulates the broken state
+	// the user's `uv sync` leaves behind on a .python-version mismatch.
+	cfg := "home = " + filepath.Dir(pythonPath) + "\ninclude-system-site-packages = false\nversion = 3.11.12\n"
+	if err := os.WriteFile(filepath.Join(venvDir, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write pyvenv.cfg: %v", err)
+	}
+	// Sentinel file inside the venv: should be gone after rebuild.
+	sentinel := filepath.Join(venvDir, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	if err := ensureSystemSitePackagesVenv(dir, ""); err != nil {
+		t.Fatalf("ensureSystemSitePackagesVenv: %v", err)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("expected sentinel to be removed during rebuild, got err=%v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(venvDir, "pyvenv.cfg"))
+	if err != nil {
+		t.Fatalf("read rebuilt pyvenv.cfg: %v", err)
+	}
+	if !strings.Contains(string(got), "include-system-site-packages = true") {
+		t.Fatalf("rebuilt venv missing include-system-site-packages=true, got:\n%s", got)
+	}
+}
+
+func TestEnsureSystemSitePackagesVenv_RebuildsWhenHomeMismatches(t *testing.T) {
+	pythonPath := setSystemPython(t)
+	dir := t.TempDir()
+	venvDir := filepath.Join(dir, ".venv")
+	if err := os.MkdirAll(venvDir, 0o755); err != nil {
+		t.Fatalf("mkdir .venv: %v", err)
+	}
+	// system-site-packages is true, but home points elsewhere (simulates
+	// uv recreating the venv on a different Python interpreter).
+	cfg := "home = /some/other/python/bin\ninclude-system-site-packages = true\nversion = 3.13.13\n"
+	if err := os.WriteFile(filepath.Join(venvDir, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write pyvenv.cfg: %v", err)
+	}
+
+	if err := ensureSystemSitePackagesVenv(dir, ""); err != nil {
+		t.Fatalf("ensureSystemSitePackagesVenv: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(venvDir, "pyvenv.cfg"))
+	if err != nil {
+		t.Fatalf("read rebuilt pyvenv.cfg: %v", err)
+	}
+	expectedHome := "home = " + filepath.Dir(pythonPath)
+	if !strings.Contains(string(got), expectedHome) {
+		t.Fatalf("rebuilt venv home does not match %q, got:\n%s", expectedHome, got)
+	}
+}
+
+func TestVenvMatchesSystemContract_AcceptsAdditionalAcceptedHome(t *testing.T) {
+	// Regression: when uvSystemPythonPath is a symlink, `python -m venv`
+	// writes the resolved interpreter directory into pyvenv.cfg `home`,
+	// which need not equal filepath.Dir(uvSystemPythonPath). The contract
+	// check must accept the probed canonical home as an additional match.
+	dir := t.TempDir()
+	venvDir := filepath.Join(dir, ".venv")
+	if err := os.MkdirAll(venvDir, 0o755); err != nil {
+		t.Fatalf("mkdir .venv: %v", err)
+	}
+	cfg := "home = /opt/conda/envs/base/bin\ninclude-system-site-packages = true\nversion = 3.11.12\n"
+	if err := os.WriteFile(filepath.Join(venvDir, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write pyvenv.cfg: %v", err)
+	}
+	// Lexical home /opt/conda/bin would NOT match; the probed home
+	// /opt/conda/envs/base/bin must rescue the comparison.
+	if !venvMatchesSystemContract(venvDir, "/opt/conda/bin/python", "/opt/conda/envs/base/bin") {
+		t.Fatal("expected probed home to satisfy the contract")
+	}
+	if venvMatchesSystemContract(venvDir, "/opt/conda/bin/python") {
+		t.Fatal("expected lexical-only check to fail without probed home")
+	}
+}
+
+func TestEnsureSystemSitePackagesVenv_KeepsValidVenv(t *testing.T) {
+	pythonPath := setSystemPython(t)
+	dir := t.TempDir()
+	venvDir := filepath.Join(dir, ".venv")
+	if err := os.MkdirAll(venvDir, 0o755); err != nil {
+		t.Fatalf("mkdir .venv: %v", err)
+	}
+	cfg := "home = " + filepath.Dir(pythonPath) + "\ninclude-system-site-packages = true\nversion = 3.11.12\n"
+	if err := os.WriteFile(filepath.Join(venvDir, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write pyvenv.cfg: %v", err)
+	}
+	// Sentinel file inside the venv: should survive an unchanged call.
+	sentinel := filepath.Join(venvDir, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	if err := ensureSystemSitePackagesVenv(dir, ""); err != nil {
+		t.Fatalf("ensureSystemSitePackagesVenv: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("expected sentinel to survive (contract was honored), got err=%v", err)
+	}
+}
+
+func TestShouldUseSystemTorchPackages_DeclinesOnPythonVersionMismatch(t *testing.T) {
+	setSystemPython(t)
+	dir := t.TempDir()
+	writeTorchPyproject(t, dir)
+	// 99.99 will never match any real Python install.
+	if err := os.WriteFile(filepath.Join(dir, ".python-version"), []byte("99.99\n"), 0o644); err != nil {
+		t.Fatalf("write .python-version: %v", err)
+	}
+
+	use, reason, err := shouldUseSystemTorchPackages(dir)
+	if err != nil {
+		t.Fatalf("shouldUseSystemTorchPackages: %v", err)
+	}
+	if use {
+		t.Fatalf("expected shortcut to be declined, got use=true")
+	}
+	if !strings.Contains(reason, "99.99") {
+		t.Fatalf("expected reason to cite mismatched version, got: %q", reason)
+	}
+
+	// Verify prepareUVSyncEnvironment surfaces the reason and returns a
+	// bare `uv sync` with no UV_PYTHON override.
+	cmd, env, gotReason, err := prepareUVSyncEnvironment(dir, "uv sync", []string{"A=1"}, "")
+	if err != nil {
+		t.Fatalf("prepareUVSyncEnvironment: %v", err)
+	}
+	if cmd != "uv sync" {
+		t.Fatalf("expected bare 'uv sync', got: %q", cmd)
+	}
+	for _, v := range env {
+		if strings.HasPrefix(v, "UV_PYTHON=") {
+			t.Fatalf("expected no UV_PYTHON override on fallback, got: %v", env)
+		}
+	}
+	if gotReason != reason {
+		t.Fatalf("reason mismatch: prepare returned %q, predicate returned %q", gotReason, reason)
+	}
+}
+
+func TestShouldUseSystemTorchPackages_AcceptsMatchingPythonVersion(t *testing.T) {
+	setSystemPython(t)
+	sys, err := systemPythonMajorMinor()
+	if err != nil {
+		t.Skipf("cannot probe system python: %v", err)
+	}
+	dir := t.TempDir()
+	writeTorchPyproject(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, ".python-version"), []byte(sys+"\n"), 0o644); err != nil {
+		t.Fatalf("write .python-version: %v", err)
+	}
+
+	use, reason, err := shouldUseSystemTorchPackages(dir)
+	if err != nil {
+		t.Fatalf("shouldUseSystemTorchPackages: %v", err)
+	}
+	if !use {
+		t.Fatalf("expected shortcut to be used, got use=false (reason=%q)", reason)
+	}
+	if reason != "" {
+		t.Fatalf("expected empty reason on match, got: %q", reason)
+	}
+}
+
+func TestPythonVersionRequest_HandlesVariousFormats(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"bare major.minor", "3.13\n", "3.13"},
+		{"bare major.minor.patch", "3.13.1\n", "3.13"},
+		{"cpython implementation", "cpython@3.13\n", "3.13"},
+		{"cpython dash form", "cpython-3.13\n", "3.13"},
+		{"pypy implementation preserved", "pypy@3.10\n", "pypy:3.10"},
+		{"pypy dash form preserved", "pypy-3.10\n", "pypy:3.10"},
+		// Regression: dotted prefixes are versions, not implementations.
+		// Earlier code used strconv.Atoi to decide impl-vs-version and
+		// misread "3.13" as an impl name, suppressing the version match.
+		{"version dash suffix accepted", "3.13-rc1\n", "3.13"},
+		{"version dash patch suffix accepted", "3.13.5-foo\n", "3.13"},
+		{"prerelease rc accepted", "3.13rc1\n", "3.13"},
+		{"prerelease alpha accepted", "3.13.0a3\n", "3.13"},
+		{"dev suffix accepted", "3.13.dev0\n", "3.13"},
+		{"leading blank lines", "\n\n3.12\n", "3.12"},
+		{"comment lines skipped", "# pin\n3.11\n", "3.11"},
+		{"junk first line skipped", "latest\n3.13\n", "3.13"},
+		{"junk only file", "latest\nbroken\n", ""},
+		{"only one component", "3\n", ""},
+		{"empty file", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.content != "" || tt.name == "empty file" {
+				if err := os.WriteFile(filepath.Join(dir, ".python-version"), []byte(tt.content), 0o644); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+			if got := pythonVersionRequest(dir); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// Missing file → "" (no error).
+	t.Run("missing file", func(t *testing.T) {
+		if got := pythonVersionRequest(t.TempDir()); got != "" {
+			t.Fatalf("expected empty for missing file, got %q", got)
+		}
+	})
 }

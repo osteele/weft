@@ -952,6 +952,48 @@ rule DetectFailureReason {
 -- producing exit-127 storms across wj2221-wj2232 + follow-on attempts on
 -- 2026-05-28.
 
+-- On cloud pytorch images, weft takes a "system-torch shortcut" to avoid
+-- a ~870 MiB torch download per job: bootstrap creates .venv with
+-- `python -m venv --system-site-packages` against /opt/conda/bin/python,
+-- and each job's setup runs `uv sync --no-install-package torch …` with
+-- UV_PYTHON pinned to that interpreter, so torch is read from the image's
+-- system site-packages instead of re-installed. The shortcut has two
+-- structural invariants the runner must enforce on every setup phase:
+--
+--   (a) The .venv must be on uvSystemPythonPath. Specifically,
+--       .venv/pyvenv.cfg must contain `include-system-site-packages =
+--       true` AND `home = filepath.Dir(uvSystemPythonPath)`. Probing only
+--       `dirExists(.venv)` is insufficient: a previous job's user command
+--       (`uv sync && uv run …`) runs without UV_PYTHON in its env, so any
+--       project pin (`.python-version`, `requires-python`) can cause uv
+--       to remove the venv and rebuild it on a different Python without
+--       --system-site-packages. The next setup must detect that broken
+--       state structurally and rebuild the venv before `uv sync` runs.
+--
+--   (b) The shortcut must be declined when the project's `.python-version`
+--       requests a major.minor different from the runtime version of
+--       uvSystemPythonPath. With UV_PYTHON=3.11 against a .venv that
+--       .python-version forces to 3.13, uv tears down and recreates the
+--       venv on every cycle (project sync ↔ weft sync), and the torch
+--       preflight fails inside the resulting torch-less, non-system-site-
+--       packages venv. In that case weft must fall back to a plain `uv
+--       sync` (no --no-install-package torch, no UV_PYTHON override, no
+--       UV_NO_SYNC) and log the reason to the job log so the user sees
+--       why a full sync ran. Torch is then resolved by the project's
+--       normal dependency resolution.
+--
+-- Implementation: internal/runner/envsetup.go —
+--   * venvMatchesSystemContract enforces (a).
+--   * ensureSystemSitePackagesVenv calls it; on mismatch it os.RemoveAll
+--     the venv and recreates with --system-site-packages before sync.
+--   * shouldUseSystemTorchPackages enforces (b) via pythonVersionRequest
+--     (reads .python-version, accepts `3.13`, `3.13.1`, `cpython@3.13`,
+--     `pypy@3.10`) and systemPythonMajorMinor (execs the interpreter for
+--     `sys.version_info`). When declined, the function returns a non-empty
+--     fallback reason and the runner appends it to the setup log.
+--   * prepareUVSyncEnvironment returns the fallback reason as a 4th value
+--     so the caller can surface it (the predicate alone is invisible).
+
 -- failure_reason is a single-line classification, never a multi-line
 -- diagnostic dump. Writers must keep it to one line of free-form text
 -- (typically a FailureReason enum value or short headline). The prewarm

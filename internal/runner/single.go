@@ -213,7 +213,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			slog.Info("skipping setup command: setup already prewarmed",
 				"component", "runner", "job_id", cfg.JobID, "cmd", setupCmd)
 		} else {
-			ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths, cfg.SetupTimeout)
+			ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, expandedDir, envVars, paths, cfg.SetupTimeout)
 			if setupErr != nil {
 				now := time.Now().Unix()
 				phases.SetupEnd = now

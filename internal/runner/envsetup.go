@@ -2,11 +2,13 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -127,13 +129,17 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 	preparedCmd := setupCmd
 	if setupCmd == "uv sync" {
 		var prepErr error
-		preparedCmd, preparedEnv, prepErr = prepareUVSyncEnvironment(workingDir, setupCmd, envVars)
+		var fallbackReason string
+		preparedCmd, preparedEnv, fallbackReason, prepErr = prepareUVSyncEnvironment(workingDir, setupCmd, envVars, paths.Log)
 		if prepErr != nil {
 			slog.Warn("uv sync preflight failed; continuing with normal uv sync",
 				"component", "runner", "job_id", jobID, "error", prepErr)
 			appendSetupLog(paths.Log, []byte("weft: uv sync preflight failed; continuing with normal uv sync: "+prepErr.Error()+"\n"))
 			preparedCmd = setupCmd
 			preparedEnv = envVars
+		}
+		if fallbackReason != "" {
+			appendSetupLog(paths.Log, []byte("weft: "+fallbackReason+"\n"))
 		}
 	}
 	appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: setup command: %s\n", preparedCmd)))
@@ -175,19 +181,27 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 	return ExitInfo{}, nil
 }
 
-func prepareUVSyncEnvironment(workingDir, setupCmd string, envVars []string) (string, []string, error) {
-	useSystem, err := shouldUseSystemTorchPackages(workingDir)
+// prepareUVSyncEnvironment returns the prepared setup command, env
+// additions, and an optional fallback reason that the caller should
+// append to the job log to explain why the system-torch shortcut was
+// declined. logPath is also used internally to log shortcut-applied and
+// venv-rebuild markers.
+func prepareUVSyncEnvironment(workingDir, setupCmd string, envVars []string, logPath string) (string, []string, string, error) {
+	useSystem, fallbackReason, err := shouldUseSystemTorchPackages(workingDir)
 	if err != nil {
-		return setupCmd, envVars, err
+		return setupCmd, envVars, "", err
 	}
 	if !useSystem {
-		return setupCmd, envVars, nil
+		return setupCmd, envVars, fallbackReason, nil
 	}
-	if err := ensureSystemSitePackagesVenv(workingDir); err != nil {
-		return setupCmd, envVars, err
+	if err := ensureSystemSitePackagesVenv(workingDir, logPath); err != nil {
+		return setupCmd, envVars, "", err
 	}
 	skip := dataloc.ImageProvidedTorchPackages(filepath.Join(workingDir, "uv.lock"))
-	return setupCmd + dataloc.UVNoInstallPackageFlags(skip), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), nil
+	if logPath != "" {
+		appendSetupLog(logPath, []byte("weft: system-torch shortcut: UV_PYTHON="+uvSystemPythonPath+", skipping image-provided torch packages\n"))
+	}
+	return setupCmd + dataloc.UVNoInstallPackageFlags(skip), mergeEnvVars(envVars, []string{"UV_PYTHON=" + uvSystemPythonPath}), "", nil
 }
 
 // uvRunEnvAdditions returns env vars that suppress uv's implicit sync on every
@@ -205,7 +219,7 @@ func uvRunEnvAdditions(workingDir, setupCmd string) ([]string, error) {
 	if setupCmd != "uv sync" {
 		return nil, nil
 	}
-	useSystem, err := shouldUseSystemTorchPackages(workingDir)
+	useSystem, _, err := shouldUseSystemTorchPackages(workingDir)
 	if err != nil {
 		return nil, err
 	}
@@ -233,21 +247,45 @@ func applyUVRunEnvAdditions(workingDir, setupCmd string, envVars []string, jobID
 	return mergeEnvVars(envVars, uvEnv)
 }
 
-func shouldUseSystemTorchPackages(workingDir string) (bool, error) {
+// shouldUseSystemTorchPackages reports whether the cloud-image
+// system-torch shortcut applies. A non-empty second return is a fallback
+// reason the caller should surface — set when the shortcut was a
+// candidate but declined (currently: .python-version pins a major.minor
+// the system Python can't satisfy).
+func shouldUseSystemTorchPackages(workingDir string) (bool, string, error) {
 	if setupPythonPath := strings.TrimSpace(uvSystemPythonPath); setupPythonPath == "" {
-		return false, nil
+		return false, "", nil
 	}
 	if _, err := os.Stat(uvSystemPythonPath); err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, "", nil
 		}
-		return false, fmt.Errorf("stat %s: %w", uvSystemPythonPath, err)
+		return false, "", fmt.Errorf("stat %s: %w", uvSystemPythonPath, err)
 	}
 	torchProject, err := pyprojectDependsOnTorch(filepath.Join(workingDir, "pyproject.toml"))
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return torchProject, nil
+	if !torchProject {
+		return false, "", nil
+	}
+	// A project .python-version that doesn't match the system Python
+	// breaks the contract on every cycle. Decline so a normal `uv sync`
+	// runs.
+	req := pythonVersionRequest(workingDir)
+	if req == "" {
+		return true, "", nil
+	}
+	sys, sysErr := systemPythonMajorMinor()
+	if sysErr != nil {
+		slog.Warn("system python version probe failed; assuming compatible with .python-version",
+			"component", "runner", "python", uvSystemPythonPath, "error", sysErr)
+		return true, "", nil
+	}
+	if req != sys {
+		return false, fmt.Sprintf("system-torch shortcut declined: .python-version=%s does not match %s (%s); running full uv sync", req, sys, uvSystemPythonPath), nil
+	}
+	return true, "", nil
 }
 
 func pyprojectDependsOnTorch(path string) (bool, error) {
@@ -262,10 +300,174 @@ func pyprojectDependsOnTorch(path string) (bool, error) {
 	return strings.Contains(lower, "\"torch") || strings.Contains(lower, "'torch"), nil
 }
 
-func ensureSystemSitePackagesVenv(workingDir string) error {
+// pyVersionLineRE matches leading "major.minor" digits, ignoring PEP 440
+// suffixes like "rc1" / "0a3" / "dev".
+var pyVersionLineRE = regexp.MustCompile(`^(\d+)\.(\d+)`)
+
+func isAlphaUnderscore(s string) bool {
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// pythonVersionRequest reads .python-version and returns the requested
+// major.minor, or "" if the file is absent or contains no parseable line.
+//
+// Non-CPython implementations are returned with their prefix preserved
+// (e.g. "pypy:3.10") so the system-torch shortcut — which is always
+// CPython from the cloud image — declines via string inequality with
+// systemPythonMajorMinor's output.
+func pythonVersionRequest(workingDir string) string {
+	data, err := os.ReadFile(filepath.Join(workingDir, ".python-version"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		impl := ""
+		if idx := strings.Index(line, "@"); idx >= 0 {
+			impl = strings.ToLower(line[:idx])
+			line = line[idx+1:]
+		} else if i := strings.Index(line, "-"); i > 0 {
+			// "cpython-3.13" / "pypy-3.10" form: prefix before the first
+			// dash is the implementation only when it's a pure
+			// letters/underscore identifier. Otherwise dotted version
+			// forms like "3.13-rc1" or "3.13.5-foo" would be misread as
+			// impl="3.13", suppressing the decline-on-mismatch path.
+			prefix := line[:i]
+			if prefix != "" && isAlphaUnderscore(prefix) {
+				impl = strings.ToLower(prefix)
+				line = line[i+1:]
+			}
+		}
+		m := pyVersionLineRE.FindStringSubmatch(line)
+		if m == nil {
+			continue // junk line; try the next
+		}
+		ver := m[1] + "." + m[2]
+		if impl != "" && impl != "cpython" {
+			return impl + ":" + ver
+		}
+		return ver
+	}
+	return ""
+}
+
+// The probe runs before RunSetupCommand's setup_timeout watchdog arms,
+// so it needs its own deadline to keep a hung interpreter from wedging
+// setup.
+const systemPythonProbeTimeout = 10 * time.Second
+
+// -I runs Python in isolated mode (suppresses PYTHONSTARTUP, sitecustomize,
+// and usercustomize) so the two output lines aren't preceded by banners.
+const systemPythonProbeScript = `import sys, os
+print('%d.%d' % (sys.version_info[0], sys.version_info[1]))
+print(os.path.dirname(getattr(sys, '_base_executable', sys.executable)))`
+
+// systemPythonProbe returns the interpreter's runtime major.minor and the
+// directory `python -m venv` would record as `home` in pyvenv.cfg. The
+// home value follows symlinks the way Python's venv module does, so
+// callers can compare it against an existing pyvenv.cfg's home without a
+// separate filepath.EvalSymlinks dance.
+func systemPythonProbe() (version, venvHome string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), systemPythonProbeTimeout)
+	defer cancel()
+	out, runErr := exec.CommandContext(ctx, uvSystemPythonPath, "-I", "-c", systemPythonProbeScript).Output()
+	if runErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", "", fmt.Errorf("probe %s: timed out after %s", uvSystemPythonPath, systemPythonProbeTimeout)
+		}
+		return "", "", fmt.Errorf("probe %s: %w", uvSystemPythonPath, runErr)
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) < 2 {
+		return "", "", fmt.Errorf("probe %s: expected 2 lines, got %q", uvSystemPythonPath, string(out))
+	}
+	// Take the last two lines in case anything leaked past -I.
+	version = strings.TrimSpace(lines[len(lines)-2])
+	venvHome = strings.TrimSpace(lines[len(lines)-1])
+	return version, venvHome, nil
+}
+
+func systemPythonMajorMinor() (string, error) {
+	ver, _, err := systemPythonProbe()
+	return ver, err
+}
+
+// venvMatchesSystemContract reports whether the venv at venvDir was built
+// with --system-site-packages against expectedPython.
+//
+// `home` in pyvenv.cfg is accepted as either filepath.Dir(expectedPython)
+// or any value in additionalAcceptedHomes — pass the value returned by
+// systemPythonProbe to accept symlink-resolved paths the way Python's
+// venv module writes them.
+func venvMatchesSystemContract(venvDir, expectedPython string, additionalAcceptedHomes ...string) bool {
+	cfg, err := os.ReadFile(filepath.Join(venvDir, "pyvenv.cfg"))
+	if err != nil {
+		return false
+	}
+	acceptableHomes := append([]string{filepath.Dir(expectedPython)}, additionalAcceptedHomes...)
+	hasSystemSitePackages := false
+	homeMatches := false
+	for _, line := range strings.Split(string(cfg), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "include-system-site-packages":
+			if strings.EqualFold(strings.TrimSpace(value), "true") {
+				hasSystemSitePackages = true
+			}
+		case "home":
+			got := strings.TrimSpace(value)
+			for _, accepted := range acceptableHomes {
+				if got == accepted {
+					homeMatches = true
+					break
+				}
+			}
+		}
+	}
+	return hasSystemSitePackages && homeMatches
+}
+
+// ensureSystemSitePackagesVenv brings .venv into compliance with the
+// system-torch contract. Wipes and rebuilds when the existing venv
+// doesn't match. When logPath is non-empty, the rebuild is announced
+// there so users grepping the job log can see why .venv contents were
+// discarded.
+func ensureSystemSitePackagesVenv(workingDir, logPath string) error {
 	venvDir := filepath.Join(workingDir, ".venv")
-	if dirExists(venvDir) {
+	// Probe failure is non-fatal: fall back to the lexical check.
+	var probedHomes []string
+	if _, h, probeErr := systemPythonProbe(); probeErr == nil && h != "" {
+		probedHomes = []string{h}
+	}
+	if venvMatchesSystemContract(venvDir, uvSystemPythonPath, probedHomes...) {
 		return nil
+	}
+	venvExists := false
+	if info, statErr := os.Lstat(venvDir); statErr == nil {
+		venvExists = true
+		if logPath != "" {
+			kind := "directory"
+			if !info.IsDir() {
+				kind = "non-directory"
+			}
+			appendSetupLog(logPath, []byte(fmt.Sprintf("weft: rebuilding .venv: existing %s does not match the system-torch contract (system-site-packages + home=%s)\n", kind, filepath.Dir(uvSystemPythonPath))))
+		}
+	}
+	if venvExists {
+		if err := os.RemoveAll(venvDir); err != nil {
+			return fmt.Errorf("remove stale .venv: %w", err)
+		}
 	}
 	cmd := exec.Command(uvSystemPythonPath, "-m", "venv", "--system-site-packages", ".venv")
 	cmd.Dir = workingDir
