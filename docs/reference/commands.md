@@ -1112,6 +1112,70 @@ Cordoning lets the current job finish without the autopilot routing new
 work to the instance — useful when an instance has a stale agent or you
 want to drain just one instance without pausing the autopilot globally.
 
+### weft instance mark-credit-exhausted
+
+Reclassify already-terminated cloud instances to record that they failed
+because the provider account ran out of credit. The reclassified rows are
+excluded from the bidding survival model so credit-exhaustion failures
+don't poison machine/SKU/region priors.
+
+Use this after an incident where the provider destroyed running
+instances for non-payment. Weft has no programmatic signal that
+distinguishes those from generic provider failures at the moment of
+destruction, so the operator labels them retroactively.
+
+```bash
+# Auto-detect the most recent incident on any provider.
+weft instance mark-credit-exhausted --auto --dry-run
+weft instance mark-credit-exhausted --auto
+
+# Reclassify all credit-signature failures in a time window.
+weft instance mark-credit-exhausted --since 24h --dry-run
+weft instance mark-credit-exhausted --since 24h
+
+# Reclassify rows in the window even when the detail string has no
+# credit signature (use when you know every failure in the window was
+# credit-related).
+weft instance mark-credit-exhausted --since 6h --include-generic
+
+# Reclassify by ID.
+weft instance mark-credit-exhausted wi1 wi2 wi3
+```
+
+**Selection modes** (mutually exclusive):
+
+- **Positional IDs**: always reclassified if eligible — the operator has
+  named them explicitly.
+- **`--since DURATION`**: failed/canceled launches in the window. By
+  default only rows whose `termination_detail` matches a
+  credit-exhaustion signature are included (explicit credit-out phrases
+  from the provider, plus generic "provider dead" rows that cluster in
+  time with the explicit signals, ~15 min before / ~5 min after). Pass
+  `--include-generic` to reclassify all generic-reason rows in the window.
+- **`--auto`**: auto-detect the most recent credit-exhaustion incident
+  on any provider by finding a mass-destroy burst followed by a silent
+  gap until a same-provider recovery launch came up. Provider-scoped:
+  silence and recovery on one provider can never satisfy a burst on
+  another. Tunables:
+
+  - `--auto-lookback DURATION` (default `168h`) — how far back to search.
+  - `--auto-burst-window DURATION` (default `8m`) — max time span for a
+    cluster of failures to count as simultaneous.
+  - `--auto-min-silence DURATION` (default `90s`) — minimum quiet period
+    after the burst before declaring credit exhaustion. Rejects bursts
+    followed by a quick recovery, which usually indicates a regional
+    outage on the provider rather than a wallet event.
+
+**Eligibility**: status must be `failed` or `canceled`, and the current
+`termination_reason` must be generic (`provider_failure`,
+`infra_failure`, `unknown`, or empty). Specific reasons such as
+`disk_full`, `job_failure`, or `weft_bug` are never overwritten. The
+prior `termination_detail` is preserved with a timestamped
+"reclassified" prefix.
+
+See [Cloud Instance Debugging](../guides/cloud-instance-debugging.md)
+for the recommended incident-response walkthrough.
+
 ### weft campaign launch / watch / list / show / terminate
 
 Batch-level commands. `weft campaign launch` is a deprecated alias for

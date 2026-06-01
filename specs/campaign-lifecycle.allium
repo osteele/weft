@@ -68,6 +68,16 @@ value TerminationReason = completed | provider_failure | job_failure
 --                   CreateInstance-time case still records provider_failure
 --                   + detail until the call-site survey in
 --                   docs/planning/ROADMAP.md is done.
+--                   The `--auto` mode of mark-credit-exhausted heuristically
+--                   identifies the incident window on a single provider by
+--                   finding a mass-destroy burst followed by a silent gap
+--                   (no same-provider instance reached running) until a
+--                   recovery launch came up. Provider-scoped by construction:
+--                   silence and recovery on one provider can never satisfy a
+--                   burst on another. Bursts followed by quick recovery
+--                   (regional outage) or by <90s of silence (transient
+--                   cluster) are rejected and surfaced to the operator
+--                   rather than reclassified. See internal/credit/incident.go.
 
 -- AttemptOutcome classifies how a single Job attempt on a Launch ended.
 -- "preempted" specifically indicates the attempt was running on an

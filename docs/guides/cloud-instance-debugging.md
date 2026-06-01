@@ -432,6 +432,64 @@ queued for retry. If setup stalls recur for a specific project,
 investigate the setup command (e.g., network issues during package
 installation, pip/uv resolution hangs).
 
+## When the wallet ran out
+
+Vast.ai destroys running rentals and starts rejecting new launches with
+"insufficient credit" once the account balance hits zero. Weft cannot
+distinguish runtime credit-destroys from generic provider failures at
+the moment they happen, so the affected launches land with
+`termination_reason = provider_failure` or `infra_failure` — the same
+labels used for genuine machine flakes. Leaving them mislabeled poisons
+the bidding survival model with phantom "machine X is unreliable"
+signals.
+
+After topping up, reclassify the affected launches:
+
+```bash
+# 1. See what the auto-detector would label, without writing anything.
+weft instance mark-credit-exhausted --auto --dry-run
+
+# 2. If the proposed window and members look right, apply it.
+weft instance mark-credit-exhausted --auto
+```
+
+The auto-detector finds the most recent **provider-scoped** burst of
+failures followed by a silent gap (no same-provider instance reached
+running) and a recovery launch. It will:
+
+- **Refuse** to declare an incident if a same-provider instance reached
+  running within the candidate silence window — that pattern is a
+  regional outage, not a wallet event, and reclassifying would
+  mislabel real machine failures.
+- **Refuse** if the gap to the next same-provider recovery was shorter
+  than `--auto-min-silence` (default 90s) — that's typically a
+  transient cluster.
+- **Wait** if the burst is still in progress (silence shorter than the
+  floor with no recovery yet). Re-run after another minute.
+
+A clean detection looks like:
+
+```
+Detected credit-exhaustion incident on vastai:
+  Burst:    6 instances destroyed within 6m53s, peak 2026-06-01 08:24:04 CST
+  Silence:  5m1s (no vastai instance reached running)
+  Recovery: 2026-06-01 08:29:05 CST  (wi3419)
+  Window:   2026-06-01 08:02:11 CST → 2026-06-01 08:29:05 CST
+  ...
+```
+
+The detector intentionally includes failures whose detail strings have
+no credit signature (e.g. `agent heartbeat stale`) when they fall
+inside the burst window — those are typically running rentals Vast
+killed at the moment the wallet hit zero, before the agent could
+report the cause.
+
+If the auto-detector misses an older incident (it only returns the
+most recent qualifying burst), fall back to `--since DURATION` with
+signature filtering, or name affected IDs explicitly. See
+[`weft instance mark-credit-exhausted`](../reference/commands.md#weft-instance-mark-credit-exhausted)
+for full flag reference.
+
 ## Debugging with preserved working directories
 
 By default, the agent deletes completed jobs' working directories in the

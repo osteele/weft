@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/credit"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/spf13/cobra"
@@ -21,6 +22,10 @@ var (
 	instanceMarkCreditExhaustedDryRun         bool
 	instanceMarkCreditExhaustedYes            bool
 	instanceMarkCreditExhaustedIncludeGeneric bool
+	instanceMarkCreditExhaustedAuto           bool
+	instanceMarkCreditExhaustedAutoLookback   time.Duration
+	instanceMarkCreditExhaustedAutoBurstWin   time.Duration
+	instanceMarkCreditExhaustedAutoMinSilence time.Duration
 )
 
 // creditClusterBeforeWindow / creditClusterAfterWindow define how far
@@ -61,6 +66,14 @@ Selection:
     signature but have a generic termination_reason. Use when you know
     every eligible row in the window was credit-related and the detail
     strings are sparse.
+  - --auto: auto-detect the most recent credit-exhaustion incident on any
+    provider by finding a mass-destroy burst followed by a silent gap (no
+    same-provider instance reached running) until a recovery launch came
+    up. Provider-specific: a burst on one provider is matched against
+    silence and recovery on that same provider only — cross-provider
+    matches are never proposed. Rejects bursts followed by a quick
+    recovery (regional outage) or by < 90s of silence (transient).
+    Mutually exclusive with --since and positional IDs.
 
 Eligibility:
   - Status must be 'failed' or 'canceled'.
@@ -72,6 +85,8 @@ The previous termination_detail is preserved (prefixed with a timestamped
 note recording the manual reclassification).
 
 Examples:
+  weft instance mark-credit-exhausted --auto --dry-run
+  weft instance mark-credit-exhausted --auto
   weft instance mark-credit-exhausted --since 24h --dry-run
   weft instance mark-credit-exhausted --since 24h
   weft instance mark-credit-exhausted wi1 wi2 wi3
@@ -89,11 +104,23 @@ func init() {
 		"Skip interactive confirmation when reclassifying multiple rows")
 	instanceMarkCreditExhaustedCmd.Flags().BoolVar(&instanceMarkCreditExhaustedIncludeGeneric, "include-generic", false,
 		"With --since, also reclassify rows whose detail does not match a credit signature")
+	instanceMarkCreditExhaustedCmd.Flags().BoolVar(&instanceMarkCreditExhaustedAuto, "auto", false,
+		"Auto-detect the most recent credit-exhaustion incident (mutually exclusive with --since and positional IDs)")
+	instanceMarkCreditExhaustedCmd.Flags().DurationVar(&instanceMarkCreditExhaustedAutoLookback, "auto-lookback", credit.DefaultLookback,
+		"With --auto, how far back to search for incidents")
+	instanceMarkCreditExhaustedCmd.Flags().DurationVar(&instanceMarkCreditExhaustedAutoBurstWin, "auto-burst-window", credit.DefaultBurstWindow,
+		"With --auto, max time span for a burst of failures to count as simultaneous")
+	instanceMarkCreditExhaustedCmd.Flags().DurationVar(&instanceMarkCreditExhaustedAutoMinSilence, "auto-min-silence", credit.DefaultMinSilence,
+		"With --auto, minimum silence after a burst before declaring credit exhaustion (rejects regional-outage bursts)")
 }
 
 func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 && instanceMarkCreditExhaustedSince <= 0 {
-		return usageErrorf("specify at least one instance ID or --since DURATION")
+	if instanceMarkCreditExhaustedAuto {
+		if len(args) > 0 || instanceMarkCreditExhaustedSince > 0 || instanceMarkCreditExhaustedIncludeGeneric {
+			return usageErrorf("--auto is mutually exclusive with --since, --include-generic, and positional IDs")
+		}
+	} else if len(args) == 0 && instanceMarkCreditExhaustedSince <= 0 {
+		return usageErrorf("specify at least one instance ID, --since DURATION, or --auto")
 	}
 
 	database, err := db.Open()
@@ -102,15 +129,29 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	plan, err := collectMarkCreditExhaustedTargets(database, args,
-		instanceMarkCreditExhaustedSince, instanceMarkCreditExhaustedIncludeGeneric)
-	if err != nil {
-		return err
-	}
 	out := cmd.OutOrStdout()
-	if len(plan.targets) == 0 && len(plan.rejected) == 0 {
-		fmt.Fprintln(out, "No eligible instances found.")
-		return nil
+	var plan *markCreditExhaustedPlan
+	if instanceMarkCreditExhaustedAuto {
+		plan, err = collectAutoDetectedTargets(database, out)
+		if err != nil {
+			return err
+		}
+		// --auto's own "no incident detected" message has already been
+		// printed; avoid the generic "No eligible instances found." that
+		// would otherwise contradict it.
+		if plan == nil || len(plan.targets) == 0 {
+			return nil
+		}
+	} else {
+		plan, err = collectMarkCreditExhaustedTargets(database, args,
+			instanceMarkCreditExhaustedSince, instanceMarkCreditExhaustedIncludeGeneric)
+		if err != nil {
+			return err
+		}
+		if plan == nil || (len(plan.targets) == 0 && len(plan.rejected) == 0) {
+			fmt.Fprintln(out, "No eligible instances found.")
+			return nil
+		}
 	}
 
 	if len(plan.targets) > 0 {
@@ -134,12 +175,15 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Prompt when the operator did not name every row explicitly: --since
-	// can match a single unrelated row, and silently mutating it has no
-	// undo. Skip the prompt only when the operator named all IDs by hand
-	// (no --since) and a single target was found, or when --yes was given.
+	// Prompt when the operator did not name every row explicitly. --since
+	// and --auto are both heuristic selectors, so even a single matched
+	// row deserves confirmation; only when the operator named every ID
+	// explicitly AND there is just one target do we skip the prompt.
+	// --yes always skips.
 	needsPrompt := !instanceMarkCreditExhaustedYes &&
-		(instanceMarkCreditExhaustedSince > 0 || len(plan.targets) > 1)
+		(instanceMarkCreditExhaustedAuto ||
+			instanceMarkCreditExhaustedSince > 0 ||
+			len(plan.targets) > 1)
 	if needsPrompt {
 		if !confirmMarkCreditExhausted(cmd.InOrStdin(), out, len(plan.targets)) {
 			fmt.Fprintln(out, "Aborted.")
@@ -181,6 +225,86 @@ func runInstanceMarkCreditExhausted(cmd *cobra.Command, args []string) error {
 type markCreditExhaustedPlan struct {
 	targets  []*db.Launch         // rows that will be reclassified
 	rejected []rejectedReclassify // rows excluded by signature filter (--since only)
+}
+
+// collectAutoDetectedTargets runs the credit incident detector and turns the
+// resulting Incident.Members into a reclassify plan. It also prints the
+// incident banner and any rejection diagnostics so the operator can see why
+// neighboring candidate bursts were skipped.
+func collectAutoDetectedTargets(database *sql.DB, out io.Writer) (*markCreditExhaustedPlan, error) {
+	cfg := credit.Config{
+		Lookback:    instanceMarkCreditExhaustedAutoLookback,
+		BurstWindow: instanceMarkCreditExhaustedAutoBurstWin,
+		MinSilence:  instanceMarkCreditExhaustedAutoMinSilence,
+	}
+	res, err := credit.DetectFromDB(database, cfg, time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("detect credit-exhaustion incident: %w", err)
+	}
+	if res.Incident == nil {
+		fmt.Fprintf(out, "No credit-exhaustion incident detected in the last %s.\n",
+			durationOrDefault(instanceMarkCreditExhaustedAutoLookback, credit.DefaultLookback))
+		if len(res.Rejections) > 0 {
+			fmt.Fprintln(out, "\nRejected candidate bursts:")
+			printIncidentRejections(out, res.Rejections)
+		}
+		return &markCreditExhaustedPlan{}, nil
+	}
+	printIncidentBanner(out, res.Incident)
+	if len(res.Rejections) > 0 {
+		fmt.Fprintf(out, "\nAlso rejected %d earlier candidate(s):\n", len(res.Rejections))
+		printIncidentRejections(out, res.Rejections)
+		fmt.Fprintln(out)
+	}
+	return &markCreditExhaustedPlan{targets: res.Incident.Members}, nil
+}
+
+func printIncidentBanner(w io.Writer, inc *credit.Incident) {
+	fmt.Fprintf(w, "Detected credit-exhaustion incident on %s:\n", inc.Provider)
+	burstSpan := inc.BurstEnd.Sub(inc.BurstStart).Truncate(time.Second)
+	fmt.Fprintf(w, "  Burst:    %d instances destroyed within %s, peak %s\n",
+		inc.BurstCount, burstSpan, inc.BurstEnd.Local().Format("2006-01-02 15:04:05 MST"))
+	if inc.Ongoing {
+		fmt.Fprintf(w, "  Silence:  %s and counting (no %s instance has reached running)\n",
+			inc.Silence.Truncate(time.Second), inc.Provider)
+		fmt.Fprintf(w, "  Recovery: not yet — rerun later if more failures arrive\n")
+	} else {
+		fmt.Fprintf(w, "  Silence:  %s (no %s instance reached running)\n",
+			inc.Silence.Truncate(time.Second), inc.Provider)
+		if inc.RecoveryLaunch != nil {
+			fmt.Fprintf(w, "  Recovery: %s  (%s)\n",
+				inc.Recovery.Local().Format("2006-01-02 15:04:05 MST"),
+				ids.FormatInstanceID(inc.RecoveryLaunch.ID))
+		} else {
+			fmt.Fprintf(w, "  Recovery: %s\n",
+				inc.Recovery.Local().Format("2006-01-02 15:04:05 MST"))
+		}
+	}
+	fmt.Fprintf(w, "  Window:   %s → %s\n\n",
+		inc.WindowStart.Local().Format("2006-01-02 15:04:05 MST"),
+		inc.WindowEnd.Local().Format("2006-01-02 15:04:05 MST"))
+}
+
+func printIncidentRejections(w io.Writer, rejections []credit.Rejection) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "PROVIDER\tBURST PEAK\tCOUNT\tREASON\tDETAIL")
+	for _, r := range rejections {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
+			r.Provider,
+			r.BurstEnd.Local().Format("2006-01-02 15:04"),
+			r.BurstCount,
+			r.Reason,
+			r.Detail,
+		)
+	}
+	_ = tw.Flush()
+}
+
+func durationOrDefault(d, fallback time.Duration) time.Duration {
+	if d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 // rejectedReclassify carries a launch the smart filter excluded and the
