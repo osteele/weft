@@ -319,6 +319,25 @@ func (p *pattern) Match(logContent string) *ErrorDiagnosis {
 // Data patterns: missing HF models/datasets, missing files (remediable)
 var dataPatterns = []*pattern{
 	{
+		// HuggingFace gated-repo access denied. The repo exists but the
+		// HF_TOKEN doesn't have access approval for it. Distinguished from
+		// "missing model" (no cache entry) and from "timeout" (the request
+		// completed quickly with an auth response) — both of which the
+		// classifier used to mis-attribute this to before this rule existed.
+		// Lives in dataPatterns so it wins over the generic `timeout`
+		// pattern in failurePatternRules, which would otherwise match a
+		// "HTTPSConnectionPool ... read timed out" tail if HF was slow to
+		// return the 401, or a "Cannot access gated repo for url" phrase
+		// that happens to contain the substring "access ... gated".
+		re:         regexp.MustCompile(`(?is)(?:GatedRepoError|access .{0,40}?gated repo|HfHubHTTPError.*?\b401\b|\b401 Client Error.*?(?:Repository|gated|Unauthorized))`),
+		patternID:  "hf_gated_repo",
+		category:   "data",
+		message:    "HuggingFace gated repo: token lacks access approval",
+		remediable: false,
+		// extractAssets intentionally nil — the asset isn't auto-fetchable;
+		// the user has to request access on huggingface.co first.
+	},
+	{
 		re:         regexp.MustCompile(`(?i)(?:FileNotFoundError|OSError|No such file or directory).*huggingface/hub/models--([^\s/]+--[^\s/]+)`),
 		patternID:  "missing_hf_model",
 		category:   "data",

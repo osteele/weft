@@ -2,13 +2,82 @@ package remediation
 
 import "testing"
 
+// patternByID is a position-independent lookup helper for tests. Pattern
+// order in dataPatterns matters for runtime priority (first match wins),
+// so tests should refer to patterns by ID rather than index.
+func patternByID(ps []*pattern, id string) *pattern {
+	for _, p := range ps {
+		if p.patternID == id {
+			return p
+		}
+	}
+	return nil
+}
+
+func TestDataPatterns_HFGatedRepo_DiagnosesAuth(t *testing.T) {
+	// Real wj2321 failure shape: huggingface_hub raises OSError /
+	// GatedRepoError + 401 Client Error against the proxy URL. Before the
+	// hf_gated_repo pattern existed, the matcher fell through to the
+	// generic `timeout` rule (which matches loose "timed out" tokens that
+	// can appear in nested urllib3 tracebacks) — surfacing the failure as
+	// "Execution timed out" even though the job died in 3-4 minutes well
+	// inside its time budget.
+	log := `Traceback (most recent call last):
+  ...
+  File ".../huggingface_hub/utils/_errors.py", line 333, in hf_raise_for_status
+    raise GatedRepoError(message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-abc)
+
+Cannot access gated repo for url http://localhost:8080/meta-llama/Meta-Llama-3-8B/resolve/main/config.json.
+Access to model meta-llama/Meta-Llama-3-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+  File "scripts/exp_xxx.py", line 42, in <module>
+    config = AutoConfig.from_pretrained("meta-llama/Meta-Llama-3-8B")
+OSError: You are trying to access a gated repo.`
+	d := patternByID(dataPatterns, "hf_gated_repo").Match(log)
+	if d == nil {
+		t.Fatal("expected gated-repo diagnosis to match")
+	}
+	if d.Pattern != "hf_gated_repo" {
+		t.Errorf("pattern = %q, want hf_gated_repo", d.Pattern)
+	}
+	if d.Category != "data" {
+		t.Errorf("category = %q, want data", d.Category)
+	}
+	if d.Remediable {
+		t.Error("gated-repo isn't remediable by weft — user must request access on huggingface.co")
+	}
+	// And: the higher-level DiagnoseFromLog should also pick this up,
+	// not fall through to the timeout rule.
+	if got := DiagnoseFromLog(log); got == nil || got.Pattern != "hf_gated_repo" {
+		t.Fatalf("DiagnoseFromLog should classify gated-repo, got %+v", got)
+	}
+}
+
+func TestDataPatterns_HFGatedRepo_DoesNotMatchBenignTimeout(t *testing.T) {
+	// A plain timeout (no gated/401 mention) should still fall through to
+	// the `timeout` pattern in failurePatternRules, not get mis-attributed
+	// to gated-repo.
+	log := `socket.timeout: The read operation timed out
+ConnectionError: HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out.`
+	d := patternByID(dataPatterns, "hf_gated_repo").Match(log)
+	if d != nil {
+		t.Fatalf("gated-repo pattern should not match a plain timeout, got %+v", d)
+	}
+	if got := DiagnoseFromLog(log); got == nil || got.Pattern != "timeout" {
+		t.Fatalf("plain timeout should classify as `timeout`, got %+v", got)
+	}
+}
+
 func TestDataPatterns_MissingHFModel(t *testing.T) {
 	log := `Traceback (most recent call last):
   File "train.py", line 10, in <module>
     model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3-8B")
 FileNotFoundError: /home/user/.cache/huggingface/hub/models--meta-llama--Llama-3-8B/snapshots/abc123/model.safetensors`
 
-	d := dataPatterns[0].Match(log)
+	d := patternByID(dataPatterns, "missing_hf_model").Match(log)
 	if d == nil {
 		t.Fatal("expected match for missing HF model")
 	}
@@ -29,7 +98,7 @@ FileNotFoundError: /home/user/.cache/huggingface/hub/models--meta-llama--Llama-3
 func TestDataPatterns_MissingHFDataset(t *testing.T) {
 	log := `OSError: No such file or directory: /home/user/.cache/huggingface/hub/datasets--squad--squad/snapshots/abc/data.json`
 
-	d := dataPatterns[1].Match(log)
+	d := patternByID(dataPatterns, "missing_hf_dataset").Match(log)
 	if d == nil {
 		t.Fatal("expected match for missing HF dataset")
 	}
@@ -44,7 +113,7 @@ func TestDataPatterns_MissingHFDataset(t *testing.T) {
 func TestDataPatterns_MissingFile(t *testing.T) {
 	log := `FileNotFoundError: No such file or directory: '/home/user/project/data/config.yaml'`
 
-	d := dataPatterns[2].Match(log)
+	d := patternByID(dataPatterns, "missing_file").Match(log)
 	if d == nil {
 		t.Fatal("expected match for missing file")
 	}
