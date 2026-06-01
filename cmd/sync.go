@@ -374,10 +374,6 @@ func allowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, 
 	return syncorch.AllowCompletedMarkerFallback(currentStatus, launchID, needsBackfill)
 }
 
-func shouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
-	return syncorch.ShouldMarkCloudJobProcessed(currentStatus, needsBackfill, source)
-}
-
 func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, error) {
 	return syncorch.JobEligibleForStartedMarker(database, jobID)
 }

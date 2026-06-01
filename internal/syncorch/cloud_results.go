@@ -104,7 +104,7 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 				break
 			}
 			jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
-			if jobID == 0 || markers.IsProcessed(jobID) {
+			if jobID == 0 || !markers.HasUnprocessedComplete(jobID) {
 				continue
 			}
 
@@ -287,13 +287,6 @@ func completedMarkerFallbackSafe(database *sql.DB, currentStatus string, launchI
 	return !(ok && verb == campaign.PhaseRunning && phaseJobID == jobID)
 }
 
-func ShouldMarkCloudJobProcessed(currentStatus string, needsBackfill bool, source string) bool {
-	if db.IsTerminalStatus(currentStatus) && needsBackfill {
-		return false
-	}
-	return source == campaign.SourceResults
-}
-
 type completedMarkerResult struct {
 	updatedInstanceID int64
 	completed         bool
@@ -316,7 +309,12 @@ func syncOneCompletedJobMarker(
 		"SELECT status, latest_run_id, launch_id FROM job_status WHERE id = ? AND tombstoned = 0",
 		jobID,
 	).Scan(&currentStatus, &latestRunID, &launchID); err != nil {
-		_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
+		// Job is gone from the DB (tombstoned or never existed). Mark every
+		// observed .complete marker as processed at its own attempt key so
+		// the gate skips this job on future syncs.
+		for completeKey := range markers.CompletedKeysForJob(jobID) {
+			_ = r2Client.PutMarker(ctx, r2.PairedProcessedKey(completeKey))
+		}
 		return completedMarkerResult{}
 	}
 
@@ -331,7 +329,13 @@ func syncOneCompletedJobMarker(
 		if !needsBackfill {
 			slog.Debug("skipping cloud completion sync for terminal job with complete metadata",
 				"component", "sync", "job_id", jobID, "reason", "terminal_complete_skip")
-			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
+			// Mark every observed .complete marker for this job as processed
+			// at its own attempt key, so the per-attempt gate skips this job
+			// on future syncs. Using the paired key handles both per-attempt
+			// (cloud) and job-scoped (inventory) markers uniformly.
+			for completeKey := range markers.CompletedKeysForJob(jobID) {
+				_ = r2Client.PutMarker(ctx, r2.PairedProcessedKey(completeKey))
+			}
 			return completedMarkerResult{}
 		}
 		slog.Debug("attempting cloud completion backfill for terminal job",
@@ -449,9 +453,20 @@ func syncOneCompletedJobMarker(
 	if source == campaign.SourceResults {
 		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
 		_ = r2Client.DeletePrefix(ctx, resultPrefix)
-	}
-	if ShouldMarkCloudJobProcessed(currentStatus, needsBackfill, source) {
-		_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
+		// Also mark any other observed .complete markers for this job
+		// as processed. Without this, a stale .complete for an earlier
+		// run that never got its .processed (e.g. agent crash mid-sync,
+		// or cleanupStaleAttempts advanced latest_run_id past it) would
+		// keep flipping HasUnprocessedComplete to true and trigger
+		// re-processing of the already-done canonical run on every
+		// subsequent sync tick.
+		canonicalProcessed := r2keys.JobAttemptProcessed(jobID, runID)
+		for completeKey := range markers.CompletedKeysForJob(jobID) {
+			otherProcessed := r2.PairedProcessedKey(completeKey)
+			if otherProcessed != canonicalProcessed {
+				_ = r2Client.PutMarker(ctx, otherProcessed)
+			}
+		}
 	}
 	os.RemoveAll(tmpDir)
 	return result

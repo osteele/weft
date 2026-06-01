@@ -412,6 +412,34 @@ the enum drift. Consult if a similar silent-stuck-instance pattern recurs.
   with `TerminationReasonWeftBug` after N retries so the instance still
   drains and jobs are reset — the original reason gets recorded in
   `termination_detail` for postmortem.
+
+## Attempt-scoped R2 markers: full unification
+
+The cloud sync was changed to gate on per-attempt `.processed` markers (see
+`internal/syncorch/cloud_results.go` and the `HasUnprocessedComplete`,
+`CompletedKeysForJob`, `PairedProcessedKey` helpers in
+`internal/r2/client.go`). Two related cleanups were left out of that change:
+
+- **Give inventory jobs a real R2 run identifier.** Today the inventory agent
+  (`cmd/agent/inventory_r2.go`) writes `jobs/X/.started` and `jobs/X/.complete`
+  with no run ID. The key constructors collapse to job-scoped keys via the
+  `runID <= 0` fallback in `internal/controlplane/keys.go`. This works because
+  the readers go through the same fallback, but it means the inventory path is
+  the *only* writer of job-scoped marker keys — an exception in an otherwise
+  attempt-scoped control plane. Threading the `job_attempts.attempt_number`
+  (or `attempt_id`) through the inventory runner and writing
+  `jobs/X/runs/N/.complete` would remove the exception. Touchpoints: inventory
+  agent hooks (`runner.OnJobStart` / `OnJobFinish` signature), the SSH-fallback
+  reader (`internal/ops/r2_fallback.go`), and the key fallback in
+  `controlplane/keys.go` (could then be deleted).
+- **Prune legacy job-scoped `.processed` markers.** Before the attempt-scoped
+  fix landed, the cloud sync wrote `jobs/X/.processed` after processing a
+  job. Those keys are now inert (no reader consults them at the job grain),
+  but they remain in R2. A background sweep — e.g. inside the existing
+  `coordinator.vastaiSweep` or a periodic janitor — could delete
+  `jobs/X/.processed` whenever any `jobs/X/runs/*/.processed` key exists.
+  Safe to defer indefinitely; the keys are small and harmless.
+
 ## Dashboard: persistent system-state snapshots
 
 `weft dashboard`'s Pulse sparklines (queue depth, running count, $/hr,

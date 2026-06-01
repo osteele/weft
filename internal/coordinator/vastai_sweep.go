@@ -49,19 +49,25 @@ func (c *Coordinator) sweepVastaiResults() *r2.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 1. Check for completed results
-	completedJobIDs, err := r2Client.ListCompleted(ctx, "jobs/")
+	// 1. List markers, then process jobs that still have at least one
+	// .complete marker without a paired .processed marker. The per-attempt
+	// gate ensures a re-queued job whose earlier attempt was processed is
+	// still picked up when a newer attempt completes.
+	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
-		c.logger.Warn("failed to list r2 completed jobs", "error", err)
+		c.logger.Warn("failed to list r2 job markers", "error", err)
 		return r2Client
 	}
 
-	for _, jobIDStr := range completedJobIDs {
+	for _, jobIDStr := range markers.Completed {
 		jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
 		if err != nil {
 			continue
 		}
-		c.processCompletedVastaiJob(ctx, r2Client, jobID)
+		if !markers.HasUnprocessedComplete(jobID) {
+			continue
+		}
+		c.processCompletedVastaiJob(ctx, r2Client, markers, jobID)
 	}
 
 	return r2Client
@@ -69,7 +75,7 @@ func (c *Coordinator) sweepVastaiResults() *r2.Client {
 
 // processCompletedVastaiJob downloads results from R2, updates the job in the DB,
 // writes logs to the log cache, and cleans up the R2 prefix.
-func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r2.Client, jobID int64) {
+func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r2.Client, markers *r2.JobMarkers, jobID int64) {
 	var latestRunID sql.NullInt64
 	if err := c.db.QueryRow(`SELECT latest_run_id FROM job_status WHERE id = ?`, jobID).Scan(&latestRunID); err != nil && err != sql.ErrNoRows {
 		c.logger.Warn("failed to get latest_run_id", "job_id", jobID, "error", err)
@@ -183,6 +189,17 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	// Keep live-log chunks: they are the primary log source for `weft log`.
 	_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
 	_ = r2Client.DeletePrefix(ctx, resultPrefix)
+
+	// Suppress any orphan .complete markers for earlier runs of this job so
+	// they don't keep triggering HasUnprocessedComplete on subsequent sweeps.
+	// See the matching write in internal/syncorch/cloud_results.go.
+	canonicalProcessed := r2keys.JobAttemptProcessed(jobID, runID)
+	for completeKey := range markers.CompletedKeysForJob(jobID) {
+		otherProcessed := r2.PairedProcessedKey(completeKey)
+		if otherProcessed != canonicalProcessed {
+			_ = r2Client.PutMarker(ctx, otherProcessed)
+		}
+	}
 
 	c.logger.Info("processed vastai job", "job_id", jobID, "exit_code", exitCode, "status", db.StatusCompleted)
 	if exitCode == 0 {

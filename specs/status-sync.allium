@@ -620,6 +620,37 @@ rule SyncJobCompletionsFromR2 {
         -- See AllowCompletedMarkerFallback in cmd/sync.go.
 }
 
+invariant ProcessedMarkerIsPerAttempt {
+    -- The "already ingested" gate on R2 .complete markers is per-attempt,
+    -- not per-job. Each .complete marker is paired with a .processed marker
+    -- at the same prefix:
+    --   jobs/<jobID>/runs/<runID>/.complete ↔ jobs/<jobID>/runs/<runID>/.processed
+    --   jobs/<jobID>/.complete              ↔ jobs/<jobID>/.processed
+    --     (inventory form; runID=0 collapses via key constructor)
+    --
+    -- The sync loop processes a job whenever any of its observed .complete
+    -- markers lacks the matching .processed marker. A .processed marker for
+    -- one attempt must NOT suppress reconciliation of a different attempt's
+    -- .complete on the same job.
+    for job in jobs/Jobs:
+        for complete_key in R2CompletedMarkersOf(job):
+            if not R2HasMarker(PairedProcessedKey(complete_key)):
+                SyncLoopEnqueues(job)
+
+    @guidance
+        -- Implementation: HasUnprocessedComplete in internal/r2/client.go;
+        -- gated at internal/syncorch/cloud_results.go and
+        -- internal/coordinator/vastai_sweep.go. Pairing helper:
+        -- r2.PairedProcessedKey(completeKey).
+        --
+        -- Regression: TestJobMarkers_HasUnprocessedComplete_NewAttemptAfter
+        -- ProcessedOlderAttempt in internal/r2/client_test.go pins the
+        -- failure mode this invariant rules out — a legacy job-scoped
+        -- jobs/<jobID>/.processed marker (written by the pre-fix code path
+        -- for an earlier attempt) silently stranded re-queued cloud jobs
+        -- whose newer attempt had completed on a different instance.
+}
+
 -- ==========================================================================
 -- Agent-side status reporting
 -- ==========================================================================

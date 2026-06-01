@@ -229,13 +229,48 @@ func (m *JobMarkers) AnyCompletedKey(jobID int64) (string, bool) {
 	return "", false
 }
 
-// IsProcessed returns true if any .processed marker exists for the given job.
-func (m *JobMarkers) IsProcessed(jobID int64) bool {
+// HasUnprocessedComplete reports whether jobID has at least one .complete
+// marker whose paired .processed marker is absent. The pairing rule is the
+// natural one: replace the .complete suffix with .processed. This works
+// uniformly for per-attempt keys (`jobs/X/runs/N/.complete` ↔
+// `jobs/X/runs/N/.processed`) and the inventory-fallback job-scoped form
+// (`jobs/X/.complete` ↔ `jobs/X/.processed`).
+//
+// This is the per-attempt gate used by the cloud sync loop: an older attempt
+// being processed must not suppress reconciliation of a newer attempt's
+// .complete marker on the same job.
+func (m *JobMarkers) HasUnprocessedComplete(jobID int64) bool {
 	if m == nil {
 		return false
 	}
-	_, ok := m.processedKeys[jobID]
-	return ok
+	completes, ok := m.completedKeys[jobID]
+	if !ok {
+		return false
+	}
+	processed := m.processedKeys[jobID]
+	for completeKey := range completes {
+		processedKey := PairedProcessedKey(completeKey)
+		if _, done := processed[processedKey]; !done {
+			return true
+		}
+	}
+	return false
+}
+
+// CompletedKeysForJob returns the raw set of .complete-marker keys observed
+// for jobID. Returns nil when no markers exist. The map is owned by the
+// JobMarkers; callers must not mutate it.
+func (m *JobMarkers) CompletedKeysForJob(jobID int64) map[string]struct{} {
+	if m == nil {
+		return nil
+	}
+	return m.completedKeys[jobID]
+}
+
+// PairedProcessedKey derives the .processed key for a given .complete key by
+// swapping the suffix. See HasUnprocessedComplete.
+func PairedProcessedKey(completeKey string) string {
+	return strings.TrimSuffix(completeKey, "/.complete") + "/.processed"
 }
 
 func (m *JobMarkers) hasMarker(markers map[int64]map[string]struct{}, jobID int64, key string) bool {
@@ -248,27 +283,6 @@ func (m *JobMarkers) hasMarker(markers map[int64]map[string]struct{}, jobID int6
 	}
 	_, ok = keys[key]
 	return ok
-}
-
-// ListCompleted returns job IDs that have a .complete marker but no .processed
-// marker under the given prefix. Jobs that have already been processed are
-// excluded so the caller doesn't re-ingest them.
-func (c *Client) ListCompleted(ctx context.Context, prefix string) ([]string, error) {
-	markers, err := c.ListJobMarkers(ctx, prefix)
-	if err != nil {
-		return nil, err
-	}
-	var unprocessed []string
-	for _, idStr := range markers.Completed {
-		jobID, err := strconv.ParseInt(idStr, 10, 64)
-		if err != nil {
-			continue
-		}
-		if !markers.IsProcessed(jobID) {
-			unprocessed = append(unprocessed, idStr)
-		}
-	}
-	return unprocessed, nil
 }
 
 // DownloadResults downloads all files under prefix to a local directory.
