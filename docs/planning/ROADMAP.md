@@ -24,6 +24,7 @@ instead of maintaining its own provisioning infrastructure.
 | Per-instance actual cost tracking | Medium | Show real campaign spend from observed runtime, not just estimates or limits. | Cost summary with per-GPU breakdown |
 | Resume interrupted campaigns | Medium | Recover quickly after interruption by continuing from persisted state rather than restarting all work. | `--resume` flag, JSON state file |
 | Seed-first validation | Medium | Reduce blast radius by validating the setup path on one seed before provisioning full scale. | `--seed-first` flag |
+| Skip past gated benchmarks | Medium | When a benchmark-tagged job at the head of the queue is gated on host CPU/RAM thresholds (`internal/runner/benchmark.go`), the runner currently blocks the entire queue waiting for the host to go idle — which it may never do on a shared dev machine. Instead, read past the gated benchmark to the next non-benchmark job and start that, while keeping the benchmark in pending. Triggered today: wj557 sat in cool30's pending list with `benchmark.waiting cpu=16%>5%` for 30+ minutes, blocking ~28 other ready jobs. Care needed: don't promote a non-benchmark job whose start would itself push CPU above the threshold (would just defer the benchmark forever); fall back to "wait" if no eligible non-benchmark job exists. | — |
 
 ## Tier 3: Nice to Have
 

@@ -37,6 +37,16 @@ func TestRunDataFetchRecordsCompletedRequest(t *testing.T) {
 		switch {
 		case strings.Contains(command, "df -Pk"):
 			return "20971520\n", "", nil
+		// Daemonized download path (see runDetachedRemoteCommand in
+		// internal/dataloc/download.go): the spawn issues a `nohup bash -c
+		// ... cmd.sh ...` invocation; the poll calls `if [ -f "$D/status"
+		// ]`. We don't actually need to run anything here — the test only
+		// cares that the request transitions to "completed" — so the spawn
+		// returns "OK" and the first poll claims STATUS=0 with no stderr.
+		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+			return "OK\n", "", nil
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "STATUS=0\n---STDERR---\n", "", nil
 		case strings.Contains(command, "$_hfdl --repo-type model"):
 			return "", "", nil
 		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
@@ -46,6 +56,9 @@ func TestRunDataFetchRecordsCompletedRequest(t *testing.T) {
 		}
 	})
 	t.Cleanup(cleanupSSH)
+	// Tighten poll interval so the test doesn't sit on the default 5s wait.
+	cleanupPoll := dataloc.SetDetachedPollIntervalForTest(time.Millisecond)
+	t.Cleanup(cleanupPoll)
 
 	dataFetchHost = "cool30"
 	dataFetchRev = "main"

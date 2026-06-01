@@ -217,9 +217,133 @@ rule SyncHost {
     for job in jobs/Jobs where job.host.name = host and not job.is_terminal:
         ensures: SyncJobTriggered(job, mode)
 
-    -- Step 3: Ensure locally-queued jobs exist on remote queue
+    -- Step 3: Reconcile the local queue view with the runner's pending list
+    -- in BOTH directions. Together these form the contract: a job ID is in
+    -- the runner's pending list if and only if the DB considers it queued
+    -- on this host (modulo transient/running states).
+    --   - Forward (DB → runner): DB-queued jobs missing from runner state
+    --     get re-dispatched (see RedispatchMissingQueuedJobs).
+    --   - Reverse (runner → DB): runner-pending entries that the DB no
+    --     longer expects get cancel ops (see PruneStaleRunnerPendings).
     if mode = full:
         ensures: QueuedJobsPushedToRemote(host)
+    ensures: RunnerStateReconciled(host)
+}
+
+-- Forward reconcile: walk DB-queued jobs whose last_synced_status is queued
+-- (so the dispatcher previously believed the runner had them), and re-dispatch
+-- any that the runner no longer knows about. This catches runner crashes,
+-- agent restarts, and glibc-mismatch reinstalls where the runner's local
+-- queue state was lost while the DB still records the dispatch as synced.
+-- AppendJobToQueue / AddPending are idempotent, so re-dispatching a job the
+-- runner does in fact still hold is a no-op.
+rule RedispatchMissingQueuedJobs {
+    when: RunnerStateReconciled(host)
+
+    let state = FetchRemoteRunnerState(host)
+    -- If state is unavailable (SSH failed, runner not started), the next
+    -- sync cycle retries; we do not infer "runner has nothing".
+    if state != null:
+        for job in jobs/Jobs
+            where job.host.name = host
+            and job.status = queued
+            and job.latest_attempt.last_synced_status = queued
+            and not JobInRunnerState(job.id, state):
+                ensures: job.latest_attempt.last_synced_status = null
+                ensures: JobReDispatchedToRunner(host, job)
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/ops/host_sync.go syncQueueRunnerForHost
+        --     - db.ListSyncedQueuedJobs(database, host) yields the
+        --       candidate set (status=queued, last_synced_status=queued).
+        --     - fetchRemoteRunnerState(host, timeout) reads state.json.
+        --     - isJobInRunnerState(jobID, state) checks pending, current,
+        --       and running maps.
+        --     - db.ResetLastSyncedStatus(jobID) clears the synced marker
+        --       so the dispatcher treats the job as unsynced on this pass.
+}
+
+-- Reverse reconcile: walk the runner's pending list and remove entries the
+-- DB no longer expects there. Without this, the runner's pending array grows
+-- unboundedly: any job that ran to a terminal state without an explicit
+-- cancel op (the normal case for completed/failed jobs) leaves a stale ID
+-- in pending. New arrivals then queue behind the stale entries, blocking
+-- progress while the TUI (reading the DB) shows them at the head of the
+-- queue. This is the symptom that drove the fix (incident wj557, 2026-06):
+-- a benchmark job sat at the head of cool30's runner pending list for
+-- 30+ minutes after the DB had marked it failed and processed, gating
+-- ~28 other ready jobs behind its stale GPU/benchmark constraints.
+rule PruneStaleRunnerPendings {
+    when: RunnerStateReconciled(host)
+
+    let state = FetchRemoteRunnerState(host)
+    -- Expected = the set of job IDs the dispatcher legitimately wants the
+    -- runner to hold on this pass: queued-on-host jobs (both unsynced and
+    -- synced, including any just re-dispatched by RedispatchMissingQueuedJobs).
+    let expected = QueuedJobsForHost(host) + ReDispatchedJobsThisPass(host)
+
+    if state != null:
+        for pending_id in state.pending where pending_id not in expected:
+            let job = JobByID(pending_id)
+
+            -- Branch (1): No DB row. The job was deleted or never tracked;
+            -- the runner would fail to start it anyway (no job file on
+            -- disk). Send cancel op.
+            if job = null:
+                ensures: RunnerCancelOpSent(host, pending_id, db_row_missing)
+
+            -- Branch (2): DB-terminal. The dispatcher has moved past this
+            -- job; the runner has no business trying to start it. Send
+            -- cancel op. The reason tag carries the specific terminal
+            -- status (completed | failed | dead | killed | canceled) for
+            -- log traceability.
+            else if job.status in {completed, failed, dead, killed, canceled}:
+                ensures: RunnerCancelOpSent(host, pending_id, db_terminal)
+
+            -- Branch (3): DB says queued, but the job is NOT
+            -- inventory-targeted at this specific host. Three sub-cases:
+            --   (a) Retargeted to a different inventory host.
+            --   (b) Retargeted to a rental instance (target_kind becomes
+            --       rental_instance, so has_inventory_host is false).
+            --   (c) Moved to unplaced (target_kind becomes unplaced).
+            -- In all three, this runner shouldn't hold the entry.
+            -- The condition is the negation of branch (4)'s positive
+            -- identification — matching the positive case keeps newly
+            -- added target kinds from silently defaulting to "leave
+            -- alone" and reintroducing the leak.
+            else if job.status = queued and not (job.has_inventory_host and job.host = host):
+                ensures: RunnerCancelOpSent(host, pending_id, db_queued_on_other_host)
+
+            -- Branch (4): DB says queued AND inventory-targeted at this
+            -- host. The runner is right to hold it. Shouldn't fire in
+            -- practice (the expected set should have caught it) but is
+            -- preserved defensively. Leave entry alone.
+            --
+            -- Branch (5): Running, starting, paused, or other transient/
+            -- in-flight states. Canceling under the agent could race the
+            -- job's own lifecycle. Leave entry alone.
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/ops/host_sync.go
+        --     - pruneStaleRunnerPendings builds the expected set from the
+        --       (jobs, syncedJobs) slices that syncQueueRunnerForHost
+        --       already has on hand, then walks state.Pending issuing
+        --       removeFromQueueFile(host, id) for each entry the
+        --       shouldPruneStalePending classifier marks prunable.
+        --     - shouldPruneStalePending is the classifier; its five
+        --       branches (db_row_missing, db_terminal:<status>,
+        --       db_queued_on_other_host, db_queued_here, db_transient:
+        --       <status>) are pinned by TestShouldPruneStalePending in
+        --       internal/ops/host_sync_test.go.
+        --
+        -- Best-effort: any single cancel-op failure logs at debug and the
+        -- reverse reconcile continues; the next sync retries. A missed
+        -- prune costs one extra dispatch tick of the agent skipping the
+        -- stale entry. A wrong prune (cancelling a job that should still
+        -- run) is more expensive, so the classifier errs on the side of
+        -- leaving ambiguous entries in place.
 }
 
 -- Sync a single on-prem job by probing its remote state via SSH.
@@ -1417,6 +1541,41 @@ invariant PendingStatusClearedAfterApply {
     for attempt in JobAttempts:
         if attempt.pending_status != null:
             attempt.pending_at != null
+}
+
+invariant RunnerPendingMatchesDBQueued {
+    -- The agent runner's pending list and the DB's queued-on-host view
+    -- must converge. After SyncHost completes for a host, every entry in
+    -- the runner's pending list either corresponds to a job the DB still
+    -- considers queued on that host, or is in a transient/in-flight state
+    -- (running, starting, paused) where the runner is mid-execution. No
+    -- terminal jobs, no DB-row-missing entries, and no jobs retargeted to
+    -- another host should remain in the runner's pending list across
+    -- consecutive sync passes.
+    --
+    -- This invariant is the contract pair of the two reconcile directions:
+    --   - RedispatchMissingQueuedJobs supplies the forward direction
+    --     (DB-queued ⊆ runner.pending ∪ runner.current ∪ runner.running).
+    --   - PruneStaleRunnerPendings supplies the reverse direction
+    --     (runner.pending ⊆ DB-queued-here ∪ transient-states).
+    -- Either direction alone is insufficient: forward without reverse
+    -- accumulates stale entries forever (incident wj557); reverse without
+    -- forward never recovers a job the runner has lost.
+    for host in Hosts:
+        for pending_id in RunnerStateFor(host).pending:
+            let job = JobByID(pending_id)
+            exists job
+            job.status not in {completed, failed, dead, killed, canceled}
+            not (job.status = queued and job.has_inventory_host and job.host != host)
+
+    @guidance
+        -- Convergence, not instantaneous equality: a stale entry that
+        -- appears between sync passes is expected and acceptable. The
+        -- invariant holds in the limit — after each SyncHostRequested
+        -- pass with mode != lease-skipped completes, the relation is
+        -- restored. PruneStaleRunnerPendings is best-effort on individual
+        -- cancel ops, so a single failing cancel may carry one entry
+        -- forward by one tick.
 }
 
 invariant R2RunIDFromDB {

@@ -71,6 +71,16 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 // the actual remote work.
 var detachedPollInterval = 5 * time.Second
 
+// SetDetachedPollIntervalForTest swaps detachedPollInterval and returns a
+// cleanup function. Exported so cross-package tests in cmd/ that exercise
+// the data-fetch path can collapse the 5s poll interval to milliseconds
+// without forcing every test into the dataloc package.
+func SetDetachedPollIntervalForTest(d time.Duration) func() {
+	prev := detachedPollInterval
+	detachedPollInterval = d
+	return func() { detachedPollInterval = prev }
+}
+
 // detachedSpawnTimeout caps the SSH call that spawns the detached process.
 // Spawning is cheap (a few file writes and a fork) so a short bound here just
 // fails fast on connectivity issues rather than blocking on a hung session.

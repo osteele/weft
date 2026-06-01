@@ -417,6 +417,111 @@ func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, e
 	return &state, nil
 }
 
+// pruneStaleRunnerPendings sends cancel ops for entries in state.Pending
+// whose DB row says they shouldn't be there: terminal status, retargeted
+// to a different host, or absent from the DB entirely. This is the reverse
+// half of host_sync reconciliation — the forward half (DB → runner) ensures
+// queued work reaches the runner; the reverse half (runner → DB) sweeps the
+// runner's local queue of entries the DB has moved past.
+//
+// Without this, the agent's pending list grows unboundedly over time. A
+// queued job that ran, completed, and was post-processed leaves a stale
+// entry in `state.Pending` because the runner never received a `cancel` op
+// for it — there was no need at the time it transitioned. New arrivals get
+// buried behind the accumulated stale entries; the TUI reads the DB and
+// shows them at "head of queue" while the agent has them at position N+.
+//
+// We deliberately leave entries alone when:
+//   - The DB row is missing (could be in-flight insertion racing with sync)
+//   - The DB row says queued-on-this-host (the runner is right to have it)
+//   - The job is currently running or transient-state per its DB attempt
+//
+// The check is best-effort: a missed prune costs one extra dispatch tick of
+// the agent skipping a stale entry. A wrong prune (canceling a job that
+// should still run) is more expensive, so we err on the side of leaving
+// ambiguous entries in place.
+func pruneStaleRunnerPendings(database *sql.DB, host string, state *RunnerState, jobs, syncedJobs []*db.Job, timeout time.Duration, syncLog *slog.Logger) {
+	if state == nil || len(state.Pending) == 0 {
+		return
+	}
+	// Build the set of IDs we expect the runner to legitimately hold.
+	expected := make(map[int64]struct{}, len(jobs)+len(syncedJobs))
+	for _, j := range jobs {
+		if j != nil {
+			expected[j.ID] = struct{}{}
+		}
+	}
+	for _, j := range syncedJobs {
+		if j != nil {
+			expected[j.ID] = struct{}{}
+		}
+	}
+
+	pruned := 0
+	for _, pendingID := range state.Pending {
+		if _, ok := expected[pendingID]; ok {
+			continue
+		}
+		job, err := db.GetJobByID(database, pendingID)
+		if err != nil {
+			syncLog.Debug("prune: lookup failed; leaving entry", "host", host, "job_id", pendingID, "error", err)
+			continue
+		}
+		shouldPrune, reason := shouldPruneStalePending(job, host)
+		if !shouldPrune {
+			continue
+		}
+		if err := removeFromQueueFile(host, pendingID, timeout); err != nil {
+			syncLog.Debug("prune: cancel op failed; will retry next sync", "host", host, "job_id", pendingID, "error", err)
+			continue
+		}
+		pruned++
+		syncLog.Debug("prune: removed stale runner pending entry", "host", host, "job_id", pendingID, "reason", reason)
+	}
+	if pruned > 0 {
+		syncLog.Info("pruned stale runner pending entries", "host", host, "count", pruned)
+	}
+}
+
+// shouldPruneStalePending classifies whether a runner-pending entry that
+// isn't in our expected set should be removed via a cancel op. Returns the
+// reason as a short tag for logging.
+func shouldPruneStalePending(job *db.Job, host string) (bool, string) {
+	if job == nil {
+		// No DB row at all — the job was deleted or never tracked. Safe to
+		// prune; the runner would fail to start it anyway (no job file).
+		return true, "db_row_missing"
+	}
+	es := job.EffectiveStatus()
+	switch es {
+	case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
+		// Terminal in the DB's view; the runner has no business
+		// trying to start it.
+		return true, "db_terminal:" + es
+	case db.StatusQueued:
+		// DB says queued, but the host target may have moved off this
+		// runner. Three cases prune:
+		//   - Retargeted to a different inventory host.
+		//   - Retargeted to a rental instance (TargetKind becomes
+		//     RentalInstance, so HasInventoryHost is false).
+		//   - Moved to unplaced (TargetKind becomes Unplaced).
+		// Only "still inventory-targeted at THIS host" should keep the
+		// runner entry. Positively identifying that case is safer than
+		// enumerating the negatives, especially since new target kinds
+		// added later would otherwise default to "leave alone" and
+		// leak entries again.
+		if job.HasInventoryHost() && job.Host == host {
+			// Runner is right to have it. (This branch shouldn't fire if
+			// the expected set is correct, but defensively skip prune.)
+			return false, "db_queued_here"
+		}
+		return true, "db_queued_on_other_host"
+	default:
+		// Running, starting, paused, etc. — transient, leave it.
+		return false, "db_transient:" + es
+	}
+}
+
 // isJobInRunnerState reports whether a job ID is present in the runner's live state
 // (pending queue, current job, or running map). A nil state is treated as empty.
 func isJobInRunnerState(jobID int64, state *RunnerState) bool {
@@ -451,26 +556,51 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	if err != nil {
 		return 0, false, err
 	}
-	if len(syncedJobs) > 0 {
-		state, stateErr := fetchRemoteRunnerState(host, timeout)
-		if stateErr != nil {
-			// Can't read state — skip re-dispatch check, we'll retry next sync cycle
-			syncLog.Debug("could not read runner state", "host", host, "error", stateErr)
-		} else {
-			// state may be nil if the state file doesn't exist yet (runner not started)
-			for _, job := range syncedJobs {
-				if isJobInRunnerState(job.ID, state) {
-					continue // runner has it — nothing to do
-				}
-				// Runner doesn't know about this job. Reset so it gets re-dispatched below.
-				syncLog.Debug("job missing from runner state, re-dispatching", "job_id", job.ID, "host", host)
-				if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
-					syncLog.Debug("failed to reset last_synced_status", "job_id", job.ID, "error", err)
-					continue
-				}
-				jobs = append(jobs, job)
+
+	// Fetch the runner state once and reconcile in BOTH directions:
+	//   - Forward: DB-queued jobs missing from runner state → re-dispatch.
+	//   - Reverse: runner-pending jobs that the DB no longer considers
+	//     queued-on-this-host → send cancel ops to prune.
+	//
+	// The reverse direction is what keeps the agent's local queue from
+	// accumulating completed-but-never-canceled entries indefinitely. Old
+	// jobs that ran and finished but were never explicitly canceled stay in
+	// the agent's `pending` array forever; new arrivals get buried behind
+	// them; the TUI (which reads DB-as-truth) shows the new job at the head
+	// of the queue while the agent has it at position N+. Reverse-reconcile
+	// converges the two views.
+	state, stateErr := fetchRemoteRunnerState(host, timeout)
+	if stateErr != nil {
+		syncLog.Debug("could not read runner state", "host", host, "error", stateErr)
+	}
+
+	// Forward reconcile: re-dispatch syncedJobs that the runner doesn't know
+	// about. We gate on stateErr (not state) so the no-state-file case —
+	// runner not yet started, intentional (nil, nil) sentinel — still
+	// triggers re-dispatch: isJobInRunnerState(_, nil) returns false, so
+	// every syncedJob is treated as missing and reposted. AppendJobToQueue
+	// is idempotent, so a queue file that already holds the entry is
+	// unchanged. Only a genuine state-read failure (stateErr != nil) leaves
+	// the synced set untouched.
+	if stateErr == nil && len(syncedJobs) > 0 {
+		for _, job := range syncedJobs {
+			if isJobInRunnerState(job.ID, state) {
+				continue // runner has it — nothing to do
 			}
+			// Runner doesn't know about this job. Reset so it gets re-dispatched below.
+			syncLog.Debug("job missing from runner state, re-dispatching", "job_id", job.ID, "host", host)
+			if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
+				syncLog.Debug("failed to reset last_synced_status", "job_id", job.ID, "error", err)
+				continue
+			}
+			jobs = append(jobs, job)
 		}
+	}
+
+	// Reverse reconcile requires the actual pending list, so it stays gated
+	// on a non-nil state.
+	if state != nil {
+		pruneStaleRunnerPendings(database, host, state, jobs, syncedJobs, timeout, syncLog)
 	}
 
 	var r2Client *r2.Client

@@ -15,6 +15,108 @@ import (
 	srcsync "github.com/osteele/weft/internal/sync"
 )
 
+// TestShouldPruneStalePending exercises the classifier that decides whether
+// a runner-pending entry should be cancelled via host_sync's reverse
+// reconcile. The classifier is the contract surface — fixing it wrong
+// either cancels legitimate work or leaks stale entries forever, both of
+// which have hit production today.
+func TestShouldPruneStalePending(t *testing.T) {
+	cases := []struct {
+		name      string
+		job       *db.Job
+		host      string
+		wantPrune bool
+		// reason prefix the classifier should emit for traceability.
+		wantReasonPrefix string
+	}{
+		{
+			name:             "nil job (deleted DB row) prunes",
+			job:              nil,
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_row_missing",
+		},
+		{
+			name:             "completed job prunes",
+			job:              &db.Job{Host: "cool30", Status: db.StatusCompleted},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_terminal:",
+		},
+		{
+			name:             "failed job prunes",
+			job:              &db.Job{Host: "cool30", Status: db.StatusFailed},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_terminal:",
+		},
+		{
+			name:             "killed job prunes",
+			job:              &db.Job{Host: "cool30", Status: db.StatusKilled},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_terminal:",
+		},
+		{
+			name:             "canceled job prunes",
+			job:              &db.Job{Host: "cool30", Status: db.StatusCanceled},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_terminal:",
+		},
+		{
+			name:             "queued on different host prunes",
+			job:              &db.Job{Host: "cool100", Status: db.StatusQueued},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_queued_on_other_host",
+		},
+		{
+			name: "queued and retargeted to rental prunes (TargetKind=RentalInstance)",
+			job: &db.Job{
+				Host:     "cool30",
+				Status:   db.StatusQueued,
+				LaunchID: int64Ptr(99),
+			},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_queued_on_other_host",
+		},
+		{
+			name:             "queued and unplaced prunes (Host cleared)",
+			job:              &db.Job{Host: "", Status: db.StatusQueued},
+			host:             "cool30",
+			wantPrune:        true,
+			wantReasonPrefix: "db_queued_on_other_host",
+		},
+		{
+			name:             "queued on same host does NOT prune (defensive)",
+			job:              &db.Job{Host: "cool30", Status: db.StatusQueued},
+			host:             "cool30",
+			wantPrune:        false,
+			wantReasonPrefix: "db_queued_here",
+		},
+		{
+			name:             "running job does NOT prune (transient)",
+			job:              &db.Job{Host: "cool30", Status: db.StatusRunning},
+			host:             "cool30",
+			wantPrune:        false,
+			wantReasonPrefix: "db_transient:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := shouldPruneStalePending(tc.job, tc.host)
+			if got != tc.wantPrune {
+				t.Fatalf("prune = %v, want %v (reason=%q)", got, tc.wantPrune, reason)
+			}
+			if !strings.HasPrefix(reason, tc.wantReasonPrefix) {
+				t.Fatalf("reason = %q, want prefix %q", reason, tc.wantReasonPrefix)
+			}
+		})
+	}
+}
+
 // stubProbeRemoteNeedsState swaps probeRemoteNeedsStateFunc for the duration
 // of a test, recording call count and the last needs slice it received.
 func stubProbeRemoteNeedsState(t *testing.T, reply map[string]remoteNeedState) (calls *int, lastNeeds *[]pendingNeed) {
@@ -217,9 +319,17 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 		return fmt.Errorf("rsync timeout")
 	}))
 
-	// Mock SSH — should never be called since sync fails first
+	// Mock SSH — the only legitimate SSH for this test is the runner-state
+	// read at the top of ensureQueuedJobsOnRemote (fetchRemoteRunnerState,
+	// which both the forward and reverse reconcilers consume). Returning
+	// the no-state-file sentinel makes that call a no-op so the prune pass
+	// has nothing to do. Any OTHER SSH command would be a job-dispatch
+	// path that shouldn't run while source sync is failing.
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
-		t.Error("SSH should not be called when sync fails")
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		}
+		t.Errorf("unexpected SSH command when source sync fails: %s", command)
 		return "", "", 0
 	})
 
@@ -377,6 +487,16 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 		switch {
 		case strings.Contains(command, "df -Pk"):
 			return "20971520\n", "", 0
+		// Daemonized download path (runDetachedRemoteCommand in
+		// internal/dataloc/download.go): the spawn issues a `nohup bash
+		// -c ... cmd.sh ...` invocation; each poll calls
+		// `if [ -f "$D/status" ]`. The test cares about the request
+		// completing, not what the download actually did — return OK to
+		// spawn, STATUS=0 to the first poll.
+		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+			return "OK\n", "", 0
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "STATUS=0\n---STDERR---\n", "", 0
 		case strings.Contains(command, "$_hfdl download --repo-type model"):
 			return "", "", 0
 		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
@@ -389,6 +509,7 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 			return "", "", 0
 		}
 	})
+	t.Cleanup(dataloc.SetDetachedPollIntervalForTest(time.Millisecond))
 
 	if err := ensureHFInputsAvailable(database, "test-host", []string{"hf:bert-base-uncased"}, 5*time.Second); err != nil {
 		t.Fatalf("ensureHFInputsAvailable: %v", err)
