@@ -352,17 +352,31 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 	pidFile := session.JobPidFile(job.ID, job.StartTime)
 	pgidFile := session.SimplePgidFile(job.ID)
 	killReasonFile := session.SimpleKillReasonFile(job.ID)
+	statusFile := session.SimpleStatusFile(job.ID)
 
 	// Write kill reason before sending signals, then kill both the wrapper process
-	// (pid file) and the command's process group (pgid file).
+	// (pid file) and the command's process group (pgid file). After SIGKILL,
+	// give the wrapper's SIGTERM trap a moment to write the status file
+	// (see WrapCommandWithExitCapture); if it didn't (SIGKILL beat it, or
+	// the wrapper was already wedged), write a synthetic status so the
+	// runner's refreshRunningJobs can free the slot promptly. Without this
+	// fallback, the wrapper becomes a zombie and the slot stays occupied
+	// until the zombie-detection path catches up.
 	// Note: pidFile contains ~ which must NOT be single-quoted (prevents expansion)
 	killCmd := fmt.Sprintf(`
 		# Write kill reason before sending signals
 		echo "user_kill" > %s
+		# Record whether the job ever actually started — we'll only write a
+		# synthetic .status if at least one of pid/pgid existed at kill time.
+		# Otherwise this kill targets a queued-but-never-started job and a
+		# 137 status file would falsely tell the runner the job had run and
+		# completed, blocking later `+"`weft restart`"+`.
+		had_proc=0
 		# Kill wrapper process
-		if [ -f %s ]; then kill $(cat %s) 2>/dev/null || true; fi
+		if [ -f %s ]; then had_proc=1; kill $(cat %s) 2>/dev/null || true; fi
 		# Kill process group (setsid tree) - the minus sign targets the whole group
 		if [ -f %s ]; then
+			had_proc=1
 			pgid=$(cat %s 2>/dev/null)
 			if [ -n "$pgid" ]; then
 				kill -TERM -$pgid 2>/dev/null || true
@@ -371,7 +385,16 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 			fi
 			rm -f %s
 		fi
-	`, killReasonFile, pidFile, pidFile, pgidFile, pgidFile, pgidFile)
+		# Belt-and-suspenders: ensure a .status file exists so the queue runner
+		# can recover the slot even if the wrapper's TERM trap didn't fire OR
+		# fired but was preempted by SIGKILL mid-write (leaves an empty file).
+		# Test -s (non-empty) rather than -f (exists) so we overwrite a partial
+		# write from a trap that started but didn't finish.
+		if [ $had_proc -eq 1 ]; then
+			sleep 0.2
+			if [ ! -s %s ]; then echo 137 > %s; fi
+		fi
+	`, killReasonFile, pidFile, pidFile, pgidFile, pgidFile, pgidFile, statusFile, statusFile)
 
 	_, stderr, err := ssh.RunWithTimeout(job.Host, killCmd, timeout)
 	if err != nil && ssh.IsConnectionError(stderr) {

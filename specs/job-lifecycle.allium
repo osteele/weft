@@ -499,6 +499,52 @@ rule JobDied {
     ensures: job.status = dead
 }
 
+-- The queue-runner's refreshRunningJobs treats a wrapper process in zombie
+-- state (state Z) the same as one that's truly gone: it writes a synthetic
+-- status file, marks the job failed via the existing orphan-recovery path,
+-- and frees the runner slot. The wrapper PID is best-effort reaped with
+-- wait4(WNOHANG) so its process-table entry clears.
+--
+-- The bug this guards against: a wrapper that was SIGKILL'd (so no .status
+-- file was written) AND whose parent (the agent) has lost its Wait()
+-- goroutine across a syscall.Exec re-exec leaves the wrapper as a zombie.
+-- CheckPIDAlive(pid) returns true for zombies because the kernel keeps the
+-- process-table entry until the parent reaps. Before this rule, the runner
+-- saw kill -0 succeed and `continue`d its scan, leaving the slot occupied
+-- indefinitely.
+--
+-- The hasWaiter guard that normally prevents the orphan path from firing on
+-- a process the runner is still actively waiting for is bypassed in the
+-- zombie case: Wait() will never produce a status file for a zombie whose
+-- waiter is gone, so we treat the wrapper as gone regardless.
+rule WrapperZombieRecovered {
+    when: QueueRunnerTick(host)
+    for job in host.running_jobs:
+        let wrapper = WrapperProcess(job)
+        requires: WrapperPIDAlive(wrapper) and WrapperInZombieState(wrapper)
+
+        ensures: ZombieDetectedLogged(job: job, pid: wrapper.pid)
+        ensures: WrapperReaped(wrapper)
+        ensures: SyntheticStatusFileWritten(job)
+        ensures: job.status = failed
+        ensures: RunnerSlotFreed(job)
+
+    @guidance
+        -- Implementation:
+        --   internal/runner/process.go CheckProcessZombie, reapZombie
+        --   internal/runner/runner.go  refreshRunningJobs (zombie branch
+        --                              skips the hasWaiter guard, falls
+        --                              through to orphan recovery, then
+        --                              calls reapZombie before writing the
+        --                              synthetic status file)
+        -- The oplog event emitted is `job.zombie_detected` with detail
+        -- `pid=<PID> state=Z`, distinct from `job.orphan_killed`.
+        -- reapZombie is best-effort: after a syscall.Exec the child may have
+        -- been reparented to init, in which case wait4 returns ECHILD and
+        -- we move on — the housekeeping is purely so the process-table
+        -- entry doesn't linger.
+}
+
 -- Preflight rejection closes the attempt without running it. The runner's
 -- per-job provenance check (source-data-sync.allium §
 -- RunnerPreflightProvenanceCheck) refused to stamp start_time; the
@@ -975,8 +1021,47 @@ rule UserKillsJob {
     requires: job.status in {running, starting, queued, paused}
 
     ensures: job.status = killed
+    ensures: KillProducesStatusFile(job)
     @guidance
-        -- Sends SIGTERM, waits config.kill_grace_period, then SIGKILL.
+        -- Sends SIGTERM to the wrapper's process group, waits
+        -- config.kill_grace_period (0.5s in the queue-runner path), then
+        -- SIGKILL. Regardless of which signal terminates the wrapper, a
+        -- .status file is produced for the job — see KillProducesStatusFile.
+}
+
+-- A `weft kill` must always leave a {jobID}.status file behind so the
+-- queue runner's refreshRunningJobs can free the job slot promptly and
+-- record the real exit code. The implementation uses three layers:
+--   1. The job wrapper installs SIGTERM/SIGINT traps (WrapCommandWithExitCapture)
+--      that write the status file with code 143 (SIGTERM) or 130 (SIGINT)
+--      before exiting. This handles the SIGTERM phase.
+--   2. killQueueRunnerJob waits 0.2s after SIGKILL and writes a synthetic
+--      `echo 137 > {jobID}.status` if the file is still missing. This handles
+--      the case where SIGKILL beat the trap or the wrapper was already wedged.
+--   3. If both above fail, refreshRunningJobs's zombie-detection path (see
+--      rule WrapperZombieRecovered) writes a synthetic status file as a final
+--      safety net.
+rule KillProducesStatusFile {
+    when: KillProducesStatusFile(job)
+
+    ensures: JobStatusFileExists(job)
+
+    @guidance
+        -- Without these layers a `weft kill` on a queue-runner job could leave
+        -- the wrapper as a zombie (kernel keeps a process-table entry; the
+        -- agent's Wait() goroutine doesn't survive syscall.Exec re-execs), the
+        -- queue slot would stay occupied indefinitely, and `weft kill` would
+        -- appear to succeed at the CLI while the job remained "running" to the
+        -- runner.
+        --
+        -- Implementation:
+        --   internal/runner/process.go WrapCommandWithExitCapture
+        --     — installs `trap '_weft_on_signal 143 SIGTERM' TERM` and the
+        --       same for SIGINT (130). The trap writes "=== END exit=$_e ..."
+        --       to the log, writes $_e to the status file, then exits $_e.
+        --   internal/ops/reconcile.go killQueueRunnerJob
+        --     — after SIGTERM, sleeps 0.5s, sends SIGKILL, sleeps 0.2s, then
+        --       writes echo 137 to the status file if it's still missing.
 }
 
 -- ==========================================================================

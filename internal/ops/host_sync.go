@@ -591,30 +591,73 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		// got nuked), escalate to a content-addressed R2 tarball so the
 		// runner can extract byte-identical sources into a per-job dir,
 		// bypassing the shared working directory entirely.
+		//
+		// Two escalation triggers:
+		//   (1) source_provenance_mismatch dispatch event — emitted by
+		//       the new agent's PREFLIGHT_REJECTED protocol. Has an
+		//       expectedSHA encoded in the detail, so we can do the
+		//       pin_lost vs. matching-SHA check.
+		//   (2) any prior failed attempt — covers legacy pre-fix runners
+		//       that recorded provenance failures only via the runner log
+		//       and a non-zero exit, with no lifecycle event. No
+		//       expectedSHA is recoverable, so we upload the current
+		//       laptop SHA and accept that the job may run against newer
+		//       sources than originally queued. The alternative is the
+		//       job sitting queued forever, which is what happens to
+		//       jobs that failed under the pre-92be8b4f1 runner.
 		useR2Source := false
 		sourceR2Key := ""
+		escalateToR2 := func(reasonTag string) {
+			localDir := workdir.ResolveLocal(job.WorkingDir)
+			r2c, r2Err := getR2Client()
+			if r2Err != nil {
+				syncLog.Debug("R2 client unavailable; falling back to normal sync", "job_id", job.ID, "error", r2Err)
+				return
+			}
+			uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			key, uploadErr := srcsync.UploadSourceToR2ForInputs(uploadCtx, r2c, localDir, job.Inputs)
+			cancel()
+			if uploadErr != nil {
+				syncLog.Debug("R2 source upload failed; falling back to normal sync", "job_id", job.ID, "error", uploadErr)
+				return
+			}
+			useR2Source = true
+			sourceR2Key = key
+			syncLog.Info("escalated to R2-isolated source mode",
+				"job_id", job.ID, "host", host, "r2_key", key, "reason", reasonTag)
+		}
 		if backend != db.BackendSlurm && job.WorkingDir != "" {
-			prior, perr := db.CountJobDispatchFailuresMatching(database, job.ID, "source_provenance_mismatch")
+			provFails, perr := db.CountJobDispatchFailuresMatching(database, job.ID, "source_provenance_mismatch")
 			if perr != nil {
 				syncLog.Debug("count prior provenance failures failed", "job_id", job.ID, "error", perr)
-			} else if prior >= 1 {
-				// The expected SHA isn't stored on the job record — it lives
-				// in the failure detail of the prior dispatch event. Parse
-				// it out so we can decide whether the laptop tree can still
-				// reproduce it.
+			}
+			failedAttempts, faerr := db.CountJobFailedAttempts(database, job.ID)
+			if faerr != nil {
+				syncLog.Debug("count prior failed attempts failed", "job_id", job.ID, "error", faerr)
+			}
+
+			// The prov_fails path is preferred when available because it can
+			// do the pin_lost vs. matching-SHA check, which produces a
+			// richer diagnosis than the legacy fallback. But if its inner
+			// branches can't act (expectedSHA missing from the event
+			// detail, or local ComputeSourceSHA256 errors), we still want
+			// to fall through to legacy escalation when there's evidence
+			// of a prior failure — silently wedging is worse than
+			// escalating broadly.
+			if provFails >= 1 {
 				detail, detailErr := db.LatestJobDispatchFailureDetail(database, job.ID, "source_provenance_mismatch")
 				if detailErr != nil {
 					syncLog.Debug("read prior provenance failure detail failed", "job_id", job.ID, "error", detailErr)
 				}
 				expectedSHA := extractExpectedSHA(detail)
 				if expectedSHA == "" {
-					syncLog.Debug("prior provenance failure detail missing expected SHA; cannot escalate", "job_id", job.ID, "detail", detail)
+					syncLog.Debug("prior provenance failure detail missing expected SHA; falling through to legacy escalation", "job_id", job.ID, "detail", detail)
 				} else {
 					localDir := workdir.ResolveLocal(job.WorkingDir)
 					currentSHA, hashErr := srcsync.ComputeSourceSHA256(localDir)
 					switch {
 					case hashErr != nil:
-						syncLog.Debug("source SHA recompute failed; cannot escalate to R2", "job_id", job.ID, "error", hashErr)
+						syncLog.Debug("source SHA recompute failed; falling through to legacy escalation", "job_id", job.ID, "error", hashErr)
 					case currentSHA != expectedSHA:
 						// Pin lost: the laptop tree has moved past the SHA
 						// this job was queued against. We cannot
@@ -628,23 +671,19 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 						// Laptop SHA still matches — upload the original
 						// tarball to R2 (content-addressed, idempotent)
 						// and switch the queue entry to R2-isolated mode.
-						r2c, r2Err := getR2Client()
-						if r2Err != nil {
-							syncLog.Debug("R2 client unavailable; falling back to normal sync", "job_id", job.ID, "error", r2Err)
-						} else {
-							uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-							key, uploadErr := srcsync.UploadSourceToR2ForInputs(uploadCtx, r2c, localDir, job.Inputs)
-							cancel()
-							if uploadErr != nil {
-								syncLog.Debug("R2 source upload failed; falling back to normal sync", "job_id", job.ID, "error", uploadErr)
-							} else {
-								useR2Source = true
-								sourceR2Key = key
-								syncLog.Info("escalated to R2-isolated source mode after prior provenance failure", "job_id", job.ID, "host", host, "r2_key", key)
-							}
-						}
+						escalateToR2("prior provenance failure")
 					}
 				}
+			}
+
+			// Legacy escalation: prior failed attempt with no
+			// source_provenance_mismatch dispatch event we could use.
+			// Most likely a pre-PREFLIGHT_REJECTED runner that reported
+			// failures only via the runner log and a non-zero exit.
+			// Skipped if prov_fails escalation already succeeded — no
+			// point uploading twice.
+			if !useR2Source && failedAttempts >= 1 {
+				escalateToR2("legacy failed attempt")
 			}
 		}
 

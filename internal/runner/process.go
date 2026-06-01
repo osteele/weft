@@ -185,12 +185,46 @@ func CheckPIDAlive(pid int) bool {
 
 // CheckProcessStopped checks if a process is in stopped state (T).
 func CheckProcessStopped(pid int) bool {
-	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
+	state, ok := processStateChar(pid)
+	if !ok {
 		return false
 	}
-	state := strings.TrimSpace(string(out))
 	return strings.Contains(state, "T")
+}
+
+// CheckProcessZombie reports whether a process is in zombie state (Z) —
+// it has exited but its parent hasn't waited for it. Zombies still satisfy
+// CheckPIDAlive (the kernel keeps a process table entry) so callers that
+// distinguish "still doing work" from "gone" must check this separately.
+func CheckProcessZombie(pid int) bool {
+	state, ok := processStateChar(pid)
+	if !ok {
+		return false
+	}
+	return strings.Contains(state, "Z")
+}
+
+// processStateChar returns the ps `stat` column for pid, or false if the
+// process cannot be queried (e.g. already reaped or insufficient permissions).
+func processStateChar(pid int) (string, bool) {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// reapZombie best-effort wait4s a zombie PID with WNOHANG so the kernel can
+// clear its process-table entry. Returns silently when the caller isn't the
+// parent (ECHILD) or the wait fails for any other reason — the only goal here
+// is housekeeping; the zombie-detection code path has already produced the
+// status file and recovery before this is called.
+func reapZombie(pid int) {
+	if pid <= 0 {
+		return
+	}
+	var ws syscall.WaitStatus
+	_, _ = syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
 }
 
 // ReadPIDFile reads a PID from a file.
@@ -243,15 +277,42 @@ func CleanupPIDFiles(paths JobPaths) {
 // WrapCommandWithExitCapture wraps a command string so that bash writes the
 // exit code to a status file and appends a log footer after the command finishes.
 // This ensures exit information is recorded even if the Go runner process dies
-// mid-job (e.g., during a runner restart). StartProcess runs the result as
-// bash -c '<wrapped>', so stdout/stderr go to the log file via Go's fd redirection.
+// mid-job (e.g., during a runner restart) or the wrapper is killed via SIGTERM.
+//
+// A SIGTERM/SIGINT trap is installed so `weft kill` (which sends SIGTERM to the
+// wrapper before escalating to SIGKILL) still produces a .status file before
+// the wrapper exits. Without the trap, a SIGTERM'd wrapper dies without
+// writing the status file, the kernel keeps a process-table entry until the
+// parent waits, and after the agent re-execs there is no Wait() goroutine —
+// leaving the wrapper as a zombie. refreshRunningJobs's zombie path recovers
+// from that, but the trap is the primary fix; this is the redundant lower
+// layer. SIGKILL cannot be trapped; killQueueRunnerJob writes a synthetic
+// status file as a third layer for that case.
+//
+// StartProcess runs the result as bash -c '<wrapped>', so stdout/stderr go to
+// the log file via Go's fd redirection.
 func WrapCommandWithExitCapture(command, statusFile string) string {
+	// On SIGTERM/SIGINT: write whatever $? is at trap entry. In the common
+	// case (no user-installed signal handler), the foreground command also
+	// received the signal via the process group and `$?` is the signal-exit
+	// code (143 for SIGTERM, 130 for SIGINT). When the user has installed
+	// their own handler and chose to exit 0, we honor that — overriding 0→143
+	// would silently lose the user's signal that work finished cleanly.
+	// If `$?` is empty (no foreground command was running and `$?` got reset
+	// — extremely rare), we fall back to the signal's exit code so the
+	// status file is never blank.
 	return fmt.Sprintf(
-		"%s; EXIT_CODE=$?; "+
+		`_weft_status_file=%s; `+
+			`_weft_on_signal() { _e=$?; if [ -z "$_e" ]; then _e=$1; fi; `+
+			`echo "=== END exit=$_e ($2) $(date) ==="; `+
+			`echo "$_e" > "$_weft_status_file"; exit "$_e"; }; `+
+			`trap '_weft_on_signal 143 SIGTERM' TERM; `+
+			`trap '_weft_on_signal 130 SIGINT' INT; `+
+			`%s; EXIT_CODE=$?; `+
 			`echo "=== END exit=$EXIT_CODE $(date) ==="; `+
-			"echo $EXIT_CODE > %s; "+
-			"exit $EXIT_CODE",
-		command, statusFile)
+			`echo "$EXIT_CODE" > "$_weft_status_file"; `+
+			`exit "$EXIT_CODE"`,
+		statusFile, command)
 }
 
 // GetProcessTree returns all PIDs in the process tree rooted at the given PID.

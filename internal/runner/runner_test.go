@@ -2,9 +2,12 @@ package runner
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -433,6 +436,64 @@ func TestRefreshRunningJobs_DetectsOrphanWhenNoWaiter(t *testing.T) {
 	// Status file should have been written
 	if _, err := os.Stat(paths.Status); err != nil {
 		t.Fatalf("status file should exist after orphan detection: %v", err)
+	}
+}
+
+// TestRefreshRunningJobs_RecoversZombieWrapper exercises the path where the
+// wrapper bash got SIGKILL'd (so no .status file was ever written) AND the
+// agent re-execed (losing its Wait() goroutine), leaving the wrapper as a
+// state-Z zombie. Before the fix, CheckPIDAlive returned true for zombies and
+// refreshRunningJobs `continue`d, so the slot stayed occupied forever.
+func TestRefreshRunningJobs_RecoversZombieWrapper(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(383)
+	jobIDStr := "383"
+	paths := NewJobPaths(r.logDir, jobID)
+
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	// Fork a child that exits immediately but never wait for it -> zombie.
+	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start zombie child: %v", err)
+	}
+	pid := cmd.Process.Pid
+	// Give the kernel a moment to mark the child as Z.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if CheckProcessZombie(pid) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !CheckProcessZombie(pid) {
+		t.Skip("could not produce a zombie process on this platform; skipping")
+	}
+	if !CheckPIDAlive(pid) {
+		// Sanity: the original bug only manifests because kill -0 still
+		// succeeds on zombies. If that's not true here, the test premise
+		// doesn't hold.
+		t.Skip("kill -0 does not see zombies on this platform; test premise invalid")
+	}
+
+	os.WriteFile(paths.PID, []byte(fmt.Sprintf("%d\n", pid)), 0644)
+	os.WriteFile(paths.PGID, []byte(fmt.Sprintf("%d\n", pid)), 0644)
+
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		StartedAt: time.Now().Unix() - 10,
+	})
+
+	r.refreshRunningJobs()
+
+	if _, exists := r.state.Running[jobIDStr]; exists {
+		t.Fatal("zombie wrapper should have been recovered out of running state")
+	}
+	if _, err := os.Stat(paths.Status); err != nil {
+		t.Fatalf("status file should exist after zombie recovery: %v", err)
 	}
 }
 

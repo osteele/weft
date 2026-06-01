@@ -521,67 +521,123 @@ rule PreflightRejected {
 -- Rules: Layer D — R2-isolated source fallback
 -- ==========================================================================
 
--- When a job has at least one prior dispatch-failed lifecycle event with a
--- source_provenance_mismatch reason, the dispatcher escalates this job to
--- R2-isolated mode rather than rsyncing the working dir again. The
--- escalation is per-job and runs at the next dispatch sweep, not from the
--- runner side.
+-- When a job has prior dispatch evidence of source-related failure, the
+-- dispatcher escalates to R2-isolated mode rather than rsyncing the working
+-- dir again. The escalation is per-job and runs at the next dispatch sweep,
+-- not from the runner side.
 --
--- The decision branches on whether the laptop tree can still reproduce
--- the SHA that prior dispatches expected:
---   - matches  → upload the source tarball to R2 under sources/<sha>.tar.gz
---                (idempotent; same data plane as cloud rentals), stamp
---                source_r2_key on the queue entry, skip the rsync and the
---                per-job marker write for this dispatch.
---   - mismatch → the SHA has been lost (working dir advanced past the SHA
---                this job was queued at). Surface as provenance_pin_lost
---                rather than loop silently, so diagnose has a concrete
---                reason to show.
+-- Two triggers, evaluated in priority order:
+--   (1) provenance-mismatch trigger: at least one prior
+--       EventQueueDispatchFailed for this job whose detail starts with
+--       "source_provenance_mismatch". This event is emitted only by the new
+--       PREFLIGHT_REJECTED protocol. The detail carries the expected SHA, so
+--       the dispatcher can branch on whether the laptop tree can still
+--       reproduce that SHA:
+--         - matches  → upload the source tarball to R2 under
+--                      sources/<sha>.tar.gz (idempotent; same data plane as
+--                      cloud rentals), stamp source_r2_key on the queue
+--                      entry, skip the rsync and the per-job marker write
+--                      for this dispatch.
+--         - mismatch → the SHA has been lost (working dir advanced past the
+--                      SHA this job was queued at). Surface as
+--                      provenance_pin_lost rather than loop silently, so
+--                      diagnose has a concrete reason to show.
+--   (2) legacy-attempt trigger: at least one prior JobAttempt for this job
+--       ended with status in {failed, dead} (or terminal failure exit code).
+--       This catches jobs that failed under pre-PREFLIGHT_REJECTED runners,
+--       which reported source-provenance failures only via the runner log
+--       and a non-zero exit, with no lifecycle event the dispatcher can read.
+--       No expectedSHA is recoverable, so the dispatcher unconditionally
+--       uploads the current laptop SHA and runs R2-isolated. The job may run
+--       against newer sources than originally queued; the alternative is
+--       wedging forever waiting for a marker the new runner protocol never
+--       generated.
+--
+-- Trigger (1) takes precedence when both apply: its branch produces a richer
+-- diagnosis (pin_lost vs. matching SHA) and avoids the legacy fallback's
+-- "run against current sources" semantics when the dispatcher has enough
+-- information to do the strict check.
 rule EscalateToR2IsolatedSource {
     when: DispatchToOnPremHost(job, host)
     requires: job.target_kind = inventory_host
-    requires: count(LifecycleEvents
-                    where event_kind = queue_dispatch_failed
-                          and job = job
-                          and detail starts_with "source_provenance_mismatch") >= 1
 
-    let expected_sha = ExtractExpectedSHA(
-        LatestQueueDispatchFailedDetail(job, "source_provenance_mismatch")
-    )
-    let current_sha = ComputeSourceSHA256(job.working_dir)
+    let prov_fails = count(LifecycleEvents
+                           where event_kind = queue_dispatch_failed
+                                 and job = job
+                                 and detail starts_with "source_provenance_mismatch")
+    let failed_attempts = count(JobAttempts
+                                where job = job
+                                      and end_time != null
+                                      and (status in {failed, dead}
+                                           or (status = completed and exit_code != 0)))
+
+    requires: prov_fails >= 1 or failed_attempts >= 1
 
     ensures:
-        if expected_sha = null:
-            -- Prior failure detail lacked an expected SHA. Cannot escalate;
-            -- fall through to normal dispatch path.
-            EscalationSkipped(job: job, reason: no_expected_sha)
-        else if current_sha = null:
-            -- Local hash failed (unreadable working dir, etc.). Cannot
-            -- escalate; let normal path try.
-            EscalationSkipped(job: job, reason: hash_unavailable)
-        else if current_sha != expected_sha:
-            -- Pin lost. Record a fresh dispatch-failed event and skip
-            -- dispatch for this job in this sweep.
-            EventQueueDispatchFailedRecorded(
-                job: job,
-                detail: "provenance_pin_lost: queued at "
-                        + ShortSHA(expected_sha)
-                        + ", laptop now " + ShortSHA(current_sha)
+        if prov_fails >= 1:
+            -- Trigger (1): provenance-mismatch path. The expected SHA isn't
+            -- stored on the job record — it lives in the failure detail of
+            -- the prior dispatch event. Parse it out so we can decide
+            -- whether the laptop tree can still reproduce it.
+            let expected_sha = ExtractExpectedSHA(
+                LatestQueueDispatchFailedDetail(job, "source_provenance_mismatch")
             )
-            DispatchSkippedForJob(job: job)
+            let current_sha = ComputeSourceSHA256(job.working_dir)
+
+            if expected_sha = null:
+                -- Prior failure detail lacked an expected SHA. Cannot
+                -- escalate via this path; fall through to normal dispatch.
+                EscalationSkipped(job: job, reason: no_expected_sha)
+            else if current_sha = null:
+                -- Local hash failed (unreadable working dir, etc.). Cannot
+                -- escalate; let normal path try.
+                EscalationSkipped(job: job, reason: hash_unavailable)
+            else if current_sha != expected_sha:
+                -- Pin lost. Record a fresh dispatch-failed event and skip
+                -- dispatch for this job in this sweep.
+                EventQueueDispatchFailedRecorded(
+                    job: job,
+                    detail: "provenance_pin_lost: queued at "
+                            + ShortSHA(expected_sha)
+                            + ", laptop now " + ShortSHA(current_sha)
+                )
+                DispatchSkippedForJob(job: job)
+            else:
+                -- Pin still reproducible: upload to R2 and switch the queue
+                -- entry to R2-isolated mode for this dispatch.
+                let key = UploadSourceToR2ForInputs(
+                    local_dir: job.working_dir,
+                    inputs: job.inputs
+                )
+                DispatchEntry{job: job}.source_r2_key = key
+                EscalationLogged(
+                    job: job, host: host, r2_key: key,
+                    reason: "prior provenance failure"
+                )
         else:
-            -- Pin still reproducible: upload to R2 and switch the queue
-            -- entry to R2-isolated mode for this dispatch.
+            -- Trigger (2): legacy failed-attempt path. No expected SHA is
+            -- recoverable, so upload the current laptop SHA and run
+            -- R2-isolated. Accept that the job may run against newer sources
+            -- than it was originally queued at — that matches user intent
+            -- better than wedging forever.
             let key = UploadSourceToR2ForInputs(
                 local_dir: job.working_dir,
                 inputs: job.inputs
             )
             DispatchEntry{job: job}.source_r2_key = key
-            EscalationLogged(job: job, host: host, r2_key: key)
+            EscalationLogged(
+                job: job, host: host, r2_key: key,
+                reason: "legacy failed attempt"
+            )
 
     @guidance
         -- Implementation anchor:
         --   internal/ops/host_sync.go    — Layer D escalation block
+        --                                  (escalateToR2 closure, the
+        --                                   provFails/failedAttempts switch)
+        --   internal/db/lifecycle_events.go — CountJobDispatchFailuresMatching
+        --                                     (trigger 1), CountJobFailedAttempts
+        --                                     (trigger 2)
         --   internal/srcsync/            — ComputeSourceSHA256,
         --                                  UploadSourceToR2ForInputs
         --   internal/opsqueue/queue.go   — QueueEntry.SourceR2Key

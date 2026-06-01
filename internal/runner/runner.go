@@ -859,20 +859,34 @@ func (r *Runner) refreshRunningJobs() {
 			continue
 		}
 
-		// Check if wrapper process is still alive
+		// Check if wrapper process is still alive. Zombies (state Z) pass
+		// kill -0 because the kernel keeps a process table entry, but they
+		// will never write the status file — their parent (the agent) lost
+		// its Wait() goroutine across a re-exec or never installed one.
+		// Treat zombies as gone so the slot doesn't stay occupied forever.
+		zombieWrapper := false
 		if hasPID && CheckPIDAlive(pid) {
-			continue
+			if !CheckProcessZombie(pid) {
+				continue
+			}
+			zombieWrapper = true
+			fmt.Printf("Job %s wrapper pid %d is zombie - treating as gone\n", ids.FormatJobID(jobID), pid)
+			oplog.LogJob("job.zombie_detected", jobID, "", oplog.WithDetailf("pid=%d state=Z", pid))
 		}
 
 		// If the waitForJob goroutine is still tracking this process,
 		// it will handle the exit — don't treat it as an orphan.
 		// This avoids a race where bash exits, Wait() returns, but
 		// the status file hasn't been written yet when we check here.
-		r.processesMu.Lock()
-		_, hasWaiter := r.processes[jobIDStr]
-		r.processesMu.Unlock()
-		if hasWaiter {
-			continue
+		// Skip this guard for zombies: the wrapper is already reaped/dead
+		// in any meaningful sense and Wait() will not produce a status file.
+		if !zombieWrapper {
+			r.processesMu.Lock()
+			_, hasWaiter := r.processes[jobIDStr]
+			r.processesMu.Unlock()
+			if hasWaiter {
+				continue
+			}
 		}
 
 		// Wrapper gone — kill orphaned process group
@@ -881,6 +895,40 @@ func (r *Runner) refreshRunningJobs() {
 			fmt.Printf("Killing orphaned process group %d for job %s\n", pgid, ids.FormatJobID(jobID))
 			KillProcessGroup(pgid)
 			oplog.LogJob("job.orphan_killed", jobID, "", oplog.WithDetailf("pgid=%d", pgid))
+		}
+
+		// Reap the zombie wrapper (if any) so the process table entry clears.
+		// Best-effort: if syscall.Exec preserved the parent-child relation
+		// we should succeed; if Wait returns ECHILD we silently move on.
+		if zombieWrapper {
+			reapZombie(pid)
+		}
+
+		// Re-check for a status file before declaring the job orphaned. The
+		// wrapper's SIGTERM trap (WrapCommandWithExitCapture) writes the
+		// status file at process exit, and the gap between the top-of-loop
+		// stat at paths.Status and this point is wide enough for the trap
+		// to land. If a real status file arrived, use the existing recovery
+		// path (read its exit code) rather than clobbering it with a
+		// synthetic ExitCode: 1.
+		if exitCode, ok := ReadStatusFile(paths.Status); ok {
+			ei := ExitInfo{ExitCode: exitCode}
+			endTime := time.Now().Unix()
+			rs, _ := r.state.GetRunning(jobIDStr)
+			if exitCode == 0 {
+				oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetail("exit=0 (recovered after orphan check)"))
+			} else {
+				failureReason := DetectFailureReasonFromExitInfo(ei)
+				WriteFailureReasonFile(paths, failureReason)
+				oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("exit=%d (recovered after orphan check)", exitCode))
+			}
+			WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, nil)
+			WriteRusageFile(paths, rs)
+			r.state.RecordFinished(jobIDStr, exitCode, endTime)
+			r.state.RemoveRunning(jobIDStr)
+			CleanupPIDFiles(paths)
+			changed = true
+			continue
 		}
 
 		// No status file — truly orphaned, exit code unknown

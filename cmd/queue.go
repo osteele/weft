@@ -10,12 +10,14 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -731,7 +733,50 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("The queue runner is now a Go binary. Use 'weft sync %s' to deploy the latest agent binary.\n", host)
+	spec := inventory.FindHost(host)
+	if spec == nil {
+		return fmt.Errorf("host %q is not in the local inventory; run 'weft host discover %s' first", host, host)
+	}
+
+	// Step 1: deploy the latest agent binary if the remote version differs.
+	deployed, err := agentdeploy.EnsureAgentUpToDate(host, *spec)
+	if err != nil {
+		return fmt.Errorf("deploy agent on %s: %w", host, err)
+	}
+	if deployed {
+		fmt.Printf("%s: agent binary updated\n", host)
+	} else {
+		fmt.Printf("%s: agent binary already up-to-date\n", host)
+	}
+
+	// Step 2: if the queue runner isn't running, start it. Otherwise send a
+	// restart op so the running process re-execs into the new binary. The
+	// restart op preserves the tmux session and queue state — pending jobs
+	// stay queued, current jobs keep running across the syscall.Exec.
+	runner := queuerunner.NewRunner(host)
+	running, err := runner.IsRunning()
+	if err != nil {
+		return fmt.Errorf("check queue runner on %s: %w", host, err)
+	}
+	if !running {
+		if _, err := ensureQueueRunnerStarted(host); err != nil {
+			return fmt.Errorf("start queue runner on %s: %w", host, err)
+		}
+		fmt.Printf("%s: queue runner started (was not running)\n", host)
+		return nil
+	}
+
+	// EnsureAgentUpToDate already sends a restart op when it deploys a new
+	// binary (see internal/agentdeploy/deploy.go). Only send our own when no
+	// deploy happened — otherwise we'd re-exec twice for no reason.
+	if !deployed {
+		if err := runner.SendRestartSignal(); err != nil {
+			return fmt.Errorf("send restart signal to %s: %w", host, err)
+		}
+		fmt.Printf("%s: queue runner restart signaled (no binary change)\n", host)
+		return nil
+	}
+	fmt.Printf("%s: queue runner restart signaled (picked up new binary)\n", host)
 	return nil
 }
 

@@ -347,6 +347,39 @@ type LifecycleEventKindCount struct {
 	Count int
 }
 
+// CountJobFailedAttempts counts job_attempts rows that completed with a
+// non-zero exit code (or a terminal failure status that isn't a clean cancel).
+// Used by the dispatcher as a fallback escalation signal alongside
+// CountJobDispatchFailuresMatching: legacy pre-preflight-rejection runners
+// reported source-provenance failures only via the runner log + exit code,
+// not via the lifecycle_events.queue.dispatch.failed channel. Counting failed
+// attempts catches those cases so R2-isolated fallback can still kick in.
+func CountJobFailedAttempts(database *sql.DB, jobID int64) (int, error) {
+	if database == nil || jobID == 0 {
+		return 0, nil
+	}
+	var n int
+	// A completed attempt with NULL exit_code is treated as a failure here
+	// on purpose: pre-PREFLIGHT_REJECTED runners that died before writing a
+	// status file left exactly that shape (status=completed, exit_code=NULL).
+	// Those are the legacy attempts the R2 escalation fallback was added to
+	// recover; folding NULL→0 with COALESCE would silently exclude them.
+	err := database.QueryRow(`
+		SELECT COUNT(*) FROM job_attempts
+		WHERE job_id = ?
+		  AND end_time IS NOT NULL
+		  AND (
+		    status IN ('failed','dead')
+		    OR (status = 'completed' AND (exit_code IS NULL OR exit_code != 0))
+		  )`,
+		jobID,
+	).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // CountJobDispatchFailuresMatching counts EventQueueDispatchFailed rows for a
 // job whose detail starts with detailPrefix. Used by the dispatcher to decide
 // whether to escalate a repeated source-provenance mismatch to an

@@ -109,7 +109,15 @@ func localAgentSourceVersion(repoRoot string) (string, error) {
 }
 
 func agentSourceFiles(repoRoot string) ([]string, error) {
-	const goListTimeout = 3 * time.Second
+	// `go list -deps -json ./cmd/agent` walks every transitive dependency
+	// and is regularly 10–20s on a cold build cache (Apple Silicon, no GOCACHE
+	// hits). With a 3-second budget the source-hash version path always lost
+	// to jjVersion in normal development, which meant uncommitted agent
+	// changes inherited the parent commit's version and `agentdeploy.EnsureBuilt`
+	// happily served a cached stale binary instead of rebuilding. 60s is
+	// generous but still bounded, and the timeout only matters on the rare
+	// first invocation per cache state.
+	const goListTimeout = 60 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), goListTimeout)
 	defer cancel()
 

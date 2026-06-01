@@ -5,6 +5,64 @@ import (
 	"time"
 )
 
+func TestCountJobFailedAttempts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Job with no attempts -> 0
+	insertTestJob(t, database, 100, "echo a", "/tmp", StatusQueued)
+	if n, err := CountJobFailedAttempts(database, 100); err != nil || n != 0 {
+		t.Fatalf("queued-only job: n=%d err=%v, want 0, nil", n, err)
+	}
+
+	// Job with one completed attempt, exit 0 -> 0
+	insertTestJob(t, database, 101, "echo b", "/tmp", StatusCompleted, withExitCode(0))
+	if n, err := CountJobFailedAttempts(database, 101); err != nil || n != 0 {
+		t.Fatalf("clean completion: n=%d err=%v, want 0, nil", n, err)
+	}
+
+	// Job with one completed attempt, exit 1 -> 1 (legacy failure shape:
+	// runner marks attempt completed with non-zero exit, the dispatcher
+	// must treat this as a failure signal for R2 escalation).
+	insertTestJob(t, database, 102, "echo c", "/tmp", StatusCompleted, withExitCode(1))
+	if n, err := CountJobFailedAttempts(database, 102); err != nil || n != 1 {
+		t.Fatalf("legacy failed completion: n=%d err=%v, want 1, nil", n, err)
+	}
+
+	// Job with completed status but NULL exit_code -> 1 (legacy runner
+	// that died before writing status file leaves this shape; the R2
+	// escalation fallback is specifically supposed to catch it).
+	insertTestJob(t, database, 106, "echo g", "/tmp", StatusCompleted)
+	if n, err := CountJobFailedAttempts(database, 106); err != nil || n != 1 {
+		t.Fatalf("completed with NULL exit_code: n=%d err=%v, want 1, nil (legacy pre-fix shape)", n, err)
+	}
+
+	// Job with explicit failed status
+	insertTestJob(t, database, 103, "echo d", "/tmp", StatusFailed)
+	if n, err := CountJobFailedAttempts(database, 103); err != nil || n != 1 {
+		t.Fatalf("failed status: n=%d err=%v, want 1, nil", n, err)
+	}
+
+	// Job with dead status
+	insertTestJob(t, database, 104, "echo e", "/tmp", StatusDead)
+	if n, err := CountJobFailedAttempts(database, 104); err != nil || n != 1 {
+		t.Fatalf("dead status: n=%d err=%v, want 1, nil", n, err)
+	}
+
+	// Canceled is not a failure
+	insertTestJob(t, database, 105, "echo f", "/tmp", StatusCanceled)
+	if n, err := CountJobFailedAttempts(database, 105); err != nil || n != 0 {
+		t.Fatalf("canceled job: n=%d err=%v, want 0, nil", n, err)
+	}
+
+	// Nil DB / zero ID should return 0,nil without panicking
+	if n, err := CountJobFailedAttempts(nil, 102); err != nil || n != 0 {
+		t.Fatalf("nil db: n=%d err=%v, want 0, nil", n, err)
+	}
+	if n, err := CountJobFailedAttempts(database, 0); err != nil || n != 0 {
+		t.Fatalf("zero job id: n=%d err=%v, want 0, nil", n, err)
+	}
+}
+
 func TestInsertAndListLifecycleEvents(t *testing.T) {
 	database := SetupTestDB(t)
 
