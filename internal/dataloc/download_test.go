@@ -3,8 +3,10 @@ package dataloc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildHFDownloadCommand_Model(t *testing.T) {
@@ -79,16 +81,39 @@ func TestRunHostCommand_LocalhostUsesLocalRunner(t *testing.T) {
 	}
 }
 
+// detachedDownloadMock returns a hostCommandRunner that models the spawn/poll
+// flow of runDetachedRemoteCommand. The download is reported as having
+// finished with exitCode and the given captured stderr on the first poll.
+// df queries (from checkHFCacheFreeSpace) are still answered with abundant
+// free space.
+func detachedDownloadMock(t *testing.T, exitCode int, capturedStderr string) commandRunnerFunc {
+	t.Helper()
+	// Speed up the polling so tests don't pay 5s per assertion.
+	origInterval := detachedPollInterval
+	detachedPollInterval = 1 * time.Millisecond
+	t.Cleanup(func() { detachedPollInterval = origInterval })
+	return func(_ context.Context, _ string, command string) (string, string, error) {
+		switch {
+		case strings.Contains(command, "df -Pk"):
+			return "123456789\n", "", nil
+		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+			// Spawn succeeded.
+			return "OK\n", "", nil
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			// Poll: report completion with captured stderr.
+			return fmt.Sprintf("STATUS=%d\n---STDERR---\n%s", exitCode, capturedStderr), "", nil
+		default:
+			return "", "", fmt.Errorf("unexpected command in test mock: %s", command)
+		}
+	}
+}
+
 func TestDownloadAssetToHost_RepoNotFoundMessageIsActionable(t *testing.T) {
 	origHostRunner := hostCommandRunner
 	t.Cleanup(func() { hostCommandRunner = origHostRunner })
 
-	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
-		if strings.Contains(command, "df -Pk") {
-			return "123456789\n", "", nil
-		}
-		return "", "Error: Repository not found.\nCheck the `repo_id` and `repo_type` parameters.\n", errors.New("exit status 1")
-	}
+	hostCommandRunner = detachedDownloadMock(t, 1,
+		"Error: Repository not found.\nCheck the `repo_id` and `repo_type` parameters.\n")
 
 	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFModel, ID: "application/json"}, "main")
 	if err == nil {
@@ -113,12 +138,7 @@ func TestDownloadAssetToHost_GenericStderrIsNormalized(t *testing.T) {
 	origHostRunner := hostCommandRunner
 	t.Cleanup(func() { hostCommandRunner = origHostRunner })
 
-	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
-		if strings.Contains(command, "df -Pk") {
-			return "123456789\n", "", nil
-		}
-		return "", "first line\nsecond line\n", errors.New("exit status 1")
-	}
+	hostCommandRunner = detachedDownloadMock(t, 1, "first line\nsecond line\n")
 
 	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFModel, ID: "gpt2"}, "main")
 	if err == nil {
@@ -137,12 +157,12 @@ func TestDownloadAssetToHost_IncludesStdoutRetryLoop(t *testing.T) {
 	origHostRunner := hostCommandRunner
 	t.Cleanup(func() { hostCommandRunner = origHostRunner })
 
-	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
-		if strings.Contains(command, "df -Pk") {
-			return "123456789\n", "", nil
-		}
-		return "Fetching 52 files...\nNo local file found. Retrying...\n", "", errors.New("exit status 1")
-	}
+	// In real life the hf CLI surfaces "No local file found. Retrying..."
+	// on stderr (stdout is /dev/null in buildHFDownloadCommand). The
+	// detached runner captures stderr from the remote stderr.log; that's
+	// what reaches formatHFDownloadError's stderr argument.
+	hostCommandRunner = detachedDownloadMock(t, 1,
+		"Fetching 52 files...\nNo local file found. Retrying...\n")
 
 	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFDataset, ID: "DKYoon/SlimPajama-6B"}, "main")
 	if err == nil {
@@ -153,6 +173,46 @@ func TestDownloadAssetToHost_IncludesStdoutRetryLoop(t *testing.T) {
 		t.Fatalf("expected retry-loop diagnosis, got: %q", msg)
 	}
 	if !strings.Contains(msg, "No local file found") {
-		t.Fatalf("expected stdout to be included, got: %q", msg)
+		t.Fatalf("expected stderr to be included, got: %q", msg)
+	}
+}
+
+// TestRunDetachedRemoteCommand_CancelKillsRemote verifies that when the
+// caller's context is cancelled mid-poll, the helper sends a SIGTERM to
+// the remote PID before returning ctx.Err(). Without this, weft data fetch
+// orphans nohup'd processes when the user hits Ctrl-C.
+func TestRunDetachedRemoteCommand_CancelKillsRemote(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+	origInterval := detachedPollInterval
+	detachedPollInterval = 1 * time.Millisecond
+	t.Cleanup(func() { detachedPollInterval = origInterval })
+
+	var killed bool
+	hostCommandRunner = func(ctx context.Context, _ string, command string) (string, string, error) {
+		switch {
+		case strings.Contains(command, "nohup bash -c"):
+			return "OK\n", "", nil
+		case strings.Contains(command, "kill -TERM"):
+			killed = true
+			return "", "", nil
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "RUNNING\n", "", nil
+		}
+		return "", "", fmt.Errorf("unexpected command: %s", command)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, _, err := runDetachedRemoteCommand(ctx, "cool30", "sleep 30")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if !killed {
+		t.Fatal("expected SIGTERM to be sent to remote PID on context cancel")
 	}
 }

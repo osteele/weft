@@ -3,13 +3,16 @@ package dataloc
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	gosync "sync"
+	"time"
 
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -26,7 +29,10 @@ type commandRunnerFunc func(ctx context.Context, host, command string) (string, 
 var hostCommandRunner commandRunnerFunc = defaultHostCommandRunner
 
 // DownloadAssetToHost ensures the requested HF asset is present in the host's
-// local HF cache, then returns the discovered cache entry.
+// local HF cache, then returns the discovered cache entry. The download itself
+// runs as a detached process on the remote (see runDetachedRemoteCommand) so a
+// VPN blip or SSH ServerAliveCountMax tripping mid-download doesn't kill the
+// transfer — only the cheap poll calls need stable connectivity.
 func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revision string) (HostDataEntry, error) {
 	if revision == "" {
 		revision = "main"
@@ -38,8 +44,12 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 	if err != nil {
 		return HostDataEntry{}, err
 	}
-	if stdout, stderr, err := hostCommandRunner(ctx, host, cmd); err != nil {
-		return HostDataEntry{}, formatHFDownloadError(host, asset, strings.TrimSpace(stdout+"\n"+stderr), err)
+	exitCode, stderr, err := runDetachedRemoteCommand(ctx, host, cmd)
+	if err != nil {
+		return HostDataEntry{}, formatHFDownloadError(host, asset, stderr, err)
+	}
+	if exitCode != 0 {
+		return HostDataEntry{}, formatHFDownloadError(host, asset, stderr, fmt.Errorf("remote download exited %d", exitCode))
 	}
 
 	entries, err := ScanHFCacheDetailed(host)
@@ -53,6 +63,154 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 	}
 
 	return HostDataEntry{}, fmt.Errorf("asset %s downloaded on %s but not found in HF cache scan", asset, host)
+}
+
+// detachedPollInterval is how long runDetachedRemoteCommand waits between
+// successive polls of the remote .status file. Each poll is a short SSH call
+// (typically <1s); the interval bounds the wall-clock noise added on top of
+// the actual remote work.
+var detachedPollInterval = 5 * time.Second
+
+// detachedSpawnTimeout caps the SSH call that spawns the detached process.
+// Spawning is cheap (a few file writes and a fork) so a short bound here just
+// fails fast on connectivity issues rather than blocking on a hung session.
+var detachedSpawnTimeout = 30 * time.Second
+
+// runDetachedRemoteCommand runs `command` on `host` as a nohup'd detached
+// process, polling a small status file for completion. Each SSH call (spawn
+// + each poll + final reap) is short and well within the ServerAliveCountMax
+// window of the SSH connection pool, so VPN blips or network jitter that
+// would kill a multi-minute streaming SSH command are tolerated here — the
+// remote work continues running, and the next poll picks up the status file
+// when it lands.
+//
+// Returns the remote command's exit code and any captured stderr. On context
+// cancel, sends SIGTERM to the remote process (best-effort) before returning
+// ctx.Err().
+//
+// The remote uses ~/.cache/weft/data-fetch/<runID>/ as a per-call scratch
+// directory holding pid, status, and stderr.log. The directory is left in
+// place after success for ad-hoc inspection; callers that want to clean up
+// can do so themselves.
+func runDetachedRemoteCommand(ctx context.Context, host, command string) (int, string, error) {
+	runID, err := newRunID()
+	if err != nil {
+		return -1, "", fmt.Errorf("generate run id: %w", err)
+	}
+	// Note: $HOME is expanded by the remote shell, not Go. We avoid embedding
+	// the resolved absolute path here so the same script works regardless of
+	// the remote user's home.
+	runDir := fmt.Sprintf("$HOME/.cache/weft/data-fetch/%s", runID)
+
+	// Spawn the command in a nohup'd background bash with an EXIT trap that
+	// writes the exit code to the status file. Heredoc keeps the user
+	// command literal — no Go-side escaping of $vars, backticks, etc. The
+	// heredoc delimiter is unique enough not to collide with the body.
+	const heredocDelim = "WEFT_DETACHED_CMD_END"
+	if strings.Contains(command, heredocDelim) {
+		return -1, "", fmt.Errorf("command contains reserved heredoc delimiter %q", heredocDelim)
+	}
+	spawnCmd := fmt.Sprintf(`set -e
+D=%s
+mkdir -p "$D"
+cat > "$D/cmd.sh" <<'%s'
+%s
+%s
+chmod +x "$D/cmd.sh"
+nohup bash -c "trap '_e=\$?; echo \$_e > \"$D/status\"; exit \$_e' EXIT TERM INT; bash \"$D/cmd.sh\"" > "$D/stdout.log" 2> "$D/stderr.log" < /dev/null &
+echo $! > "$D/pid"
+disown 2>/dev/null || true
+echo OK
+`, runDir, heredocDelim, command, heredocDelim)
+
+	spawnCtx, spawnCancel := context.WithTimeout(ctx, detachedSpawnTimeout)
+	_, spawnStderr, err := hostCommandRunner(spawnCtx, host, spawnCmd)
+	spawnCancel()
+	if err != nil {
+		return -1, normalizeShellStderr(spawnStderr), fmt.Errorf("spawn detached command on %s: %w", host, err)
+	}
+
+	checkCmd := fmt.Sprintf(`D=%s
+if [ -f "$D/status" ]; then
+  echo "STATUS=$(cat "$D/status")"
+  echo "---STDERR---"
+  cat "$D/stderr.log" 2>/dev/null || true
+elif [ -f "$D/pid" ] && kill -0 $(cat "$D/pid") 2>/dev/null; then
+  echo "RUNNING"
+else
+  echo "ORPHANED"
+  echo "---STDERR---"
+  cat "$D/stderr.log" 2>/dev/null || true
+fi
+`, runDir)
+
+	killCmd := fmt.Sprintf(`D=%s
+if [ -f "$D/pid" ]; then kill -TERM $(cat "$D/pid") 2>/dev/null || true; fi
+`, runDir)
+
+	slog.Debug("detached remote command spawned", "host", host, "run_id", runID)
+
+	timer := time.NewTimer(detachedPollInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// Best-effort kill using a fresh context so a timed-out parent
+			// doesn't prevent us from sending the SIGTERM.
+			killCtx, killCancel := context.WithTimeout(context.Background(), detachedSpawnTimeout)
+			_, _, _ = hostCommandRunner(killCtx, host, killCmd)
+			killCancel()
+			return -1, "", ctx.Err()
+		case <-timer.C:
+		}
+		timer.Reset(detachedPollInterval)
+
+		pollCtx, pollCancel := context.WithTimeout(ctx, detachedSpawnTimeout)
+		stdout, _, pollErr := hostCommandRunner(pollCtx, host, checkCmd)
+		pollCancel()
+		if pollErr != nil {
+			slog.Debug("detached poll SSH failed; will retry", "host", host, "run_id", runID, "error", pollErr)
+			continue
+		}
+
+		head, capturedStderr := splitDetachedPoll(stdout)
+		switch {
+		case strings.HasPrefix(head, "STATUS="):
+			ecStr := strings.TrimSpace(strings.TrimPrefix(head, "STATUS="))
+			ec, perr := strconv.Atoi(ecStr)
+			if perr != nil {
+				return -1, capturedStderr, fmt.Errorf("parse remote status %q: %w", ecStr, perr)
+			}
+			return ec, capturedStderr, nil
+		case head == "RUNNING":
+			continue
+		case head == "ORPHANED":
+			return -1, capturedStderr, fmt.Errorf("remote process orphaned (pid not alive, no status file)")
+		default:
+			slog.Debug("unexpected detached poll output", "host", host, "run_id", runID, "head", head)
+		}
+	}
+}
+
+// splitDetachedPoll separates the STATUS/RUNNING/ORPHANED header from the
+// stderr tail in the format produced by the checkCmd shell snippet.
+func splitDetachedPoll(out string) (head, stderr string) {
+	parts := strings.SplitN(out, "---STDERR---\n", 2)
+	head = strings.TrimSpace(parts[0])
+	if len(parts) > 1 {
+		stderr = parts[1]
+	}
+	return head, stderr
+}
+
+// newRunID returns a short, mostly-unique identifier for a single detached
+// remote command invocation. Format: <unix-seconds>-<8 random hex bytes>.
+func newRunID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d-%x", time.Now().Unix(), b), nil
 }
 
 func formatHFDownloadError(host string, asset DataAsset, stderr string, runErr error) error {
