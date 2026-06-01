@@ -159,7 +159,10 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			MovingJobs: movingJobs,
 		})
 		if rebErr != nil {
-			return nil, rebErr
+			return &GroupedAutoPilotResult{
+				Launched:      moveRetryLaunches,
+				AutoReplanned: autoReplanned,
+			}, rebErr
 		}
 		return &GroupedAutoPilotResult{
 			Rebalanced:    len(rebalanceResult.Moves),
@@ -170,7 +173,10 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, err
+		return &GroupedAutoPilotResult{
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
+		}, err
 	}
 	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
 	if len(unplaced) == 0 {
@@ -180,7 +186,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			MovingJobs: movingJobs,
 		})
 		if err != nil {
-			return nil, err
+			return &GroupedAutoPilotResult{
+				Placed:        prePlaced,
+				Launched:      moveRetryLaunches,
+				AutoReplanned: autoReplanned,
+			}, err
 		}
 		return &GroupedAutoPilotResult{
 			Placed:        prePlaced,
@@ -193,7 +203,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	launches, err := db.ListRunningLaunches(database)
 	if err != nil {
-		return nil, err
+		return &GroupedAutoPilotResult{
+			Placed:        prePlaced,
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
+		}, err
 	}
 	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
 	for _, ci := range launches {
@@ -211,7 +225,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		oplog.Log("auto_pilot.planner_error",
 			oplog.WithError(err),
 			oplog.WithDetailf("unplaced=%d capacities=%d", len(unplaced), len(capacities)))
-		return nil, err
+		return &GroupedAutoPilotResult{
+			Placed:        prePlaced,
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
+		}, err
 	}
 	blockedReasons := map[int64]string{}
 	structuredBlocked := map[int64]*blockreason.Structured{}
@@ -331,7 +349,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		MovingJobs: movingJobs,
 	})
 	if err != nil {
-		return nil, err
+		return &GroupedAutoPilotResult{
+			Placed:        placed,
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
+		}, err
 	}
 	rebalanced := len(rebalanceResult.Moves)
 
@@ -343,7 +365,13 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	remaining, err := db.ListUnplacedJobs(database)
 	if err != nil {
-		return nil, err
+		return &GroupedAutoPilotResult{
+			Placed:        placed,
+			Rebalanced:    rebalanced,
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
+			ReuseFilled:   reuseFilled,
+		}, err
 	}
 	rentalScope := make([]int64, 0, len(remaining))
 	allCandidates := make([]int64, 0, len(remaining))

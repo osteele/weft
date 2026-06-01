@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,6 +184,40 @@ func TestRunGroupedAutoPilotPass_InventoryTaggedJobsBypassCloudPlanner(t *testin
 	}
 	if len(job.PlacementReasons) == 0 || job.PlacementReasons[len(job.PlacementReasons)-1] != inventoryAwaitingReason {
 		t.Fatalf("inventory placement_reasons did not end with %q: %v", inventoryAwaitingReason, job.PlacementReasons)
+	}
+}
+
+func TestRunGroupedAutoPilotPass_ErrorPathStillCarriesInventoryReasons(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	invID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "inventory job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU inventory: %v", err)
+	}
+	if err := db.SetJobTags(database, invID, []string{db.TagInventory}); err != nil {
+		t.Fatalf("SetJobTags inventory: %v", err)
+	}
+	if _, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "cloud job", "A100"); err != nil {
+		t.Fatalf("RecordQueuedWithGPU cloud: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	t.Cleanup(func() { autoPilotBuildPlan = originalBuildPlan })
+
+	wantErr := errors.New("planner exploded")
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{}, wantErr
+	}
+
+	result, runErr := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if !errors.Is(runErr, wantErr) {
+		t.Fatalf("err = %v, want wrapping %v", runErr, wantErr)
+	}
+	if result == nil {
+		t.Fatal("result is nil; error paths after inventory partition must return a non-nil result so callers see inventory reasons")
+	}
+	if got := result.BlockedReasons[invID]; got != inventoryAwaitingReason {
+		t.Fatalf("inventory job blocked reason = %q, want %q", got, inventoryAwaitingReason)
 	}
 }
 
