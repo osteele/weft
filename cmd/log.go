@@ -409,6 +409,15 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	return nil
 }
 
+// shouldUseCloudLogs routes log lookups to the cloud (R2/SSH) path when the
+// job's most recent attempt ran on (or is currently assigned to) a rental
+// instance. Jobs whose latest attempt ran on an inventory host fall through
+// to the on-prem path — even if an *earlier* attempt was on a rental — so
+// that requeued-after-cool30-failure jobs don't get the misleading "log not
+// found in R2" error.
+//
+// An unplaced job whose only history is a cloud attempt still routes to the
+// cloud path: its latest attempt is the cloud one.
 func shouldUseCloudLogs(database *sql.DB, job *db.Job) bool {
 	if job == nil {
 		return false
@@ -419,8 +428,12 @@ func shouldUseCloudLogs(database *sql.DB, job *db.Job) bool {
 	if database == nil {
 		return false
 	}
-	attempts, err := db.GetLaunchAttempts(database, job.ID)
-	return err == nil && len(attempts) > 0
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil || len(attempts) == 0 {
+		return false
+	}
+	// ListAttempts returns newest first.
+	return attempts[0].LaunchID != nil
 }
 
 // runLogForCloudJob fetches log output for a cloud-based job.

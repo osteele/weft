@@ -406,3 +406,58 @@ func TestShouldUseCloudLogsTrueForUnplacedJobWithCloudHistory(t *testing.T) {
 		t.Fatal("shouldUseCloudLogs() = false, want true for unplaced job with cloud attempts")
 	}
 }
+
+// Regression: a job whose latest attempt ran on an inventory host must not
+// route to the cloud log path just because an *earlier* attempt was on a
+// rental instance. Symptom before the fix: `weft jobs log` produced
+// "log not found in R2 for job ... (instance was terminated before log
+// upload)" for jobs that had since been requeued onto cool30 / cool100.
+func TestShouldUseCloudLogsFalseWhenLatestAttemptIsInventory(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	// Attempt #1: canceled on a rental instance (mirrors wj2301 attempt #1).
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	endTime := time.Now().Unix() - 60
+	if err := db.CloseAttempt(database, jobID, db.StatusCanceled, nil, endTime); err != nil {
+		t.Fatalf("CloseAttempt cloud: %v", err)
+	}
+	if err := db.CloseLaunchAttempt(database, jobID, db.AttemptOutcomeCancelled); err != nil {
+		t.Fatalf("CloseLaunchAttempt: %v", err)
+	}
+
+	// Attempt #2: ran on inventory host cool30, exited 1 (mirrors wj2301 #2).
+	if _, err := db.CreateAttempt(database, jobID, "cool30", nil, db.StatusRunning); err != nil {
+		t.Fatalf("CreateAttempt cool30: %v", err)
+	}
+	exit := 1
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exit, time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt cool30 close: %v", err)
+	}
+	// Job is now awaiting retry.
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, db.StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status queued: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if shouldUseCloudLogs(database, job) {
+		attempts, _ := db.ListAttempts(database, jobID)
+		t.Fatalf("shouldUseCloudLogs() = true, want false; latest attempt should be inventory cool30. attempts=%+v", attempts)
+	}
+}
