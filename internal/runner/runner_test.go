@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,17 +207,143 @@ func TestStartJob_SourceProvenanceMismatchFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected provenance mismatch error")
 	}
-	if !strings.Contains(err.Error(), "source provenance check failed") {
-		t.Fatalf("error = %v, want provenance failure", err)
+	if !strings.Contains(err.Error(), "source_provenance_mismatch") {
+		t.Fatalf("error = %v, want source_provenance_mismatch", err)
 	}
 
 	paths := NewJobPaths(r.logDir, jobID)
-	status, readErr := os.ReadFile(paths.Status)
-	if readErr != nil {
-		t.Fatalf("read status file: %v", readErr)
+	// Preflight rejection must NOT write a status file. A status file would
+	// surface to the coordinator as exit_code=1 / duration=0s, masking the
+	// fact that the attempt never started.
+	if _, statErr := os.Stat(paths.Status); statErr == nil {
+		t.Fatal("preflight rejection wrote a status file; expected none")
 	}
-	if strings.TrimSpace(string(status)) != "1" {
-		t.Fatalf("status = %q, want 1", strings.TrimSpace(string(status)))
+	// Preflight rejection MUST NOT write a meta file. The presence of
+	// start_time in meta would make the attempt look like it ran.
+	if _, statErr := os.Stat(paths.Meta); statErr == nil {
+		t.Fatal("preflight rejection wrote a meta file; expected none")
+	}
+	// Preflight rejection MUST write the sentinel that batch-status reads.
+	if _, statErr := os.Stat(paths.PreflightRejected); statErr != nil {
+		t.Fatalf("preflight sentinel missing: %v", statErr)
+	}
+	// Preflight rejection MUST write the failure_reason file with the
+	// structured token so explain.ForJob and the diagnose surface can
+	// quote it back to the user.
+	reason := ReadFailureReasonFile(paths.FailureReason)
+	if !strings.HasPrefix(reason, "source_provenance_mismatch:") {
+		t.Fatalf("failure_reason = %q, want source_provenance_mismatch prefix", reason)
+	}
+	if !strings.Contains(reason, "expected=expected-hash") {
+		t.Fatalf("failure_reason = %q, want expected=expected-hash", reason)
+	}
+	if !strings.Contains(reason, "marker=different") {
+		t.Fatalf("failure_reason = %q, want marker=different", reason)
+	}
+}
+
+func TestStartJob_SourceProvenanceMatchPassesViaPerJobMarker(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	workDir := t.TempDir()
+	// Write the per-job marker; the rolling marker is intentionally absent
+	// so we know the runner used the per-job file (Layer C).
+	jobID := int64(708)
+	if err := os.WriteFile(
+		filepath.Join(workDir, srcsync.PerJobSourceMarkerFile(jobID)),
+		[]byte("matching-hash\n"), 0644,
+	); err != nil {
+		t.Fatalf("write per-job marker: %v", err)
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:        jobID,
+		Dir:       workDir,
+		Cmd:       "true",
+		SourceSHA: "matching-hash",
+	}, nil)
+	if err != nil {
+		t.Fatalf("startJob returned %v; expected nil (provenance match via per-job marker)", err)
+	}
+}
+
+func TestStartJob_R2IsolatedSourceFetchInvokesHook(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	workDir := t.TempDir()
+	jobID := int64(709)
+
+	var hookCalls int
+	var seenR2Key string
+	var seenPerJobDir string
+	r.EnsureSourceFromR2 = func(id int64, r2Key, perJobDir string) error {
+		hookCalls++
+		seenR2Key = r2Key
+		seenPerJobDir = perJobDir
+		// Materialize a minimal per-job dir so the rest of startJob has
+		// something to chdir into without errors.
+		if err := os.MkdirAll(perJobDir, 0o755); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:          jobID,
+		Dir:         workDir,
+		Cmd:         "true",
+		SourceR2Key: "sources/test-tarball.tar.gz",
+		// SourceSHA is intentionally set to confirm that R2 mode wins —
+		// the per-job marker check should be skipped when R2Key is set.
+		SourceSHA: "would-fail-marker-check",
+	}, nil)
+	if err != nil {
+		t.Fatalf("startJob returned %v; expected nil when EnsureSourceFromR2 succeeds", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("EnsureSourceFromR2 invoked %d times, want 1", hookCalls)
+	}
+	if seenR2Key != "sources/test-tarball.tar.gz" {
+		t.Fatalf("hook saw r2Key=%q, want sources/test-tarball.tar.gz", seenR2Key)
+	}
+	if !strings.Contains(seenPerJobDir, "weft/jobs/") || !strings.HasSuffix(seenPerJobDir, "/source") {
+		t.Fatalf("hook saw perJobDir=%q, want a path like .../weft/jobs/<id>/source", seenPerJobDir)
+	}
+}
+
+func TestStartJob_R2IsolatedSourceFetchFailureRejectsPreflight(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	workDir := t.TempDir()
+	jobID := int64(710)
+
+	r.EnsureSourceFromR2 = func(_ int64, _, _ string) error {
+		return errors.New("simulated download failure")
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:          jobID,
+		Dir:         workDir,
+		Cmd:         "echo should-not-run",
+		SourceR2Key: "sources/missing.tar.gz",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected preflight rejection error")
+	}
+	if !strings.Contains(err.Error(), "r2_isolated_source_fetch_failed") {
+		t.Fatalf("error = %v, want r2_isolated_source_fetch_failed", err)
+	}
+
+	paths := NewJobPaths(r.logDir, jobID)
+	if _, statErr := os.Stat(paths.Status); statErr == nil {
+		t.Fatal("R2 fetch failure wrote a status file; expected none")
+	}
+	if _, statErr := os.Stat(paths.PreflightRejected); statErr != nil {
+		t.Fatalf("preflight sentinel missing: %v", statErr)
+	}
+	reason := ReadFailureReasonFile(paths.FailureReason)
+	if !strings.HasPrefix(reason, "r2_isolated_source_fetch_failed") {
+		t.Fatalf("failure_reason = %q, want r2_isolated_source_fetch_failed prefix", reason)
 	}
 }
 

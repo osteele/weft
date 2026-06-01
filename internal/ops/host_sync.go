@@ -584,9 +584,74 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			job.Backend = backend
 		}
 
+		// Layer D: R2-isolated source fallback. When a job has previously
+		// failed the runner's preflight provenance check (per-job marker
+		// from Layer C didn't hold — e.g. because rsync --delete reaped it
+		// before our exclude pattern shipped, or because the working dir
+		// got nuked), escalate to a content-addressed R2 tarball so the
+		// runner can extract byte-identical sources into a per-job dir,
+		// bypassing the shared working directory entirely.
+		useR2Source := false
+		sourceR2Key := ""
+		if backend != db.BackendSlurm && job.WorkingDir != "" {
+			prior, perr := db.CountJobDispatchFailuresMatching(database, job.ID, "source_provenance_mismatch")
+			if perr != nil {
+				syncLog.Debug("count prior provenance failures failed", "job_id", job.ID, "error", perr)
+			} else if prior >= 1 {
+				// The expected SHA isn't stored on the job record — it lives
+				// in the failure detail of the prior dispatch event. Parse
+				// it out so we can decide whether the laptop tree can still
+				// reproduce it.
+				detail, detailErr := db.LatestJobDispatchFailureDetail(database, job.ID, "source_provenance_mismatch")
+				if detailErr != nil {
+					syncLog.Debug("read prior provenance failure detail failed", "job_id", job.ID, "error", detailErr)
+				}
+				expectedSHA := extractExpectedSHA(detail)
+				if expectedSHA == "" {
+					syncLog.Debug("prior provenance failure detail missing expected SHA; cannot escalate", "job_id", job.ID, "detail", detail)
+				} else {
+					localDir := workdir.ResolveLocal(job.WorkingDir)
+					currentSHA, hashErr := srcsync.ComputeSourceSHA256(localDir)
+					switch {
+					case hashErr != nil:
+						syncLog.Debug("source SHA recompute failed; cannot escalate to R2", "job_id", job.ID, "error", hashErr)
+					case currentSHA != expectedSHA:
+						// Pin lost: the laptop tree has moved past the SHA
+						// this job was queued against. We cannot
+						// reconstruct the original snapshot. Surface so
+						// diagnose tells the user what's actually wrong
+						// instead of looping silently.
+						reason := fmt.Sprintf("provenance_pin_lost: queued at %s, laptop now %s", shortSHA(expectedSHA), shortSHA(currentSHA))
+						recordFailure(job.ID, reason, fmt.Errorf("%s", reason))
+						continue
+					default:
+						// Laptop SHA still matches — upload the original
+						// tarball to R2 (content-addressed, idempotent)
+						// and switch the queue entry to R2-isolated mode.
+						r2c, r2Err := getR2Client()
+						if r2Err != nil {
+							syncLog.Debug("R2 client unavailable; falling back to normal sync", "job_id", job.ID, "error", r2Err)
+						} else {
+							uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+							key, uploadErr := srcsync.UploadSourceToR2ForInputs(uploadCtx, r2c, localDir, job.Inputs)
+							cancel()
+							if uploadErr != nil {
+								syncLog.Debug("R2 source upload failed; falling back to normal sync", "job_id", job.ID, "error", uploadErr)
+							} else {
+								useR2Source = true
+								sourceR2Key = key
+								syncLog.Info("escalated to R2-isolated source mode after prior provenance failure", "job_id", job.ID, "host", host, "r2_key", key)
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Sync sources, deduplicated by remote path.
 		// If sync fails, skip this job — don't queue it with stale code.
-		if job.WorkingDir != "" {
+		// Skipped entirely when this job is in R2-isolated mode.
+		if !useR2Source && job.WorkingDir != "" {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
 			if !syncedDirs[remoteDir] {
@@ -665,7 +730,23 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if job.WorkingDir != "" {
 			sourceSHA256 = sourceSHAByDir[workdir.ToTildeRelative(job.WorkingDir)]
 		}
-		if err := AppendJobToQueueWithSource(job, timeout, sourceSHA256); err != nil {
+		// Stamp the per-job source marker. The runner reads this file (not
+		// the rolling .weft-source.sha256) so peer-job syncs to the same
+		// working dir won't invalidate this job's preflight provenance
+		// check. Best-effort: a write failure here only loses the per-job
+		// marker; the runner falls back to the rolling marker, which keeps
+		// the legacy behaviour. Skipped in R2-isolated mode (the runner
+		// reads from a per-job dir extracted from R2, not the shared dir).
+		if !useR2Source && job.WorkingDir != "" && sourceSHA256 != "" {
+			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+			if err := srcsync.WriteRemoteSourceMarkerForJob(job.Host, remoteDir, job.ID, sourceSHA256, timeout); err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					return ensured, contacted, nil
+				}
+				syncLog.Debug("per-job source marker write failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
+			}
+		}
+		if err := AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, sourceR2Key); err != nil {
 			if ssh.IsConnectionError(err.Error()) {
 				recordDeferred(job.ID, "queue append deferred (host unreachable)", err)
 				return ensured, contacted, nil
@@ -739,6 +820,33 @@ func truncateDispatchDetail(s string) string {
 		s = s[:i]
 	}
 	return util.Truncate(strings.TrimSpace(s), 240)
+}
+
+// shortSHA returns the first 8 hex characters of a SHA, or the full string if
+// shorter. Used in human-readable dispatch-failure reasons where the full
+// 64-character hash would dominate the message.
+func shortSHA(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
+// extractExpectedSHA parses the "expected=<hex>" token out of a
+// source_provenance_mismatch dispatch detail. Returns "" when the token is
+// absent (older formats or truncated details).
+func extractExpectedSHA(detail string) string {
+	const prefix = "expected="
+	i := strings.Index(detail, prefix)
+	if i < 0 {
+		return ""
+	}
+	rest := detail[i+len(prefix):]
+	end := strings.IndexAny(rest, ", ")
+	if end < 0 {
+		return strings.TrimSpace(rest)
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {

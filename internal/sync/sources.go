@@ -72,6 +72,11 @@ func DefaultExcludes() []string {
 		"CLAUDE.md", "AGENTS.md", "WARP.md",
 		// Weft project config
 		".weft.toml", ".weft.yaml",
+		// Per-job source-provenance markers (written by the dispatcher on
+		// the remote host; never present in the local tree). Excluding them
+		// keeps rsync --delete from removing other queued jobs' markers
+		// when this job's sync runs into a shared working dir.
+		".weft-source.sha256", ".weft-source.*.sha256",
 	}
 }
 

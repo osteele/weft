@@ -48,6 +48,58 @@ func TestForJobExplainsInventoryDispatchBlock(t *testing.T) {
 	}
 }
 
+// TestForJobExplainsSourceProvenanceMismatchAsDispatchBlock validates that a
+// queued job whose latest dispatch failed with a source_provenance_mismatch
+// reason surfaces that reason through explain.ForJob (Layer A+B). Without
+// this wiring the diagnose surface falls back to the generic "job is queued
+// / wait" reply that triggered the original bug report.
+func TestForJobExplainsSourceProvenanceMismatchAsDispatchBlock(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	now := time.Unix(20_000, 0)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-2*time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	reason := "source_provenance_mismatch: expected=991f6ad9, marker=d7531f4c"
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: now.Add(-30 * time.Minute).Unix(),
+		EventKind:  db.EventQueueDispatchFailed,
+		JobID:      jobID,
+		Detail:     reason,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	x := ForJob(database, job, now)
+	if x.State != "blocked" {
+		t.Fatalf("State = %q, want blocked", x.State)
+	}
+	if !strings.Contains(x.PrimaryReason, "source_provenance_mismatch") {
+		t.Fatalf("PrimaryReason = %q, want source_provenance_mismatch", x.PrimaryReason)
+	}
+	if !strings.Contains(x.PrimaryReason, "expected=991f6ad9") {
+		t.Fatalf("PrimaryReason = %q, want expected=991f6ad9", x.PrimaryReason)
+	}
+	var hasReplan bool
+	for _, opt := range x.Options {
+		if opt.Label == "replan" {
+			hasReplan = true
+			break
+		}
+	}
+	if !hasReplan {
+		t.Fatalf("Options missing 'replan' choice: %+v", x.Options)
+	}
+}
+
 func TestForJobAutoReplanUsesStartOfDispatchBlockStreak(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")

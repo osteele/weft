@@ -129,6 +129,11 @@ const (
 	queueStatePaused
 	queueStateQueued
 	queueStateDead
+	// queueStatePreflightRejected signals that the runner refused to start an
+	// attempt before any startTime was stamped. Carries a populated
+	// FailureReason; ExitCode is always nil and Mtime carries the rejection
+	// timestamp.
+	queueStatePreflightRejected
 )
 
 type quickStatus struct {

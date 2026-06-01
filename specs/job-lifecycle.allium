@@ -259,6 +259,25 @@ entity JobAttempt {
     last_synced_status: String?     -- remote state at last successful sync
     pending_status: String?         -- what user wants (nil = no pending change)
     pending_at: Timestamp?          -- when user requested change
+
+    -- Derived: a "preflight-rejected" attempt is one the runner refused
+    -- to start before stamping a start_time. The DB shape is:
+    --   status        = failed
+    --   start_time    = null
+    --   exit_code     = null
+    --   end_time      = 0       (CloseAttempt was called with endTime=0)
+    --   failure_reason non-empty (e.g. "source_provenance_mismatch: ...")
+    -- See source-data-sync.allium § RunnerPreflightProvenanceCheck for the
+    -- runner-side semantics and status-sync.allium §
+    -- PreflightRejectionReconciled for the coordinator-side closure.
+    -- Display surfaces (cmd/job.go) render this as "preflight-rejected"
+    -- with Exit "-" and Duration "-". The Job itself stays queued so the
+    -- autopilot or user can replan.
+    is_preflight_rejected:
+        status = failed
+        and start_time = null
+        and exit_code = null
+        and failure_reason != null
 }
 
 -- Job processes get a small set of WEFT_* environment variables that let
@@ -478,6 +497,38 @@ rule JobDied {
     requires: job.status in {running, starting, queued}
 
     ensures: job.status = dead
+}
+
+-- Preflight rejection closes the attempt without running it. The runner's
+-- per-job provenance check (source-data-sync.allium §
+-- RunnerPreflightProvenanceCheck) refused to stamp start_time; the
+-- coordinator's batch-status reconciliation closes the attempt as failed
+-- with NULL start_time / exit_code, end_time = 0, and a populated
+-- failure_reason. The Job itself stays queued so the autopilot or user
+-- can replan it.
+rule PreflightRejectionClosesAttempt {
+    when: PreflightRejectionReported(job, reason)
+    requires: job.latest_attempt.start_time = null
+
+    ensures: job.latest_attempt.status = failed
+    ensures: job.latest_attempt.failure_reason = reason
+    ensures: job.latest_attempt.end_time = 0
+    ensures: job.latest_attempt.exit_code = null
+    -- Job stays queued; no RecordJobCompletion call.
+    ensures: job.status = queued
+
+    @guidance
+        -- Implementation anchors:
+        --   internal/ops/queue_batch.go    — applyBatchStatuses
+        --                                    (queueStatePreflightRejected
+        --                                    branch)
+        --   cmd/job.go                     — isAttemptPreflightRejected,
+        --                                    attemptStatus (renders as
+        --                                    "preflight-rejected" with
+        --                                    Exit "-" Duration "-")
+        -- The wire-level reconciliation contract (PREFLIGHT_REJECTED line
+        -- → coordinator closure + EventQueueDispatchFailed) lives in
+        -- status-sync.allium § PreflightRejectionReconciled.
 }
 
 -- ==========================================================================
@@ -1209,15 +1260,25 @@ invariant TerminalJobsHaveEndTime {
              job.latest_attempt.last_synced_status = null)
 
     @guidance
-        -- end_time = 0 is INVALID and must not be written. It breaks:
+        -- end_time = 0 is INVALID for jobs in a terminal status. It breaks:
         --   - CloseLaunchAttempts (WHERE end_time IS NULL misses 0)
         --   - ComputeJobState (LatestJobEnd > 0 treats 0 as "no end")
         --   - Self-destruct detection (requires LatestJobEnd > 0)
         -- The startup repair repairAttemptEndTimeZero fixes historical
         -- rows that were written as 0 by previous code. Any code path
-        -- that writes end_time must ensure it is either NULL (not yet
-        -- ended, OR cloud terminal pending backfill) or a positive
-        -- unix timestamp.
+        -- that writes end_time for a terminal *job* must ensure it is
+        -- either NULL (not yet ended, OR cloud terminal pending
+        -- backfill) or a positive unix timestamp.
+        --
+        -- Carve-out for preflight-rejected attempts (see
+        -- PreflightRejectionClosesAttempt): the attempt closes with
+        -- end_time = 0 by design, paired with start_time = null and
+        -- exit_code = null, because there is no execution boundary to
+        -- record. This is consistent with the invariant because the
+        -- containing Job stays in `queued` (not terminal); only the
+        -- specific attempt row carries end_time = 0. is_preflight_rejected
+        -- on the attempt narrows display surfaces to the "preflight-
+        -- rejected" rendering without touching the job's terminal status.
         --
         -- RecordCloudJobCompletion (cloud terminal writer) prefers the
         -- agent's authoritative end_time from <jobID>.completion.json,

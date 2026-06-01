@@ -347,6 +347,57 @@ type LifecycleEventKindCount struct {
 	Count int
 }
 
+// CountJobDispatchFailuresMatching counts EventQueueDispatchFailed rows for a
+// job whose detail starts with detailPrefix. Used by the dispatcher to decide
+// whether to escalate a repeated source-provenance mismatch to an
+// R2-isolated fallback (Layer D).
+func CountJobDispatchFailuresMatching(database *sql.DB, jobID int64, detailPrefix string) (int, error) {
+	if database == nil || jobID == 0 {
+		return 0, nil
+	}
+	var n int
+	err := database.QueryRow(`
+		SELECT COUNT(*) FROM lifecycle_events
+		WHERE job_id = ?
+		  AND event_kind = ?
+		  AND COALESCE(detail, '') LIKE ?`,
+		jobID, EventQueueDispatchFailed, detailPrefix+"%",
+	).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// LatestJobDispatchFailureDetail returns the detail string of the most recent
+// EventQueueDispatchFailed event for a job whose detail starts with
+// detailPrefix. Returns "" with nil error when no matching event exists.
+// Used by the dispatcher to extract the expected source SHA from a prior
+// provenance failure when deciding whether the laptop tree can still
+// reconstruct it.
+func LatestJobDispatchFailureDetail(database *sql.DB, jobID int64, detailPrefix string) (string, error) {
+	if database == nil || jobID == 0 {
+		return "", nil
+	}
+	var detail sql.NullString
+	err := database.QueryRow(`
+		SELECT detail FROM lifecycle_events
+		WHERE job_id = ?
+		  AND event_kind = ?
+		  AND COALESCE(detail, '') LIKE ?
+		ORDER BY occurred_at DESC, id DESC
+		LIMIT 1`,
+		jobID, EventQueueDispatchFailed, detailPrefix+"%",
+	).Scan(&detail)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return detail.String, nil
+}
+
 // CountLifecycleEventsByKind returns event counts grouped by kind, ordered by count descending.
 func CountLifecycleEventsByKind(database *sql.DB, filter LifecycleEventFilter) ([]LifecycleEventKindCount, error) {
 	var conditions []string

@@ -35,12 +35,22 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 // AppendJobToQueueWithSource adds an existing job to the remote queue and
 // includes an optional source snapshot hash for provenance checks.
 func AppendJobToQueueWithSource(job *db.Job, timeout time.Duration, sourceSHA256 string) error {
+	return AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, "")
+}
+
+// AppendJobToQueueWithSourceAndR2 adds an existing job to the remote queue
+// with an optional source SHA and an optional R2 source-tarball key. When
+// sourceR2Key is non-empty, the runner switches to R2-isolated mode for this
+// job (Layer D fallback): it downloads the tarball, extracts into a per-job
+// dir, and skips the marker check.
+func AppendJobToQueueWithSourceAndR2(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
 	entry := QueueEntry{
 		JobID:        job.ID,
 		WorkingDir:   job.WorkingDir,
 		Command:      job.Command,
 		Description:  job.Description,
 		SourceSHA256: sourceSHA256,
+		SourceR2Key:  sourceR2Key,
 		EnvVars:      job.EnvVars,
 		DepSpec:      job.DepSpec,
 		CPUAllotment: job.CPUAllotment,

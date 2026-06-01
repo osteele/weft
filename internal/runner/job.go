@@ -151,22 +151,23 @@ func logTailMentionsCUDADriverTooOld(tail string) bool {
 
 // JobPaths holds all file paths for a job.
 type JobPaths struct {
-	Log           string
-	Status        string
-	Meta          string
-	PID           string
-	PGID          string
-	Samples       string
-	Paused        string
-	Rusage        string
-	FailureReason string
-	Timeseries    string
-	Telemetry     string
-	KillReason    string
-	Heartbeat     string
-	Completion    string
-	Phases        string
-	ManifestError string
+	Log               string
+	Status            string
+	Meta              string
+	PID               string
+	PGID              string
+	Samples           string
+	Paused            string
+	Rusage            string
+	FailureReason     string
+	Timeseries        string
+	Telemetry         string
+	KillReason        string
+	Heartbeat         string
+	Completion        string
+	Phases            string
+	ManifestError     string
+	PreflightRejected string
 }
 
 // TimeseriesSample holds a single time-series telemetry sample for a running job.
@@ -191,22 +192,23 @@ type TimeseriesSample struct {
 // NewJobPaths returns file paths for all job-related files.
 func NewJobPaths(logDir string, jobID int64) JobPaths {
 	return JobPaths{
-		Log:           filepath.Join(logDir, fmt.Sprintf("%d.log", jobID)),
-		Status:        filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)),
-		Meta:          filepath.Join(logDir, fmt.Sprintf("%d.meta", jobID)),
-		PID:           filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID)),
-		PGID:          filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID)),
-		Samples:       filepath.Join(logDir, fmt.Sprintf("%d.samples", jobID)),
-		Paused:        filepath.Join(logDir, fmt.Sprintf("%d.paused", jobID)),
-		Rusage:        filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
-		FailureReason: filepath.Join(logDir, fmt.Sprintf("%d.failure_reason", jobID)),
-		Timeseries:    filepath.Join(logDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)),
-		Telemetry:     filepath.Join(logDir, fmt.Sprintf("%d.telemetry.jsonl", jobID)),
-		KillReason:    filepath.Join(logDir, fmt.Sprintf("%d.kill_reason", jobID)),
-		Heartbeat:     filepath.Join(logDir, fmt.Sprintf("%d.heartbeat", jobID)),
-		Completion:    filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID)),
-		Phases:        filepath.Join(logDir, fmt.Sprintf("%d.phases.json", jobID)),
-		ManifestError: filepath.Join(logDir, fmt.Sprintf("%d.manifest_error", jobID)),
+		Log:               filepath.Join(logDir, fmt.Sprintf("%d.log", jobID)),
+		Status:            filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)),
+		Meta:              filepath.Join(logDir, fmt.Sprintf("%d.meta", jobID)),
+		PID:               filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID)),
+		PGID:              filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID)),
+		Samples:           filepath.Join(logDir, fmt.Sprintf("%d.samples", jobID)),
+		Paused:            filepath.Join(logDir, fmt.Sprintf("%d.paused", jobID)),
+		Rusage:            filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
+		FailureReason:     filepath.Join(logDir, fmt.Sprintf("%d.failure_reason", jobID)),
+		Timeseries:        filepath.Join(logDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)),
+		Telemetry:         filepath.Join(logDir, fmt.Sprintf("%d.telemetry.jsonl", jobID)),
+		KillReason:        filepath.Join(logDir, fmt.Sprintf("%d.kill_reason", jobID)),
+		Heartbeat:         filepath.Join(logDir, fmt.Sprintf("%d.heartbeat", jobID)),
+		Completion:        filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID)),
+		Phases:            filepath.Join(logDir, fmt.Sprintf("%d.phases.json", jobID)),
+		ManifestError:     filepath.Join(logDir, fmt.Sprintf("%d.manifest_error", jobID)),
+		PreflightRejected: filepath.Join(logDir, fmt.Sprintf("%d.preflight_rejected", jobID)),
 	}
 }
 
@@ -215,7 +217,7 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 // position of the prior on-host attempt — see session.ArchiveCommand for the
 // matching shell-side implementation.
 func ArchiveExistingFiles(logDir string, jobID int64) {
-	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json", "manifest_error"}
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json", "manifest_error", "preflight_rejected"}
 	seq := nextArchiveSeq(logDir, jobID)
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
@@ -375,6 +377,30 @@ func readReasonFile(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// WritePreflightRejectedFile writes the per-job preflight-rejected sentinel.
+// The file's existence signals to the agent's batch-status that the attempt
+// was rejected before it could start; reason text travels in the separate
+// failure_reason file. The sentinel itself records the rejection timestamp
+// so timeline displays have something to anchor on.
+func WritePreflightRejectedFile(paths JobPaths) error {
+	ts := strconv.FormatInt(time.Now().Unix(), 10) + "\n"
+	return os.WriteFile(paths.PreflightRejected, []byte(ts), 0644)
+}
+
+// ReadPreflightRejectedFile returns the rejection timestamp recorded in the
+// sentinel, or zero when the file is absent or unreadable.
+func ReadPreflightRejectedFile(path string) int64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return ts
 }
 
 // WriteFailureReasonFile writes a failure reason file for a failed job.

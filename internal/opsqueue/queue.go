@@ -48,6 +48,11 @@ type QueueEntry struct {
 	Command      string
 	Description  string
 	SourceSHA256 string
+	// SourceR2Key is the content-addressed R2 key for the source tarball
+	// when this job is queued in R2-isolated mode (Layer D fallback after a
+	// per-job marker failure). Empty for jobs that run against the shared
+	// working dir.
+	SourceR2Key  string
 	EnvVars      []string
 	DepSpec      string
 	CPUAllotment *int

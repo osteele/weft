@@ -136,6 +136,55 @@ func ensureSourceFresh(bucket, jobDir string) {
 	}
 }
 
+// fetchSourceTarballToDir downloads sources/<sha>.tar.gz from R2 (or reuses a
+// cached copy) and extracts it into perJobDir. Used as the implementation of
+// runner.Runner.EnsureSourceFromR2: returns a non-nil error on any failure so
+// the runner can reject the attempt at preflight instead of silently running
+// against the wrong sources.
+//
+// Unlike ensureSourceFresh, this is a primary path (not a best-effort
+// recovery), so errors are propagated rather than logged-and-swallowed. The
+// per-job dir is created if missing and the cached tarball is shared across
+// jobs that need the same R2 key (content-addressed).
+func fetchSourceTarballToDir(bucket, r2Key, perJobDir string) error {
+	if bucket == "" {
+		return fmt.Errorf("no R2 bucket configured")
+	}
+	if r2Key == "" {
+		return fmt.Errorf("empty r2 key")
+	}
+	if perJobDir == "" {
+		return fmt.Errorf("empty per-job dir")
+	}
+	cachePath := sourceCachePath(r2Key)
+	if _, err := os.Stat(cachePath); err != nil {
+		if err := downloadSourceToCache(bucket, r2Key, cachePath); err != nil {
+			return fmt.Errorf("download tarball: %w", err)
+		}
+	}
+	// Clean any partial leftovers from a prior interrupted extract so the
+	// new extract isn't a merge of two trees. Cheap insurance — the per-job
+	// dir is single-use.
+	if err := os.RemoveAll(perJobDir); err != nil {
+		return fmt.Errorf("clean per-job dir: %w", err)
+	}
+	if err := os.MkdirAll(perJobDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir per-job dir: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tar", "xzf", cachePath, "-C", perJobDir)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract tarball: %w", err)
+	}
+	// Record the mapping so any subsequent ensureSourceFresh recovery (e.g.
+	// a kill+resubmit during a grace window) can find the tarball again.
+	sources.record(perJobDir, r2Key)
+	slog.Info("staged R2-isolated source", "component", "agent", "per_job_dir", perJobDir, "r2_key", r2Key)
+	return nil
+}
+
 func downloadSourceToCache(bucket, r2Key, cachePath string) error {
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		return fmt.Errorf("mkdir cache: %w", err)

@@ -147,6 +147,117 @@ func TestBatchSyncRunningTransitionsQueuedJob(t *testing.T) {
 	}
 }
 
+// TestBatchSyncPreflightRejectedRecordsReasonAndDispatchBlock validates
+// Layer A+B: a PREFLIGHT_REJECTED batch-status report closes the attempt
+// with failure_reason populated AND inserts an EventQueueDispatchFailed
+// lifecycle event so explain.LatestInventoryDispatchBlock surfaces the
+// reason via `weft job diagnose`. Crucially, no RecordJobCompletion runs,
+// so the attempt does not get a misleading exit_code=1 / duration=0s.
+func TestBatchSyncPreflightRejectedRecordsReasonAndDispatchBlock(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "rejected job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	jobByID := map[int64]*db.Job{jobID: job}
+	reason := "source_provenance_mismatch: expected=abc123, marker=def456"
+	statuses := map[int64]queueBatchStatus{
+		jobID: {State: queueStatePreflightRejected, FailureReason: reason, Mtime: time.Now().Unix()},
+	}
+
+	updated, err := applyBatchStatuses(database, []int64{jobID}, jobByID, statuses, time.Second)
+	if err != nil {
+		t.Fatalf("applyBatchStatuses: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("expected 1 update, got %d", updated)
+	}
+
+	// failure_reason must be persisted on the attempt for the display layer
+	// to pick it up.
+	result, _ := db.GetJobByID(database, jobID)
+	if result.FailureReason != reason {
+		t.Fatalf("failure_reason = %q, want %q", result.FailureReason, reason)
+	}
+
+	// A dispatch-failed lifecycle event must be present so diagnose surfaces
+	// the reason via LatestInventoryDispatchBlock.
+	events, lerr := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind: db.EventQueueDispatchFailed,
+	})
+	if lerr != nil {
+		t.Fatalf("ListLifecycleEvents: %v", lerr)
+	}
+	var found bool
+	for _, ev := range events {
+		if ev.JobID == jobID && ev.Detail == reason {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected EventQueueDispatchFailed event for job %d with detail %q; events=%+v", jobID, reason, events)
+	}
+}
+
+// TestBatchSyncCompletedWithFailureReasonAlsoRecordsDispatchBlock validates
+// that the existing exit-code path also records a dispatch-failed lifecycle
+// event when a failure_reason is set. This keeps the diagnose surface
+// consistent regardless of whether the agent reported COMPLETED or
+// PREFLIGHT_REJECTED.
+func TestBatchSyncCompletedWithFailureReasonAlsoRecordsDispatchBlock(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "completed-with-reason")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	jobByID := map[int64]*db.Job{jobID: job}
+	exit := 1
+	reason := "oom"
+	mock := mockQueueRemote{metadata: "start_time=1700000000\nend_time=1700000010\n"}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	statuses := map[int64]queueBatchStatus{
+		jobID: {ExitCode: &exit, Mtime: 1700000020, FailureReason: reason},
+	}
+	if _, err := applyBatchStatuses(database, []int64{jobID}, jobByID, statuses, time.Second); err != nil {
+		t.Fatalf("applyBatchStatuses: %v", err)
+	}
+
+	events, lerr := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind: db.EventQueueDispatchFailed,
+	})
+	if lerr != nil {
+		t.Fatalf("ListLifecycleEvents: %v", lerr)
+	}
+	var found bool
+	for _, ev := range events {
+		if ev.JobID == jobID && ev.Detail == reason {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected EventQueueDispatchFailed event for job %d with detail %q", jobID, reason)
+	}
+}
+
 // TestBatchSyncSkipsUnknownJobs validates that jobs not in the agent's response
 // are silently skipped (no status change).
 func TestBatchSyncSkipsUnknownJobs(t *testing.T) {

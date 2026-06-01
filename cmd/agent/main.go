@@ -113,6 +113,13 @@ func runQueue(args []string) {
 	r := runner.New(cfg)
 	if parsed.R2Bucket != "" {
 		setupInventoryR2(r, parsed.R2Bucket)
+		// Wire the Layer D R2-isolated source fallback: when the dispatcher
+		// queues a job with SourceR2Key set, the runner asks us to fetch
+		// the content-addressed tarball and extract it into a per-job dir.
+		bucket := parsed.R2Bucket
+		r.EnsureSourceFromR2 = func(_ int64, r2Key, perJobDir string) error {
+			return fetchSourceTarballToDir(bucket, r2Key, perJobDir)
+		}
 	}
 	if err := r.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)

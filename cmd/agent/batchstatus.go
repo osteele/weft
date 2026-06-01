@@ -69,6 +69,19 @@ func batchStatus(jobIDs []int64) {
 			continue
 		}
 
+		// Check for the preflight-rejected sentinel. This file is written by
+		// the runner when a preflight check (currently: source provenance)
+		// fails before the attempt was stamped with a startTime. We surface it
+		// distinctly so the coordinator can record the attempt without a
+		// misleading exit_code / start_time / end_time.
+		preflightFile := filepath.Join(logDir, fmt.Sprintf("%d.preflight_rejected", jobID))
+		if _, err := os.Stat(preflightFile); err == nil {
+			ts := fileMtime(preflightFile)
+			fr := readFailureReason(logDir, jobID)
+			fmt.Printf("JOB|%d|PREFLIGHT_REJECTED|%d|%s\n", jobID, ts, fr)
+			continue
+		}
+
 		// Check status file
 		statusFile := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
 		if statusContent, err := os.ReadFile(statusFile); err == nil {

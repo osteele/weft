@@ -301,6 +301,103 @@ rule RemoteJobResumed {
 }
 
 -- ==========================================================================
+-- Preflight rejection (runner → agent → coordinator)
+-- ==========================================================================
+
+-- The agent's `batch-status` subcommand, called by the coordinator over
+-- SSH, detects the runner's preflight rejection sentinel
+-- (<jobid>.preflight_rejected in the agent's log dir) and emits a wire
+-- line distinct from COMPLETED, carrying the failure_reason text the
+-- runner wrote alongside the sentinel.
+--
+-- Wire format:
+--   JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
+--
+-- Distinct from:
+--   JOB|<id>|COMPLETED|<exit_code>|<mtime>[|<failure_reason>]
+rule AgentBatchStatusReportsPreflightRejection {
+    when: AgentBatchStatusInvoked(host, job_ids)
+
+    for jobID in job_ids:
+        if PreflightSentinelExists(jobID):
+            ensures: WireLineEmitted(
+                job_id: jobID,
+                state: preflight_rejected,
+                ts: PreflightRejectedTimestamp(jobID),
+                failure_reason: PreflightFailureReason(jobID)
+            )
+
+    @guidance
+        -- Implementation anchor:
+        --   cmd/agent/batchstatus.go    — detects <jobid>.preflight_rejected
+        --                                 and prints the PREFLIGHT_REJECTED
+        --                                 line before any other classifier.
+        --   internal/runner/runner.go   — writes the sentinel and
+        --                                 <jobid>.failure_reason files
+        --                                 (see source-data-sync.allium
+        --                                 § PreflightRejected).
+}
+
+-- Coordinator handling for PREFLIGHT_REJECTED. The attempt is closed as
+-- failed with exit_code = NULL and end_time = 0; the job stays queued
+-- (no RecordJobCompletion call). A dedup-windowed
+-- EventQueueDispatchFailed lifecycle event is inserted so `weft job
+-- diagnose` surfaces the reason via LatestInventoryDispatchBlock with
+-- the existing wait/replan options at high confidence.
+rule PreflightRejectionReconciled {
+    when: BatchStatusLineReceived(line)
+    requires: line.state = preflight_rejected
+
+    let job = JobByID(line.job_id)
+    let reason = line.failure_reason
+
+    -- Persist the reason on the open attempt FIRST (while it is still the
+    -- latest open attempt; SetJobRemoteState targets the latest open),
+    -- then close the attempt without exit_code / end_time.
+    ensures: JobFailureReasonStored(job: job, reason: reason)
+    ensures: EventQueueDispatchFailedRecorded(job: job, detail: reason)
+    ensures: PreflightRejectionReported(job: job, reason: reason)
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/ops/queue_batch.go    — applyBatchStatuses
+        --                                    (queueStatePreflightRejected
+        --                                    branch); recordPreflightDispatchBlock
+        --                                    inserts the lifecycle event with
+        --                                    dispatchEventDedupeWindow.
+        --   internal/db/attempts.go        — CloseAttempt(StatusFailed,
+        --                                    nil, 0)
+        -- See job-lifecycle.allium § PreflightRejectionClosesAttempt for
+        -- the attempt-shape semantics this rule produces.
+}
+
+-- Both the new PREFLIGHT_REJECTED line and the existing COMPLETED-with-
+-- reason path produce the same lifecycle-event side effect: a dedup-windowed
+-- EventQueueDispatchFailed carrying the failure_reason. `weft job diagnose`
+-- reads this via explain.LatestInventoryDispatchBlock and surfaces it as
+-- "[Xs ago] <reason>" with wait / replan options at high confidence,
+-- instead of falling through to the generic "job is queued / wait".
+rule DispatchFailureEventDedupWindowed {
+    when: BatchStatusLineReceived(line)
+    requires: line.failure_reason != null and line.failure_reason != ""
+
+    -- Same dedup window applies to PREFLIGHT_REJECTED and COMPLETED-with-
+    -- reason paths. The window suppresses repeat inserts for the same
+    -- (job, kind, detail) triple within the window.
+    ensures: EventQueueDispatchFailedRecorded(
+        job: JobByID(line.job_id),
+        detail: line.failure_reason
+    )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/ops/queue_batch.go    — recordPreflightDispatchBlock,
+        --                                    dispatchEventDedupeWindow.
+        --   internal/explain/               — LatestInventoryDispatchBlock
+        --                                    is the diagnose-side reader.
+}
+
+-- ==========================================================================
 -- Runner restart and exit code preservation (on-prem)
 -- ==========================================================================
 

@@ -151,6 +151,25 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				}
 				updated++
 			}
+		case queueStatePreflightRejected:
+			// The runner rejected the attempt before stamping a startTime
+			// (currently: source provenance mismatch). Persist failure_reason
+			// FIRST (while the attempt is still open — SetJobRemoteState
+			// targets the latest open attempt), then close it without
+			// exit_code or end_time. Record a dispatch-failed lifecycle event
+			// so `weft job diagnose` surfaces the reason via
+			// LatestInventoryDispatchBlock. The job stays in queued so the
+			// autopilot / user can replan it.
+			if status.FailureReason != "" {
+				if err := db.SetJobRemoteState(database, job.ID, "", status.FailureReason); err != nil {
+					slog.Warn("failed to record failure reason", "component", "sync", "job_id", job.ID, "error", err)
+				}
+				recordPreflightDispatchBlock(database, job.ID, status.FailureReason)
+			}
+			if err := db.CloseAttempt(database, job.ID, db.StatusFailed, nil, 0); err != nil {
+				return updated, err
+			}
+			updated++
 		default:
 			if status.ExitCode != nil {
 				metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
@@ -165,11 +184,13 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				if err := RecordJobCompletion(database, job.ID, *status.ExitCode, endTime); err != nil {
 					return updated, err
 				}
-				// Record failure reason if present
+				// Record failure reason if present, and surface as a dispatch
+				// block so explain.ForJob shows the reason in `diagnose`.
 				if status.FailureReason != "" {
 					if err := db.SetJobRemoteState(database, job.ID, "", status.FailureReason); err != nil {
 						slog.Warn("failed to record failure reason", "component", "sync", "job_id", job.ID, "error", err)
 					}
+					recordPreflightDispatchBlock(database, job.ID, status.FailureReason)
 				}
 				CacheCompletedJobLog(job, timeout)
 				// Fetch resource usage data (best-effort)
@@ -189,6 +210,19 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 	}
 
 	return updated, nil
+}
+
+// recordPreflightDispatchBlock inserts a dedup-windowed
+// EventQueueDispatchFailed for a job whose runner reported a failure_reason.
+// This is what `weft job diagnose` reads via
+// explain.LatestInventoryDispatchBlock to surface the reason on a queued or
+// just-failed job.
+func recordPreflightDispatchBlock(database *sql.DB, jobID int64, detail string) {
+	_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed,
+		JobID:     jobID,
+		Detail:    truncateDispatchDetail(detail),
+	}, dispatchEventDedupeWindow)
 }
 
 func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (map[int64]queueBatchStatus, error) {
@@ -244,6 +278,17 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 				failureReason = strings.TrimSpace(parts[5])
 			}
 			results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: mtime, FailureReason: failureReason}
+		case "PREFLIGHT_REJECTED":
+			// Format: JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
+			var mtime int64
+			if len(parts) >= 4 && parts[3] != "" {
+				mtime, _ = strconv.ParseInt(parts[3], 10, 64)
+			}
+			failureReason := ""
+			if len(parts) >= 5 && parts[4] != "" {
+				failureReason = strings.TrimSpace(parts[4])
+			}
+			results[id] = queueBatchStatus{State: queueStatePreflightRejected, Mtime: mtime, FailureReason: failureReason}
 		case "CURRENT", "RUNNING":
 			gpuDevs := ""
 			if len(parts) >= 4 {

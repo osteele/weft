@@ -39,6 +39,17 @@ use "./campaign-lifecycle.allium" as cloud
 -- External Entities
 -- ==========================================================================
 
+-- DispatchEntry is the on-host queue entry the dispatcher writes for a job.
+-- Owned by the queue runner / dispatcher (internal/opsqueue), not by this
+-- spec, but referenced here because the source-staging mode (rsync + per-job
+-- marker vs. R2-isolated tarball) is recorded on it. source_sha256 and
+-- source_r2_key live only on the queue entry, not on the persistent Job row.
+external entity DispatchEntry {
+    job: jobs/Job
+    source_sha256: String?          -- SHA the dispatcher queued the job with
+    source_r2_key: String?          -- "sources/<sha>.tar.gz" when R2-isolated
+}
+
 -- DataAsset identifies a piece of named, addressable data (an HF model,
 -- dataset, or named corpus) that may exist on zero or more hosts. Managed
 -- by the dataloc subsystem; this spec only observes its presence.
@@ -94,6 +105,13 @@ value ExcludePattern {
     pattern: String
     origin: SourceExcludeOrigin
 }
+
+-- Outcome of the runner's per-job preflight provenance check. Distinct from
+-- a runtime failure: the attempt never started, so there is no start_time,
+-- no exit_code, no log header, and no meta file.
+value PreflightOutcome = passed
+                      | source_provenance_mismatch
+                      | r2_isolated_source_unavailable
 
 -- Record of a single observed source or data transfer, written to the
 -- oplog and (for prestage) to the transferbw observation table.
@@ -166,8 +184,29 @@ entity HostSourceState {
     working_dir: String
     snapshot: SourceSnapshot
     synced_at: Timestamp
-    marker_written: Boolean         -- success marker on the remote host;
-                                    -- only written after rsync returned 0
+    rolling_marker_written: Boolean -- the rolling .weft-source.sha256 marker
+                                    -- on the remote host, written after a
+                                    -- successful rsync. Retained for human
+                                    -- debugging only; preflight reads the
+                                    -- per-job marker instead (see
+                                    -- PerJobSourceMarker).
+}
+
+-- A per-job source provenance marker. Written by the dispatcher in the
+-- target working directory at the SHA the job was queued against
+-- (`.weft-source.<jobid>.sha256`). The runner reads this file at preflight
+-- and rejects the attempt if the marker is missing, unreadable, or holds a
+-- different SHA. Distinct from the rolling per-working-dir marker so that
+-- a peer job rsyncing the same directory (or rsync --delete reaping the
+-- old marker) cannot invalidate this job's preflight. Both the per-job
+-- marker file pattern and the rolling marker file are in DefaultExcludes
+-- so rsync --delete must not reap them.
+entity PerJobSourceMarker {
+    job: jobs/Job
+    host: jobs/Host
+    working_dir: String
+    expected_sha: String            -- SHA the dispatcher queued the job at
+    written_at: Timestamp
 }
 
 -- CloudSourceObject represents the R2-hosted tarball for a given source
@@ -230,6 +269,11 @@ default ExcludePattern exclude_outputs   = { pattern: "output",     origin: buil
 default ExcludePattern exclude_outputs_s = { pattern: "outputs",    origin: builtin }
 default ExcludePattern exclude_testdata  = { pattern: "testdata",   origin: builtin }
 default ExcludePattern exclude_env       = { pattern: ".env",       origin: builtin }
+-- Source provenance markers are excluded so peer jobs' rsync --delete does
+-- not reap this job's per-job marker (or the rolling per-workdir marker
+-- retained for human debugging).
+default ExcludePattern exclude_src_mark  = { pattern: ".weft-source.sha256",   origin: builtin }
+default ExcludePattern exclude_src_mark_j = { pattern: ".weft-source.*.sha256", origin: builtin }
 
 -- ==========================================================================
 -- Rules: source snapshotting
@@ -287,10 +331,20 @@ rule EnforceSourceSizeLimit {
 -- Send a snapshot to an inventory host over rsync+ssh. --delete is used so
 -- remote sources mirror local sources exactly; the remote sources directory
 -- is treated as weft's own scratch space, not a place the user edits.
+--
+-- After the rsync, the dispatcher writes TWO markers in the remote working
+-- dir: the rolling `.weft-source.sha256` (human debug only) and the per-job
+-- `.weft-source.<job-id>.sha256` carrying the SHA this job was queued at.
+-- The per-job marker is what the runner's preflight reads (see
+-- RunnerPreflightProvenanceCheck). Both filename patterns appear in
+-- DefaultExcludes so a sibling rsync --delete cannot reap them.
 rule SyncSourceToOnPremHost {
     when: DispatchToOnPremHost(job, host)
     requires: host.name != "" and not IsLocalHost(host)
     requires: job.working_dir != ""
+    -- R2-isolated jobs bypass rsync entirely; their source is extracted
+    -- from a content-addressed tarball into a per-job dir on the runner side.
+    requires: DispatchEntry{job: job}.source_r2_key = null
 
     let snapshot = LatestSnapshotFor(job.working_dir)
 
@@ -307,7 +361,7 @@ rule SyncSourceToOnPremHost {
                 working_dir: job.working_dir,
                 snapshot: snapshot,
                 synced_at: now,
-                marker_written: true
+                rolling_marker_written: true
             )
             RecordTransferObservation(
                 source: "local",
@@ -315,11 +369,22 @@ rule SyncSourceToOnPremHost {
                 bytes: snapshot.size_bytes,
                 ok: true
             )
+        -- Per-job marker stamps the SHA this job was queued at, regardless
+        -- of whether the rsync ran or was skipped via the reuse window.
+        PerJobSourceMarker.created(
+            job: job,
+            host: host,
+            working_dir: job.working_dir,
+            expected_sha: snapshot.content_hash,
+            written_at: now
+        )
 
     @guidance
         -- Implementation anchor:
         --   internal/sync/sync_to_host.go  — SyncSourcesToHost
-        --   internal/sync/sources.go       — SyncSources, BuildRsyncArgs
+        --   internal/sync/sources.go       — SyncSources, BuildRsyncArgs,
+        --                                    DefaultExcludes
+        --   internal/ops/host_sync.go      — per-job marker write at dispatch
         -- rsync uses BatchMode=yes ssh (see status-sync NonInteractiveSSH)
         -- so a fresh host key never blocks the TUI on a tty prompt.
 }
@@ -336,7 +401,7 @@ rule ReuseRecentOnPremSnapshot {
     requires: state.snapshot.content_hash
               = LatestSnapshotFor(job.working_dir).content_hash
     requires: state.synced_at + config.host_snapshot_reuse_window > now
-    requires: state.marker_written = true
+    requires: state.rolling_marker_written = true
 
     ensures: SourceSyncSkipped(host: host, job: job, reason: recent_match)
 }
@@ -357,7 +422,176 @@ rule ResyncAfterRemediation {
     ensures:
         for state in HostSourceStates where host = host and working_dir = working_dir:
             state.synced_at = now
-            state.marker_written = true
+            state.rolling_marker_written = true
+}
+
+-- ==========================================================================
+-- Rules: runner preflight (per-job source provenance)
+-- ==========================================================================
+
+-- Before the runner stamps a startTime, writes the meta or status files,
+-- writes the log header, or emits OpJobStart, it reads the per-job source
+-- marker the dispatcher wrote in the working dir and compares it against
+-- the SHA recorded on the queue entry. A mismatch (or an unreadable
+-- marker) is a preflight rejection: the attempt never started.
+--
+-- On rejection the runner writes two sidecar files in the agent's log
+-- directory and emits OpJobStartFailed (NOT OpJobStart):
+--   * <jobid>.failure_reason  — text content
+--     "source_provenance_mismatch: expected=<X>, marker=<Y>"
+--   * <jobid>.preflight_rejected — sentinel carrying the rejection ts
+-- The status file, meta file, and log header are NOT written. The job
+-- file is removed from the runner queue so the runner does not retry it.
+-- The job remains queued in the coordinator's view, so the autopilot or
+-- user can replan it.
+--
+-- R2-isolated jobs (queue entry has source_r2_key) skip the marker
+-- comparison entirely: the SHA is implicit in the R2 key. The runner
+-- instead invokes EnsureSourceFromR2 to extract the tarball into a
+-- per-job source dir; failure to extract is itself a preflight rejection
+-- with reason r2_isolated_source_unavailable.
+rule RunnerPreflightProvenanceCheck {
+    when: RunnerStartsJob(job, host)
+    requires: job.target_kind = inventory_host
+
+    let entry = DispatchEntry{job: job}
+    let marker = PerJobSourceMarker{job: job, host: host,
+                                    working_dir: job.working_dir}
+
+    -- R2-isolated mode bypasses the marker comparison.
+    if entry.source_r2_key != null:
+        ensures:
+            if EnsureSourceFromR2(job, entry.source_r2_key) succeeds:
+                PreflightOutcomeRecorded(job: job, outcome: passed)
+            else:
+                PreflightRejected(
+                    job: job,
+                    outcome: r2_isolated_source_unavailable,
+                    reason: "r2_isolated_source_unavailable: "
+                            + entry.source_r2_key
+                )
+
+    -- Normal mode: per-job marker must exist and match.
+    else if marker = null or marker.expected_sha != entry.source_sha256:
+        ensures: PreflightRejected(
+            job: job,
+            outcome: source_provenance_mismatch,
+            reason: "source_provenance_mismatch: expected="
+                    + entry.source_sha256 + ", marker="
+                    + (marker.expected_sha ?? "<missing>")
+        )
+
+    else:
+        ensures: PreflightOutcomeRecorded(job: job, outcome: passed)
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/runner/runner.go    — startJob (preflight branch runs
+        --                                  BEFORE startTime/meta/header/
+        --                                  OpJobStart)
+        --   internal/runner/runner.go    — rejectPreflight,
+        --                                  WritePreflightRejectedFile
+        --   internal/opsqueue/queue.go   — CommandJob.SourceSHA,
+        --                                  CommandJob.SourceR2Key
+}
+
+-- Record a preflight rejection. No JobAttempt fields are mutated here;
+-- the runner just writes the two sidecar files and removes the job
+-- from its queue. The corresponding attempt closure on the coordinator
+-- side lives in status-sync.allium (PreflightRejectionReconciled).
+rule PreflightRejected {
+    when: PreflightRejected(job, outcome, reason)
+
+    ensures:
+        PreflightFailureReasonWritten(job: job, reason: reason)
+        PreflightSentinelWritten(job: job, rejected_at: now)
+        OpJobStartFailedLogged(job: job, reason: reason)
+        RunnerQueueFileRemoved(job: job)
+
+    @guidance
+        -- The agent's `batch-status` subcommand detects the sentinel and
+        -- emits "JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>" on the
+        -- wire, distinct from the COMPLETED line. See status-sync.allium
+        -- § AgentBatchStatusReportsPreflightRejection for the wire
+        -- contract and § PreflightRejectionReconciled for what the
+        -- coordinator does with it.
+}
+
+-- ==========================================================================
+-- Rules: Layer D — R2-isolated source fallback
+-- ==========================================================================
+
+-- When a job has at least one prior dispatch-failed lifecycle event with a
+-- source_provenance_mismatch reason, the dispatcher escalates this job to
+-- R2-isolated mode rather than rsyncing the working dir again. The
+-- escalation is per-job and runs at the next dispatch sweep, not from the
+-- runner side.
+--
+-- The decision branches on whether the laptop tree can still reproduce
+-- the SHA that prior dispatches expected:
+--   - matches  → upload the source tarball to R2 under sources/<sha>.tar.gz
+--                (idempotent; same data plane as cloud rentals), stamp
+--                source_r2_key on the queue entry, skip the rsync and the
+--                per-job marker write for this dispatch.
+--   - mismatch → the SHA has been lost (working dir advanced past the SHA
+--                this job was queued at). Surface as provenance_pin_lost
+--                rather than loop silently, so diagnose has a concrete
+--                reason to show.
+rule EscalateToR2IsolatedSource {
+    when: DispatchToOnPremHost(job, host)
+    requires: job.target_kind = inventory_host
+    requires: count(LifecycleEvents
+                    where event_kind = queue_dispatch_failed
+                          and job = job
+                          and detail starts_with "source_provenance_mismatch") >= 1
+
+    let expected_sha = ExtractExpectedSHA(
+        LatestQueueDispatchFailedDetail(job, "source_provenance_mismatch")
+    )
+    let current_sha = ComputeSourceSHA256(job.working_dir)
+
+    ensures:
+        if expected_sha = null:
+            -- Prior failure detail lacked an expected SHA. Cannot escalate;
+            -- fall through to normal dispatch path.
+            EscalationSkipped(job: job, reason: no_expected_sha)
+        else if current_sha = null:
+            -- Local hash failed (unreadable working dir, etc.). Cannot
+            -- escalate; let normal path try.
+            EscalationSkipped(job: job, reason: hash_unavailable)
+        else if current_sha != expected_sha:
+            -- Pin lost. Record a fresh dispatch-failed event and skip
+            -- dispatch for this job in this sweep.
+            EventQueueDispatchFailedRecorded(
+                job: job,
+                detail: "provenance_pin_lost: queued at "
+                        + ShortSHA(expected_sha)
+                        + ", laptop now " + ShortSHA(current_sha)
+            )
+            DispatchSkippedForJob(job: job)
+        else:
+            -- Pin still reproducible: upload to R2 and switch the queue
+            -- entry to R2-isolated mode for this dispatch.
+            let key = UploadSourceToR2ForInputs(
+                local_dir: job.working_dir,
+                inputs: job.inputs
+            )
+            DispatchEntry{job: job}.source_r2_key = key
+            EscalationLogged(job: job, host: host, r2_key: key)
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/ops/host_sync.go    — Layer D escalation block
+        --   internal/srcsync/            — ComputeSourceSHA256,
+        --                                  UploadSourceToR2ForInputs
+        --   internal/opsqueue/queue.go   — QueueEntry.SourceR2Key
+        --   internal/opsqueue/commandqueue.go — CommandJob.SourceR2Key
+        --
+        -- source_r2_key lives only on the in-process queue entry and the
+        -- on-host command-queue file, not on the persistent Job row.
+        -- This mirrors the precedent set by source_sha256 (also not in
+        -- the DB) and keeps escalation a per-dispatch decision rather
+        -- than a sticky job attribute.
 }
 
 -- ==========================================================================
@@ -692,14 +926,45 @@ invariant SourceHashDeterministic {
         implies s1.content_hash = s2.content_hash
 }
 
--- The "marker_written" flag on a HostSourceState must only be true after
+-- The rolling marker flag on a HostSourceState must only be true after
 -- the corresponding rsync has returned success. Marker-before-success is
 -- a safety hazard: a subsequent dispatch would skip the sync while the
 -- remote tree is incomplete.
 invariant SourceMarkerOnlyAfterSuccess {
     for state in HostSourceStates:
-        state.marker_written
+        state.rolling_marker_written
             implies LastRsyncForHostReturnedOK(state.host, state.working_dir)
+}
+
+-- The per-job marker the runner reads at preflight must encode the SHA
+-- the dispatcher queued the job against, not the rolling per-workdir
+-- value (which a peer job's rsync may have replaced). Sibling jobs
+-- sharing the same working directory each get their own marker file.
+invariant PerJobMarkerCarriesQueuedSHA {
+    for marker in PerJobSourceMarkers:
+        marker.expected_sha = DispatchEntry{job: marker.job}.source_sha256
+}
+
+-- Source provenance marker files (both rolling and per-job) must be in
+-- DefaultExcludes so that rsync --delete from a peer job's sync cannot
+-- reap them. Reaping the per-job marker would manifest as a spurious
+-- source_provenance_mismatch on the next preflight.
+invariant SourceMarkersExcludedFromRsync {
+    for pattern in {".weft-source.sha256", ".weft-source.*.sha256"}:
+        exists ExcludePattern{pattern: pattern, origin: builtin}
+}
+
+-- An R2-isolated dispatch (source_r2_key set) MUST NOT rsync the working
+-- dir or write a per-job marker for that dispatch; the source comes from
+-- the content-addressed tarball and the SHA is implicit in the key.
+invariant R2IsolatedDispatchSkipsRsync {
+    for entry in DispatchEntries where entry.source_r2_key != null:
+        not exists RsyncInvocation{
+            host: entry.job.host,
+            working_dir: entry.job.working_dir,
+            for_job: entry.job
+        }
+        and not exists PerJobSourceMarker{job: entry.job}
 }
 
 -- Syncing to the machine weft is running on is a no-op. Rsyncing a

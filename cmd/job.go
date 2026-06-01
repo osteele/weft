@@ -1264,6 +1264,8 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 	fmt.Printf("Attempts:    %d\n", len(attempts))
 	if latest := attempts[0]; latest.StartTime != nil {
 		fmt.Printf("Latest:      #%d started %s on %s\n", latest.AttemptNumber, formatUnixTime(*latest.StartTime), attemptTarget(latest))
+	} else if latest := attempts[0]; isAttemptPreflightRejected(latest) {
+		fmt.Printf("Latest:      #%d preflight-rejected on %s\n", latest.AttemptNumber, attemptTarget(latest))
 	}
 	if previous := previousInstanceList(attempts); previous != "" {
 		fmt.Printf("Previous:    %s\n", previous)
@@ -1279,7 +1281,7 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 				a.AttemptNumber,
 				attemptWhen(a),
 				attemptTarget(a),
-				dashIfEmpty(a.Status),
+				attemptStatus(a),
 				attemptExit(a),
 				attemptDuration(a, now),
 				attemptOutcome(a),
@@ -1294,7 +1296,7 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 				attemptRangeLabel(attempts, s),
 				attemptWhen(latest),
 				attemptTarget(latest),
-				dashIfEmpty(latest.Status),
+				attemptStatus(latest),
 				attemptExit(latest),
 				attemptDuration(latest, now),
 				attemptOutcomeWithFold(attempts, s),
@@ -1458,6 +1460,24 @@ func attemptOutcome(a db.JobAttempt) string {
 		return a.ErrorMessage
 	}
 	return "-"
+}
+
+// isAttemptPreflightRejected detects an attempt the runner refused to start
+// (e.g. source provenance mismatch). Such attempts have no start_time, no
+// exit_code, and a populated failure_reason — distinguishing them from
+// genuine exit-1 failures that ran for 0 seconds.
+func isAttemptPreflightRejected(a db.JobAttempt) bool {
+	return a.Status == db.StatusFailed && a.StartTime == nil && a.ExitCode == nil && a.FailureReason != ""
+}
+
+// attemptStatus returns the display label for an attempt's status, mapping
+// preflight rejections to a distinct label rather than the underlying
+// "failed" stored on the row.
+func attemptStatus(a db.JobAttempt) string {
+	if isAttemptPreflightRejected(a) {
+		return "preflight-rejected"
+	}
+	return dashIfEmpty(a.Status)
 }
 
 func dashIfEmpty(s string) string {

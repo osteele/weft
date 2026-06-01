@@ -56,6 +56,15 @@ type Runner struct {
 	OnJobStart  func(jobID int64, logPath string) func() // returns stop function for live upload
 	OnJobFinish func(jobID int64, logDir string, exitCode int)
 
+	// EnsureSourceFromR2 is an optional preflight hook used by jobs queued
+	// in R2-isolated mode (CommandJob.SourceR2Key != ""). The agent
+	// implementation downloads sources/<sha>.tar.gz from R2 (rclone) and
+	// extracts it into perJobDir, then returns nil. A non-nil error causes
+	// the runner to reject the attempt at preflight (no startTime, no meta
+	// file, sentinel + failure_reason written). When nil, jobs with
+	// SourceR2Key fall back to the shared working dir with a debug log.
+	EnsureSourceFromR2 func(jobID int64, r2Key, perJobDir string) error
+
 	// Shutdown
 	stopCh chan struct{}
 }
@@ -408,11 +417,52 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		gpuDevices = resolvedGPUDevices
 	}
 
-	startTime := time.Now().Unix()
 	paths := NewJobPaths(r.logDir, jobID)
 
-	// Archive existing files only when the job is definitely launching.
+	// Expand ~ in working directory (needed for the preflight marker read).
+	expandedDir := job.Dir
+	if len(expandedDir) > 1 && expandedDir[0] == '~' {
+		home, _ := os.UserHomeDir()
+		expandedDir = home + expandedDir[1:]
+	}
+
+	// Archive previous attempt's artifacts before either preflight or full
+	// startup runs, so a fresh attempt starts with a clean slate.
 	ArchiveExistingFiles(r.logDir, jobID)
+
+	// Preflight (Layer D): R2-isolated source. When the dispatcher
+	// escalated this job to R2-isolated mode after a prior provenance
+	// failure, download + extract the original tarball into a per-job dir
+	// and run from there. Bypasses the marker comparison since the SHA is
+	// implicit in the content-addressed R2 key.
+	if job.SourceR2Key != "" {
+		if r.EnsureSourceFromR2 == nil {
+			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_unavailable: SourceR2Key=%s but the runner has no EnsureSourceFromR2 hook", job.SourceR2Key))
+		}
+		perJobDir := perJobSourceDir(jobID)
+		if err := r.EnsureSourceFromR2(jobID, job.SourceR2Key, perJobDir); err != nil {
+			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
+		}
+		expandedDir = perJobDir
+	} else if job.SourceSHA != "" {
+		// Preflight (Layer A+C): per-job source provenance check. Runs
+		// before startTime is stamped so a rejection isn't recorded as a
+		// 0-second "completed" attempt. On failure: write the
+		// failure_reason file (read by the agent's batch-status) and the
+		// preflight_rejected sentinel (signals to the coordinator that
+		// this attempt never started), then return.
+		markerSHA, err := srcsync.ReadSourceMarkerForJob(expandedDir, jobID)
+		if err != nil {
+			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker unreadable in %s (%v)", job.SourceSHA, expandedDir, err)
+			return r.rejectPreflight(jobID, paths, msg)
+		}
+		if markerSHA != job.SourceSHA {
+			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker=%s", job.SourceSHA, markerSHA)
+			return r.rejectPreflight(jobID, paths, msg)
+		}
+	}
+
+	startTime := time.Now().Unix()
 
 	oplog.LogJob(oplog.OpJobStart, jobID, "", oplog.WithDetailf("cmd=%s", command))
 	fmt.Printf("==========================================\n")
@@ -425,36 +475,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	fmt.Printf("  Log: %s\n", paths.Log)
 	fmt.Printf("==========================================\n")
 
-	// Expand ~ in working directory
-	expandedDir := job.Dir
-	if len(expandedDir) > 1 && expandedDir[0] == '~' {
-		home, _ := os.UserHomeDir()
-		expandedDir = home + expandedDir[1:]
-	}
-
 	// Write metadata
 	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, startTime, job.SourceSHA)
 
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command, job.SourceSHA)
-
-	if job.SourceSHA != "" {
-		markerSHA, err := srcsync.ReadSourceMarker(expandedDir)
-		if err != nil {
-			msg := fmt.Sprintf("source provenance check failed: expected %s, marker unreadable in %s (%v)", job.SourceSHA, expandedDir, err)
-			oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(msg))
-			_ = os.WriteFile(paths.Status, []byte("1\n"), 0644)
-			appendLine(paths.Log, msg)
-			return fmt.Errorf("%s", msg)
-		}
-		if markerSHA != job.SourceSHA {
-			msg := fmt.Sprintf("source provenance check failed: expected %s, marker has %s", job.SourceSHA, markerSHA)
-			oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(msg))
-			_ = os.WriteFile(paths.Status, []byte("1\n"), 0644)
-			appendLine(paths.Log, msg)
-			return fmt.Errorf("%s", msg)
-		}
-	}
 
 	// Call OnJobStart hook (best-effort)
 	if r.OnJobStart != nil {
@@ -514,9 +539,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		envVars = append(envVars, cudaEnv)
 	}
 
-	// Run environment setup as a separate phase
+	// Run environment setup as a separate phase. Use expandedDir, not
+	// job.Dir: in R2-isolated mode the latter still points at the
+	// user-facing dir while the extracted sources live under expandedDir.
 	if setupCmd != "" {
-		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths, r.setupTimeout)
+		ei, setupErr := RunSetupCommand(setupCmd, jobID, expandedDir, envVars, paths, r.setupTimeout)
 		if setupErr != nil {
 			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
 			WriteFailureReasonFile(paths, failureReason)
@@ -534,9 +561,12 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// the Go runner crashes mid-job (e.g., during a runner restart).
 	wrappedCommand := WrapCommandWithExitCapture(command, paths.Status)
 
-	// Start the process
+	// Start the process. Use expandedDir, not job.Dir: in R2-isolated mode
+	// job.Dir is the user-facing path but the runtime sources are under
+	// expandedDir. In normal mode expandedDir is just job.Dir with ~/
+	// expanded, so the call is equivalent.
 	slog.Debug("launching process", "component", "runner", "job_id", jobID)
-	proc, err := StartProcess(wrappedCommand, job.Dir, envVars, paths.Log)
+	proc, err := StartProcess(wrappedCommand, expandedDir, envVars, paths.Log)
 	if err != nil {
 		oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithError(err))
 		slog.Warn("job start failed", "component", "runner", "job_id", jobID, "error", err)
@@ -553,8 +583,10 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	r.processes[jobIDStr] = proc
 	r.processesMu.Unlock()
 
-	// Start wait goroutine
-	go r.waitForJob(jobID, proc, paths, startTime, rj)
+	// Start wait goroutine. Pass the resolved working dir (possibly the
+	// per-job R2-isolated source dir) so output discovery and per-job
+	// cleanup operate on the directory where the job actually ran.
+	go r.waitForJob(jobID, proc, paths, startTime, rj, expandedDir)
 
 	// Update running state
 	allotment := r.jobAllotment(job)
@@ -581,7 +613,28 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	return nil
 }
 
-func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob) {
+// rejectPreflight records a preflight rejection without ever marking the
+// attempt as started. It writes the failure_reason file and a
+// preflight_rejected sentinel (no status file, no meta, no log header), emits
+// oplog.OpJobStartFailed, and removes the job from the runner queue so it
+// won't be re-attempted on the next sweep. The coordinator's batch-status
+// reconciler picks up the sentinel and closes the attempt with NULL
+// timestamps and the populated failure reason.
+func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason string) error {
+	if err := WriteFailureReasonFile(paths, reason); err != nil {
+		slog.Warn("preflight reject: write failure_reason failed",
+			"component", "runner", "job_id", jobID, "error", err)
+	}
+	if err := WritePreflightRejectedFile(paths); err != nil {
+		slog.Warn("preflight reject: write sentinel failed",
+			"component", "runner", "job_id", jobID, "error", err)
+	}
+	oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(reason))
+	removeJobFile(r.queueDir, jobID)
+	return fmt.Errorf("preflight rejected: %s", reason)
+}
+
+func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob, runDir string) {
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	err := proc.Cmd.Wait()
 	ei := ExtractExitInfo(err)
@@ -636,7 +689,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		if len(dirs) == 0 {
 			dirs = config.DefaultOutputDirs
 		}
-		if discovered, err := DiscoverOutputs(rj.Data.Dir, dirs); err == nil && len(discovered) > 0 {
+		if discovered, err := DiscoverOutputs(runDir, dirs); err == nil && len(discovered) > 0 {
 			outputFiles = discovered
 			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
 			fmt.Printf("Job %s: discovered %d output files\n", ids.FormatJobID(jobID), len(discovered))
@@ -682,8 +735,49 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 
 	CleanupPIDFiles(paths)
 	removeJobFile(r.queueDir, jobID)
+	removePerJobSourceMarker(rj.Data.Dir, jobID)
+	// In R2-isolated mode the runtime source lives under a per-job dir we
+	// own; remove it now so ~/.cache/weft/jobs/ doesn't grow unbounded.
+	if rj.Data.SourceR2Key != "" {
+		removePerJobSourceDir(jobID)
+	}
 
 	r.saveState()
+}
+
+// perJobSourceDir returns the per-job working directory used in R2-isolated
+// mode (CommandJob.SourceR2Key). Tarballs are extracted here so jobs running
+// off the same project don't share filesystem state.
+func perJobSourceDir(jobID int64) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "weft", "jobs", fmt.Sprintf("%d", jobID), "source")
+}
+
+// removePerJobSourceDir removes ~/.cache/weft/jobs/<id>/ for R2-isolated
+// jobs after they complete. Best-effort: a stale dir wastes disk but is
+// otherwise harmless; the next R2-isolated attempt would overwrite it.
+func removePerJobSourceDir(jobID int64) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	_ = os.RemoveAll(filepath.Join(home, ".cache", "weft", "jobs", fmt.Sprintf("%d", jobID)))
+}
+
+// removePerJobSourceMarker deletes the per-job .weft-source.<jobid>.sha256
+// file from the working directory. Best-effort: a leftover marker is
+// harmless (the next dispatch overwrites it).
+func removePerJobSourceMarker(workingDir string, jobID int64) {
+	if workingDir == "" {
+		return
+	}
+	expanded := workingDir
+	if len(expanded) > 1 && expanded[0] == '~' {
+		if home, err := os.UserHomeDir(); err == nil {
+			expanded = home + expanded[1:]
+		}
+	}
+	_ = os.Remove(filepath.Join(expanded, srcsync.PerJobSourceMarkerFile(jobID)))
 }
 
 func (r *Runner) refreshRunningJobs() {
