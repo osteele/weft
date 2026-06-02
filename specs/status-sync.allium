@@ -1170,15 +1170,24 @@ rule TUIPeriodicSync {
         --   - Running:   job.status in {running, starting}.
         --   - Paused:    job.status = paused. Paused jobs are NOT counted as
         --               running in the footer "N jobs running" summary.
-        --   - Queued:    placed job.status = queued AND a sibling on the same
-        --               launch is in Running/Starting. The sibling membership
-        --               is computed from actual job statuses in the current
-        --               snapshot, not from LaunchLiveState.JobProgressID
-        --               (which can go stale).
+        --   - Queued:    placed job.status = queued AND either (a) a sibling
+        --               on the same launch is in Running/Starting, OR (b) the
+        --               launch's agent has been ready at least once (i.e.
+        --               Launch.agent_ready_at is set). Condition (b) keeps
+        --               between-jobs phases (uploading outputs, draining
+        --               background work, polling for new work) classified as
+        --               Queued rather than cycling back through Launching.
+        --               Sibling membership is computed from actual job
+        --               statuses in the current snapshot, not from
+        --               LaunchLiveState.JobProgressID (which can go stale).
         --   - Launching: placed job whose launch is Planned/Launching, OR
-        --               rental-assigned job whose launch is Running but no
-        --               sibling job is genuinely Running/Starting yet
-        --               (agent-dispatch window).
+        --               rental-assigned job whose launch is Running but whose
+        --               agent has never been ready yet (bootstrap window).
+        --               Once the agent has been ready once, queued jobs on
+        --               that launch belong in Queued regardless of current
+        --               agent activity. The Launching row also surfaces a
+        --               "terminate in <d>" countdown when the bootstrap
+        --               deadline is within ~10 minutes.
         --   - Unplaced:  queued/pending jobs with no target, plus jobs whose
         --               launch has Failed/Cancelled, plus stale pending
         --               placements without a launch.

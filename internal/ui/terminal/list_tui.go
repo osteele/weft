@@ -2487,7 +2487,7 @@ func (m listTUIModel) hasActiveLaunchingSpinner() bool {
 		return false
 	}
 	for _, job := range m.groupedJobsWithAutoReasons() {
-		if groupedStatusBucketWithOptions(job, m.launchesWithActiveJob(), groupedStatusRenderOptions{
+		if groupedStatusBucketWithOptions(job, m.launchesWithActiveJob(), jobview.LaunchesEverReady(m.launchByID), groupedStatusRenderOptions{
 			launchStatusByID:     m.launchStatusByID,
 			placingJobIDs:        m.placingJobIDs,
 			placementStatusByJob: m.placementStatusByJob,

@@ -123,3 +123,38 @@ func TestPlacementStatusForJobs_LaunchingUntilTargetInstanceHasActiveJob(t *test
 		t.Fatalf("bucket = %q, want %q", ps.Bucket, BucketLaunching)
 	}
 }
+
+// Regression: once a launch's agent has been ready, queued jobs belong in
+// BucketQueued — even if no job is currently active. This guards against the
+// wi3501-style misclassification where an instance in a between-jobs phase
+// (uploading outputs, post_job_uploads_drained, ready_for_next_job) had its
+// queued follow-up jobs reappear in the Launching section.
+func TestPlacementStatusForJobs_QueuedOnceLaunchAgentEverReady(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.SetLaunchAgentReadyAtIfUnset(database, launchID, time.Unix(9_000, 0)); err != nil {
+		t.Fatalf("SetLaunchAgentReadyAtIfUnset: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	got, err := PlacementStatusForJobs(database, []*db.Job{job}, time.Unix(10_000, 0))
+	if err != nil {
+		t.Fatalf("PlacementStatusForJobs: %v", err)
+	}
+	if ps := got[jobID]; ps.Bucket != BucketQueued {
+		t.Fatalf("bucket = %q, want %q (ever-ready launch should not bucket queued jobs as launching)", ps.Bucket, BucketQueued)
+	}
+}

@@ -20,8 +20,14 @@ const (
 )
 
 type ClassifyInput struct {
-	LaunchStatusByID     map[int64]string
-	LaunchesWithActive   map[int64]bool
+	LaunchStatusByID   map[int64]string
+	LaunchesWithActive map[int64]bool
+	// LaunchEverReady marks launches whose agent has signaled readiness at
+	// least once (db.Launch.AgentReadyAtUnix is set). Once an agent has been
+	// ready, "Launching" no longer applies — queued jobs on such a launch
+	// belong in BucketQueued even if no job is currently active (e.g. the
+	// agent is between jobs uploading outputs or polling for new work).
+	LaunchEverReady      map[int64]bool
 	HasOpenPlacingIntent bool
 }
 
@@ -43,6 +49,19 @@ func LaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLi
 		verb, phaseJobID, ok := campaign.ParsePhaseJobID(live.InstancePhase)
 		if ok && verb == campaign.PhaseRunning && phaseJobID > 0 {
 			out[launchID] = true
+		}
+	}
+	return out
+}
+
+// LaunchesEverReady returns the set of launch IDs whose agent has signaled
+// readiness at least once. "Ready" is determined from db.Launch.IsAgentReady,
+// which is set by the live-state sync on the first transition.
+func LaunchesEverReady(launchByID map[int64]*db.Launch) map[int64]bool {
+	out := make(map[int64]bool, len(launchByID))
+	for id, launch := range launchByID {
+		if launch.IsAgentReady() {
+			out[id] = true
 		}
 	}
 	return out
@@ -91,8 +110,17 @@ func ClassifyBucket(job *db.Job, input ClassifyInput) Bucket {
 		case db.LaunchStatusFailed, db.LaunchStatusCancelled:
 			return BucketUnplaced
 		case db.LaunchStatusRunning:
-			if job.LaunchID != nil && input.LaunchesWithActive[*job.LaunchID] {
-				return BucketQueued
+			if job.LaunchID != nil {
+				// Once the agent has been ready, the launch is past
+				// bootstrap and "Launching" no longer applies — even if
+				// the agent is between jobs (uploading outputs, draining
+				// background work, polling for new work).
+				if input.LaunchEverReady[*job.LaunchID] {
+					return BucketQueued
+				}
+				if input.LaunchesWithActive[*job.LaunchID] {
+					return BucketQueued
+				}
 			}
 			return BucketLaunching
 		}

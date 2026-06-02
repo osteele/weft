@@ -60,7 +60,12 @@ func PlacementStatusForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (ma
 	if err != nil {
 		return nil, err
 	}
+	launchByID, err := db.GetLaunchesByIDs(database, launchIDs)
+	if err != nil {
+		return nil, err
+	}
 	launchesWithActiveJob := LaunchesWithActiveJob(jobs, launchLiveByID)
+	launchesEverReady := LaunchesEverReady(launchByID)
 
 	out := make(map[int64]PlacementStatus, len(jobs))
 	for _, job := range jobs {
@@ -80,6 +85,7 @@ func PlacementStatusForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (ma
 		ps.Bucket = ClassifyBucket(job, ClassifyInput{
 			LaunchStatusByID:     launchStatusByID,
 			LaunchesWithActive:   launchesWithActiveJob,
+			LaunchEverReady:      launchesEverReady,
 			HasOpenPlacingIntent: ps.HasOpenIntent,
 		})
 		out[job.ID] = ps

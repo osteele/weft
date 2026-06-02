@@ -1106,6 +1106,94 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingOverdueUsesBootstrapDeadline
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_LaunchingDeadlineCountdownAppearsWhenClose(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2336)
+	deadline := now.Add(5 * time.Minute).Unix()
+	jobs := []*db.Job{
+		{ID: 1753, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "near deadline"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID: map[int64]*db.Launch{launchID: {
+			ID:                    launchID,
+			CreatedAt:             now.Add(-2 * time.Minute).Unix(),
+			BootstrapDeadlineUnix: &deadline,
+		}},
+		now: now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50:     10 * time.Minute,
+			totalSamples: 8,
+		},
+	})
+	if !strings.Contains(out, "terminate in 5m0s") {
+		t.Fatalf("expected deadline countdown when within warn window, got:\n%s", out)
+	}
+	if strings.Contains(out, "overdue") {
+		t.Fatalf("did not expect overdue while deadline is still in the future:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingFarFutureDeadlineSuppressesCountdown(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2337)
+	deadline := now.Add(30 * time.Minute).Unix()
+	jobs := []*db.Job{
+		{ID: 1754, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "far deadline"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID: map[int64]*db.Launch{launchID: {
+			ID:                    launchID,
+			CreatedAt:             now.Add(-2 * time.Minute).Unix(),
+			BootstrapDeadlineUnix: &deadline,
+		}},
+		now: now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50:     10 * time.Minute,
+			totalSamples: 8,
+		},
+	})
+	if strings.Contains(out, "terminate in") {
+		t.Fatalf("did not expect deadline countdown when comfortably ahead of deadline:\n%s", out)
+	}
+}
+
+// Regression: queued jobs on a LaunchStatusRunning launch whose agent has
+// been ready at least once should land in the Queued section, not Launching,
+// even when no job is currently active and the instance phase is one of the
+// between-jobs phases (e.g. post_job_uploads_drained).
+func TestRenderJobListGroupedStatusPlainAt_EverReadyLaunchKeepsQueuedJobsInQueuedSection(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2338)
+	agentReadyAt := now.Add(-30 * time.Minute).Unix()
+	jobs := []*db.Job{
+		{ID: 1755, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "between jobs"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID: map[int64]*db.LaunchLiveState{launchID: {
+			LaunchID:      launchID,
+			InstancePhase: "post_job_uploads_drained:2375",
+		}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusRunning},
+		launchByID: map[int64]*db.Launch{launchID: {
+			ID:               launchID,
+			Status:           db.LaunchStatusRunning,
+			CreatedAt:        now.Add(-1 * time.Hour).Unix(),
+			AgentReadyAtUnix: &agentReadyAt,
+		}},
+		now: now,
+	})
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("expected ever-ready running launch to bucket queued job into Queued, got:\n%s", out)
+	}
+	if strings.Contains(out, "Launching (") {
+		t.Fatalf("did not expect Launching section for ever-ready running launch:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_LaunchingFutureDeadlineSuppressesOverdue(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	launchID := int64(2334)

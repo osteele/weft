@@ -175,12 +175,13 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 	killedCanceled := make([]*db.Job, 0)
 
 	launchesWithActiveJob := computeLaunchesWithActiveJob(jobs, opts.launchLiveByID)
+	launchesEverReady := jobview.LaunchesEverReady(opts.launchByID)
 
 	for _, job := range jobs {
 		if job == nil {
 			continue
 		}
-		switch groupedStatusBucketWithOptions(job, launchesWithActiveJob, opts) {
+		switch groupedStatusBucketWithOptions(job, launchesWithActiveJob, launchesEverReady, opts) {
 		case string(jobview.BucketRunning):
 			running = append(running, job)
 		case string(jobview.BucketPaused):
@@ -806,9 +807,21 @@ func groupedStatusLaunchingElapsed(job *db.Job, launch *db.Launch, now time.Time
 	return shortRelativeTime(now.Unix() - startedAt)
 }
 
+// bootstrapDeadlineWarnThreshold is the window before a launch's bootstrap
+// deadline within which we surface a "terminate in <d>" countdown in place
+// of the stage ETA. Picked to give a clear heads-up without being noisy for
+// healthy boots that finish in under ten minutes.
+const bootstrapDeadlineWarnThreshold = 10 * time.Minute
+
 func groupedStatusLaunchingETAText(launch *db.Launch, live *db.LaunchLiveState, now time.Time, eta groupedStatusLaunchingETA) string {
 	if launch != nil && launch.BootstrapDeadlineExceeded(now) {
 		return "overdue"
+	}
+	if launch != nil && launch.BootstrapDeadlineUnix != nil {
+		remaining := time.Unix(*launch.BootstrapDeadlineUnix, 0).Sub(now)
+		if remaining > 0 && remaining <= bootstrapDeadlineWarnThreshold {
+			return "terminate in " + remaining.Truncate(time.Second).String()
+		}
 	}
 	stageETA, stageEnteredAt := groupedStatusLaunchingStageETAForLaunch(launch, live, now, eta)
 	if stageETA.samples >= 5 && stageETA.p50 > 0 && stageEnteredAt > 0 && now.Sub(time.Unix(stageETA.oldest, 0)) >= db.BootstrapStageStatsMinSpan() {
@@ -968,22 +981,23 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 	return "ETA " + remaining.FormatWithBounds()
 }
 
-func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, placingJobIDs map[int64]struct{}, now time.Time) string {
+func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, placingJobIDs map[int64]struct{}, now time.Time) string {
 	_, placing := placingJobIDs[job.ID]
 	return string(jobview.ClassifyBucket(job, jobview.ClassifyInput{
 		LaunchStatusByID:     launchStatusByID,
 		LaunchesWithActive:   launchesWithActiveJob,
+		LaunchEverReady:      launchesEverReady,
 		HasOpenPlacingIntent: placing,
 	}))
 }
 
-func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, opts groupedStatusRenderOptions) string {
+func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, opts groupedStatusRenderOptions) string {
 	if opts.placementStatusByJob != nil && job != nil {
 		if ps, ok := opts.placementStatusByJob[job.ID]; ok && ps.Bucket != "" {
 			return string(ps.Bucket)
 		}
 	}
-	return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, opts.placingJobIDs, opts.now)
+	return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, opts.placingJobIDs, opts.now)
 }
 
 // groupedStatusJobParts returns the project name and description separately.
@@ -1037,7 +1051,7 @@ func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
 func countVisibleRunningJobs(jobs []*db.Job) int {
 	n := 0
 	for _, job := range jobs {
-		if job != nil && groupedStatusBucket(job, nil, nil, nil, time.Now()) == "running" {
+		if job != nil && groupedStatusBucket(job, nil, nil, nil, nil, time.Now()) == "running" {
 			n++
 		}
 	}
