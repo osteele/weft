@@ -258,8 +258,8 @@ func LaunchNewForJob(
 	if job == nil {
 		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
-	if job.EffectiveStatus() != db.StatusQueued {
-		return "", fmt.Errorf("can only launch queued jobs (job %s has status: %s)", ids.FormatJobID(jobID), job.EffectiveStatus())
+	if !isMoveAdmissibleStatus(job.EffectiveStatus(), true) {
+		return "", fmt.Errorf("cannot launch new instance for job %s in status %s", ids.FormatJobID(jobID), job.EffectiveStatus())
 	}
 
 	provider, _ := db.RequestedProvider(job.Tags)
@@ -316,6 +316,11 @@ func executeWithIntent(
 	if job.LaunchID != nil {
 		sourceLaunchID = *job.LaunchID
 	}
+	// Snapshot any on-prem running source BEFORE the move runs. After
+	// claim transfer the DB no longer carries the source attempt's
+	// (host, start_time); we need this snapshot to SSH-kill the source
+	// process when the move commits.
+	sources := SnapshotForcedSources([]*db.Job{job})
 
 	desc, err := executeMoveOptionForMove(ctx, database, r2Client, cfg, cloudClients, job, opt, intent)
 	if err != nil {
@@ -337,6 +342,9 @@ func executeWithIntent(
 			slog.Warn("resolve move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
 		}
 	}
+	TerminateForcedSources(database, sources, func(msg string) {
+		slog.Warn("terminate forced source", "component", "move", "job_id", job.ID, "msg", msg)
+	})
 	return desc, nil
 }
 
@@ -495,7 +503,7 @@ func tryRestoreJobToSource(database *sql.DB, jobID, sourceLaunchID int64) bool {
 	return true
 }
 
-func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {
+func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64, force bool) (Result, error) {
 	moveStarted := time.Now()
 	logPhase := func(phase string, started time.Time, detail string, err error) {
 		msg := "cmd=jobs move target=new phase=" + phase
@@ -521,9 +529,10 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {
 		return Result{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	logPhase("load_job", jobLoadStarted, fmt.Sprintf("status=%s host=%s", job.EffectiveStatus(), job.Host), nil)
-	if job.EffectiveStatus() != db.StatusQueued {
-		return Result{}, fmt.Errorf("can only move queued jobs (job %s has status: %s)", ids.FormatJobID(jobID), job.EffectiveStatus())
+	if !isMoveAdmissibleStatus(job.EffectiveStatus(), force) {
+		return Result{}, fmt.Errorf("can only move queued jobs (job %s has status: %s); pass --force to move running jobs", ids.FormatJobID(jobID), job.EffectiveStatus())
 	}
+	sources := SnapshotForcedSources([]*db.Job{job})
 
 	configStarted := time.Now()
 	cfg, err := config.Load()
@@ -620,10 +629,13 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64) (Result, error) {
 		}
 	}
 	logPhase("complete", moveStarted, fmt.Sprintf("target=%s instance=%d", result.TargetDesc, result.InstanceID), nil)
+	TerminateForcedSources(database, sources, func(msg string) {
+		slog.Warn("terminate forced source", "component", "move", "job_id", jobID, "msg", msg)
+	})
 	return result, nil
 }
 
-func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, cb BulkCallbacks) (BulkResult, error) {
+func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, force bool, cb BulkCallbacks) (BulkResult, error) {
 	moveStarted := time.Now()
 	logPhase := func(phase string, started time.Time, detail string, err error) {
 		msg := "cmd=jobs move target=new phase=" + phase
@@ -668,13 +680,15 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	logPhase("build_r2_client", r2Started, fmt.Sprintf("enabled=%t", r2Client != nil), nil)
 
 	refreshStarted := time.Now()
-	launchable, warnings := refreshMoveToNewJobs(database, jobs)
+	launchable, warnings := refreshMoveToNewJobs(database, jobs, force)
 	for _, warning := range warnings {
 		if cb.OnWarning != nil {
 			cb.OnWarning(warning)
 		}
 	}
 	logPhase("refresh_launchable", refreshStarted, fmt.Sprintf("launchable=%d warnings=%d", len(launchable), len(warnings)), nil)
+
+	sources := SnapshotForcedSources(launchable)
 
 	groupStarted := time.Now()
 	var groups []campaign.InstanceGroup
@@ -873,6 +887,25 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	// agent_ready or retry replacement launch" lifecycle.
 	placed, unplaced := groupOutcomes.partition()
 	unplaced = append(unplaced, preDropped...)
+	// SSH-kill on-prem source processes for every job whose TransferClaim
+	// has already closed the source attempt in the DB. Jobs whose group
+	// failed offer search or launch are filtered out (their source attempt
+	// is still open and we must leave the source process running).
+	placedSet := make(map[int64]struct{}, len(placed))
+	for _, id := range placed {
+		placedSet[id] = struct{}{}
+	}
+	survivingSources := make([]SourceSnapshot, 0, len(sources))
+	for _, snap := range sources {
+		if _, ok := placedSet[snap.JobID]; ok {
+			survivingSources = append(survivingSources, snap)
+		}
+	}
+	TerminateForcedSources(database, survivingSources, func(msg string) {
+		if cb.OnWarning != nil {
+			cb.OnWarning(msg)
+		}
+	})
 	return BulkResult{
 		InstanceIDs:    result.InstanceIDs,
 		PlacedJobIDs:   placed,
@@ -1082,7 +1115,7 @@ func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
 	return err
 }
 
-func refreshMoveToNewJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
+func refreshMoveToNewJobs(database *sql.DB, jobs []*db.Job, force bool) ([]*db.Job, []string) {
 	launchable := make([]*db.Job, 0, len(jobs))
 	var warnings []string
 	for _, job := range jobs {
@@ -1099,7 +1132,7 @@ func refreshMoveToNewJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string
 			continue
 		}
 		status := latest.EffectiveStatus()
-		if status != db.StatusQueued && status != db.StatusPendingPlacement {
+		if !isMoveAdmissibleStatus(status, force) {
 			warnings = append(warnings, fmt.Sprintf("Warning: job %s has status %s, skipping", ids.FormatJobID(job.ID), status))
 			continue
 		}
@@ -1109,7 +1142,23 @@ func refreshMoveToNewJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string
 }
 
 func RefreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []string) {
-	return refreshMoveToNewJobs(database, jobs)
+	return refreshMoveToNewJobs(database, jobs, false)
+}
+
+// isMoveAdmissibleStatus reports whether a job's effective status is allowed
+// into the move-to-new pipeline. Queued/pending_placement always qualify;
+// the running set (running/starting/paused) is admitted only under --force,
+// in which case the destination's TransferClaim atomically supersedes the
+// source attempt and TerminateForcedSources cleans up the source process.
+func isMoveAdmissibleStatus(status string, force bool) bool {
+	switch status {
+	case db.StatusQueued, db.StatusPendingPlacement:
+		return true
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+		return force
+	default:
+		return false
+	}
 }
 
 func jobsForGrouping(jobs []*db.Job) []*db.Job {

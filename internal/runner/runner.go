@@ -322,6 +322,19 @@ func (r *Runner) tryStartNextJob() {
 		}
 	}
 
+	// Host-wide measured load gate. Independent of weft's allotment
+	// bookkeeping; catches overload from non-weft users on shared hosts,
+	// BLAS/OMP overdraft beyond declared cores, and any other source of
+	// load the per-job CPU allotment system has no visibility into.
+	if r.cpuConfig.HostLoadCeiling > 0 && r.cpuCount > 0 {
+		loadPct := int((HostLoadAvg1() * 100.0) / float64(r.cpuCount))
+		if loadPct >= r.cpuConfig.HostLoadCeiling {
+			r.state.AddPendingWithReason(jobID, fmt.Sprintf("host load gate: %d%% >= %d%% ceiling (1-min loadavg / %d cores)", loadPct, r.cpuConfig.HostLoadCeiling, r.cpuCount))
+			r.saveState()
+			return
+		}
+	}
+
 	// Refresh actual GPU memory snapshot before GPU checks (only for GPU jobs)
 	jobHasGPU := job.GPUClass != "" || len(GetJobGPUDevices(job)) > 0
 	if jobHasGPU {

@@ -1927,8 +1927,16 @@ func (m listTUIModel) beginGroupedMove() (tea.Model, tea.Cmd) {
 	if job == nil {
 		return m, nil
 	}
-	if job.EffectiveStatus() != db.StatusQueued {
-		m.statusMessage = "Move is only available for queued jobs"
+	status := job.EffectiveStatus()
+	switch status {
+	case db.StatusQueued, db.StatusPendingPlacement:
+		// Standard move; no force semantics.
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+		// Force-move: source attempt is atomically superseded inside the
+		// launch; on success, the source process is terminated.
+		m.statusMessage = fmt.Sprintf("Force-moving running job #%d — source will be killed on success", job.ID)
+	default:
+		m.statusMessage = fmt.Sprintf("Move not available for job in status %s", status)
 		return m, nil
 	}
 	m.clearAutoPilotPersistentState()

@@ -39,9 +39,29 @@ func ResolveEligibleJobs(
 	unplacedOnly bool,
 	callbacks JobMoveCallbacks,
 ) ([]*db.Job, error) {
+	return ResolveEligibleJobsWithForce(database, jobIDs, project, from, unplacedOnly, false, callbacks)
+}
+
+// ResolveEligibleJobsWithForce is like ResolveEligibleJobs but, when
+// allowRunning is true, also admits jobs in running/starting/paused state.
+// Callers using this path move the jobs via the normal move pipeline, which
+// uses TransferClaim to atomically supersede the source attempt and then
+// calls TerminateForcedSources to SSH-kill the source process.
+func ResolveEligibleJobsWithForce(
+	database *sql.DB,
+	jobIDs []int64,
+	project string,
+	from string,
+	unplacedOnly bool,
+	allowRunning bool,
+	callbacks JobMoveCallbacks,
+) ([]*db.Job, error) {
 	var jobs []*db.Job
 	explicitJobList := len(jobIDs) > 0
 	eligibleStatuses := []string{db.StatusQueued, db.StatusPendingPlacement}
+	if allowRunning {
+		eligibleStatuses = append(eligibleStatuses, db.StatusRunning, db.StatusStarting, db.StatusPaused)
+	}
 	var sourceInstanceID int64
 	sourceHost := ""
 	sourceProject := ""
@@ -122,7 +142,7 @@ func ResolveEligibleJobs(
 	var eligible []*db.Job
 	for _, job := range jobs {
 		status := job.EffectiveStatus()
-		if status != db.StatusQueued && status != db.StatusPendingPlacement {
+		if !isEligibleMoveStatus(status, allowRunning) {
 			if explicitJobList {
 				callbacks.warningf("Warning: job %s has status %s, skipping", ids.FormatJobID(job.ID), status)
 			}
@@ -277,4 +297,18 @@ func supersedeOpenPlacementForMove(database *sql.DB, jobID int64) error {
 		}
 	}
 	return nil
+}
+
+// isEligibleMoveStatus reports whether a job's effective status lets it be
+// admitted to the move pipeline. Queued/pending_placement always qualify; the
+// running set is only admitted under --force.
+func isEligibleMoveStatus(status string, allowRunning bool) bool {
+	switch status {
+	case db.StatusQueued, db.StatusPendingPlacement:
+		return true
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+		return allowRunning
+	default:
+		return false
+	}
 }

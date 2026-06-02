@@ -214,8 +214,18 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return switchToHostsMsg{} }
 	case "m":
 		job := m.selectedCloudJob()
-		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+		if job == nil {
 			return m, nil
+		}
+		status := job.EffectiveStatus()
+		switch status {
+		case db.StatusQueued, db.StatusPendingPlacement,
+			db.StatusRunning, db.StatusStarting, db.StatusPaused:
+			// Standard move for queued/pending; force-move semantics for
+			// running/starting/paused (source attempt atomically superseded
+			// inside the launch, source process killed on success).
+		default:
+			return m, m.flash.Set(fmt.Sprintf("Move not available for job in status %s", status), true)
 		}
 		m.clearAutoPilotPersistentState()
 		m.moveLookupSeq++

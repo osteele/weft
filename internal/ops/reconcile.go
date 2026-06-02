@@ -347,6 +347,17 @@ func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
 	return killQueueRunnerJob(job, timeout)
 }
 
+// KillQueueRunnerJob is an exported wrapper around killQueueRunnerJob for
+// callers in other packages that need to SSH-kill a queue-runner-managed
+// job's process tree given a snapshot of its pre-move host and start_time.
+// Used by the --force move path after TransferClaim has closed the source
+// attempt in the DB; the source process on the on-prem host still needs an
+// explicit kill because the on-prem queue runner doesn't watch attempt
+// state in the central DB.
+func KillQueueRunnerJob(job *db.Job, timeout time.Duration) error {
+	return killQueueRunnerJob(job, timeout)
+}
+
 // killQueueRunnerJob kills a queue-runner managed job via its PID and process group.
 func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 	pidFile := session.JobPidFile(job.ID, job.StartTime)

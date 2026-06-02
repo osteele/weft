@@ -12,7 +12,10 @@
 -- Excludes:
 --   - PlaceJob and ReuseAssignment (job-lifecycle.allium /
 --     campaign-lifecycle.allium): initial placement of an unplaced job.
---   - Mid-execution attempts (running jobs are never moved by this spec).
+--   - Mid-execution attempts under the default (no-force) move path. Running
+--     jobs may only be moved via the explicit `--force` option (see
+--     UserForceMovesRunningJob), which kills the job before treating it as
+--     queued. Without `--force`, running jobs are rejected with a warning.
 --
 -- Note on QueueRebalanceJob (campaign-lifecycle.allium): cost rebalancing
 -- across already-running instances now opens MoveIntent { target_kind =
@@ -132,6 +135,65 @@ rule MoveTargetSameAsSourceRejected {
     ensures:
         ShowError("Target is the current instance")
         -- UI SHOULD not offer this option; rule is defense in depth.
+}
+
+rule UserForceMovesRunningJob {
+    -- `weft jobs move --force --to new` admits jobs in {running, starting,
+    -- paused} to the move-to-new pipeline. The move is atomic: the existing
+    -- LaunchCampaign(TransferClaim = true) flow supersedes the source
+    -- attempt only once the destination instance has been created. If the
+    -- launch fails before instance creation (no offer, provider error,
+    -- planner rejection) the source attempt is untouched and the source
+    -- process keeps running. On success the central DB closes the source
+    -- attempt and creates a fresh attempt on the destination launch in one
+    -- transaction (see internal/campaign/launch_claim.go
+    -- claimJobForLaunchTransfer → db.TransferJobLaunchID).
+    --
+    -- After the claim transfer commits, the source process still has to be
+    -- terminated explicitly:
+    --   * Cloud sources: LaunchCampaign writes an R2 cancel marker to the
+    --     source instance via sendGraceCancelAttempts (existing behavior).
+    --   * On-prem sources: the move caller invokes TerminateForcedSources,
+    --     which SSH-kills the queue-runner-managed process tree using a
+    --     pre-move snapshot of (host, start_time). Failure to kill leaves
+    --     the source process orphaned (consuming host CPU until natural
+    --     completion) but does not affect DB-visible job state.
+    --
+    -- --force is only supported for `--to new`, `--to <host>`, and
+    -- `--to <instance>`. It is rejected for `--to auto` / `--to unplaced`
+    -- because returning a running job to the pool has no atomic primitive.
+
+    when: UserInvokesMove(selector, target)
+          and selector.force = true
+          and exists(job in MoveCandidateJobs where
+                     job.status in {running, starting, paused})
+
+    requires:
+        selector.force = true
+        and target.kind in {new, existing, host}
+
+    for job in MoveCandidateJobs where job.status in {running, starting, paused}:
+      ensures:
+          let sourceSnapshot = capture(job.host, job.latest_attempt.start_time)
+              if job.host is inventory_host
+          ExecuteMoveOption(job, target, MoveIntentFor(job, target))
+              with LaunchOpts.TransferClaim = true
+          if ExecuteMoveOption succeeded and sourceSnapshot exists:
+              SSHKillQueueRunnerJob(sourceSnapshot)
+              -- Best-effort; failures are reported but do not abort the move
+
+    @guidance
+        -- Implementation:
+        --   cmd/job.go --force flag →
+        --   orchestration.ResolveEligibleJobsWithForce(allowRunning = force) →
+        --   orchestration.MoveQueuedJobToNewInstance(force) /
+        --   orchestration.MoveQueuedJobsToNewInstances(force).
+        --   Inner status guards (isMoveAdmissibleStatus) admit running jobs.
+        --   TransferClaim is already true for move-to-new paths.
+        --   Post-success kill: orchestration.SnapshotForcedSources +
+        --   TerminateForcedSources (force_move.go) →
+        --   ops.KillQueueRunnerJob.
+        --   Without --force the existing queued-only filter is unchanged.
 }
 
 rule MoveSelectorResolution {

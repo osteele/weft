@@ -21,6 +21,15 @@ type CPUConfig struct {
 	DecayStep                int // Allotment % decrease per adjustment
 	MinAllotment             int // Minimum allotment %
 	MaxAllotment             int // Maximum allotment %
+
+	// HostLoadCeiling: refuse to start any new job (regardless of allotment
+	// bookkeeping) when measured 1-minute loadavg as a percentage of CPU
+	// count is at or above this value. This catches host overload that
+	// weft's per-job allotment system has no visibility into — non-weft
+	// users on multi-tenant hosts, BLAS/OMP overdraft beyond declared
+	// cores, runaway threads. Set to 0 to disable. Default 130 allows
+	// modest I/O-wait inflation without false positives.
+	HostLoadCeiling int
 }
 
 // DefaultCPUConfig returns the default CPU configuration matching the bash runner.
@@ -38,6 +47,7 @@ func DefaultCPUConfig() CPUConfig {
 		DecayStep:                10,
 		MinAllotment:             10,
 		MaxAllotment:             100,
+		HostLoadCeiling:          130,
 	}
 }
 

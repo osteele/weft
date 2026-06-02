@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -41,7 +42,21 @@ type GraceCommandAck struct {
 }
 
 const defaultGraceAckPollInterval = 500 * time.Millisecond
-const defaultGraceAckTimeout = 30 * time.Second
+
+// defaultGraceAckTimeout is how long submit-to-instance / extend / release
+// will wait for the instance's agent to ack a grace command before
+// returning an error. Slow providers (runpod under load, vast.ai instances
+// in grace state with R2 churn) routinely take 20-40s to respond, so the
+// default is set with headroom. Override per-call with WithGraceAckTimeout
+// or globally with the WEFT_GRACE_ACK_TIMEOUT env var (e.g. "90s").
+var defaultGraceAckTimeout = func() time.Duration {
+	if v := os.Getenv("WEFT_GRACE_ACK_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 90 * time.Second
+}()
 
 type graceAckTimeoutKey struct{}
 

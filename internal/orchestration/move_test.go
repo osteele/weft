@@ -151,7 +151,7 @@ func TestRefreshMoveToNewJobs_AcceptsPendingPlacement(t *testing.T) {
 		t.Fatalf("SetPendingStatus: %v", err)
 	}
 
-	launchable, warnings := refreshMoveToNewJobs(database, []*db.Job{staleJob})
+	launchable, warnings := refreshMoveToNewJobs(database, []*db.Job{staleJob}, false)
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", warnings)
 	}
@@ -730,7 +730,7 @@ func TestLaunchNewForJob_JobNotQueued(t *testing.T) {
 	}
 
 	_, err = LaunchNewForJob(context.Background(), database, nil, nil, nil, jobID, bidding.StrategyFast)
-	if err == nil || !strings.Contains(err.Error(), "can only launch queued jobs") {
+	if err == nil || !strings.Contains(err.Error(), "cannot launch new instance for job") {
 		t.Fatalf("LaunchNewForJob err = %v, want status error", err)
 	}
 }

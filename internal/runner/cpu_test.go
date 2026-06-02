@@ -2,6 +2,16 @@ package runner
 
 import "testing"
 
+func TestDefaultCPUConfig_HostLoadCeiling(t *testing.T) {
+	cfg := DefaultCPUConfig()
+	if cfg.HostLoadCeiling <= 100 {
+		t.Errorf("HostLoadCeiling = %d, want > 100 (must allow some I/O-wait inflation)", cfg.HostLoadCeiling)
+	}
+	if cfg.HostLoadCeiling > 200 {
+		t.Errorf("HostLoadCeiling = %d, want <= 200 (must catch real overload like cool30 incident at 210)", cfg.HostLoadCeiling)
+	}
+}
+
 func TestDefaultAllotment(t *testing.T) {
 	cfg := DefaultCPUConfig()
 

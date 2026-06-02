@@ -148,7 +148,7 @@ func TestResolveEligibleJobs_FromSelectsOnlyQueuedJobs(t *testing.T) {
 		t.Fatalf("mark running attempt: %v", err)
 	}
 
-	jobs, err := resolveEligibleJobs(database, nil, "", ids.FormatInstanceID(instanceID), false)
+	jobs, err := resolveEligibleJobs(database, nil, "", ids.FormatInstanceID(instanceID), false, false)
 	if err != nil {
 		t.Fatalf("resolveEligibleJobs returned error: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestResolveEligibleJobs_FromHostSelectsOnlyEligibleQueuedJobs(t *testing.T)
 		t.Fatalf("record other-host job: %v", err)
 	}
 
-	jobs, err := resolveEligibleJobs(database, nil, "", "cool30", false)
+	jobs, err := resolveEligibleJobs(database, nil, "", "cool30", false, false)
 	if err != nil {
 		t.Fatalf("resolveEligibleJobs returned error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestResolveEligibleJobs_FromHostNoEligibleJobsReportsHost(t *testing.T) {
 		t.Fatalf("mark running attempt: %v", err)
 	}
 
-	_, err = resolveEligibleJobs(database, nil, "", "cool30", false)
+	_, err = resolveEligibleJobs(database, nil, "", "cool30", false, false)
 	if err == nil {
 		t.Fatal("expected no-eligible-jobs error")
 	}
@@ -234,7 +234,7 @@ func TestResolveEligibleJobs_FromFallsBackToProject(t *testing.T) {
 		t.Fatalf("set project: %v", err)
 	}
 
-	jobs, err := resolveEligibleJobs(database, nil, "", "markov-attention", false)
+	jobs, err := resolveEligibleJobs(database, nil, "", "markov-attention", false, false)
 	if err != nil {
 		t.Fatalf("resolveEligibleJobs returned error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestResolveEligibleJobs_FromHostTakesPrecedenceOverSameNamedProject(t *test
 		t.Fatalf("set project: %v", err)
 	}
 
-	jobs, err := resolveEligibleJobs(database, nil, "", "cool30", false)
+	jobs, err := resolveEligibleJobs(database, nil, "", "cool30", false, false)
 	if err != nil {
 		t.Fatalf("resolveEligibleJobs returned error: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestMoveJobsToNewInstancesRetriesSingleJobRetryableLaunch(t *testing.T) {
 	defer restore()
 
 	attempts := 0
-	moveQueuedJobToNewInstance = func(_ *sql.DB, jobID int64) (orchestration.Result, error) {
+	moveQueuedJobToNewInstance = func(_ *sql.DB, jobID int64, _ bool) (orchestration.Result, error) {
 		attempts++
 		if attempts == 1 {
 			return orchestration.Result{}, cloud.ErrProviderRejected
@@ -439,7 +439,7 @@ func TestMoveJobsToNewInstancesRetriesSingleJobRetryableLaunch(t *testing.T) {
 		return orchestration.Result{TargetDesc: "new A100 instance wi42"}, nil
 	}
 
-	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, false)
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, false, false)
 	if err != nil {
 		t.Fatalf("moveJobsToNewInstances: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestMoveJobsToNewInstancesRetriesBulkRetryableLaunch(t *testing.T) {
 	defer restore()
 
 	attempts := 0
-	moveQueuedJobsToNewInstances = func(_ *sql.DB, _ []*db.Job, _ bool, _ orchestration.BulkCallbacks) (orchestration.BulkResult, error) {
+	moveQueuedJobsToNewInstances = func(_ *sql.DB, _ []*db.Job, _ bool, _ bool, _ orchestration.BulkCallbacks) (orchestration.BulkResult, error) {
 		attempts++
 		if attempts == 1 {
 			return orchestration.BulkResult{}, cloud.ErrProviderRejected
@@ -461,7 +461,7 @@ func TestMoveJobsToNewInstancesRetriesBulkRetryableLaunch(t *testing.T) {
 		return orchestration.BulkResult{InstanceIDs: []int64{42}}, nil
 	}
 
-	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}, {ID: 124}}, false, false)
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}, {ID: 124}}, false, false, false)
 	if err != nil {
 		t.Fatalf("moveJobsToNewInstances: %v", err)
 	}
@@ -476,12 +476,12 @@ func TestMoveJobsToNewInstancesDoesNotRetryNonRetryableLaunch(t *testing.T) {
 
 	attempts := 0
 	sentinel := errors.New("bad config")
-	moveQueuedJobToNewInstance = func(_ *sql.DB, jobID int64) (orchestration.Result, error) {
+	moveQueuedJobToNewInstance = func(_ *sql.DB, jobID int64, _ bool) (orchestration.Result, error) {
 		attempts++
 		return orchestration.Result{}, sentinel
 	}
 
-	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, false)
+	err := moveJobsToNewInstances(nil, []*db.Job{{ID: 123}}, false, false, false)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("moveJobsToNewInstances err = %v, want %v", err, sentinel)
 	}

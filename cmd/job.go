@@ -150,6 +150,7 @@ var (
 	jobMoveProject string
 	jobMoveTo      string
 	jobMoveFrom    string
+	jobMoveForce   bool
 	jobMoveTUI     bool
 	jobMovePlain   bool
 	jobMoveNoTUI   bool
@@ -185,6 +186,11 @@ Flags:
   --to, -t <dest>     Destination (alternative to positional final argument)
   --from, -f <src>    Select queued jobs from source instance, host, or project (e.g., wi872, cool30, myproj)
   --project <name>    Select all eligible queued jobs in the named project
+  --force             Allow running/starting/paused jobs to be moved. The move uses TransferClaim:
+                      the source attempt is only superseded once the destination commits. If the
+                      launch fails (no offer, provider error) before the instance is created,
+                      the source is untouched. On success, the source process is killed (SSH for
+                      on-prem, R2 cancel marker for cloud). Currently only supported with --to new.
 
 Examples:
   weft job move 42 cool100              # Place job 42 on cool100
@@ -476,7 +482,7 @@ func init() {
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
-	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveTUI, jobMovePlain || jobMoveNoTUI)
+	return runJobMoveOrPlace(args, jobMoveProject, jobMoveEach, false, jobMoveTo, jobMoveFrom, jobMoveTUI, jobMovePlain || jobMoveNoTUI, jobMoveForce)
 }
 
 func runJobPriority(cmd *cobra.Command, args []string) error {
@@ -527,6 +533,7 @@ func runJobPriority(cmd *cobra.Command, args []string) error {
 func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destination *string, from *string) {
 	cmd.Flags().BoolVar(each, "each", false, "With 'new'/'create'/'distinct': launch a separate instance per job")
 	cmd.Flags().StringVar(project, "project", "", "Select all eligible queued jobs in the named project")
+	cmd.Flags().BoolVar(&jobMoveForce, "force", false, "Allow running/starting/paused jobs to be moved. Source attempt is superseded atomically inside the launch; the source process is killed on success (in-progress work is lost). Only supported with --to new.")
 	cmd.Flags().BoolVar(&jobMoveTUI, "tui", false, "Force launch progress TUI for move-to-new")
 	cmd.Flags().BoolVar(&jobMovePlain, "plain", false, "Force plain text output for move-to-new")
 	cmd.Flags().BoolVar(&jobMoveNoTUI, "no-tui", false, "Disable launch progress TUI for move-to-new (alias for --plain)")
@@ -541,7 +548,7 @@ func addJobMoveFlags(cmd *cobra.Command, each *bool, project *string, destinatio
 	}
 }
 
-func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string, forceTUI bool, forcePlain bool) error {
+func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bool, destinationFlag string, from string, forceTUI bool, forcePlain bool, force bool) error {
 	dest, jobArgs, err := resolveMoveDestination(args, destinationFlag)
 	if err != nil {
 		return err
@@ -558,7 +565,7 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 	}
 	defer database.Close()
 
-	eligible, err := resolveEligibleJobs(database, jobArgs, project, from, unplacedOnly)
+	eligible, err := resolveEligibleJobs(database, jobArgs, project, from, unplacedOnly, force)
 	if err != nil {
 		return err
 	}
@@ -568,16 +575,22 @@ func runJobMoveOrPlace(args []string, project string, each bool, unplacedOnly bo
 		if each {
 			return usageErrorf("--each is only valid with 'new', 'create', or 'distinct' destination")
 		}
+		if force {
+			return usageErrorf("--force is not supported with destination 'auto' / 'unplaced'")
+		}
 		return moveJobsToAuto(database, eligible)
 	case strings.EqualFold(dest, "new") || strings.EqualFold(dest, "create"):
 		useTUI, err := resolveTUI(forceTUI, forcePlain)
 		if err != nil {
 			return err
 		}
-		return moveJobsToNewInstances(database, eligible, each, useTUI)
+		return moveJobsToNewInstances(database, eligible, each, useTUI, force)
 	default:
 		if each {
 			return usageErrorf("--each is only valid with 'new', 'create', or 'distinct' destination")
+		}
+		if force {
+			return usageErrorf("--force is currently only supported with --to new")
 		}
 		if instanceID, parseErr := ids.ParseInstanceID(dest); parseErr == nil {
 			return moveJobsToInstance(database, eligible, instanceID)
@@ -630,13 +643,16 @@ func validateMoveSelectors(jobArgs []string, project string, from string) error 
 
 // resolveEligibleJobs fetches jobs by ID list and/or --project, filtering to
 // queued jobs. When unplacedOnly is true (place command), already-placed jobs
-// are also skipped.
-func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, from string, unplacedOnly bool) ([]*db.Job, error) {
+// are also skipped. When force is true, running/starting/paused jobs are also
+// admitted; the move pipeline will atomically supersede the source attempt via
+// TransferClaim and then SSH-kill the source process via
+// orchestration.SnapshotForcedSources / TerminateForcedSources.
+func resolveEligibleJobs(database *sql.DB, jobArgs []string, project string, from string, unplacedOnly bool, force bool) ([]*db.Job, error) {
 	jobIDs, err := ParseJobIDs(jobArgs)
 	if err != nil {
 		return nil, fmt.Errorf("parse job IDs: %w", err)
 	}
-	return orchestration.ResolveEligibleJobs(database, jobIDs, project, from, unplacedOnly, orchestration.JobMoveCallbacks{
+	return orchestration.ResolveEligibleJobsWithForce(database, jobIDs, project, from, unplacedOnly, force, orchestration.JobMoveCallbacks{
 		OnWarning: func(message string) {
 			fmt.Fprintln(os.Stderr, message)
 		},
@@ -688,7 +704,7 @@ func moveJobsToInstance(database *sql.DB, jobs []*db.Job, instanceID int64) erro
 	return err
 }
 
-func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, useLaunchTUI bool) error {
+func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool, useLaunchTUI bool, force bool) error {
 	if !verbose {
 		restore := logging.Suppress()
 		defer restore()
@@ -700,7 +716,7 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 	}
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err = moveJobsToNewInstancesOnce(database, jobs, separateEach, useLaunchTUI)
+		err = moveJobsToNewInstancesOnce(database, jobs, separateEach, useLaunchTUI, force)
 		if err == nil {
 			return nil
 		}
@@ -723,11 +739,11 @@ func moveJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach bool,
 	return err
 }
 
-func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach bool, useLaunchTUI bool) error {
+func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach bool, useLaunchTUI bool, force bool) error {
 	// Keep single-job move-to-new on the same implementation path as TUI move,
 	// so behavior and instrumentation stay consistent across interfaces.
 	if len(jobs) == 1 && !separateEach {
-		res, err := moveQueuedJobToNewInstance(database, jobs[0].ID)
+		res, err := moveQueuedJobToNewInstance(database, jobs[0].ID, force)
 		if err != nil {
 			return err
 		}
@@ -742,7 +758,7 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 		return nil
 	}
 	var launchTUI *terminal.LaunchProgressTUI
-	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, orchestration.BulkCallbacks{
+	result, err := moveQueuedJobsToNewInstances(database, jobs, separateEach, force, orchestration.BulkCallbacks{
 		OnStatus: func(message string) {
 			if shouldPrintMoveLaunchStatus(useLaunchTUI, launchTUI != nil) {
 				fmt.Println(message)
