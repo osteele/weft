@@ -1,6 +1,7 @@
 package vastai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -604,26 +605,63 @@ func (c *Client) runWithTimeout(commandTimeout time.Duration, args ...string) ([
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.CLIPath, args...)
-	out, err := cmd.Output()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	prefix := args
+	if len(prefix) > 3 {
+		prefix = args[:3]
+	}
 	if err != nil {
-		prefix := args
-		if len(prefix) > 3 {
-			prefix = args[:3]
-		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("%w: vastai %s timed out after %s", cloud.ErrProviderCommandTimeout, strings.Join(prefix, " "), timeout)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			// Only include the first 3 args (subcommand + ID) — later args may be large scripts.
-			stderr := strings.TrimSpace(string(exitErr.Stderr))
-			if stderr == "" {
-				stderr = fmt.Sprintf("exit %d (no stderr)", exitErr.ExitCode())
+			detail := strings.TrimSpace(stderr.String())
+			if detail == "" {
+				detail = fmt.Sprintf("exit %d (no stderr)", exitErr.ExitCode())
 			}
-			return nil, fmt.Errorf("%s: %s", strings.Join(prefix, " "), stderr)
+			return nil, fmt.Errorf("%s: %s", strings.Join(prefix, " "), detail)
 		}
 		return nil, err
 	}
-	return out, nil
+	// vastai CLI can exit 0 with empty stdout and an error payload on stderr
+	// — notably for API 400s like "bogus_field is not a valid search key".
+	// Surface those as ErrProviderRejected so callers see the underlying
+	// reason instead of "provider returned empty response".
+	if stdout.Len() == 0 && stderr.Len() > 0 {
+		if cliErr := extractStderrError(stderr.Bytes()); cliErr != "" {
+			return nil, fmt.Errorf("%s: %w: %s", strings.Join(prefix, " "), cloud.ErrProviderRejected, cliErr)
+		}
+	}
+	return stdout.Bytes(), nil
+}
+
+// extractStderrError pulls a human-readable error message out of vastai CLI
+// stderr. Returns "" when stderr looks like benign output (only warnings,
+// progress notices, deprecation hints, etc.) so the caller treats the command
+// as successful — vastai routinely writes informational lines to stderr while
+// exiting 0, and we must not misclassify those as provider rejections.
+// Handles two observed error shapes:
+//   - {"error": true, "status_code": N, "msg": "..."} (API error JSON)
+//   - "Warning: ..." preamble followed by an error JSON line on the next line
+func extractStderrError(stderrBytes []byte) string {
+	s := strings.TrimSpace(string(stderrBytes))
+	if s == "" {
+		return ""
+	}
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		if msg := extractProviderErrorMessage([]byte(line)); msg != "" {
+			return msg
+		}
+	}
+	return ""
 }
 
 // buildSearchFilter constructs a vastai search filter string from constraints.

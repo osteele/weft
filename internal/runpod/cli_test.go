@@ -63,6 +63,19 @@ Usage:
 	}
 }
 
+func TestIsOfferUnavailableError_RunpodMachineOutOfResources(t *testing.T) {
+	err := formatRunpodctlError(
+		[]string{"pod", "create", "--gpu-id", "NVIDIA GeForce RTX 4090"},
+		errTestExit{},
+		[]byte(`{"error":"This machine does not have the resources to deploy your pod. Please try a different machine"}
+Usage:
+  runpodctl pod create [flags]`),
+	)
+	if !isOfferUnavailableError(err) {
+		t.Fatalf("isOfferUnavailableError(%v) = false, want true", err)
+	}
+}
+
 type errTestExit struct{}
 
 func (errTestExit) Error() string { return "exit status 1" }

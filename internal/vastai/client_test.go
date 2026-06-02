@@ -389,6 +389,45 @@ func TestRunWithTimeoutHonorsPerCallTimeout(t *testing.T) {
 	}
 }
 
+// TestSearchOffersSurfacesStderrErrorOnZeroExit covers the case where the
+// vastai CLI exits 0 with empty stdout but writes an API error payload to
+// stderr — observed with vastai 1.0.7's "driver_vers gte None" regression and
+// with rejections like "bogus_field is not a valid search key". Before the
+// fix this surfaced as a generic "provider returned empty response" with no
+// detail; now it propagates as ErrProviderRejected carrying the actual msg.
+func TestSearchOffersSurfacesStderrErrorOnZeroExit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	// Mimic vastai's observed behavior: a "Warning:" preamble line followed by
+	// the JSON error payload, all on stderr, with empty stdout and exit 0.
+	script := `#!/bin/sh
+printf '%s\n' 'Warning: Unrecognized field: bogus_field, see list of recognized fields.' >&2
+printf '%s\n' '{"error": true, "status_code": 400, "msg": "bogus_field is not a valid search key"}' >&2
+exit 0
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.SearchOffers(OfferConstraints{GPUClass: "nvidia", MinGPUMemGB: 8, NumGPUs: 1})
+	if err == nil {
+		t.Fatal("SearchOffers err = nil, want error")
+	}
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("SearchOffers err = %v, want errors.Is(ErrProviderRejected)=true", err)
+	}
+	if !strings.Contains(err.Error(), "bogus_field is not a valid search key") {
+		t.Fatalf("SearchOffers err = %q, want CLI msg in detail", err)
+	}
+	// Regression: the unhelpful "provider returned empty response" branch must
+	// not eat this case anymore.
+	if strings.Contains(err.Error(), "provider returned empty response") {
+		t.Fatalf("SearchOffers err = %q, must not collapse to generic empty-response message", err)
+	}
+}
+
 // TestCreateInstanceAndAttachSSHUseLongerTimeoutConstants asserts that the
 // long-timeout opt-in is real: the createInstanceTimeout and attachSSHTimeout
 // constants must be strictly greater than the default cliTimeout so a slow

@@ -353,6 +353,14 @@ func isOfferUnavailableError(err error) bool {
 		return true
 	case strings.Contains(msg, "something went wrong") && strings.Contains(msg, "try again later"):
 		return true
+	// RunPod's host-out-of-stock rejection: a specific machine that backs the
+	// chosen offer can't actually accept the pod. The remedy is the same as
+	// for unavailable offers — try a different machine. Require both clauses
+	// to fire together so generic advisory text ("try a different machine
+	// type") in flag-parse or template-mismatch errors doesn't get misclassified.
+	case strings.Contains(msg, "does not have the resources") &&
+		strings.Contains(msg, "try a different machine"):
+		return true
 	default:
 		return false
 	}
