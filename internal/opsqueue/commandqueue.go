@@ -194,11 +194,22 @@ func AppendCommandLocal(commandsFile string, cmd QueueCommand) error {
 
 // RunnerState represents the queue runner's internal state.
 type RunnerState struct {
-	Cursor     string                    `json:"cursor"`
-	CursorLine int                       `json:"cursor_line"`
-	Pending    []int64                   `json:"pending"`
-	Current    *int64                    `json:"current"`
-	Running    map[string]RunnerJobState `json:"running,omitempty"`
+	Cursor     string                         `json:"cursor"`
+	CursorLine int                            `json:"cursor_line"`
+	Pending    []int64                        `json:"pending"`
+	Current    *int64                         `json:"current"`
+	Running    map[string]RunnerJobState      `json:"running,omitempty"`
+	Finished   map[string]RunnerFinishedState `json:"finished,omitempty"`
+}
+
+// RunnerFinishedState records the runner's terminal entry for a job. The
+// laptop needs presence-only awareness so the forward-reconcile path in
+// ensureQueuedJobsOnRemote does not re-dispatch jobs the runner has already
+// completed (which, after the archive-on-add fix, is no longer a no-op and
+// would re-run them).
+type RunnerFinishedState struct {
+	ExitCode   int   `json:"exit_code"`
+	FinishedAt int64 `json:"finished_at"`
 }
 
 // RunnerJobState captures per-job runtime state for concurrent execution.

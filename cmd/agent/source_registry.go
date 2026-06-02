@@ -13,10 +13,47 @@ import (
 	"time"
 )
 
-// sourceCacheDir is where we keep the most recent source tarball for each
-// RemoteDir, so the agent can re-extract on demand if the working directory
-// is found empty/incomplete when a job starts. Overridable for tests.
-var sourceCacheDir = "/var/cache/weft-sources"
+// sourceCacheDir returns the directory where the agent keeps the most recent
+// source tarball for each RemoteDir, so it can re-extract on demand if a
+// job's working directory is found empty/incomplete at start. Overridable
+// for tests via sourceCacheDirOverride.
+//
+// Default selection (resolveSourceCacheDir): cloud rentals run the agent as
+// root and use /var/cache/weft-sources; on-prem hosts run as a regular user
+// and use ${XDG_CACHE_HOME:-$HOME/.cache}/weft-sources. Non-root processes
+// without a usable HOME fall back to os.TempDir()/weft-sources rather than
+// /var/cache (which is the original permission-denied bug). Resolution is
+// lazy so privilege drops between init and first use, and tests that
+// t.Setenv HOME/XDG_CACHE_HOME, are honored.
+var sourceCacheDirOverride string
+
+func sourceCacheDir() string {
+	if sourceCacheDirOverride != "" {
+		return sourceCacheDirOverride
+	}
+	return resolveSourceCacheDir()
+}
+
+// resolveSourceCacheDir picks a writable default for the source tarball
+// cache. Root processes (typical on cloud rentals) get the system path;
+// other uids get a user-cache path so the agent can mkdir without sudo.
+// When XDG_CACHE_HOME is unset and UserHomeDir fails (HOME-less daemons,
+// stripped-env containers), fall back to a TempDir path the current uid
+// can definitely write — never /var/cache, which is the configuration
+// that originally produced the permission-denied wedge.
+func resolveSourceCacheDir() string {
+	const systemPath = "/var/cache/weft-sources"
+	if os.Geteuid() == 0 {
+		return systemPath
+	}
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		return filepath.Join(dir, "weft-sources")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".cache", "weft-sources")
+	}
+	return filepath.Join(os.TempDir(), "weft-sources")
+}
 
 // sourceRegistry maps a RemoteDir (the on-rental absolute path of a project's
 // working directory) to the R2 key of the most recently applied source
@@ -58,7 +95,7 @@ func (r *sourceRegistry) lookup(remoteDir string) (string, bool) {
 // a given R2 key. Hashing the key avoids slash-in-filename issues.
 func sourceCachePath(r2Key string) string {
 	h := sha256.Sum256([]byte(r2Key))
-	return filepath.Join(sourceCacheDir, hex.EncodeToString(h[:])+".tar.gz")
+	return filepath.Join(sourceCacheDir(), hex.EncodeToString(h[:])+".tar.gz")
 }
 
 // hasSourceMarkers reports whether dir looks like a populated project

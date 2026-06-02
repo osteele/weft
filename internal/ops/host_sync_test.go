@@ -11,9 +11,59 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/r2"
 	srcsync "github.com/osteele/weft/internal/sync"
 )
+
+// TestIsJobInRunnerState_FinishedCountsAsPresent guards the regression that
+// re-ran wj2348 on cool30: ensureQueuedJobsOnRemote forward-reconciles by
+// re-dispatching synced-queued jobs that aren't visible in the runner's live
+// state. Before the archive-on-add fix, a re-dispatched completed job was
+// silently dropped by JobCompleted; after that fix it runs again. The fix
+// here is to recognize state.Finished as "the runner knows about this job"
+// so the forward-reconcile loop skips it (the right action is local-DB
+// status reconciliation, not a fresh attempt).
+func TestIsJobInRunnerState_FinishedCountsAsPresent(t *testing.T) {
+	current := int64(7)
+	state := &opsqueue.RunnerState{
+		Current: &current,
+		Pending: []int64{1, 2},
+		Running: map[string]opsqueue.RunnerJobState{
+			"3": {StartedAt: 100},
+		},
+		Finished: map[string]opsqueue.RunnerFinishedState{
+			"42": {ExitCode: 0, FinishedAt: 200},
+			"43": {ExitCode: 1, FinishedAt: 201},
+		},
+	}
+
+	cases := []struct {
+		jobID int64
+		want  bool
+		where string
+	}{
+		{7, true, "current"},
+		{1, true, "pending head"},
+		{2, true, "pending tail"},
+		{3, true, "running"},
+		{42, true, "finished (success)"},
+		{43, true, "finished (failure)"},
+		{99, false, "unknown id"},
+	}
+	for _, tc := range cases {
+		if got := isJobInRunnerState(tc.jobID, state); got != tc.want {
+			t.Errorf("isJobInRunnerState(%d) [%s] = %v, want %v", tc.jobID, tc.where, got, tc.want)
+		}
+	}
+
+	// nil state must remain "not present" so the no-state-file path
+	// continues to trigger re-dispatch (see the gate comment in
+	// ensureQueuedJobsOnRemote).
+	if isJobInRunnerState(1, nil) {
+		t.Errorf("isJobInRunnerState(1, nil) = true, want false")
+	}
+}
 
 // TestShouldPruneStalePending exercises the classifier that decides whether
 // a runner-pending entry should be cancelled via host_sync's reverse

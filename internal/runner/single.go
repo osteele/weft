@@ -98,7 +98,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	paths := NewJobPaths(cfg.LogDir, cfg.JobID)
 
 	// Archive existing files
-	ArchiveExistingFiles(cfg.LogDir, cfg.JobID)
+	if err := ArchiveExistingFiles(cfg.LogDir, cfg.JobID); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: archive prior artifacts for job %d: %v\n", cfg.JobID, err)
+	}
 
 	// Expand ~ in working directory
 	expandedDir := ExpandTilde(workingDir)

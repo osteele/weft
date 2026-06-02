@@ -24,7 +24,7 @@ func TestProcessCommands_Add(t *testing.T) {
 	}
 	appendCmd(t, cmdFile, cmd)
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	result, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestProcessCommands_AddPreservesSourceSHAOnDuplicate(t *testing.T) {
 		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo two"},
 	})
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	if _, err := cp.ProcessCommands(state); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestProcessCommands_AddSkipsPendingWhenJobFileWriteFails(t *testing.T) {
 		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo hello", Dir: "/tmp"},
 	})
 
-	cp := NewCommandProcessor(cmdFile, queueDir)
+	cp := NewCommandProcessor(cmdFile, queueDir, queueDir)
 	if _, err := cp.ProcessCommands(state); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestProcessCommands_Priority(t *testing.T) {
 	}
 	appendCmd(t, cmdFile, cmd)
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	_, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func TestProcessCommands_Cancel(t *testing.T) {
 	}
 	appendCmd(t, cmdFile, cmd)
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	_, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +164,7 @@ func TestProcessCommands_Stop(t *testing.T) {
 	}
 	appendCmd(t, cmdFile, cmd)
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	result, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestProcessCommands_StopCancelledByAdd(t *testing.T) {
 		Job:       &opsqueue.CommandJob{ID: 99, Cmd: "echo work"},
 	})
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	_, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestProcessCommands_SkipsAlreadyProcessed(t *testing.T) {
 		Job:       &opsqueue.CommandJob{ID: 2, Cmd: "echo second"},
 	})
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 
 	// First pass: processes both
 	_, err := cp.ProcessCommands(state)
@@ -254,7 +254,7 @@ func TestProcessCommands_MissingFile(t *testing.T) {
 	cmdFile := filepath.Join(dir, "nonexistent.commands")
 	state := NewState()
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	result, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -387,7 +387,7 @@ func TestProcessCommands_AddWithGPUFields(t *testing.T) {
 	}
 	appendCmd(t, cmdFile, cmd)
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	_, err := cp.ProcessCommands(state)
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +416,7 @@ func TestProcessCommands_AddHandlesLongJSONLine(t *testing.T) {
 		},
 	})
 
-	cp := NewCommandProcessor(cmdFile, dir)
+	cp := NewCommandProcessor(cmdFile, dir, dir)
 	if _, err := cp.ProcessCommands(state); err != nil {
 		t.Fatalf("ProcessCommands: %v", err)
 	}
@@ -431,6 +431,108 @@ func TestProcessCommands_AddHandlesLongJSONLine(t *testing.T) {
 	}
 	if jobData.Desc != largeDesc {
 		t.Fatalf("job description length = %d, want %d", len(jobData.Desc), len(largeDesc))
+	}
+}
+
+// TestProcessCommands_Add_ArchivesPriorArtifacts verifies the regression
+// that wedged wj2301 on cool30: a leftover primary <id>.status file from a
+// prior on-host attempt used to make JobCompleted() return true for the next
+// add, so the runner silently dropped the re-added job. (paths.Status is
+// written by the wrapper-exit trap, StartProcess failure, waitForJob,
+// dep-failed skip, and orphan recovery — NOT by rejectPreflight, which
+// writes only failure_reason and preflight_rejected.) The OpAdd handler
+// must now archive any prior artifacts so JobCompleted is false when
+// startJob runs.
+func TestProcessCommands_Add_ArchivesPriorArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	// Stage a leftover primary status file from a previous attempt — e.g.
+	// the wrapper's signal-trap write at the end of a killed attempt, or
+	// the dep-failed skip path in startJob.
+	const jobID int64 = 4242
+	priorStatus := filepath.Join(dir, "4242.status")
+	if err := os.WriteFile(priorStatus, []byte("1\n"), 0644); err != nil {
+		t.Fatalf("seed prior status: %v", err)
+	}
+	priorLog := filepath.Join(dir, "4242.log")
+	if err := os.WriteFile(priorLog, []byte("prior attempt log\n"), 0644); err != nil {
+		t.Fatalf("seed prior log: %v", err)
+	}
+
+	// Sanity: before the add op, JobCompleted is true.
+	if !JobCompleted(dir, jobID) {
+		t.Fatalf("precondition: expected JobCompleted=true with seeded status file")
+	}
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: jobID, Cmd: "echo hi", Dir: "/tmp"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+
+	if !slices.Contains(state.Pending, jobID) {
+		t.Fatalf("expected job %d in pending, got %v", jobID, state.Pending)
+	}
+
+	// Primary status must have been archived (so startJob's JobCompleted
+	// check no longer fires) and the archived copy must still exist.
+	if JobCompleted(dir, jobID) {
+		t.Fatalf("expected JobCompleted=false after OpAdd archived prior status")
+	}
+	if _, err := os.Stat(priorStatus); !os.IsNotExist(err) {
+		t.Fatalf("expected primary status file to be removed, stat err=%v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "4242-*.status"))
+	if err != nil {
+		t.Fatalf("glob archived status: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Fatalf("expected an archived <id>-<seq>.status file under %s", dir)
+	}
+}
+
+// TestProcessCommands_Add_SkipsArchiveForLiveJob verifies that a duplicate
+// OpAdd for a job currently in state.Running does not rename the live
+// attempt's in-flight artifacts (.heartbeat, .timeseries.jsonl, .pid, …).
+// Duplicate OpAdds are legitimate (host_sync forward reconcile, coordinator
+// retries) — mergeResourceFields in writeJobFile already handles them.
+func TestProcessCommands_Add_SkipsArchiveForLiveJob(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	const jobID int64 = 7777
+	// Seed in-flight heartbeat as if the job were currently running.
+	liveHeartbeat := filepath.Join(dir, "7777.heartbeat")
+	if err := os.WriteFile(liveHeartbeat, []byte("alive\n"), 0644); err != nil {
+		t.Fatalf("seed heartbeat: %v", err)
+	}
+	state.AddRunning("7777", RunningJobState{})
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: jobID, Cmd: "echo dup", Dir: "/tmp"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+
+	if _, err := os.Stat(liveHeartbeat); err != nil {
+		t.Fatalf("live heartbeat must not be archived while job is running: %v", err)
+	}
+	archived, _ := filepath.Glob(filepath.Join(dir, "7777-*.heartbeat"))
+	if len(archived) != 0 {
+		t.Fatalf("expected no archived heartbeat for live job, got %v", archived)
 	}
 }
 

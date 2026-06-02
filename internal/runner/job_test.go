@@ -64,7 +64,9 @@ func TestArchiveExistingFilesUsesSequenceSuffix(t *testing.T) {
 	if err := os.WriteFile(primary, []byte("first"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ArchiveExistingFiles(logDir, 100)
+	if err := ArchiveExistingFiles(logDir, 100); err != nil {
+		t.Fatalf("ArchiveExistingFiles: %v", err)
+	}
 	if _, err := os.Stat(primary); err == nil {
 		t.Fatal("primary log should be moved")
 	}
@@ -78,7 +80,9 @@ func TestArchiveExistingFilesUsesSequenceSuffix(t *testing.T) {
 	if err := os.WriteFile(primary, []byte("second"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	ArchiveExistingFiles(logDir, 100)
+	if err := ArchiveExistingFiles(logDir, 100); err != nil {
+		t.Fatalf("ArchiveExistingFiles (second): %v", err)
+	}
 	second := filepath.Join(logDir, "100-2.log")
 	if data, err := os.ReadFile(second); err != nil {
 		t.Fatalf("expected archived %s: %v", second, err)

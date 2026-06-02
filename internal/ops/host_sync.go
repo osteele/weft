@@ -523,7 +523,16 @@ func shouldPruneStalePending(job *db.Job, host string) (bool, string) {
 }
 
 // isJobInRunnerState reports whether a job ID is present in the runner's live state
-// (pending queue, current job, or running map). A nil state is treated as empty.
+// (pending queue, current job, running map, or finished map). A nil state is
+// treated as empty.
+//
+// Finished is included because the laptop's last_synced_status lags the
+// runner's terminal state: a job that finished on the runner may still be
+// `queued` in the local DB for a short reconciliation window, and re-dispatch
+// during that window was previously a no-op (the runner's JobCompleted gate
+// silently skipped the add). The archive-on-add fix turned that no-op into a
+// real re-run; checking Finished here restores the intended invariant —
+// reconcile the DB to completed, do not re-dispatch.
 func isJobInRunnerState(jobID int64, state *RunnerState) bool {
 	if state == nil {
 		return false
@@ -534,7 +543,11 @@ func isJobInRunnerState(jobID int64, state *RunnerState) bool {
 	if slices.Contains(state.Pending, jobID) {
 		return true
 	}
-	_, ok := state.Running[strconv.FormatInt(jobID, 10)]
+	jobIDStr := strconv.FormatInt(jobID, 10)
+	if _, ok := state.Running[jobIDStr]; ok {
+		return true
+	}
+	_, ok := state.Finished[jobIDStr]
 	return ok
 }
 

@@ -216,17 +216,27 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 // suffix. The sequence is local to (jobID, this host) and corresponds to the
 // position of the prior on-host attempt — see session.ArchiveCommand for the
 // matching shell-side implementation.
-func ArchiveExistingFiles(logDir string, jobID int64) {
+//
+// Returns the first os.Rename error encountered (subsequent files are still
+// attempted). Callers that rely on archival to clear JobCompleted's view of
+// the primary <id>.status MUST check the error; a silent rename failure leaves
+// the primary status file in place and re-introduces the silent-skip bug the
+// archive is meant to prevent.
+func ArchiveExistingFiles(logDir string, jobID int64) error {
 	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json", "manifest_error", "preflight_rejected"}
 	seq := nextArchiveSeq(logDir, jobID)
+	var firstErr error
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}
 		newPath := filepath.Join(logDir, fmt.Sprintf("%d-%d.%s", jobID, seq, ext))
-		os.Rename(path, newPath)
+		if err := os.Rename(path, newPath); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("archive %s: %w", path, err)
+		}
 	}
+	return firstErr
 }
 
 // nextArchiveSeq returns the smallest seq >= 1 such that no file

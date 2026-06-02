@@ -849,7 +849,9 @@ func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {
 func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm setupPrewarmResult) {
 	paths := runner.NewJobPaths(cfg.LogDir, job.ID)
 	_ = os.MkdirAll(cfg.LogDir, 0o755)
-	runner.ArchiveExistingFiles(cfg.LogDir, job.ID)
+	if err := runner.ArchiveExistingFiles(cfg.LogDir, job.ID); err != nil {
+		slog.Warn("archive prior artifacts before prewarm-failure write", "component", "agent", "job_id", job.ID, "error", err)
+	}
 	now := time.Now().Unix()
 	_ = runner.WriteMetaFile(paths, job.ID, job.Dir, job.Command, "", now, "")
 	_ = runner.WriteLogHeader(paths, job.ID, job.Dir, job.Command, "")

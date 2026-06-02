@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/osteele/weft/internal/opsqueue"
 )
@@ -17,6 +18,7 @@ import (
 type CommandProcessor struct {
 	commandsFile string
 	queueDir     string
+	logDir       string
 }
 
 // CommandResult describes the outcome of processing all new commands.
@@ -26,11 +28,28 @@ type CommandResult struct {
 }
 
 // NewCommandProcessor creates a processor for the given commands file.
-func NewCommandProcessor(commandsFile, queueDir string) *CommandProcessor {
+// logDir is where job artifacts (.status, .log, .meta, …) live; it may be
+// empty in tests that don't exercise the archive-on-add path.
+func NewCommandProcessor(commandsFile, queueDir, logDir string) *CommandProcessor {
 	return &CommandProcessor{
 		commandsFile: commandsFile,
 		queueDir:     queueDir,
+		logDir:       logDir,
 	}
+}
+
+// jobIsLive reports whether jobID is currently in Running or matches the
+// Current job marker. Callers must already hold state.mu (read or write).
+// Used by the OpAdd handler to avoid archiving in-flight artifacts of a
+// running attempt when a duplicate OpAdd arrives.
+func (cp *CommandProcessor) jobIsLive(state *State, jobID int64) bool {
+	if _, ok := state.Running[strconv.FormatInt(jobID, 10)]; ok {
+		return true
+	}
+	if state.Current != nil && *state.Current == jobID {
+		return true
+	}
+	return false
 }
 
 // ProcessCommands reads new lines from the commands file and applies them to the state.
@@ -90,11 +109,32 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 		switch cmd.Op {
 		case opsqueue.OpAdd:
 			if cmd.Job != nil {
-				// Write job data file for later use.
+				// Write job data file first so a write failure leaves prior
+				// artifacts intact (no archived-but-unrun limbo).
 				if err := writeJobFile(cp.queueDir, cmd.Job); err != nil {
 					// Log but don't fail.
 					fmt.Fprintf(os.Stderr, "warning: write job file: %v\n", err)
 				} else {
+					// Archive any prior on-host artifacts (.status, .log,
+					// .meta, …) so a re-added job ID is treated as a fresh
+					// attempt. Without this, a leftover primary .status from
+					// a previous completed/failed run causes startJob() to
+					// silently skip the job via JobCompleted.
+					//
+					// Skip when the job is currently running on this host:
+					// archive would rename live .heartbeat/.timeseries/.pid
+					// out from under the running monitor. A duplicate OpAdd
+					// for a live job is legitimate (host_sync forward
+					// reconcile, coordinator retries) — mergeResourceFields
+					// in writeJobFile already covers that case.
+					if cp.logDir != "" && !cp.jobIsLive(state, cmd.Job.ID) {
+						if err := ArchiveExistingFiles(cp.logDir, cmd.Job.ID); err != nil {
+							// Don't silently swallow: a rename failure
+							// leaves the primary .status in place and
+							// would silently re-introduce the skip bug.
+							fmt.Fprintf(os.Stderr, "warning: archive prior artifacts for job %d: %v\n", cmd.Job.ID, err)
+						}
+					}
 					state.addPendingLocked(cmd.Job.ID)
 					// Cancel any pending stop — new work arrived.
 					state.StopRequested = false

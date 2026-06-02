@@ -120,7 +120,7 @@ func (r *Runner) Run() error {
 	// Discover hardware
 	r.gpuInv = DiscoverGPUs()
 	r.cpuCount = DetectCPUCount()
-	r.cmdProc = NewCommandProcessor(r.commandsFile, r.queueDir)
+	r.cmdProc = NewCommandProcessor(r.commandsFile, r.queueDir, r.logDir)
 
 	// Load state
 	var err error
@@ -427,8 +427,12 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	// Archive previous attempt's artifacts before either preflight or full
-	// startup runs, so a fresh attempt starts with a clean slate.
-	ArchiveExistingFiles(r.logDir, jobID)
+	// startup runs, so a fresh attempt starts with a clean slate. A rename
+	// failure here would leave the prior .status in place and cause
+	// JobCompleted() to skip the job on the next tick — log loudly.
+	if err := ArchiveExistingFiles(r.logDir, jobID); err != nil {
+		slog.Warn("archive prior attempt artifacts", "component", "runner", "job_id", jobID, "error", err)
+	}
 
 	// Preflight (Layer D): R2-isolated source. When the dispatcher
 	// escalated this job to R2-isolated mode after a prior provenance
