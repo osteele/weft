@@ -180,7 +180,7 @@ func extractGPUFromEnvVars(envVars []string) string {
 }
 
 // queueJob records a job locally via RecordQueuedJob (DB-only, no SSH).
-// The caller is responsible for calling syncAndReportOffline to push to the remote.
+// The caller is responsible for calling syncHostWithProgress to push to the remote.
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	gpu := opts.GPU
 	if gpu == "" {

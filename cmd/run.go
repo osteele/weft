@@ -377,13 +377,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err := cfg.ValidateCommand(command); err != nil {
 		return err
 	}
+	// Phase recorder: attribute wall-clock to predictor/placement/submit/sync
+	// so users (and agents) can see where time went instead of guessing.
+	// See cmd/run_progress.go.
+	rec := newRunPhaseRecorder(cmd.ErrOrStderr(), command)
+	defer rec.PrintSummary()
+
 	// Skip predictor entirely when placement won't use it: explicit --host,
 	// rental-tagged jobs (skip on-prem placement), or draft submissions. This
 	// avoids both the readiness check and the later gpu-mem prediction path
 	// (which both cold-start `uv run` and dominate submission latency).
 	predictorNeeded := host == "" && !db.HasRentalTag(runTags) && !runDraft
 	if predictorNeeded {
-		if err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction"); err != nil {
+		endPredictor := rec.Phase("predictor", "checking predictor")
+		err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction")
+		endPredictor()
+		if err != nil {
 			return err
 		}
 	}
@@ -701,7 +710,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	predict := placement.BuildJobPredictorFromConfig(cfg, placementConstraints)
 
 	if runDryRun {
+		endPlacement := rec.Phase("placement", "scoring hosts")
 		scores, err := placement.ScoreHostsWithPredictor(database, placementConstraints, nil, predict)
+		endPlacement()
 		if err != nil {
 			return fmt.Errorf("placement scoring: %w", err)
 		}
@@ -780,7 +791,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Needs:       resolvedNeeds,
 			Disk:        diskMeta,
 		}
+		endSubmit := rec.Phase("submit", "submitting via coordinator relay")
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
+		endSubmit()
 		if err != nil {
 			return err
 		}
@@ -812,12 +825,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if host == "" {
 			// Build sources: on-prem + cloud reuse
 			sources := []placement.CandidateSource{&placement.OnPremSource{}, &campaign.ReuseSource{}}
+			endPlacement := rec.Phase("placement", "evaluating placement")
 			plan, err := placement.Evaluate(placement.EvaluateRequest{
 				Constraints: placementConstraints,
 				Predictor:   predict,
 				Sources:     sources,
 				Database:    database,
 			})
+			endPlacement()
 			if err != nil {
 				return err
 			}
@@ -880,7 +895,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		endSubmit := rec.Phase("submit", "submitting job")
 		jobID, err := ops.RecordQueuedJob(database, params)
+		endSubmit()
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
 		}
@@ -987,16 +1004,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 		printDiskPreview(w, diskMeta)
 
 		// Push the job to the remote host before waiting/following.
-		deferred := !syncHostQuietly(database, host, runNoSync)
+		deferred := !syncHostWithProgress(database, host, runNoSync, rec)
 
+		// wait/follow handlers call os.Exit, which would bypass the deferred
+		// PrintSummary. Print it now so the user sees phase timing before
+		// the wait begins. PrintSummary is idempotent.
 		if runWait {
+			rec.PrintSummary()
 			return waitForQueuedJobCompletion(database, jobID, deferred)
 		}
 		if runFollow {
+			rec.PrintSummary()
 			return followQueuedJob(database, jobID, host, deferred)
-		}
-		if deferred {
-			fmt.Fprintf(w, "\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
 		}
 		return nil
 	}
@@ -1031,12 +1050,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Placement for non-scheduler paths (--draft, --after)
 	var placementResult *placement.PlacementResult
 	if host == "" {
+		endPlacement := rec.Phase("placement", "evaluating placement")
 		plan, err := placement.Evaluate(placement.EvaluateRequest{
 			Constraints: placementConstraints,
 			Predictor:   predict,
 			Sources:     []placement.CandidateSource{&placement.OnPremSource{}},
 			Database:    database,
 		})
+		endPlacement()
 		if err != nil {
 			return fmt.Errorf("auto-placement failed: %w", err)
 		}
@@ -1051,6 +1072,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Unplaced jobs: record locally and prompt for cloud launch
 	if host == "" {
+		endSubmit := rec.Phase("submit", "recording unplaced job")
 		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
 			WorkingDir:  workingDir,
 			Command:     command,
@@ -1068,6 +1090,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Needs:       resolvedNeeds,
 			Disk:        diskMeta,
 		})
+		endSubmit()
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
 		}
@@ -1126,6 +1149,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 				cloudAfter = append(cloudAfter, *cloudDep)
 			}
 		}
+		endSubmit := rec.Phase("submit", "queueing dependent job")
 		res, err := queueJob(database, queueJobOptions{
 			Host:         host,
 			WorkingDir:   workingDir,
@@ -1149,6 +1173,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUMemStrict: true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 			Disk:         diskMeta,
 		})
+		endSubmit()
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
 		}
@@ -1165,7 +1190,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		printDiskPreview(os.Stdout, diskMeta)
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
 
-		syncAndReportOffline(database, host, runNoSync)
+		syncHostWithProgress(database, host, runNoSync, rec)
 		return nil
 	}
 
@@ -1783,13 +1808,23 @@ func syncHostQuietly(database *sql.DB, host string, noSync bool) bool {
 	return syncResult.HostContacted
 }
 
-// syncAndReportOffline syncs a host and prints an offline message if unreachable.
-func syncAndReportOffline(database *sql.DB, host string, noSync bool) {
+// syncHostWithProgress runs the post-submission sync and emits phase-recorder
+// progress lines for each outcome. Returns true if the host was contacted
+// and the job was pushed; false when the sync was skipped (--no-sync), the
+// host was empty, or the host was unreachable.
+func syncHostWithProgress(database *sql.DB, host string, noSync bool, rec *runPhaseRecorder) bool {
 	if noSync {
-		fmt.Printf("\nSync skipped (--no-sync). Job will be sent to the remote queue on the next background sync.\n")
-		return
+		rec.Event("sync skipped (--no-sync) — will sync on next background sync")
+		return false
 	}
-	if !syncHostQuietly(database, host, false) && host != "" {
-		fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
+	if host == "" {
+		return false
 	}
+	endSync := rec.Phase("sync", fmt.Sprintf("syncing host %s", host))
+	ok := syncHostQuietly(database, host, false)
+	endSync()
+	if !ok {
+		rec.Event(fmt.Sprintf("sync deferred — %s offline, will retry on next sync", host))
+	}
+	return ok
 }
