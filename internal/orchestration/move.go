@@ -44,7 +44,32 @@ type BulkCallbacks struct {
 }
 
 type BulkResult struct {
+	// InstanceIDs lists every successfully launched instance.
 	InstanceIDs []int64
+	// PlacedJobIDs lists jobs that landed on one of InstanceIDs. Empty when
+	// the move never reached the launch stage.
+	PlacedJobIDs []int64
+	// UnplacedJobs lists jobs that were intended to land on a new instance
+	// but didn't, with the best-available reason. A job is "unplaced" when
+	// either offer search produced nothing for its group or the per-group
+	// launch ultimately failed after retries.
+	UnplacedJobs []UnplacedJob
+	// RequestedEach is true when the caller asked for one instance per job
+	// (e.g. --to distinct / --each). Surfacing the user's intent lets the
+	// receipt formatter say "Placed M of N distinct instances" precisely.
+	RequestedEach bool
+	// RequestedCount is the number of distinct instances the caller asked
+	// for. For RequestedEach it equals the launchable job count; for the
+	// merged planner branch it equals the planner's group output count.
+	RequestedCount int
+}
+
+// UnplacedJob pairs a job ID with the user-visible reason it didn't reach
+// an instance, drawn from the offer-search or launch-failure path that
+// dropped it.
+type UnplacedJob struct {
+	JobID  int64
+	Reason string
 }
 
 func BuildOptions(
@@ -671,12 +696,21 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	offersStarted := time.Now()
 	var launchGroups []campaign.InstanceGroup
 	var launchOffers []cloud.Offer
+	// preDropped collects unplaced jobs that fell out of the run before the
+	// launch stage (offer search returned nothing for their group, or the
+	// planner could not satisfy them). These are merged with launch-time
+	// failures into BulkResult.UnplacedJobs at the end of the function so
+	// the receipt distinguishes "requested but no offers" from "requested
+	// and launch failed".
+	var preDropped []UnplacedJob
 	planLabel := "none"
+	requestedCount := 0
 	if separateEach {
 		// User explicitly asked for one instance per job. Skip the planner so
 		// MergeCompatibleGroups can't undo that intent; resolve offers directly.
 		groupOffers := campaign.FetchGroupOffers(clients, groups, nil, 1.0, nil, bidding.StrategyCheap, cfg.CampaignReliability(), 0.4)
 		logPhase("fetch_offers", offersStarted, fmt.Sprintf("group_offers=%d mode=each", len(groupOffers)), nil)
+		requestedCount = len(groupOffers)
 
 		for _, gOffer := range groupOffers {
 			if gOffer.Offer == nil || gOffer.Err != nil {
@@ -687,6 +721,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 				if cb.OnWarning != nil {
 					cb.OnWarning(fmt.Sprintf("Warning: %s for %s (%d jobs) — skipping", detail, gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs)))
 				}
+				preDropped = append(preDropped, unplacedJobsFromGroup(gOffer.Group, detail)...)
 				continue
 			}
 			launchGroups = append(launchGroups, gOffer.Group)
@@ -719,6 +754,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 
 		launchGroups = prep.LaunchGroups
 		launchOffers = prep.Offers
+		requestedCount = len(launchGroups)
 
 		// Surface offer failures to the user so they know which jobs were
 		// dropped from the launch (and why). Map the winning candidate's
@@ -727,27 +763,33 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		// merged/parallel group identity. When the planner picked no
 		// candidate at all, emit one warning per split group: no candidate
 		// means no offers anywhere.
-		if cb.OnWarning != nil {
-			if prep.StrategyPlan.NewCandidate == nil {
-				for _, sg := range groups {
-					cb.OnWarning(fmt.Sprintf("Warning: no offers for %s (%d jobs) — skipping", sg.GPUSpec(), len(sg.Jobs)))
-				}
-			} else {
-				projected := campaign.MapOffersToSplitGroups(groups, *prep.StrategyPlan.NewCandidate)
-				for i, sg := range groups {
-					if i >= len(projected) {
-						break
-					}
-					po := projected[i]
-					if po.Offer != nil && po.Err == nil {
-						continue
-					}
-					detail := "no offers"
-					if po.Err != nil {
-						detail = po.Err.Error()
-					}
+		if prep.StrategyPlan.NewCandidate == nil {
+			for _, sg := range groups {
+				detail := "no offers"
+				if cb.OnWarning != nil {
 					cb.OnWarning(fmt.Sprintf("Warning: %s for %s (%d jobs) — skipping", detail, sg.GPUSpec(), len(sg.Jobs)))
 				}
+				preDropped = append(preDropped, unplacedJobsFromGroup(sg, detail)...)
+			}
+			requestedCount = len(groups)
+		} else {
+			projected := campaign.MapOffersToSplitGroups(groups, *prep.StrategyPlan.NewCandidate)
+			for i, sg := range groups {
+				if i >= len(projected) {
+					break
+				}
+				po := projected[i]
+				if po.Offer != nil && po.Err == nil {
+					continue
+				}
+				detail := "no offers"
+				if po.Err != nil {
+					detail = po.Err.Error()
+				}
+				if cb.OnWarning != nil {
+					cb.OnWarning(fmt.Sprintf("Warning: %s for %s (%d jobs) — skipping", detail, sg.GPUSpec(), len(sg.Jobs)))
+				}
+				preDropped = append(preDropped, unplacedJobsFromGroup(sg, detail)...)
 			}
 		}
 	}
@@ -769,6 +811,11 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		TransferClaim: true,
 	}
 	launchStarted := time.Now()
+	// Track per-group launch outcomes so the receipt can attribute success
+	// and failure to specific jobs. The campaign layer reports outcomes per
+	// group via LaunchEventGroupDone / LaunchEventGroupFailed; matching by
+	// LaunchGroupSignature is stable across the goroutines that fire them.
+	groupOutcomes := newGroupOutcomeTracker(launchGroups)
 	execution, err := executeNewInstanceLaunchWithMoveIntents(newInstanceLaunchExecutionOptions{
 		Database:   database,
 		Clients:    clients,
@@ -780,6 +827,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 			return createOptsForProvider(cfg, provider)
 		},
 		OnEvent: func(event campaign.LaunchEvent) {
+			groupOutcomes.observe(event)
 			if cb.OnEvent != nil {
 				cb.OnEvent(event)
 			}
@@ -823,7 +871,99 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	// Leave the move_intents open. The CLI/TUI only waited for provider
 	// acceptance here; the autopilot owns the longer "target reached
 	// agent_ready or retry replacement launch" lifecycle.
-	return BulkResult{InstanceIDs: result.InstanceIDs}, nil
+	placed, unplaced := groupOutcomes.partition()
+	unplaced = append(unplaced, preDropped...)
+	return BulkResult{
+		InstanceIDs:    result.InstanceIDs,
+		PlacedJobIDs:   placed,
+		UnplacedJobs:   unplaced,
+		RequestedEach:  separateEach,
+		RequestedCount: requestedCount,
+	}, nil
+}
+
+// unplacedJobsFromGroup builds an UnplacedJob entry for every job in the
+// group, sharing a single reason string. Used at offer-search drop sites
+// where one group's worth of jobs all fail for the same reason.
+func unplacedJobsFromGroup(group campaign.InstanceGroup, reason string) []UnplacedJob {
+	out := make([]UnplacedJob, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		if job == nil || job.ID <= 0 {
+			continue
+		}
+		out = append(out, UnplacedJob{JobID: job.ID, Reason: reason})
+	}
+	return out
+}
+
+// groupOutcomeTracker matches LaunchEventGroupDone / LaunchEventGroupFailed
+// events back to the originally submitted launch groups by signature, so
+// the orchestration layer can report per-job outcomes without changing the
+// campaign layer's flat (InstanceIDs, Errors) result shape.
+type groupOutcomeTracker struct {
+	pending map[string]campaign.InstanceGroup // signature -> group, awaiting outcome
+	placed  []int64
+	failed  []UnplacedJob
+}
+
+func newGroupOutcomeTracker(groups []campaign.InstanceGroup) *groupOutcomeTracker {
+	t := &groupOutcomeTracker{pending: make(map[string]campaign.InstanceGroup, len(groups))}
+	for _, g := range groups {
+		t.pending[campaign.LaunchGroupSignature(g)] = g
+	}
+	return t
+}
+
+func (t *groupOutcomeTracker) observe(event campaign.LaunchEvent) {
+	switch event.Kind {
+	case campaign.LaunchEventGroupDone:
+		sig := campaign.LaunchGroupSignature(event.Group)
+		group, ok := t.pending[sig]
+		if !ok {
+			return
+		}
+		delete(t.pending, sig)
+		for _, job := range group.Jobs {
+			if job == nil || job.ID <= 0 {
+				continue
+			}
+			t.placed = append(t.placed, job.ID)
+		}
+	case campaign.LaunchEventGroupFailed:
+		sig := campaign.LaunchGroupSignature(event.Group)
+		group, ok := t.pending[sig]
+		if !ok {
+			return
+		}
+		delete(t.pending, sig)
+		reason := strings.TrimSpace(event.Reason)
+		if reason == "" {
+			reason = "launch failed"
+		}
+		for _, job := range group.Jobs {
+			if job == nil || job.ID <= 0 {
+				continue
+			}
+			t.failed = append(t.failed, UnplacedJob{JobID: job.ID, Reason: reason})
+		}
+	}
+}
+
+// partition returns the placed job IDs and the unplaced jobs the tracker
+// has observed. Groups whose outcome never fired are reported as unplaced
+// with a "launch outcome unknown" reason — this shouldn't happen with the
+// current campaign code, but defending against it keeps the receipt honest.
+func (t *groupOutcomeTracker) partition() ([]int64, []UnplacedJob) {
+	for _, group := range t.pending {
+		for _, job := range group.Jobs {
+			if job == nil || job.ID <= 0 {
+				continue
+			}
+			t.failed = append(t.failed, UnplacedJob{JobID: job.ID, Reason: "launch outcome not reported"})
+		}
+	}
+	t.pending = nil
+	return t.placed, t.failed
 }
 
 func formatMoveLaunchEventLine(event campaign.LaunchEvent, groupLabels map[string]string) string {

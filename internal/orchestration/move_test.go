@@ -16,6 +16,83 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
+// TestGroupOutcomeTracker_PartitionsByEvent verifies the orchestration-side
+// matching of campaign per-group events back to the user-visible jobs in
+// each group: LaunchEventGroupDone marks those jobs placed, GroupFailed
+// marks them unplaced with the reason, and any group whose outcome event
+// never arrived defaults to "launch outcome not reported" so the receipt
+// can never silently drop a requested instance.
+func TestGroupOutcomeTracker_PartitionsByEvent(t *testing.T) {
+	placedGroup := campaign.InstanceGroup{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 2384}}}
+	failedGroup := campaign.InstanceGroup{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 2383}}}
+	silentGroup := campaign.InstanceGroup{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 2387}}}
+
+	tracker := newGroupOutcomeTracker([]campaign.InstanceGroup{placedGroup, failedGroup, silentGroup})
+	tracker.observe(campaign.LaunchEvent{Kind: campaign.LaunchEventGroupDone, Group: placedGroup})
+	tracker.observe(campaign.LaunchEvent{Kind: campaign.LaunchEventGroupFailed, Group: failedGroup, Reason: "no offer accepted"})
+
+	placed, unplaced := tracker.partition()
+	if len(placed) != 1 || placed[0] != 2384 {
+		t.Fatalf("placed = %v, want [2384]", placed)
+	}
+	wantUnplaced := map[int64]string{
+		2383: "no offer accepted",
+		2387: "launch outcome not reported",
+	}
+	if len(unplaced) != len(wantUnplaced) {
+		t.Fatalf("unplaced = %v, want %d entries", unplaced, len(wantUnplaced))
+	}
+	for _, u := range unplaced {
+		if got, ok := wantUnplaced[u.JobID]; !ok {
+			t.Fatalf("unexpected unplaced job %d", u.JobID)
+		} else if got != u.Reason {
+			t.Fatalf("unplaced %d reason = %q, want %q", u.JobID, u.Reason, got)
+		}
+	}
+}
+
+// TestGroupOutcomeTracker_IgnoresUnknownGroup confirms the tracker doesn't
+// crash or pollute its tally when the campaign layer emits an event for a
+// group that wasn't part of the originally submitted launch — defensive
+// behavior against future event-source changes.
+func TestGroupOutcomeTracker_IgnoresUnknownGroup(t *testing.T) {
+	knownGroup := campaign.InstanceGroup{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 10}}}
+	unknownGroup := campaign.InstanceGroup{GPUClass: "NVIDIA", Jobs: []*db.Job{{ID: 99}}}
+	tracker := newGroupOutcomeTracker([]campaign.InstanceGroup{knownGroup})
+	tracker.observe(campaign.LaunchEvent{Kind: campaign.LaunchEventGroupDone, Group: unknownGroup})
+	tracker.observe(campaign.LaunchEvent{Kind: campaign.LaunchEventGroupDone, Group: knownGroup})
+
+	placed, unplaced := tracker.partition()
+	if len(placed) != 1 || placed[0] != 10 {
+		t.Fatalf("placed = %v, want [10]", placed)
+	}
+	if len(unplaced) != 0 {
+		t.Fatalf("unplaced = %v, want none", unplaced)
+	}
+}
+
+// TestUnplacedJobsFromGroup_PreservesJobIDsAndShareReason covers the small
+// helper that fans an offer-search drop reason out to every job in the
+// affected group. Concretely: when SearchOffers returns nothing for a
+// group, all its jobs share the same "no offers" reason in the receipt.
+func TestUnplacedJobsFromGroup_PreservesJobIDsAndShareReason(t *testing.T) {
+	group := campaign.InstanceGroup{
+		Jobs: []*db.Job{{ID: 100}, {ID: 101}, nil, {ID: 0}, {ID: 102}},
+	}
+	got := unplacedJobsFromGroup(group, "no offers")
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3 (nil and zero-id skipped)", len(got))
+	}
+	for i, want := range []int64{100, 101, 102} {
+		if got[i].JobID != want {
+			t.Fatalf("got[%d].JobID = %d, want %d", i, got[i].JobID, want)
+		}
+		if got[i].Reason != "no offers" {
+			t.Fatalf("got[%d].Reason = %q, want %q", i, got[i].Reason, "no offers")
+		}
+	}
+}
+
 func TestBuildMoveGroupProgressLabels_UsesOrdinalAndAnchorJobID(t *testing.T) {
 	groups := []campaign.InstanceGroup{
 		{

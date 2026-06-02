@@ -789,7 +789,7 @@ func moveJobsToNewInstancesOnce(database *sql.DB, jobs []*db.Job, separateEach b
 		}
 	}
 	if err == nil && usedLaunchTUI {
-		fmt.Fprint(os.Stdout, terminal.FormatMoveExitSummary(database, jobs, result.InstanceIDs))
+		fmt.Fprint(os.Stdout, terminal.FormatMoveExitSummary(database, result))
 	}
 	return err
 }
