@@ -445,6 +445,32 @@ config {
 -- internal/imagereq/imagereq.go (Merge, MinDriverForCUDA, BackfillDriverFromCUDA);
 -- internal/campaign/offers.go provider compatibility penalty.
 
+-- Unknown-compatibility offers (providers that do not expose driver_version
+-- or cuda_max_good at offer search, currently RunPod) are hard-excluded from
+-- the candidate set whenever at least one known-compatible offer survives.
+-- The 10^9 score penalty in compatibilityScorePenalty remains as a
+-- tiebreaker for the fallback path when no known-compatible offer exists.
+-- Implementation: internal/campaign/offers.go filterOffersByProviderCompatibility.
+
+-- Defense in depth: the agent runs a driver probe at instance bootstrap,
+-- after the disk-cap check and before accepting any job. It queries
+-- nvidia-smi --query-gpu=driver_version, parses the major version, and
+-- compares against CampaignManifest.RequiredDriverMajor (populated from
+-- group.MinDriverVersion at launch time). On insufficient driver, it
+-- uploads a structured failure report to R2 and self-destructs the
+-- instance with infra_failure rather than running the full ~3-5 minute
+-- setup before vLLM/torch hits the runtime driver check. Catches the
+-- fallback path where weft selected an unknown-compat (RunPod) offer
+-- whose driver turned out to be too old, and is a safety net for cases
+-- where the provider's advertised driver/CUDA fields don't match the
+-- actual host capability. When the required major is 0 (no floor) or
+-- nvidia-smi is unavailable / unparseable, the probe is a no-op (avoids
+-- blocking CPU-only instances and parse-fragile drivers).
+-- Implementation: cmd/agent/driver_version_probe.go checkDriverVersion;
+-- cmd/agent/runinstance.go (call site after checkDiskCap);
+-- internal/cloud/wrapper.go CampaignManifest.RequiredDriverMajor;
+-- internal/campaign/lifecycle.go (manifest population).
+
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil
 -- AND Err != nil; checking Offer == nil before Err mis-classifies provider

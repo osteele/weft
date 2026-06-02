@@ -208,6 +208,17 @@ func runInstance(args []string) {
 		return
 	}
 
+	// Verify the host's NVIDIA driver is new enough for the wheels the
+	// campaign's jobs will load. RunPod doesn't expose driver_version at
+	// offer search, so we may have landed on an old-driver host even when
+	// MinDriverVersion was set. Vast offers are filtered at search time but
+	// the field can be stale, so we run the check there too. Failing fast
+	// here saves the ~3-5 minute setup before vLLM/torch hits the runtime
+	// driver check.
+	if checkDriverVersion(r2Bucket, instanceIDInt, manifest.RequiredDriverMajor, manifest.SelfDestructCmd) {
+		return
+	}
+
 	// Hedge probe: launched with no jobs. Idle and poll R2 for jobs
 	// migrated by a later reuse pass — without this branch the agent
 	// would exit immediately and self-destruct.

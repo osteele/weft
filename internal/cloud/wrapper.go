@@ -58,6 +58,15 @@ type CampaignManifest struct {
 	// fails fast (infra_failure) if the provider silently delivered
 	// substantially less.
 	RequestedDiskGB int `json:"requested_disk_gb,omitempty"`
+	// RequiredDriverMajor is the minimum NVIDIA driver major version that
+	// the wheels installed by this campaign's jobs need at runtime, derived
+	// from the placement-time MinDriverVersion. The agent queries
+	// nvidia-smi at startup and fails fast (infra_failure) when the host's
+	// driver is below this. Defense in depth: at offer-search time some
+	// providers don't expose driver_version (RunPod) so we may have landed
+	// on an old-driver host even with the cuda/driver floors applied. Zero
+	// means no check (job has no driver floor).
+	RequiredDriverMajor int `json:"required_driver_major,omitempty"`
 	// Drain holds the upload-drain gate tunables. Zero fields fall back
 	// to the r2upload package defaults.
 	Drain DrainSettings `json:"drain,omitempty"`

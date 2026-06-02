@@ -182,6 +182,55 @@ The "rare TUI gets banner integration first time it's used" pattern is fine
 — banners are a net additive feature; entrypoints without integration are
 no worse than before.
 
+## Driver-floor enforcement refinements
+
+The agent's bootstrap driver probe (`cmd/agent/driver_version_probe.go`,
+called from `cmd/agent/runinstance.go` after `checkDiskCap`) currently
+self-destructs the whole instance with `infra_failure` when the host's
+NVIDIA driver is below the campaign's `RequiredDriverMajor`. That's the
+right thing when every job in the manifest needs the same floor, but two
+follow-ups are pending:
+
+1. **Per-job eligibility, not all-or-nothing instance kill.** When an
+   instance is launched with a mixed batch — some jobs need driver ≥570,
+   others are happy with ≥525 — and the host turns out to have only 525,
+   the probe should fail only the ineligible jobs and let the rest run.
+   Today the manifest carries a single `RequiredDriverMajor` (the max
+   across the group); refining to per-job floors means either (a)
+   propagating each job's MinDriverVersion in `AgentJob` and rejecting
+   individual jobs in the job loop before they pick up wheels, or (b)
+   keeping the manifest field but having the agent skip individual
+   AgentJob entries that exceed the host's actual driver rather than
+   tearing down. Option (b) is the smaller surface.
+
+2. **Reject wrong-fit jobs placed on already-running instances.** Jobs
+   can be routed to an existing instance after its bootstrap probe has
+   already passed (e.g. via `weft move`, autopilot reuse, or
+   `weft instance submit`). Today nothing re-checks driver compatibility
+   at that point — a vLLM 0.20 job moved onto a driver-570 instance
+   originally launched for a driver-550 workload will run, set up for
+   minutes, and fail at the vLLM init driver check.
+
+   Two implementation paths:
+
+   - **Augment `instanceAcceptsReuse`** (`internal/campaign/reuse.go`,
+     see also the [InstanceAcceptsJobs unified predicate](#instanceacceptsjobs-unified-predicate)
+     section) with a driver-fit signal. Returns false when the candidate
+     job's MinDriverVersion exceeds what we know about the instance.
+   - **Have the agent publish its actual driver/CUDA capabilities to
+     the DB at bootstrap.** Add a `cloud_instances.actual_driver_major`
+     (and `actual_cuda_version`) column the agent writes after the
+     successful driver probe. Then both reuse and move logic can filter
+     against ground truth rather than the placement-time assumption.
+     This is the cleaner option because it also fixes the case where
+     weft's placement-time floor undershot (e.g. provider lied about
+     `cuda_max_good`) — the agent's recorded value would still gate
+     subsequent placements correctly.
+
+   Either way, the rejection at this layer should surface as
+   `placement_blocked = "driver_too_old_on_target_instance"` rather than
+   silently dropping the job, so the user can see why the move didn't take.
+
 ## Execution target normalization
 
 Current state: `execution_targets` stores inventory hosts and rental

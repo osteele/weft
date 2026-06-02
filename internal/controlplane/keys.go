@@ -149,6 +149,10 @@ func InstanceDiskCapFailure(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/disk-cap-failure.json", instanceID)
 }
 
+func InstanceDriverFailure(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/driver-failure.json", instanceID)
+}
+
 // InstanceOnStartProbe is written by the very first line of OnStart via a
 // presigned PUT URL. Its presence proves the container ran OnStart and had
 // outbound network at all — independent of whether rclone is installed,

@@ -112,6 +112,10 @@ func InstanceDiskCapFailure(instanceID int64) string {
 	return controlplane.InstanceDiskCapFailure(instanceID)
 }
 
+func InstanceDriverFailure(instanceID int64) string {
+	return controlplane.InstanceDriverFailure(instanceID)
+}
+
 func InstanceOnStartProbe(instanceID int64) string {
 	return controlplane.InstanceOnStartProbe(instanceID)
 }

@@ -1961,6 +1961,7 @@ func LaunchInstance(
 		Provider:            string(client.Provider()),
 		InstanceType:        instance.InstanceType,
 		RequestedDiskGB:     requestedDiskGB,
+		RequiredDriverMajor: group.MinDriverVersion,
 		Drain:               drainSettingsFromConfig(),
 	}
 	manifestJSON, err := json.Marshal(manifest)
