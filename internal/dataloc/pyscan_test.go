@@ -187,6 +187,12 @@ func TestPyScanIsHFModelID(t *testing.T) {
 		{"application/json", false},
 		{"text/plain", false},
 		{`org\model`, false},
+		{"N/M", false},
+		{"A/B", false},
+		{"X/Y", false},
+		{"a/b", false},
+		{"ab/c", true},
+		{"BAAI/bge-small-en-v1.5", true},
 	}
 
 	for _, tt := range tests {
@@ -196,6 +202,22 @@ func TestPyScanIsHFModelID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPyScanPythonHFRefs_IgnoresShortMathNotation(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "config.py", `
+SPARSITY_PATTERNS = {
+    "default": "N/M",
+    "alt": "A/B",
+}
+
+MODEL_CONFIGS = {
+    "base": "meta-llama/Llama-3-8B",
+}
+`)
+	refs := ScanPythonHFRefs(dir)
+	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
 }
 
 func TestPyScanDictValuePattern(t *testing.T) {

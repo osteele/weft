@@ -252,6 +252,13 @@ func IsHFModelID(s string) bool {
 	if strings.Count(s, "/") > 1 {
 		return false
 	}
+	if i := strings.Index(s, "/"); i >= 0 {
+		// HF Hub requires org/user names to be at least 2 characters.
+		// Rejects math-notation false positives like "N/M", "A/B".
+		if i < 2 {
+			return false
+		}
+	}
 	lower := strings.ToLower(s)
 	if strings.Contains(lower, "output/") ||
 		strings.Contains(lower, "data/") ||
