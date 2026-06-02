@@ -57,6 +57,52 @@ func TestIdentityArgs_IdentityWithoutUserPassesThrough(t *testing.T) {
 	}
 }
 
+// TestIdentityArgs_PerHostOverridesCloudFallback is a regression test for the
+// "weft offered the cloud key to agent@studio, which only accepts a different
+// key, so every dispatch died with EOF" bug. The fix is per-host
+// ssh_identity_file taking precedence over cloud.ssh.identity_file.
+func TestIdentityArgs_PerHostOverridesCloudFallback(t *testing.T) {
+	prevID := sshIdentityFile
+	prevUsers := sshUserByHost
+	prevByHost := sshIdentityByHost
+	t.Cleanup(func() {
+		sshIdentityFile = prevID
+		sshUserByHost = prevUsers
+		sshIdentityByHost = prevByHost
+	})
+	sshIdentityFile = "/path/to/cloud_key"
+	sshUserByHost = map[string]string{"studio": "agent"}
+	sshIdentityByHost = map[string]string{"studio": "/path/to/agent_studio_key"}
+
+	got := identityArgs("studio")
+	want := []string{"-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes", "-i", "/path/to/agent_studio_key"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("identityArgs = %v, want %v (per-host should win over cloud fallback)", got, want)
+	}
+}
+
+// TestIdentityArgs_PerHostWithoutCloudFallback: a per-host identity should
+// also work when there's no cluster-wide cloud key configured.
+func TestIdentityArgs_PerHostWithoutCloudFallback(t *testing.T) {
+	prevID := sshIdentityFile
+	prevUsers := sshUserByHost
+	prevByHost := sshIdentityByHost
+	t.Cleanup(func() {
+		sshIdentityFile = prevID
+		sshUserByHost = prevUsers
+		sshIdentityByHost = prevByHost
+	})
+	sshIdentityFile = ""
+	sshUserByHost = map[string]string{"studio": "agent"}
+	sshIdentityByHost = map[string]string{"studio": "/path/to/agent_studio_key"}
+
+	got := identityArgs("studio")
+	want := []string{"-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes", "-i", "/path/to/agent_studio_key"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("identityArgs = %v, want %v", got, want)
+	}
+}
+
 // TestHostTarget_NoOverride: with no per-host user override the host
 // is returned unchanged so ssh resolves the user via ~/.ssh/config or
 // the local username.

@@ -1932,6 +1932,7 @@ rule ExplainInventoryDispatchBlock {
 
 rule AutoReplanStuckInventoryDispatch {
     when: AutoPilotTick(_)
+    requires: config.auto_replan_stuck_inventory_dispatch = true
 
     for job in Jobs:
       requires: job.status = queued
@@ -1949,15 +1950,35 @@ rule AutoReplanStuckInventoryDispatch {
       ensures: LifecycleEvent(job, "queue.dispatch.auto_replanned")
 
     @guidance
+        -- Opt-in by design. The intervention unplaces the job and adds the
+        -- `rental` tag, converting an on-prem inventory job into a
+        -- rental-eligible job — a placement change without explicit user
+        -- consent. When the inventory host's problem is transient (slow HF
+        -- download, transient SSH issue, host reboot), an automatic flip to
+        -- cloud rental is rarely what the user wants. With the gate off
+        -- (the default), blocked inventory jobs stay blocked until the user
+        -- intervenes; the user-visible "blocked for Nm" explanation in
+        -- ExplainStuckInventoryDispatch is unaffected. Set
+        -- `[autopilot] auto_replan_stuck_inventory_dispatch = true` in
+        -- config.toml to restore the previous automatic behavior.
+        --
         -- Implementation: internal/orchestration/autopilot.go
-        -- autoReplanStuckInventoryJobs. Scoped autopilot runs only replan
-        -- jobs inside their scope. Jobs with open move/placement intents
-        -- remain protected by job-move.allium's AutopilotIgnoresMovingJobs
-        -- invariant.
+        -- RunGroupedAutoPilotPass consults autoReplanConfigEnabled() (which
+        -- reads Config.AutoReplanStuckInventoryDispatchEnabled()) before
+        -- invoking autoReplanStuckInventoryJobs. Scoped autopilot runs only
+        -- replan jobs inside their scope. Jobs with open move/placement
+        -- intents remain protected by job-move.allium's
+        -- AutopilotIgnoresMovingJobs invariant.
 }
 
 config {
     inventory_dispatch_auto_replan_after: Duration = 10.minutes
+
+    -- Gate for AutoReplanStuckInventoryDispatch. Off by default because the
+    -- intervention changes a job's placement (adds the `rental` tag and
+    -- unplaces) without explicit user consent. TOML key:
+    -- [autopilot] auto_replan_stuck_inventory_dispatch.
+    auto_replan_stuck_inventory_dispatch: Boolean = false
 }
 
 -- ==========================================================================

@@ -224,6 +224,35 @@ backend = "queue-runner"
 	}
 }
 
+func TestAutoReplanStuckInventoryDispatchDefaultOffAndOverride(t *testing.T) {
+	// Default (no config block, no key): disabled. The intervention changes
+	// a job's placement and adds the `rental` tag, so it must be opt-in.
+	var cfg Config
+	if cfg.AutoReplanStuckInventoryDispatchEnabled() {
+		t.Fatal("default should be off; an unconfigured Config{} returned enabled")
+	}
+
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	content := `
+[autopilot]
+auto_replan_stuck_inventory_dispatch = true
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.AutoReplanStuckInventoryDispatchEnabled() {
+		t.Fatal("[autopilot] auto_replan_stuck_inventory_dispatch = true was not honored")
+	}
+}
+
 func TestDataCacheEvictionDefaultsAndOverrides(t *testing.T) {
 	var cfg Config
 	if got := cfg.CacheEvictionPolicy(); got != CacheEvictionPolicyLRU {

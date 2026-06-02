@@ -1569,6 +1569,16 @@ func RequeueByID(database *sql.DB, id int64) error {
 		tx.Rollback()
 		return err
 	}
+	// Clear any prior user-cancel/kill intent so the job_status view derives
+	// status from the new attempt instead of overriding it. Without this, a
+	// job with requested_status='canceled' (or 'killed') silently flips back
+	// to that state on the next view query — the cloud branch
+	// (RequeueFreshAttemptByID) handles this; the on-prem branch did not.
+	// See specs/job-lifecycle.allium UserRequeuesJob.
+	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit()
 }
 

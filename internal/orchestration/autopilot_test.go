@@ -72,6 +72,95 @@ func TestAutoReplanStuckInventoryJobsMovesSustainedDispatchBlock(t *testing.T) {
 	}
 }
 
+// TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault asserts that the
+// AutoReplanStuckInventoryDispatch rule does NOT fire when the config flag is
+// off (its default). The rule converts an inventory job into an unplaced
+// (rental-eligible) job after 10 min of dispatch failures; that's a placement
+// change without explicit user consent, which surprised users in practice
+// (jobs pinned to studio/cool100 silently jumped to cloud after the inventory
+// host had a transient SSH/HF issue). The gate lives in autopilot.go's
+// RunGroupedAutoPilotPass; this test verifies it's wired correctly.
+func TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", t.TempDir(), "python train.py", "blocked job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	now := time.Now()
+	// Synthesize sustained dispatch failures > 10 min — the same condition
+	// the existing TestAutoReplanStuckInventoryJobsMovesSustainedDispatchBlock
+	// test uses to trigger a replan when calling the inner function directly.
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	for _, at := range []time.Time{now.Add(-20 * time.Minute), now.Add(-12 * time.Minute)} {
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			OccurredAt: at.Unix(),
+			EventKind:  db.EventQueueDispatchDeferred,
+			JobID:      jobID,
+			Detail:     "source sync deferred (host unreachable): ssh timeout",
+		}); err != nil {
+			t.Fatalf("InsertLifecycleEvent: %v", err)
+		}
+	}
+
+	// Disable autopilot launch path so we isolate the replan gate.
+	origBuild := autoPilotBuildPlan
+	origRelaunch := autoPilotRelaunch
+	origReplanGate := autoReplanConfigEnabled
+	origUnplace := autoReplanUnplaceQueuedJob
+	t.Cleanup(func() {
+		autoPilotBuildPlan = origBuild
+		autoPilotRelaunch = origRelaunch
+		autoReplanConfigEnabled = origReplanGate
+		autoReplanUnplaceQueuedJob = origUnplace
+	})
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+	unplaceCalls := 0
+	autoReplanUnplaceQueuedJob = func(database *sql.DB, job *db.Job, _ ops.ExecuteOptions) (ops.Result, error) {
+		unplaceCalls++
+		return ops.Result{Success: true, JobID: job.ID}, nil
+	}
+
+	// Default — gate returns false.
+	autoReplanConfigEnabled = func() bool { return false }
+	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass (disabled): %v", err)
+	}
+	if unplaceCalls != 0 {
+		t.Fatalf("disabled gate: unplaceCalls = %d, want 0 (job should stay pinned to cool30)", unplaceCalls)
+	}
+	if result.AutoReplanned != 0 {
+		t.Fatalf("disabled gate: AutoReplanned = %d, want 0", result.AutoReplanned)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+	if job.TargetKind() != db.JobTargetInventoryHost {
+		t.Fatalf("disabled gate: TargetKind = %s, want inventory_host", job.TargetKind())
+	}
+
+	// Opt-in — gate returns true, replan fires.
+	autoReplanConfigEnabled = func() bool { return true }
+	autoReplanUnplaceQueuedJob = func(database *sql.DB, job *db.Job, _ ops.ExecuteOptions) (ops.Result, error) {
+		unplaceCalls++
+		if err := db.MoveQueuedJobToUnplaced(database, job.ID); err != nil {
+			return ops.Result{}, err
+		}
+		return ops.Result{Success: true, JobID: job.ID}, nil
+	}
+	if _, err := RunGroupedAutoPilotPass(context.Background(), database, nil); err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass (enabled): %v", err)
+	}
+	if unplaceCalls != 1 {
+		t.Fatalf("enabled gate: unplaceCalls = %d, want 1", unplaceCalls)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -1232,13 +1232,31 @@ rule UserRequeuesJob {
         -- retry-budget accounting does not keep charging elapsed/spend
         -- from the failed chain.
         --
-        -- Implementation: internal/db/db.go RequeueByID delegates to
-        -- RequeueFreshAttemptByID for cloud jobs.
+        -- Both branches must clear `requested_status` so the
+        -- `job.status = queued` post-condition holds uniformly. The
+        -- job_status view treats user-level overrides as authoritative:
+        -- a stale `requested_status='canceled'` or `'killed'` from an
+        -- earlier user action will keep reporting the job as canceled/
+        -- killed regardless of the latest attempt's status. The cloud
+        -- branch (RequeueFreshAttemptByID) writes
+        -- `requested_status='queued'`; the on-prem branch now does the
+        -- same after creating its fresh queued attempt.
         --
-        -- Regression reference: jobs wj1379, wj1381 (2026-04-24) —
+        -- Implementation: internal/db/db.go RequeueByID delegates to
+        -- RequeueFreshAttemptByID for cloud jobs; the on-prem branch
+        -- runs `UPDATE jobs SET requested_status='queued' WHERE id = ?`
+        -- alongside the fresh-attempt insert.
+        --
+        -- Regression references: jobs wj1379, wj1381 (2026-04-24) —
         -- `weft edit --retry` reported success locally but listings kept
         -- showing 'failed' because the cloud branch only set
-        -- requested_status='queued' without creating a fresh attempt.
+        -- requested_status='queued' without creating a fresh attempt;
+        -- job wj2365 — an on-prem job that had been canceled by the user
+        -- could not be requeued because the on-prem branch left
+        -- requested_status='canceled' in place, so job_status kept
+        -- reporting 'canceled' even after the fresh queued attempt was
+        -- created. Test: TestRequeueByID_CanceledOnPremJob_ViewReportsQueued
+        -- in internal/db/db_test.go.
 }
 
 rule ResetJobToUnplaced {

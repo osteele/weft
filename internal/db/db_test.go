@@ -2910,6 +2910,68 @@ func TestRequeueByID_FailedCloudJob_ViewReportsQueued(t *testing.T) {
 	}
 }
 
+// TestRequeueByID_CanceledOnPremJob_ViewReportsQueued is a regression test for
+// a bug where `weft restart` on a canceled on-prem job (e.g. wj2365 on studio)
+// reported success locally but `weft jobs show` immediately showed the job
+// canceled again. Root cause: the on-prem branch of RequeueByID created a
+// fresh queued attempt but never cleared jobs.requested_status, so the
+// job_status view's "user-level overrides always win" rule
+// (`WHEN j.requested_status = 'canceled' THEN 'canceled'`) kept overriding
+// the new attempt. The cloud branch (RequeueFreshAttemptByID) already cleared
+// the flag; the on-prem branch did not. Fix: mirror that single UPDATE in
+// the on-prem path. See specs/job-lifecycle.allium UserRequeuesJob.
+func TestRequeueByID_CanceledOnPremJob_ViewReportsQueued(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Canceled on-prem job: terminal attempt on an inventory host, no
+	// launch_id (so RequeueByID takes the on-prem branch). insertTestJob
+	// auto-stamps requested_status='canceled' when status=StatusCanceled.
+	insertTestJob(t, database, 1, "python eval.py", "/tmp", StatusCanceled,
+		withHost("studio"),
+	)
+
+	before, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID before: %v", err)
+	}
+	if before.Status != StatusCanceled {
+		t.Fatalf("before requeue: got status %q, want %q", before.Status, StatusCanceled)
+	}
+	var beforeIntent sql.NullString
+	if err := database.QueryRow(
+		`SELECT requested_status FROM jobs WHERE id = 1`,
+	).Scan(&beforeIntent); err != nil {
+		t.Fatalf("query requested_status before: %v", err)
+	}
+	if beforeIntent.String != StatusCanceled {
+		t.Fatalf("setup precondition: requested_status = %q, want %q", beforeIntent.String, StatusCanceled)
+	}
+
+	if err := RequeueByID(database, 1); err != nil {
+		t.Fatalf("RequeueByID: %v", err)
+	}
+
+	after, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.Status != StatusQueued {
+		t.Fatalf("after requeue: got status %q, want %q (bug: view still reports canceled because requested_status not cleared)", after.Status, StatusQueued)
+	}
+
+	// requested_status should now reflect the user's new intent (queued),
+	// matching what the cloud branch does at internal/db/db.go RequeueFreshAttemptByID.
+	var afterIntent sql.NullString
+	if err := database.QueryRow(
+		`SELECT requested_status FROM jobs WHERE id = 1`,
+	).Scan(&afterIntent); err != nil {
+		t.Fatalf("query requested_status after: %v", err)
+	}
+	if afterIntent.String != StatusQueued {
+		t.Fatalf("after requeue: requested_status = %q, want %q", afterIntent.String, StatusQueued)
+	}
+}
+
 func TestUpdateQueuedToRunningCreatesLatestRun(t *testing.T) {
 	t.Skip("job_runs archival removed; job_attempts tracks history via LatestRunID → attempt ID")
 }

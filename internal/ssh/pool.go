@@ -32,11 +32,18 @@ var (
 	poolOnce            sync.Once
 
 	// sshIdentityFile is the cloud.ssh.identity_file path, used by
-	// identityArgs for hosts with ssh_user overrides.
+	// identityArgs as a fallback for hosts with ssh_user overrides that
+	// don't specify their own per-host identity.
 	sshIdentityFile string
 	// sshUserByHost is hosts.<name>.ssh_user overrides; empty entries
 	// fall back to ssh defaults so ~/.ssh/config keeps driving auth.
 	sshUserByHost map[string]string
+	// sshIdentityByHost is hosts.<name>.ssh_identity_file overrides
+	// (tilde-expanded). Takes precedence over the cloud fallback so a host
+	// like studio can offer its own key (e.g. ~/.ssh/agent_studio_ed25519)
+	// rather than the cloud key that the host would reject. Empty entries
+	// fall back to sshIdentityFile, then to ssh defaults.
+	sshIdentityByHost map[string]string
 )
 
 func init() {
@@ -55,9 +62,13 @@ func init() {
 		}
 		sshIdentityFile = cfg.Cloud.SSH.ExpandedIdentityFile()
 		sshUserByHost = make(map[string]string, len(cfg.Hosts))
+		sshIdentityByHost = make(map[string]string, len(cfg.Hosts))
 		for name, hc := range cfg.Hosts {
 			if hc.SSHUser != "" {
 				sshUserByHost[name] = hc.SSHUser
+			}
+			if id := strings.TrimSpace(hc.SSHIdentityFile); id != "" {
+				sshIdentityByHost[name] = config.ExpandUserPath(id)
 			}
 		}
 	}
@@ -81,22 +92,39 @@ func init() {
 	}
 }
 
-// identityArgs returns the SSH flags that force weft's identity file
-// when the host has an explicit ssh_user override. Applied only for
-// hosts with ssh_user set; hosts without it pass through to ssh
-// defaults (which honor ~/.ssh/config). We deliberately do NOT use
-// `-F /dev/null` — that would also strip HostName aliasing from the
-// user's config, breaking hosts whose canonical address only resolves
-// via an alias (observed: studio). IdentitiesOnly=yes + IdentityAgent=none
-// + -i are sufficient to pin our key without losing alias resolution.
+// identityArgs returns the SSH flags that pin weft's identity file when
+// the host has an explicit ssh_user override. Identity precedence:
+//  1. hosts.<name>.ssh_identity_file (per-host override)
+//  2. cloud.ssh.identity_file (legacy cluster-wide fallback)
+//  3. none — pass through to ssh defaults / ~/.ssh/config.
+//
+// Applied only for hosts with ssh_user set; hosts without it pass through
+// to ssh defaults (which honor ~/.ssh/config). We deliberately do NOT use
+// `-F /dev/null` — that would also strip HostName aliasing from the user's
+// config, breaking hosts whose canonical address only resolves via an
+// alias (observed: studio). IdentitiesOnly=yes + IdentityAgent=none + -i
+// are sufficient to pin our key without losing alias resolution.
+//
+// Without the per-host override, weft used to send the cloud key to every
+// host that had an ssh_user — including studio, whose `agent` account only
+// accepts ~/.ssh/agent_studio_ed25519. The result was "SSH connection to
+// studio failed: EOF" (after Permission denied), which propagated as a
+// 644-hour-stale host_inventory cache and silent dispatch failures.
 func identityArgs(host string) []string {
-	if sshIdentityFile == "" || sshUserByHost[host] == "" {
+	if sshUserByHost[host] == "" {
+		return nil
+	}
+	identity := sshIdentityByHost[host]
+	if identity == "" {
+		identity = sshIdentityFile
+	}
+	if identity == "" {
 		return nil
 	}
 	return []string{
 		"-o", "IdentityAgent=none",
 		"-o", "IdentitiesOnly=yes",
-		"-i", sshIdentityFile,
+		"-i", identity,
 	}
 }
 

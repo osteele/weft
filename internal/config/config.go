@@ -127,9 +127,36 @@ type Config struct {
 	// AgentBuild holds on-demand remote builder configuration for agent binaries.
 	AgentBuild AgentBuildConfig `yaml:"agent_build" toml:"agent_build"`
 
+	// Autopilot holds singleton-autopilot policy knobs (intervention behavior).
+	Autopilot AutopilotConfig `yaml:"autopilot" toml:"autopilot"`
+
 	// AutomapDirs lists local prefixes that should reuse the same relative path
 	// on remote hosts; defaults to ["~"].
 	AutomapDirs []string `yaml:"automap_dirs" toml:"automap_dirs"`
+}
+
+// AutopilotConfig gates optional autopilot interventions that change a job's
+// placement (host pin, tags) without explicit user action. These are off by
+// default because they can convert an on-prem inventory job into a cloud
+// rental job, which is rarely what the user wants when the inventory host's
+// problem is transient (slow HF download, temporary SSH issue, host reboot).
+type AutopilotConfig struct {
+	// AutoReplanStuckInventoryDispatch enables the autopilot rule that
+	// automatically unplaces a job from its inventory host and adds the
+	// `rental` tag after `inventory_dispatch_auto_replan_after` (10 min) of
+	// sustained dispatch failures.
+	//
+	// When false (the default), an inventory job that's blocked on its host
+	// stays blocked until the user intervenes (fix the underlying issue,
+	// move the job, or restart it). The user-visible "blocked for Nm"
+	// explanation is unchanged; only the automatic intervention is gated.
+	//
+	// When true, the previous behavior is restored: jobs blocked >10 min
+	// on an inventory host are auto-unplaced and the `rental` tag is added,
+	// making them eligible for cloud relaunch.
+	//
+	// See specs/campaign-lifecycle.allium § AutoReplanStuckInventoryDispatch.
+	AutoReplanStuckInventoryDispatch bool `yaml:"auto_replan_stuck_inventory_dispatch" toml:"auto_replan_stuck_inventory_dispatch"`
 }
 
 // AgentBuildConfig configures remote builders used to compile agent binaries.
@@ -592,6 +619,14 @@ type HostConfig struct {
 	// you want weft to connect as a service user (e.g., "agent") that
 	// is distinct from the user you use for interactive `ssh <host>`.
 	SSHUser string `yaml:"ssh_user" toml:"ssh_user"`
+
+	// SSHIdentityFile is the private key weft should offer when connecting
+	// to this host. If unset, weft falls back to `cloud.ssh.identity_file`
+	// when SSHUser is non-empty (legacy behavior), otherwise lets ssh use
+	// its default agent / ~/.ssh/config resolution. Set this when the host
+	// requires a key distinct from the cloud key (e.g., studio's `agent`
+	// account only accepts ~/.ssh/agent_studio_ed25519).
+	SSHIdentityFile string `yaml:"ssh_identity_file" toml:"ssh_identity_file"`
 }
 
 // HostGPUConfig describes a homogeneous GPU group for a host.
@@ -831,6 +866,18 @@ func (c *Config) HostOptInOnly(host string) bool {
 	return ok && cfg.OptInOnly
 }
 
+// AutoReplanStuckInventoryDispatchEnabled reports whether the autopilot
+// should automatically unplace inventory jobs that have been blocked on
+// dispatch beyond the configured threshold. Default false: the intervention
+// changes a job's placement (and adds the rental tag), which is rarely what
+// the user wants when the inventory host's problem is transient.
+func (c *Config) AutoReplanStuckInventoryDispatchEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Autopilot.AutoReplanStuckInventoryDispatch
+}
+
 var (
 	configPath       string
 	legacyConfigPath string
@@ -925,6 +972,10 @@ func parseUndecodedKeys(err error) []string {
 	}
 	return keys
 }
+
+// ExpandUserPath is the exported form of expandUserPath, used by other
+// packages (e.g. internal/ssh for per-host identity files).
+func ExpandUserPath(path string) string { return expandUserPath(path) }
 
 func expandUserPath(path string) string {
 	path = strings.TrimSpace(path)

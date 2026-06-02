@@ -51,6 +51,19 @@ var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
 var autoPilotLaunchMoveIntentRetry = launchMoveIntentRetry
 var autoReplanUnplaceQueuedJob = ops.UnplaceQueuedJob
 
+// autoReplanConfigEnabled reports whether the autopilot should run
+// AutoReplanStuckInventoryDispatch this pass. Wrapped in a var so tests
+// can swap it without touching the on-disk config.
+var autoReplanConfigEnabled = func() bool {
+	cfg, err := config.Load()
+	if err != nil {
+		// Conservative on config-load failure: behave as if disabled
+		// rather than silently changing job placement.
+		return false
+	}
+	return cfg.AutoReplanStuckInventoryDispatchEnabled()
+}
+
 // placementIntentProtectionWindow shields freshly-opened intents from
 // auto-prune; it must exceed a healthy relaunch's offer-search →
 // instance-create window (a few seconds typically, up to ~90s under load).
@@ -108,9 +121,19 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		return nil, err
 	}
-	autoReplanned, err := autoReplanStuckInventoryJobs(database, scoped, movingJobs)
-	if err != nil {
-		oplog.Log("auto_pilot.auto_replan_error", oplog.WithError(err))
+	// Auto-replan is off by default — it converts an on-prem inventory job
+	// into an unplaced (rental-eligible) job after 10 min of dispatch
+	// failures, which is rarely what the user wants when the host's problem
+	// is transient (slow HF download, SSH wedge, host reboot). Enable via
+	// [autopilot] auto_replan_stuck_inventory_dispatch = true. See
+	// internal/config AutopilotConfig and specs/campaign-lifecycle.allium §
+	// AutoReplanStuckInventoryDispatch.
+	var autoReplanned int
+	if autoReplanConfigEnabled() {
+		autoReplanned, err = autoReplanStuckInventoryJobs(database, scoped, movingJobs)
+		if err != nil {
+			oplog.Log("auto_pilot.auto_replan_error", oplog.WithError(err))
+		}
 	}
 
 	unplacedJobs, err := db.ListUnplacedJobs(database)
