@@ -79,6 +79,13 @@ func TestComputeCapForGPU(t *testing.T) {
 		{"RTX PRO 4500 Blackwell", "12.0"},
 		{"RTX PRO 6000 WS", "12.0"},
 		{"RTX 5090", "12.0"},
+		// Regression for wj2365 on 2026-06-02: RunPod's offer.GPUName is
+		// the terse displayName (no "Blackwell" suffix), so the
+		// generation-name fallback misses these and we need explicit
+		// model entries in modelComputeCap.
+		{"RTX PRO 4500", "12.0"},
+		{"RTX PRO 5000", "12.0"},
+		{"RTX PRO 6000", "12.0"},
 		// Pascal and Maxwell — regression for EXP-179 wj2240 on 2026-05-28,
 		// where Vast.ai offered GTX 1080 Tis and weft's catalog didn't
 		// recognize them, letting the torch-min compute-cap filter

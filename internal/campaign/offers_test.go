@@ -1044,11 +1044,12 @@ func TestFilterOffersByTorchArch(t *testing.T) {
 		{ProviderID: "rtxpro", GPUName: "RTX PRO 4500 Blackwell"},
 		{ProviderID: "unknown", GPUName: "weird-future-gpu"},
 	}
-	// Cap at 9.0 (Hopper): A100 and H100 pass; B200/RTX PRO Blackwell rejected;
-	// unknown GPU passes (we cannot prove violation).
+	// Cap at 9.0 (Hopper): A100 and H100 pass; B200/RTX PRO Blackwell
+	// rejected by model lookup; unknown GPU rejected because fail-closed
+	// under any bound (see wj2365 regression on 2026-06-02).
 	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "", "9.0")
-	if filtered != 2 {
-		t.Errorf("filtered = %d, want 2", filtered)
+	if filtered != 3 {
+		t.Errorf("filtered = %d, want 3", filtered)
 	}
 	if exGPU == "" || exCap == "" {
 		t.Errorf("expected example GPU and cap to be set, got %q %q", exGPU, exCap)
@@ -1057,11 +1058,45 @@ func TestFilterOffersByTorchArch(t *testing.T) {
 	for _, o := range got {
 		keepIDs[o.ProviderID] = true
 	}
-	if !keepIDs["a100"] || !keepIDs["h100"] || !keepIDs["unknown"] {
-		t.Errorf("expected a100, h100, unknown to survive; got %+v", keepIDs)
+	if !keepIDs["a100"] || !keepIDs["h100"] {
+		t.Errorf("expected a100, h100 to survive; got %+v", keepIDs)
 	}
-	if keepIDs["b200"] || keepIDs["rtxpro"] {
-		t.Errorf("expected b200, rtxpro to be filtered; got %+v", keepIDs)
+	if keepIDs["b200"] || keepIDs["rtxpro"] || keepIDs["unknown"] {
+		t.Errorf("expected b200, rtxpro, unknown to be filtered; got %+v", keepIDs)
+	}
+}
+
+// TestFilterOffersByTorchArch_RejectsBlackwellForTorch26 is the wj2365
+// regression on 2026-06-02: torch 2.6 maps to maxCap "9.0" and the job had
+// gpu-arch-max sm_9.0, but the autopilot launched onto RunPod RTX PRO 4500
+// Blackwell instances three times. Two failure modes stacked:
+//  1. modelComputeCap didn't list "rtxpro4500" / "rtxpro5000", and the
+//     generation-name fallback in ComputeCapForGPU needs the literal
+//     "blackwell" in the GPU name. RunPod's offer.GPUName is the terse
+//     displayName ("RTX PRO 4500"), so ComputeCapForGPU returned "".
+//  2. filterOffersByTorchArch was fail-open on maxCap-only when gpuCap == "",
+//     so an unknown card sailed through. Both are now closed.
+func TestFilterOffersByTorchArch_RejectsBlackwellForTorch26(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "rtxpro4500", GPUName: "RTX PRO 4500"},
+		{ProviderID: "rtxpro5000", GPUName: "RTX PRO 5000"},
+		{ProviderID: "rtxpro6000ws", GPUName: "RTX PRO 6000 WS"},
+		{ProviderID: "a6000", GPUName: "RTX A6000"},
+		{ProviderID: "4000ada", GPUName: "RTX 4000 Ada"},
+	}
+	got, filtered, _, _ := filterOffersByTorchArch(offers, "", "9.0")
+	if filtered != 3 {
+		t.Errorf("filtered = %d, want 3 (RTX PRO 4500/5000/6000 WS all sm_12.0)", filtered)
+	}
+	keepIDs := map[string]bool{}
+	for _, o := range got {
+		keepIDs[o.ProviderID] = true
+	}
+	if keepIDs["rtxpro4500"] || keepIDs["rtxpro5000"] || keepIDs["rtxpro6000ws"] {
+		t.Errorf("expected RTX PRO Blackwell variants rejected by sm_9.0 cap; got %+v", keepIDs)
+	}
+	if !keepIDs["a6000"] || !keepIDs["4000ada"] {
+		t.Errorf("expected Ampere/Ada offers to survive sm_9.0 cap; got %+v", keepIDs)
 	}
 }
 
@@ -1134,14 +1169,18 @@ func TestFilterOffersByTorchArch_RejectsPascalForTorch210(t *testing.T) {
 	}
 }
 
-// TestFilterOffersByTorchArch_UnknownGPUFailOpenOnMaxOnly verifies the
-// asymmetry: with no min-cap, an unknown GPU is treated as "probably older
-// than the cap" rather than "newer than the cap allows", so it passes. This
-// preserves the existing fail-open behavior for upper-bound-only filtering.
-func TestFilterOffersByTorchArch_UnknownGPUFailOpenOnMaxOnly(t *testing.T) {
+// TestFilterOffersByTorchArch_UnknownGPUFailClosedOnMaxOnly verifies that
+// unknown GPUs are rejected under a max-only cap. The catalog gets updated
+// lazily, so "unknown to weft" empirically biases newer-than-the-cap-allows
+// (e.g. wj2365 / RTX PRO 4500 Blackwell on 2026-06-02), not older. Both
+// bounds now fail closed on unknown GPUs.
+func TestFilterOffersByTorchArch_UnknownGPUFailClosedOnMaxOnly(t *testing.T) {
 	offers := []cloud.Offer{{ProviderID: "unknown", GPUName: "weird-future-gpu"}}
-	got, filtered, _, _ := filterOffersByTorchArch(offers, "", "9.0")
-	if filtered != 0 || len(got) != 1 {
-		t.Errorf("max-only filter should fail open on unknown GPU; filtered=%d remaining=%d", filtered, len(got))
+	got, filtered, exGPU, exCap := filterOffersByTorchArch(offers, "", "9.0")
+	if filtered != 1 || len(got) != 0 {
+		t.Errorf("max-only filter should fail closed on unknown GPU; filtered=%d remaining=%d", filtered, len(got))
+	}
+	if exGPU != "weird-future-gpu" || exCap != "unknown" {
+		t.Errorf("expected diagnostic example to be unknown GPU; got %q %q", exGPU, exCap)
 	}
 }

@@ -361,8 +361,14 @@ rule EvaluateEligibility {
         -- pyproject.toml, placement.TorchMaxComputeCap and TorchMinComputeCap
         -- map (version, cu-variant) to caps, placement.MaxComputeCapForJob /
         -- MinComputeCapForJob apply them. Cloud-offer arch filtering:
-        -- campaign.filterOffersByTorchArch — same fail-closed-on-unknown
-        -- rule for the lower bound, fail-open for the upper bound.
+        -- campaign.filterOffersByTorchArch — fail-closed-on-unknown for
+        -- BOTH bounds (stricter than the on-prem asymmetry above). The
+        -- difference reflects where unknown-to-weft GPUs come from: on a
+        -- cloud provider's catalog the appearance of an unrecognized GPU
+        -- model almost always means a newer card weft hasn't catalogued
+        -- yet (wj2365 / RTX PRO 4500 Blackwell on 2026-06-02), so fail-open
+        -- on the upper bound silently dispatched a torch-2.6 (sm_9.0) job
+        -- onto sm_12.0 silicon.
 }
 
 -- =========================================================================

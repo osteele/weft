@@ -360,23 +360,22 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 	for _, o := range offers {
 		gpuCap := placement.ComputeCapForGPU(o.GPUName)
 		if gpuCap == "" {
-			// Fail closed when a minimum compute cap is required and the
-			// offer's GPU is unknown to weft. Otherwise we'd silently
-			// dispatch to a card the torch pin cannot run on — the EXP-179
-			// regression on wj2240, where Vast.ai offered GTX 1080 Tis that
-			// weft's catalog didn't recognize and the torch-derived
-			// MinComputeCap=7.5 was never checked. maxCap-only is left
-			// fail-open: "unknown" there could mean "older and probably
-			// fine" rather than "newer than the cap allows".
-			if minCap != "" {
-				filtered++
-				if exampleGPU == "" {
-					exampleGPU = o.GPUName
-					exampleCap = "unknown"
-				}
-				continue
+			// Fail closed for unknown GPUs whenever any bound is set. The
+			// catalog gets updated lazily, so "unknown to weft" is in
+			// practice biased toward newer-than-the-catalog-knows, not
+			// older — wj2365 on 2026-06-02 landed on an RTX PRO 4500
+			// Blackwell (sm_12.0) under a torch-2.6 sm_9.0 cap because the
+			// provider's terse "RTX PRO 4500" GPUName missed the
+			// generation-name fallback and the maxCap-only branch failed
+			// open. Same direction as the older EXP-179 wj2240 minCap
+			// regression (GTX 1080 Tis below torch 2.10's sm_75 floor),
+			// just from the other side. Both are safer routed off the
+			// unknown card.
+			filtered++
+			if exampleGPU == "" {
+				exampleGPU = o.GPUName
+				exampleCap = "unknown"
 			}
-			compatible = append(compatible, o)
 			continue
 		}
 		if maxCap != "" && placement.CompareComputeCap(gpuCap, maxCap) > 0 {

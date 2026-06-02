@@ -53,7 +53,12 @@ var modelComputeCap = map[string]string{
 	"b300":  "10.0",
 	"gb200": "10.0",
 	// Workstation / consumer Blackwell (sm_120). Some providers omit the
-	// word "Blackwell" and report names like "RTX PRO 6000 WS".
+	// word "Blackwell" and report names like "RTX PRO 6000 WS",
+	// "RTX PRO 5000", or "RTX PRO 4500" (no generation suffix), so the
+	// generation-name fallback in ComputeCapForGPU does not catch them and
+	// each variant needs an explicit entry here.
+	"rtxpro4500": "12.0",
+	"rtxpro5000": "12.0",
 	"rtxpro6000": "12.0",
 }
 
