@@ -104,7 +104,7 @@ func TestLaunchInstanceNilR2Client(t *testing.T) {
 	}
 
 	_, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		R2Assets{Client: nil, AgentR2Key: "agents/test-version/linux-amd64", SourceR2Keys: map[string]string{}},
@@ -161,7 +161,7 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	}
 
 	instanceID, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		R2Assets{Client: &r2.Client{}},
@@ -247,7 +247,7 @@ func TestLaunchInstanceCreateTimesOutMarksProviderTimeout(t *testing.T) {
 	}
 
 	instanceID, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		R2Assets{Client: &r2.Client{}},
@@ -311,7 +311,7 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 	var callbackJobLaunch sql.NullInt64
 	var callbackJobHost string
 	instanceID, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		R2Assets{Client: &r2.Client{}},
@@ -390,7 +390,7 @@ func TestLaunchInstanceRecordsOfferGPUMemory(t *testing.T) {
 	}
 
 	instanceID, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{}, r2Cfg, createOpts,
 		R2Assets{Client: &r2.Client{}},
 		nil, func(string) {}, nil,
@@ -454,7 +454,7 @@ func TestLaunchInstanceRecomputesDiskFloor(t *testing.T) {
 	}
 
 	instanceID, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{},
 		cloud.R2Config{Bucket: "test", AccountID: "test"},
 		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04", DiskGB: 50},
@@ -614,8 +614,9 @@ func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
 		},
 	}
 
-	inst, finalOffer, err := createInstanceWithReplacement(
+	inst, finalOffer, _, err := createInstanceWithReplacement(
 		mockClient,
+		nil,
 		group,
 		initialOffer,
 		cloud.CreateOpts{},
@@ -668,8 +669,9 @@ func TestCreateInstanceWithReplacementRetriesUnavailableRunpodOffer(t *testing.T
 		},
 	}
 
-	inst, finalOffer, err := createInstanceWithReplacement(
+	inst, finalOffer, _, err := createInstanceWithReplacement(
 		mockClient,
+		nil,
 		group,
 		initialOffer,
 		cloud.CreateOpts{},
@@ -703,8 +705,9 @@ func TestCreateInstanceWithReplacementNoReplacementOffer(t *testing.T) {
 		},
 	}
 
-	_, _, err := createInstanceWithReplacement(
+	_, _, _, err := createInstanceWithReplacement(
 		mockClient,
+		nil,
 		group,
 		initialOffer,
 		cloud.CreateOpts{},
@@ -742,8 +745,9 @@ func TestCreateInstanceWithReplacementDoesNotRetryGenericError(t *testing.T) {
 		},
 	}
 
-	_, _, err := createInstanceWithReplacement(
+	_, _, _, err := createInstanceWithReplacement(
 		mockClient,
+		nil,
 		group,
 		initialOffer,
 		cloud.CreateOpts{},
@@ -786,8 +790,9 @@ func TestCreateInstanceWithReplacementRetriesProviderRejected(t *testing.T) {
 	}
 
 	replacementIdx := 0
-	inst, finalOffer, err := createInstanceWithReplacement(
+	inst, finalOffer, _, err := createInstanceWithReplacement(
 		mockClient,
+		nil,
 		group,
 		offers[0],
 		cloud.CreateOpts{},
@@ -829,8 +834,9 @@ func TestCreateInstanceWithReplacementExhaustsAttempts(t *testing.T) {
 		},
 	}
 
-	_, _, err := createInstanceWithReplacement(
+	_, _, _, err := createInstanceWithReplacement(
 		mockClient,
+		nil,
 		group,
 		initialOffer,
 		cloud.CreateOpts{},
@@ -850,6 +856,108 @@ func TestCreateInstanceWithReplacementExhaustsAttempts(t *testing.T) {
 	}
 	if createCalls != maxCreateAttempts {
 		t.Fatalf("create calls = %d, want %d", createCalls, maxCreateAttempts)
+	}
+}
+
+// TestCreateInstanceWithReplacementSwapsClientOnCrossProviderOffer covers
+// the cross-provider retry fallback: when the original provider's pool is
+// dry but a different provider has a compatible offer within the price
+// cap, createInstanceWithReplacement must (a) call the new provider's
+// CreateInstance, not the old one, and (b) return the new client so the
+// caller's downstream ShowInstance / DestroyInstance route correctly.
+func TestCreateInstanceWithReplacementSwapsClientOnCrossProviderOffer(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "RTX4090", Provider: cloud.ProviderRunpod, CostPerHour: 0.40}
+	crossProvider := cloud.Offer{ProviderID: "8765", Provider: cloud.ProviderVastai, CostPerHour: 0.45}
+
+	var runpodCalls, vastaiCalls []string
+	runpodClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderRunpod,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			runpodCalls = append(runpodCalls, offerID)
+			return nil, fmt.Errorf("%w: gpu %s no longer exists", cloud.ErrOfferUnavailable, offerID)
+		},
+	}
+	vastaiClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			vastaiCalls = append(vastaiCalls, offerID)
+			return &cloud.Instance{ProviderID: "vast-inst-9", Status: cloud.ProviderStatusCreating}, nil
+		},
+	}
+	lookup := func(p cloud.Provider) cloud.Client {
+		switch p {
+		case cloud.ProviderRunpod:
+			return runpodClient
+		case cloud.ProviderVastai:
+			return vastaiClient
+		}
+		return nil
+	}
+
+	inst, finalOffer, finalClient, err := createInstanceWithReplacement(
+		runpodClient,
+		lookup,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		nil,
+		func(map[string]struct{}) (*cloud.Offer, error) { return &crossProvider, nil },
+	)
+	if err != nil {
+		t.Fatalf("createInstanceWithReplacement: %v", err)
+	}
+	if inst == nil || inst.ProviderID != "vast-inst-9" {
+		t.Fatalf("instance = %+v, want vast-inst-9 (from vastai client)", inst)
+	}
+	if finalOffer.ProviderID != crossProvider.ProviderID {
+		t.Fatalf("final offer ID = %s, want %s", finalOffer.ProviderID, crossProvider.ProviderID)
+	}
+	if finalClient == nil || finalClient.Provider() != cloud.ProviderVastai {
+		t.Fatalf("final client provider = %v, want vastai", finalClient)
+	}
+	if len(runpodCalls) != 1 || runpodCalls[0] != "RTX4090" {
+		t.Fatalf("runpod create calls = %v, want one attempt against RTX4090", runpodCalls)
+	}
+	if len(vastaiCalls) != 1 || vastaiCalls[0] != "8765" {
+		t.Fatalf("vastai create calls = %v, want one attempt against 8765 (the cross-provider replacement)", vastaiCalls)
+	}
+}
+
+// TestCreateInstanceWithReplacementRejectsCrossProviderWhenLookupMissing
+// guards against silently fanning out to a different provider when no
+// cross-provider client lookup was supplied (e.g. relaunch and TUI single-
+// shot paths pass nil for the lookup). The retry must fail loudly rather
+// than calling the original provider's CreateInstance with an alien offer
+// ID, which would burn an attempt and surface a confusing provider error.
+func TestCreateInstanceWithReplacementRejectsCrossProviderWhenLookupMissing(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "RTX4090", Provider: cloud.ProviderRunpod, CostPerHour: 0.40}
+	crossProvider := cloud.Offer{ProviderID: "8765", Provider: cloud.ProviderVastai, CostPerHour: 0.45}
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderRunpod,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, fmt.Errorf("%w: gpu %s no longer exists", cloud.ErrOfferUnavailable, offerID)
+		},
+	}
+
+	_, _, _, err := createInstanceWithReplacement(
+		mockClient,
+		nil, // no lookup supplied — replacement must NOT be applied
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		nil,
+		func(map[string]struct{}) (*cloud.Offer, error) { return &crossProvider, nil },
+	)
+	if err == nil {
+		t.Fatal("expected error when replacement is from another provider but lookup is nil")
+	}
+	if !strings.Contains(err.Error(), "no cross-provider client lookup was supplied") {
+		t.Fatalf("err = %v, want it to mention the missing cross-provider lookup", err)
 	}
 }
 
@@ -942,7 +1050,7 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	}
 
 	dst, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{TransferClaim: true},
 		cloud.R2Config{Bucket: "test", AccountID: "test"},
 		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
@@ -970,7 +1078,7 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 		t.Fatalf("re-set source launch: %v", err)
 	}
 	_, err = LaunchInstance(
-		mockClient, database, nil, group, offer,
+		mockClient, nil, database, nil, group, offer,
 		LaunchOpts{},
 		cloud.R2Config{Bucket: "test", AccountID: "test"},
 		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},

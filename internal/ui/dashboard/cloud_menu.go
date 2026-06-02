@@ -323,7 +323,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 
 		launchOpts := campaign.LaunchOpts{GPUWarmup: m.appConfig.Campaign.GPUWarmup}
 		campaignID, err := campaign.LaunchInstance(
-			client, m.database, nil, group, offer, launchOpts, cloudR2, createOpts,
+			client, nil, m.database, nil, group, offer, launchOpts, cloudR2, createOpts,
 			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys},
 			nil,
 			func(phase string) {

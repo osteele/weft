@@ -648,14 +648,16 @@ func classifyLaunchGroupPhaseEvent(group InstanceGroup, phase string) LaunchEven
 }
 
 func createInstanceWithReplacement(
-	client cloud.Client,
+	initialClient cloud.Client,
+	clientForProvider func(cloud.Provider) cloud.Client,
 	group InstanceGroup,
 	offer cloud.Offer,
 	createOpts cloud.CreateOpts,
 	progress cloud.ProgressFunc,
 	updateOfferMetadata func(cloud.Offer) error,
 	replacementOffer replacementOfferFunc,
-) (*cloud.Instance, cloud.Offer, error) {
+) (*cloud.Instance, cloud.Offer, cloud.Client, error) {
+	client := initialClient
 	currentOffer := offer
 	excludedOffers := make(map[string]struct{})
 	var lastErr error
@@ -684,7 +686,7 @@ func createInstanceWithReplacement(
 			inst, err = client.CreateInstance(currentOffer.ProviderID, createAttemptOpts)
 		}
 		if err == nil {
-			return inst, currentOffer, nil
+			return inst, currentOffer, client, nil
 		}
 		lastErr = err
 
@@ -698,6 +700,7 @@ func createInstanceWithReplacement(
 			"component", "launch",
 			"attempt", attempt,
 			"offer", currentOffer.ProviderID,
+			"provider", client.Provider(),
 			"gpu_spec", group.GPUSpec(),
 			"error", err,
 		)
@@ -705,15 +708,34 @@ func createInstanceWithReplacement(
 
 		nextOffer, retryErr := replacementOffer(excludedOffers)
 		if retryErr != nil {
-			return nil, currentOffer, fmt.Errorf("search replacement offer: %w", retryErr)
+			return nil, currentOffer, client, fmt.Errorf("search replacement offer: %w", retryErr)
 		}
 		if nextOffer == nil {
-			return nil, currentOffer, fmt.Errorf("offer %s failed, no replacement found: %w", currentOffer.ProviderID, ErrNoReplacementOffer)
+			return nil, currentOffer, client, fmt.Errorf("offer %s failed, no replacement found: %w", currentOffer.ProviderID, ErrNoReplacementOffer)
+		}
+
+		// When the replacement offer comes from a different cloud provider,
+		// swap the active client so the subsequent CreateInstance call (and
+		// any downstream ShowInstance / DestroyInstance routing the caller
+		// runs after we return) targets the right provider. Without this
+		// swap the loop would call e.g. RunPod's CreateInstance with a
+		// Vast.ai offer ID, which fails immediately and burns an attempt.
+		if nextOffer.Provider != "" && nextOffer.Provider != client.Provider() {
+			if clientForProvider == nil {
+				return nil, currentOffer, client, fmt.Errorf(
+					"replacement offer is from provider %q but no cross-provider client lookup was supplied", nextOffer.Provider)
+			}
+			swapped := clientForProvider(nextOffer.Provider)
+			if swapped == nil {
+				return nil, currentOffer, client, fmt.Errorf(
+					"replacement offer is from provider %q but no client is configured for it", nextOffer.Provider)
+			}
+			client = swapped
 		}
 
 		if updateOfferMetadata != nil {
 			if err := updateOfferMetadata(*nextOffer); err != nil {
-				return nil, currentOffer, fmt.Errorf("update replacement offer metadata: %w", err)
+				return nil, currentOffer, client, fmt.Errorf("update replacement offer metadata: %w", err)
 			}
 		}
 
@@ -723,10 +745,11 @@ func createInstanceWithReplacement(
 			"attempt", attempt+1,
 			"gpu_spec", group.GPUSpec(),
 			"offer", currentOffer.ProviderID,
+			"provider", client.Provider(),
 		)
 	}
 
-	return nil, currentOffer, lastErr
+	return nil, currentOffer, client, lastErr
 }
 
 // LaunchCampaign creates a campaign record and launches instances for each group
@@ -1208,10 +1231,17 @@ func launchCampaignWithStager(
 			if cfg, err := config.Load(); err == nil && cfg != nil {
 				minReliability = cfg.CampaignReliability()
 			}
+			// Pass the full clients slice into the replacement-offer search
+			// so a retryable failure on one provider's offer can fall back
+			// to another provider's offer pool. The existing price-cap
+			// filter (searchReplacementOfferWithPriceCap) still bounds the
+			// candidates by 1.25x of the original offer's price, so cross-
+			// provider fallback can't blow the cost budget. The matching
+			// client swap happens inside createInstanceWithReplacement.
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
 				return searchReplacementOfferWithPriceCap(originalPrice, excludeOfferKeys, func(exclude map[string]struct{}) GroupOffer {
 					return SearchBestOfferForGroupWithProfile(
-						[]cloud.Client{client},
+						clients,
 						group,
 						survivalModel,
 						jobDurationHrs,
@@ -1225,7 +1255,7 @@ func launchCampaignWithStager(
 			})
 
 			cID, err := LaunchInstance(
-				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
+				client, clients, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
 				groupAssets, replacementOffer, progress, instanceRegistered,
 			)
 
@@ -1406,6 +1436,20 @@ func cancelNonTerminalCampaignInstances(database *sql.DB, campaignID int64, deta
 	}
 }
 
+// clientForProviderFromList partially-applies clientForProvider so a
+// cross-provider lookup can be passed through createInstanceWithReplacement
+// without leaking the full clients slice. Returns nil when the slice is
+// empty so createInstanceWithReplacement falls back to single-provider
+// retries (today's behavior before the cross-provider fix).
+func clientForProviderFromList(clients []cloud.Client) func(cloud.Provider) cloud.Client {
+	if len(clients) == 0 {
+		return nil
+	}
+	return func(p cloud.Provider) cloud.Client {
+		return clientForProvider(clients, p)
+	}
+}
+
 // clientForProvider finds the client matching a provider from a list.
 // If provider is empty, returns the first client as a default. Otherwise
 // returns the exact match or nil — never fall back to a different provider,
@@ -1504,8 +1548,15 @@ type R2Assets struct {
 // bootstraps the instance. Most providers self-bootstrap via onstart, while
 // RunPod uses an SSH-triggered bootstrap step after pod creation.
 // Returns the cloud instance DB ID.
+// LaunchInstance creates one cloud instance for the given group/offer and
+// returns the local DB launch ID. The clients slice is consulted only when
+// the replacement-offer retry chain pivots to a different provider; pass
+// nil when the caller doesn't intend to allow cross-provider fallback
+// (e.g. the relaunch path and TUI single-shot launches, which already
+// pass nil for replacementOffer).
 func LaunchInstance(
 	client cloud.Client,
+	clients []cloud.Client,
 	database *sql.DB,
 	campaignID *int64,
 	group InstanceGroup,
@@ -1833,9 +1884,13 @@ func LaunchInstance(
 		createOpts.Label,
 	))
 
-	// Create cloud instance
-	inst, finalOffer, err := createInstanceWithReplacement(
+	// Create cloud instance. createInstanceWithReplacement may swap client
+	// mid-retry if the replacement offer is from a different provider, and
+	// returns the final client so the readback / downstream calls below
+	// route to the right provider.
+	inst, finalOffer, finalClient, err := createInstanceWithReplacement(
 		client,
+		clientForProviderFromList(clients),
 		group,
 		offer,
 		createOpts,
@@ -1845,6 +1900,9 @@ func LaunchInstance(
 		},
 		replacementOffer,
 	)
+	if finalClient != nil {
+		client = finalClient
+	}
 	if err != nil {
 		// Distinguish provider CLI/API timeouts from genuine create failures so
 		// the clustered-failures banner can ignore them — see

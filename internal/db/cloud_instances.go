@@ -1258,14 +1258,19 @@ func SetLaunchProviderID(db *sql.DB, id int64, providerID string) error {
 
 // UpdateLaunchOfferMetadata refreshes the offer-derived fields on a cloud
 // instance row before a create-instance retry uses a replacement offer.
+// The provider column is also updated so cross-provider replacements
+// (e.g. retry pivots from RunPod to Vast.ai when the original provider's
+// pool dries up) end up with the correct downstream provider routing.
 func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) error {
 	_, err := database.Exec(
 		`UPDATE launches
-		 SET resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
+		 SET provider = ?,
+		     resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
 		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?,
 		     cpu_cores_effective = ?, cpu_name = ?, ram_gb = ?,
 		     disk_gb = ?, gpu_mem_gb = ?
 		 WHERE id = ?`,
+		string(offer.Provider),
 		offer.GPUName,
 		int(offer.CostPerHour*100),
 		offer.NumGPUs,

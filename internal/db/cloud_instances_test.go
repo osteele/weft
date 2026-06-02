@@ -197,6 +197,46 @@ func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	}
 }
 
+// TestUpdateLaunchOfferMetadata_SwitchesProvider covers the cross-provider
+// retry case: a launch row created for one provider must be rewritten when
+// the retry chain pivots to a different provider's offer, so downstream
+// ShowInstance / DestroyInstance routing uses the correct client.
+func TestUpdateLaunchOfferMetadata_SwitchesProvider(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:           LaunchStatusPlanned,
+		Provider:         "runpod",
+		GPUSpec:          "RTX_4090",
+		ResolvedGPUName:  "RTX_4090",
+		CostPerHourCents: 30,
+		NumGPUs:          1,
+		DiskGB:           80,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	replacement := cloud.Offer{
+		Provider:    "vastai",
+		GPUName:     "RTX_4090",
+		CostPerHour: 0.32,
+		NumGPUs:     1,
+		GPUMemGB:    24,
+		DiskSpaceGB: 80,
+	}
+	if err := UpdateLaunchOfferMetadata(database, instanceID, replacement); err != nil {
+		t.Fatalf("UpdateLaunchOfferMetadata: %v", err)
+	}
+
+	inst, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if inst.Provider != "vastai" {
+		t.Fatalf("provider after cross-provider replacement = %q, want vastai", inst.Provider)
+	}
+}
+
 // TestJobStatusView_CanceledAttemptOnLiveLaunch verifies that an attempt
 // closed with status='canceled' on a launch that's still running surfaces as
 // 'canceled' rather than the previous 'dead' fallthrough.

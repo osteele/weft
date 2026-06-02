@@ -597,7 +597,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				})
 			})
 			instanceID, err := LaunchInstance(
-				client, cfg.Database, campaignID, group, offer,
+				client, nil, cfg.Database, campaignID, group, offer,
 				cfg.LaunchOpts, cfg.R2Cfg, createOpts,
 				*r2Assets, nil, progress, nil,
 			)
@@ -687,7 +687,7 @@ func launchHedgeProbes(cfg RelaunchConfig, campaignID *int64, group InstanceGrou
 			probeOpts := cfg.LaunchOpts
 			probeOpts.HedgeProbe = true
 			probeOpts.HedgeCohortID = primaryInstanceID
-			probeID, err := LaunchInstance(probeClient, cfg.Database, campaignID, group, probeOffer, probeOpts, cfg.R2Cfg, probeCreateOpts, r2Assets, nil, nil, nil)
+			probeID, err := LaunchInstance(probeClient, nil, cfg.Database, campaignID, group, probeOffer, probeOpts, cfg.R2Cfg, probeCreateOpts, r2Assets, nil, nil, nil)
 			if err != nil {
 				slog.Warn("hedge probe launch failed", "component", "relaunch", "primary", primaryInstanceID, "error", err)
 				continue
