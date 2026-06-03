@@ -5,13 +5,28 @@ import (
 	"testing"
 )
 
+// resetIdentityGlobals zeroes the package-level identity globals and restores
+// them on test cleanup. Tests should call this first so that any leaked state
+// from a process-wide Configure() (or future init regression) doesn't bleed
+// into the assertions — see the "agent_studio" key leak from real user config.
+func resetIdentityGlobals(t *testing.T) {
+	t.Helper()
+	prevFile, prevUsers, prevByHost := sshIdentityFile, sshUserByHost, sshIdentityByHost
+	sshIdentityFile = ""
+	sshUserByHost = nil
+	sshIdentityByHost = nil
+	t.Cleanup(func() {
+		sshIdentityFile = prevFile
+		sshUserByHost = prevUsers
+		sshIdentityByHost = prevByHost
+	})
+}
+
 // TestIdentityArgs_EmptyByDefault: when no identity is configured, no
 // `-i`/`-F` flags are injected — weft falls back to ssh's default
 // behavior (which honors ~/.ssh/config and ssh-agent).
 func TestIdentityArgs_EmptyByDefault(t *testing.T) {
-	prev := sshIdentityFile
-	t.Cleanup(func() { sshIdentityFile = prev })
-	sshIdentityFile = ""
+	resetIdentityGlobals(t)
 	if got := identityArgs("studio"); len(got) != 0 {
 		t.Fatalf("identityArgs without identity = %v, want empty", got)
 	}
@@ -23,12 +38,7 @@ func TestIdentityArgs_EmptyByDefault(t *testing.T) {
 // connect as a service account distinct from the user's interactive
 // `ssh <host>` setup.
 func TestIdentityArgs_WithIdentityAndUser(t *testing.T) {
-	prev := sshIdentityFile
-	prevUsers := sshUserByHost
-	t.Cleanup(func() {
-		sshIdentityFile = prev
-		sshUserByHost = prevUsers
-	})
+	resetIdentityGlobals(t)
 	sshIdentityFile = "/path/to/key"
 	sshUserByHost = map[string]string{"studio": "agent"}
 	got := identityArgs("studio")
@@ -44,12 +54,7 @@ func TestIdentityArgs_WithIdentityAndUser(t *testing.T) {
 // Common case for personally-managed machines where weft shares the
 // user's interactive credentials.
 func TestIdentityArgs_IdentityWithoutUserPassesThrough(t *testing.T) {
-	prev := sshIdentityFile
-	prevUsers := sshUserByHost
-	t.Cleanup(func() {
-		sshIdentityFile = prev
-		sshUserByHost = prevUsers
-	})
+	resetIdentityGlobals(t)
 	sshIdentityFile = "/path/to/key"
 	sshUserByHost = map[string]string{"studio": "agent"}
 	if got := identityArgs("cool30"); len(got) != 0 {
@@ -62,14 +67,7 @@ func TestIdentityArgs_IdentityWithoutUserPassesThrough(t *testing.T) {
 // key, so every dispatch died with EOF" bug. The fix is per-host
 // ssh_identity_file taking precedence over cloud.ssh.identity_file.
 func TestIdentityArgs_PerHostOverridesCloudFallback(t *testing.T) {
-	prevID := sshIdentityFile
-	prevUsers := sshUserByHost
-	prevByHost := sshIdentityByHost
-	t.Cleanup(func() {
-		sshIdentityFile = prevID
-		sshUserByHost = prevUsers
-		sshIdentityByHost = prevByHost
-	})
+	resetIdentityGlobals(t)
 	sshIdentityFile = "/path/to/cloud_key"
 	sshUserByHost = map[string]string{"studio": "agent"}
 	sshIdentityByHost = map[string]string{"studio": "/path/to/agent_studio_key"}
@@ -84,15 +82,7 @@ func TestIdentityArgs_PerHostOverridesCloudFallback(t *testing.T) {
 // TestIdentityArgs_PerHostWithoutCloudFallback: a per-host identity should
 // also work when there's no cluster-wide cloud key configured.
 func TestIdentityArgs_PerHostWithoutCloudFallback(t *testing.T) {
-	prevID := sshIdentityFile
-	prevUsers := sshUserByHost
-	prevByHost := sshIdentityByHost
-	t.Cleanup(func() {
-		sshIdentityFile = prevID
-		sshUserByHost = prevUsers
-		sshIdentityByHost = prevByHost
-	})
-	sshIdentityFile = ""
+	resetIdentityGlobals(t)
 	sshUserByHost = map[string]string{"studio": "agent"}
 	sshIdentityByHost = map[string]string{"studio": "/path/to/agent_studio_key"}
 
@@ -107,9 +97,7 @@ func TestIdentityArgs_PerHostWithoutCloudFallback(t *testing.T) {
 // is returned unchanged so ssh resolves the user via ~/.ssh/config or
 // the local username.
 func TestHostTarget_NoOverride(t *testing.T) {
-	prev := sshUserByHost
-	t.Cleanup(func() { sshUserByHost = prev })
-	sshUserByHost = nil
+	resetIdentityGlobals(t)
 	if got := hostTarget("studio"); got != "studio" {
 		t.Fatalf("hostTarget = %q, want %q", got, "studio")
 	}
@@ -119,8 +107,7 @@ func TestHostTarget_NoOverride(t *testing.T) {
 // weft connects as a service account distinct from the user's
 // interactive `ssh studio` login.
 func TestHostTarget_WithUser(t *testing.T) {
-	prev := sshUserByHost
-	t.Cleanup(func() { sshUserByHost = prev })
+	resetIdentityGlobals(t)
 	sshUserByHost = map[string]string{"studio": "agent"}
 	if got := hostTarget("studio"); got != "agent@studio" {
 		t.Fatalf("hostTarget = %q, want %q", got, "agent@studio")

@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -45,6 +46,7 @@ func Execute() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	ssh.Configure(cfg)
 	if keys := config.UnknownTOMLKeys; len(keys) > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %s: unknown key(s): %s\n", config.ConfigPath(), strings.Join(keys, ", "))
 	}

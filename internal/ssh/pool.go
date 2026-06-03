@@ -47,33 +47,11 @@ var (
 )
 
 func init() {
-	// Apply config file settings first
-	cfg, _ := config.Load()
-	if cfg != nil {
-		if n := cfg.SSH.PoolSize; n > 0 {
-			defaultPoolSize = n
-		}
-		if n := cfg.SSH.MaxParallel; n > 0 {
-			defaultMaxParallel = n
-		}
-		if n := cfg.SSH.ConnectTimeout; n > 0 {
-			defaultConnTimeout = n
-			defaultReadyTimeout = time.Duration(n+5) * time.Second
-		}
-		sshIdentityFile = cfg.Cloud.SSH.ExpandedIdentityFile()
-		sshUserByHost = make(map[string]string, len(cfg.Hosts))
-		sshIdentityByHost = make(map[string]string, len(cfg.Hosts))
-		for name, hc := range cfg.Hosts {
-			if hc.SSHUser != "" {
-				sshUserByHost[name] = hc.SSHUser
-			}
-			if id := strings.TrimSpace(hc.SSHIdentityFile); id != "" {
-				sshIdentityByHost[name] = config.ExpandUserPath(id)
-			}
-		}
-	}
-
-	// Environment variables override config file
+	// Environment variables (config-file overrides are applied later via
+	// Configure(), which the CLI entry point calls after config.Load).
+	// Reading config here would import the user's real ~/.config/weft state
+	// into every test binary that links this package — see the "agent_studio"
+	// SSH key leak that motivated splitting init from Configure.
 	if s := os.Getenv("WEFT_SSH_POOL_SIZE"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultPoolSize = n
@@ -88,6 +66,37 @@ func init() {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultConnTimeout = n
 			defaultReadyTimeout = time.Duration(n+5) * time.Second
+		}
+	}
+}
+
+// Configure applies SSH-pool and identity settings from a loaded config.
+// Call this once at process startup, before any SSH operations. Env vars
+// already applied in init() take precedence over the config values here for
+// pool sizing; identity settings come solely from config.
+func Configure(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if n := cfg.SSH.PoolSize; n > 0 && os.Getenv("WEFT_SSH_POOL_SIZE") == "" {
+		defaultPoolSize = n
+	}
+	if n := cfg.SSH.MaxParallel; n > 0 && os.Getenv("WEFT_SSH_MAX_PARALLEL") == "" {
+		defaultMaxParallel = n
+	}
+	if n := cfg.SSH.ConnectTimeout; n > 0 && os.Getenv("WEFT_SSH_CONNECT_TIMEOUT") == "" {
+		defaultConnTimeout = n
+		defaultReadyTimeout = time.Duration(n+5) * time.Second
+	}
+	sshIdentityFile = cfg.Cloud.SSH.ExpandedIdentityFile()
+	sshUserByHost = make(map[string]string, len(cfg.Hosts))
+	sshIdentityByHost = make(map[string]string, len(cfg.Hosts))
+	for name, hc := range cfg.Hosts {
+		if hc.SSHUser != "" {
+			sshUserByHost[name] = hc.SSHUser
+		}
+		if id := strings.TrimSpace(hc.SSHIdentityFile); id != "" {
+			sshIdentityByHost[name] = config.ExpandUserPath(id)
 		}
 	}
 }
