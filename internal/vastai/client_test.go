@@ -696,10 +696,24 @@ func TestBuildSearchFilter_CPUCores(t *testing.T) {
 	}
 }
 
+// TestBuildSearchFilter_MinDriverVersion asserts the dotted-version form.
+//
+// Regression: Vast.ai's `driver_version` filter is a string field that the CLI
+// maps server-side to integer `driver_vers`. A bare integer ("driver_version>=535")
+// fails the server's integer parse and returns 400
+// "ask_contract_offers.driver_vers gte None: query values can't be None",
+// silently blocking every offer search the autopilot makes. The CLI's own help
+// example uses dotted form ("driver_version >= 535.86.05"); padding the major
+// version as "<N>.00.00" yields a parseable value. Verified by hand against
+// the live API on 2026-06-03 — see the commit message for the reproduction.
 func TestBuildSearchFilter_MinDriverVersion(t *testing.T) {
 	filter, _ := buildSearchFilter(OfferConstraints{MinDriverVersion: 535})
-	if !strings.Contains(filter, "driver_version>=535") {
-		t.Errorf("filter %q missing driver_version>=535", filter)
+	if !strings.Contains(filter, "driver_version>=535.00.00") {
+		t.Errorf("filter %q missing driver_version>=535.00.00 (dotted-version form)", filter)
+	}
+	// Bare integer form is the bug: must not regress to it.
+	if strings.Contains(filter, "driver_version>=535 ") || strings.HasSuffix(filter, "driver_version>=535") {
+		t.Errorf("filter %q emits bare integer driver_version — Vast.ai 400s on that form", filter)
 	}
 }
 

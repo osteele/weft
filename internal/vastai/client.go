@@ -732,7 +732,13 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 		parts = append(parts, fmt.Sprintf("reliability>=%g", c.MinReliability))
 	}
 	if c.MinDriverVersion > 0 {
-		parts = append(parts, fmt.Sprintf("driver_version>=%d", c.MinDriverVersion))
+		// Vast.ai's driver_version field is a dotted version string ("535.86.05").
+		// The CLI maps it server-side to integer driver_vers; passing a bare
+		// integer (e.g. "535") fails the integer parse and the API returns 400
+		// "ask_contract_offers.driver_vers gte None: query values can't be None",
+		// silently blocking every offer search. Emit the major version padded as
+		// "<N>.00.00" so the server-side mapping yields a valid integer.
+		parts = append(parts, fmt.Sprintf("driver_version>=%d.00.00", c.MinDriverVersion))
 	}
 	if c.MinCUDAVersion != "" {
 		parts = append(parts, fmt.Sprintf("cuda_vers>=%s", c.MinCUDAVersion))
