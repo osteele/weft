@@ -1027,6 +1027,16 @@ func formatMoveLaunchEventLine(event campaign.LaunchEvent, groupLabels map[strin
 			return ""
 		}
 		return fmt.Sprintf("  %s: retrying with replacement offer (attempt %d/%d)", prefix, event.RetryAttempt, event.RetryMax)
+	case campaign.LaunchEventGroupReplan:
+		group := event.Group
+		prefix := strings.TrimSpace(group.GPUSpec())
+		if label := moveGroupProgressLabel(group, groupLabels); label != "" {
+			prefix = strings.TrimSpace(label + " " + prefix)
+		}
+		if prefix == "" {
+			return ""
+		}
+		return fmt.Sprintf("  %s: replanning with fresh offer (chain %d/%d)", prefix, event.RetryAttempt, event.RetryMax)
 	case campaign.LaunchEventGroupPhase:
 		group := event.Group
 		phase := strings.TrimSpace(event.Phase)

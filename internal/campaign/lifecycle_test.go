@@ -969,6 +969,203 @@ func TestCreateInstanceWithReplacementRejectsCrossProviderWhenLookupMissing(t *t
 // authorization gate. See price_anchor.go, price_gate.go, and their tests
 // for the replacement's coverage.
 
+// TestRunGroupLaunchWithReplan_SecondChainSucceedsAfterFirstExhausted is the
+// happy-path replan scenario: the first chain returns a retryable error
+// (e.g. createInstanceWithReplacement exhausted its inner budget), the
+// fresh-offer search produces a different offer (potentially from a
+// different provider), and the second chain succeeds. The helper must
+// surface the second chain's outcome and the second offer/client.
+func TestRunGroupLaunchWithReplan_SecondChainSucceedsAfterFirstExhausted(t *testing.T) {
+	initialOffer := cloud.Offer{ProviderID: "RTX4090-A", Provider: cloud.ProviderRunpod, CostPerHour: 0.40}
+	freshOffer := cloud.Offer{ProviderID: "8888", Provider: cloud.ProviderVastai, CostPerHour: 0.42}
+
+	runpodClient := &cloud.MockClient{ProviderVal: cloud.ProviderRunpod}
+	vastaiClient := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+
+	var launchCalls []cloud.Offer
+	launch := func(c cloud.Client, o cloud.Offer) (int64, error) {
+		launchCalls = append(launchCalls, o)
+		if len(launchCalls) == 1 {
+			// First chain exhausted: simulate the lastErr that
+			// createInstanceWithReplacement would surface.
+			return 0, fmt.Errorf("%w: ask %s no longer exists", cloud.ErrOfferUnavailable, o.ProviderID)
+		}
+		// Second chain: success
+		return 555, nil
+	}
+
+	freshCalls := 0
+	fetchFresh := func() (*cloud.Offer, error) {
+		freshCalls++
+		return &freshOffer, nil
+	}
+	lookup := func(p cloud.Provider) cloud.Client {
+		switch p {
+		case cloud.ProviderRunpod:
+			return runpodClient
+		case cloud.ProviderVastai:
+			return vastaiClient
+		}
+		return nil
+	}
+	var progressMsgs []string
+	progress := cloud.ProgressFunc(func(s string) { progressMsgs = append(progressMsgs, s) })
+
+	cID, finalOffer, finalClient, err := runGroupLaunchWithReplan(
+		initialOffer, runpodClient, 1, launch, fetchFresh, lookup, progress,
+	)
+	if err != nil {
+		t.Fatalf("runGroupLaunchWithReplan: %v", err)
+	}
+	if cID != 555 {
+		t.Fatalf("cID = %d, want 555 (second chain's success)", cID)
+	}
+	if finalOffer.ProviderID != freshOffer.ProviderID {
+		t.Fatalf("finalOffer = %s, want %s (fresh offer)", finalOffer.ProviderID, freshOffer.ProviderID)
+	}
+	if finalClient.Provider() != cloud.ProviderVastai {
+		t.Fatalf("finalClient provider = %v, want vastai", finalClient.Provider())
+	}
+	if len(launchCalls) != 2 {
+		t.Fatalf("launch calls = %d, want 2 (one per chain)", len(launchCalls))
+	}
+	if freshCalls != 1 {
+		t.Fatalf("fetchFresh calls = %d, want 1", freshCalls)
+	}
+	wantPhrase := "replanning with fresh offer (chain 2/2)"
+	found := false
+	for _, m := range progressMsgs {
+		if strings.Contains(m, wantPhrase) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("progress missing replan phrase %q: %v", wantPhrase, progressMsgs)
+	}
+}
+
+// TestRunGroupLaunchWithReplan_BothChainsExhaustBubblesUpFinalError verifies
+// the budget-exhaustion path: when every chain fails retryably and the
+// replan budget is spent, the helper returns the final error so the
+// per-group goroutine can emit LaunchEventGroupFailed exactly once with
+// the most recent terminal reason.
+func TestRunGroupLaunchWithReplan_BothChainsExhaustBubblesUpFinalError(t *testing.T) {
+	initialOffer := cloud.Offer{ProviderID: "A", Provider: cloud.ProviderVastai, CostPerHour: 0.40}
+	freshOffer := cloud.Offer{ProviderID: "B", Provider: cloud.ProviderVastai, CostPerHour: 0.42}
+	client := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+
+	var launchCalls []cloud.Offer
+	chainErrs := []error{
+		fmt.Errorf("chain1 exhausted: %w", cloud.ErrOfferUnavailable),
+		fmt.Errorf("chain2 exhausted: %w", cloud.ErrOfferUnavailable),
+	}
+	launch := func(_ cloud.Client, o cloud.Offer) (int64, error) {
+		launchCalls = append(launchCalls, o)
+		return 0, chainErrs[len(launchCalls)-1]
+	}
+	fetchFresh := func() (*cloud.Offer, error) { return &freshOffer, nil }
+	lookup := func(cloud.Provider) cloud.Client { return client }
+
+	_, _, _, err := runGroupLaunchWithReplan(
+		initialOffer, client, 1, launch, fetchFresh, lookup, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error after both chains exhaust")
+	}
+	if !strings.Contains(err.Error(), "chain2 exhausted") {
+		t.Fatalf("err = %v, want second chain's terminal error", err)
+	}
+	if len(launchCalls) != 2 {
+		t.Fatalf("launch calls = %d, want 2 (one per chain)", len(launchCalls))
+	}
+}
+
+// TestRunGroupLaunchWithReplan_NonRetryableErrorSkipsReplan asserts the
+// helper bails out immediately on errors that aren't classified as
+// retryable — credit-exhaustion is the canonical case. Replanning against
+// a fresh offer wouldn't help (the account still has no credit), so the
+// error must propagate without a second chain.
+func TestRunGroupLaunchWithReplan_NonRetryableErrorSkipsReplan(t *testing.T) {
+	initialOffer := cloud.Offer{ProviderID: "A", Provider: cloud.ProviderVastai, CostPerHour: 0.40}
+	client := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+
+	var launchCalls int
+	launch := func(_ cloud.Client, _ cloud.Offer) (int64, error) {
+		launchCalls++
+		return 0, fmt.Errorf("create instance: %w", cloud.ErrAccountCreditExhausted)
+	}
+	freshCalls := 0
+	fetchFresh := func() (*cloud.Offer, error) {
+		freshCalls++
+		return &initialOffer, nil
+	}
+	lookup := func(cloud.Provider) cloud.Client { return client }
+
+	_, _, _, err := runGroupLaunchWithReplan(
+		initialOffer, client, 1, launch, fetchFresh, lookup, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error to propagate")
+	}
+	if !errors.Is(err, cloud.ErrAccountCreditExhausted) {
+		t.Fatalf("err = %v, want credit-exhausted preserved", err)
+	}
+	if launchCalls != 1 {
+		t.Fatalf("launch calls = %d, want 1 (no replan after non-retryable)", launchCalls)
+	}
+	if freshCalls != 0 {
+		t.Fatalf("fetchFresh calls = %d, want 0", freshCalls)
+	}
+}
+
+// TestRunGroupLaunchWithReplan_NoFreshOfferAvailableSurfacesChainError covers
+// the case where the first chain fails retryably but the price-gated
+// search returns no replacement (every candidate either disappeared or
+// was rejected by the price gate). The helper must NOT call launch a
+// second time and must surface the first chain's terminal error.
+func TestRunGroupLaunchWithReplan_NoFreshOfferAvailableSurfacesChainError(t *testing.T) {
+	initialOffer := cloud.Offer{ProviderID: "A", Provider: cloud.ProviderVastai, CostPerHour: 0.40}
+	client := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+
+	launchCalls := 0
+	launch := func(_ cloud.Client, _ cloud.Offer) (int64, error) {
+		launchCalls++
+		return 0, fmt.Errorf("first chain: %w", cloud.ErrOfferUnavailable)
+	}
+	fetchFresh := func() (*cloud.Offer, error) { return nil, nil }
+	lookup := func(cloud.Provider) cloud.Client { return client }
+
+	_, _, _, err := runGroupLaunchWithReplan(
+		initialOffer, client, 1, launch, fetchFresh, lookup, nil,
+	)
+	if err == nil {
+		t.Fatal("expected first-chain error to propagate")
+	}
+	if !strings.Contains(err.Error(), "first chain") {
+		t.Fatalf("err = %v, want first chain's error", err)
+	}
+	if launchCalls != 1 {
+		t.Fatalf("launch calls = %d, want 1 (no replan when fresh offer missing)", launchCalls)
+	}
+}
+
+// TestClassifyLaunchGroupPhaseEvent_ReplanProgressBecomesGroupReplan
+// covers the regex/classifier wiring: the progress phrase emitted by
+// runGroupLaunchWithReplan must turn into a LaunchEventGroupReplan event
+// with the chain numbers parsed, so the TUI ("chain N/M" badge) and
+// move.go formatter can render it without scraping raw strings.
+func TestClassifyLaunchGroupPhaseEvent_ReplanProgressBecomesGroupReplan(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090"}
+	event := classifyLaunchGroupPhaseEvent(group, "replanning with fresh offer (chain 2/3)")
+	if event.Kind != LaunchEventGroupReplan {
+		t.Fatalf("kind = %q, want %q", event.Kind, LaunchEventGroupReplan)
+	}
+	if event.RetryAttempt != 2 || event.RetryMax != 3 {
+		t.Fatalf("attempt/max = %d/%d, want 2/3", event.RetryAttempt, event.RetryMax)
+	}
+}
+
 func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	// Regression: with LaunchOpts.TransferClaim=true (move-to-new path),
 	// the source's active claim is superseded rather than rejected with

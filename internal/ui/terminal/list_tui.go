@@ -3127,6 +3127,8 @@ func formatQuickLaunchEventLine(event campaign.LaunchEvent) string {
 		return fmt.Sprintf("%s: staging (%d/%d assets ready)", event.Group.GPUSpec(), event.AssetsReady, event.AssetsTotal)
 	case campaign.LaunchEventGroupRetry:
 		return fmt.Sprintf("%s: retrying with replacement offer (attempt %d/%d)", event.Group.GPUSpec(), event.RetryAttempt, event.RetryMax)
+	case campaign.LaunchEventGroupReplan:
+		return fmt.Sprintf("%s: replanning with fresh offer (chain %d/%d)", event.Group.GPUSpec(), event.RetryAttempt, event.RetryMax)
 	case campaign.LaunchEventGroupPhase:
 		if strings.TrimSpace(event.Phase) != "" {
 			return fmt.Sprintf("%s: %s", event.Group.GPUSpec(), strings.TrimSpace(event.Phase))

@@ -2372,6 +2372,13 @@ func (m launchModel) launchInstances() tea.Cmd {
 					} else {
 						sendCampaignPhase(fmt.Sprintf("%s: %s", event.Group.GPUSpec(), phase))
 					}
+				case campaign.LaunchEventGroupReplan:
+					phase := fmt.Sprintf("replanning with fresh offer (chain %d/%d)", event.RetryAttempt, event.RetryMax)
+					if idx := findGroupIndex(event.Group); idx >= 0 {
+						sendGroupPhase(idx, phase)
+					} else {
+						sendCampaignPhase(fmt.Sprintf("%s: %s", event.Group.GPUSpec(), phase))
+					}
 				case campaign.LaunchEventGroupPhase:
 					if idx := findGroupIndex(event.Group); idx >= 0 {
 						sendGroupPhase(idx, event.Phase)

@@ -51,6 +51,9 @@ type launchProgressRow struct {
 	retryAttempt int
 	retryMax     int
 
+	replanAttempt int
+	replanMax     int
+
 	failed bool
 	reason string
 
@@ -200,7 +203,7 @@ func (m *launchProgressModel) applyEvent(event campaign.LaunchEvent) {
 	switch event.Kind {
 	case campaign.LaunchEventCampaignStatus:
 		m.headerMsg = strings.TrimSpace(event.Phase)
-	case campaign.LaunchEventGroupPhase, campaign.LaunchEventGroupAssets, campaign.LaunchEventGroupRetry, campaign.LaunchEventGroupDone, campaign.LaunchEventGroupFailed:
+	case campaign.LaunchEventGroupPhase, campaign.LaunchEventGroupAssets, campaign.LaunchEventGroupRetry, campaign.LaunchEventGroupReplan, campaign.LaunchEventGroupDone, campaign.LaunchEventGroupFailed:
 		row := m.ensureRow(event.Group)
 		switch event.Kind {
 		case campaign.LaunchEventGroupPhase:
@@ -213,6 +216,15 @@ func (m *launchProgressModel) applyEvent(event campaign.LaunchEvent) {
 			row.setPhase("creating instance", now)
 			row.retryAttempt = event.RetryAttempt
 			row.retryMax = event.RetryMax
+		case campaign.LaunchEventGroupReplan:
+			row.setPhase("creating instance", now)
+			row.replanAttempt = event.RetryAttempt
+			row.replanMax = event.RetryMax
+			// New chain: the prior chain's per-attempt counter is no
+			// longer accurate, so reset it before the next
+			// LaunchEventGroupRetry refills it.
+			row.retryAttempt = 0
+			row.retryMax = 0
 		case campaign.LaunchEventGroupDone:
 			row.done = true
 			row.failed = false
@@ -411,6 +423,12 @@ func (m launchProgressModel) renderRow(row *launchProgressRow, now time.Time) st
 		badges += lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render(padRight(fmt.Sprintf("retry %d/%d", row.retryAttempt, row.retryMax), retryWidth))
 	} else if showRetryCol {
 		badges += strings.Repeat(" ", retryWidth)
+	}
+	if !row.done && row.replanAttempt > 1 {
+		if badges != "" {
+			badges += "  "
+		}
+		badges += lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("chain %d/%d", row.replanAttempt, row.replanMax))
 	}
 	if row.failed && row.reason != "" {
 		if badges != "" {

@@ -13,8 +13,16 @@ const (
 	LaunchEventGroupPhase     LaunchEventKind = "group_phase"
 	LaunchEventGroupAssets    LaunchEventKind = "group_assets"
 	LaunchEventGroupRetry     LaunchEventKind = "group_retry"
-	LaunchEventGroupDone      LaunchEventKind = "group_done"
-	LaunchEventGroupFailed    LaunchEventKind = "group_failed"
+	// LaunchEventGroupReplan is emitted when the per-group goroutine
+	// abandons an exhausted create-with-replacement chain and starts a
+	// fresh chain against a newly searched initial offer. Distinct from
+	// LaunchEventGroupRetry (which fires for in-chain replacement
+	// attempts) so the TUI can label them differently — one is "another
+	// offer on the same chain," the other is "the whole chain is being
+	// restarted."
+	LaunchEventGroupReplan LaunchEventKind = "group_replan"
+	LaunchEventGroupDone   LaunchEventKind = "group_done"
+	LaunchEventGroupFailed LaunchEventKind = "group_failed"
 )
 
 type LaunchEvent struct {

@@ -585,7 +585,10 @@ func recordRunpodObservedBootstrapPhase(database *sql.DB, campaignID *int64, lau
 	}
 }
 
-var retryAttemptPattern = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
+var (
+	retryAttemptPattern = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
+	replanChainPattern  = regexp.MustCompile(`chain\s+(\d+)/(\d+)`)
+)
 
 func classifyLaunchGroupPhaseEvent(group InstanceGroup, phase string) LaunchEvent {
 	event := LaunchEvent{
@@ -593,21 +596,36 @@ func classifyLaunchGroupPhaseEvent(group InstanceGroup, phase string) LaunchEven
 		Group: group,
 		Phase: phase,
 	}
-	if !strings.Contains(phase, "retrying with replacement offer") {
+	switch {
+	case strings.Contains(phase, "replanning with fresh offer"):
+		matches := replanChainPattern.FindStringSubmatch(phase)
+		if len(matches) != 3 {
+			return event
+		}
+		attempt, errA := strconv.Atoi(matches[1])
+		maxAttempts, errM := strconv.Atoi(matches[2])
+		if errA != nil || errM != nil {
+			return event
+		}
+		event.Kind = LaunchEventGroupReplan
+		event.RetryAttempt = attempt
+		event.RetryMax = maxAttempts
+		return event
+	case strings.Contains(phase, "retrying with replacement offer"):
+		matches := retryAttemptPattern.FindStringSubmatch(phase)
+		if len(matches) != 3 {
+			return event
+		}
+		attempt, errA := strconv.Atoi(matches[1])
+		maxAttempts, errM := strconv.Atoi(matches[2])
+		if errA != nil || errM != nil {
+			return event
+		}
+		event.Kind = LaunchEventGroupRetry
+		event.RetryAttempt = attempt
+		event.RetryMax = maxAttempts
 		return event
 	}
-	matches := retryAttemptPattern.FindStringSubmatch(phase)
-	if len(matches) != 3 {
-		return event
-	}
-	attempt, errA := strconv.Atoi(matches[1])
-	maxAttempts, errM := strconv.Atoi(matches[2])
-	if errA != nil || errM != nil {
-		return event
-	}
-	event.Kind = LaunchEventGroupRetry
-	event.RetryAttempt = attempt
-	event.RetryMax = maxAttempts
 	return event
 }
 
@@ -1225,9 +1243,23 @@ func launchCampaignWithStager(
 				})
 			})
 
-			cID, err := LaunchInstance(
-				client, clients, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-				groupAssets, replacementOffer, progress, instanceRegistered,
+			cID, currentOffer, _, err := runGroupLaunchWithReplan(
+				ofr,
+				client,
+				retrypolicy.MaxGroupReplans(),
+				func(c cloud.Client, o cloud.Offer) (int64, error) {
+					return LaunchInstance(
+						c, clients, database, &campaignID, group, o, opts, r2Cfg, createOpts,
+						groupAssets, replacementOffer, progress, instanceRegistered,
+					)
+				},
+				func() (*cloud.Offer, error) {
+					return replacementOffer(map[string]struct{}{})
+				},
+				func(p cloud.Provider) cloud.Client {
+					return clientForProvider(clients, p)
+				},
+				progress,
 			)
 
 			mu.Lock()
@@ -1248,7 +1280,7 @@ func launchCampaignWithStager(
 				}
 			} else {
 				instanceIDs = append(instanceIDs, cID)
-				recordCampaignPlacementTelemetry(database, appCfg, campaignID, cID, group, ofr, estimate, opts.ScoringProfile(), opts.PlacementAlternatives)
+				recordCampaignPlacementTelemetry(database, appCfg, campaignID, cID, group, currentOffer, estimate, opts.ScoringProfile(), opts.PlacementAlternatives)
 				if onEvent != nil {
 					onEvent(LaunchEvent{
 						Kind:       LaunchEventGroupDone,
@@ -1513,6 +1545,56 @@ type R2Assets struct {
 	AgentVersion string            // agent version string (jj commit hash)
 	AgentR2Key   string            // R2 key for the agent binary
 	SourceR2Keys map[string]string // localDir -> R2 key for source tarballs
+}
+
+// runGroupLaunchWithReplan invokes launch up to maxReplans+1 times. The
+// first invocation uses the planner's initial offer/client. After each
+// retryable failure (and while budget remains), it consults fetchFreshOffer
+// for a brand-new initial offer and clientForProvider to align the active
+// client, then re-runs the launch with a fresh excludedOffers set inside
+// createInstanceWithReplacement. Returns the final cID/offer/client/err.
+//
+// The replan exists because providers' offer pools turn over within the
+// move window — a freshly searched offer can succeed where the previous
+// chain's accumulated exclude set could not. The price-gated search used
+// for in-chain replacement and outer replan is the same closure, so the
+// per-chain offers stay within the user's authorized spend.
+func runGroupLaunchWithReplan(
+	initialOffer cloud.Offer,
+	initialClient cloud.Client,
+	maxReplans int,
+	launch func(client cloud.Client, offer cloud.Offer) (int64, error),
+	fetchFreshOffer func() (*cloud.Offer, error),
+	clientForProvider func(cloud.Provider) cloud.Client,
+	progress cloud.ProgressFunc,
+) (int64, cloud.Offer, cloud.Client, error) {
+	currentOffer := initialOffer
+	currentClient := initialClient
+	var cID int64
+	var err error
+	for replanIdx := 0; replanIdx <= maxReplans; replanIdx++ {
+		if replanIdx > 0 && progress != nil {
+			progress(fmt.Sprintf("replanning with fresh offer (chain %d/%d)", replanIdx+1, maxReplans+1))
+		}
+		cID, err = launch(currentClient, currentOffer)
+		if err == nil {
+			return cID, currentOffer, currentClient, nil
+		}
+		if !isRetryableCreateError(err) || replanIdx == maxReplans {
+			return cID, currentOffer, currentClient, err
+		}
+		nextOffer, searchErr := fetchFreshOffer()
+		if searchErr != nil || nextOffer == nil {
+			return cID, currentOffer, currentClient, err
+		}
+		nextClient := clientForProvider(nextOffer.Provider)
+		if nextClient == nil {
+			return cID, currentOffer, currentClient, err
+		}
+		currentOffer = *nextOffer
+		currentClient = nextClient
+	}
+	return cID, currentOffer, currentClient, err
 }
 
 // LaunchInstance creates a cloud instance record, pre-stages assets to R2, and
