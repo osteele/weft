@@ -13,10 +13,14 @@ var ErrInstanceNotFound = errors.New("instance not found")
 // disappears before instance creation succeeds.
 var ErrOfferUnavailable = errors.New("offer unavailable")
 
-// ErrProviderRejected is returned when the provider accepts the create request
-// but responds with success=false (e.g. machine busy, provider-side failure).
-// Like ErrOfferUnavailable, the remedy is to try a different offer.
-var ErrProviderRejected = errors.New("provider rejected instance creation")
+// ErrProviderRejected is returned when the provider accepts a request but
+// responds with a failure (e.g. machine busy, success=false, API 400 with a
+// payload on stderr). For instance creation the remedy is to try a different
+// offer — `isRetryableCreateError` / `IsRetryableNewInstanceLaunchError`
+// branch on this sentinel. The error text is intentionally operation-neutral
+// because the same sentinel wraps generic CLI failures from non-create paths
+// (destroy, show, search) where "instance creation" would be misleading.
+var ErrProviderRejected = errors.New("provider rejected request")
 
 // ErrAccountCreditExhausted is returned when a provider request fails because
 // the authenticated account has insufficient credit/balance. Unlike

@@ -1689,8 +1689,8 @@ func TestStripContractRef(t *testing.T) {
 	}{
 		{
 			name: "trailing contract reference removed",
-			in:   "machine busy: provider rejected instance creation (contract 37151723)",
-			want: "machine busy: provider rejected instance creation",
+			in:   "machine busy: provider rejected request (contract 37151723)",
+			want: "machine busy: provider rejected request",
 		},
 		{
 			name: "inline contract reference removed",

@@ -320,7 +320,7 @@ func TestCreateInstanceProviderRejectionLeadsWithReason(t *testing.T) {
 	// truncation in compact views; the boilerplate trails it.
 	msg := err.Error()
 	reasonIdx := strings.Index(msg, "no_such_ask")
-	boilerplateIdx := strings.Index(msg, "provider rejected instance creation")
+	boilerplateIdx := strings.Index(msg, "provider rejected request")
 	if reasonIdx < 0 || boilerplateIdx < 0 {
 		t.Fatalf("CreateInstance error = %q, want both provider reason and boilerplate", msg)
 	}
