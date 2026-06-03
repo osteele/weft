@@ -81,10 +81,28 @@ func runJobAnomalies(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	mined := mineAnomalies(recs)
+
+	// Disk-telemetry anomalies are scanned across the whole DB (not just the
+	// recent-N window), because the bogus samples are often months old and
+	// continue to taint estimator output for jobs that share their command
+	// signature. See `EstimateGroupDisk` and the DiskTelemetryPlausibilityBytes
+	// bound for the detection logic.
+	var telemetry []telemetryAnomaly
+	database, dbErr := db.OpenForReading()
+	if dbErr == nil {
+		defer database.Close()
+		telemetry, _ = scanDiskTelemetryAnomalies(database)
+	}
+
 	if jobMineJSON {
-		return writeJSON(cmd.OutOrStdout(), mined)
+		out := struct {
+			Jobs      []minedJob         `json:"jobs"`
+			Telemetry []telemetryAnomaly `json:"telemetry,omitempty"`
+		}{Jobs: mined, Telemetry: telemetry}
+		return writeJSON(cmd.OutOrStdout(), out)
 	}
 	printAnomalies(cmd.OutOrStdout(), mined)
+	printTelemetryAnomalies(cmd.OutOrStdout(), telemetry)
 	return nil
 }
 

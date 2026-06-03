@@ -22,8 +22,14 @@ func PrepareGroupsWithConfig(jobs []*db.Job, database *sql.DB, cfg *config.Confi
 	groups = FilterByGPUClass(groups, gpuFilter)
 	groups = SplitGroupsByImage(database, groups)
 	groups = ApplyImageMetadataRequirements(cfg, groups)
+	var diskAnomalies []DiskTelemetryAnomaly
 	for i := range groups {
-		groups[i].DiskGB = EstimateGroupDisk(groups[i], database, r2Client)
+		var anomalies []DiskTelemetryAnomaly
+		groups[i].DiskGB, anomalies = EstimateGroupDisk(groups[i], database, r2Client)
+		diskAnomalies = append(diskAnomalies, anomalies...)
+	}
+	if len(diskAnomalies) > 0 {
+		recordDiskTelemetryAnomalies(database, groups, diskAnomalies)
 	}
 	return groups
 }

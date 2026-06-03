@@ -19,7 +19,7 @@ func TestEstimateGroupDisk_NoInputs(t *testing.T) {
 	group := InstanceGroup{
 		Jobs: []*db.Job{{ID: 1, Command: "echo test"}},
 	}
-	disk := EstimateGroupDisk(group, nil, nil)
+	disk, _ := EstimateGroupDisk(group, nil, nil)
 	if disk != DefaultMinDiskGB {
 		t.Errorf("got %d, want %d", disk, DefaultMinDiskGB)
 	}
@@ -30,7 +30,7 @@ func TestEstimateGroupDisk_MinFloor(t *testing.T) {
 	group := InstanceGroup{
 		Jobs: []*db.Job{{ID: 1, Inputs: []string{"~/data/file"}}},
 	}
-	disk := EstimateGroupDisk(group, nil, nil)
+	disk, _ := EstimateGroupDisk(group, nil, nil)
 	if disk < DefaultMinDiskGB {
 		t.Errorf("got %d, want >= %d", disk, DefaultMinDiskGB)
 	}
@@ -91,7 +91,7 @@ func TestEstimateGroupDisk_HonorsDiskFloor(t *testing.T) {
 			},
 		}},
 	}
-	if disk := EstimateGroupDisk(group, nil, nil); disk != 96 {
+	if disk, _ := EstimateGroupDisk(group, nil, nil); disk != 96 {
 		t.Fatalf("disk = %d, want explicit floor 96", disk)
 	}
 }
@@ -114,7 +114,7 @@ print("train")
 			Command:    "python train.py",
 		}},
 	}
-	if disk := EstimateGroupDisk(group, nil, nil); disk != 96 {
+	if disk, _ := EstimateGroupDisk(group, nil, nil); disk != 96 {
 		t.Fatalf("disk = %d, want current script floor 96", disk)
 	}
 }
@@ -141,7 +141,7 @@ print("train")
 			},
 		}},
 	}
-	if disk := EstimateGroupDisk(group, nil, nil); disk != 200 {
+	if disk, _ := EstimateGroupDisk(group, nil, nil); disk != 200 {
 		t.Fatalf("disk = %d, want CLI floor 200", disk)
 	}
 }
@@ -156,12 +156,12 @@ func TestEstimateGroupDisk_UsesExplicitRuntimeDiskHeadroom(t *testing.T) {
 			},
 		}},
 	}
-	if disk := EstimateGroupDisk(group, nil, nil); disk != DefaultMinDiskGB {
+	if disk, _ := EstimateGroupDisk(group, nil, nil); disk != DefaultMinDiskGB {
 		t.Fatalf("disk = %d, want floor %d; explicit runtime headroom should not exceed floor here", disk, DefaultMinDiskGB)
 	}
 
 	group.Jobs[0].Metadata.Disk.RuntimeDiskGB = 96
-	if disk := EstimateGroupDisk(group, nil, nil); disk != 105 {
+	if disk, _ := EstimateGroupDisk(group, nil, nil); disk != 105 {
 		t.Fatalf("disk = %d, want 105 (base non-CUDA overhead plus explicit runtime headroom)", disk)
 	}
 }
@@ -211,7 +211,7 @@ func TestEstimateGroupDisk_UsesCachedUVManifestUnion(t *testing.T) {
 		},
 	}
 
-	disk := EstimateGroupDisk(group, nil, nil)
+	disk, _ := EstimateGroupDisk(group, nil, nil)
 	// BaseOverheadGB(6) + NonCUDAOverheadGB(3) + uv(45) = 54
 	if disk != 54 {
 		t.Fatalf("disk = %d, want 54", disk)
@@ -245,7 +245,7 @@ dependencies = ["torch>=2.0", "transformer-lens>=2.0"]
 	}
 
 	group := InstanceGroup{Jobs: []*db.Job{{ID: 1, WorkingDir: dir}}}
-	disk := EstimateGroupDisk(group, nil, nil)
+	disk, _ := EstimateGroupDisk(group, nil, nil)
 
 	// Per-package CUDA fallback is 80 MB; 1000 × 80MB = 80 GB.
 	// + BaseOverheadGB (6) + CUDAOverheadGB (18) = 104 GB. Must exceed
@@ -264,7 +264,7 @@ dependencies = ["torch>=2.0", "transformer-lens>=2.0"]
 	os.WriteFile(filepath.Join(smallDir, "pyproject.toml"), []byte("[project]\ndependencies = [\"requests\"]\n"), 0o644)
 	os.WriteFile(filepath.Join(smallDir, "uv.lock"), []byte("[[package]]\nname=\"p\"\nversion=\"1\"\n"), 0o644)
 	smallGroup := InstanceGroup{Jobs: []*db.Job{{ID: 2, WorkingDir: smallDir}}}
-	smallDisk := EstimateGroupDisk(smallGroup, nil, nil)
+	smallDisk, _ := EstimateGroupDisk(smallGroup, nil, nil)
 	if smallDisk != DefaultMinDiskGB {
 		t.Errorf("small lockfile disk = %d, want %d (floor)", smallDisk, DefaultMinDiskGB)
 	}
@@ -303,7 +303,7 @@ func TestEstimateGroupDisk_UsesEmpiricalHistoryWhenAllJobsMatch(t *testing.T) {
 	addHistoricalDiskRecord(t, database, "llm-performance-models", "bash scripts/collect_all.sh --skip-vllm", 47_607_521_280)
 	addHistoricalDiskRecord(t, database, "llm-performance-models", "uv run python scripts/calibrate_power.py --duration 10 --sweep", 47_607_513_088)
 
-	disk := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
+	disk, _ := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
 	if disk != 60 {
 		t.Fatalf("disk = %d, want 60", disk)
 	}
@@ -314,7 +314,7 @@ func TestEstimateGroupDisk_FallsBackWhenAnyJobLacksHistory(t *testing.T) {
 	addHistoricalDiskRecord(t, database, "llm-performance-models", "bash scripts/collect_all.sh --skip-vllm", 47_607_521_280)
 	// Second job has no history → should fall back
 
-	disk := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
+	disk, _ := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
 	if disk != DefaultMinDiskGB {
 		t.Fatalf("disk = %d, want %d", disk, DefaultMinDiskGB)
 	}
@@ -351,7 +351,7 @@ func TestEstimateGroupDisk_UnresolvedInputsGetFallback(t *testing.T) {
 			Inputs: []string{"hf:good/model", "hf:wikitext"},
 		}},
 	}
-	disk := EstimateGroupDisk(group, nil, nil)
+	disk, _ := EstimateGroupDisk(group, nil, nil)
 
 	// hfBytes = 10 GB (good/model), unresolvedFallback = 20 GB (hf:wikitext).
 	// inputDiskGB = ceil((10 + 20) * 1.5) = 45

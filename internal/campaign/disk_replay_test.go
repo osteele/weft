@@ -58,7 +58,7 @@ func TestReplayEstimateForJob(t *testing.T) {
 		Jobs:     []*db.Job{job},
 	}
 
-	estimate := EstimateGroupDisk(group, conn, nil)
+	estimate, _ := EstimateGroupDisk(group, conn, nil)
 	t.Logf("estimator: %d GB", estimate)
 
 	// Recorded launch disk and offer host disk for any launch this job ran on.

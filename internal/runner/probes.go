@@ -104,7 +104,7 @@ func ProbeDiskUsageAtPath(path string) (used, total int64) {
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return 0, 0
 	}
-	bsize := int64(stat.Bsize)
+	bsize := StatfsBlockBytes(stat)
 	total = int64(stat.Blocks) * bsize
 	free := int64(stat.Bfree) * bsize
 	return total - free, total

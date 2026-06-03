@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -56,6 +57,156 @@ const EmpiricalDiskSafetyMultiplier = 1.15
 // multiplicative empirical safety margin.
 const EmpiricalDiskSafetyGB = 5
 
+// DiskTelemetryPlausibilityBytes is the upper bound for a single historical
+// disk reading we will trust as input to the empirical estimator. Any sample
+// above this is treated as anomalous (almost certainly a unit-conversion or
+// statfs Bsize-vs-Frsize bug in the source telemetry) and skipped. 2 TB sits
+// well above the largest rental disk we'd ever provision and well below the
+// hundreds-of-TB / PB scale that legitimate bugs have produced.
+const DiskTelemetryPlausibilityBytes int64 = 2 * 1000 * 1000 * 1000 * 1000
+
+// DiskTelemetryAnomaly records a single telemetry sample that exceeded
+// DiskTelemetryPlausibilityBytes and was rejected by the estimator.
+// These are emitted for surfacing in placement_reasons and `weft job anomalies`
+// rather than silently clamped, so the underlying bug stays visible.
+type DiskTelemetryAnomaly struct {
+	JobID         int64
+	Project       string
+	Command       string
+	Source        string // "phase_timings" (disk_used_bytes) or "timeseries" (peak_used_bytes)
+	ObservedBytes int64
+	BoundBytes    int64
+}
+
+// recordDiskTelemetryAnomalies surfaces estimator-rejected telemetry samples
+// via three channels:
+//   - Structured logs (`anomalous_disk_telemetry` event) — durable, scrapable.
+//   - placement_reasons on each current job whose group triggered the
+//     anomaly — appears in the TUI and `weft job diagnose` for the unplaced
+//     job that suffered the inflated estimate.
+//   - The raw anomaly records are detected on demand by `weft job anomalies`
+//     (no separate anomalies table is materialized today; the underlying
+//     telemetry rows are the source of truth). The signature already carries
+//     enough fields (JobID, Project, Command, Source, ObservedBytes,
+//     BoundBytes) that a future extraction to a telemetry_anomalies table
+//     is a query swap, not a schema migration.
+//
+// We deliberately do NOT silently clamp the bad sample inside the estimator —
+// that would mask future bugs of the same shape. Loud surfaces only.
+func recordDiskTelemetryAnomalies(localDB *sql.DB, groups []InstanceGroup, anomalies []DiskTelemetryAnomaly) {
+	if len(anomalies) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(anomalies))
+	for _, a := range anomalies {
+		key := fmt.Sprintf("%d|%s", a.JobID, a.Source)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		slog.Warn("anomalous_disk_telemetry",
+			"component", "disk",
+			"source_job_id", a.JobID,
+			"source", a.Source,
+			"project", a.Project,
+			"observed_bytes", a.ObservedBytes,
+			"bound_bytes", a.BoundBytes,
+			"note", "telemetry sample exceeds plausibility bound; estimator rejected it. Likely cause: statfs Bsize-vs-Frsize on overlay/fuse filesystems (cmd/agent/heartbeat.go, internal/runner/probes.go)")
+	}
+	if localDB == nil {
+		return
+	}
+	// Build a human-readable summary of the rejected samples and prepend it
+	// to placement_reasons for every current job in the affected groups.
+	// We prepend rather than overwrite so the autopilot's own placement
+	// failure reasons remain visible underneath; we accept that a subsequent
+	// placement pass may overwrite this entry — by then the anomaly has
+	// already shown up in the TUI / diagnose output, and the structured log
+	// + `weft job anomalies` scan provide the durable surface.
+	summary := formatDiskAnomalySummary(anomalies)
+	if summary == "" {
+		return
+	}
+	for _, group := range groups {
+		for _, job := range group.Jobs {
+			if job == nil {
+				continue
+			}
+			fresh, err := db.GetJobByID(localDB, job.ID)
+			if err != nil {
+				slog.Warn("read placement_reasons for anomaly surface failed", "component", "disk", "job_id", job.ID, "error", err)
+				continue
+			}
+			existing := []string{}
+			if fresh != nil {
+				existing = fresh.PlacementReasons
+			}
+			// Avoid duplicating the entry if a previous estimation pass
+			// already prepended the same summary and the autopilot has
+			// not yet overwritten it.
+			if len(existing) > 0 && existing[0] == summary {
+				continue
+			}
+			merged := append([]string{summary}, existing...)
+			if err := db.SetJobPlacementReasons(localDB, job.ID, merged); err != nil {
+				slog.Warn("write placement_reasons for anomaly surface failed", "component", "disk", "job_id", job.ID, "error", err)
+			}
+		}
+	}
+}
+
+// formatDiskAnomalySummary renders a single-line placement_reasons entry that
+// names the suspect source jobs and their reported sizes. Kept short so it
+// fits in the TUI without truncation.
+func formatDiskAnomalySummary(anomalies []DiskTelemetryAnomaly) string {
+	if len(anomalies) == 0 {
+		return ""
+	}
+	// Dedupe by source job ID; report the larger observed sample if both
+	// the phase_timings and timeseries readings were anomalous.
+	type entry struct {
+		observed int64
+	}
+	byJob := make(map[int64]entry)
+	var order []int64
+	for _, a := range anomalies {
+		cur, seen := byJob[a.JobID]
+		if !seen || a.ObservedBytes > cur.observed {
+			byJob[a.JobID] = entry{observed: a.ObservedBytes}
+		}
+		if !seen {
+			order = append(order, a.JobID)
+		}
+	}
+	bound := DiskTelemetryPlausibilityBytes
+	var b strings.Builder
+	b.WriteString("skipped anomalous historical disk reading from ")
+	for i, jobID := range order {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "wj%d (%s)", jobID, humanBytes(byJob[jobID].observed))
+	}
+	fmt.Fprintf(&b, " > %s plausibility bound; likely statfs Bsize-vs-Frsize bug — see `weft job anomalies`", humanBytes(bound))
+	return b.String()
+}
+
+// humanBytes formats a byte count using decimal (1000-based) units, which
+// matches how disk sizes are reported elsewhere in weft (GB, not GiB).
+func humanBytes(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%dB", n)
+	}
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	v := float64(n) / 1000.0
+	idx := 0
+	for v >= 1000 && idx < len(units)-1 {
+		v /= 1000.0
+		idx++
+	}
+	return fmt.Sprintf("%.1f%s", v, units[idx])
+}
+
 // imageOverheadGB returns additional disk overhead in GB for non-default Docker images.
 // The default nvidia/cuda runtime image is ~4 GB on disk (accounted for in BaseOverheadGB).
 // Larger images like pytorch/pytorch add extra overhead.
@@ -84,7 +235,12 @@ var cudaPackages = []string{
 // based on the deduplicated HF input footprint, deduplicated uv sync footprint,
 // explicit runtime headroom, and fixed project overhead. Returns at least
 // DefaultMinDiskGB.
-func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client) int {
+//
+// The returned anomalies slice carries any historical telemetry samples that
+// exceeded DiskTelemetryPlausibilityBytes and were rejected. Callers should
+// surface these (via placement_reasons / `weft job anomalies`) rather than
+// silently swallow them — the underlying bug needs to stay visible.
+func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client) (int, []DiskTelemetryAnomaly) {
 	// Compute input-based estimate (always, as a floor)
 	allInputs := group.AllInputs()
 	if localDB != nil {
@@ -120,7 +276,8 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	// Use the larger of history-based and input-based estimates.
 	// History may underestimate if prior runs failed before completing.
 	diskGB := inputDiskGB
-	if historyGB, ok := estimateGroupDiskFromHistory(group, localDB); ok && historyGB > diskGB {
+	historyGB, anomalies, ok := estimateGroupDiskFromHistory(group, localDB)
+	if ok && historyGB > diskGB {
 		diskGB = historyGB
 	}
 
@@ -130,48 +287,58 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	if floor := groupDiskFloorGB(group); floor > diskGB {
 		diskGB = floor
 	}
-	return diskGB
+	return diskGB, anomalies
 }
 
-func estimateGroupDiskFromHistory(group InstanceGroup, localDB *sql.DB) (int, bool) {
+func estimateGroupDiskFromHistory(group InstanceGroup, localDB *sql.DB) (int, []DiskTelemetryAnomaly, bool) {
 	if localDB == nil || len(group.Jobs) == 0 {
-		return 0, false
+		return 0, nil, false
 	}
 
 	seenSigs := make(map[string]bool)
 	var groupPeakBytes int64
+	var allAnomalies []DiskTelemetryAnomaly
+	allFound := true
 	for _, job := range group.Jobs {
 		if job == nil {
-			return 0, false
+			return 0, allAnomalies, false
 		}
 		sig, ok := diskHistorySignature(job)
 		if !ok {
-			return 0, false
+			// Without a usable signature we can't usefully look up
+			// history, but we still want any already-collected
+			// anomalies surfaced to the caller.
+			return 0, allAnomalies, false
 		}
 		if seenSigs[sig] {
 			continue
 		}
 		seenSigs[sig] = true
-		peakBytes, found, err := estimateHistoricalPeakDiskBytes(localDB, job.Project, sig)
+		peakBytes, anomalies, found, err := estimateHistoricalPeakDiskBytes(localDB, job.Project, sig)
+		// Always merge anomalies, even when the row is unusable for
+		// estimation — bad telemetry is still a thing to surface.
+		allAnomalies = append(allAnomalies, anomalies...)
 		if err != nil {
 			slog.Warn("estimating historical disk failed, falling back to input sizes", "component", "disk", "job_id", job.ID, "error", err)
-			return 0, false
+			return 0, allAnomalies, false
 		}
 		if !found {
-			return 0, false
+			allFound = false
+			continue
 		}
 		groupPeakBytes = max(groupPeakBytes, peakBytes)
 	}
-	if groupPeakBytes <= 0 {
-		return 0, false
+	if !allFound || groupPeakBytes <= 0 {
+		return 0, allAnomalies, false
 	}
 
-	return empiricalRequiredDiskGB(groupPeakBytes), true
+	return empiricalRequiredDiskGB(groupPeakBytes), allAnomalies, true
 }
 
-func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string) (int64, bool, error) {
+func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string) (int64, []DiskTelemetryAnomaly, bool, error) {
 	rows, err := localDB.Query(
-		`SELECT j.command,
+		`SELECT j.id,
+		        j.command,
 		        COALESCE(jpt.disk_used_bytes, 0),
 		        COALESCE(ts.peak_used_bytes, 0)
 		   FROM jobs j
@@ -193,28 +360,58 @@ func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string)
 		project, project,
 	)
 	if err != nil {
-		return 0, false, err
+		return 0, nil, false, err
 	}
 	defer rows.Close()
 
 	var peakBytes int64
+	var anomalies []DiskTelemetryAnomaly
 	for rows.Next() {
+		var jobID int64
 		var command string
 		var diskUsedBytes int64
 		var peakUsedBytes int64
-		if err := rows.Scan(&command, &diskUsedBytes, &peakUsedBytes); err != nil {
-			return 0, false, err
+		if err := rows.Scan(&jobID, &command, &diskUsedBytes, &peakUsedBytes); err != nil {
+			return 0, anomalies, false, err
 		}
 		sig, ok := commandHistorySignature(project, command)
 		if !ok || sig != targetSig {
 			continue
 		}
+		// Reject samples above the plausibility bound rather than feeding
+		// them into the estimator. We deliberately do not silently clamp:
+		// the source telemetry is almost certainly the product of a bug
+		// (statfs Bsize-vs-Frsize on overlay filesystems is the known
+		// case), and silent clamping would mask future occurrences. The
+		// caller is expected to surface the returned anomalies.
+		if diskUsedBytes > DiskTelemetryPlausibilityBytes {
+			anomalies = append(anomalies, DiskTelemetryAnomaly{
+				JobID:         jobID,
+				Project:       project,
+				Command:       command,
+				Source:        "phase_timings",
+				ObservedBytes: diskUsedBytes,
+				BoundBytes:    DiskTelemetryPlausibilityBytes,
+			})
+			diskUsedBytes = 0
+		}
+		if peakUsedBytes > DiskTelemetryPlausibilityBytes {
+			anomalies = append(anomalies, DiskTelemetryAnomaly{
+				JobID:         jobID,
+				Project:       project,
+				Command:       command,
+				Source:        "timeseries",
+				ObservedBytes: peakUsedBytes,
+				BoundBytes:    DiskTelemetryPlausibilityBytes,
+			})
+			peakUsedBytes = 0
+		}
 		peakBytes = max(peakBytes, max(diskUsedBytes, peakUsedBytes))
 	}
 	if err := rows.Err(); err != nil {
-		return 0, false, err
+		return 0, anomalies, false, err
 	}
-	return peakBytes, peakBytes > 0, nil
+	return peakBytes, anomalies, peakBytes > 0, nil
 }
 
 func diskHistorySignature(job *db.Job) (string, bool) {

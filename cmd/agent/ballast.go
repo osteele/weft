@@ -135,7 +135,7 @@ func probeFilesystem(path string) (freeBytes, totalBytes int64, err error) {
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return 0, 0, err
 	}
-	bsize := int64(stat.Bsize)
+	bsize := runner.StatfsBlockBytes(stat)
 	return int64(stat.Bavail) * bsize, int64(stat.Blocks) * bsize, nil
 }
 

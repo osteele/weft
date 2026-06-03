@@ -1594,7 +1594,7 @@ func LaunchInstance(
 	if group.DiskGB > 0 && group.DiskGB > requestedDiskGB {
 		requestedDiskGB = group.DiskGB
 	}
-	estimatedDiskGB := EstimateGroupDisk(group, database, r2Assets.Client)
+	estimatedDiskGB, diskAnomalies := EstimateGroupDisk(group, database, r2Assets.Client)
 	if estimatedDiskGB > requestedDiskGB {
 		requestedDiskGB = estimatedDiskGB
 		slog.Info("raised launch disk allocation from estimator",
@@ -1603,6 +1603,9 @@ func LaunchInstance(
 			"base_disk_gb", createOpts.DiskGB,
 			"group_disk_gb", group.DiskGB,
 			"estimated_disk_gb", estimatedDiskGB)
+	}
+	if len(diskAnomalies) > 0 {
+		recordDiskTelemetryAnomalies(database, []InstanceGroup{group}, diskAnomalies)
 	}
 
 	// Create cloud instance record with offer metadata
