@@ -3,6 +3,7 @@ package cmd
 import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/vastai"
 )
 
 var loadPredictorConfig = config.Load
@@ -26,7 +27,7 @@ func resolveEffectiveGPUMemAndCeiling(cfg *config.Config, explicit *int, gpu str
 	needsGPU := gpu != "" || gpuClass != ""
 	floor, _, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB)
 	if floor != nil {
-		effective := applyGPUMemHeadroom(*floor, explicit != nil, strict, false)
+		effective := applyGPUMemHeadroom(*floor, explicit != nil, strict, false, gpuClass)
 		if effective != *floor {
 			floor = &effective
 			predicted = false
@@ -40,8 +41,22 @@ func resolveEffectiveGPUMem(explicit *int, gpu string, gpuClass string, host str
 	return resolveEffectiveGPUMemWithConfig(cfg, explicit, gpu, gpuClass, false, host, project, command, 0)
 }
 
-func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool, hardwareFloor bool) int {
+// applyGPUMemHeadroom returns the gpu_mem value to persist for the job.
+// The +2GB safety headroom is skipped when:
+//   - the value was not user-specified (e.g. a predicted floor),
+//   - strict mode is on,
+//   - the caller marks the value as already being a hardware floor, or
+//   - (class, memGB) names a known hardware ceiling (vastai.KnownHardwareMemoryGB) —
+//     adding headroom to "A100 80GB" pushes the request above the hardware's
+//     own gpu_ram and excludes every matching offer. The filter-time
+//     EffectiveMemGB resolves the same condition for historical jobs, so
+//     persisted values are sanitized regardless of which code path created
+//     them.
+func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool, hardwareFloor bool, gpuClass string) int {
 	if !hasExplicitRequest || strict || hardwareFloor || memGB <= 0 {
+		return memGB
+	}
+	if vastai.KnownHardwareMemoryGB(gpuClass, memGB) {
 		return memGB
 	}
 	return memGB + defaultGPUMemHeadroomGB

@@ -202,7 +202,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	if hasGPUMem {
 		mem := restartGPUMem
 		if mem > 0 {
-			effective := applyGPUMemHeadroom(mem, true, out.GPUMemStrict, out.GPUMemHardwareFloor)
+			effective := applyGPUMemHeadroom(mem, true, out.GPUMemStrict, out.GPUMemHardwareFloor, gpuClassValue)
 			out.GPUMemGB = &effective
 		} else {
 			out.GPUMemGB = nil
@@ -457,7 +457,7 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 
 	var effMem *int
 	if effGPUMemRaw > 0 {
-		m := applyGPUMemHeadroom(effGPUMemRaw, true, effStrict, effMemHardware)
+		m := applyGPUMemHeadroom(effGPUMemRaw, true, effStrict, effMemHardware, effGPUClass)
 		effMem = &m
 	}
 	memChanged := (effMem == nil) != (job.GPUMemGB == nil) ||

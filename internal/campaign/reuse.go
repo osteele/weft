@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	weftsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -241,10 +242,16 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("broad NVIDIA job should not reuse premium accelerator: job=%s instance=%s", job.GPUClass, inst.DisplayGPUBrief())
 	}
 
-	// GPU memory check
+	// GPU memory check. IntendedMemGB resolves the persisted gpu_mem_gb
+	// to the user's original intent — rolling back the +2GB submit-time
+	// headroom only when the stored value is recognizably (ceiling +
+	// defaultHeadroom) for a known model. A job stored as "82" for "A100
+	// 80GB" therefore matches an instance reporting 80GB instead of
+	// failing with "insufficient", but a stored value of "50" stays "50"
+	// (no spurious +2GB cushion at the capacity comparison boundary).
 	jobMemGB := 0
 	if job.GPUMemGB != nil {
-		jobMemGB = *job.GPUMemGB
+		jobMemGB = vastai.IntendedMemGB(job.GPUClass, *job.GPUMemGB)
 	}
 	if jobMemGB > 0 && jobMemGB > inst.GPUMemGB {
 		return false, fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", jobMemGB, inst.GPUMemGB)

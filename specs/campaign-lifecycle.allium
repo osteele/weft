@@ -798,6 +798,64 @@ rule OfferClaimInPassExclusion {
         -- filterOffersByClaim and recordOfferClaim are the helpers.
 }
 
+rule GPUMemoryHardwareCeilingResolution {
+    when: BuildOfferSearchFilter(job_or_group, gpu_class, requested_mem_gb)
+       OR MatchJobToInstance(job, instance_capacity)
+
+    ensures:
+        for any (gpu_class, mem_gb) where KnownHardwareMemoryGB(gpu_class, mem_gb):
+            -- search filter and reuse check MUST treat requested_mem_gb as
+            -- the literal hardware ceiling — no +2GB safety headroom may
+            -- be added when the request names the exact hardware.
+            effective_filter_mem_gb == mem_gb
+            intended_job_mem_gb     == mem_gb
+
+        for any (gpu_class, mem_gb) where KnownHardwareMemoryGB(gpu_class, mem_gb - defaultHeadroomGB):
+            -- back-compat: jobs persisted before headroom moved to filter
+            -- time stored (ceiling + 2GB) in the gpu_mem_gb column. The
+            -- search filter and reuse check both roll those values back to
+            -- the underlying ceiling so the job picks up automatically on
+            -- the next autopilot tick — no manual `weft restart` required.
+            effective_filter_mem_gb == mem_gb - defaultHeadroomGB
+            intended_job_mem_gb     == mem_gb - defaultHeadroomGB
+
+    @guidance
+        -- Vast.ai's `gpu_ram>=N` filter is in GB (despite the response field
+        -- being in MB). A100 80GB hardware reports gpu_ram=80GB exactly, so
+        -- emitting `gpu_ram>=82` (the literal request +2GB safety headroom)
+        -- excludes every A100 80GB offer and the job sits unplaceable. The
+        -- same arithmetic breaks H100 80GB, H200 141GB, RTX 4090 24GB, and
+        -- every other model where the user names the exact hardware
+        -- capacity.
+        --
+        -- The +2GB safety headroom (defaultHeadroomGB) is still applied
+        -- when the request is a user-supplied minimum that doesn't match a
+        -- known hardware ceiling. EffectiveMemGB
+        -- (internal/vastai/hardware_memory.go) is the search-filter
+        -- transform; it returns:
+        --   1. requested      when (class, requested) is a known ceiling
+        --   2. ceiling        when (class, requested - 2) is a known ceiling
+        --   3. requested + 2  otherwise
+        --
+        -- IntendedMemGB is the consumer-side transform (reuse capacity
+        -- check). It applies rules 1 and 2 but NOT rule 3 — when comparing
+        -- against a real instance capacity, adding a +2GB cushion would
+        -- falsely reject a rental that exactly satisfies the request.
+        --
+        -- Submit-time applyGPUMemHeadroom (cmd/gpu_estimator.go) consults
+        -- the same KnownHardwareMemoryGB table, so new jobs persist the
+        -- user's intent (e.g. 80 for "A100 80GB") rather than the
+        -- post-headroom value (82). Historical jobs persisted with the
+        -- old +2GB-baked-in behaviour are resolved at filter and reuse
+        -- time by the rollback path.
+        --
+        -- Implementation: hardwareMemoryByClass (the GPU model → memory
+        -- sizes table), EffectiveMemGB, IntendedMemGB, KnownHardwareMemoryGB
+        -- in internal/vastai/hardware_memory.go. Consumed by
+        -- internal/vastai/client.go buildSearchFilter and
+        -- internal/campaign/reuse.go matchJobToInstance.
+}
+
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
 

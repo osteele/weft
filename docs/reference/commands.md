@@ -38,8 +38,22 @@ Use `start <job-id>` to start a queued job immediately.
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
 - `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `ampere+`)
-- `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default)
+- `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default, except when the value matches a known hardware ceiling — see below)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
+
+**Hardware-ceiling auto-strict.** When `--gpu-class` (or `--gpu`) names a
+specific model and `--gpu-mem` matches that model's actual capacity (A100
+40GB/80GB, H100 80GB, H200 141GB, RTX 4090 24GB, RTX 3090 24GB, and other
+catalogued sizes), weft treats the value as the hardware ceiling and skips
+the `+2GB` headroom — adding it would over-constrain the search filter
+past what the hardware reports. So `--gpu-class a100 --gpu-mem 80` and
+`--gpu a100>=80GB` produce the same `gpu_ram>=80` filter. Non-ceiling
+values like `--gpu-mem 60` still get the headroom (effective 62GB). The
+catalogued models live in `internal/vastai/hardware_memory.go`. Jobs
+persisted under the older behaviour (where the headroom was applied at
+submit time, baking 82 into the DB for an A100 80GB request) are
+recognised at filter time and rolled back automatically — no manual
+`weft restart` is required.
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
 - `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; rental/ephemeral producers are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
 - `--dry-run`: Show placement scores without submitting the job

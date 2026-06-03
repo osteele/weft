@@ -495,6 +495,17 @@ safety margin for placement and queue admission checks. For example,
 `gpu-mem = 8` is treated as an effective `10GB` requirement. Use strict mode
 (`gpu-mem-strict = true` or `--gpu-mem-strict`) to keep exact matching.
 
+**Hardware-ceiling values skip the +2GB headroom automatically.** When
+`gpu-class`/`gpu` names a specific model and `gpu-mem` matches that model's
+actual capacity (A100 80GB, H100 80GB, H200 141GB, RTX 4090 24GB, and other
+known sizes), weft recognises the request as "I want this exact hardware"
+and does not inflate the filter above the model's `gpu_ram`. So
+`gpu-class = "a100"` + `gpu-mem = 80` and `gpu = "a100>=80GB"` produce the
+same search — both target `gpu_ram>=80` and match A100 80GB offers. Without
+this, adding the headroom would yield `gpu_ram>=82`, which excludes every
+A100 80GB host because their `gpu_ram` reports exactly 80GB. The known-
+hardware table lives in `internal/vastai/hardware_memory.go`.
+
 Memory inside a GPU selector is different. `gpu = "a100>=80GB"` or
 `--gpu a100>=80GB` means "use an A100-class GPU whose advertised capacity is at
 least 80GB"; weft does not add `+2GB` to that hardware floor. Use separate

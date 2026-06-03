@@ -688,12 +688,15 @@ func TestBuildSearchFilter(t *testing.T) {
 			wantParts: []string{`gpu_name="RTX 4090"`, "gpu_ram>=24", "num_gpus=1"},
 		},
 		{
+			// Memory request 22GB isn't a V100 ceiling (V100 ships as 16
+			// or 32) so the filter applies the +2GB headroom — the test
+			// is named for the gpu_name mapping, not the memory math.
 			name: "v100 maps to current Vast offer name",
 			constraints: OfferConstraints{
 				GPUClass:    "v100",
 				MinGPUMemGB: 22,
 			},
-			wantParts: []string{`gpu_name="Tesla V100"`, "gpu_ram>=22", "num_gpus=1"},
+			wantParts: []string{`gpu_name="Tesla V100"`, "gpu_ram>=24", "num_gpus=1"},
 		},
 		{
 			name: "with reliability",
@@ -729,6 +732,36 @@ func TestBuildSearchFilter_CPUCores(t *testing.T) {
 	})
 	if !strings.Contains(filter, "cpu_cores_effective>=16") {
 		t.Errorf("filter %q missing cpu_cores_effective>=16", filter)
+	}
+}
+
+// TestBuildSearchFilter_HardwareCeilingDoesNotInflateMem is the regression
+// for wj2265 and peers: when the request names a known hardware ceiling
+// (A100 80GB) the search filter must emit `gpu_ram>=80`, not `>=82`, or
+// every A100 80GB offer is excluded by the +2GB safety headroom. This
+// covers both new submissions (stored 80, exact ceiling) and historical
+// jobs persisted before the resolution moved to filter time (stored 82,
+// rolled back to 80).
+func TestBuildSearchFilter_HardwareCeilingDoesNotInflateMem(t *testing.T) {
+	cases := []struct {
+		name string
+		c    OfferConstraints
+		want string
+	}{
+		{"exact ceiling", OfferConstraints{GPUClass: "a100", MinGPUMemGB: 80}, "gpu_ram>=80"},
+		{"post-headroom rollback", OfferConstraints{GPUClass: "a100", MinGPUMemGB: 82}, "gpu_ram>=80"},
+		{"non-ceiling adds headroom", OfferConstraints{GPUClass: "a100", MinGPUMemGB: 50}, "gpu_ram>=52"},
+		{"unknown class adds headroom", OfferConstraints{GPUClass: "nvidia", MinGPUMemGB: 24}, "gpu_ram>=26"},
+		{"h100 80GB", OfferConstraints{GPUClass: "h100", MinGPUMemGB: 80}, "gpu_ram>=80"},
+		{"h100 post-headroom", OfferConstraints{GPUClass: "h100", MinGPUMemGB: 82}, "gpu_ram>=80"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			filter, _ := buildSearchFilter(tc.c)
+			if !strings.Contains(filter, tc.want) {
+				t.Errorf("filter %q missing %q", filter, tc.want)
+			}
+		})
 	}
 }
 
@@ -768,12 +801,15 @@ func TestBuildSearchFilter_NoCPUCores(t *testing.T) {
 }
 
 func TestBuildSearchFilter_IgnoresMaxGPUMem(t *testing.T) {
+	// No GPUClass — filter falls through to apply the +2GB safety
+	// headroom (24 → 26). The test is asserting MaxGPUMemGB is dropped,
+	// not the exact gpu_ram floor.
 	filter, _ := buildSearchFilter(OfferConstraints{MinGPUMemGB: 24, MaxGPUMemGB: 48})
-	if !strings.Contains(filter, "gpu_ram>=24") {
-		t.Errorf("filter %q should contain gpu_ram>=24", filter)
+	if !strings.Contains(filter, "gpu_ram>=26") {
+		t.Errorf("filter %q should contain gpu_ram>=26 (24 + 2GB headroom)", filter)
 	}
 	if strings.Contains(filter, "gpu_ram<=") {
-		t.Errorf("filter %q should not contain gpu_ram<=", filter)
+		t.Errorf("filter %q should not contain gpu_ram<= (MaxGPUMemGB must be ignored)", filter)
 	}
 }
 

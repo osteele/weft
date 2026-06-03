@@ -737,7 +737,15 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 		}
 	}
 	if c.MinGPUMemGB > 0 {
-		parts = append(parts, fmt.Sprintf("gpu_ram>=%d", c.MinGPUMemGB)) // search filter uses GB (response field is MB)
+		// EffectiveMemGB applies the +2GB safety headroom dynamically here,
+		// rather than at submission time, so that requests naming a known
+		// hardware ceiling (e.g. "A100 80GB") aren't pushed just above the
+		// hardware's own gpu_ram (80GB), excluding every matching offer.
+		// It also rolls back submit-time headroom that was baked into
+		// historical jobs persisted before this resolution moved to the
+		// filter boundary — those jobs replan automatically next tick.
+		// Filter uses GB (response field is MB).
+		parts = append(parts, fmt.Sprintf("gpu_ram>=%d", EffectiveMemGB(c.GPUClass, c.MinGPUMemGB)))
 	}
 	if c.MinDiskGB > 0 {
 		parts = append(parts, fmt.Sprintf("disk_space>=%d", c.MinDiskGB))

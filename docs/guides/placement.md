@@ -59,6 +59,16 @@ The `>=NGB` form on `--gpu` is a hardware capacity floor. For example,
 `--gpu a100>=80GB` matches 80GB A100 offers exactly; it does not add the
 `+2GB` workload headroom used by separate `--gpu-mem` reservations.
 
+The separate `--gpu-class` + `--gpu-mem` form **also skips the +2GB headroom
+when `--gpu-mem` matches the model's actual hardware ceiling**. So
+`--gpu-class a100 --gpu-mem 80` and `--gpu a100>=80GB` produce the same
+search (`gpu_ram>=80`) and match the same A100 80GB offers. Hardware
+ceilings are recognised per model — A100 40GB/80GB, H100 80GB, H200 141GB,
+RTX 4090 24GB, RTX 3090 24GB, etc. (see `internal/vastai/hardware_memory.go`
+for the full table). For non-ceiling values like `--gpu-mem 60`, the +2GB
+headroom is still applied (effective floor 62GB) — the same behaviour as
+before.
+
 Use `--input` to declare data the job needs:
 
 ```bash
