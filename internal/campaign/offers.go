@@ -922,6 +922,12 @@ func RankGroupOffersWithPredictor(raw []GroupRawOffers, predCfg *predictor.Confi
 
 func RankGroupOffersWithProfile(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, profile bidding.ScoreProfile, minSurvival float64) []GroupOffer {
 	results := make([]GroupOffer, len(raw))
+	// See rankGroupOffersFromPredictions for the per-pass claim rationale:
+	// excluding offers claimed by earlier groups in this same ranking pass
+	// prevents two groups from picking the same machine and racing each
+	// other on vastai's per-machine-serialized create endpoint.
+	claimedMachines := make(map[string]struct{})
+	claimedOffers := make(map[string]struct{})
 	for i, r := range raw {
 		if r.Err != nil {
 			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
@@ -931,7 +937,11 @@ func RankGroupOffersWithProfile(raw []GroupRawOffers, survivalModel *bidding.Sur
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
-		results[i] = rankOfferWithProfile(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverhead, profile, minSurvival)
+		availableOffers := filterOffersByClaim(r.Offers, claimedMachines, claimedOffers)
+		results[i] = rankOfferWithProfile(r.Group, availableOffers, survivalModel, jobDurationHrs, setupOverhead, profile, minSurvival)
+		if results[i].Offer != nil {
+			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers)
+		}
 	}
 	return results
 }

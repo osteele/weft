@@ -758,6 +758,46 @@ invariant PriceAuthorizationDoesNotTripCircuitBreaker {
 -- HasPreemptibleJob, internal/campaign/offers.go offerConstraintsForGroup,
 -- internal/campaign/lifecycle.go (MaxBidPrice default = offer cost).
 
+rule OfferClaimInPassExclusion {
+    when: RankGroupOffers(raw_offers_per_group)
+
+    ensures:
+        for groups (g_i, g_j) in raw_offers_per_group where i < j:
+            ranked[i].offer != null implies
+                ranked[j].offer.machine_id != ranked[i].offer.machine_id
+                  OR ranked[j].offer.machine_id == null
+                  OR ranked[j].offer.provider != ranked[i].offer.provider
+
+    @guidance
+        -- The offer picker must NOT select the same (provider, machine_id)
+        -- for two groups in the same ranking pass. Vast.ai serializes
+        -- create-instance per machine — concurrent CreateInstance calls
+        -- against the same machine_id race, with vastai accepting the
+        -- first and returning success=false for the rest. A single
+        -- ranking pass producing duplicate machine_ids fans out into
+        -- parallel creates that lose the race against weft itself,
+        -- burning the losers' attempt budgets on a self-inflicted
+        -- failure.
+        --
+        -- Each group's ranking sees an offer pool with previously-
+        -- claimed (provider, machine_id) and (provider, provider_id)
+        -- entries excluded. machine_id is the primary granularity;
+        -- provider_id is the fallback for providers (e.g. runpod) that
+        -- don't populate machine_id. The next-cheapest available offer
+        -- wins, falling through to the global filterStats reason when
+        -- no offer survives.
+        --
+        -- This is per-pass only — global cross-pass ordering is the
+        -- autopilot's responsibility (the next pass refreshes the offer
+        -- pool from a fresh provider search).
+        --
+        -- Implementation: rankGroupOffersFromPredictions and
+        -- RankGroupOffersWithProfile in internal/campaign/strategy_plan.go
+        -- and internal/campaign/offers.go thread a claimedMachines /
+        -- claimedOffers pair through the per-group loop;
+        -- filterOffersByClaim and recordOfferClaim are the helpers.
+}
+
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
 

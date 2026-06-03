@@ -353,10 +353,15 @@ func appendBlockedGroupedJobRows(
 	opts groupedStatusRenderOptions,
 	now time.Time,
 ) []groupedStatusRow {
-	sharedLaunch := commonLaunchBlocker(section.jobs, opts.blockedDetail)
+	rows = appendActiveIncidentsRows(rows, section, opts.blockedDetail, section.key)
+	sharedLaunch, sharedCount := commonLaunchBlocker(section.jobs, opts.blockedDetail)
 	if sharedLaunch != "" {
+		scope := "for all"
+		if sharedCount < len(section.jobs) {
+			scope = fmt.Sprintf("for %d of %d", sharedCount, len(section.jobs))
+		}
 		rows = append(rows, groupedStatusRow{
-			text:      fmt.Sprintf("  launch blocked for all: %s", sharedLaunch),
+			text:      fmt.Sprintf("  launch blocked %s: %s", scope, sharedLaunch),
 			isBlocked: true,
 			section:   section.key,
 		})
@@ -392,15 +397,148 @@ func appendBlockedGroupedJobRows(
 	return rows
 }
 
-// commonLaunchBlocker returns the launch-side blocker shared by every
-// placement-failure job in the section, or "" if the jobs disagree or none
-// have a structured breakdown. Single-cause jobs (preconditions) are ignored —
-// they carry no launch blocker and do not prevent hoisting.
-func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structured) string {
+// activeIncidentSummary describes one fingerprint affecting ≥2 jobs in the
+// section. Sample is one job's launch reason picked deterministically (lowest
+// job ID) so the rollup row can carry the human-readable upstream message
+// alongside the fingerprint identifier.
+type activeIncidentSummary struct {
+	fingerprint string
+	count       int
+	sample      string
+	sampleJobID int64
+}
+
+// collectActiveIncidents scans the section for fingerprints shared across ≥2
+// jobs and returns them in deterministic order (highest count first, ties
+// broken by fingerprint). Single-job fingerprints don't qualify — a single
+// blocked job is not an "incident", it's a job-specific failure.
+func collectActiveIncidents(jobs []*db.Job, detail map[int64]*blockreason.Structured) []activeIncidentSummary {
 	if len(detail) == 0 {
-		return ""
+		return nil
 	}
+	type bucket struct {
+		count       int
+		sample      string
+		sampleJobID int64
+	}
+	by := make(map[string]*bucket)
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		d := detail[job.ID]
+		if d == nil {
+			continue
+		}
+		fp := strings.TrimSpace(d.Fingerprint)
+		if fp == "" {
+			continue
+		}
+		b, ok := by[fp]
+		if !ok {
+			b = &bucket{}
+			by[fp] = b
+		}
+		b.count++
+		candidate := strings.TrimSpace(d.Launch)
+		if candidate == "" {
+			candidate = strings.TrimSpace(d.Summary)
+		}
+		// Only adopt this job as the sample when it actually carries a
+		// non-empty message — otherwise a lower-ID job with neither Launch
+		// nor Summary would wipe a meaningful sample picked up earlier.
+		if candidate == "" {
+			continue
+		}
+		if b.sample == "" || job.ID < b.sampleJobID {
+			b.sample = candidate
+			b.sampleJobID = job.ID
+		}
+	}
+	out := make([]activeIncidentSummary, 0, len(by))
+	for fp, b := range by {
+		if b.count < 2 {
+			continue
+		}
+		out = append(out, activeIncidentSummary{
+			fingerprint: fp,
+			count:       b.count,
+			sample:      b.sample,
+			sampleJobID: b.sampleJobID,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].count != out[j].count {
+			return out[i].count > out[j].count
+		}
+		return out[i].fingerprint < out[j].fingerprint
+	})
+	return out
+}
+
+// appendActiveIncidentsRows emits one rollup row per active incident
+// (fingerprint shared by ≥2 jobs in the section). The rollup precedes the
+// "launch blocked for all" hoist and the per-bucket subheaders, so a user
+// scanning the section sees the systemic failures first. Each row reads
+// "  ⚠ vastai/search-offers/400/bad-field:driver_vers — N jobs: <message>".
+// Per-job rows still appear under their normal buckets — the rollup is
+// additive and doesn't replace anything.
+func appendActiveIncidentsRows(rows []groupedStatusRow, section groupedStatusSection, detail map[int64]*blockreason.Structured, sectionKey string) []groupedStatusRow {
+	incidents := collectActiveIncidents(section.jobs, detail)
+	if len(incidents) == 0 {
+		return rows
+	}
+	for _, inc := range incidents {
+		text := fmt.Sprintf("  ⚠ %s — %s", inc.fingerprint, plural(inc.count, "job", "jobs"))
+		if sample := strings.TrimSpace(inc.sample); sample != "" {
+			text += ": " + sample
+		}
+		rows = append(rows, groupedStatusRow{
+			text:      text,
+			isBlocked: true,
+			section:   sectionKey,
+		})
+	}
+	return rows
+}
+
+// plural is the inline plural-helper twin of internal/blockreason.plural — TUI
+// rendering shouldn't reach into another package for a one-liner.
+func plural(n int, singular, pluralForm string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", n, pluralForm)
+}
+
+// commonLaunchBlocker returns the launch-side blocker shared by the
+// placement-failure jobs in the section, along with the number of section
+// jobs covered by that blocker. Returns ("", 0) when fewer than two
+// placement-failure jobs share a blocker — a single matching job is a
+// job-specific failure, not a section-wide hoist. Single-cause jobs
+// (preconditions) are ignored: they carry no launch blocker and do not
+// prevent hoisting.
+//
+// Equality is computed on Fingerprint when the participating jobs all
+// carry one — that lets a systemic upstream failure (e.g. every vastai
+// search-offers call 400-ing on the same field) hoist as a shared blocker
+// even when the per-job Launch strings differ on cosmetic prefix. Falls
+// back to exact-Launch-string equality when fingerprints are absent or
+// disagree, preserving today's behavior for unclassified errors.
+//
+// The returned count lets the caller distinguish "for all" from "for N of
+// M" so the hoist line doesn't overstate its scope when only a subset of
+// the section's jobs share the blocker (the rest may be deferred for
+// unrelated reasons that don't persist a Structured breakdown).
+func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structured) (string, int) {
+	if len(detail) == 0 {
+		return "", 0
+	}
+	fingerprint := ""
 	launch := ""
+	launchAgreed := true
+	useFingerprint := true
+	covered := 0
 	for _, job := range jobs {
 		if job == nil {
 			continue
@@ -411,26 +549,68 @@ func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structure
 		}
 		l := strings.TrimSpace(d.Launch)
 		if l == "" {
-			return ""
+			return "", 0
 		}
+		covered++
 		if launch == "" {
 			launch = l
-			continue
+		} else if l != launch {
+			launchAgreed = false
 		}
-		if l != launch {
-			return ""
+		fp := strings.TrimSpace(d.Fingerprint)
+		if fp == "" {
+			useFingerprint = false
+		} else if fingerprint == "" {
+			fingerprint = fp
+		} else if fp != fingerprint {
+			useFingerprint = false
+		}
+		// Once neither the launch strings agree nor the fingerprints all
+		// match, no hoist is possible. Bail early so we don't return the
+		// last-seen Launch as a falsely shared blocker.
+		if !launchAgreed && !useFingerprint {
+			return "", 0
 		}
 	}
-	return launch
+	if covered < 2 {
+		return "", 0
+	}
+	if launchAgreed && launch != "" {
+		return launch, covered
+	}
+	if useFingerprint && fingerprint != "" {
+		return fingerprint, covered
+	}
+	return "", 0
 }
 
 // blockedBucketKey is the subheader grouping key for a blocked job. Once the
 // shared launch blocker is hoisted, placement-failure jobs group by their
 // reuse-side headline; everything else keeps the resolved one-line reason.
+//
+// When the job carries a Fingerprint, it overrides the flat string as the
+// bucket key so jobs with cosmetically different filter prefixes but the
+// same systemic upstream cause collapse into one bucket. The fingerprint is
+// rendered in human-readable form (the launch reason or the fingerprint
+// itself) — the raw fingerprint string is the bucket identity, but display
+// stays close to today's compact reason text.
 func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockreason.Structured, launchHoisted bool) string {
-	if launchHoisted && job != nil {
-		if d := detail[job.ID]; d != nil && d.IsPlacementFailure() {
-			return d.ReuseHeadline()
+	if job != nil {
+		if d := detail[job.ID]; d != nil {
+			if launchHoisted && d.IsPlacementFailure() {
+				// When there are no actual reuse rejections to enumerate, the
+				// "no running instances to reuse" headline is non-actionable
+				// noise — the section hoist already says why these jobs are
+				// blocked. Falling through to "" lets the renderer place the
+				// jobs inline under the hoist without a redundant subheader.
+				if len(d.Reuse) == 0 {
+					return ""
+				}
+				return d.ReuseHeadline()
+			}
+			if fp := strings.TrimSpace(d.Fingerprint); fp != "" {
+				return fp
+			}
 		}
 	}
 	return groupedStatusBlockedReason(job, sectionKey)

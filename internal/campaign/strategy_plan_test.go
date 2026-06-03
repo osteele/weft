@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -201,9 +202,18 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredChoosesParall
 			// merged candidate
 			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.30}}
 		case 4:
-			// parallel candidate (fully launchable)
+			// parallel candidate (fully launchable). Each sub-group gets a
+			// distinct ProviderID + MachineID so the in-pass exclusion
+			// (rankGroupOffersFromPredictions) doesn't drop sub-groups for
+			// claiming the same machine — running four jobs in parallel
+			// requires four distinct instances.
 			for i := range raw {
-				raw[i].Offers = []cloud.Offer{{ProviderID: "parallel", GPUName: "RTX 4090", CostPerHour: 0.60}}
+				raw[i].Offers = []cloud.Offer{{
+					ProviderID:  fmt.Sprintf("parallel-%d", i),
+					MachineID:   fmt.Sprintf("p-%d", i),
+					GPUName:     "RTX 4090",
+					CostPerHour: 0.60,
+				}}
 			}
 		default:
 			t.Fatalf("unexpected candidate size %d", len(groups))
@@ -787,6 +797,54 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing
 	}
 	if offers[0].Offer.ProviderID != "rtx3090" {
 		t.Fatalf("expected predictor-backed ranking to avoid H200, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+// TestRankGroupOffersForPlanning_NoMachineRaceAcrossGroups is the regression
+// for the production bug: nine separate launch groups were all ranking
+// offers independently and each picking the same cheapest vastai
+// machine_id, so the parallel CreateInstance calls raced on vastai's
+// per-machine-serialized create endpoint. Two succeeded, seven returned
+// success=false. With the in-pass exclusion the second group must NOT
+// pick a machine the first group already claimed — it falls through to
+// the next-cheapest available machine, eliminating the race at its source.
+func TestRankGroupOffersForPlanning_NoMachineRaceAcrossGroups(t *testing.T) {
+	raw := []GroupRawOffers{
+		{
+			Group: InstanceGroup{
+				GPUClass: "NVIDIA",
+				GPUMemGB: 10,
+				Jobs:     []*db.Job{{ID: 1, Project: "p", Command: "x"}},
+			},
+			Offers: []cloud.Offer{
+				{Provider: "vastai", ProviderID: "39256061", MachineID: "44696", GPUName: "RTX A4000", GPUMemGB: 16, CostPerHour: 0.12, DLPerf: 10},
+				{Provider: "vastai", ProviderID: "39256067", MachineID: "29150", GPUName: "GTX 1060", GPUMemGB: 12, CostPerHour: 0.14, DLPerf: 8},
+			},
+		},
+		{
+			Group: InstanceGroup{
+				GPUClass: "NVIDIA",
+				GPUMemGB: 10,
+				Jobs:     []*db.Job{{ID: 2, Project: "p", Command: "x"}},
+			},
+			Offers: []cloud.Offer{
+				{Provider: "vastai", ProviderID: "39256061", MachineID: "44696", GPUName: "RTX A4000", GPUMemGB: 16, CostPerHour: 0.12, DLPerf: 10},
+				{Provider: "vastai", ProviderID: "39256067", MachineID: "29150", GPUName: "GTX 1060", GPUMemGB: 12, CostPerHour: 0.14, DLPerf: 8},
+			},
+		},
+	}
+	offers := rankGroupOffersForPlanning(raw, nil, nil, nil, bidding.StrategyCheap.Profile(), 0)
+	if len(offers) != 2 || offers[0].Offer == nil || offers[1].Offer == nil {
+		t.Fatalf("expected 2 ranked offers, got %#v", offers)
+	}
+	if offers[0].Offer.MachineID == offers[1].Offer.MachineID {
+		t.Fatalf("two groups picked the same machine_id=%q — race not prevented", offers[0].Offer.MachineID)
+	}
+	if offers[0].Offer.MachineID != "44696" {
+		t.Fatalf("first group should pick cheapest machine 44696, got %q", offers[0].Offer.MachineID)
+	}
+	if offers[1].Offer.MachineID != "29150" {
+		t.Fatalf("second group should fall through to next-cheapest machine 29150 (44696 taken), got %q", offers[1].Offer.MachineID)
 	}
 }
 

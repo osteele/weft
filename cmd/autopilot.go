@@ -195,6 +195,9 @@ type autopilotStateView struct {
 	LastPassSummary    string             `json:"last_pass_summary,omitempty"`
 	LastPassError      string             `json:"last_pass_error,omitempty"`
 	OrphanStreaks      []orphanStreakView `json:"orphan_streaks,omitempty"`
+	// Incidents lists active placement incidents (fingerprints affecting ≥2
+	// unplaced jobs) — see `weft incidents` for the dedicated CLI.
+	Incidents []IncidentSummary `json:"incidents,omitempty"`
 }
 
 // orphanStreakView reports a job stuck in a launch-orphan loop. Surfaces the
@@ -306,6 +309,9 @@ func runAutopilotStatus(cmd *cobra.Command, args []string) error {
 			})
 		}
 	}
+	if incs, err := collectIncidents(database); err == nil && len(incs) > 0 {
+		view.Incidents = incs
+	}
 
 	if autopilotStatusQuiet {
 		exitCode := autopilotStateExitCode(view)
@@ -376,6 +382,12 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 		}
 		if desc != "" {
 			fmt.Fprintf(&b, ": %s", desc)
+		}
+	}
+	for _, inc := range view.Incidents {
+		fmt.Fprintf(&b, "\n  incident: %s — %d jobs", inc.Fingerprint, inc.Count)
+		if msg := strings.TrimSpace(inc.Message); msg != "" {
+			fmt.Fprintf(&b, " (%s)", truncateForTable(msg, 80))
 		}
 	}
 	return b.String()

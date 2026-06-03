@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -614,6 +615,170 @@ func TestBuildGroupedStatusRows_HoistsLaunchAndExpandsDisclosure(t *testing.T) {
 	// indented "reuse <instance>  ..." detail line should be absent.
 	if strings.Contains(out, "reuse wi1023  grace period") {
 		t.Fatalf("collapsed job disclosure detail leaked into output:\n%s", out)
+	}
+}
+
+// TestBuildGroupedStatusRows_FingerprintRollsUpDistinctLaunchStrings is the
+// regression for the user-visible bug that motivated the error-class
+// coalescing work: eighteen jobs hitting the same upstream vastai 400
+// (driver_vers) were rendered as four separate "blocked: planner: search
+// offers …" buckets because the per-group filter prefix differs. With the
+// fingerprint plumbing in place those four launch strings still differ, but
+// they share Structured.Fingerprint — and the renderer must (a) emit one
+// "⚠ <fingerprint> — N jobs" rollup row and (b) collapse the bucket key to
+// that single fingerprint instead of four cosmetic prefixes.
+func TestBuildGroupedStatusRows_FingerprintRollsUpDistinctLaunchStrings(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	fingerprint := "vastai/search-offers/400/bad-field:driver_vers"
+	mkJob := func(id int64) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "desc",
+			QueuedAt:           4_000,
+			QueueBlockedReason: "blocked",
+		}
+	}
+	jobs := []*db.Job{mkJob(2265), mkJob(2350), mkJob(2398), mkJob(2407)}
+	detail := map[int64]*blockreason.Structured{
+		2265: {
+			Summary:     "planner: search offers gpu_ram>=82 disk_space>=60 …",
+			Launch:      "planner: search offers gpu_ram>=82 disk_space>=60 …",
+			Fingerprint: fingerprint,
+		},
+		2350: {
+			Summary:     "planner: search offers gpu_ram>=82 disk_space>=201 …",
+			Launch:      "planner: search offers gpu_ram>=82 disk_space>=201 …",
+			Fingerprint: fingerprint,
+		},
+		2398: {
+			Summary:     "planner: search offers gpu_ram>=10 disk_space>=50 …",
+			Launch:      "planner: search offers gpu_ram>=10 disk_space>=50 …",
+			Fingerprint: fingerprint,
+		},
+		2407: {
+			Summary:     "planner: search offers gpu_ram>=20 disk_space>=114 …",
+			Launch:      "planner: search offers gpu_ram>=20 disk_space>=114 …",
+			Fingerprint: fingerprint,
+		},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+
+	// One rollup row, naming the fingerprint and the count.
+	rollupLine := fmt.Sprintf("⚠ %s — 4 jobs", fingerprint)
+	if c := strings.Count(out, rollupLine); c != 1 {
+		t.Fatalf("expected one rollup row %q, got %d:\n%s", rollupLine, c, out)
+	}
+	// Section header carries the fingerprint (since the launch strings
+	// disagree, commonLaunchBlocker falls back to the shared fingerprint).
+	hoist := fmt.Sprintf("launch blocked for all: %s", fingerprint)
+	if c := strings.Count(out, hoist); c != 1 {
+		t.Fatalf("expected one hoist line %q, got %d:\n%s", hoist, c, out)
+	}
+	// The cosmetic per-prefix buckets must not appear as their own subheaders.
+	for _, leak := range []string{
+		"blocked: planner: search offers gpu_ram>=82 disk_space>=60",
+		"blocked: planner: search offers gpu_ram>=10 disk_space>=50",
+	} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("cosmetic per-prefix bucket %q leaked into output:\n%s", leak, out)
+		}
+	}
+	// "no running instances to reuse" must not appear as a bucket — when
+	// there are zero reuse rejections to enumerate, the section hoist already
+	// explains the failure; that bucket label is non-actionable noise.
+	if strings.Contains(out, "no running instances to reuse") {
+		t.Fatalf("empty-reuse bucket label leaked into output:\n%s", out)
+	}
+}
+
+// TestBuildGroupedStatusRows_SingleJobFingerprintDoesNotRollUp verifies that a
+// single blocked job does not appear as an "incident" — a one-off failure is
+// a job problem, not a systemic incident.
+func TestBuildGroupedStatusRows_SingleJobFingerprintDoesNotRollUp(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{{
+		ID:                 99,
+		Status:             db.StatusQueued,
+		Project:            "proj",
+		Description:        "lone",
+		QueuedAt:           4_000,
+		QueueBlockedReason: "blocked",
+	}}
+	detail := map[int64]*blockreason.Structured{
+		99: {
+			Summary:     "planner: search offers …",
+			Launch:      "planner: search offers …",
+			Fingerprint: "vastai/search-offers/400/bad-field:driver_vers",
+		},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+	if strings.Contains(out, "⚠ ") {
+		t.Fatalf("incident rollup must not fire for a single job:\n%s", out)
+	}
+}
+
+// TestBuildGroupedStatusRows_HoistScopedWhenSubsetSharesBlocker verifies
+// that when only a subset of section jobs carries placement-failure detail
+// with a shared blocker (the rest deferred for unrelated reasons that
+// don't persist a Structured breakdown, e.g. offer-race dedup), the hoist
+// line reads "for N of M" instead of overstating "for all". This is the
+// fix for the live TUI observation: 4 of 11 unplaced jobs shared the
+// empty-result fingerprint while 7 had no Structured at all, and the
+// hoist used to claim "for all".
+func TestBuildGroupedStatusRows_HoistScopedWhenSubsetSharesBlocker(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	mkJob := func(id int64) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "desc",
+			QueuedAt:           4_000,
+			QueueBlockedReason: "blocked",
+		}
+	}
+	jobs := []*db.Job{mkJob(1), mkJob(2), mkJob(3), mkJob(4), mkJob(5)}
+	// Two jobs share the empty-offers blocker; three have no Structured
+	// detail at all (the offer-race deferral path).
+	detail := map[int64]*blockreason.Structured{
+		1: {Launch: "no compatible offers", Fingerprint: "vastai/search-offers/empty-result:no-offers", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "x"}}},
+		2: {Launch: "no compatible offers", Fingerprint: "vastai/search-offers/empty-result:no-offers", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "x"}}},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+	if strings.Contains(out, "launch blocked for all:") {
+		t.Fatalf("hoist must not claim 'for all' when only a subset shares the blocker:\n%s", out)
+	}
+	if !strings.Contains(out, "launch blocked for 2 of 5: no compatible offers") {
+		t.Fatalf("expected scoped hoist 'for 2 of 5', got:\n%s", out)
+	}
+}
+
+// TestCommonLaunchBlocker_ThreeJobsDifferentLaunchesNoFingerprints is a
+// regression for a subtle bug introduced when commonLaunchBlocker grew
+// fingerprint support: with ≥3 placement-failure jobs that disagree on
+// launch AND carry no fingerprints, the function used to return the
+// last-seen launch as if it were shared. Now it must return "" — the user
+// must not see a hoist that claims something shared that isn't.
+func TestCommonLaunchBlocker_ThreeJobsDifferentLaunchesNoFingerprints(t *testing.T) {
+	jobs := []*db.Job{{ID: 1}, {ID: 2}, {ID: 3}}
+	detail := map[int64]*blockreason.Structured{
+		1: {Launch: "no rental headroom", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "x"}}},
+		2: {Launch: "no compatible offers", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "x"}}},
+		3: {Launch: "search offers: 400", Reuse: []blockreason.ReuseRejection{{Instance: "wi1", Reason: "x"}}},
+	}
+	if got, _ := commonLaunchBlocker(jobs, detail); got != "" {
+		t.Fatalf("commonLaunchBlocker = %q, want empty (three distinct launches, no fingerprints)", got)
 	}
 }
 

@@ -1037,6 +1037,16 @@ func rankGroupOffersFromPredictions(
 ) ([]GroupOffer, []offerRuntimePrediction) {
 	results := make([]GroupOffer, len(raw))
 	selected := make([]offerRuntimePrediction, len(raw))
+	// Track machines (and specific offer IDs) already claimed by earlier
+	// groups in this ranking pass. Vast.ai serializes create-instance per
+	// machine — when two groups in the same tick both pick the cheapest
+	// RTX A4000, only one create succeeds and the rest get success=false
+	// (verified in production: 9 groups, machine_id=44696, 2 successes + 7
+	// rejections). Filtering each group's offer pool against earlier
+	// selections eliminates the race at its source. The exclusion is
+	// in-pass only — global cross-pass ordering is the autopilot's job.
+	claimedMachines := make(map[string]struct{})
+	claimedOffers := make(map[string]struct{})
 	for i, r := range raw {
 		if r.Err != nil {
 			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
@@ -1047,11 +1057,12 @@ func rankGroupOffersFromPredictions(
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
+		availableOffers := filterOffersByClaim(r.Offers, claimedMachines, claimedOffers)
 
 		if offerPredictions, ok := predicted[i]; ok {
 			if ranked, ok := rankOfferWithPredictedRuntime(
 				r.Group,
-				r.Offers,
+				availableOffers,
 				survivalModel,
 				setupOverhead,
 				profile,
@@ -1061,15 +1072,16 @@ func rankGroupOffersFromPredictions(
 				results[i] = ranked
 				if ranked.Offer != nil {
 					selected[i] = offerPredictions[offerPredictionKey(*ranked.Offer)]
+					recordOfferClaim(*ranked.Offer, claimedMachines, claimedOffers)
 				}
 				continue
 			}
 		}
 
-		neutral := neutralOfferRuntimePredictions(r.Group, r.Offers)
+		neutral := neutralOfferRuntimePredictions(r.Group, availableOffers)
 		results[i], _ = rankOfferWithPredictedRuntime(
 			r.Group,
-			r.Offers,
+			availableOffers,
 			survivalModel,
 			setupOverhead,
 			profile,
@@ -1078,6 +1090,7 @@ func rankGroupOffersFromPredictions(
 		)
 		if results[i].Offer != nil {
 			selected[i] = neutral[offerPredictionKey(*results[i].Offer)]
+			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers)
 		}
 	}
 	return results, selected
@@ -2404,4 +2417,42 @@ func makeDefaultNeutralDurations(jobCount int) []time.Duration {
 		neutral[i] = estimate.DefaultJobDuration.Mean
 	}
 	return neutral
+}
+
+// filterOffersByClaim returns a copy of offers with entries dropped when a
+// peer group earlier in this ranking pass has already claimed the same
+// (provider, machine_id) or the same (provider, ProviderID). machine_id is
+// the granularity vastai serializes create-instance on; ProviderID guards
+// against duplicate offer IDs on machines where machine_id is empty
+// (runpod, etc.). Empty maps short-circuit to the input slice.
+func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers map[string]struct{}) []cloud.Offer {
+	if len(claimedMachines) == 0 && len(claimedOffers) == 0 {
+		return offers
+	}
+	out := offers[:0:0]
+	for _, o := range offers {
+		if o.MachineID != "" {
+			if _, taken := claimedMachines[string(o.Provider)+"/"+o.MachineID]; taken {
+				continue
+			}
+		}
+		if o.ProviderID != "" {
+			if _, taken := claimedOffers[string(o.Provider)+"/"+o.ProviderID]; taken {
+				continue
+			}
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// recordOfferClaim marks an offer as claimed for the remainder of the
+// ranking pass.
+func recordOfferClaim(o cloud.Offer, claimedMachines, claimedOffers map[string]struct{}) {
+	if o.MachineID != "" {
+		claimedMachines[string(o.Provider)+"/"+o.MachineID] = struct{}{}
+	}
+	if o.ProviderID != "" {
+		claimedOffers[string(o.Provider)+"/"+o.ProviderID] = struct{}{}
+	}
 }

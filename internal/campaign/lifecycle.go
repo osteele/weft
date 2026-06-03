@@ -501,8 +501,6 @@ func PrepareR2AssetsPerDir(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Ass
 
 type replacementOfferFunc func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error)
 
-const replacementOfferMaxPriceMultiplier = 1.25
-
 func launchCostInputs(estimates []CostEstimate, idx int) (jobDurationHrs, setupOverheadHrs float64) {
 	jobDurationHrs = 1.0
 	setupOverheadHrs = 0.5
@@ -517,16 +515,6 @@ func launchCostInputs(estimates []CostEstimate, idx int) (jobDurationHrs, setupO
 	}
 	return jobDurationHrs, setupOverheadHrs
 }
-
-// The fixed-multiplier price cap (replacementPriceAllowed /
-// searchReplacementOfferWithPriceCap, anchored on the original offer's
-// hourly price) was removed in favor of the history-derived authorization
-// gate in price_gate.go. The user-facing reasoning: anchoring on a single
-// offer's price meant a promotional or scarcity-discounted original could
-// produce a ceiling that no real-market replacement could clear, so
-// stockouts dead-ended the launch instead of pivoting to a real offer.
-// See evaluatePriceGate and searchAuthorizedReplacementOffer for the
-// replacement.
 
 // runpodSSHBootstrapTimeout must stay below launchingPhaseTimeout so the
 // launch goroutine fails before the reconciler's launching-phase safety net.
