@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 // PriceGateContext is the per-launch state the gate needs to decide whether a
@@ -198,7 +199,7 @@ func searchAuthorizedReplacementOffer(
 	search func(map[string]struct{}) GroupOffer,
 ) (*cloud.Offer, error) {
 	var lastDecision PriceGateDecision
-	for range replacementOfferSearchAttempts {
+	for range retrypolicy.MaxReplacementOfferSearchAttempts() {
 		replacement := search(excludeOfferKeys)
 		if replacement.Err != nil {
 			return nil, replacement.Err

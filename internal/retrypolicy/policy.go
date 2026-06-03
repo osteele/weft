@@ -45,3 +45,27 @@ func MaxAttemptsWithExtra(extra int) int {
 	}
 	return maxAttempts
 }
+
+// MaxCreateAttempts is the total number of provider CreateInstance calls a
+// single LaunchInstance may issue before giving up on the group. Each attempt
+// may target a different offer — and with cross-provider fallback, a
+// different provider — selected by the replacement-offer search. 4 is the
+// historical default; it has not been calibrated against real provider
+// flakiness, so revisit it if launch failure rates on flaky days demand
+// more headroom.
+func MaxCreateAttempts() int { return 4 }
+
+// MaxReplacementOfferSearchAttempts caps how many candidate offers the
+// replacement-offer search inspects per retry attempt before falling back
+// to the price-cap rejection error. The cap is generous because listing and
+// scoring offers is cheap relative to creating instances; 10 is the
+// historical default.
+func MaxReplacementOfferSearchAttempts() int { return 10 }
+
+// MaxGroupReplans is the number of times the per-group launch goroutine
+// re-fetches a fresh initial offer and re-runs the create-with-replacement
+// chain after a previous chain failed retryably. 1 means: original chain
+// plus one fresh chain. Replans exist because provider offer pools turn
+// over within the move window — a freshly searched offer can succeed where
+// the previous chain's accumulated exclude set could not.
+func MaxGroupReplans() int { return 1 }

@@ -29,6 +29,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/retrypolicy"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
 )
@@ -527,14 +528,6 @@ func launchCostInputs(estimates []CostEstimate, idx int) (jobDurationHrs, setupO
 // See evaluatePriceGate and searchAuthorizedReplacementOffer for the
 // replacement.
 
-// maxCreateAttempts is the maximum number of actual provider create requests
-// before giving up.
-const maxCreateAttempts = 4
-
-// replacementOfferSearchAttempts is separate from maxCreateAttempts because
-// listing and scoring candidate offers is cheap compared with creating them.
-const replacementOfferSearchAttempts = 10
-
 // runpodSSHBootstrapTimeout must stay below launchingPhaseTimeout so the
 // launch goroutine fails before the reconciler's launching-phase safety net.
 const runpodSSHBootstrapTimeout = 10 * time.Minute
@@ -632,12 +625,13 @@ func createInstanceWithReplacement(
 	currentOffer := offer
 	excludedOffers := make(map[string]struct{})
 	var lastErr error
+	maxAttempts := retrypolicy.MaxCreateAttempts()
 
-	for attempt := 1; attempt <= maxCreateAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt == 1 {
 			progress("creating instance")
 		} else {
-			progress(fmt.Sprintf("retrying with replacement offer (attempt %d/%d)", attempt, maxCreateAttempts))
+			progress(fmt.Sprintf("retrying with replacement offer (attempt %d/%d)", attempt, maxAttempts))
 		}
 
 		var (
@@ -661,7 +655,7 @@ func createInstanceWithReplacement(
 		}
 		lastErr = err
 
-		if replacementOffer == nil || !isRetryableCreateError(err) || attempt == maxCreateAttempts {
+		if replacementOffer == nil || !isRetryableCreateError(err) || attempt == maxAttempts {
 			break
 		}
 

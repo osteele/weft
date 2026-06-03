@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 // setupTestDB creates an in-memory SQLite database for testing.
@@ -854,8 +855,8 @@ func TestCreateInstanceWithReplacementExhaustsAttempts(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after exhausting attempts")
 	}
-	if createCalls != maxCreateAttempts {
-		t.Fatalf("create calls = %d, want %d", createCalls, maxCreateAttempts)
+	if createCalls != retrypolicy.MaxCreateAttempts() {
+		t.Fatalf("create calls = %d, want %d", createCalls, retrypolicy.MaxCreateAttempts())
 	}
 }
 
