@@ -461,7 +461,19 @@ func hfDownloadScript(assets []dataloc.DataAsset) string {
 	b.WriteString("  _repo_type=\"$1\"; _repo_id=\"$2\"\n")
 	b.WriteString("  if command -v hf >/dev/null 2>&1; then hf download --repo-type \"$_repo_type\" \"$_repo_id\" 2>&1; elif command -v huggingface-cli >/dev/null 2>&1; then huggingface-cli download --repo-type \"$_repo_type\" \"$_repo_id\" 2>&1; else python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2])' \"$_repo_id\" \"$_repo_type\"; fi\n")
 	b.WriteString("}\n")
+	// hf_validate_token pings /whoami once when HF_TOKEN is set. huggingface-hub
+	// v1.x surfaces 401/403 on token-bearing requests as a misleading "not
+	// found" error per model; this gives an honest single diagnostic and drops
+	// a bad token so anonymous downloads of public models can still succeed.
+	b.WriteString("hf_validate_token() {\n")
+	b.WriteString("  if [ -z \"${HF_TOKEN:-}\" ]; then return 0; fi\n")
+	b.WriteString("  export HF_DEBUG=1\n")
+	b.WriteString("  local _ok=0\n")
+	b.WriteString("  if command -v hf >/dev/null 2>&1; then if hf auth whoami >/dev/null 2>&1; then _ok=1; fi; elif command -v huggingface-cli >/dev/null 2>&1; then if huggingface-cli whoami >/dev/null 2>&1; then _ok=1; fi; else return 0; fi\n")
+	b.WriteString("  if [ \"$_ok\" -ne 1 ]; then echo 'weft: HF_TOKEN is set but rejected by the Hub — check expiry/scope. Unsetting HF_TOKEN and retrying anonymously.' >&2; unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HF_HUB_TOKEN; fi\n")
+	b.WriteString("}\n")
 	b.WriteString("ensure_hf_download_tool\n")
+	b.WriteString("hf_validate_token\n")
 	for _, asset := range assets {
 		repoType := "model"
 		if asset.Kind == dataloc.AssetHFDataset {

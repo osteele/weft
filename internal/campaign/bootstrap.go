@@ -132,6 +132,7 @@ func writeHFDownloads(b *strings.Builder, models, datasets []string, instanceID 
 	b.WriteString("# Download HF assets\n")
 	writeStageMarker(b, instanceID, "hf_tool_installing")
 	b.WriteString("ensure_hf_download_tool\n")
+	b.WriteString("hf_validate_token\n")
 	writeStageMarker(b, instanceID, "hf_tool_installed")
 	b.WriteString("_hf_done=0\n")
 	b.WriteString(fmt.Sprintf("_hf_total=%d\n", total))
@@ -179,6 +180,30 @@ func writeHFDownloadHelpers(b *strings.Builder) {
   else
     echo 'no uv or python3 available to install huggingface-hub' >&2
     return 127
+  fi
+}
+
+hf_validate_token() {
+  # If HF_TOKEN is set, verify it's accepted by the Hub once up front.
+  # huggingface-hub v1.x rewrites 401/403 into a misleading "not found"
+  # error per model; pinging /whoami once gives an honest diagnostic and
+  # lets us drop a bad token so anonymous downloads of public models can
+  # still succeed.
+  if [ -z "${HF_TOKEN:-}" ]; then
+    return 0
+  fi
+  export HF_DEBUG=1
+  local _ok=0
+  if command -v hf >/dev/null 2>&1; then
+    if hf auth whoami >/dev/null 2>&1; then _ok=1; fi
+  elif command -v huggingface-cli >/dev/null 2>&1; then
+    if huggingface-cli whoami >/dev/null 2>&1; then _ok=1; fi
+  else
+    return 0
+  fi
+  if [ "$_ok" -ne 1 ]; then
+    echo 'weft: HF_TOKEN is set but rejected by the Hub — check expiry/scope. Unsetting HF_TOKEN and retrying anonymously.' >&2
+    unset HF_TOKEN HUGGING_FACE_HUB_TOKEN HF_HUB_TOKEN
   fi
 }
 
