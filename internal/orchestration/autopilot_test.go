@@ -561,7 +561,7 @@ func TestNoRentalHeadroomStructured_BuildsLaunchAndReuseBreakdown(t *testing.T) 
 		{Instance: &db.Launch{ID: 11, GPUClass: "A100", GPUMemGB: 40}},
 		{Instance: &db.Launch{ID: 12, GPUClass: "A100", GPUMemGB: 24}},
 	}
-	s := noRentalHeadroomStructured(job, caps, nil)
+	s := placementFailureStructured(job, caps, nil, noRentalHeadroomLaunchReason)
 	if !s.IsPlacementFailure() {
 		t.Fatalf("expected a placement failure, got %+v", s)
 	}
@@ -1458,8 +1458,16 @@ func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *tes
 	if strings.HasPrefix(reason, "could not reuse") {
 		t.Fatalf("blocked reason = %q, want an authoritative reason before the reuse detail", reason)
 	}
-	if !strings.Contains(reason, "no rental headroom") {
-		t.Fatalf("blocked reason = %q, want a noRentalHeadroomReason primary", reason)
+	// Regression: the safety-net catch-all used to label this as "no rental
+	// headroom" even when the run-rate gate had not fired and the real reason
+	// was that the planner produced no launch decision for the candidate. The
+	// honest catch-all is "no launch path determined" so the user is not
+	// misdirected toward a budget verdict that didn't happen.
+	if !strings.Contains(reason, unclassifiedLaunchReason) {
+		t.Fatalf("blocked reason = %q, want unclassified-launch placeholder", reason)
+	}
+	if strings.Contains(reason, noRentalHeadroomLaunchReason) {
+		t.Fatalf("blocked reason = %q, must not assert no-rental-headroom for a safety-net fallback", reason)
 	}
 }
 

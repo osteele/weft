@@ -124,3 +124,71 @@ func TestStructuredMarshalEmpty(t *testing.T) {
 		t.Fatalf("empty Marshal() = %q, want empty", got)
 	}
 }
+
+// TestStructuredDetailLinesExpandsLaunchDetail verifies that when the launch
+// avenue carries a multi-line LaunchDetail (e.g. the full vastai stderr), the
+// disclosure emits the compact reason on the avenue row and continues with the
+// full detail on indented follow-on rows. The user must be able to see the
+// underlying provider message, not a clipped one-liner.
+func TestStructuredDetailLinesExpandsLaunchDetail(t *testing.T) {
+	s := &Structured{
+		Summary: "planner: search offers: provider rejected request: 400 invalid filter",
+		Launch:  "planner: search offers: provider rejected request: 400 invalid filter",
+		LaunchDetail: "search offers: provider rejected request: Warning: ignoring legacy parameter\n" +
+			"{\"error\": true, \"status_code\": 400, \"msg\": \"bogus_field is not a valid search key\"}",
+	}
+	lines := s.DetailLines()
+	if len(lines) < 3 {
+		t.Fatalf("DetailLines() returned %d lines, want >=3 (avenue + multi-line detail): %q", len(lines), lines)
+	}
+	if !strings.HasPrefix(lines[0], "new instance") {
+		t.Fatalf("avenue row = %q, want prefix \"new instance\"", lines[0])
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "bogus_field is not a valid search key") {
+		t.Fatalf("DetailLines() = %q, want full stderr line preserved", joined)
+	}
+	if !strings.Contains(joined, "Warning: ignoring legacy parameter") {
+		t.Fatalf("DetailLines() = %q, want first detail line preserved", joined)
+	}
+}
+
+// TestStructuredDetailLinesSkipsRedundantDetail verifies the disclosure does
+// not emit a follow-on row when LaunchDetail matches the compact reason —
+// the compact line already says everything.
+func TestStructuredDetailLinesSkipsRedundantDetail(t *testing.T) {
+	s := &Structured{
+		Summary:      "no offers from providers for nvidia >=24GB",
+		Launch:       "no offers from providers for nvidia >=24GB",
+		LaunchDetail: "no offers from providers for nvidia >=24GB",
+	}
+	lines := s.DetailLines()
+	if len(lines) != 1 {
+		t.Fatalf("DetailLines() returned %d lines for redundant detail, want 1: %q", len(lines), lines)
+	}
+}
+
+// TestStructuredMarshalRoundTripIncludesDetail verifies that LaunchDetail and
+// ReuseRejection.Detail are persisted across Marshal/Parse so the placement
+// disclosure survives a process restart.
+func TestStructuredMarshalRoundTripIncludesDetail(t *testing.T) {
+	s := &Structured{
+		Summary:      "planner: search offers: provider rejected request",
+		Launch:       "planner: search offers: provider rejected request",
+		LaunchDetail: "search offers: provider rejected request: stderr line 1\nstderr line 2",
+		Reuse: []ReuseRejection{
+			{Instance: "wi1", Reason: "disk insufficient", Detail: "need=42GB free=12GB max=24GB"},
+		},
+	}
+	encoded := s.Marshal()
+	got := Parse(encoded)
+	if got == nil {
+		t.Fatal("Parse() returned nil")
+	}
+	if got.LaunchDetail != s.LaunchDetail {
+		t.Fatalf("LaunchDetail round trip: got %q, want %q", got.LaunchDetail, s.LaunchDetail)
+	}
+	if len(got.Reuse) != 1 || got.Reuse[0].Detail != s.Reuse[0].Detail {
+		t.Fatalf("ReuseRejection.Detail round trip: got %+v, want %+v", got.Reuse, s.Reuse)
+	}
+}

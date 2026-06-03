@@ -459,15 +459,30 @@ func appendBlockedDisclosureRows(
 	if !expanded {
 		return rows
 	}
+	const indent = "        "
+	const continuation = indent + "  "
 	for _, line := range d.DetailLines() {
-		text := "        " + line
-		if width > 0 {
-			text = truncateDisplayWidth(text, width)
+		// Wrap long lines (e.g. multi-line vastai stderr surfaced via
+		// LaunchDetail) to the terminal width so the user can read the full
+		// underlying message in expanded form. wrapDisplayWidth strips leading
+		// whitespace via strings.Fields, so wrap the bare line against the
+		// indent-adjusted width and prepend the indent to each row.
+		var wrapped []string
+		if width > len(indent) {
+			wrapped = wrapDisplayWidth(line, width-len(indent))
+		} else {
+			wrapped = []string{line}
 		}
-		rows = append(rows, groupedStatusRow{
-			text:    blockedDetailStyle.Render(text),
-			section: sectionKey,
-		})
+		for i, w := range wrapped {
+			prefix := indent
+			if i > 0 {
+				prefix = continuation
+			}
+			rows = append(rows, groupedStatusRow{
+				text:    blockedDetailStyle.Render(prefix + w),
+				section: sectionKey,
+			})
+		}
 	}
 	return rows
 }

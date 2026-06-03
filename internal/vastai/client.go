@@ -216,9 +216,14 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 		args = append(args, filter)
 	}
 
+	// c.run prefixes errors with the operation (e.g. "search offers: …"), so
+	// don't re-wrap with another "search offers:" prefix here — that produces
+	// a doubled "search offers: search offers: …" headline in the TUI. The
+	// internal-only branches below (empty body, parse failures) add
+	// "search offers:" because c.run didn't supply context for those cases.
 	out, err := c.run(args...)
 	if err != nil {
-		return nil, fmt.Errorf("search offers: %w", err)
+		return nil, err
 	}
 	if strings.TrimSpace(string(out)) == "" {
 		return nil, fmt.Errorf("search offers: provider returned empty response")
@@ -616,16 +621,17 @@ func (c *Client) runWithTimeout(commandTimeout time.Duration, args ...string) ([
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	prefix := args
-	if len(prefix) > 3 {
-		prefix = args[:3]
-	}
+	// Build the human-facing operation prefix from positional argv only —
+	// flags like "--raw" or "-y" are implementation detail noise. "search
+	// offers --raw" → "search offers"; "destroy instance 123 -y --raw" →
+	// "destroy instance 123". Capped at 3 positional tokens so we don't
+	// inline scripts or other large trailing arguments.
+	prefix := operationPrefix(args, 3)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("%w: vastai %s timed out after %s", cloud.ErrProviderCommandTimeout, strings.Join(prefix, " "), timeout)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Only include the first 3 args (subcommand + ID) — later args may be large scripts.
 			detail := strings.TrimSpace(stderr.String())
 			if detail == "" {
 				detail = fmt.Sprintf("exit %d (no stderr)", exitErr.ExitCode())
@@ -644,6 +650,29 @@ func (c *Client) runWithTimeout(commandTimeout time.Duration, args ...string) ([
 		}
 	}
 	return stdout.Bytes(), nil
+}
+
+// operationPrefix returns the positional argv tokens (up to maxPositional)
+// that identify the vastai operation for error-message prefixing. Flags
+// (anything starting with "-") are dropped so error text reads as the
+// semantic operation rather than the literal command line — "search offers"
+// instead of "search offers --raw", "destroy instance 123" instead of
+// "destroy instance 123 -y --raw".
+func operationPrefix(args []string, maxPositional int) []string {
+	if len(args) == 0 || maxPositional <= 0 {
+		return nil
+	}
+	out := make([]string, 0, maxPositional)
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		out = append(out, a)
+		if len(out) >= maxPositional {
+			break
+		}
+	}
+	return out
 }
 
 // extractStderrError pulls a human-readable error message out of vastai CLI

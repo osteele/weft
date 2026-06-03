@@ -2469,12 +2469,23 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- finalizeUnplacedBlockedReasons settles every still-unplaced
         -- candidate: it first guarantees an authoritative launch-path reason
         -- (including for jobs the planner classified as neither launch nor
-        -- blocked, e.g. a failed reuse assignment, via noRentalHeadroomReason),
-        -- then appends the reuse diagnostic as trailing detail. Reuse
-        -- diagnostics are also recorded to the oplog
-        -- (auto_pilot.reuse_fill_blocked / reuse_skipped / reuse_failed).
-        -- Implementation: internal/orchestration/autopilot.go
+        -- blocked, via placementFailureStructured with the
+        -- unclassifiedLaunchReason placeholder), then appends the reuse
+        -- diagnostic as trailing detail. Reuse diagnostics are also recorded
+        -- to the oplog (auto_pilot.reuse_fill_blocked / reuse_skipped /
+        -- reuse_failed). Implementation: internal/orchestration/autopilot.go
         -- RunGroupedAutoPilotPass, finalizeUnplacedBlockedReasons.
+        --
+        -- Two distinct launch-side placeholders:
+        --   * "no rental headroom" — used only by the run-rate gate path
+        --     (AutoPilotReusePreferredFallback) where the budget verdict is
+        --     the literal cause.
+        --   * "no launch path determined" — used by the safety-net
+        --     catch-all when the planner produced no launch decision for a
+        --     candidate and no other gate fired. Distinguishing the two
+        --     stops the TUI from misdirecting the user toward a budget
+        --     verdict when the actual cause is, say, an upstream offer
+        --     search failure or a planner classification gap.
         --
         -- Structured form: a job blocked because no placement avenue is
         -- available (no new instance could be launched AND no running
@@ -2482,7 +2493,12 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- value. It splits the one-line reason into its primary launch
         -- blocker and a secondary per-instance list of reuse rejections, so
         -- a display surface can show every avenue rather than the truncated
-        -- head of a joined string. It is carried on the pass result
+        -- head of a joined string. When the planner observed a multi-line
+        -- underlying reason (e.g. wrapped vastai stderr), the full
+        -- untruncated text is persisted on Structured.LaunchDetail (and
+        -- ReuseRejection.Detail) so the TUI disclosure expand view and the
+        -- `weft job info` CLI can show the underlying provider message
+        -- instead of a clipped one-liner. It is carried on the pass result
         -- (GroupedAutoPilotResult.StructuredBlocked) and also persisted to
         -- the jobs.placement_blocked column by finalizeUnplacedBlockedReasons
         -- so consumers that did not run the pass (watch TUIs, weft job info)
@@ -2491,7 +2507,7 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- Structured.Flat(). Single-cause blockers (preconditions,
         -- cooldowns) have no structured entry — their flat reason is already
         -- the whole story, and their placement_blocked column is cleared.
-        -- Built by noRentalHeadroomStructured.
+        -- Built by placementFailureStructured.
 }
 
 rule RunRateBlockedReasonDedup {

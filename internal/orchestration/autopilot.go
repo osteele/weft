@@ -261,6 +261,21 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			blockedReasons[jobID] = reason
 		}
 	}
+	// Lift the planner's per-job full-detail map (e.g. multi-line vastai
+	// stderr) into the structured form so the TUI disclosure expand view and
+	// CLI surfaces can show the underlying provider message instead of the
+	// compact 240-char one-liner.
+	for jobID, detail := range plan.BlockedReasonDetails {
+		flat, ok := blockedReasons[jobID]
+		if !ok || strings.TrimSpace(flat) == "" {
+			continue
+		}
+		structuredBlocked[jobID] = &blockreason.Structured{
+			Summary:      flat,
+			Launch:       flat,
+			LaunchDetail: detail,
+		}
+	}
 	// Reuse-rejection diagnostics are kept separate from blockedReasons so an
 	// opportunistic "could not reuse" note never masks the authoritative
 	// launch-path reason. They are appended as detail by
@@ -823,7 +838,7 @@ func finalizeUnplacedBlockedReasons(
 		if _, has := blockedReasons[jobID]; has {
 			continue
 		}
-		s := noRentalHeadroomStructured(job, capacities, r2Client)
+		s := placementFailureStructured(job, capacities, r2Client, unclassifiedLaunchReason)
 		blockedReasons[jobID] = s.Flat()
 		if structuredBlocked != nil && s.IsPlacementFailure() {
 			structuredBlocked[jobID] = s
@@ -837,21 +852,26 @@ func finalizeUnplacedBlockedReasons(
 		addAutoPilotBlockedReason(blockedReasons, jobID, diag)
 	}
 	// Attach the structured launch/reuse breakdown to any still-unplaced job
-	// whose authoritative reason is the no-rental-headroom family but was
-	// settled before this call (so the safety-net loop above skipped it).
+	// whose authoritative reason was settled by an earlier path as a
+	// placeholder (no-rental-headroom or unclassified) without having the
+	// structured form attached.
 	if structuredBlocked != nil {
 		for jobID, flat := range blockedReasons {
 			if _, done := structuredBlocked[jobID]; done {
 				continue
 			}
-			if !strings.HasPrefix(flat, noRentalHeadroomBase) {
+			if !isPlaceholderLaunchReason(flat) {
 				continue
 			}
 			job, ok := remainingByID[jobID]
 			if !ok || job == nil {
 				continue
 			}
-			if s := noRentalHeadroomStructured(job, capacities, r2Client); s.IsPlacementFailure() {
+			launch := noRentalHeadroomLaunchReason
+			if strings.HasPrefix(flat, unclassifiedLaunchReason) {
+				launch = unclassifiedLaunchReason
+			}
+			if s := placementFailureStructured(job, capacities, r2Client, launch); s.IsPlacementFailure() {
 				structuredBlocked[jobID] = s
 			}
 		}
@@ -1296,26 +1316,51 @@ func minLaunchGroupJobID(group campaign.LaunchGroup) int64 {
 	return minID
 }
 
-// noRentalHeadroomBase is the launch+reuse combined headline for a job the
-// autopilot could neither launch a new instance for nor reuse onto a running
-// one. finalizeUnplacedBlockedReasons keys structured-detail attachment off
-// this prefix.
-const noRentalHeadroomBase = "no rental headroom; running instances couldn't accept this job"
+// Launch-side reasons used to compose the launch+reuse breakdown. The
+// run-rate gate path (autopilot.go run-rate-exceeded fallback) is the only
+// caller for which "no rental headroom" is the literal truth — it's the
+// budget verdict. The safety-net path uses unclassifiedLaunchReason because
+// the planner produced no launch decision for the candidate at all, which is
+// almost never a budget verdict; calling it "no rental headroom" misleads
+// users when the status bar shows full headroom and zero running instances.
+const (
+	noRentalHeadroomLaunchReason  = "no rental headroom"
+	unclassifiedLaunchReason      = "no launch path determined"
+	reuseRejectedHeadlineFragment = "running instances couldn't accept this job"
+)
 
-func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {
-	return noRentalHeadroomStructured(job, capacities, r2Client).Flat()
+// blockReasonBase composes the combined launch+reuse summary headline from a
+// launch-side reason. The result reads "<launch>; running instances couldn't
+// accept this job".
+func blockReasonBase(launch string) string {
+	return launch + "; " + reuseRejectedHeadlineFragment
 }
 
-// noRentalHeadroomStructured builds the full launch/reuse breakdown for a job
+// isPlaceholderLaunchReason reports whether a launch-side string is one of the
+// safety-net placeholders this file produces. finalizeUnplacedBlockedReasons
+// keys structured-detail reattachment off these prefixes.
+func isPlaceholderLaunchReason(s string) bool {
+	return strings.HasPrefix(s, noRentalHeadroomLaunchReason) ||
+		strings.HasPrefix(s, unclassifiedLaunchReason)
+}
+
+func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {
+	return placementFailureStructured(job, capacities, r2Client, noRentalHeadroomLaunchReason).Flat()
+}
+
+// placementFailureStructured builds the full launch/reuse breakdown for a job
 // the autopilot could neither launch a new instance for nor reuse onto a
-// running one. Launch is the authoritative primary reason; each running
-// instance that refused the job contributes a secondary reuse-rejection entry.
-// When any running instance is compatible, headroom is the whole story and no
-// reuse detail is attached — mirroring the original flat-string behavior.
-func noRentalHeadroomStructured(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) *blockreason.Structured {
+// running one. Launch is the authoritative primary reason (supplied by the
+// caller — "no rental headroom" for the run-rate gate, a placeholder for the
+// safety-net catch-all); each running instance that refused the job
+// contributes a secondary reuse-rejection entry. When any running instance is
+// compatible, the launch reason is the whole story and no reuse detail is
+// attached.
+func placementFailureStructured(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client, launchReason string) *blockreason.Structured {
+	summary := blockReasonBase(launchReason)
 	s := &blockreason.Structured{
-		Summary: noRentalHeadroomBase,
-		Launch:  "no rental headroom",
+		Summary: summary,
+		Launch:  launchReason,
 	}
 	if job == nil || len(capacities) == 0 {
 		return s
@@ -1344,8 +1389,8 @@ func noRentalHeadroomStructured(job *db.Job, capacities []campaign.InstanceCapac
 		}
 		if ok {
 			// A running instance is compatible; reuse was blocked elsewhere,
-			// so launch headroom is the whole story.
-			return &blockreason.Structured{Summary: noRentalHeadroomBase, Launch: "no rental headroom"}
+			// so the launch reason is the whole story.
+			return &blockreason.Structured{Summary: summary, Launch: launchReason}
 		}
 		instLabel := ""
 		if cap.Instance != nil {
@@ -1359,7 +1404,7 @@ func noRentalHeadroomStructured(job *db.Job, capacities []campaign.InstanceCapac
 	}
 	s.Reuse = rejections
 	if firstReason != "" {
-		s.Summary = noRentalHeadroomBase + ": " + firstReason
+		s.Summary = summary + ": " + firstReason
 	}
 	return s
 }

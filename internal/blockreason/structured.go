@@ -9,9 +9,15 @@ import (
 )
 
 // ReuseRejection records why one running instance refused to accept a job.
+//
+// Reason is the compact, sanitized one-liner used for collapsed-row display.
+// Detail is the optional full, untruncated reason (preserved newlines and all)
+// for expand views and CLI surfaces. When Detail is empty, callers should fall
+// back to Reason.
 type ReuseRejection struct {
-	Instance string `json:"instance"` // display instance id, e.g. "wi3022"
-	Reason   string `json:"reason"`
+	Instance string `json:"instance"`         // display instance id, e.g. "wi3022"
+	Reason   string `json:"reason"`           // compact, sanitized
+	Detail   string `json:"detail,omitempty"` // full, untruncated when distinct from Reason
 }
 
 // Structured is the full explanation of why a job cannot be placed.
@@ -24,10 +30,17 @@ type ReuseRejection struct {
 //
 // Single-cause blockers — an unmet precondition, a retry cooldown — leave
 // Launch and Reuse empty and carry the whole explanation in Summary.
+//
+// Summary/Launch carry compact, sanitized one-liners suitable for collapsed
+// rows and column-width display. LaunchDetail (and ReuseRejection.Detail)
+// carry the optional full, untruncated reason (preserved newlines and all)
+// used by the TUI expand view and CLI diagnose/show surfaces. When the detail
+// fields are empty, callers should fall back to the sanitized fields.
 type Structured struct {
-	Summary string           `json:"summary"`
-	Launch  string           `json:"launch,omitempty"`
-	Reuse   []ReuseRejection `json:"reuse,omitempty"`
+	Summary      string           `json:"summary"`
+	Launch       string           `json:"launch,omitempty"`
+	LaunchDetail string           `json:"launch_detail,omitempty"`
+	Reuse        []ReuseRejection `json:"reuse,omitempty"`
 }
 
 // IsPlacementFailure reports whether the reason has the launch/reuse structure
@@ -66,9 +79,11 @@ func (s *Structured) ReuseHeadline() string {
 	return "reuse: " + first + " + " + plural(len(s.Reuse)-1, "more instance", "more instances")
 }
 
-// DetailLines returns the expanded per-avenue breakdown, one line per
-// placement avenue, for an in-place TUI disclosure. The launch avenue is
-// listed first, then each running instance.
+// DetailLines returns the expanded per-avenue breakdown for an in-place TUI
+// disclosure. The launch avenue is listed first, then each running instance.
+// When LaunchDetail (or ReuseRejection.Detail) is set, its full, untruncated
+// text is emitted with multi-line content split across rows so the user can
+// read the underlying provider stderr instead of a clipped one-liner.
 func (s *Structured) DetailLines() []string {
 	if !s.IsPlacementFailure() {
 		if s == nil {
@@ -81,7 +96,7 @@ func (s *Structured) DetailLines() []string {
 	}
 	lines := make([]string, 0, 1+len(s.Reuse))
 	if launch := strings.TrimSpace(s.Launch); launch != "" {
-		lines = append(lines, "new instance  "+launch)
+		lines = appendAvenueLines(lines, "new instance", launch, s.LaunchDetail)
 	}
 	for _, r := range s.Reuse {
 		inst := strings.TrimSpace(r.Instance)
@@ -92,7 +107,34 @@ func (s *Structured) DetailLines() []string {
 		if reason == "" {
 			reason = "incompatible"
 		}
-		lines = append(lines, "reuse "+inst+"  "+reason)
+		lines = appendAvenueLines(lines, "reuse "+inst, reason, r.Detail)
+	}
+	return lines
+}
+
+// appendAvenueLines emits one disclosure row for an avenue, expanding the
+// optional full Detail across multiple rows when it carries more information
+// than the compact reason. Subsequent rows are indented under the avenue label
+// so the structure stays visible.
+func appendAvenueLines(lines []string, label, compact, detail string) []string {
+	lines = append(lines, label+"  "+compact)
+	detail = strings.TrimSpace(detail)
+	if detail == "" || detail == compact {
+		return lines
+	}
+	// Only emit extra rows when the detail adds information beyond the
+	// compact line. Single-line details that are a prefix of the compact form
+	// are redundant.
+	if !strings.ContainsRune(detail, '\n') && strings.HasPrefix(compact, detail) {
+		return lines
+	}
+	indent := strings.Repeat(" ", len(label)+2)
+	for _, ln := range strings.Split(detail, "\n") {
+		ln = strings.TrimRight(ln, " \t\r")
+		if ln == "" {
+			continue
+		}
+		lines = append(lines, indent+ln)
 	}
 	return lines
 }

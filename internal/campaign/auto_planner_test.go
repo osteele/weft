@@ -48,6 +48,58 @@ func TestApplyGroupOffer_BlocksOnlyUnreusedJobsWhenNoOffer(t *testing.T) {
 	}
 }
 
+// TestApplyGroupOffer_FullDetailPreservedForMultiLineError verifies that when
+// the offer carries a multi-line error (e.g. wrapped vastai CLI stderr), the
+// sanitized compact form lands in BlockedReasons while the full text lands in
+// BlockedReasonDetails — the TUI disclosure relies on the latter to show the
+// underlying provider message instead of a clipped one-liner.
+func TestApplyGroupOffer_FullDetailPreservedForMultiLineError(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 808}}}
+	full := "search offers: provider rejected request: Warning: ignoring legacy parameter\n" +
+		"{\"error\": true, \"status_code\": 400, \"msg\": \"bogus_field is not a valid search key\"}"
+	offer := GroupOffer{Err: errors.New(full)}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	compact, ok := plan.BlockedReasons[808]
+	if !ok || compact == "" {
+		t.Fatalf("BlockedReasons[808] missing, want compact reason")
+	}
+	detail, ok := plan.BlockedReasonDetails[808]
+	if !ok || detail == "" {
+		t.Fatalf("BlockedReasonDetails[808] missing, want full multi-line detail")
+	}
+	if !strings.Contains(detail, "bogus_field is not a valid search key") {
+		t.Fatalf("detail = %q, want full stderr line preserved", detail)
+	}
+	if strings.Contains(compact, "\n") {
+		t.Fatalf("compact reason = %q, must be single-line for TUI display", compact)
+	}
+}
+
+// TestApplyGroupOffer_DetailOmittedWhenCompactSufficient verifies that single
+// short reasons (the common case) do not bloat BlockedReasonDetails — there's
+// no point persisting a duplicate of the compact line.
+func TestApplyGroupOffer_DetailOmittedWhenCompactSufficient(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{
+		GPUClass: "ampere+",
+		GPUMemGB: 40,
+		Jobs:     []*db.Job{{ID: 909}},
+	}
+	offer := GroupOffer{FilterStats: OfferFilterStats{RawCount: 0}}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	if _, ok := plan.BlockedReasonDetails[909]; ok {
+		t.Fatalf("BlockedReasonDetails[909] set unexpectedly, want no entry for short single-line reason")
+	}
+	if plan.BlockedReasons[909] == "" {
+		t.Fatalf("BlockedReasons[909] empty, want compact reason")
+	}
+}
+
 func TestApplyGroupOffer_NoOfferEmitsConstraintAwareReason(t *testing.T) {
 	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
 	group := InstanceGroup{

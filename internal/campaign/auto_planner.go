@@ -23,7 +23,17 @@ type AutoPlacementPlan struct {
 	// LaunchRateCentsPerHour is the projected aggregate $/hr for new instances
 	// implied by this pass's launchable candidate groups.
 	LaunchRateCentsPerHour int
-	BlockedReasons         map[int64]string
+	// BlockedReasons carries the sanitized, single-line reason for each job
+	// the planner could not place. Use these for display surfaces that need a
+	// compact form.
+	BlockedReasons map[int64]string
+	// BlockedReasonDetails carries the full, untruncated underlying reason
+	// (e.g. multi-line vastai stderr) per job ID, suitable for the TUI
+	// disclosure expand view and CLI diagnose/show surfaces. Entries are
+	// present only when the detail is meaningfully richer than the sanitized
+	// BlockedReasons entry — callers should fall back to BlockedReasons when
+	// the map has no entry for a job.
+	BlockedReasonDetails map[int64]string
 }
 
 // LaunchGroup captures one launchable candidate group and its projected run-rate cost.
@@ -166,6 +176,35 @@ func BuildAutoPlacementPlanWithOptions(
 		applyGroupOffer(&plan, group, offer, reused, minReliability)
 	}
 	plan.LaunchGroups = buildLaunchGroups(strategyPlan.NewCandidate, reused)
+	// Safety pass: every non-reused job that did not end up in a LaunchGroup
+	// AND did not receive a per-group BlockedReason above must carry a
+	// planner-layer reason. Without this, the autopilot's downstream safety
+	// net stamps a misleading "no rental headroom" / "no launch path
+	// determined" label on jobs whose offer path produced no diagnostic — the
+	// catch-all sees no entry and assumes a placement gate fired when no gate
+	// ran. Anchor on the strategy plan: if the planner classified the job
+	// neither as reuse nor as launch, surface that explicitly.
+	launchedIDs := make(map[int64]struct{}, 16)
+	for _, lg := range plan.LaunchGroups {
+		for _, id := range lg.JobIDs {
+			launchedIDs[id] = struct{}{}
+		}
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := reused[job.ID]; ok {
+			continue
+		}
+		if _, ok := launchedIDs[job.ID]; ok {
+			continue
+		}
+		if _, ok := plan.BlockedReasons[job.ID]; ok {
+			continue
+		}
+		plan.BlockedReasons[job.ID] = "planner: no launch candidate available; no compatible offer or capacity surfaced"
+	}
 	plan.LaunchRateCentsPerHour = 0
 	for _, group := range plan.LaunchGroups {
 		plan.LaunchRateCentsPerHour += group.CostPerHourCents
@@ -242,15 +281,22 @@ func jobByID(jobs []*db.Job, id int64) *db.Job {
 
 func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}, minReliability float64) {
 	launchable := offer.Offer != nil && offer.Err == nil
-	reason := ""
+	rawReason := ""
 	if !launchable {
 		if offer.Err != nil {
-			reason = offer.Err.Error()
+			rawReason = offer.Err.Error()
 		} else {
 			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(group, minReliability))
-			reason = offer.FilterStats.NoOffersDetail(constraintStr)
+			rawReason = offer.FilterStats.NoOffersDetail(constraintStr)
 		}
 	}
+	compact := SanitizeBlockedReason(rawReason)
+	full := strings.TrimSpace(rawReason)
+	// Whether the full text actually adds information beyond the compact form
+	// (it does when SanitizeBlockedReason collapsed multiple lines or hit the
+	// 240-char cap). If they're identical there's nothing new to persist.
+	detailAddsInfo := full != "" && full != compact &&
+		(strings.ContainsRune(full, '\n') || len(full) > len(compact))
 	for _, job := range group.Jobs {
 		if job == nil {
 			continue
@@ -259,7 +305,13 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 			continue
 		}
 		if !launchable {
-			plan.BlockedReasons[job.ID] = "planner: " + SanitizeBlockedReason(reason)
+			plan.BlockedReasons[job.ID] = "planner: " + compact
+			if detailAddsInfo {
+				if plan.BlockedReasonDetails == nil {
+					plan.BlockedReasonDetails = map[int64]string{}
+				}
+				plan.BlockedReasonDetails[job.ID] = full
+			}
 		}
 	}
 }

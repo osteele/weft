@@ -426,6 +426,49 @@ exit 0
 	if strings.Contains(err.Error(), "provider returned empty response") {
 		t.Fatalf("SearchOffers err = %q, must not collapse to generic empty-response message", err)
 	}
+	// Regression for the duplicate-prefix UX bug: the user-visible error must
+	// not contain "search offers: search offers" or expose the internal
+	// "--raw" flag. The operation label is added once by runWithTimeout.
+	msg := err.Error()
+	if strings.Contains(msg, "search offers: search offers") {
+		t.Fatalf("SearchOffers err = %q, must not double-prefix the operation label", msg)
+	}
+	if strings.Contains(msg, "--raw") {
+		t.Fatalf("SearchOffers err = %q, must not leak the internal --raw flag into user-facing text", msg)
+	}
+}
+
+// TestOperationPrefixDropsFlags verifies that the error-message prefix
+// rendering drops flag tokens (anything starting with "-") so users see the
+// semantic operation, not the literal command line.
+func TestOperationPrefixDropsFlags(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		max  int
+		want []string
+	}{
+		{"empty", nil, 3, nil},
+		{"all positional", []string{"show", "instance", "123"}, 3, []string{"show", "instance", "123"}},
+		{"trailing flag dropped", []string{"search", "offers", "--raw"}, 3, []string{"search", "offers"}},
+		{"interleaved flags dropped", []string{"destroy", "instance", "123", "-y", "--raw"}, 3, []string{"destroy", "instance", "123"}},
+		{"cap respected", []string{"a", "b", "c", "d"}, 2, []string{"a", "b"}},
+		{"flags at start dropped", []string{"--global", "show", "user"}, 3, []string{"show", "user"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := operationPrefix(tc.args, tc.max)
+			if len(got) != len(tc.want) {
+				t.Fatalf("operationPrefix(%v, %d) = %v, want %v", tc.args, tc.max, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("operationPrefix(%v, %d)[%d] = %q, want %q", tc.args, tc.max, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
 }
 
 // TestCreateInstanceAndAttachSSHUseLongerTimeoutConstants asserts that the
