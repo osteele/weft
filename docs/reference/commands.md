@@ -544,6 +544,16 @@ non-zero exits, retries, multiple attempts, suspicious cloud outcomes, and
 common metadata gaps such as Hugging Face jobs without explicit cache or
 offline-mode overrides.
 
+The output also includes a **Disk telemetry anomalies** section that scans
+the entire job-time-series history (not just the recent-N window the
+per-job mining uses) for `disk_used_bytes` / peak-disk-used samples above a
+2 TB plausibility bound. Such samples are almost always the result of an
+agent-side `statfs` probe misreporting on an overlay/fuse container root,
+and they will inflate disk requests for any future job whose command
+signature matches the affected source job — see
+[cloud-instance-debugging.md](../guides/cloud-instance-debugging.md#disk-request-implausibly-large-infra_failure-no-instances-available-with-enough-disk-space)
+for the failure pattern this prevents.
+
 `churn` groups recent jobs that look like iterations of the same script or
 command. Use the suggested `weft job diff` and `weft source diff` commands to
 compare adjacent jobs in a group.

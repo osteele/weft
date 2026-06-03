@@ -321,6 +321,37 @@ against the driver's CUDA compatibility.
   torch pin; both can be set explicitly when the auto-derivation can't
   see the relevant torch.
 
+### Disk request implausibly large (`infra_failure`, "no instances available with enough disk space")
+
+Symptom: every fresh launch fails almost instantly with
+`offer unavailable: pod create --gpu-id: There are no longer any instances
+available with enough disk space.` (RunPod phrasing — Vast surfaces the
+same condition differently). Inspecting `weft instance list` shows
+`launches.disk_gb` is wildly large (hundreds of TB / PB).
+
+This is the disk estimator amplifying a single bogus telemetry sample
+from a prior run. The agent-side `statfs` probe on overlay/fuse
+container roots used to multiply by `stat.Bsize` instead of
+`stat.Frsize`, over-reporting the filesystem by orders of magnitude. The
+probe is fixed in current builds, but old `job_phase_timings` /
+`job_timeseries` rows from before the fix can still poison
+`EstimateGroupDisk` for jobs with matching command signatures.
+
+**Action:** Run `weft job anomalies` — there's a "Disk telemetry
+anomalies" section listing every prior job whose recorded disk reading
+exceeds the 2 TB plausibility bound. If the current estimator is
+seeing a bogus sample, it surfaces a one-line note prepended to
+`placement_reasons` (visible in the TUI and `weft job diagnose`) such
+as `skipped anomalous historical disk reading from wjN (231.1TB > 2.0TB
+plausibility bound) — likely statfs Bsize-vs-Frsize bug; see weft job
+anomalies`. The estimator then falls back to the input-based size, so
+the next placement attempt will request a reasonable disk and the
+provider's stockout error should go away.
+
+There is no bulk-cleanup tool by design — natural decay of the
+poisoned rows is preferred over a silent mass-delete that would also
+remove the evidence trail.
+
 ### Provider delivered less disk than requested (`infra_failure:disk-cap`)
 
 At agent startup, weft probes `df` against the disk it asked the provider

@@ -601,6 +601,95 @@ rule ProviderCreditGate {
         -- campaign launches, future schedulers — not only the autopilot.
 }
 
+rule PriceAuthorizationGate {
+    when: LaunchInstance(group) evaluates a candidate cloud Offer
+          (initial offer or any replacement returned by the
+          replacement-offer search)
+
+    let ceiling = AuthorizedSpendCeiling(group)
+    if Offer.cost_per_hour > ceiling:
+        ensures: the candidate Offer is rejected, added to the search
+                 exclude set, and the next replacement is requested
+        ensures: if every candidate within the replacement-offer search
+                 budget is rejected, the launch fails with a
+                 PriceAuthorizationRequiredError carrying the offered,
+                 anchor, ceiling, and (informational) current market
+                 median prices, and the job's placement_blocked column
+                 is written with a structured "requires_price_authorization"
+                 reason
+
+    @guidance
+        -- The ceiling resolution order is, highest priority first:
+        --   1. The maximum jobs.price_authorized_up_to_cents across the
+        --      jobs in the group (per-job sticky override set by
+        --      `weft job authorize-price`).
+        --   2. price_authorizations(gpu_class, gpu_mem_gb).up_to_cents
+        --      (class-level sticky override set by
+        --      `weft job authorize-price --for-class`).
+        --   3. The price anchor's auto-approve ceiling:
+        --      PriceAnchorForClass(gpu_class, gpu_mem_gb).P75Cents
+        --      multiplied by PriceAnchorAutoApproveMultiplier (1.5).
+        --      The anchor is the p75 of cost_per_hour_cents from
+        --      `launches` rows in the same bucket that reached
+        --      launched_at IS NOT NULL within a rolling window. The
+        --      window backs off 30d → 90d → 365d → unbounded, picking
+        --      the smallest window with at least PriceAnchorMinSamples
+        --      (3) samples. Sparse classes — e.g., a job that runs
+        --      every two months — still get an anchor.
+        --   4. None (sparse history, no overrides). The gate fails
+        --      closed; the job needs an explicit
+        --      `weft job authorize-price` before it can launch.
+        --
+        -- Market data is INTENTIONALLY NOT a ceiling-raising input.
+        -- Rental markets are thin and can spike 10× on supply-
+        -- constrained days; if the current market median fed into the
+        -- ceiling, a price spike would silently re-authorize spend the
+        -- user has never agreed to. The market median is computed
+        -- separately for display only and shown alongside the anchor
+        -- in the placement_blocked message.
+        --
+        -- The gate applies uniformly across same-provider and cross-
+        -- provider replacements. There is no special case for an offer
+        -- that comes from a different provider than the originating
+        -- search; the user authorizes a spend ceiling, not a provider
+        -- boundary.
+        --
+        -- The previous fixed cap (replacementOfferMaxPriceMultiplier =
+        -- 1.25 anchored on the original offer's price) was removed
+        -- because anchoring on a single promotional or scarcity-
+        -- discounted original could produce a ceiling no real-market
+        -- replacement could clear, dead-ending the launch instead of
+        -- pivoting. The history-derived anchor was chosen as the
+        -- replacement because it reflects what the user has implicitly
+        -- accepted paying for this bucket, not what one search
+        -- iteration's first-ranked offer happens to cost.
+        --
+        -- Implementation: internal/campaign/price_gate.go
+        -- (evaluatePriceGate, searchAuthorizedReplacementOffer),
+        -- internal/campaign/price_anchor.go (PriceAnchorForClass),
+        -- internal/db/price_authorizations.go (per-job and class-level
+        -- storage).
+}
+
+invariant PriceAuthorizationDoesNotTripCircuitBreaker {
+    -- The autopilot circuit breaker counts repeated infrastructure
+    -- failures to detect runaway loops. A price-authorization block is
+    -- categorically different: the system is correctly refusing to
+    -- spend money the user has not authorized. Treating it as an infra
+    -- failure would trip the breaker on a perfectly healthy autopilot
+    -- as soon as a single bucket exhausted its authorized history.
+    --
+    -- For every autopilot pass, BlockedByPriceAuthorization counts the
+    -- jobs whose latest pass result was rejected by
+    -- PriceAuthorizationGate. These jobs MUST NOT contribute to the
+    -- "repeated infrastructure failures without progress" tally that
+    -- pauses the autopilot.
+    --
+    -- Implementation: internal/orchestration/autopilot.go
+    -- (failure-streak accounting); the price-gate block reason carries
+    -- a distinct tag that the breaker filters out.
+}
+
 -- --------------------------------------------------------------------------
 -- Interruptible placement
 -- --------------------------------------------------------------------------

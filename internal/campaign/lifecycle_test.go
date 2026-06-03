@@ -961,46 +961,12 @@ func TestCreateInstanceWithReplacementRejectsCrossProviderWhenLookupMissing(t *t
 	}
 }
 
-func TestReplacementPriceAllowed(t *testing.T) {
-	if !replacementPriceAllowed(1.00, 1.25) {
-		t.Fatal("expected replacement at 25% premium to be allowed")
-	}
-	if replacementPriceAllowed(1.00, 1.26) {
-		t.Fatal("expected replacement above 25% premium to be rejected")
-	}
-}
-
-func TestSearchReplacementOfferWithPriceCapSkipsExpensiveCandidates(t *testing.T) {
-	var calls int
-	offer, err := searchReplacementOfferWithPriceCap(1.00, map[string]struct{}{}, func(exclude map[string]struct{}) GroupOffer {
-		calls++
-		if calls <= replacementOfferSearchAttempts-1 {
-			id := fmt.Sprintf("expensive-%d", calls)
-			if _, ok := exclude[cloud.Offer{ProviderID: id, Provider: cloud.ProviderVastai}.Key()]; ok {
-				t.Fatalf("offer %s was already excluded before it was returned", id)
-			}
-			return GroupOffer{Offer: &cloud.Offer{
-				ProviderID:  id,
-				Provider:    cloud.ProviderVastai,
-				CostPerHour: 1.26,
-			}}
-		}
-		return GroupOffer{Offer: &cloud.Offer{
-			ProviderID:  "allowed",
-			Provider:    cloud.ProviderVastai,
-			CostPerHour: 1.25,
-		}}
-	})
-	if err != nil {
-		t.Fatalf("searchReplacementOfferWithPriceCap: %v", err)
-	}
-	if offer == nil || offer.ProviderID != "allowed" {
-		t.Fatalf("offer = %+v, want allowed", offer)
-	}
-	if calls != replacementOfferSearchAttempts {
-		t.Fatalf("search calls = %d, want %d", calls, replacementOfferSearchAttempts)
-	}
-}
+// TestReplacementPriceAllowed and
+// TestSearchReplacementOfferWithPriceCapSkipsExpensiveCandidates were
+// removed when the fixed-multiplier cap (replacementPriceAllowed /
+// searchReplacementOfferWithPriceCap) was replaced by the history-derived
+// authorization gate. See price_anchor.go, price_gate.go, and their tests
+// for the replacement's coverage.
 
 func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	// Regression: with LaunchOpts.TransferClaim=true (move-to-new path),

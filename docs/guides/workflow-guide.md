@@ -145,6 +145,17 @@ declared inputs, cached uv-lock estimates, Docker image overhead, and prior
 observed disk peaks when available, but runtime setup caches are explicit:
 add `--runtime-disk` when command startup needs extra scratch space.
 
+The "prior observed disk peaks" path reads `disk_used_bytes` from
+`job_phase_timings` and the time-series peak from `job_timeseries`. The
+estimator rejects any historical sample above a 2 TB plausibility bound
+(`DiskTelemetryPlausibilityBytes`) — that range is reachable only when an
+agent-side `statfs` probe misreports on an overlay/fuse container root, and
+the estimator chooses to surface the bad sample (via `weft job anomalies`,
+structured logs, and a one-line note prepended to `placement_reasons`)
+rather than silently clamp it. If your job is being held up by an
+"anomalous historical disk reading" note, run `weft job anomalies` to see
+which prior job produced the bogus sample.
+
 Weft sets `TMPDIR` to a writable per-job directory under `output/tmp` when the
 environment does not already define it. Override it with `-e TMPDIR=...` only
 when a job needs a different scratch location.

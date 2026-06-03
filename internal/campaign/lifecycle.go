@@ -517,44 +517,15 @@ func launchCostInputs(estimates []CostEstimate, idx int) (jobDurationHrs, setupO
 	return jobDurationHrs, setupOverheadHrs
 }
 
-func replacementPriceAllowed(originalPricePerHour, replacementPricePerHour float64) bool {
-	if originalPricePerHour <= 0 || replacementPricePerHour <= 0 {
-		return true
-	}
-	return replacementPricePerHour <= originalPricePerHour*replacementOfferMaxPriceMultiplier
-}
-
-func replacementPriceCapError(originalPricePerHour float64, replacement cloud.Offer) error {
-	return fmt.Errorf(
-		"replacement offer price $%.2f/hr exceeds %.0f%% cap over original offer $%.2f/hr",
-		replacement.CostPerHour,
-		(replacementOfferMaxPriceMultiplier-1)*100,
-		originalPricePerHour,
-	)
-}
-
-func searchReplacementOfferWithPriceCap(originalPricePerHour float64, excludeOfferKeys map[string]struct{}, search func(map[string]struct{}) GroupOffer) (*cloud.Offer, error) {
-	var lastPriceErr error
-	for range replacementOfferSearchAttempts {
-		replacement := search(excludeOfferKeys)
-		if replacement.Err != nil {
-			return nil, replacement.Err
-		}
-		if replacement.Offer == nil {
-			if lastPriceErr != nil {
-				return nil, lastPriceErr
-			}
-			return nil, nil
-		}
-		if replacementPriceAllowed(originalPricePerHour, replacement.Offer.CostPerHour) {
-			return replacement.Offer, nil
-		}
-
-		lastPriceErr = replacementPriceCapError(originalPricePerHour, *replacement.Offer)
-		excludeOfferKeys[replacement.Offer.Key()] = struct{}{}
-	}
-	return nil, lastPriceErr
-}
+// The fixed-multiplier price cap (replacementPriceAllowed /
+// searchReplacementOfferWithPriceCap, anchored on the original offer's
+// hourly price) was removed in favor of the history-derived authorization
+// gate in price_gate.go. The user-facing reasoning: anchoring on a single
+// offer's price meant a promotional or scarcity-discounted original could
+// produce a ceiling that no real-market replacement could clear, so
+// stockouts dead-ended the launch instead of pivoting to a real offer.
+// See evaluatePriceGate and searchAuthorizedReplacementOffer for the
+// replacement.
 
 // maxCreateAttempts is the maximum number of actual provider create requests
 // before giving up.
@@ -1226,20 +1197,26 @@ func launchCampaignWithStager(
 				return
 			}
 
-			originalPrice := ofr.CostPerHour
 			minReliability := 0.95
 			if cfg, err := config.Load(); err == nil && cfg != nil {
 				minReliability = cfg.CampaignReliability()
 			}
 			// Pass the full clients slice into the replacement-offer search
 			// so a retryable failure on one provider's offer can fall back
-			// to another provider's offer pool. The existing price-cap
-			// filter (searchReplacementOfferWithPriceCap) still bounds the
-			// candidates by 1.25x of the original offer's price, so cross-
-			// provider fallback can't blow the cost budget. The matching
-			// client swap happens inside createInstanceWithReplacement.
+			// to another provider's offer pool. The price gate
+			// (searchAuthorizedReplacementOffer) bounds candidates by the
+			// user's authorized spend history for this GPU bucket, applied
+			// uniformly across same-provider and cross-provider
+			// replacements. The matching client swap happens inside
+			// createInstanceWithReplacement.
+			gateCtx := PriceGateContext{
+				GPUClass: group.GPUClass,
+				GPUMemGB: group.GPUMemGB,
+				JobIDs:   priceGateJobIDs(group),
+				DB:       database,
+			}
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
-				return searchReplacementOfferWithPriceCap(originalPrice, excludeOfferKeys, func(exclude map[string]struct{}) GroupOffer {
+				return searchAuthorizedReplacementOffer(gateCtx, excludeOfferKeys, func(exclude map[string]struct{}) GroupOffer {
 					return SearchBestOfferForGroupWithProfile(
 						clients,
 						group,
@@ -1907,6 +1884,49 @@ func LaunchInstance(
 		client = finalClient
 	}
 	if err != nil {
+		// A price-authorization failure is categorically different from an
+		// infra failure. The system correctly refused to spend more than the
+		// user authorized for this GPU bucket; no instance was actually
+		// created at the provider, and the autopilot's runaway-failure
+		// circuit breaker must not count this against the failure tally.
+		// Mark the placeholder launch as canceled (not failed), write a
+		// structured placement_blocked block for every job in the group so
+		// the TUI surfaces an actionable message, and return the typed
+		// error so the autopilot caller can route it correctly.
+		var authErr *PriceAuthorizationRequiredError
+		if errors.As(err, &authErr) {
+			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled, authErr.Error())
+			// Use AttemptOutcomeCancelled (not Orphaned) so the runaway
+			// breaker and orphan-streak alarm don't count price-
+			// authorization holds — they're user-actionable, not
+			// infrastructural, and the autopilot tally must not pause for
+			// them. See specs/campaign-lifecycle.allium §
+			// PriceAuthorizationDoesNotTripCircuitBreaker.
+			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeCancelled)
+			// Build the structured blockreason JSON inline rather than
+			// importing internal/blockreason (it depends on this package,
+			// so the import would cycle). The shape matches
+			// blockreason.Structured.Marshal() output.
+			structuredJSON, _ := json.Marshal(struct {
+				Summary string `json:"summary"`
+				Launch  string `json:"launch,omitempty"`
+			}{
+				Summary: authErr.Error(),
+				Launch:  authErr.Error(),
+			})
+			for _, job := range group.Jobs {
+				if job == nil {
+					continue
+				}
+				_ = db.SetJobPlacementBlocked(database, job.ID, string(structuredJSON))
+				_ = db.SetJobPlacementReasons(database, job.ID, []string{authErr.Error()})
+			}
+			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+				"launch_id=%d provider=%s requires_price_authorization gpu_class=%s gpu_mem_gb=%d",
+				instanceID, client.Provider(), authErr.GPUClass, authErr.GPUMemGB,
+			))
+			return instanceID, err
+		}
 		// Distinguish provider CLI/API timeouts from genuine create failures so
 		// the clustered-failures banner can ignore them — see
 		// db.IsTransientInstanceTermination and internal/ui/terminal/list_grouped_status.go.

@@ -599,3 +599,31 @@ guards (referencing the incident that exposed them when applicable),
 rules with `when:` / `ensures:` blocks, `@guidance` blocks pointing
 to implementation anchors. Cross-reference via `use "./other.allium"
 as alias`.
+
+## Migration test forces per-migration idempotency boilerplate
+
+`TestOpen_TakesMigrationBackupOnUpgrade` zeroes the goose version table
+and re-opens, forcing every numbered migration to re-execute against an
+already-current schema. The standard goose contract is "each migration
+runs once when the recorded version advances," so production never
+re-applies migration N on a database already at N — but the test path
+does, and every `ALTER TABLE ... ADD COLUMN` migration has to be
+authored as a Go migration with a `pragma_table_info` guard to survive
+it.
+
+Two migrations currently pay this tax (versions 9 and 12 — see
+`internal/db/migrations/migrations.go applyAddOnStartProbeSeenColumn`
+and `applyPriceAuthorizations`). Each future column-add will too if
+left as-is. The same column-add in plain idiomatic SQL is one line.
+
+Fix direction: rework the backup test so it uses a fixture DB whose
+goose version is genuinely an older `Target() - 1` (or a throwaway
+test-only migration registered to drive the backup path), rather than
+zeroing the version table on a current DB. Then every ALTER TABLE
+migration can go back to being plain SQL, and migrations 9 and 12 can
+be simplified to match.
+
+Don't take the alternative path of writing a goose wrapper that
+parses migration SQL and rewrites ADD COLUMN to a conditional — the
+parser becomes a meaningful surface for surprise, and the workaround
+moves but doesn't disappear.

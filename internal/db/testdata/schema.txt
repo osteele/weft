@@ -312,6 +312,7 @@ table jobs
   col 30 priority INTEGER notnull=1 default=0 pk=0
   col 31 job_metadata TEXT notnull=0 default=<none> pk=0
   col 32 placement_blocked TEXT notnull=0 default=<none> pk=0
+  col 33 price_authorized_up_to_cents INTEGER notnull=0 default=<none> pk=0
 table launch_live_state
   col 0 launch_id INTEGER notnull=0 default=<none> pk=1
   col 1 instance_phase TEXT notnull=0 default=<none> pk=0
@@ -515,6 +516,15 @@ table prediction_history
   col 13 created_at INTEGER notnull=1 default=<none> pk=0
   fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
   fk job_id -> jobs(id) on_update=NO ACTION on_delete=NO ACTION
+table price_authorizations
+  col 0 id INTEGER notnull=0 default=<none> pk=1
+  col 1 gpu_class TEXT notnull=1 default=<none> pk=0
+  col 2 gpu_mem_gb INTEGER notnull=1 default=<none> pk=0
+  col 3 up_to_cents INTEGER notnull=1 default=<none> pk=0
+  col 4 created_at INTEGER notnull=1 default=<none> pk=0
+  col 5 created_by TEXT notnull=0 default=<none> pk=0
+  col 6 note TEXT notnull=0 default=<none> pk=0
+  unique-index (gpu_class,gpu_mem_gb) origin=u partial=0
 table processed_intents
   col 0 intent_id TEXT notnull=0 default=<none> pk=1
   col 1 processed_at INTEGER notnull=1 default=<none> pk=0
