@@ -34,6 +34,15 @@ type AutoPlacementPlan struct {
 	// BlockedReasons entry — callers should fall back to BlockedReasons when
 	// the map has no entry for a job.
 	BlockedReasonDetails map[int64]string
+	// BlockedReasonFingerprints carries the stable error-class fingerprint
+	// (e.g. "vastai/search-offers/400/bad-field:driver_vers") per job ID
+	// when applyGroupOffer's offer.Err was a *cloud.ProviderError. Display
+	// surfaces use these to coalesce systemic upstream failures across many
+	// jobs into one incident headline instead of fragmenting per
+	// filter-prefix variation. Empty entries mean "no upstream
+	// classification available" and the row keeps today's per-message
+	// bucketing.
+	BlockedReasonFingerprints map[int64]string
 }
 
 // LaunchGroup captures one launchable candidate group and its projected run-rate cost.
@@ -282,12 +291,18 @@ func jobByID(jobs []*db.Job, id int64) *db.Job {
 func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOffer, reused map[int64]struct{}, minReliability float64) {
 	launchable := offer.Offer != nil && offer.Err == nil
 	rawReason := ""
+	fingerprint := ""
 	if !launchable {
 		if offer.Err != nil {
 			rawReason = offer.Err.Error()
+			fingerprint = cloud.FingerprintOf(offer.Err)
 		} else {
 			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(group, minReliability))
 			rawReason = offer.FilterStats.NoOffersDetail(constraintStr)
+			// Empty-after-filter is itself a categorized failure; coalesce
+			// jobs that share the same filter-stage failure into one incident
+			// even though the constraint strings differ across groups.
+			fingerprint = filterStatsFingerprint(offer.FilterStats)
 		}
 	}
 	compact := SanitizeBlockedReason(rawReason)
@@ -312,8 +327,36 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 				}
 				plan.BlockedReasonDetails[job.ID] = full
 			}
+			if fingerprint != "" {
+				if plan.BlockedReasonFingerprints == nil {
+					plan.BlockedReasonFingerprints = map[int64]string{}
+				}
+				plan.BlockedReasonFingerprints[job.ID] = fingerprint
+			}
 		}
 	}
+}
+
+// filterStatsFingerprint maps the OfferFilterStats post-filter outcome to a
+// stable coalescing key. Returns "" when the stats don't identify a
+// categorical failure stage (so the caller falls back to today's per-message
+// bucketing).
+func filterStatsFingerprint(s OfferFilterStats) string {
+	switch {
+	case s.RawCount == 0:
+		return "vastai/search-offers/empty-result:no-offers"
+	case s.AfterVRAM == 0:
+		return "vastai/search-offers/empty-result:vram"
+	case s.AfterCUDA == 0:
+		return "vastai/search-offers/empty-result:cuda"
+	case s.ProviderCompatibilityFiltered > 0 && s.AfterProvider == 0:
+		return "vastai/search-offers/empty-result:provider-driver"
+	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
+		return "vastai/search-offers/empty-result:torch-arch"
+	case s.AfterSurvival == 0:
+		return "vastai/search-offers/empty-result:survival"
+	}
+	return ""
 }
 
 // SanitizeBlockedReason collapses multi-line errors (e.g. Python tracebacks

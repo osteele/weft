@@ -2498,7 +2498,22 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- untruncated text is persisted on Structured.LaunchDetail (and
         -- ReuseRejection.Detail) so the TUI disclosure expand view and the
         -- `weft job info` CLI can show the underlying provider message
-        -- instead of a clipped one-liner. It is carried on the pass result
+        -- instead of a clipped one-liner.
+        --
+        -- Structured.Fingerprint carries a stable error-class coalescing key
+        -- (shape "<provider>/<op>/<class>[:<key>]" — see
+        -- cloud.ProviderError) when the upstream provider error was
+        -- classifiable. Display surfaces SHOULD group blocked jobs sharing
+        -- the same Fingerprint into a single incident row instead of
+        -- bucketing per cosmetic filter-prefix variation. Empty Fingerprint
+        -- means "no upstream classification available" and the row keeps
+        -- per-message bucketing. Populated by applyGroupOffer via
+        -- cloud.FingerprintOf(offer.Err) or, for empty-after-filter cases,
+        -- filterStatsFingerprint over the post-filter OfferFilterStats. The
+        -- autopilot lifts plan.BlockedReasonFingerprints into
+        -- Structured.Fingerprint independently of LaunchDetail so jobs
+        -- with a structured upstream error but short single-line detail
+        -- still participate in incident coalescing. It is carried on the pass result
         -- (GroupedAutoPilotResult.StructuredBlocked) and also persisted to
         -- the jobs.placement_blocked column by finalizeUnplacedBlockedReasons
         -- so consumers that did not run the pass (watch TUIs, weft job info)

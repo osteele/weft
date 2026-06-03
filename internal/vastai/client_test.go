@@ -438,6 +438,42 @@ exit 0
 	}
 }
 
+// TestSearchOffersCarriesProviderErrorWithFingerprint is the integration-level
+// regression for error-class coalescing: when Vast.ai 400s with the
+// driver_vers shape, SearchOffers must surface a *cloud.ProviderError whose
+// Fingerprint is the stable coalescing key. The TUI/CLI layers downstream
+// then group every job hitting the same fingerprint into one incident.
+func TestSearchOffersCarriesProviderErrorWithFingerprint(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := `#!/bin/sh
+printf '%s\n' '{"error": true, "status_code": 400, "msg": " ask_contract_offers.driver_vers gte None: query values can'"'"'t be None"}' >&2
+exit 0
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	c := &Client{CLIPath: stub}
+	_, err := c.SearchOffers(OfferConstraints{GPUClass: "nvidia", MinGPUMemGB: 10, NumGPUs: 1, MinDriverVersion: 535})
+	if err == nil {
+		t.Fatal("SearchOffers err = nil, want error")
+	}
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("errors.Is(ErrProviderRejected) = false, err = %v", err)
+	}
+	pe, ok := cloud.AsProviderError(err)
+	if !ok {
+		t.Fatalf("AsProviderError returned ok=false, err = %v", err)
+	}
+	if pe.Fingerprint != "vastai/search-offers/400/bad-field:driver_vers" {
+		t.Fatalf("Fingerprint = %q, want vastai/search-offers/400/bad-field:driver_vers", pe.Fingerprint)
+	}
+	if pe.StatusCode != 400 {
+		t.Fatalf("StatusCode = %d, want 400", pe.StatusCode)
+	}
+}
+
 // TestOperationPrefixDropsFlags verifies that the error-message prefix
 // rendering drops flag tokens (anything starting with "-") so users see the
 // semantic operation, not the literal command line.

@@ -78,6 +78,65 @@ func TestApplyGroupOffer_FullDetailPreservedForMultiLineError(t *testing.T) {
 	}
 }
 
+// TestApplyGroupOffer_FingerprintFromProviderError verifies that when
+// offer.Err is a *cloud.ProviderError, applyGroupOffer extracts the
+// fingerprint into plan.BlockedReasonFingerprints. This is the substrate that
+// lets the TUI coalesce 18 jobs sharing one upstream cause (e.g. the vastai
+// driver_vers 400) into a single incident instead of N look-alike buckets.
+func TestApplyGroupOffer_FingerprintFromProviderError(t *testing.T) {
+	pe := cloud.WrapProviderError(
+		cloud.ErrProviderRejected,
+		"vastai",
+		"search-offers",
+		400,
+		"ask_contract_offers.driver_vers gte None: query values can't be None",
+		"vastai", "search-offers", "400/bad-field:driver_vers",
+	)
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 808}}}
+	offer := GroupOffer{Err: pe}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	want := "vastai/search-offers/400/bad-field:driver_vers"
+	if got := plan.BlockedReasonFingerprints[808]; got != want {
+		t.Fatalf("BlockedReasonFingerprints[808] = %q, want %q", got, want)
+	}
+}
+
+// TestApplyGroupOffer_FingerprintFromFilterStats verifies that empty-after-
+// filter cases also produce a categorical fingerprint so VRAM/CUDA/arch
+// shortfalls coalesce across groups even when no upstream error reached the
+// planner.
+func TestApplyGroupOffer_FingerprintFromFilterStats(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{GPUClass: "ampere+", GPUMemGB: 40, Jobs: []*db.Job{{ID: 911}}}
+	offer := GroupOffer{FilterStats: OfferFilterStats{RawCount: 12, AfterVRAM: 0}}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	if got := plan.BlockedReasonFingerprints[911]; got != "vastai/search-offers/empty-result:vram" {
+		t.Fatalf("BlockedReasonFingerprints[911] = %q, want vram class", got)
+	}
+}
+
+// TestApplyGroupOffer_NoFingerprintForPlainError verifies the no-fingerprint
+// fallback so today's per-message bucketing continues for unclassified errors.
+func TestApplyGroupOffer_NoFingerprintForPlainError(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 912}}}
+	offer := GroupOffer{Err: errors.New("some upstream complaint we don't classify")}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	if _, ok := plan.BlockedReasonFingerprints[912]; ok {
+		t.Fatalf("BlockedReasonFingerprints[912] set unexpectedly")
+	}
+	if plan.BlockedReasons[912] == "" {
+		t.Fatal("BlockedReasons[912] empty, want compact reason")
+	}
+}
+
 // TestApplyGroupOffer_DetailOmittedWhenCompactSufficient verifies that single
 // short reasons (the common case) do not bloat BlockedReasonDetails — there's
 // no point persisting a duplicate of the compact line.

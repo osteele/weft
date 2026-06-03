@@ -168,6 +168,44 @@ func TestStructuredDetailLinesSkipsRedundantDetail(t *testing.T) {
 	}
 }
 
+// TestStructuredMarshalRoundTripIncludesFingerprint verifies the
+// error-coalescing fingerprint survives Marshal/Parse. Required so the TUI
+// disclosure and `weft incidents` CLI can group jobs by fingerprint after a
+// process restart without re-running the planner.
+func TestStructuredMarshalRoundTripIncludesFingerprint(t *testing.T) {
+	s := &Structured{
+		Summary:     "planner: search offers: provider rejected request",
+		Launch:      "planner: search offers: provider rejected request",
+		Fingerprint: "vastai/search-offers/400/bad-field:driver_vers",
+	}
+	encoded := s.Marshal()
+	got := Parse(encoded)
+	if got == nil {
+		t.Fatal("Parse returned nil")
+	}
+	if got.Fingerprint != s.Fingerprint {
+		t.Fatalf("Fingerprint round trip: got %q, want %q", got.Fingerprint, s.Fingerprint)
+	}
+}
+
+// TestStructuredParseBackwardCompatibleNoFingerprint verifies that pre-existing
+// rows in the placement_blocked column (persisted before this commit added
+// Fingerprint) parse cleanly with an empty Fingerprint field.
+func TestStructuredParseBackwardCompatibleNoFingerprint(t *testing.T) {
+	// Shape from a pre-fingerprint DB row.
+	encoded := `{"summary":"planner: search offers: provider rejected request","launch":"planner: search offers: provider rejected request"}`
+	got := Parse(encoded)
+	if got == nil {
+		t.Fatal("Parse returned nil for pre-fingerprint row")
+	}
+	if got.Fingerprint != "" {
+		t.Fatalf("Fingerprint = %q, want empty for pre-fingerprint row", got.Fingerprint)
+	}
+	if !got.IsPlacementFailure() {
+		t.Fatal("pre-fingerprint row lost IsPlacementFailure")
+	}
+}
+
 // TestStructuredMarshalRoundTripIncludesDetail verifies that LaunchDetail and
 // ReuseRejection.Detail are persisted across Marshal/Parse so the placement
 // disclosure survives a process restart.

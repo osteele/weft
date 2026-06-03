@@ -263,17 +263,32 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	// Lift the planner's per-job full-detail map (e.g. multi-line vastai
 	// stderr) into the structured form so the TUI disclosure expand view and
-	// CLI surfaces can show the underlying provider message instead of the
-	// compact 240-char one-liner.
-	for jobID, detail := range plan.BlockedReasonDetails {
+	// CLI surfaces can show the underlying provider message. Lift the
+	// fingerprint independently so jobs with a structured upstream error but
+	// short single-line detail still participate in incident coalescing.
+	liftStructured := func(jobID int64) *blockreason.Structured {
+		if s, ok := structuredBlocked[jobID]; ok && s != nil {
+			return s
+		}
 		flat, ok := blockedReasons[jobID]
 		if !ok || strings.TrimSpace(flat) == "" {
+			return nil
+		}
+		s := &blockreason.Structured{Summary: flat, Launch: flat}
+		structuredBlocked[jobID] = s
+		return s
+	}
+	for jobID, detail := range plan.BlockedReasonDetails {
+		if s := liftStructured(jobID); s != nil {
+			s.LaunchDetail = detail
+		}
+	}
+	for jobID, fp := range plan.BlockedReasonFingerprints {
+		if strings.TrimSpace(fp) == "" {
 			continue
 		}
-		structuredBlocked[jobID] = &blockreason.Structured{
-			Summary:      flat,
-			Launch:       flat,
-			LaunchDetail: detail,
+		if s := liftStructured(jobID); s != nil {
+			s.Fingerprint = fp
 		}
 	}
 	// Reuse-rejection diagnostics are kept separate from blockedReasons so an

@@ -282,14 +282,13 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 
 	out, err := c.runWithTimeout(createInstanceTimeout, args...)
 	if err != nil {
-		if isAccountCreditError(err.Error()) {
-			return nil, fmt.Errorf("%w: %v", cloud.ErrAccountCreditExhausted, err)
-		}
-		if isUnavailableOfferError(err) {
-			return nil, fmt.Errorf("%w: %v", cloud.ErrOfferUnavailable, err)
-		}
-		if isProviderRejectedCreateError(err) {
-			return nil, fmt.Errorf("%w: %v", cloud.ErrProviderRejected, err)
+		switch {
+		case isAccountCreditError(err.Error()):
+			return nil, upgradeSentinel("create-instance", cloud.ErrAccountCreditExhausted, err)
+		case isUnavailableOfferError(err):
+			return nil, upgradeSentinel("create-instance", cloud.ErrOfferUnavailable, err)
+		case isProviderRejectedCreateError(err):
+			return nil, upgradeSentinel("create-instance", cloud.ErrProviderRejected, err)
 		}
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
@@ -307,20 +306,21 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		// surfacing the generic provider-rejected message so the autopilot
 		// stops retrying against a dead provider.
 		if credit, probeErr := c.probeCreditBalance(); probeErr == nil && credit <= 0 {
-			return nil, fmt.Errorf("provider returned empty response while account credit was exhausted ($%.2f): %w", credit, cloud.ErrAccountCreditExhausted)
+			return nil, classify("create-instance", cloud.ErrAccountCreditExhausted, 0, fmt.Sprintf("provider returned empty response while account credit was exhausted ($%.2f)", credit))
 		}
-		return nil, fmt.Errorf("provider returned empty response: %w", cloud.ErrProviderRejected)
+		return nil, classify("create-instance", cloud.ErrProviderRejected, 0, "provider returned empty response")
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		if msg := extractProviderErrorMessage(out); msg != "" {
+			sentinel := cloud.ErrProviderRejected
 			if isAccountCreditError(msg) {
-				return nil, fmt.Errorf("%s: %w", msg, cloud.ErrAccountCreditExhausted)
+				sentinel = cloud.ErrAccountCreditExhausted
 			}
-			return nil, fmt.Errorf("%s: %w", msg, cloud.ErrProviderRejected)
+			return nil, classify("create-instance", sentinel, 0, msg)
 		}
 		if msg := extractCLIError(out); msg != "" {
 			if isAccountCreditError(msg) {
-				return nil, fmt.Errorf("%s: %w", msg, cloud.ErrAccountCreditExhausted)
+				return nil, classify("create-instance", cloud.ErrAccountCreditExhausted, 0, msg)
 			}
 			return nil, fmt.Errorf("create instance: %s", msg)
 		}
@@ -342,9 +342,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
 				slog.Warn("failed to destroy orphaned instance", "component", "vastai", "instance", resp.NewContract, "error", destroyErr)
 			}
-			return nil, fmt.Errorf("%s: %w (contract %d)", reason, sentinel, resp.NewContract)
+			return nil, fmt.Errorf("%w (contract %d)", classify("create-instance", sentinel, 0, reason), resp.NewContract)
 		}
-		return nil, fmt.Errorf("%s: %w", reason, sentinel)
+		return nil, classify("create-instance", sentinel, 0, reason)
 	}
 
 	if opts.PublicKeyFile != "" {
@@ -645,8 +645,14 @@ func (c *Client) runWithTimeout(commandTimeout time.Duration, args ...string) ([
 	// Surface those as ErrProviderRejected so callers see the underlying
 	// reason instead of "provider returned empty response".
 	if stdout.Len() == 0 && stderr.Len() > 0 {
-		if cliErr := extractStderrError(stderr.Bytes()); cliErr != "" {
-			return nil, fmt.Errorf("%s: %w: %s", strings.Join(prefix, " "), cloud.ErrProviderRejected, cliErr)
+		if cliErr, statusCode := extractStderrErrorDetailed(stderr.Bytes()); cliErr != "" {
+			// Wrap with the structured ProviderError so display surfaces can
+			// coalesce by fingerprint (e.g. every job hitting the same vastai
+			// 400 lands in one incident, not N look-alike buckets). The
+			// embedded Sentinel keeps existing errors.Is dispatch intact for
+			// retry classification.
+			pe := classify(opNameFromArgs(prefix), cloud.ErrProviderRejected, statusCode, cliErr)
+			return nil, fmt.Errorf("%s: %w", strings.Join(prefix, " "), pe)
 		}
 	}
 	return stdout.Bytes(), nil
@@ -675,29 +681,40 @@ func operationPrefix(args []string, maxPositional int) []string {
 	return out
 }
 
-// extractStderrError pulls a human-readable error message out of vastai CLI
-// stderr. Returns "" when stderr looks like benign output (only warnings,
-// progress notices, deprecation hints, etc.) so the caller treats the command
-// as successful — vastai routinely writes informational lines to stderr while
-// exiting 0, and we must not misclassify those as provider rejections.
-// Handles two observed error shapes:
+// extractStderrErrorDetailed pulls a human-readable error message and
+// upstream status_code (0 when not present) out of vastai CLI stderr. Returns
+// "" when stderr looks like benign output (only warnings, progress notices,
+// deprecation hints, etc.) so the caller treats the command as successful —
+// vastai routinely writes informational lines to stderr while exiting 0, and
+// we must not misclassify those as provider rejections. Handles two observed
+// error shapes:
 //   - {"error": true, "status_code": N, "msg": "..."} (API error JSON)
 //   - "Warning: ..." preamble followed by an error JSON line on the next line
-func extractStderrError(stderrBytes []byte) string {
+func extractStderrErrorDetailed(stderrBytes []byte) (string, int) {
 	s := strings.TrimSpace(string(stderrBytes))
 	if s == "" {
-		return ""
+		return "", 0
 	}
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if len(line) == 0 || line[0] != '{' {
 			continue
 		}
+		var resp struct {
+			Msg        string `json:"msg"`
+			StatusCode int    `json:"status_code"`
+		}
+		if err := json.Unmarshal([]byte(line), &resp); err == nil {
+			if msg := strings.TrimSpace(resp.Msg); msg != "" {
+				return msg, resp.StatusCode
+			}
+		}
+		// Fallback to the existing extractor for shapes we don't parse here.
 		if msg := extractProviderErrorMessage([]byte(line)); msg != "" {
-			return msg
+			return msg, 0
 		}
 	}
-	return ""
+	return "", 0
 }
 
 // buildSearchFilter constructs a vastai search filter string from constraints.

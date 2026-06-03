@@ -36,10 +36,18 @@ type ReuseRejection struct {
 // carry the optional full, untruncated reason (preserved newlines and all)
 // used by the TUI expand view and CLI diagnose/show surfaces. When the detail
 // fields are empty, callers should fall back to the sanitized fields.
+//
+// Fingerprint is an optional stable coalescing key (shape:
+// "<provider>/<op>/<class>[:<key>]" — see cloud.ProviderError). When set,
+// display surfaces SHOULD group blocked jobs sharing the same Fingerprint
+// into a single incident row instead of bucketing per filter-prefix
+// variation. Empty when no upstream classification was available; absence
+// reverts to today's per-message bucketing.
 type Structured struct {
 	Summary      string           `json:"summary"`
 	Launch       string           `json:"launch,omitempty"`
 	LaunchDetail string           `json:"launch_detail,omitempty"`
+	Fingerprint  string           `json:"fingerprint,omitempty"`
 	Reuse        []ReuseRejection `json:"reuse,omitempty"`
 }
 
