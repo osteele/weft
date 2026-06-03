@@ -561,6 +561,13 @@ func (c *Client) DestroyInstance(instanceID int) error {
 	// turning every destroy into a no-op and stranding stopped instances.
 	_, err := c.run("destroy", "instance", strconv.Itoa(instanceID), "-y", "--raw")
 	if err != nil {
+		// Already gone on the provider — destroy is idempotent. Mirrors
+		// runpod/client.go DestroyInstance. Without this, the reconciler
+		// at internal/campaign/instance_check.go aborts the terminal-status
+		// write on every pass and the launch wedges indefinitely.
+		if strings.Contains(err.Error(), fmt.Sprintf("Instance %d not found", instanceID)) {
+			return nil
+		}
 		return fmt.Errorf("destroy instance %d: %w", instanceID, err)
 	}
 	return nil

@@ -883,3 +883,37 @@ func TestDestroyInstancePassesYesFlag(t *testing.T) {
 		t.Fatalf("DestroyInstance must pass -y/--yes; got args:\n%s", got)
 	}
 }
+
+// Regression: when vastai reports "Instance N not found", treat destroy as
+// idempotent success. Otherwise the reconciler (instance_check.go) defers
+// terminal-status writes on every pass and a launch can wedge indefinitely.
+func TestDestroyInstanceIdempotentWhenNotFound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf 'Instance 39145397 not found\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	c := &Client{CLIPath: stub}
+	if err := c.DestroyInstance(39145397); err != nil {
+		t.Fatalf("DestroyInstance: expected nil for already-gone instance, got %v", err)
+	}
+}
+
+// Negative case: confirm the not-found match is specific. An unrelated
+// failure must still surface as an error so transient provider issues
+// don't get silently swallowed.
+func TestDestroyInstanceErrorsOnUnrelatedFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf 'Internal server error\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	c := &Client{CLIPath: stub}
+	if err := c.DestroyInstance(39145397); err == nil {
+		t.Fatalf("DestroyInstance: expected error for unrelated failure, got nil")
+	}
+}
