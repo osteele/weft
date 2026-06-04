@@ -304,15 +304,23 @@ func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {
 }
 
 func (c *CloudClient) WaitReady(instanceID string, timeout time.Duration) (*cloud.Instance, error) {
-	deadline := time.Now().Add(timeout)
-	poll := 5 * time.Second
+	return c.waitReady(instanceID, timeout, 5*time.Second)
+}
 
+func (c *CloudClient) waitReady(instanceID string, timeout, poll time.Duration) (*cloud.Instance, error) {
+	deadline := time.Now().Add(timeout)
+
+	seen := false
 	for time.Now().Before(deadline) {
 		inst, err := c.ShowInstance(instanceID)
 		if err != nil {
+			if seen && errors.Is(err, cloud.ErrInstanceNotFound) {
+				return nil, err
+			}
 			time.Sleep(poll)
 			continue
 		}
+		seen = true
 		if inst.Status == cloud.ProviderStatusRunning {
 			return inst, nil
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -530,13 +531,24 @@ func (c *Client) ListAllInstances() ([]Instance, error) {
 
 // WaitReady polls until an instance reaches "running" status or the timeout expires.
 func (c *Client) WaitReady(instanceID int, timeout time.Duration) (*Instance, error) {
+	return c.waitReady(instanceID, timeout, 5*time.Second)
+}
+
+func (c *Client) waitReady(instanceID int, timeout, poll time.Duration) (*Instance, error) {
+	return waitReady(instanceID, timeout, poll, c.ShowInstance)
+}
+
+func waitReady(instanceID int, timeout, poll time.Duration, showInstance func(int) (*Instance, error)) (*Instance, error) {
 	deadline := time.Now().Add(timeout)
-	poll := 5 * time.Second
 
 	lastStatus := ""
+	seen := false
 	for time.Now().Before(deadline) {
-		inst, err := c.ShowInstance(instanceID)
+		inst, err := showInstance(instanceID)
 		if err != nil {
+			if seen && errors.Is(err, cloud.ErrInstanceNotFound) {
+				return nil, err
+			}
 			// Instance might not be visible immediately after creation
 			if lastStatus == "" {
 				slog.Debug("instance not visible yet, retrying", "component", "vastai", "instance", instanceID)
@@ -544,6 +556,7 @@ func (c *Client) WaitReady(instanceID int, timeout time.Duration) (*Instance, er
 			time.Sleep(poll)
 			continue
 		}
+		seen = true
 		if inst.Status != lastStatus {
 			slog.Debug("instance status changed", "component", "vastai", "instance", instanceID, "status", inst.Status)
 			lastStatus = inst.Status

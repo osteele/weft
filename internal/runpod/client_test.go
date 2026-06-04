@@ -398,6 +398,92 @@ func TestShowInstanceBackfillsMachineMetadataFromDetail(t *testing.T) {
 	}
 }
 
+func TestWaitReadyReturnsNotFoundAfterPodDisappears(t *testing.T) {
+	prev := fetchPodDetailFunc
+	t.Cleanup(func() { fetchPodDetailFunc = prev })
+	fetchPodDetailFunc = func(context.Context, string) (*Pod, error) {
+		return nil, errors.New("detail unavailable")
+	}
+
+	calls := 0
+	runner := newSequencedPodGetRunner(t, func() ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte(`{"id":"pod-123","desiredStatus":"STARTING"}`), nil
+		}
+		return nil, errors.New("pod not found")
+	})
+
+	_, err := newCloudClientForTests(runner).waitReady("pod-123", 100*time.Millisecond, time.Millisecond)
+	if !errors.Is(err, cloud.ErrInstanceNotFound) {
+		t.Fatalf("WaitReady error = %v, want ErrInstanceNotFound", err)
+	}
+}
+
+func TestWaitReadyAllowsInitialPodNotFound(t *testing.T) {
+	prev := fetchPodDetailFunc
+	t.Cleanup(func() { fetchPodDetailFunc = prev })
+	fetchPodDetailFunc = func(context.Context, string) (*Pod, error) {
+		return nil, errors.New("detail unavailable")
+	}
+
+	calls := 0
+	runner := newSequencedPodGetRunner(t, func() ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("pod not found")
+		}
+		return []byte(`{"id":"pod-123","desiredStatus":"RUNNING"}`), nil
+	})
+
+	inst, err := newCloudClientForTests(runner).waitReady("pod-123", 100*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if inst.ProviderID != "pod-123" || inst.Status != cloud.ProviderStatusRunning {
+		t.Fatalf("instance = %+v, want running pod-123", inst)
+	}
+}
+
+func newSequencedPodGetRunner(t *testing.T, podGet func() ([]byte, error)) *cliRunner {
+	t.Helper()
+	const path = "/opt/homebrew/bin/runpodctl"
+	return &cliRunner{
+		cliPath:  "runpodctl",
+		lookPath: func(string) (string, error) { return path, nil },
+		runCombined: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runCombined path = %q, want %q", gotPath, path)
+			}
+			switch strings.Join(args, " ") {
+			case "version":
+				return []byte("runpodctl 2.1.6"), nil
+			case "get --help":
+				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "gpu --help":
+				return []byte("Available Commands:\n  list\n"), nil
+			case "pod --help":
+				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
+			case "template --help":
+				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
+			default:
+				t.Fatalf("unexpected combined command %q", strings.Join(args, " "))
+				return nil, nil
+			}
+		},
+		runOutput: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runOutput path = %q, want %q", gotPath, path)
+			}
+			if strings.Join(args, " ") == "pod get pod-123" {
+				return podGet()
+			}
+			t.Fatalf("unexpected output command %q", strings.Join(args, " "))
+			return nil, nil
+		},
+	}
+}
+
 func TestParseSearchOutput_AllowsCLIWarningPrefix(t *testing.T) {
 	input := []byte(`warning: 'runpodctl get cloud' is deprecated
 [{"id":"offer-4090","displayName":"RTX 4090","memoryInGb":24,"communityPrice":0.44,"maxGpuCount":1}]`)

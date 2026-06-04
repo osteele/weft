@@ -3,6 +3,7 @@ package vastai
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,6 +139,49 @@ func TestParseShowInstances(t *testing.T) {
 	}
 	if inst.CPURAMMB != 131072.0 {
 		t.Errorf("instance.CPURAMMB = %f, want 131072.0", inst.CPURAMMB)
+	}
+}
+
+func TestWaitReadyReturnsNotFoundAfterInstanceDisappears(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	show := func(id int) (*Instance, error) {
+		if id != 99999 {
+			t.Fatalf("instance ID = %d, want 99999", id)
+		}
+		calls++
+		if calls == 1 {
+			return &Instance{ID: 99999, Status: cloud.ProviderStatusCreating}, nil
+		}
+		return nil, fmt.Errorf("instance 99999: %w", cloud.ErrInstanceNotFound)
+	}
+
+	_, err := waitReady(99999, 100*time.Millisecond, time.Millisecond, show)
+	if !errors.Is(err, cloud.ErrInstanceNotFound) {
+		t.Fatalf("WaitReady error = %v, want ErrInstanceNotFound", err)
+	}
+}
+
+func TestWaitReadyAllowsInitialNotFound(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	show := func(id int) (*Instance, error) {
+		if id != 99999 {
+			t.Fatalf("instance ID = %d, want 99999", id)
+		}
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("instance 99999: %w", cloud.ErrInstanceNotFound)
+		}
+		return &Instance{ID: 99999, Status: cloud.ProviderStatusRunning}, nil
+	}
+
+	inst, err := waitReady(99999, 100*time.Millisecond, time.Millisecond, show)
+	if err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if inst.ID != 99999 || inst.Status != cloud.ProviderStatusRunning {
+		t.Fatalf("instance = %+v, want running 99999", inst)
 	}
 }
 
