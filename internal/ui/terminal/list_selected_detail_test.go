@@ -373,6 +373,64 @@ func TestSelectedJobDetail_RentalRunningShowsElapsedCost(t *testing.T) {
 	}
 }
 
+func TestSelectedJobDetail_CompletedShowsRunCostAndExit(t *testing.T) {
+	now := time.Unix(3_000_000, 0)
+	launchID := int64(2427)
+	endTime := now.Add(-4 * time.Minute).Unix()
+	exit := 0
+	cost := 0.15
+	job := &db.Job{
+		ID:        2427,
+		LaunchID:  &launchID,
+		Status:    db.StatusCompleted,
+		StartTime: endTime - int64(37*time.Minute/time.Second),
+		EndTime:   &endTime,
+		ExitCode:  &exit,
+		Cost:      &cost,
+	}
+
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
+	if len(lines) == 0 {
+		t.Fatalf("expected detail lines, got none")
+	}
+	for _, want := range []string{"Job: wj2427", "ran 37m", "finished 4m ago", "cost $0.15", "exit 0"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("expected %q in Job line, got: %s", want, lines[0])
+		}
+	}
+}
+
+func TestSelectedJobDetail_CompletedFallsBackToLaunchRateCost(t *testing.T) {
+	now := time.Unix(3_000_000, 0)
+	launchID := int64(2428)
+	endTime := now.Add(-1 * time.Minute).Unix()
+	exit := 0
+	job := &db.Job{
+		ID:        2428,
+		LaunchID:  &launchID,
+		Status:    db.StatusCompleted,
+		StartTime: endTime - int64(30*time.Minute/time.Second),
+		EndTime:   &endTime,
+		ExitCode:  &exit,
+	}
+	ctx := selectedJobContext{
+		launchByID: map[int64]*db.Launch{
+			launchID: {
+				ID:               launchID,
+				CostPerHourCents: 20,
+			},
+		},
+	}
+
+	lines := renderSelectedJobDetail(job, ctx, now)
+	if len(lines) == 0 {
+		t.Fatalf("expected detail lines, got none")
+	}
+	if !strings.Contains(lines[0], "cost $0.10") {
+		t.Fatalf("expected fallback cost from launch rate, got: %s", lines[0])
+	}
+}
+
 func TestSelectedJobDetail_RentalHostFallbackWhenLaunchMissing(t *testing.T) {
 	now := time.Unix(3_000_000, 0)
 	launchID := int64(77)

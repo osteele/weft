@@ -1272,9 +1272,22 @@ rule TUIPeriodicSync {
         --       - running/starting:         "elapsed <duration>" when
         --                                   StartTime > 0.
         --       - queued/pending_placement: "waiting <duration>".
+        --       - completed:                "ran <duration>",
+        --                                   "finished <duration> ago",
+        --                                   "cost $<amount>", and
+        --                                   "exit <code>" when the
+        --                                   corresponding fields are
+        --                                   available. Cost uses the
+        --                                   stored job cost first and
+        --                                   falls back to run duration
+        --                                   multiplied by launch hourly
+        --                                   rate.
         --       - failed:                   "exit <code>", then
         --                                   "<FailureReason>" or the first
-        --                                   line of ErrorMessage.
+        --                                   line of ErrorMessage. Failed
+        --                                   jobs also show the completed
+        --                                   timing/cost segments above when
+        --                                   those fields are available.
         --   - Sibling-wait segment: "waiting for wj<sibling-id>" appears
         --     between the status-context segment and the ETA segment when
         --     EffectiveStatus is queued or pending_placement AND a running

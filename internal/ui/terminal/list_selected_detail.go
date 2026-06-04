@@ -325,7 +325,8 @@ func appendJobStatusParts(parts []string, job *db.Job, ctx selectedJobContext, n
 		if t := firstNonZeroTimestamp(job.QueuedAt, job.CreatedAt); t > 0 {
 			parts = append(parts, "waiting "+estimate.FormatDurationShort(now.Sub(time.Unix(t, 0))))
 		}
-	case db.StatusFailed:
+	case db.StatusCompleted, db.StatusFailed:
+		parts = appendTerminalJobParts(parts, job, ctx, now)
 		if job.ExitCode != nil {
 			parts = append(parts, fmt.Sprintf("exit %d", *job.ExitCode))
 		}
@@ -336,6 +337,41 @@ func appendJobStatusParts(parts []string, job *db.Job, ctx selectedJobContext, n
 		}
 	}
 	return parts
+}
+
+func appendTerminalJobParts(parts []string, job *db.Job, ctx selectedJobContext, now time.Time) []string {
+	if job.StartTime > 0 && job.EndTime != nil && *job.EndTime > job.StartTime {
+		runDuration := time.Duration(*job.EndTime-job.StartTime) * time.Second
+		parts = append(parts, "ran "+estimate.FormatDurationShort(runDuration))
+	}
+	if job.EndTime != nil && *job.EndTime > 0 {
+		age := now.Sub(time.Unix(*job.EndTime, 0))
+		if age >= 0 {
+			parts = append(parts, "finished "+estimate.FormatDurationShort(age)+" ago")
+		}
+	}
+	if cost, ok := selectedCompletedJobCost(job, ctx); ok {
+		parts = append(parts, fmt.Sprintf("cost $%.2f", cost))
+	}
+	return parts
+}
+
+func selectedCompletedJobCost(job *db.Job, ctx selectedJobContext) (float64, bool) {
+	if job == nil {
+		return 0, false
+	}
+	if job.Cost != nil {
+		return *job.Cost, true
+	}
+	if job.StartTime <= 0 || job.EndTime == nil || *job.EndTime <= job.StartTime || job.LaunchID == nil {
+		return 0, false
+	}
+	launch := ctx.launchByID[*job.LaunchID]
+	if launch == nil || launch.CostPerHourCents <= 0 {
+		return 0, false
+	}
+	elapsed := time.Duration(*job.EndTime-job.StartTime) * time.Second
+	return elapsed.Hours() * float64(launch.CostPerHourCents) / 100.0, true
 }
 
 func selectedJobElapsedCost(job *db.Job, ctx selectedJobContext, now time.Time) (float64, bool) {
