@@ -210,6 +210,26 @@ func TestIsConnectionError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "pool ready EOF",
+			input:    "SSH connection to studio failed: EOF",
+			expected: true,
+		},
+		{
+			name:     "pooled session stdout EOF",
+			input:    "read stdout: EOF",
+			expected: true,
+		},
+		{
+			name:     "pooled session stderr EOF",
+			input:    "read stderr: EOF",
+			expected: true,
+		},
+		{
+			name:     "pooled session broken pipe",
+			input:    "write command: broken pipe",
+			expected: true,
+		},
+		{
 			name:     "permission denied is not connection error",
 			input:    "Permission denied (publickey)",
 			expected: false,

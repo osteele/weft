@@ -365,7 +365,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		stdout, stderr, err = ssh.Run(job.Host, remoteCmd)
 	}
 	if err != nil {
-		if ssh.IsConnectionError(stderr) {
+		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			if cached, cacheErr := logcache.Read(jobID); cacheErr == nil {
 				fmt.Fprintf(os.Stderr, "Warning: host unreachable; using cached log for job %s.\n", ids.FormatJobID(jobID))
 				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)

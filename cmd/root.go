@@ -192,7 +192,7 @@ func startPprof() {
 		// random local port so this process is still attachable.
 		ln, err = net.Listen("tcp", "localhost:0")
 		if err != nil {
-			slog.Warn("pprof listener failed", "error", err)
+			slog.Debug("pprof listener failed", "error", err)
 			return
 		}
 	}

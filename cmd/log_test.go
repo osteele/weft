@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -162,6 +163,47 @@ func TestShouldUseCachedLogForJob_RejectsLegacyCacheForRunAwareJob(t *testing.T)
 	}
 	if shouldUseCachedLogForJob(job) {
 		t.Fatal("expected legacy cache to be rejected for run-aware job")
+	}
+}
+
+func TestRunLogForJob_UsesCachedLogWhenSSHReturnsEOF(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+	t.Setenv("HOME", t.TempDir())
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp/project", "echo hi", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	exitCode := 0
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	if err := logcache.WriteWithMeta(jobID, "cached log\n", false); err != nil {
+		t.Fatalf("WriteWithMeta: %v", err)
+	}
+
+	cleanupSSH := ssh.SetRunner(func(host, command string) (string, string, error) {
+		if host != "studio" {
+			t.Fatalf("host = %q, want studio", host)
+		}
+		return "", "", errors.New("SSH connection to studio failed: EOF")
+	})
+	defer cleanupSSH()
+
+	cmd := &cobra.Command{Use: "log"}
+	addLogFlags(cmd)
+	logFull = true
+	logFrom = 1
+
+	out := captureStdout(t, func() {
+		if err := runLogForJob(cmd, database, jobID); err != nil {
+			t.Fatalf("runLogForJob: %v", err)
+		}
+	})
+	if !strings.Contains(out, "cached log") {
+		t.Fatalf("output = %q, want cached log", out)
 	}
 }
 
