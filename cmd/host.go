@@ -134,6 +134,7 @@ func init() {
 	hostCmd.AddCommand(hostListCmd)
 	hostCmd.AddCommand(hostLoadCmd)
 	hostCmd.AddCommand(hostDiscoverCmd)
+	hostCmd.AddCommand(hostDoctorCmd)
 	hostCmd.AddCommand(hostSetupCmd)
 
 	hostDataCmd.Flags().BoolVar(&hostDataScan, "scan", false, "Scan remote HF cache and update local database")

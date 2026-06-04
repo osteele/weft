@@ -12,6 +12,8 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // ReconcileResult describes what happened during reconciliation.
@@ -27,6 +29,30 @@ type ReconcileResult struct {
 // ReconcileOptions configures reconciliation behavior.
 type ReconcileOptions struct {
 	Timeout time.Duration
+}
+
+var queueSourceSync = syncQueueJobSources
+
+func syncQueueJobSources(job *db.Job, timeout time.Duration) (string, error) {
+	if job.WorkingDir == "" {
+		return "", nil
+	}
+	localDir := workdir.ResolveLocal(job.WorkingDir)
+	remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+	sourceSHA256 := ""
+	hash, hashErr := srcsync.ComputeSourceSHA256(localDir)
+	if hashErr == nil {
+		sourceSHA256 = hash
+	}
+	if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+		return "", fmt.Errorf("sync sources: %w", err)
+	}
+	if sourceSHA256 != "" {
+		if err := srcsync.WriteRemoteSourceMarkerForJob(job.Host, remoteDir, job.ID, sourceSHA256, timeout); err != nil {
+			return "", fmt.Errorf("write source marker: %w", err)
+		}
+	}
+	return sourceSHA256, nil
 }
 
 // Reconcile performs three-way merge between base (last synced), local (pending),
@@ -468,7 +494,11 @@ func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 	if job.Host == "" {
 		return nil
 	}
-	return AppendJobToQueue(job, timeout)
+	sourceSHA256, err := queueSourceSync(job, timeout)
+	if err != nil {
+		return err
+	}
+	return AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, "")
 }
 
 // applyStartToRemote starts a queued or draft job on the remote host.

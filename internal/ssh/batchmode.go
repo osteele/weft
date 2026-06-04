@@ -32,3 +32,35 @@ func BatchModeArgs(connectTimeout time.Duration, extraOpts ...string) []string {
 func BatchModeRsyncCommand(connectTimeout time.Duration, extraOpts ...string) string {
 	return "ssh " + strings.Join(BatchModeArgs(connectTimeout, extraOpts...), " ")
 }
+
+// BatchModeRsyncCommandForHost returns an rsync -e command that uses the same
+// configured identity isolation as ssh.Run for the given host.
+func BatchModeRsyncCommandForHost(host string, connectTimeout time.Duration, extraOpts ...string) string {
+	args := append(BatchModeArgs(connectTimeout, extraOpts...), identityArgs(host)...)
+	return "ssh " + shellJoin(args)
+}
+
+// RsyncTarget returns the remote target prefix for rsync destinations/sources.
+// It applies hosts.<name>.ssh_user so rsync and ssh.Run operate in the same
+// remote account and home directory.
+func RsyncTarget(host string) string {
+	return hostTarget(host)
+}
+
+func shellJoin(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n'\"\\$`!#&;<>*?()[]{}|") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}

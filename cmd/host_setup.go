@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/agentdeploy"
+	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
@@ -27,6 +28,9 @@ var hostSetupCmd = &cobra.Command{
 	Long: `Perform full host setup: install prerequisites, discover hardware,
 deploy the agent binary, configure rclone, deploy Slack notifications,
 and start the queue runner.
+
+Prerequisites include tmux, jq, rsync, rclone, curl, uv, and a Go toolchain
+for hosts that build the agent natively.
 
 Each step is best-effort — failures are warned about but don't stop
 subsequent steps (except SSH connectivity which fails fast).
@@ -164,10 +168,10 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 // Returns the list of packages that were installed.
 func installPrerequisites(host string) ([]string, error) {
 	// Probe for missing commands and detect package manager in a single SSH call
-	probeCmd := `echo "---MISSING---"
-for cmd in tmux jq rsync rclone curl; do command -v "$cmd" >/dev/null 2>&1 || echo "$cmd"; done
+	probeCmd := agentenv.ShellPrefix(`echo "---MISSING---"
+for cmd in tmux jq rsync curl unzip; do command -v "$cmd" >/dev/null 2>&1 || echo "$cmd"; done
 echo "---PKGMGR---"
-command -v apt-get >/dev/null 2>&1 && echo apt-get || (command -v brew >/dev/null 2>&1 && echo brew || echo none)`
+command -v apt-get >/dev/null 2>&1 && echo apt-get || (command -v brew >/dev/null 2>&1 && echo brew || echo none)`)
 	stdout, _, err := ssh.Run(host, probeCmd)
 	if err != nil {
 		return nil, fmt.Errorf("probe commands: %w", err)
@@ -181,30 +185,103 @@ command -v apt-get >/dev/null 2>&1 && echo apt-get || (command -v brew >/dev/nul
 	}
 
 	missing := parseLines(missingSection)
-	if len(missing) == 0 {
-		return nil, nil
+
+	installed := append([]string(nil), missing...)
+	if len(missing) > 0 {
+		pkgMgr := strings.TrimSpace(pkgMgrSection)
+		if pkgMgr == "none" || pkgMgr == "" {
+			return nil, fmt.Errorf("cannot install %s: no package manager found", strings.Join(missing, ", "))
+		}
+
+		var installCmd string
+		switch pkgMgr {
+		case "apt-get":
+			installCmd = agentenv.ShellPrefix(fmt.Sprintf("sudo apt-get install -y %s", strings.Join(missing, " ")))
+		case "brew":
+			installCmd = agentenv.ShellPrefix(fmt.Sprintf("brew install %s", strings.Join(missing, " ")))
+		default:
+			return nil, fmt.Errorf("unsupported package manager %q for installing %s", pkgMgr, strings.Join(missing, ", "))
+		}
+
+		if _, stderr, err := ssh.Run(host, installCmd); err != nil {
+			return nil, fmt.Errorf("install failed: %w\n%s", err, stderr)
+		}
 	}
 
-	pkgMgr := strings.TrimSpace(pkgMgrSection)
-	if pkgMgr == "none" || pkgMgr == "" {
-		return nil, fmt.Errorf("cannot install %s: no package manager found", strings.Join(missing, ", "))
+	rcloneInstalled, err := ensureRcloneOnHost(host)
+	if err != nil {
+		return installed, err
+	}
+	if rcloneInstalled {
+		installed = append(installed, "rclone")
 	}
 
-	var installCmd string
-	switch pkgMgr {
-	case "apt-get":
-		installCmd = fmt.Sprintf("sudo apt-get install -y %s", strings.Join(missing, " "))
-	case "brew":
-		installCmd = fmt.Sprintf("brew install %s", strings.Join(missing, " "))
-	default:
-		return nil, fmt.Errorf("unsupported package manager %q for installing %s", pkgMgr, strings.Join(missing, ", "))
+	uvInstalled, err := ensureUVOnHost(host)
+	if err != nil {
+		return installed, err
+	}
+	if uvInstalled {
+		installed = append(installed, "uv")
 	}
 
+	return installed, nil
+}
+
+func ensureRcloneOnHost(host string) (bool, error) {
+	checkCmd := agentenv.ShellPrefix(`command -v rclone || true`)
+	stdout, _, err := ssh.Run(host, checkCmd)
+	if err != nil {
+		return false, fmt.Errorf("probe rclone: %w", err)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		return false, nil
+	}
+
+	installCmd := agentenv.ShellPrefix(`set -e
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+arch="$(uname -m)"
+case "$os" in
+  darwin) os="osx" ;;
+  linux) os="linux" ;;
+  *) echo "unsupported OS for user-local rclone install: $os" >&2; exit 1 ;;
+esac
+case "$arch" in
+  arm64|aarch64) arch="arm64" ;;
+  x86_64|amd64) arch="amd64" ;;
+  *) echo "unsupported architecture for user-local rclone install: $arch" >&2; exit 1 ;;
+esac
+command -v curl >/dev/null 2>&1 || { echo "curl is required to install rclone" >&2; exit 1; }
+command -v unzip >/dev/null 2>&1 || { echo "unzip is required to install rclone" >&2; exit 1; }
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/weft-rclone.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+zip="$tmp/rclone.zip"
+curl --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 2 -fsSL "https://downloads.rclone.org/rclone-current-${os}-${arch}.zip" -o "$zip"
+unzip -q "$zip" -d "$tmp"
+mkdir -p "$HOME/.local/bin"
+cp "$tmp"/rclone-*/rclone "$HOME/.local/bin/rclone"
+chmod +x "$HOME/.local/bin/rclone"
+"$HOME/.local/bin/rclone" version >/dev/null`)
 	if _, stderr, err := ssh.Run(host, installCmd); err != nil {
-		return nil, fmt.Errorf("install failed: %w\n%s", err, stderr)
+		return false, fmt.Errorf("install rclone: %w\n%s", err, stderr)
+	}
+	return true, nil
+}
+
+func ensureUVOnHost(host string) (bool, error) {
+	checkCmd := agentenv.ShellPrefix(`if command -v uv >/dev/null 2>&1; then command -v uv; elif [ -x "$HOME/.local/bin/uv" ]; then echo "$HOME/.local/bin/uv"; fi`)
+	stdout, _, err := ssh.Run(host, checkCmd)
+	if err != nil {
+		return false, fmt.Errorf("probe uv: %w", err)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		return false, nil
 	}
 
-	return missing, nil
+	installCmd := agentenv.ShellPrefix(`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+	if _, stderr, err := ssh.Run(host, installCmd); err != nil {
+		return false, fmt.Errorf("install uv: %w\n%s", err, stderr)
+	}
+	return true, nil
 }
 
 // discoverHost probes a host via SSH and writes its inventory YAML file.

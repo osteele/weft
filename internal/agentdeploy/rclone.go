@@ -24,10 +24,11 @@ func EnsureRcloneConfig(host string, r2Cfg cloud.R2Config) error {
 		return nil
 	}
 
-	// Generate and write config
+	// Generate and write config. Use stdin instead of a heredoc so this works
+	// through the SSH session pool and for secrets with shell-sensitive bytes.
 	configContent := cloud.GenerateRcloneConfig(r2Cfg)
-	writeCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat >> %s << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConfigPath, configContent)
-	if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
+	writeCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat >> %s", rcloneConfigPath)
+	if _, stderr, err := ssh.RunWithStdin(host, writeCmd, configContent); err != nil {
 		if s := strings.TrimSpace(stderr); s != "" {
 			return fmt.Errorf("write rclone config on %s: %s", host, s)
 		}

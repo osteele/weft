@@ -42,6 +42,10 @@ func TestSCPCommandArgOrder(t *testing.T) {
 	if args[1] != "-q" {
 		t.Errorf("args[1] = %q, want -q", args[1])
 	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "BatchMode=yes") {
+		t.Errorf("scp args should disable password prompts, got %v", args)
+	}
 
 	// SCP args should be last
 	if args[len(args)-2] != "local.txt" {

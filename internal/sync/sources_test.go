@@ -7,6 +7,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 func TestDefaultExcludes(t *testing.T) {
@@ -116,6 +119,35 @@ func TestBuildRsyncArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildRsyncArgsUsesConfiguredSSHUser(t *testing.T) {
+	ssh.Configure(&config.Config{
+		Hosts: map[string]config.HostConfig{
+			"studio": {
+				SSHUser:         "agent",
+				SSHIdentityFile: "/path/to/agent_studio_ed25519",
+			},
+		},
+	})
+	t.Cleanup(func() { ssh.Configure(&config.Config{}) })
+
+	args := BuildRsyncArgs("studio", "/tmp/src", "~/code/project", []string{".git"})
+	dst := args[len(args)-1]
+	if dst != "agent@studio:~/code/project/" {
+		t.Fatalf("destination = %q, want agent@studio target", dst)
+	}
+
+	eIdx := slices.Index(args, "-e")
+	if eIdx < 0 || eIdx+1 >= len(args) {
+		t.Fatalf("missing rsync -e ssh command: %v", args)
+	}
+	sshCmd := args[eIdx+1]
+	for _, want := range []string{"IdentityAgent=none", "IdentitiesOnly=yes", "-i /path/to/agent_studio_ed25519"} {
+		if !strings.Contains(sshCmd, want) {
+			t.Fatalf("rsync ssh command = %q, missing %q", sshCmd, want)
+		}
 	}
 }
 

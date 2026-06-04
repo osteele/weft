@@ -399,7 +399,7 @@ See `cmd/sync.go` and `internal/ops/` for the reconciliation logic.
 | `~/.cache/weft/logs/{id}-{ts}.status` | Exit code |
 | `~/.cache/weft/logs/{id}-{ts}.meta` | Metadata |
 | `~/.cache/weft/logs/{id}-{ts}.pid` | Process ID |
-| `/tmp/weft-notify-slack.sh` | Notification script (deployed at runtime) |
+| `~/.cache/weft/bin/notify-slack.sh` | Notification script (deployed at runtime) |
 
 ## Design Decisions
 

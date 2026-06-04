@@ -13,7 +13,7 @@ import (
 )
 
 // NotifyScriptPath is where the notification script is deployed on remote hosts.
-const NotifyScriptPath = "/tmp/weft-notify-slack.sh"
+const NotifyScriptPath = "~/.cache/weft/bin/notify-slack.sh"
 
 // GetWebhook returns the Slack webhook URL from environment or config file.
 func GetWebhook() string {
@@ -86,6 +86,11 @@ func DeployNotifyScript(host, slackWebhook string) {
 		return
 	}
 	tmpFile.Close()
+
+	if _, stderr, err := ssh.Run(host, "mkdir -p ~/.cache/weft/bin"); err != nil {
+		slog.Warn("failed to create remote notify script directory", "component", "slack", "host", host, "error", err, "stderr", strings.TrimSpace(stderr))
+		return
+	}
 
 	if err := ssh.CopyTo(tmpFile.Name(), host, NotifyScriptPath); err != nil {
 		slog.Warn("failed to deploy notify script", "component", "slack", "host", host, "error", err)

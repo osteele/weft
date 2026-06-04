@@ -310,8 +310,8 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusCompleted {
-		t.Fatalf("expected completed status, got %s", updated.Status)
+	if updated.Status != db.StatusFailed {
+		t.Fatalf("expected failed status, got %s", updated.Status)
 	}
 	if updated.ExitCode == nil || *updated.ExitCode != exitCode {
 		t.Fatalf("expected exit code %d, got %v", exitCode, updated.ExitCode)
@@ -570,8 +570,8 @@ func TestSyncJobRecordsCompletionWithSignalSuffix(t *testing.T) {
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusCompleted {
-		t.Fatalf("expected completed status, got %s", updated.Status)
+	if updated.Status != db.StatusFailed {
+		t.Fatalf("expected failed status, got %s", updated.Status)
 	}
 	if updated.ExitCode == nil || *updated.ExitCode != 137 {
 		t.Fatalf("expected exit code 137, got %v", updated.ExitCode)

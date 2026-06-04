@@ -16,7 +16,7 @@ const remoteGoDir = "~/.local/go"
 // BuildOnHost builds the agent natively on a remote inventory host.
 // It rsyncs the source tree, ensures Go is installed, and compiles the agent
 // binary directly into the remote bin directory.
-func BuildOnHost(host, version string) error {
+func BuildOnHost(host, version, goos, goarch string) error {
 	root, err := RepoRoot()
 	if err != nil {
 		return fmt.Errorf("locate repo root: %w", err)
@@ -28,7 +28,7 @@ func BuildOnHost(host, version string) error {
 	}
 
 	slog.Debug("ensuring Go is available", "component", "agentdeploy", "host", host)
-	gobin, err := ensureGoOnHost(host)
+	gobin, err := ensureGoOnHost(host, goos, goarch)
 	if err != nil {
 		return fmt.Errorf("ensure Go: %w", err)
 	}
@@ -51,6 +51,7 @@ func BuildOnHost(host, version string) error {
 func rsyncSourcesToHost(localRoot, host string) error {
 	args := []string{
 		"-az", "--delete",
+		"-e", ssh.BatchModeRsyncCommandForHost(host, 15*time.Second),
 		"--exclude=.git/", "--exclude=.jj/", "--exclude=.claude/",
 		"--exclude=.gocache/", "--exclude=.gomodcache/", "--exclude=.cache/",
 		"--exclude=.bench-*-gocache/", "--exclude=.bench-*-gomodcache/",
@@ -59,7 +60,7 @@ func rsyncSourcesToHost(localRoot, host string) error {
 		"--exclude=internal/agentdeploy/binaries/VERSION",
 		"--exclude=weft", "--exclude=placement.test",
 		localRoot + "/",
-		host + ":" + remoteAgentBuildDir + "/",
+		ssh.RsyncTarget(host) + ":" + remoteAgentBuildDir + "/",
 	}
 	cmd := exec.Command("rsync", args...)
 	out, err := cmd.CombinedOutput()
@@ -71,7 +72,7 @@ func rsyncSourcesToHost(localRoot, host string) error {
 
 // ensureGoOnHost checks whether Go is available on the remote host, installing
 // it under ~/.local/go if needed. Returns the path to the go binary.
-func ensureGoOnHost(host string) (string, error) {
+func ensureGoOnHost(host, goos, goarch string) (string, error) {
 	// Check common locations: PATH, then ~/.local/go/bin/go.
 	checkCmd := fmt.Sprintf(
 		`if command -v go >/dev/null 2>&1; then command -v go; elif [ -x %s/bin/go ]; then echo %s/bin/go; fi`,
@@ -96,7 +97,7 @@ func ensureGoOnHost(host string) (string, error) {
 	slog.Info("Go not found, installing", "component", "agentdeploy", "host", host, "go_version", goVersion)
 	installScript := fmt.Sprintf(`set -euo pipefail
 VERSION=%s
-URL="https://go.dev/dl/go${VERSION}.linux-amd64.tar.gz"
+URL="https://go.dev/dl/go${VERSION}.%s-%s.tar.gz"
 DEST=%s
 PARENT="$(dirname "$DEST")"
 mkdir -p "$PARENT"
@@ -109,7 +110,7 @@ if [ "$EXTRACTED" != "$DEST" ]; then
   mv "$EXTRACTED" "$DEST"
 fi
 echo "installed Go $("$DEST/bin/go" version)"
-`, goVersion, remoteGoDir)
+`, goVersion, goos, goarch, remoteGoDir)
 
 	_, stderr, err := ssh.RunWithStdin(host, "bash -s", installScript)
 	if err != nil {

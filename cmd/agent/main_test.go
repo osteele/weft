@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/oplog"
 )
 
@@ -74,6 +75,19 @@ func TestAgentLogPathRespectsHome(t *testing.T) {
 	path := agentLogPath()
 	if !strings.HasSuffix(path, "agent-operations.log") {
 		t.Errorf("expected path to end with 'agent-operations.log', got %s", path)
+	}
+}
+
+func TestEnsureUserToolPath(t *testing.T) {
+	t.Setenv("HOME", "/Users/agent")
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	agentenv.EnsureToolPath()
+
+	got := os.Getenv("PATH")
+	wantPrefix := "/Users/agent/.cache/weft/bin:/Users/agent/.local/bin:/Users/agent/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin"
+	if got != wantPrefix {
+		t.Fatalf("PATH = %q, want %q", got, wantPrefix)
 	}
 }
 

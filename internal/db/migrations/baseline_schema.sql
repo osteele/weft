@@ -876,12 +876,7 @@ CREATE VIEW IF NOT EXISTS job_status AS
 		)
 		SELECT
 			j.id,
-			CASE WHEN j.requested_status = 'queued'
-			          AND la.end_time IS NOT NULL
-			          AND COALESCE(la.status, '') != 'completed'
-			          AND COALESCE(la.exit_code, 1) != 0
-			     THEN ''
-			     WHEN et.kind = 'inventory_host' THEN et.host
+			CASE WHEN et.kind = 'inventory_host' THEN et.host
 			     WHEN et.kind = 'rental_instance' THEN ''
 			     WHEN la.launch_id IS NOT NULL THEN ''
 			     ELSE COALESCE(la.host, '')
@@ -909,25 +904,35 @@ CREATE VIEW IF NOT EXISTS job_status AS
 					     WHEN j.requested_status IS NOT NULL THEN j.requested_status
 					     ELSE 'draft'
 					END
-				-- Cloud jobs: derive status from attempt facts + instance lifecycle
-				WHEN COALESCE(et.launch_id, la.launch_id) IS NOT NULL THEN
+				-- Terminal attempts: derive script outcomes from the
+				-- same facts for both inventory hosts and rentals.
+				WHEN la.end_time IS NOT NULL THEN
 					CASE
+						-- Non-execution closures stay queued for replan.
 						WHEN j.requested_status = 'queued'
-						     AND la.end_time IS NOT NULL
 						     AND (
 						          COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
-						          OR la.status = 'canceled'
+						          OR (
+						             la.start_time IS NULL
+						             AND la.exit_code IS NULL
+						             AND COALESCE(la.failure_reason, '') != ''
+						          )
 						     )
 						     THEN 'queued'
-						WHEN la.end_time IS NOT NULL THEN
-							CASE
-								WHEN la.exit_code = 0 THEN 'completed'
-								WHEN la.exit_code IS NOT NULL THEN 'failed'
-								WHEN l.termination_reason = 'job_failure' THEN 'failed'
-								WHEN l.status IN ('failed','canceled') THEN 'orphaned'
-								WHEN la.status = 'canceled' THEN 'canceled'
-								ELSE 'dead'
-							END
+						WHEN la.exit_code = 0 THEN 'completed'
+						WHEN la.exit_code IS NOT NULL THEN 'failed'
+						WHEN la.status = 'completed' THEN 'completed'
+						WHEN la.status = 'failed' THEN 'failed'
+						WHEN l.termination_reason = 'job_failure' THEN 'failed'
+						WHEN l.status IN ('failed','canceled') THEN 'orphaned'
+						WHEN la.status = 'dead' THEN 'dead'
+						WHEN la.status = 'killed' THEN 'killed'
+						WHEN la.status = 'canceled' THEN 'canceled'
+						ELSE 'dead'
+					END
+				-- Cloud jobs: derive active/not-yet-started state from instance lifecycle
+				WHEN COALESCE(et.launch_id, la.launch_id) IS NOT NULL THEN
+					CASE
 						WHEN la.start_time IS NOT NULL THEN
 							CASE
 								WHEN l.status IN ('failed','canceled') THEN 'orphaned'
@@ -937,10 +942,6 @@ CREATE VIEW IF NOT EXISTS job_status AS
 						WHEN l.status IN ('failed','canceled') THEN 'orphaned'
 						ELSE 'queued'
 					END
-				-- On-prem jobs: existing three-way merge logic
-				WHEN j.requested_status = 'queued'
-				     AND la.status IN ('completed','failed','dead','killed','canceled')
-				     THEN 'queued'
 				ELSE la.status
 			END AS status,
 			la.error_message,
@@ -977,10 +978,8 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			j.placement_reasons,
 			j.cli_overrides,
 			j.placement_blocked,
-			CASE WHEN j.requested_status = 'queued'
-			          AND la.end_time IS NOT NULL
-			          AND COALESCE(la.status, '') != 'completed'
-			          AND COALESCE(la.exit_code, 1) != 0
+			CASE WHEN la.end_time IS NOT NULL
+			          AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
 			     THEN NULL ELSE COALESCE(et.launch_id, la.launch_id) END AS launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
@@ -989,11 +988,6 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
-				WHEN j.requested_status = 'queued'
-				     AND la.end_time IS NOT NULL
-				     AND COALESCE(la.status, '') != 'completed'
-				     AND COALESCE(la.exit_code, 1) != 0
-				THEN 'unplaced'
 				WHEN et.kind = 'rental_instance'
 				     AND l.status IN ('launching', 'running', 'grace', 'completed')
 				THEN 'rental_instance'

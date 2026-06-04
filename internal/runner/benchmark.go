@@ -146,44 +146,11 @@ func hostCPUInstantPct() int {
 
 // hostRAMUsagePct returns RAM usage as a percentage.
 func hostRAMUsagePct() int {
-	// Try `free` (Linux)
-	out, err := exec.Command("free", "-b").Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, "Mem:") {
-				fields := strings.Fields(line)
-				if len(fields) >= 7 {
-					total, _ := strconv.ParseFloat(fields[1], 64)
-					available, _ := strconv.ParseFloat(fields[6], 64)
-					if total > 0 {
-						return int((total - available) * 100 / total)
-					}
-				}
-			}
-		}
-	}
-
-	// macOS fallback
-	memOut, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
-	if err != nil {
+	totalKB, usedKB, _ := HostMemoryStatsKB()
+	if totalKB <= 0 {
 		return 0
 	}
-	totalBytes, _ := strconv.ParseFloat(strings.TrimSpace(string(memOut)), 64)
-	vmOut, err := exec.Command("vm_stat").Output()
-	if err != nil || totalBytes <= 0 {
-		return 0
-	}
-	var freePages float64
-	for _, line := range strings.Split(string(vmOut), "\n") {
-		if strings.Contains(line, "Pages free") {
-			fields := strings.Fields(line)
-			if len(fields) >= 3 {
-				freePages, _ = strconv.ParseFloat(strings.TrimSuffix(fields[2], "."), 64)
-			}
-		}
-	}
-	freeBytes := freePages * 4096
-	return int((totalBytes - freeBytes) * 100 / totalBytes)
+	return int(usedKB * 100 / totalKB)
 }
 
 // hostGPUUtilizationPct returns max GPU utilization across all GPUs.

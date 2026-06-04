@@ -41,7 +41,9 @@ func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
 // hostTarget is not applied here — callers wanting user@host:path
 // must build that themselves (see pool's session-bound code).
 func scpCommand(host string, args ...string) *exec.Cmd {
-	fullArgs := append([]string{"-q"}, identityArgs(host)...)
+	fullArgs := []string{"-q"}
+	fullArgs = append(fullArgs, BatchModeArgs(time.Duration(defaultConnTimeout)*time.Second)...)
+	fullArgs = append(fullArgs, identityArgs(host)...)
 	fullArgs = append(fullArgs, args...)
 	return exec.Command("scp", fullArgs...)
 }
@@ -162,7 +164,7 @@ func Run(host string, command string) (string, string, error) {
 // RunWithStdin executes an SSH command with data piped to stdin.
 // Returns stdout, stderr, and error.
 func RunWithStdin(host, command, stdin string) (string, string, error) {
-	cmd := sshCommand(host, command)
+	cmd := sshCommand(host, command, BatchModeArgs(time.Duration(defaultConnTimeout)*time.Second)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
@@ -344,7 +346,7 @@ func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
 
 // CopyTo copies a local file to a remote host using scp (single attempt, no retries).
 func CopyTo(localPath, host, remotePath string) error {
-	cmd := scpCommand(host, localPath, fmt.Sprintf("%s:%s", host, remotePath))
+	cmd := scpCommand(host, localPath, scpTarget(host, remotePath))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -357,7 +359,7 @@ func CopyTo(localPath, host, remotePath string) error {
 func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) error {
 	var lastStderr string
 	return connectionRetry(func() error {
-		cmd := scpCommand(host, localPath, fmt.Sprintf("%s:%s", host, remotePath))
+		cmd := scpCommand(host, localPath, scpTarget(host, remotePath))
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
@@ -380,13 +382,17 @@ func CopyFromWithRetry(remotePath, host, localPath string) error {
 func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) error {
 	var lastStderr string
 	return connectionRetry(func() error {
-		cmd := scpCommand(host, fmt.Sprintf("%s:%s", host, remotePath), localPath)
+		cmd := scpCommand(host, scpTarget(host, remotePath), localPath)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
 		lastStderr = stderr.String()
 		return err
 	}, func() string { return lastStderr }, "SCP", verbose)
+}
+
+func scpTarget(host, remotePath string) string {
+	return fmt.Sprintf("%s:%s", hostTarget(host), remotePath)
 }
 
 // connectionRetry runs op with retry logic, retrying only on SSH connection errors.
@@ -412,7 +418,7 @@ func connectionRetry(op func() error, getOutput func() string, label string, ver
 
 // TmuxSessionExists checks if a tmux session exists on the remote host (with retry)
 func TmuxSessionExists(host, sessionName string) (bool, error) {
-	stdout, stderr, err := RunWithRetryQuiet(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))
+	stdout, stderr, err := RunWithRetryQuiet(host, TmuxCommand(fmt.Sprintf("has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName)))
 	if err != nil {
 		// Check if it's a connection error
 		if IsConnectionError(stdout + stderr) {
@@ -443,7 +449,7 @@ func TmuxSessionExistsQuick(host, sessionName string) (bool, error) {
 // TmuxSessionExistsQuickTimeout checks if a tmux session exists with a timeout.
 func TmuxSessionExistsQuickTimeout(host, sessionName string, timeout time.Duration) (bool, error) {
 	timeout = quickCommandTimeout(timeout)
-	stdout, stderr, err := RunWithTimeout(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName), timeout)
+	stdout, stderr, err := RunWithTimeout(host, TmuxCommand(fmt.Sprintf("has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName)), timeout)
 	if err != nil {
 		// Check if it's a connection error
 		if IsConnectionError(stdout + stderr) {
@@ -516,9 +522,15 @@ func ReadRemoteFileWithMtime(host, path string, timeout time.Duration) (string, 
 	return content, mtime, nil
 }
 
+// TmuxCommand prefixes tmux invocations with common package-manager paths.
+// Non-login service accounts on macOS often get only /usr/bin:/bin:/usr/sbin:/sbin.
+func TmuxCommand(args string) string {
+	return "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH tmux " + args
+}
+
 // TmuxListSessions lists all tmux sessions on a remote host
 func TmuxListSessions(host string) ([]string, error) {
-	stdout, _, err := Run(host, "tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
+	stdout, _, err := Run(host, TmuxCommand("list-sessions -F '#{session_name}' 2>/dev/null || true"))
 	if err != nil {
 		return nil, err
 	}
@@ -534,13 +546,13 @@ func TmuxListSessions(host string) ([]string, error) {
 
 // TmuxKillSession kills a tmux session on a remote host
 func TmuxKillSession(host, sessionName string) error {
-	_, _, err := Run(host, fmt.Sprintf("tmux kill-session -t '%s'", sessionName))
+	_, _, err := Run(host, TmuxCommand(fmt.Sprintf("kill-session -t '%s'", sessionName)))
 	return err
 }
 
 // TmuxCapturePaneOutput captures the last N lines from a tmux pane
 func TmuxCapturePaneOutput(host, sessionName string, lines int) (string, error) {
-	stdout, _, err := Run(host, fmt.Sprintf("tmux capture-pane -t '%s' -p | tail -%d", sessionName, lines))
+	stdout, _, err := Run(host, TmuxCommand(fmt.Sprintf("capture-pane -t '%s' -p", sessionName))+" | tail -"+strconv.Itoa(lines))
 	return stdout, err
 }
 
@@ -576,7 +588,7 @@ func RemoteFileExistsWithTimeout(host, path string, timeout time.Duration) (bool
 
 // GetTmuxPanePID gets the PID of the process running in a tmux pane
 func GetTmuxPanePID(host, sessionName string) (string, error) {
-	stdout, _, err := Run(host, fmt.Sprintf("tmux list-panes -t '%s' -F '#{pane_pid}' 2>/dev/null | head -1", sessionName))
+	stdout, _, err := Run(host, TmuxCommand(fmt.Sprintf("list-panes -t '%s' -F '#{pane_pid}' 2>/dev/null", sessionName))+" | head -1")
 	return strings.TrimSpace(stdout), err
 }
 

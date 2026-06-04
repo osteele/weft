@@ -1496,6 +1496,38 @@ Drafting is handy when you realize a queued job shouldn’t run anymore but you
 want to keep its metadata/log references around for editing or cloning later.
 You can also trigger the same action from the TUI by pressing `d`.
 
+### weft host
+
+Set up and inspect on-prem inventory hosts.
+
+#### weft host setup
+
+Provision an on-prem host for use with weft:
+
+```bash
+weft host setup <host>
+```
+
+The setup command:
+- Installs required host tools: `tmux`, `jq`, `rsync`, `rclone`, `curl`, and `uv`
+- Installs or verifies a Go toolchain when the agent is built natively on the host
+- Discovers CPU, memory, GPU, and cache information and writes `~/.config/weft/hosts/<host>.yaml`
+- Deploys `weft-agent` to `~/.cache/weft/bin/weft-agent`
+- Deploys R2 and notification configuration when configured
+- Starts the queue runner unless `--no-runner` is set
+
+Examples:
+
+```bash
+weft host setup studio
+weft host setup cool30 --no-runner
+weft host setup cool30 --skip-prerequisites
+```
+
+Use `--skip-prerequisites` only when the target account already has the required
+tools on its job PATH. Python jobs submitted through `uv run ...` require `uv`
+to be available to the account that runs the queue agent.
+
 ### weft queue
 
 Manage job queues for CPU-capped execution on remote hosts.

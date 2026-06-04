@@ -149,7 +149,7 @@ func resolveGlobalGitIgnorePath() string {
 // ensuring trailing slashes so rsync syncs contents, not the directory itself.
 func rsyncSrcDst(host, localDir, remoteDir string) (src, dst string) {
 	src = strings.TrimRight(localDir, "/") + "/"
-	dst = host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	dst = ssh.RsyncTarget(host) + ":" + strings.TrimRight(remoteDir, "/") + "/"
 	return
 }
 
@@ -162,7 +162,7 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 
 // BuildRsyncArgsWithOptions constructs rsync arguments with an optional --delete.
 func BuildRsyncArgsWithOptions(host, localDir, remoteDir string, excludes []string, delete bool) []string {
-	args := []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout)}
+	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout)}
 	if delete {
 		args = append(args, "--delete")
 	}
@@ -262,7 +262,7 @@ func SyncSources(host, localDir, remoteDir string) error {
 // to a remote host. Unlike BuildRsyncArgs, this does NOT use --delete since the
 // remote directory may contain content from other sources.
 func BuildExtraPathRsyncArgs(host, localDir, remoteDir string) []string {
-	args := []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout)}
+	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout)}
 	src, dst := rsyncSrcDst(host, localDir, remoteDir)
 	args = append(args, src, dst)
 	return args
@@ -371,7 +371,7 @@ func SyncTree(host, localDir, remoteDir string, delete bool) error {
 
 // SyncFile copies a single file to a remote path on the target host.
 func SyncFile(host, localPath, remotePath string) error {
-	args := []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout), localPath, host + ":" + remotePath}
+	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout), localPath, ssh.RsyncTarget(host) + ":" + remotePath}
 
 	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
 	defer cancel()

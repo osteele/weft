@@ -110,6 +110,7 @@ var transitions = []TransitionRule{
 	{From: Paused, To: Queued, UpdatesSynced: false},
 
 	// --- From terminal states (restart/requeue paths) ---
+	{From: Completed, To: Queued, UpdatesSynced: false},
 	{From: Failed, To: Running, UpdatesSynced: false},
 	{From: Failed, To: Paused, UpdatesSynced: false},
 	{From: Failed, To: Queued, UpdatesSynced: false},

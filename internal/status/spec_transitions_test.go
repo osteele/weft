@@ -46,6 +46,7 @@ var allDeclaredTransitions = []struct {
 	{Paused, Queued, false},
 
 	// Restart/requeue paths (from terminal states)
+	{Completed, Queued, false},
 	{Failed, Running, false},
 	{Failed, Paused, false},
 	{Failed, Queued, false},
@@ -115,10 +116,9 @@ func TestSpec_TerminalStatesHaveNoNonAuthoritativeOutbound(t *testing.T) {
 	for _, s := range terminalStates {
 		t.Run(s, func(t *testing.T) {
 			allowed := AllowedFrom(s, false)
-			// Terminal states may have restart paths (Failed→Queued, etc.)
-			// but Completed should be a true sink with zero outbound.
-			if s == Completed && len(allowed) > 0 {
-				t.Errorf("Completed should be a sink state; got outbound: %v", allowed)
+			// Terminal states may have restart paths.
+			if len(allowed) == 0 {
+				t.Errorf("terminal state %s should have a restart/requeue path", s)
 			}
 		})
 	}
@@ -169,10 +169,9 @@ func TestSpec_AuthoritativeTransitionsRequireFlag(t *testing.T) {
 	}
 }
 
-func TestSpec_CompletedIsSinkState(t *testing.T) {
-	// Completed has no outbound edges, even with authoritative.
+func TestSpec_CompletedOnlyRequeues(t *testing.T) {
 	allowed := AllowedFrom(Completed, true)
-	if len(allowed) != 0 {
-		t.Errorf("Completed should have no outbound transitions even with authoritative; got %v", allowed)
+	if len(allowed) != 1 || allowed[0] != Queued {
+		t.Errorf("Completed should only requeue; got %v", allowed)
 	}
 }

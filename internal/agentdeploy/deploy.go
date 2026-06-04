@@ -73,7 +73,7 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	binaryPath, err := EnsureBuiltWithProgress(localVer, spec.OS, spec.Arch, output, onProgress)
 	if errors.Is(err, ErrAgentNotAvailable) {
 		// No pre-built binary — build natively on the remote host.
-		if err := BuildOnHost(host, localVer); err != nil {
+		if err := BuildOnHost(host, localVer, spec.OS, spec.Arch); err != nil {
 			return false, fmt.Errorf("native build on %s: %w", host, err)
 		}
 		// Binary was built directly into place; skip SCP.
@@ -103,7 +103,7 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	if errors.Is(err, ErrAgentIncompatible) {
 		// Cross-compiled binary doesn't run (e.g. GLIBC mismatch). Fall back to native build.
 		slog.Warn("cross-compiled agent incompatible, building natively", "component", "agentdeploy", "host", host, "error", err)
-		if err := BuildOnHost(host, localVer); err != nil {
+		if err := BuildOnHost(host, localVer, spec.OS, spec.Arch); err != nil {
 			return false, fmt.Errorf("native build on %s: %w", host, err)
 		}
 		deployedVer, err = RemoteAgentVersion(host)

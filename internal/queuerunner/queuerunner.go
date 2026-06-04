@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -13,7 +14,7 @@ const agentBinaryPath = "$HOME/.cache/weft/bin/weft-agent"
 
 // RunnerCommand builds the command to start the Go queue runner.
 func RunnerCommand(envPrefix, r2Bucket string, setupTimeout time.Duration) string {
-	cmd := fmt.Sprintf("%s%s run-queue", envPrefix, agentBinaryPath)
+	cmd := fmt.Sprintf("%s%s %s run-queue", envPrefix, agentenv.ShellPathAssignment(), agentBinaryPath)
 	if r2Bucket != "" {
 		cmd += fmt.Sprintf(" --r2-bucket=%s", r2Bucket)
 	}
@@ -42,7 +43,7 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 		return false, nil
 	}
 
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", session, ssh.EscapeForSingleQuotes(runnerCmd))
+	tmuxCmd := ssh.TmuxCommand(fmt.Sprintf("new-session -d -s '%s' bash -c '%s'", session, ssh.EscapeForSingleQuotes(runnerCmd)))
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
 		if msg := strings.TrimSpace(stderr); msg != "" {
 			return false, fmt.Errorf("start queue runner: %s", msg)

@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -103,6 +104,7 @@ func main() {
 }
 
 func runQueue(args []string) {
+	agentenv.EnsureToolPath()
 	parsed, err := parseRunQueueArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "run-queue: %v\n", err)

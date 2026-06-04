@@ -31,7 +31,7 @@ func SyncOutputsBack(host, remoteDir, localDir string, dirs []string, totalSizeM
 // Unlike source sync, this goes remote -> local with no --delete.
 func BuildOutputSyncArgs(host, remoteDir, localDir, outputDir string) []string {
 	dir := strings.TrimSuffix(outputDir, "/")
-	src := host + ":" + strings.TrimRight(remoteDir, "/") + "/" + dir + "/"
+	src := ssh.RsyncTarget(host) + ":" + strings.TrimRight(remoteDir, "/") + "/" + dir + "/"
 	dst := strings.TrimRight(localDir, "/") + "/" + dir + "/"
-	return []string{"-az", "-e", ssh.BatchModeRsyncCommand(rsyncConnectTimeout), src, dst}
+	return []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout), src, dst}
 }

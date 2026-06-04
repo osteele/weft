@@ -14,6 +14,7 @@ import (
 // mockSSHForReconcile sets up SSH mocks that succeed for all operations.
 func mockSSHForReconcile(t *testing.T) {
 	t.Helper()
+	mockQueueSourceSync(t, "test-source-sha")
 	mockSSHFunc(t, func(host, cmd string) (string, string, int) {
 		// Accept all SSH commands — we're testing the merge logic, not SSH.
 		return "", "", 0

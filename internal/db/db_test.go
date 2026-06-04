@@ -1106,7 +1106,7 @@ func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	}
 }
 
-func TestMoveQueuedJobToUnplaced_QueuedIntentOverTerminalHostAttempt(t *testing.T) {
+func TestMoveQueuedJobToUnplaced_FreshQueuedHostAttemptOverTerminalHistory(t *testing.T) {
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueuedWithGPU(database, "cool100", "/tmp/project", "python train.py", "completed but requeued", "")
@@ -1116,6 +1116,9 @@ func TestMoveQueuedJobToUnplaced_QueuedIntentOverTerminalHostAttempt(t *testing.
 	end := time.Now().Unix()
 	if err := CloseAttempt(database, jobID, StatusCompleted, intPtr(0), end); err != nil {
 		t.Fatalf("CloseAttempt: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "cool100", nil, StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt retry: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
 		t.Fatalf("set requested_status queued: %v", err)
@@ -2330,6 +2333,70 @@ func TestResetLaunchJobsClosesAttempts(t *testing.T) {
 	}
 	if attempts[0].EndedAt == nil {
 		t.Error("attempt should have ended")
+	}
+}
+
+func TestJobStatusView_OnPremTerminalExitOverridesQueuedIntent(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "studio", "/tmp/project", "python train.py", "script failure", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := RecordCompletionByID(database, jobID, 1, time.Now().Unix()); err != nil {
+		t.Fatalf("record completion: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", job.Status, StatusFailed)
+	}
+	if job.Host != "studio" {
+		t.Fatalf("host = %q, want studio", job.Host)
+	}
+	if job.TargetKind() != JobTargetInventoryHost {
+		t.Fatalf("target kind = %q, want %q", job.TargetKind(), JobTargetInventoryHost)
+	}
+}
+
+func TestJobStatusView_OnPremPreflightRejectionStaysQueued(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "studio", "/tmp/project", "python train.py", "preflight", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := CloseAttempt(database, jobID, StatusFailed, nil, 0); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = NULL, exit_code = NULL, failure_reason = ? WHERE job_id = ?`,
+		"source mismatch", jobID,
+	); err != nil {
+		t.Fatalf("set preflight failure_reason: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested_status queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.Host != "studio" {
+		t.Fatalf("host = %q, want studio", job.Host)
 	}
 }
 
@@ -3643,8 +3710,8 @@ func TestStartupRepair_FixesCompletedCloudAttemptsMissingExitCode(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.Status != StatusDead {
-		t.Fatalf("pre-condition job status = %q, want %q", job.Status, StatusDead)
+	if job.Status != StatusCompleted {
+		t.Fatalf("pre-condition job status = %q, want %q", job.Status, StatusCompleted)
 	}
 
 	database.Close()

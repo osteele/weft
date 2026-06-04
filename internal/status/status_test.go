@@ -23,12 +23,7 @@ func TestIsTerminal(t *testing.T) {
 
 func TestAllStatusesCovered(t *testing.T) {
 	all := AllStatuses()
-	// Every status should appear as From in at least one rule OR be Completed
-	// (which is a sink state with no non-authoritative outbound transitions).
 	for _, s := range all {
-		if s == Completed {
-			continue // sink state
-		}
 		allowed := AllowedFrom(s, false)
 		if len(allowed) == 0 {
 			t.Errorf("status %s has no non-authoritative outbound transitions", s)
@@ -57,6 +52,7 @@ func TestValidateTransition_Valid(t *testing.T) {
 		{Running, Failed, false},
 		{Running, Paused, false},
 		{Paused, Running, false},
+		{Completed, Queued, false},
 		{Failed, Queued, false},
 		{Dead, Running, false},
 		{Draft, Queued, false},
@@ -80,9 +76,7 @@ func TestValidateTransition_Invalid(t *testing.T) {
 		from, to      string
 		authoritative bool
 	}{
-		// Completed is a sink (non-authoritative)
 		{Completed, Running, false},
-		{Completed, Queued, false},
 		// Cannot go backward from completed
 		{Completed, Starting, false},
 		// Authoritative required but not provided
@@ -136,10 +130,10 @@ func TestAllowedFrom(t *testing.T) {
 		}
 	}
 
-	// Completed has no non-authoritative outbound transitions
+	// Completed can be manually retried, but not resumed as running.
 	allowed = AllowedFrom(Completed, false)
-	if len(allowed) != 0 {
-		t.Errorf("AllowedFrom(%s, false) = %v; want empty", Completed, allowed)
+	if !slices.Contains(allowed, Queued) {
+		t.Errorf("AllowedFrom(%s, false) = %v; want %s", Completed, allowed, Queued)
 	}
 
 	// Failed should include Completed when authoritative

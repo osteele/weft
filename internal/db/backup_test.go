@@ -151,17 +151,8 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 
 func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
 	t.Helper()
-	if migrations.Target() != 13 {
+	if migrations.Target() != 14 {
 		t.Fatalf("update backup migration fixture for target version %d", migrations.Target())
-	}
-	if _, err := database.Exec(`DROP INDEX IF EXISTS idx_price_authorizations_class`); err != nil {
-		t.Fatalf("drop price authorizations index: %v", err)
-	}
-	if _, err := database.Exec(`DROP TABLE IF EXISTS price_authorizations`); err != nil {
-		t.Fatalf("drop price authorizations table: %v", err)
-	}
-	if _, err := database.Exec(`ALTER TABLE jobs DROP COLUMN price_authorized_up_to_cents`); err != nil {
-		t.Fatalf("drop price authorization column: %v", err)
 	}
 	setGooseVersionForTest(t, database, int(migrations.Target()-1))
 }

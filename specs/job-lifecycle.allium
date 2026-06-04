@@ -206,6 +206,7 @@ entity Job {
         paused -> queued
 
         -- Restart/requeue paths (from terminal states)
+        completed -> queued
         failed -> running
         failed -> paused
         failed -> queued

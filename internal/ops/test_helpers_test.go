@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -45,4 +47,15 @@ func mockSSHFunc(t *testing.T, handler func(host, command string) (string, strin
 		return stdout, stderr, err
 	})
 	t.Cleanup(cleanup)
+}
+
+func mockQueueSourceSync(t *testing.T, sourceSHA256 string) {
+	t.Helper()
+	orig := queueSourceSync
+	queueSourceSync = func(job *db.Job, timeout time.Duration) (string, error) {
+		return sourceSHA256, nil
+	}
+	t.Cleanup(func() {
+		queueSourceSync = orig
+	})
 }

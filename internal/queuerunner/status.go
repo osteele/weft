@@ -20,12 +20,11 @@ type StatusInfo struct {
 
 // StatusCommand returns the SSH command that gathers queue runner status.
 func StatusCommand() string {
-	return fmt.Sprintf(
-		`tmux has-session -t 'weft-queue-default' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; ` +
-			`PATH="$HOME/.local/bin:$PATH" jq -r '.current // ""' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; ` +
-			`PATH="$HOME/.local/bin:$PATH" jq -r '.pending | length // 0' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/DEPTH:/' || echo "DEPTH:0"; ` +
-			`PATH="$HOME/.local/bin:$PATH" jq -r '(.pending_reasons // {}) as $reasons | (.pending // [])[]? as $job | ($reasons[($job|tostring)] // empty) | select(length > 0) | "BLOCKED:\($job):\(.)"' ~/.cache/weft/queue/default.state.json 2>/dev/null || true; ` +
-			`test -f ~/.cache/weft/queue/default.stop && echo "STOP:yes" || echo "STOP:no"`)
+	return ssh.TmuxCommand(`has-session -t 'weft-queue-default' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"`) + `; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -r '.current // ""' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -r '.pending | length // 0' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/DEPTH:/' || echo "DEPTH:0"; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -r '(.pending_reasons // {}) as $reasons | (.pending // [])[]? as $job | ($reasons[($job|tostring)] // empty) | select(length > 0) | "BLOCKED:\($job):\(.)"' ~/.cache/weft/queue/default.state.json 2>/dev/null || true; ` +
+		`test -f ~/.cache/weft/queue/default.stop && echo "STOP:yes" || echo "STOP:no"`
 }
 
 // ParseStatus parses the output of StatusCommand into a StatusInfo struct.

@@ -80,6 +80,36 @@ func TestProcessCommands_AddPreservesSourceSHAOnDuplicate(t *testing.T) {
 	}
 }
 
+func TestProcessCommands_AddCanClearTagsOnDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo one", Tags: []string{"benchmark"}},
+	})
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:01Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo two"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatal(err)
+	}
+
+	jobData, err := ReadJobFile(dir, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobData.Tags) != 0 {
+		t.Fatalf("Tags = %v, want empty", jobData.Tags)
+	}
+}
+
 func TestProcessCommands_AddSkipsPendingWhenJobFileWriteFails(t *testing.T) {
 	rootDir := t.TempDir()
 	cmdFile := filepath.Join(rootDir, "default.commands")

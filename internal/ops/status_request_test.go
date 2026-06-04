@@ -2,6 +2,7 @@ package ops
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ func TestRequestStatus_ToDraft(t *testing.T) {
 
 func TestRequestStatus_ToQueued(t *testing.T) {
 	database := db.SetupTestDB(t)
+	mockQueueSourceSync(t, "queued-source-sha")
 
 	// Create a draft job
 	jobID, _ := db.RecordJobStarting(database, "test-host", "/tmp", "echo test", "test job")
@@ -49,12 +51,17 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 	}
 	job, _ := db.GetJobByID(database, jobID)
 
-	// Mock SSH to succeed
-	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "mkdir", Stdout: ""},   // Queue append
-		{Contains: "printf", Stdout: ""},  // Append command
-		{Contains: "cat", Stdout: ""},     // Current file check
-		{Contains: "grep", Stdout: "YES"}, // In queue
+	var sawSourceSHA bool
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "source_sha256") && strings.Contains(command, "queued-source-sha") {
+			sawSourceSHA = true
+		}
+		switch {
+		case strings.Contains(command, "grep"):
+			return "YES", "", 0
+		default:
+			return "", "", 0
+		}
 	})
 
 	result, err := RequestStatus(database, job, db.StatusQueued, TimeoutFast)
@@ -64,6 +71,9 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 
 	if !result.Success {
 		t.Error("expected Success to be true")
+	}
+	if !sawSourceSHA {
+		t.Error("expected queued request to append source_sha256")
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)

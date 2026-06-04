@@ -359,9 +359,9 @@ func TestAllowCompletedMarkerFallback_AllowsQueuedUnplacedPlaceholder(t *testing
 	}
 	if _, err := database.Exec(
 		`UPDATE job_attempts
-		 SET status = ?, end_time = ?
+		 SET status = ?, end_time = ?, cloud_outcome = ?
 		 WHERE job_id = ? AND end_time IS NULL`,
-		db.StatusCanceled, int64(1000), jobID,
+		db.StatusCanceled, int64(1000), db.AttemptOutcomeOrphaned, jobID,
 	); err != nil {
 		t.Fatalf("close attempt: %v", err)
 	}

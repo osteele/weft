@@ -32,3 +32,44 @@ func TestBatchModeRsyncCommand(t *testing.T) {
 		t.Errorf("rsync command should start with 'ssh ', got %q", got)
 	}
 }
+
+func TestBatchModeRsyncCommandForHostUsesConfiguredIdentity(t *testing.T) {
+	resetIdentityGlobals(t)
+	sshUserByHost = map[string]string{"studio": "agent"}
+	sshIdentityByHost = map[string]string{"studio": "/path/to/agent key"}
+
+	got := BatchModeRsyncCommandForHost("studio", 15*time.Second, "ConnectionAttempts=1")
+	for _, want := range []string{
+		"-o BatchMode=yes",
+		"-o ConnectTimeout=15",
+		"-o ConnectionAttempts=1",
+		"-o IdentityAgent=none",
+		"-o IdentitiesOnly=yes",
+		"-i '/path/to/agent key'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("BatchModeRsyncCommandForHost = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestRsyncTargetUsesConfiguredUser(t *testing.T) {
+	resetIdentityGlobals(t)
+	sshUserByHost = map[string]string{"studio": "agent"}
+
+	if got := RsyncTarget("studio"); got != "agent@studio" {
+		t.Fatalf("RsyncTarget = %q, want %q", got, "agent@studio")
+	}
+	if got := RsyncTarget("cool30"); got != "cool30" {
+		t.Fatalf("RsyncTarget unconfigured = %q, want %q", got, "cool30")
+	}
+}
+
+func TestScpTargetUsesConfiguredUser(t *testing.T) {
+	resetIdentityGlobals(t)
+	sshUserByHost = map[string]string{"studio": "agent"}
+
+	if got := scpTarget("studio", "~/.cache/weft/bin/notify-slack.sh"); got != "agent@studio:~/.cache/weft/bin/notify-slack.sh" {
+		t.Fatalf("scpTarget = %q, want %q", got, "agent@studio:~/.cache/weft/bin/notify-slack.sh")
+	}
+}
