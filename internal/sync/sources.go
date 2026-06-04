@@ -27,14 +27,22 @@ const rsyncConnectTimeout = 15 * time.Second
 // Tests can replace it with SetSyncFunc to avoid spawning rsync processes.
 type SyncFunc func(host, localDir, remoteDir string, excludes []string) error
 
-var syncFunc SyncFunc = defaultSyncFunc
+var (
+	syncFunc          SyncFunc = defaultSyncFunc
+	extraPathSyncFunc SyncFunc = defaultExtraPathSyncFunc
+)
 
 // SetSyncFunc replaces the sync execution function.
 // Returns a cleanup function that restores the original.
 func SetSyncFunc(fn SyncFunc) func() {
 	original := syncFunc
+	originalExtraPath := extraPathSyncFunc
 	syncFunc = fn
-	return func() { syncFunc = original }
+	extraPathSyncFunc = fn
+	return func() {
+		syncFunc = original
+		extraPathSyncFunc = originalExtraPath
+	}
 }
 
 // DefaultExcludes returns the hardcoded rsync exclude patterns for source syncing.
@@ -292,7 +300,7 @@ func SyncExtraPaths(host string, paths []string) error {
 		}
 
 		start := time.Now()
-		err := syncFunc(host, localPath, remotePath, nil)
+		err := extraPathSyncFunc(host, localPath, remotePath, nil)
 		oplog.Log("sync.extra_path",
 			oplog.WithHost(host),
 			oplog.WithDuration(time.Since(start)),
@@ -310,7 +318,15 @@ func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error 
 	return defaultSyncFuncWithDelete(host, localDir, remoteDir, excludes, true)
 }
 
+func defaultExtraPathSyncFunc(host, localDir, remoteDir string, excludes []string) error {
+	return defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir, excludes, false, extraPathRsyncTimeout)
+}
+
 func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []string, delete bool) error {
+	return defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir, excludes, delete, rsyncTimeout)
+}
+
+func defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir string, excludes []string, delete bool, timeout time.Duration) error {
 	var args []string
 	if excludes != nil {
 		args = BuildRsyncArgsWithOptions(host, localDir, remoteDir, excludes, delete)
@@ -321,7 +337,7 @@ func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []stri
 	// Use a timeout so a slow or unresponsive host doesn't block the caller
 	// indefinitely. Rsync's own --timeout covers data stalls but not initial
 	// SSH connection hangs, so we use a context deadline for the whole process.
-	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "rsync", args...)
@@ -332,6 +348,12 @@ func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []stri
 		msg := strings.TrimSpace(stderrBuf.String())
 		if isIgnorableRsyncError(err, msg) {
 			return nil
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if msg != "" {
+				return fmt.Errorf("rsync to %s:%s timed out after %s: %s: %w", host, remoteDir, timeout, msg, err)
+			}
+			return fmt.Errorf("rsync to %s:%s timed out after %s: %w", host, remoteDir, timeout, err)
 		}
 		if msg != "" {
 			return fmt.Errorf("rsync to %s:%s: %s: %w", host, remoteDir, msg, err)
@@ -394,6 +416,10 @@ func SyncFile(host, localPath, remotePath string) error {
 // rsyncTimeout is the maximum time to wait for a single rsync operation.
 // This prevents indefinite hangs when the remote host is unresponsive.
 const rsyncTimeout = 30 * time.Second
+
+// extraPathRsyncTimeout is longer because local: inputs can intentionally name
+// data directories that are excluded from normal source sync.
+const extraPathRsyncTimeout = 10 * time.Minute
 
 // SyncSourcesWithSSH rsyncs localDir to a remote host with a custom SSH command.
 // sshCmd is the full SSH command string (e.g., "ssh -p 12345 -o StrictHostKeyChecking=no").

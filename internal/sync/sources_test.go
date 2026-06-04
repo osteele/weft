@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/ssh"
@@ -390,6 +391,48 @@ func TestBuildExtraPathRsyncArgs(t *testing.T) {
 				t.Errorf("destination = %q, want %q", dst, tt.wantDst)
 			}
 		})
+	}
+}
+
+func TestSyncExtraPathsUsesExtraPathSyncFunc(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var capturedHost, capturedLocal, capturedRemote string
+	var capturedExcludes []string
+	cleanup := SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		capturedHost = host
+		capturedLocal = localDir
+		capturedRemote = remoteDir
+		capturedExcludes = excludes
+		return nil
+	})
+	defer cleanup()
+
+	if err := SyncExtraPaths("host-beta", []string{"~/code/project/data"}); err != nil {
+		t.Fatalf("SyncExtraPaths: %v", err)
+	}
+	if capturedHost != "host-beta" {
+		t.Errorf("host = %q, want host-beta", capturedHost)
+	}
+	wantLocal := filepath.Join(home, "code", "project", "data")
+	if capturedLocal != wantLocal {
+		t.Errorf("local = %q, want %q", capturedLocal, wantLocal)
+	}
+	if capturedRemote != "~/code/project/data" {
+		t.Errorf("remote = %q, want ~/code/project/data", capturedRemote)
+	}
+	if capturedExcludes != nil {
+		t.Errorf("excludes = %v, want nil", capturedExcludes)
+	}
+}
+
+func TestExtraPathRsyncTimeoutLongerThanSourceTimeout(t *testing.T) {
+	if extraPathRsyncTimeout <= rsyncTimeout {
+		t.Fatalf("extraPathRsyncTimeout = %s, want > %s", extraPathRsyncTimeout, rsyncTimeout)
+	}
+	if extraPathRsyncTimeout < 10*time.Minute {
+		t.Fatalf("extraPathRsyncTimeout = %s, want at least 10m", extraPathRsyncTimeout)
 	}
 }
 
