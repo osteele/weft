@@ -1227,11 +1227,20 @@ rule UserRequeuesJob {
         -- exit_code != 0 keeps the job visible as 'failed' in listings and
         -- the autopilot never re-places it.
         --
-        -- For cloud retries the new attempt is unplaced (host='',
-        -- launch_id=NULL); the scheduler re-places it on the next sweep.
-        -- Prior cloud attempts are marked cloud_outcome='superseded' so
-        -- retry-budget accounting does not keep charging elapsed/spend
-        -- from the failed chain.
+        -- Retry resolves the fresh attempt target in this order:
+        -- explicit retry command target, stored jobs.placement_host,
+        -- current inventory-host target, current live rental-instance
+        -- target, otherwise unplaced. A stored or explicit host is a
+        -- concrete placement and wins over tags, including stale `rental`
+        -- tags left from an earlier cloud attempt.
+        --
+        -- If no concrete target exists, the new attempt is unplaced
+        -- (host='', launch_id=NULL) and the scheduler re-places it on the
+        -- next sweep. Prior cloud attempts are marked
+        -- cloud_outcome='superseded' so retry-budget accounting does not
+        -- keep charging elapsed/spend from the failed chain. Terminal
+        -- prior instances do not count as live targets and therefore do
+        -- not trigger replacement launch from retry alone.
         --
         -- Both branches must clear `requested_status` so the
         -- `job.status = queued` post-condition holds uniformly. The
@@ -1243,10 +1252,11 @@ rule UserRequeuesJob {
         -- `requested_status='queued'`; the on-prem branch now does the
         -- same after creating its fresh queued attempt.
         --
-        -- Implementation: internal/db/db.go RequeueByID delegates to
-        -- RequeueFreshAttemptByID for cloud jobs; the on-prem branch
-        -- runs `UPDATE jobs SET requested_status='queued' WHERE id = ?`
-        -- alongside the fresh-attempt insert.
+        -- Implementation: cmd/restart.go resolveRetryTarget applies the
+        -- precedence above. internal/db/db.go RequeueFreshAttemptByTarget
+        -- creates a fresh queued attempt with the resolved inventory host
+        -- or live launch target; RequeueFreshAttemptByID is the unplaced
+        -- fallback.
         --
         -- Regression references: jobs wj1379, wj1381 (2026-04-24) —
         -- `weft edit --retry` reported success locally but listings kept

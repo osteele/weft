@@ -62,6 +62,17 @@ func TestGetHostSyncModeKeepsStatusForAlreadyDispatchedQueuedJob(t *testing.T) {
 	}
 }
 
+func TestGetHostSyncModePromotesPendingQueuedInventoryJob(t *testing.T) {
+	pending := db.StatusQueued
+	jobs := []*db.Job{
+		{ID: 1, Host: "test-host", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued, PendingStatus: &pending},
+	}
+
+	if got := GetHostSyncMode(jobs); got != ops.SyncModeFull {
+		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeFull)
+	}
+}
+
 func TestGetHostSyncModeIgnoresJobsThatCannotBeDispatched(t *testing.T) {
 	pending := db.StatusCanceled
 	jobs := []*db.Job{

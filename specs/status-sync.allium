@@ -222,12 +222,42 @@ rule SyncHost {
     -- the runner's pending list if and only if the DB considers it queued
     -- on this host (modulo transient/running states).
     --   - Forward (DB → runner): DB-queued jobs missing from runner state
-    --     get re-dispatched (see RedispatchMissingQueuedJobs).
+    --     get dispatched or re-dispatched (see DispatchQueuedExplicitTargets
+    --     and RedispatchMissingQueuedJobs).
     --   - Reverse (runner → DB): runner-pending entries that the DB no
     --     longer expects get cancel ops (see PruneStaleRunnerPendings).
     if mode = full:
         ensures: QueuedJobsPushedToRemote(host)
     ensures: RunnerStateReconciled(host)
+}
+
+-- Dispatch is a sync responsibility once a concrete inventory-host target
+-- is already known. It is not an autopilot responsibility: autopilot chooses
+-- destinations and launches new rental instances, while host sync pushes
+-- queued work to an already-known host.
+rule DispatchQueuedExplicitTargets {
+    when: SyncHostRequested(host, full)
+
+    for job in jobs/Jobs
+        where job.host.name = host
+        and job.status = queued
+        and job.target_kind = inventory_host
+        and (job.latest_attempt.pending_status = queued
+             or job.latest_attempt.last_synced_status != queued):
+            ensures: SourceSyncedToHost(job, host)
+            ensures: JobAppendedToRunnerQueue(host, job)
+            ensures: job.latest_attempt.pending_status = null
+            ensures: job.latest_attempt.last_synced_status = queued
+            ensures: job.latest_attempt.queued_at != null
+            ensures: LifecycleEvent(job, "queue.dispatch.ok")
+
+    @guidance
+        -- Applies to explicit `weft sync`, daemon/background sync, and
+        -- the TUI hostsync.Worker whenever it selects full mode for the
+        -- host. On timeout, connection error, source-sync failure, input
+        -- staging failure, or queue append failure, the target remains
+        -- durable and pending_status stays queued so any later sync actor
+        -- can complete dispatch.
 }
 
 -- Forward reconcile: walk DB-queued jobs whose last_synced_status is queued
@@ -1125,9 +1155,12 @@ rule ExplicitSync {
 rule TUIPeriodicSync {
     when: TUISyncTickFired()
 
-    -- On-prem: request syncs for hosts with visible jobs
+    -- On-prem: request syncs for hosts with visible jobs.
     for host in visible_job_hosts:
-        ensures: SyncHostRequested(host, status_only)
+        if HostHasQueuedExplicitTargetNeedingDispatch(host):
+            ensures: SyncHostRequested(host, full)
+        else:
+            ensures: SyncHostRequested(host, status_only)
 
     -- Cloud: reconcile runs on its own 60s ticker inside the worker
     ensures: CloudReconcileTriggered()
@@ -1156,6 +1189,12 @@ rule TUIPeriodicSync {
         --
         -- The TUI also reloads jobs every sync tick (60s) regardless
         -- of worker results, to catch DB changes from other sources.
+        --
+        -- HostHasQueuedExplicitTargetNeedingDispatch is true when any
+        -- queued inventory-host job has pending_status=queued or
+        -- last_synced_status != queued. This promotes the worker from a
+        -- status-only probe to full sync so TUI background sync can append
+        -- durable explicit placements to the runner queue.
         --
         -- TUI rendering contract for grouped status list:
         --   - Status/footer block is bottom-anchored.

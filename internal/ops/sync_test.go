@@ -68,6 +68,13 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchFailed,
+		JobID:     jobID,
+		Detail:    "source sync failed: rsync killed",
+	}); err != nil {
+		t.Fatalf("insert stale dispatch failure: %v", err)
+	}
 
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -98,6 +105,16 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 	}
 	if updated.Status != db.StatusRunning {
 		t.Fatalf("expected job status running, got %s", updated.Status)
+	}
+	var okEvents int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM lifecycle_events WHERE job_id = ? AND event_kind = ?`,
+		jobID, db.EventQueueDispatchOK,
+	).Scan(&okEvents); err != nil {
+		t.Fatalf("count dispatch ok events: %v", err)
+	}
+	if okEvents == 0 {
+		t.Fatalf("expected dispatch ok event after runner reported job running")
 	}
 }
 

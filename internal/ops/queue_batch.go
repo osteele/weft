@@ -62,6 +62,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 
 		switch status.State {
 		case queueStateQueued:
+			recordQueueDispatchOK(database, job.ID)
 			if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
 				if err := removeFromQueueFile(job.Host, job.ID, timeout); err != nil {
 					return updated, err
@@ -83,6 +84,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				updated++
 			}
 		case queueStateRunning:
+			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
 				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 					slog.Warn("failed to update start time", "component", "sync", "job_id", job.ID, "error", err)
@@ -114,6 +116,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				syncGPUDevicesToMetadata(database, job, status.GPUDevices)
 			}
 		case queueStatePaused:
+			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
 				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 					slog.Warn("failed to update start time", "component", "sync", "job_id", job.ID, "error", err)
@@ -172,6 +175,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 			updated++
 		default:
 			if status.ExitCode != nil {
+				recordQueueDispatchOK(database, job.ID)
 				metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
 				if metaErr != nil {
 					return updated, metaErr

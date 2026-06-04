@@ -64,6 +64,29 @@ func TestListUnsyncedQueuedJobs_ExcludesPending(t *testing.T) {
 	}
 }
 
+func TestListUnsyncedQueuedJobs_IncludesPendingQueued(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "test-host", "/tmp", "echo hello", "test")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := SetPendingStatus(database, jobID, StatusQueued); err != nil {
+		t.Fatalf("set pending queued: %v", err)
+	}
+
+	jobs, err := ListUnsyncedQueuedJobs(database, "test-host")
+	if err != nil {
+		t.Fatalf("list unsynced: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 pending queued job, got %d", len(jobs))
+	}
+	if jobs[0].ID != jobID {
+		t.Errorf("expected job ID %d, got %d", jobID, jobs[0].ID)
+	}
+}
+
 func TestListUnsyncedQueuedJobs_FiltersByHost(t *testing.T) {
 	database := SetupTestDB(t)
 

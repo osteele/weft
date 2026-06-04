@@ -25,6 +25,12 @@ currently driving a pass — wait or pause before issuing manual launches.
 across restarts and means the autopilot is disabled — every runner is skipping
 its pass — see "Enabling and disabling" below.
 
+Paused autopilot is not paused sync. While autopilot is paused, weft does not
+make new placement decisions, launch new rental instances, or auto-relaunch
+orphaned jobs. Host sync still runs: explicit `weft sync`, daemon sync, and TUI
+background sync can dispatch queued jobs whose host or live rental-instance
+target is already known.
+
 ## Enabling and disabling
 
 The autopilot is enabled or disabled globally. Toggle it from the CLI:

@@ -1585,9 +1585,16 @@ func RequeueByID(database *sql.DB, id int64) error {
 // RequeueFreshAttemptByID creates a fresh queued attempt for manual retries.
 // Unlike RequeueByID's cloud path, this always creates a new attempt number so
 // retry budgeting and lifecycle accounting are reset from a clean attempt.
-// The caller controls host placement by passing host="" for unplaced/cloud jobs
+// The caller controls inventory placement by passing host="" for unplaced jobs
 // or an inventory host name for pinned on-prem jobs.
 func RequeueFreshAttemptByID(database *sql.DB, id int64, host string) error {
+	return RequeueFreshAttemptByTarget(database, id, host, nil)
+}
+
+// RequeueFreshAttemptByTarget creates a fresh queued retry attempt and preserves
+// a concrete target when one is known. Pass an inventory host, a live launch ID,
+// or neither for an unplaced retry.
+func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launchID *int64) error {
 	warnOpenTransition(database, id, StatusQueued, false, status.SourceUserAction)
 
 	tx, err := database.Begin()
@@ -1599,7 +1606,7 @@ func RequeueFreshAttemptByID(database *sql.DB, id int64, host string) error {
 		tx.Rollback()
 		return err
 	}
-	attemptID, err := createAttemptTx(tx, id, host, nil, StatusQueued)
+	attemptID, err := createAttemptTx(tx, id, host, launchID, StatusQueued)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -3535,9 +3542,9 @@ func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE host = ? AND effective_target_kind = ? AND status = ?
 		  AND (last_synced_status IS NULL OR last_synced_status != ?)
-		  AND pending_status IS NULL AND tombstoned = 0
+		  AND (pending_status IS NULL OR pending_status = ?) AND tombstoned = 0
 		ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusQueued, StatusQueued)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusQueued, StatusQueued, StatusQueued)
 }
 
 // ListSyncedQueuedJobs returns queued jobs on a host that were already pushed to

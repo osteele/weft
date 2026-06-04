@@ -702,11 +702,11 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 				}
 			}
 
-			retryHost := ""
-			if job.HasInventoryHost() {
-				retryHost = job.Host
+			retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
+			if err != nil {
+				return err
 			}
-			if err := db.RequeueFreshAttemptByID(database, jobID, retryHost); err != nil {
+			if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {
 				return fmt.Errorf("create fresh queued attempt: %w", err)
 			}
 			if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
@@ -760,8 +760,18 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
 			return err
 		}
-		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+		retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
+		if err != nil {
 			return err
+		}
+		if retryHost != "" || retryLaunchID != nil {
+			if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {
+				return fmt.Errorf("create fresh queued attempt: %w", err)
+			}
+		} else {
+			if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+				return err
+			}
 		}
 		if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
 			return fmt.Errorf("carry retry metadata: %w", err)
@@ -828,13 +838,27 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return nil
 	}
 
-	result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
+	retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
 	if err != nil {
 		return err
 	}
-	if result.Deferred {
-		if result.Message != "" {
-			fmt.Println(result.Message)
+	if retryHost != "" || retryLaunchID != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+			return err
+		}
+		if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {
+			return fmt.Errorf("create fresh queued attempt: %w", err)
+		}
+		_ = logcache.Delete(jobID)
+	} else {
+		result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
+		if err != nil {
+			return err
+		}
+		if result.Deferred {
+			if result.Message != "" {
+				fmt.Println(result.Message)
+			}
 		}
 	}
 
@@ -851,6 +875,46 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(job.EnvVars))
 	}
 	return nil
+}
+
+func resolveRetryTarget(database *sql.DB, job *db.Job) (string, *int64, error) {
+	if job == nil {
+		return "", nil, nil
+	}
+	storedHost, err := retryStoredPlacementHost(database, job.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	if storedHost != "" && !db.IsLaunchHost(storedHost) {
+		return storedHost, nil, nil
+	}
+	if job.HasInventoryHost() {
+		return job.Host, nil, nil
+	}
+	if job.LaunchID == nil || *job.LaunchID <= 0 {
+		return "", nil, nil
+	}
+	launch, err := db.GetLaunch(database, *job.LaunchID)
+	if err != nil {
+		return "", nil, fmt.Errorf("get launch %d: %w", *job.LaunchID, err)
+	}
+	if launch == nil || !db.IsLiveLaunchStatus(launch.Status) {
+		return "", nil, nil
+	}
+	launchID := *job.LaunchID
+	return "", &launchID, nil
+}
+
+func retryStoredPlacementHost(database *sql.DB, jobID int64) (string, error) {
+	var host sql.NullString
+	err := database.QueryRow(`SELECT placement_host FROM jobs WHERE id = ?`, jobID).Scan(&host)
+	if err == sql.ErrNoRows || !host.Valid {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get stored placement host for job %d: %w", jobID, err)
+	}
+	return strings.TrimSpace(host.String), nil
 }
 
 func printRestartModeLine() {

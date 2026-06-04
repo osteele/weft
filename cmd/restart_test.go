@@ -462,6 +462,141 @@ func TestRestartQueuedWithCloudHistory_CreatesFreshAttempt(t *testing.T) {
 	}
 }
 
+func TestRestartQueuedExplicitHostWithStaleRentalTagKeepsHost(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", t.TempDir(), "python train.py", "queued retry reset")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.AddJobTag(database, jobID, db.TagRental); err != nil {
+		t.Fatalf("add stale rental tag: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "H200",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", &launchID, db.StatusCanceled); err != nil {
+		t.Fatalf("create historical cloud attempt: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "studio", nil, db.StatusQueued); err != nil {
+		t.Fatalf("restore queued host attempt: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.TargetKind() != db.JobTargetInventoryHost {
+		t.Fatalf("target kind = %q, want %q", job.TargetKind(), db.JobTargetInventoryHost)
+	}
+	if job.Host != "studio" {
+		t.Fatalf("host = %q, want studio", job.Host)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("launch_id = %v, want nil", job.LaunchID)
+	}
+	if job.PendingStatus == nil || *job.PendingStatus != db.StatusQueued {
+		t.Fatalf("pending_status = %v, want queued", job.PendingStatus)
+	}
+}
+
+func TestRestartLiveRentalJobKeepsLaunchTarget(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "live rental retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "H200",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("set launch: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusFailed, int64(1000), db.AttemptOutcomeFailed, jobID,
+	); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.TargetKind() != db.JobTargetRentalInstance {
+		t.Fatalf("target kind = %q, want %q", job.TargetKind(), db.JobTargetRentalInstance)
+	}
+	if job.LaunchID == nil || *job.LaunchID != launchID {
+		t.Fatalf("launch_id = %v, want %d", job.LaunchID, launchID)
+	}
+	if job.PendingStatus == nil || *job.PendingStatus != db.StatusQueued {
+		t.Fatalf("pending_status = %v, want queued", job.PendingStatus)
+	}
+}
+
+func TestRestartLiveRentalJobWithStoredPlacementHostKeepsHost(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", t.TempDir(), "python train.py", "live rental retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "H200",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("set launch: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusFailed, int64(1000), db.AttemptOutcomeFailed, jobID,
+	); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatalf("restartJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.TargetKind() != db.JobTargetInventoryHost {
+		t.Fatalf("target kind = %q, want %q", job.TargetKind(), db.JobTargetInventoryHost)
+	}
+	if job.Host != "studio" {
+		t.Fatalf("host = %q, want studio", job.Host)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("launch_id = %v, want nil", job.LaunchID)
+	}
+	if job.PendingStatus == nil || *job.PendingStatus != db.StatusQueued {
+		t.Fatalf("pending_status = %v, want queued", job.PendingStatus)
+	}
+}
+
 func TestRestartJobRejectsDeterministicPinnedHostGateMismatch(t *testing.T) {
 	restore := inventory.SetHosts([]inventory.HostSpec{
 		{

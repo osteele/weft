@@ -635,9 +635,11 @@ func GetHostSyncMode(jobs []*db.Job) ops.SyncMode {
 }
 
 func needsQueuedDispatchSync(job *db.Job) bool {
-	return job != nil &&
-		job.HasInventoryHost() &&
-		job.Status == db.StatusQueued &&
-		job.PendingStatus == nil &&
-		job.LastSyncedStatus != db.StatusQueued
+	if job == nil || !job.HasInventoryHost() || job.Status != db.StatusQueued {
+		return false
+	}
+	if job.PendingStatus != nil && *job.PendingStatus == db.StatusQueued {
+		return true
+	}
+	return job.PendingStatus == nil && job.LastSyncedStatus != db.StatusQueued
 }

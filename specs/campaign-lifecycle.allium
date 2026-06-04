@@ -1915,7 +1915,9 @@ rule RunawayBreakerClears {
 --
 -- The unplaced_jobs input is defined by jobs.is_unplaced_awaiting_placement
 -- (target_kind = unplaced AND status = queued AND no open MoveIntent or
--- PlacementIntent — see specs/job-move.allium).
+-- PlacementIntent — see specs/job-move.allium). The autopilot consumes only
+-- this unplaced set. Jobs already targeted at an inventory host or an
+-- already-live rental instance are sync-dispatched, not auto-placed.
 --
 -- Inventory-tagged jobs are partitioned off before the planner runs (see
 -- InventoryTaggedJobsBypassCloudPlanner). The cloud planner sees only
@@ -3050,4 +3052,9 @@ invariant PausedAutopilotTakesNoActions {
         -- Manual user-driven launches and `weft instance submit` are
         -- still permitted while the autopilot is paused — pause is
         -- specifically about the *automated* policy loop.
+        -- Sync is also still permitted: explicit `weft sync`, daemon sync,
+        -- and TUI hostsync.Worker may dispatch queued jobs whose concrete
+        -- host/live-instance target is already known. Pause disables new
+        -- placement decisions and new instance creation, not queue
+        -- dispatch to known destinations.
 }

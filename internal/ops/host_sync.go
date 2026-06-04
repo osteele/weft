@@ -696,10 +696,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		}, dispatchEventDedupeWindow)
 	}
 	recordDispatchOK := func(jobID int64) {
-		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
-			EventKind: db.EventQueueDispatchOK,
-			JobID:     jobID,
-		})
+		recordQueueDispatchOK(database, jobID)
 	}
 	recordDeferred := func(jobID int64, stage string, err error) {
 		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
@@ -899,7 +896,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			}
 			contacted = true
 			if outcome.resolved {
-				if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
+				if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+					return ensured, contacted, err
+				}
+				if err := db.SetQueuedAtNow(database, job.ID); err != nil {
 					return ensured, contacted, err
 				}
 				recordDispatchOK(job.ID)
@@ -937,7 +937,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			continue
 		}
 		contacted = true
-		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+			return ensured, contacted, err
+		}
+		if err := db.SetQueuedAtNow(database, job.ID); err != nil {
 			return ensured, contacted, err
 		}
 		recordDispatchOK(job.ID)

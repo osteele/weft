@@ -124,10 +124,12 @@ effective GPU memory requirement is automatically raised above the capacity that
 caused the OOM, preventing the same failure from repeating. An explicit
 `--gpu-mem` flag overrides this floor.
 
-If an immediate run can't reach the host, the CLI automatically records the job
-locally and defers it to the remote queue. The next sync (or any command that
-touches that host) will append the saved entry so it runs as soon as the host is
-reachable again.
+If an explicit-host run can't reach the host, the CLI records the job locally
+with that host target and defers it to the remote queue. Any full host sync can
+append the saved entry later: `weft sync`, the daemon sync loop, and TUI
+background sync all dispatch queued jobs whose destination is already known.
+This still happens while autopilot is paused, because autopilot pause stops new
+placement decisions and instance creation, not sync dispatch to a known host.
 
 Draft jobs (`--draft`) stay entirely local. They’re useful for capturing a job
 definition you want to tweak later or to keep certain jobs from ever syncing to
@@ -1026,6 +1028,13 @@ headroom that applies to separate `--gpu-mem` values.
 script metadata for GPU defaults. Explicit `retry` flags (`--gpu`,
 `--gpu-class`, `--gpu-mem`, `--gpu-mem-strict`) take precedence over script
 metadata.
+
+For terminal jobs, `retry` preserves a concrete destination when one is known:
+an explicit command target, stored `placement_host`, current inventory host, or
+already-live rental instance. Explicit host placement wins over tags, including
+stale `rental` tags from older attempts. If no concrete target exists, the fresh
+attempt stays unplaced and requires autopilot or an explicit move/run command to
+choose a destination.
 
 ### weft job move
 

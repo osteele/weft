@@ -35,6 +35,7 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 1: Check if status file exists (job completed)
 	completedResult, completionInfo := prober.ProbeCompleted(job.ID)
 	if completedResult == remote.ProbeTrue && completionInfo != nil {
+		recordQueueDispatchOK(database, job.ID)
 		metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
 		if metaErr != nil {
 			return SyncResult{HostContacted: true}, metaErr
@@ -60,6 +61,7 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 2: Check if job is the current job in queue runner
 	currentResult := prober.ProbeCurrent(job.ID)
 	if currentResult == remote.ProbeTrue {
+		recordQueueDispatchOK(database, job.ID)
 		metadata, err := UpdateStartTimeFromMetadata(database, job, timeout)
 		if err != nil {
 			return SyncResult{HostContacted: true}, err
@@ -88,6 +90,7 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 3: Check if job is in queue file (waiting)
 	inQueueResult := prober.ProbeInQueue(job.ID)
 	if inQueueResult == remote.ProbeTrue {
+		recordQueueDispatchOK(database, job.ID)
 		if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
 			if err := host.RemoveFromQueue(job.ID); err != nil {
 				return SyncResult{HostContacted: true}, err
@@ -137,6 +140,7 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 5: Check if process is running via PID
 	processResult := prober.ProbeProcessRunning(job.ID)
 	if processResult == remote.ProbeTrue {
+		recordQueueDispatchOK(database, job.ID)
 		metadata, err := UpdateStartTimeFromMetadata(database, job, timeout)
 		if err != nil {
 			return SyncResult{HostContacted: true}, err
