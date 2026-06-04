@@ -220,6 +220,7 @@ var (
 	editEnvVars         []string
 	editClearEnv        bool
 	editTags            []string
+	editRemoveTags      []string
 	editClearTags       bool
 	editStatus          string
 	editRetry           bool
@@ -908,7 +909,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	statusChanged := cmd.Flags().Changed("status") || editRetry
 	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
-	tagsChanged := cmd.Flags().Changed("tag") || editClearTags
+	tagsChanged := cmd.Flags().Changed("tag") || cmd.Flags().Changed("remove-tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
 	gpuMemChanged := cmd.Flags().Changed("gpu-mem")
 	providerChanged := cmd.Flags().Changed("provider")
@@ -934,6 +935,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 	if editClearTags && cmd.Flags().Changed("tag") {
 		return fmt.Errorf("%w: cannot combine --tag and --clear-tags", errFlagConflict)
+	}
+	if cmd.Flags().Changed("remove-tag") && cmd.Flags().Changed("tag") {
+		return fmt.Errorf("%w: cannot combine --remove-tag and --tag", errFlagConflict)
+	}
+	if cmd.Flags().Changed("remove-tag") && editClearTags {
+		return fmt.Errorf("%w: cannot combine --remove-tag and --clear-tags", errFlagConflict)
 	}
 	if editRetry && cmd.Flags().Changed("status") {
 		return fmt.Errorf("%w: cannot combine --retry with --status", errFlagConflict)
@@ -1084,7 +1091,23 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 	if tagsChanged {
 		var newTags []string
-		if !editClearTags {
+		switch {
+		case editClearTags:
+		case cmd.Flags().Changed("remove-tag"):
+			remove := make(map[string]struct{}, len(editRemoveTags))
+			for _, tag := range editRemoveTags {
+				tag = db.CanonicalizeTag(tag)
+				if tag == "" {
+					return fmt.Errorf("update tags: tag cannot be empty")
+				}
+				remove[tag] = struct{}{}
+			}
+			for _, tag := range job.Tags {
+				if _, ok := remove[db.CanonicalizeTag(tag)]; !ok {
+					newTags = append(newTags, tag)
+				}
+			}
+		default:
 			newTags = append([]string(nil), editTags...)
 		}
 		if err := db.SetJobTags(database, jobID, newTags); err != nil {
@@ -1303,6 +1326,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 				Command:      &job.Command,
 				Project:      &job.Project,
 				EnvVars:      append([]string(nil), job.EnvVars...),
+				Tags:         append([]string(nil), job.Tags...),
 				GPU:          stringPtr(job.GPU),
 				GPUClass:     stringPtr(job.GPUClass),
 				GPUMemGB:     job.GPUMemGB,
@@ -1313,6 +1337,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 				Produces:     append([]string(nil), job.Produces...),
 				Needs:        append([]string(nil), job.Needs...),
 				CPUAllotment: job.CPUAllotment,
+			}
+			if len(job.Tags) == 0 {
+				update.ClearTags = true
 			}
 			if cmd.Flags().Changed("message") {
 				update.Description = &job.Description
@@ -1532,6 +1559,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVarP(&editEnvVars, "env", "e", nil, "Replace environment variables (VAR=value)")
 	cmd.Flags().BoolVar(&editClearEnv, "clear-env", false, "Remove all environment variables")
 	cmd.Flags().StringSliceVar(&editTags, "tag", nil, "Replace job tags (repeat or comma-separate values)")
+	cmd.Flags().StringSliceVar(&editRemoveTags, "remove-tag", nil, "Remove job tags without replacing other tags")
 	cmd.Flags().BoolVar(&editClearTags, "clear-tags", false, "Remove all job tags")
 	cmd.Flags().StringSliceVar(&queueEditDepends, "depends-on", nil, "Wait for these job IDs to succeed before running (comma-separated or repeated)")
 	cmd.Flags().StringSliceVar(&queueEditDependsAny, "depends-on-any", nil, "Wait for these job IDs to finish (success or failure)")

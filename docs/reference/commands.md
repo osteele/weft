@@ -1580,6 +1580,7 @@ weft edit [flags] <job-id>
 - `-e, --env VAR=value`: Replace environment variables (repeat flag to set multiple)
 - `--clear-env`: Remove all environment variables
 - `--tag TAG`: Replace the job's tags (repeat flag to set multiple)
+- `--remove-tag TAG`: Remove one tag without replacing other tags (repeat flag to remove multiple)
 - `--clear-tags`: Remove all job tags
 - `--depends-on ID[,ID...]`: Require the listed jobs to succeed before running
 - `--depends-on-any ID[,ID...]`: Wait for the listed jobs to finish (success or failure)
@@ -1593,8 +1594,12 @@ weft edit wj1595 --depends-on wj1599
 weft edit wj1600 --depends-on wj1400 --depends-on-any wj1401
 weft edit wj1700 --clear-depends
 weft edit wj1750 --tag benchmark --tag exp-012
+weft edit wj2428 --remove-tag benchmark
 weft edit wj1800 --command "python eval.py" -C ~/project -e FOO=bar
 ```
+
+`--tag` replaces the complete tag set. Use `--remove-tag` as the edit-form
+synonym for `weft job tag rm` when removing a tag from the existing set.
 
 Dependencies can target local-host jobs or rental/ephemeral jobs. For rental
 dependencies, the queue entry is held until dependency completion/artifact sync

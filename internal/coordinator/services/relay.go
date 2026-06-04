@@ -275,6 +275,15 @@ func (p *RelayProcessor) handleUpdate(ctx context.Context, req *coordinatorrelay
 			return err
 		}
 	}
+	if req.Update.ClearTags || req.Update.Tags != nil {
+		tags := req.Update.Tags
+		if req.Update.ClearTags {
+			tags = nil
+		}
+		if err := db.SetJobTags(p.db, job.ID, tags); err != nil {
+			return err
+		}
+	}
 	if req.Update.GPU != nil {
 		if err := db.SetJobGPU(p.db, job.ID, *req.Update.GPU); err != nil {
 			return err

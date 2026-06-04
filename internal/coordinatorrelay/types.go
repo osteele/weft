@@ -68,6 +68,7 @@ type UpdateJobPayload struct {
 	EnvVars      []string `json:"env_vars,omitempty"`
 	ClearEnv     bool     `json:"clear_env,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
+	ClearTags    bool     `json:"clear_tags,omitempty"`
 	GPU          *string  `json:"gpu,omitempty"`
 	GPUClass     *string  `json:"gpu_class,omitempty"`
 	GPUMemGB     *int     `json:"gpu_mem_gb,omitempty"`

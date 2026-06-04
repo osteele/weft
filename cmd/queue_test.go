@@ -319,6 +319,108 @@ func TestRunEditClearsTags(t *testing.T) {
 	}
 }
 
+func TestRunEditRemovesTag(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{"benchmark", "exp-012"}); err != nil {
+		t.Fatalf("set initial tags: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("remove-tag", "benchmark"); err != nil {
+		t.Fatalf("set remove-tag flag: %v", err)
+	}
+
+	var remoteTags []string
+	cleanupSSH := ssh.SetRunner(func(host, command string) (string, string, error) {
+		if host != "hostA" {
+			return "", "", fmt.Errorf("unexpected host %q", host)
+		}
+		if strings.Contains(command, fmt.Sprintf("job-%d.json", jobID)) {
+			remoteTags, err = extractQueuedJobTags(command, jobID)
+			if err != nil {
+				t.Fatalf("extract queued tags: %v", err)
+			}
+			return "", "", nil
+		}
+		return "", "connection timed out", fmt.Errorf("exit status 255")
+	})
+	t.Cleanup(cleanupSSH)
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "tags: exp-012") {
+		t.Fatalf("output missing tag update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	wantTags := []string{"exp-012"}
+	if got := job.Tags; len(got) != len(wantTags) {
+		t.Fatalf("tags len = %d, want %d (%v)", len(got), len(wantTags), got)
+	} else {
+		for i := range wantTags {
+			if got[i] != wantTags[i] {
+				t.Fatalf("tags[%d] = %q, want %q", i, got[i], wantTags[i])
+			}
+		}
+	}
+
+	if len(remoteTags) != len(wantTags) {
+		t.Fatalf("remote tags len = %d, want %d (%v)", len(remoteTags), len(wantTags), remoteTags)
+	}
+	for i := range wantTags {
+		if remoteTags[i] != wantTags[i] {
+			t.Fatalf("remoteTags[%d] = %q, want %q", i, remoteTags[i], wantTags[i])
+		}
+	}
+}
+
+func TestRunEditRemovesCanonicalizedTag(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{"rental", "exp-012"}); err != nil {
+		t.Fatalf("set initial tags: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("remove-tag", "cloud"); err != nil {
+		t.Fatalf("set remove-tag flag: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "tags: exp-012") {
+		t.Fatalf("output missing tag update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got := job.Tags; len(got) != 1 || got[0] != "exp-012" {
+		t.Fatalf("tags = %v, want [exp-012]", got)
+	}
+}
+
 func TestRunEditUpdatesGPUMem(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -417,6 +519,51 @@ func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 	}
 }
 
+func TestRunEditRejectsRemoveTagConflicts(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		set  func(*cobra.Command)
+	}{
+		{
+			name: "tag",
+			set: func(cmd *cobra.Command) {
+				if err := cmd.Flags().Set("tag", "exp-012"); err != nil {
+					t.Fatalf("set tag flag: %v", err)
+				}
+			},
+		},
+		{
+			name: "clear-tags",
+			set: func(cmd *cobra.Command) {
+				if err := cmd.Flags().Set("clear-tags", "true"); err != nil {
+					t.Fatalf("set clear-tags flag: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetEditState()
+			cmd := newEditTestCommand()
+			if err := cmd.Flags().Set("remove-tag", "benchmark"); err != nil {
+				t.Fatalf("set remove-tag flag: %v", err)
+			}
+			tc.set(cmd)
+
+			err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
+			if err == nil || !errors.Is(err, errFlagConflict) {
+				t.Fatalf("expected errFlagConflict, got %v", err)
+			}
+		})
+	}
+}
+
 func resetEditState() {
 	queueEditDepends = nil
 	queueEditDependsAny = nil
@@ -428,6 +575,7 @@ func resetEditState() {
 	editEnvVars = nil
 	editClearEnv = false
 	editTags = nil
+	editRemoveTags = nil
 	editClearTags = false
 	editStatus = ""
 	editRetry = false
