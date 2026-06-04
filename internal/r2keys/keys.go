@@ -76,6 +76,9 @@ func JobAttemptArtifactManifest(jobID, runID int64) string {
 func JobAttemptLiveTimeseries(jobID, runID int64) string {
 	return dataplane.JobAttemptLiveTimeseries(jobID, runID)
 }
+func JobAttemptRawTimeseries(jobID, runID int64) string {
+	return dataplane.JobAttemptRawTimeseries(jobID, runID)
+}
 func JobAttemptLiveTelemetry(jobID, runID int64) string {
 	return dataplane.JobAttemptLiveTelemetry(jobID, runID)
 }

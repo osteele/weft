@@ -180,9 +180,16 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 	}
 	out.AttemptID = *job.LatestRunID
 
-	legacySamples, err := db.GetTimeseriesByRun(database, *job.LatestRunID)
+	legacySummary, err := db.GetTimeseriesSummaryByRun(database, *job.LatestRunID)
 	if err != nil {
-		return telemetryOutput{}, fmt.Errorf("get latest-run timeseries: %w", err)
+		return telemetryOutput{}, fmt.Errorf("get latest-run timeseries summary: %w", err)
+	}
+	var legacySamples []db.TimeseriesSample
+	if legacySummary == nil {
+		legacySamples, err = db.GetTimeseriesByRun(database, *job.LatestRunID)
+		if err != nil {
+			return telemetryOutput{}, fmt.Errorf("get latest-run timeseries: %w", err)
+		}
 	}
 	richSamples, err := db.GetTelemetryByRun(database, *job.LatestRunID)
 	if err != nil {
@@ -193,6 +200,10 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 		out.TimeMin = richSamples[0].Ts
 		out.TimeMax = richSamples[len(richSamples)-1].Ts
 		out.Samples = len(richSamples)
+	} else if legacySummary != nil && legacySummary.SampleCount > 0 {
+		out.TimeMin = legacySummary.TSMin
+		out.TimeMax = legacySummary.TSMax
+		out.Samples = legacySummary.SampleCount
 	} else if len(legacySamples) > 0 {
 		out.TimeMin = legacySamples[0].Ts
 		out.TimeMax = legacySamples[len(legacySamples)-1].Ts
@@ -202,7 +213,11 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 		out.DurationS = float64(out.TimeMax - out.TimeMin)
 	}
 
-	out.GPU = db.ComputeGPUTelemetryStats(legacySamples)
+	if legacySummary != nil {
+		out.GPU = db.GPUTelemetryStatsFromTimeseriesSummary(legacySummary)
+	} else {
+		out.GPU = db.ComputeGPUTelemetryStats(legacySamples)
+	}
 	if len(richSamples) > 0 {
 		var wallDuration float64
 		if job.StartTime > 0 && job.EndTime != nil && *job.EndTime > job.StartTime {

@@ -215,10 +215,8 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Fetch timeseries
-		ts, err := db.GetTimeseriesByRun(database, run.RunID)
-		if err == nil && len(ts) > 0 {
-			rec.Timeseries = ts
+		if raw, _, err := loadRawTimeseries(database, run.JobID, run.RunID); err == nil && len(raw) > 0 {
+			rec.Timeseries = db.ParseTimeseriesJSONL(string(raw), 0, "")
 		}
 		if telemetrySamples, err := db.GetTelemetryByRun(database, run.RunID); err == nil && len(telemetrySamples) > 0 {
 			if rec.TelemetryV2 == nil {

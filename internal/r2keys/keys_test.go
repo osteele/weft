@@ -1,6 +1,25 @@
 package r2keys
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/osteele/weft/internal/controlplane"
+	"github.com/osteele/weft/internal/dataplane"
+)
+
+func TestControlAndDataPlaneJobRunPrefixesStayInLockstep(t *testing.T) {
+	jobID := int64(441)
+	runID := int64(123)
+	if got, want := controlplane.JobPrefix(jobID), dataplane.JobPrefix(jobID); got != want {
+		t.Fatalf("JobPrefix mismatch: controlplane=%q dataplane=%q", got, want)
+	}
+	if got, want := controlplane.JobRunPrefix(jobID, runID), dataplane.JobRunPrefix(jobID, runID); got != want {
+		t.Fatalf("JobRunPrefix mismatch: controlplane=%q dataplane=%q", got, want)
+	}
+	if got, want := controlplane.JobRunPrefix(jobID, 0), dataplane.JobRunPrefix(jobID, 0); got != want {
+		t.Fatalf("legacy JobRunPrefix mismatch: controlplane=%q dataplane=%q", got, want)
+	}
+}
 
 func TestExtractRunID(t *testing.T) {
 	tests := []struct {

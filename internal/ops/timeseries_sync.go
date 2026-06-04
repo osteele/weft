@@ -2,7 +2,6 @@ package ops
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -42,28 +41,17 @@ func syncJobTimeseries(database *sql.DB, job *db.Job, timeout time.Duration) err
 		return nil // No timeseries file yet — not an error
 	}
 
-	// Parse JSONL and filter to new samples
-	var samples []db.TimeseriesSample
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var s db.TimeseriesSample
-		if err := json.Unmarshal([]byte(line), &s); err != nil {
-			continue // skip malformed lines
-		}
-		if s.Ts <= lastTS {
-			continue // already synced
-		}
-		// Override tenant from backend (runner always writes "multi")
-		s.Tenant = tenant
-		samples = append(samples, s)
-	}
+	samples := db.ParseTimeseriesJSONL(stdout, lastTS, tenant)
 
 	if len(samples) == 0 {
 		return nil
 	}
 
-	return db.InsertTimeseries(database, job.ID, samples)
+	if err := db.InsertTimeseries(database, job.ID, samples); err != nil {
+		return err
+	}
+	if job.LatestRunID != nil {
+		return db.RefreshTimeseriesSummaryFromRows(database, job.ID, *job.LatestRunID)
+	}
+	return nil
 }

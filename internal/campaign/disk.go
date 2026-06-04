@@ -345,6 +345,12 @@ func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string)
 		   LEFT JOIN job_phase_timings jpt ON jpt.job_id = j.id
 		   LEFT JOIN (
 		     SELECT job_id,
+		            MAX(peak_disk_used_bytes) AS peak_used_bytes
+		       FROM job_timeseries_summaries
+		      WHERE job_id IN (SELECT id FROM jobs WHERE project = ?)
+		      GROUP BY job_id
+		     UNION ALL
+		     SELECT job_id,
 		            MAX(
 		              CASE
 		                WHEN disk_total_bytes > 0 AND disk_free_bytes >= 0 AND disk_total_bytes >= disk_free_bytes
@@ -354,10 +360,11 @@ func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string)
 		            ) AS peak_used_bytes
 		       FROM job_timeseries
 		      WHERE job_id IN (SELECT id FROM jobs WHERE project = ?)
+		        AND job_id NOT IN (SELECT job_id FROM job_timeseries_summaries)
 		      GROUP BY job_id
 		   ) ts ON ts.job_id = j.id
 		  WHERE j.project = ?`,
-		project, project,
+		project, project, project,
 	)
 	if err != nil {
 		return 0, nil, false, err

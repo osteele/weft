@@ -145,7 +145,8 @@ instance/<id>/termination-intent.json
 **Per-job-run keys** (replace `<job>` and `<run>`):
 
 ```
-jobs/<job>/runs/<run>/results/<job>.timeseries.jsonl   # per-sample (~5 MB per long run)
+jobs/<job>/runs/<run>/telemetry/timeseries.jsonl       # durable raw per-sample timeseries
+jobs/<job>/runs/<run>/timeseries.jsonl                 # live checkpoint while running
 jobs/<job>/runs/<run>/results/<job>.telemetry.jsonl    # finer-grained
 jobs/<job>/runs/<run>/results/<job>.log                # stdout/stderr
 jobs/<job>/runs/<run>/live-log/part-NNNNNN.log         # live tail
@@ -163,7 +164,7 @@ weft job timeseries <job-id> --raw      # full JSONL stream
 weft job timeseries <job-id> --run <id> # specific attempt
 
 # Stream raw telemetry for a specific job run via rclone if you prefer.
-rclone cat <r2-remote>:weft-results/jobs/<job>/runs/<run>/results/<job>.timeseries.jsonl
+rclone cat <r2-remote>:weft-results/jobs/<job>/runs/<run>/telemetry/timeseries.jsonl
 ```
 
 The `disk-failure.json` report is the most direct evidence for `disk_full`

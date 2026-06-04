@@ -278,6 +278,34 @@ table job_timeseries
   col 15 attempt_id INTEGER notnull=0 default=<none> pk=0
   col 16 job_run_id INTEGER notnull=0 default=<none> pk=0
   unique-index (job_id,ts) origin=pk partial=0
+table job_timeseries_raw_objects
+  col 0 job_id INTEGER notnull=1 default=<none> pk=0
+  col 1 attempt_id INTEGER notnull=1 default=<none> pk=1
+  col 2 kind TEXT notnull=1 default=<none> pk=2
+  col 3 r2_key TEXT notnull=1 default=<none> pk=0
+  col 4 size_bytes INTEGER notnull=1 default=0 pk=0
+  col 5 etag TEXT notnull=0 default=<none> pk=0
+  col 6 confirmed_at INTEGER notnull=1 default=<none> pk=0
+  col 7 created_at INTEGER notnull=1 default=<none> pk=0
+  fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
+  unique-index (attempt_id,kind) origin=pk partial=0
+table job_timeseries_summaries
+  col 0 job_id INTEGER notnull=1 default=<none> pk=0
+  col 1 attempt_id INTEGER notnull=1 default=<none> pk=1
+  col 2 sample_count INTEGER notnull=1 default=0 pk=0
+  col 3 ts_min INTEGER notnull=1 default=0 pk=0
+  col 4 ts_max INTEGER notnull=1 default=0 pk=0
+  col 5 peak_disk_used_bytes INTEGER notnull=1 default=0 pk=0
+  col 6 last_disk_total_bytes INTEGER notnull=1 default=0 pk=0
+  col 7 peak_rss_kb INTEGER notnull=1 default=0 pk=0
+  col 8 peak_gpu_mem_mib INTEGER notnull=1 default=0 pk=0
+  col 9 peak_gpu_util_pct INTEGER notnull=1 default=0 pk=0
+  col 10 peak_gpu_temp_c INTEGER notnull=1 default=0 pk=0
+  col 11 mean_gpu_util_pct REAL notnull=1 default=0 pk=0
+  col 12 mean_gpu_temp_c REAL notnull=1 default=0 pk=0
+  col 13 tenant TEXT notnull=0 default=<none> pk=0
+  col 14 updated_at INTEGER notnull=1 default=<none> pk=0
+  fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
 table jobs
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 working_dir TEXT notnull=1 default=<none> pk=0

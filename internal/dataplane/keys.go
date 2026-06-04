@@ -132,6 +132,10 @@ func JobAttemptLiveTimeseries(jobID, runID int64) string {
 	return fmt.Sprintf("%s/timeseries.jsonl", JobRunPrefix(jobID, runID))
 }
 
+func JobAttemptRawTimeseries(jobID, runID int64) string {
+	return fmt.Sprintf("%s/telemetry/timeseries.jsonl", JobRunPrefix(jobID, runID))
+}
+
 func JobAttemptLiveTelemetry(jobID, runID int64) string {
 	if runID <= 0 {
 		return JobLiveTelemetry(jobID)

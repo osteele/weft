@@ -72,14 +72,22 @@ func scanDiskTelemetryAnomalies(database *sql.DB) ([]telemetryAnomaly, error) {
 
 	tsRows, err := database.Query(
 		`SELECT j.id, COALESCE(j.project, ''), COALESCE(j.command, ''),
-		        MAX(CASE
-		             WHEN ts.disk_total_bytes > 0
-		              AND ts.disk_free_bytes >= 0
-		              AND ts.disk_total_bytes >= ts.disk_free_bytes
-		             THEN ts.disk_total_bytes - ts.disk_free_bytes
-		             ELSE 0
-		            END) AS peak_used_bytes
-		   FROM job_timeseries ts
+		        MAX(ts.peak_used_bytes) AS peak_used_bytes
+		   FROM (
+		     SELECT job_id, peak_disk_used_bytes AS peak_used_bytes
+		       FROM job_timeseries_summaries
+		     UNION ALL
+		     SELECT job_id,
+		            CASE
+		              WHEN disk_total_bytes > 0
+		               AND disk_free_bytes >= 0
+		               AND disk_total_bytes >= disk_free_bytes
+		              THEN disk_total_bytes - disk_free_bytes
+		              ELSE 0
+		            END AS peak_used_bytes
+		       FROM job_timeseries
+		      WHERE job_id NOT IN (SELECT job_id FROM job_timeseries_summaries)
+		   ) ts
 		   JOIN jobs j ON j.id = ts.job_id
 		  GROUP BY j.id
 		 HAVING peak_used_bytes > ?

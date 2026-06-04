@@ -76,3 +76,22 @@ func ComputeGPUTelemetryStats(samples []TimeseriesSample) *GPUTelemetryStats {
 	}
 	return &stats
 }
+
+func GPUTelemetryStatsFromTimeseriesSummary(summary *TimeseriesSummary) *GPUTelemetryStats {
+	if summary == nil || summary.SampleCount == 0 {
+		return nil
+	}
+	if summary.PeakGPUTempC == 0 && summary.PeakGPUUtilPct == 0 && summary.PeakGPUMemMiB == 0 {
+		return nil
+	}
+	stats := &GPUTelemetryStats{
+		SampleCount: summary.SampleCount,
+		TempMax:     summary.PeakGPUTempC,
+		TempMean:    summary.MeanGPUTempC,
+		UtilMax:     summary.PeakGPUUtilPct,
+		UtilMean:    summary.MeanGPUUtilPct,
+		MemPeakMiB:  summary.PeakGPUMemMiB,
+		Throttled:   summary.PeakGPUTempC > ThermalThrottleThresholdC,
+	}
+	return stats
+}
