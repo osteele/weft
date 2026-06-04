@@ -178,7 +178,7 @@ Examples:
   weft edit wj1595 --depends-on wj1599
   weft edit wj1595 --command "python eval.py"
   weft edit wj1595 --env FOO=bar --env BAZ=qux
-  weft edit wj1595 --tag benchmark --tag exp-012
+  weft edit wj1595 --tag benchmark-isolation --tag exp-012
   weft edit wj1595 --input hf:meta-llama/Llama-3-8B
   weft edit wj1595 --needs output/run/ckpt.pt:wj1778`,
 	Args: usageArgs(cobra.ExactArgs(1)),
@@ -299,7 +299,7 @@ func init() {
 	addSecretEnvFlags(queueAddCmd, &queueHFToken, &queueHFTokenFrom, &queueSecretVars)
 	queueAddCmd.Flags().IntVar(&queueDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	queueAddCmd.Flags().IntVar(&queueRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
-	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
+	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark-isolation' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")

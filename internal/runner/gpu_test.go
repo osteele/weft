@@ -893,7 +893,7 @@ func TestCanStartGPUJob_InventoryBenchmark_BlocksAnyComputeProcess(t *testing.T)
 	}
 	state := NewState()
 	job := &RunnerJob{
-		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPUClass: "a100", Tags: []string{"benchmark"}},
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPUClass: "a100", Tags: []string{"benchmark-isolation"}},
 		ID:   1,
 	}
 

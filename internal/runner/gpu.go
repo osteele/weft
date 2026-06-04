@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
@@ -546,7 +547,7 @@ func (inv *GPUInventory) CanStartGPUJob(state *State, job *RunnerJob) (bool, []s
 // CanStartGPUJobWithReason checks if a job can start based on GPU constraints.
 // Returns a user-facing reason when the GPU gate blocks the job.
 func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) (bool, []string, string) {
-	strictIsolation := HasTag(job.Data, "benchmark")
+	strictIsolation := HasTag(job.Data, db.TagBenchmark)
 
 	// GPU class-based job
 	if job.Data.GPUClass != "" {

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 // BenchmarkConfig holds thresholds for system idle detection.
@@ -69,14 +71,14 @@ func (cfg BenchmarkConfig) SystemIdleCheck() string {
 	return strings.Join(reasons, ", ")
 }
 
-// HasExclusiveOrBenchmarkTag checks if a job has either the "exclusive" or "benchmark" tag.
+// HasExclusiveOrBenchmarkTag checks if a job has either the exclusive or benchmark-isolation tag.
 func HasExclusiveOrBenchmarkTag(job *RunnerJob) bool {
-	return HasTag(job.Data, "exclusive") || HasTag(job.Data, "benchmark")
+	return HasTag(job.Data, db.TagExclusive) || HasTag(job.Data, db.TagBenchmark)
 }
 
-// HasBenchmarkTag checks if a job has the "benchmark" tag.
+// HasBenchmarkTag checks if a job has the benchmark-isolation tag.
 func HasBenchmarkTag(job *RunnerJob) bool {
-	return HasTag(job.Data, "benchmark")
+	return HasTag(job.Data, db.TagBenchmark)
 }
 
 // AnyRunningExclusive checks if any running job has exclusive or benchmark tags.

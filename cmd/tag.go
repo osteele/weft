@@ -22,11 +22,12 @@ scheduler and runner:
   processed         Marks a job as processed; filtered by --processed /
                     --unprocessed on 'weft jobs list'. Set with
                     'weft mark-processed'.
-  benchmark         Treat the job as a benchmark: requires an idle host,
+  benchmark-isolation
+                    Treat the job as a benchmark: requires an idle host,
                     enables strict GPU isolation, optional GPU warmup, and
                     blocks combination with 'interruptible'.
   exclusive         Requires the host to be idle while the job runs (like
-                    'benchmark', without the timing-protection requirements).
+                    'benchmark-isolation', without the timing-protection requirements).
   cpu-intensive     CPU-heavy job. Skips the queue-contention penalty in
                     run-time estimation and adds a placement bonus
                     proportional to the host's free CPU capacity (cores ×

@@ -1048,17 +1048,17 @@ laptop$ weft run atlas \
 The queue runner waits until all other jobs finish, runs the exclusive job alone,
 then resumes normal scheduling.
 
-`exclusive` and `benchmark` are part of the broader catalog of tags the
+`exclusive` and `benchmark-isolation` are part of the broader catalog of tags the
 scheduler treats specially. See the
 [Placement guide § Reserved tags](placement.md#reserved-tags) for the full
 list and effects.
 
-For reproducible benchmarking, the `benchmark` tag goes further — it waits for
+For reproducible benchmarking, the `benchmark-isolation` tag goes further — it waits for
 the whole system (CPU, RAM, GPU, VRAM) to be idle before starting:
 
 ```
 laptop$ weft run atlas \
-  --tag benchmark \
+  --tag benchmark-isolation \
   -m "Measure throughput at batch_size=64" \
   'uv run python benchmark.py --batch 64'
 ```

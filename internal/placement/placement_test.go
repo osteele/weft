@@ -1416,7 +1416,7 @@ func extractTransferMinutes(reasons []string) float64 {
 
 func TestBenchmarkTag_NoMetrics_Ineligible(t *testing.T) {
 	db := setupTestDB(t)
-	constraints := Constraints{Tags: []string{"benchmark"}}
+	constraints := Constraints{Tags: []string{dbpkg.TagBenchmark}}
 
 	// Without metrics, benchmark jobs should be ineligible (can't verify idle)
 	scores := scoreTestHosts(db, constraints)
@@ -1439,7 +1439,7 @@ func TestBenchmarkTag_NoMetrics_Ineligible(t *testing.T) {
 
 func TestBenchmarkTag_IdleHost_Eligible(t *testing.T) {
 	db := setupTestDB(t)
-	constraints := Constraints{Tags: []string{"benchmark"}}
+	constraints := Constraints{Tags: []string{dbpkg.TagBenchmark}}
 
 	metrics := map[string]*HostMetrics{
 		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
@@ -1458,7 +1458,7 @@ func TestBenchmarkTag_IdleHost_Eligible(t *testing.T) {
 
 func TestBenchmarkTag_BusyHost_Ineligible(t *testing.T) {
 	db := setupTestDB(t)
-	constraints := Constraints{Tags: []string{"benchmark"}}
+	constraints := Constraints{Tags: []string{dbpkg.TagBenchmark}}
 
 	metrics := map[string]*HostMetrics{
 		"host-beta":  {CPUPercent: 50, GPUPercent: 0, RAMPercent: 5},  // CPU too high
@@ -1477,7 +1477,7 @@ func TestBenchmarkTag_BusyHost_Ineligible(t *testing.T) {
 
 func TestBenchmarkTag_MixedHosts_OnlyIdleEligible(t *testing.T) {
 	db := setupTestDB(t)
-	constraints := Constraints{Tags: []string{"benchmark"}}
+	constraints := Constraints{Tags: []string{dbpkg.TagBenchmark}}
 
 	metrics := map[string]*HostMetrics{
 		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},    // idle
@@ -1508,7 +1508,7 @@ func TestBenchmarkTag_SharedHost_Ineligible(t *testing.T) {
 [hosts.host-beta]
 shared = true
 `)
-	constraints := Constraints{Tags: []string{"benchmark"}}
+	constraints := Constraints{Tags: []string{dbpkg.TagBenchmark}}
 	metrics := map[string]*HostMetrics{
 		"host-alpha": {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
 		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
@@ -1520,7 +1520,7 @@ shared = true
 	if shared.Eligible {
 		t.Fatal("shared host should be ineligible for benchmark auto-placement")
 	}
-	if len(shared.Reasons) == 0 || shared.Reasons[0] != "shared host excluded for benchmark auto-placement" {
+	if len(shared.Reasons) == 0 || shared.Reasons[0] != "shared host excluded for benchmark-isolation auto-placement" {
 		t.Fatalf("unexpected reasons: %v", shared.Reasons)
 	}
 }
@@ -1726,9 +1726,9 @@ func TestShouldSpillToRental_ComputeIntensiveRequiresThirtyMinuteMargin(t *testi
 func TestDescribeConstraints_IncludesBenchmark(t *testing.T) {
 	desc := DescribeConstraints(Constraints{
 		GPUClass: "a100",
-		Tags:     []string{"benchmark"},
+		Tags:     []string{dbpkg.TagBenchmark},
 	})
-	if !strings.Contains(desc, "benchmark") {
+	if !strings.Contains(desc, dbpkg.TagBenchmark) {
 		t.Errorf("DescribeConstraints should mention benchmark, got: %s", desc)
 	}
 }
@@ -1751,7 +1751,7 @@ shared = true
 	}
 	found := false
 	for _, reason := range reasons {
-		if strings.Contains(reason, "shared host excluded for benchmark auto-placement") {
+		if strings.Contains(reason, "shared host excluded for benchmark-isolation auto-placement") {
 			found = true
 			break
 		}

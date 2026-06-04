@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,7 +162,7 @@ func (m *setupPrewarmManager) startNext(currentIndex int, jobs []cloud.AgentJob,
 		return
 	}
 	current := jobs[currentIndex]
-	if slices.Contains(current.Tags, "benchmark") {
+	if db.HasBenchmarkTag(current.Tags) {
 		return
 	}
 	currentDir := runner.ExpandTilde(currentWorkDir)
@@ -198,7 +197,7 @@ func setupPrewarmEligible(currentDir string, job cloud.AgentJob, nextDir string)
 	if nextDir == "" || nextDir == currentDir {
 		return false
 	}
-	if len(job.CloudAfter) > 0 || slices.Contains(job.Tags, "benchmark") {
+	if len(job.CloudAfter) > 0 || db.HasBenchmarkTag(job.Tags) {
 		return false
 	}
 	if len(hfInputAssets(job.Inputs)) > 0 {
@@ -560,7 +559,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		// Benchmark barrier: wait for all background uploads/deletions
-		if slices.Contains(job.Tags, "benchmark") {
+		if db.HasBenchmarkTag(job.Tags) {
 			bgm.Barrier()
 			if lastPostJobID > 0 {
 				setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
@@ -573,7 +572,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// GPU warmup (opt-in via config): prime system-level CUDA caches
 		// before the first benchmark job to avoid cold-start bias.
-		if cfg.GPUWarmup && job.UsesGPU && slices.Contains(job.Tags, "benchmark") && !gpuWarmedUp {
+		if cfg.GPUWarmup && job.UsesGPU && db.HasBenchmarkTag(job.Tags) && !gpuWarmedUp {
 			runGPUWarmup(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase)
 			gpuWarmedUp = true
 		}

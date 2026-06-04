@@ -13,7 +13,7 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 	job := &db.Job{
 		ID:          42,
 		Command:     "python train.py",
-		Tags:        []string{"benchmark", "nightly"},
+		Tags:        []string{"benchmark-isolation", "nightly"},
 		GPUClass:    "a100",
 		Priority:    3,
 		OutputDirs:  []string{"results/"},

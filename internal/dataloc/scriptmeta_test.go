@@ -19,7 +19,7 @@ func TestParseScriptMeta(t *testing.T) {
 # [tool.weft]
 # gpu = "nvidia>=24GB"
 # inputs = ["hf:gpt2", "hf:bert-base-uncased"]
-# tags = ["benchmark"]
+# tags = ["benchmark-isolation"]
 # ///
 
 import torch
@@ -27,7 +27,7 @@ import torch
 			want: &ScriptMeta{
 				GPU:    "nvidia>=24GB",
 				Inputs: []string{"hf:gpt2", "hf:bert-base-uncased"},
-				Tags:   []string{"benchmark"},
+				Tags:   []string{"benchmark-isolation"},
 			},
 		},
 		{

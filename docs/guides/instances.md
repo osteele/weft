@@ -193,8 +193,8 @@ pick a cheaper offer via the usual GPU/memory filters. The launch plan table
 annotates interruptible groups as `$X.YY/hr (int, bid $X.YY)` so the chosen
 bid is visible in `--dry-run`.
 
-**Not compatible with `benchmark`.** The submission path rejects jobs that
-combine `benchmark` and `interruptible`: preemption pauses the container
+**Not compatible with `benchmark-isolation`.** The submission path rejects jobs that
+combine `benchmark-isolation` and `interruptible`: preemption pauses the container
 mid-measurement (invalidating timing; the GPU is cold on resume), and a
 stale-pause relaunch moves the job to a different physical machine, breaking
 the "same hardware" control that benchmark analyses rely on.
@@ -524,7 +524,7 @@ reconciliation owns success or rollback.
      [campaign]
      gpu_warmup = true
      ```
-   - **Benchmark barrier**: Benchmark jobs (tagged `benchmark`) wait for all
+   - **Benchmark barrier**: Benchmark jobs (tagged `benchmark-isolation`) wait for all
      background uploads from prior jobs to complete before starting,
      preventing I/O interference with measurements.
 4. **Result upload**: After each job, the wrapper uploads results (logs,

@@ -937,7 +937,7 @@ func TestRestartQueuedJob_ClearsGPUMemWhenScriptDropsIt(t *testing.T) {
 	// longer declares gpu-mem.
 	script := `# /// script
 # [tool.weft]
-# tags = ["benchmark"]
+# tags = ["benchmark-isolation"]
 # ///
 print("train")
 `
@@ -974,7 +974,7 @@ func TestRestartQueuedJob_PreservesStoredCLIOverride(t *testing.T) {
 	// Script no longer declares gpu-mem.
 	script := `# /// script
 # [tool.weft]
-# tags = ["benchmark"]
+# tags = ["benchmark-isolation"]
 # ///
 print("train")
 `

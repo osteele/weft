@@ -283,7 +283,7 @@ deploy-agent host="":
         echo "Or set WEFT_DEPLOY_HOST in .env"
         exit 1
     fi
-    ./weft queue update "${HOST}"
+    go run . queue update "${HOST}"
 
 # Deploy coordinator to studio: sync sources, rebuild, restart the launchd service
 deploy-coordinator host="studio":

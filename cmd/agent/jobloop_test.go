@@ -205,7 +205,7 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 	job := cloud.AgentJob{
 		ID:         42,
 		Command:    "python train.py",
-		Tags:       []string{"benchmark"},
+		Tags:       []string{"benchmark-isolation"},
 		OutputDirs: []string{"results/"},
 		Produces:   []string{"results/model.pt"},
 		Needs:      []string{"inputs/data.csv:41"},

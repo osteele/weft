@@ -57,7 +57,7 @@ type Constraints struct {
 	Inputs   []string // Asset refs the job reads (for locality scoring)
 	Command  string   // For predictor-based scoring; empty = skip
 	Project  string   // For predictor-based scoring; empty = skip
-	Tags     []string // Job tags; "benchmark" triggers idle-host requirement
+	Tags     []string // Job tags; benchmark-isolation triggers idle-host requirement
 
 	// PreferredInstanceIDs is a soft preference toward reusing these specific
 	// rental instances. Used to co-locate a consumer on its --needs
@@ -559,11 +559,11 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 
 	applyHistoricalFailureRisk(database, &s, host, c)
 
-	// Hard constraint: benchmark jobs require an idle host
+	// Hard constraint: benchmark-isolation jobs require an idle host.
 	if hasBenchmarkTag(c.Tags) {
 		if !db.HasInventoryTag(c.Tags) && cfg != nil && cfg.HostShared(host.Name) {
 			s.Eligible = false
-			s.Reasons = append(s.Reasons, "shared host excluded for benchmark auto-placement")
+			s.Reasons = append(s.Reasons, "shared host excluded for benchmark-isolation auto-placement")
 			return s
 		}
 		reason := benchmarkIdleCheck(database, host.Name, metrics)
@@ -572,7 +572,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			s.Reasons = append(s.Reasons, reason)
 			return s
 		}
-		s.Reasons = append(s.Reasons, "host idle (benchmark)")
+		s.Reasons = append(s.Reasons, "host idle (benchmark-isolation)")
 	}
 
 	// --- Time-based scoring ---
@@ -1176,7 +1176,7 @@ func DescribeConstraints(c Constraints) string {
 		parts = append(parts, fmt.Sprintf("%d inputs", len(c.Inputs)))
 	}
 	if hasBenchmarkTag(c.Tags) {
-		parts = append(parts, "benchmark")
+		parts = append(parts, db.TagBenchmark)
 	}
 	if db.HasRentalTag(c.Tags) {
 		parts = append(parts, db.TagRental)
@@ -1347,9 +1347,9 @@ func intFromEnvOrDefault(key string, defaultVal int) int {
 	return defaultVal
 }
 
-// hasBenchmarkTag returns true if tags contain the benchmark tag.
+// hasBenchmarkTag returns true if tags contain the benchmark-isolation tag.
 func hasBenchmarkTag(tags []string) bool {
-	return slices.Contains(tags, db.TagBenchmark)
+	return db.HasBenchmarkTag(tags)
 }
 
 // hasComputeIntensiveTag returns true if tags contain the compute-intensive tag.

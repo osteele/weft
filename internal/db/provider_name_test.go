@@ -11,10 +11,10 @@ func TestJobProviderName(t *testing.T) {
 		{"no tags", nil, ""},
 		{"vastai tag", []string{"provider:vastai"}, "vastai"},
 		{"runpod tag", []string{"provider:runpod"}, "runpod"},
-		{"mixed with other tags", []string{"benchmark", "provider:runpod", "rental"}, "runpod"},
+		{"mixed with other tags", []string{"benchmark-isolation", "provider:runpod", "rental"}, "runpod"},
 		{"case-insensitive prefix", []string{"Provider:VastAI"}, "vastai"},
 		{"unknown provider value", []string{"provider:gcp"}, ""},
-		{"no provider tag", []string{"benchmark", "rental"}, ""},
+		{"no provider tag", []string{"benchmark-isolation", "rental"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

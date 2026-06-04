@@ -36,7 +36,7 @@ func TestTrainingExamplesViewSeparatesRequestedAndActualHardware(t *testing.T) {
 	if err := SetJobGPUMemGB(database, jobID, intPtr(80)); err != nil {
 		t.Fatalf("SetJobGPUMemGB: %v", err)
 	}
-	if err := SetJobTags(database, jobID, []string{"benchmark", "nightly"}); err != nil {
+	if err := SetJobTags(database, jobID, []string{"benchmark-isolation", "nightly"}); err != nil {
 		t.Fatalf("SetJobTags: %v", err)
 	}
 	if err := UpdateQueuedToRunning(database, jobID); err != nil {
@@ -148,8 +148,8 @@ func TestTrainingExamplesViewSeparatesRequestedAndActualHardware(t *testing.T) {
 	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
 		t.Fatalf("Unmarshal(tags): %v", err)
 	}
-	if len(tags) != 2 || tags[0] != "benchmark" || tags[1] != "nightly" {
-		t.Fatalf("tags = %+v, want [benchmark nightly]", tags)
+	if len(tags) != 2 || tags[0] != "benchmark-isolation" || tags[1] != "nightly" {
+		t.Fatalf("tags = %+v, want [benchmark-isolation nightly]", tags)
 	}
 
 	var aliasActualGPUClass string

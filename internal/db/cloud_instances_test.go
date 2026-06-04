@@ -467,14 +467,17 @@ func TestLastProviderStatusTransitionTime(t *testing.T) {
 func TestValidateReservedPlacementTags_BenchmarkPreemptibleRejected(t *testing.T) {
 	err := validateReservedPlacementTags([]string{TagBenchmark, TagPreemptible})
 	if err == nil {
-		t.Fatal("expected error for benchmark + preemptible, got nil")
+		t.Fatal("expected error for benchmark-isolation + preemptible, got nil")
 	}
 	// Each tag alone is fine.
 	if err := validateReservedPlacementTags([]string{TagBenchmark}); err != nil {
-		t.Errorf("benchmark alone should be valid: %v", err)
+		t.Errorf("benchmark-isolation alone should be valid: %v", err)
 	}
 	if err := validateReservedPlacementTags([]string{TagPreemptible}); err != nil {
 		t.Errorf("preemptible alone should be valid: %v", err)
+	}
+	if err := validateReservedPlacementTags([]string{"benchmark", TagPreemptible}); err != nil {
+		t.Errorf("legacy benchmark label should not be treated as benchmark isolation: %v", err)
 	}
 }
 

@@ -643,7 +643,7 @@ func repairLiveCloudAssignments(db *sql.DB) error {
 const (
 	ProcessedTag      = "processed"
 	TagExclusive      = "exclusive"
-	TagBenchmark      = "benchmark"
+	TagBenchmark      = "benchmark-isolation"
 	TagRental         = "rental"
 	TagInventory      = "inventory"
 	TagInterruptible  = "interruptible"

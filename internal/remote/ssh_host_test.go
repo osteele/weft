@@ -479,7 +479,7 @@ func TestCommandJobSerializesAllFields(t *testing.T) {
 		GPU:        "0,1",
 		GPUClass:   "a100",
 		GPUMem:     &gpuMem,
-		Tags:       []string{"exclusive", "benchmark"},
+		Tags:       []string{"exclusive", "benchmark-isolation"},
 		OutputDirs: []string{"output/", "results/"},
 		Produces:   []string{"output/model.pt"},
 		Needs:      []string{"data.csv:1"},
@@ -527,7 +527,7 @@ func TestCommandJobSerializesAllFields(t *testing.T) {
 		key  string
 		want []string
 	}{
-		{"tags", []string{"exclusive", "benchmark"}},
+		{"tags", []string{"exclusive", "benchmark-isolation"}},
 		{"output_dirs", []string{"output/", "results/"}},
 		{"produces", []string{"output/model.pt"}},
 		{"needs", []string{"data.csv:1"}},

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/opsqueue"
 )
 
@@ -45,7 +46,7 @@ func BenchmarkTelemetryPolicy() JobTelemetryPolicy {
 }
 
 func TelemetryPolicyForJob(job *opsqueue.CommandJob) JobTelemetryPolicy {
-	if job != nil && HasTag(job, "benchmark") {
+	if job != nil && HasTag(job, db.TagBenchmark) {
 		return BenchmarkTelemetryPolicy()
 	}
 	return DefaultJobTelemetryPolicy()

@@ -73,7 +73,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated). Most tags are user-defined; reserved scheduler tags such as `rental`, `inventory`, `benchmark`, `exclusive`, `interruptible`, and `cpu-intensive` are described in the [Placement guide](../guides/placement.md#reserved-tags).
+- `--tag TAG`: Tag to attach to the job (can be repeated). Most tags are user-defined; reserved scheduler tags such as `rental`, `inventory`, `benchmark-isolation`, `exclusive`, `interruptible`, and `cpu-intensive` are described in the [Placement guide](../guides/placement.md#reserved-tags).
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -170,7 +170,7 @@ weft run --tag exclusive deepthought 'python large_model.py'
 
 # Run a benchmark (exclusive + waits for system-wide idle: low CPU, RAM, GPU, VRAM;
 # auto-placement skips hosts marked shared = true)
-weft run --tag benchmark deepthought 'python bench_encode.py'
+weft run --tag benchmark-isolation deepthought 'python bench_encode.py'
 
 # Force rental placement (legacy alias: --tag cloud)
 weft run --tag rental --gpu a100 'python train.py'
@@ -800,7 +800,7 @@ weft job tag add wj42 wj43 wj44 rental    # tag multiple jobs at once
 ```
 
 Most tags are user-defined. For the catalog of tags the scheduler and runner
-treat specially (`rental`, `inventory`, `benchmark`, `exclusive`,
+treat specially (`rental`, `inventory`, `benchmark-isolation`, `exclusive`,
 `interruptible`, `cpu-intensive`, `provider:<name>`) and the legacy
 aliases `cloud`, `on-prem`, `preemptible`, `compute-intensive`, see the
 [Placement guide § Reserved tags](../guides/placement.md#reserved-tags).
@@ -1602,8 +1602,8 @@ IDs can also be suffixed with `+` or `:any` to mark them as completion-based dep
 weft edit wj1595 --depends-on wj1599
 weft edit wj1600 --depends-on wj1400 --depends-on-any wj1401
 weft edit wj1700 --clear-depends
-weft edit wj1750 --tag benchmark --tag exp-012
-weft edit wj2428 --remove-tag benchmark
+weft edit wj1750 --tag benchmark-isolation --tag exp-012
+weft edit wj2428 --remove-tag benchmark-isolation
 weft edit wj1800 --command "python eval.py" -C ~/project -e FOO=bar
 ```
 

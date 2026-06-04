@@ -738,7 +738,7 @@ invariant PriceAuthorizationDoesNotTripCircuitBreaker {
 -- and state on resume), and a stale-pause relaunch puts the job on a
 -- different physical machine, breaking the "same hardware" control that
 -- benchmark analyses rely on. The submission path rejects the combined
--- {"benchmark", "interruptible"} tag set.
+-- {"benchmark-isolation", "interruptible"} tag set.
 --
 -- For provenance of historical launches, three columns on `launches`
 -- capture the rental decision at create time:
@@ -2758,7 +2758,7 @@ invariant BenchmarkIncompatibleWithInterruptible {
     -- canonicalized first, so the legacy "preemptible" alias is also
     -- caught.
     for job in Jobs:
-        not ("benchmark" in job.tags and "interruptible" in job.tags)
+        not ("benchmark-isolation" in job.tags and "interruptible" in job.tags)
 }
 
 invariant TerminalInstancesHaveEndTime {

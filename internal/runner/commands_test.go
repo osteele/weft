@@ -88,7 +88,7 @@ func TestProcessCommands_AddCanClearTagsOnDuplicate(t *testing.T) {
 	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:00Z",
 		Op:        opsqueue.OpAdd,
-		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo one", Tags: []string{"benchmark"}},
+		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo one", Tags: []string{"benchmark-isolation"}},
 	})
 	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:01Z",

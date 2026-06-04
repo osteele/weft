@@ -106,7 +106,7 @@ locality:
   utilization.
 
 - **Edge agents** (titan, atlas, studio queue runners): Host-local authority.
-  Own **execution timing** (when to start a placed job), exclusive/benchmark
+  Own **execution timing** (when to start a placed job), exclusive/benchmark-isolation
   coordination on local GPUs, resource enforcement, and measurement collection.
   Can autonomously defer jobs (e.g., system is hot, benchmark running) without
   asking the coordinator.
@@ -147,7 +147,7 @@ The contract includes:
 - **Queue depth guidance**: How much work buffer the edge should maintain (the
   coordinator knows cluster-wide balance; the edge knows local throughput)
 - **Job metadata**: Input data requirements, resource constraints, tags
-  (exclusive, benchmark) that inform the edge agent's local scheduling
+  (exclusive, benchmark-isolation) that inform the edge agent's local scheduling
 - **Status feedback**: The edge agent reports job lifecycle events (accepted,
   deferred, started, completed, failed) and measurements back to the coordinator
 

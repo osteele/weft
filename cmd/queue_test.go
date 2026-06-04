@@ -211,7 +211,7 @@ func TestRunEditReplacesTags(t *testing.T) {
 
 	resetEditState()
 	cmd := newEditTestCommand()
-	if err := cmd.Flags().Set("tag", "benchmark,processed,benchmark, "); err != nil {
+	if err := cmd.Flags().Set("tag", "benchmark-isolation,processed,benchmark-isolation, "); err != nil {
 		t.Fatalf("set tag flag: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestRunEditReplacesTags(t *testing.T) {
 			t.Fatalf("runEdit: %v", err)
 		}
 	})
-	if !strings.Contains(out, "tags: benchmark, processed") {
+	if !strings.Contains(out, "tags: benchmark-isolation, processed") {
 		t.Fatalf("output missing tag update, got %q", out)
 	}
 
@@ -244,7 +244,7 @@ func TestRunEditReplacesTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	wantTags := []string{"benchmark", "processed"}
+	wantTags := []string{"benchmark-isolation", "processed"}
 	if got := job.Tags; len(got) != len(wantTags) {
 		t.Fatalf("tags len = %d, want %d (%v)", len(got), len(wantTags), got)
 	} else {
@@ -326,13 +326,13 @@ func TestRunEditRemovesTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
-	if err := db.SetJobTags(database, jobID, []string{"benchmark", "exp-012"}); err != nil {
+	if err := db.SetJobTags(database, jobID, []string{"benchmark-isolation", "exp-012"}); err != nil {
 		t.Fatalf("set initial tags: %v", err)
 	}
 
 	resetEditState()
 	cmd := newEditTestCommand()
-	if err := cmd.Flags().Set("remove-tag", "benchmark"); err != nil {
+	if err := cmd.Flags().Set("remove-tag", "benchmark-isolation"); err != nil {
 		t.Fatalf("set remove-tag flag: %v", err)
 	}
 
@@ -506,7 +506,7 @@ func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 
 	resetEditState()
 	cmd := newEditTestCommand()
-	if err := cmd.Flags().Set("tag", "benchmark"); err != nil {
+	if err := cmd.Flags().Set("tag", "benchmark-isolation"); err != nil {
 		t.Fatalf("set tag flag: %v", err)
 	}
 	if err := cmd.Flags().Set("clear-tags", "true"); err != nil {
@@ -551,7 +551,7 @@ func TestRunEditRejectsRemoveTagConflicts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resetEditState()
 			cmd := newEditTestCommand()
-			if err := cmd.Flags().Set("remove-tag", "benchmark"); err != nil {
+			if err := cmd.Flags().Set("remove-tag", "benchmark-isolation"); err != nil {
 				t.Fatalf("set remove-tag flag: %v", err)
 			}
 			tc.set(cmd)

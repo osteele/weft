@@ -104,7 +104,7 @@ runner behavior:
 | --- | --- |
 | `processed` | Marks a job as processed; filtered by `--processed` / `--unprocessed` on `weft jobs list`. Set with `weft mark-processed`. |
 | `exclusive` | Requires the host to be idle while the job runs. |
-| `benchmark` | Requires an idle host and enables benchmark protections. Auto-placement skips hosts marked `shared = true`, but an explicit host still runs there. |
+| `benchmark-isolation` | Requires an idle host and enables benchmark protections. Auto-placement skips hosts marked `shared = true`, but an explicit host still runs there. |
 | `cpu-intensive` | Declares that the job is CPU-heavy. Skips the queue-contention penalty in run-time estimation, adds a placement bonus proportional to free CPU capacity, requires rental instances to expose at least `WEFT_COMPUTE_CPU_CORES` effective CPU cores (default `16`), and prefers on-prem placement unless a rental is estimated at least 30 minutes faster. Alias: `compute-intensive` (deprecated). |
 | `rental` | Bind the job to cloud rental placement. Alias: `cloud`. |
 | `inventory` | Bind the job to on-prem inventory placement. Alias: `on-prem`. |
@@ -145,7 +145,7 @@ fragments include:
 | `no GPU with >=24GB` | The host failed the GPU memory constraint. |
 | `no ampere+ GPU` | The host failed the GPU class or generation constraint. |
 | `host is opt-in only (specify with --host)` | The host is excluded from automatic placement unless explicitly named. |
-| `shared host excluded for benchmark auto-placement` | A benchmark job skipped a shared host. |
+| `shared host excluded for benchmark-isolation auto-placement` | A benchmark job skipped a shared host. |
 | `3/3 inputs local` | All declared data assets are already present on the host. |
 | `~20m transfer for 1 missing inputs (learned, n=4)` | Weft estimated transfer time from observed or static bandwidth. |
 | `2 jobs queued (~60m drain)` | Queue depth contributes estimated wait time. |

@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/remediation"
 )
@@ -64,7 +65,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		cfg.SampleInterval = time.Second
 	}
 	telemetryPolicy := TelemetryPolicyForJob(&cfg.Job)
-	if HasTag(&cfg.Job, "benchmark") && telemetryPolicy.Interval > cfg.SampleInterval {
+	if HasTag(&cfg.Job, db.TagBenchmark) && telemetryPolicy.Interval > cfg.SampleInterval {
 		cfg.SampleInterval = telemetryPolicy.Interval
 	}
 

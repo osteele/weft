@@ -38,11 +38,11 @@ func TestNormalizeProviderFlag(t *testing.T) {
 }
 
 func TestWithProviderTag(t *testing.T) {
-	tags, err := withProviderTag([]string{"benchmark", "provider:vastai", "exp-1"}, "runpod")
+	tags, err := withProviderTag([]string{"benchmark-isolation", "provider:vastai", "exp-1"}, "runpod")
 	if err != nil {
 		t.Fatalf("withProviderTag: %v", err)
 	}
-	want := []string{"benchmark", "exp-1", "provider:runpod"}
+	want := []string{"benchmark-isolation", "exp-1", "provider:runpod"}
 	if !reflect.DeepEqual(tags, want) {
 		t.Fatalf("tags = %v, want %v", tags, want)
 	}

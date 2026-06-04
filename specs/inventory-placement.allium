@@ -259,7 +259,7 @@ value Constraints {
                                 -- override exists yet.
     provider: String?           -- rental provider name ("" = on-prem first)
     inputs: List<String>        -- asset refs (see Data locality below)
-    tags: Set<Tag>              -- rental/inventory/benchmark/compute_intensive
+    tags: Set<Tag>              -- rental/inventory/benchmark_isolation/compute_intensive
     preferred_instance_ids: List<Integer>   -- soft hint for instance reuse
 }
 
@@ -342,7 +342,7 @@ rule EvaluateEligibility {
             and ComputeCapForGPU(g.class) >= c.min_compute_cap)
 
     -- 6. Benchmark jobs must land on an idle host.
-    if benchmark in c.tags:
+    if benchmark_isolation in c.tags:
         requires: metrics.is_idle
 
     ensures: EligibilityResult(host, eligible: true)

@@ -37,7 +37,7 @@ func TestRelayUpdateAppliesTags(t *testing.T) {
 	req := &coordinatorrelay.Request{
 		JobID: jobID,
 		Update: &coordinatorrelay.UpdateJobPayload{
-			Tags: []string{"benchmark", "exp-012"},
+			Tags: []string{"benchmark-isolation", "exp-012"},
 		},
 	}
 	var ack coordinatorrelay.Ack
@@ -49,7 +49,7 @@ func TestRelayUpdateAppliesTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	want := []string{"benchmark", "exp-012"}
+	want := []string{"benchmark-isolation", "exp-012"}
 	if len(job.Tags) != len(want) {
 		t.Fatalf("tags len = %d, want %d (%v)", len(job.Tags), len(want), job.Tags)
 	}
@@ -66,7 +66,7 @@ func TestRelayUpdateClearsTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
-	if err := db.SetJobTags(database, jobID, []string{"benchmark"}); err != nil {
+	if err := db.SetJobTags(database, jobID, []string{"benchmark-isolation"}); err != nil {
 		t.Fatalf("set initial tags: %v", err)
 	}
 

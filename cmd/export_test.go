@@ -38,7 +38,7 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 	if err := db.SetJobGPUClass(database, jobID, "a100"); err != nil {
 		t.Fatalf("SetJobGPUClass: %v", err)
 	}
-	if err := db.SetJobTags(database, jobID, []string{"benchmark"}); err != nil {
+	if err := db.SetJobTags(database, jobID, []string{"benchmark-isolation"}); err != nil {
 		t.Fatalf("SetJobTags: %v", err)
 	}
 	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
@@ -121,7 +121,7 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 	if rec.ActualGPUName != "RTX 3090" || rec.ActualGPUClass != "rtx3090" {
 		t.Fatalf("actual gpu = %+v", rec)
 	}
-	if len(rec.Tags) != 1 || rec.Tags[0] != "benchmark" {
+	if len(rec.Tags) != 1 || rec.Tags[0] != "benchmark-isolation" {
 		t.Fatalf("tags = %+v", rec.Tags)
 	}
 	if rec.StartTime == 0 || rec.EndTime == 0 || rec.DurationS != 42 {

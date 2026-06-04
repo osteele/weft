@@ -498,7 +498,7 @@ func TestRefreshRunningJobs_RecoversZombieWrapper(t *testing.T) {
 }
 
 func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
-	policy := TelemetryPolicyForJob(&opsqueue.CommandJob{Tags: []string{"benchmark"}})
+	policy := TelemetryPolicyForJob(&opsqueue.CommandJob{Tags: []string{"benchmark-isolation"}})
 	if policy.Interval != 5*time.Second {
 		t.Fatalf("benchmark telemetry interval = %v, want %v", policy.Interval, 5*time.Second)
 	}

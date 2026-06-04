@@ -297,7 +297,7 @@ entity JobAttempt {
 --                         boot. Detected by an agent-written sentinel.
 -- The legacy RJ_* prefix is also set for backward compatibility.
 
-value Tag = exclusive | benchmark | rental | inventory | compute_intensive
+value Tag = exclusive | benchmark_isolation | rental | inventory | compute_intensive
 
 -- unplaced is represented as target = null on the attempt.
 value TargetKind = unplaced | inventory_host | rental_instance
