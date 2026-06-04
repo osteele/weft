@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/prestage"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -395,10 +396,10 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 // distinguishes a not-yet-started runner from an empty SSH response. The
 // former maps to (nil, nil); the latter is an error so callers do not
 // redispatch every synced job as missing from runner state.
-func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, error) {
+func fetchRemoteRunnerState(host string, timeout time.Duration) (*opsqueue.RunnerState, error) {
 	const noFileSentinel = "__WEFT_NO_STATE_FILE__"
 	cmd := fmt.Sprintf(`if [ -e %s ]; then cat %s; else echo %s; fi`,
-		StateFilePath(), StateFilePath(), noFileSentinel)
+		opsqueue.StateFilePath(), opsqueue.StateFilePath(), noFileSentinel)
 	stdout, _, err := ssh.TryRunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return nil, err
@@ -410,7 +411,7 @@ func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, e
 	if stdout == "" {
 		return nil, fmt.Errorf("empty runner state response (transient read failure?)")
 	}
-	var state RunnerState
+	var state opsqueue.RunnerState
 	if err := json.Unmarshal([]byte(stdout), &state); err != nil {
 		return nil, fmt.Errorf("parse runner state: %w", err)
 	}
@@ -440,7 +441,7 @@ func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, e
 // the agent skipping a stale entry. A wrong prune (canceling a job that
 // should still run) is more expensive, so we err on the side of leaving
 // ambiguous entries in place.
-func pruneStaleRunnerPendings(database *sql.DB, host string, state *RunnerState, jobs, syncedJobs []*db.Job, timeout time.Duration, syncLog *slog.Logger) {
+func pruneStaleRunnerPendings(database *sql.DB, host string, state *opsqueue.RunnerState, jobs, syncedJobs []*db.Job, timeout time.Duration, syncLog *slog.Logger) {
 	if state == nil || len(state.Pending) == 0 {
 		return
 	}
@@ -533,7 +534,7 @@ func shouldPruneStalePending(job *db.Job, host string) (bool, string) {
 // silently skipped the add). The archive-on-add fix turned that no-op into a
 // real re-run; checking Finished here restores the intended invariant —
 // reconcile the DB to completed, do not re-dispatch.
-func isJobInRunnerState(jobID int64, state *RunnerState) bool {
+func isJobInRunnerState(jobID int64, state *opsqueue.RunnerState) bool {
 	if state == nil {
 		return false
 	}

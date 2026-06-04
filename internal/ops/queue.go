@@ -13,20 +13,6 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
-// Re-export queue types from opsqueue.
-const (
-	QueueDir        = opsqueue.QueueDir
-	DefaultGPUMemGB = opsqueue.DefaultGPUMemGB
-)
-
-type QueueEntry = opsqueue.QueueEntry
-type AppendQueueEntryOptions = opsqueue.AppendQueueEntryOptions
-type QueueAppendError = opsqueue.QueueAppendError
-
-func AppendQueueEntry(host string, entry QueueEntry, opts AppendQueueEntryOptions) error {
-	return opsqueue.AppendQueueEntry(host, entry, opts)
-}
-
 // AppendJobToQueue adds an existing job to the remote queue.
 func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 	return AppendJobToQueueWithSource(job, timeout, "")
@@ -44,8 +30,13 @@ func AppendJobToQueueWithSource(job *db.Job, timeout time.Duration, sourceSHA256
 // job (Layer D fallback): it downloads the tarball, extracts into a per-job
 // dir, and skips the marker check.
 func AppendJobToQueueWithSourceAndR2(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
-	entry := QueueEntry{
+	var runID int64
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+	entry := opsqueue.QueueEntry{
 		JobID:        job.ID,
+		RunID:        runID,
 		WorkingDir:   job.WorkingDir,
 		Command:      job.Command,
 		Description:  job.Description,
@@ -137,7 +128,7 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 	// Apply default GPU memory reservation when GPU is involved but no explicit reservation.
 	gpuMemGB := params.GPUMemGB
 	if gpuMemGB == nil && (gpu != "" || params.GPUClass != "") {
-		defaultMem := DefaultGPUMemGB
+		defaultMem := opsqueue.DefaultGPUMemGB
 		gpuMemGB = &defaultMem
 	}
 

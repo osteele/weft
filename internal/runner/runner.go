@@ -213,7 +213,7 @@ func (r *Runner) tick() error {
 		// Re-exec ourselves
 		oplog.Log("cmd.restart")
 		exe, _ := os.Executable()
-		syscall.Exec(exe, os.Args, os.Environ())
+		syscall.Exec(exe, os.Args, mergeEnvVars(os.Environ(), result.RestartEnv))
 	}
 
 	// Refresh running jobs (check for completion)
@@ -611,6 +611,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	telemetryPolicy := TelemetryPolicyForJob(job)
 
 	r.state.AddRunning(jobIDStr, RunningJobState{
+		RunID:                    job.RunID,
 		StartedAt:                startTime,
 		WarmupUntil:              startTime + int64(r.cpuConfig.WarmupDuration),
 		LocalAllotment:           allotment,

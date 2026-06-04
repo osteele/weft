@@ -44,6 +44,7 @@ const AgentLegacyQueueArg = queueName
 // QueueEntry represents a job entry to be added to a remote queue
 type QueueEntry struct {
 	JobID        int64
+	RunID        int64
 	WorkingDir   string
 	Command      string
 	Description  string

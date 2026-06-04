@@ -70,6 +70,7 @@ func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOpti
 
 	var setupTimeout time.Duration
 	if spec != nil {
+		envVars += spec.BenchmarkEnvPrefix()
 		setupTimeout = spec.SetupTimeoutDuration()
 	}
 

@@ -56,8 +56,8 @@ func hasCUDAEnvVar(envVars []string) bool {
 	return false
 }
 
-func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry {
-	return QueueEntry{
+func queueEntryForJob(job *db.Job, envVars []string, depSpec string) opsqueue.QueueEntry {
+	return opsqueue.QueueEntry{
 		JobID:        job.ID,
 		WorkingDir:   job.WorkingDir,
 		Command:      job.Command,
@@ -74,13 +74,13 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry 
 	}
 }
 
-func writeQueueJobFile(host string, entry QueueEntry, timeout time.Duration) error {
+func writeQueueJobFile(host string, entry opsqueue.QueueEntry, timeout time.Duration) error {
 	resolvedEnv, err := secrets.ResolveEnvVars(entry.EnvVars)
 	if err != nil {
 		return err
 	}
 	entry.EnvVars = resolvedEnv
-	job := CommandJob{
+	job := opsqueue.CommandJob{
 		ID:       entry.JobID,
 		Dir:      entry.WorkingDir,
 		Cmd:      entry.Command,
@@ -100,8 +100,8 @@ func writeQueueJobFile(host string, entry QueueEntry, timeout time.Duration) err
 		return fmt.Errorf("marshal queue job: %w", err)
 	}
 
-	jobFile := fmt.Sprintf("%s/job-%d.json", QueueDir, entry.JobID)
-	cmd := fmt.Sprintf(`mkdir -p %s && printf '%%s\n' %q > %s`, QueueDir, string(payload), jobFile)
+	jobFile := fmt.Sprintf("%s/job-%d.json", opsqueue.QueueDir, entry.JobID)
+	cmd := fmt.Sprintf(`mkdir -p %s && printf '%%s\n' %q > %s`, opsqueue.QueueDir, string(payload), jobFile)
 
 	var stderr string
 	if timeout > 0 {
@@ -148,8 +148,8 @@ func applyQueuePriority(host string, jobID int64, timeout time.Duration) (bool, 
 		return false, nil
 	}
 
-	cmd := NewPriorityCommand(jobID)
-	if err := AppendCommand(host, cmd, AppendCommandOptions{Timeout: timeout}); err != nil {
+	cmd := opsqueue.NewPriorityCommand(jobID)
+	if err := opsqueue.AppendCommand(host, cmd, opsqueue.AppendCommandOptions{Timeout: timeout}); err != nil {
 		if isQueueConnectionError(err) {
 			return false, fmt.Errorf("%w: %s", errQueueConnection, err.Error())
 		}
@@ -166,7 +166,7 @@ func isQueueConnectionError(err error) bool {
 	if errors.Is(err, errQueueConnection) {
 		return true
 	}
-	var qaErr *QueueAppendError
+	var qaErr *opsqueue.QueueAppendError
 	if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
 		return true
 	}

@@ -7,13 +7,13 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/runner"
 )
 
 // runJob handles the "run-job" subcommand.
 // Usage: weft-agent run-job --job-id=123 --log-dir=/tmp/weft-logs [--working-dir=/path/to/project]
-// Reads JSON ops.CommandJob from stdin.
+// Reads JSON opsqueue.CommandJob from stdin.
 func runJob(args []string) {
 	var jobID int64
 	var logDir string
@@ -59,7 +59,7 @@ func runJob(args []string) {
 	}
 
 	// Read job spec from stdin
-	var job ops.CommandJob
+	var job opsqueue.CommandJob
 	if err := json.NewDecoder(os.Stdin).Decode(&job); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to read job from stdin: %v\n", err)
 		os.Exit(1)

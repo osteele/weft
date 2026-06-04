@@ -148,6 +148,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, " skipped (agent unavailable)\n")
 		} else {
 			envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
+			envVars += spec.BenchmarkEnvPrefix()
 			runner := queuerunner.NewRunner(host)
 			started, runnerErr := runner.EnsureStarted(envVars, r2Bucket, spec.SetupTimeoutDuration())
 			if runnerErr != nil {

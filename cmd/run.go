@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
@@ -107,7 +108,7 @@ var (
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
 
-const defaultGPUMemGB = ops.DefaultGPUMemGB
+const defaultGPUMemGB = opsqueue.DefaultGPUMemGB
 
 const (
 	runCloudReuseAckWaitTimeout  = 250 * time.Millisecond

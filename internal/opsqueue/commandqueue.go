@@ -23,6 +23,7 @@ const (
 // CommandJob contains job data for an add command.
 type CommandJob struct {
 	ID        int64  `json:"id"`
+	RunID     int64  `json:"run_id,omitempty"`
 	Dir       string `json:"dir,omitempty"`
 	Cmd       string `json:"cmd"`
 	Desc      string `json:"desc,omitempty"`
@@ -51,6 +52,7 @@ type QueueCommand struct {
 	Op        string      `json:"op"`
 	JobID     int64       `json:"job_id,omitempty"` // For priority, cancel ops
 	Job       *CommandJob `json:"job,omitempty"`    // For add op
+	Env       []string    `json:"env,omitempty"`    // For restart ops
 }
 
 // CommandsFileName returns the path to the commands file for a queue.
@@ -70,6 +72,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 		Op:        OpAdd,
 		Job: &CommandJob{
 			ID:          entry.JobID,
+			RunID:       entry.RunID,
 			Dir:         entry.WorkingDir,
 			Cmd:         entry.Command,
 			Desc:        entry.Description,
@@ -117,9 +120,15 @@ func NewStopCommand() QueueCommand {
 
 // NewRestartCommand creates a command for the queue runner to re-exec itself.
 func NewRestartCommand() QueueCommand {
+	return NewRestartCommandWithEnv(nil)
+}
+
+// NewRestartCommandWithEnv creates a restart command with environment overrides.
+func NewRestartCommandWithEnv(env []string) QueueCommand {
 	return QueueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        OpRestart,
+		Env:       env,
 	}
 }
 

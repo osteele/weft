@@ -20,7 +20,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -918,7 +918,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 	env = append(env, hfOfflineEnv(job.Inputs)...)
 	return runner.SingleJobConfig{
 		JobID: job.ID,
-		Job: ops.CommandJob{
+		Job: opsqueue.CommandJob{
 			Cmd:        job.Command,
 			Tags:       append([]string(nil), job.Tags...),
 			OutputDirs: append([]string(nil), job.OutputDirs...),

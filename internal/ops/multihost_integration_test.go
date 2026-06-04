@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -119,10 +120,10 @@ func multihostStartRunner(t *testing.T, host string) string {
 
 func multihostSubmitJob(t *testing.T, host string, jobID int64, cmd string) {
 	t.Helper()
-	addCmd := ops.QueueCommand{
+	addCmd := opsqueue.QueueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        ops.OpAdd,
-		Job: &ops.CommandJob{
+		Op:        opsqueue.OpAdd,
+		Job: &opsqueue.CommandJob{
 			ID:  jobID,
 			Dir: "/tmp",
 			Cmd: cmd,

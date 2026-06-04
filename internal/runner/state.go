@@ -30,6 +30,7 @@ type State struct {
 // RunningJobState captures per-job runtime state for concurrent execution.
 // Field names match the bash runner's JSON format for compatibility.
 type RunningJobState struct {
+	RunID          int64    `json:"run_id,omitempty"`
 	StartedAt      int64    `json:"started_at"`
 	WarmupUntil    int64    `json:"warmup_until"`
 	LocalAllotment int      `json:"local_allotment"`

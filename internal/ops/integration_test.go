@@ -127,8 +127,8 @@ func TestIntegration_QueueJobWithArtifactEnvVars(t *testing.T) {
 	}
 
 	// Clean up: cancel the job
-	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	cancelCmd := opsqueue.NewCancelCommand(jobID)
+	_ = opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 func TestIntegration_JobLifecycle(t *testing.T) {
@@ -275,8 +275,8 @@ func TestIntegration_QueueEntryContainsArtifactEnvVars(t *testing.T) {
 	}
 
 	// Clean up
-	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	cancelCmd := opsqueue.NewCancelCommand(jobID)
+	_ = opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 // State transition tests
@@ -406,8 +406,8 @@ func TestIntegration_StateTransition_QueueEntryRemovedOnCancel(t *testing.T) {
 	}
 
 	// Cancel the job - this should append a cancel command
-	cancelCmd := ops.NewCancelCommand(jobID)
-	if err := ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second}); err != nil {
+	cancelCmd := opsqueue.NewCancelCommand(jobID)
+	if err := opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second}); err != nil {
 		t.Fatalf("AppendCommand (cancel) failed: %v", err)
 	}
 
@@ -538,8 +538,8 @@ func TestIntegration_ExclusiveTagSynced(t *testing.T) {
 	t.Logf("Verified exclusive tag synced to remote: %v", queueCmd.Job.Tags)
 
 	// Clean up
-	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	cancelCmd := opsqueue.NewCancelCommand(jobID)
+	_ = opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 func TestIntegration_ExclusiveJobRunsAlone(t *testing.T) {
@@ -1137,8 +1137,8 @@ func TestIntegration_SyncDetectsRunningProcess(t *testing.T) {
 	}
 
 	// Clean up: wait for job to complete or cancel it
-	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	cancelCmd := opsqueue.NewCancelCommand(jobID)
+	_ = opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 func TestSlurmIntegration_JobCancellation(t *testing.T) {
@@ -1249,8 +1249,8 @@ func TestIntegration_PausedJobNotKilledByQueueRunner(t *testing.T) {
 
 	if job == nil || job.Status != db.StatusRunning {
 		// Clean up and skip
-		cancelCmd := ops.NewCancelCommand(jobID)
-		_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+		cancelCmd := opsqueue.NewCancelCommand(jobID)
+		_ = opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second})
 		t.Skipf("Job did not start running in time (status: %v), skipping test", job)
 	}
 	t.Logf("Job %d is running, waiting for pgid file...", jobID)
@@ -1321,8 +1321,8 @@ func TestIntegration_PausedJobNotKilledByQueueRunner(t *testing.T) {
 
 	// If job didn't complete, cancel it
 	if job != nil && !db.IsTerminalStatus(job.Status) {
-		cancelCmd := ops.NewCancelCommand(jobID)
-		_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+		cancelCmd := opsqueue.NewCancelCommand(jobID)
+		_ = opsqueue.AppendCommand(host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: 10 * time.Second})
 		t.Log("Cancelled job that didn't complete in time")
 	}
 }

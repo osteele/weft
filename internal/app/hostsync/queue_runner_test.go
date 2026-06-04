@@ -132,3 +132,55 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 		t.Fatal("expected rclone config deployment")
 	}
 }
+
+func TestEnsureQueueRunnerStartedPassesBenchmarkEnvPrefix(t *testing.T) {
+	originalFindHostSpec := findHostSpecFunc
+	originalEnsureAgentUpToDate := ensureAgentUpToDateFunc
+	originalLoadConfig := loadConfigFunc
+	originalGetSlackWebhook := getSlackWebhookFunc
+	originalDeployNotifyScript := deployNotifyScriptFunc
+	originalBuildRunnerEnvPrefix := buildRunnerEnvPrefixFunc
+	originalEnsureRunnerStarted := ensureRunnerStartedFunc
+	t.Cleanup(func() {
+		findHostSpecFunc = originalFindHostSpec
+		ensureAgentUpToDateFunc = originalEnsureAgentUpToDate
+		loadConfigFunc = originalLoadConfig
+		getSlackWebhookFunc = originalGetSlackWebhook
+		deployNotifyScriptFunc = originalDeployNotifyScript
+		buildRunnerEnvPrefixFunc = originalBuildRunnerEnvPrefix
+		ensureRunnerStartedFunc = originalEnsureRunnerStarted
+	})
+
+	findHostSpecFunc = func(host string) *inventory.HostSpec {
+		return &inventory.HostSpec{
+			Name: host,
+			OS:   "darwin",
+			Arch: "arm64",
+			Benchmark: inventory.BenchmarkGateSpec{
+				CPUThreshold: 15,
+				RAMThreshold: 35,
+			},
+		}
+	}
+	ensureAgentUpToDateFunc = func(host string, spec inventory.HostSpec, opts agentdeploy.EnsureAgentOptions) (bool, error) {
+		return false, nil
+	}
+	loadConfigFunc = func() (*config.Config, error) { return &config.Config{}, nil }
+	getSlackWebhookFunc = func() string { return "https://hooks.example/test" }
+	deployNotifyScriptFunc = func(host, webhook string) {}
+	buildRunnerEnvPrefixFunc = func(webhook string) string { return "WEBHOOK=1 " }
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
+		if envPrefix != "WEBHOOK=1 WEFT_BENCHMARK_CPU=15 WEFT_BENCHMARK_RAM=35 " {
+			t.Fatalf("envPrefix = %q", envPrefix)
+		}
+		return true, nil
+	}
+
+	started, err := EnsureQueueRunnerStarted("studio")
+	if err != nil {
+		t.Fatalf("EnsureQueueRunnerStarted: %v", err)
+	}
+	if !started {
+		t.Fatal("started = false, want true")
+	}
+}

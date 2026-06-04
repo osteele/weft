@@ -102,17 +102,58 @@ type GPUSpec struct {
 
 // HostSpec describes the static capabilities of a host.
 type HostSpec struct {
-	Name         string    `yaml:"name"`
-	OS           string    `yaml:"os"`
-	Arch         string    `yaml:"arch"`
-	CPUCores     int       `yaml:"cpu_cores"`
-	Memory       string    `yaml:"memory"`
-	NetworkBW    string    `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
-	GPUs         []GPUSpec `yaml:"gpus"`
-	CPUFactor    float64   `yaml:"cpu_factor"`              // relative CPU perf (1.0 = baseline)
-	GPUFactor    float64   `yaml:"gpu_factor"`              // relative GPU perf (1.0 = baseline)
-	HFCacheDir   string    `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
-	SetupTimeout string    `yaml:"setup_timeout,omitempty"` // max duration for setup commands (e.g. "90m"); default 20m
+	Name         string            `yaml:"name"`
+	OS           string            `yaml:"os"`
+	Arch         string            `yaml:"arch"`
+	CPUCores     int               `yaml:"cpu_cores"`
+	Memory       string            `yaml:"memory"`
+	NetworkBW    string            `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
+	GPUs         []GPUSpec         `yaml:"gpus"`
+	CPUFactor    float64           `yaml:"cpu_factor"`              // relative CPU perf (1.0 = baseline)
+	GPUFactor    float64           `yaml:"gpu_factor"`              // relative GPU perf (1.0 = baseline)
+	HFCacheDir   string            `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
+	SetupTimeout string            `yaml:"setup_timeout,omitempty"` // max duration for setup commands (e.g. "90m"); default 20m
+	Benchmark    BenchmarkGateSpec `yaml:"benchmark,omitempty"`
+}
+
+// BenchmarkGateSpec configures how quiet a host must be before benchmark jobs start.
+type BenchmarkGateSpec struct {
+	CPUThreshold  int `yaml:"cpu_threshold,omitempty"`
+	RAMThreshold  int `yaml:"ram_threshold,omitempty"`
+	GPUThreshold  int `yaml:"gpu_threshold,omitempty"`
+	VRAMThreshold int `yaml:"vram_threshold,omitempty"`
+	IdleSamples   int `yaml:"idle_samples,omitempty"`
+	CheckInterval int `yaml:"check_interval,omitempty"`
+}
+
+// EnvVars returns WEFT_BENCHMARK_* assignments for configured fields.
+func (b BenchmarkGateSpec) EnvVars() []string {
+	var env []string
+	add := func(key string, value int) {
+		if value > 0 {
+			env = append(env, fmt.Sprintf("%s=%d", key, value))
+		}
+	}
+	add("WEFT_BENCHMARK_CPU", b.CPUThreshold)
+	add("WEFT_BENCHMARK_RAM", b.RAMThreshold)
+	add("WEFT_BENCHMARK_GPU", b.GPUThreshold)
+	add("WEFT_BENCHMARK_VRAM", b.VRAMThreshold)
+	add("WEFT_BENCHMARK_SAMPLES", b.IdleSamples)
+	add("WEFT_BENCHMARK_INTERVAL", b.CheckInterval)
+	return env
+}
+
+// BenchmarkEnvPrefix returns shell VAR=value assignments for runner startup.
+func (h *HostSpec) BenchmarkEnvPrefix() string {
+	if h == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, ev := range h.Benchmark.EnvVars() {
+		b.WriteString(ev)
+		b.WriteByte(' ')
+	}
+	return b.String()
 }
 
 // DefaultSetupTimeout is the default maximum duration for setup commands
@@ -334,6 +375,24 @@ func applyHostConfig(base HostSpec, cfg config.HostConfig) HostSpec {
 	}
 	if cfg.HFCacheDir != "" {
 		base.HFCacheDir = cfg.HFCacheDir
+	}
+	if cfg.Benchmark.CPUThreshold != 0 {
+		base.Benchmark.CPUThreshold = cfg.Benchmark.CPUThreshold
+	}
+	if cfg.Benchmark.RAMThreshold != 0 {
+		base.Benchmark.RAMThreshold = cfg.Benchmark.RAMThreshold
+	}
+	if cfg.Benchmark.GPUThreshold != 0 {
+		base.Benchmark.GPUThreshold = cfg.Benchmark.GPUThreshold
+	}
+	if cfg.Benchmark.VRAMThreshold != 0 {
+		base.Benchmark.VRAMThreshold = cfg.Benchmark.VRAMThreshold
+	}
+	if cfg.Benchmark.IdleSamples != 0 {
+		base.Benchmark.IdleSamples = cfg.Benchmark.IdleSamples
+	}
+	if cfg.Benchmark.CheckInterval != 0 {
+		base.Benchmark.CheckInterval = cfg.Benchmark.CheckInterval
 	}
 	return base
 }

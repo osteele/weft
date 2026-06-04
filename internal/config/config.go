@@ -634,6 +634,20 @@ type HostConfig struct {
 	// requires a key distinct from the cloud key (e.g., studio's `agent`
 	// account only accepts ~/.ssh/agent_studio_ed25519).
 	SSHIdentityFile string `yaml:"ssh_identity_file" toml:"ssh_identity_file"`
+
+	// Benchmark configures how quiet this host must be before benchmark-tagged
+	// jobs are allowed to start.
+	Benchmark HostBenchmarkConfig `yaml:"benchmark" toml:"benchmark"`
+}
+
+// HostBenchmarkConfig holds per-host benchmark idle gate thresholds.
+type HostBenchmarkConfig struct {
+	CPUThreshold  int `yaml:"cpu_threshold" toml:"cpu_threshold"`
+	RAMThreshold  int `yaml:"ram_threshold" toml:"ram_threshold"`
+	GPUThreshold  int `yaml:"gpu_threshold" toml:"gpu_threshold"`
+	VRAMThreshold int `yaml:"vram_threshold" toml:"vram_threshold"`
+	IdleSamples   int `yaml:"idle_samples" toml:"idle_samples"`
+	CheckInterval int `yaml:"check_interval" toml:"check_interval"`
 }
 
 // HostGPUConfig describes a homogeneous GPU group for a host.
@@ -999,6 +1013,7 @@ func Load() (*Config, error) {
 		}
 	}
 
+	UnknownTOMLKeys = nil
 	switch filepath.Ext(path) {
 	case ".toml":
 		// Decode in strict mode so unknown keys are reported. The decoder still
@@ -1007,7 +1022,11 @@ func Load() (*Config, error) {
 		dec := toml.NewDecoder(bytes.NewReader(data)).Strict(true)
 		if err := dec.Decode(cfg); err != nil {
 			if keys := parseUndecodedKeys(err); len(keys) > 0 {
-				UnknownTOMLKeys = keys
+				hostBenchmarkKeys, applyErr := applyHostBenchmarkTOML(data, cfg)
+				if applyErr != nil {
+					return cfg, applyErr
+				}
+				UnknownTOMLKeys = filterKnownTOMLKeys(keys, hostBenchmarkKeys)
 			} else {
 				return cfg, err
 			}
@@ -1019,6 +1038,73 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func applyHostBenchmarkTOML(data []byte, cfg *Config) (map[string]struct{}, error) {
+	tree, err := toml.LoadBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse host benchmark config: %w", err)
+	}
+	hostsTree, ok := tree.Get("hosts").(*toml.Tree)
+	if !ok {
+		return nil, nil
+	}
+
+	known := make(map[string]struct{})
+	for _, host := range hostsTree.Keys() {
+		hostTree, ok := hostsTree.Get(host).(*toml.Tree)
+		if !ok {
+			continue
+		}
+		benchTree, ok := hostTree.Get("benchmark").(*toml.Tree)
+		if !ok {
+			continue
+		}
+		if cfg.Hosts == nil {
+			cfg.Hosts = make(map[string]HostConfig)
+		}
+		hostCfg := cfg.Hosts[host]
+		assignInt := func(key string, dst *int) {
+			value, ok := tomlInt(benchTree.Get(key))
+			if !ok {
+				return
+			}
+			*dst = value
+			known[fmt.Sprintf("hosts.%s.benchmark.%s", host, key)] = struct{}{}
+		}
+		assignInt("cpu_threshold", &hostCfg.Benchmark.CPUThreshold)
+		assignInt("ram_threshold", &hostCfg.Benchmark.RAMThreshold)
+		assignInt("gpu_threshold", &hostCfg.Benchmark.GPUThreshold)
+		assignInt("vram_threshold", &hostCfg.Benchmark.VRAMThreshold)
+		assignInt("idle_samples", &hostCfg.Benchmark.IdleSamples)
+		assignInt("check_interval", &hostCfg.Benchmark.CheckInterval)
+		cfg.Hosts[host] = hostCfg
+	}
+	return known, nil
+}
+
+func tomlInt(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func filterKnownTOMLKeys(keys []string, known map[string]struct{}) []string {
+	if len(known) == 0 {
+		return keys
+	}
+	filtered := keys[:0]
+	for _, key := range keys {
+		if _, ok := known[key]; !ok {
+			filtered = append(filtered, key)
+		}
+	}
+	return filtered
 }
 
 // parseUndecodedKeys extracts the key list from a go-toml strict-mode error of

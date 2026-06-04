@@ -203,6 +203,11 @@ shared = true
 
 [hosts.cool100]
 backend = "queue-runner"
+
+[hosts.studio.benchmark]
+cpu_threshold = 15
+ram_threshold = 35
+idle_samples = 2
 `
 	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -223,6 +228,18 @@ backend = "queue-runner"
 	}
 	if cfg.HostShared("missing") {
 		t.Fatal("missing host should not be marked shared")
+	}
+	if cfg.Hosts["studio"].Benchmark.CPUThreshold != 15 {
+		t.Fatalf("studio benchmark cpu_threshold = %d, want 15", cfg.Hosts["studio"].Benchmark.CPUThreshold)
+	}
+	if cfg.Hosts["studio"].Benchmark.RAMThreshold != 35 {
+		t.Fatalf("studio benchmark ram_threshold = %d, want 35", cfg.Hosts["studio"].Benchmark.RAMThreshold)
+	}
+	if cfg.Hosts["studio"].Benchmark.IdleSamples != 2 {
+		t.Fatalf("studio benchmark idle_samples = %d, want 2", cfg.Hosts["studio"].Benchmark.IdleSamples)
+	}
+	if len(UnknownTOMLKeys) != 0 {
+		t.Fatalf("UnknownTOMLKeys = %#v, want empty", UnknownTOMLKeys)
 	}
 }
 

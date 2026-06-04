@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestCommandJobGPUClassSerialization(t *testing.T) {
 	t.Run("omitempty when empty", func(t *testing.T) {
-		job := CommandJob{ID: 1, Cmd: "echo hi"}
+		job := opsqueue.CommandJob{ID: 1, Cmd: "echo hi"}
 		data, err := json.Marshal(job)
 		if err != nil {
 			t.Fatal(err)
@@ -22,7 +23,7 @@ func TestCommandJobGPUClassSerialization(t *testing.T) {
 	})
 
 	t.Run("present when set", func(t *testing.T) {
-		job := CommandJob{ID: 1, Cmd: "echo hi", GPUClass: "A100"}
+		job := opsqueue.CommandJob{ID: 1, Cmd: "echo hi", GPUClass: "A100"}
 		data, err := json.Marshal(job)
 		if err != nil {
 			t.Fatal(err)
@@ -33,12 +34,12 @@ func TestCommandJobGPUClassSerialization(t *testing.T) {
 	})
 
 	t.Run("round-trip", func(t *testing.T) {
-		original := CommandJob{ID: 42, Cmd: "train.py", GPUClass: "RTX 3090", GPU: ""}
+		original := opsqueue.CommandJob{ID: 42, Cmd: "train.py", GPUClass: "RTX 3090", GPU: ""}
 		data, err := json.Marshal(original)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var decoded CommandJob
+		var decoded opsqueue.CommandJob
 		if err := json.Unmarshal(data, &decoded); err != nil {
 			t.Fatal(err)
 		}
@@ -193,18 +194,18 @@ func TestQueueEntryForJob_GPUParity(t *testing.T) {
 	})
 }
 
-// TestNewAddCommand_GPUParity verifies that NewAddCommand produces equivalent
+// TestNewAddCommand_GPUParity verifies that opsqueue.NewAddCommand produces equivalent
 // JSON commands for --gpu flag and --env CUDA_VISIBLE_DEVICES paths.
 func TestNewAddCommand_GPUParity(t *testing.T) {
 	gpuMem := intPtr(20)
 
 	t.Run("--gpu flag command has gpu and gpu_mem fields", func(t *testing.T) {
-		entry := QueueEntry{
+		entry := opsqueue.QueueEntry{
 			JobID: 1, Command: "train.py",
 			GPU: "0", GPUMemGB: gpuMem,
 			EnvVars: []string{"CUDA_VISIBLE_DEVICES=0"},
 		}
-		cmd := NewAddCommand(entry)
+		cmd := opsqueue.NewAddCommand(entry)
 		if cmd.Job.GPU != "0" {
 			t.Errorf("expected GPU=0, got %q", cmd.Job.GPU)
 		}
@@ -214,12 +215,12 @@ func TestNewAddCommand_GPUParity(t *testing.T) {
 	})
 
 	t.Run("--env CUDA_VISIBLE_DEVICES command has gpu_mem but no gpu field", func(t *testing.T) {
-		entry := QueueEntry{
+		entry := opsqueue.QueueEntry{
 			JobID: 1, Command: "train.py",
 			GPU: "", GPUMemGB: gpuMem,
 			EnvVars: []string{"CUDA_VISIBLE_DEVICES=0"},
 		}
-		cmd := NewAddCommand(entry)
+		cmd := opsqueue.NewAddCommand(entry)
 		// GPU field empty — device info is only in env vars
 		if cmd.Job.GPU != "" {
 			t.Errorf("expected empty GPU field, got %q", cmd.Job.GPU)
@@ -233,11 +234,11 @@ func TestNewAddCommand_GPUParity(t *testing.T) {
 	})
 
 	t.Run("gpu_class command has gpu_class and gpu_mem but no gpu", func(t *testing.T) {
-		entry := QueueEntry{
+		entry := opsqueue.QueueEntry{
 			JobID: 1, Command: "train.py",
 			GPUClass: "A100", GPUMemGB: gpuMem,
 		}
-		cmd := NewAddCommand(entry)
+		cmd := opsqueue.NewAddCommand(entry)
 		if cmd.Job.GPUClass != "A100" {
 			t.Errorf("expected GPUClass=A100, got %q", cmd.Job.GPUClass)
 		}
@@ -250,10 +251,10 @@ func TestNewAddCommand_GPUParity(t *testing.T) {
 	})
 
 	t.Run("no GPU command has no gpu fields", func(t *testing.T) {
-		entry := QueueEntry{
+		entry := opsqueue.QueueEntry{
 			JobID: 1, Command: "echo hi",
 		}
-		cmd := NewAddCommand(entry)
+		cmd := opsqueue.NewAddCommand(entry)
 		if cmd.Job.GPU != "" {
 			t.Errorf("expected empty GPU, got %q", cmd.Job.GPU)
 		}
@@ -273,9 +274,9 @@ func TestNewAddCommand_JSONParity(t *testing.T) {
 	gpuMem := intPtr(20)
 
 	// Helper to marshal and unmarshal to check the JSON structure
-	marshalJob := func(t *testing.T, entry QueueEntry) map[string]any {
+	marshalJob := func(t *testing.T, entry opsqueue.QueueEntry) map[string]any {
 		t.Helper()
-		cmd := NewAddCommand(entry)
+		cmd := opsqueue.NewAddCommand(entry)
 		data, err := json.Marshal(cmd)
 		if err != nil {
 			t.Fatal(err)
@@ -292,7 +293,7 @@ func TestNewAddCommand_JSONParity(t *testing.T) {
 	}
 
 	t.Run("--gpu flag job JSON has gpu_mem", func(t *testing.T) {
-		jobMap := marshalJob(t, QueueEntry{
+		jobMap := marshalJob(t, opsqueue.QueueEntry{
 			JobID: 1, Command: "train.py",
 			GPU: "0", GPUMemGB: gpuMem,
 			EnvVars: []string{"CUDA_VISIBLE_DEVICES=0"},
@@ -306,7 +307,7 @@ func TestNewAddCommand_JSONParity(t *testing.T) {
 	})
 
 	t.Run("--env CUDA_VISIBLE_DEVICES job JSON has gpu_mem", func(t *testing.T) {
-		jobMap := marshalJob(t, QueueEntry{
+		jobMap := marshalJob(t, opsqueue.QueueEntry{
 			JobID: 1, Command: "train.py",
 			GPUMemGB: gpuMem,
 			EnvVars:  []string{"CUDA_VISIBLE_DEVICES=0"},
@@ -322,7 +323,7 @@ func TestNewAddCommand_JSONParity(t *testing.T) {
 	})
 
 	t.Run("non-GPU job JSON has no gpu_mem", func(t *testing.T) {
-		jobMap := marshalJob(t, QueueEntry{
+		jobMap := marshalJob(t, opsqueue.QueueEntry{
 			JobID: 1, Command: "echo hi",
 		})
 		if _, ok := jobMap["gpu_mem"]; ok {
@@ -351,7 +352,7 @@ func TestQueueJobParams_GPUExtraction(t *testing.T) {
 		}
 		gpuMemGB = params.GPUMemGB
 		if gpuMemGB == nil && (gpu != "" || params.GPUClass != "") {
-			defaultMem := DefaultGPUMemGB
+			defaultMem := opsqueue.DefaultGPUMemGB
 			gpuMemGB = &defaultMem
 		}
 		return
@@ -362,8 +363,8 @@ func TestQueueJobParams_GPUExtraction(t *testing.T) {
 		if gpu != "0" {
 			t.Errorf("expected gpu=0, got %q", gpu)
 		}
-		if mem == nil || *mem != DefaultGPUMemGB {
-			t.Errorf("expected mem=%d, got %v", DefaultGPUMemGB, mem)
+		if mem == nil || *mem != opsqueue.DefaultGPUMemGB {
+			t.Errorf("expected mem=%d, got %v", opsqueue.DefaultGPUMemGB, mem)
 		}
 	})
 
@@ -374,8 +375,8 @@ func TestQueueJobParams_GPUExtraction(t *testing.T) {
 		if gpu != "0" {
 			t.Errorf("expected gpu=0, got %q", gpu)
 		}
-		if mem == nil || *mem != DefaultGPUMemGB {
-			t.Errorf("expected mem=%d, got %v", DefaultGPUMemGB, mem)
+		if mem == nil || *mem != opsqueue.DefaultGPUMemGB {
+			t.Errorf("expected mem=%d, got %v", opsqueue.DefaultGPUMemGB, mem)
 		}
 	})
 
@@ -384,8 +385,8 @@ func TestQueueJobParams_GPUExtraction(t *testing.T) {
 		if gpu != "0,1" {
 			t.Errorf("expected gpu=0,1, got %q", gpu)
 		}
-		if mem == nil || *mem != DefaultGPUMemGB {
-			t.Errorf("expected mem=%d, got %v", DefaultGPUMemGB, mem)
+		if mem == nil || *mem != opsqueue.DefaultGPUMemGB {
+			t.Errorf("expected mem=%d, got %v", opsqueue.DefaultGPUMemGB, mem)
 		}
 	})
 
@@ -396,15 +397,15 @@ func TestQueueJobParams_GPUExtraction(t *testing.T) {
 		if gpu != "0,1" {
 			t.Errorf("expected gpu=0,1, got %q", gpu)
 		}
-		if mem == nil || *mem != DefaultGPUMemGB {
-			t.Errorf("expected mem=%d, got %v", DefaultGPUMemGB, mem)
+		if mem == nil || *mem != opsqueue.DefaultGPUMemGB {
+			t.Errorf("expected mem=%d, got %v", opsqueue.DefaultGPUMemGB, mem)
 		}
 	})
 
 	t.Run("--gpu-class A100 gets default GPU mem", func(t *testing.T) {
 		_, mem := extractGPU(QueueJobParams{GPUClass: "A100"})
-		if mem == nil || *mem != DefaultGPUMemGB {
-			t.Errorf("expected mem=%d, got %v", DefaultGPUMemGB, mem)
+		if mem == nil || *mem != opsqueue.DefaultGPUMemGB {
+			t.Errorf("expected mem=%d, got %v", opsqueue.DefaultGPUMemGB, mem)
 		}
 	})
 

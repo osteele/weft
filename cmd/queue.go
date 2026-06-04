@@ -755,6 +755,7 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 	// restart op preserves the tmux session and queue state — pending jobs
 	// stay queued, current jobs keep running across the syscall.Exec.
 	runner := queuerunner.NewRunner(host)
+	restartEnv := spec.Benchmark.EnvVars()
 	running, err := runner.IsRunning()
 	if err != nil {
 		return fmt.Errorf("check queue runner on %s: %w", host, err)
@@ -767,17 +768,14 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// EnsureAgentUpToDate already sends a restart op when it deploys a new
-	// binary (see internal/agentdeploy/deploy.go). Only send our own when no
-	// deploy happened — otherwise we'd re-exec twice for no reason.
-	if !deployed {
-		if err := runner.SendRestartSignal(); err != nil {
-			return fmt.Errorf("send restart signal to %s: %w", host, err)
-		}
-		fmt.Printf("%s: queue runner restart signaled (no binary change)\n", host)
-		return nil
+	if err := runner.SendRestartSignalWithEnv(restartEnv); err != nil {
+		return fmt.Errorf("send restart signal to %s: %w", host, err)
 	}
-	fmt.Printf("%s: queue runner restart signaled (picked up new binary)\n", host)
+	if deployed {
+		fmt.Printf("%s: queue runner restart signaled (picked up new binary/config)\n", host)
+	} else {
+		fmt.Printf("%s: queue runner restart signaled (picked up config)\n", host)
+	}
 	return nil
 }
 

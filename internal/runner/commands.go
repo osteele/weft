@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/osteele/weft/internal/opsqueue"
@@ -25,6 +26,7 @@ type CommandProcessor struct {
 type CommandResult struct {
 	StopRequested    bool
 	RestartRequested bool
+	RestartEnv       []string
 }
 
 // NewCommandProcessor creates a processor for the given commands file.
@@ -50,6 +52,22 @@ func (cp *CommandProcessor) jobIsLive(state *State, jobID int64) bool {
 		return true
 	}
 	return false
+}
+
+func (cp *CommandProcessor) sameAttemptTerminalDuplicate(state *State, job *opsqueue.CommandJob) bool {
+	if job == nil || job.RunID == 0 || cp.logDir == "" || cp.jobIsLive(state, job.ID) {
+		return false
+	}
+	completionFile := filepath.Join(cp.logDir, fmt.Sprintf("%d.completion.json", job.ID))
+	data, err := os.ReadFile(completionFile)
+	if err != nil {
+		return false
+	}
+	var rec CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return false
+	}
+	return rec.RunID == job.RunID && rec.RunID != 0
 }
 
 // ProcessCommands reads new lines from the commands file and applies them to the state.
@@ -109,6 +127,13 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 		switch cmd.Op {
 		case opsqueue.OpAdd:
 			if cmd.Job != nil {
+				if cp.sameAttemptTerminalDuplicate(state, cmd.Job) {
+					state.removePendingLocked(cmd.Job.ID)
+					if exitCode, ok := ReadStatusFile(filepath.Join(cp.logDir, fmt.Sprintf("%d.status", cmd.Job.ID))); ok {
+						state.recordFinishedLocked(strconv.FormatInt(cmd.Job.ID, 10), exitCode, 0)
+					}
+					break
+				}
 				// Write job data file first so a write failure leaves prior
 				// artifacts intact (no archived-but-unrun limbo).
 				if err := writeJobFile(cp.queueDir, cmd.Job); err != nil {
@@ -157,6 +182,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 			state.CursorLine = lineNum
 			state.mu.Unlock()
 			result.RestartRequested = true
+			result.RestartEnv = append([]string(nil), cmd.Env...)
 			return result, nil
 		}
 

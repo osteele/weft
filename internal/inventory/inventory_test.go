@@ -187,6 +187,10 @@ os = "linux"
 arch = "amd64"
 cpu_cores = 32
 memory = "128GB"
+
+[hosts.cool30.benchmark]
+cpu_threshold = 15
+ram_threshold = 35
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +209,15 @@ memory = "128GB"
 	}
 	if host.Memory != "128GB" {
 		t.Fatalf("memory = %q, want 128GB", host.Memory)
+	}
+	if host.Benchmark.CPUThreshold != 15 {
+		t.Fatalf("benchmark cpu_threshold = %d, want 15", host.Benchmark.CPUThreshold)
+	}
+	if host.Benchmark.RAMThreshold != 35 {
+		t.Fatalf("benchmark ram_threshold = %d, want 35", host.Benchmark.RAMThreshold)
+	}
+	if got := host.BenchmarkEnvPrefix(); got != "WEFT_BENCHMARK_CPU=15 WEFT_BENCHMARK_RAM=35 " {
+		t.Fatalf("BenchmarkEnvPrefix = %q", got)
 	}
 }
 

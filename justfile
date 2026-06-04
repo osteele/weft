@@ -266,7 +266,8 @@ remote-build:
     echo "==> Done. Local binary and agent binaries updated."
 
 # Deploy agent binary to a remote host (default: WEFT_DEPLOY_HOST from .env)
-# Builds for the target platform, deploys via scp + atomic rename, and kills the runner session.
+# Delegates to the CLI so host ssh_user/identity config and queue-runner
+# lifecycle handling stay in one place.
 deploy-agent host="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -282,31 +283,7 @@ deploy-agent host="":
         echo "Or set WEFT_DEPLOY_HOST in .env"
         exit 1
     fi
-
-    # Determine target platform
-    TARGET_OS=$(ssh "$HOST" uname -s | tr '[:upper:]' '[:lower:]')
-    TARGET_ARCH=$(ssh "$HOST" uname -m)
-    case "$TARGET_ARCH" in
-        x86_64) TARGET_ARCH="amd64" ;;
-        aarch64|arm64) TARGET_ARCH="arm64" ;;
-    esac
-
-    echo "==> Building agent for ${TARGET_OS}-${TARGET_ARCH}..."
-    mkdir -p dist
-    VERSION=$(jj log --no-graph -r 'ancestors(@-, 200)' -T 'commit_id.short(12)' --limit 1 cmd/agent/ internal/ 2>/dev/null || echo "dev")
-    LDFLAGS="-X main.version=${VERSION}"
-    GOOS="${TARGET_OS}" GOARCH="${TARGET_ARCH}" go build -ldflags "${LDFLAGS}" -o "dist/weft-agent-${TARGET_OS}-${TARGET_ARCH}" ./cmd/agent
-
-    REMOTE_BIN="~/.cache/weft/bin/weft-agent"
-    echo "==> Deploying to ${HOST}..."
-    ssh "$HOST" "mkdir -p ~/.cache/weft/bin"
-    scp "dist/weft-agent-${TARGET_OS}-${TARGET_ARCH}" "${HOST}:${REMOTE_BIN}.tmp"
-    ssh "$HOST" "chmod +x ${REMOTE_BIN}.tmp && mv ${REMOTE_BIN}.tmp ${REMOTE_BIN}"
-
-    echo "==> Killing runner session on ${HOST} (will restart with new binary)..."
-    ssh "$HOST" "tmux kill-session -t weft-runner 2>/dev/null" || true
-
-    echo "==> Done. Agent ${VERSION} deployed to ${HOST}."
+    ./weft queue update "${HOST}"
 
 # Deploy coordinator to studio: sync sources, rebuild, restart the launchd service
 deploy-coordinator host="studio":

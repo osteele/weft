@@ -94,7 +94,12 @@ func (r *Runner) SendStopSignal() error {
 
 // SendRestartSignal signals the runner to re-exec with the current binary.
 func (r *Runner) SendRestartSignal() error {
-	cmd := opsqueue.NewRestartCommand()
+	return r.SendRestartSignalWithEnv(nil)
+}
+
+// SendRestartSignalWithEnv signals the runner to re-exec with environment overrides.
+func (r *Runner) SendRestartSignalWithEnv(env []string) error {
+	cmd := opsqueue.NewRestartCommandWithEnv(env)
 	return opsqueue.AppendCommand(r.host, cmd, opsqueue.AppendCommandOptions{})
 }
 

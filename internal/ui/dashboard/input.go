@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/progress"
@@ -69,7 +70,7 @@ func (m Model) createJob() tea.Cmd {
 		}
 		predCfg := placement.PredictorConfigFromApp(m.appConfig)
 		projectName := db.DeriveProject(workingDir, command)
-		gpuMemGB, gpuMemMaxGB, _ := predictor.ResolveGPUMem(predCfg, nil, gpuInput != "", host, projectName, "", command, ops.DefaultGPUMemGB, 0)
+		gpuMemGB, gpuMemMaxGB, _ := predictor.ResolveGPUMem(predCfg, nil, gpuInput != "", host, projectName, "", command, opsqueue.DefaultGPUMemGB, 0)
 		params := ops.QueueJobParams{
 			Host:         host,
 			WorkingDir:   workingDir,

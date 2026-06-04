@@ -294,6 +294,33 @@ func TestProcessCommands_MissingFile(t *testing.T) {
 	}
 }
 
+func TestProcessCommands_RestartCarriesEnv(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpRestart,
+		Env:       []string{"WEFT_BENCHMARK_CPU=15", "WEFT_BENCHMARK_RAM=35"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	result, err := cp.ProcessCommands(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RestartRequested {
+		t.Fatal("RestartRequested = false, want true")
+	}
+	if !slices.Equal(result.RestartEnv, []string{"WEFT_BENCHMARK_CPU=15", "WEFT_BENCHMARK_RAM=35"}) {
+		t.Fatalf("RestartEnv = %#v", result.RestartEnv)
+	}
+	if state.CursorLine != 1 {
+		t.Fatalf("CursorLine = %d, want 1", state.CursorLine)
+	}
+}
+
 func intPtr(n int) *int { return &n }
 
 // assertResourceFields checks all GPU and artifact fields on a CommandJob.
@@ -525,6 +552,89 @@ func TestProcessCommands_Add_ArchivesPriorArtifacts(t *testing.T) {
 	}
 	if len(matches) == 0 {
 		t.Fatalf("expected an archived <id>-<seq>.status file under %s", dir)
+	}
+}
+
+func TestProcessCommands_Add_IgnoresSameRunTerminalDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	const jobID int64 = 4242
+	const runID int64 = 99
+	priorStatus := filepath.Join(dir, "4242.status")
+	if err := os.WriteFile(priorStatus, []byte("0\n"), 0644); err != nil {
+		t.Fatalf("seed prior status: %v", err)
+	}
+	data, err := json.Marshal(CompletionRecord{RunID: runID, ExitCode: 0, EndTime: 1_700_000_000})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4242.completion.json"), data, 0644); err != nil {
+		t.Fatalf("seed completion: %v", err)
+	}
+	state.AddPending(jobID)
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: jobID, RunID: runID, Cmd: "echo dup", Dir: "/tmp"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+
+	if slices.Contains(state.Pending, jobID) {
+		t.Fatalf("same-run terminal duplicate should not remain pending, got %v", state.Pending)
+	}
+	if !JobCompleted(dir, jobID) {
+		t.Fatalf("same-run duplicate must keep primary status available for sync")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "4242-*.status"))
+	if err != nil {
+		t.Fatalf("glob archived status: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("same-run duplicate should not archive status, got %v", matches)
+	}
+}
+
+func TestProcessCommands_Add_ArchivesPriorArtifactsForNewRun(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	const jobID int64 = 4242
+	priorStatus := filepath.Join(dir, "4242.status")
+	if err := os.WriteFile(priorStatus, []byte("0\n"), 0644); err != nil {
+		t.Fatalf("seed prior status: %v", err)
+	}
+	data, err := json.Marshal(CompletionRecord{RunID: 98, ExitCode: 0, EndTime: 1_700_000_000})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4242.completion.json"), data, 0644); err != nil {
+		t.Fatalf("seed completion: %v", err)
+	}
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: jobID, RunID: 99, Cmd: "echo retry", Dir: "/tmp"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+
+	if !slices.Contains(state.Pending, jobID) {
+		t.Fatalf("new run should be queued, got %v", state.Pending)
+	}
+	if JobCompleted(dir, jobID) {
+		t.Fatalf("new run should archive primary status so startJob can run")
 	}
 }
 

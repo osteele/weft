@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestRecordQueuedJob_Basic(t *testing.T) {
@@ -103,8 +104,8 @@ func TestRecordQueuedJob_DefaultGPUMem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if job.GPUMemGB == nil || *job.GPUMemGB != DefaultGPUMemGB {
-		t.Errorf("expected GPUMemGB=%d, got %v", DefaultGPUMemGB, job.GPUMemGB)
+	if job.GPUMemGB == nil || *job.GPUMemGB != opsqueue.DefaultGPUMemGB {
+		t.Errorf("expected GPUMemGB=%d, got %v", opsqueue.DefaultGPUMemGB, job.GPUMemGB)
 	}
 }
 

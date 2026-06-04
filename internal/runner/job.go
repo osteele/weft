@@ -533,6 +533,7 @@ type UploadSummary struct {
 
 // CompletionRecord is the structured post-mortem record written as .completion.json.
 type CompletionRecord struct {
+	RunID            int64               `json:"run_id,omitempty"`
 	ExitCode         int                 `json:"exit_code"`
 	Signal           string              `json:"signal,omitempty"`
 	SignalName       string              `json:"signal_name,omitempty"`
@@ -611,6 +612,7 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 		peakRSS = rs.PeakRSSFromTS
 	}
 	rec := CompletionRecord{
+		RunID:            rs.RunID,
 		ExitCode:         ei.ExitCode,
 		CoreDump:         ei.CoreDump,
 		WallTimeSecs:     endTime - startTime,

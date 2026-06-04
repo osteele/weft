@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hooks"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -442,11 +443,11 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 
 // removeFromQueueFile removes a job from the remote queue by issuing a cancel command.
 func removeFromQueueFile(host string, jobID int64, timeout time.Duration) error {
-	cancelCmd := NewCancelCommand(jobID)
-	opts := AppendCommandOptions{Timeout: timeout}
-	if err := AppendCommand(host, cancelCmd, opts); err != nil {
-		var qaErr *QueueAppendError
-		if e, ok := err.(*QueueAppendError); ok {
+	cancelCmd := opsqueue.NewCancelCommand(jobID)
+	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
+	if err := opsqueue.AppendCommand(host, cancelCmd, opts); err != nil {
+		var qaErr *opsqueue.QueueAppendError
+		if e, ok := err.(*opsqueue.QueueAppendError); ok {
 			qaErr = e
 			if qaErr.IsConnectionError() {
 				return fmt.Errorf("connection error: %s", qaErr.Stderr)
