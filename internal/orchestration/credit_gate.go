@@ -104,10 +104,10 @@ func CheckProviderCreditHealth(cfg *config.Config) []ProviderCreditStatus {
 		probe    func() (float64, error)
 	}
 	requests := make([]request, 0, 2)
-	if cfg.Vastai.Enabled {
+	if cfg.ProviderEnabledForDiscovery(cloud.ProviderVastai) {
 		requests = append(requests, request{cloud.ProviderVastai, providerCreditGateProbeVastai})
 	}
-	if cfg.Runpod.Enabled {
+	if cfg.ProviderEnabledForDiscovery(cloud.ProviderRunpod) {
 		requests = append(requests, request{cloud.ProviderRunpod, providerCreditGateProbeRunpod})
 	}
 	if len(requests) == 0 {

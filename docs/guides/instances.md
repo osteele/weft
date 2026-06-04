@@ -19,6 +19,7 @@ groups multiple instances launched together, see [Campaigns](campaigns.md).
 # 1. Install Vast.ai CLI
 pip install vastai
 vastai set api-key YOUR_API_KEY
+weft provider list
 
 # 2. Configure R2 for result upload (in ~/.config/weft/config.toml)
 # [vastai.r2]
@@ -40,6 +41,13 @@ is the primary command for moving unplaced jobs onto cloud GPUs — but see
 [Coordinating with the autopilot](#coordinating-with-the-autopilot) first.
 You usually do not need to launch by hand.
 
+Provider discovery is automatic until you configure it explicitly. On a fresh
+config, Weft searches Vast.ai and leaves RunPod inactive. Once any provider has
+an explicit `enabled` setting, Weft searches only providers with
+`enabled = true`. Use `weft provider list`, `weft provider enable <provider>`,
+`weft provider disable <provider>`, and `weft provider reset <provider>` to
+edit `~/.config/weft/config.toml`.
+
 RunPod is also supported. Setup:
 
 ```bash
@@ -49,7 +57,8 @@ weft runpod doctor
 weft runpod setup
 ```
 
-RunPod launch readiness depends on the shared R2 bootstrap config under
+`weft runpod setup` enables RunPod in the provider policy. RunPod launch
+readiness depends on the shared R2 bootstrap config under
 `[vastai.r2]` plus a compatible `runpod.bootstrap_template_id`. Use
 `weft runpod template print-bootstrap` to inspect the exact startup command
 that the managed template must run.
@@ -567,8 +576,12 @@ In `~/.config/weft/config.toml`:
 
 ```toml
 [vastai]
+# enabled = true              # optional; Vast.ai is the default when no providers are explicit
 default_image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
 max_runtime = "4h"
+
+[runpod]
+# enabled = true              # set by `weft runpod setup` or `weft provider enable runpod`
 
 [campaign]
 reliability = 0.95             # provider-offer reliability floor (0 disables)

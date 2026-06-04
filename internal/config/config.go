@@ -206,6 +206,11 @@ type DataConfig struct {
 
 var defaultSourceExcludeDirs = []string{"runs", "wand", "wandb"}
 
+// Bool returns a pointer to v for tri-state config fields.
+func Bool(v bool) *bool {
+	return &v
+}
+
 // RemediationConfig holds configuration for automatic job failure remediation.
 type RemediationConfig struct {
 	// CodingAgent is the command to invoke for code fixes (e.g., "claude -p").
@@ -300,8 +305,9 @@ type HedgeConfig struct {
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
 type VastaiConfig struct {
-	// Enabled controls whether Vast.ai cloud GPU options are available
-	Enabled bool `yaml:"enabled" toml:"enabled"`
+	// Enabled controls whether Vast.ai cloud GPU options are available.
+	// nil means automatic/default provider policy.
+	Enabled *bool `yaml:"enabled" toml:"enabled"`
 	// SpendingLimit is the maximum cost per job in dollars
 	SpendingLimit float64 `yaml:"spending_limit" toml:"spending_limit"`
 	// DefaultImage is the Docker image for cloud instances
@@ -338,8 +344,9 @@ func (r R2Config) ToCloudR2Config() cloud.R2Config {
 
 // RunpodConfig holds Runpod cloud GPU settings.
 type RunpodConfig struct {
-	// Enabled controls whether Runpod cloud GPU options are available
-	Enabled bool `yaml:"enabled" toml:"enabled"`
+	// Enabled controls whether Runpod cloud GPU options are available.
+	// nil means automatic/default provider policy.
+	Enabled *bool `yaml:"enabled" toml:"enabled"`
 	// SpendingLimit is the maximum cost per job in dollars
 	SpendingLimit float64 `yaml:"spending_limit" toml:"spending_limit"`
 	// DefaultImage is the Docker image for cloud instances
@@ -718,6 +725,74 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 		opts.SSHPublicKeyFile = sshPublicKey
 		return opts, nil
 	}
+}
+
+// ProviderEnabledSetting returns the raw tri-state provider setting.
+// nil means unset/auto, true means explicitly enabled, false means explicitly
+// disabled.
+func (c *Config) ProviderEnabledSetting(provider cloud.Provider) (*bool, error) {
+	if c == nil {
+		return nil, nil
+	}
+	switch provider {
+	case cloud.ProviderVastai:
+		return c.Vastai.Enabled, nil
+	case cloud.ProviderRunpod:
+		return c.Runpod.Enabled, nil
+	default:
+		return nil, fmt.Errorf("unknown provider %q", provider)
+	}
+}
+
+// ProviderExplicitlyEnabled reports whether a provider is configured true.
+func (c *Config) ProviderExplicitlyEnabled(provider cloud.Provider) bool {
+	setting, err := c.ProviderEnabledSetting(provider)
+	return err == nil && setting != nil && *setting
+}
+
+// ProviderExplicitlyDisabled reports whether a provider is configured false.
+func (c *Config) ProviderExplicitlyDisabled(provider cloud.Provider) bool {
+	setting, err := c.ProviderEnabledSetting(provider)
+	return err == nil && setting != nil && !*setting
+}
+
+// AnyProviderExplicitlyConfigured reports whether any provider has an enabled
+// setting. Once a user starts managing providers explicitly, unset providers
+// are treated as disabled instead of falling back to legacy Vast.ai auto.
+func (c *Config) AnyProviderExplicitlyConfigured() bool {
+	if c == nil {
+		return false
+	}
+	return c.Vastai.Enabled != nil || c.Runpod.Enabled != nil
+}
+
+// SetProviderEnabled updates the raw tri-state provider setting.
+func (c *Config) SetProviderEnabled(provider cloud.Provider, enabled *bool) error {
+	if c == nil {
+		return fmt.Errorf("nil config")
+	}
+	switch provider {
+	case cloud.ProviderVastai:
+		c.Vastai.Enabled = enabled
+	case cloud.ProviderRunpod:
+		c.Runpod.Enabled = enabled
+	default:
+		return fmt.Errorf("unknown provider %q", provider)
+	}
+	return nil
+}
+
+// ProviderEnabledForDiscovery implements the provider discovery policy.
+// Explicit true enables a provider, explicit false disables it. When no
+// providers have any explicit setting, Vast.ai remains a legacy auto provider.
+func (c *Config) ProviderEnabledForDiscovery(provider cloud.Provider) bool {
+	if c == nil {
+		return provider == cloud.ProviderVastai
+	}
+	if c.AnyProviderExplicitlyConfigured() {
+		return c.ProviderExplicitlyEnabled(provider)
+	}
+	return provider == cloud.ProviderVastai
 }
 
 // RegistryAuthForImage returns private registry credentials for image. secret

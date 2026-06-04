@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 func TestLoadPrefersTOMLConfig(t *testing.T) {
@@ -101,7 +103,7 @@ bucket = "bucket"
 	if cfg.Predictor.ProjectPath != "/tmp/job-estimator" {
 		t.Fatalf("predictor.project_path = %q", cfg.Predictor.ProjectPath)
 	}
-	if !cfg.Vastai.Enabled {
+	if !cfg.ProviderExplicitlyEnabled(cloud.ProviderVastai) {
 		t.Fatal("vastai.enabled was not decoded from TOML")
 	}
 	if cfg.Vastai.DefaultImage != "nvidia/cuda:12.4.1-runtime-ubuntu22.04" {

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	toml "github.com/pelletier/go-toml"
 )
 
@@ -42,7 +43,7 @@ enabled = false
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !cfg.Runpod.Enabled {
+	if !cfg.ProviderExplicitlyEnabled(cloud.ProviderRunpod) {
 		t.Fatal("runpod.enabled was not updated")
 	}
 	if cfg.Runpod.BootstrapTemplateID != "tpl-bootstrap" {
@@ -92,7 +93,7 @@ runpod:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !cfg.Runpod.Enabled {
+	if !cfg.ProviderExplicitlyEnabled(cloud.ProviderRunpod) {
 		t.Fatal("runpod.enabled was not migrated")
 	}
 	if cfg.Runpod.BootstrapTemplateID != "tpl-123" {
@@ -100,6 +101,51 @@ runpod:
 	}
 	if len(cfg.Sync.ExcludeDirs) != 1 || cfg.Sync.ExcludeDirs[0] != "legacy-dir" {
 		t.Fatalf("sync.exclude_dirs = %v", cfg.Sync.ExcludeDirs)
+	}
+}
+
+func TestSetProviderEnabledSetting(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	yamlPath := filepath.Join(dir, "config.yaml")
+	restore := SetConfigPathsForTesting(tomlPath, yamlPath)
+	defer restore()
+
+	if err := SetProviderEnabledSetting(cloud.ProviderRunpod, Bool(true)); err != nil {
+		t.Fatalf("SetProviderEnabledSetting(true): %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ProviderExplicitlyEnabled(cloud.ProviderRunpod) {
+		t.Fatal("runpod should be explicitly enabled")
+	}
+
+	if err := SetProviderEnabledSetting(cloud.ProviderRunpod, Bool(false)); err != nil {
+		t.Fatalf("SetProviderEnabledSetting(false): %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load after disable: %v", err)
+	}
+	if !cfg.ProviderExplicitlyDisabled(cloud.ProviderRunpod) {
+		t.Fatal("runpod should be explicitly disabled")
+	}
+
+	if err := SetProviderEnabledSetting(cloud.ProviderRunpod, nil); err != nil {
+		t.Fatalf("SetProviderEnabledSetting(nil): %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load after reset: %v", err)
+	}
+	setting, err := cfg.ProviderEnabledSetting(cloud.ProviderRunpod)
+	if err != nil {
+		t.Fatalf("ProviderEnabledSetting: %v", err)
+	}
+	if setting != nil {
+		t.Fatalf("runpod enabled setting = %v, want nil", *setting)
 	}
 }
 

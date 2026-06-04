@@ -4,6 +4,54 @@ This is the canonical CLI reference for `weft` commands. For end-to-end workflow
 
 ## Commands
 
+### weft provider
+
+Inspect and edit which cloud GPU providers are eligible for rental placement.
+
+```bash
+weft provider list [--json]
+weft provider enable vastai|runpod
+weft provider disable vastai|runpod
+weft provider reset vastai|runpod
+```
+
+`enable`, `disable`, and `reset` update `~/.config/weft/config.toml`.
+`reset` removes that provider's `enabled` key so it returns to the default
+policy.
+
+Provider enablement is tri-state:
+
+- `enabled = true`: search this provider
+- `enabled = false`: do not search this provider
+- unset: automatic/default policy
+
+For compatibility, when no provider has an explicit `enabled` setting, Weft
+searches Vast.ai and leaves RunPod inactive. Once any provider is explicitly
+enabled or disabled, Weft searches only providers with `enabled = true`.
+
+Examples:
+
+```bash
+# See current provider policy
+weft provider list
+
+# Use only RunPod, even if Vast.ai was previously enabled
+weft provider enable runpod
+weft provider disable vastai
+
+# Use both providers
+weft provider enable vastai
+weft provider enable runpod
+
+# Disable rental placement across all providers
+weft provider disable vastai
+weft provider disable runpod
+
+# Return Vast.ai to the legacy default policy
+weft provider reset vastai
+weft provider reset runpod
+```
+
 ### weft run
 
 Queue a job on a remote host for managed execution.

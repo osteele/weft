@@ -331,7 +331,7 @@ func fetchProviderCreditWarning() string {
 	}
 
 	var warnings []string
-	if cfg.Vastai.Enabled {
+	if cfg.ProviderEnabledForDiscovery(cloud.ProviderVastai) {
 		credit, err := vastaiCreditWarningUser()
 		if err == nil {
 			threshold := max(defaultLowProviderCreditThreshold, cfg.Vastai.SpendingLimit)
@@ -340,7 +340,7 @@ func fetchProviderCreditWarning() string {
 			warnings = appendProviderCreditCheckWarning(warnings, cloud.ProviderVastai, err)
 		}
 	}
-	if cfg.Runpod.Enabled {
+	if cfg.ProviderEnabledForDiscovery(cloud.ProviderRunpod) {
 		credit, err := runpodCreditWarningUser()
 		if err == nil {
 			threshold := max(defaultLowProviderCreditThreshold, cfg.Runpod.SpendingLimit)

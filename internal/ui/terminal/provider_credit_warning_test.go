@@ -304,9 +304,9 @@ func TestFetchProviderCreditWarningIncludesRunpod(t *testing.T) {
 	prevVastUser := vastaiCreditWarningUser
 	providerCreditWarningLoad = func() (*config.Config, error) {
 		cfg := config.DefaultConfig()
-		cfg.Runpod.Enabled = true
+		cfg.Runpod.Enabled = config.Bool(true)
 		cfg.Runpod.SpendingLimit = 20
-		cfg.Vastai.Enabled = false
+		cfg.Vastai.Enabled = config.Bool(false)
 		return cfg, nil
 	}
 	runpodCreditWarningUser = func() (float64, error) { return 5, nil }
@@ -332,8 +332,8 @@ func TestFetchProviderCreditWarningIncludesVastaiCreditCheckFailure(t *testing.T
 	prevVastUser := vastaiCreditWarningUser
 	providerCreditWarningLoad = func() (*config.Config, error) {
 		cfg := config.DefaultConfig()
-		cfg.Vastai.Enabled = true
-		cfg.Runpod.Enabled = false
+		cfg.Vastai.Enabled = config.Bool(true)
+		cfg.Runpod.Enabled = config.Bool(false)
 		return cfg, nil
 	}
 	vastaiCreditWarningUser = func() (float64, error) {
@@ -361,8 +361,8 @@ func TestFetchProviderCreditWarningSuppressesTransientVastaiCreditCheckFailure(t
 	prevVastUser := vastaiCreditWarningUser
 	providerCreditWarningLoad = func() (*config.Config, error) {
 		cfg := config.DefaultConfig()
-		cfg.Vastai.Enabled = true
-		cfg.Runpod.Enabled = false
+		cfg.Vastai.Enabled = config.Bool(true)
+		cfg.Runpod.Enabled = config.Bool(false)
 		return cfg, nil
 	}
 	vastaiCreditWarningUser = func() (float64, error) {

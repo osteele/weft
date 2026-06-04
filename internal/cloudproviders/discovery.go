@@ -49,13 +49,10 @@ func (d Discovery) UnavailableError() error {
 // Discover creates cloud clients for enabled providers, preserving the existing
 // fallback behavior of attempting Vast.ai when no providers are explicitly enabled.
 func Discover(cfg *config.Config) Discovery {
-	vastaiEnabled := cfg != nil && cfg.Vastai.Enabled
-	runpodEnabled := cfg != nil && cfg.Runpod.Enabled
-
 	return discover([]providerCheck{
 		{
 			Provider: cloud.ProviderVastai,
-			Attempt:  vastaiEnabled || !runpodEnabled,
+			Attempt:  cfg == nil || cfg.ProviderEnabledForDiscovery(cloud.ProviderVastai),
 			Load: func() (cloud.Client, error) {
 				vc := vastai.NewClient()
 				if err := vc.Available(); err != nil {
@@ -66,7 +63,7 @@ func Discover(cfg *config.Config) Discovery {
 		},
 		{
 			Provider: cloud.ProviderRunpod,
-			Attempt:  runpodEnabled,
+			Attempt:  cfg != nil && cfg.ProviderEnabledForDiscovery(cloud.ProviderRunpod),
 			Load: func() (cloud.Client, error) {
 				rc := runpod.NewCloudClient()
 				if err := rc.Available(); err != nil {

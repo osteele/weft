@@ -73,8 +73,9 @@ func (m *Manager) diagnose(cfg *config.Config) (*Diagnosis, BootstrapTemplateSpe
 
 	spec := DesiredBootstrapTemplate(cfg)
 	imageCheckOK, imageCheckDetail := runpodImageCheck(cfg)
+	runpodEnabled := cfg.ProviderExplicitlyEnabled(cloud.ProviderRunpod)
 	diag := &Diagnosis{
-		Enabled:              cfg.Runpod.Enabled,
+		Enabled:              runpodEnabled,
 		TemplateID:           cfg.Runpod.BootstrapTemplateID,
 		RequiredStartCommand: "",
 		DefaultImage:         effectiveRunpodImage(cfg),
@@ -83,7 +84,7 @@ func (m *Manager) diagnose(cfg *config.Config) (*Diagnosis, BootstrapTemplateSpe
 	ctx := context.Background()
 	caps, capErr := m.client.capabilities(ctx)
 
-	searchChecks := []Check{{Name: "runpod.enabled", OK: cfg.Runpod.Enabled, Detail: boolDetail(cfg.Runpod.Enabled, "enabled", "disabled")}}
+	searchChecks := []Check{{Name: "runpod.enabled", OK: runpodEnabled, Detail: boolDetail(runpodEnabled, "enabled", "disabled")}}
 	if capErr != nil {
 		searchChecks = append(searchChecks,
 			Check{Name: "runpodctl", OK: false, Detail: capErr.Error()},
@@ -108,7 +109,7 @@ func (m *Manager) diagnose(cfg *config.Config) (*Diagnosis, BootstrapTemplateSpe
 	authErr := m.client.checkAuth(ctx, caps)
 	searchChecks = append(searchChecks, Check{Name: "auth", OK: authErr == nil, Detail: detailOrOK(authErr, "authenticated")})
 	diag.SearchChecks = searchChecks
-	diag.SearchReady = cfg.Runpod.Enabled && authErr == nil
+	diag.SearchReady = runpodEnabled && authErr == nil
 
 	diag.LaunchChecks = launchChecksForConfig(cfg, imageCheckOK, imageCheckDetail)
 	diag.LaunchReady = diag.SearchReady && allChecksOK(diag.LaunchChecks)
@@ -154,7 +155,7 @@ func (m *Manager) Setup(cfg *config.Config) (*SetupResult, error) {
 	result.UpdatedConfig = true
 
 	updatedCfg := *cfg
-	updatedCfg.Runpod.Enabled = true
+	updatedCfg.Runpod.Enabled = config.Bool(true)
 	updatedCfg.Runpod.DefaultImage = image
 	if template != nil {
 		updatedCfg.Runpod.BootstrapTemplateID = template.ID

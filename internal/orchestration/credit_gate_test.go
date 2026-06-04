@@ -14,8 +14,8 @@ func TestCheckProviderCreditHealthSkipsDisabledProviders(t *testing.T) {
 	ResetProviderCreditGateCacheForTests()
 	t.Cleanup(ResetProviderCreditGateCacheForTests)
 
-	// No providers enabled → nothing to check.
 	cfg := &config.Config{}
+	cfg.Vastai.Enabled = config.Bool(false)
 	if got := CheckProviderCreditHealth(cfg); len(got) != 0 {
 		t.Fatalf("CheckProviderCreditHealth = %v, want empty for disabled providers", got)
 	}
@@ -30,7 +30,7 @@ func TestCheckProviderCreditHealthExhaustedVastai(t *testing.T) {
 	t.Cleanup(func() { providerCreditGateProbeVastai = prev })
 
 	cfg := &config.Config{}
-	cfg.Vastai.Enabled = true
+	cfg.Vastai.Enabled = config.Bool(true)
 
 	got := CheckProviderCreditHealth(cfg)
 	if len(got) != 1 {
@@ -55,7 +55,7 @@ func TestCheckProviderCreditHealthProbeFailureIsNotExhausted(t *testing.T) {
 	t.Cleanup(func() { providerCreditGateProbeVastai = prev })
 
 	cfg := &config.Config{}
-	cfg.Vastai.Enabled = true
+	cfg.Vastai.Enabled = config.Bool(true)
 
 	got := CheckProviderCreditHealth(cfg)
 	if len(got) != 1 {
@@ -82,7 +82,7 @@ func TestCheckProviderCreditHealthCachesProbe(t *testing.T) {
 	t.Cleanup(func() { providerCreditGateProbeVastai = prev })
 
 	cfg := &config.Config{}
-	cfg.Vastai.Enabled = true
+	cfg.Vastai.Enabled = config.Bool(true)
 
 	_ = CheckProviderCreditHealth(cfg)
 	_ = CheckProviderCreditHealth(cfg)
@@ -110,7 +110,7 @@ func TestCheckProviderCreditHealthCacheExpiresAfterTTL(t *testing.T) {
 	t.Cleanup(func() { providerCreditGateProbeVastai = prev })
 
 	cfg := &config.Config{}
-	cfg.Vastai.Enabled = true
+	cfg.Vastai.Enabled = config.Bool(true)
 
 	_ = CheckProviderCreditHealth(cfg)
 	now = now.Add(providerCreditGateTTL + time.Second)

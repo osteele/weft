@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/osteele/weft/internal/cloud"
 	toml "github.com/pelletier/go-toml"
 )
 
@@ -102,6 +103,40 @@ func SetAutoRunRateSoftTarget(usdPerHour float64) error {
 // 0; the breaker code falls back to the compiled-in default in that case.
 func SetAutoRunawaySpendNoProgressLimit(usd float64) error {
 	return setCampaignUSDField("auto_runaway_spend_no_progress_limit", usd)
+}
+
+// SetProviderEnabledSetting updates a provider's global tri-state enabled
+// setting. nil removes the key so the provider returns to auto/default policy.
+func SetProviderEnabledSetting(provider cloud.Provider, enabled *bool) error {
+	section, err := providerConfigSection(provider)
+	if err != nil {
+		return err
+	}
+	return UpdateGlobalTOML(func(tree *toml.Tree) error {
+		path := []string{section, "enabled"}
+		if enabled == nil {
+			if err := tree.DeletePath(path); err != nil {
+				if err.Error() == "no such key to delete" {
+					return nil
+				}
+				return fmt.Errorf("delete %s.enabled: %w", section, err)
+			}
+			return nil
+		}
+		tree.SetPath(path, *enabled)
+		return nil
+	})
+}
+
+func providerConfigSection(provider cloud.Provider) (string, error) {
+	switch provider {
+	case cloud.ProviderVastai:
+		return "vastai", nil
+	case cloud.ProviderRunpod:
+		return "runpod", nil
+	default:
+		return "", fmt.Errorf("unknown provider %q", provider)
+	}
 }
 
 func setCampaignUSDField(key string, usd float64) error {

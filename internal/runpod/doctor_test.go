@@ -160,7 +160,7 @@ func TestSetupPersistsCompatibleDefaultImage(t *testing.T) {
 	defer restore()
 
 	cfg := config.DefaultConfig()
-	cfg.Runpod.Enabled = true
+	cfg.Runpod.Enabled = config.Bool(true)
 	cfg.Runpod.DefaultImage = "runpod/pytorch:test"
 
 	runner := newStubRunner(t,
@@ -210,7 +210,7 @@ func TestSetupNormalizesIncompatibleDefaultImage(t *testing.T) {
 	defer restore()
 
 	cfg := config.DefaultConfig()
-	cfg.Runpod.Enabled = true
+	cfg.Runpod.Enabled = config.Bool(true)
 	cfg.Runpod.DefaultImage = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
 
 	runner := newStubRunner(t,
