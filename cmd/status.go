@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/syncorch"
 	"github.com/spf13/cobra"
 )
 
@@ -40,6 +41,7 @@ var (
 )
 
 var syncRentalJobsStatusFunc = syncRentalJobsStatusWithTimeout
+var statusSyncHostsFunc = syncStatusHostsWithBounds
 
 var statusCmd = &cobra.Command{
 	Use:   "status [id]...",
@@ -199,39 +201,16 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 	// ssh/rclone-deploy cost.
 	startRunners := statusWait
 
-	// Sync logic: default 5s, fast 2s, full 30s, --ssh-timeout overrides, or skip
+	// Sync logic: default bounded quick sync, --fast/--sync/--ssh-timeout tune the bound.
 	if needsSync {
 		hosts := mapKeys(hostsToSync)
-		if statusSync {
-			// Full sync requested (30s timeout)
-			for _, host := range hosts {
-				_, _ = syncHost(database, host)
-			}
-			if startRunners {
-				startQueueRunnersForHosts(database, hosts)
-			}
-		} else if statusFast && statusSSHTimeout == 0 {
-			// Fast sync (2s timeout) - skip queue starting for speed
-			completed, unreachable, slow := performFastSyncForHosts(database, hosts, false)
+		if len(hosts) > 0 {
+			sshTimeout, hostTimeout := statusHostSyncBounds()
+			completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, startRunners)
 			if !completed {
 				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
 					fmt.Fprintln(os.Stderr, note)
 				}
-			}
-		} else {
-			// Use --ssh-timeout if set, otherwise default 5s
-			syncTimeout := DefaultSyncTimeout
-			if statusSSHTimeout > 0 {
-				syncTimeout = statusSSHTimeout
-			}
-			completed, unreachable, slow := performSyncWithTimeoutForHosts(database, hosts, syncTimeout, false)
-			if !completed {
-				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
-					fmt.Fprintln(os.Stderr, note)
-				}
-			}
-			if startRunners {
-				startQueueRunnersForHosts(database, hosts)
 			}
 		}
 		if needsRentalSync {
@@ -570,6 +549,42 @@ func mapKeys(m map[string]struct{}) []string {
 	return keys
 }
 
+func statusHostSyncBounds() (time.Duration, time.Duration) {
+	sshTimeout := DefaultSyncTimeout
+	if statusFast && statusSSHTimeout == 0 {
+		sshTimeout = FastSyncTimeout
+	}
+	if statusSync {
+		sshTimeout = NormalSyncTimeout
+	}
+	if statusSSHTimeout > 0 {
+		sshTimeout = statusSSHTimeout
+	}
+
+	hostTimeout := FastSyncHostTimeout
+	if statusSync {
+		hostTimeout = NormalSyncTimeout
+	}
+	if statusSSHTimeout > hostTimeout {
+		hostTimeout = statusSSHTimeout
+	}
+	return sshTimeout, hostTimeout
+}
+
+func syncStatusHostsWithBounds(database *sql.DB, hosts []string, sshTimeout, hostTimeout time.Duration, startQueueRunners bool) (bool, []string, []string) {
+	result := syncorch.SyncHosts(database, syncorch.SyncOptions{
+		Hosts:            hosts,
+		SSHTimeout:       sshTimeout,
+		HostTimeout:      hostTimeout,
+		StartQueueRunner: startQueueRunners,
+		EnsureQueueRunner: func(host string) (bool, error) {
+			return ensureQueueRunnerStarted(host)
+		},
+	})
+	emitWarnings(result.Warnings)
+	return result.Completed, result.Unreachable, result.Slow
+}
+
 func isWaitTerminalStatus(status string) bool {
 	switch status {
 	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
@@ -716,25 +731,16 @@ func showActiveJobs(database *sql.DB) error {
 
 	// Sync first if not disabled
 	if !statusNoSync {
-		if statusSync {
-			hosts, err := db.ListUniqueActiveHosts(database)
-			if err == nil && len(hosts) > 0 {
-				for _, host := range hosts {
-					_, _ = syncHost(database, host)
+		hosts, err := db.ListUniqueActiveHosts(database)
+		if err == nil && len(hosts) > 0 {
+			sshTimeout, hostTimeout := statusHostSyncBounds()
+			completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, false)
+			if !completed {
+				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
+					fmt.Fprintln(os.Stderr, note)
 				}
 			}
-		} else if statusFast && statusSSHTimeout == 0 {
-			performFastSync(database, false)
-		} else {
-			syncTimeout := DefaultSyncTimeout
-			if statusSSHTimeout > 0 {
-				syncTimeout = statusSSHTimeout
-			}
-			performSyncWithTimeout(database, syncTimeout, false)
 		}
-
-		// Start queue runners on hosts with queued or running queue-runner jobs
-		startQueueRunnersForQueuedHosts(database)
 	}
 
 	// Get running jobs

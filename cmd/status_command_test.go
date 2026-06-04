@@ -83,6 +83,110 @@ func TestRunStatusFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 	}
 }
 
+func TestRunStatusInventorySyncUsesBoundedStatusTimeout(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "bounded status", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	statusSync = true
+
+	originalSyncHosts := statusSyncHostsFunc
+	t.Cleanup(func() {
+		statusSyncHostsFunc = originalSyncHosts
+	})
+
+	var gotHosts []string
+	var gotSSHTimeout time.Duration
+	var gotHostTimeout time.Duration
+	var gotStartQueueRunners bool
+	statusSyncHostsFunc = func(_ *sql.DB, hosts []string, sshTimeout, hostTimeout time.Duration, startQueueRunners bool) (bool, []string, []string) {
+		gotHosts = append([]string(nil), hosts...)
+		gotSSHTimeout = sshTimeout
+		gotHostTimeout = hostTimeout
+		gotStartQueueRunners = startQueueRunners
+		return true, nil, nil
+	}
+
+	captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+
+	if strings.Join(gotHosts, ",") != "studio" {
+		t.Fatalf("synced hosts = %v, want [studio]", gotHosts)
+	}
+	if gotSSHTimeout != NormalSyncTimeout {
+		t.Fatalf("ssh timeout = %v, want %v", gotSSHTimeout, NormalSyncTimeout)
+	}
+	if gotHostTimeout != NormalSyncTimeout {
+		t.Fatalf("host timeout = %v, want %v", gotHostTimeout, NormalSyncTimeout)
+	}
+	if gotStartQueueRunners {
+		t.Fatal("read-only status should not start queue runners")
+	}
+}
+
+func TestShowActiveJobsUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "active status", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreStatusFlags(t)
+
+	originalSyncHosts := statusSyncHostsFunc
+	t.Cleanup(func() {
+		statusSyncHostsFunc = originalSyncHosts
+	})
+
+	calls := 0
+	var gotStartQueueRunners bool
+	statusSyncHostsFunc = func(_ *sql.DB, hosts []string, sshTimeout, hostTimeout time.Duration, startQueueRunners bool) (bool, []string, []string) {
+		calls++
+		if strings.Join(hosts, ",") != "studio" {
+			t.Fatalf("synced hosts = %v, want [studio]", hosts)
+		}
+		if sshTimeout != DefaultSyncTimeout {
+			t.Fatalf("ssh timeout = %v, want %v", sshTimeout, DefaultSyncTimeout)
+		}
+		if hostTimeout != FastSyncHostTimeout {
+			t.Fatalf("host timeout = %v, want %v", hostTimeout, FastSyncHostTimeout)
+		}
+		gotStartQueueRunners = startQueueRunners
+		return true, nil, nil
+	}
+
+	captureStdout(t, func() {
+		if err := showActiveJobs(database); err != nil {
+			t.Fatalf("showActiveJobs: %v", err)
+		}
+	})
+
+	if calls != 1 {
+		t.Fatalf("status sync calls = %d, want 1", calls)
+	}
+	if gotStartQueueRunners {
+		t.Fatal("no-arg status should not start queue runners")
+	}
+}
+
+func TestStatusHostSyncBoundsRespectSSHTimeoutOverride(t *testing.T) {
+	restoreStatusFlags(t)
+	statusSSHTimeout = 2 * time.Minute
+
+	sshTimeout, hostTimeout := statusHostSyncBounds()
+	if sshTimeout != statusSSHTimeout {
+		t.Fatalf("ssh timeout = %v, want %v", sshTimeout, statusSSHTimeout)
+	}
+	if hostTimeout != statusSSHTimeout {
+		t.Fatalf("host timeout = %v, want %v", hostTimeout, statusSSHTimeout)
+	}
+}
+
 func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID := createRentalQueuedJob(t, database)
