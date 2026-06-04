@@ -26,6 +26,8 @@ instead of maintaining its own provisioning infrastructure.
 | Seed-first validation | Medium | Reduce blast radius by validating the setup path on one seed before provisioning full scale. | `--seed-first` flag |
 | Skip past gated benchmarks | Medium | When a benchmark-tagged job at the head of the queue is gated on host CPU/RAM thresholds (`internal/runner/benchmark.go`), the runner currently blocks the entire queue waiting for the host to go idle — which it may never do on a shared dev machine. Instead, read past the gated benchmark to the next non-benchmark job and start that, while keeping the benchmark in pending. Triggered today: wj557 sat in cool30's pending list with `benchmark.waiting cpu=16%>5%` for 30+ minutes, blocking ~28 other ready jobs. Care needed: don't promote a non-benchmark job whose start would itself push CPU above the threshold (would just defer the benchmark forever); fall back to "wait" if no eligible non-benchmark job exists. | — |
 | Unify GPU catalogs | Medium | `internal/placement/torch_compat.go` (modelComputeCap, generationDefaultComputeCap) and `internal/vastai/gpu_mapping.go` (vastaiGPUCatalog) hand-maintain overlapping facts (model → generation → compute capability) in two places. They've already drifted: e.g. `gpu_mapping.go` classifies `RTX PRO 6000 WS` as Ada Lovelace while `torch_compat.go` treats it as Blackwell (sm_12.0), and `torch_compat.go` was missing `RTX PRO 4500` / `RTX PRO 5000` entirely until wj2365 on 2026-06-02 caught it. Consolidate into one canonical (model → generation → cap) table that both arch filtering and Vast.ai class matching read from, with a single test that asserts every model resolves consistently. | — |
+| Price-gate market median | Low | The price-authorization error message already has a structurally present market-median informational field, but it currently always displays `0`. Compute the median across the candidate offer list at search time and thread it into the displayed context. This does not affect the gate decision, only the operator-facing explanation. | — |
+| Price-authorization block visibility | Medium | `weft autopilot status` does not yet have a dedicated `blocked_on_price_authorization` section comparable to `orphan_streaks`. Add a status surface for jobs blocked by price authorization so operators can see when autopilot is stopped by an explicit spend gate rather than ordinary placement churn. | — |
 
 ## Tier 3: Nice to Have
 
@@ -310,6 +312,35 @@ comparison dance, matching the Move/Placement/Termination intent shape.
 
 Worth revisiting when the view's complexity becomes a concrete pain
 point. Mostly clarity, not behavior change.
+
+## Calibrate cloud launch retry policy
+
+The cloud launch retry defaults in `internal/retrypolicy` are historical
+values, not tuned from provider flakiness data:
+
+- `MaxCreateAttempts`: 4 provider `CreateInstance` calls per launch chain.
+- `MaxReplacementOfferSearchAttempts`: 10 candidate offers per replacement
+  search.
+- `MaxGroupReplans`: 1 fresh-offer replan after a retryable launch-chain
+  failure.
+
+Do not change these from intuition alone. First collect enough structured
+launch telemetry to estimate the marginal value of more attempts versus the
+extra latency and spend. Required fields:
+
+- Create attempt index and max-attempt value used at decision time.
+- Provider, offer key, GPU spec, and whether fallback crossed providers.
+- Retryable error class and raw provider error text.
+- Replacement search candidate count and rejection reason distribution
+  (price gate, reliability floor, provider offer gone, no fit).
+- Replan chain index and max-replan value.
+- Final launch-chain outcome, elapsed time, and estimated cost impact.
+
+Decision trigger: revisit the `4/10/1` defaults after collecting at least a
+few flaky-provider days or several hundred retryable launch failures with
+this telemetry. The analysis should answer counterfactuals such as whether
+`5/10/1`, `4/15/1`, or `4/10/2` would have converted enough failed launches
+to justify the added wait and spend.
 
 ## Mutable Current State Split
 
