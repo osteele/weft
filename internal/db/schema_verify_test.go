@@ -19,8 +19,14 @@ func setGooseVersionForTest(t *testing.T, database *sql.DB, v int) {
 		}
 		return
 	}
+	if _, err := database.Exec(`DELETE FROM goose_db_version WHERE version_id > ?`, v); err != nil {
+		t.Fatalf("lower goose version to %d: %v", v, err)
+	}
 	if _, err := database.Exec(
-		`INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`, v,
+		`INSERT INTO goose_db_version (version_id, is_applied)
+		 SELECT ?, 1
+		 WHERE NOT EXISTS (SELECT 1 FROM goose_db_version WHERE version_id = ?)`,
+		v, v,
 	); err != nil {
 		t.Fatalf("set goose version %d: %v", v, err)
 	}

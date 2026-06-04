@@ -5,8 +5,7 @@
 // idempotent initSchema body plus an append-only versionedMigrations list).
 // That history has been squashed: the entire schema as of the squash is the
 // single v1 baseline below, applied as a goose Go migration. New schema
-// changes are added as ordinary goose SQL files under sql/ (NNNNN_name.sql)
-// or, when they need Go logic, as additional entries in GoMigrations.
+// changes are added as ordinary goose SQL files under sql/ (NNNNN_name.sql).
 package migrations
 
 import (
@@ -49,28 +48,19 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyBaseline},
 		&goose.GoFunc{RunDB: dropBaseline},
 	)
-	// Go-only at version 9: the real work is an ALTER TABLE that needs
-	// a pragma_table_info pre-check to stay idempotent on the test path
-	// that resets goose to 0 and re-runs every migration against an
-	// already-current DB. See applyAddOnStartProbeSeenColumn.
+	// Go-only at version 9: the squashed pre-goose baseline already contains
+	// this column, so the one-time pre-goose upgrade path needs a conditional
+	// ALTER TABLE.
 	addProbeSeen := goose.NewGoMigration(
 		9,
 		&goose.GoFunc{RunDB: applyAddOnStartProbeSeenColumn},
 		&goose.GoFunc{RunDB: dropAddOnStartProbeSeenColumn},
 	)
-	// Go-only at version 12 for the same reason as 9 — an ALTER TABLE
-	// jobs ADD COLUMN that has to be conditional on pragma_table_info.
-	// See applyPriceAuthorizations.
-	addPriceAuthorizations := goose.NewGoMigration(
-		12,
-		&goose.GoFunc{RunDB: applyPriceAuthorizations},
-		&goose.GoFunc{RunDB: dropPriceAuthorizations},
-	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addPriceAuthorizations),
+		goose.WithGoMigrations(baseline, addProbeSeen),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -79,12 +69,8 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 // and its partial index. SQLite has no ALTER TABLE ... ADD COLUMN IF NOT
 // EXISTS, so we ask pragma_table_info first and skip the ALTER if the column
 // is already there (true for any DB that picked up the column from the
-// baseline). This keeps the migration idempotent on the test path that resets
-// goose to 0 and re-runs every migration against an already-current DB.
-//
-// See migration sql/00009_launches_onstart_probe_seen_at.sql for the
-// commentary; the .sql file is intentionally a no-op so the migration index
-// stays contiguous and greppable.
+// baseline). This keeps the one existing pre-goose upgrade path harmless while
+// goose records version 9.
 func applyAddOnStartProbeSeenColumn(ctx context.Context, db *sql.DB) error {
 	var exists int
 	if err := db.QueryRowContext(ctx,
@@ -122,69 +108,6 @@ func dropAddOnStartProbeSeenColumn(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// applyPriceAuthorizations adds jobs.price_authorized_up_to_cents and the
-// price_authorizations table + index. The ALTER TABLE needs an existence
-// check because SQLite has no ADD COLUMN IF NOT EXISTS; the table and index
-// already use IF NOT EXISTS so they're idempotent on their own.
-//
-// Two surfaces on top of these columns:
-//   - jobs.price_authorized_up_to_cents — per-job override. Sticky for the
-//     scoped job until cleared. Default scope for `weft job authorize-price`.
-//   - price_authorizations — per (gpu_class, gpu_mem_gb) class-level sticky
-//     override. Created with `weft job authorize-price --for-class`.
-//     UNIQUE on the bucket so a new authorization upserts the prior one.
-func applyPriceAuthorizations(ctx context.Context, db *sql.DB) error {
-	var exists int
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM pragma_table_info('jobs') WHERE name = 'price_authorized_up_to_cents'`,
-	).Scan(&exists); err != nil {
-		return fmt.Errorf("inspect jobs columns: %w", err)
-	}
-	if exists == 0 {
-		if _, err := db.ExecContext(ctx,
-			`ALTER TABLE jobs ADD COLUMN price_authorized_up_to_cents INTEGER`,
-		); err != nil {
-			return fmt.Errorf("add price_authorized_up_to_cents column: %w", err)
-		}
-	}
-	if _, err := db.ExecContext(ctx,
-		`CREATE TABLE IF NOT EXISTS price_authorizations (
-		    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-		    gpu_class    TEXT    NOT NULL,
-		    gpu_mem_gb   INTEGER NOT NULL,
-		    up_to_cents  INTEGER NOT NULL,
-		    created_at   INTEGER NOT NULL,
-		    created_by   TEXT,
-		    note         TEXT,
-		    UNIQUE(gpu_class, gpu_mem_gb)
-		)`,
-	); err != nil {
-		return fmt.Errorf("create price_authorizations: %w", err)
-	}
-	if _, err := db.ExecContext(ctx,
-		`CREATE INDEX IF NOT EXISTS idx_price_authorizations_class
-		    ON price_authorizations(gpu_class, gpu_mem_gb)`,
-	); err != nil {
-		return fmt.Errorf("create idx_price_authorizations_class: %w", err)
-	}
-	return nil
-}
-
-func dropPriceAuthorizations(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_price_authorizations_class`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS price_authorizations`); err != nil {
-		return err
-	}
-	// SQLite ALTER TABLE DROP COLUMN exists since 3.35; we do it best-effort
-	// here so a re-up can re-add cleanly. Same caveats as
-	// dropAddOnStartProbeSeenColumn — the table drop above is the load-
-	// bearing part.
-	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN price_authorized_up_to_cents`)
-	return nil
-}
-
 // HasPending reports whether any migration has not yet been applied to db.
 func HasPending(ctx context.Context, db *sql.DB) (bool, error) {
 	p, err := newProvider(db)
@@ -208,11 +131,9 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 	return v
 }
 
-// goMigrationVersions enumerates the versions implemented as Go migrations
-// (versions whose work is not in sql/NNNNN_*.sql because they need column-
-// existence checks or other logic SQL alone can't express idempotently).
+// goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 12}
+var goMigrationVersions = []int64{9}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

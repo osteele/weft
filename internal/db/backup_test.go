@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/db/migrations"
 )
 
 func TestSnapshot_ProducesValidStandaloneCopy(t *testing.T) {
@@ -118,9 +120,9 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	// Remove goose's version table so the next Open sees the baseline as a
-	// pending migration on a populated database.
-	setGooseVersionForTest(t, database, 0)
+	// Model a real upgrade: the schema and goose version are both at the
+	// previous migration, so only the latest migration is pending.
+	preparePreviousMigrationVersionForTest(t, database)
 	database.Close()
 
 	// Snapshot directory must be empty before second Open.
@@ -145,6 +147,23 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 	if !strings.Contains(filepath.Base(snaps[0]), migrationBackupPrefix) {
 		t.Errorf("snapshot name missing pre-migration prefix: %s", snaps[0])
 	}
+}
+
+func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
+	t.Helper()
+	if migrations.Target() != 12 {
+		t.Fatalf("update backup migration fixture for target version %d", migrations.Target())
+	}
+	if _, err := database.Exec(`DROP INDEX IF EXISTS idx_price_authorizations_class`); err != nil {
+		t.Fatalf("drop price authorizations index: %v", err)
+	}
+	if _, err := database.Exec(`DROP TABLE IF EXISTS price_authorizations`); err != nil {
+		t.Fatalf("drop price authorizations table: %v", err)
+	}
+	if _, err := database.Exec(`ALTER TABLE jobs DROP COLUMN price_authorized_up_to_cents`); err != nil {
+		t.Fatalf("drop price authorization column: %v", err)
+	}
+	setGooseVersionForTest(t, database, int(migrations.Target()-1))
 }
 
 func TestOpen_NoMigrationBackupOnFreshDB(t *testing.T) {
