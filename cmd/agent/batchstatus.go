@@ -50,8 +50,10 @@ func batchStatus(jobIDs []int64) {
 			continue
 		}
 
-		// Check if pending
-		if pendingSet[jobID] {
+		// Check if pending. A pending entry with no payload cannot launch; if
+		// terminal artifacts exist, surface those instead of hiding them behind
+		// stale runner state.
+		if pendingSet[jobID] && (jobPayloadExists(stateFile, jobID) || !terminalArtifactExists(logDir, jobID)) {
 			fmt.Printf("JOB|%d|QUEUED\n", jobID)
 			continue
 		}
@@ -113,6 +115,26 @@ func batchStatus(jobIDs []int64) {
 			fmt.Printf("JOB|%d|DEAD\n", jobID)
 		}
 	}
+}
+
+func jobPayloadExists(stateFile string, jobID int64) bool {
+	queueDir := filepath.Dir(stateFile)
+	path := filepath.Join(queueDir, fmt.Sprintf("job-%d.json", jobID))
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func terminalArtifactExists(logDir string, jobID int64) bool {
+	paths := []string{
+		filepath.Join(logDir, fmt.Sprintf("%d.preflight_rejected", jobID)),
+		filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)),
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func readFailureReason(logDir string, jobID int64) string {

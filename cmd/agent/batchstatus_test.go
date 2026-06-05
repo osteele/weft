@@ -153,6 +153,69 @@ func TestBatchStatus_PrefersQueuedOverFinishedState(t *testing.T) {
 	}
 }
 
+func TestBatchStatus_PendingMissingPayloadDoesNotHideStatusFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	stateFile := filepath.Join(queueDir, "default.state.json")
+	stateJSON := `{"pending":[42]}`
+	if err := os.WriteFile(stateFile, []byte(stateJSON), 0644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42.status"), []byte("1\n"), 0644); err != nil {
+		t.Fatalf("write status file: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{42})
+	})
+
+	if !strings.HasPrefix(strings.TrimSpace(output), "JOB|42|COMPLETED|1|") {
+		t.Fatalf("batchStatus output = %q, want completed", strings.TrimSpace(output))
+	}
+}
+
+func TestBatchStatus_PendingPayloadWinsOverStaleStatusFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	stateFile := filepath.Join(queueDir, "default.state.json")
+	stateJSON := `{"pending":[42]}`
+	if err := os.WriteFile(stateFile, []byte(stateJSON), 0644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(queueDir, "job-42.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("write payload file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42.status"), []byte("1\n"), 0644); err != nil {
+		t.Fatalf("write status file: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{42})
+	})
+
+	if strings.TrimSpace(output) != "JOB|42|QUEUED" {
+		t.Fatalf("batchStatus output = %q, want queued", strings.TrimSpace(output))
+	}
+}
+
 func TestBatchStatus_HandlesInvalidStateFile(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
