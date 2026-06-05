@@ -71,6 +71,31 @@ func TestFileLogger(t *testing.T) {
 	}
 }
 
+func TestReadEntriesSkipsMalformedLinesAndStopsAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.log")
+	content := strings.Join([]string{
+		`{"t":"2026-06-05T01:02:03Z","op":"job.start","job":2474}`,
+		`{malformed`,
+		`{"t":"2026-06-05T01:02:04Z","op":"job.complete","job":2474}`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	entries, err := ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ReadEntries returned %d entries, want 2", len(entries))
+	}
+	if entries[0].Operation != OpJobStart || entries[1].Operation != OpJobComplete {
+		t.Fatalf("operations = %q, %q; want %q, %q",
+			entries[0].Operation, entries[1].Operation, OpJobStart, OpJobComplete)
+	}
+}
+
 func TestLogRotation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")

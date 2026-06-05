@@ -4,8 +4,12 @@
 package oplog
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -362,13 +366,24 @@ func ReadEntries(path string) ([]Entry, error) {
 	defer file.Close()
 
 	var entries []Entry
-	decoder := json.NewDecoder(file)
-	for decoder.More() {
-		var entry Entry
-		if err := decoder.Decode(&entry); err != nil {
-			continue // Skip malformed entries
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimSpace(line)
 		}
-		entries = append(entries, entry)
+		if len(line) > 0 {
+			var entry Entry
+			if err := json.Unmarshal(line, &entry); err == nil {
+				entries = append(entries, entry)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
 	}
 	return entries, nil
 }
