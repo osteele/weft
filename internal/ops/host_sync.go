@@ -552,6 +552,93 @@ func isJobInRunnerState(jobID int64, state *opsqueue.RunnerState) bool {
 	return ok
 }
 
+type remoteJobPayload struct {
+	exists bool
+	runID  int64
+}
+
+func fetchRemoteJobPayloads(host string, jobs []*db.Job, timeout time.Duration) (map[int64]remoteJobPayload, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(jobs))
+	seen := make(map[int64]struct{}, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		ids = append(ids, strconv.FormatInt(job.ID, 10))
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	cmd := fmt.Sprintf(`for id in %s; do f=%s/job-${id}.json; if [ -e "$f" ]; then run=$(jq -r '.run_id // 0' "$f" 2>/dev/null || echo INVALID); printf '%%s	%%s\n' "$id" "$run"; else printf '%%s	MISSING\n' "$id"; fi; done`,
+		strings.Join(ids, " "), opsqueue.QueueDir)
+	stdout, _, err := ssh.TryRunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	payloads := make(map[int64]remoteJobPayload, len(ids))
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("parse remote job payload probe line %q", line)
+		}
+		jobID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse remote job payload id %q: %w", parts[0], err)
+		}
+		if parts[1] == "MISSING" {
+			payloads[jobID] = remoteJobPayload{}
+			continue
+		}
+		runID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			payloads[jobID] = remoteJobPayload{exists: true, runID: -1}
+			continue
+		}
+		payloads[jobID] = remoteJobPayload{exists: true, runID: runID}
+	}
+	return payloads, nil
+}
+
+func queuedJobMaterializedInRunner(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload) bool {
+	if job == nil || state == nil {
+		return false
+	}
+	jobIDStr := strconv.FormatInt(job.ID, 10)
+	if _, ok := state.Finished[jobIDStr]; ok {
+		return true
+	}
+	if running, ok := state.Running[jobIDStr]; ok {
+		return runIDsCompatible(job.LatestRunID, running.RunID)
+	}
+	if state.Current != nil && *state.Current == job.ID {
+		return true
+	}
+	if !slices.Contains(state.Pending, job.ID) {
+		return false
+	}
+	payload, ok := payloads[job.ID]
+	if !ok || !payload.exists {
+		return false
+	}
+	return runIDsCompatible(job.LatestRunID, payload.runID)
+}
+
+func runIDsCompatible(want *int64, got int64) bool {
+	return want == nil || *want == 0 || got == 0 || *want == got
+}
+
 // ensureQueuedJobsOnRemote pushes locally-queued jobs to the remote host.
 // It fetches its own job list via ListUnsyncedQueuedJobs, resolves the backend
 // once per host, syncs sources (deduplicated by working directory), and appends
@@ -596,9 +683,15 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	// is idempotent, so a queue file that already holds the entry is
 	// unchanged. Only a genuine state-read failure (stateErr != nil) leaves
 	// the synced set untouched.
+	var payloads map[int64]remoteJobPayload
 	if stateErr == nil && len(syncedJobs) > 0 {
+		var payloadErr error
+		payloads, payloadErr = fetchRemoteJobPayloads(host, syncedJobs, timeout)
+		if payloadErr != nil {
+			syncLog.Debug("could not read runner job payloads", "host", host, "error", payloadErr)
+		}
 		for _, job := range syncedJobs {
-			if isJobInRunnerState(job.ID, state) {
+			if payloadErr == nil && queuedJobMaterializedInRunner(job, state, payloads) {
 				continue // runner has it — nothing to do
 			}
 			// Runner doesn't know about this job. Reset so it gets re-dispatched below.

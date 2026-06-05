@@ -246,6 +246,7 @@ func (r *Runner) tryStartNextJob() {
 
 	// Don't start during warmup
 	if r.warmupActive() {
+		r.annotateBenchmarkWarmupWait()
 		return
 	}
 
@@ -262,8 +263,9 @@ func (r *Runner) tryStartNextJob() {
 	// Load job data
 	job, err := ReadJobFile(r.queueDir, jobID)
 	if err != nil {
+		reason := fmt.Sprintf("missing queue payload: %v", err)
 		fmt.Fprintf(os.Stderr, "Job %s: cannot read job file: %v\n", ids.FormatJobID(jobID), err)
-		r.state.AddPending(jobID)
+		r.state.AddPendingWithReason(jobID, reason)
 		r.saveState()
 		return
 	}
@@ -383,6 +385,19 @@ func (r *Runner) tryStartNextJob() {
 }
 
 var errRequeue = fmt.Errorf("requeue")
+
+func (r *Runner) annotateBenchmarkWarmupWait() {
+	jobID, ok := r.state.PeekPending()
+	if !ok {
+		return
+	}
+	job, err := ReadJobFile(r.queueDir, jobID)
+	if err != nil || !HasBenchmarkTag(&RunnerJob{Data: job, ID: jobID}) {
+		return
+	}
+	r.state.SetPendingReason(jobID, "benchmark gate: waiting for propitious conditions (runner warmup)")
+	r.saveState()
+}
 
 func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUDevices []string) error {
 	jobIDStr := strconv.FormatInt(jobID, 10)

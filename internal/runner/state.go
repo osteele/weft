@@ -204,6 +204,23 @@ func (s *State) AddPendingWithReason(jobID int64, reason string) {
 	s.addPendingWithReasonLocked(jobID, reason)
 }
 
+// SetPendingReason records a transient gate reason without changing queue order.
+func (s *State) SetPendingReason(jobID int64, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	jobIDStr := fmt.Sprintf("%d", jobID)
+	if !slices.Contains(s.Pending, jobID) {
+		s.clearPendingReasonLocked(jobIDStr)
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		s.clearPendingReasonLocked(jobIDStr)
+		return
+	}
+	s.PendingReasons[jobIDStr] = reason
+}
+
 // PriorityPending moves a job to the front of the pending list.
 func (s *State) PriorityPending(jobID int64) {
 	s.mu.Lock()
@@ -224,6 +241,16 @@ func (s *State) PopPending() (int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.popPendingLocked()
+}
+
+// PeekPending returns the first pending job without changing queue order.
+func (s *State) PeekPending() (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.Pending) == 0 {
+		return 0, false
+	}
+	return s.Pending[0], true
 }
 
 func (s *State) popPendingLocked() (int64, bool) {

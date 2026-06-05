@@ -461,6 +461,58 @@ func TestEnsureQueuedJobsOnRemote_SkipsAlreadySynced(t *testing.T) {
 	}
 }
 
+func TestEnsureQueuedJobsOnRemote_RedispatchesSyncedQueuedJobWithMissingPayload(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	workingDir := t.TempDir()
+	jobID, err := db.RecordQueued(database, "test-host", workingDir, "echo hello", "synced missing payload")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobBackend(database, jobID, db.BackendQueueRunner); err != nil {
+		t.Fatalf("set backend: %v", err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
+
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		return nil
+	}))
+
+	appendCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return fmt.Sprintf(`{"pending":[%d],"current":null}`, jobID) + "\n", "", 0
+		case strings.Contains(command, "job-${id}.json"):
+			return fmt.Sprintf("%d\tMISSING\n", jobID), "", 0
+		case strings.Contains(command, `"op":"add"`):
+			appendCount++
+			if !strings.Contains(command, fmt.Sprintf(`"id":%d`, jobID)) {
+				t.Fatalf("append command missing job id: %s", command)
+			}
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, slog.Default())
+	if err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	}
+	if ensured != 1 {
+		t.Fatalf("ensured = %d, want 1", ensured)
+	}
+	if !contacted {
+		t.Fatal("contacted = false, want true")
+	}
+	if appendCount != 1 {
+		t.Fatalf("appendCount = %d, want 1", appendCount)
+	}
+}
+
 func TestEnsureQueuedJobsOnRemote_SkipsPendingStatus(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -223,6 +223,7 @@ type RunnerFinishedState struct {
 
 // RunnerJobState captures per-job runtime state for concurrent execution.
 type RunnerJobState struct {
+	RunID          int64    `json:"run_id,omitempty"`
 	StartedAt      int64    `json:"started_at"`
 	WarmupUntil    int64    `json:"warmup_until"`
 	LocalAllotment int      `json:"local_allotment"`

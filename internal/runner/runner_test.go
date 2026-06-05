@@ -126,6 +126,39 @@ func TestTryStartNextJob_GPUClassBlockedByExternalVRAM_RequeuesWithoutStarting(t
 	}
 }
 
+func TestTryStartNextJob_BenchmarkWarmupRecordsPendingReason(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	r.state.AddRunning("900", RunningJobState{
+		StartedAt:   time.Now().Unix(),
+		WarmupUntil: time.Now().Unix() + 60,
+	})
+
+	jobID := int64(123)
+	job := &opsqueue.CommandJob{
+		ID:   jobID,
+		Dir:  t.TempDir(),
+		Cmd:  "echo benchmark",
+		Tags: []string{"benchmark-isolation"},
+	}
+	if err := writeJobFile(r.queueDir, job); err != nil {
+		t.Fatalf("write job file: %v", err)
+	}
+	r.state.AddPending(jobID)
+
+	r.tryStartNextJob()
+
+	if len(r.state.Pending) != 1 || r.state.Pending[0] != jobID {
+		t.Fatalf("pending = %v, want [%d]", r.state.Pending, jobID)
+	}
+	got := r.state.PendingReasons[fmt.Sprintf("%d", jobID)]
+	want := "benchmark gate: waiting for propitious conditions (runner warmup)"
+	if got != want {
+		t.Fatalf("pending reason = %q, want %q", got, want)
+	}
+	assertJobNotStarted(t, r.logDir, jobID)
+}
+
 func TestStartJob_GPUResolutionFailure_DoesNotLogStartOrCreateArtifacts(t *testing.T) {
 	r, oplogPath := initTestRunner(t)
 	r.gpuInv = &GPUInventory{
