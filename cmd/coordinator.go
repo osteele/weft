@@ -1,62 +1,55 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 
-	appconfig "github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
-	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
 var coordinatorCmd = &cobra.Command{
 	Use:   "coordinator",
-	Short: "Manage the coordinator daemon",
-	Long:  `The coordinator daemon centralizes job placement decisions, running on an always-on host (e.g., studio).`,
+	Short: "Manage the deprecated coordinator daemon",
+	Long:  `Deprecated: the coordinator daemon is no longer part of normal weft operation. Use local CLI/TUI placement, sync, autopilot, and remote agents instead.`,
 }
 
 var coordinatorStartCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the coordinator daemon",
-	Long: `Start the coordinator daemon in the foreground.
-
-The coordinator manages cloud instance sweeps (Vast.ai), host state
-monitoring, and job remediation.
-
-Use Ctrl+C to stop.`,
-	RunE: runCoordinatorStart,
+	Short: "Deprecated: coordinator start is disabled",
+	Long:  `Deprecated: coordinator start is disabled. Use local CLI/TUI placement, sync, autopilot, and remote agents instead.`,
+	RunE:  runCoordinatorStart,
 }
 
 var coordinatorStopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Stop the coordinator daemon",
+	Short: "Stop a legacy coordinator daemon",
+	Long:  `Deprecated cleanup command: stop a legacy coordinator daemon if one is still running.`,
 	RunE:  runCoordinatorStop,
 }
 
 var coordinatorStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show coordinator daemon status",
+	Short: "Show legacy coordinator daemon status",
+	Long:  `Deprecated cleanup command: report whether a legacy coordinator daemon is still running.`,
 	RunE:  runCoordinatorStatus,
 }
 
 var coordinatorInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install coordinator as a launchd service (macOS)",
-	Long:  `Creates a launchd plist so the coordinator starts automatically on login and restarts if it crashes.`,
+	Short: "Deprecated: coordinator install is disabled",
+	Long:  `Deprecated: coordinator install is disabled. Use local CLI/TUI placement, sync, autopilot, and remote agents instead.`,
 	RunE:  runCoordinatorInstall,
 }
 
 var coordinatorUninstallCmd = &cobra.Command{
 	Use:   "uninstall",
-	Short: "Remove coordinator launchd service",
+	Short: "Remove legacy coordinator launchd service",
+	Long:  `Deprecated cleanup command: remove a legacy coordinator launchd service.`,
 	RunE:  runCoordinatorUninstall,
 }
 
@@ -70,28 +63,7 @@ func init() {
 }
 
 func runCoordinatorStart(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
-
-	config := coordinator.DefaultConfig()
-	c := coordinator.New(database, config)
-
-	cfg, cfgErr := appconfig.Load()
-	if cfgErr != nil {
-		slog.Warn("failed to load config", "component", "coordinator", "error", cfgErr)
-	} else if clients, err := buildCloudClients(cfg); err != nil {
-		slog.Warn("cloud clients unavailable", "component", "coordinator", "error", err)
-	} else {
-		c.CloudClients = clients
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	return c.Run(ctx)
+	return fmt.Errorf("coordinator start is deprecated and disabled; use local placement, sync, autopilot, and remote agents instead")
 }
 
 func runCoordinatorStop(cmd *cobra.Command, args []string) error {
@@ -155,17 +127,7 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runCoordinatorInstall(cmd *cobra.Command, args []string) error {
-	if coordinator.IsInstalled() {
-		fmt.Printf("Already installed at %s\n", coordinator.PlistPath())
-		return nil
-	}
-	if err := coordinator.Install(); err != nil {
-		return fmt.Errorf("install: %w", err)
-	}
-	fmt.Printf("Installed coordinator launchd service\n")
-	fmt.Printf("  Plist: %s\n", coordinator.PlistPath())
-	fmt.Println("The coordinator will start automatically on login.")
-	return nil
+	return fmt.Errorf("coordinator install is deprecated and disabled; use local placement, sync, autopilot, and remote agents instead")
 }
 
 func runCoordinatorUninstall(cmd *cobra.Command, args []string) error {

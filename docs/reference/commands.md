@@ -60,9 +60,9 @@ Queue a job on a remote host for managed execution.
 weft run [flags] [host] <command...>
 ```
 
-The host is optional when a coordinator is running — the placement engine
-automatically selects the best host based on GPU constraints, data locality,
-current utilization, and queue depth.
+The host is optional; the local placement engine automatically selects the best
+host based on GPU constraints, data locality, current utilization, and queue
+depth.
 
 By default, jobs are added to a queue and scheduled by the queue runner. It can run multiple jobs on a host while keeping total CPU usage under a target cap. Use `--immediate` (`-i`) to start a job immediately.
 

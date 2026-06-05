@@ -1,17 +1,16 @@
 # Weft Architecture
 
-This document describes the architecture and design of weft. For the
-coordinator-specific design (placement scoring, data locality, pre-staging),
-see [Coordinator Architecture](coordinator-architecture.md).
+This document describes the architecture and design of weft. The earlier
+coordinator daemon design is deprecated; current operation uses local CLI/TUI
+placement and durable remote agents.
 
 ## Overview
 
-Weft is a coordinator-based workload scheduler for GPU compute clusters. It has
-three main components:
+Weft is a workload scheduler for GPU compute clusters. It has two main runtime
+components:
 
-1. **CLI / TUI** (laptop) — submits jobs as intents, monitors status
-2. **Coordinator** (studio) — scores hosts, pre-stages data, dispatches jobs
-3. **Go agent** (each remote host) — autonomous queue runner with GPU management
+1. **CLI / TUI** (laptop) — places jobs, dispatches work, syncs status, monitors progress
+2. **Go agent** (each remote host) — autonomous queue runner with GPU management
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -22,17 +21,7 @@ three main components:
 │  │              │    │   (SQLite)   │    │   Host Inventory     │  │
 │  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
 │         │                                                           │
-│         │ Intent files (via SSH)                                     │
-│         ▼                                                           │
-├─────────────────────────────────────────────────────────────────────┤
-│                    Coordinator (studio)                               │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │   Placement  │───▶│  Pre-staging │    │   Intent Watcher     │  │
-│  │   Scoring    │    │   (rsync)    │    │   (fsnotify)         │  │
-│  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
-│         │                                                           │
-│         │ SSH dispatch                                              │
+│         │ Placement, sync, SSH dispatch                             │
 │         ▼                                                           │
 ├─────────────────────────────────────────────────────────────────────┤
 │                      Remote Host(s)                                  │
@@ -44,8 +33,9 @@ three main components:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-When the coordinator is unreachable, the CLI falls back to local placement
-scoring and direct SSH dispatch — the same job submission works either way.
+The legacy coordinator daemon is deprecated. The CLI/TUI performs placement
+scoring and direct SSH dispatch; remote agents continue running already queued
+jobs when the laptop disconnects.
 
 ### Facades vs Core
 
@@ -76,7 +66,7 @@ set of states. The CLI records each transition so commands such as `status`,
 | `queued`    | Job was added to a remote queue and awaits the queue runner.                |
 | `pending`   | Local intent recorded (kill/start/change) awaiting reconciliation.          |
 | `draft`     | Job saved locally but not yet submitted to a remote host.                   |
-| `pending_placement` | Job submitted to the coordinator but not yet placed on a host.     |
+| `pending_placement` | Job recorded for placement but not yet assigned to a host.        |
 
 ```mermaid
 stateDiagram-v2
@@ -102,7 +92,7 @@ weft/
 │   ├── root.go            # Root command, default command handling
 │   ├── run.go             # Start jobs (supports --from, --timeout, --input, --output)
 │   ├── host.go            # Host inventory and data locality commands
-│   ├── coordinator.go     # Coordinator daemon management
+│   ├── coordinator.go     # Deprecated coordinator cleanup/status commands
 │   ├── sync.go            # Sync job statuses + deploy agent binary
 │   ├── queue.go           # Queue commands (add, start, stop, list)
 │   ├── tui.go             # Launch interactive TUI
@@ -130,7 +120,7 @@ weft/
 │   └── ...                # progress, llm, queuejob, plan, etc.
 └── docs/
     ├── architecture.md    # This document
-    ├── coordinator-architecture.md  # Coordinator design and migration phases
+    ├── coordinator-architecture.md  # Deprecated historical coordinator design
     └── workflow-guide.md  # Common workflows with examples
 ```
 

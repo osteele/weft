@@ -17,7 +17,7 @@ than ad hoc SSH scripts, without adopting a heavyweight HPC scheduler.
   and estimated resource use.
 - Runs jobs in durable remote sessions managed by a Go agent.
 - Tracks logs, exit status, progress, artifacts, and job metadata locally.
-- Falls back to direct SSH dispatch when the coordinator is unavailable.
+- Dispatches directly over SSH; remote agents keep jobs moving after disconnects.
 - Bursts to Vast.ai or RunPod when local machines are full.
 - Shows active jobs, queues, cloud instances, and hosts from terminal and web
   views.
@@ -99,10 +99,7 @@ For task-oriented examples, start with the
 ```
 Laptop CLI / TUI
    |
-   | intent, status, logs
-   v
-Coordinator
-   | placement, data staging, queue dispatch
+   | placement, sync, queue dispatch, status, logs
    v
 Remote host agents
    | tmux jobs, GPU allocation, logs, telemetry
@@ -110,12 +107,11 @@ Remote host agents
 On-prem or cloud GPU hosts
 ```
 
-The coordinator is optional. If it is unavailable, the CLI uses the same
-placement logic locally and queues work directly over SSH. Remote agents keep
-running after the submitting laptop disconnects.
+The legacy coordinator daemon is deprecated. The CLI/TUI owns placement and
+sync locally, queues work directly over SSH, and relies on remote agents for
+durable execution after the submitting laptop disconnects.
 
-See [Architecture](docs/design/architecture.md),
-[Coordinator Architecture](docs/design/coordinator-architecture.md), and
+See [Architecture](docs/design/architecture.md) and
 [Comparison to SLURM](docs/design/comparison-to-slurm.md) for design details.
 
 ## Monitoring

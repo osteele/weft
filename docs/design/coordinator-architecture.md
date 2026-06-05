@@ -1,5 +1,9 @@
 # Weft — Coordinator Architecture
 
+> Deprecated: this document describes the historical coordinator-daemon design.
+> Current weft operation uses local CLI/TUI placement, direct SSH dispatch, and
+> durable remote agents instead of an always-on coordinator service.
+
 Weft is forked from weft to evolve from a laptop-centric job runner into
 a coordinator-based workload scheduler with resource inventory and data locality
 awareness.
