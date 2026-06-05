@@ -166,11 +166,7 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 					startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 				}
 
-				if _, err := database.ExecContext(ctx,
-					`UPDATE job_attempts SET status = ?, start_time = ?
-					 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
-					db.StatusRunning, startTimeUnix, jobID,
-				); err != nil {
+				if err := markStartedJobFromMarker(database, jobID, startTimeUnix); err != nil {
 					slog.Warn("failed to update cloud job to running", "component", "sync", "job_id", jobID, "error", err)
 					return
 				}
@@ -244,6 +240,22 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 	BackfillHFDownloadObservations(database)
 
 	return updated
+}
+
+func markStartedJobFromMarker(database *sql.DB, jobID int64, startTimeUnix int64) error {
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		return err
+	}
+	if startTimeUnix <= 0 {
+		return nil
+	}
+	_, err := database.Exec(
+		`UPDATE job_attempts
+		 SET start_time = ?
+		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
+		startTimeUnix, jobID,
+	)
+	return err
 }
 
 // AllowCompletedMarkerFallback reports whether a sync may use AnyCompletedKey

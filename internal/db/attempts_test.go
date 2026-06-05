@@ -644,3 +644,57 @@ func TestMarkQueuedJobRunning_ClearsSatisfiedPendingStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestTrigger_RunningTransitionClearsSatisfiedPendingStatus(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID := int64(9200)
+	insertTestJob(t, database, jobID, "echo direct-running", "/tmp", StatusQueued)
+	if err := SetAttemptPendingStatus(database, jobID, StatusQueued); err != nil {
+		t.Fatalf("SetAttemptPendingStatus: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		StatusRunning, time.Now().Unix(), jobID,
+	); err != nil {
+		t.Fatalf("direct running update: %v", err)
+	}
+
+	var pending sql.NullString
+	var pendingAt sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT pending_status, pending_at FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&pending, &pendingAt); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if pending.Valid {
+		t.Fatalf("pending_status = %q, want NULL", pending.String)
+	}
+	if pendingAt.Valid {
+		t.Fatalf("pending_at = %d, want NULL", pendingAt.Int64)
+	}
+}
+
+func TestTrigger_PendingQueuedIntentOnAlreadyRunningJobSurvives(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID := int64(9201)
+	insertTestJob(t, database, jobID, "echo running-requeue-intent", "/tmp", StatusRunning)
+
+	if err := SetAttemptPendingStatus(database, jobID, StatusQueued); err != nil {
+		t.Fatalf("SetAttemptPendingStatus: %v", err)
+	}
+
+	var pending string
+	if err := database.QueryRow(
+		`SELECT COALESCE(pending_status, '') FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&pending); err != nil {
+		t.Fatalf("query pending_status: %v", err)
+	}
+	if pending != StatusQueued {
+		t.Fatalf("pending_status = %q, want %q", pending, StatusQueued)
+	}
+}
