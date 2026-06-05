@@ -576,6 +576,11 @@ remain usable when `~/.config/weft/jobs.db` has a schema mismatch or another
 job-database failure. Bug reports are for Weft runtime defects and invariant
 violations, not for normal job failures or feature requests.
 
+Older bug records that were written to `jobs.db` are imported into `bugs.db`
+the first time `weft bug` opens the standalone bug database. Imported records
+keep their original detail and notes, and receive an import note with the
+legacy bug id.
+
 ```bash
 weft bug report --title "runner pending job is missing queue payload" \
   --scope infrastructure \

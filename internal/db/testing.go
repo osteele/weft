@@ -46,7 +46,10 @@ func SetupTestBugDB(t *testing.T) *sql.DB {
 	tmpFile.Close()
 
 	cleanup := SetBugDBPath(tmpFile.Name())
+	legacyImportWasEnabled := legacyBugImportEnabled
+	legacyBugImportEnabled = false
 	t.Cleanup(func() {
+		legacyBugImportEnabled = legacyImportWasEnabled
 		cleanup()
 		os.Remove(tmpFile.Name())
 	})

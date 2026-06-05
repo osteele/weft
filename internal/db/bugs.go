@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 )
 
 const bugPrefix = "wb"
+
+var legacyBugImportEnabled = true
 
 type Bug struct {
 	ID          int64
@@ -100,6 +103,11 @@ func OpenBugDB() (*sql.DB, error) {
 		database.Close()
 		return nil, fmt.Errorf("init bug schema: %w", err)
 	}
+	if legacyBugImportEnabled {
+		if err := importLegacyBugs(database); err != nil {
+			slog.Debug("legacy bug import skipped", "error", err)
+		}
+	}
 	return database, nil
 }
 
@@ -137,6 +145,13 @@ func initBugSchema(database *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bug_notes_bug_created
 			ON bug_notes(bug_id, created_at ASC, id ASC)`,
+		`CREATE TABLE IF NOT EXISTS bug_imports (
+			source TEXT NOT NULL,
+			legacy_id INTEGER NOT NULL,
+			bug_id INTEGER NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
+			imported_at INTEGER NOT NULL,
+			PRIMARY KEY (source, legacy_id)
+		)`,
 	}
 	for _, stmt := range statements {
 		if _, err := database.Exec(stmt); err != nil {
@@ -144,6 +159,176 @@ func initBugSchema(database *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func importLegacyBugs(database *sql.DB) error {
+	if dbPath == "" || bugDBPath == "" || filepath.Clean(dbPath) == filepath.Clean(bugDBPath) {
+		return nil
+	}
+	legacy, err := openLegacyBugDBReadOnly()
+	if err != nil {
+		return err
+	}
+	defer legacy.Close()
+	if !legacyHasBugTables(legacy) {
+		return nil
+	}
+	bugs, err := readLegacyBugs(legacy)
+	if err != nil {
+		return err
+	}
+	for _, bug := range bugs {
+		if err := importLegacyBug(database, legacy, bug); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func openLegacyBugDBReadOnly() (*sql.DB, error) {
+	connStr := fmt.Sprintf("file:%s?_pragma=busy_timeout(1000)&_pragma=foreign_keys(ON)&mode=ro", dbPath)
+	database, err := sql.Open("sqlite", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open legacy jobs database: %w", err)
+	}
+	if err := database.Ping(); err != nil {
+		database.Close()
+		return nil, err
+	}
+	return database, nil
+}
+
+func legacyHasBugTables(database *sql.DB) bool {
+	var count int
+	err := database.QueryRow(`
+		SELECT COUNT(*)
+		  FROM sqlite_master
+		 WHERE type = 'table'
+		   AND name IN ('bugs', 'bug_notes')`).Scan(&count)
+	return err == nil && count == 2
+}
+
+func readLegacyBugs(database *sql.DB) ([]Bug, error) {
+	rows, err := database.Query(`
+		SELECT id, status, title, kind, scope, likelihood, severity, fingerprint,
+		       job_id, host, summary, detail, occurrences, created_at, updated_at,
+		       closed_at, close_reason
+		  FROM bugs ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBugs(rows)
+}
+
+func importLegacyBug(database, legacy *sql.DB, bug Bug) error {
+	var imported int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM bug_imports WHERE source = 'jobs.db' AND legacy_id = ?`, bug.ID).Scan(&imported); err != nil {
+		return err
+	}
+	if imported > 0 {
+		return nil
+	}
+
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	targetID, err := findBugForLegacyImport(tx, bug)
+	if err != nil {
+		return err
+	}
+	if targetID == 0 {
+		targetID, err = insertImportedBug(tx, bug)
+		if err != nil {
+			return err
+		}
+	} else if err := mergeImportedBug(tx, targetID, bug); err != nil {
+		return err
+	}
+
+	if err := importLegacyBugNotes(tx, legacy, bug.ID, targetID); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	legacyNote := fmt.Sprintf("Imported from legacy jobs.db bug %s.", FormatBugID(bug.ID))
+	if _, err := tx.Exec(`INSERT INTO bug_notes (bug_id, body, created_at) VALUES (?, ?, ?)`, targetID, legacyNote, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO bug_imports (source, legacy_id, bug_id, imported_at) VALUES ('jobs.db', ?, ?, ?)`, bug.ID, targetID, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func findBugForLegacyImport(tx *sql.Tx, bug Bug) (int64, error) {
+	if strings.TrimSpace(bug.Fingerprint) == "" {
+		return 0, nil
+	}
+	var id int64
+	err := tx.QueryRow(`SELECT id FROM bugs WHERE fingerprint = ? ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id LIMIT 1`, bug.Fingerprint).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func insertImportedBug(tx *sql.Tx, bug Bug) (int64, error) {
+	result, err := tx.Exec(`
+		INSERT INTO bugs
+		    (status, title, kind, scope, likelihood, severity, fingerprint,
+		     job_id, host, summary, detail, occurrences, created_at, updated_at,
+		     closed_at, close_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		defaultTrim(bug.Status, "open"),
+		bug.Title, defaultTrim(bug.Kind, "bug"), defaultTrim(bug.Scope, "infrastructure"),
+		defaultTrim(bug.Likelihood, "unknown"), defaultTrim(bug.Severity, "notice"),
+		bug.Fingerprint, nullableBugInt64(bug.JobID), bug.Host, bug.Summary, bug.Detail,
+		bug.Occurrences, bug.CreatedAt, bug.UpdatedAt, nullableBugInt64(bug.ClosedAt), bug.CloseReason,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func mergeImportedBug(tx *sql.Tx, id int64, bug Bug) error {
+	_, err := tx.Exec(`
+		UPDATE bugs
+		   SET occurrences = MAX(occurrences, ?),
+		       updated_at = MAX(updated_at, ?),
+		       job_id = COALESCE(job_id, ?),
+		       host = CASE WHEN host = '' THEN ? ELSE host END,
+		       summary = CASE WHEN summary = '' THEN ? ELSE summary END,
+		       detail = CASE WHEN detail = '' THEN ? ELSE detail END
+		 WHERE id = ?`,
+		bug.Occurrences, bug.UpdatedAt, nullableBugInt64(bug.JobID), bug.Host, bug.Summary, bug.Detail, id,
+	)
+	return err
+}
+
+func importLegacyBugNotes(tx *sql.Tx, legacy *sql.DB, legacyBugID, targetBugID int64) error {
+	rows, err := legacy.Query(`SELECT body, created_at FROM bug_notes WHERE bug_id = ? ORDER BY created_at ASC, id ASC`, legacyBugID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		var createdAt int64
+		if err := rows.Scan(&body, &createdAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO bug_notes (bug_id, body, created_at) VALUES (?, ?, ?)`, targetBugID, body, createdAt); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func ReportBug(database *sql.DB, report BugReport) (*Bug, bool, error) {
