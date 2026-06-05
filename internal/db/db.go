@@ -692,6 +692,7 @@ const statusNeedsRental = "needs_rental"
 // versionedMigrations).
 
 var dbPath string
+var bugDBPath string
 var startupRepairFn = startupRepair
 
 func init() {
@@ -699,7 +700,9 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	dbPath = filepath.Join(home, ".config", "weft", "jobs.db")
+	configDir := filepath.Join(home, ".config", "weft")
+	dbPath = filepath.Join(configDir, "jobs.db")
+	bugDBPath = filepath.Join(configDir, "bugs.db")
 }
 
 // Open opens the database, creating it if necessary

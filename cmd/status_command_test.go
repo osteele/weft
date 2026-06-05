@@ -369,6 +369,7 @@ func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 
 func TestRunStatusHidesMissingPayloadDetailAndReportsBug(t *testing.T) {
 	database := db.SetupTestDB(t)
+	bugDatabase := db.SetupTestBugDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
@@ -394,7 +395,7 @@ func TestRunStatusHidesMissingPayloadDetailAndReportsBug(t *testing.T) {
 	if !strings.Contains(out, "Weft bug wb") {
 		t.Fatalf("missing bug id in output:\n%s", out)
 	}
-	bugs, err := db.ListBugs(database, false)
+	bugs, err := db.ListBugs(bugDatabase, false)
 	if err != nil {
 		t.Fatalf("ListBugs: %v", err)
 	}

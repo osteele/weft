@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,7 +12,7 @@ import (
 )
 
 func TestBugCommandsLifecycle(t *testing.T) {
-	db.SetupTestDB(t)
+	db.SetupTestBugDB(t)
 	restoreBugFlags(t)
 
 	bugReportScope = "infrastructure"
@@ -54,6 +56,34 @@ func TestBugCommandsLifecycle(t *testing.T) {
 	})
 	if !strings.Contains(out, "Closed wb1") {
 		t.Fatalf("close output = %q", out)
+	}
+}
+
+func TestBugReportDoesNotOpenMainJobsDB(t *testing.T) {
+	bugDB := db.SetupTestBugDB(t)
+	restoreBugFlags(t)
+
+	jobsPath := filepath.Join(t.TempDir(), "jobs.db")
+	if err := os.WriteFile(jobsPath, []byte("not a sqlite database"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	restoreJobsPath := db.SetDBPath(jobsPath)
+	t.Cleanup(restoreJobsPath)
+
+	out := captureStdout(t, func() {
+		if err := runBugReport(&cobra.Command{}, []string{"schema", "mismatch"}); err != nil {
+			t.Fatalf("runBugReport: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Reported wb1: schema mismatch") {
+		t.Fatalf("report output = %q", out)
+	}
+	bugs, err := db.ListBugs(bugDB, false)
+	if err != nil {
+		t.Fatalf("ListBugs: %v", err)
+	}
+	if len(bugs) != 1 {
+		t.Fatalf("len(bugs) = %d, want 1", len(bugs))
 	}
 }
 

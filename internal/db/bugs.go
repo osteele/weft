@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +69,81 @@ func ParseBugID(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid bug id %q", s)
 	}
 	return id, nil
+}
+
+// BugPath returns the location of the standalone bug database.
+func BugPath() string {
+	return bugDBPath
+}
+
+func SetBugDBPath(path string) func() {
+	original := bugDBPath
+	bugDBPath = path
+	return func() {
+		bugDBPath = original
+	}
+}
+
+// OpenBugDB opens the standalone bug database. It intentionally does not open
+// or migrate the main jobs database, so bug reporting remains available when
+// jobs.db has a schema mismatch or other unrelated failure.
+func OpenBugDB() (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(bugDBPath), 0755); err != nil {
+		return nil, fmt.Errorf("create bug database dir: %w", err)
+	}
+	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)&_txlock=immediate", bugDBPath)
+	database, err := sql.Open("sqlite", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open bug database: %w", err)
+	}
+	if err := initBugSchema(database); err != nil {
+		database.Close()
+		return nil, fmt.Errorf("init bug schema: %w", err)
+	}
+	return database, nil
+}
+
+func initBugSchema(database *sql.DB) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS bugs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			status TEXT NOT NULL DEFAULT 'open',
+			title TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'bug',
+			scope TEXT NOT NULL DEFAULT 'infrastructure',
+			likelihood TEXT NOT NULL DEFAULT 'unknown',
+			severity TEXT NOT NULL DEFAULT 'notice',
+			fingerprint TEXT NOT NULL DEFAULT '',
+			job_id INTEGER,
+			host TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			detail TEXT NOT NULL DEFAULT '',
+			occurrences INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			closed_at INTEGER,
+			close_reason TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_open_fingerprint
+			ON bugs(fingerprint)
+			WHERE status = 'open' AND fingerprint != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_bugs_status_updated
+			ON bugs(status, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS bug_notes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			bug_id INTEGER NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
+			body TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bug_notes_bug_created
+			ON bug_notes(bug_id, created_at ASC, id ASC)`,
+	}
+	for _, stmt := range statements {
+		if _, err := database.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ReportBug(database *sql.DB, report BugReport) (*Bug, bool, error) {

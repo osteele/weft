@@ -85,7 +85,7 @@ func userVisibleBlockedReason(host string, jobID int64, reason string) string {
 }
 
 func reportMissingPayloadBug(host string, jobID int64, reason string) string {
-	database, err := db.Open()
+	database, err := db.OpenBugDB()
 	if err != nil {
 		return ""
 	}

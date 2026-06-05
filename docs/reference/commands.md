@@ -569,9 +569,12 @@ This command:
 
 ### weft bug
 
-Record and inspect local Weft bug reports. Bug reports are stored in the local
-SQLite database and use `wb<id>` identifiers. They are for Weft runtime defects
-and invariant violations, not for normal job failures or feature requests.
+Record and inspect local Weft bug reports. Bug reports are stored in
+`~/.config/weft/bugs.db`, a small SQLite database that is separate from the
+main jobs database, and use `wb<id>` identifiers. The command is intended to
+remain usable when `~/.config/weft/jobs.db` has a schema mismatch or another
+job-database failure. Bug reports are for Weft runtime defects and invariant
+violations, not for normal job failures or feature requests.
 
 ```bash
 weft bug report --title "runner pending job is missing queue payload" \

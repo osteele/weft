@@ -35,6 +35,31 @@ func SetupTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+// SetupTestBugDB creates a temporary standalone bug database for testing.
+func SetupTestBugDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	tmpFile, err := os.CreateTemp("", "weft-bug-db-test-*.db")
+	if err != nil {
+		t.Fatalf("Failed to create temp bug database file: %v", err)
+	}
+	tmpFile.Close()
+
+	cleanup := SetBugDBPath(tmpFile.Name())
+	t.Cleanup(func() {
+		cleanup()
+		os.Remove(tmpFile.Name())
+	})
+
+	database, err := OpenBugDB()
+	if err != nil {
+		t.Fatalf("Failed to open test bug database: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	return database
+}
+
 // insertTestJob inserts a job row with an attempt for testing.
 // It accepts spec-level columns on jobs plus execution-state overrides on the attempt.
 func insertTestJob(t *testing.T, db *sql.DB, id int64, command, workingDir, status string, opts ...testJobOpt) {

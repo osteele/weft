@@ -94,7 +94,7 @@ func init() {
 }
 
 func runBugReport(_ *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
@@ -133,7 +133,7 @@ func runBugReport(_ *cobra.Command, args []string) error {
 }
 
 func runBugNote(_ *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,7 @@ func runBugNote(_ *cobra.Command, args []string) error {
 }
 
 func runBugList(_ *cobra.Command, _ []string) error {
-	database, err := db.Open()
+	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
@@ -174,7 +174,7 @@ func runBugList(_ *cobra.Command, _ []string) error {
 }
 
 func runBugShow(_ *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,7 @@ func runBugShow(_ *cobra.Command, args []string) error {
 }
 
 func runBugClose(_ *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
