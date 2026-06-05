@@ -567,6 +567,47 @@ This command:
 - Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
   The command exits with `0` only if every waited-on job succeeds.
 
+### weft bug
+
+Record and inspect local Weft bug reports. Bug reports are stored in the local
+SQLite database and use `wb<id>` identifiers. They are for Weft runtime defects
+and invariant violations, not for normal job failures or feature requests.
+
+```bash
+weft bug report --title "runner pending job is missing queue payload" \
+  --scope infrastructure \
+  --kind invariant \
+  --fingerprint "queue.missing_payload:studio" \
+  --job wj2454 \
+  --host studio \
+  --detail "raw maintainer details"
+
+weft bug note wb123 "additional context from a later observation"
+weft bug list
+weft bug list --all
+weft bug show wb123
+weft bug close wb123 --reason "fixed in e95f1f4e"
+```
+
+`report` returns a bug number. If another open bug has the same fingerprint,
+Weft updates that bug instead of creating a duplicate, increments its occurrence
+count, and refreshes the stored context.
+
+Important fields:
+
+- `--scope`: broad user-facing category such as `job-specific`, `network`,
+  `infrastructure`, or `other`
+- `--kind`: defect category such as `bug` or `invariant`
+- `--fingerprint`: stable dedupe key; choose one that groups repeated sightings
+  of the same defect
+- `--summary`: short user-facing explanation
+- `--detail`: raw maintainer evidence, including internal paths or invariant
+  failures that should not be shown as normal user remediation advice
+
+When Weft detects an internal invariant failure that might otherwise mislead
+users, status output may show a concise `Weft bug wb123` message instead of raw
+implementation details. Use `weft bug show wb123` for the maintainer record.
+
 ### weft job inspect / diff
 
 Normalize job metadata for postmortem inspection, or compare two jobs.

@@ -367,6 +367,45 @@ func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	}
 }
 
+func TestRunStatusHidesMissingPayloadDetailAndReportsBug(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	statusNoSync = true
+
+	rawReason := "missing queue payload: open /Users/agent/.cache/weft/queue/job-42.json: no such file or directory"
+	cleanupSSH := ssh.SetRunner(func(_ string, _ string) (string, string, error) {
+		return fmt.Sprintf("RUNNER:yes\nCURRENT:\nDEPTH:1\nBLOCKED:%d:%s\nSTOP:no\n", jobID, rawReason), "", nil
+	})
+	t.Cleanup(cleanupSSH)
+
+	out := captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+	if strings.Contains(out, "missing queue payload") || strings.Contains(out, "job-42.json") {
+		t.Fatalf("raw invariant leaked to user:\n%s", out)
+	}
+	if !strings.Contains(out, "Weft bug wb") {
+		t.Fatalf("missing bug id in output:\n%s", out)
+	}
+	bugs, err := db.ListBugs(database, false)
+	if err != nil {
+		t.Fatalf("ListBugs: %v", err)
+	}
+	if len(bugs) != 1 {
+		t.Fatalf("len(bugs) = %d, want 1", len(bugs))
+	}
+	if bugs[0].Scope != "infrastructure" {
+		t.Fatalf("bug scope = %q, want infrastructure", bugs[0].Scope)
+	}
+}
+
 func TestRunJobInfoShowsBlockedReasonFromQueueState(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked info", "")

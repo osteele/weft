@@ -151,7 +151,7 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 
 func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
 	t.Helper()
-	if migrations.Target() != 15 {
+	if migrations.Target() != 16 {
 		t.Fatalf("update backup migration fixture for target version %d", migrations.Target())
 	}
 	setGooseVersionForTest(t, database, int(migrations.Target()-1))
