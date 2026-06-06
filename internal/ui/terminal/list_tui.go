@@ -27,6 +27,7 @@ import (
 	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/placement"
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
@@ -108,6 +109,7 @@ type listTUIModel struct {
 	recentFailedInstances      *recentFailedInstances
 	hostInfoByName             map[string]*db.CachedHostInfo
 	cordonedHostsByName        map[string]bool
+	overloadedHostsByName      map[string]bool
 	quickLaunching             bool
 	quickLaunchScope           string
 	quickLaunchProgress        <-chan listQuickLaunchProgressMsg
@@ -214,6 +216,7 @@ type listJobsLoadedMsg struct {
 	recentFailedInstances    *recentFailedInstances
 	hostInfoByName           map[string]*db.CachedHostInfo
 	cordonedHostsByName      map[string]bool
+	overloadedHostsByName    map[string]bool
 	autoPassPhase            autoPilotPhaseHint
 	autopilotPaused          bool
 	autopilotPausedReason    string
@@ -564,6 +567,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recentFailedInstances = msg.recentFailedInstances
 		m.hostInfoByName = msg.hostInfoByName
 		m.cordonedHostsByName = msg.cordonedHostsByName
+		m.overloadedHostsByName = msg.overloadedHostsByName
 		m.autoPassPhase = msg.autoPassPhase
 		m.autopilotPaused = msg.autopilotPaused
 		m.autopilotPausedReason = msg.autopilotPausedReason
@@ -1423,12 +1427,13 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		return nil
 	}
 	return renderSelectedJobDetail(job, selectedJobContext{
-		launchLiveByID:      m.launchLiveByID,
-		launchByID:          m.launchByID,
-		hostInfoByName:      m.hostInfoByName,
-		cordonedHostsByName: m.cordonedHostsByName,
-		siblingJobs:         m.jobs,
-		cloudConfigured:     len(m.cloudClients) > 0,
+		launchLiveByID:        m.launchLiveByID,
+		launchByID:            m.launchByID,
+		hostInfoByName:        m.hostInfoByName,
+		cordonedHostsByName:   m.cordonedHostsByName,
+		overloadedHostsByName: m.overloadedHostsByName,
+		siblingJobs:           m.jobs,
+		cloudConfigured:       len(m.cloudClients) > 0,
 	}, time.Now())
 }
 
@@ -2426,7 +2431,7 @@ func (m *listTUIModel) rebuildLayout() {
 }
 
 func (m listTUIModel) cordonedTargets() cordonedTargets {
-	out := cordonedTargets{hosts: m.cordonedHostsByName}
+	out := cordonedTargets{hosts: m.cordonedHostsByName, overloadedHosts: m.overloadedHostsByName}
 	if len(m.launchByID) > 0 {
 		launches := map[int64]bool{}
 		for id, l := range m.launchByID {
@@ -2455,6 +2460,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			placingJobIDs:          m.placingJobIDs,
 			placementQueuedAtByJob: m.placementQueuedAtByJob,
 			placementStatusByJob:   m.placementStatusByJob,
+			overloadedHostsByName:  m.overloadedHostsByName,
 			failedInstances:        m.recentFailedInstances,
 			launchByID:             m.launchByID,
 			now:                    time.Now(),
@@ -2638,6 +2644,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		placingJobIDs, placementQueuedAtByJob := placementDisplayMaps(placementStatusByJob)
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		cordonedHostsByName := loadCordonedHostsByName(database, jobs)
+		overloadedHostsByName := loadOverloadedHostsByName(database, jobs)
 		autopilotPaused, autopilotPausedReason := autopilotPauseState(database)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
@@ -2654,6 +2661,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			recentFailedInstances:    loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now()),
 			hostInfoByName:           hostInfoByName,
 			cordonedHostsByName:      cordonedHostsByName,
+			overloadedHostsByName:    overloadedHostsByName,
 			autoPassPhase:            loadLatestAutoPilotPhase(database),
 			autopilotPaused:          autopilotPaused,
 			autopilotPausedReason:    autopilotPausedReason,
@@ -2819,6 +2827,35 @@ func loadCordonedHostsByName(database *sql.DB, jobs []*db.Job) map[string]bool {
 		if err := rows.Scan(&host); err != nil {
 			return nil
 		}
+		out[host] = true
+	}
+	return out
+}
+
+func loadOverloadedHostsByName(database *sql.DB, jobs []*db.Job) map[string]bool {
+	want := map[string]struct{}{}
+	for _, job := range jobs {
+		if job == nil || !job.HasInventoryHost() {
+			continue
+		}
+		host := strings.TrimSpace(job.Host)
+		if host != "" {
+			want[host] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	hosts := make([]string, 0, len(want))
+	for host := range want {
+		hosts = append(hosts, host)
+	}
+	assessments := placement.OverloadedHostsFromRecent(database, hosts)
+	if len(assessments) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(assessments))
+	for host := range assessments {
 		out[host] = true
 	}
 	return out

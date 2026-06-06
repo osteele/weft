@@ -81,6 +81,7 @@ type autopilotRunPassEvent struct {
 	Placed         int              `json:"placed"`
 	Rebalanced     int              `json:"rebalanced"`
 	Launched       int              `json:"launched"`
+	OverloadMoved  int              `json:"overload_moved"`
 	LaunchedClass  string           `json:"launched_class,omitempty"`
 	BlockedReasons map[int64]string `json:"blocked_reasons,omitempty"`
 	Error          string           `json:"error,omitempty"`
@@ -166,6 +167,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 			ev.Placed = result.Placed
 			ev.Rebalanced = result.Rebalanced
 			ev.Launched = result.Launched
+			ev.OverloadMoved = result.OverloadMoved
 			ev.LaunchedClass = result.LaunchedClass
 			if len(result.BlockedReasons) > 0 {
 				ev.BlockedReasons = result.BlockedReasons
@@ -341,7 +343,7 @@ func classifyAutopilotPass(result *orchestration.GroupedAutoPilotResult, err err
 	if result == nil {
 		return outcomeIdle, orchestration.AutopilotCooldownIdle
 	}
-	if result.Placed > 0 || result.Launched > 0 || result.Rebalanced > 0 {
+	if result.Placed > 0 || result.Launched > 0 || result.Rebalanced > 0 || result.OverloadMoved > 0 {
 		return outcomeProgress, orchestration.AutopilotCooldownProgress
 	}
 	if len(result.BlockedReasons) > 0 {
@@ -392,6 +394,7 @@ func emitPassEvent(ev autopilotRunPassEvent) {
 		fmt.Sprintf("placed=%d", ev.Placed),
 		fmt.Sprintf("launched=%d", ev.Launched),
 		fmt.Sprintf("rebalanced=%d", ev.Rebalanced),
+		fmt.Sprintf("overload_moved=%d", ev.OverloadMoved),
 		fmt.Sprintf("blocked=%d", len(ev.BlockedReasons)),
 		fmt.Sprintf("dur=%s", time.Duration(ev.DurationMS)*time.Millisecond),
 	}

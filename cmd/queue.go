@@ -386,6 +386,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	diskMeta := buildDiskMetadata(queueDiskGB, queueRuntimeDiskGB)
 	cliOverrides := &db.CLIResourceOverrides{}
+	if strings.TrimSpace(host) != "" {
+		cliOverrides.Host = strings.TrimSpace(host)
+	}
 	if cmd.Flags().Changed("disk") {
 		disk := queueDiskGB
 		cliOverrides.DiskGB = &disk

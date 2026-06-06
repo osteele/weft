@@ -449,6 +449,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// These overrides are persisted on the job so retries can replay the user's
 	// original submission intent against updated script metadata.
 	cliOverrides := &db.CLIResourceOverrides{}
+	if strings.TrimSpace(host) != "" {
+		cliOverrides.Host = strings.TrimSpace(host)
+	}
 	if runGPU != "" {
 		cliOverrides.GPU = runGPU
 	}

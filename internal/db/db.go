@@ -276,6 +276,7 @@ func (j *Job) UsesPreemptiblePlacement() bool {
 // a fresh `weft run`. Later edit/retry commands store the effective
 // reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
+	Host           string `json:"host,omitempty"`
 	GPU            string `json:"gpu,omitempty"`
 	GPUClass       string `json:"gpu_class,omitempty"`
 	GPUMemGB       *int   `json:"gpu_mem_gb,omitempty"`
@@ -1326,7 +1327,7 @@ func SetJobCLIResourceOverrides(db *sql.DB, jobID int64, snap *CLIResourceOverri
 
 // IsEmpty reports whether no fields are populated.
 func (o *CLIResourceOverrides) IsEmpty() bool {
-	return o.GPU == "" && o.GPUClass == "" && o.GPUMemGB == nil && o.GPUMemStrict == nil &&
+	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUMemGB == nil && o.GPUMemStrict == nil &&
 		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinCUDAVersion == ""
 }
 

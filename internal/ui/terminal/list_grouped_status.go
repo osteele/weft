@@ -42,6 +42,7 @@ type groupedStatusRenderOptions struct {
 	placingJobIDs          map[int64]struct{}
 	placementQueuedAtByJob map[int64]int64
 	placementStatusByJob   map[int64]jobview.PlacementStatus
+	overloadedHostsByName  map[string]bool
 	failedInstances        *recentFailedInstances
 	launchByID             map[int64]*db.Launch
 	now                    time.Time
@@ -238,7 +239,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 			rows = appendLaunchingGroupedJobRows(rows, section, projectWidth, width, opts)
 		} else {
 			for _, job := range section.jobs {
-				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false)
+				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
 			}
 		}
 		rows = append(rows, groupedStatusRow{text: ""})
@@ -386,12 +387,12 @@ func appendBlockedGroupedJobRows(
 			section:   section.key,
 		})
 		for _, job := range jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
 			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 		}
 	}
 	for _, job := range buckets[""] {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false)
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
 		rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 	}
 	return rows
@@ -730,16 +731,16 @@ func appendLaunchingGroupedJobRows(
 		bucket := buckets[launchID]
 		sort.SliceStable(bucket.jobs, func(i, j int) bool { return bucket.jobs[i].ID < bucket.jobs[j].ID })
 		if len(bucket.jobs) == 1 {
-			rows = appendGroupedStatusJobRow(rows, bucket.jobs[0], section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false)
+			rows = appendGroupedStatusJobRow(rows, bucket.jobs[0], section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false, opts.overloadedHostsByName)
 			continue
 		}
 		rows = append(rows, launchingInstanceHeaderRow(bucket, section.key, width, opts))
 		for _, job := range bucket.jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, "", groupedStatusLaunchingETA{}, true)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
 		}
 	}
 	for _, job := range ungrouped {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false)
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false, opts.overloadedHostsByName)
 	}
 	return rows
 }
@@ -802,6 +803,7 @@ func appendGroupedStatusJobRow(
 	launchSpinner string,
 	launchingETA groupedStatusLaunchingETA,
 	indented bool,
+	overloadedHostsByName map[string]bool,
 ) []groupedStatusRow {
 	project, desc := groupedStatusJobParts(job)
 	projectCol := formatProjectColumn(project, projectWidth)
@@ -844,6 +846,9 @@ func appendGroupedStatusJobRow(
 	}
 	prefix := fmt.Sprintf("%s- %s %s — %s ", indent, glyph, jobID, projectCol)
 	line := prefix + desc + suffix
+	if job != nil && job.TargetKind() == db.JobTargetInventoryHost && overloadedHostsByName[strings.TrimSpace(job.Host)] {
+		line = tuiFailedStyle.Render(line)
+	}
 	if width > 0 {
 		prefixWidth := lipgloss.Width(prefix)
 		suffixWidth := lipgloss.Width(suffix)

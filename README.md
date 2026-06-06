@@ -15,6 +15,8 @@ than ad hoc SSH scripts, without adopting a heavyweight HPC scheduler.
 
 - Places jobs automatically by GPU class, memory, queue depth, data locality,
   and estimated resource use.
+- Detects overloaded on-prem hosts, drains movable jobs to healthier local or
+  rental capacity, and marks overloaded hosts/jobs in terminal dashboards.
 - Runs jobs in durable remote sessions managed by a Go agent.
 - Tracks logs, exit status, progress, artifacts, and job metadata locally.
 - Dispatches directly over SSH; remote agents keep jobs moving after disconnects.

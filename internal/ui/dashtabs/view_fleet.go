@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/placement"
 )
 
 type fleetView struct{}
@@ -175,7 +176,13 @@ func hostCard(h *hostinfo.Host, jobs []*db.Job) string {
 	}
 	sort.Slice(running, func(i, j int) bool { return running[i].StartTime < running[j].StartTime })
 
+	metrics := placement.HostMetricsFromHostInfo(h, nil)
+	overloaded := placement.AssessHostLoad(nil, h.Name, metrics, placement.DefaultHostLoadOptions()).State == placement.HostLoadOverloaded
+
 	header := titleStyle.Render(h.Name)
+	if overloaded {
+		header = failedStyle.Render(h.Name)
+	}
 	gpuLine := dimStyle.Render(hostGPUSummary(h))
 	jobLine := ""
 	if len(running) > 0 {
@@ -188,6 +195,15 @@ func hostCard(h *hostinfo.Host, jobs []*db.Job) string {
 		queueLine = queuedStyle.Render(fmt.Sprintf("%d queued", queued))
 	}
 	statusLine := dimStyle.Render(hostStatusLabel(h.Status))
+	if overloaded {
+		if len(running) > 0 {
+			jobLine = failedStyle.Render(fmt.Sprintf("▶ %d running", len(running)))
+		}
+		if queued > 0 {
+			queueLine = failedStyle.Render(fmt.Sprintf("%d queued", queued))
+		}
+		statusLine = failedStyle.Render(hostStatusLabel(h.Status) + " [overloaded]")
+	}
 
 	lines := []string{header, gpuLine, jobLine}
 	if queueLine != "" {

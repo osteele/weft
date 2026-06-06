@@ -26,6 +26,7 @@ type GroupedAutoPilotResult struct {
 	Launched      int
 	AutoReplanned int
 	ReuseFilled   int
+	OverloadMoved int
 	LaunchedClass string
 	// BlockedReasons holds the authoritative one-line reason per still-unplaced
 	// job (back-compat flat form).
@@ -135,6 +136,17 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			oplog.Log("auto_pilot.auto_replan_error", oplog.WithError(err))
 		}
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return &GroupedAutoPilotResult{
+			Launched:      moveRetryLaunches,
+			AutoReplanned: autoReplanned,
+		}, err
+	}
+	overloadMoved, err := drainOverloadedInventoryHosts(ctx, database, cfg, scoped, movingJobs)
+	if err != nil {
+		oplog.Log("auto_pilot.overload_drain_error", oplog.WithError(err))
+	}
 
 	unplacedJobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
@@ -185,22 +197,17 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			return &GroupedAutoPilotResult{
 				Launched:      moveRetryLaunches,
 				AutoReplanned: autoReplanned,
+				OverloadMoved: overloadMoved,
 			}, rebErr
 		}
 		return &GroupedAutoPilotResult{
 			Rebalanced:    len(rebalanceResult.Moves),
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
+			OverloadMoved: overloadMoved,
 		}, nil
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return &GroupedAutoPilotResult{
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-		}, err
-	}
 	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
 	if len(unplaced) == 0 {
 		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
@@ -213,6 +220,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 				Placed:        prePlaced,
 				Launched:      moveRetryLaunches,
 				AutoReplanned: autoReplanned,
+				OverloadMoved: overloadMoved,
 			}, err
 		}
 		return &GroupedAutoPilotResult{
@@ -220,6 +228,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Rebalanced:    len(rebalanceResult.Moves),
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
+			OverloadMoved: overloadMoved,
 		}, nil
 	}
 	r2Client, _ := BuildR2Client(cfg)
@@ -230,6 +239,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Placed:        prePlaced,
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
+			OverloadMoved: overloadMoved,
 		}, err
 	}
 	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
@@ -252,6 +262,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Placed:        prePlaced,
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
+			OverloadMoved: overloadMoved,
 		}, err
 	}
 	blockedReasons := map[int64]string{}
@@ -382,6 +393,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 							Placed:            0,
 							Launched:          moveRetryLaunches,
 							AutoReplanned:     autoReplanned,
+							OverloadMoved:     overloadMoved,
 							LaunchedClass:     "",
 							BlockedReasons:    blockedReasons,
 							StructuredBlocked: structuredBlocked,
@@ -406,6 +418,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Placed:        placed,
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
+			OverloadMoved: overloadMoved,
 		}, err
 	}
 	rebalanced := len(rebalanceResult.Moves)
@@ -424,6 +437,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
 			ReuseFilled:   reuseFilled,
+			OverloadMoved: overloadMoved,
 		}, err
 	}
 	rentalScope := make([]int64, 0, len(remaining))
@@ -503,6 +517,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Launched:          moveRetryLaunches,
 			AutoReplanned:     autoReplanned,
 			ReuseFilled:       reuseFilled,
+			OverloadMoved:     overloadMoved,
 			LaunchedClass:     "",
 			BlockedReasons:    blockedReasons,
 			StructuredBlocked: structuredBlocked,
@@ -529,6 +544,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Launched:          moveRetryLaunches,
 			AutoReplanned:     autoReplanned,
 			ReuseFilled:       reuseFilled,
+			OverloadMoved:     overloadMoved,
 			LaunchedClass:     "",
 			BlockedReasons:    blockedReasons,
 			StructuredBlocked: structuredBlocked,
@@ -557,6 +573,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Launched:          moveRetryLaunches,
 			AutoReplanned:     autoReplanned,
 			ReuseFilled:       reuseFilled,
+			OverloadMoved:     overloadMoved,
 			LaunchedClass:     "",
 			BlockedReasons:    blockedReasons,
 			StructuredBlocked: structuredBlocked,
@@ -570,6 +587,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			Launched:          moveRetryLaunches,
 			AutoReplanned:     autoReplanned,
 			ReuseFilled:       reuseFilled,
+			OverloadMoved:     overloadMoved,
 			LaunchedClass:     "",
 			BlockedReasons:    blockedReasons,
 			StructuredBlocked: structuredBlocked,
@@ -654,6 +672,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		Launched:          moveRetryLaunches + len(result.InstanceIDs),
 		AutoReplanned:     autoReplanned,
 		ReuseFilled:       reuseFilled,
+		OverloadMoved:     overloadMoved,
 		LaunchedClass:     launchedClassFromResult(database, result.InstanceIDs),
 		BlockedReasons:    blockedReasons,
 		StructuredBlocked: structuredBlocked,

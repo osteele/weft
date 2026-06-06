@@ -62,6 +62,12 @@ func TestClassifyAutopilotPass(t *testing.T) {
 			wantWait:    orchestration.AutopilotCooldownProgress,
 		},
 		{
+			name:        "overload move counts as progress",
+			result:      &orchestration.GroupedAutoPilotResult{OverloadMoved: 1},
+			wantOutcome: outcomeProgress,
+			wantWait:    orchestration.AutopilotCooldownProgress,
+		},
+		{
 			name:        "blocked-only with no progress",
 			result:      &orchestration.GroupedAutoPilotResult{BlockedReasons: map[int64]string{1: "no offer"}},
 			wantOutcome: outcomeBlocked,

@@ -24,8 +24,9 @@ type jobListLayout struct {
 }
 
 type cordonedTargets struct {
-	launches map[int64]bool
-	hosts    map[string]bool
+	launches        map[int64]bool
+	hosts           map[string]bool
+	overloadedHosts map[string]bool
 }
 
 func (c cordonedTargets) IsCordoned(job *db.Job) bool {
@@ -41,7 +42,15 @@ func (c cordonedTargets) IsCordoned(job *db.Job) bool {
 	return false
 }
 
+func (c cordonedTargets) IsOverloaded(job *db.Job) bool {
+	if job == nil || job.TargetKind() != db.JobTargetInventoryHost {
+		return false
+	}
+	return c.overloadedHosts[strings.TrimSpace(job.Host)]
+}
+
 const cordonMarker = "⊘"
+const overloadMarker = "!"
 
 func renderJobListPlain(jobs []*db.Job, width int) string {
 	return renderJobListPlainWithOptions(jobs, width, nil, false)
@@ -211,14 +220,17 @@ func newJobListLayoutWithCordon(width int, jobs []*db.Job, columnKeys []string, 
 }
 
 func decorateHostColumnForCordon(cd columnDef, cordoned cordonedTargets) columnDef {
-	if len(cordoned.launches) == 0 && len(cordoned.hosts) == 0 {
+	if len(cordoned.launches) == 0 && len(cordoned.hosts) == 0 && len(cordoned.overloadedHosts) == 0 {
 		return cd
 	}
 	inner := cd.value
 	cd.value = func(job *db.Job) string {
 		s := inner(job)
+		if cordoned.IsOverloaded(job) {
+			s += " " + overloadMarker
+		}
 		if cordoned.IsCordoned(job) {
-			return s + " " + cordonMarker
+			s += " " + cordonMarker
 		}
 		return s
 	}
@@ -276,7 +288,11 @@ func formatJobListRow(layout jobListLayout, job *db.Job) string {
 	for _, column := range layout.columns {
 		parts = append(parts, padOrTruncateDisplay(column.value(job), column.width, column.alignRight))
 	}
-	return strings.Join(parts, " ")
+	row := strings.Join(parts, " ")
+	if layout.cordoned.IsOverloaded(job) {
+		return tuiFailedStyle.Render(row)
+	}
+	return row
 }
 
 func formatJobListHost(job *db.Job) string {

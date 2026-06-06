@@ -545,6 +545,26 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		return s
 	}
 
+	busyPenalty := 0.0
+	load := AssessHostLoad(database, host.Name, metrics, DefaultHostLoadOptions())
+	switch load.State {
+	case HostLoadOverloaded:
+		s.Eligible = false
+		if load.Reason != "" {
+			s.Reasons = append(s.Reasons, "host overloaded: "+load.Reason)
+		} else {
+			s.Reasons = append(s.Reasons, "host overloaded")
+		}
+		return s
+	case HostLoadBusy:
+		busyPenalty = 2.0
+		if load.Reason != "" {
+			s.Reasons = append(s.Reasons, "host busy: "+load.Reason)
+		} else {
+			s.Reasons = append(s.Reasons, "host busy")
+		}
+	}
+
 	var gc GPUConstraint
 	if c.NeedsGPU() || c.MaxComputeCap != "" || c.MinComputeCap != "" {
 		gc = ParseGPUConstraint(c.GPUClass)
@@ -693,6 +713,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	s.CompletionEst = s.QueueDrainEst.Add(s.TransferEst).Add(s.RunEst)
 	if s.Eligible {
 		s.Total = -s.CompletionEst.Mean.Minutes()
+		s.Total -= busyPenalty
 		s.Reasons = append(s.Reasons,
 			fmt.Sprintf("est. ~%.0fm total (%.0fm queue + %.0fm transfer + %.0fm run)",
 				s.CompletionEst.Mean.Minutes(),

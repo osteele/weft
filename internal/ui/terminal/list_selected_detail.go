@@ -21,11 +21,12 @@ import (
 // uptime/cost), cached inventory host info for staleness, and the full
 // sibling list for "waiting for wjN" lookups on on-prem hosts.
 type selectedJobContext struct {
-	launchLiveByID      map[int64]*db.LaunchLiveState
-	launchByID          map[int64]*db.Launch
-	hostInfoByName      map[string]*db.CachedHostInfo
-	cordonedHostsByName map[string]bool
-	siblingJobs         []*db.Job
+	launchLiveByID        map[int64]*db.LaunchLiveState
+	launchByID            map[int64]*db.Launch
+	hostInfoByName        map[string]*db.CachedHostInfo
+	cordonedHostsByName   map[string]bool
+	overloadedHostsByName map[string]bool
+	siblingJobs           []*db.Job
 	// cloudConfigured is true when at least one cloud provider client is
 	// available. When true, an unplaced job whose only blocker is "no local
 	// host matched ..." is not actionable (autopilot is responsible for
@@ -189,6 +190,9 @@ func renderHostFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 		parts := []string{"Host: " + host}
 		if ctx.cordonedHostsByName[host] {
 			parts = append(parts, "cordoned")
+		}
+		if ctx.overloadedHostsByName[host] {
+			parts = append(parts, "overloaded")
 		}
 		if info := ctx.hostInfoByName[host]; info != nil && info.LastUpdated > 0 {
 			age := now.Sub(time.Unix(info.LastUpdated, 0))
