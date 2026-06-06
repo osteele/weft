@@ -2065,3 +2065,47 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 		t.Fatalf("GTX 1080 Ti host should be ineligible for min cap 7.5 (sm_6.1 below floor)")
 	}
 }
+
+func TestConstraintsFromJobIgnoresTorchCapsForCPUJob(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu128" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.6.0%2Bcu128-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	cpuJob := &dbpkg.Job{
+		ID:            1,
+		WorkingDir:    dir,
+		Command:       "uv run python script.py",
+		MaxComputeCap: "12.0",
+	}
+	cpuConstraints := ConstraintsFromJob(cpuJob)
+	if cpuConstraints.NeedsGPU() {
+		t.Fatalf("CPU job unexpectedly needs GPU: %+v", cpuConstraints)
+	}
+	if cpuConstraints.MinComputeCap != "" || cpuConstraints.MaxComputeCap != "" {
+		t.Fatalf("CPU job compute caps = min %q max %q, want empty", cpuConstraints.MinComputeCap, cpuConstraints.MaxComputeCap)
+	}
+
+	gpuJob := &dbpkg.Job{
+		ID:            2,
+		WorkingDir:    dir,
+		Command:       "uv run python script.py",
+		GPUClass:      "nvidia",
+		MaxComputeCap: "12.0",
+	}
+	gpuConstraints := ConstraintsFromJob(gpuJob)
+	if gpuConstraints.MinComputeCap == "" {
+		t.Fatalf("GPU job min compute cap is empty, want torch-derived cap")
+	}
+	if gpuConstraints.MaxComputeCap != "12.0" {
+		t.Fatalf("GPU job max compute cap = %q, want 12.0", gpuConstraints.MaxComputeCap)
+	}
+}

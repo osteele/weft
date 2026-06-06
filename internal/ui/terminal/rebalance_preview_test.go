@@ -39,6 +39,25 @@ func TestRebalancePreviewView_InBudgetMove(t *testing.T) {
 	}
 }
 
+func TestRebalancePreviewView_OnPremMove(t *testing.T) {
+	move := orchestration.QueueRebalanceMove{
+		JobID:          12,
+		FromInstanceID: 3,
+		ToHost:         "studio",
+		Reason:         "rental-to-onprem rebalance",
+	}
+	m := rebalancePreviewModel{active: true, moves: []orchestration.QueueRebalanceMove{move}}
+	out := stripANSI(m.View(100, 30))
+	for _, want := range []string{"wj12", "wi3", "studio", "on-prem", "rental-to-onprem"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in view, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "over-budget") {
+		t.Fatalf("on-prem move should not be flagged over-budget, got:\n%s", out)
+	}
+}
+
 func TestRebalancePreviewView_MixedBudgetMoves(t *testing.T) {
 	inBudget := orchestration.QueueRebalanceMove{
 		JobID:          12,

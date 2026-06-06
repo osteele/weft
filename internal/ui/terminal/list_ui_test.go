@@ -301,6 +301,23 @@ func TestListTUICountUnplacedQueuedJobsIncludesPendingPlacement(t *testing.T) {
 	}
 }
 
+func TestListTUICountAutoPilotActionableQueuedJobsIncludesRentalQueue(t *testing.T) {
+	pending := db.StatusPendingPlacement
+	launchID := int64(3648)
+	m := listTUIModel{
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued},
+			{ID: 2, Status: db.StatusQueued, PendingStatus: &pending},
+			{ID: 3, Status: db.StatusQueued, LaunchID: &launchID},
+			{ID: 4, Status: db.StatusRunning, LaunchID: &launchID},
+			{ID: 5, Status: db.StatusQueued, Host: "studio"},
+		},
+	}
+	if got, want := m.countAutoPilotActionableQueuedJobs(), 3; got != want {
+		t.Fatalf("countAutoPilotActionableQueuedJobs() = %d, want %d", got, want)
+	}
+}
+
 func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T) {
 	m := listTUIModel{
 		autoBlockReasons: map[int64]string{

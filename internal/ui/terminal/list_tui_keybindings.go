@@ -463,7 +463,7 @@ func listGroupedKeyBindings() []listKeyBinding {
 			m.rebalancePreview = rebalancePreviewModel{active: true, loading: true}
 			m.statusMessage = "Planning rebalance moves…"
 			return m, tea.Batch(
-				requestRebalancePreview(m.database, progressCh),
+				requestRebalancePreview(m.database, m.appConfig, progressCh),
 				m.waitForRebalanceProgress(),
 			)
 		}},

@@ -21,40 +21,63 @@ var autoPilotLoadRentalOnPremHostNames = placement.LoadHostNames
 var autoPilotCollectRentalOnPremMetrics = placement.CollectMetrics
 
 func rebalanceQueuedRentalJobsToOnPrem(ctx context.Context, database *sql.DB, cfg *config.Config, scoped map[int64]struct{}, movingJobs map[int64]struct{}) (int, error) {
-	if database == nil {
-		return 0, nil
+	result, err := RebalanceQueuedRentalJobsToOnPrem(ctx, database, cfg, QueueRebalanceOptions{
+		Apply:      true,
+		JobScope:   scoped,
+		MovingJobs: movingJobs,
+		Operation:  "auto_pilot.rebalance_onprem",
+	})
+	if err != nil {
+		return 0, err
 	}
+	return len(result.Moves), nil
+}
+
+func RebalanceQueuedRentalJobsToOnPrem(ctx context.Context, database *sql.DB, cfg *config.Config, opts QueueRebalanceOptions) (QueueRebalanceResult, error) {
+	if database == nil {
+		return QueueRebalanceResult{}, nil
+	}
+	emitRebalanceProgress(opts.Progress, "Loading on-prem host state…")
 	hostNames, err := autoPilotLoadRentalOnPremHostNames()
 	if err != nil || len(hostNames) == 0 {
-		return 0, err
+		return QueueRebalanceResult{}, err
 	}
 	metrics := autoPilotCollectRentalOnPremMetrics(database, hostNames, 5*time.Second)
 	if len(metrics) == 0 {
-		return 0, nil
+		return QueueRebalanceResult{}, nil
 	}
 
 	instanceState, err := buildRebalanceInstanceState(database)
 	if err != nil {
-		return 0, err
+		return QueueRebalanceResult{}, err
 	}
 	if len(instanceState) == 0 {
-		return 0, nil
+		return QueueRebalanceResult{}, nil
 	}
 	rentalPlan := &rebalancePlan{instances: instanceState}
 	runtimes := loadRuntimePredictions(database, rentalPlan.allJobs(), nil)
 
 	jobs, err := db.ListJobsByStatuses(database, []string{db.StatusQueued, db.StatusPendingPlacement}, "", "", 0, nil, "unprocessed")
 	if err != nil {
-		return 0, fmt.Errorf("list queued rental jobs for on-prem rebalance: %w", err)
+		return QueueRebalanceResult{}, fmt.Errorf("list queued rental jobs for on-prem rebalance: %w", err)
 	}
 
-	moved := 0
+	emitRebalanceProgress(opts.Progress, fmt.Sprintf("Scoring %d queued rental job(s) against on-prem hosts…", len(jobs)))
+	result := QueueRebalanceResult{Moves: make([]QueueRebalanceMove, 0)}
 	for _, job := range jobs {
 		if ctx != nil && ctx.Err() != nil {
-			return moved, ctx.Err()
+			return result, ctx.Err()
 		}
-		if !rentalToOnPremCandidate(job, scoped, movingJobs) {
+		if !rentalToOnPremCandidate(job, opts.JobScope, opts.MovingJobs) {
 			continue
+		}
+		if len(opts.InstanceScope) > 0 {
+			if job.LaunchID == nil {
+				continue
+			}
+			if _, ok := opts.InstanceScope[*job.LaunchID]; !ok {
+				continue
+			}
 		}
 		sourceEst, ok := rentalQueuedCompletionEstimate(rentalPlan, job, runtimes)
 		if !ok || sourceEst.Mean <= 0 {
@@ -81,22 +104,42 @@ func rebalanceQueuedRentalJobsToOnPrem(ctx context.Context, database *sql.DB, cf
 		if !rebalanceEstimateImproves(sourceEst, pick.EstTime) {
 			continue
 		}
-		if _, err := MoveJobsToHost(database, []*db.Job{job}, pick.OnPrem.Host, JobMoveCallbacks{}); err != nil {
-			return moved, fmt.Errorf("move %s from rental to %s: %w", ids.FormatJobID(job.ID), pick.OnPrem.Host, err)
+		move := QueueRebalanceMove{
+			JobID:          job.ID,
+			FromInstanceID: *job.LaunchID,
+			ToHost:         pick.OnPrem.Host,
+			CostRatio:      0,
+			MeanDelta:      sourceEst.Mean.Hours() - pick.EstTime.Mean.Hours(),
+			LowerDelta:     sourceEst.Lower.Hours() - pick.EstTime.Lower.Hours(),
+			UpperDelta:     sourceEst.Upper.Hours() - pick.EstTime.Upper.Hours(),
 		}
-		moved++
 		detail := fmt.Sprintf("rental-to-onprem rebalance: %s -> %s (rental %.0fm, on-prem %.0fm)",
 			ids.FormatInstanceID(*job.LaunchID),
 			pick.OnPrem.Host,
 			sourceEst.Mean.Minutes(),
 			pick.EstTime.Mean.Minutes())
-		appendPlacementReason(database, job.ID, detail)
-		oplog.LogJob("auto_pilot.rebalance_onprem", job.ID, pick.OnPrem.Host, oplog.WithDetail(detail))
+		move.Reason = detail
+		if opts.Apply {
+			if _, err := MoveJobsToHost(database, []*db.Job{job}, pick.OnPrem.Host, JobMoveCallbacks{}); err != nil {
+				return result, fmt.Errorf("move %s from rental to %s: %w", ids.FormatJobID(job.ID), pick.OnPrem.Host, err)
+			}
+			appendPlacementReason(database, job.ID, detail)
+			op := strings.TrimSpace(opts.Operation)
+			if op == "" {
+				op = "rebalance_onprem"
+			}
+			oplog.LogJob(op, job.ID, pick.OnPrem.Host, oplog.WithDetail(detail))
+		}
+		result.Moves = append(result.Moves, move)
 	}
-	if moved > 0 {
-		oplog.Log("auto_pilot.rebalance_onprem", oplog.WithDetailf("moved=%d", moved))
+	if opts.Apply && len(result.Moves) > 0 {
+		op := strings.TrimSpace(opts.Operation)
+		if op == "" {
+			op = "rebalance_onprem"
+		}
+		oplog.Log(op, oplog.WithDetailf("moved=%d", len(result.Moves)))
 	}
-	return moved, nil
+	return result, nil
 }
 
 func rentalToOnPremCandidate(job *db.Job, scoped map[int64]struct{}, movingJobs map[int64]struct{}) bool {

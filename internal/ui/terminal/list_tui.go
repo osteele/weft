@@ -574,7 +574,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotPaused = msg.autopilotPaused
 		m.autopilotPausedReason = msg.autopilotPausedReason
 		m.pruneAutoBlockReasons()
-		if m.countUnplacedQueuedJobs() == 0 {
+		if m.countAutoPilotActionableQueuedJobs() == 0 {
 			m.autoPersistentBlocked = ""
 			m.autoPersistentBlockedN = 0
 		}
@@ -785,7 +785,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case msg.placed > 0:
 				m.statusMessage = fmt.Sprintf("Auto-pilot: placed %d", msg.placed)
 			case msg.rebalanced > 0:
-				m.statusMessage = fmt.Sprintf("Auto-pilot: rebalanced %d job(s) across existing instances.", msg.rebalanced)
+				m.statusMessage = fmt.Sprintf("Auto-pilot: rebalanced %d queued job(s).", msg.rebalanced)
 			case msg.launched > 0:
 				m.statusMessage = "Auto-pilot: " + formatAutoPilotLaunchedSummary(msg.launched, msg.launchedClass)
 			case strings.HasPrefix(m.statusMessage, "Auto-pilot:"):
@@ -1340,6 +1340,20 @@ func (m listTUIModel) countUnplacedQueuedJobs() int {
 	return n
 }
 
+func (m listTUIModel) countAutoPilotActionableQueuedJobs() int {
+	n := 0
+	for _, job := range m.jobs {
+		if job.IsUnplacedAwaitingPlacement() {
+			n++
+			continue
+		}
+		if job != nil && job.EffectiveStatus() == db.StatusQueued && job.IsRentalJob() {
+			n++
+		}
+	}
+	return n
+}
+
 func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 	// The list TUI has two blocked-reason sources: the persistent summary
 	// from the last pass, and reasons hydrated onto the visible unplaced
@@ -1721,7 +1735,7 @@ func (m listTUIModel) handleRebalancePreviewKey(msg tea.KeyMsg) (tea.Model, tea.
 		m.rebalanceProgress = progressCh
 		m.statusMessage = "Applying rebalance moves…"
 		return m, tea.Batch(
-			requestRebalanceApply(m.database, progressCh),
+			requestRebalanceApply(m.database, m.appConfig, progressCh),
 			m.waitForRebalanceProgress(),
 		)
 	}
@@ -2195,7 +2209,7 @@ func (m listTUIModel) requestGroupedMoveNewOptions(requestID int64, jobID int64)
 	}
 }
 
-func requestRebalancePreview(database *sql.DB, progress chan<- rebalanceProgressMsg) tea.Cmd {
+func requestRebalancePreview(database *sql.DB, cfg *config.Config, progress chan<- rebalanceProgressMsg) tea.Cmd {
 	return func() tea.Msg {
 		opts := orchestration.QueueRebalanceOptions{
 			Apply:               false,
@@ -2203,7 +2217,7 @@ func requestRebalancePreview(database *sql.DB, progress chan<- rebalanceProgress
 			Operation:           "tui.rebalance",
 			Progress:            makeRebalanceProgressFn(progress),
 		}
-		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, opts)
+		result, err := orchestration.RebalanceQueuedJobsAcrossTargets(context.Background(), database, cfg, opts)
 		if progress != nil {
 			close(progress)
 		}
@@ -2214,7 +2228,7 @@ func requestRebalancePreview(database *sql.DB, progress chan<- rebalanceProgress
 	}
 }
 
-func requestRebalanceApply(database *sql.DB, progress chan<- rebalanceProgressMsg) tea.Cmd {
+func requestRebalanceApply(database *sql.DB, cfg *config.Config, progress chan<- rebalanceProgressMsg) tea.Cmd {
 	return func() tea.Msg {
 		opts := orchestration.QueueRebalanceOptions{
 			Apply:               true,
@@ -2222,7 +2236,7 @@ func requestRebalanceApply(database *sql.DB, progress chan<- rebalanceProgressMs
 			Operation:           "tui.rebalance",
 			Progress:            makeRebalanceProgressFn(progress),
 		}
-		result, err := orchestration.RebalanceQueuedJobsAcrossInstances(context.Background(), database, opts)
+		result, err := orchestration.RebalanceQueuedJobsAcrossTargets(context.Background(), database, cfg, opts)
 		if progress != nil {
 			close(progress)
 		}
@@ -3003,7 +3017,7 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
 		return nil
 	}
-	if m.countUnplacedQueuedJobs() == 0 {
+	if m.countAutoPilotActionableQueuedJobs() == 0 {
 		// Nothing to evaluate; skip the pass so the status line doesn't flicker.
 		return nil
 	}

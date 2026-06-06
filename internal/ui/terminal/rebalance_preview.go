@@ -128,18 +128,35 @@ func formatRebalanceMoveLine(move orchestration.QueueRebalanceMove) string {
 	if rebalanceMoveOverBudget(move) {
 		flag = " over-budget"
 	}
-	return fmt.Sprintf("%-10s %-5s → %-5s  %.2f   %s%s",
+	return fmt.Sprintf("%-10s %-5s → %-8s  %-7s %s%s",
 		ids.FormatJobID(move.JobID),
 		ids.FormatInstanceID(move.FromInstanceID),
-		ids.FormatInstanceID(move.ToInstanceID),
-		move.CostRatio,
+		rebalanceMoveDestination(move),
+		rebalanceMoveRatio(move),
 		move.Reason,
 		flag,
 	)
 }
 
 func rebalanceMoveOverBudget(move orchestration.QueueRebalanceMove) bool {
+	if strings.TrimSpace(move.ToHost) != "" {
+		return false
+	}
 	return move.CostCeiling > 0 && move.CostRatio > move.CostCeiling+1e-9
+}
+
+func rebalanceMoveDestination(move orchestration.QueueRebalanceMove) string {
+	if host := strings.TrimSpace(move.ToHost); host != "" {
+		return host
+	}
+	return ids.FormatInstanceID(move.ToInstanceID)
+}
+
+func rebalanceMoveRatio(move orchestration.QueueRebalanceMove) string {
+	if strings.TrimSpace(move.ToHost) != "" {
+		return "on-prem"
+	}
+	return fmt.Sprintf("%.2f", move.CostRatio)
 }
 
 func countOverBudgetRebalanceMoves(moves []orchestration.QueueRebalanceMove) int {

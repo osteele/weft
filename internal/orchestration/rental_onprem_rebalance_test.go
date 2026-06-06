@@ -60,6 +60,64 @@ func TestRebalanceQueuedRentalJobsToOnPremMovesFasterQueuedJob(t *testing.T) {
 	}
 }
 
+func TestRebalanceQueuedRentalJobsToOnPremDryRunLeavesJobOnRental(t *testing.T) {
+	inventory.UseTestHosts(t)
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "RTX 3080", 10, 16, 1, "")
+
+	running := createQueuedLaunchJob(t, database, srcID, "rtx3090", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, running); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queued := createQueuedLaunchJob(t, database, srcID, "rtx3090", t.TempDir())
+
+	origLoad := autoPilotLoadRentalOnPremHostNames
+	origCollect := autoPilotCollectRentalOnPremMetrics
+	t.Cleanup(func() {
+		autoPilotLoadRentalOnPremHostNames = origLoad
+		autoPilotCollectRentalOnPremMetrics = origCollect
+	})
+	autoPilotLoadRentalOnPremHostNames = func() ([]string, error) {
+		return []string{"host-alpha", "host-beta", "host-gamma"}, nil
+	}
+	autoPilotCollectRentalOnPremMetrics = func(_ *sql.DB, _ []string, _ time.Duration) map[string]*placement.HostMetrics {
+		return map[string]*placement.HostMetrics{
+			"host-alpha": {CPUPercent: 5, GPUPercent: 5},
+			"host-beta":  {CPUPercent: 5, GPUPercent: 5},
+			"host-gamma": {CPUPercent: 5, GPUPercent: 5},
+		}
+	}
+
+	result, err := RebalanceQueuedRentalJobsToOnPrem(context.Background(), database, &config.Config{}, QueueRebalanceOptions{})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedRentalJobsToOnPrem: %v", err)
+	}
+	if len(result.Moves) != 1 {
+		t.Fatalf("moves = %d, want 1", len(result.Moves))
+	}
+	move := result.Moves[0]
+	if move.JobID != queued {
+		t.Fatalf("move job = %d, want %d", move.JobID, queued)
+	}
+	if move.FromInstanceID != srcID {
+		t.Fatalf("from instance = %d, want %d", move.FromInstanceID, srcID)
+	}
+	if move.ToHost != "host-beta" {
+		t.Fatalf("to host = %q, want host-beta", move.ToHost)
+	}
+	job, err := db.GetJobByID(database, queued)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Host != "" {
+		t.Fatalf("job host = %q, want empty", job.Host)
+	}
+	if job.LaunchID == nil || *job.LaunchID != srcID {
+		t.Fatalf("launch id = %v, want %d", job.LaunchID, srcID)
+	}
+}
+
 func TestRebalanceQueuedRentalJobsToOnPremSkipsRentalTaggedJob(t *testing.T) {
 	inventory.UseTestHosts(t)
 	withDefaultRebalanceDurations(t)

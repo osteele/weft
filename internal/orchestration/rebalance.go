@@ -72,6 +72,7 @@ type QueueRebalanceMove struct {
 	JobID           int64
 	FromInstanceID  int64
 	ToInstanceID    int64
+	ToHost          string
 	CostRatio       float64
 	CostCeiling     float64
 	MeanDelta       float64
@@ -86,6 +87,43 @@ type QueueRebalanceMove struct {
 
 type QueueRebalanceResult struct {
 	Moves []QueueRebalanceMove
+}
+
+func RebalanceQueuedJobsAcrossTargets(ctx context.Context, database *sql.DB, cfg *config.Config, opts QueueRebalanceOptions) (QueueRebalanceResult, error) {
+	onPremResult, err := RebalanceQueuedRentalJobsToOnPrem(ctx, database, cfg, opts)
+	if err != nil {
+		return QueueRebalanceResult{}, err
+	}
+
+	instanceOpts := opts
+	instanceMoving := copyJobIDSet(opts.MovingJobs)
+	if instanceMoving == nil {
+		instanceMoving = make(map[int64]struct{})
+	}
+	for _, move := range onPremResult.Moves {
+		instanceMoving[move.JobID] = struct{}{}
+	}
+	instanceOpts.MovingJobs = instanceMoving
+	instanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, instanceOpts)
+	if err != nil {
+		return QueueRebalanceResult{}, err
+	}
+
+	moves := make([]QueueRebalanceMove, 0, len(onPremResult.Moves)+len(instanceResult.Moves))
+	moves = append(moves, onPremResult.Moves...)
+	moves = append(moves, instanceResult.Moves...)
+	return QueueRebalanceResult{Moves: moves}, nil
+}
+
+func copyJobIDSet(in map[int64]struct{}) map[int64]struct{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[int64]struct{}, len(in))
+	for id := range in {
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 type rebalanceInstanceState struct {

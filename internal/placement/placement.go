@@ -97,7 +97,11 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 	if j.GPUMemGB != nil {
 		c.GPUMemGB = *j.GPUMemGB
 	}
-	if localDir := workdir.ResolveLocal(j.EffectiveWorkingDir()); localDir != "" {
+	if c.NeedsGPU() && j.MaxComputeCap != "" && j.MaxComputeCap != MaxComputeCapAny {
+		c.MaxComputeCap = j.MaxComputeCap
+	}
+	if c.NeedsGPU() {
+		localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 		c.MinComputeCap = MinComputeCapForJob(localDir)
 	}
 	return c

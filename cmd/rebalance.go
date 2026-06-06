@@ -27,8 +27,9 @@ var (
 
 var rebalanceCmd = &cobra.Command{
 	Use:   "rebalance",
-	Short: "Re-balance queued jobs across existing instances",
-	Long: `Move queued jobs between existing cloud instances to start sooner
+	Short: "Re-balance queued jobs across rentals and on-prem hosts",
+	Long: `Move queued jobs from rentals to faster on-prem hosts, or between
+existing cloud instances, to start sooner
 without exceeding a cost ratio ceiling.
 
 By default this command is a dry-run and prints what would move.
@@ -66,7 +67,12 @@ func runRebalance(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := orchestration.RebalanceQueuedJobsAcrossInstances(cmd.Context(), database, orchestration.QueueRebalanceOptions{
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	result, err := orchestration.RebalanceQueuedJobsAcrossTargets(cmd.Context(), database, cfg, orchestration.QueueRebalanceOptions{
 		Apply:               rebalanceYes,
 		Strategy:            strategy,
 		CostCeilingOverride: rebalanceMaxIncrease,
@@ -85,7 +91,7 @@ func runRebalance(cmd *cobra.Command, args []string) error {
 		if result.Moves[i].FromInstanceID != result.Moves[j].FromInstanceID {
 			return result.Moves[i].FromInstanceID < result.Moves[j].FromInstanceID
 		}
-		return result.Moves[i].ToInstanceID < result.Moves[j].ToInstanceID
+		return rebalanceMoveDestination(result.Moves[i]) < rebalanceMoveDestination(result.Moves[j])
 	})
 
 	printRebalanceMovesTable(cmd.OutOrStdout(), result.Moves, rebalanceYes)
@@ -204,8 +210,8 @@ func printRebalanceMovesTable(out io.Writer, moves []orchestration.QueueRebalanc
 	for _, move := range moves {
 		jobID := ids.FormatJobID(move.JobID)
 		fromID := ids.FormatInstanceID(move.FromInstanceID)
-		toID := ids.FormatInstanceID(move.ToInstanceID)
-		ratio := fmt.Sprintf("%.2f", move.CostRatio)
+		toID := rebalanceMoveDestination(move)
+		ratio := rebalanceMoveRatio(move)
 		if applied {
 			fmt.Fprintf(w, "✓\t%s\t%s\t%s\t%s\t-\t%s\n", jobID, fromID, toID, ratio, move.Reason)
 		} else {
@@ -213,4 +219,18 @@ func printRebalanceMovesTable(out io.Writer, moves []orchestration.QueueRebalanc
 		}
 	}
 	_ = w.Flush()
+}
+
+func rebalanceMoveDestination(move orchestration.QueueRebalanceMove) string {
+	if host := strings.TrimSpace(move.ToHost); host != "" {
+		return host
+	}
+	return ids.FormatInstanceID(move.ToInstanceID)
+}
+
+func rebalanceMoveRatio(move orchestration.QueueRebalanceMove) string {
+	if strings.TrimSpace(move.ToHost) != "" {
+		return "on-prem"
+	}
+	return fmt.Sprintf("%.2f", move.CostRatio)
 }
