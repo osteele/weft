@@ -41,6 +41,7 @@ type CommandJob struct {
 	GPUMem      *int     `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
 	Tags        []string `json:"tags,omitempty"`
 	OutputDirs  []string `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
+	Outputs     []string `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
 	Produces    []string `json:"produces,omitempty"`    // artifact specs this job produces
 	Needs       []string `json:"needs,omitempty"`       // artifact specs this job needs
 }
@@ -86,6 +87,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			GPUMem:      entry.GPUMemGB,
 			Tags:        entry.Tags,
 			OutputDirs:  entry.OutputDirs,
+			Outputs:     entry.Outputs,
 			Produces:    entry.Produces,
 			Needs:       entry.Needs,
 		},

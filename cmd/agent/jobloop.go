@@ -921,6 +921,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 			Cmd:        job.Command,
 			Tags:       append([]string(nil), job.Tags...),
 			OutputDirs: append([]string(nil), job.OutputDirs...),
+			Outputs:    append([]string(nil), job.Outputs...),
 			Produces:   append([]string(nil), job.Produces...),
 			Needs:      append([]string(nil), job.Needs...),
 			Env:        env,

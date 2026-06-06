@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/runner"
 	"github.com/spf13/cobra"
 )
 
@@ -288,7 +289,7 @@ func TestSyncArtifactsForJob_FallsBackToConventionOutputs(t *testing.T) {
 	syncCloudJobArtifactsFunc = func(*sql.DB, *r2.Client, *db.Job) (artifacts.SyncResult, error) {
 		return artifacts.SyncResult{}, artifacts.ErrManifestMissing
 	}
-	syncJobOutputsFunc = func(*db.Job) (artifacts.SyncResult, error) {
+	syncJobOutputsFunc = func(*sql.DB, *db.Job) (artifacts.SyncResult, error) {
 		outputsCalled = true
 		return artifacts.SyncResult{Added: 2}, nil
 	}
@@ -325,7 +326,7 @@ func TestRunArtifactSync_PrintsZeroConventionOutputs(t *testing.T) {
 	syncCloudJobArtifactsFunc = func(*sql.DB, *r2.Client, *db.Job) (artifacts.SyncResult, error) {
 		return artifacts.SyncResult{}, artifacts.ErrManifestMissing
 	}
-	syncJobOutputsFunc = func(*db.Job) (artifacts.SyncResult, error) {
+	syncJobOutputsFunc = func(*sql.DB, *db.Job) (artifacts.SyncResult, error) {
 		return artifacts.SyncResult{}, nil
 	}
 
@@ -338,6 +339,60 @@ func TestRunArtifactSync_PrintsZeroConventionOutputs(t *testing.T) {
 	}
 	if got := outBuf.String(); !strings.Contains(got, "synced 0 convention-based outputs") {
 		t.Fatalf("stdout = %q, want zero-output count", got)
+	}
+}
+
+func TestSyncJobOutputsCachesDeclaredOutputDirectoryWithoutCompletionRecord(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	outDir := filepath.Join(workDir, "output", "bayes_course")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	outFile := filepath.Join(outDir, "exp_178.json")
+	if err := os.WriteFile(outFile, []byte(`{"ok": true}`), 0o644); err != nil {
+		t.Fatalf("write output file: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "studio", workDir, "python exp.py", "pep output")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobOutputs(database, jobID, []string{"output/bayes_course/"}); err != nil {
+		t.Fatalf("SetJobOutputs: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevCompletion := completionOutputFilesFunc
+	t.Cleanup(func() {
+		completionOutputFilesFunc = prevCompletion
+	})
+	completionOutputFilesFunc = func(*db.Job) []runner.OutputFile {
+		return nil
+	}
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+
+	entries, err := db.ListArtifactsByJob(database, jobID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("artifact entries = %+v, want one", entries)
+	}
+	if entries[0].Path != "output/bayes_course/exp_178.json" {
+		t.Fatalf("artifact path = %q", entries[0].Path)
 	}
 }
 

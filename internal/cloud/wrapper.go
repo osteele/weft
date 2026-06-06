@@ -10,6 +10,7 @@ type AgentJob struct {
 	Priority   int      `json:"priority,omitempty"`
 	UsesGPU    bool     `json:"uses_gpu,omitempty"`
 	OutputDirs []string `json:"output_dirs,omitempty"`
+	Outputs    []string `json:"outputs,omitempty"`
 	Produces   []string `json:"produces,omitempty"`
 	Needs      []string `json:"needs,omitempty"`
 	// Inputs are the declared input refs (e.g. "hf:Qwen/Qwen2.5-7B").

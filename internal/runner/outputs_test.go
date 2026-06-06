@@ -137,3 +137,40 @@ func TestTotalSizeMB(t *testing.T) {
 		t.Errorf("expected 0, got %d", got)
 	}
 }
+
+func TestDiscoverOutputRefs(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "output", "bayes_course"), 0o755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "output", "bayes_course", "result.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "metrics.json"), []byte(`{"loss": 1}`), 0o644); err != nil {
+		t.Fatalf("write metrics: %v", err)
+	}
+
+	files, err := DiscoverOutputRefs(tmpDir, []string{
+		"output/bayes_course/",
+		"metrics.json",
+		"hf:org/model",
+		"missing/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := map[string]bool{}
+	for _, f := range files {
+		paths[f.RelPath] = true
+	}
+	if !paths["output/bayes_course/result.json"] {
+		t.Fatalf("expected declared output directory file, got %+v", files)
+	}
+	if !paths["metrics.json"] {
+		t.Fatalf("expected declared output file, got %+v", files)
+	}
+	if paths["hf:org/model"] {
+		t.Fatalf("data-location token was treated as a local file: %+v", files)
+	}
+}

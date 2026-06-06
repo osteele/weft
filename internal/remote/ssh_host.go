@@ -82,6 +82,7 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 			GPUMem:     entry.GPUMemGB,
 			Tags:       entry.Tags,
 			OutputDirs: entry.OutputDirs,
+			Outputs:    entry.Outputs,
 			Produces:   entry.Produces,
 			Needs:      entry.Needs,
 		},
@@ -348,6 +349,7 @@ type commandJob struct {
 	GPUMem     *int     `json:"gpu_mem,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	OutputDirs []string `json:"output_dirs,omitempty"`
+	Outputs    []string `json:"outputs,omitempty"`
 	Produces   []string `json:"produces,omitempty"`
 	Needs      []string `json:"needs,omitempty"`
 }

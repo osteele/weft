@@ -722,7 +722,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		if len(dirs) == 0 {
 			dirs = config.DefaultOutputDirs
 		}
-		if discovered, err := DiscoverOutputs(runDir, dirs); err == nil && len(discovered) > 0 {
+		if discovered, err := DiscoverJobOutputs(runDir, dirs, rj.Data.Outputs); err == nil && len(discovered) > 0 {
 			outputFiles = discovered
 			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
 			fmt.Printf("Job %s: discovered %d output files\n", ids.FormatJobID(jobID), len(discovered))

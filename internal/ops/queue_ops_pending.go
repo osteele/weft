@@ -69,6 +69,8 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) opsqueue.Qu
 		GPUClass:     job.GPUClass,
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
+		OutputDirs:   job.OutputDirs,
+		Outputs:      job.Outputs,
 		Produces:     job.Produces,
 		Needs:        job.Needs,
 	}

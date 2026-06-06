@@ -22,36 +22,117 @@ func DiscoverOutputs(workDir string, dirs []string) ([]OutputFile, error) {
 	var files []OutputFile
 	for _, dir := range dirs {
 		dir = strings.TrimSuffix(dir, "/")
-		absDir := filepath.Join(workDir, dir)
-
-		info, err := os.Stat(absDir)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-
-		err = filepath.WalkDir(absDir, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil || d.IsDir() {
-				return nil
-			}
-			rel, err := filepath.Rel(workDir, path)
-			if err != nil {
-				return nil
-			}
-			fi, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			files = append(files, OutputFile{
-				RelPath:   rel,
-				SizeBytes: fi.Size(),
-			})
-			return nil
-		})
+		discovered, err := discoverOutputDir(workDir, dir)
 		if err != nil {
 			return files, err
 		}
+		files = append(files, discovered...)
 	}
 	return files, nil
+}
+
+// DiscoverOutputRefs walks declared output references under workDir. References
+// may be either regular files or directories.
+func DiscoverOutputRefs(workDir string, refs []string) ([]OutputFile, error) {
+	if workDir == "" || len(refs) == 0 {
+		return nil, nil
+	}
+
+	workDir = ExpandTilde(workDir)
+
+	var files []OutputFile
+	seen := make(map[string]bool)
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || strings.Contains(ref, ":") {
+			continue
+		}
+
+		cleanRef := strings.TrimSuffix(ref, "/")
+		absPath := filepath.Join(workDir, cleanRef)
+		info, err := os.Stat(absPath)
+		if err != nil {
+			continue
+		}
+
+		var discovered []OutputFile
+		if info.IsDir() {
+			discovered, err = discoverOutputDir(workDir, cleanRef)
+		} else if info.Mode().IsRegular() {
+			rel, relErr := filepath.Rel(workDir, absPath)
+			if relErr != nil {
+				continue
+			}
+			discovered = []OutputFile{{
+				RelPath:   filepath.ToSlash(rel),
+				SizeBytes: info.Size(),
+			}}
+		}
+		if err != nil {
+			return files, err
+		}
+		for _, f := range discovered {
+			if seen[f.RelPath] {
+				continue
+			}
+			seen[f.RelPath] = true
+			files = append(files, f)
+		}
+	}
+	return files, nil
+}
+
+// DiscoverJobOutputs discovers convention directories and declared filesystem
+// output references for a job.
+func DiscoverJobOutputs(workDir string, dirs, refs []string) ([]OutputFile, error) {
+	files, err := DiscoverOutputs(workDir, dirs)
+	if err != nil {
+		return nil, err
+	}
+	refsFiles, err := DiscoverOutputRefs(workDir, refs)
+	if err != nil {
+		return files, err
+	}
+	seen := make(map[string]bool, len(files)+len(refsFiles))
+	deduped := make([]OutputFile, 0, len(files)+len(refsFiles))
+	for _, f := range append(files, refsFiles...) {
+		if seen[f.RelPath] {
+			continue
+		}
+		seen[f.RelPath] = true
+		deduped = append(deduped, f)
+	}
+	return deduped, nil
+}
+
+func discoverOutputDir(workDir, dir string) ([]OutputFile, error) {
+	absDir := filepath.Join(workDir, dir)
+
+	info, err := os.Stat(absDir)
+	if err != nil || !info.IsDir() {
+		return nil, nil
+	}
+
+	var files []OutputFile
+	err = filepath.WalkDir(absDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(workDir, path)
+		if err != nil {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		files = append(files, OutputFile{
+			RelPath:   filepath.ToSlash(rel),
+			SizeBytes: fi.Size(),
+		})
+		return nil
+	})
+	return files, err
 }
 
 // ExpandTilde replaces a leading "~" with the user's home directory.

@@ -242,6 +242,9 @@ func mergeResourceFields(job, existing *opsqueue.CommandJob) {
 	if len(job.OutputDirs) == 0 && len(existing.OutputDirs) > 0 {
 		job.OutputDirs = existing.OutputDirs
 	}
+	if len(job.Outputs) == 0 && len(existing.Outputs) > 0 {
+		job.Outputs = existing.Outputs
+	}
 	if len(job.Produces) == 0 && len(existing.Produces) > 0 {
 		job.Produces = existing.Produces
 	}

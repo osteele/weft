@@ -62,6 +62,7 @@ type QueueEntry struct {
 	GPUMemGB     *int
 	Tags         []string
 	OutputDirs   []string
+	Outputs      []string
 	Produces     []string
 	Needs        []string
 }

@@ -50,6 +50,7 @@ func AppendJobToQueueWithSourceAndR2(job *db.Job, timeout time.Duration, sourceS
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
 		OutputDirs:   job.OutputDirs,
+		Outputs:      job.Outputs,
 		Produces:     job.Produces,
 		Needs:        job.Needs,
 	}
@@ -385,11 +386,22 @@ func UpdateQueuedJobEntry(job *db.Job, envVars []string, depSpec string) error {
 	}
 
 	entryJob := &db.Job{
-		ID:          job.ID,
-		Host:        job.Host,
-		WorkingDir:  job.WorkingDir,
-		Command:     job.Command,
-		Description: job.Description,
+		ID:           job.ID,
+		Host:         job.Host,
+		WorkingDir:   job.WorkingDir,
+		Command:      job.Command,
+		Description:  job.Description,
+		EnvVars:      append([]string(nil), job.EnvVars...),
+		DepSpec:      job.DepSpec,
+		CPUAllotment: job.CPUAllotment,
+		GPU:          job.GPU,
+		GPUClass:     job.GPUClass,
+		GPUMemGB:     job.GPUMemGB,
+		Tags:         append([]string(nil), job.Tags...),
+		OutputDirs:   append([]string(nil), job.OutputDirs...),
+		Outputs:      append([]string(nil), job.Outputs...),
+		Produces:     append([]string(nil), job.Produces...),
+		Needs:        append([]string(nil), job.Needs...),
 	}
 
 	needEnv := len(envVars) == 0

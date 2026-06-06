@@ -151,6 +151,56 @@ func SyncOutstandingJob(database *sql.DB, job *db.Job, timeout time.Duration) (S
 	return result, nil
 }
 
+// StoreLocalArtifact copies a local file into the artifact cache and records it
+// in the artifact database.
+func StoreLocalArtifact(database *sql.DB, jobID int64, relPath, sourcePath string) error {
+	if strings.TrimSpace(relPath) == "" {
+		return nil
+	}
+	localRoot, err := LocalArtifactsDir()
+	if err != nil {
+		return err
+	}
+
+	storedPath := LocalStoredPath(jobID, relPath)
+	localPath := filepath.Join(localRoot, storedPath)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return err
+	}
+	if err := copyLocalFile(sourcePath, localPath); err != nil {
+		return err
+	}
+	size, sha, err := hashFile(localPath)
+	if err != nil {
+		return err
+	}
+	return db.UpsertArtifact(database, db.Artifact{
+		JobID:      jobID,
+		Path:       relPath,
+		StoredPath: storedPath,
+		SizeBytes:  size,
+		SHA256:     sha,
+	})
+}
+
+func copyLocalFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func hashFile(path string) (int64, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
