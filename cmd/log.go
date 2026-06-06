@@ -203,7 +203,12 @@ func runLog(cmd *cobra.Command, args []string) error {
 				timeout = NormalSyncTimeout
 				cloudTimeout = NormalCloudSyncTimeout
 			}
+			doneNotice := func() {}
+			if targets := remoteLiveTargets(jobsToSync); targets != "" {
+				doneNotice = remoteWaitNotice(cmd, "Refreshing live state from %s; use --no-sync for cached DB state.", targets)
+			}
 			quickSyncJobs(database, jobsToSync, timeout, cloudTimeout)
+			doneNotice()
 		}
 	}
 
@@ -303,6 +308,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	if logTimeout > 0 {
 		ssh.SetMinConnectTimeout(logTimeout)
 	}
+
+	doneLogNotice := remoteWaitNotice(cmd, "Fetching live log from %s; slow host networks can make this take a while.", job.Host)
+	defer doneLogNotice()
 
 	// Determine log file path using shared resolver
 	logFile, resolved := logfiles.ResolveWithTimeout(job, logTimeout)

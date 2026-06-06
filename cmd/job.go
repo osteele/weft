@@ -1027,7 +1027,12 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				timeout = NormalSyncTimeout
 				cloudTimeout = NormalCloudSyncTimeout
 			}
+			doneNotice := func() {}
+			if targets := remoteLiveTargets(jobsToSync); targets != "" {
+				doneNotice = remoteWaitNotice(cmd, "Refreshing live state from %s; use --no-sync for cached DB state.", targets)
+			}
 			quickSyncJobsFunc(database, jobsToSync, timeout, cloudTimeout)
+			doneNotice()
 		}
 	}
 
