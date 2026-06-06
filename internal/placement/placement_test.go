@@ -176,6 +176,62 @@ func TestScoreHosts_GPUClassAndMemoryMustMatchSameDevice(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_RequiresRecordedCUDAVersion(t *testing.T) {
+	db := setupTestDB(t)
+	hosts := []inventory.HostSpec{{
+		Name:                "old-yaml",
+		NVIDIADriverVersion: "550.120",
+		GPUs: []inventory.GPUSpec{{
+			Name:    "NVIDIA GeForce RTX 3090",
+			Class:   "rtx3090",
+			Memory:  "24GB",
+			Indices: []int{0},
+		}},
+	}}
+
+	scores := ScoreHostListWithMetrics(db, hosts, Constraints{
+		GPUClass:       "nvidia",
+		GPUMemGB:       20,
+		MinCUDAVersion: "12.4",
+	}, nil)
+	score := findScore(scores, "old-yaml")
+	if score.Eligible {
+		t.Fatalf("host without cuda_version should be ineligible")
+	}
+	if !strings.Contains(strings.Join(score.Reasons, ", "), "no recorded CUDA compatibility >=12.4") {
+		t.Fatalf("reasons = %v", score.Reasons)
+	}
+}
+
+func TestScoreHosts_RejectsOldNVIDIADriver(t *testing.T) {
+	db := setupTestDB(t)
+	hosts := []inventory.HostSpec{{
+		Name:                "old-driver",
+		NVIDIADriverVersion: "550.120",
+		CUDAVersion:         "12.4",
+		GPUs: []inventory.GPUSpec{{
+			Name:    "NVIDIA GeForce RTX 3090",
+			Class:   "rtx3090",
+			Memory:  "24GB",
+			Indices: []int{0},
+		}},
+	}}
+
+	scores := ScoreHostListWithMetrics(db, hosts, Constraints{
+		GPUClass:         "nvidia",
+		GPUMemGB:         20,
+		MinCUDAVersion:   "12.8",
+		MinDriverVersion: 570,
+	}, nil)
+	score := findScore(scores, "old-driver")
+	if score.Eligible {
+		t.Fatalf("host with old driver should be ineligible")
+	}
+	if !strings.Contains(strings.Join(score.Reasons, ", "), "NVIDIA driver 550.120 < required 570") {
+		t.Fatalf("reasons = %v", score.Reasons)
+	}
+}
+
 func TestScoreHosts_GPUMemOnly_UsesGPUScoring(t *testing.T) {
 	db := setupTestDB(t)
 	// When only GPUMemGB is set (no GPUClass), scoring should use GPU performance
@@ -2107,5 +2163,23 @@ wheels = [
 	}
 	if gpuConstraints.MaxComputeCap != "12.0" {
 		t.Fatalf("GPU job max compute cap = %q, want 12.0", gpuConstraints.MaxComputeCap)
+	}
+}
+
+func TestFormatScoreRejectionDetail(t *testing.T) {
+	scores := []Score{
+		{Host: "cool30", Reasons: []string{"no GPU with compute cap >= 7.5"}},
+		{Host: "cool100", Reasons: []string{"host overloaded: CPU >=98% for 3 samples"}},
+		{Host: "studio", Reasons: []string{"no nvidia GPU"}},
+	}
+	got := FormatScoreRejectionDetail(scores, 2)
+	for _, want := range []string{
+		"cool30: no GPU with compute cap >= 7.5",
+		"cool100: host overloaded: CPU >=98% for 3 samples",
+		"+1 more",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("FormatScoreRejectionDetail = %q, want %q", got, want)
+		}
 	}
 }

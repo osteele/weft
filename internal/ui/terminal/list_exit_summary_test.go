@@ -14,6 +14,7 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 	now := time.Unix(1778230000, 0)
 	model := listTUIModel{
 		title:           "Jobs - unprocessed",
+		unprocessedView: true,
 		groupedByStatus: true,
 		jobs: []*db.Job{
 			{
@@ -51,9 +52,7 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 
 	out := model.exitSummaryAt(now, 96)
 	for _, want := range []string{
-		"Group: status",
-		"Order: job id",
-		"Filter: none",
+		"Unprocessed jobs · grouped by status · ordered by job id",
 		"Running (1):",
 		"wj707",
 		"baseline sweep",
@@ -67,6 +66,9 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 		}
 	}
 	for _, unwanted := range []string{
+		"Group:",
+		"Order:",
+		"Filter:",
 		"weft uj ended",
 		"Selected:",
 		"Next:",
@@ -83,5 +85,50 @@ func TestListTUIExitSummaryAt_PrintsGroupedPlainReceipt(t *testing.T) {
 		if lipgloss.Width(line) > 96 {
 			t.Fatalf("line width = %d, want <= 96: %q", lipgloss.Width(line), line)
 		}
+	}
+}
+
+func TestListTUIExitSummaryHeader_ComposesOptionalClauses(t *testing.T) {
+	tests := []struct {
+		name  string
+		model listTUIModel
+		want  string
+	}{
+		{
+			name:  "plain jobs",
+			model: listTUIModel{},
+			want:  "Jobs · ordered by current list order",
+		},
+		{
+			name: "status grouped",
+			model: listTUIModel{
+				groupedByStatus: true,
+			},
+			want: "Jobs · grouped by status · ordered by job id",
+		},
+		{
+			name: "unprocessed project",
+			model: listTUIModel{
+				unprocessedView: true,
+				projectFilter:   "contour-pareto",
+			},
+			want: "Unprocessed jobs · project contour-pareto · ordered by current list order",
+		},
+		{
+			name: "failed unprocessed grouped",
+			model: listTUIModel{
+				unprocessedView: true,
+				statusView:      db.StatusFailed,
+				groupMode:       listGroupStatus,
+			},
+			want: "Unprocessed failed jobs · grouped by status · ordered by job id",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.model.exitSummaryHeader(); got != tt.want {
+				t.Fatalf("header = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

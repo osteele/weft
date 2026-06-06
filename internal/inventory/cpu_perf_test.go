@@ -78,3 +78,29 @@ func TestHostSpecFromHostInfo_UnknownCPU_DefaultsFactor(t *testing.T) {
 		t.Errorf("CPUFactor = %.1f, want 1.0 for unknown CPU", spec.CPUFactor)
 	}
 }
+
+func TestHostSpecFromHostInfo_ResolvesTruncatedGeForceNames(t *testing.T) {
+	info := &hostinfo.Host{
+		CPUs:                96,
+		Arch:                "Linux x86_64",
+		MemTotal:            "503Gi",
+		NVIDIADriverVersion: "550.120",
+		CUDAVersion:         "12.4",
+		GPUs: []hostinfo.GPUInfo{
+			{Index: 0, Name: "NVIDIA GeForce ...", MemTotal: "24576MiB"},
+			{Index: 1, Name: "NVIDIA GeForce ...", MemTotal: "24576MiB"},
+		},
+	}
+
+	spec := HostSpecFromHostInfo("cool30", info, "")
+	if spec.NVIDIADriverVersion != "550.120" || spec.CUDAVersion != "12.4" {
+		t.Fatalf("driver/cuda = %q/%q, want 550.120/12.4", spec.NVIDIADriverVersion, spec.CUDAVersion)
+	}
+	if len(spec.GPUs) != 1 {
+		t.Fatalf("got %d GPU groups, want 1", len(spec.GPUs))
+	}
+	gpu := spec.GPUs[0]
+	if gpu.Name != "NVIDIA GeForce RTX 3090" || gpu.Class != "nvidiageforcertx3090" {
+		t.Fatalf("GPU = %+v, want RTX 3090 class", gpu)
+	}
+}

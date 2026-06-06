@@ -729,6 +729,7 @@ rule DiscoverHost {
     --   - 1-minute load average
     --   - GPU inventory (nvidia-smi table + `-L` for untruncated names;
     --     system_profiler on macOS for Apple GPUs)
+    --   - NVIDIA driver version and driver-reported CUDA compatibility
     --   - Resolved HF hub cache directory
 
     let probe = SSHProbe(hostname)
@@ -741,6 +742,8 @@ rule DiscoverHost {
         arch: probe.arch,
         cpu_cores: probe.cpu_cores,
         memory: probe.memory,
+        nvidia_driver: probe.nvidia_driver,
+        cuda_version: probe.cuda_version,
         gpus: gpus.map(g => GPUSpec(
             name: g.name,
             class: NormalizeGPUClass(g.name),
@@ -760,6 +763,10 @@ rule DiscoverHost {
         -- Implementation: internal/inventory/discover.go,
         --   internal/hostinfo/host.go.
         -- Network bandwidth is not probed; operators set it manually.
+        -- On NVIDIA hosts, `nvidia_driver` and `cuda_version` are static
+        -- compatibility gates. If a GPU job has a CUDA/driver floor and the
+        -- host inventory lacks the corresponding field, on-prem placement
+        -- treats the host as not proven compatible.
         -- Performance factors (cpu_factor, gpu_factor) default to 1.0
         -- when the CPU model is unknown to the lookup table.
 }

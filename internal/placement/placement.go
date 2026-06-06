@@ -15,10 +15,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/imagereq"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/transferbw"
@@ -80,6 +82,12 @@ type Constraints struct {
 	// disables this filter. Inferred from the project's uv.lock or
 	// pyproject.toml.
 	MinComputeCap string
+
+	// Minimum NVIDIA runtime compatibility required by the job. These are
+	// compared against static on-prem host inventory (`cuda_version` and
+	// `nvidia_driver`). Empty/zero disables the corresponding filter.
+	MinCUDAVersion   string
+	MinDriverVersion int
 }
 
 // ConstraintsFromJob builds Constraints from a db.Job's fields.
@@ -103,6 +111,13 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 	if c.NeedsGPU() {
 		localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 		c.MinComputeCap = MinComputeCapForJob(localDir)
+		req := MinRuntimeRequirementsForJob(localDir, j.Command)
+		if j.CLIResourceOverrides != nil && j.CLIResourceOverrides.MinCUDAVersion != "" {
+			req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: j.CLIResourceOverrides.MinCUDAVersion})
+		}
+		req = imagereq.BackfillDriverFromCUDA(req)
+		c.MinCUDAVersion = req.MinCUDAVersion
+		c.MinDriverVersion = req.MinDriverVersion
 	}
 	return c
 }
@@ -570,7 +585,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	}
 
 	var gc GPUConstraint
-	if c.NeedsGPU() || c.MaxComputeCap != "" || c.MinComputeCap != "" {
+	if c.NeedsGPU() || c.MaxComputeCap != "" || c.MinComputeCap != "" || c.MinCUDAVersion != "" || c.MinDriverVersion > 0 {
 		gc = ParseGPUConstraint(c.GPUClass)
 		eligible, reasons := CheckHostGPUConstraints(host, c)
 		if !eligible {
@@ -745,11 +760,28 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 // a single host. A host is eligible only if one physical GPU satisfies the
 // requested class, memory floor, and compute-capability ceiling.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
-	if !c.NeedsGPU() && c.MaxComputeCap == "" && c.MinComputeCap == "" {
+	if !c.NeedsGPU() && c.MaxComputeCap == "" && c.MinComputeCap == "" && c.MinCUDAVersion == "" && c.MinDriverVersion == 0 {
 		return true, nil
 	}
 	if len(host.GPUs) == 0 {
 		return false, []string{"no GPUs"}
+	}
+	if c.MinDriverVersion > 0 {
+		major := driverMajor(host.NVIDIADriverVersion)
+		if major == 0 {
+			return false, []string{fmt.Sprintf("no recorded NVIDIA driver >=%d", c.MinDriverVersion)}
+		}
+		if major < c.MinDriverVersion {
+			return false, []string{fmt.Sprintf("NVIDIA driver %s < required %d", host.NVIDIADriverVersion, c.MinDriverVersion)}
+		}
+	}
+	if c.MinCUDAVersion != "" {
+		if strings.TrimSpace(host.CUDAVersion) == "" {
+			return false, []string{fmt.Sprintf("no recorded CUDA compatibility >=%s", c.MinCUDAVersion)}
+		}
+		if compareDottedVersion(host.CUDAVersion, c.MinCUDAVersion) < 0 {
+			return false, []string{fmt.Sprintf("CUDA compatibility %s < required %s", host.CUDAVersion, c.MinCUDAVersion)}
+		}
 	}
 
 	gc := ParseGPUConstraint(c.GPUClass)
@@ -1353,6 +1385,104 @@ func FormatHostMetricsDetail(m *HostMetrics) string {
 		}
 	}
 	return b.String()
+}
+
+// FormatScoreRejectionDetail summarizes why on-prem scoring did not produce an
+// eligible host. It is intentionally compact for oplog forensics.
+func FormatScoreRejectionDetail(scores []Score, limit int) string {
+	if len(scores) == 0 {
+		return "no host scores"
+	}
+	if limit <= 0 || limit > len(scores) {
+		limit = len(scores)
+	}
+	var b strings.Builder
+	for i := 0; i < limit; i++ {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		score := scores[i]
+		b.WriteString(score.Host)
+		b.WriteString(": ")
+		if score.Eligible {
+			b.WriteString("eligible")
+			continue
+		}
+		reason := strings.Join(score.Reasons, ", ")
+		if reason == "" {
+			reason = "ineligible"
+		}
+		b.WriteString(reason)
+	}
+	if len(scores) > limit {
+		fmt.Fprintf(&b, "; +%d more", len(scores)-limit)
+	}
+	return b.String()
+}
+
+func driverMajor(version string) int {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return 0
+	}
+	token := strings.Fields(version)[0]
+	major, err := strconv.Atoi(strings.SplitN(token, ".", 2)[0])
+	if err != nil || major < 0 {
+		return 0
+	}
+	return major
+}
+
+func compareDottedVersion(a, b string) int {
+	as := splitVersionInts(a)
+	bs := splitVersionInts(b)
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		ai, bi := 0, 0
+		if i < len(as) {
+			ai = as[i]
+		}
+		if i < len(bs) {
+			bi = bs[i]
+		}
+		if ai < bi {
+			return -1
+		}
+		if ai > bi {
+			return 1
+		}
+	}
+	return 0
+}
+
+func MaxCUDAVersion(a, b string) string {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	case compareDottedVersion(b, a) > 0:
+		return b
+	default:
+		return a
+	}
+}
+
+func splitVersionInts(version string) []int {
+	var out []int
+	for _, part := range strings.Split(strings.TrimSpace(version), ".") {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			break
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // Benchmark idle thresholds — reads the same env vars as runner.DefaultBenchmarkConfig()

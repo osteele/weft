@@ -179,6 +179,8 @@ GPUNAME:|   0  NVIDIA GeForce ...  On   | 00000000:01:00.0 Off |                
 GPUSTAT:| 51%   45C    P8    22W / 350W |      6MiB / 24576MiB |      0%      Default |
 GPUNAME:|   1  NVIDIA GeForce ...  On   | 00000000:41:00.0 Off |                  N/A |
 GPUSTAT:| 51%   45C    P8    19W / 350W |      6MiB / 24576MiB |      0%      Default |
+GPUDRIVER:550.120
+GPUCUDA:12.4
 GPULIST:GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-aaaa-bbbb)
 GPULIST:GPU 1: NVIDIA GeForce RTX 3090 (UUID: GPU-cccc-dddd)`
 
@@ -191,6 +193,12 @@ GPULIST:GPU 1: NVIDIA GeForce RTX 3090 (UUID: GPU-cccc-dddd)`
 		if gpu.Name != "NVIDIA GeForce RTX 3090" {
 			t.Errorf("GPU[%d].Name = %q, want %q", i, gpu.Name, "NVIDIA GeForce RTX 3090")
 		}
+	}
+	if host.NVIDIADriverVersion != "550.120" {
+		t.Errorf("NVIDIADriverVersion = %q, want 550.120", host.NVIDIADriverVersion)
+	}
+	if host.CUDAVersion != "12.4" {
+		t.Errorf("CUDAVersion = %q, want 12.4", host.CUDAVersion)
 	}
 }
 

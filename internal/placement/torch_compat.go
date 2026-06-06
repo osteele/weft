@@ -4,8 +4,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/gpucatalog"
+	"github.com/osteele/weft/internal/imagereq"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -146,6 +149,39 @@ func MinComputeCapForJob(dir string) string {
 		return ""
 	}
 	return TorchMinComputeCap(pin.Version, pin.CudaVariant)
+}
+
+// MinRuntimeRequirementsForJob resolves local, non-network NVIDIA runtime
+// requirements for a job. It mirrors the cloud planner's local sources:
+// project .weft.toml, script metadata, torch lockfile, and inline dependency
+// declarations. Image label fetching remains in the cloud campaign path.
+func MinRuntimeRequirementsForJob(dir, command string) cloud.ImageRequirements {
+	var req cloud.ImageRequirements
+	if minDriver, minCUDA := config.ProjectCloudRequirements(dir); minDriver != "" || minCUDA != "" {
+		if explicit, err := imagereq.Explicit(minDriver, minCUDA); err == nil {
+			req = imagereq.Merge(req, explicit)
+		}
+	}
+	if meta, err := dataloc.ScanScriptMeta(dir, command); err == nil && meta != nil {
+		if explicit, err := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); err == nil {
+			req = imagereq.Merge(req, explicit)
+		}
+	}
+	if torchCUDA := dataloc.TorchMinCUDAVersion(dir); torchCUDA != "" {
+		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
+	}
+	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
+	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
+	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
+		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: libCUDA})
+	}
+	return imagereq.BackfillDriverFromCUDA(req)
+}
+
+// MinDriverForCUDAVersion returns the NVIDIA driver-major floor for a CUDA
+// compatibility version, or zero when the mapping is unknown.
+func MinDriverForCUDAVersion(cuda string) int {
+	return imagereq.MinDriverForCUDA(cuda)
 }
 
 // MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded".

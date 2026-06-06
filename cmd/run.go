@@ -707,6 +707,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if placementConstraints.NeedsGPU() {
 		placementConstraints.MinComputeCap = placement.MinComputeCapForJob(localDir)
+		req := placement.MinRuntimeRequirementsForJob(localDir, command)
+		if cliOverrides.MinCUDAVersion != "" {
+			req.MinCUDAVersion = placement.MaxCUDAVersion(req.MinCUDAVersion, cliOverrides.MinCUDAVersion)
+			if driver := placement.MinDriverForCUDAVersion(req.MinCUDAVersion); driver > req.MinDriverVersion {
+				req.MinDriverVersion = driver
+			}
+		}
+		if req.MinCUDAVersion != "" {
+			placementConstraints.MinCUDAVersion = req.MinCUDAVersion
+		}
+		if req.MinDriverVersion > 0 {
+			placementConstraints.MinDriverVersion = req.MinDriverVersion
+		}
 	}
 	// Tip placement toward producers' live rental instances so --needs
 	// consumers co-locate with their producers and can read outputs from
@@ -846,9 +859,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 				if err != nil {
 					return err
 				}
-				if !recent {
-					autoPlacementPendingReason = "recent host state unavailable"
-				} else if plan != nil {
+				autoPlacementPendingReason = fastSubmitPendingReasonForRecentOnPrem(autoPlacementPendingReason, runTags, recent, plan)
+				if recent && plan != nil {
 					placementPlan = plan
 					pick := plan.Fast
 					if pick == nil {
@@ -861,8 +873,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 						oplog.Log(oplog.OpPlacementDecided,
 							oplog.WithHost(host),
 							oplog.WithDetail(placement.FormatPlacementDetail(pick.OnPrem)))
-					} else if plan.Unplaced {
-						autoPlacementPendingReason = "no eligible on-prem host in recent DB state"
 					}
 				}
 			} else {
@@ -1199,6 +1209,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func fastSubmitPendingReasonForRecentOnPrem(current string, tags []string, recent bool, plan *placement.PlacementPlan) string {
+	if !db.HasInventoryTag(tags) {
+		return current
+	}
+	if !recent {
+		return "recent host state unavailable"
+	}
+	if plan != nil && plan.Unplaced {
+		return "no eligible on-prem host in recent DB state"
+	}
+	return current
 }
 
 func scanRunScriptMeta(localDir, command string) (*dataloc.ScriptMeta, error) {

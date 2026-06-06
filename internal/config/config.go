@@ -604,8 +604,13 @@ type HostConfig struct {
 	Memory    string          `yaml:"memory" toml:"memory"`
 	NetworkBW string          `yaml:"network_bw" toml:"network_bw"`
 	GPUs      []HostGPUConfig `yaml:"gpus" toml:"gpus"`
-	CPUFactor float64         `yaml:"cpu_factor" toml:"cpu_factor"`
-	GPUFactor float64         `yaml:"gpu_factor" toml:"gpu_factor"`
+	// NVIDIADriverVersion and CUDAVersion are static compatibility fields
+	// discovered from nvidia-smi. They may be set manually when discovery
+	// cannot parse a host's driver output.
+	NVIDIADriverVersion string  `yaml:"nvidia_driver" toml:"nvidia_driver"`
+	CUDAVersion         string  `yaml:"cuda_version" toml:"cuda_version"`
+	CPUFactor           float64 `yaml:"cpu_factor" toml:"cpu_factor"`
+	GPUFactor           float64 `yaml:"gpu_factor" toml:"gpu_factor"`
 
 	// HFCacheDir is the resolved HF hub cache directory on this host (e.g. /mnt/nas/.cache/huggingface/hub).
 	// Set by `weft host discover` or manually. Used by prestage to construct correct rsync destination paths.

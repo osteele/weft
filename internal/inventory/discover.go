@@ -24,12 +24,14 @@ func HostSpecFromHostInfo(name string, info *hostinfo.Host, hfCacheDir string) H
 	}
 
 	spec := HostSpec{
-		Name:       name,
-		CPUCores:   info.CPUs,
-		Memory:     info.MemTotal,
-		CPUFactor:  cpuFactor,
-		GPUFactor:  1.0,
-		HFCacheDir: strings.TrimSpace(hfCacheDir),
+		Name:                name,
+		CPUCores:            info.CPUs,
+		Memory:              info.MemTotal,
+		NVIDIADriverVersion: strings.TrimSpace(info.NVIDIADriverVersion),
+		CUDAVersion:         strings.TrimSpace(info.CUDAVersion),
+		CPUFactor:           cpuFactor,
+		GPUFactor:           1.0,
+		HFCacheDir:          strings.TrimSpace(hfCacheDir),
 	}
 
 	// Parse "Linux x86_64" or "Darwin arm64"
@@ -71,6 +73,7 @@ func groupGPUs(gpus []hostinfo.GPUInfo) []GPUSpec {
 	groups := map[string]*GPUSpec{}
 
 	for _, g := range gpus {
+		g.Name = resolveTruncatedGPUName(g.Name, g.MemTotal)
 		if spec, ok := groups[g.Name]; ok {
 			spec.Indices = append(spec.Indices, g.Index)
 		} else {
@@ -89,4 +92,22 @@ func groupGPUs(gpus []hostinfo.GPUInfo) []GPUSpec {
 		result = append(result, *groups[name])
 	}
 	return result
+}
+
+func resolveTruncatedGPUName(name, mem string) string {
+	normalized := NormalizeGPUClass(name)
+	if !strings.HasPrefix(normalized, "nvidiageforce") {
+		return name
+	}
+	if !strings.Contains(name, "...") && normalized != "nvidiageforce" {
+		return name
+	}
+	switch ParseMemGB(mem) {
+	case 24:
+		return "NVIDIA GeForce RTX 3090"
+	case 11:
+		return "NVIDIA GeForce RTX 2080 Ti"
+	default:
+		return name
+	}
 }

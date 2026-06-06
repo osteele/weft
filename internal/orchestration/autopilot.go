@@ -235,6 +235,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			OverloadMoved: overloadMoved,
 		}, nil
 	}
+	logAutoPilotOnPremDiagnostics(database, unplaced)
 	r2Client, _ := BuildR2Client(cfg)
 
 	launches, err := db.ListRunningLaunches(database)
@@ -1204,6 +1205,48 @@ func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Confi
 			oplog.WithDetailf("onprem_min=%.0f", onPrem.CompletionEst.Mean.Minutes()))
 	}
 	return remaining, placed
+}
+
+func logAutoPilotOnPremDiagnostics(database *sql.DB, jobs []*db.Job) {
+	if database == nil || len(jobs) == 0 {
+		return
+	}
+	hostNames, err := placement.LoadHostNames()
+	if err != nil || len(hostNames) == 0 {
+		oplog.Log("auto_pilot.onprem_diagnostics_unavailable", oplog.WithError(err))
+		return
+	}
+	metrics, recent, err := placement.RecentHostMetrics(database, hostNames, db.HostInfoStaleThreshold)
+	if err != nil || !recent {
+		oplog.Log("auto_pilot.onprem_diagnostics_unavailable", oplog.WithError(err), oplog.WithDetailf("recent=%t hosts=%d", recent, len(hostNames)))
+		return
+	}
+	for _, job := range jobs {
+		if job == nil || db.HasRentalTag(job.Tags) {
+			continue
+		}
+		constraints := placement.ConstraintsFromJob(job)
+		if constraints.Provider != "" {
+			continue
+		}
+		scores, err := placement.ScoreHostsWithPredictor(database, constraints, metrics, nil)
+		if err != nil {
+			oplog.LogJob("auto_pilot.onprem_diagnostics_error", job.ID, "", oplog.WithError(err))
+			continue
+		}
+		best := ""
+		for _, score := range scores {
+			if score.Eligible {
+				best = score.Host
+				break
+			}
+		}
+		if best != "" {
+			oplog.LogJob("auto_pilot.onprem_diagnostics", job.ID, best, oplog.WithDetail("eligible_onprem=true"))
+			continue
+		}
+		oplog.LogJob("auto_pilot.onprem_diagnostics", job.ID, "", oplog.WithDetail("eligible_onprem=false "+placement.FormatScoreRejectionDetail(scores, 4)))
+	}
 }
 
 func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment, reuseDiagnostics map[int64]string) int {

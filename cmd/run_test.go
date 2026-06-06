@@ -71,6 +71,21 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+func TestFastSubmitPendingReasonForRecentOnPrem(t *testing.T) {
+	const current = "daemon placement pending"
+	unplaced := &placement.PlacementPlan{Unplaced: true}
+
+	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{"EXP-127"}, true, unplaced); got != current {
+		t.Fatalf("cloud-eligible reason = %q, want %q", got, current)
+	}
+	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{db.TagInventory}, true, unplaced); got != "no eligible on-prem host in recent DB state" {
+		t.Fatalf("inventory unplaced reason = %q", got)
+	}
+	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{db.TagInventory}, false, nil); got != "recent host state unavailable" {
+		t.Fatalf("inventory stale reason = %q", got)
+	}
+}
+
 func TestPathHasHomePrefix(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

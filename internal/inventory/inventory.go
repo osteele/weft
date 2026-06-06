@@ -102,18 +102,20 @@ type GPUSpec struct {
 
 // HostSpec describes the static capabilities of a host.
 type HostSpec struct {
-	Name         string            `yaml:"name"`
-	OS           string            `yaml:"os"`
-	Arch         string            `yaml:"arch"`
-	CPUCores     int               `yaml:"cpu_cores"`
-	Memory       string            `yaml:"memory"`
-	NetworkBW    string            `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
-	GPUs         []GPUSpec         `yaml:"gpus"`
-	CPUFactor    float64           `yaml:"cpu_factor"`              // relative CPU perf (1.0 = baseline)
-	GPUFactor    float64           `yaml:"gpu_factor"`              // relative GPU perf (1.0 = baseline)
-	HFCacheDir   string            `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
-	SetupTimeout string            `yaml:"setup_timeout,omitempty"` // max duration for setup commands (e.g. "90m"); default 20m
-	Benchmark    BenchmarkGateSpec `yaml:"benchmark,omitempty"`
+	Name                string            `yaml:"name"`
+	OS                  string            `yaml:"os"`
+	Arch                string            `yaml:"arch"`
+	CPUCores            int               `yaml:"cpu_cores"`
+	Memory              string            `yaml:"memory"`
+	NetworkBW           string            `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
+	GPUs                []GPUSpec         `yaml:"gpus"`
+	NVIDIADriverVersion string            `yaml:"nvidia_driver,omitempty"` // e.g. "550.120"
+	CUDAVersion         string            `yaml:"cuda_version,omitempty"`  // max CUDA compatibility reported by the NVIDIA driver, e.g. "12.4"
+	CPUFactor           float64           `yaml:"cpu_factor"`              // relative CPU perf (1.0 = baseline)
+	GPUFactor           float64           `yaml:"gpu_factor"`              // relative GPU perf (1.0 = baseline)
+	HFCacheDir          string            `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
+	SetupTimeout        string            `yaml:"setup_timeout,omitempty"` // max duration for setup commands (e.g. "90m"); default 20m
+	Benchmark           BenchmarkGateSpec `yaml:"benchmark,omitempty"`
 }
 
 // BenchmarkGateSpec configures how quiet a host must be before benchmark jobs start.
@@ -354,6 +356,12 @@ func applyHostConfig(base HostSpec, cfg config.HostConfig) HostSpec {
 	}
 	if cfg.NetworkBW != "" {
 		base.NetworkBW = cfg.NetworkBW
+	}
+	if cfg.NVIDIADriverVersion != "" {
+		base.NVIDIADriverVersion = cfg.NVIDIADriverVersion
+	}
+	if cfg.CUDAVersion != "" {
+		base.CUDAVersion = cfg.CUDAVersion
 	}
 	if len(cfg.GPUs) > 0 {
 		gpus := make([]GPUSpec, 0, len(cfg.GPUs))

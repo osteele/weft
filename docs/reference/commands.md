@@ -1569,7 +1569,7 @@ weft host setup <host>
 The setup command:
 - Installs required host tools: `tmux`, `jq`, `rsync`, `rclone`, `curl`, and `uv`
 - Installs or verifies a Go toolchain when the agent is built natively on the host
-- Discovers CPU, memory, GPU, and cache information and writes `~/.config/weft/hosts/<host>.yaml`
+- Discovers CPU, memory, GPU model/memory, NVIDIA driver/CUDA compatibility, and cache information, then writes `~/.config/weft/hosts/<host>.yaml`
 - Deploys `weft-agent` to `~/.cache/weft/bin/weft-agent`
 - Deploys R2 and notification configuration when configured
 - Starts the queue runner unless `--no-runner` is set

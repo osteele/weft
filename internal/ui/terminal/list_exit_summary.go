@@ -21,9 +21,7 @@ func (m listTUIModel) exitSummaryAt(now time.Time, width int) string {
 		width = 120
 	}
 	var b strings.Builder
-	writeSummaryLine(&b, width, fmt.Sprintf("Group: %s", listGroupModeLabel(m.effectiveGroupMode())))
-	writeSummaryLine(&b, width, fmt.Sprintf("Order: %s", m.exitSummaryOrder()))
-	writeSummaryLine(&b, width, fmt.Sprintf("Filter: %s", m.exitSummaryFilter()))
+	writeSummaryLine(&b, width, m.exitSummaryHeader())
 	b.WriteString("\n")
 
 	switch m.effectiveGroupMode() {
@@ -74,21 +72,54 @@ func (m listTUIModel) exitSummaryOrder() string {
 	}
 }
 
-func (m listTUIModel) exitSummaryFilter() string {
-	parts := make([]string, 0, 3)
+func (m listTUIModel) exitSummaryHeader() string {
+	parts := []string{m.exitSummaryViewName()}
+	if group := m.exitSummaryGroupClause(); group != "" {
+		parts = append(parts, group)
+	}
+	for _, filter := range m.exitSummaryFilterClauses() {
+		parts = append(parts, filter)
+	}
+	parts = append(parts, "ordered by "+m.exitSummaryOrder())
+	return strings.Join(parts, " · ")
+}
+
+func (m listTUIModel) exitSummaryViewName() string {
+	switch {
+	case m.unprocessedView && m.statusView != "":
+		return fmt.Sprintf("Unprocessed %s jobs", m.statusView)
+	case m.unprocessedView:
+		return "Unprocessed jobs"
+	case m.statusView != "":
+		return fmt.Sprintf("%s jobs", titleCaseStatus(m.statusView))
+	default:
+		return "Jobs"
+	}
+}
+
+func (m listTUIModel) exitSummaryGroupClause() string {
+	mode := m.effectiveGroupMode()
+	if mode == listGroupUngrouped {
+		return ""
+	}
+	return "grouped by " + listGroupModeLabel(mode)
+}
+
+func (m listTUIModel) exitSummaryFilterClauses() []string {
+	parts := make([]string, 0, 2)
 	if m.projectFilter != "" {
-		parts = append(parts, "project="+m.projectFilter)
+		parts = append(parts, "project "+m.projectFilter)
 	}
-	if m.statusView != "" {
-		parts = append(parts, "status="+m.statusView)
+	return parts
+}
+
+func titleCaseStatus(status string) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return ""
 	}
-	if m.unprocessedView {
-		parts = append(parts, "unprocessed")
-	}
-	if len(parts) == 0 {
-		return "none"
-	}
-	return strings.Join(parts, ", ")
+	status = strings.ReplaceAll(status, "_", " ")
+	return strings.ToUpper(status[:1]) + status[1:]
 }
 
 func writeSummaryLine(b *strings.Builder, width int, line string) {

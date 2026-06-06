@@ -69,8 +69,11 @@ type Host struct {
 	DiskFree  int64  // Free disk space in bytes (for home directory)
 	DiskTotal int64  // Total disk space in bytes (for home directory)
 	GPUs      []GPUInfo
-	LastCheck time.Time
-	Error     string // connection error message (not displayed as error)
+	// NVIDIA driver/CUDA compatibility, when nvidia-smi is available.
+	NVIDIADriverVersion string
+	CUDAVersion         string
+	LastCheck           time.Time
+	Error               string // connection error message (not displayed as error)
 
 	// Queue status
 	QueueStatus       QueueCheckStatus // Unknown, Checking, Checked
@@ -125,6 +128,9 @@ const HostInfoCommand = `echo "ARCH:$(uname -sm)"; ` +
 	`system_profiler SPDisplaysDataType 2>/dev/null | grep -E '(Chipset Model|VRAM|Total Number of Cores|Metal)' | sed 's/^[[:space:]]*/MACGPU:/' || true; ` +
 	// Linux GPU: nvidia-smi table output (name + stats lines)
 	`nvidia-smi 2>/dev/null | awk '/^\|[[:space:]]+[0-9]+[[:space:]]+[A-Z]/ { print "GPUNAME:" $0; getline; print "GPUSTAT:" $0 }'; ` +
+	// Linux NVIDIA driver and CUDA compatibility. These are host-wide.
+	`nvidia-smi 2>/dev/null | sed -n 's/.*Driver Version:[[:space:]]*\([0-9.][0-9.]*\).*/GPUDRIVER:\1/p' | head -n1; ` +
+	`nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version:[[:space:]]*\([0-9.][0-9.]*\).*/GPUCUDA:\1/p' | head -n1; ` +
 	// Linux GPU: nvidia-smi -L for untruncated names (old drivers truncate table output)
 	`nvidia-smi -L 2>/dev/null | sed 's/^/GPULIST:/'`
 
@@ -218,6 +224,10 @@ func ParseHostInfo(output string) *Host {
 				if gpuIdx, name := parseGPUListLine(value); name != "" {
 					gpuListNames[gpuIdx] = name
 				}
+			case "GPUDRIVER":
+				host.NVIDIADriverVersion = firstVersionToken(value)
+			case "GPUCUDA":
+				host.CUDAVersion = firstVersionToken(value)
 			}
 		}
 	}
@@ -277,10 +287,24 @@ func parseNvidiaSmiNameLine(line string) *GPUInfo {
 		nameParts = append(nameParts, fields[i])
 	}
 	gpu.Name = strings.Join(nameParts, " ")
-	// Remove trailing "..." from truncated names
-	gpu.Name = strings.TrimSuffix(gpu.Name, "...")
+	// Keep a visible truncated marker so later -L backfill can recognize this
+	// as lower-quality than the full model string.
+	gpu.Name = strings.TrimSpace(gpu.Name)
 
 	return gpu
+}
+
+func firstVersionToken(value string) string {
+	for _, field := range strings.Fields(strings.TrimSpace(value)) {
+		field = strings.Trim(field, ",;")
+		if field == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(strings.SplitN(field, ".", 2)[0]); err == nil {
+			return field
+		}
+	}
+	return ""
 }
 
 // parseGPUListLine parses a line from nvidia-smi -L output.
