@@ -460,10 +460,10 @@ func bestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTi
 		}
 	}
 
-	return nil, ErrNoReachableHost
+	return nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
 }
 
-// PlaceOnPrem tries live on-prem placement first, falls back to static scoring.
+// PlaceOnPrem tries live on-prem placement with contention-aware metrics.
 // Returns ErrNoEligibleHost if no inventory host matches.
 // Does not compare against rental — use Evaluate for cross-strategy comparison.
 func PlaceOnPrem(database *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
@@ -482,7 +482,7 @@ func placeOnPremWithMetrics(database *sql.DB, constraints Constraints, predict J
 		return result, nil
 	}
 	if errors.Is(err, ErrNoReachableHost) {
-		return BestHostWithPredictor(database, constraints, nil, predict)
+		return nil, err
 	}
 	return nil, err
 }

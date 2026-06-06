@@ -113,7 +113,7 @@ func SelectHostFromSnapshot(database *sql.DB, hosts []inventory.HostSpec, liveMe
 	if host, ok := FirstEligibleHost(database, reachableHosts, constraints, liveMetrics, predict); ok {
 		return host, true
 	}
-	return FirstEligibleHost(database, hosts, constraints, nil, predict)
+	return "", false
 }
 
 func BuildBatchPredictors(cfg *config.Config, jobs []*db.Job, hosts []inventory.HostSpec, onPhase func(string)) map[int64]JobPredictor {

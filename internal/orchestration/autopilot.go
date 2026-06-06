@@ -147,6 +147,10 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	if err != nil {
 		oplog.Log("auto_pilot.overload_drain_error", oplog.WithError(err))
 	}
+	onPremRebalanced, err := rebalanceQueuedRentalJobsToOnPrem(ctx, database, cfg, scoped, movingJobs)
+	if err != nil {
+		oplog.Log("auto_pilot.rebalance_onprem_error", oplog.WithError(err))
+	}
 
 	unplacedJobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
@@ -201,7 +205,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			}, rebErr
 		}
 		return &GroupedAutoPilotResult{
-			Rebalanced:    len(rebalanceResult.Moves),
+			Rebalanced:    onPremRebalanced + len(rebalanceResult.Moves),
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
 			OverloadMoved: overloadMoved,
@@ -225,7 +229,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 		return &GroupedAutoPilotResult{
 			Placed:        prePlaced,
-			Rebalanced:    len(rebalanceResult.Moves),
+			Rebalanced:    onPremRebalanced + len(rebalanceResult.Moves),
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
 			OverloadMoved: overloadMoved,
@@ -422,6 +426,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}, err
 	}
 	rebalanced := len(rebalanceResult.Moves)
+	rebalanced += onPremRebalanced
 
 	reuseFilled, err := fillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics)
 	if err != nil {
@@ -1143,6 +1148,15 @@ func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Confi
 	if database == nil || len(jobs) == 0 {
 		return jobs, 0
 	}
+	hostNames, err := placement.LoadHostNames()
+	if err != nil || len(hostNames) == 0 {
+		return jobs, 0
+	}
+	metrics := placement.CollectMetrics(database, hostNames, 5*time.Second)
+	if len(metrics) == 0 {
+		return jobs, 0
+	}
+	onPremSource := &placement.OnPremSource{Metrics: metrics}
 	remaining := make([]*db.Job, 0, len(jobs))
 	placed := 0
 	for _, job := range jobs {
@@ -1156,11 +1170,25 @@ func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Confi
 			continue
 		}
 		predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
-		onPrem, err := placement.PlaceOnPrem(database, constraints, predict)
-		if err != nil || onPrem == nil || onPrem.Host == "" {
+		plan, err := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: constraints,
+			Predictor:   predict,
+			Sources:     []placement.CandidateSource{onPremSource},
+			Database:    database,
+		})
+		if err != nil || plan == nil || plan.Unplaced {
 			remaining = append(remaining, job)
 			continue
 		}
+		pick := plan.Fast
+		if pick == nil {
+			pick = plan.Cheap
+		}
+		if pick == nil || pick.Kind != placement.CandidateOnPrem || pick.OnPrem == nil || pick.OnPrem.Host == "" {
+			remaining = append(remaining, job)
+			continue
+		}
+		onPrem := pick.OnPrem
 		rental := placement.EstimateRentalCompletion(database, constraints, predict)
 		if rental != nil && placement.ShouldSpillToRental(onPrem.CompletionEst, rental.Total, constraints.Tags) {
 			remaining = append(remaining, job)

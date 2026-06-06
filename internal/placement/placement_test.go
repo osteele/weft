@@ -364,6 +364,29 @@ func TestPlaceWithFallback_ReachableHostsUsePredictor(t *testing.T) {
 	}
 }
 
+func TestPlaceWithFallback_NoStaticFallbackWithoutMetrics(t *testing.T) {
+	db := setupTestDB(t)
+
+	oldLoadHosts := loadHosts
+	oldCollectMetrics := collectMetrics
+	t.Cleanup(func() {
+		loadHosts = oldLoadHosts
+		collectMetrics = oldCollectMetrics
+	})
+
+	loadHosts = func() ([]inventory.HostSpec, error) {
+		return testHosts(), nil
+	}
+	collectMetrics = func(*sql.DB, []string, time.Duration) map[string]*HostMetrics {
+		return nil
+	}
+
+	_, err := PlaceWithFallback(db, Constraints{Command: "python train.py", Project: "proj"}, nil)
+	if !errors.Is(err, ErrNoReachableHost) {
+		t.Fatalf("PlaceWithFallback err = %v, want ErrNoReachableHost", err)
+	}
+}
+
 func TestPlaceWithFallback_ReachableHostsApplyPredictedGPUMemFit(t *testing.T) {
 	db := setupTestDB(t)
 
@@ -1596,6 +1619,18 @@ func TestInventoryTag_DoesNotSkipLocalPlacement(t *testing.T) {
 	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 	constraints := Constraints{Tags: []string{dbpkg.TagInventory}}
+
+	oldCollectMetrics := collectMetrics
+	t.Cleanup(func() {
+		collectMetrics = oldCollectMetrics
+	})
+	collectMetrics = func(*sql.DB, []string, time.Duration) map[string]*HostMetrics {
+		return map[string]*HostMetrics{
+			"host-alpha": {CPUPercent: 5, GPUPercent: 5},
+			"host-beta":  {CPUPercent: 5, GPUPercent: 5},
+			"host-gamma": {CPUPercent: 5, GPUPercent: 5},
+		}
+	}
 
 	result, err := PlaceWithFallback(db, constraints, nil)
 	if err != nil {
