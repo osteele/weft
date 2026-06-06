@@ -988,6 +988,9 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
+				WHEN la.end_time IS NOT NULL
+				     AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
+				THEN 'unplaced'
 				WHEN et.kind = 'rental_instance'
 				     AND l.status IN ('launching', 'running', 'grace', 'completed')
 				THEN 'rental_instance'

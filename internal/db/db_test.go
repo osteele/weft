@@ -781,6 +781,59 @@ func TestListUnplacedJobsIncludesJobsResetFromTerminalInstances(t *testing.T) {
 	}
 }
 
+func TestListUnplacedJobsIncludesLatestOrphanedRentalAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX 3080",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := EnsureRentalExecutionTarget(database, instanceID); err != nil {
+		t.Fatalf("EnsureRentalExecutionTarget: %v", err)
+	}
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "orphaned rental", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE job_attempts
+		SET status = ?, end_time = ?, cloud_outcome = ?
+		WHERE job_id = ?`,
+		StatusCanceled, now, AttemptOutcomeOrphaned, jobID); err != nil {
+		t.Fatalf("mark orphaned attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
+		t.Fatalf("set requested status: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
+	}
+	if got := job.TargetKind(); got != JobTargetUnplaced {
+		t.Fatalf("target kind = %q, want %q", got, JobTargetUnplaced)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != jobID {
+		t.Fatalf("ListUnplacedJobs = %#v, want only job %d", jobs, jobID)
+	}
+}
+
 func TestJobStatusViewTargetKind(t *testing.T) {
 	database := SetupTestDB(t)
 
