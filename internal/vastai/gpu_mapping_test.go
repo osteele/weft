@@ -219,7 +219,7 @@ func TestResolveGPUFilter(t *testing.T) {
 			wantNames:     nil,
 			wantPostFilt:  true,
 			acceptGPUName: "RTX PRO 5000",
-			rejectGPUName: "RTX PRO 6000 WS",
+			rejectGPUName: "RTX 4090",
 		},
 		{
 			name:      "exact model RTX 3090 Ti",

@@ -82,7 +82,7 @@ func TestComputeCapForGPU(t *testing.T) {
 		// Regression for wj2365 on 2026-06-02: RunPod's offer.GPUName is
 		// the terse displayName (no "Blackwell" suffix), so the
 		// generation-name fallback misses these and we need explicit
-		// model entries in modelComputeCap.
+		// catalog entries.
 		{"RTX PRO 4500", "12.0"},
 		{"RTX PRO 5000", "12.0"},
 		{"RTX PRO 6000", "12.0"},

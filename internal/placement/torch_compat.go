@@ -1,11 +1,11 @@
 package placement
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -35,105 +35,19 @@ func TorchMinComputeCap(version, cudaVariant string) string {
 	return dataloc.TorchMinComputeCap(version, cudaVariant)
 }
 
-// modelComputeCap maps normalized GPU model fragments to compute capability.
-// Used for cases where the gen-default is too coarse — for example, A100 has
-// sm_8.0 while consumer Ampere is sm_8.6, and datacenter Blackwell (B100/B200)
-// is sm_10.0 while consumer/PRO Blackwell is sm_12.0.
-var modelComputeCap = map[string]string{
-	// Ampere datacenter
-	"a100": "8.0",
-	"a30":  "8.0",
-	"a40":  "8.6",
-	// Hopper
-	"h100": "9.0",
-	"h200": "9.0",
-	// Datacenter Blackwell (sm_100)
-	"b100":  "10.0",
-	"b200":  "10.0",
-	"b300":  "10.0",
-	"gb200": "10.0",
-	// Workstation / consumer Blackwell (sm_120). Some providers omit the
-	// word "Blackwell" and report names like "RTX PRO 6000 WS",
-	// "RTX PRO 5000", or "RTX PRO 4500" (no generation suffix), so the
-	// generation-name fallback in ComputeCapForGPU does not catch them and
-	// each variant needs an explicit entry here.
-	"rtxpro4500": "12.0",
-	"rtxpro5000": "12.0",
-	"rtxpro6000": "12.0",
-}
-
-// generationDefaultComputeCap is the cap to assume for a GPU when only its
-// generation is known. For arches with multiple SMs in active use, this picks
-// the highest cap we'd reasonably encounter on a Vast offer, since that is
-// the conservative choice for an upper-bound filter.
-var generationDefaultComputeCap = map[GPUGeneration]string{
-	// Maxwell: GTX 9-series (5.2), Tesla M40 (5.2), Tesla M60 (5.2). GM20x.
-	// The Tegra/Jetson SoCs at 5.3 are not relevant for Vast.ai offers.
-	GenMaxwell: "5.2",
-	// Pascal: GTX 10-series + Titan Xp (6.1), Tesla P40/P4 (6.1). GP100
-	// datacenter (Tesla P100 / Quadro GP100) is 6.0 but those rarely appear
-	// on Vast; 6.1 is the conservative default for the family.
-	GenPascal:      "6.1",
-	GenVolta:       "7.0",
-	GenTuring:      "7.5",
-	GenAmpere:      "8.6", // most consumer Ampere; A100 is 8.0
-	GenAdaLovelace: "8.9",
-	GenHopper:      "9.0",
-	GenBlackwell:   "12.0", // RTX PRO / 50-series; B100/B200 split out via modelComputeCap
-}
-
-// modelComputeCapKeys is modelComputeCap's keys sorted by descending length
-// so that longer fragments (e.g. "gb200") match before shorter prefixes
-// (e.g. "b200"). Map iteration order is randomized; this list is the
-// canonical traversal order used by ComputeCapForGPU.
-var modelComputeCapKeys = sortedByLenDesc(modelComputeCap)
-
-// nvidiaGenerationNamesSorted is nvidiaGenerationNames' keys sorted by
-// descending length for the same reason.
-var nvidiaGenerationNamesSorted = sortedByLenDesc(nvidiaGenerationNames)
-
-func sortedByLenDesc[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if len(keys[i]) != len(keys[j]) {
-			return len(keys[i]) > len(keys[j])
-		}
-		return keys[i] < keys[j]
-	})
-	return keys
-}
-
 // ComputeCapForGPU returns the CUDA compute capability of a GPU, identified
 // by its name as it appears in cloud offers ("RTX PRO 4500 Blackwell",
 // "B200", "A100"). Returns "" if unknown.
 func ComputeCapForGPU(gpuName string) string {
 	norm := inventory.NormalizeGPUClass(gpuName)
-	if cap, ok := modelComputeCap[norm]; ok {
+	if cap := gpucatalog.ComputeCapForGPU(gpuName); cap != "" {
 		return cap
-	}
-	for _, fragment := range modelComputeCapKeys {
-		if strings.Contains(norm, fragment) {
-			return modelComputeCap[fragment]
-		}
-	}
-	if gen := generationOf(norm); gen != GenUnknown {
-		return generationDefaultComputeCap[gen]
 	}
 	for _, class := range knownGPUClasses {
 		if strings.Contains(norm, class) {
-			if g := generationOf(class); g != GenUnknown {
-				return generationDefaultComputeCap[g]
+			if cap := gpucatalog.ComputeCapForGPU(class); cap != "" {
+				return cap
 			}
-		}
-	}
-	// Catches names like "RTX PRO 4500 Blackwell" where the model isn't in the
-	// known list but the generation is named explicitly.
-	for _, genName := range nvidiaGenerationNamesSorted {
-		if strings.Contains(norm, genName) {
-			return generationDefaultComputeCap[nvidiaGenerationNames[genName]]
 		}
 	}
 	return ""
@@ -172,7 +86,10 @@ func ArchNameToMaxCap(name string) string {
 	if !ok {
 		return ""
 	}
-	return generationDefaultComputeCap[gen]
+	if gen.isNVIDIA() {
+		return gpucatalog.GenerationDefaultComputeCap(gpucatalog.Generation(gen))
+	}
+	return ""
 }
 
 // hostHasGPUWithinCap returns true if any GPU on the host has a known compute

@@ -152,18 +152,19 @@ func printTimeseriesSummary(summary *db.TimeseriesSummary) {
 }
 
 func loadRawTimeseries(database *sql.DB, jobID, runID int64) ([]byte, string, error) {
+	var fetchErr error
 	if obj, err := db.GetTimeseriesRawObject(database, runID, db.TimeseriesRawKind); err != nil {
 		return nil, "", err
 	} else if obj != nil && obj.R2Key != "" {
 		if data, ok := timeseriescache.Read(jobID, runID, obj.ETag); ok {
 			return data, "cache", nil
 		}
-		data, err := fetchR2TimeseriesObject(obj.R2Key)
-		if err != nil {
-			return nil, "", err
+		data, err := fetchR2TimeseriesObjectFunc(obj.R2Key)
+		if err == nil {
+			_ = timeseriescache.Write(jobID, runID, obj.ETag, data)
+			return data, "r2", nil
 		}
-		_ = timeseriescache.Write(jobID, runID, obj.ETag, data)
-		return data, "r2", nil
+		fetchErr = err
 	}
 
 	if data, key, err := loadLegacyRawTimeseriesFromR2(jobID, runID); err == nil && len(data) > 0 {
@@ -175,6 +176,9 @@ func loadRawTimeseries(database *sql.DB, jobID, runID int64) ([]byte, string, er
 		return nil, "", err
 	}
 	if len(samples) == 0 {
+		if fetchErr != nil {
+			return nil, "", fetchErr
+		}
 		return nil, "", os.ErrNotExist
 	}
 	var b strings.Builder
@@ -201,13 +205,15 @@ func fetchR2TimeseriesObject(key string) ([]byte, error) {
 	return data, nil
 }
 
+var fetchR2TimeseriesObjectFunc = fetchR2TimeseriesObject
+
 func loadLegacyRawTimeseriesFromR2(jobID, runID int64) ([]byte, string, error) {
 	keys := []string{
 		r2keys.JobAttemptRawTimeseries(jobID, runID),
-		fmt.Sprintf("jobs/%d/runs/%d/results/%d.timeseries.jsonl", jobID, runID, jobID),
+		r2keys.JobAttemptLegacyResultTimeseries(jobID, runID),
 	}
 	for _, key := range keys {
-		data, err := fetchR2TimeseriesObject(key)
+		data, err := fetchR2TimeseriesObjectFunc(key)
 		if err == nil && len(data) > 0 {
 			return data, key, nil
 		}

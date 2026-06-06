@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/inventory"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // GPUGeneration represents an ordered GPU generation/architecture.
@@ -21,20 +21,20 @@ const (
 	// are listed for compute-cap recognition only; torch >= 2.5 cu118+ no
 	// longer ships kernels for sm < 7.0, so placement uses these mainly to
 	// REJECT Maxwell/Pascal offers when a torch-derived min-cap is set.
-	GenMaxwell
-	GenPascal
-	GenVolta
-	GenTuring
-	GenAmpere
-	GenAdaLovelace
-	GenHopper
-	GenBlackwell
+	GenMaxwell     = GPUGeneration(gpucatalog.GenMaxwell)
+	GenPascal      = GPUGeneration(gpucatalog.GenPascal)
+	GenVolta       = GPUGeneration(gpucatalog.GenVolta)
+	GenTuring      = GPUGeneration(gpucatalog.GenTuring)
+	GenAmpere      = GPUGeneration(gpucatalog.GenAmpere)
+	GenAdaLovelace = GPUGeneration(gpucatalog.GenAdaLovelace)
+	GenHopper      = GPUGeneration(gpucatalog.GenHopper)
+	GenBlackwell   = GPUGeneration(gpucatalog.GenBlackwell)
 
 	// Apple generations (separate family, ordered oldest to newest)
-	GenAppleM1
-	GenAppleM2
-	GenAppleM3
-	GenAppleM4
+	GenAppleM1 GPUGeneration = 100
+	GenAppleM2 GPUGeneration = 101
+	GenAppleM3 GPUGeneration = 102
+	GenAppleM4 GPUGeneration = 103
 )
 
 func (g GPUGeneration) isNVIDIA() bool {
@@ -65,43 +65,17 @@ var appleClassToGeneration = map[string]GPUGeneration{
 	"m4max":   GenAppleM4,
 }
 
-var nvidiaGenerationNames = map[string]GPUGeneration{
-	"maxwell":     GenMaxwell,
-	"pascal":      GenPascal,
-	"volta":       GenVolta,
-	"turing":      GenTuring,
-	"ampere":      GenAmpere,
-	"ada":         GenAdaLovelace,
-	"adalovelace": GenAdaLovelace,
-	"hopper":      GenHopper,
-	"blackwell":   GenBlackwell,
-}
-
 var knownGPUClasses = func() []string {
-	classes := make([]string, 0, len(appleClassToGeneration)+len(vastai.KnownNormalizedGPUClasses()))
+	classes := make([]string, 0, len(appleClassToGeneration)+len(gpucatalog.KnownNormalizedClasses()))
 	for class := range appleClassToGeneration {
 		classes = append(classes, class)
 	}
-	classes = append(classes, vastai.KnownNormalizedGPUClasses()...)
+	classes = append(classes, gpucatalog.KnownNormalizedClasses()...)
 	return classes
 }()
 
 // generationNames maps user-facing generation names to their generation.
-var generationNames = map[string]GPUGeneration{
-	"maxwell":     GenMaxwell,
-	"pascal":      GenPascal,
-	"volta":       GenVolta,
-	"turing":      GenTuring,
-	"ampere":      GenAmpere,
-	"ada":         GenAdaLovelace,
-	"adalovelace": GenAdaLovelace,
-	"hopper":      GenHopper,
-	"blackwell":   GenBlackwell,
-	"applem1":     GenAppleM1,
-	"applem2":     GenAppleM2,
-	"applem3":     GenAppleM3,
-	"applem4":     GenAppleM4,
-}
+var generationNames = buildGenerationNames()
 
 // generationMinCUDA maps GPU generations to the minimum CUDA toolkit version
 // required to compile kernels for that architecture.
@@ -149,7 +123,7 @@ func ParseCUDADriverFloor(raw string) (string, error) {
 	if v, ok := parseSemverPair(s); ok {
 		return v, nil
 	}
-	if gen, ok := nvidiaGenerationNames[strings.ReplaceAll(s, " ", "")]; ok {
+	if gen, ok := generationNames[strings.ReplaceAll(s, " ", "")]; ok && gen.isNVIDIA() {
 		if v, ok := generationMinCUDA[gen]; ok {
 			major := int(v)
 			minor := int((v-float64(major))*10 + 0.5)
@@ -213,12 +187,22 @@ func generationOf(normalizedClass string) GPUGeneration {
 	if gen, ok := appleClassToGeneration[normalizedClass]; ok {
 		return gen
 	}
-	if genName, ok := vastai.NVIDIAGenerationNameForNormalizedGPUClass(normalizedClass); ok {
-		if gen, ok := nvidiaGenerationNames[genName]; ok {
-			return gen
-		}
+	if gen, ok := gpucatalog.GenerationForNormalizedClass(normalizedClass); ok {
+		return GPUGeneration(gen)
 	}
 	return GenUnknown
+}
+
+func buildGenerationNames() map[string]GPUGeneration {
+	names := make(map[string]GPUGeneration, len(gpucatalog.GenerationNameToGeneration)+4)
+	for name, gen := range gpucatalog.GenerationNameToGeneration {
+		names[name] = GPUGeneration(gen)
+	}
+	names["applem1"] = GenAppleM1
+	names["applem2"] = GenAppleM2
+	names["applem3"] = GenAppleM3
+	names["applem4"] = GenAppleM4
+	return names
 }
 
 type gpuConstraintMode int

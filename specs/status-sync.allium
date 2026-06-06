@@ -1570,8 +1570,8 @@ config {
     oplog_lookback: Duration = 7.days
     oplog_not_found_buffer: Duration = 10.minutes
     oplog_max_parallel: Integer = 10
-    oplog_sync_timeout: Duration = 30.seconds
-    oplog_request_timeout: Duration = 5.seconds
+    oplog_sync_timeout: Duration = 60.seconds
+    oplog_request_timeout: Duration = 10.seconds
 }
 
 -- ==========================================================================

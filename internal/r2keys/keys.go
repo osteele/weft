@@ -32,6 +32,7 @@ func JobLiveTimeseries(jobID int64) string   { return dataplane.JobLiveTimeserie
 func JobLiveTelemetry(jobID int64) string    { return dataplane.JobLiveTelemetry(jobID) }
 func JobPrefix(jobID int64) string           { return dataplane.JobPrefix(jobID) }
 func JobRunPrefix(jobID, runID int64) string { return dataplane.JobRunPrefix(jobID, runID) }
+func JobRunsPrefix(jobID int64) string       { return dataplane.JobRunsPrefix(jobID) }
 func JobAttemptStarted(jobID, runID int64) string {
 	return controlplane.JobAttemptStarted(jobID, runID)
 }
@@ -78,6 +79,9 @@ func JobAttemptLiveTimeseries(jobID, runID int64) string {
 }
 func JobAttemptRawTimeseries(jobID, runID int64) string {
 	return dataplane.JobAttemptRawTimeseries(jobID, runID)
+}
+func JobAttemptLegacyResultTimeseries(jobID, runID int64) string {
+	return dataplane.JobAttemptLegacyResultTimeseries(jobID, runID)
 }
 func JobAttemptLiveTelemetry(jobID, runID int64) string {
 	return dataplane.JobAttemptLiveTelemetry(jobID, runID)

@@ -25,6 +25,11 @@ func JobRunPrefix(jobID, runID int64) string {
 	return fmt.Sprintf("jobs/%d/runs/%d", jobID, runID)
 }
 
+// JobRunsPrefix returns the prefix that contains all run-scoped job objects.
+func JobRunsPrefix(jobID int64) string {
+	return fmt.Sprintf("%s/runs/", JobPrefix(jobID))
+}
+
 func JobResultsPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/results/", jobID)
 }
@@ -134,6 +139,12 @@ func JobAttemptLiveTimeseries(jobID, runID int64) string {
 
 func JobAttemptRawTimeseries(jobID, runID int64) string {
 	return fmt.Sprintf("%s/telemetry/timeseries.jsonl", JobRunPrefix(jobID, runID))
+}
+
+// JobAttemptLegacyResultTimeseries returns the old results-bundle timeseries
+// key kept only for fallback reads of objects produced before raw retention.
+func JobAttemptLegacyResultTimeseries(jobID, runID int64) string {
+	return fmt.Sprintf("%s%d.timeseries.jsonl", JobAttemptResultsPrefix(jobID, runID), jobID)
 }
 
 func JobAttemptLiveTelemetry(jobID, runID int64) string {

@@ -1070,7 +1070,7 @@ func TestFilterOffersByTorchArch(t *testing.T) {
 // regression on 2026-06-02: torch 2.6 maps to maxCap "9.0" and the job had
 // gpu-arch-max sm_9.0, but the autopilot launched onto RunPod RTX PRO 4500
 // Blackwell instances three times. Two failure modes stacked:
-//  1. modelComputeCap didn't list "rtxpro4500" / "rtxpro5000", and the
+//  1. the GPU catalog didn't list "rtxpro4500" / "rtxpro5000", and the
 //     generation-name fallback in ComputeCapForGPU needs the literal
 //     "blackwell" in the GPU name. RunPod's offer.GPUName is the terse
 //     displayName ("RTX PRO 4500"), so ComputeCapForGPU returned "".

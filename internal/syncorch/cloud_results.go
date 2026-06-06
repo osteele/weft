@@ -68,9 +68,9 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 		return updated
 	}
 
-	// Cap this phase at 60s, derived from the parent so caller cancellation
-	// also propagates here.
-	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+	// Cap this phase at the opslog sync budget, derived from the parent so
+	// caller cancellation also propagates here.
+	ctx, cancel := context.WithTimeout(parent, opslogSyncTimeout)
 	defer cancel()
 
 	updatedInstanceIDs := make(map[int64]struct{})

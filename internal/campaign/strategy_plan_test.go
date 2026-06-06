@@ -853,12 +853,12 @@ func TestRankGroupOffersForPlanning_FiltersOffersAboveMaxComputeCap(t *testing.T
 		Group: InstanceGroup{
 			GPUClass:      "NVIDIA",
 			GPUMemGB:      82,
-			MaxComputeCap: "9.0",
+			MaxComputeCap: "8.0",
 			Jobs:          []*db.Job{{ID: 1888, Project: "markov-attention", Command: "uv run python -u scripts/exp177_ols_init_for_lora.py"}},
 		},
 		Offers: []cloud.Offer{
-			{ProviderID: "blackwell", GPUName: "RTX PRO 6000 WS", GPUMemGB: 96, CostPerHour: 0.10, DLPerf: 60.0},
-			{ProviderID: "h100", GPUName: "H100", GPUMemGB: 94, CostPerHour: 0.80, DLPerf: 35.0},
+			{ProviderID: "ada", GPUName: "RTX 4090", GPUMemGB: 96, CostPerHour: 0.10, DLPerf: 60.0},
+			{ProviderID: "a100", GPUName: "A100", GPUMemGB: 94, CostPerHour: 0.80, DLPerf: 35.0},
 		},
 	}}
 
@@ -873,11 +873,11 @@ func TestRankGroupOffersForPlanning_FiltersOffersAboveMaxComputeCap(t *testing.T
 	if len(offers) != 1 || offers[0].Offer == nil {
 		t.Fatalf("expected ranked offer, got %#v", offers)
 	}
-	if offers[0].Offer.ProviderID != "h100" {
-		t.Fatalf("expected sm_9.0-compatible offer, got %s", offers[0].Offer.ProviderID)
+	if offers[0].Offer.ProviderID != "a100" {
+		t.Fatalf("expected sm_8.0-compatible offer, got %s", offers[0].Offer.ProviderID)
 	}
-	if offers[0].FilterStats.TorchArchExampleGPU != "RTX PRO 6000 WS" {
-		t.Fatalf("expected Blackwell offer to be reported as arch-filtered, got %#v", offers[0].FilterStats)
+	if offers[0].FilterStats.TorchArchExampleGPU != "RTX 4090" {
+		t.Fatalf("expected Ada offer to be reported as arch-filtered, got %#v", offers[0].FilterStats)
 	}
 }
 

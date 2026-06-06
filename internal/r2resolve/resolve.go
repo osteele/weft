@@ -37,11 +37,11 @@ var ObjectExistsFunc = func(ctx context.Context, client *r2.Client, key string) 
 // jobs/<jobID>/runs/. Used by the fallback path when latest_run_id and
 // run-zero both miss. Exported so tests can stub without a live S3 client.
 var ListRunIDsFunc = func(ctx context.Context, client *r2.Client, jobID int64) ([]int64, error) {
-	objects, err := client.ListObjects(ctx, fmt.Sprintf("jobs/%d/runs/", jobID))
+	prefix := r2keys.JobRunsPrefix(jobID)
+	objects, err := client.ListObjects(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	prefix := fmt.Sprintf("jobs/%d/runs/", jobID)
 	seen := map[int64]struct{}{}
 	var runIDs []int64
 	for _, obj := range objects {
