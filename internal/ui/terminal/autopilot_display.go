@@ -46,7 +46,8 @@ type autopilotDisplayInput struct {
 	unplaced int
 	running  int
 
-	targetCents int
+	targetCents    int
+	suppressTarget bool
 }
 
 // autopilotStatusLine renders the "Auto-pilot: ..." status line, or "" only
@@ -70,9 +71,9 @@ func autopilotStatusLine(in autopilotDisplayInput) string {
 	target := formatAutoRunRateTarget(in.targetCents)
 	if in.syncing {
 		if len(in.syncHosts) > 0 {
-			return fmt.Sprintf("Auto-pilot: syncing %s... (target %s)", strings.Join(in.syncHosts, ", "), target)
+			return fmt.Sprintf("Auto-pilot: syncing %s...%s", strings.Join(in.syncHosts, ", "), autopilotTargetParen(target, in.suppressTarget))
 		}
-		return "Auto-pilot: syncing cloud state... (target " + target + ")"
+		return "Auto-pilot: syncing cloud state..." + autopilotTargetParen(target, in.suppressTarget)
 	}
 	if in.inFlight {
 		elapsed := ""
@@ -80,11 +81,11 @@ func autopilotStatusLine(in autopilotDisplayInput) string {
 			elapsed = fmt.Sprintf(" (%s)", time.Since(in.passStartedAt).Round(time.Second))
 		}
 		phase := activePassPhase(in.passPhase, in.passStartedAt)
-		return fmt.Sprintf("Auto-pilot: evaluating %s%s%s... (target %s)",
-			pluralize(in.unplaced, "unplaced job", "unplaced jobs"), phase, elapsed, target)
+		return fmt.Sprintf("Auto-pilot: evaluating %s%s%s...%s",
+			pluralize(in.unplaced, "unplaced job", "unplaced jobs"), phase, elapsed, autopilotTargetParen(target, in.suppressTarget))
 	}
 	if in.launching {
-		return "Auto-pilot: launching instance... (target " + target + ")"
+		return "Auto-pilot: launching instance..." + autopilotTargetParen(target, in.suppressTarget)
 	}
 	if err := strings.TrimSpace(in.persistentError); err != "" {
 		return "Auto-pilot: failed — " + err
@@ -99,10 +100,24 @@ func autopilotStatusLine(in autopilotDisplayInput) string {
 		return formatAutoPilotNextPass(in.nextPassAt, in.unplaced)
 	}
 	if !in.nextSyncAt.IsZero() && time.Now().Before(in.nextSyncAt) {
-		return fmt.Sprintf("Auto-pilot: idle — next sync in %s · watching DB (%d unplaced, %d running, target %s)",
-			waitUntil(in.nextSyncAt), in.unplaced, in.running, target)
+		return fmt.Sprintf("Auto-pilot: idle — next sync in %s · watching DB (%d unplaced, %d running%s)",
+			waitUntil(in.nextSyncAt), in.unplaced, in.running, autopilotTargetClause(target, in.suppressTarget))
 	}
-	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running, target %s)", in.unplaced, in.running, target)
+	return fmt.Sprintf("Auto-pilot: monitoring (%d unplaced, %d running%s)", in.unplaced, in.running, autopilotTargetClause(target, in.suppressTarget))
+}
+
+func autopilotTargetParen(target string, suppress bool) string {
+	if suppress {
+		return ""
+	}
+	return " (target " + target + ")"
+}
+
+func autopilotTargetClause(target string, suppress bool) string {
+	if suppress {
+		return ""
+	}
+	return ", target " + target
 }
 
 // autopilotFooterState returns the A-key footer token for the single global

@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/ids"
 )
 
@@ -23,6 +24,7 @@ import (
 type selectedJobContext struct {
 	launchLiveByID        map[int64]*db.LaunchLiveState
 	launchByID            map[int64]*db.Launch
+	hostMetricsByName     map[string]*hostinfo.Host
 	hostInfoByName        map[string]*db.CachedHostInfo
 	cordonedHostsByName   map[string]bool
 	overloadedHostsByName map[string]bool
@@ -174,9 +176,9 @@ func renderJobFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) str
 // renderHostFooterLine returns the enriched Host line. For rental instances
 // with a known Launch record: "Host: wi<id> @ <Provider> · <state> ·
 // <GPU brief> · $<rate>/hr · uptime <dur> · $<cost>". For inventory hosts:
-// just "Host: <name>", with an optional "· last seen <dur> ago" when cached
-// host info is older than db.HostInfoStaleThreshold. Returns "" for
-// unplaced or nil jobs.
+// "Host: <name> · CPU <1m> (<pct>%/<cores>c) · RAM <pct> · GPU <stats>
+// · fresh/stale <dur> ago"
+// when cached host metrics are available. Returns "" for unplaced or nil jobs.
 func renderHostFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) string {
 	if job == nil {
 		return ""
@@ -194,17 +196,152 @@ func renderHostFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 		if ctx.overloadedHostsByName[host] {
 			parts = append(parts, "overloaded")
 		}
-		if info := ctx.hostInfoByName[host]; info != nil && info.LastUpdated > 0 {
-			age := now.Sub(time.Unix(info.LastUpdated, 0))
-			if age > db.HostInfoStaleThreshold {
-				parts = append(parts, "last seen "+estimate.FormatDurationShort(age)+" ago")
-			}
-		}
+		parts = appendInventoryHostTelemetry(parts, job, ctx.hostMetricsByName[host], ctx.hostInfoByName[host], now)
 		return strings.Join(parts, " · ")
 	case db.JobTargetRentalInstance:
 		return renderRentalHostLine(job, ctx, now)
 	}
 	return ""
+}
+
+func appendInventoryHostTelemetry(parts []string, job *db.Job, metrics *hostinfo.Host, cached *db.CachedHostInfo, now time.Time) []string {
+	if load := inventoryHostLoadSummary(metrics); load != "" {
+		parts = append(parts, load)
+	}
+	if ram := inventoryHostRAMSummary(metrics); ram != "" {
+		parts = append(parts, ram)
+	}
+	if gpu := inventoryHostGPUSummary(job, metrics); gpu != "" {
+		parts = append(parts, gpu)
+	}
+	if freshness := inventoryHostFreshnessSummary(metrics, cached, now); freshness != "" {
+		parts = append(parts, freshness)
+	}
+	return parts
+}
+
+func inventoryHostLoadSummary(metrics *hostinfo.Host) string {
+	if metrics == nil {
+		return ""
+	}
+	loadFields := strings.Fields(strings.ReplaceAll(metrics.LoadAvg, ",", " "))
+	if len(loadFields) == 0 {
+		return ""
+	}
+	load := loadFields[0]
+	if pct, ok := hostinfo.HostCPULoadPercent(metrics); ok && metrics.CPUs > 0 {
+		return fmt.Sprintf("CPU %s (%d%%x%dc)", load, pct, metrics.CPUs)
+	}
+	return "CPU " + load
+}
+
+func inventoryHostRAMSummary(metrics *hostinfo.Host) string {
+	if metrics == nil {
+		return ""
+	}
+	pct := metrics.RAMUtilizationPct()
+	if pct < 0 {
+		return ""
+	}
+	used := strings.TrimSpace(metrics.MemUsed)
+	total := strings.TrimSpace(metrics.MemTotal)
+	if used != "" && total != "" {
+		return fmt.Sprintf("RAM %d%% (%s/%s)", pct, used, total)
+	}
+	return fmt.Sprintf("RAM %d%%", pct)
+}
+
+func inventoryHostGPUSummary(job *db.Job, metrics *hostinfo.Host) string {
+	if job == nil {
+		return ""
+	}
+	devices := splitGPUDevices(job.GPUDevice())
+	if len(devices) == 0 {
+		return ""
+	}
+	if metrics == nil || len(metrics.GPUs) == 0 {
+		return "GPU " + strings.Join(devices, ",")
+	}
+	byIndex := make(map[int]hostinfo.GPUInfo, len(metrics.GPUs))
+	for _, gpu := range metrics.GPUs {
+		byIndex[gpu.Index] = gpu
+	}
+	parts := make([]string, 0, len(devices))
+	for _, device := range devices {
+		label := device
+		if idx, ok := parseGPUDeviceIndex(device); ok {
+			if gpu, found := byIndex[idx]; found {
+				label = inventoryGPUDeviceSummary(device, gpu)
+			}
+		}
+		parts = append(parts, label)
+	}
+	return "GPU " + strings.Join(parts, ", ")
+}
+
+func splitGPUDevices(devices string) []string {
+	fields := strings.FieldsFunc(devices, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+func parseGPUDeviceIndex(device string) (int, bool) {
+	var idx int
+	if _, err := fmt.Sscanf(device, "%d", &idx); err != nil {
+		return 0, false
+	}
+	return idx, true
+}
+
+func inventoryGPUDeviceSummary(device string, gpu hostinfo.GPUInfo) string {
+	parts := []string{device}
+	if gpu.Utilization > 0 || gpu.MemUsed != "" {
+		parts = append(parts, fmt.Sprintf("%d%%", gpu.Utilization))
+	}
+	if gpu.MemUsed != "" && gpu.MemTotal != "" {
+		parts = append(parts, compactMetricRatio(gpu.MemUsed, gpu.MemTotal))
+	}
+	if gpu.Temperature > 0 {
+		parts = append(parts, fmt.Sprintf("%dC", gpu.Temperature))
+	}
+	return strings.Join(parts, " ")
+}
+
+func compactMetricRatio(used, total string) string {
+	return compactMetricValue(used) + "/" + compactMetricValue(total)
+}
+
+func compactMetricValue(s string) string {
+	return strings.ReplaceAll(strings.TrimSpace(s), " ", "")
+}
+
+func inventoryHostFreshnessSummary(metrics *hostinfo.Host, cached *db.CachedHostInfo, now time.Time) string {
+	var checkedAt time.Time
+	if metrics != nil && !metrics.LastCheck.IsZero() {
+		checkedAt = metrics.LastCheck
+	} else if cached != nil && cached.LastUpdated > 0 {
+		checkedAt = time.Unix(cached.LastUpdated, 0)
+	}
+	if checkedAt.IsZero() {
+		return ""
+	}
+	age := now.Sub(checkedAt)
+	if age < 0 {
+		age = 0
+	}
+	state := "fresh"
+	if age > db.HostInfoStaleThreshold {
+		state = "stale"
+	}
+	return state + " " + estimate.FormatDurationShort(age) + " ago"
 }
 
 func renderRentalHostLine(job *db.Job, ctx selectedJobContext, now time.Time) string {

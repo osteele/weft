@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/oplog"
@@ -107,6 +108,7 @@ type listTUIModel struct {
 	launchSpinner              spinner.Model
 	launchSpinnerRunning       bool
 	recentFailedInstances      *recentFailedInstances
+	hostMetricsByName          map[string]*hostinfo.Host
 	hostInfoByName             map[string]*db.CachedHostInfo
 	cordonedHostsByName        map[string]bool
 	overloadedHostsByName      map[string]bool
@@ -668,6 +670,12 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case listSyncWorkerResultMsg:
 		if msg.result.Host != "" {
 			delete(m.pendingSyncHosts, msg.result.Host)
+			if msg.result.HostFull != nil {
+				if m.hostMetricsByName == nil {
+					m.hostMetricsByName = map[string]*hostinfo.Host{}
+				}
+				m.hostMetricsByName[msg.result.Host] = msg.result.HostFull
+			}
 		}
 		if msg.result.Error != nil {
 			if !m.quickLaunchStatusProtected() {
@@ -1362,6 +1370,7 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		unplaced:        m.countUnplacedQueuedJobs(),
 		running:         visibleRunning,
 		targetCents:     m.autoRunRateTargetCents,
+		suppressTarget:  true,
 	})
 }
 
@@ -1429,6 +1438,7 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 	return renderSelectedJobDetail(job, selectedJobContext{
 		launchLiveByID:        m.launchLiveByID,
 		launchByID:            m.launchByID,
+		hostMetricsByName:     m.hostMetricsByName,
 		hostInfoByName:        m.hostInfoByName,
 		cordonedHostsByName:   m.cordonedHostsByName,
 		overloadedHostsByName: m.overloadedHostsByName,

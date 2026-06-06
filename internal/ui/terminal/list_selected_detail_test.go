@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
 )
 
 func TestSelectedJobDetail_InventoryHost(t *testing.T) {
@@ -465,19 +466,54 @@ func TestSelectedJobDetail_InventoryLastSeenWhenStale(t *testing.T) {
 		Status:    db.StatusRunning,
 		StartTime: now.Add(-1 * time.Minute).Unix(),
 	}
-	// Fresh (under threshold): no suffix.
+	// Fresh (under threshold): explicit freshness.
 	fresh := selectedJobContext{hostInfoByName: map[string]*db.CachedHostInfo{
 		"cool30": {Name: "cool30", LastUpdated: now.Add(-4 * time.Minute).Unix()},
 	}}
-	if got := renderHostFooterLine(job, fresh, now); got != "Host: cool30" {
-		t.Errorf("fresh host info must not add 'last seen', got: %s", got)
+	if got := renderHostFooterLine(job, fresh, now); got != "Host: cool30 · fresh 4m ago" {
+		t.Errorf("fresh host info should show freshness, got: %s", got)
 	}
-	// Stale (over threshold): suffix present.
+	// Stale (over threshold): stale suffix present.
 	stale := selectedJobContext{hostInfoByName: map[string]*db.CachedHostInfo{
 		"cool30": {Name: "cool30", LastUpdated: now.Add(-10 * time.Minute).Unix()},
 	}}
 	got := renderHostFooterLine(job, stale, now)
-	if !strings.Contains(got, "Host: cool30") || !strings.Contains(got, "last seen") {
-		t.Errorf("stale host info must show 'last seen', got: %s", got)
+	if !strings.Contains(got, "Host: cool30") || !strings.Contains(got, "stale 10m ago") {
+		t.Errorf("stale host info must show stale age, got: %s", got)
+	}
+}
+
+func TestSelectedJobDetail_InventoryHostLoad(t *testing.T) {
+	now := time.Unix(4_000_000, 0)
+	job := &db.Job{
+		ID:        10,
+		Host:      "cool30",
+		Status:    db.StatusRunning,
+		StartTime: now.Add(-1 * time.Minute).Unix(),
+		Metadata:  &db.JobMetadata{Resource: &db.ResourceUsage{GPUDevices: "0"}},
+	}
+	ctx := selectedJobContext{hostMetricsByName: map[string]*hostinfo.Host{
+		"cool30": {
+			Name:     "cool30",
+			CPUs:     8,
+			LoadAvg:  "4.0, 3.0, 2.0",
+			MemUsed:  "32G",
+			MemTotal: "128G",
+			GPUs: []hostinfo.GPUInfo{{
+				Index:       0,
+				Name:        "NVIDIA RTX 3090",
+				Utilization: 81,
+				MemUsed:     "12 GiB",
+				MemTotal:    "24 GiB",
+				Temperature: 66,
+			}},
+			LastCheck: now.Add(-30 * time.Second),
+		},
+	}}
+	got := renderHostFooterLine(job, ctx, now)
+	for _, want := range []string{"Host: cool30", "CPU 4.0 (50%x8c)", "RAM 25% (32G/128G)", "GPU 0 81% 12GiB/24GiB 66C", "fresh 30s ago"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in host footer, got: %s", want, got)
+		}
 	}
 }

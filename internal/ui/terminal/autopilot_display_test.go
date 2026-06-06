@@ -57,6 +57,21 @@ func TestAutopilotStatusLineEmptyOnlyWhileBudgetPromptOpen(t *testing.T) {
 	}
 }
 
+func TestAutopilotStatusLineCanSuppressTarget(t *testing.T) {
+	line := autopilotStatusLine(autopilotDisplayInput{
+		syncing:        true,
+		syncHosts:      []string{"cool30", "studio"},
+		targetCents:    350,
+		suppressTarget: true,
+	})
+	if line != "Auto-pilot: syncing cool30, studio..." {
+		t.Fatalf("status line = %q, want target omitted", line)
+	}
+	if strings.Contains(line, "target") {
+		t.Fatalf("status line = %q, target should be omitted", line)
+	}
+}
+
 func TestAutopilotFooterState(t *testing.T) {
 	if got := autopilotFooterState(false); got != "ON" {
 		t.Fatalf("autopilotFooterState(false) = %q, want ON", got)
