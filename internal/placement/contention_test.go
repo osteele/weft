@@ -92,6 +92,43 @@ func TestRecordContentionObs_NilSafe(t *testing.T) {
 	RecordContentionObs(db, "host1", nil)
 }
 
+func TestRecentHostMetricsRequiresFreshObservationForEveryHost(t *testing.T) {
+	db := setupContentionDB(t)
+	now := time.Now().Unix()
+	_, _ = db.Exec(`INSERT INTO host_contention_obs (host, gpu_pct, cpu_pct, queue_depth, gpu_jobs_queued, observed_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, "host1", 42, 30, 2, 1, now)
+
+	metrics, ok, err := RecentHostMetrics(db, []string{"host1"}, time.Minute)
+	if err != nil {
+		t.Fatalf("RecentHostMetrics: %v", err)
+	}
+	if !ok {
+		t.Fatal("RecentHostMetrics returned ok=false for fresh complete snapshot")
+	}
+	if got := metrics["host1"].GPUPercent; got != 42 {
+		t.Fatalf("GPUPercent = %d, want 42", got)
+	}
+
+	if _, ok, err := RecentHostMetrics(db, []string{"host1", "host2"}, time.Minute); err != nil {
+		t.Fatalf("RecentHostMetrics missing-host: %v", err)
+	} else if ok {
+		t.Fatal("RecentHostMetrics returned ok=true with a missing host")
+	}
+}
+
+func TestRecentHostMetricsRejectsStaleObservation(t *testing.T) {
+	db := setupContentionDB(t)
+	old := time.Now().Add(-10 * time.Minute).Unix()
+	_, _ = db.Exec(`INSERT INTO host_contention_obs (host, gpu_pct, cpu_pct, queue_depth, gpu_jobs_queued, observed_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, "host1", 80, 50, 4, 2, old)
+
+	if _, ok, err := RecentHostMetrics(db, []string{"host1"}, time.Minute); err != nil {
+		t.Fatalf("RecentHostMetrics: %v", err)
+	} else if ok {
+		t.Fatal("RecentHostMetrics returned ok=true for stale observation")
+	}
+}
+
 func TestRecentContentionStats_IgnoresOldData(t *testing.T) {
 	db := setupContentionDB(t)
 	// Insert very old observation (48h ago)

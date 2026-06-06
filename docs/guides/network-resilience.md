@@ -20,11 +20,16 @@ state even if it was restarted elsewhere.
 ## Connection-aware job submission
 
 When you start a job (`weft run` or `weft job start`), the CLI
-records the job locally before touching the remote host. If SSH cannot be
-established, the job is deferred to the remote queue automatically. A
-`weft sync` (or any command
-that syncs) will add the job back to the host's queue when it becomes
-reachable. No work is lost, and you no longer need a separate retry command.
+records the job locally before touching the remote host. Hostless `weft run`
+uses recent database host state when it can, then leaves slow live probing,
+rental reuse, instance creation, and SSH dispatch to the daemon/autopilot. If
+recent host state is stale, the command returns with placement pending instead
+of blocking on SSH.
+
+For explicit-host submissions, if SSH cannot be established, the job is
+deferred to the remote queue automatically. A `weft sync` (or any command that
+syncs) will add the job back to the host's queue when it becomes reachable. No
+work is lost, and you no longer need a separate retry command.
 
 Queue submissions behave the same way. `plan submit` and `queue add` now
 spool queue entries locally whenever the host is unreachable. The job remains

@@ -21,6 +21,12 @@ weft run --gpu ampere+ 'python train.py'
 weft run --tag rental --gpu a100 'python train.py'
 ```
 
+Hostless `weft run` records the job locally first. If recent host-state
+observations are available, it can select an on-prem host from the database
+without probing SSH; otherwise it reports that placement is pending. The
+daemon/autopilot performs live host probes, reuses existing rental instances,
+or launches new instances after submission.
+
 These forms bypass placement and target the named host directly:
 
 ```bash

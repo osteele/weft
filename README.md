@@ -19,7 +19,8 @@ than ad hoc SSH scripts, without adopting a heavyweight HPC scheduler.
   rental capacity, and marks overloaded hosts/jobs in terminal dashboards.
 - Runs jobs in durable remote sessions managed by a Go agent.
 - Tracks logs, exit status, progress, artifacts, and job metadata locally.
-- Dispatches directly over SSH; remote agents keep jobs moving after disconnects.
+- Submits jobs locally first; daemon/autopilot placement and SSH dispatch keep
+  submission responsive even when hosts are slow to probe.
 - Bursts to Vast.ai or RunPod when local machines are full.
 - Shows active jobs, queues, cloud instances, and hosts from terminal and web
   views.

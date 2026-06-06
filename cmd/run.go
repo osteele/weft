@@ -113,6 +113,8 @@ const defaultGPUMemGB = opsqueue.DefaultGPUMemGB
 const (
 	runCloudReuseAckWaitTimeout  = 250 * time.Millisecond
 	runCloudReuseAckPollInterval = 50 * time.Millisecond
+	runAutoPlacementWaitTimeout  = 2 * time.Second
+	runAutoPlacementPollInterval = 100 * time.Millisecond
 )
 
 type cloudReuseSubmitOutcome int
@@ -384,20 +386,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	rec := newRunPhaseRecorder(cmd.ErrOrStderr(), command)
 	defer rec.PrintSummary()
 
-	// Skip predictor entirely when placement won't use it: explicit --host,
-	// rental-tagged jobs (skip on-prem placement), or draft submissions. This
-	// avoids both the readiness check and the later gpu-mem prediction path
-	// (which both cold-start `uv run` and dominate submission latency).
-	predictorNeeded := host == "" && !db.HasRentalTag(runTags) && !runDraft
-	if predictorNeeded {
-		endPredictor := rec.Phase("predictor", "checking predictor")
-		err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction")
-		endPredictor()
-		if err != nil {
-			return err
-		}
-	}
-
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided
 	dirExplicit := runDir != ""
@@ -667,6 +655,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if hasRequestedProvider && host != "" && !db.IsLaunchHost(host) {
 		return fmt.Errorf("--provider=%s cannot be used with inventory host %q; omit --host to keep the job unplaced for rental launch", requestedProvider, host)
 	}
+	fastAutoSubmit := host == "" && !runDraft && !runDryRun && !runWait && !runFollow && runAfter == 0 && runAfterAny == 0
+	// Skip predictor entirely when placement won't use it: explicit --host,
+	// rental-tagged jobs, draft submissions, and the fast auto-submit path.
+	// The daemon/autopilot performs predictor-backed placement after the job
+	// is durably recorded.
+	predictorNeeded := host == "" && !db.HasRentalTag(runTags) && !runDraft && !fastAutoSubmit
+	if predictorNeeded {
+		endPredictor := rec.Phase("predictor", "checking predictor")
+		err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction")
+		endPredictor()
+		if err != nil {
+			return err
+		}
+	}
 
 	gpu := extractGPUFromEnvVars(runEnvVars)
 	gpuClass := runGPUClass
@@ -710,8 +712,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// needs_classify.go does the actual routing at launch time).
 	placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
 
-	// Build predictor closure if configured
-	predict := placement.BuildJobPredictorFromConfig(cfg, placementConstraints)
+	// Build predictor closure if configured and used by this path.
+	var predict placement.JobPredictor
+	if predictorNeeded {
+		predict = placement.BuildJobPredictorFromConfig(cfg, placementConstraints)
+	}
 
 	if runDryRun {
 		endPlacement := rec.Phase("placement", "scoring hosts")
@@ -821,43 +826,69 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Route through local placement for non-draft, non-dependency submissions
+	// Route through local placement for non-draft, non-dependency submissions.
+	// Auto-placement records jobs first and lets the daemon/autopilot do slow
+	// live probes and dispatch. It may choose an on-prem host from recent DB
+	// observations, but never contacts SSH on the submit path.
 	if !runDraft && runAfter == 0 && runAfterAny == 0 {
 		var placementResult *placement.PlacementResult
 		var placementPlan *placement.PlacementPlan
+		autoPlacementPendingReason := "daemon placement pending"
+		autoPlacedFromDB := false
 
 		if host == "" {
-			// Build sources: on-prem + cloud reuse
-			sources := []placement.CandidateSource{&placement.OnPremSource{}, &campaign.ReuseSource{}}
-			endPlacement := rec.Phase("placement", "evaluating placement")
-			plan, err := placement.Evaluate(placement.EvaluateRequest{
-				Constraints: placementConstraints,
-				Predictor:   predict,
-				Sources:     sources,
-				Database:    database,
-			})
-			endPlacement()
-			if err != nil {
-				return err
-			}
-
-			// Pick the "fast" strategy (survival-adjusted wallclock)
-			pick := plan.Fast
-			if pick == nil {
-				pick = plan.Cheap
-			}
-
-			if pick != nil && pick.Kind == placement.CandidateOnPrem && pick.OnPrem != nil {
-				placementResult = pick.OnPrem
-				host = pick.OnPrem.Host
-				oplog.Log(oplog.OpPlacementDecided,
-					oplog.WithHost(host),
-					oplog.WithDetail(placement.FormatPlacementDetail(pick.OnPrem)))
-			} else if pick != nil && pick.Kind == placement.CandidateCloudReuse && pick.Reuse != nil {
-				// Cloud reuse selected — will handle after job creation
+			if fastAutoSubmit {
+				endPlacement := rec.Phase("placement", "checking recent host state")
+				plan, recent, err := evaluateRecentOnPremPlacement(database, placementConstraints)
+				endPlacement()
+				if err != nil {
+					return err
+				}
+				if !recent {
+					autoPlacementPendingReason = "recent host state unavailable"
+				} else if plan != nil {
+					placementPlan = plan
+					pick := plan.Fast
+					if pick == nil {
+						pick = plan.Cheap
+					}
+					if pick != nil && pick.Kind == placement.CandidateOnPrem && pick.OnPrem != nil {
+						placementResult = pick.OnPrem
+						host = pick.OnPrem.Host
+						autoPlacedFromDB = true
+						oplog.Log(oplog.OpPlacementDecided,
+							oplog.WithHost(host),
+							oplog.WithDetail(placement.FormatPlacementDetail(pick.OnPrem)))
+					} else if plan.Unplaced {
+						autoPlacementPendingReason = "no eligible on-prem host in recent DB state"
+					}
+				}
+			} else {
+				sources := []placement.CandidateSource{&placement.OnPremSource{}, &campaign.ReuseSource{}}
+				endPlacement := rec.Phase("placement", "evaluating placement")
+				plan, err := placement.Evaluate(placement.EvaluateRequest{
+					Constraints: placementConstraints,
+					Predictor:   predict,
+					Sources:     sources,
+					Database:    database,
+				})
+				endPlacement()
+				if err != nil {
+					return err
+				}
 				placementPlan = plan
+				pick := plan.Fast
+				if pick == nil {
+					pick = plan.Cheap
+				}
+				if pick != nil && pick.Kind == placement.CandidateOnPrem && pick.OnPrem != nil {
+					placementResult = pick.OnPrem
+					host = pick.OnPrem.Host
+					oplog.Log(oplog.OpPlacementDecided,
+						oplog.WithHost(host),
+						oplog.WithDetail(placement.FormatPlacementDetail(pick.OnPrem)))
+				}
 			}
-			// else: unplaced
 		}
 
 		// Build queue params
@@ -922,50 +953,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		if host == "" {
-			// If Evaluate selected cloud reuse, submit the job now
-			if placementPlan != nil && placementPlan.Fast != nil && placementPlan.Fast.Reuse != nil {
-				r2Client, err := newR2ClientFromConfig()
-				if err == nil {
-					job, _ := db.GetJobByID(database, jobID)
-					if job != nil {
-						instanceID := placementPlan.Fast.Reuse.InstanceID
-						outcome, dur, submitErr := submitJobToCloudReuse(database, r2Client, instanceID, job)
-						switch outcome {
-						case cloudReuseAckReceived:
-							oplog.Log(oplog.OpCloudSetJobInstance,
-								oplog.WithJobID(jobID),
-								oplog.WithDetailf("instance=%d ack=received", instanceID),
-								oplog.WithDuration(dur))
-							fmt.Printf("Job #%d submitted to rental instance %s (%s)\n",
-								jobID, ids.FormatInstanceID(instanceID), placementPlan.Fast.Reuse.DisplayName)
-							return nil
-						case cloudReuseAckNotObserved:
-							oplog.Log(oplog.OpCloudSetJobInstance,
-								oplog.WithJobID(jobID),
-								oplog.WithDetailf("instance=%d ack=not_observed timeout_ms=%d", instanceID, runCloudReuseAckWaitTimeout.Milliseconds()),
-								oplog.WithDuration(dur))
-							fmt.Printf("Job #%d sent to rental instance %s (%s); acknowledgment not yet received. Check status later.\n",
-								jobID, ids.FormatInstanceID(instanceID), placementPlan.Fast.Reuse.DisplayName)
-							return nil
-						default:
-							oplog.Log(oplog.OpCloudSetJobInstance,
-								oplog.WithJobID(jobID),
-								oplog.WithDetailf("instance=%d ack=error", instanceID),
-								oplog.WithDuration(dur),
-								oplog.WithError(submitErr))
-						}
-					}
-				}
-			}
-			if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
-				slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
-			} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
+			reasons := []string{autoPlacementPendingReason}
+			if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
 				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 			}
-			if cfg.ShowRentalHints {
-				printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints, placementResult)
-			}
-			printSubmissionPreview(cmd.OutOrStdout(), placementResult)
+			printAutoPlacementPending(cmd.OutOrStdout(), database, jobID, autoPlacementPendingReason)
 			return nil
 		}
 
@@ -1007,8 +999,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		printDiskPreview(w, diskMeta)
 
-		// Push the job to the remote host before waiting/following.
-		deferred := !syncHostWithProgress(database, host, runNoSync, rec)
+		// Push explicit-host jobs immediately. Auto-placed jobs intentionally
+		// leave dispatch to the daemon so submission avoids live SSH probes.
+		deferred := autoPlacedFromDB
+		if autoPlacedFromDB {
+			rec.Event("sync deferred — daemon will dispatch selected host")
+		} else {
+			deferred = !syncHostWithProgress(database, host, runNoSync, rec)
+		}
 
 		// wait/follow handlers call os.Exit, which would bypass the deferred
 		// PrintSummary. Print it now so the user sees phase timing before
@@ -1207,6 +1205,79 @@ func scanRunScriptMeta(localDir, command string) (*dataloc.ScriptMeta, error) {
 		return nil, fmt.Errorf("invalid script metadata: %w", err)
 	}
 	return scriptMeta, nil
+}
+
+func evaluateRecentOnPremPlacement(database *sql.DB, constraints placement.Constraints) (*placement.PlacementPlan, bool, error) {
+	hostNames, err := placement.LoadHostNames()
+	if err != nil {
+		return nil, false, fmt.Errorf("load host inventory: %w", err)
+	}
+	metrics, recent, err := placement.RecentHostMetrics(database, hostNames, db.HostInfoStaleThreshold)
+	if err != nil || !recent {
+		return nil, recent, err
+	}
+	scores, err := placement.ScoreHostsWithPredictor(database, constraints, metrics, nil)
+	if err != nil {
+		return nil, true, err
+	}
+	for _, s := range scores {
+		if !s.Eligible || metrics[s.Host] == nil {
+			continue
+		}
+		result := &placement.PlacementResult{
+			Host:          s.Host,
+			Reasons:       s.Reasons,
+			Scores:        scores,
+			Metrics:       metrics,
+			CompletionEst: s.CompletionEst,
+		}
+		candidate := placement.Candidate{
+			Kind:        placement.CandidateOnPrem,
+			ID:          s.Host,
+			DisplayName: s.Host,
+			EstTime:     s.CompletionEst,
+			Survival:    1.0,
+			OnPrem:      result,
+		}
+		return &placement.PlacementPlan{
+			Candidates: []placement.Candidate{candidate},
+			Cheap:      &candidate,
+			Fast:       &candidate,
+			Fastest:    &candidate,
+		}, true, nil
+	}
+	return &placement.PlacementPlan{Unplaced: true}, true, nil
+}
+
+func printAutoPlacementPending(w io.Writer, database *sql.DB, jobID int64, reason string) {
+	if placed := waitForAutoPlacement(database, jobID, runAutoPlacementWaitTimeout); placed != nil {
+		switch placed.TargetKind() {
+		case db.JobTargetInventoryHost:
+			fmt.Fprintf(w, "Job #%d accepted and queued on %s\n", jobID, placed.Host)
+		case db.JobTargetRentalInstance:
+			if placed.LaunchID != nil {
+				fmt.Fprintf(w, "Job #%d accepted and assigned to rental instance %s\n", jobID, ids.FormatInstanceID(*placed.LaunchID))
+			} else {
+				fmt.Fprintf(w, "Job #%d accepted and assigned to %s\n", jobID, placed.Host)
+			}
+		default:
+			fmt.Fprintf(w, "Job #%d accepted; placement pending (%s)\n", jobID, reason)
+		}
+		return
+	}
+	fmt.Fprintf(w, "Job #%d accepted; placement pending (%s)\n", jobID, reason)
+}
+
+func waitForAutoPlacement(database *sql.DB, jobID int64, timeout time.Duration) *db.Job {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		job, err := db.GetJobByID(database, jobID)
+		if err == nil && job != nil && job.TargetKind() != db.JobTargetUnplaced {
+			return job
+		}
+		time.Sleep(runAutoPlacementPollInterval)
+	}
+	return nil
 }
 
 // printUnplacedJobMessage prints user-facing output when a job has no eligible local host.

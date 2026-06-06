@@ -20,6 +20,37 @@ func RecordContentionObs(db *sql.DB, host string, metrics *HostMetrics) {
 		time.Now().Unix())
 }
 
+// RecentHostMetrics returns latest contention observations for all requested
+// hosts when every host has an observation newer than maxAge. Missing or stale
+// observations make the snapshot unusable for synchronous no-probe placement.
+func RecentHostMetrics(db *sql.DB, hosts []string, maxAge time.Duration) (map[string]*HostMetrics, bool, error) {
+	if db == nil || len(hosts) == 0 {
+		return nil, false, nil
+	}
+	cutoff := time.Now().Add(-maxAge).Unix()
+	metrics := make(map[string]*HostMetrics, len(hosts))
+	for _, host := range hosts {
+		row := db.QueryRow(`SELECT gpu_pct, cpu_pct, queue_depth, gpu_jobs_queued, observed_at
+			FROM host_contention_obs
+			WHERE host = ?
+			ORDER BY observed_at DESC
+			LIMIT 1`, host)
+		var m HostMetrics
+		var observedAt int64
+		if err := row.Scan(&m.GPUPercent, &m.CPUPercent, &m.QueueDepth, &m.GPUJobsQueued, &observedAt); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, false, nil
+			}
+			return nil, false, err
+		}
+		if observedAt < cutoff {
+			return nil, false, nil
+		}
+		metrics[host] = &m
+	}
+	return metrics, true, nil
+}
+
 // ContentionStats summarizes recent contention observations for a host.
 type ContentionStats struct {
 	AvgGPUPct        float64

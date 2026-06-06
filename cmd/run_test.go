@@ -10,8 +10,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/spf13/cobra"
 )
@@ -272,6 +275,46 @@ func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Draft job #") {
 		t.Fatalf("output missing draft confirmation:\n%s", out.String())
+	}
+}
+
+func TestEvaluateRecentOnPremPlacementRequiresFreshMetrics(t *testing.T) {
+	database := db.SetupTestDB(t)
+	inventory.UseTestHosts(t)
+
+	plan, recent, err := evaluateRecentOnPremPlacement(database, placement.Constraints{GPUClass: "a100", GPUMemGB: 80})
+	if err != nil {
+		t.Fatalf("evaluateRecentOnPremPlacement: %v", err)
+	}
+	if recent || plan != nil {
+		t.Fatalf("got recent=%v plan=%#v, want stale/no plan", recent, plan)
+	}
+}
+
+func TestEvaluateRecentOnPremPlacementUsesDBMetricsOnly(t *testing.T) {
+	database := db.SetupTestDB(t)
+	inventory.UseTestHosts(t)
+	now := time.Now().Unix()
+	for _, host := range []string{"host-alpha", "host-beta", "host-gamma"} {
+		_, err := database.Exec(`INSERT INTO host_contention_obs (host, gpu_pct, cpu_pct, queue_depth, gpu_jobs_queued, observed_at)
+			VALUES (?, ?, ?, ?, ?, ?)`, host, 5, 10, 0, 0, now)
+		if err != nil {
+			t.Fatalf("insert contention obs: %v", err)
+		}
+	}
+
+	plan, recent, err := evaluateRecentOnPremPlacement(database, placement.Constraints{GPUClass: "a100", GPUMemGB: 80})
+	if err != nil {
+		t.Fatalf("evaluateRecentOnPremPlacement: %v", err)
+	}
+	if !recent {
+		t.Fatal("recent = false, want true")
+	}
+	if plan == nil || plan.Fast == nil || plan.Fast.OnPrem == nil {
+		t.Fatalf("plan missing on-prem candidate: %#v", plan)
+	}
+	if got := plan.Fast.OnPrem.Host; got != "host-alpha" {
+		t.Fatalf("selected host = %q, want host-alpha", got)
 	}
 }
 
