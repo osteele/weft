@@ -566,9 +566,13 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 		jobs = filterRentalLaunchJobs(jobs)
 		jobs = filterLaunchJobsForScope(jobs, m.projectFilter)
 		if len(jobs) == 0 {
-			msg := "No jobs need rental GPUs."
+			msg := "No unplaced jobs need new rental GPUs."
 			if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
-				msg += fmt.Sprintf(" (%d job(s) waiting on instances still setting up)", n)
+				if n == 1 {
+					msg += " 1 queued job is already assigned to a rental instance and not started yet."
+				} else {
+					msg += fmt.Sprintf(" %d queued jobs are already assigned to a rental instance and not started yet.", n)
+				}
 			}
 			return launchPlanReadyMsg{flash: msg}
 		}

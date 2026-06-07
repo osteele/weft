@@ -94,6 +94,29 @@ func TestFilterRentalLaunchJobsExcludesInventoryJobs(t *testing.T) {
 	}
 }
 
+func TestNoRentalLaunchNeededMessageReportsAssignedQueuedJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "A40"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo hi", "assigned", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	got := noRentalLaunchNeededMessage(database)
+	if !strings.Contains(got, "No unplaced jobs need new rental GPUs.") {
+		t.Fatalf("missing no-unplaced message: %q", got)
+	}
+	if !strings.Contains(got, "1 queued job is already assigned to a rental instance and not started yet.") {
+		t.Fatalf("missing assigned queued summary: %q", got)
+	}
+}
+
 func TestFilterLaunchJobsByDependencies(t *testing.T) {
 	database := db.SetupTestDB(t)
 

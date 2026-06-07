@@ -389,6 +389,12 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 
 		if len(entries) == 0 && len(outputAssets) == 0 && len(cloudOutputFiles) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
+			if job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "Job %s has not started yet; no artifacts are available.\n", ids.FormatJobID(job.ID))
+				for _, line := range queuedPlacementLines(database, job) {
+					fmt.Fprintf(cmd.OutOrStdout(), "%-12s %s\n", line.Label+":", line.Value)
+				}
+			}
 			continue
 		}
 		for _, entry := range entries {

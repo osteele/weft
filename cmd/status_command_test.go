@@ -498,6 +498,74 @@ func TestRunJobInfoRentalDisplaysHostElapsedEstimateETAAndCost(t *testing.T) {
 	}
 }
 
+func TestRunStatusQueuedRentalShowsPlacementAndQueueReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, jobID := createRentalQueuedJobWithInstance(t, database)
+
+	restoreStatusFlags(t)
+	statusNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+	if !strings.Contains(out, fmt.Sprintf("Placement: assigned to wi%d", instanceID)) {
+		t.Fatalf("missing placement line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Queue reason: waiting for assigned target to start the job") {
+		t.Fatalf("missing queue reason, got:\n%s", out)
+	}
+}
+
+func TestRunJobInfoQueuedUnplacedShowsPlacement(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "unplaced", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Placement:   unplaced, awaiting assignment") {
+		t.Fatalf("missing unplaced placement line, got:\n%s", out)
+	}
+}
+
+func TestRunJobInfoQueuedRentalBehindRunningJobShowsQueueReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, queuedID := createRentalQueuedJobWithInstance(t, database)
+	runningID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo run", "running", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(running): %v", err)
+	}
+	if err := db.SetJobLaunchID(database, runningID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID(running): %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, now, runningID); err != nil {
+		t.Fatalf("set running attempt: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(queuedID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, fmt.Sprintf("Queue reason: waiting behind %s", ids.FormatJobID(runningID))) {
+		t.Fatalf("missing behind-running queue reason, got:\n%s", out)
+	}
+}
+
 func TestRunJobInfoRentalSharedInstanceUsesSetupAndRunCostBasis(t *testing.T) {
 	database := db.SetupTestDB(t)
 	now := time.Now().Unix()
@@ -613,6 +681,12 @@ func float64PtrSC(v float64) *float64 {
 
 func createRentalQueuedJob(t *testing.T, database *sql.DB) int64 {
 	t.Helper()
+	_, jobID := createRentalQueuedJobWithInstance(t, database)
+	return jobID
+}
+
+func createRentalQueuedJobWithInstance(t *testing.T, database *sql.DB) (int64, int64) {
+	t.Helper()
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
 		Status:   db.LaunchStatusRunning,
@@ -630,7 +704,7 @@ func createRentalQueuedJob(t *testing.T, database *sql.DB) int64 {
 	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	return jobID
+	return instanceID, jobID
 }
 
 func restoreStatusFlags(t *testing.T) {

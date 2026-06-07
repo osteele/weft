@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -495,5 +496,45 @@ func TestRunArtifactListSync_ReadOnlySyncFailureFallsBackToCachedArtifacts(t *te
 	}
 	if got := errBuf.String(); !strings.Contains(got, "skipped artifact sync") {
 		t.Fatalf("stderr missing readonly sync warning, got:\n%s", got)
+	}
+}
+
+func TestRunArtifactListQueuedNotStartedShowsPlacementContext(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp/project", "echo hi", "artifact list", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	prevListSync := artifactListSync
+	t.Cleanup(func() {
+		artifactListSync = prevListSync
+	})
+	artifactListSync = false
+
+	outBuf := &bytes.Buffer{}
+	c := &cobra.Command{}
+	c.SetOut(outBuf)
+
+	if err := runArtifactList(c, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactList: %v", err)
+	}
+
+	out := outBuf.String()
+	if !strings.Contains(out, "No cached artifacts.") {
+		t.Fatalf("missing empty artifact message, got:\n%s", out)
+	}
+	if !strings.Contains(out, "has not started yet; no artifacts are available") {
+		t.Fatalf("missing not-started explanation, got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Placement:   assigned to wi%d", instanceID)) {
+		t.Fatalf("missing placement context, got:\n%s", out)
 	}
 }

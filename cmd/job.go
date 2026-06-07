@@ -1098,6 +1098,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("Status:      %s%s\n", statusText, tombstone)
 		}
+		printPlacementLines(queuedPlacementLines(database, job), 12)
 		if job.Priority > 0 {
 			fmt.Printf("Priority:    %d\n", job.Priority)
 		}

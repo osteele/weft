@@ -672,6 +672,7 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 	} else {
 		fmt.Printf("Status:   %s\n", effectiveStatus)
 	}
+	printPlacementLines(queuedPlacementLines(database, job), 10)
 	if x.SuggestedAction != "" && x.SuggestedAction != "none" {
 		fmt.Printf("Explain:  %s\n", x.SuggestedAction)
 	}

@@ -141,10 +141,7 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(jobs) == 0 {
-		fmt.Println("No jobs need rental GPUs.")
-		if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
-			fmt.Printf("(%d job(s) waiting on instances still setting up)\n", n)
-		}
+		printNoRentalLaunchNeeded(database)
 		return nil
 	}
 
@@ -160,10 +157,7 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 		if instanceLaunchGPU != "" {
 			fmt.Printf("No unplaced jobs match GPU class %q.\n", instanceLaunchGPU)
 		} else {
-			fmt.Println("No jobs need rental GPUs.")
-			if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
-				fmt.Printf("(%d job(s) waiting on instances still setting up)\n", n)
-			}
+			printNoRentalLaunchNeeded(database)
 		}
 		return nil
 	}
@@ -687,6 +681,25 @@ func formatLaunchPlanProgress(progress campaign.PlanProgress) string {
 		message += " — " + progress.Detail
 	}
 	return message
+}
+
+func printNoRentalLaunchNeeded(database *sql.DB) {
+	fmt.Println(noRentalLaunchNeededMessage(database))
+}
+
+func noRentalLaunchNeededMessage(database *sql.DB) string {
+	msg := "No unplaced jobs need new rental GPUs."
+	if n, err := db.CountJobsWaitingOnInstances(database); err == nil && n > 0 {
+		msg += " " + pluralizeQueuedJobCount(n) + " already assigned to a rental instance and not started yet."
+	}
+	return msg
+}
+
+func pluralizeQueuedJobCount(n int) string {
+	if n == 1 {
+		return "1 queued job is"
+	}
+	return fmt.Sprintf("%d queued jobs are", n)
 }
 
 type launchWatchScope string

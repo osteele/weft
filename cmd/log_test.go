@@ -54,6 +54,12 @@ func TestRunLogForJob_QueuedPlacedJobHasNoLogsYet(t *testing.T) {
 	if !strings.Contains(out, "has not started yet; no logs are available") {
 		t.Fatalf("output = %q, want queued no-log message", out)
 	}
+	if !strings.Contains(out, "Placement:   assigned to wi17") {
+		t.Fatalf("output = %q, want placement context", out)
+	}
+	if !strings.Contains(out, "Queue reason: waiting for assigned target to start the job") {
+		t.Fatalf("output = %q, want queue reason", out)
+	}
 }
 
 func TestReadOpsEntriesIncludesSyncedInstanceLogs(t *testing.T) {

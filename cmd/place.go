@@ -21,17 +21,17 @@ var (
 var placeCmd = &cobra.Command{
 	Use:     "place [job-id]...",
 	Aliases: []string{"submit"},
-	Short:   "Launch cloud instances for queued unplaced jobs",
-	Long: `Place queued unplaced jobs by launching cloud instances for them.
+	Short:   "Launch cloud instances for queued jobs that are not assigned yet",
+	Long: `Launch cloud instances for queued jobs that are not assigned yet.
 
-Without arguments, all queued unplaced jobs are considered. Filter with
+Without arguments, all queued jobs with no assigned host or instance are considered. Filter with
 positional job IDs, --project, or --status.
 
 Use --watch to enter watch mode after launching; --yes to skip the
 interactive confirmation; --dry-run to preview the plan without launching.
 
 Examples:
-  weft place                        # all queued unplaced jobs (interactive)
+  weft place                        # all unassigned queued jobs (interactive)
   weft place wj42 wj43              # only these jobs
   weft place --project myproj       # unplaced jobs from one project
   weft place --all --yes --watch    # launch everything, then watch`,

@@ -267,6 +267,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	// prior launch attempts left R2 metadata behind.
 	if job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0 {
 		fmt.Printf("Job %s has not started yet; no logs are available.\n", ids.FormatJobID(job.ID))
+		printPlacementLines(queuedPlacementLines(database, job), 12)
 		return nil
 	}
 
