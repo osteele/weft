@@ -126,6 +126,54 @@ func TestTryStartNextJob_GPUClassBlockedByExternalVRAM_RequeuesWithoutStarting(t
 	}
 }
 
+func TestTryStartNextJob_WaitsForPostJobWorkdirBeforeStartGates(t *testing.T) {
+	r, oplogPath := initTestRunner(t)
+
+	fakeBinDir := writeFakeNvidiaSmi(t, filepath.Dir(oplogPath), "0, 28672, 81920\n")
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	r.gpuInv = &GPUInventory{
+		Devices:      []GPUInfo{{Index: "0", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80}},
+		hasNvidiaSmi: true,
+	}
+
+	workDir := t.TempDir()
+	manager := &recordingPostJobManager{}
+	r.PostJobManager = manager
+
+	jobID := int64(102)
+	job := &opsqueue.CommandJob{
+		ID:       jobID,
+		Dir:      workDir,
+		Cmd:      "echo should-not-run",
+		GPUClass: "a100",
+		GPUMem:   gpuMemPtr(60),
+	}
+	if err := writeJobFile(r.queueDir, job); err != nil {
+		t.Fatalf("write job file: %v", err)
+	}
+	r.state.AddPending(jobID)
+
+	r.tryStartNextJob()
+
+	if manager.waitedWorkdir != workDir {
+		t.Fatalf("waited workdir = %q, want %q", manager.waitedWorkdir, workDir)
+	}
+	assertJobNotStarted(t, r.logDir, jobID)
+}
+
+type recordingPostJobManager struct {
+	waitedWorkdir string
+	captures      []PostJobCapture
+}
+
+func (m *recordingPostJobManager) WaitForWorkdir(workdir string) {
+	m.waitedWorkdir = workdir
+}
+
+func (m *recordingPostJobManager) StartPostJob(capture PostJobCapture) {
+	m.captures = append(m.captures, capture)
+}
+
 func TestTryStartNextJob_BenchmarkWarmupRecordsPendingReason(t *testing.T) {
 	r, _ := initTestRunner(t)
 

@@ -56,6 +56,11 @@ type Runner struct {
 	OnJobStart  func(jobID int64, logPath string) func() // returns stop function for live upload
 	OnJobFinish func(jobID int64, logDir string, exitCode int)
 
+	// PostJobManager coordinates post-job artifact capture with subsequent
+	// starts. Runners call WaitForWorkdir before starting a job, then
+	// StartPostJob after the job's completion record has been written.
+	PostJobManager PostJobManager
+
 	// EnsureSourceFromR2 is an optional preflight hook used by jobs queued
 	// in R2-isolated mode (CommandJob.SourceR2Key != ""). The agent
 	// implementation downloads sources/<sha>.tar.gz from R2 (rclone) and
@@ -67,6 +72,19 @@ type Runner struct {
 
 	// Shutdown
 	stopCh chan struct{}
+}
+
+type PostJobCapture struct {
+	JobID    int64
+	RunID    int64
+	WorkDir  string
+	LogDir   string
+	ExitCode int
+}
+
+type PostJobManager interface {
+	WaitForWorkdir(workdir string)
+	StartPostJob(capture PostJobCapture)
 }
 
 // Config holds configuration for the runner.
@@ -270,6 +288,11 @@ func (r *Runner) tryStartNextJob() {
 		return
 	}
 	rj := &RunnerJob{Data: job, ID: jobID}
+
+	// Wait for prior post-job uploads from this workdir before reusing it.
+	if r.PostJobManager != nil {
+		r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+	}
 
 	// Check exclusive constraints
 	if AnyRunningExclusive(r.state, r.queueDir) {
@@ -755,6 +778,15 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	}
 	if r.OnJobFinish != nil {
 		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
+	}
+	if r.PostJobManager != nil {
+		r.PostJobManager.StartPostJob(PostJobCapture{
+			JobID:    jobID,
+			RunID:    rj.Data.RunID,
+			WorkDir:  runDir,
+			LogDir:   filepath.Dir(paths.Log),
+			ExitCode: ei.ExitCode,
+		})
 	}
 
 	// Record finished and remove from running

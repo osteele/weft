@@ -35,16 +35,52 @@ func setupInventoryR2(r *runner.Runner, r2Bucket string) {
 	}
 
 	r.OnJobFinish = func(jobID int64, logDir string, exitCode int) {
-		// Upload the job's log directory to R2 via single rclone copy
-		uploadInventoryJobResults(r2Bucket, jobID, logDir)
-		// Write .complete marker with exit code
+		// Write .complete marker with exit code. Post-job output/result
+		// uploads run through the shared post-job manager below, which also
+		// provides the same-workdir barrier before the next job starts.
 		if err := r2Put(r2Bucket, r2keys.JobComplete(jobID), fmt.Sprintf("%d", exitCode)); err != nil {
 			oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
 				oplog.WithDetail("inventory .complete"), oplog.WithError(err))
 		}
 	}
+	r.PostJobManager = newInventoryPostJobManager(r2Bucket)
 
 	fmt.Printf("R2 uploads enabled (bucket=%s)\n", r2Bucket)
+}
+
+type inventoryPostJobManager struct {
+	r2Bucket string
+	bgm      *bgWorkManager
+}
+
+func newInventoryPostJobManager(r2Bucket string) *inventoryPostJobManager {
+	return &inventoryPostJobManager{
+		r2Bucket: r2Bucket,
+		bgm:      newBGWorkManager(nil, true),
+	}
+}
+
+func (m *inventoryPostJobManager) WaitForWorkdir(workdir string) {
+	m.bgm.WaitForUploadsInWorkdir(runner.ExpandTilde(workdir))
+}
+
+func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
+	logSnapshot, err := snapshotLogDir(capture.LogDir, capture.JobID)
+	if err != nil {
+		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(capture.JobID),
+			oplog.WithDetail("inventory post-job snapshot"), oplog.WithError(err))
+		return
+	}
+	m.bgm.StartPostJobWork(postJobWork{
+		r2Bucket:          m.r2Bucket,
+		jobID:             capture.JobID,
+		runID:             capture.RunID,
+		exitCode:          capture.ExitCode,
+		workDir:           runner.ExpandTilde(capture.WorkDir),
+		logSnapshot:       logSnapshot,
+		phase:             fmt.Sprintf("inventory_uploading:%d", capture.JobID),
+		uploadStartedUnix: time.Now().Unix(),
+	})
 }
 
 // uploadInventoryJobResults uploads the job's log directory to R2 via rclone copy.

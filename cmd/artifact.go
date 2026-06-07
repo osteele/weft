@@ -1704,6 +1704,10 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		return syncCloudJobOutputs(database, job)
 	}
 
+	if result, err := syncCloudJobOutputs(database, job); err == nil && result.Added > 0 {
+		return result, nil
+	}
+
 	if !job.HasInventoryHost() || job.WorkingDir == "" {
 		return artifacts.SyncResult{}, nil
 	}
