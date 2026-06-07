@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/bidding"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -1005,7 +1006,7 @@ func TestListTUIGroupedViewSelectsRecentLaunchFailure(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           140,
-		height:          20,
+		height:          40,
 		title:           "Jobs",
 		recentFailedInstances: &recentFailedInstances{
 			items: []*db.Launch{
@@ -1032,6 +1033,16 @@ func TestListTUIGroupedViewSelectsRecentLaunchFailure(t *testing.T) {
 	if len(m.groupedSelectableRows) != 1 {
 		t.Fatalf("selectable rows = %d, want 1", len(m.groupedSelectableRows))
 	}
+	if launch := m.selectedGroupedLaunch(); launch != nil {
+		t.Fatalf("collapsed failed-instance summary selected launch = %+v, want nil", launch)
+	}
+	if out := failedInstanceRowText(m.groupedRows); !strings.Contains(out, "▸ Recent failed instances: 1 failed") {
+		t.Fatalf("expected collapsed failed-instance summary, got:\n%s", out)
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(listTUIModel)
+	m.cursor = 1
 	if launch := m.selectedGroupedLaunch(); launch == nil || launch.ID != 77 {
 		t.Fatalf("selected launch = %+v, want wi77", launch)
 	}
@@ -1053,7 +1064,7 @@ func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           100,
-		height:          20,
+		height:          40,
 		title:           "Jobs",
 		jobs: []*db.Job{
 			{ID: 101, Status: db.StatusRunning, Description: "running"},
@@ -1075,9 +1086,13 @@ func TestListTUIMouseClickSelectsRecentLaunchFailure(t *testing.T) {
 		},
 	}
 	m.rebuildGroupedRows()
+	m.cursor = 1
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(listTUIModel)
+	m.cursor = 1
 	clickY := groupedClickYForLaunch(t, m, 88)
 
-	next, _ := m.Update(tea.MouseMsg{
+	next, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		Y:      clickY,
@@ -1122,6 +1137,121 @@ func TestGroupedViewportCountsFailedInstanceRows(t *testing.T) {
 
 func TestListTUIExpandsFailedInstancesToggle(t *testing.T) {
 	now := time.Now()
+	newModel := func(expanded bool) listTUIModel {
+		m := listTUIModel{
+			groupedByStatus:         true,
+			width:                   120,
+			height:                  24,
+			title:                   "Jobs",
+			expandedFailedInstances: expanded,
+			recentFailedInstances: &recentFailedInstances{
+				items: []*db.Launch{
+					{ID: 91, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-5 * time.Minute).Unix())},
+					{ID: 92, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-6 * time.Minute).Unix())},
+					{ID: 93, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "no agent", EndedAt: testInt64Ptr(now.Add(-7 * time.Minute).Unix())},
+				},
+				// 91/92 succeeded, 93 is a dud — all FYI buckets, collapsed by default.
+				jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+					91: {JobID: 1, Status: db.StatusCompleted},
+					92: {JobID: 2, Status: db.StatusCompleted},
+				},
+			},
+		}
+		m.rebuildGroupedRows()
+		return m
+	}
+
+	m := newModel(false)
+	collapsedText := failedInstanceRowText(m.groupedRows)
+	if !strings.Contains(collapsedText, "▸ Recent failed instances:") {
+		t.Fatalf("collapsed view should render disclosure header:\n%s", collapsedText)
+	}
+	if strings.Contains(collapsedText, "succeeded (2)") {
+		t.Fatalf("FYI buckets should be collapsed by default:\n%s", collapsedText)
+	}
+	if len(m.groupedSelectableRows) != 1 {
+		t.Fatalf("expected the expand toggle as the only selectable row, got %d", len(m.groupedSelectableRows))
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(listTUIModel)
+	if !got.expandedFailedInstances {
+		t.Fatal("Enter on the toggle row should set expandedFailedInstances")
+	}
+	expandedText := failedInstanceRowText(got.groupedRows)
+	if strings.Contains(expandedText, "▾ Recent failed instances:") {
+		t.Fatalf("expanded view should replace the collapsed summary header:\n%s", expandedText)
+	}
+	if !strings.Contains(expandedText, "▾ Recent failed instances —") {
+		t.Fatalf("expanded view should render disclosure marker on section header:\n%s", expandedText)
+	}
+	for _, want := range []string{"succeeded (2)", "dud (1)"} {
+		if !strings.Contains(expandedText, want) {
+			t.Fatalf("expanded view should reveal %q:\n%s", want, expandedText)
+		}
+	}
+
+	rightNext, _ := newModel(false).Update(tea.KeyMsg{Type: tea.KeyRight})
+	if !rightNext.(listTUIModel).expandedFailedInstances {
+		t.Fatal("Right arrow should expand a collapsed failed-instances disclosure")
+	}
+	rightAgain, _ := newModel(true).Update(tea.KeyMsg{Type: tea.KeyRight})
+	if !rightAgain.(listTUIModel).expandedFailedInstances {
+		t.Fatal("Right arrow should leave an expanded failed-instances disclosure expanded")
+	}
+	leftNext, _ := newModel(true).Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if leftNext.(listTUIModel).expandedFailedInstances {
+		t.Fatal("Left arrow should collapse an expanded failed-instances disclosure")
+	}
+	leftAgain, _ := newModel(false).Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if leftAgain.(listTUIModel).expandedFailedInstances {
+		t.Fatal("Left arrow should leave a collapsed failed-instances disclosure collapsed")
+	}
+}
+
+func TestListTUIArrowKeysExpandPlacementBreakdown(t *testing.T) {
+	job := &db.Job{
+		ID:     42,
+		Status: db.StatusQueued,
+		PlacementBlockedJSON: (&blockreason.Structured{
+			Summary: "no compatible hosts",
+			Launch:  "credit exhausted",
+			Reuse: []blockreason.ReuseRejection{
+				{Instance: "wi1", Reason: "disk insufficient"},
+			},
+		}).Marshal(),
+	}
+	newModel := func(expanded bool) listTUIModel {
+		m := listTUIModel{
+			groupedByStatus: true,
+			width:           120,
+			height:          24,
+			title:           "Jobs",
+			jobs:            []*db.Job{job},
+		}
+		if expanded {
+			m.expandedBlocked = map[int64]bool{job.ID: true}
+		}
+		m.rebuildGroupedRows()
+		return m
+	}
+
+	rightNext, _ := newModel(false).Update(tea.KeyMsg{Type: tea.KeyRight})
+	if !rightNext.(listTUIModel).expandedBlocked[job.ID] {
+		t.Fatal("Right arrow should expand a collapsed placement breakdown")
+	}
+	leftNext, _ := newModel(true).Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if leftNext.(listTUIModel).expandedBlocked[job.ID] {
+		t.Fatal("Left arrow should collapse an expanded placement breakdown")
+	}
+	enterNext, _ := newModel(false).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !enterNext.(listTUIModel).expandedBlocked[job.ID] {
+		t.Fatal("Enter should still toggle placement breakdown expansion")
+	}
+}
+
+func TestListTUIRecentFailedInstancesViewportKeepsHeader(t *testing.T) {
+	now := time.Now()
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           120,
@@ -1142,22 +1272,12 @@ func TestListTUIExpandsFailedInstancesToggle(t *testing.T) {
 	}
 	m.rebuildGroupedRows()
 
-	if strings.Contains(failedInstanceRowText(m.groupedRows), "succeeded (2)") {
-		t.Fatalf("FYI buckets should be collapsed by default:\n%s", failedInstanceRowText(m.groupedRows))
+	lines := selectGroupedRowsForViewport(m.groupedRows, 20)
+	if len(lines) == 0 {
+		t.Fatal("selectGroupedRowsForViewport returned no lines")
 	}
-	if len(m.groupedSelectableRows) != 1 {
-		t.Fatalf("expected the expand toggle as the only selectable row, got %d", len(m.groupedSelectableRows))
-	}
-
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	got := next.(listTUIModel)
-	if !got.expandedFailedInstances {
-		t.Fatal("Enter on the toggle row should set expandedFailedInstances")
-	}
-	for _, want := range []string{"succeeded (2)", "dud (1)"} {
-		if !strings.Contains(failedInstanceRowText(got.groupedRows), want) {
-			t.Fatalf("expanded view should reveal %q:\n%s", want, failedInstanceRowText(got.groupedRows))
-		}
+	if got := stripANSI(lines[0].text); !strings.HasPrefix(got, "▸ Recent failed instances:") {
+		t.Fatalf("viewport should preserve failed-instances disclosure header, got %q", got)
 	}
 }
 

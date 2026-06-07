@@ -16,6 +16,14 @@ type listKeyBinding struct {
 	handler func(listTUIModel) (tea.Model, tea.Cmd)
 }
 
+type groupedDisclosureAction int
+
+const (
+	groupedDisclosureToggle groupedDisclosureAction = iota
+	groupedDisclosureExpand
+	groupedDisclosureCollapse
+)
+
 func (b listKeyBinding) matches(key string) bool {
 	if key == b.keys {
 		return true
@@ -272,6 +280,57 @@ func listFlatKeyBindings() []listKeyBinding {
 	return bindings
 }
 
+func handleGroupedDisclosureKey(m listTUIModel, action groupedDisclosureAction) (tea.Model, tea.Cmd) {
+	setState := func(current bool) bool {
+		switch action {
+		case groupedDisclosureExpand:
+			return true
+		case groupedDisclosureCollapse:
+			return false
+		default:
+			return !current
+		}
+	}
+
+	if rowIdx := m.selectedGroupedRow(); rowIdx >= 0 && rowIdx < len(m.groupedRows) &&
+		m.groupedRows[rowIdx].expandToggle == failedInstancesSectionKey {
+		next := setState(m.expandedFailedInstances)
+		if next != m.expandedFailedInstances {
+			m.expandedFailedInstances = next
+			m.rebuildGroupedRows()
+		}
+		return m, nil
+	}
+
+	job := m.selectedGroupedJob()
+	if job == nil {
+		return m, nil
+	}
+	d := m.effectiveBlockedDetail()[job.ID]
+	if d == nil || !d.IsPlacementFailure() {
+		m.statusMessage = "No placement breakdown for this job"
+		return m, nil
+	}
+	current := false
+	if m.expandedBlocked != nil {
+		current = m.expandedBlocked[job.ID]
+	}
+	next := setState(current)
+	if next == current {
+		return m, nil
+	}
+	if m.expandedBlocked == nil {
+		m.expandedBlocked = map[int64]bool{}
+	}
+	if next {
+		m.expandedBlocked[job.ID] = true
+	} else {
+		delete(m.expandedBlocked, job.ID)
+	}
+	m.rebuildGroupedRows()
+	return m, nil
+}
+
 func listGroupedKeyBindings() []listKeyBinding {
 	bindings := listCommonKeyBindings(true)
 	bindings = append(bindings,
@@ -324,27 +383,13 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m.beginAutoRunRateInput()
 		}},
 		listKeyBinding{keys: "enter", action: "expand", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			if rowIdx := m.selectedGroupedRow(); rowIdx >= 0 && rowIdx < len(m.groupedRows) &&
-				m.groupedRows[rowIdx].expandToggle == failedInstancesSectionKey {
-				m.expandedFailedInstances = !m.expandedFailedInstances
-				m.rebuildGroupedRows()
-				return m, nil
-			}
-			job := m.selectedGroupedJob()
-			if job == nil {
-				return m, nil
-			}
-			d := m.autoBlockDetail[job.ID]
-			if d == nil || !d.IsPlacementFailure() {
-				m.statusMessage = "No placement breakdown for this job"
-				return m, nil
-			}
-			if m.expandedBlocked == nil {
-				m.expandedBlocked = map[int64]bool{}
-			}
-			m.expandedBlocked[job.ID] = !m.expandedBlocked[job.ID]
-			m.rebuildGroupedRows()
-			return m, nil
+			return handleGroupedDisclosureKey(m, groupedDisclosureToggle)
+		}},
+		listKeyBinding{keys: "right", action: "expand", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return handleGroupedDisclosureKey(m, groupedDisclosureExpand)
+		}},
+		listKeyBinding{keys: "left", action: "collapse", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return handleGroupedDisclosureKey(m, groupedDisclosureCollapse)
 		}},
 		listKeyBinding{keys: "O", action: "expand all blockers", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			expandable := 0

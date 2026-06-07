@@ -1635,7 +1635,7 @@ func (m *listTUIModel) selectGroupedMouseRow(y int) {
 		return
 	}
 	row := m.groupedRows[rowIdx]
-	if (row.job == nil && row.launch == nil && row.expandToggle == "") || row.isHeader || row.isBlocked {
+	if row.expandToggle == "" && ((row.job == nil && row.launch == nil) || row.isHeader || row.isBlocked) {
 		return
 	}
 	for i, selectableRow := range m.groupedSelectableRows {
@@ -2543,7 +2543,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 	}
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
-		if (row.job != nil || row.launch != nil || row.expandToggle != "") && !row.isHeader && !row.isBlocked {
+		if row.expandToggle != "" || ((row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked) {
 			m.groupedSelectableRows = append(m.groupedSelectableRows, i)
 		}
 	}
@@ -3609,7 +3609,7 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []group
 			if section.summaryOnly {
 				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d)", section.title, section.itemCount), rowIdx: -1})
 			} else {
-				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d):", section.title, section.itemCount), rowIdx: section.headerRowIndex})
+				out = append(out, groupedViewportLine{text: rows[section.headerRowIndex].text, rowIdx: section.headerRowIndex})
 				for i := 0; i < section.shownRows && i < len(section.rows) && i < len(section.rowIdxs); i++ {
 					out = append(out, groupedViewportLine{text: section.rows[i].text, rowIdx: section.rowIdxs[i]})
 				}

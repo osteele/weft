@@ -1465,6 +1465,37 @@ func dominantFailureFactor(items []*db.Launch) string {
 	return ""
 }
 
+func failureClusterFactor(items []*db.Launch) string {
+	if len(items) < 3 {
+		return ""
+	}
+	clusterItems := make([]*db.Launch, 0, len(items))
+	for _, f := range items {
+		if db.IsTransientInstanceTermination(f.TerminationReason) {
+			continue
+		}
+		clusterItems = append(clusterItems, f)
+	}
+	if len(clusterItems) < 3 {
+		return ""
+	}
+	return dominantFailureFactor(clusterItems)
+}
+
+func newestFailureAge(items []*db.Launch, now time.Time) string {
+	var newest int64
+	for _, f := range items {
+		e := launchEndedAt(f)
+		if e > newest {
+			newest = e
+		}
+	}
+	if newest <= 0 {
+		return ""
+	}
+	return shortRelativeTime(now.Unix() - newest)
+}
+
 func appendRecentFailedInstanceRows(
 	rows []groupedStatusRow,
 	failures *recentFailedInstances,
@@ -1506,27 +1537,53 @@ func appendRecentFailedInstanceRows(
 		})
 	}
 
-	// Header. The span is placed before the count so the viewport's header
-	// reconstruction — which strips text from the first " (" onward — keeps it.
-	headerSpan := formatFailureSpan(renderable, now)
-	headerText := "Recent failed instances"
-	if headerSpan != "" {
-		headerText += " — " + headerSpan
-	}
-	headerText += fmt.Sprintf(" (%d):", total)
-	rows = append(rows, groupedStatusRow{
-		text:     headerText,
-		isHeader: true,
-		section:  failedInstancesSectionKey,
-	})
-
-	// Summary line: full breakdown, overall span, wasted spend.
 	summaryParts := make([]string, 0, len(failureOutcomeOrder))
 	for _, o := range failureOutcomeOrder {
 		if n := len(byOutcome[o]); n > 0 {
 			summaryParts = append(summaryParts, failureCountPhrase(o, n))
 		}
 	}
+	clusterFactor := failureClusterFactor(renderable)
+	headerSpan := formatFailureSpan(renderable, now)
+	if interactive {
+		if !expanded {
+			summary := "Recent failed instances: " + strings.Join(summaryParts, " · ")
+			if clusterFactor != "" {
+				summary += " · " + clusterFactor + " cluster"
+			}
+			if age := newestFailureAge(renderable, now); age != "" {
+				summary += " · newest " + age
+			}
+			if wastedCents > 0 {
+				summary += fmt.Sprintf(" · $%.2f wasted", float64(wastedCents)/100)
+			}
+			rows = append(rows, groupedStatusRow{
+				text:         applyDisclosureMarker(summary, false),
+				isHeader:     true,
+				section:      failedInstancesSectionKey,
+				expandToggle: failedInstancesSectionKey,
+			})
+			rows = append(rows, groupedStatusRow{text: ""})
+			return rows
+		}
+	}
+
+	headerText := "Recent failed instances"
+	if headerSpan != "" {
+		headerText += " — " + headerSpan
+	}
+	headerText += fmt.Sprintf(" (%d):", total)
+	if interactive {
+		headerText = applyDisclosureMarker(headerText, true)
+	}
+	rows = append(rows, groupedStatusRow{
+		text:         headerText,
+		isHeader:     true,
+		section:      failedInstancesSectionKey,
+		expandToggle: failedInstancesSectionKey,
+	})
+
+	// Summary line: full breakdown, overall span, wasted spend.
 	summary := "  " + strings.Join(summaryParts, " · ")
 	if headerSpan != "" {
 		summary += " — " + headerSpan
@@ -1545,23 +1602,12 @@ func appendRecentFailedInstanceRows(
 	// terminations (e.g. CLI timeouts) so a slow-API hour doesn't masquerade
 	// as a systemic provider failure — the rows still appear above for
 	// cost/postmortem accounting, they just don't contribute to clustering.
-	if total >= 3 {
-		clusterItems := make([]*db.Launch, 0, len(renderable))
-		for _, f := range renderable {
-			if db.IsTransientInstanceTermination(f.TerminationReason) {
-				continue
-			}
-			clusterItems = append(clusterItems, f)
-		}
-		if len(clusterItems) >= 3 {
-			if factor := dominantFailureFactor(clusterItems); factor != "" {
-				rows = append(rows, groupedStatusRow{
-					text:      "  ⚠ clustered failures — common factor: " + factor,
-					isBlocked: true,
-					section:   failedInstancesSectionKey,
-				})
-			}
-		}
+	if clusterFactor != "" {
+		rows = append(rows, groupedStatusRow{
+			text:      "  ⚠ clustered failures — common factor: " + clusterFactor,
+			isBlocked: true,
+			section:   failedInstancesSectionKey,
+		})
 	}
 
 	appendGroup := func(rows []groupedStatusRow, o failureOutcome) []groupedStatusRow {
@@ -1606,7 +1652,7 @@ func appendRecentFailedInstanceRows(
 	switch {
 	case len(fyiItems) == 0:
 		// Nothing to show or collapse.
-	case !interactive:
+	case !interactive || expanded:
 		for _, o := range failureFYIOutcomes {
 			rows = appendGroup(rows, o)
 		}

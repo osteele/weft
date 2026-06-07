@@ -1700,17 +1700,15 @@ func TestAppendRecentFailedInstanceRows_ExpandTogglesFYIBuckets(t *testing.T) {
 	}
 
 	collapsed := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, true, false, now))
-	if !strings.Contains(collapsed, "failed (1)") {
-		t.Fatalf("collapsed view should always show the failed bucket:\n%s", collapsed)
+	for _, want := range []string{"▸ Recent failed instances", "1 failed", "2 succeeded", "1 dud", "newest 5m ago"} {
+		if !strings.Contains(collapsed, want) {
+			t.Fatalf("collapsed view should summarize %q:\n%s", want, collapsed)
+		}
 	}
-	if !strings.Contains(collapsed, "+ 3 more: 2 succeeded, 1 dud") {
-		t.Fatalf("collapsed view should roll up the FYI buckets:\n%s", collapsed)
-	}
-	if !strings.Contains(collapsed, "▸") {
-		t.Fatalf("collapsed toggle should carry a ▸ marker:\n%s", collapsed)
-	}
-	if strings.Contains(collapsed, "succeeded (2)") || strings.Contains(collapsed, "dud (1)") {
-		t.Fatalf("collapsed view should hide the FYI bucket sub-headers:\n%s", collapsed)
+	for _, hidden := range []string{"failed (1)", "succeeded (2)", "dud (1)", "boom", "no agent"} {
+		if strings.Contains(collapsed, hidden) {
+			t.Fatalf("collapsed view should hide detailed row content %q:\n%s", hidden, collapsed)
+		}
 	}
 
 	expanded := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, true, true, now))
