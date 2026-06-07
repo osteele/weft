@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/agentenv"
 )
 
 func TestHostDoctorProbeCommandAgentPath(t *testing.T) {
 	cmd := hostDoctorProbeCommand(true)
 	for _, want := range []string{
-		`export PATH="$HOME/.cache/weft/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"`,
+		agentenv.ShellExportPath(),
 		`command -v "$cmd"`,
 		`/opt/homebrew/bin/brew`,
 		`writable=`,

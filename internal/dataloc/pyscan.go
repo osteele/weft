@@ -15,7 +15,6 @@ var (
 	hfHubDownloadPattern       = regexp.MustCompile(`hf_hub_download\(\s*["']([^"']+)["']`)
 	sentenceTransformerPattern = regexp.MustCompile(`SentenceTransformer\(\s*["']([^"']+)["']`)
 	loadDatasetPattern         = regexp.MustCompile(`load_dataset\(\s*["']([^"']+)["']`)
-	dictValueModelPattern      = regexp.MustCompile(`:\s*["']([^"']+/[^"'/]+)["']`)
 	argparseDefaultPattern     = regexp.MustCompile(`default\s*=\s*["']([^"']+)["']`)
 	modelFlagPattern           = regexp.MustCompile(`["']--(?:model|model-name|base-model)["']`)
 )
@@ -85,7 +84,6 @@ func scanPythonContent(content string, refs *[]string, seen map[string]struct{})
 	addModelMatches(content, snapshotDownloadPattern, refs, seen)
 	addModelMatches(content, hfHubDownloadPattern, refs, seen)
 	addModelMatches(content, sentenceTransformerPattern, refs, seen)
-	addModelMatches(content, dictValueModelPattern, refs, seen)
 	addDatasetMatches(content, loadDatasetPattern, refs, seen)
 
 	for _, block := range findArgparseBlocks(lines) {

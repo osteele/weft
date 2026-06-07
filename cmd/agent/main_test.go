@@ -85,7 +85,7 @@ func TestEnsureUserToolPath(t *testing.T) {
 	agentenv.EnsureToolPath()
 
 	got := os.Getenv("PATH")
-	wantPrefix := "/Users/agent/.cache/weft/bin:/Users/agent/.local/bin:/Users/agent/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin"
+	wantPrefix := "/Users/agent/.local/share/mise/installs/python/latest/bin:/Users/agent/.local/share/mise/shims:/Users/agent/.cache/weft/bin:/Users/agent/.local/bin:/Users/agent/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin"
 	if got != wantPrefix {
 		t.Fatalf("PATH = %q, want %q", got, wantPrefix)
 	}

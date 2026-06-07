@@ -17,6 +17,15 @@ func TestBuildHFDownloadCommand_Model(t *testing.T) {
 	if !strings.Contains(cmd, "HF_HUB_CACHE") || !strings.Contains(cmd, "HF_HOME") {
 		t.Fatalf("command should resolve HF_HUB_CACHE/HF_HOME: %s", cmd)
 	}
+	if !strings.Contains(cmd, `if [ -z "${HOME:-}" ]`) {
+		t.Fatalf("command should establish HOME before building PATH: %s", cmd)
+	}
+	if !strings.Contains(cmd, "$HOME/.local/share/mise/shims") {
+		t.Fatalf("command should include mise shims in PATH: %s", cmd)
+	}
+	if !strings.Contains(cmd, "$HOME/.local/share/mise/installs/python/latest/bin") {
+		t.Fatalf("command should include mise Python install bin in PATH: %s", cmd)
+	}
 	if !strings.Contains(cmd, "_hfdl='hf_xet download'") {
 		t.Fatalf("command missing hf_xet candidate: %s", cmd)
 	}
@@ -31,6 +40,15 @@ func TestBuildHFDownloadCommand_Model(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "snapshot_download") {
 		t.Fatalf("command missing python fallback: %s", cmd)
+	}
+	if !strings.Contains(cmd, "uv tool install 'huggingface-hub[hf_xet]'") {
+		t.Fatalf("command missing remote helper bootstrap via uv: %s", cmd)
+	}
+	if !strings.Contains(cmd, "python3 -m pip install --user --quiet 'huggingface-hub[hf_xet]'") {
+		t.Fatalf("command missing remote helper bootstrap via pip: %s", cmd)
+	}
+	if strings.Count(cmd, "_hfdl='hf download'") < 2 {
+		t.Fatalf("command should rediscover hf after helper bootstrap: %s", cmd)
 	}
 	if !strings.Contains(cmd, "meta-llama/Llama-3-8B") {
 		t.Fatalf("command missing repo id: %s", cmd)

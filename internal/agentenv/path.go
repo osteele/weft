@@ -18,18 +18,28 @@ var staticToolDirs = []string{
 func ToolPathDirs(home string) []string {
 	dirs := []string{}
 	if home != "" {
-		dirs = append(dirs, home+"/.cache/weft/bin", home+"/.local/bin", home+"/bin")
+		dirs = append(dirs,
+			home+"/.local/share/mise/installs/python/latest/bin",
+			home+"/.local/share/mise/shims",
+			home+"/.cache/weft/bin",
+			home+"/.local/bin",
+			home+"/bin",
+		)
 	}
 	dirs = append(dirs, staticToolDirs...)
 	return dirs
 }
 
 func ShellPathAssignment() string {
-	return `PATH="$HOME/.cache/weft/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"`
+	return `PATH="$HOME/.local/share/mise/installs/python/latest/bin:$HOME/.local/share/mise/shims:$HOME/.cache/weft/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"`
 }
 
 func ShellExportPath() string {
 	return `export ` + ShellPathAssignment()
+}
+
+func ShellEnsureHomeAndExportPath() string {
+	return `if [ -z "${HOME:-}" ]; then HOME="$(cd ~ && pwd)"; export HOME; fi; ` + ShellExportPath()
 }
 
 func ShellPrefix(command string) string {

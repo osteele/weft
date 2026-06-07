@@ -78,7 +78,7 @@ MODEL_CONFIGS = {
 `)
 
 	refs := ScanPythonHFRefs(dir)
-	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
+	assertSetEqual(t, refs, nil)
 }
 
 func TestPyScanPythonHFRefs_ModelArgBlockWithSlashDefault(t *testing.T) {
@@ -217,24 +217,22 @@ MODEL_CONFIGS = {
 }
 `)
 	refs := ScanPythonHFRefs(dir)
-	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
+	assertSetEqual(t, refs, nil)
 }
 
-func TestPyScanDictValuePattern(t *testing.T) {
+func TestPyScanPythonHFRefs_IgnoresAmbiguousDictValues(t *testing.T) {
 	dir := t.TempDir()
 	writePyFile(t, dir, "config.py", `
 MODEL_CONFIGS = {
     "pythia-1.4b": "EleutherAI/pythia-1.4b",
     "llama-8b": "meta-llama/Llama-3-8B",
+    "gpt2": "openai/gpt2",
     "local_only": "gpt2",
     "some_key": "not-a-model",
 }
 `)
 	refs := ScanPythonHFRefs(dir)
-	assertSetEqual(t, refs, []string{
-		"hf:EleutherAI/pythia-1.4b",
-		"hf:meta-llama/Llama-3-8B",
-	})
+	assertSetEqual(t, refs, nil)
 }
 
 func TestExtractPythonScripts(t *testing.T) {

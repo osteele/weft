@@ -14,6 +14,7 @@ import (
 	gosync "sync"
 	"time"
 
+	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -272,8 +273,8 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 	repoIDPython := strconv.Quote(asset.ID)
 	revisionPython := strconv.Quote(revision)
 
-	// Expand PATH to include common user bin dirs so hf/hf_xet are found in
-	// non-interactive SSH sessions where ~/.profile may not be sourced.
+	// Expand PATH so hf/hf_xet and Python tools installed by mise, Homebrew,
+	// or user-local installers are found in non-interactive SSH sessions.
 	// Forward HF token: prefer local coordinator token (so gated models work
 	// even if the remote host has no token), fall back to the remote host's
 	// cached token file.
@@ -285,7 +286,7 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 			"export HF_TOKEN=$(tr -d '\\n' < \"$HOME/.cache/huggingface/token\"); fi; "
 	}
 	prefix := "set -e; " +
-		"export PATH=\"$HOME/.local/bin:$HOME/bin:${PATH}\"; " +
+		agentenv.ShellEnsureHomeAndExportPath() + "; " +
 		tokenExport +
 		ResolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
 	body := fmt.Sprintf(
@@ -297,12 +298,24 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 			"elif command -v hf >/dev/null 2>&1; then _hfdl='hf download'; "+
 			"elif command -v hf-download >/dev/null 2>&1; then _hfdl=hf-download; "+
 			"fi; "+
+			"if [ -z \"${_hfdl:-}\" ] && ! python3 -c 'import huggingface_hub' >/dev/null 2>&1; then "+
+			"if command -v uv >/dev/null 2>&1; then uv tool install 'huggingface-hub[hf_xet]' >/dev/null && export PATH=\"$HOME/.local/bin:$PATH\"; "+
+			"elif command -v python3 >/dev/null 2>&1; then python3 -m pip install --user --quiet 'huggingface-hub[hf_xet]' >/dev/null; "+
+			"fi; "+
+			"fi; "+
+			"if [ -z \"${_hfdl:-}\" ]; then "+
+			"if command -v hf_xet >/dev/null 2>&1; then _hfdl='hf_xet download'; "+
+			"elif command -v hf >/dev/null 2>&1; then _hfdl='hf download'; "+
+			"elif command -v hf-download >/dev/null 2>&1; then _hfdl=hf-download; "+
+			"fi; "+
+			"fi; "+
 			"if [ -n \"${_hfdl:-}\" ]; then "+
 			"$_hfdl --repo-type %s --revision %s %s >/dev/null; "+
 			"elif python3 -c 'import huggingface_hub' >/dev/null 2>&1; then "+
 			"python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id=%s, repo_type=%s, revision=%s)\" >/dev/null; "+
 			"else "+
 			"echo 'huggingface_hub not available on remote host (need hf_xet, hf CLI, or python3 package huggingface_hub)' >&2; "+
+			"echo \"diagnostic: HOME=${HOME:-} PATH=$PATH python3=$(command -v python3 2>/dev/null || true) hf=$(command -v hf 2>/dev/null || true)\" >&2; "+
 			"exit 127; "+
 			"fi",
 		repoType,
