@@ -1,7 +1,6 @@
 package queueblock
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -77,36 +76,7 @@ func userVisibleBlockedReason(host string, jobID int64, reason string) string {
 	if !strings.Contains(reason, "missing queue payload") {
 		return reason
 	}
-	bugID := reportMissingPayloadBug(host, jobID, reason)
-	if bugID == "" {
-		return "Weft bug: queue state is inconsistent on this host. Scope: infrastructure, not job-specific. Likelihood: uncommon; sync or runner restart usually repairs it."
-	}
-	return fmt.Sprintf("Weft bug %s: queue state is inconsistent on this host. Scope: infrastructure, not job-specific. Likelihood: uncommon; sync or runner restart usually repairs it.", bugID)
-}
-
-func reportMissingPayloadBug(host string, jobID int64, reason string) string {
-	database, err := db.OpenBugDB()
-	if err != nil {
-		return ""
-	}
-	defer database.Close()
-	jobIDCopy := jobID
-	bug, _, err := db.ReportBug(database, db.BugReport{
-		Title:       "runner pending job is missing queue payload",
-		Kind:        "invariant",
-		Scope:       "infrastructure",
-		Likelihood:  "uncommon; may persist for affected queued jobs until sync or runner restart repairs state",
-		Severity:    "warning",
-		Fingerprint: fmt.Sprintf("queue.missing_payload:%s", strings.TrimSpace(host)),
-		JobID:       &jobIDCopy,
-		Host:        host,
-		Summary:     "Weft queue state is inconsistent on the remote host; this is not a job-code or input problem.",
-		Detail:      reason,
-	})
-	if err != nil {
-		return ""
-	}
-	return db.FormatBugID(bug.ID)
+	return "Weft queue state is temporarily inconsistent on this host. Scope: infrastructure, not job-specific. Likelihood: uncommon; sync or runner restart usually repairs it."
 }
 
 // Apply writes transient blocked-reason overlays onto the supplied jobs.

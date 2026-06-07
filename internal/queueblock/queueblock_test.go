@@ -1,6 +1,7 @@
 package queueblock
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -52,5 +53,22 @@ func TestApply_PendingPlacementClearsAndKeepsHostQueueBlocking(t *testing.T) {
 	}
 	if running.QueueBlockedReason != "" {
 		t.Errorf("running: want cleared, got %q", running.QueueBlockedReason)
+	}
+}
+
+func TestMissingPayloadReasonDoesNotReportBug(t *testing.T) {
+	bugDB := db.SetupTestBugDB(t)
+
+	reason := userVisibleBlockedReason("cool30", 2556, "missing queue payload: open /home/oliver/.cache/weft/queue/job-2556.json: no such file or directory")
+	if !strings.Contains(reason, "temporarily inconsistent") {
+		t.Fatalf("reason = %q, want temporary inconsistency message", reason)
+	}
+
+	bugs, err := db.ListBugs(bugDB, true)
+	if err != nil {
+		t.Fatalf("ListBugs: %v", err)
+	}
+	if len(bugs) != 0 {
+		t.Fatalf("bug count = %d, want 0; bugs=%v", len(bugs), bugs)
 	}
 }

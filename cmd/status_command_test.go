@@ -367,7 +367,7 @@ func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	}
 }
 
-func TestRunStatusHidesMissingPayloadDetailAndReportsBug(t *testing.T) {
+func TestRunStatusHidesMissingPayloadDetailWithoutReportingBug(t *testing.T) {
 	database := db.SetupTestDB(t)
 	bugDatabase := db.SetupTestBugDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")
@@ -392,18 +392,18 @@ func TestRunStatusHidesMissingPayloadDetailAndReportsBug(t *testing.T) {
 	if strings.Contains(out, "missing queue payload") || strings.Contains(out, "job-42.json") {
 		t.Fatalf("raw invariant leaked to user:\n%s", out)
 	}
-	if !strings.Contains(out, "Weft bug wb") {
-		t.Fatalf("missing bug id in output:\n%s", out)
+	if strings.Contains(out, "Weft bug wb") {
+		t.Fatalf("unexpected bug id in output:\n%s", out)
+	}
+	if !strings.Contains(out, "temporarily inconsistent") {
+		t.Fatalf("missing temporary inconsistency explanation:\n%s", out)
 	}
 	bugs, err := db.ListBugs(bugDatabase, false)
 	if err != nil {
 		t.Fatalf("ListBugs: %v", err)
 	}
-	if len(bugs) != 1 {
-		t.Fatalf("len(bugs) = %d, want 1", len(bugs))
-	}
-	if bugs[0].Scope != "infrastructure" {
-		t.Fatalf("bug scope = %q, want infrastructure", bugs[0].Scope)
+	if len(bugs) != 0 {
+		t.Fatalf("len(bugs) = %d, want 0", len(bugs))
 	}
 }
 
