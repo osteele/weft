@@ -39,8 +39,12 @@ func renderStructuredBlock(lines []watchInstanceLine, addSelectable, addPlain fu
 
 func (m watchModel) View() string {
 	if m.movePicker.active {
-		return m.movePicker.View(m.width, m.height)
+		return m.movePicker.ViewOver(m.width, m.height, m.baseView())
 	}
+	return m.baseView()
+}
+
+func (m watchModel) baseView() string {
 	if m.projectHelp && m.mode != watchModeProject {
 		return m.renderWatchHelpView()
 	}

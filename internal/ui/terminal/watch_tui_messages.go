@@ -38,7 +38,9 @@ type watchCheckDoneMsg struct{}
 type watchCheckDoneResultMsg struct{ allTerminal bool }
 
 // watchInstanceSyncResultMsg is sent when the background SyncWorker produces a result (instance-based modes).
-type watchInstanceSyncResultMsg struct{}
+type watchInstanceSyncResultMsg struct {
+	result hostsync.Result
+}
 
 // retryResultMsg carries the result of retrying failed instances.
 type retryResultMsg struct {
@@ -175,11 +177,16 @@ type autoPilotBackoffReadyMsg struct{}
 
 // moveOptionsReadyMsg carries computed move destinations for the inline picker.
 type moveOptionsReadyMsg struct {
+	requestID  int64
+	jobID      int64
+	options    []moveOption
+	err        error
+	newOnly    bool
+	loadingNew bool
+}
+
+type moveLookupTickMsg struct {
 	requestID int64
-	jobID     int64
-	options   []moveOption
-	err       error
-	newOnly   bool
 }
 
 type moveExecuteAction string

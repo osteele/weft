@@ -13,6 +13,8 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -237,6 +239,118 @@ func TestBuildOptions_ExistingInstanceWaitIncludesActiveAndQueuedJobs(t *testing
 	}
 	if got, want := options[0].WaitTime, time.Hour; got != want {
 		t.Fatalf("existing instance wait = %s, want %s", got, want)
+	}
+	if got, want := options[0].QueueDepth, 2; got != want {
+		t.Fatalf("existing instance queue depth = %d, want %d", got, want)
+	}
+	if !options[0].Eligible {
+		t.Fatalf("existing instance option should be eligible: %+v", options[0])
+	}
+}
+
+func TestBuildExistingOptionsIncludesIneligibleInstances(t *testing.T) {
+	memGB := 20
+	job := &db.Job{
+		ID:       1934,
+		Status:   db.StatusQueued,
+		GPUClass: "nvidia",
+		GPUMemGB: &memGB,
+	}
+	capacity := campaign.InstanceCapacity{
+		Instance: &db.Launch{
+			ID:               2872,
+			Status:           db.LaunchStatusRunning,
+			GPUClass:         "nvidia",
+			ResolvedGPUName:  "RTX 2080 Ti",
+			GPUMemGB:         11,
+			CostPerHourCents: 0,
+		},
+		RunningJobCount: 0,
+	}
+
+	options := BuildExistingOptions(job, []campaign.InstanceCapacity{capacity}, nil, 0)
+	if len(options) != 1 {
+		t.Fatalf("options len = %d, want 1: %+v", len(options), options)
+	}
+	if options[0].Eligible {
+		t.Fatalf("incompatible instance should be ineligible: %+v", options[0])
+	}
+	if strings.TrimSpace(options[0].Reason) == "" {
+		t.Fatalf("ineligible instance reason is empty: %+v", options[0])
+	}
+}
+
+func TestBuildOnPremOptionsIncludesEligibleAndIneligibleHosts(t *testing.T) {
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+	for _, host := range []string{"host-alpha", "host-beta", "host-gamma"} {
+		placement.RecordContentionObs(database, host, &placement.HostMetrics{
+			CPUPercent:    5,
+			GPUPercent:    5,
+			QueueDepth:    0,
+			GPUJobsQueued: 0,
+		})
+	}
+	memGB := 20
+	job := &db.Job{
+		ID:       1935,
+		Status:   db.StatusQueued,
+		GPUClass: "nvidia",
+		GPUMemGB: &memGB,
+	}
+
+	options := BuildOnPremOptions(database, nil, job)
+	if len(options) != 3 {
+		t.Fatalf("options len = %d, want 3: %+v", len(options), options)
+	}
+	var eligible, ineligible bool
+	for _, opt := range options {
+		if opt.Kind != OptionKindOnPrem {
+			t.Fatalf("option kind = %q, want on-prem: %+v", opt.Kind, opt)
+		}
+		if opt.Eligible {
+			eligible = true
+		} else if strings.TrimSpace(opt.Reason) != "" {
+			ineligible = true
+		}
+	}
+	if !eligible {
+		t.Fatalf("expected at least one eligible on-prem host: %+v", options)
+	}
+	if !ineligible {
+		t.Fatalf("expected at least one ineligible on-prem host with reason: %+v", options)
+	}
+}
+
+func TestExecuteOptionRejectsCloudToOnPremWithoutR2(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "cloud job", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.TransferJobToLaunch(database, jobID, launchID); err != nil {
+		t.Fatalf("TransferJobToLaunch: %v", err)
+	}
+
+	_, err = ExecuteOption(context.Background(), database, nil, nil, nil, jobID, Option{
+		Kind:     OptionKindOnPrem,
+		Host:     "cool30",
+		Eligible: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "destination acceptance must be confirmed") {
+		t.Fatalf("ExecuteOption err = %v, want destination acceptance error", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != launchID {
+		t.Fatalf("job launch_id = %v, want %d", job.LaunchID, launchID)
 	}
 }
 

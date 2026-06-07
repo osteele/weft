@@ -1,13 +1,13 @@
 -- allium: 3
 -- job-move.allium
 --
--- Scope: Moving a queued job from one placement to another.
+-- Scope: Moving a job from one placement to another.
 --
 -- A "move" is what the user invokes by pressing `m` on a queued job in the
--- jobs list TUI (or via `weft jobs move`). The destination is either an
--- already-running cloud instance ("existing") or a freshly-launched
--- instance ("new"). Includes the autopilot's required hands-off behavior
--- while a move is in flight.
+-- jobs list TUI (or via `weft jobs move`). The destination can be an
+-- on-prem host, an already-running rental instance ("existing"), or a
+-- freshly-launched rental instance ("new"). Includes the autopilot's
+-- required hands-off behavior while a move is in flight.
 --
 -- Excludes:
 --   - PlaceJob and ReuseAssignment (job-lifecycle.allium /
@@ -30,13 +30,12 @@
 -- Model
 -- ==========================================================================
 
--- A MoveIntent records a deliberate attempt to move a queued job. The source
+-- A MoveIntent records a deliberate attempt to move a job. The source
 -- (its current placement, if any) remains authoritative until the intent is
--- confirmed: the job's launch_id, attempts, and source-instance R2 queue are
--- not modified by the move flow's intermediate steps. On confirmation the
--- job is associated with the target and the source attempt is canceled. On
--- cancellation the source is left intact (or restored, if it was modified
--- as part of the existing-flow's intermediate work).
+-- confirmed: the source attempt remains the job-status / job-info / artifact
+-- authority while the destination is being asked to accept the work. On
+-- confirmation the job is associated with the accepted target and the source
+-- attempt is stopped. On cancellation the source is left intact.
 --
 -- The intent serves three purposes simultaneously:
 --   (1) Mutex: at most one move per job at a time.
@@ -53,12 +52,15 @@ entity MoveIntent {
     -- Where the job was placed when the move started. Drives the
     -- restore-to-source rollback on cancellation.
     source_launch: CloudInstance?
+    source_host: String?
 
     target_kind: MoveTargetKind
-    -- Set immediately for `existing`. For `new`, populated once the cloud
+    -- Set immediately for `existing`. For `new`, populated once the rental
     -- launch has produced an instance row; remains null while the launch
-    -- is still in flight (provider call outstanding).
+    -- is still in flight (provider call outstanding). Null for host targets.
     target_launch: CloudInstance?
+    -- Set for `host` targets. Null for rental targets.
+    target_host: String?
     -- Recorded for `new` so audit / re-try can show which offer was chosen.
     -- Not used for matching.
     target_offer_provider: String?
@@ -71,7 +73,7 @@ entity MoveIntent {
     resolution: String?         -- short reason recorded at terminal state
 }
 
-value MoveTargetKind = existing | new
+value MoveTargetKind = existing | new | host
 
 -- State machine:
 --                ┌──────┐
@@ -85,6 +87,91 @@ value MoveTargetKind = existing | new
 --
 -- All non-`open` states are terminal.
 value MoveIntentState = open | confirmed | canceled | obsoleted
+
+-- ==========================================================================
+-- Unified move protocol
+-- ==========================================================================
+
+-- All placement-to-placement moves share one coordinator protocol. The
+-- source and destination differ only by adapter:
+--
+--   Source adapters:
+--     cloud source  -> write cancel_attempts and kill-job R2 markers
+--     on-prem source -> SSH-kill the queue-runner process group
+--
+--   Destination adapters:
+--     cloud existing -> submit a grace job request / R2 payload
+--     cloud new      -> create launch, then submit the job payload
+--     on-prem host   -> enqueue the job through the host queue protocol
+--
+-- The coordinator MUST NOT make the destination authoritative at request
+-- time. It first opens MoveIntent, asks the destination to accept the job,
+-- and waits for destination acceptance. Only after acceptance is confirmed
+-- does it stop the source and switch DB-visible job status/info/artifact
+-- authority to the destination attempt.
+
+rule UnifiedMoveCoordinator {
+    when: UserRequestsMove(job, target)
+
+    ensures:
+        let intent = OpenMoveIntent(job, target)
+        RequestDestinationAcceptance(intent)
+
+        if DestinationAccepted(intent):
+            ConfirmMove(intent)
+            StopSourceAttempt(intent)
+
+        if DestinationRejected(intent) or DestinationUnavailable(intent):
+            CancelMove(intent, "destination did not accept")
+            LeaveSourceAuthoritative(job)
+}
+
+rule MovePathSharing {
+    -- These four path families MUST share the same coordinator state machine:
+    -- cloud -> cloud, cloud -> on-prem, on-prem -> cloud, and on-prem -> on-prem.
+    -- The implementation should not grow separate correctness logic for each
+    -- pair. Pair-specific code is limited to SourceAdapter and
+    -- DestinationAdapter operations.
+    for path in {cloud_to_cloud, cloud_to_host, host_to_cloud, host_to_host}:
+        path.uses = UnifiedMoveCoordinator
+}
+
+rule DestinationAcceptanceBeforeSourceStop {
+    when: UserRequestsMove(job, target)
+
+    ensures:
+        until DestinationAccepted(MoveIntentFor(job, target)):
+            job.status_authority = MoveIntentFor(job, target).source_attempt
+            SourceAttemptMayContinueRunning(job)
+
+        after DestinationAccepted(MoveIntentFor(job, target)):
+            StopSourceAttempt(MoveIntentFor(job, target))
+}
+
+rule OverlapCompletionResolution {
+    -- A forced move may temporarily produce a source attempt and destination
+    -- attempt that are both running. This is acceptable only during an open
+    -- move intent. If either attempt completes successfully while both exist,
+    -- that successful attempt wins: it becomes the status/info/artifact source
+    -- and the other attempt is terminated best-effort. If one attempt fails
+    -- while the other is still running, the running attempt remains eligible
+    -- to finish and win.
+    when: exists(MoveIntent { state = open })
+          and SourceAttempt.running
+          and DestinationAttempt.running
+
+    if SourceAttempt.completed_successfully:
+        ensures:
+            ObsoleteMove(MoveIntent, "source completed before destination confirmation")
+            StopDestinationAttempt(MoveIntent)
+            job.status_authority = SourceAttempt
+
+    if DestinationAttempt.completed_successfully:
+        ensures:
+            ConfirmMove(MoveIntent)
+            StopSourceAttempt(MoveIntent)
+            job.status_authority = DestinationAttempt
+}
 
 -- ==========================================================================
 -- Rules
@@ -138,30 +225,16 @@ rule MoveTargetSameAsSourceRejected {
 }
 
 rule UserForceMovesRunningJob {
-    -- `weft jobs move --force --to new` admits jobs in {running, starting,
-    -- paused} to the move-to-new pipeline. The move is atomic: the existing
-    -- LaunchCampaign(TransferClaim = true) flow supersedes the source
-    -- attempt only once the destination instance has been created. If the
-    -- launch fails before instance creation (no offer, provider error,
-    -- planner rejection) the source attempt is untouched and the source
-    -- process keeps running. On success the central DB closes the source
-    -- attempt and creates a fresh attempt on the destination launch in one
-    -- transaction (see internal/campaign/launch_claim.go
-    -- claimJobForLaunchTransfer → db.TransferJobLaunchID).
+    -- `weft jobs move --force` admits jobs in {running, starting, paused}
+    -- to the unified move protocol. The source keeps running and remains
+    -- authoritative until the destination accepts the job. After acceptance,
+    -- the source adapter stops the old attempt; if stop fails, the overlap
+    -- resolver decides which successful attempt wins.
     --
-    -- After the claim transfer commits, the source process still has to be
-    -- terminated explicitly:
-    --   * Cloud sources: LaunchCampaign writes an R2 cancel marker to the
-    --     source instance via sendGraceCancelAttempts (existing behavior).
-    --   * On-prem sources: the move caller invokes TerminateForcedSources,
-    --     which SSH-kills the queue-runner-managed process tree using a
-    --     pre-move snapshot of (host, start_time). Failure to kill leaves
-    --     the source process orphaned (consuming host CPU until natural
-    --     completion) but does not affect DB-visible job state.
-    --
-    -- --force is only supported for `--to new`, `--to <host>`, and
+    -- --force is supported for `--to new`, `--to <host>`, and
     -- `--to <instance>`. It is rejected for `--to auto` / `--to unplaced`
-    -- because returning a running job to the pool has no atomic primitive.
+    -- because returning a running job to the pool has no destination
+    -- acceptance primitive.
 
     when: UserInvokesMove(selector, target)
           and selector.force = true
@@ -177,7 +250,7 @@ rule UserForceMovesRunningJob {
           let sourceSnapshot = capture(job.host, job.latest_attempt.start_time)
               if job.host is inventory_host
           ExecuteMoveOption(job, target, MoveIntentFor(job, target))
-              with LaunchOpts.TransferClaim = true
+              using UnifiedMoveCoordinator
           if ExecuteMoveOption succeeded and sourceSnapshot exists:
               SSHKillQueueRunnerJob(sourceSnapshot)
               -- Best-effort; failures are reported but do not abort the move
@@ -186,13 +259,10 @@ rule UserForceMovesRunningJob {
         -- Implementation:
         --   cmd/job.go --force flag →
         --   orchestration.ResolveEligibleJobsWithForce(allowRunning = force) →
-        --   orchestration.MoveQueuedJobToNewInstance(force) /
-        --   orchestration.MoveQueuedJobsToNewInstances(force).
-        --   Inner status guards (isMoveAdmissibleStatus) admit running jobs.
-        --   TransferClaim is already true for move-to-new paths.
-        --   Post-success kill: orchestration.SnapshotForcedSources +
-        --   TerminateForcedSources (force_move.go) →
-        --   ops.KillQueueRunnerJob.
+        --   orchestration move coordinator. Inner status guards
+        --   (isMoveAdmissibleStatus) admit running jobs. Post-acceptance
+        --   source stop uses cloud R2 markers or on-prem SSH kill depending
+        --   on the source adapter.
         --   Without --force the existing queued-only filter is unchanged.
 }
 
@@ -594,6 +664,12 @@ invariant MoveTargetExistingHasInstance {
         implies intent.target_launch != null
 }
 
+invariant MoveTargetHostHasHost {
+    for intent in MoveIntent:
+        intent.target_kind = host
+        implies intent.target_host != null
+}
+
 invariant ResolvedIntentHasResolutionTime {
     for intent in MoveIntent:
         intent.state != open implies intent.resolved_at != null
@@ -618,39 +694,24 @@ invariant ResolvedIntentHasResolutionTime {
 -- Future work
 -- ==========================================================================
 --
--- Speculative second-placement model:
+-- Implementation work required for the unified protocol:
 --
---   - Move-to-existing (DONE): SubmitJobsToInstanceForMove uses
---     TransferJobLaunchID to atomically supersede the source claim.
---   - Move-to-new (DONE): LaunchOpts.TransferClaim=true threads the
---     same atomic-supersede semantics down through LaunchCampaign; on
---     launch failure before the instance is created, source is
---     untouched.
+--   - Schema: MoveIntent needs target_host and target_attempt fields, and
+--     target_kind must include `host`. The current one-open-attempt index on
+--     job_attempts must be refined so an open MoveIntent can have one source
+--     attempt and one pending/accepted destination attempt.
 --
--- AttemptCancelMarker (DONE): on a transfer-claim the orchestrator
--- writes a `cancel_attempts` grace request to the source instance's
--- R2 bucket carrying the (now superseded) source attempt id. The
--- source agent drains these between jobs; the dispatcher consults the
--- canceled set at the start of each iteration and skips matched
--- attempts rather than running them. Closes the two-attempt overlap
--- without a separate reconciler, because the source agent's queue
--- file no longer wins races against the DB transition.
+--   - Destination acceptance:
+--       * cloud existing/new: acceptance is the destination agent pickup ack
+--         or equivalent ready/claimed signal, not provider create success.
+--       * on-prem host: acceptance is the host queue accepting the job and
+--         reporting the destination attempt through host sync.
 --
--- Outstanding refinements:
+--   - Source stop:
+--       * cloud source: write cancel_attempts and kill-job R2 markers.
+--       * on-prem source: SSH-kill the queue-runner process group from the
+--         captured (host, start_time) snapshot.
 --
---   - Two-attempt overlap *runtime* race. Cancel markers are
---     best-effort; an agent that's already started a superseded job
---     (rare for queued jobs but possible mid-launch) still completes.
---     The reconciler sketched by ObsoleteMoveOnSourceCompletion is
---     cheap insurance once observable cases exist.
---
---   - Caller-side ack-waiting on the running-instance grace path
---     (SendGraceJobPayloadNoAck → ack-waiting) would let
---     move-to-existing claim *after* the destination agent's pickup ack
---     rather than at submit time, narrowing the transfer-claim window.
---     The agent already writes a pickup ack in drainGraceJobRequests.
---
--- Two-attempt overlap reconciler: once the speculative model lands, a
--- safety reconciler scans for jobs with two `running` attempts on
--- different launches and applies the OverlapResolution rule (kill older
--- unless source already exited 0).
+--   - Reconciler: scan open MoveIntents and apply
+--     OverlapCompletionResolution. This is the shared cleanup path for
+--     cloud->cloud, cloud->host, host->cloud, and host->host.

@@ -203,27 +203,84 @@ func (m watchModel) handleMoveOptionsReady(msg moveOptionsReadyMsg) (tea.Model, 
 		}
 		if msg.err != nil {
 			m.movePicker.loadingNew = false
-			existingCount, newCount := countMoveOptions(m.movePicker.options)
-			m.movePicker.status = fmt.Sprintf("%s Cloud offers failed: %v", movePickerStatus(existingCount, newCount, false), msg.err)
+			existingCount, newCount, disabledCount := countMoveOptions(m.movePicker.options)
+			m.movePicker.status = fmt.Sprintf("%s Cloud offers failed: %v", movePickerStatus(existingCount, newCount, disabledCount, false), msg.err)
 			return m, m.flash.Set("Move: cloud offer lookup failed", true)
 		}
 		m.movePicker.addNewOptions(msg.options)
-		existingCount, newCount := countMoveOptions(m.movePicker.options)
-		m.movePicker.status = movePickerStatus(existingCount, newCount, false)
+		existingCount, newCount, disabledCount := countMoveOptions(m.movePicker.options)
+		m.movePicker.status = movePickerStatus(existingCount, newCount, disabledCount, false)
 		return m, m.flash.Set(m.movePicker.status, false)
 	}
 	if msg.err != nil {
+		if msg.requestID != 0 && !m.acceptMoveOptionsResult(msg) {
+			return m, nil
+		}
+		if !msg.loadingNew {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+			m.movePicker.reset()
+		}
 		return m, m.flash.Set(fmt.Sprintf("Move: %v", msg.err), true)
 	}
-	m.movePicker = movePickerModel{
-		active:       true,
-		jobID:        msg.jobID,
-		requestID:    msg.requestID,
-		options:      msg.options,
-		cursor:       0,
-		existingDone: true,
+	if msg.requestID != 0 {
+		if !m.acceptMoveOptionsResult(msg) {
+			return m, nil
+		}
+		if !msg.loadingNew {
+			m.moveLookupPending = false
+			m.moveLookupRequestID = 0
+		}
 	}
+	loadingNew := msg.loadingNew
+	if m.movePicker.active && m.movePicker.requestID == msg.requestID && m.movePicker.jobID == msg.jobID {
+		loadingNew = msg.loadingNew && m.movePicker.loadingNew
+		m.movePicker.setExistingOptions(msg.options)
+		m.movePicker.loadingNew = loadingNew
+		m.movePicker.existingDone = true
+	} else {
+		m.movePicker = movePickerModel{
+			active:       true,
+			jobID:        msg.jobID,
+			requestID:    msg.requestID,
+			options:      msg.options,
+			cursor:       firstEligibleMoveOption(msg.options),
+			loadingNew:   loadingNew,
+			loadingStart: m.movePicker.loadingStart,
+			loadingFrame: m.movePicker.loadingFrame,
+			existingDone: true,
+		}
+	}
+	existingCount, newCount, disabledCount := countMoveOptions(m.movePicker.options)
+	m.movePicker.status = movePickerStatus(existingCount, newCount, disabledCount, loadingNew)
+	m.requestMovePickerStaleHostSyncs(msg.options)
 	return m, nil
+}
+
+func (m watchModel) acceptMoveOptionsResult(msg moveOptionsReadyMsg) bool {
+	if m.moveLookupPending {
+		return msg.requestID == m.moveLookupRequestID
+	}
+	return m.movePicker.active && m.movePicker.requestID == msg.requestID && m.movePicker.jobID == msg.jobID
+}
+
+func (m watchModel) requestMovePickerStaleHostSyncs(options []moveOption) {
+	if m.syncWorker == nil {
+		return
+	}
+	for _, opt := range options {
+		if opt.kind != orchestration.OptionKindOnPrem || strings.TrimSpace(opt.host) == "" {
+			continue
+		}
+		if strings.TrimSpace(opt.reason) != "host state stale" {
+			continue
+		}
+		m.syncWorker.Request(hostsync.Request{
+			Host:     opt.host,
+			Rate:     hostsync.RateWarmup,
+			Priority: true,
+		})
+	}
 }
 
 func (m watchModel) handleMoveExecuteDone(msg moveExecuteDoneMsg) (tea.Model, tea.Cmd) {

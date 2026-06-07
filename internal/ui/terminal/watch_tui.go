@@ -381,8 +381,8 @@ func (m watchModel) Init() tea.Cmd {
 		cmds = append(cmds, m.startDBWatcher(), m.scheduleSyncTick(), m.scheduleCheckDone())
 		if m.syncWorker != nil {
 			m.requestOnPremSyncs()
-			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(hostsync.Result) tea.Msg {
-				return watchInstanceSyncResultMsg{}
+			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
+				return watchInstanceSyncResultMsg{result: r}
 			}))
 		}
 	case m.mode == watchModeSystem:
@@ -507,6 +507,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
+	case moveLookupTickMsg:
+		if !m.moveLookupPending || msg.requestID != m.moveLookupRequestID || !m.movePicker.active {
+			return m, nil
+		}
+		m.movePicker.loadingFrame++
+		return m, scheduleMoveLookupTick(msg.requestID)
+
 	// --- Shared ---
 	case flash.ExpiredMsg:
 		m.flash.HandleExpired()
@@ -570,9 +577,15 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.mode.isInstanceBased() || m.syncWorker == nil {
 			return m, nil
 		}
-		return m, m.syncWorker.WaitForResult(m.ctx, func(hostsync.Result) tea.Msg {
-			return watchInstanceSyncResultMsg{}
-		})
+		cmds := []tea.Cmd{
+			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
+				return watchInstanceSyncResultMsg{result: r}
+			}),
+		}
+		if cmd := m.requestMoveOptionsForActivePicker(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case retryResultMsg:
 		return m.handleRetryResult(msg)
@@ -599,12 +612,16 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode != watchModeSystem {
 			return m, nil
 		}
-		return m, tea.Batch(
+		cmds := []tea.Cmd{
 			refreshWatchOnPrem(m.database),
 			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return watchSyncResultMsg{result: r}
 			}),
-		)
+		}
+		if cmd := m.requestMoveOptionsForActivePicker(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case watchOnPremRefreshedMsg:
 		if msg.err != nil {

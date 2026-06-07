@@ -554,6 +554,9 @@ func (w *Worker) doSync(host string, mode ops.SyncMode) {
 				result.HostFull.BlockedQueueJobs = result.QueueStatus.BlockedReasons
 			}
 		}
+		if result.HostFull != nil {
+			placement.RecordContentionObs(w.database, host, placement.HostMetricsFromHostInfo(result.HostFull, result.QueueStatus))
+		}
 	}
 }
 

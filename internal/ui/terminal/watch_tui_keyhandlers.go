@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/blockreason"
@@ -232,10 +233,6 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		requestID := m.moveLookupSeq
 		m.moveLookupPending = true
 		m.moveLookupRequestID = requestID
-		sourceInstanceID := int64(0)
-		if job.LaunchID != nil {
-			sourceInstanceID = *job.LaunchID
-		}
 		capacities := m.buildInstanceCapacities()
 		// Snapshot queued-job counts on the main goroutine to avoid a data
 		// race — the updates map must not be read from a background goroutine.
@@ -247,26 +244,30 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		existing := orchestration.BuildExistingOptions(job, capacities, queuedCounts, sourceInstanceID)
-		options := moveOptionsFromOrchestration(existing)
-		loadingNew := len(m.cloudClients) > 0
-		existingCount, newCount := countMoveOptions(options)
+		sourceInstanceID := int64(0)
+		if job.LaunchID != nil {
+			sourceInstanceID = *job.LaunchID
+		}
 		m.movePicker = movePickerModel{
 			active:       true,
 			jobID:        job.ID,
 			requestID:    requestID,
-			options:      options,
-			cursor:       0,
-			loadingNew:   loadingNew,
-			status:       movePickerStatus(existingCount, newCount, loadingNew),
-			existingDone: true,
+			cursor:       -1,
+			loadingNew:   true,
+			loadingStart: time.Now(),
+			status:       "Searching move destinations...",
+			existingDone: false,
 		}
 		flashCmd := m.flash.Set(m.movePicker.status, false)
-		if !loadingNew {
-			m.moveLookupPending = false
-			return m, flashCmd
+		cmds := []tea.Cmd{
+			flashCmd,
+			scheduleMoveLookupTick(requestID),
+			requestMoveOptions(requestID, m.database, m.appConfig, len(m.cloudClients) > 0, job, capacities, queuedCounts, sourceInstanceID),
 		}
-		return m, tea.Batch(flashCmd, requestMoveNewOptions(requestID, m.appConfig, m.cloudClients, job))
+		if len(m.cloudClients) > 0 {
+			cmds = append(cmds, requestMoveNewOptions(requestID, m.appConfig, m.cloudClients, job))
+		}
+		return m, tea.Batch(cmds...)
 	case "N":
 		job := m.selectedCloudJob()
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {
@@ -357,7 +358,9 @@ func (m watchModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.movePicker.reset()
 		targetDesc := fmt.Sprintf("instance %s", ids.FormatInstanceID(selected.instanceID))
-		if selected.isNew {
+		if selected.kind == orchestration.OptionKindOnPrem {
+			targetDesc = fmt.Sprintf("host %s", selected.host)
+		} else if selected.isNew {
 			targetDesc = fmt.Sprintf("new %s instance", selected.gpuName)
 		}
 		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Moving job #%d to %s...", jobID, targetDesc), false)

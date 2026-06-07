@@ -766,18 +766,25 @@ func (m watchModel) scheduleProjectSyncTick() tea.Cmd {
 	})
 }
 
+func scheduleMoveLookupTick(requestID int64) tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+		return moveLookupTickMsg{requestID: requestID}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Move picker commands
 // ---------------------------------------------------------------------------
 
-// requestMoveOptions builds the list of move destinations (existing instances + new offers).
+// requestMoveOptions builds the list of existing move destinations (on-prem hosts and running rentals).
 // sourceInstanceID is the instance the job is currently on (excluded from existing options).
 // queuedCounts is a snapshot of queued-job counts per instance (built on the main goroutine
 // to avoid a data race on the updates map).
 func requestMoveOptions(
+	requestID int64,
 	database *sql.DB,
 	cfg *config.Config,
-	cloudClients []cloud.Client,
+	loadingNew bool,
 	job *db.Job,
 	capacities []campaign.InstanceCapacity,
 	queuedCounts map[int64]int,
@@ -803,26 +810,46 @@ func requestMoveOptions(
 		}
 		oplog.LogJob(oplog.OpTUIAction, jobID, jobHost, oplog.WithDetail("key=m action=move_lookup_start"))
 
-		// --- Existing instances + new options ---
+		// --- Existing destinations ---
 		existingStarted := time.Now()
-		jmOptions, buildErr := orchestration.BuildOptions(cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability())
-		if buildErr != nil {
-			logPhase("raw_offers", existingStarted, "", buildErr)
-			return moveOptionsReadyMsg{jobID: jobID, err: buildErr}
-		}
+		jmOptions := orchestration.BuildMovePickerExistingOptions(database, cfg, job, capacities, queuedCounts, sourceInstanceID)
 		options := moveOptionsFromOrchestration(jmOptions)
-		existingCount, newCount := countMoveOptions(options)
+		existingCount, _, disabledCount := countMoveOptions(options)
 		logPhase("existing_instances", existingStarted, fmt.Sprintf("count=%d", existingCount), nil)
-		logPhase("rank_offers", existingStarted, fmt.Sprintf("new_options=%d", newCount), nil)
+		logPhase("existing_reasons", existingStarted, fmt.Sprintf("disabled=%d", disabledCount), nil)
 
-		if len(options) == 0 {
+		if len(options) == 0 && !loadingNew {
 			logPhase("complete", lookupStarted, "options=0", fmt.Errorf("no compatible destinations found"))
-			return moveOptionsReadyMsg{jobID: jobID, err: fmt.Errorf("no compatible destinations found")}
+			return moveOptionsReadyMsg{requestID: requestID, jobID: jobID, err: fmt.Errorf("no compatible destinations found"), loadingNew: loadingNew}
 		}
 		logPhase("complete", lookupStarted, fmt.Sprintf("options=%d", len(options)), nil)
 		slog.Debug("move lookup complete", "component", "tui", "job_id", jobID, "options", len(options), "elapsed", time.Since(lookupStarted).Truncate(time.Millisecond))
-		return moveOptionsReadyMsg{jobID: jobID, options: options}
+		return moveOptionsReadyMsg{requestID: requestID, jobID: jobID, options: options, loadingNew: loadingNew}
 	}
+}
+
+func (m watchModel) requestMoveOptionsForActivePicker() tea.Cmd {
+	if !m.movePicker.active || m.movePicker.jobID == 0 {
+		return nil
+	}
+	job, err := db.GetJobByID(m.database, m.movePicker.jobID)
+	if err != nil || job == nil {
+		return nil
+	}
+	capacities := m.buildInstanceCapacities()
+	queuedCounts := make(map[int64]int)
+	for id, u := range m.updates {
+		for _, j := range u.Jobs {
+			if j != nil && j.EffectiveStatus() == db.StatusQueued {
+				queuedCounts[id]++
+			}
+		}
+	}
+	sourceInstanceID := int64(0)
+	if job.LaunchID != nil {
+		sourceInstanceID = *job.LaunchID
+	}
+	return requestMoveOptions(m.movePicker.requestID, m.database, m.appConfig, false, job, capacities, queuedCounts, sourceInstanceID)
 }
 
 func requestMoveNewOptions(
@@ -873,13 +900,17 @@ func requestMoveExecute(
 ) tea.Cmd {
 	return func() tea.Msg {
 		targetDesc, execErr := orchestration.ExecuteOption(ctx, database, r2Client, cfg, cloudClients, jobID, orchestration.Option{
+			Kind:        opt.kind,
 			IsNew:       opt.isNew,
+			Host:        opt.host,
 			InstanceID:  opt.instanceID,
 			Offer:       opt.offer,
 			Strategy:    opt.strategy,
 			WaitTime:    opt.waitTime,
 			CostPerHour: opt.costPerHour,
 			GPUName:     opt.gpuName,
+			Eligible:    opt.eligible,
+			Reason:      opt.reason,
 		})
 		if execErr != nil {
 			return moveExecuteDoneMsg{jobID: jobID, err: execErr}

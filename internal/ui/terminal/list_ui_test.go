@@ -11,11 +11,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/orchestration"
 )
 
 func TestRenderJobListPlainTruncatesToWidth(t *testing.T) {
@@ -2272,7 +2274,7 @@ func TestMovePickerViewShowsLoadingWithoutExistingOptions(t *testing.T) {
 		active:       true,
 		jobID:        1933,
 		loadingNew:   true,
-		status:       movePickerStatus(0, 0, true),
+		status:       movePickerStatus(0, 0, 0, true),
 		existingDone: true,
 	}
 
@@ -2282,11 +2284,68 @@ func TestMovePickerViewShowsLoadingWithoutExistingOptions(t *testing.T) {
 		"EXISTING INSTANCES",
 		"none available",
 		"NEW INSTANCE",
-		"searching cloud offers",
+		"waiting for cloud offers",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("picker view missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestMovePickerViewOmitsSingleNewInstanceStrategy(t *testing.T) {
+	picker := movePickerModel{
+		active: true,
+		jobID:  1934,
+		options: []moveOption{
+			{
+				kind:        orchestration.OptionKindNew,
+				isNew:       true,
+				strategy:    bidding.StrategyCheap,
+				gpuName:     "RTX 3090",
+				waitTime:    8 * time.Minute,
+				costPerHour: 0.20,
+				eligible:    true,
+			},
+		},
+		existingDone: true,
+	}
+
+	out := stripANSI(picker.View(100, 30))
+	if strings.Contains(out, "cheap") {
+		t.Fatalf("single new-instance strategy should be omitted:\n%s", out)
+	}
+	if !strings.Contains(out, "RTX 3090") {
+		t.Fatalf("picker view missing GPU:\n%s", out)
+	}
+}
+
+func TestMovePickerViewShowsExistingSearchAfterCloudArrivesFirst(t *testing.T) {
+	picker := movePickerModel{
+		active: true,
+		jobID:  1934,
+		options: []moveOption{
+			{
+				kind:        orchestration.OptionKindNew,
+				isNew:       true,
+				gpuName:     "RTX 3090",
+				waitTime:    8 * time.Minute,
+				costPerHour: 0.20,
+				eligible:    true,
+			},
+		},
+		loadingNew:   false,
+		existingDone: false,
+		status:       movePickerStatus(0, 1, 0, false),
+	}
+
+	out := stripANSI(picker.View(100, 30))
+	for _, want := range []string{"EXISTING INSTANCES", "searching destinations", "NEW INSTANCE", "RTX 3090"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("picker view missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "waiting for cloud offers") {
+		t.Fatalf("cloud loader should be hidden after cloud arrives:\n%s", out)
 	}
 }
 
@@ -2352,9 +2411,9 @@ func TestListTUIGroupedAddsNewMoveOptionsToActivePicker(t *testing.T) {
 			active:       true,
 			jobID:        12,
 			requestID:    9,
-			options:      []moveOption{{instanceID: 2871, gpuName: "RTX 4070S Ti"}},
+			options:      []moveOption{{kind: orchestration.OptionKindExisting, instanceID: 2871, gpuName: "RTX 4070S Ti", eligible: true}},
 			loadingNew:   true,
-			status:       movePickerStatus(1, 0, true),
+			status:       movePickerStatus(1, 0, 0, true),
 			existingDone: true,
 		},
 	}
@@ -2362,7 +2421,7 @@ func TestListTUIGroupedAddsNewMoveOptionsToActivePicker(t *testing.T) {
 	next, _ := m.Update(listMoveOptionsReadyMsg{
 		requestID: 9,
 		jobID:     12,
-		options:   []moveOption{{isNew: true, gpuName: "A100"}},
+		options:   []moveOption{{kind: orchestration.OptionKindNew, isNew: true, gpuName: "A100", eligible: true}},
 		newOnly:   true,
 	})
 	got := next.(listTUIModel)
@@ -2378,8 +2437,108 @@ func TestListTUIGroupedAddsNewMoveOptionsToActivePicker(t *testing.T) {
 	if len(got.movePicker.options) != 2 {
 		t.Fatalf("options len = %d, want 2", len(got.movePicker.options))
 	}
-	if !strings.Contains(got.movePicker.status, "Found 1 existing and 1 new") {
+	if !strings.Contains(got.movePicker.status, "Found 1 existing destination and 1 new destination") {
 		t.Fatalf("status = %q", got.movePicker.status)
+	}
+}
+
+func TestListTUIGroupedExistingRefreshDoesNotRestartCloudLoading(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:   true,
+		width:             100,
+		height:            20,
+		moveLookupPending: false,
+		movePicker: movePickerModel{
+			active:       true,
+			jobID:        12,
+			requestID:    9,
+			options:      []moveOption{{kind: orchestration.OptionKindNew, isNew: true, gpuName: "RTX 3090", eligible: true}},
+			loadingNew:   false,
+			status:       movePickerStatus(0, 1, 0, false),
+			existingDone: true,
+		},
+		jobs: []*db.Job{{ID: 12, Status: db.StatusQueued}},
+	}
+
+	next, _ := m.Update(listMoveOptionsReadyMsg{
+		requestID:  9,
+		jobID:      12,
+		options:    []moveOption{{kind: orchestration.OptionKindOnPrem, host: "cool30", gpuName: "RTX 3090", eligible: true}},
+		loadingNew: true,
+	})
+	got := next.(listTUIModel)
+	if got.movePicker.loadingNew {
+		t.Fatalf("late existing refresh restarted cloud loading")
+	}
+	out := stripANSI(got.movePicker.View(100, 30))
+	if strings.Contains(out, "waiting for cloud offers") {
+		t.Fatalf("late existing refresh should not show cloud loader:\n%s", out)
+	}
+	if !strings.Contains(out, "cool30") || !strings.Contains(out, "RTX 3090") {
+		t.Fatalf("picker should keep existing and new rows:\n%s", out)
+	}
+}
+
+func TestMovePickerViewShowsDisabledDestinations(t *testing.T) {
+	picker := movePickerModel{
+		active: true,
+		jobID:  1936,
+		options: []moveOption{
+			{
+				kind:       orchestration.OptionKindOnPrem,
+				host:       "host-alpha",
+				gpuName:    "A100 80GB PCIe",
+				queueDepth: 0,
+				eligible:   true,
+			},
+			{
+				kind:       orchestration.OptionKindExisting,
+				instanceID: 2871,
+				gpuName:    "M2 Max",
+				eligible:   false,
+				reason:     "requires nvidia GPU",
+			},
+		},
+		existingDone: true,
+	}
+
+	out := stripANSI(picker.View(100, 30))
+	for _, want := range []string{
+		"EXISTING INSTANCES",
+		"host-alpha",
+		"wi2871",
+		"requires nvidia GPU",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("picker view missing %q:\n%s", want, out)
+		}
+	}
+	picker.cursor = 1
+	if got := picker.selectedOption(); got != nil {
+		t.Fatalf("selected disabled option = %+v, want nil", *got)
+	}
+}
+
+func TestMovePickerOnPremLineAbbreviatesGPUAndShowsLoad(t *testing.T) {
+	line := formatMoveOptionLine(moveOption{
+		kind:       orchestration.OptionKindOnPrem,
+		host:       "cool30",
+		gpuName:    "NVIDIA GeForce RTX 3090",
+		queueDepth: 0,
+		cpuPercent: 43,
+		hasCPULoad: true,
+		gpuPercent: 12,
+		hasGPULoad: true,
+		eligible:   true,
+	})
+
+	if strings.Contains(line, "NVIDIA GeForce") {
+		t.Fatalf("line should abbreviate NVIDIA GeForce prefix: %q", line)
+	}
+	for _, want := range []string{"RTX 3090", "queue 0", "CPU 43%", "GPU 12%"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("line missing %q: %q", want, line)
+		}
 	}
 }
 

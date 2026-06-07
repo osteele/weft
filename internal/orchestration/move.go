@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -16,19 +17,38 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 )
 
+type OptionKind string
+
+const (
+	OptionKindOnPrem   OptionKind = "on-prem"
+	OptionKindExisting OptionKind = "existing"
+	OptionKindNew      OptionKind = "new"
+)
+
 type Option struct {
+	Kind        OptionKind
 	IsNew       bool
+	Host        string
 	InstanceID  int64
 	Offer       *cloud.Offer
 	Strategy    bidding.SelectionStrategy
 	WaitTime    time.Duration
+	QueueDepth  int
+	CPUPercent  int
+	HasCPULoad  bool
+	GPUPercent  int
+	HasGPULoad  bool
 	CostPerHour float64
 	GPUName     string
+	Eligible    bool
+	Reason      string
 }
 
 type Result struct {
@@ -83,6 +103,87 @@ func BuildOptions(
 	return BuildOptionsWithSurvival(cloudClients, job, capacities, queuedCounts, sourceInstanceID, minReliability, nil, 0, nil)
 }
 
+func BuildMovePickerOptions(
+	database *sql.DB,
+	cfg *config.Config,
+	cloudClients []cloud.Client,
+	job *db.Job,
+	capacities []campaign.InstanceCapacity,
+	queuedCounts map[int64]int,
+	sourceInstanceID int64,
+	minReliability float64,
+) ([]Option, error) {
+	options := BuildMovePickerExistingOptions(database, cfg, job, capacities, queuedCounts, sourceInstanceID)
+	cloudOptions, err := BuildOptionsWithSurvival(cloudClients, job, capacities, queuedCounts, sourceInstanceID, minReliability, nil, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	options = append(options, cloudOptions...)
+	sortOptions(options)
+	return options, nil
+}
+
+func BuildMovePickerExistingOptions(
+	database *sql.DB,
+	cfg *config.Config,
+	job *db.Job,
+	capacities []campaign.InstanceCapacity,
+	queuedCounts map[int64]int,
+	sourceInstanceID int64,
+) []Option {
+	var options []Option
+	options = append(options, BuildOnPremOptions(database, cfg, job)...)
+	options = append(options, BuildExistingOptions(job, capacities, queuedCounts, sourceInstanceID)...)
+	sortOptions(options)
+	return options
+}
+
+func sortOptions(options []Option) {
+	sort.SliceStable(options, func(i, j int) bool {
+		a, b := options[i], options[j]
+		if a.Eligible != b.Eligible {
+			return a.Eligible
+		}
+		if optionKindRank(a.Kind) != optionKindRank(b.Kind) {
+			return optionKindRank(a.Kind) < optionKindRank(b.Kind)
+		}
+		if a.WaitTime != b.WaitTime {
+			return a.WaitTime < b.WaitTime
+		}
+		if a.CostPerHour != b.CostPerHour {
+			return a.CostPerHour < b.CostPerHour
+		}
+		return optionLabel(a) < optionLabel(b)
+	})
+}
+
+func optionKindRank(kind OptionKind) int {
+	switch kind {
+	case OptionKindOnPrem:
+		return 0
+	case OptionKindExisting:
+		return 1
+	case OptionKindNew:
+		return 2
+	default:
+		return 9
+	}
+}
+
+func optionLabel(opt Option) string {
+	switch opt.Kind {
+	case OptionKindOnPrem:
+		return opt.Host
+	case OptionKindExisting:
+		return ids.FormatInstanceID(opt.InstanceID)
+	case OptionKindNew:
+		if opt.Offer != nil {
+			return opt.Offer.Key()
+		}
+	}
+	return ""
+}
+
 func BuildOptionsWithSurvival(
 	cloudClients []cloud.Client,
 	job *db.Job,
@@ -117,21 +218,158 @@ func BuildExistingOptions(
 		}
 		filtered = append(filtered, cap)
 	}
-	for _, cap := range campaign.RankForJob(job, filtered) {
+	ranked := campaign.RankForJob(job, filtered)
+	seen := make(map[int64]struct{}, len(ranked))
+	for _, cap := range ranked {
 		inst := cap.Instance
+		seen[inst.ID] = struct{}{}
 		gpuName := inst.ResolvedGPUName
 		if gpuName == "" {
 			gpuName = inst.GPUClass
 		}
+		queueDepth := queuedCounts[inst.ID]
 		options = append(options, Option{
+			Kind:        OptionKindExisting,
 			IsNew:       false,
 			InstanceID:  inst.ID,
 			GPUName:     gpuName,
-			WaitTime:    existingInstanceMoveWait(cap, queuedCounts[inst.ID]),
+			WaitTime:    existingInstanceMoveWait(cap, queueDepth),
+			QueueDepth:  cap.RunningJobCount + queueDepth,
 			CostPerHour: float64(inst.CostPerHourCents) / 100.0,
+			Eligible:    true,
+		})
+	}
+	for _, cap := range filtered {
+		inst := cap.Instance
+		if _, ok := seen[inst.ID]; ok {
+			continue
+		}
+		gpuName := inst.ResolvedGPUName
+		if gpuName == "" {
+			gpuName = inst.GPUClass
+		}
+		_, reason := campaign.MatchJobToInstance(job, cap)
+		if reason == "" {
+			reason = "not compatible"
+		}
+		queueDepth := queuedCounts[inst.ID]
+		options = append(options, Option{
+			Kind:        OptionKindExisting,
+			InstanceID:  inst.ID,
+			GPUName:     gpuName,
+			WaitTime:    existingInstanceMoveWait(cap, queueDepth),
+			QueueDepth:  cap.RunningJobCount + queueDepth,
+			CostPerHour: float64(inst.CostPerHourCents) / 100.0,
+			Eligible:    false,
+			Reason:      reason,
 		})
 	}
 	return options
+}
+
+func BuildOnPremOptions(database *sql.DB, cfg *config.Config, job *db.Job) []Option {
+	if database == nil || job == nil {
+		return nil
+	}
+	hosts, err := inventory.LoadHosts()
+	if err != nil || len(hosts) == 0 {
+		return nil
+	}
+	hostNames := make([]string, 0, len(hosts))
+	hostSpecs := make(map[string]inventory.HostSpec, len(hosts))
+	for _, host := range hosts {
+		hostNames = append(hostNames, host.Name)
+		hostSpecs[host.Name] = host
+	}
+	metrics, staleHosts, err := recentHostMetricsByHost(database, hostNames, db.HostInfoStaleThreshold)
+	if err != nil {
+		return nil
+	}
+	constraints := placement.ConstraintsFromJob(job)
+	jobUsesGPU := constraints.GPUClass != "" || constraints.GPUMemGB > 0
+	scores, err := placement.ScoreHostsWithPredictor(database, constraints, metrics, nil)
+	if err != nil {
+		return nil
+	}
+	options := make([]Option, 0, len(scores))
+	for _, score := range scores {
+		queueDepth := 0
+		cpuPercent := 0
+		hasCPULoad := false
+		gpuPercent := 0
+		hasGPULoad := false
+		if m := metrics[score.Host]; m != nil {
+			queueDepth = m.GPUJobsQueued
+			if queueDepth == 0 {
+				queueDepth = m.QueueDepth
+			}
+			cpuPercent = m.CPUPercent
+			hasCPULoad = true
+			gpuPercent = m.GPUPercent
+			hasGPULoad = jobUsesGPU
+		}
+		gpuName := formatMoveOptionHostGPU(hostSpecs[score.Host])
+		for _, reason := range score.Reasons {
+			if strings.HasPrefix(reason, "has ") && strings.HasSuffix(reason, " GPU") {
+				gpuName = strings.TrimSuffix(strings.TrimPrefix(reason, "has "), " GPU")
+				break
+			}
+		}
+		reason := ""
+		if !score.Eligible {
+			reason = strings.Join(score.Reasons, ", ")
+			if reason == "" {
+				reason = "not eligible"
+			}
+		}
+		if staleHosts[score.Host] {
+			reason = "host state stale"
+		}
+		options = append(options, Option{
+			Kind:       OptionKindOnPrem,
+			Host:       score.Host,
+			GPUName:    gpuName,
+			WaitTime:   score.QueueDrainEst.Mean,
+			QueueDepth: queueDepth,
+			CPUPercent: cpuPercent,
+			HasCPULoad: hasCPULoad,
+			GPUPercent: gpuPercent,
+			HasGPULoad: hasGPULoad,
+			Eligible:   score.Eligible && !staleHosts[score.Host],
+			Reason:     reason,
+		})
+	}
+	return options
+}
+
+func recentHostMetricsByHost(database *sql.DB, hosts []string, maxAge time.Duration) (map[string]*placement.HostMetrics, map[string]bool, error) {
+	metrics := make(map[string]*placement.HostMetrics, len(hosts))
+	stale := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		hostMetrics, recent, err := placement.RecentHostMetrics(database, []string{host}, maxAge)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !recent {
+			stale[host] = true
+			metrics[host] = &placement.HostMetrics{}
+			continue
+		}
+		metrics[host] = hostMetrics[host]
+	}
+	return metrics, stale, nil
+}
+
+func formatMoveOptionHostGPU(host inventory.HostSpec) string {
+	for _, gpu := range host.GPUs {
+		if strings.TrimSpace(gpu.Name) != "" {
+			return strings.TrimSpace(gpu.Name)
+		}
+		if strings.TrimSpace(gpu.Class) != "" {
+			return strings.TrimSpace(gpu.Class)
+		}
+	}
+	return "on-prem"
 }
 
 func BuildNewOptionsWithSurvival(
@@ -184,12 +422,14 @@ func BuildNewOptionsWithSurvival(
 		}
 		seen[key] = true
 		options = append(options, Option{
+			Kind:        OptionKindNew,
 			IsNew:       true,
 			Offer:       offer,
 			Strategy:    strategy,
 			GPUName:     offer.GPUName,
 			WaitTime:    8 * time.Minute,
 			CostPerHour: offer.CostPerHour,
+			Eligible:    true,
 		})
 	}
 	return options, nil
@@ -234,6 +474,30 @@ func ExecuteOption(
 	}
 	if job == nil {
 		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+	}
+	if !opt.Eligible {
+		reason := strings.TrimSpace(opt.Reason)
+		if reason == "" {
+			reason = "destination is not eligible"
+		}
+		return "", errors.New(reason)
+	}
+	if opt.Kind == OptionKindOnPrem || strings.TrimSpace(opt.Host) != "" {
+		host := strings.TrimSpace(opt.Host)
+		if host == "" {
+			return "", fmt.Errorf("on-prem option missing host")
+		}
+		if job.IsLaunchJob() {
+			return "", fmt.Errorf("moving %s from rental instance to on-prem host %s is not implemented safely yet: destination acceptance must be confirmed before the source is stopped", ids.FormatJobID(job.ID), host)
+		}
+		sources := SnapshotForcedSources([]*db.Job{job})
+		if _, err := MoveJobsToHost(database, []*db.Job{job}, host, JobMoveCallbacks{}); err != nil {
+			return "", err
+		}
+		TerminateForcedSources(database, sources, func(msg string) {
+			slog.Warn("terminate forced source", "component", "move", "job_id", job.ID, "msg", msg)
+		})
+		return fmt.Sprintf("host %s", host), nil
 	}
 
 	return executeWithIntent(ctx, database, r2Client, cfg, cloudClients, job, opt)
