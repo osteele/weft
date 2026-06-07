@@ -153,16 +153,16 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	envVars = append(envVars, job.Env...)
 	envVars = artifacts.MergeEnvVars(envVars, cfg.JobID)
 
-	// Pre-register --produces declarations in the artifact manifest before
+	// Pre-register filesystem artifact declarations in the manifest before
 	// the job starts. The periodic output uploader (60s tick on cloud agents)
 	// reads this manifest, so registering early lets large in-progress files
 	// (e.g. checkpoints written every N steps) be uploaded throughout the
 	// run rather than only after the script exits. This is idempotent with
 	// the post-exit call below; the post-exit call covers paths the script
 	// itself appended to $WEFT_ARTIFACT_MANIFEST during the run.
-	if len(job.Produces) > 0 {
-		if err := RecordProducedArtifacts(cfg.JobID, job.Produces); err != nil {
-			slog.Warn("failed to pre-register --produces in artifact manifest",
+	if len(job.Produces) > 0 || len(job.Outputs) > 0 {
+		if err := RecordDeclaredArtifacts(cfg.JobID, job.Produces, job.Outputs); err != nil {
+			slog.Warn("failed to pre-register declared artifacts in artifact manifest",
 				"component", "runner", "job_id", cfg.JobID, "error", err)
 			WriteManifestErrorFile(paths, "pre-register: "+err.Error())
 		}
@@ -528,8 +528,8 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// Discover outputs
 	var outputFiles []OutputFile
 	if ei.ExitCode == 0 {
-		if err := RecordProducedArtifacts(cfg.JobID, job.Produces); err != nil {
-			slog.Warn("failed to write artifact manifest from --produces",
+		if err := RecordDeclaredArtifacts(cfg.JobID, job.Produces, job.Outputs); err != nil {
+			slog.Warn("failed to write artifact manifest from declared artifacts",
 				"component", "runner", "job_id", cfg.JobID, "error", err)
 			WriteManifestErrorFile(paths, "post-exit: "+err.Error())
 		}

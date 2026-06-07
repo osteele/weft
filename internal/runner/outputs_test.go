@@ -152,6 +152,7 @@ func TestDiscoverOutputRefs(t *testing.T) {
 
 	files, err := DiscoverOutputRefs(tmpDir, []string{
 		"output/bayes_course/",
+		"local:output/bayes_course/",
 		"metrics.json",
 		"hf:org/model",
 		"missing/",
@@ -172,5 +173,26 @@ func TestDiscoverOutputRefs(t *testing.T) {
 	}
 	if paths["hf:org/model"] {
 		t.Fatalf("data-location token was treated as a local file: %+v", files)
+	}
+}
+
+func TestDiscoverOutputRefs_LocalOutputRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "output", "exp-231"), 0o755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "output", "exp-231", "summary.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write summary: %v", err)
+	}
+
+	files, err := DiscoverOutputRefs(tmpDir, []string{"local:output/exp-231/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(files), 1; got != want {
+		t.Fatalf("file count = %d, want %d: %+v", got, want, files)
+	}
+	if files[0].RelPath != "output/exp-231/summary.json" {
+		t.Fatalf("path = %q, want output/exp-231/summary.json", files[0].RelPath)
 	}
 }

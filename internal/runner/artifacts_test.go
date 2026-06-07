@@ -232,3 +232,35 @@ func TestRecordProducedArtifacts_MergesExistingManifest(t *testing.T) {
 		t.Fatalf("artifact paths = %+v", manifest.Artifacts)
 	}
 }
+
+func TestRecordDeclaredArtifacts_IncludesLocalOutputs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	jobID := int64(125)
+
+	if err := RecordDeclaredArtifacts(jobID, []string{"output/model.pt:456"}, []string{
+		"local:output/exp-231/",
+		"checkpoint:phase-residual",
+	}); err != nil {
+		t.Fatalf("RecordDeclaredArtifacts: %v", err)
+	}
+
+	manifestPath := filepath.Join(home, ".cache", "weft", "artifacts", "125.json")
+	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
+	if err != nil {
+		t.Fatalf("ReadManifestFile: %v", err)
+	}
+	paths := make(map[string]bool, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		paths[artifact.Path] = true
+	}
+	if !paths["output/model.pt"] {
+		t.Fatalf("produces path missing from manifest: %+v", manifest.Artifacts)
+	}
+	if !paths["output/exp-231/"] {
+		t.Fatalf("local output path missing from manifest: %+v", manifest.Artifacts)
+	}
+	if paths["checkpoint:phase-residual"] {
+		t.Fatalf("non-filesystem data output was added to manifest: %+v", manifest.Artifacts)
+	}
+}

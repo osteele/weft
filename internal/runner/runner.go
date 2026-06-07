@@ -719,8 +719,8 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		}
 	}
 	if ei.ExitCode == 0 {
-		if err := RecordProducedArtifacts(jobID, rj.Data.Produces); err != nil {
-			fmt.Fprintf(os.Stderr, "Job %s: failed to write artifact manifest from --produces: %v\n", ids.FormatJobID(jobID), err)
+		if err := RecordDeclaredArtifacts(jobID, rj.Data.Produces, rj.Data.Outputs); err != nil {
+			fmt.Fprintf(os.Stderr, "Job %s: failed to write artifact manifest from declared artifacts: %v\n", ids.FormatJobID(jobID), err)
 			WriteManifestErrorFile(paths, "post-exit: "+err.Error())
 		}
 	}

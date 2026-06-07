@@ -92,7 +92,13 @@ func ArtifactSatisfiedFile(logDir string, path string, version int64) string {
 // artifact manifest, so they are uploaded/downloadable even when outside
 // convention-based output directories.
 func RecordProducedArtifacts(jobID int64, produces []string) error {
-	if len(produces) == 0 {
+	return RecordDeclaredArtifacts(jobID, produces, nil)
+}
+
+// RecordDeclaredArtifacts ensures declared filesystem artifacts are present in
+// the manifest consumed by cloud output uploaders.
+func RecordDeclaredArtifacts(jobID int64, produces, outputs []string) error {
+	if len(produces) == 0 && len(outputs) == 0 {
 		return nil
 	}
 	manifestPath := ExpandTilde(artifacts.RemoteManifestPath(jobID))
@@ -117,6 +123,15 @@ func RecordProducedArtifacts(jobID int64, produces []string) error {
 		parsed := ParseProducesSpec(raw)
 		path := strings.TrimSpace(parsed.Path)
 		if path == "" || seen[path] {
+			continue
+		}
+		manifest.Artifacts = append(manifest.Artifacts, artifacts.ArtifactSpec{Path: path})
+		seen[path] = true
+		changed = true
+	}
+	for _, raw := range outputs {
+		path, ok := FilesystemOutputRefPath(raw)
+		if !ok || seen[path] {
 			continue
 		}
 		manifest.Artifacts = append(manifest.Artifacts, artifacts.ArtifactSpec{Path: path})

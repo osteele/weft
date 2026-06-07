@@ -43,12 +43,12 @@ func DiscoverOutputRefs(workDir string, refs []string) ([]OutputFile, error) {
 	var files []OutputFile
 	seen := make(map[string]bool)
 	for _, ref := range refs {
-		ref = strings.TrimSpace(ref)
-		if ref == "" || strings.Contains(ref, ":") {
+		cleanRef, ok := FilesystemOutputRefPath(ref)
+		if !ok {
 			continue
 		}
 
-		cleanRef := strings.TrimSuffix(ref, "/")
+		cleanRef = strings.TrimSuffix(cleanRef, "/")
 		absPath := filepath.Join(workDir, cleanRef)
 		info, err := os.Stat(absPath)
 		if err != nil {
@@ -80,6 +80,23 @@ func DiscoverOutputRefs(workDir string, refs []string) ([]OutputFile, error) {
 		}
 	}
 	return files, nil
+}
+
+// FilesystemOutputRefPath returns the workspace-relative path named by a
+// filesystem output reference. Plain paths and local: paths are filesystem
+// outputs; other colon-qualified refs identify data assets.
+func FilesystemOutputRefPath(ref string) (string, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", false
+	}
+	if strings.HasPrefix(ref, "local:") {
+		ref = strings.TrimSpace(strings.TrimPrefix(ref, "local:"))
+	}
+	if ref == "" || strings.Contains(ref, ":") {
+		return "", false
+	}
+	return ref, true
 }
 
 // DiscoverJobOutputs discovers convention directories and declared filesystem
