@@ -174,24 +174,28 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		ssh.SetMinConnectTimeout(statusSSHTimeout)
 	}
 
-	// Check if all requested jobs are already in terminal state - skip sync if so
-	needsSync := false
+	// Collect requested jobs so the cached-first sync policy can decide once.
+	var jobsForSync []*db.Job
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil || job == nil {
+			continue
+		}
+		jobsForSync = append(jobsForSync, job)
+	}
+	needsSync := liveSyncNeededForJobs(database, jobsForSync, statusSync || statusWait, statusNoSync)
 	hostsToSync := make(map[string]struct{})
 	needsRentalSync := false
-	if !statusNoSync {
-		for _, jobID := range jobIDs {
-			job, err := db.GetJobByID(database, jobID)
-			if err != nil || job == nil {
+	if needsSync {
+		for _, job := range jobsForSync {
+			if status.IsTerminal(job.Status) {
 				continue
 			}
-			if !status.IsTerminal(job.Status) {
-				needsSync = true
-				if job.HasInventoryHost() {
-					hostsToSync[job.Host] = struct{}{}
-				}
-				if job.IsRentalJob() {
-					needsRentalSync = true
-				}
+			if job.HasInventoryHost() {
+				hostsToSync[job.Host] = struct{}{}
+			}
+			if job.IsRentalJob() {
+				needsRentalSync = true
 			}
 		}
 	}
@@ -244,7 +248,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			fmt.Println("---")
 		}
 		printed++
-		printSingleJobStatus(database, jobID, job, singleJob, needsSync || statusNoSync)
+		printSingleJobStatus(database, jobID, job, singleJob, true)
 	}
 
 	if statusWait {
@@ -734,11 +738,23 @@ func showActiveJobs(database *sql.DB) error {
 	if !statusNoSync {
 		hosts, err := db.ListUniqueActiveHosts(database)
 		if err == nil && len(hosts) > 0 {
-			sshTimeout, hostTimeout := statusHostSyncBounds()
-			completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, false)
-			if !completed {
-				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
-					fmt.Fprintln(os.Stderr, note)
+			needsSync := statusSync || !daemonLiveFunc()
+			if !needsSync {
+				now := time.Now()
+				for _, host := range hosts {
+					if !syncTargetFresh(database, host, now) {
+						needsSync = true
+						break
+					}
+				}
+			}
+			if needsSync {
+				sshTimeout, hostTimeout := statusHostSyncBounds()
+				completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, false)
+				if !completed {
+					if note := buildStaleDataNote(database, unreachable, slow); note != "" {
+						fmt.Fprintln(os.Stderr, note)
+					}
 				}
 			}
 		}

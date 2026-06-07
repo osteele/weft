@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/blockreason"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ssh"
@@ -130,6 +131,77 @@ func TestRunStatusInventorySyncUsesBoundedStatusTimeout(t *testing.T) {
 	}
 }
 
+func TestRunStatusSkipsLiveSyncWhenDaemonSyncIsFresh(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "fresh status", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.RecordHostSync(database, "studio", time.Now()); err != nil {
+		t.Fatalf("RecordHostSync: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	daemonLiveFunc = func() bool { return true }
+
+	originalSyncHosts := statusSyncHostsFunc
+	t.Cleanup(func() {
+		statusSyncHostsFunc = originalSyncHosts
+	})
+
+	calls := 0
+	statusSyncHostsFunc = func(_ *sql.DB, _ []string, _, _ time.Duration, _ bool) (bool, []string, []string) {
+		calls++
+		return true, nil, nil
+	}
+
+	captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+
+	if calls != 0 {
+		t.Fatalf("status sync calls = %d, want 0 with fresh daemon sync", calls)
+	}
+}
+
+func TestRunStatusForceSyncIgnoresFreshDaemonSync(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "forced status", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.RecordHostSync(database, "studio", time.Now()); err != nil {
+		t.Fatalf("RecordHostSync: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	statusSync = true
+	daemonLiveFunc = func() bool { return true }
+
+	originalSyncHosts := statusSyncHostsFunc
+	t.Cleanup(func() {
+		statusSyncHostsFunc = originalSyncHosts
+	})
+
+	calls := 0
+	statusSyncHostsFunc = func(_ *sql.DB, _ []string, _, _ time.Duration, _ bool) (bool, []string, []string) {
+		calls++
+		return true, nil, nil
+	}
+
+	captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+
+	if calls != 1 {
+		t.Fatalf("status sync calls = %d, want 1 with --sync", calls)
+	}
+}
+
 func TestShowActiveJobsUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) {
 	database := db.SetupTestDB(t)
 	if _, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "active status", ""); err != nil {
@@ -223,6 +295,110 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 	}
 	if gotCloudTimeout != NormalCloudSyncTimeout {
 		t.Fatalf("job info cloud timeout = %v, want %v", gotCloudTimeout, NormalCloudSyncTimeout)
+	}
+}
+
+func TestRunJobInfoSkipsQuickSyncWhenDaemonSyncIsFresh(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID := createRentalQueuedJob(t, database)
+	if err := db.RecordCloudSync(database, time.Now()); err != nil {
+		t.Fatalf("RecordCloudSync: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	daemonLiveFunc = func() bool { return true }
+
+	originalQuickSyncJobs := quickSyncJobsFunc
+	t.Cleanup(func() {
+		quickSyncJobsFunc = originalQuickSyncJobs
+	})
+
+	calls := 0
+	quickSyncJobsFunc = func(_ *sql.DB, _ []*db.Job, _, _ time.Duration) {
+		calls++
+	}
+
+	captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+
+	if calls != 0 {
+		t.Fatalf("quickSyncJobs calls = %d, want 0 with fresh daemon sync", calls)
+	}
+}
+
+func TestInstanceStatusSkipsLiveRefreshWhenDaemonCloudSyncIsFresh(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, _ := createRentalQueuedJobWithInstance(t, database)
+	if err := db.RecordCloudSync(database, time.Now()); err != nil {
+		t.Fatalf("RecordCloudSync: %v", err)
+	}
+
+	restoreInstanceStatusFlags(t)
+	daemonLiveFunc = func() bool { return true }
+
+	out := captureStdout(t, func() {
+		if err := runInstanceStatus(&cobra.Command{}, []string{ids.FormatInstanceID(instanceID)}); err != nil {
+			t.Fatalf("runInstanceStatus: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Instance: (provisioning") {
+		t.Fatalf("expected cached instance display without provider status, got:\n%s", out)
+	}
+}
+
+func TestInstanceStatusNoSyncSkipsLiveRefresh(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, _ := createRentalQueuedJobWithInstance(t, database)
+
+	restoreInstanceStatusFlags(t)
+	instanceStatusNoSync = true
+	daemonLiveFunc = func() bool { return false }
+
+	out := captureStdout(t, func() {
+		if err := runInstanceStatus(&cobra.Command{}, []string{ids.FormatInstanceID(instanceID)}); err != nil {
+			t.Fatalf("runInstanceStatus: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Instance: (provisioning") {
+		t.Fatalf("expected --no-sync cached instance display, got:\n%s", out)
+	}
+}
+
+func TestShouldRefreshInstanceLiveStateUsesDaemonCloudFreshness(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launch := &db.Launch{Status: db.LaunchStatusRunning}
+	if _, err := database.Exec(`DELETE FROM host_syncs WHERE name = ?`, db.CloudSyncTargetName); err != nil {
+		t.Fatalf("clear cloud sync: %v", err)
+	}
+	if got := db.GetLastCloudSync(database); !got.IsZero() {
+		t.Fatalf("cloud sync after clear = %v, want zero", got)
+	}
+	if campaign.IsInstanceTerminal(launch.Status) {
+		t.Fatalf("launch status %q unexpectedly terminal", launch.Status)
+	}
+
+	restoreInstanceStatusFlags(t)
+	daemonLiveFunc = func() bool { return true }
+
+	if !shouldRefreshInstanceLiveState(database, launch, false, false) {
+		t.Fatal("missing cloud sync should require live refresh")
+	}
+	if err := db.RecordCloudSync(database, time.Now()); err != nil {
+		t.Fatalf("RecordCloudSync: %v", err)
+	}
+	if shouldRefreshInstanceLiveState(database, launch, false, false) {
+		t.Fatal("fresh daemon cloud sync should skip live refresh")
+	}
+	if !shouldRefreshInstanceLiveState(database, launch, true, false) {
+		t.Fatal("--sync should force live refresh")
+	}
+	if shouldRefreshInstanceLiveState(database, launch, true, true) {
+		t.Fatal("--no-sync should skip live refresh")
 	}
 }
 
@@ -716,6 +892,7 @@ func restoreStatusFlags(t *testing.T) {
 	origWait := statusWait
 	origWaitTimeout := statusWaitTimeout
 	origSSHTimeout := statusSSHTimeout
+	origDaemonLive := daemonLiveFunc
 
 	t.Cleanup(func() {
 		statusSync = origSync
@@ -724,6 +901,7 @@ func restoreStatusFlags(t *testing.T) {
 		statusWait = origWait
 		statusWaitTimeout = origWaitTimeout
 		statusSSHTimeout = origSSHTimeout
+		daemonLiveFunc = origDaemonLive
 	})
 
 	statusSync = false
@@ -739,12 +917,31 @@ func restoreJobInfoFlags(t *testing.T) {
 
 	origSync := jobInfoSync
 	origNoSync := jobInfoNoSync
+	origDaemonLive := daemonLiveFunc
 
 	t.Cleanup(func() {
 		jobInfoSync = origSync
 		jobInfoNoSync = origNoSync
+		daemonLiveFunc = origDaemonLive
 	})
 
 	jobInfoSync = false
 	jobInfoNoSync = false
+}
+
+func restoreInstanceStatusFlags(t *testing.T) {
+	t.Helper()
+
+	origSync := instanceStatusSync
+	origNoSync := instanceStatusNoSync
+	origDaemonLive := daemonLiveFunc
+
+	t.Cleanup(func() {
+		instanceStatusSync = origSync
+		instanceStatusNoSync = origNoSync
+		daemonLiveFunc = origDaemonLive
+	})
+
+	instanceStatusSync = false
+	instanceStatusNoSync = false
 }

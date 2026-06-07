@@ -76,6 +76,8 @@ via SSH. Use --print to print the SSH command instead of connecting.`,
 
 var instanceSSHPrint bool
 var instanceSubmitCommand string
+var instanceStatusSync bool
+var instanceStatusNoSync bool
 
 var instanceSubmitCmd = &cobra.Command{
 	Use:   "submit <instance-id> <job-id>",
@@ -199,6 +201,10 @@ func init() {
 	instanceSSHCmd.Flags().BoolVar(&instanceSSHPrint, "print", false, "Print the SSH command instead of connecting")
 	instanceSubmitCmd.Flags().StringVar(&instanceSubmitCommand, "command", "", "Override the job command")
 	instanceCordonCmd.Flags().StringVar(&instanceCordonReason, "reason", "", "Optional human-readable reason (recorded with the cordon)")
+	for _, cmd := range []*cobra.Command{instanceStatusCmd, instanceInfoCmd} {
+		cmd.Flags().BoolVar(&instanceStatusSync, "sync", false, "Perform live provider/R2 refresh before showing status")
+		cmd.Flags().BoolVar(&instanceStatusNoSync, "no-sync", false, "Skip live provider/R2 refresh")
+	}
 
 	configureWatchFlags(instanceWatchCmd)
 	addInstanceLaunchFlags(instanceLaunchCmd)
@@ -673,6 +679,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	forceLive, noLive := instanceStatusSyncMode(cmd)
 	for i, arg := range args {
 		if i > 0 {
 			fmt.Println()
@@ -717,8 +724,9 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		providerInstID := ci.EffectiveProviderID()
 		var inst *cloud.Instance
 		client := cloudClientForDBInstance(ci.Provider)
+		useLive := shouldRefreshInstanceLiveState(database, ci, forceLive, noLive)
 		if providerInstID != "" {
-			if !campaign.IsInstanceTerminal(ci.Status) {
+			if useLive {
 				inst, _ = client.ShowInstance(providerInstID)
 			}
 			if inst != nil && inst.Status != "" {
@@ -736,7 +744,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 
 		// Agent version and live status
 		var liveUpdate *campaign.InstanceUpdate
-		if !campaign.IsInstanceTerminal(ci.Status) {
+		if useLive {
 			if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
 				watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
 				ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
@@ -871,6 +879,34 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+func instanceStatusSyncMode(cmd *cobra.Command) (forceLive bool, noLive bool) {
+	if cmd != nil && isTopLevelStatusCommand(cmd) {
+		return statusSync, statusNoSync
+	}
+	if cmd != nil {
+		switch cmd.Name() {
+		case "info", "show":
+			if cmd.Parent() == rootCmd {
+				return jobInfoSync, jobInfoNoSync
+			}
+		}
+	}
+	return instanceStatusSync, instanceStatusNoSync
+}
+
+func shouldRefreshInstanceLiveState(database *sql.DB, ci *db.Launch, forceLive, noLive bool) bool {
+	if ci == nil || campaign.IsInstanceTerminal(ci.Status) || noLive {
+		return false
+	}
+	if forceLive {
+		return true
+	}
+	if !daemonLiveFunc() {
+		return true
+	}
+	return !syncTargetFresh(database, db.CloudSyncTargetName, time.Now())
 }
 
 func printInventoryTargetStatus(database *sql.DB, host string) (bool, error) {

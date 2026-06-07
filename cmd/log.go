@@ -196,7 +196,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 			}
 			jobsToSync = append(jobsToSync, job)
 		}
-		if len(jobsToSync) > 0 {
+		if len(jobsToSync) > 0 && liveSyncNeededForJobs(database, jobsToSync, logSync, logNoSync) {
 			timeout := FastSyncTimeout
 			cloudTimeout := FastCloudSyncTimeout
 			if logSync {

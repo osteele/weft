@@ -4384,6 +4384,8 @@ func LoadAllCachedHosts(db *sql.DB) ([]*CachedHostInfo, error) {
 	return hosts, rows.Err()
 }
 
+const CloudSyncTargetName = "__cloud__"
+
 // RecordHostSync stores the latest successful sync timestamp for a host.
 func RecordHostSync(db *sql.DB, host string, syncedAt time.Time) error {
 	if host == "" {
@@ -4396,6 +4398,26 @@ func RecordHostSync(db *sql.DB, host string, syncedAt time.Time) error {
 		host, syncedAt.Unix(),
 	)
 	return err
+}
+
+// RecordCloudSync stores the latest successful cloud sync timestamp.
+func RecordCloudSync(db *sql.DB, syncedAt time.Time) error {
+	return RecordHostSync(db, CloudSyncTargetName, syncedAt)
+}
+
+// GetLastHostSync returns the timestamp when a host was last synced.
+func GetLastHostSync(db *sql.DB, host string) time.Time {
+	var ts int64
+	err := db.QueryRow(`SELECT last_synced FROM host_syncs WHERE name = ?`, host).Scan(&ts)
+	if err != nil || ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0)
+}
+
+// GetLastCloudSync returns the timestamp when cloud state was last synced.
+func GetLastCloudSync(db *sql.DB) time.Time {
+	return GetLastHostSync(db, CloudSyncTargetName)
 }
 
 // GetLastRestartCheck returns the timestamp when we last checked for restarted jobs on this host.
@@ -4438,6 +4460,9 @@ func LoadHostSyncTimes(db *sql.DB) (map[string]time.Time, error) {
 		if err := rows.Scan(&name, &lastSynced); err != nil {
 			return nil, err
 		}
+		if name == CloudSyncTargetName {
+			continue
+		}
 		if name != "" && lastSynced > 0 {
 			times[name] = time.Unix(lastSynced, 0)
 		}
@@ -4447,7 +4472,7 @@ func LoadHostSyncTimes(db *sql.DB) (map[string]time.Time, error) {
 
 // ListHostsSyncedSince returns hosts synced since the provided timestamp.
 func ListHostsSyncedSince(db *sql.DB, since time.Time) ([]string, error) {
-	rows, err := db.Query(`SELECT name FROM host_syncs WHERE last_synced >= ? ORDER BY name`, since.Unix())
+	rows, err := db.Query(`SELECT name FROM host_syncs WHERE last_synced >= ? AND name != ? ORDER BY name`, since.Unix(), CloudSyncTargetName)
 	if err != nil {
 		return nil, err
 	}

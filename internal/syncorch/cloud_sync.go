@@ -145,7 +145,13 @@ func syncCloud(ctx context.Context, cfg *config.Config, database *sql.DB, opts C
 		}()
 	}
 
-	return syncCloudWithClients(ctx, database, reconciler, clients, r2Client, opts, cfg)
+	res := syncCloudWithClients(ctx, database, reconciler, clients, r2Client, opts, cfg)
+	if res.Completed && database != nil {
+		if err := db.RecordCloudSync(database, time.Now()); err != nil {
+			slog.Debug("failed to record cloud sync time", "component", "sync", "error", err)
+		}
+	}
+	return res
 }
 
 func syncCloudWithClients(ctx context.Context, database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, opts CloudSyncOptions, cfg *config.Config) CloudSyncResult {
