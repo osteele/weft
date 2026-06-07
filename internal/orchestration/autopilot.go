@@ -50,6 +50,10 @@ var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
 var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
 var autoPilotLaunchMoveIntentRetry = launchMoveIntentRetry
+var autoPilotDrainOverloadedInventoryHosts = drainOverloadedInventoryHosts
+var autoPilotRebalanceQueuedRentalJobsToOnPrem = rebalanceQueuedRentalJobsToOnPrem
+var autoPilotRebalanceQueuedJobsAcrossInstances = RebalanceQueuedJobsAcrossInstances
+var autoPilotFillReusableInstances = fillReusableInstances
 var autoReplanUnplaceQueuedJob = ops.UnplaceQueuedJob
 
 // autoReplanConfigEnabled reports whether the autopilot should run
@@ -143,11 +147,11 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			AutoReplanned: autoReplanned,
 		}, err
 	}
-	overloadMoved, err := drainOverloadedInventoryHosts(ctx, database, cfg, scoped, movingJobs)
+	overloadMoved, err := autoPilotDrainOverloadedInventoryHosts(ctx, database, cfg, scoped, movingJobs)
 	if err != nil {
 		oplog.Log("auto_pilot.overload_drain_error", oplog.WithError(err))
 	}
-	onPremRebalanced, err := rebalanceQueuedRentalJobsToOnPrem(ctx, database, cfg, scoped, movingJobs)
+	onPremRebalanced, err := autoPilotRebalanceQueuedRentalJobsToOnPrem(ctx, database, cfg, scoped, movingJobs)
 	if err != nil {
 		oplog.Log("auto_pilot.rebalance_onprem_error", oplog.WithError(err))
 	}
@@ -192,7 +196,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 	inventoryAwaitingReasons = persistInventoryAwaitingReasons(database, inventoryAwaiting)
 	if len(unplaced) == 0 {
-		rebalanceResult, rebErr := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+		rebalanceResult, rebErr := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,
 			Operation:  "auto_pilot.rebalance",
 			MovingJobs: movingJobs,
@@ -214,7 +218,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 
 	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
 	if len(unplaced) == 0 {
-		rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+		rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,
 			Operation:  "auto_pilot.rebalance",
 			MovingJobs: movingJobs,
@@ -412,7 +416,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	placed := prePlaced
 	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, reuseDiagnostics)
 
-	rebalanceResult, err := RebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
+	rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 		Apply:      true,
 		R2Client:   r2Client,
 		Operation:  "auto_pilot.rebalance",
@@ -429,7 +433,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	rebalanced := len(rebalanceResult.Moves)
 	rebalanced += onPremRebalanced
 
-	reuseFilled, err := fillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics)
+	reuseFilled, err := autoPilotFillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics)
 	if err != nil {
 		oplog.Log("auto_pilot.reuse_fill_error", oplog.WithError(err))
 	}

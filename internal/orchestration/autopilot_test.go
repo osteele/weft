@@ -18,6 +18,61 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
+type groupedAutoPilotPassTestOptions struct {
+	realFillReusableInstances bool
+}
+
+type groupedAutoPilotPassTestOption func(*groupedAutoPilotPassTestOptions)
+
+func withRealFillReusableInstances(opts *groupedAutoPilotPassTestOptions) {
+	opts.realFillReusableInstances = true
+}
+
+func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database *sql.DB, scopedJobs []*db.Job, optionFns ...groupedAutoPilotPassTestOption) (*GroupedAutoPilotResult, error) {
+	t.Helper()
+	opts := groupedAutoPilotPassTestOptions{}
+	for _, optionFn := range optionFns {
+		if optionFn != nil {
+			optionFn(&opts)
+		}
+	}
+	origDrain := autoPilotDrainOverloadedInventoryHosts
+	origOnPremRebalance := autoPilotRebalanceQueuedRentalJobsToOnPrem
+	origInstanceRebalance := autoPilotRebalanceQueuedJobsAcrossInstances
+	origFillReusable := autoPilotFillReusableInstances
+	origCreditHealth := autoPilotCheckProviderCreditHealth
+	origPlaceComputeIntensive := autoPilotPlaceComputeIntensive
+	t.Cleanup(func() {
+		autoPilotDrainOverloadedInventoryHosts = origDrain
+		autoPilotRebalanceQueuedRentalJobsToOnPrem = origOnPremRebalance
+		autoPilotRebalanceQueuedJobsAcrossInstances = origInstanceRebalance
+		autoPilotFillReusableInstances = origFillReusable
+		autoPilotCheckProviderCreditHealth = origCreditHealth
+		autoPilotPlaceComputeIntensive = origPlaceComputeIntensive
+	})
+	autoPilotDrainOverloadedInventoryHosts = func(context.Context, *sql.DB, *config.Config, map[int64]struct{}, map[int64]struct{}) (int, error) {
+		return 0, nil
+	}
+	autoPilotRebalanceQueuedRentalJobsToOnPrem = func(context.Context, *sql.DB, *config.Config, map[int64]struct{}, map[int64]struct{}) (int, error) {
+		return 0, nil
+	}
+	autoPilotRebalanceQueuedJobsAcrossInstances = func(context.Context, *sql.DB, QueueRebalanceOptions) (QueueRebalanceResult, error) {
+		return QueueRebalanceResult{}, nil
+	}
+	if !opts.realFillReusableInstances {
+		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, map[int64]string) (int, error) {
+			return 0, nil
+		}
+	}
+	autoPilotCheckProviderCreditHealth = func(*config.Config) []ProviderCreditStatus {
+		return nil
+	}
+	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+		return jobs, 0
+	}
+	return RunGroupedAutoPilotPass(ctx, database, scopedJobs)
+}
+
 func TestAutoReplanStuckInventoryJobsMovesSustainedDispatchBlock(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", t.TempDir(), "python train.py", "blocked job", "A100")
@@ -129,7 +184,7 @@ func TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault(t *testing.T) {
 
 	// Default — gate returns false.
 	autoReplanConfigEnabled = func() bool { return false }
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass (disabled): %v", err)
 	}
@@ -153,7 +208,7 @@ func TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault(t *testing.T) {
 		}
 		return ops.Result{Success: true, JobID: job.ID}, nil
 	}
-	if _, err := RunGroupedAutoPilotPass(context.Background(), database, nil); err != nil {
+	if _, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil); err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass (enabled): %v", err)
 	}
 	if unplaceCalls != 1 {
@@ -191,7 +246,7 @@ func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T)
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -248,7 +303,7 @@ func TestRunGroupedAutoPilotPass_InventoryTaggedJobsBypassCloudPlanner(t *testin
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -298,7 +353,7 @@ func TestRunGroupedAutoPilotPass_ErrorPathStillCarriesInventoryReasons(t *testin
 		return campaign.AutoPlacementPlan{}, wantErr
 	}
 
-	result, runErr := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, runErr := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if !errors.Is(runErr, wantErr) {
 		t.Fatalf("err = %v, want wrapping %v", runErr, wantErr)
 	}
@@ -385,7 +440,7 @@ func TestRunGroupedAutoPilotPass_SkipsComputeIntensiveReuseBelowCPUFloor(t *test
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -433,7 +488,7 @@ func TestRunGroupedAutoPilotPass_FallbackRelaunchesWhenPlannerReturnsNoDecisions
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -647,7 +702,7 @@ func TestRunGroupedAutoPilotPass_NoSubsetFitsTriggersPreferReuseRetry(t *testing
 		return nil, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -708,7 +763,7 @@ func TestRunGroupedAutoPilotPass_RunRateAllFitLeavesLaunchScope(t *testing.T) {
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -773,7 +828,7 @@ func TestRunGroupedAutoPilotPass_RunRateNoneFitBlocksAll(t *testing.T) {
 		return nil, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -871,7 +926,7 @@ func TestRunGroupedAutoPilotPass_ReuseFallbackExecutesAssignmentsWithoutLaunch(t
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -1002,7 +1057,7 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenMoveIntent(t *testing.T) {
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	if _, err := RunGroupedAutoPilotPass(context.Background(), database, nil); err != nil {
+	if _, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil); err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
 
@@ -1083,7 +1138,7 @@ func TestRunGroupedAutoPilotPass_RetriesOpenMoveIntentAfterNoStartLaunchFailure(
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -1184,7 +1239,7 @@ func TestRunGroupedAutoPilotPass_ReusesExistingInstanceWhenLaunchBlocked(t *test
 		return nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -1251,7 +1306,7 @@ func TestRunGroupedAutoPilotPass_FillsReusableInstanceAfterPlanner(t *testing.T)
 		return nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil, withRealFillReusableInstances)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -1354,7 +1409,7 @@ func TestRunGroupedAutoPilotPass_ReuseDiagnosticAppendedNotMasking(t *testing.T)
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil, withRealFillReusableInstances)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -1444,7 +1499,7 @@ func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *tes
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	result, err := RunGroupedAutoPilotPass(context.Background(), database, nil)
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
@@ -1529,7 +1584,7 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenPlacementIntent(t *testing.
 		return &campaign.RelaunchResult{}, nil
 	}
 
-	if _, err := RunGroupedAutoPilotPass(context.Background(), database, nil); err != nil {
+	if _, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil); err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
 
