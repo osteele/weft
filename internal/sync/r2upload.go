@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 
 	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/r2"
@@ -120,7 +118,7 @@ func stageSourceDirWithLocalInputs(localDir string, inputs []string) (string, fu
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve source directory: %w", err)
 	}
-	overlays, err := localInputOverlays(localDir, inputs)
+	overlays, err := LocalInputOverlays(localDir, inputs, RequireLocalInput)
 	if err != nil {
 		return "", nil, err
 	}
@@ -128,56 +126,4 @@ func stageSourceDirWithLocalInputs(localDir string, inputs []string) (string, fu
 		return "", func() {}, nil
 	}
 	return buildSourceSnapshotWithOverlays(localDir, overlays)
-}
-
-type localOverlay struct {
-	input string
-	abs   string
-	rel   string
-}
-
-func localInputOverlays(localDir string, inputs []string) ([]localOverlay, error) {
-	var overlays []localOverlay
-	seen := map[string]struct{}{}
-
-	for _, ref := range inputs {
-		if !strings.HasPrefix(ref, "local:") {
-			continue
-		}
-		raw := strings.TrimSpace(strings.TrimPrefix(ref, "local:"))
-		if raw == "" {
-			return nil, fmt.Errorf("invalid input %q: local path is empty", ref)
-		}
-
-		candidate := filepath.Clean(filepath.Join(localDir, raw))
-		rel, err := filepath.Rel(localDir, candidate)
-		if err != nil {
-			return nil, fmt.Errorf("resolve input %q: %w", ref, err)
-		}
-		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil, fmt.Errorf("input %q escapes project directory %s", ref, localDir)
-		}
-		if _, err := os.Stat(candidate); err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("declared local input %q not found at %s", ref, candidate)
-			}
-			return nil, fmt.Errorf("check declared local input %q: %w", ref, err)
-		}
-		if _, ok := seen[rel]; ok {
-			continue
-		}
-		seen[rel] = struct{}{}
-		slog.Debug("source overlay: resolved local input", "component", "sync",
-			"input", ref, "abs", candidate, "rel", rel)
-		overlays = append(overlays, localOverlay{
-			input: ref,
-			abs:   candidate,
-			rel:   rel,
-		})
-	}
-
-	slices.SortFunc(overlays, func(a, b localOverlay) int {
-		return strings.Compare(a.rel, b.rel)
-	})
-	return overlays, nil
 }

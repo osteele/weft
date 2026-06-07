@@ -22,14 +22,14 @@ func BuildSourceSnapshot(localDir string, inputs []string) (SnapshotResult, erro
 		return SnapshotResult{}, fmt.Errorf("resolve source directory: %w", err)
 	}
 
-	overlays, err := localInputOverlays(localDir, inputs)
+	overlays, err := LocalInputOverlays(localDir, inputs, RequireLocalInput)
 	if err != nil {
 		return SnapshotResult{}, err
 	}
 
 	var overlayNames []string
 	for _, o := range overlays {
-		overlayNames = append(overlayNames, o.input)
+		overlayNames = append(overlayNames, o.Input)
 	}
 
 	dir, cleanup, err := buildSourceSnapshotWithOverlays(localDir, overlays)
@@ -39,7 +39,7 @@ func BuildSourceSnapshot(localDir string, inputs []string) (SnapshotResult, erro
 	return SnapshotResult{Dir: dir, Cleanup: cleanup, Overlays: overlayNames}, nil
 }
 
-func buildSourceSnapshotWithOverlays(localDir string, overlays []localOverlay) (string, func(), error) {
+func buildSourceSnapshotWithOverlays(localDir string, overlays []LocalOverlay) (string, func(), error) {
 	stageDir, err := os.MkdirTemp("", "weft-source-stage-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create staged source dir: %w", err)
@@ -58,10 +58,10 @@ func buildSourceSnapshotWithOverlays(localDir string, overlays []localOverlay) (
 	}
 
 	for _, overlay := range overlays {
-		target := filepath.Join(stageDir, overlay.rel)
-		if err := CopyPath(overlay.abs, target); err != nil {
+		target := filepath.Join(stageDir, overlay.Rel)
+		if err := CopyPath(overlay.Abs, target); err != nil {
 			cleanup()
-			return "", nil, fmt.Errorf("stage declared local input %q: %w", overlay.input, err)
+			return "", nil, fmt.Errorf("stage declared local input %q: %w", overlay.Input, err)
 		}
 	}
 	return stageDir, cleanup, nil

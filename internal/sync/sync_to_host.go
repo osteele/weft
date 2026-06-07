@@ -21,7 +21,16 @@ func SyncSourcesToHost(host, localDir, remoteDir string, inputs []string) error 
 	if err := SyncSources(host, localDir, remoteDir); err != nil {
 		return err
 	}
-	extraPaths := CollectExtraPaths(inputs, localDir)
+	overlays, err := LocalInputOverlays(localDir, inputs, SkipMissingLocalInput)
+	if err != nil {
+		return err
+	}
+	if len(overlays) > 0 {
+		if err := SyncLocalInputOverlays(host, remoteDir, overlays); err != nil {
+			return err
+		}
+	}
+	extraPaths := CollectExtraPaths(nonLocalInputs(inputs), localDir)
 	if len(extraPaths) > 0 {
 		if err := SyncExtraPaths(host, extraPaths); err != nil {
 			return err

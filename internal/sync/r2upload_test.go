@@ -62,7 +62,7 @@ func TestLocalInputOverlays_ValidatePaths(t *testing.T) {
 	localDir := t.TempDir()
 
 	t.Run("missing local input", func(t *testing.T) {
-		_, err := localInputOverlays(localDir, []string{"local:data/conllu/"})
+		_, err := LocalInputOverlays(localDir, []string{"local:data/conllu/"}, RequireLocalInput)
 		if err == nil {
 			t.Fatal("expected error for missing local input")
 		}
@@ -75,7 +75,7 @@ func TestLocalInputOverlays_ValidatePaths(t *testing.T) {
 			t.Fatalf("write outside file: %v", err)
 		}
 		defer os.Remove(outside)
-		_, err := localInputOverlays(localDir, []string{"local:../outside"})
+		_, err := LocalInputOverlays(localDir, []string{"local:../outside"}, RequireLocalInput)
 		if err == nil {
 			t.Fatal("expected error for escaping local input")
 		}
@@ -196,5 +196,30 @@ func TestBuildSourceSnapshot_UsesDefaultExcludesAndLocalInputOverlays(t *testing
 	defer withOverlay.Cleanup()
 	if _, err := os.Stat(filepath.Join(withOverlay.Dir, "data", "conllu", "train.conllu")); err != nil {
 		t.Fatalf("expected explicit local input to be present: %v", err)
+	}
+}
+
+func TestBuildSourceSnapshot_OverlaysLocalFileInput(t *testing.T) {
+	localDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localDir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "main.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(localDir, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "data", "calibration.db"), []byte("db"), 0o644); err != nil {
+		t.Fatalf("write calibration db: %v", err)
+	}
+
+	withOverlay, err := BuildSourceSnapshot(localDir, []string{"local:data/calibration.db"})
+	if err != nil {
+		t.Fatalf("BuildSourceSnapshot(with file overlay): %v", err)
+	}
+	defer withOverlay.Cleanup()
+	if _, err := os.Stat(filepath.Join(withOverlay.Dir, "data", "calibration.db")); err != nil {
+		t.Fatalf("expected explicit local file input to be present: %v", err)
 	}
 }

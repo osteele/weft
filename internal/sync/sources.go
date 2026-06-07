@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -271,9 +272,26 @@ func SyncSources(host, localDir, remoteDir string) error {
 // remote directory may contain content from other sources.
 func BuildExtraPathRsyncArgs(host, localDir, remoteDir string) []string {
 	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout)}
-	src, dst := rsyncSrcDst(host, localDir, remoteDir)
+	src, dst := rsyncPathSrcDst(host, localDir, remoteDir, localPathIsDir(localDir))
 	args = append(args, src, dst)
 	return args
+}
+
+func rsyncPathSrcDst(host, localPath, remotePath string, isDir bool) (src, dst string) {
+	if isDir {
+		return rsyncSrcDst(host, localPath, remotePath)
+	}
+	src = strings.TrimRight(localPath, "/")
+	dst = ssh.RsyncTarget(host) + ":" + strings.TrimRight(remotePath, "/")
+	return src, dst
+}
+
+func localPathIsDir(localPath string) bool {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return true
+	}
+	return info.IsDir()
 }
 
 // SyncExtraPaths rsyncs a list of local paths to the same paths on a remote host.
@@ -314,12 +332,94 @@ func SyncExtraPaths(host string, paths []string) error {
 	return nil
 }
 
+func SyncLocalInputOverlays(host, remoteDir string, overlays []LocalOverlay) error {
+	for _, overlay := range overlays {
+		remotePath := path.Join(strings.TrimRight(remoteDir, "/"), filepath.ToSlash(overlay.Rel))
+		start := time.Now()
+		err := extraPathSyncFunc(host, overlay.Abs, remotePath, nil)
+		oplog.Log("sync.local_input",
+			oplog.WithHost(host),
+			oplog.WithDuration(time.Since(start)),
+			oplog.WithDetailf("%s -> %s", overlay.Input, remotePath),
+			oplog.WithError(err),
+		)
+		if err != nil {
+			return fmt.Errorf("rsync local input %s to %s: %w", overlay.Input, host, err)
+		}
+	}
+	return nil
+}
+
 func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error {
 	return defaultSyncFuncWithDelete(host, localDir, remoteDir, excludes, true)
 }
 
 func defaultExtraPathSyncFunc(host, localDir, remoteDir string, excludes []string) error {
-	return defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir, excludes, false, extraPathRsyncTimeout)
+	if !localPathIsDir(localDir) {
+		if err := ensureRemoteParentDir(host, remoteDir); err != nil {
+			return err
+		}
+	}
+	return defaultExtraPathSyncFuncWithTimeout(host, localDir, remoteDir, extraPathRsyncTimeout)
+}
+
+func defaultExtraPathSyncFuncWithTimeout(host, localDir, remoteDir string, timeout time.Duration) error {
+	args := BuildExtraPathRsyncArgs(host, localDir, remoteDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderrBuf.String())
+		if isIgnorableRsyncError(err, msg) {
+			return nil
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if msg != "" {
+				return fmt.Errorf("rsync to %s:%s timed out after %s: %s: %w", host, remoteDir, timeout, msg, err)
+			}
+			return fmt.Errorf("rsync to %s:%s timed out after %s: %w", host, remoteDir, timeout, err)
+		}
+		if msg != "" {
+			return fmt.Errorf("rsync to %s:%s: %s: %w", host, remoteDir, msg, err)
+		}
+		return fmt.Errorf("rsync to %s:%s: %w", host, remoteDir, err)
+	}
+	return nil
+}
+
+func ensureRemoteParentDir(host, remotePath string) error {
+	parent := path.Dir(strings.TrimRight(remotePath, "/"))
+	if parent == "." || parent == "" {
+		return nil
+	}
+	_, stderr, err := ssh.Run(host, "mkdir -p "+quoteRemotePath(parent))
+	if err != nil {
+		detail := strings.TrimSpace(stderr)
+		if detail != "" {
+			return fmt.Errorf("create remote parent %s on %s: %s: %w", parent, host, detail, err)
+		}
+		return fmt.Errorf("create remote parent %s on %s: %w", parent, host, err)
+	}
+	return nil
+}
+
+func quoteRemotePath(p string) string {
+	if p == "~" {
+		return "~"
+	}
+	if strings.HasPrefix(p, "~/") {
+		return "~/" + singleQuoteRemote(p[2:])
+	}
+	return singleQuoteRemote(p)
+}
+
+func singleQuoteRemote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []string, delete bool) error {

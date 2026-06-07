@@ -14,6 +14,9 @@ func TestCollectExtraPaths_RelativeResolution(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(localDir, "data"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(localDir, "data", "calibration.db"), []byte("db"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(localDir, "cache"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -39,6 +42,12 @@ func TestCollectExtraPaths_RelativeResolution(t *testing.T) {
 			inputs:   []string{"local:data/"},
 			localDir: localDir,
 			want:     []string{"~/code/research/structural-probes/data"},
+		},
+		{
+			name:     "relative file path resolved to tilde-relative",
+			inputs:   []string{"local:data/calibration.db"},
+			localDir: localDir,
+			want:     []string{"~/code/research/structural-probes/data/calibration.db"},
 		},
 		{
 			name:     "tilde path passed through",
@@ -78,6 +87,36 @@ func TestCollectExtraPaths_RelativeResolution(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLocalInputOverlays_FileAndDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := filepath.Join(home, "code", "project")
+	if err := os.MkdirAll(filepath.Join(localDir, "data", "conllu"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "data", "calibration.db"), []byte("db"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := LocalInputOverlays(localDir, []string{
+		"local:data/calibration.db",
+		"local:data/conllu/",
+	}, RequireLocalInput)
+	if err != nil {
+		t.Fatalf("LocalInputOverlays: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LocalInputOverlays returned %d overlays: %v", len(got), got)
+	}
+	if got[0].Rel != "data/calibration.db" || got[0].IsDir {
+		t.Fatalf("file overlay = %+v, want rel data/calibration.db and IsDir=false", got[0])
+	}
+	if got[1].Rel != "data/conllu" || !got[1].IsDir {
+		t.Fatalf("directory overlay = %+v, want rel data/conllu and IsDir=true", got[1])
 	}
 }
 

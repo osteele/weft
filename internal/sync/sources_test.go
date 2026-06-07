@@ -339,6 +339,11 @@ func TestSourceExcludesIncludesGitignore(t *testing.T) {
 }
 
 func TestBuildExtraPathRsyncArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "calibration.db")
+	if err := os.WriteFile(filePath, []byte("db"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	tests := []struct {
 		name      string
 		host      string
@@ -362,6 +367,14 @@ func TestBuildExtraPathRsyncArgs(t *testing.T) {
 			remoteDir: "/data/profiling",
 			wantSrc:   "/data/profiling/",
 			wantDst:   "host-alpha:/data/profiling/",
+		},
+		{
+			name:      "file path",
+			host:      "host-alpha",
+			localDir:  filePath,
+			remoteDir: "~/code/project/data/calibration.db",
+			wantSrc:   filePath,
+			wantDst:   "host-alpha:~/code/project/data/calibration.db",
 		},
 	}
 
@@ -424,6 +437,52 @@ func TestSyncExtraPathsUsesExtraPathSyncFunc(t *testing.T) {
 	}
 	if capturedExcludes != nil {
 		t.Errorf("excludes = %v, want nil", capturedExcludes)
+	}
+}
+
+func TestSyncSourcesToHostSyncsLocalFileInputAsProjectOverlay(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := filepath.Join(home, "code", "project")
+	if err := os.MkdirAll(filepath.Join(localDir, "data"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "main.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	filePath := filepath.Join(localDir, "data", "calibration.db")
+	if err := os.WriteFile(filePath, []byte("db"), 0o644); err != nil {
+		t.Fatalf("WriteFile db: %v", err)
+	}
+
+	type call struct {
+		host, local, remote string
+		excludesNil         bool
+	}
+	var calls []call
+	cleanup := SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		calls = append(calls, call{
+			host:        host,
+			local:       localDir,
+			remote:      remoteDir,
+			excludesNil: excludes == nil,
+		})
+		return nil
+	})
+	defer cleanup()
+
+	if err := SyncSourcesToHost("host-beta", localDir, "~/remote/project", []string{"local:data/calibration.db"}); err != nil {
+		t.Fatalf("SyncSourcesToHost: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("sync calls = %#v, want source sync plus local input overlay", calls)
+	}
+	if calls[0].local != localDir || calls[0].remote != "~/remote/project" || calls[0].excludesNil {
+		t.Fatalf("source sync call = %#v", calls[0])
+	}
+	if calls[1].local != filePath || calls[1].remote != "~/remote/project/data/calibration.db" || !calls[1].excludesNil {
+		t.Fatalf("local file overlay sync call = %#v", calls[1])
 	}
 }
 
