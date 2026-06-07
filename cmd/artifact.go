@@ -562,19 +562,30 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 
 // fetchCloudArtifactByToken searches R2 cloud outputs for a file matching token
 // (by basename or path suffix) and downloads it.
-func fetchCloudArtifactByToken(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, token string, multiple bool) error {
+func fetchCloudArtifactByToken(cmd *cobra.Command, r2Client cloudOutputStore, job *db.Job, token string, multiple bool) error {
 	cloudFiles := listCloudJobOutputFiles(r2Client, job)
+	var lastNotFound error
 	for _, f := range cloudFiles {
 		basename := filepath.Base(f.RelPath)
 		if basename == token || f.RelPath == token || strings.HasSuffix(f.RelPath, "/"+token) {
-			return downloadSingleCloudFile(cmd, r2Client, job, f, multiple)
+			if err := downloadSingleCloudFile(cmd, r2Client, job, f, multiple); err != nil {
+				if r2.IsNotFound(err) {
+					lastNotFound = err
+					continue
+				}
+				return err
+			}
+			return nil
 		}
+	}
+	if lastNotFound != nil {
+		return lastNotFound
 	}
 	return fmt.Errorf("not found in cloud outputs")
 }
 
 // downloadSingleCloudFile downloads one cloud output file to the output destination.
-func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, f runner.OutputFile, multiple bool) error {
+func downloadSingleCloudFile(cmd *cobra.Command, r2Client cloudOutputDownloader, job *db.Job, f runner.OutputFile, multiple bool) error {
 	dest, err := resolveArtifactOutputPathForJob(f.RelPath, artifactOutput, job.ID, multiple)
 	if err != nil {
 		return err
@@ -589,33 +600,40 @@ func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Jo
 	return nil
 }
 
-func downloadSingleCloudFileToPath(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, f runner.OutputFile, dest string) error {
+type cloudOutputDownloader interface {
+	DownloadObjectToWriterWithIdleTimeout(context.Context, string, io.Writer, time.Duration) (int64, error)
+	DownloadObjectToFileWithIdleTimeout(context.Context, string, string, time.Duration) (int64, error)
+}
+
+type cloudOutputLister interface {
+	ListObjects(context.Context, string) ([]r2.ObjectInfo, error)
+}
+
+type cloudOutputStore interface {
+	cloudOutputDownloader
+	cloudOutputLister
+}
+
+func downloadSingleCloudFileToPath(cmd *cobra.Command, r2Client cloudOutputDownloader, job *db.Job, f runner.OutputFile, dest string) error {
 	var (
 		lastErr error
 	)
 	for _, runID := range jobAttemptRunIDs(job) {
-		// Determine the R2 key based on whether this is an artifact or convention output
-		var r2Key string
-		if strings.HasPrefix(f.RelPath, "artifacts/") {
-			trimmed := strings.TrimPrefix(f.RelPath, "artifacts/")
-			r2Key = r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID) + trimmed
-		} else {
-			r2Key = r2keys.JobAttemptOutputsPrefix(job.ID, runID) + f.RelPath
-		}
-
-		var err error
-		if dest == "-" {
-			_, err = r2Client.DownloadObjectToWriterWithIdleTimeout(context.Background(), r2Key, cmd.OutOrStdout(), artifactTimeout)
-		} else {
-			err = downloadR2ObjectToFileAtomic(r2Client, r2Key, dest, artifactTimeout)
-		}
-		if err == nil {
-			lastErr = nil
-			break
-		}
-		lastErr = err
-		if !r2.IsNotFound(err) {
-			break
+		for _, r2Key := range cloudOutputCandidateKeys(job.ID, runID, f.RelPath) {
+			var err error
+			if dest == "-" {
+				_, err = r2Client.DownloadObjectToWriterWithIdleTimeout(context.Background(), r2Key, cmd.OutOrStdout(), artifactTimeout)
+			} else {
+				err = downloadR2ObjectToFileAtomic(r2Client, r2Key, dest, artifactTimeout)
+			}
+			if err == nil {
+				lastErr = nil
+				return nil
+			}
+			lastErr = err
+			if !r2.IsNotFound(err) {
+				break
+			}
 		}
 	}
 	if lastErr != nil {
@@ -623,6 +641,21 @@ func downloadSingleCloudFileToPath(cmd *cobra.Command, r2Client *r2.Client, job 
 	}
 
 	return nil
+}
+
+func cloudOutputCandidateKeys(jobID, runID int64, relPath string) []string {
+	if strings.HasPrefix(relPath, "artifacts/") {
+		trimmed := strings.TrimPrefix(relPath, "artifacts/")
+		prefix := r2keys.JobAttemptArtifactFilesPrefix(jobID, runID)
+		keys := []string{prefix + trimmed}
+		exactKey := prefix + relPath
+		if exactKey != keys[0] {
+			keys = append(keys, exactKey)
+		}
+		keys = append(keys, r2keys.JobAttemptOutputsPrefix(jobID, runID)+relPath)
+		return keys
+	}
+	return []string{r2keys.JobAttemptOutputsPrefix(jobID, runID) + relPath}
 }
 
 // downloadCloudOutputFiles downloads all cloud output files for a job.
@@ -942,7 +975,7 @@ func resolveArtifactOutputPathForAll(source, output string, jobID int64, multipl
 	return filepath.Join(base, filepath.FromSlash(rel)), nil
 }
 
-func downloadR2ObjectToFileAtomic(r2Client *r2.Client, key, dest string, idleTimeout time.Duration) error {
+func downloadR2ObjectToFileAtomic(r2Client cloudOutputDownloader, key, dest string, idleTimeout time.Duration) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -2136,7 +2169,7 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 
 // listCloudJobOutputFiles lists output files for a cloud job by checking R2 for
 // both the outputs/ and artifacts/files/ prefixes.
-func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFile {
+func listCloudJobOutputFiles(r2Client cloudOutputLister, job *db.Job) []runner.OutputFile {
 	result := make([]runner.OutputFile, 0)
 	seen := make(map[string]struct{})
 	var mu sync.Mutex

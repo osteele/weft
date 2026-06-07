@@ -145,6 +145,103 @@ func (s *fakeCloudArtifactStore) ListObjects(_ context.Context, prefix string) (
 	return objects, nil
 }
 
+func (s *fakeCloudArtifactStore) DownloadObjectToWriterWithIdleTimeout(ctx context.Context, key string, dst io.Writer, _ time.Duration) (int64, error) {
+	body, err := s.GetObjectReader(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	defer body.Close()
+	return io.Copy(dst, body)
+}
+
+func (s *fakeCloudArtifactStore) DownloadObjectToFileWithIdleTimeout(ctx context.Context, key string, localPath string, timeout time.Duration) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return 0, err
+	}
+	f, err := os.Create(localPath)
+	if err != nil {
+		return 0, err
+	}
+	n, copyErr := s.DownloadObjectToWriterWithIdleTimeout(ctx, key, f, timeout)
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(localPath)
+		return n, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(localPath)
+		return n, closeErr
+	}
+	return n, nil
+}
+
+func setupLaunchArtifactJob(t *testing.T) *db.Job {
+	t.Helper()
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	return job
+}
+
+func TestDownloadSingleCloudFileToPath_ArtifactsPathFromConventionOutputs(t *testing.T) {
+	job := setupLaunchArtifactJob(t)
+	runID := int64(0)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "artifacts/summary.md": []byte("summary\n"),
+		},
+	}
+
+	dest := filepath.Join(t.TempDir(), "summary.md")
+	if err := downloadSingleCloudFileToPath(&cobra.Command{}, store, job, runner.OutputFile{RelPath: "artifacts/summary.md"}, dest); err != nil {
+		t.Fatalf("downloadSingleCloudFileToPath: %v", err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "summary\n" {
+		t.Fatalf("downloaded content = %q, want summary", data)
+	}
+}
+
+func TestFetchCloudArtifactByToken_BasenameMatchesArtifactsConventionOutput(t *testing.T) {
+	job := setupLaunchArtifactJob(t)
+	runID := int64(0)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "artifacts/summary.md": []byte("summary\n"),
+		},
+	}
+
+	oldOutput := artifactOutput
+	artifactOutput = "-"
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := fetchCloudArtifactByToken(cmd, store, job, "summary.md", false); err != nil {
+		t.Fatalf("fetchCloudArtifactByToken: %v", err)
+	}
+	if got := out.String(); got != "summary\n" {
+		t.Fatalf("stdout = %q, want summary", got)
+	}
+}
+
 func TestSyncCloudJobArtifactsWithStore_DirectoryArtifact(t *testing.T) {
 	database := db.SetupTestDB(t)
 	home := t.TempDir()
