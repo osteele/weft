@@ -4,13 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/instanceintent"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -23,13 +27,14 @@ import (
 // that binding so the watch and reconcile paths agree on what "probe present"
 // means.
 var (
-	syncFetchInstancePhase  = fetchInstancePhase
-	syncFetchBootstrapStage = fetchBootstrapStage
-	syncFetchHeartbeat      = fetchHeartbeat
-	syncFetchJobProgress    = fetchJobProgress
-	syncFetchTermIntent     = fetchTerminationIntentFromR2
-	syncCheckR2GraceStatus  = checkR2GraceStatus
-	syncCheckOnStartProbe   = func(ctx context.Context, c *r2.Client, key string) (bool, error) {
+	syncFetchInstancePhase   = fetchInstancePhase
+	syncFetchBootstrapStage  = fetchBootstrapStage
+	syncFetchHeartbeat       = fetchHeartbeat
+	syncFetchJobProgress     = fetchJobProgress
+	syncFetchTermIntent      = fetchTerminationIntentFromR2
+	syncCheckR2GraceStatus   = checkR2GraceStatus
+	syncCheckGraceCommandAck = controlplane.CheckGraceCommandAck
+	syncCheckOnStartProbe    = func(ctx context.Context, c *r2.Client, key string) (bool, error) {
 		return reconcileObjectExists(ctx, c, key)
 	}
 )
@@ -93,6 +98,7 @@ func SyncInstanceState(
 	}
 
 	instanceID := ci.ID
+	reconcilePendingMoveTargetRequestAcks(ctx, database, r2Client, instanceID)
 
 	if opts.AgentVersionFetched {
 		s.AgentVersion = opts.AgentVersion
@@ -217,7 +223,7 @@ func SyncInstanceState(
 		if err := db.SetLaunchAgentReadyAtIfUnset(database, instanceID, time.Now()); err == nil {
 			now := time.Now().Unix()
 			ci.AgentReadyAtUnix = &now
-			_ = db.ConfirmOpenMoveIntentsForTargetLaunch(database, instanceID, "target agent_ready")
+			confirmMoveIntentsForReadyLaunch(ctx, database, r2Client, instanceID)
 		}
 	}
 
@@ -332,6 +338,109 @@ func SyncInstanceState(
 	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
 
 	return s
+}
+
+func confirmMoveIntentsForReadyLaunch(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64) {
+	sourceStops, err := db.ListMoveIntentSourceStopsForTargetLaunch(database, instanceID)
+	if err != nil {
+		slog.Warn("list move source stops for ready launch", "component", "sync", "instance", instanceID, "error", err)
+	}
+	if err := db.ConfirmOpenMoveIntentsForTargetLaunch(database, instanceID, "target agent_ready"); err != nil {
+		slog.Warn("confirm move intents for ready launch", "component", "sync", "instance", instanceID, "error", err)
+		return
+	}
+	stopMoveIntentSources(ctx, r2Client, sourceStops)
+}
+
+func reconcilePendingMoveTargetRequestAcks(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64) {
+	pending, err := db.ListOpenMoveIntentPendingTargetRequests(database, instanceID)
+	if err != nil {
+		slog.Warn("list pending move target requests", "component", "sync", "instance", instanceID, "error", err)
+		return
+	}
+	for _, req := range pending {
+		ack, found, err := syncCheckGraceCommandAck(ctx, r2Client, instanceID, req.RequestID)
+		if err != nil {
+			slog.Warn("check move target request ack",
+				"component", "sync", "instance", instanceID, "intent_id", req.IntentID,
+				"request_id", req.RequestID, "error", err)
+			continue
+		}
+		if !found {
+			continue
+		}
+		if ack == nil || ack.Kind != controlplane.GraceCommandJobs {
+			slog.Warn("ignore unexpected move target ack",
+				"component", "sync", "instance", instanceID, "intent_id", req.IntentID,
+				"request_id", req.RequestID, "kind", ackKind(ack))
+			continue
+		}
+		if !ack.Accepted {
+			resolution := strings.TrimSpace(ack.Message)
+			if resolution == "" {
+				resolution = "target rejected jobs request"
+			} else {
+				resolution = "target rejected jobs request: " + resolution
+			}
+			if err := db.ResolveMoveIntent(database, req.IntentID, db.MoveIntentStateCanceled, resolution); err != nil {
+				slog.Warn("cancel rejected move target request",
+					"component", "sync", "instance", instanceID, "intent_id", req.IntentID, "error", err)
+			}
+			continue
+		}
+
+		stop := db.MoveIntentSourceStop{
+			IntentID:        req.IntentID,
+			JobID:           req.JobID,
+			SourceAttemptID: req.SourceAttemptID,
+			SourceLaunchID:  req.SourceLaunchID,
+			SourceHost:      req.SourceHost,
+			SourceStartTime: req.SourceStartTime,
+		}
+		if err := db.ConfirmMoveTargetAccepted(database, req.IntentID, fmt.Sprintf("target accepted request %s", req.RequestID)); err != nil {
+			slog.Warn("confirm acknowledged move target request",
+				"component", "sync", "instance", instanceID, "intent_id", req.IntentID, "error", err)
+			continue
+		}
+		stopMoveIntentSources(ctx, r2Client, []db.MoveIntentSourceStop{stop})
+	}
+}
+
+func ackKind(ack *controlplane.GraceCommandAck) controlplane.GraceCommandKind {
+	if ack == nil {
+		return ""
+	}
+	return ack.Kind
+}
+
+func stopMoveIntentSources(ctx context.Context, r2Client *r2.Client, sourceStops []db.MoveIntentSourceStop) {
+	if len(sourceStops) == 0 {
+		return
+	}
+	cancelByLaunch := map[int64][]int64{}
+	for _, stop := range sourceStops {
+		if stop.SourceLaunchID != nil && *stop.SourceLaunchID > 0 && stop.SourceAttemptID > 0 {
+			cancelByLaunch[*stop.SourceLaunchID] = append(cancelByLaunch[*stop.SourceLaunchID], stop.SourceAttemptID)
+			continue
+		}
+		if stop.SourceHost == "" || stop.SourceStartTime <= 0 {
+			continue
+		}
+		job := &db.Job{ID: stop.JobID, Host: stop.SourceHost, StartTime: stop.SourceStartTime}
+		if err := ops.KillQueueRunnerJob(job, 30*time.Second); err != nil {
+			slog.Warn("terminate move source after target ready",
+				"component", "sync", "job_id", ids.FormatJobID(stop.JobID), "host", stop.SourceHost, "error", err)
+		}
+	}
+	if r2Client == nil {
+		return
+	}
+	for launchID, attemptIDs := range cancelByLaunch {
+		if err := sendGraceCancelAttempts(ctx, r2Client, launchID, attemptIDs); err != nil {
+			slog.Warn("send move source cancel-attempts after target ready",
+				"component", "sync", "source_launch_id", launchID, "attempt_ids", attemptIDs, "error", err)
+		}
+	}
 }
 
 func syncObservedR2State(s *SyncedState) bool {

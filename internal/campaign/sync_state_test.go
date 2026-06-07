@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	weftlogging "github.com/osteele/weft/internal/logging"
@@ -87,6 +88,252 @@ func TestSyncInstanceState_GraceToRunning(t *testing.T) {
 	}
 	if ci.GraceDeadline != nil {
 		t.Errorf("GraceDeadline should be nil, got %v", *ci.GraceDeadline)
+	}
+}
+
+func TestConfirmMoveIntentsForReadyLaunchStopsCloudSource(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	targetLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusLaunching, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, command, tombstoned)
+		 VALUES (101, '/tmp', 'RTX_3090', 'python train.py', 0)`,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, 101, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	sourceAttemptID, err := db.GetLatestAttemptID(database, 101)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           101,
+		SourceAttemptID: &sourceAttemptID,
+		SourceLaunchID:  &sourceLaunch,
+		TargetKind:      db.MoveTargetNew,
+		TargetLaunchID:  &targetLaunch,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if _, err := db.CreateMoveTargetAttempt(database, intent.ID, 101, "", &targetLaunch, db.StatusQueued); err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() { sendGraceCancelAttempts = prevSendCancel })
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, launchID int64, attemptIDs []int64) error {
+		canceledByLaunch[launchID] = append(canceledByLaunch[launchID], attemptIDs...)
+		return nil
+	}
+
+	confirmMoveIntentsForReadyLaunch(context.Background(), database, &r2.Client{}, targetLaunch)
+
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != db.MoveIntentStateConfirmed {
+		t.Fatalf("intent state = %q, want confirmed", gotIntent.State)
+	}
+	if got := canceledByLaunch[sourceLaunch]; len(got) != 1 || got[0] != sourceAttemptID {
+		t.Fatalf("source cancel-attempts = %v, want [%d]", canceledByLaunch, sourceAttemptID)
+	}
+	var abandonedReason string
+	if err := database.QueryRow(`SELECT abandoned_reason FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&abandonedReason); err != nil {
+		t.Fatalf("read source abandoned reason: %v", err)
+	}
+	if abandonedReason != db.AttemptAbandonedMoveTargetAccepted {
+		t.Fatalf("source abandoned reason = %q, want %q", abandonedReason, db.AttemptAbandonedMoveTargetAccepted)
+	}
+}
+
+func TestReconcilePendingMoveTargetRequestAckConfirmsAndStopsSource(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	targetLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, command, tombstoned)
+		 VALUES (102, '/tmp', 'RTX_3090', 'python train.py', 0)`,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, 102, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	sourceAttemptID, err := db.GetLatestAttemptID(database, 102)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           102,
+		SourceAttemptID: &sourceAttemptID,
+		SourceLaunchID:  &sourceLaunch,
+		TargetKind:      db.MoveTargetExisting,
+		TargetLaunchID:  &targetLaunch,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, 102, "", &targetLaunch, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := db.SetMoveIntentTargetRequest(database, intent.ID, string(controlplane.GraceCommandJobs), "req-accepted"); err != nil {
+		t.Fatalf("SetMoveIntentTargetRequest: %v", err)
+	}
+
+	prevCheckAck := syncCheckGraceCommandAck
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() {
+		syncCheckGraceCommandAck = prevCheckAck
+		sendGraceCancelAttempts = prevSendCancel
+	})
+	syncCheckGraceCommandAck = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, requestID string) (*controlplane.GraceCommandAck, bool, error) {
+		if instanceID != targetLaunch || requestID != "req-accepted" {
+			t.Fatalf("ack lookup = (%d, %q), want (%d, req-accepted)", instanceID, requestID, targetLaunch)
+		}
+		return &controlplane.GraceCommandAck{Kind: controlplane.GraceCommandJobs, Accepted: true}, true, nil
+	}
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, launchID int64, attemptIDs []int64) error {
+		canceledByLaunch[launchID] = append(canceledByLaunch[launchID], attemptIDs...)
+		return nil
+	}
+
+	reconcilePendingMoveTargetRequestAcks(context.Background(), database, &r2.Client{}, targetLaunch)
+
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != db.MoveIntentStateConfirmed {
+		t.Fatalf("intent state = %q, want confirmed", gotIntent.State)
+	}
+	if got := canceledByLaunch[sourceLaunch]; len(got) != 1 || got[0] != sourceAttemptID {
+		t.Fatalf("source cancel-attempts = %v, want [%d]", canceledByLaunch, sourceAttemptID)
+	}
+	var targetReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID).Scan(&targetReason); err != nil {
+		t.Fatalf("read target abandoned reason: %v", err)
+	}
+	if targetReason != "" {
+		t.Fatalf("target abandoned reason = %q, want authoritative target", targetReason)
+	}
+	var sourceReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&sourceReason); err != nil {
+		t.Fatalf("read source abandoned reason: %v", err)
+	}
+	if sourceReason != db.AttemptAbandonedMoveTargetAccepted {
+		t.Fatalf("source abandoned reason = %q, want %q", sourceReason, db.AttemptAbandonedMoveTargetAccepted)
+	}
+}
+
+func TestReconcilePendingMoveTargetRequestAckRejectedCancelsMove(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	targetLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, command, tombstoned)
+		 VALUES (103, '/tmp', 'RTX_3090', 'python train.py', 0)`,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, 103, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	sourceAttemptID, err := db.GetLatestAttemptID(database, 103)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           103,
+		SourceAttemptID: &sourceAttemptID,
+		SourceLaunchID:  &sourceLaunch,
+		TargetKind:      db.MoveTargetExisting,
+		TargetLaunchID:  &targetLaunch,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, 103, "", &targetLaunch, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := db.SetMoveIntentTargetRequest(database, intent.ID, string(controlplane.GraceCommandJobs), "req-rejected"); err != nil {
+		t.Fatalf("SetMoveIntentTargetRequest: %v", err)
+	}
+
+	prevCheckAck := syncCheckGraceCommandAck
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() {
+		syncCheckGraceCommandAck = prevCheckAck
+		sendGraceCancelAttempts = prevSendCancel
+	})
+	syncCheckGraceCommandAck = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, requestID string) (*controlplane.GraceCommandAck, bool, error) {
+		if instanceID != targetLaunch || requestID != "req-rejected" {
+			t.Fatalf("ack lookup = (%d, %q), want (%d, req-rejected)", instanceID, requestID, targetLaunch)
+		}
+		return &controlplane.GraceCommandAck{Kind: controlplane.GraceCommandJobs, Accepted: false, Message: "queue full"}, true, nil
+	}
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, launchID int64, attemptIDs []int64) error {
+		canceledByLaunch[launchID] = append(canceledByLaunch[launchID], attemptIDs...)
+		return nil
+	}
+
+	reconcilePendingMoveTargetRequestAcks(context.Background(), database, &r2.Client{}, targetLaunch)
+
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != db.MoveIntentStateCanceled {
+		t.Fatalf("intent state = %q, want canceled", gotIntent.State)
+	}
+	if len(canceledByLaunch) != 0 {
+		t.Fatalf("source cancel-attempts = %v, want none", canceledByLaunch)
+	}
+	var targetReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID).Scan(&targetReason); err != nil {
+		t.Fatalf("read target abandoned reason: %v", err)
+	}
+	if targetReason != db.AttemptAbandonedMoveDestinationRejected {
+		t.Fatalf("target abandoned reason = %q, want %q", targetReason, db.AttemptAbandonedMoveDestinationRejected)
+	}
+	var sourceReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&sourceReason); err != nil {
+		t.Fatalf("read source abandoned reason: %v", err)
+	}
+	if sourceReason != "" {
+		t.Fatalf("source abandoned reason = %q, want still authoritative", sourceReason)
 	}
 }
 

@@ -51,6 +51,10 @@ type Option struct {
 	Reason      string
 }
 
+var queueHostMoveJob = ops.QueueJobToRemote
+var sendMoveCancelAttempts = campaign.SendCancelAttempts
+var terminateMoveForcedSources = TerminateForcedSources
+
 type Result struct {
 	TargetDesc string
 	InstanceID int64
@@ -487,16 +491,9 @@ func ExecuteOption(
 		if host == "" {
 			return "", fmt.Errorf("on-prem option missing host")
 		}
-		if job.IsLaunchJob() {
-			return "", fmt.Errorf("moving %s from rental instance to on-prem host %s is not implemented safely yet: destination acceptance must be confirmed before the source is stopped", ids.FormatJobID(job.ID), host)
-		}
-		sources := SnapshotForcedSources([]*db.Job{job})
-		if _, err := MoveJobsToHost(database, []*db.Job{job}, host, JobMoveCallbacks{}); err != nil {
+		if _, err := executeHostMoveWithIntent(ctx, database, r2Client, job, host); err != nil {
 			return "", err
 		}
-		TerminateForcedSources(database, sources, func(msg string) {
-			slog.Warn("terminate forced source", "component", "move", "job_id", job.ID, "msg", msg)
-		})
 		return fmt.Sprintf("host %s", host), nil
 	}
 
@@ -606,9 +603,11 @@ func executeWithIntent(
 			slog.Warn("resolve move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
 		}
 	}
-	TerminateForcedSources(database, sources, func(msg string) {
-		slog.Warn("terminate forced source", "component", "move", "job_id", job.ID, "msg", msg)
-	})
+	if !opt.IsNew {
+		TerminateForcedSources(database, sources, func(msg string) {
+			slog.Warn("terminate forced source", "component", "move", "job_id", job.ID, "msg", msg)
+		})
+	}
 	return desc, nil
 }
 
@@ -616,9 +615,10 @@ func executeWithIntent(
 // runs. Rejects a second move on a job that already has one in flight.
 func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, error) {
 	params := db.CreateMoveIntentParams{
-		JobID:          job.ID,
-		SourceLaunchID: job.LaunchID,
-		TargetGPUName:  opt.GPUName,
+		JobID:           job.ID,
+		SourceAttemptID: job.LatestRunID,
+		SourceLaunchID:  job.LaunchID,
+		TargetGPUName:   opt.GPUName,
 	}
 	if opt.IsNew {
 		params.TargetKind = db.MoveTargetNew
@@ -628,6 +628,9 @@ func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, 
 			params.TargetOfferProvider = string(opt.Offer.Provider)
 			params.TargetOfferID = opt.Offer.ProviderID
 		}
+	} else if opt.Kind == OptionKindOnPrem || strings.TrimSpace(opt.Host) != "" {
+		params.TargetKind = db.MoveTargetExisting
+		params.TargetHost = strings.TrimSpace(opt.Host)
 	} else {
 		params.TargetKind = db.MoveTargetExisting
 		params.TargetLaunchID = &opt.InstanceID
@@ -637,6 +640,83 @@ func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, 
 		return nil, fmt.Errorf("open move intent: %w", err)
 	}
 	return intent, nil
+}
+
+func executeHostMoveWithIntent(
+	ctx context.Context,
+	database *sql.DB,
+	r2Client *r2.Client,
+	job *db.Job,
+	host string,
+) (string, error) {
+	opt := Option{Kind: OptionKindOnPrem, Host: host, Eligible: true}
+	intent, err := openMoveIntent(database, job, opt)
+	if err != nil {
+		return "", err
+	}
+	sourceSnapshots := SnapshotForcedSources([]*db.Job{job})
+	var sourceAttemptID int64
+	if job.LatestRunID != nil {
+		sourceAttemptID = *job.LatestRunID
+	}
+	sourceLaunchID := int64(0)
+	if job.LaunchID != nil {
+		sourceLaunchID = *job.LaunchID
+	}
+
+	attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, job.ID, host, nil, db.StatusQueued)
+	if err != nil {
+		_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "host move failed before destination attempt")
+		return "", fmt.Errorf("create destination attempt on %s: %w", host, err)
+	}
+	targetJob := *job
+	targetJob.Host = host
+	targetJob.Status = db.StatusQueued
+	targetJob.LaunchID = nil
+	targetJob.LatestRunID = &attemptID
+	if err := queueHostMoveJob(database, &targetJob, 30*time.Second); err != nil {
+		_ = db.AbandonMoveLoser(database, intent.ID, attemptID, db.AttemptAbandonedMoveDestinationRejected)
+		_ = db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "host destination did not accept")
+		return "", fmt.Errorf("submit to host %s: %w", host, err)
+	}
+	if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+		slog.Warn("set queued_at after host move", "component", "move", "job_id", job.ID, "attempt_id", attemptID, "error", err)
+	}
+	if err := db.ConfirmMoveTargetAccepted(database, intent.ID, "moved to host "+host); err != nil {
+		slog.Warn("resolve host move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
+	}
+	if sourceLaunchID > 0 && sourceAttemptID > 0 && r2Client != nil {
+		cancelCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := sendMoveCancelAttempts(cancelCtx, r2Client, sourceLaunchID, []int64{sourceAttemptID})
+		cancel()
+		if err != nil {
+			slog.Warn("send source cancel-attempts marker", "component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "attempt_id", sourceAttemptID, "error", err)
+		}
+	}
+	terminateMoveForcedSources(database, sourceSnapshots, func(msg string) {
+		slog.Warn("terminate forced source", "component", "move", "job_id", job.ID, "msg", msg)
+	})
+	return host, nil
+}
+
+func restoreMoveSource(database *sql.DB, jobID int64, sourceLaunchID int64, sourceHost string, sourceStatus string) {
+	if sourceLaunchID > 0 {
+		if err := db.TransferJobLaunchID(database, jobID, sourceLaunchID); err != nil {
+			slog.Warn("restore source launch after failed host move", "component", "move", "job_id", jobID, "source_launch_id", sourceLaunchID, "error", err)
+		}
+		return
+	}
+	sourceHost = strings.TrimSpace(sourceHost)
+	if sourceHost == "" {
+		return
+	}
+	status := sourceStatus
+	if status == "" {
+		status = db.StatusQueued
+	}
+	if _, err := db.CreateAttempt(database, jobID, sourceHost, nil, status); err != nil {
+		slog.Warn("restore source host after failed host move", "component", "move", "job_id", jobID, "source_host", sourceHost, "error", err)
+	}
 }
 
 func executeMoveOption(
@@ -650,22 +730,20 @@ func executeMoveOption(
 	intent *db.MoveIntent,
 ) (string, error) {
 	if !opt.IsNew {
-		// Move-to-existing supersedes the source claim atomically inside
-		// SubmitJobsToInstanceForMove (TransferJobLaunchID), so the source
-		// is never visibly unplaced. On failure the rollback inside the
-		// submit returns the job to unplaced; the outer cancel-intent path
-		// then restores to source if it is still alive.
+		// Move-to-existing opens a hidden target attempt, submits it to the
+		// destination, and confirms only after the destination accepts it.
+		// On failure the source remains authoritative.
 		if err := campaign.SubmitJobsToInstanceForMove(ctx, database, r2Client, opt.InstanceID, []*db.Job{job}); err != nil {
 			return "", fmt.Errorf("submit to instance %s: %w", ids.FormatInstanceID(opt.InstanceID), err)
 		}
 		return fmt.Sprintf("instance %s", ids.FormatInstanceID(opt.InstanceID)), nil
 	}
 
-	// Move-to-new uses TransferClaim to atomically supersede the source
-	// claim *inside* LaunchCampaign — the prior unplace-then-launch
-	// sequence is gone. If the launch fails (no offer, provider error)
-	// before the instance is created, source is untouched. If the instance
-	// is created and the agent later stalls, the existing
+	// Move-to-new creates hidden target attempts on the placeholder launch.
+	// The source remains authoritative until the target agent reports ready
+	// or the target attempt produces a job-owned terminal result first. If
+	// the launch fails before acceptance, the source is untouched. If the
+	// instance is created and the agent later stalls, the existing
 	// reconcile.bootstrap_timeout path terminates the instance and resets
 	// the job back to queued — at which point the autopilot can re-place.
 	if opt.Offer == nil {
@@ -694,7 +772,7 @@ func executeMoveOption(
 	launchOpts := campaign.LaunchOpts{
 		GracePeriodSeconds: int(gracePeriod.Seconds()),
 		Strategy:           opt.Strategy,
-		TransferClaim:      true,
+		MoveTargetClaim:    true,
 	}
 
 	var r2Cfg cloud.R2Config
@@ -796,7 +874,6 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64, force bool) (Resu
 	if !isMoveAdmissibleStatus(job.EffectiveStatus(), force) {
 		return Result{}, fmt.Errorf("can only move queued jobs (job %s has status: %s); pass --force to move running jobs", ids.FormatJobID(jobID), job.EffectiveStatus())
 	}
-	sources := SnapshotForcedSources([]*db.Job{job})
 
 	configStarted := time.Now()
 	cfg, err := config.Load()
@@ -893,9 +970,6 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64, force bool) (Resu
 		}
 	}
 	logPhase("complete", moveStarted, fmt.Sprintf("target=%s instance=%d", result.TargetDesc, result.InstanceID), nil)
-	TerminateForcedSources(database, sources, func(msg string) {
-		slog.Warn("terminate forced source", "component", "move", "job_id", jobID, "msg", msg)
-	})
 	return result, nil
 }
 
@@ -951,8 +1025,6 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		}
 	}
 	logPhase("refresh_launchable", refreshStarted, fmt.Sprintf("launchable=%d warnings=%d", len(launchable), len(warnings)), nil)
-
-	sources := SnapshotForcedSources(launchable)
 
 	groupStarted := time.Now()
 	var groups []campaign.InstanceGroup
@@ -1086,7 +1158,7 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 		Strategy:           bidding.StrategyCheap,
 		MinSurvival:        0.4,
 		// Rental-source claim is transferred atomically; see unplaceIfNeeded.
-		TransferClaim: true,
+		MoveTargetClaim: true,
 	}
 	launchStarted := time.Now()
 	// Track per-group launch outcomes so the receipt can attribute success
@@ -1151,25 +1223,6 @@ func MoveQueuedJobsToNewInstances(database *sql.DB, jobs []*db.Job, separateEach
 	// agent_ready or retry replacement launch" lifecycle.
 	placed, unplaced := groupOutcomes.partition()
 	unplaced = append(unplaced, preDropped...)
-	// SSH-kill on-prem source processes for every job whose TransferClaim
-	// has already closed the source attempt in the DB. Jobs whose group
-	// failed offer search or launch are filtered out (their source attempt
-	// is still open and we must leave the source process running).
-	placedSet := make(map[int64]struct{}, len(placed))
-	for _, id := range placed {
-		placedSet[id] = struct{}{}
-	}
-	survivingSources := make([]SourceSnapshot, 0, len(sources))
-	for _, snap := range sources {
-		if _, ok := placedSet[snap.JobID]; ok {
-			survivingSources = append(survivingSources, snap)
-		}
-	}
-	TerminateForcedSources(database, survivingSources, func(msg string) {
-		if cb.OnWarning != nil {
-			cb.OnWarning(msg)
-		}
-	})
 	return BulkResult{
 		InstanceIDs:    result.InstanceIDs,
 		PlacedJobIDs:   placed,
@@ -1378,10 +1431,9 @@ func unplaceIfNeeded(database *sql.DB, job *db.Job) error {
 	if job.TargetKind() == db.JobTargetUnplaced {
 		return nil
 	}
-	// Rental-source jobs stay attached to source until LaunchCampaign with
-	// TransferClaim=true atomically supersedes the source claim at
-	// instance-creation time. See specs/job-move.allium §
-	// SourceLaunchUnchangedWhileIntentOpen.
+	// Rental-source jobs stay attached to source while move-to-new opens a
+	// hidden target attempt. The source is abandoned only after the target
+	// accepts the move.
 	if job.IsRentalJob() {
 		return nil
 	}
@@ -1422,8 +1474,8 @@ func RefreshLaunchableJobs(database *sql.DB, jobs []*db.Job) ([]*db.Job, []strin
 // isMoveAdmissibleStatus reports whether a job's effective status is allowed
 // into the move-to-new pipeline. Queued/pending_placement always qualify;
 // the running set (running/starting/paused) is admitted only under --force,
-// in which case the destination's TransferClaim atomically supersedes the
-// source attempt and TerminateForcedSources cleans up the source process.
+// in which case the source process is stopped only after the target accepts
+// the move.
 func isMoveAdmissibleStatus(status string, force bool) bool {
 	switch status {
 	case db.StatusQueued, db.StatusPendingPlacement:

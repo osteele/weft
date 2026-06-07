@@ -133,7 +133,16 @@ entity Job {
     attempts: JobAttempt with job = this
 
     -- Derived
-    latest_attempt: attempts.max_by(a => a.attempt_number)
+    -- User-visible job status/info/artifacts use the latest non-abandoned
+    -- attempt. Attempts marked abandoned are retained for forensics and
+    -- explicit attempt-level queries, but no longer own the logical job.
+    latest_attempt: attempts
+        .where(a => a.abandoned_at = null)
+        .max_by(a => a.attempt_number)
+    -- Physical history still uses the maximum attempt number. Retry and
+    -- attempt-number allocation use this so a user-requested retry can
+    -- supersede an abandoned move attempt.
+    physical_latest_attempt: attempts.max_by(a => a.attempt_number)
     is_placed: host != null
     is_terminal: status in {completed, failed, dead, killed, canceled, draft}
     -- queued+unplaced means no prospective assignment yet.
@@ -255,6 +264,15 @@ entity JobAttempt {
                                         -- continues (set when the job is
                                         -- reattached to a fresh launch after
                                         -- a preempted/orphaned termination).
+
+    -- Move-overlap authority. When two attempts temporarily exist during a
+    -- deliberate move, the loser is marked abandoned instead of deleting the
+    -- row or choosing a global winner on the job. abandoned_reason is a short
+    -- durable string for forensics; abandoned_by_intent is structured
+    -- provenance when a MoveIntent caused the abandonment.
+    abandoned_at: Timestamp?
+    abandoned_reason: String?
+    abandoned_by_intent: MoveIntent?
 
     -- Three-way merge fields (for on-prem sync reconciliation)
     last_synced_status: String?     -- remote state at last successful sync

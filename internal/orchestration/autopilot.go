@@ -988,7 +988,7 @@ func fulfillOpenMoveToNewIntents(ctx context.Context, database *sql.DB, scoped m
 		case moveIntentActionWait:
 			continue
 		case moveIntentActionConfirm:
-			if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed, "target accepted job before terminal"); err != nil {
+			if err := db.ConfirmMoveTargetAccepted(database, intent.ID, "target accepted job before terminal"); err != nil {
 				return launched, err
 			}
 			continue

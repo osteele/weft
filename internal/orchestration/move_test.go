@@ -322,38 +322,6 @@ func TestBuildOnPremOptionsIncludesEligibleAndIneligibleHosts(t *testing.T) {
 	}
 }
 
-func TestExecuteOptionRejectsCloudToOnPremWithoutR2(t *testing.T) {
-	database := db.SetupTestDB(t)
-	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "cloud job", "nvidia")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU: %v", err)
-	}
-	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
-	if err != nil {
-		t.Fatalf("CreateLaunch: %v", err)
-	}
-	if err := db.TransferJobToLaunch(database, jobID, launchID); err != nil {
-		t.Fatalf("TransferJobToLaunch: %v", err)
-	}
-
-	_, err = ExecuteOption(context.Background(), database, nil, nil, nil, jobID, Option{
-		Kind:     OptionKindOnPrem,
-		Host:     "cool30",
-		Eligible: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "destination acceptance must be confirmed") {
-		t.Fatalf("ExecuteOption err = %v, want destination acceptance error", err)
-	}
-
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("GetJobByID: %v", err)
-	}
-	if job.LaunchID == nil || *job.LaunchID != launchID {
-		t.Fatalf("job launch_id = %v, want %d", job.LaunchID, launchID)
-	}
-}
-
 func TestBuildOptionsWithSurvival_FiltersLowSurvivalMachine(t *testing.T) {
 	job := &db.Job{
 		ID:       1905,
@@ -478,7 +446,8 @@ func TestUnplaceIfNeeded_AlreadyUnplaced(t *testing.T) {
 
 func TestUnplaceIfNeeded_RentalSourceLeftAttached(t *testing.T) {
 	// Regression: bulk move-to-new must not detach rental-source jobs
-	// before LaunchCampaign supersedes the claim. See unplaceIfNeeded.
+	// before the target accepts the hidden destination attempt. See
+	// unplaceIfNeeded.
 	database := db.SetupTestDB(t)
 
 	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning})
@@ -891,11 +860,136 @@ func TestLaunchNewForJob_ExecuteFailureResolvesIntentCanceled(t *testing.T) {
 	}
 }
 
+func TestExecuteOption_RentalToHostDispatchesAfterMoveIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "move", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	before, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID before: %v", err)
+	}
+	sourceRunID := *before.LatestRunID
+
+	var queuedHost string
+	restoreQueue := stubQueueHostMoveJob(t, func(_ *sql.DB, job *db.Job, _ time.Duration) error {
+		queuedHost = job.Host
+		if job.LatestRunID == nil || *job.LatestRunID == sourceRunID {
+			t.Fatalf("queued job latest run = %v, want destination attempt", job.LatestRunID)
+		}
+		return nil
+	})
+	defer restoreQueue()
+	restoreTerminate := stubTerminateMoveForcedSources(t, func(*sql.DB, []SourceSnapshot, func(string)) {})
+	defer restoreTerminate()
+
+	desc, err := ExecuteOption(context.Background(), database, nil, nil, nil, jobID, Option{
+		Kind:     OptionKindOnPrem,
+		Host:     "cool30",
+		Eligible: true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteOption: %v", err)
+	}
+	if desc != "host cool30" {
+		t.Fatalf("desc = %q, want host cool30", desc)
+	}
+	if queuedHost != "cool30" {
+		t.Fatalf("queuedHost = %q, want cool30", queuedHost)
+	}
+	after, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.Host != "cool30" || after.LaunchID != nil || after.Status != db.StatusQueued {
+		t.Fatalf("after = host %q launch %v status %q, want cool30 nil queued", after.Host, after.LaunchID, after.Status)
+	}
+	intent, err := db.GetMoveIntent(database, 1)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if intent == nil || intent.TargetHost != "cool30" || intent.State != db.MoveIntentStateConfirmed {
+		t.Fatalf("intent = %+v, want confirmed target_host cool30", intent)
+	}
+}
+
+func TestExecuteOption_RentalToHostQueueFailureRestoresSource(t *testing.T) {
+	database := db.SetupTestDB(t)
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "move", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	queueErr := errors.New("host unreachable")
+	restoreQueue := stubQueueHostMoveJob(t, func(*sql.DB, *db.Job, time.Duration) error {
+		return queueErr
+	})
+	defer restoreQueue()
+
+	_, err = ExecuteOption(context.Background(), database, nil, nil, nil, jobID, Option{
+		Kind:     OptionKindOnPrem,
+		Host:     "cool30",
+		Eligible: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "submit to host cool30") {
+		t.Fatalf("ExecuteOption err = %v, want host submit error", err)
+	}
+	after, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after: %v", err)
+	}
+	if after.LaunchID == nil || *after.LaunchID != sourceLaunch {
+		t.Fatalf("LaunchID = %v, want restored source %d", after.LaunchID, sourceLaunch)
+	}
+	intent, err := db.GetMoveIntent(database, 1)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if intent == nil || intent.State != db.MoveIntentStateCanceled {
+		t.Fatalf("intent = %+v, want canceled", intent)
+	}
+}
+
 func stubExecuteMoveOptionForMove(t *testing.T, fn func(context.Context, *sql.DB, *r2.Client, *config.Config, []cloud.Client, *db.Job, Option, *db.MoveIntent) (string, error)) func() {
 	t.Helper()
 	previous := executeMoveOptionForMove
 	executeMoveOptionForMove = fn
 	return func() {
 		executeMoveOptionForMove = previous
+	}
+}
+
+func stubQueueHostMoveJob(t *testing.T, fn func(*sql.DB, *db.Job, time.Duration) error) func() {
+	t.Helper()
+	previous := queueHostMoveJob
+	queueHostMoveJob = fn
+	return func() {
+		queueHostMoveJob = previous
+	}
+}
+
+func stubTerminateMoveForcedSources(t *testing.T, fn func(*sql.DB, []SourceSnapshot, func(string))) func() {
+	t.Helper()
+	previous := terminateMoveForcedSources
+	terminateMoveForcedSources = fn
+	return func() {
+		terminateMoveForcedSources = previous
 	}
 }

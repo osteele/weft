@@ -26,9 +26,14 @@ type MoveIntent struct {
 	SourceLaunchID      *int64
 	TargetKind          MoveTargetKind
 	TargetLaunchID      *int64 // set immediately for 'existing'; populated after cloud launch returns for 'new'
+	TargetAttemptID     *int64
+	TargetHost          string
 	TargetOfferProvider string
 	TargetOfferID       string
 	TargetGPUName       string
+	TargetRequestID     string
+	TargetRequestKind   string
+	TargetRequestAt     *int64
 	State               MoveIntentState
 	AttemptCount        int
 	MaxAttempts         int
@@ -64,9 +69,14 @@ type CreateMoveIntentParams struct {
 	SourceLaunchID      *int64
 	TargetKind          MoveTargetKind
 	TargetLaunchID      *int64 // pass nil for MoveTargetNew until launch resolves
+	TargetAttemptID     *int64
+	TargetHost          string
 	TargetOfferProvider string
 	TargetOfferID       string
 	TargetGPUName       string
+	TargetRequestID     string
+	TargetRequestKind   string
+	TargetRequestAt     *int64
 	AttemptCount        int
 	MaxAttempts         int
 }
@@ -82,8 +92,9 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	if p.TargetKind != MoveTargetExisting && p.TargetKind != MoveTargetNew {
 		return nil, fmt.Errorf("invalid target kind %q", p.TargetKind)
 	}
-	if p.TargetKind == MoveTargetExisting && (p.TargetLaunchID == nil || *p.TargetLaunchID <= 0) {
-		return nil, fmt.Errorf("existing target requires target_launch_id")
+	targetHost := strings.TrimSpace(p.TargetHost)
+	if p.TargetKind == MoveTargetExisting && targetHost == "" && (p.TargetLaunchID == nil || *p.TargetLaunchID <= 0) {
+		return nil, fmt.Errorf("existing target requires target_launch_id or target_host")
 	}
 	now := time.Now().Unix()
 	attemptCount := p.AttemptCount
@@ -98,12 +109,14 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	res, err := database.Exec(
 		`INSERT INTO move_intents (
 			job_id, source_attempt_id, source_launch_id,
-			target_kind, target_launch_id, target_offer_provider, target_offer_id, target_gpu_name,
+			target_kind, target_launch_id, target_attempt_id, target_host, target_offer_provider, target_offer_id, target_gpu_name,
+			target_request_id, target_request_kind, target_request_created_at,
 			state, attempt_count, max_attempts, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
 		p.JobID, nullableInt64(p.SourceAttemptID), nullableInt64(p.SourceLaunchID),
-		string(p.TargetKind), nullableInt64(p.TargetLaunchID),
+		string(p.TargetKind), nullableInt64(p.TargetLaunchID), nullableInt64(p.TargetAttemptID), emptyToNull(targetHost),
 		emptyToNull(p.TargetOfferProvider), emptyToNull(p.TargetOfferID), emptyToNull(p.TargetGPUName),
+		emptyToNull(p.TargetRequestID), emptyToNull(p.TargetRequestKind), nullableInt64(p.TargetRequestAt),
 		attemptCount, maxAttempts, now,
 	)
 	if err != nil {
@@ -196,12 +209,165 @@ func JobIDsWithOpenMoveIntents(database *sql.DB) (map[int64]struct{}, error) {
 	return out, rows.Err()
 }
 
+// MoveIntentSourceStop describes the source side effects to perform after a
+// target launch accepts a move-to-new job.
+type MoveIntentSourceStop struct {
+	IntentID        int64
+	JobID           int64
+	SourceAttemptID int64
+	SourceLaunchID  *int64
+	SourceHost      string
+	SourceStartTime int64
+}
+
+type MoveIntentPendingTargetRequest struct {
+	IntentID         int64
+	JobID            int64
+	TargetLaunchID   int64
+	TargetAttemptID  int64
+	RequestID        string
+	RequestKind      string
+	RequestCreatedAt int64
+	SourceAttemptID  int64
+	SourceLaunchID   *int64
+	SourceHost       string
+	SourceStartTime  int64
+}
+
+// ListMoveIntentSourceStopsForTargetLaunch returns the source attempts that
+// should be stopped after the target launch is confirmed. Call before
+// ConfirmOpenMoveIntentsForTargetLaunch, while the intents are still open.
+// Intents with target_request_id are excluded because running existing rental
+// targets must be confirmed by the matching grace ack, not by generic
+// agent-ready convergence.
+func ListMoveIntentSourceStopsForTargetLaunch(database *sql.DB, launchID int64) ([]MoveIntentSourceStop, error) {
+	if launchID <= 0 {
+		return nil, nil
+	}
+	rows, err := database.Query(`
+		SELECT mi.id, mi.job_id, mi.source_attempt_id,
+		       mi.source_launch_id, ja.host, COALESCE(ja.start_time, 0)
+		  FROM move_intents mi
+		  JOIN job_attempts ja ON ja.id = mi.source_attempt_id
+		 WHERE mi.target_launch_id = ?
+	   AND mi.state = ?
+	   AND mi.source_attempt_id IS NOT NULL
+	   AND mi.target_request_id IS NULL
+	 ORDER BY mi.id`,
+		launchID, string(MoveIntentStateOpen),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MoveIntentSourceStop
+	for rows.Next() {
+		var stop MoveIntentSourceStop
+		var sourceLaunch sql.NullInt64
+		var host sql.NullString
+		if err := rows.Scan(&stop.IntentID, &stop.JobID, &stop.SourceAttemptID, &sourceLaunch, &host, &stop.SourceStartTime); err != nil {
+			return nil, err
+		}
+		if sourceLaunch.Valid {
+			v := sourceLaunch.Int64
+			stop.SourceLaunchID = &v
+		}
+		if host.Valid {
+			stop.SourceHost = strings.TrimSpace(host.String)
+		}
+		out = append(out, stop)
+	}
+	return out, rows.Err()
+}
+
+func SetMoveIntentTargetRequest(database *sql.DB, intentID int64, requestKind, requestID string) error {
+	requestID = strings.TrimSpace(requestID)
+	requestKind = strings.TrimSpace(requestKind)
+	if intentID <= 0 {
+		return fmt.Errorf("invalid move intent id")
+	}
+	if requestID == "" {
+		return fmt.Errorf("target request id is required")
+	}
+	if requestKind == "" {
+		requestKind = "jobs"
+	}
+	_, err := database.Exec(
+		`UPDATE move_intents
+		    SET target_request_id = ?,
+		        target_request_kind = ?,
+		        target_request_created_at = COALESCE(target_request_created_at, ?)
+		  WHERE id = ? AND state = 'open'`,
+		requestID, requestKind, time.Now().Unix(), intentID,
+	)
+	return err
+}
+
+func ListOpenMoveIntentPendingTargetRequests(database *sql.DB, launchID int64) ([]MoveIntentPendingTargetRequest, error) {
+	if launchID <= 0 {
+		return nil, nil
+	}
+	rows, err := database.Query(`
+		SELECT mi.id, mi.job_id, mi.target_launch_id, mi.target_attempt_id,
+		       mi.target_request_id, COALESCE(mi.target_request_kind, ''),
+		       COALESCE(mi.target_request_created_at, 0),
+		       mi.source_attempt_id, mi.source_launch_id, ja.host, COALESCE(ja.start_time, 0)
+		  FROM move_intents mi
+		  LEFT JOIN job_attempts ja ON ja.id = mi.source_attempt_id
+		 WHERE mi.target_launch_id = ?
+		   AND mi.state = 'open'
+		   AND mi.target_attempt_id IS NOT NULL
+		   AND mi.target_request_id IS NOT NULL
+		 ORDER BY mi.id`,
+		launchID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MoveIntentPendingTargetRequest
+	for rows.Next() {
+		var req MoveIntentPendingTargetRequest
+		var sourceAttempt, sourceLaunch sql.NullInt64
+		var host sql.NullString
+		if err := rows.Scan(
+			&req.IntentID, &req.JobID, &req.TargetLaunchID, &req.TargetAttemptID,
+			&req.RequestID, &req.RequestKind, &req.RequestCreatedAt,
+			&sourceAttempt, &sourceLaunch, &host, &req.SourceStartTime,
+		); err != nil {
+			return nil, err
+		}
+		if sourceAttempt.Valid {
+			req.SourceAttemptID = sourceAttempt.Int64
+		}
+		if sourceLaunch.Valid {
+			v := sourceLaunch.Int64
+			req.SourceLaunchID = &v
+		}
+		if host.Valid {
+			req.SourceHost = strings.TrimSpace(host.String)
+		}
+		out = append(out, req)
+	}
+	return out, rows.Err()
+}
+
 // UpdateMoveIntentTargetLaunch fills in target_launch_id once a 'new' move
 // has had its instance created. No-op if the intent is no longer open.
 func UpdateMoveIntentTargetLaunch(database *sql.DB, intentID, launchID int64) error {
 	_, err := database.Exec(
 		`UPDATE move_intents SET target_launch_id = ? WHERE id = ? AND state = 'open'`,
 		launchID, intentID,
+	)
+	return err
+}
+
+// UpdateMoveIntentTargetAttempt records the destination attempt opened for an
+// in-flight move. No-op if the intent is no longer open.
+func UpdateMoveIntentTargetAttempt(database *sql.DB, intentID, attemptID int64) error {
+	_, err := database.Exec(
+		`UPDATE move_intents SET target_attempt_id = ? WHERE id = ? AND state = 'open'`,
+		attemptID, intentID,
 	)
 	return err
 }
@@ -227,16 +393,62 @@ func ResolveMoveIntent(database *sql.DB, intentID int64, state MoveIntentState, 
 	if state == MoveIntentStateOpen {
 		return fmt.Errorf("cannot resolve to open state")
 	}
+	if intentID <= 0 {
+		return fmt.Errorf("invalid move intent id")
+	}
+	if strings.TrimSpace(resolution) == "" {
+		resolution = string(state)
+	}
+	var currentState string
+	var targetAttempt sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT state, target_attempt_id FROM move_intents WHERE id = ?`,
+		intentID,
+	).Scan(&currentState, &targetAttempt); err != nil {
+		return err
+	}
+	if MoveIntentState(currentState) != MoveIntentStateOpen {
+		return nil
+	}
+	if state == MoveIntentStateConfirmed && targetAttempt.Valid {
+		return ConfirmMoveTargetAccepted(database, intentID, resolution)
+	}
+
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	now := time.Now().Unix()
-	_, err := database.Exec(
+	if targetAttempt.Valid {
+		reason := AttemptAbandonedMoveDestinationRejected
+		if state == MoveIntentStateObsoleted {
+			reason = AttemptAbandonedMoveSourceWon
+		}
+		if _, err := tx.Exec(
+			`UPDATE job_attempts
+			    SET abandoned_at = COALESCE(abandoned_at, ?),
+			        abandoned_reason = COALESCE(NULLIF(abandoned_reason, ''), ?),
+			        abandoned_by_intent_id = COALESCE(abandoned_by_intent_id, ?)
+			  WHERE id = ?`,
+			now, reason, intentID, targetAttempt.Int64,
+		); err != nil {
+			return fmt.Errorf("abandon target attempt: %w", err)
+		}
+	}
+	_, err = tx.Exec(
 		`UPDATE move_intents SET state = ?, resolved_at = ?, resolution = ? WHERE id = ? AND state = 'open'`,
 		string(state), now, resolution, intentID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// ConfirmOpenMoveIntentsForTargetLaunch confirms any open move intents that
-// target a launch once that launch has accepted its initial job queue.
+// ConfirmOpenMoveIntentsForTargetLaunch confirms open move intents that target
+// a launch once that launch has accepted its initial job queue. Intents with a
+// pending target_request_id are excluded; those require the exact grace ack.
 func ConfirmOpenMoveIntentsForTargetLaunch(database *sql.DB, launchID int64, resolution string) error {
 	if launchID <= 0 {
 		return nil
@@ -244,15 +456,52 @@ func ConfirmOpenMoveIntentsForTargetLaunch(database *sql.DB, launchID int64, res
 	if strings.TrimSpace(resolution) == "" {
 		resolution = fmt.Sprintf("target launch %d accepted jobs", launchID)
 	}
-	now := time.Now().Unix()
-	_, err := database.Exec(
-		`UPDATE move_intents
-		    SET state = ?, resolved_at = ?, resolution = ?
+	rows, err := database.Query(
+		`SELECT id, target_attempt_id FROM move_intents
 		  WHERE target_launch_id = ?
-		    AND state = ?`,
-		string(MoveIntentStateConfirmed), now, resolution, launchID, string(MoveIntentStateOpen),
+		    AND state = ?
+		    AND target_request_id IS NULL
+		  ORDER BY id`,
+		launchID, string(MoveIntentStateOpen),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type targetIntent struct {
+		id               int64
+		hasTargetAttempt bool
+	}
+	var intents []targetIntent
+	for rows.Next() {
+		var id int64
+		var targetAttempt sql.NullInt64
+		if err := rows.Scan(&id, &targetAttempt); err != nil {
+			return err
+		}
+		intents = append(intents, targetIntent{id: id, hasTargetAttempt: targetAttempt.Valid})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	for _, intent := range intents {
+		if intent.hasTargetAttempt {
+			if err := ConfirmMoveTargetAccepted(database, intent.id, resolution); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := database.Exec(
+			`UPDATE move_intents
+			    SET state = ?, resolved_at = ?, resolution = ?
+			  WHERE id = ? AND state = ?`,
+			string(MoveIntentStateConfirmed), now, resolution, intent.id, string(MoveIntentStateOpen),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PrunedMoveIntent describes a move intent that PruneMoveIntents just
@@ -311,7 +560,8 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 
 const moveIntentSelect = `SELECT
 	id, job_id, source_attempt_id, source_launch_id,
-	target_kind, target_launch_id, target_offer_provider, target_offer_id, target_gpu_name,
+	target_kind, target_launch_id, target_attempt_id, target_host, target_offer_provider, target_offer_id, target_gpu_name,
+	target_request_id, target_request_kind, target_request_created_at,
 	state, attempt_count, max_attempts, created_at, resolved_at, resolution
 FROM move_intents`
 
@@ -321,14 +571,15 @@ type moveIntentScanner interface {
 
 func scanMoveIntent(s moveIntentScanner) (*MoveIntent, error) {
 	var (
-		mi                                                                        MoveIntent
-		sourceAttempt, sourceLaunch, targetLaunch, resolvedAt                     sql.NullInt64
-		targetOfferProvider, targetOfferID, targetGPUName, resolution, targetKind sql.NullString
-		stateStr                                                                  string
+		mi                                                                                                                        MoveIntent
+		sourceAttempt, sourceLaunch, targetLaunch, targetAttempt, targetRequestCreatedAt, resolvedAt                              sql.NullInt64
+		targetHost, targetOfferProvider, targetOfferID, targetGPUName, targetRequestID, targetRequestKind, resolution, targetKind sql.NullString
+		stateStr                                                                                                                  string
 	)
 	err := s.Scan(
 		&mi.ID, &mi.JobID, &sourceAttempt, &sourceLaunch,
-		&targetKind, &targetLaunch, &targetOfferProvider, &targetOfferID, &targetGPUName,
+		&targetKind, &targetLaunch, &targetAttempt, &targetHost, &targetOfferProvider, &targetOfferID, &targetGPUName,
+		&targetRequestID, &targetRequestKind, &targetRequestCreatedAt,
 		&stateStr, &mi.AttemptCount, &mi.MaxAttempts, &mi.CreatedAt, &resolvedAt, &resolution,
 	)
 	if err == sql.ErrNoRows {
@@ -346,13 +597,22 @@ func scanMoveIntent(s moveIntentScanner) (*MoveIntent, error) {
 	if targetLaunch.Valid {
 		mi.TargetLaunchID = &targetLaunch.Int64
 	}
+	if targetAttempt.Valid {
+		mi.TargetAttemptID = &targetAttempt.Int64
+	}
 	if resolvedAt.Valid {
 		mi.ResolvedAt = &resolvedAt.Int64
 	}
+	if targetRequestCreatedAt.Valid {
+		mi.TargetRequestAt = &targetRequestCreatedAt.Int64
+	}
 	mi.TargetKind = MoveTargetKind(targetKind.String)
+	mi.TargetHost = targetHost.String
 	mi.TargetOfferProvider = targetOfferProvider.String
 	mi.TargetOfferID = targetOfferID.String
 	mi.TargetGPUName = targetGPUName.String
+	mi.TargetRequestID = targetRequestID.String
+	mi.TargetRequestKind = targetRequestKind.String
 	mi.State = MoveIntentState(stateStr)
 	mi.Resolution = resolution.String
 	return &mi, nil

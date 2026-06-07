@@ -102,6 +102,312 @@ func TestSetAttemptLaunch_NormalizesPendingPlacement(t *testing.T) {
 	}
 }
 
+func TestAbandonedAttemptDoesNotDriveJobStatus(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	firstAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID first: %v", err)
+	}
+	if err := CloseAttempt(database, jobID, StatusCompleted, intPtr(0), time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt first: %v", err)
+	}
+	secondAttemptID, err := CreateAttempt(database, jobID, "cool100", nil, StatusRunning)
+	if err != nil {
+		t.Fatalf("CreateAttempt second: %v", err)
+	}
+	if err := AbandonAttempt(database, secondAttemptID, AttemptAbandonedMoveSourceWon, nil); err != nil {
+		t.Fatalf("AbandonAttempt: %v", err)
+	}
+
+	physicalLatest, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID physical: %v", err)
+	}
+	if physicalLatest != secondAttemptID {
+		t.Fatalf("physical latest attempt = %d, want abandoned attempt %d", physicalLatest, secondAttemptID)
+	}
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != firstAttemptID {
+		t.Fatalf("authoritative attempt = %d, want source attempt %d", authoritative, firstAttemptID)
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.LatestRunID == nil || *job.LatestRunID != firstAttemptID {
+		t.Fatalf("job latest run = %v, want %d", job.LatestRunID, firstAttemptID)
+	}
+	if job.Host != "cool30" || job.Status != StatusCompleted {
+		t.Fatalf("job status = host %q status %q, want cool30 completed", job.Host, job.Status)
+	}
+}
+
+func TestRetryAfterAbandonedAttemptBecomesAuthoritative(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	firstAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID first: %v", err)
+	}
+	if err := CloseAttempt(database, jobID, StatusCompleted, intPtr(0), time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt first: %v", err)
+	}
+	secondAttemptID, err := CreateAttempt(database, jobID, "cool100", nil, StatusRunning)
+	if err != nil {
+		t.Fatalf("CreateAttempt second: %v", err)
+	}
+	if err := AbandonAttempt(database, secondAttemptID, AttemptAbandonedMoveSourceWon, nil); err != nil {
+		t.Fatalf("AbandonAttempt: %v", err)
+	}
+	thirdAttemptID, err := CreateAttempt(database, jobID, "studio", nil, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateAttempt third: %v", err)
+	}
+
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != thirdAttemptID {
+		t.Fatalf("authoritative attempt = %d, want retry attempt %d", authoritative, thirdAttemptID)
+	}
+	if authoritative == firstAttemptID {
+		t.Fatalf("retry attempt should supersede older completed attempt")
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.LatestRunID == nil || *job.LatestRunID != thirdAttemptID {
+		t.Fatalf("job latest run = %v, want %d", job.LatestRunID, thirdAttemptID)
+	}
+	if job.Host != "studio" || job.Status != StatusQueued {
+		t.Fatalf("job status = host %q status %q, want studio queued", job.Host, job.Status)
+	}
+}
+
+func TestAbandonMoveLoserRecordsIntentID(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	attemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &attemptID,
+		TargetKind:      MoveTargetNew,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := AbandonMoveLoser(database, intent.ID, attemptID, AttemptAbandonedMoveTargetWon); err != nil {
+		t.Fatalf("AbandonMoveLoser: %v", err)
+	}
+
+	var reason string
+	var intentID int64
+	if err := database.QueryRow(
+		`SELECT abandoned_reason, COALESCE(abandoned_by_intent_id, 0) FROM job_attempts WHERE id = ?`,
+		attemptID,
+	).Scan(&reason, &intentID); err != nil {
+		t.Fatalf("query abandoned fields: %v", err)
+	}
+	if reason != AttemptAbandonedMoveTargetWon || intentID != intent.ID {
+		t.Fatalf("abandoned fields = reason %q intent %d, want %q intent %d", reason, intentID, AttemptAbandonedMoveTargetWon, intent.ID)
+	}
+}
+
+func TestOpenMoveTargetAttemptHiddenUntilAccepted(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	sourceAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &sourceAttemptID,
+		TargetKind:      MoveTargetExisting,
+		TargetHost:      "cool100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if targetAttemptID == sourceAttemptID {
+		t.Fatalf("target attempt reused source id %d", sourceAttemptID)
+	}
+
+	physicalLatest, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID physical: %v", err)
+	}
+	if physicalLatest != targetAttemptID {
+		t.Fatalf("physical latest = %d, want target %d", physicalLatest, targetAttemptID)
+	}
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != sourceAttemptID {
+		t.Fatalf("authoritative = %d, want source %d while intent open", authoritative, sourceAttemptID)
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Host != "cool30" || job.LatestRunID == nil || *job.LatestRunID != sourceAttemptID {
+		t.Fatalf("job = host %q latest %v, want source cool30/%d", job.Host, job.LatestRunID, sourceAttemptID)
+	}
+
+	if err := ConfirmMoveTargetAccepted(database, intent.ID, "accepted"); err != nil {
+		t.Fatalf("ConfirmMoveTargetAccepted: %v", err)
+	}
+	authoritative, err = GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID after confirm: %v", err)
+	}
+	if authoritative != targetAttemptID {
+		t.Fatalf("authoritative after confirm = %d, want target %d", authoritative, targetAttemptID)
+	}
+	var sourceReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&sourceReason); err != nil {
+		t.Fatalf("source abandoned reason: %v", err)
+	}
+	if sourceReason != AttemptAbandonedMoveTargetAccepted {
+		t.Fatalf("source abandoned reason = %q, want %q", sourceReason, AttemptAbandonedMoveTargetAccepted)
+	}
+}
+
+func TestMoveSourceCompletionAbandonsTargetAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	sourceAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &sourceAttemptID,
+		TargetKind:      MoveTargetExisting,
+		TargetHost:      "cool100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := CloseAttempt(database, jobID, StatusCompleted, intPtr(0), time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt source: %v", err)
+	}
+
+	gotIntent, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateObsoleted {
+		t.Fatalf("intent state = %q, want obsoleted", gotIntent.State)
+	}
+	var targetReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID).Scan(&targetReason); err != nil {
+		t.Fatalf("target abandoned reason: %v", err)
+	}
+	if targetReason != AttemptAbandonedMoveSourceWon {
+		t.Fatalf("target abandoned reason = %q, want %q", targetReason, AttemptAbandonedMoveSourceWon)
+	}
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != sourceAttemptID {
+		t.Fatalf("authoritative = %d, want source %d", authoritative, sourceAttemptID)
+	}
+}
+
+func TestMoveTargetCompletionAbandonsSourceAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	sourceAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &sourceAttemptID,
+		TargetKind:      MoveTargetExisting,
+		TargetHost:      "cool100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusRunning)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, exit_code = 0, end_time = ? WHERE id = ?`,
+		StatusCompleted, time.Now().Unix(), targetAttemptID,
+	); err != nil {
+		t.Fatalf("complete target attempt: %v", err)
+	}
+
+	gotIntent, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateConfirmed {
+		t.Fatalf("intent state = %q, want confirmed", gotIntent.State)
+	}
+	var sourceReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&sourceReason); err != nil {
+		t.Fatalf("source abandoned reason: %v", err)
+	}
+	if sourceReason != AttemptAbandonedMoveTargetWon {
+		t.Fatalf("source abandoned reason = %q, want %q", sourceReason, AttemptAbandonedMoveTargetWon)
+	}
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != targetAttemptID {
+		t.Fatalf("authoritative = %d, want target %d", authoritative, targetAttemptID)
+	}
+}
+
 func TestPlacementDisplayQueuedAt_RestoredAfterNoStartMoveUsesSourceTime(t *testing.T) {
 	database := setupTestDB(t)
 	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})

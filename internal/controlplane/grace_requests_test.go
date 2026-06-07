@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 type fakeGraceStore struct {
@@ -102,6 +104,44 @@ func TestSendGraceReleaseReturnsRejectedAck(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already terminating") {
 		t.Fatalf("error = %v, want rejection message", err)
+	}
+}
+
+func TestSendGraceJobPayloadNoAckReturnsRequestID(t *testing.T) {
+	store := &fakeGraceStore{}
+	requestID, err := SendGraceJobPayloadNoAck(context.Background(), store, 12, GraceJobsRequest{
+		Jobs: []cloud.AgentJob{{ID: 101}},
+	})
+	if err != nil {
+		t.Fatalf("SendGraceJobPayloadNoAck: %v", err)
+	}
+	if requestID == "" {
+		t.Fatal("requestID is empty")
+	}
+	if _, err := store.GetObject(context.Background(), GraceJobRequest(12, requestID)); err != nil {
+		t.Fatalf("job request not written at returned request id: %v", err)
+	}
+}
+
+func TestCheckGraceCommandAckReadsAndDeletesAck(t *testing.T) {
+	store := &fakeGraceStore{objects: make(map[string][]byte)}
+	const (
+		instanceID = int64(15)
+		requestID  = "req-ack"
+	)
+	ack := GraceCommandAck{RequestID: requestID, Kind: GraceCommandJobs, Accepted: true}
+	data, _ := json.Marshal(ack)
+	store.objects[GraceCommandAckKey(instanceID, requestID)] = data
+
+	got, found, err := CheckGraceCommandAck(context.Background(), store, instanceID, requestID)
+	if err != nil {
+		t.Fatalf("CheckGraceCommandAck: %v", err)
+	}
+	if !found || got == nil || got.RequestID != requestID {
+		t.Fatalf("ack = %+v, found=%v; want request %q", got, found, requestID)
+	}
+	if _, err := store.GetObject(context.Background(), GraceCommandAckKey(instanceID, requestID)); err == nil {
+		t.Fatal("ack should be deleted after read")
 	}
 }
 

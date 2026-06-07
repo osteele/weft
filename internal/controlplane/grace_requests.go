@@ -159,17 +159,18 @@ func SendGraceJobPayload(ctx context.Context, store GraceStore, instanceID int64
 
 // SendGraceJobPayloadNoAck writes the job request to R2 without waiting for
 // an acknowledgment. Use this for running instances where the agent won't
-// ack until the current job finishes.
-func SendGraceJobPayloadNoAck(ctx context.Context, store GraceStore, instanceID int64, payload GraceJobsRequest) error {
+// ack until the current job finishes. The returned request id can be
+// reconciled later via CheckGraceCommandAck.
+func SendGraceJobPayloadNoAck(ctx context.Context, store GraceStore, instanceID int64, payload GraceJobsRequest) (string, error) {
 	requestID := NewGraceRequestID(instanceID)
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("encode jobs request: %w", err)
+		return "", fmt.Errorf("encode jobs request: %w", err)
 	}
 	if err := store.PutObject(ctx, GraceJobRequest(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
-		return fmt.Errorf("write jobs request: %w", err)
+		return "", fmt.Errorf("write jobs request: %w", err)
 	}
-	return nil
+	return requestID, nil
 }
 
 // SendGraceCancelAttempts writes a cancel-attempts request to R2 (no-ack:
@@ -245,6 +246,26 @@ func WaitForGraceCommandAck(ctx context.Context, store GraceStore, instanceID in
 		case <-ticker.C:
 		}
 	}
+}
+
+func CheckGraceCommandAck(ctx context.Context, store GraceStore, instanceID int64, requestID string) (*GraceCommandAck, bool, error) {
+	if requestID == "" {
+		return nil, false, fmt.Errorf("request ID is required")
+	}
+	key := GraceCommandAckKey(instanceID, requestID)
+	data, err := store.GetObject(ctx, key)
+	if err != nil {
+		if isMissingControlObject(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	var ack GraceCommandAck
+	if err := json.Unmarshal(data, &ack); err != nil {
+		return nil, true, fmt.Errorf("decode grace ack: %w", err)
+	}
+	_ = store.DeleteObject(context.Background(), key)
+	return &ack, true, nil
 }
 
 func waitForAcceptedGraceAck(ctx context.Context, store GraceStore, instanceID int64, requestID string) (*GraceCommandAck, error) {

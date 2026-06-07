@@ -770,9 +770,9 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}
 
 	var got controlplane.GraceJobsRequest
-	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) error {
+	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (string, error) {
 		got = payload
-		return nil
+		return "req-test", nil
 	}
 	resolveCloudNeedsFunc = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ []string) ([]cloud.CloudNeed, error) {
 		return []cloud.CloudNeed{{
@@ -860,8 +860,8 @@ func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {
 	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
 		return sourceDir + ".tar.gz", nil
 	}
-	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) error {
-		return errors.New("write failed")
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
+		return "", errors.New("write failed")
 	}
 
 	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{jobA, jobB})
@@ -960,9 +960,9 @@ func TestSubmitJobsToInstanceHonorsCanceledContextAfterClaim(t *testing.T) {
 	uploadSourceToR2 = func(ctx context.Context, _ *r2.Client, _ string, _ []string) (string, error) {
 		return "", ctx.Err()
 	}
-	sendGraceJobPayloadNoAck = func(ctx context.Context, _ controlplane.GraceStore, _ int64, _ controlplane.GraceJobsRequest) error {
+	sendGraceJobPayloadNoAck = func(ctx context.Context, _ controlplane.GraceStore, _ int64, _ controlplane.GraceJobsRequest) (string, error) {
 		t.Fatal("grace payload should not be sent after canceled upload")
-		return nil
+		return "", nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1009,6 +1009,19 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
 		t.Fatalf("SetJobLaunchID source: %v", err)
 	}
+	sourceAttemptID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &sourceAttemptID,
+		SourceLaunchID:  &src,
+		TargetKind:      db.MoveTargetExisting,
+		TargetLaunchID:  &dst,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
@@ -1024,8 +1037,8 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
 		return "sources/x.tar.gz", nil
 	}
-	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) error {
-		return nil
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
+		return "req-test", nil
 	}
 
 	if err := SubmitJobsToInstance(context.Background(), database, nil, dst, []*db.Job{job}); err == nil {
@@ -1039,16 +1052,31 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID reload: %v", err)
 	}
-	if reloaded.LaunchID == nil || *reloaded.LaunchID != dst {
-		t.Fatalf("after transfer: launch_id = %v, want %d", reloaded.LaunchID, dst)
+	if reloaded.LaunchID == nil || *reloaded.LaunchID != src {
+		t.Fatalf("before target ack: launch_id = %v, want source %d", reloaded.LaunchID, src)
+	}
+	intent, err := db.GetOpenMoveIntent(database, jobID)
+	if err != nil {
+		t.Fatalf("GetOpenMoveIntent: %v", err)
+	}
+	if intent == nil {
+		t.Fatal("move intent should remain open until target ack")
+	}
+	if intent.TargetRequestID != "req-test" {
+		t.Fatalf("target request id = %q, want req-test", intent.TargetRequestID)
+	}
+	var sourceReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&sourceReason); err != nil {
+		t.Fatalf("source abandoned reason: %v", err)
+	}
+	if sourceReason != "" {
+		t.Fatalf("source abandoned reason = %q, want pending source", sourceReason)
 	}
 }
 
-func TestSubmitJobsToInstanceForMove_SendsCancelMarkerToSource(t *testing.T) {
-	// Stage 3: after a transfer-claim, the move-to-existing path writes a
-	// cancel-attempts marker to the source launch's R2 grace bucket so
-	// the source agent drops the superseded attempt rather than running
-	// it. See specs/job-move.allium "AttemptCancelMarker".
+func TestSubmitJobsToInstanceForMove_RunningTargetWaitsForAckBeforeSourceCancel(t *testing.T) {
+	// A running destination only drains grace requests between jobs. The
+	// source must remain authoritative until sync observes the target ack.
 	database := db.SetupTestDB(t)
 
 	src, err := db.CreateLaunch(database, &db.Launch{
@@ -1076,6 +1104,15 @@ func TestSubmitJobsToInstanceForMove_SendsCancelMarkerToSource(t *testing.T) {
 	if err := database.QueryRow(`SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL`, jobID).Scan(&srcAttemptID); err != nil {
 		t.Fatalf("source attempt: %v", err)
 	}
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &srcAttemptID,
+		SourceLaunchID:  &src,
+		TargetKind:      db.MoveTargetExisting,
+		TargetLaunchID:  &dst,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
 
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -1093,8 +1130,8 @@ func TestSubmitJobsToInstanceForMove_SendsCancelMarkerToSource(t *testing.T) {
 	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
 		return "sources/x.tar.gz", nil
 	}
-	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) error {
-		return nil
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
+		return "req-test", nil
 	}
 	canceledByLaunch := map[int64][]int64{}
 	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, attemptIDs []int64) error {
@@ -1105,11 +1142,172 @@ func TestSubmitJobsToInstanceForMove_SendsCancelMarkerToSource(t *testing.T) {
 	if err := SubmitJobsToInstanceForMove(context.Background(), database, &r2.Client{}, dst, []*db.Job{job}); err != nil {
 		t.Fatalf("SubmitJobsToInstanceForMove: %v", err)
 	}
-	got := canceledByLaunch[src]
-	if len(got) != 1 || got[0] != srcAttemptID {
-		t.Fatalf("cancel-attempts to source = %v, want [%d]", got, srcAttemptID)
+	if len(canceledByLaunch) != 0 {
+		t.Fatalf("cancel-attempts before target ack = %v, want none", canceledByLaunch)
 	}
-	if _, ok := canceledByLaunch[dst]; ok {
-		t.Errorf("cancel-attempts must not target the destination")
+	intent, err := db.GetOpenMoveIntent(database, jobID)
+	if err != nil {
+		t.Fatalf("GetOpenMoveIntent: %v", err)
+	}
+	if intent == nil {
+		t.Fatal("move intent should remain open")
+	}
+	if intent.TargetRequestID != "req-test" {
+		t.Fatalf("target request id = %q, want req-test", intent.TargetRequestID)
+	}
+}
+
+func TestSubmitJobsToInstanceForMove_NoAckStatusFlipStillWaitsForAck(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch dst: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	srcAttemptID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &srcAttemptID,
+		SourceLaunchID:  &src,
+		TargetKind:      db.MoveTargetExisting,
+		TargetLaunchID:  &dst,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+		sendGraceCancelAttempts = prevSendCancel
+	})
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
+		return "sources/x.tar.gz", nil
+	}
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
+		if err := db.SetLaunchGraceStarted(database, dst, time.Now().Add(5*time.Minute).Unix()); err != nil {
+			t.Fatalf("SetLaunchGraceStarted: %v", err)
+		}
+		return "req-flip", nil
+	}
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, attemptIDs []int64) error {
+		canceledByLaunch[instanceID] = append(canceledByLaunch[instanceID], attemptIDs...)
+		return nil
+	}
+
+	if err := SubmitJobsToInstanceForMove(context.Background(), database, &r2.Client{}, dst, []*db.Job{job}); err != nil {
+		t.Fatalf("SubmitJobsToInstanceForMove: %v", err)
+	}
+	if len(canceledByLaunch) != 0 {
+		t.Fatalf("cancel-attempts before target ack = %v, want none", canceledByLaunch)
+	}
+	intent, err := db.GetOpenMoveIntent(database, jobID)
+	if err != nil {
+		t.Fatalf("GetOpenMoveIntent: %v", err)
+	}
+	if intent == nil {
+		t.Fatal("move intent should remain open")
+	}
+	if intent.TargetRequestID != "req-flip" {
+		t.Fatalf("target request id = %q, want req-flip", intent.TargetRequestID)
+	}
+}
+
+func TestSubmitJobsToInstanceForMove_PersistsRequestBeforeFinalCheckFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	src, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch dst: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	srcAttemptID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &srcAttemptID,
+		SourceLaunchID:  &src,
+		TargetKind:      db.MoveTargetExisting,
+		TargetLaunchID:  &dst,
+	}); err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+	})
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
+		return "sources/x.tar.gz", nil
+	}
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
+		if err := db.SetLaunchAgentReadyAtIfUnset(database, dst, time.Now()); err != nil {
+			t.Fatalf("SetLaunchAgentReadyAtIfUnset: %v", err)
+		}
+		return "req-before-fail", nil
+	}
+
+	err = SubmitJobsToInstanceForMove(context.Background(), database, &r2.Client{}, dst, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected final live-state check failure")
+	}
+	intent, getErr := db.GetOpenMoveIntent(database, jobID)
+	if getErr != nil {
+		t.Fatalf("GetOpenMoveIntent: %v", getErr)
+	}
+	if intent == nil {
+		t.Fatal("move intent should remain open")
+	}
+	if intent.TargetRequestID != "req-before-fail" {
+		t.Fatalf("target request id = %q, want req-before-fail", intent.TargetRequestID)
 	}
 }

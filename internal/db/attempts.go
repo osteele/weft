@@ -113,6 +113,9 @@ func cleanupStaleAttempts(db *sql.DB) error {
 		           ELSE cloud_outcome
 		       END
 		WHERE end_time IS NULL
+		  AND job_id NOT IN (
+			SELECT job_id FROM move_intents WHERE state = 'open'
+		  )
 		  AND id NOT IN (
 			SELECT MAX(id) FROM job_attempts
 			WHERE end_time IS NULL
@@ -256,12 +259,34 @@ func hasJobPhaseTimingsTable(db *sql.DB) bool {
 // SQLite doesn't support UPDATE ... ORDER BY ... LIMIT without SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
 // All UPDATE helpers use a subquery: WHERE id = (SELECT id ... ORDER BY ... LIMIT 1).
 
-// latestOpenAttemptSubquery returns a SQL subquery that selects the structurally
-// tracked open attempt for the given job_id placeholder.
-const latestOpenAttemptSubquery = `(SELECT attempt_id FROM job_open_attempts WHERE job_id = ?)`
+// latestOpenAttemptSubquery returns a SQL subquery that selects the
+// authoritative structurally tracked open attempt for the given job_id
+// placeholder. Open move target attempts are deliberately hidden until their
+// MoveIntent is confirmed.
+const latestOpenAttemptSubquery = `(SELECT joa.attempt_id
+FROM job_open_attempts joa
+LEFT JOIN job_attempts ja ON ja.id = joa.attempt_id
+LEFT JOIN move_intents mi ON mi.id = ja.move_intent_id AND mi.state = 'open'
+WHERE joa.job_id = ? AND mi.id IS NULL
+ORDER BY joa.attempt_id DESC
+LIMIT 1)`
 
 // latestAttemptSubquery returns a SQL subquery for the latest attempt (open or closed).
 const latestAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`
+
+// latestAuthoritativeAttemptSubquery returns the latest attempt that still
+// owns the logical job. Abandoned attempts are retained for forensics but do
+// not drive job_status, info, artifacts, or telemetry by default.
+const latestAuthoritativeAttemptSubquery = `(SELECT id FROM authoritative_job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`
+
+const (
+	AttemptAbandonedMoveSourceWon              = "move_source_won"
+	AttemptAbandonedMoveTargetWon              = "move_target_won"
+	AttemptAbandonedMoveTargetAccepted         = "move_target_accepted"
+	AttemptAbandonedMoveDestinationRejected    = "move_destination_rejected"
+	AttemptAbandonedMoveDestinationInfraFailed = "move_destination_infra_failed"
+	AttemptAbandonedDuplicateSuperseded        = "duplicate_superseded"
+)
 
 // closeOpenAttempts closes all open attempts for a job.
 func closeOpenAttempts(execer dbExecer, jobID int64, now int64) error {
@@ -271,6 +296,35 @@ func closeOpenAttempts(execer dbExecer, jobID int64, now int64) error {
 		now, jobID,
 	)
 	return err
+}
+
+// AbandonAttempt removes an attempt from logical job authority while retaining
+// its row for audit and explicit attempt-level queries.
+func AbandonAttempt(database *sql.DB, attemptID int64, reason string, intentID *int64) error {
+	if attemptID <= 0 {
+		return fmt.Errorf("invalid attempt id")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Errorf("abandon attempt reason is required")
+	}
+	now := time.Now().Unix()
+	_, err := database.Exec(
+		`UPDATE job_attempts
+		    SET abandoned_at = COALESCE(abandoned_at, ?),
+		        abandoned_reason = COALESCE(NULLIF(abandoned_reason, ''), ?),
+		        abandoned_by_intent_id = COALESCE(abandoned_by_intent_id, ?)
+		  WHERE id = ?`,
+		now, reason, nullableInt64(intentID), attemptID,
+	)
+	return err
+}
+
+func AbandonMoveLoser(database *sql.DB, intentID int64, attemptID int64, reason string) error {
+	if intentID <= 0 {
+		return fmt.Errorf("invalid move intent id")
+	}
+	return AbandonAttempt(database, attemptID, reason, &intentID)
 }
 
 // CreateAttempt inserts a new attempt for a job and returns its ID.
@@ -309,6 +363,123 @@ func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID 
 		return 0, fmt.Errorf("carry forward dependency metadata for job %d: %w", jobID, err)
 	}
 	return attemptID, nil
+}
+
+// CreateMoveTargetAttempt opens a destination attempt for an open MoveIntent
+// without closing the source attempt. The attempt is hidden from job_status
+// while the intent remains open; confirming the intent makes it authoritative.
+func CreateMoveTargetAttempt(database *sql.DB, intentID, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
+	if intentID <= 0 {
+		return 0, fmt.Errorf("invalid move intent id")
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var state string
+	if err := tx.QueryRow(`SELECT state FROM move_intents WHERE id = ? AND job_id = ?`, intentID, jobID).Scan(&state); err != nil {
+		return 0, fmt.Errorf("find move intent: %w", err)
+	}
+	if MoveIntentState(state) != MoveIntentStateOpen {
+		return 0, fmt.Errorf("move intent %d is %s, want open", intentID, state)
+	}
+	now := time.Now().Unix()
+	var endTime any
+	if IsTerminalStatus(status) {
+		endTime = now
+	}
+	targetID, err := ensureExecutionTargetForAttempt(tx, host, cloudInstanceID)
+	if err != nil {
+		return 0, fmt.Errorf("ensure execution target for job %d: %w", jobID, err)
+	}
+	result, err := tx.Exec(`
+		INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, target_id, status, queued_at, end_time, move_intent_id)
+		VALUES (?,
+			COALESCE((SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = ?), 0) + 1,
+			?, ?, ?, ?, ?, ?, ?)`,
+		jobID, jobID, host, cloudInstanceID, targetID, status, now, endTime, intentID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("create move target attempt for job %d: %w", jobID, err)
+	}
+	attemptID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := carryForwardDependencyMetadata(tx, jobID, attemptID); err != nil {
+		return 0, fmt.Errorf("carry forward dependency metadata for job %d: %w", jobID, err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE move_intents
+		    SET target_attempt_id = ?,
+		        target_launch_id = COALESCE(target_launch_id, ?),
+		        target_host = COALESCE(target_host, NULLIF(?, ''))
+		  WHERE id = ? AND state = 'open'`,
+		attemptID, nullableInt64(cloudInstanceID), host, intentID,
+	); err != nil {
+		return 0, fmt.Errorf("record move target attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return attemptID, nil
+}
+
+// ConfirmMoveTargetAccepted makes the target attempt authoritative after the
+// destination has accepted the job and abandons the source attempt so late
+// source updates cannot retake the logical job.
+func ConfirmMoveTargetAccepted(database *sql.DB, intentID int64, resolution string) error {
+	if intentID <= 0 {
+		return fmt.Errorf("invalid move intent id")
+	}
+	if strings.TrimSpace(resolution) == "" {
+		resolution = "target accepted job"
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sourceAttempt sql.NullInt64
+	var targetAttempt sql.NullInt64
+	var state string
+	if err := tx.QueryRow(
+		`SELECT source_attempt_id, target_attempt_id, state FROM move_intents WHERE id = ?`,
+		intentID,
+	).Scan(&sourceAttempt, &targetAttempt, &state); err != nil {
+		return fmt.Errorf("find move intent: %w", err)
+	}
+	if MoveIntentState(state) != MoveIntentStateOpen {
+		return nil
+	}
+	if !targetAttempt.Valid {
+		return fmt.Errorf("move intent %d has no target attempt", intentID)
+	}
+	now := time.Now().Unix()
+	if sourceAttempt.Valid {
+		if _, err := tx.Exec(
+			`UPDATE job_attempts
+			    SET abandoned_at = COALESCE(abandoned_at, ?),
+			        abandoned_reason = COALESCE(NULLIF(abandoned_reason, ''), ?),
+			        abandoned_by_intent_id = COALESCE(abandoned_by_intent_id, ?)
+			  WHERE id = ?`,
+			now, AttemptAbandonedMoveTargetAccepted, intentID, sourceAttempt.Int64,
+		); err != nil {
+			return fmt.Errorf("abandon source attempt: %w", err)
+		}
+	}
+	if _, err := tx.Exec(
+		`UPDATE move_intents
+		    SET state = ?,
+		        resolved_at = ?,
+		        resolution = ?
+		  WHERE id = ? AND state = ?`,
+		string(MoveIntentStateConfirmed), now, resolution, intentID, string(MoveIntentStateOpen),
+	); err != nil {
+		return fmt.Errorf("confirm move intent: %w", err)
+	}
+	return tx.Commit()
 }
 
 type placementDisplayAttempt struct {
@@ -476,6 +647,21 @@ func GetLatestAttemptID(db *sql.DB, jobID int64) (int64, error) {
 	var id int64
 	err := db.QueryRow(`
 		SELECT id FROM job_attempts
+		WHERE job_id = ?
+		ORDER BY attempt_number DESC
+		LIMIT 1`, jobID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
+// GetAuthoritativeAttemptID returns the latest non-abandoned attempt for a
+// job, or 0 if none exists.
+func GetAuthoritativeAttemptID(db *sql.DB, jobID int64) (int64, error) {
+	var id int64
+	err := db.QueryRow(`
+		SELECT id FROM authoritative_job_attempts
 		WHERE job_id = ?
 		ORDER BY attempt_number DESC
 		LIMIT 1`, jobID).Scan(&id)

@@ -45,8 +45,7 @@ func ResolveEligibleJobs(
 // ResolveEligibleJobsWithForce is like ResolveEligibleJobs but, when
 // allowRunning is true, also admits jobs in running/starting/paused state.
 // Callers using this path move the jobs via the normal move pipeline, which
-// uses TransferClaim to atomically supersede the source attempt and then
-// calls TerminateForcedSources to SSH-kill the source process.
+// keeps the source authoritative until the destination accepts the move.
 func ResolveEligibleJobsWithForce(
 	database *sql.DB,
 	jobIDs []int64,

@@ -51,10 +51,10 @@ type LaunchOpts struct {
 	MinSurvival         float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
 	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
-	// TransferClaim, if true, supersedes any active source claim on the
-	// jobs being launched (TransferJobLaunchID rather than SetJobLaunchID).
-	// Caller MUST have an open MoveIntent — see specs/job-move.allium.
-	TransferClaim bool
+	// MoveTargetClaim, if true, uses each job's open MoveIntent to create a
+	// hidden target attempt on this launch. The source stays authoritative
+	// until the target launch is accepted.
+	MoveTargetClaim bool
 
 	// HedgeProbe marks this launch as a hedge-cohort probe: jobs are
 	// not claimed, and the probe races siblings to agent_ready. See
@@ -1740,24 +1740,75 @@ func LaunchInstance(
 	// now are skipped rather than causing a hard failure.
 	var claimedJobs []*db.Job
 	cancelByLaunch := map[int64][]int64{}
+	type moveClaim struct {
+		intentID  int64
+		attemptID int64
+	}
+	moveClaims := make([]moveClaim, 0, len(group.Jobs))
+	rollbackMoveClaims := func(reason string) {
+		for _, claim := range moveClaims {
+			_ = db.AbandonMoveLoser(database, claim.intentID, claim.attemptID, db.AttemptAbandonedMoveDestinationInfraFailed)
+			_ = db.ResolveMoveIntent(database, claim.intentID, db.MoveIntentStateCanceled, reason)
+		}
+	}
 	for i, job := range group.Jobs {
 		var prior PriorAttempt
-		if opts.TransferClaim {
+		var updatedJob *db.Job
+		if opts.MoveTargetClaim {
 			prior = capturePriorAttempt(database, job.ID)
-		}
-		updatedJob, err := claimJobForLaunchWithOpts(database, job.ID, instanceID, opts.TransferClaim)
-		if err != nil {
-			if errors.Is(err, db.ErrJobAlreadyClaimed) {
-				slog.Info("job claimed by another launch, skipping",
-					"component", "launch", "job_id", job.ID, "launch_id", instanceID)
-				continue
+			intent, err := db.GetOpenMoveIntent(database, job.ID)
+			if err != nil {
+				oplog.Log(oplog.OpCloudSetJobInstance,
+					oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
+					oplog.WithError(err),
+				)
+				rollbackMoveClaims("new instance launch failed before destination acceptance")
+				_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+				return instanceID, err
 			}
-			oplog.Log(oplog.OpCloudSetJobInstance,
-				oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
-				oplog.WithError(err),
-			)
-			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-			return instanceID, err
+			if intent == nil {
+				err := fmt.Errorf("job %s has no open move intent", ids.FormatJobID(job.ID))
+				oplog.Log(oplog.OpCloudSetJobInstance,
+					oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
+					oplog.WithError(err),
+				)
+				rollbackMoveClaims("new instance launch failed before destination acceptance")
+				_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+				return instanceID, err
+			}
+			attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, job.ID, "", &instanceID, db.StatusQueued)
+			if err != nil {
+				oplog.Log(oplog.OpCloudSetJobInstance,
+					oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
+					oplog.WithError(err),
+				)
+				rollbackMoveClaims("new instance launch failed before destination acceptance")
+				_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+				return instanceID, err
+			}
+			moveClaims = append(moveClaims, moveClaim{intentID: intent.ID, attemptID: attemptID})
+			copyJob := *job
+			copyJob.Host = ""
+			copyJob.LaunchID = &instanceID
+			copyJob.LatestRunID = &attemptID
+			copyJob.Status = db.StatusQueued
+			updatedJob = &copyJob
+		} else {
+			var err error
+			updatedJob, err = claimJobForLaunchWithOpts(database, job.ID, instanceID, false)
+			if err != nil {
+				if errors.Is(err, db.ErrJobAlreadyClaimed) {
+					slog.Info("job claimed by another launch, skipping",
+						"component", "launch", "job_id", job.ID, "launch_id", instanceID)
+					continue
+				}
+				oplog.Log(oplog.OpCloudSetJobInstance,
+					oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
+					oplog.WithError(err),
+				)
+				_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+				return instanceID, err
+			}
 		}
 		group.Jobs[i] = updatedJob
 		if err := db.SetJobCampaignIndex(database, job.ID, i); err != nil {
@@ -1769,14 +1820,7 @@ func LaunchInstance(
 			cancelByLaunch[prior.LaunchID] = append(cancelByLaunch[prior.LaunchID], prior.AttemptID)
 		}
 	}
-	if r2Assets.Client != nil && len(cancelByLaunch) > 0 {
-		for sourceID, ids := range cancelByLaunch {
-			if err := sendGraceCancelAttempts(ctx, r2Assets.Client, sourceID, ids); err != nil {
-				slog.Warn("send cancel-attempts marker",
-					"component", "launch", "source_launch_id", sourceID, "attempt_ids", ids, "error", err)
-			}
-		}
-	}
+	_ = cancelByLaunch
 
 	// If all jobs were claimed by other launches, clean up the empty launch.
 	// Hedge probes are exempt: they intentionally launch with no jobs.
@@ -1786,6 +1830,12 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("launch %d: all %d jobs claimed by other launches", instanceID, len(group.Jobs))
 	}
 	group.Jobs = claimedJobs
+	resetLaunchJobsForFailure := func(outcome string, reason string) {
+		if opts.MoveTargetClaim {
+			rollbackMoveClaims(reason)
+		}
+		_, _ = db.ResetLaunchJobs(database, instanceID, outcome)
+	}
 
 	if onInstanceRegistered != nil {
 		onInstanceRegistered(instanceID)
@@ -1801,12 +1851,12 @@ func LaunchInstance(
 	for _, job := range group.Jobs {
 		agentJob, err := newCloudAgentJob(job, remoteDirForAgentJob(job, localToRemote))
 		if err != nil {
-			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
 			return instanceID, fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
-			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
 			return instanceID, err
 		}
 		agentJob.CloudNeeds = cloudNeeds
@@ -1890,7 +1940,7 @@ func LaunchInstance(
 	// Configure provider-specific bootstrap wiring.
 	if err := configureBootstrapCreateOpts(client, &createOpts, bootstrapKey); err != nil {
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "bootstrap config failed: "+err.Error())
-		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance bootstrap config failed before destination acceptance")
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 			"launch_id=%d reason=infra_failure detail=bootstrap config failed: %s", instanceID, err))
 		return instanceID, fmt.Errorf("configure bootstrap: %w", err)
@@ -1966,7 +2016,7 @@ func LaunchInstance(
 			// infrastructural, and the autopilot tally must not pause for
 			// them. See specs/campaign-lifecycle.allium §
 			// PriceAuthorizationDoesNotTripCircuitBreaker.
-			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeCancelled)
+			resetLaunchJobsForFailure(db.AttemptOutcomeCancelled, "new instance price authorization failed before destination acceptance")
 			// Build the structured blockreason JSON inline rather than
 			// importing internal/blockreason (it depends on this package,
 			// so the import would cycle). The shape matches
@@ -2000,7 +2050,7 @@ func LaunchInstance(
 		}
 		detail := "instance creation failed: " + err.Error()
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, reason, detail)
-		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance creation failed before destination acceptance")
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 			"launch_id=%d provider=%s offer_id=%s error=%s",
 			instanceID, client.Provider(), finalOffer.ProviderID, err,
@@ -2181,7 +2231,7 @@ func LaunchInstance(
 		if err != nil {
 			destroyLeakedInstance(client, providerInstID, instanceID)
 			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "runpod ssh bootstrap failed: "+err.Error())
-			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance runpod ssh bootstrap failed before destination acceptance")
 			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 				"launch_id=%d reason=infra_failure detail=runpod ssh bootstrap failed: %s", instanceID, err))
 			return instanceID, fmt.Errorf("runpod ssh bootstrap: %w", err)

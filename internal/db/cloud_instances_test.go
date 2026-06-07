@@ -312,7 +312,7 @@ func TestJobOutcomesByLaunchIDs(t *testing.T) {
 	}
 }
 
-func TestCleanupStaleAttempts_PreventsSupersededDuplicateOpenAttempts(t *testing.T) {
+func TestCleanupStaleAttempts_ClosesPlainDuplicateOpenAttempts(t *testing.T) {
 	database := setupTestDB(t)
 
 	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
@@ -326,8 +326,18 @@ func TestCleanupStaleAttempts_PreventsSupersededDuplicateOpenAttempts(t *testing
 		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
 		 VALUES (?, 2, '', ?, ?, ?)`,
 		jobID, launchID, StatusQueued, time.Now().Unix(),
-	); err == nil {
-		t.Fatal("insert duplicate open attempt succeeded; want unique constraint failure")
+	); err != nil {
+		t.Fatalf("insert duplicate open attempt: %v", err)
+	}
+	if err := cleanupStaleAttempts(database); err != nil {
+		t.Fatalf("cleanupStaleAttempts: %v", err)
+	}
+	var openCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND end_time IS NULL`, jobID).Scan(&openCount); err != nil {
+		t.Fatalf("count open attempts: %v", err)
+	}
+	if openCount != 1 {
+		t.Fatalf("open attempts after cleanup = %d, want 1", openCount)
 	}
 }
 

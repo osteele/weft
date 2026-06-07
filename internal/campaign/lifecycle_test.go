@@ -1166,10 +1166,11 @@ func TestClassifyLaunchGroupPhaseEvent_ReplanProgressBecomesGroupReplan(t *testi
 	}
 }
 
-func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
-	// Regression: with LaunchOpts.TransferClaim=true (move-to-new path),
-	// the source's active claim is superseded rather than rejected with
-	// ErrJobAlreadyClaimed. See specs/job-move.allium "Future work".
+func TestLaunchInstanceMoveTargetClaimKeepsSourceAuthoritative(t *testing.T) {
+	// Regression: with LaunchOpts.MoveTargetClaim=true (move-to-new path),
+	// the destination attempt is opened under the move intent without
+	// closing the source. The provider-create failure below proves control
+	// reached CreateInstance, then rollback leaves the source authoritative.
 	database := setupTestDB(t)
 	defer database.Close()
 
@@ -1191,6 +1192,10 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	if err := db.SetJobLaunchID(database, job.ID, src); err != nil {
 		t.Fatalf("SetJobLaunchID source: %v", err)
 	}
+	sourceAttemptID, err := db.GetLatestAttemptID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
 
 	stopAfterRegistration := errors.New("stop after registration")
 	mockClient := &cloud.MockClient{
@@ -1203,8 +1208,8 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
 
 	// Stub the cancel-attempts sender so the test doesn't try to PutObject
-	// against an empty stub r2.Client. Verify that the source attempt id
-	// would be canceled on the source instance.
+	// against an empty stub r2.Client. The new protocol must not send this
+	// marker before the target has accepted the job.
 	prevSendCancel := sendGraceCancelAttempts
 	t.Cleanup(func() { sendGraceCancelAttempts = prevSendCancel })
 	canceledByLaunch := map[int64][]int64{}
@@ -1212,10 +1217,20 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 		canceledByLaunch[instanceID] = append(canceledByLaunch[instanceID], attemptIDs...)
 		return nil
 	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           job.ID,
+		SourceAttemptID: &sourceAttemptID,
+		SourceLaunchID:  &src,
+		TargetKind:      db.MoveTargetNew,
+		TargetOfferID:   offer.ProviderID,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
 
 	dst, err := LaunchInstance(
 		mockClient, nil, database, nil, group, offer,
-		LaunchOpts{TransferClaim: true},
+		LaunchOpts{MoveTargetClaim: true},
 		cloud.R2Config{Bucket: "test", AccountID: "test"},
 		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
 		R2Assets{Client: &r2.Client{}},
@@ -1223,44 +1238,35 @@ func TestLaunchInstanceTransferClaimSupersedesActiveSourceClaim(t *testing.T) {
 		func(string) {},
 		nil,
 	)
-	// TransferClaim must succeed at the claim step, so the error returned
+	// MoveTargetClaim must succeed at the claim step, so the error returned
 	// is the CreateInstance failure (proving control reached CreateInstance,
-	// i.e. past the claim). Without TransferClaim, the same setup yields
+	// i.e. past the claim). Without MoveTargetClaim, the same setup yields
 	// "all jobs claimed by other launches" before CreateInstance is called.
 	if err == nil || !errors.Is(err, stopAfterRegistration) {
-		t.Fatalf("LaunchInstance with TransferClaim=true: err = %v, want stop-after-registration", err)
+		t.Fatalf("LaunchInstance with MoveTargetClaim=true: err = %v, want stop-after-registration", err)
 	}
 	if dst == 0 || dst == src {
 		t.Fatalf("dst id = %d (src = %d)", dst, src)
 	}
 
-	// Re-attach to source (the failed launch's rollback orphaned it),
-	// then try the same launch without TransferClaim — the claim step
-	// must reject the still-active source claim before CreateInstance
-	// runs.
-	if err := db.SetJobLaunchID(database, job.ID, src); err != nil {
-		t.Fatalf("re-set source launch: %v", err)
+	reloaded, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID after failed move launch: %v", err)
 	}
-	_, err = LaunchInstance(
-		mockClient, nil, database, nil, group, offer,
-		LaunchOpts{},
-		cloud.R2Config{Bucket: "test", AccountID: "test"},
-		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
-		R2Assets{Client: &r2.Client{}},
-		nil,
-		func(string) {},
-		nil,
-	)
-	if err == nil || !strings.Contains(err.Error(), "claimed by other launches") {
-		t.Fatalf("LaunchInstance without TransferClaim: err = %v, want all-claimed-by-others", err)
+	if reloaded.LaunchID == nil || *reloaded.LaunchID != src {
+		t.Fatalf("source launch after failed move launch = %v, want %d", reloaded.LaunchID, src)
 	}
-
-	// The TransferClaim path must have queued a cancel-attempts marker
-	// against the source launch (so the source agent drops the
-	// superseded attempt rather than running it). The non-TransferClaim
-	// path must not.
-	if got := canceledByLaunch[src]; len(got) != 1 {
-		t.Errorf("cancel-attempts to source = %v, want exactly one entry from the TransferClaim path", canceledByLaunch)
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent after failed move launch: %v", err)
+	}
+	if gotIntent.State != db.MoveIntentStateCanceled {
+		t.Fatalf("move intent state = %q, want canceled", gotIntent.State)
+	}
+	// No cancel-attempts marker should be sent until the target has accepted
+	// the job. This launch failed before provider create succeeded.
+	if got := canceledByLaunch[src]; len(got) != 0 {
+		t.Errorf("cancel-attempts to source = %v, want none before target acceptance", canceledByLaunch)
 	}
 }
 

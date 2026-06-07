@@ -502,6 +502,12 @@ func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 	return AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, "")
 }
 
+// QueueJobToRemote applies the standard on-prem queue dispatch path for an
+// already-recorded host-targeted queued job.
+func QueueJobToRemote(database *sql.DB, job *db.Job, timeout time.Duration) error {
+	return applyQueueToRemote(database, job, timeout)
+}
+
 // applyStartToRemote starts a queued or draft job on the remote host.
 func applyStartToRemote(database *sql.DB, job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {

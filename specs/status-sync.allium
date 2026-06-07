@@ -17,6 +17,11 @@
 -- them — e.g. rule TUIPeriodicSync below. Pure job-centric views that do
 -- not depend on sync state (such as the per-job Attempts drill-down) are
 -- specified in job-lifecycle.allium.
+--
+-- Unless a rule explicitly names an attempt id, `job.latest_attempt` means
+-- the latest non-abandoned attempt from job-lifecycle.allium. Abandoned move
+-- overlap attempts are retained for audit but do not drive sync-derived job
+-- status, info, artifacts, or telemetry.
 
 use "./job-lifecycle.allium" as jobs
 use "./campaign-lifecycle.allium" as cloud

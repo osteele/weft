@@ -465,19 +465,28 @@ type GracePayload struct {
 // SubmitJobsToInstance submits one or more jobs to an existing cloud instance
 // via R2 grace protocol. Works for both grace and running instances. The
 // jobs must not be claimed by another active launch — see
-// SubmitJobsToInstanceForMove for the move-path variant that supersedes a
-// prior owner.
+// SubmitJobsToInstanceForMove for the move-path variant that opens a hidden
+// target attempt before handoff.
 func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
 	return submitJobsToInstanceImpl(ctx, database, r2Client, instanceID, jobs, false)
 }
 
 // SubmitJobsToInstanceForMove is the move-path counterpart of
-// SubmitJobsToInstance: the source's prior claim is superseded rather than
-// rejected. Caller MUST have an open MoveIntent — see
-// specs/job-move.allium § UserMovesQueuedJob. The autopilot exclusion
-// invariant relies on the intent being open before this is called.
+// SubmitJobsToInstance: it opens hidden target attempts under each job's
+// MoveIntent, submits them to the destination, then confirms the handoff.
+// The autopilot exclusion invariant relies on the intent being open before
+// this is called.
 func SubmitJobsToInstanceForMove(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
 	return submitJobsToInstanceImpl(ctx, database, r2Client, instanceID, jobs, true)
+}
+
+// SendCancelAttempts asks a source launch to drop superseded attempts after a
+// move destination has accepted the job.
+func SendCancelAttempts(ctx context.Context, r2Client *r2.Client, launchID int64, attemptIDs []int64) error {
+	if r2Client == nil || launchID <= 0 || len(attemptIDs) == 0 {
+		return nil
+	}
+	return sendGraceCancelAttempts(ctx, r2Client, launchID, attemptIDs)
 }
 
 func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job, transfer bool) error {
@@ -503,21 +512,61 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 
 	claimedJobs := make([]*db.Job, 0, len(jobs))
 	claimedJobIDs := make([]int64, 0, len(jobs))
+	type moveClaim struct {
+		intentID  int64
+		attemptID int64
+	}
+	moveClaims := make([]moveClaim, 0, len(jobs))
+	rollbackClaims := func() error {
+		if !transfer {
+			return resetClaimedJobsToUnplaced(database, claimedJobIDs)
+		}
+		for _, claim := range moveClaims {
+			_ = db.AbandonMoveLoser(database, claim.intentID, claim.attemptID, db.AttemptAbandonedMoveDestinationRejected)
+			_ = db.ResolveMoveIntent(database, claim.intentID, db.MoveIntentStateCanceled, "destination did not accept")
+		}
+		return nil
+	}
 	// Per-source-launch attempt-ids that should be canceled on the source
 	// agent once the transfer succeeds. Populated only when transfer=true.
 	cancelByLaunch := map[int64][]int64{}
 	for _, job := range jobs {
 		var prior PriorAttempt
+		var claimedJob *db.Job
 		if transfer {
 			prior = capturePriorAttempt(database, job.ID)
-		}
-		claimedJob, err := claimJobForLaunchWithOpts(database, job.ID, instanceID, transfer)
-		if err != nil {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
-			if rollbackErr != nil {
-				return fmt.Errorf("claim job %s for instance %s: %w (rollback: %v)", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err, rollbackErr)
+			intent, err := db.GetOpenMoveIntent(database, job.ID)
+			if err != nil {
+				return fmt.Errorf("get open move intent for job %s: %w", ids.FormatJobID(job.ID), err)
 			}
-			return fmt.Errorf("claim job %s for instance %s: %w", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err)
+			if intent == nil {
+				return fmt.Errorf("job %s has no open move intent", ids.FormatJobID(job.ID))
+			}
+			attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, job.ID, "", &instanceID, db.StatusQueued)
+			if err != nil {
+				rollbackErr := rollbackClaims()
+				if rollbackErr != nil {
+					return fmt.Errorf("create move target attempt for job %s on instance %s: %w (rollback: %v)", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err, rollbackErr)
+				}
+				return fmt.Errorf("create move target attempt for job %s on instance %s: %w", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err)
+			}
+			moveClaims = append(moveClaims, moveClaim{intentID: intent.ID, attemptID: attemptID})
+			copyJob := *job
+			copyJob.Host = ""
+			copyJob.LaunchID = &instanceID
+			copyJob.LatestRunID = &attemptID
+			copyJob.Status = db.StatusQueued
+			claimedJob = &copyJob
+		} else {
+			var err error
+			claimedJob, err = claimJobForLaunchWithOpts(database, job.ID, instanceID, false)
+			if err != nil {
+				rollbackErr := rollbackClaims()
+				if rollbackErr != nil {
+					return fmt.Errorf("claim job %s for instance %s: %w (rollback: %v)", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err, rollbackErr)
+				}
+				return fmt.Errorf("claim job %s for instance %s: %w", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err)
+			}
 		}
 		claimedJobs = append(claimedJobs, claimedJob)
 		claimedJobIDs = append(claimedJobIDs, claimedJob.ID)
@@ -527,20 +576,12 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	}
 	opCtx, opCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer opCancel()
-	if r2Client != nil && len(cancelByLaunch) > 0 {
-		for launchID, ids := range cancelByLaunch {
-			if err := sendGraceCancelAttempts(opCtx, r2Client, launchID, ids); err != nil {
-				slog.Warn("send cancel-attempts marker",
-					"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", err)
-			}
-		}
-	}
 
 	// Upload sources and build payload
 	for _, job := range claimedJobs {
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 		if sourceDir == "" || workdir.IsContainerPath(sourceDir) {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			rollbackErr := rollbackClaims()
 			err := fmt.Errorf("job %s has no local source directory (working_dir=%q)", ids.FormatJobID(job.ID), job.EffectiveWorkingDir())
 			if rollbackErr != nil {
 				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
@@ -553,7 +594,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
 		sourceR2Key, err := uploadSourceToR2(opCtx, r2Client, sourceDir, job.Inputs)
 		if err != nil {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {
 				return fmt.Errorf("upload source for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
 			}
@@ -565,7 +606,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 
 		agentJob, err := newCloudAgentJob(job, remoteDir)
 		if err != nil {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {
 				return fmt.Errorf("build agent job payload for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
 			}
@@ -573,7 +614,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(opCtx, database, r2Client, job, instanceID)
 		if err != nil {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {
 				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
 			}
@@ -596,7 +637,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 	if ok, reason := instanceAcceptsReuseWithCachedLiveState(database, inst, time.Now()); !ok {
-		rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+		rollbackErr := rollbackClaims()
 		if rollbackErr != nil {
 			return fmt.Errorf("instance %s cannot accept reused jobs: %s (rollback: %v)", ids.FormatInstanceID(instanceID), reason, rollbackErr)
 		}
@@ -607,17 +648,32 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	// ack immediately — the agent only drains grace requests after the current
 	// job finishes. Write the request to R2 but skip waiting for the ack;
 	// the agent will find it. Grace instances poll continuously, so we wait.
+	targetRequestID := ""
+	usedNoAckSubmission := false
 	if inst.Status == db.LaunchStatusRunning {
-		if err := sendGraceJobPayloadNoAck(opCtx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+		usedNoAckSubmission = true
+		targetRequestID, err = sendGraceJobPayloadNoAck(opCtx, r2Client, instanceID, controlplane.GraceJobsRequest(payload))
+		if err != nil {
+			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {
 				return fmt.Errorf("submit jobs to instance control plane: %w (rollback: %v)", err, rollbackErr)
 			}
 			return fmt.Errorf("submit jobs to instance control plane: %w", err)
 		}
+		if transfer {
+			for _, claim := range moveClaims {
+				if err := db.SetMoveIntentTargetRequest(database, claim.intentID, string(controlplane.GraceCommandJobs), targetRequestID); err != nil {
+					rollbackErr := rollbackClaims()
+					if rollbackErr != nil {
+						return fmt.Errorf("record move target request for intent %d: %w (rollback: %v)", claim.intentID, err, rollbackErr)
+					}
+					return fmt.Errorf("record move target request for intent %d: %w", claim.intentID, err)
+				}
+			}
+		}
 	} else {
 		if _, err := sendGraceJobPayload(opCtx, r2Client, instanceID, controlplane.GraceJobsRequest(payload)); err != nil {
-			rollbackErr := resetClaimedJobsToUnplaced(database, claimedJobIDs)
+			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {
 				return fmt.Errorf("submit jobs to instance control plane: %w (rollback: %v)", err, rollbackErr)
 			}
@@ -636,6 +692,25 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
+	if transfer && usedNoAckSubmission {
+		return nil
+	}
+
+	if transfer {
+		for _, claim := range moveClaims {
+			if err := db.ConfirmMoveTargetAccepted(database, claim.intentID, fmt.Sprintf("submitted to instance %s", ids.FormatInstanceID(instanceID))); err != nil {
+				slog.Warn("confirm move target accepted", "component", "reuse", "intent_id", claim.intentID, "instance", instanceID, "error", err)
+			}
+		}
+	}
+	if r2Client != nil && len(cancelByLaunch) > 0 {
+		for launchID, ids := range cancelByLaunch {
+			if err := sendGraceCancelAttempts(opCtx, r2Client, launchID, ids); err != nil {
+				slog.Warn("send cancel-attempts marker",
+					"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", err)
+			}
+		}
+	}
 	return nil
 }
 

@@ -14,8 +14,8 @@
 --     campaign-lifecycle.allium): initial placement of an unplaced job.
 --   - Mid-execution attempts under the default (no-force) move path. Running
 --     jobs may only be moved via the explicit `--force` option (see
---     UserForceMovesRunningJob), which kills the job before treating it as
---     queued. Without `--force`, running jobs are rejected with a warning.
+--     UserForceMovesRunningJob). Without `--force`, running jobs are
+--     rejected with a warning.
 --
 -- Note on QueueRebalanceJob (campaign-lifecycle.allium): cost rebalancing
 -- across already-running instances now opens MoveIntent { target_kind =
@@ -36,6 +36,10 @@
 -- authority while the destination is being asked to accept the work. On
 -- confirmation the job is associated with the accepted target and the source
 -- attempt is stopped. On cancellation the source is left intact.
+-- Attempts that lose a move-overlap race are marked with
+-- JobAttempt.abandoned_at / abandoned_reason / abandoned_by_intent. Abandoned
+-- attempts remain queryable by attempt id, but job.latest_attempt ignores
+-- them so status/info/artifacts follow the winning attempt.
 --
 -- The intent serves three purposes simultaneously:
 --   (1) Mutex: at most one move per job at a time.
@@ -55,17 +59,28 @@ entity MoveIntent {
     source_host: String?
 
     target_kind: MoveTargetKind
-    -- Set immediately for `existing`. For `new`, populated once the rental
+    -- Set immediately for existing rental targets. For `new`, populated once the rental
     -- launch has produced an instance row; remains null while the launch
     -- is still in flight (provider call outstanding). Null for host targets.
     target_launch: CloudInstance?
-    -- Set for `host` targets. Null for rental targets.
+    -- Destination attempt opened for this move. While state=open, this
+    -- attempt is excluded from Job.latest_attempt / job_status authority;
+    -- it becomes authoritative only when the move is confirmed. If the
+    -- source wins first, this attempt is marked abandoned.
+    target_attempt: JobAttempt?
+    -- Set for existing on-prem host targets. Null for rental targets.
     target_host: String?
     -- Recorded for `new` so audit / re-try can show which offer was chosen.
     -- Not used for matching.
     target_offer_provider: String?
     target_offer_id: String?
     target_gpu_name: String?
+    -- For running existing rental targets, the destination grace request is
+    -- durable before it is accepted. These fields record the request so
+    -- sync can wait for the target agent's ack before confirming the move.
+    target_request_id: String?
+    target_request_kind: String?
+    target_request_created_at: Timestamp?
 
     state: MoveIntentState
     created_at: Timestamp
@@ -73,7 +88,9 @@ entity MoveIntent {
     resolution: String?         -- short reason recorded at terminal state
 }
 
-value MoveTargetKind = existing | new | host
+-- `existing` means an already-known concrete destination: either a rental
+-- launch (`target_launch`) or an inventory host (`target_host`).
+value MoveTargetKind = existing | new
 
 -- State machine:
 --                ┌──────┐
@@ -96,7 +113,7 @@ value MoveIntentState = open | confirmed | canceled | obsoleted
 -- source and destination differ only by adapter:
 --
 --   Source adapters:
---     cloud source  -> write cancel_attempts and kill-job R2 markers
+--     cloud source  -> write cancel_attempts R2 markers
 --     on-prem source -> SSH-kill the queue-runner process group
 --
 --   Destination adapters:
@@ -115,13 +132,18 @@ rule UnifiedMoveCoordinator {
 
     ensures:
         let intent = OpenMoveIntent(job, target)
-        RequestDestinationAcceptance(intent)
+        let target_attempt = OpenHiddenTargetAttempt(intent)
+        RequestDestinationAcceptance(intent, target_attempt)
 
         if DestinationAccepted(intent):
             ConfirmMove(intent)
+            AbandonAttempt(SourceAttempt, reason = "move_target_accepted",
+                           by_intent = intent)
             StopSourceAttempt(intent)
 
         if DestinationRejected(intent) or DestinationUnavailable(intent):
+            AbandonAttempt(target_attempt, reason = "move_destination_rejected",
+                           by_intent = intent)
             CancelMove(intent, "destination did not accept")
             LeaveSourceAuthoritative(job)
 }
@@ -151,25 +173,31 @@ rule DestinationAcceptanceBeforeSourceStop {
 rule OverlapCompletionResolution {
     -- A forced move may temporarily produce a source attempt and destination
     -- attempt that are both running. This is acceptable only during an open
-    -- move intent. If either attempt completes successfully while both exist,
-    -- that successful attempt wins: it becomes the status/info/artifact source
-    -- and the other attempt is terminated best-effort. If one attempt fails
-    -- while the other is still running, the running attempt remains eligible
-    -- to finish and win.
+    -- move intent. If either attempt reaches a job-owned terminal result
+    -- ({completed, failed}) while both exist, that attempt wins: it becomes
+    -- the status/info/artifact source and the other attempt is terminated
+    -- best-effort. Infrastructure/orphan closures are not job-owned terminal
+    -- results and must not win the move.
     when: exists(MoveIntent { state = open })
           and SourceAttempt.running
           and DestinationAttempt.running
 
-    if SourceAttempt.completed_successfully:
+    if SourceAttempt.status in {completed, failed}
+       and SourceAttempt.termination_origin = job:
         ensures:
             ObsoleteMove(MoveIntent, "source completed before destination confirmation")
             StopDestinationAttempt(MoveIntent)
+            AbandonAttempt(DestinationAttempt, reason = "move_source_won",
+                           by_intent = MoveIntent)
             job.status_authority = SourceAttempt
 
-    if DestinationAttempt.completed_successfully:
+    if DestinationAttempt.status in {completed, failed}
+       and DestinationAttempt.termination_origin = job:
         ensures:
             ConfirmMove(MoveIntent)
             StopSourceAttempt(MoveIntent)
+            AbandonAttempt(SourceAttempt, reason = "move_target_won",
+                           by_intent = MoveIntent)
             job.status_authority = DestinationAttempt
 }
 
@@ -182,6 +210,10 @@ rule UserMovesQueuedJob {
     requires: job.status = queued
     ensures:
         for prior in MoveIntent { job = job, state = open }:
+            if prior.target_attempt != null:
+                AbandonAttempt(prior.target_attempt,
+                               reason = "move_destination_rejected",
+                               by_intent = prior)
             ResolveMoveIntent(prior, canceled, "superseded by explicit move")
         for prior in PlacementIntent { job = job, state = open }:
             ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
@@ -192,6 +224,7 @@ rule UserMovesQueuedJob {
             source_launch = job.cloud_instance
             target_kind = target.kind
             target_launch = if target.kind = existing then target.instance else null
+            target_host = if target.kind = existing then target.host else null
             target_offer_provider = target.offer_provider
             target_offer_id = target.offer_id
             target_gpu_name = target.gpu_name
@@ -208,6 +241,10 @@ rule SecondMoveOnSameJobSupersedesPriorIntent {
 
     ensures:
         for prior in MoveIntent { job = job, state = open }:
+            if prior.target_attempt != null:
+                AbandonAttempt(prior.target_attempt,
+                               reason = "move_destination_rejected",
+                               by_intent = prior)
             ResolveMoveIntent(prior, canceled, "superseded by explicit move")
         for prior in PlacementIntent { job = job, state = open }:
             ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
@@ -217,10 +254,13 @@ rule SecondMoveOnSameJobSupersedesPriorIntent {
 rule MoveTargetSameAsSourceRejected {
     when: UserPressesMoveAndSelectsTarget(job, target)
     requires: target.kind = existing
-              and target.instance = job.cloud_instance
+              and (
+                  target.instance = job.cloud_instance
+                  or target.host = job.host
+              )
 
     ensures:
-        ShowError("Target is the current instance")
+        ShowError("Target is the current placement")
         -- UI SHOULD not offer this option; rule is defense in depth.
 }
 
@@ -243,7 +283,7 @@ rule UserForceMovesRunningJob {
 
     requires:
         selector.force = true
-        and target.kind in {new, existing, host}
+        and target.kind in {new, existing}
 
     for job in MoveCandidateJobs where job.status in {running, starting, paused}:
       ensures:
@@ -251,7 +291,8 @@ rule UserForceMovesRunningJob {
               if job.host is inventory_host
           ExecuteMoveOption(job, target, MoveIntentFor(job, target))
               using UnifiedMoveCoordinator
-          if ExecuteMoveOption succeeded and sourceSnapshot exists:
+          if DestinationAccepted(MoveIntentFor(job, target))
+             and sourceSnapshot exists:
               SSHKillQueueRunnerJob(sourceSnapshot)
               -- Best-effort; failures are reported but do not abort the move
 
@@ -302,6 +343,10 @@ rule MoveSelectorResolution {
         else:
             for job in MoveCandidateJobs:
                 for prior in MoveIntent { job = job, state = open }:
+                    if prior.target_attempt != null:
+                        AbandonAttempt(prior.target_attempt,
+                                       reason = "move_destination_rejected",
+                                       by_intent = prior)
                     ResolveMoveIntent(prior, canceled, "superseded by explicit move")
                 for prior in PlacementIntent { job = job, state = open }:
                     ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
@@ -319,8 +364,8 @@ rule MoveSelectorResolution {
 rule MoveToNewLaunchAttachesIntent {
     -- Once the cloud launch has produced an instance, link it to the
     -- intent so the autopilot exclusion (which is keyed on JobID) is
-    -- joined by an instance reference for diagnostics, and so a future
-    -- reconciler can confirm-on-agent-ready by intent → target_launch.
+    -- joined by an instance reference for diagnostics and sync can confirm
+    -- the intent when the target agent reports ready.
     when: LaunchCampaign(group, ...) returns instance_id
           and exists(MoveIntent { job in group.jobs, state = open,
                                   target_kind = new, target_launch = null })
@@ -332,31 +377,64 @@ rule MoveToNewLaunchAttachesIntent {
           UpdateMoveIntentTargetLaunch(intent, instance_id)
 }
 
-rule ConfirmMoveOnSuccess {
-    -- The destination has accepted the job. For `existing` targets the
-    -- destination's R2 grace ack constitutes acceptance (or the synchronous
-    -- `SubmitJobsToInstance` succeeded for grace instances; running
-    -- instances acknowledge between job executions). For `new` targets the
-    -- successful return of LaunchCampaign currently constitutes
-    -- acceptance — a later refinement (see "Future work" below) defers
-    -- confirmation until the agent on the new instance reports ready.
-    --
-    -- ENFORCEMENT NOTE: As of 00004 + 00005, this rule is also enforced
-    -- by DB triggers on job_attempts (INSERT / UPDATE OF launch_id) and on
-    -- launches (UPDATE OF status). The triggers fire when an attempt for
-    -- the job lands on a launch in {planned, launching, running, paused,
-    -- grace, completed}. This makes the per-call-site
-    -- ResolveMoveIntent(intent, confirmed) calls in
-    -- internal/orchestration/move.go etc. correct-but-redundant: any
-    -- placement path that creates the attempt row resolves the intent in
-    -- the same transaction. New placement paths added in the future cannot
-    -- leak an open intent. See internal/db/intent_triggers_test.go for the
-    -- exhaustive behavioural test.
-    when: ExecuteMoveOption(job, target, intent) succeeds
+rule ExistingRunningRentalMoveWaitsForTargetAck {
+    -- Running rental agents do not continuously poll for added jobs while a
+    -- job is executing. The R2 grace request is therefore only a durable
+    -- request, not acceptance. The coordinator records the request id and
+    -- leaves the move open until sync observes the corresponding ack.
+    when: ExecuteMoveOption(job, target, intent) writes GraceJobsRequest
+          and target.kind = existing
+          and target.launch.status = running
     requires: intent.state = open
 
     ensures:
-        ResolveMoveIntent(intent, confirmed, "moved to " + describe(target))
+        intent.target_request_id = GraceJobsRequest.request_id
+        intent.target_request_kind = jobs
+        intent.state = open
+        JobAuthority(job) = intent.source_attempt
+        StopSourceAttempt(intent) is not_started
+}
+
+rule ExistingRunningRentalTargetAckRejected {
+    -- If the later ack rejects the jobs request, the hidden destination
+    -- attempt is abandoned and the move is canceled. The source remains
+    -- authoritative because it was never stopped.
+    when: SyncObservesGraceAck(intent.target_launch, intent.target_request_id)
+          and GraceAck.kind = jobs
+          and GraceAck.accepted = false
+    requires: intent.state = open
+              and intent.target_kind = existing
+              and intent.target_launch.status = running
+
+    ensures:
+        if intent.target_attempt != null:
+            AbandonAttempt(intent.target_attempt,
+                           reason = "move_destination_rejected",
+                           by_intent = intent)
+        ResolveMoveIntent(intent, canceled, "target rejected jobs request")
+        JobAuthority(intent.job) = intent.source_attempt
+        StopSourceAttempt(intent) is not_started
+}
+
+rule ConfirmMoveOnTargetAcceptance {
+    -- The destination has accepted the job. For `existing` targets the
+    -- destination's R2 grace ack constitutes acceptance; for grace-status
+    -- rentals the submission path waits for this ack synchronously, while
+    -- running rentals record the request id and sync consumes the ack
+    -- later. For on-prem hosts, the queue protocol acceptance is the ack.
+    -- For `new` targets, acceptance is the target agent_ready signal, or
+    -- the target attempt reaching a job-owned terminal result first.
+    --
+    -- ENFORCEMENT NOTE: hidden target attempts are not confirmed by
+    -- generic attempt-insert triggers. Confirmation goes through
+    -- ConfirmMoveTargetAccepted (or ConfirmOpenMoveIntentsForTargetLaunch
+    -- on target agent_ready), which both resolves the intent and abandons
+    -- the source attempt in one DB transaction.
+    when: DestinationAcceptanceObserved(job, target, intent)
+    requires: intent.state = open
+
+    ensures:
+        ConfirmMoveTargetAccepted(intent, "moved to " + describe(target))
 }
 
 rule CancelMoveOnFailure {
@@ -369,6 +447,10 @@ rule CancelMoveOnFailure {
     requires: intent.state = open
 
     ensures:
+        if intent.target_attempt != null:
+            AbandonAttempt(intent.target_attempt,
+                           reason = "move_destination_rejected",
+                           by_intent = intent)
         if intent.source_launch != null
            and intent.source_launch.status in {launching, running, paused, grace}
         then
@@ -382,7 +464,7 @@ rule CancelMoveOnFailure {
 }
 
 rule ObsoleteMoveOnSourceCompletion {
-    -- If the source attempt completes (any exit code) before the move is
+    -- If the source attempt reaches a job-owned terminal result before the move is
     -- confirmed, the move is obsoleted: the destination submission
     -- (already written to R2 for `existing`, or in-flight for `new`)
     -- should be canceled. Best-effort: if the destination has already
@@ -391,59 +473,45 @@ rule ObsoleteMoveOnSourceCompletion {
     --
     -- ENFORCEMENT NOTE: As of 00005, this rule is enforced by a DB trigger
     -- on job_attempts (UPDATE OF end_time / UPDATE OF status). The trigger
-    -- gates on the source attempt's status reaching a terminal value
-    -- ({completed, failed, dead, killed, canceled}) in addition to end_time
-    -- being set — this distinguishes natural source completion from
-    -- closeOpenAttempts-driven re-routing of an in-flight move (which sets
-    -- end_time without changing status, and must NOT obsolete the intent
-    -- it is itself the placement step of).
+    -- gates on the source attempt's status reaching a job-owned terminal
+    -- value ({completed, failed}) in addition to end_time being set. This
+    -- distinguishes natural job termination from infrastructure/orphan
+    -- closure and from closeOpenAttempts-driven re-routing of an in-flight
+    -- move.
     when: intent.source_attempt.end_time != null
-          and intent.source_attempt.status in {completed, failed, dead, killed, canceled}
+          and intent.source_attempt.status in {completed, failed}
     requires: intent.state = open
 
     ensures:
         TryCancelDestinationSubmission(intent)
+        if intent.target_attempt != null:
+            AbandonAttempt(intent.target_attempt, reason = "move_source_won",
+                           by_intent = intent)
         ResolveMoveIntent(intent, obsoleted, "source completed before confirmation")
 }
 
 -- ==========================================================================
--- Trigger-based auto-resolution (added 2026-05)
+-- DB-backed auto-resolution and authority
 -- ==========================================================================
 --
--- The rules in this file (ConfirmMoveOnSuccess, CancelMoveOnFailure,
--- ObsoleteMoveOnSourceCompletion) were originally enforced only by Go-side
--- calls to ResolveMoveIntent / ResolvePlacementIntent at every code path
--- that could complete a move. A recurring class of bugs arose whenever a
--- new placement path was added (cloud instance reuse, manual placement
--- commands, alternative-target classification at launch time, etc.) and
--- forgot to close intents created by sibling paths. Leaked open intents
--- made the autopilot ignore the job indefinitely (via
--- AutopilotIgnoresMovingJobs) and made the TUI mislabel the job as
--- "Placing" forever (wj2206-class bug).
+-- The move protocol is DB-backed in two different ways:
 --
--- Migrations 00004 and 00005 promote the rules above from Go-coordinated
--- contracts to DB-enforced invariants via triggers. The triggers observe
--- the source-of-truth tables (job_attempts, launches, jobs) and resolve
--- open intents atomically in the same transaction as the placement event:
+--   * Authority is view-enforced. While a MoveIntent is open, its
+--     target_attempt is excluded from authoritative_job_attempts and
+--     therefore from job_status/job-info/artifact default lookup. When
+--     a loser is abandoned, it remains excluded permanently.
 --
---   * INSERT / UPDATE OF launch_id on job_attempts (gated on launch in
---     a live status) → ConfirmMove for any matching open MoveIntent;
---     auto-populates target_launch_id when it was NULL. Also confirms
---     any open PlacementIntent for the job.
---   * UPDATE OF status on launches (transitioning to running/grace/
---     completed) → catches the race where attempts predate the launch
---     reaching live status.
---   * UPDATE OF end_time / status on job_attempts (gated on terminal
---     status) → ObsoleteMoveOnSourceCompletion for matching source
---     attempts.
---   * UPDATE OF requested_status on jobs (to killed/canceled) → user
---     cancellation obsoletes any open MoveIntent and cancels any open
---     PlacementIntent for the job.
+--   * Race resolution is trigger-backed for job-owned terminal results.
+--     If the source attempt finishes completed/failed while the intent is
+--     open, the target attempt is abandoned and the intent is obsoleted.
+--     If the target attempt finishes completed/failed while the intent is
+--     open, the source attempt is abandoned and the intent is confirmed.
 --
--- The Go-side ResolveMoveIntent / ResolvePlacementIntent calls in
--- placement code paths remain present and correct, but are now redundant.
--- Removing them would be safe; they are retained because they make the
--- intent-resolution rationale visible at the call site.
+-- Generic placement triggers still exist for non-move placement paths:
+-- attempts with move_intent_id = NULL may auto-confirm open intents that
+-- predate the hidden-attempt protocol. Hidden target attempts use
+-- move_intent_id and are deliberately excluded from those generic
+-- insertion/update triggers.
 --
 -- The pre-trigger periodic reconciler
 -- (internal/db/placement_reconciler.go::ReconcilePlacementRows) is removed
@@ -452,8 +520,9 @@ rule ObsoleteMoveOnSourceCompletion {
 -- ReconcileStaleCloudHostJobs.
 --
 -- Behavioural test coverage:
---   internal/db/intent_triggers_test.go (per-trigger invariants)
---   internal/db/placement_reconciler_test.go (stale-cloud-host repair)
+--   internal/db/attempts_test.go (hidden target attempt authority)
+--   internal/db/move_intents_test.go (intent resolution helpers)
+--   internal/db/intent_triggers_test.go (legacy/generic trigger invariants)
 --   internal/db/cloud_instances_test.go (ResetLaunchJobs + intent flow)
 --   internal/orchestration/move_test.go (end-to-end move flows)
 
@@ -597,10 +666,9 @@ value TerminationIntentState = open | destroying | succeeded | failed
 --   - the warn-only display fires inside the last bootstrapWarnTimeout
 --     window before the deadline.
 --
--- The deferred speculative move-to-new "claim after agent ready" path
--- (see specs/job-move.allium § future work) consumes IsAgentReady to
--- decide when to confirm an open MoveIntent of kind=new without
--- waiting on indirect signals.
+-- Move-to-new consumes agent_ready_at as the destination-acceptance
+-- signal: the sync path confirms open target attempts for that launch and
+-- then stops their sources.
 
 extend entity CloudInstance {
     bootstrap_deadline: Timestamp?  -- set at LaunchInstance time
@@ -635,16 +703,13 @@ invariant InstanceWithActiveTerminationIntentRejectsReuse {
 
 invariant SourceLaunchUnchangedWhileIntentOpen {
     -- Both target kinds now satisfy this property:
-    --   - Move-to-existing uses SubmitJobsToInstanceForMove
-    --     (TransferJobLaunchID at the DB layer) to atomically supersede
-    --     the source claim.
-    --   - Move-to-new passes LaunchOpts.TransferClaim=true to
-    --     LaunchCampaign so the same TransferJobLaunchID is used at
-    --     instance-creation time. If the cloud launch fails before the
-    --     instance is created, the source is untouched. If the launch
-    --     succeeds but the agent never comes up, the existing
-    --     reconcile.bootstrap_timeout path terminates the instance and
-    --     resets the job back to queued.
+    --   - Move-to-existing opens a hidden target attempt, submits it to
+    --     the destination, and confirms only after destination acceptance.
+    --   - Move-to-new opens a hidden target attempt on the placeholder
+    --     launch. If the cloud launch fails before the instance is created,
+    --     the source is untouched. If the launch succeeds but the agent
+    --     never comes up, the bootstrap-timeout path terminates the target
+    --     and the intent remains available for retry until exhausted.
     --
     -- Job.cloud_instance still transitions through "no instance" briefly
     -- only in the rollback path (resetClaimedJobsToUnplaced after a
@@ -658,21 +723,56 @@ invariant SourceLaunchUnchangedWhileIntentOpen {
     aspirational: false
 }
 
-invariant MoveTargetExistingHasInstance {
+invariant MoveTargetExistingHasConcreteDestination {
     for intent in MoveIntent:
         intent.target_kind = existing
-        implies intent.target_launch != null
-}
-
-invariant MoveTargetHostHasHost {
-    for intent in MoveIntent:
-        intent.target_kind = host
-        implies intent.target_host != null
+        implies (
+            (intent.target_launch != null and intent.target_host = null)
+            or (intent.target_launch = null and intent.target_host != null)
+        )
 }
 
 invariant ResolvedIntentHasResolutionTime {
     for intent in MoveIntent:
         intent.state != open implies intent.resolved_at != null
+}
+
+invariant OpenMoveTargetAttemptHidden {
+    for intent in MoveIntent:
+        intent.state = open
+        and intent.target_attempt != null
+        implies intent.target_attempt not in authoritative_job_attempts
+}
+
+invariant ResolvedMoveHasSingleAuthoritativeAttempt {
+    for intent in MoveIntent:
+        intent.state = confirmed
+        and intent.target_attempt != null
+        implies intent.target_attempt in authoritative_job_attempts
+                and (intent.source_attempt = null
+                     or intent.source_attempt not in authoritative_job_attempts)
+
+    for intent in MoveIntent:
+        intent.state in {canceled, obsoleted}
+        and intent.target_attempt != null
+        implies intent.target_attempt not in authoritative_job_attempts
+}
+
+invariant ResolvedMoveLoserHasStopWork {
+    -- Stopping a process is outside SQLite, so this cannot be purely
+    -- transactional. The DB transition must leave enough source/target
+    -- identity for sync/reconcile to perform the side effect idempotently.
+    for intent in MoveIntent:
+        intent.state = confirmed
+        and intent.source_attempt != null
+        implies StopSourceAttempt(intent) is pending_or_complete
+
+    for intent in MoveIntent:
+        intent.state = obsoleted
+        and intent.target_attempt != null
+        implies StopDestinationAttempt(intent) is pending_or_complete
+
+    aspirational: true
 }
 
 -- ==========================================================================
@@ -694,24 +794,9 @@ invariant ResolvedIntentHasResolutionTime {
 -- Future work
 -- ==========================================================================
 --
--- Implementation work required for the unified protocol:
+-- Remaining refinements for the unified protocol:
 --
---   - Schema: MoveIntent needs target_host and target_attempt fields, and
---     target_kind must include `host`. The current one-open-attempt index on
---     job_attempts must be refined so an open MoveIntent can have one source
---     attempt and one pending/accepted destination attempt.
---
---   - Destination acceptance:
---       * cloud existing/new: acceptance is the destination agent pickup ack
---         or equivalent ready/claimed signal, not provider create success.
---       * on-prem host: acceptance is the host queue accepting the job and
---         reporting the destination attempt through host sync.
---
---   - Source stop:
---       * cloud source: write cancel_attempts and kill-job R2 markers.
---       * on-prem source: SSH-kill the queue-runner process group from the
---         captured (host, start_time) snapshot.
---
---   - Reconciler: scan open MoveIntents and apply
---     OverlapCompletionResolution. This is the shared cleanup path for
---     cloud->cloud, cloud->host, host->cloud, and host->host.
+--   - Reconciler: the DB triggers now apply source-wins / target-wins for
+--     job-owned terminal results. A background reconciler should still scan
+--     open MoveIntents for infrastructure failures and adapter-specific
+--     stale states.

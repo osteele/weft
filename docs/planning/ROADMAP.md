@@ -284,9 +284,11 @@ to produce and harder for operators to observe.
   "apply transition X" instead of editing rows.
 - **Add DB invariants.**
   Useful constraints include at most one open `move_intents` row per job,
-  at most one open `job_attempts` row per job, live source launches for open
-  move-to-new intents, `end_time` on terminal attempts, and a guard that
-  started attempts are never restored to a source queue.
+  live source launches for open move-to-new intents, `end_time` on terminal
+  attempts, and a guard that started attempts are never restored to a source
+  queue. Open `job_attempts` are intentionally allowed to overlap during a
+  move intent; the authoritative-attempt view decides which attempt drives
+  job status while the move is pending.
 - **Unify retry-budget semantics.**
   Move-to-new retry counters, launch attempts, relaunch blockers, and
   campaign replacement loops still account for attempts separately. The goal

@@ -67,7 +67,7 @@ func executeNewInstanceLaunchWithMoveIntents(opts newInstanceLaunchExecutionOpti
 		launch = campaign.LaunchCampaign
 	}
 	launchOpts := opts.LaunchOpts
-	launchOpts.TransferClaim = true
+	launchOpts.MoveTargetClaim = true
 	result, err := launch(
 		opts.Clients,
 		opts.Database,

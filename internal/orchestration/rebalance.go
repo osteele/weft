@@ -1040,9 +1040,9 @@ func applyRebalanceMove(_ context.Context, database *sql.DB, r2Client *r2.Client
 
 // submitRebalanceMoveAsync uses a fresh 10-minute context (matching
 // submitJobsToInstanceImpl) so the work survives the TUI command handler
-// returning. ResolveMoveIntent on success is usually redundant — DB triggers
-// resolve the intent on attempt landing — but is kept for parity with the
-// user-initiated move path.
+// returning. SubmitJobsToInstanceForMove performs the target-accepted
+// transition; the final ResolveMoveIntent is retained for parity with the
+// user-initiated move path and is normally a no-op.
 func submitRebalanceMoveAsync(database *sql.DB, r2Client *r2.Client, job *db.Job, intent *db.MoveIntent, move QueueRebalanceMove) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

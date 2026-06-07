@@ -81,6 +81,26 @@ func TestCreateMoveIntent_NewWithoutTargetLaunch(t *testing.T) {
 	}
 }
 
+func TestCreateMoveIntent_HostTarget(t *testing.T) {
+	database := SetupTestDB(t)
+	insertTestJob(t, database, 77, "echo hi", "/tmp", StatusQueued)
+
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:      77,
+		TargetKind: MoveTargetExisting,
+		TargetHost: "cool30",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.TargetHost != "cool30" {
+		t.Fatalf("TargetHost = %q, want cool30", intent.TargetHost)
+	}
+	if intent.TargetLaunchID != nil {
+		t.Fatalf("TargetLaunchID = %v, want nil", intent.TargetLaunchID)
+	}
+}
+
 func TestCreateMoveIntent_RejectsExistingWithoutTargetLaunch(t *testing.T) {
 	database := SetupTestDB(t)
 	insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
@@ -193,6 +213,90 @@ func TestResolveMoveIntent_NoOpOnAlreadyResolved(t *testing.T) {
 	}
 }
 
+func TestResolveMoveIntentCanceledAbandonsHiddenTargetAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "cool30", "/tmp", "echo hi", "move")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	sourceAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &sourceAttemptID,
+		TargetKind:      MoveTargetExisting,
+		TargetHost:      "cool100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := ResolveMoveIntent(database, intent.ID, MoveIntentStateCanceled, "superseded by explicit move"); err != nil {
+		t.Fatalf("ResolveMoveIntent canceled: %v", err)
+	}
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != sourceAttemptID {
+		t.Fatalf("authoritative = %d, want source %d", authoritative, sourceAttemptID)
+	}
+	var reason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID).Scan(&reason); err != nil {
+		t.Fatalf("target abandoned reason: %v", err)
+	}
+	if reason != AttemptAbandonedMoveDestinationRejected {
+		t.Fatalf("target abandoned reason = %q, want %q", reason, AttemptAbandonedMoveDestinationRejected)
+	}
+}
+
+func TestResolveMoveIntentConfirmedWithTargetAttemptAbandonsSource(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "cool30", "/tmp", "echo hi", "move")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	sourceAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:           jobID,
+		SourceAttemptID: &sourceAttemptID,
+		TargetKind:      MoveTargetExisting,
+		TargetHost:      "cool100",
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := ResolveMoveIntent(database, intent.ID, MoveIntentStateConfirmed, "accepted"); err != nil {
+		t.Fatalf("ResolveMoveIntent confirmed: %v", err)
+	}
+	authoritative, err := GetAuthoritativeAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetAuthoritativeAttemptID: %v", err)
+	}
+	if authoritative != targetAttemptID {
+		t.Fatalf("authoritative = %d, want target %d", authoritative, targetAttemptID)
+	}
+	var reason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&reason); err != nil {
+		t.Fatalf("source abandoned reason: %v", err)
+	}
+	if reason != AttemptAbandonedMoveTargetAccepted {
+		t.Fatalf("source abandoned reason = %q, want %q", reason, AttemptAbandonedMoveTargetAccepted)
+	}
+}
+
 func TestUpdateMoveIntentTargetLaunch(t *testing.T) {
 	database := SetupTestDB(t)
 	insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
@@ -220,6 +324,7 @@ func TestConfirmOpenMoveIntentsForTargetLaunch(t *testing.T) {
 	database := SetupTestDB(t)
 	insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
 	insertTestJob(t, database, 200, "echo hi", "/tmp", StatusQueued)
+	insertTestJob(t, database, 300, "echo hi", "/tmp", StatusQueued)
 	target := mustCreateLaunch(t, database)
 	other := mustCreateLaunch(t, database)
 
@@ -234,6 +339,15 @@ func TestConfirmOpenMoveIntentsForTargetLaunch(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent other: %v", err)
+	}
+	requestGatedIntent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID: 300, TargetKind: MoveTargetExisting, TargetLaunchID: &target,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent request gated: %v", err)
+	}
+	if err := SetMoveIntentTargetRequest(database, requestGatedIntent.ID, "jobs", "req-pending"); err != nil {
+		t.Fatalf("SetMoveIntentTargetRequest: %v", err)
 	}
 
 	if err := ConfirmOpenMoveIntentsForTargetLaunch(database, target, "agent ready"); err != nil {
@@ -252,6 +366,13 @@ func TestConfirmOpenMoveIntentsForTargetLaunch(t *testing.T) {
 	}
 	if gotOther.State != MoveIntentStateOpen {
 		t.Fatalf("other intent state = %s, want open", gotOther.State)
+	}
+	gotRequestGated, err := GetMoveIntent(database, requestGatedIntent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent request gated: %v", err)
+	}
+	if gotRequestGated.State != MoveIntentStateOpen {
+		t.Fatalf("request-gated intent state = %s, want open", gotRequestGated.State)
 	}
 }
 
