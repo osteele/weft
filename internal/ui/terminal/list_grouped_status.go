@@ -165,6 +165,9 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		now = time.Now()
 	}
 	opts.now = now
+	if len(opts.placementStatusByJob) > 0 {
+		jobs = jobview.ExpandJobsForOpenMoves(jobs, opts.placementStatusByJob)
+	}
 	running := make([]*db.Job, 0)
 	paused := make([]*db.Job, 0)
 	placing := make([]*db.Job, 0)
@@ -336,6 +339,7 @@ func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.L
 // blockedDetailStyle dims the per-avenue disclosure lines so they recede
 // beneath the job row they belong to.
 var blockedDetailStyle = lipgloss.NewStyle().Faint(true)
+var moveAttemptDimStyle = lipgloss.NewStyle().Faint(true)
 
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
 // jobs by their blocked reason. Each distinct reason becomes a subheader
@@ -825,6 +829,9 @@ func appendGroupedStatusJobRow(
 		if timing := groupedStatusTimingSuffix(job, section.key, placementQueuedAtByJob, now); timing != "" {
 			suffixParts = append(suffixParts, timing)
 		}
+		if moveText := groupedStatusMoveSuffix(job); moveText != "" {
+			suffixParts = append(suffixParts, moveText)
+		}
 		if outcome := groupedStatusOutcomeSuffix(job, section.title); outcome != "" {
 			suffixParts = append(suffixParts, outcome)
 		}
@@ -849,6 +856,9 @@ func appendGroupedStatusJobRow(
 	if job != nil && job.TargetKind() == db.JobTargetInventoryHost && overloadedHostsByName[strings.TrimSpace(job.Host)] {
 		line = tuiFailedStyle.Render(line)
 	}
+	if job != nil && job.DisplayMoveDim {
+		line = moveAttemptDimStyle.Render(line)
+	}
 	if width > 0 {
 		prefixWidth := lipgloss.Width(prefix)
 		suffixWidth := lipgloss.Width(suffix)
@@ -871,6 +881,17 @@ func appendGroupedStatusJobRow(
 		job:     job,
 		section: section.key,
 	})
+}
+
+func groupedStatusMoveSuffix(job *db.Job) string {
+	if job == nil || strings.TrimSpace(job.DisplayMoveSource) == "" || strings.TrimSpace(job.DisplayMoveTarget) == "" {
+		return ""
+	}
+	path := strings.TrimSpace(job.DisplayMoveSource) + " -> " + strings.TrimSpace(job.DisplayMoveTarget)
+	if job.DisplayMoveDim {
+		return "move target " + path + " (non-authoritative)"
+	}
+	return "move pending " + path
 }
 
 // computeProjectColumnWidth determines a uniform project column width
@@ -1192,6 +1213,9 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launche
 }
 
 func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, opts groupedStatusRenderOptions) string {
+	if job != nil && job.DisplayMoveDim {
+		return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, nil, opts.now)
+	}
 	if opts.placementStatusByJob != nil && job != nil {
 		if ps, ok := opts.placementStatusByJob[job.ID]; ok && ps.Bucket != "" {
 			return string(ps.Bucket)

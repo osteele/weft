@@ -1509,6 +1509,54 @@ func TestRenderJobListGroupedStatusPlainWithOptions_UsesPlacementStatusReadModel
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *testing.T) {
+	sourceLaunchID := int64(3656)
+	sourceAttemptID := int64(10)
+	targetAttemptID := int64(11)
+	job := &db.Job{
+		ID:          2538,
+		Status:      db.StatusRunning,
+		LaunchID:    &sourceLaunchID,
+		LatestRunID: &sourceAttemptID,
+		Project:     "proj",
+		Description: "moving job",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 0, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			2538: {
+				JobID:  2538,
+				Bucket: jobview.BucketRunning,
+				Move: &jobview.MoveDisplay{
+					IntentID:        1,
+					State:           db.MoveIntentStateOpen,
+					SourceAttemptID: &sourceAttemptID,
+					TargetAttemptID: &targetAttemptID,
+					SourceLabel:     "wi3656",
+					TargetLabel:     "cool30",
+					Phase:           "waiting for destination attempt",
+					AttemptsByID: map[int64]db.JobAttempt{
+						sourceAttemptID: {ID: sourceAttemptID, JobID: 2538, AttemptNumber: 1, LaunchID: &sourceLaunchID, Status: db.StatusRunning},
+						targetAttemptID: {ID: targetAttemptID, JobID: 2538, AttemptNumber: 2, Host: "cool30", Status: db.StatusQueued},
+					},
+				},
+			},
+		},
+		now: time.Unix(10_000, 0),
+	})
+	if !strings.Contains(out, "Running (1):") {
+		t.Fatalf("expected authoritative source running row, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("expected non-authoritative target queued row, got:\n%s", out)
+	}
+	if !strings.Contains(out, "move pending wi3656 -> cool30") {
+		t.Fatalf("expected source move suffix, got:\n%s", out)
+	}
+	if !strings.Contains(out, "move target wi3656 -> cool30 (non-authoritative)") {
+		t.Fatalf("expected non-authoritative target suffix, got:\n%s", out)
+	}
+}
+
 func failedInstanceRowText(rows []groupedStatusRow) string {
 	parts := make([]string, 0, len(rows))
 	for _, r := range rows {

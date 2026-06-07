@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/syncorch"
@@ -745,9 +746,35 @@ func showJob(database *sql.DB, id int64) error {
 		fmt.Printf("Progress:     %s\n", progress)
 	}
 	printJobLocalDiagnostics(database, job)
+	printJobMoveSummary(database, job)
 	printJobAttemptSummary(database, job)
 
 	return nil
+}
+
+func printJobMoveSummary(database *sql.DB, job *db.Job) {
+	statusByJob, err := jobview.PlacementStatusForJobs(database, []*db.Job{job}, time.Now())
+	if err != nil {
+		return
+	}
+	move := statusByJob[job.ID].Move
+	if move == nil {
+		return
+	}
+	parts := []string{fmt.Sprintf("%s -> %s", strings.TrimSpace(move.SourceLabel), strings.TrimSpace(move.TargetLabel))}
+	if strings.TrimSpace(move.Phase) != "" {
+		parts = append(parts, strings.TrimSpace(move.Phase))
+	}
+	if move.State == db.MoveIntentStateOpen && move.CreatedAt > 0 {
+		parts = append(parts, "pending "+db.FormatDuration(time.Now().Unix()-move.CreatedAt))
+	}
+	if move.State != db.MoveIntentStateOpen && move.ResolvedAt != nil {
+		parts = append(parts, "resolved "+db.FormatDuration(time.Now().Unix()-*move.ResolvedAt)+" ago")
+	}
+	if move.State != db.MoveIntentStateOpen && strings.TrimSpace(move.Resolution) != "" {
+		parts = append(parts, strings.TrimSpace(move.Resolution))
+	}
+	fmt.Printf("Move:         %s\n", strings.Join(parts, " · "))
 }
 
 func printJobAttemptSummary(database *sql.DB, job *db.Job) {
@@ -774,7 +801,11 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 		}
 		liveByLaunchID := loadLaunchLiveStateForJobs(database, jobs)
 		launchStatusByID := loadLaunchStatusForJobs(database, jobs)
-		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithFailedInstances(database, jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID))
+		placementStatusByJob, err := jobview.PlacementStatusForJobs(database, jobs, time.Now())
+		if err != nil {
+			placementStatusByJob = map[int64]jobview.PlacementStatus{}
+		}
+		return terminal.WriteListPlainOutput(terminal.RenderJobListGroupedStatusPlainWithOptions(database, jobs, terminal.ListOutputWidth(), liveByLaunchID, launchStatusByID, placementStatusByJob))
 	}
 	if listGroupBy == "project" {
 		return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))

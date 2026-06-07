@@ -290,7 +290,10 @@ func formatJobListRow(layout jobListLayout, job *db.Job) string {
 	}
 	row := strings.Join(parts, " ")
 	if layout.cordoned.IsOverloaded(job) {
-		return tuiFailedStyle.Render(row)
+		row = tuiFailedStyle.Render(row)
+	}
+	if job != nil && job.DisplayMoveDim {
+		row = moveAttemptDimStyle.Render(row)
 	}
 	return row
 }
@@ -298,6 +301,12 @@ func formatJobListRow(layout jobListLayout, job *db.Job) string {
 func formatJobListHost(job *db.Job) string {
 	if job == nil {
 		return ""
+	}
+	if strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
+		if job.DisplayMoveDim {
+			return strings.TrimSpace(job.DisplayMoveTarget)
+		}
+		return strings.TrimSpace(job.DisplayMoveSource) + " -> " + strings.TrimSpace(job.DisplayMoveTarget)
 	}
 	if job.TargetKind() == db.JobTargetRentalInstance && job.LaunchID != nil {
 		return formatRentalInstanceLabel(job)
@@ -338,6 +347,11 @@ func formatJobListStatus(job *db.Job) string {
 	}
 	if display := queueblock.Display(job, nil); display.Blocked {
 		status = "blocked"
+	}
+	if job.DisplayMoveDim {
+		status += " non-auth"
+	} else if strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
+		status += " moving"
 	}
 	if status == db.StatusCompleted && job.ExitCode != nil {
 		if *job.ExitCode == 0 {

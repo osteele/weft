@@ -13,6 +13,7 @@ type PlacementStatus struct {
 	DisplayAt     int64
 	HasOpenIntent bool
 	LaunchID      *int64
+	Move          *MoveDisplay
 }
 
 // PlacementStatusForJobs returns placement display state for the supplied jobs.
@@ -66,6 +67,10 @@ func PlacementStatusForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (ma
 	}
 	launchesWithActiveJob := LaunchesWithActiveJob(jobs, launchLiveByID)
 	launchesEverReady := LaunchesEverReady(launchByID)
+	moveByJob, err := moveDisplayForJobs(database, jobs, now)
+	if err != nil {
+		return nil, err
+	}
 
 	out := make(map[int64]PlacementStatus, len(jobs))
 	for _, job := range jobs {
@@ -75,6 +80,7 @@ func PlacementStatusForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (ma
 		ps := PlacementStatus{
 			JobID:    job.ID,
 			LaunchID: job.LaunchID,
+			Move:     moveByJob[job.ID],
 		}
 		if createdAt := openIntentCreatedAt[job.ID]; createdAt > 0 {
 			ps.HasOpenIntent = true

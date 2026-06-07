@@ -93,6 +93,12 @@ type Job struct {
 	CampaignJobIndex     *int                  // Position within a cloud campaign sequence, if assigned
 	LatestRunID          *int64                // Latest execution attempt row for this logical job
 	QueueBlockedReason   string                // Transient UI-only queue gate reason; not persisted
+	DisplayAttemptID     int64                 `json:"-"` // Transient UI-only attempt row override; 0 means authoritative job row
+	DisplayAttemptNumber int                   `json:"-"` // Transient UI-only attempt number for expanded move rows
+	DisplayMoveSource    string                `json:"-"` // Transient UI-only move source label
+	DisplayMoveTarget    string                `json:"-"` // Transient UI-only move target label
+	DisplayMovePhase     string                `json:"-"` // Transient UI-only move phase for list/detail views
+	DisplayMoveDim       bool                  `json:"-"` // Transient UI-only marker for non-authoritative attempts
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync

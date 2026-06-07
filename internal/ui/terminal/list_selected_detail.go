@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/jobview"
 )
 
 // selectedJobContext bundles the ancillary data the Job and Host footer
@@ -29,6 +30,7 @@ type selectedJobContext struct {
 	cordonedHostsByName   map[string]bool
 	overloadedHostsByName map[string]bool
 	siblingJobs           []*db.Job
+	moveByJob             map[int64]*jobview.MoveDisplay
 	// cloudConfigured is true when at least one cloud provider client is
 	// available. When true, an unplaced job whose only blocker is "no local
 	// host matched ..." is not actionable (autopilot is responsible for
@@ -56,7 +58,41 @@ func renderSelectedJobDetail(job *db.Job, ctx selectedJobContext, now time.Time)
 	if s := renderHostFooterLine(job, ctx, now); s != "" {
 		lines = append(lines, s)
 	}
+	if s := renderMoveFooterLine(job, ctx, now); s != "" {
+		lines = append(lines, s)
+	}
 	return lines
+}
+
+func renderMoveFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) string {
+	if job == nil {
+		return ""
+	}
+	move := ctx.moveByJob[job.ID]
+	if move == nil && strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
+		state := "pending"
+		if strings.TrimSpace(job.DisplayMovePhase) != "" {
+			state = strings.TrimSpace(job.DisplayMovePhase)
+		}
+		return fmt.Sprintf("Move: %s -> %s · %s", strings.TrimSpace(job.DisplayMoveSource), strings.TrimSpace(job.DisplayMoveTarget), state)
+	}
+	if move == nil {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("Move: %s -> %s", strings.TrimSpace(move.SourceLabel), strings.TrimSpace(move.TargetLabel))}
+	if strings.TrimSpace(move.Phase) != "" {
+		parts = append(parts, strings.TrimSpace(move.Phase))
+	}
+	if move.State == db.MoveIntentStateOpen && move.CreatedAt > 0 {
+		parts = append(parts, "pending "+estimate.FormatDurationShort(now.Sub(time.Unix(move.CreatedAt, 0))))
+	}
+	if move.State != db.MoveIntentStateOpen && move.ResolvedAt != nil {
+		parts = append(parts, "resolved "+estimate.FormatDurationShort(now.Sub(time.Unix(*move.ResolvedAt, 0)))+" ago")
+	}
+	if move.State != db.MoveIntentStateOpen && strings.TrimSpace(move.Resolution) != "" {
+		parts = append(parts, strings.TrimSpace(move.Resolution))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func renderSelectedLaunchDetail(launch *db.Launch, width int, now time.Time) []string {

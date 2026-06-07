@@ -152,6 +152,20 @@ func GetOpenMoveIntent(database *sql.DB, jobID int64) (*MoveIntent, error) {
 	return scanMoveIntent(row)
 }
 
+// GetRecentMoveIntent returns the newest open intent for a job, or the newest
+// resolved intent at or after sinceUnix. Open intents take precedence because
+// they describe the active transition.
+func GetRecentMoveIntent(database *sql.DB, jobID, sinceUnix int64) (*MoveIntent, error) {
+	row := database.QueryRow(moveIntentSelect+`
+		WHERE job_id = ?
+		  AND (state = 'open' OR (resolved_at IS NOT NULL AND resolved_at >= ?))
+		ORDER BY CASE WHEN state = 'open' THEN 0 ELSE 1 END,
+		         COALESCE(resolved_at, created_at) DESC,
+		         id DESC
+		LIMIT 1`, jobID, sinceUnix)
+	return scanMoveIntent(row)
+}
+
 // ListOpenMoveIntents returns all currently open intents.
 func ListOpenMoveIntents(database *sql.DB) ([]*MoveIntent, error) {
 	rows, err := database.Query(moveIntentSelect + ` WHERE state = 'open' ORDER BY created_at ASC`)

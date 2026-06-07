@@ -1488,8 +1488,22 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		cordonedHostsByName:   m.cordonedHostsByName,
 		overloadedHostsByName: m.overloadedHostsByName,
 		siblingJobs:           m.jobs,
+		moveByJob:             moveDisplayMap(m.placementStatusByJob),
 		cloudConfigured:       len(m.cloudClients) > 0,
 	}, time.Now())
+}
+
+func moveDisplayMap(statusByJob map[int64]jobview.PlacementStatus) map[int64]*jobview.MoveDisplay {
+	if len(statusByJob) == 0 {
+		return nil
+	}
+	out := make(map[int64]*jobview.MoveDisplay, len(statusByJob))
+	for jobID, status := range statusByJob {
+		if status.Move != nil {
+			out[jobID] = status.Move
+		}
+	}
+	return out
 }
 
 func (m listTUIModel) selectedGroupedRow() int {

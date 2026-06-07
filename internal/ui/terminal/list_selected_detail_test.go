@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/jobview"
 )
 
 func TestSelectedJobDetail_InventoryHost(t *testing.T) {
@@ -38,6 +39,30 @@ func TestSelectedJobDetail_InventoryHost(t *testing.T) {
 		if strings.Contains(joined, unwanted) {
 			t.Errorf("unexpected %q in detail lines (project/command must be excluded): %s", unwanted, joined)
 		}
+	}
+}
+
+func TestSelectedJobDetail_MoveIntentPhase(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	job := &db.Job{ID: 2538, Status: db.StatusRunning, Host: "wi3656", Project: "proj"}
+	lines := renderSelectedJobDetail(job, selectedJobContext{
+		moveByJob: map[int64]*jobview.MoveDisplay{
+			2538: {
+				IntentID:    1,
+				State:       db.MoveIntentStateOpen,
+				SourceLabel: "wi3656",
+				TargetLabel: "cool30",
+				Phase:       "waiting for destination acceptance",
+				CreatedAt:   now.Add(-23 * time.Second).Unix(),
+			},
+		},
+	}, now)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Move: wi3656 -> cool30") {
+		t.Fatalf("missing move path in detail lines: %v", lines)
+	}
+	if !strings.Contains(joined, "waiting for destination acceptance") {
+		t.Fatalf("missing move phase in detail lines: %v", lines)
 	}
 }
 

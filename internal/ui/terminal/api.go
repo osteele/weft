@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
 )
@@ -232,6 +233,26 @@ func RenderJobListGroupedStatusPlainWithFailedInstances(
 		failedInstances:  failures,
 		launchByID:       launchByID,
 		now:              time.Now(),
+	})
+}
+
+func RenderJobListGroupedStatusPlainWithOptions(
+	database *sql.DB,
+	jobs []*db.Job,
+	width int,
+	launchLiveByID map[int64]*db.LaunchLiveState,
+	launchStatusByID map[int64]string,
+	placementStatusByJob map[int64]jobview.PlacementStatus,
+) string {
+	failures := loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now())
+	launchByID, _ := db.GetLaunchesByIDs(database, groupedStatusLaunchIDs(jobs))
+	return renderJobListGroupedStatusPlainWithOptions(jobs, width, groupedStatusRenderOptions{
+		launchLiveByID:       launchLiveByID,
+		launchStatusByID:     launchStatusByID,
+		placementStatusByJob: placementStatusByJob,
+		failedInstances:      failures,
+		launchByID:           launchByID,
+		now:                  time.Now(),
 	})
 }
 
