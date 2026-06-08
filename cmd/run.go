@@ -771,7 +771,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if relayEnabled(relayCfg, relayClient) && !runDraft {
 		if runWait || runFollow {
-			return fmt.Errorf("--wait and --follow are not supported when coordinator relay mode is active")
+			return fmt.Errorf("--wait and --follow are not supported when legacy relay mode is active")
 		}
 		if runAfter > 0 || runAfterAny > 0 {
 			depID := runAfter
@@ -815,7 +815,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Needs:       resolvedNeeds,
 			Disk:        diskMeta,
 		}
-		endSubmit := rec.Phase("submit", "submitting via coordinator relay")
+		endSubmit := rec.Phase("submit", "submitting via legacy relay")
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
 		endSubmit()
 		if err != nil {
@@ -826,9 +826,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		w := cmd.OutOrStdout()
 		if ack != nil && ack.Host != "" {
-			fmt.Fprintf(w, "Job #%d submitted to coordinator and queued on %s\n", jobID, ack.Host)
+			fmt.Fprintf(w, "Job #%d submitted via legacy relay and queued on %s\n", jobID, ack.Host)
 		} else {
-			fmt.Fprintf(w, "Job #%d submitted to coordinator\n", jobID)
+			fmt.Fprintf(w, "Job #%d submitted via legacy relay\n", jobID)
 		}
 		if ack != nil && ack.Message != "" {
 			fmt.Fprintf(w, "  %s\n", ack.Message)

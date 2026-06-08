@@ -33,7 +33,7 @@ value KilledBy = stall | ceiling | canceled | slow_pace
 
 -- StallKind discriminates which gate fired. Populated only when
 -- DrainStatus == stalled. The marker writer surfaces this to the
--- coordinator so failure-pattern analysis can distinguish auth/DNS
+-- Weft so failure-pattern analysis can distinguish auth/DNS
 -- problems (never_started) from transient network blips (mid_transfer)
 -- from sustained underperformance (slow_pace) from process hangs
 -- (heartbeat).
@@ -58,7 +58,7 @@ value DrainResult {
 }
 
 -- Marker written to R2 when a drain ends non-OK. Best-effort: marker
--- write failures do not chain into another drain. Coordinator reads
+-- write failures do not chain into another drain. Sync reads
 -- this to render "upload truncated: <kind>" in instance diagnose.
 value UploadFailureMarker {
     kind: StallKind
@@ -288,7 +288,7 @@ rule ContextCanceled {
 -- Failure marker (best-effort R2 write)
 -- ==========================================================================
 
--- Every non-OK drain writes a structured marker so the coordinator can
+-- Every non-OK drain writes a structured marker so Weft can
 -- distinguish "instance terminated cleanly without uploading X" from
 -- "agent crashed before reporting anything". The marker write uses a
 -- short bounded context so it cannot recurse into another long drain
@@ -319,7 +319,7 @@ rule FailureMarkerWritten {
 -- A single stalled drain doesn't tear down the instance — rclone
 -- errors are common and recover. But repeated stalls with no successful
 -- upload between them mean R2 connectivity is effectively gone for
--- this instance, and the coordinator should re-place the work on a
+-- this instance, and Weft should re-place the work on a
 -- fresh instance with working network rather than wait for the
 -- heartbeat-staleness reconciler to notice (which can take hours).
 --

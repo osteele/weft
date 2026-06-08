@@ -262,7 +262,7 @@ still run drivers in the 12.2–12.4 range.
 
 Weft already classifies this signature. The runner's live log scanner
 (`internal/runner/single.go`) treats it as `fatalAtRuntime` and SIGTERMs
-the job rather than letting it spin. The coordinator's remediator then
+the job rather than letting it spin. The remediation path then
 writes an `error_diagnosis` row with pattern `cuda_driver_too_old` and
 the driver's inferred CUDA compatibility, which surfaces in:
 
@@ -389,7 +389,7 @@ agents). Check R2 for bootstrap script artifacts.
 ### OnStart died before bootstrap.sh ran (`infra_failure`, no R2 markers)
 
 Symptom: launch hits `empty_status_timeout` after 25 minutes; R2 has only
-`instance/<id>/agent-version` (written by the coordinator at create time)
+`instance/<id>/agent-version` (written when the instance is created)
 and **no** `bootstrap/<id>/stage` marker. The agent never wrote anything.
 
 This means Vast's `--onstart-cmd` chain failed before reaching

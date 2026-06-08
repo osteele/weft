@@ -289,7 +289,7 @@ entity JobAttempt {
     --   failure_reason non-empty (e.g. "source_provenance_mismatch: ...")
     -- See source-data-sync.allium § RunnerPreflightProvenanceCheck for the
     -- runner-side semantics and status-sync.allium §
-    -- PreflightRejectionReconciled for the coordinator-side closure.
+    -- PreflightRejectionReconciled for the sync-side closure.
     -- Display surfaces (cmd/job.go) render this as "preflight-rejected"
     -- with Exit "-" and Duration "-". The Job itself stays queued so the
     -- autopilot or user can replan.
@@ -568,7 +568,7 @@ rule WrapperZombieRecovered {
 -- Preflight rejection closes the attempt without running it. The runner's
 -- per-job provenance check (source-data-sync.allium §
 -- RunnerPreflightProvenanceCheck) refused to stamp start_time; the
--- coordinator's batch-status reconciliation closes the attempt as failed
+-- batch-status reconciliation closes the attempt as failed
 -- with NULL start_time / exit_code, end_time = 0, and a populated
 -- failure_reason. The Job itself stays queued so the autopilot or user
 -- can replan it.
@@ -593,7 +593,7 @@ rule PreflightRejectionClosesAttempt {
         --                                    "preflight-rejected" with
         --                                    Exit "-" Duration "-")
         -- The wire-level reconciliation contract (PREFLIGHT_REJECTED line
-        -- → coordinator closure + EventQueueDispatchFailed) lives in
+        -- → sync-side closure + EventQueueDispatchFailed) lives in
         -- status-sync.allium § PreflightRejectionReconciled.
 }
 
@@ -734,7 +734,7 @@ rule SharedWorkdirUploadBarrierBeforeNextJob {
 }
 
 -- ==========================================================================
--- Artifact retrieval (coordinator)
+-- Artifact retrieval (sync)
 -- ==========================================================================
 -- Retrieval commands read the local artifact cache or cloud output objects and
 -- materialize files for the user. Upload behavior is specified above; this
@@ -936,7 +936,7 @@ rule DetectFailureReason {
 --   1. Preserve the 124 exit code through recordPrewarmFailure into the
 --      R2 .complete marker (do not collapse to 1).
 --   2. Mark the rental instance as TerminationReasonInfraFailure and
---      self-destruct, so the coordinator's reconciler resets affected jobs
+--      self-destruct, so Weft's reconciler resets affected jobs
 --      to queued and the autopilot re-places them on a different rental.
 -- Justification: a 1-hour HF/PyPI download timeout almost always signals
 -- rental network throughput problems, not user error. Collapsing 124 to 1

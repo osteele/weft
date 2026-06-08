@@ -51,7 +51,7 @@ type jobSequenceConfig struct {
 	// SelfDestructCmd is the provider-specific shell command that terminates
 	// this instance from inside the container (e.g. `vastai destroy ...`).
 	// Used by infra-failure handlers (setup-timeout prewarm, disk-cap probe,
-	// etc.) to terminate the rental and let the coordinator's reconciler
+	// etc.) to terminate the rental and let Weft's reconciler
 	// retry the affected jobs on a fresh instance.
 	SelfDestructCmd string
 }
@@ -664,7 +664,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			// Setup-phase timeout (exit 124) at this boundary almost always
 			// indicates infrastructure trouble (rental network throughput,
 			// HF/PyPI reachability) rather than user code. Mark the instance
-			// infra_failure and self-destruct so the coordinator's reconciler
+			// infra_failure and self-destruct so Weft's reconciler
 			// resets affected jobs to queued and the autopilot re-places them
 			// on a different rental. See specs/job-lifecycle.allium.
 			if prewarm.exitInfo.ExitCode == runner.ExitCodeSetupTimeout && cfg.SelfDestructCmd != "" {
@@ -756,7 +756,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// Defense in depth: if the runner returned an error and didn't leave a
 		// failure_reason / completion.json behind, synthesize stubs so the
-		// "why" reaches the coordinator (and the DB) instead of being silently
+		// "why" reaches local sync (and the DB) instead of being silently
 		// dropped. Without this, a runner-level start failure produces an
 		// instance whose status reads "exit 1" with nothing else.
 		ensureFailureArtifacts(cfg.LogDir, job.ID, ei, err)
@@ -766,7 +766,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// (which captures the stderr message from runJobWithProgress) in R2.
 		uploadOpslog(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir)
 
-		// Write .complete marker synchronously so the coordinator sees
+		// Write .complete marker synchronously so local sync sees
 		// this job as finished before the next job's .started marker.
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
 
@@ -1154,7 +1154,7 @@ func snapshotLogDir(logDir string, jobID int64) (string, error) {
 // ensureFailureArtifacts writes a stub failure_reason and completion.json when
 // the runner returned an error or non-zero exit code without leaving them
 // behind itself. This catches early returns from RunSingleJob (e.g. setup
-// failures that didn't reach the normal completion path) so the coordinator
+// failures that didn't reach the normal completion path) so local sync
 // has something to ingest into job_attempts.failure_reason instead of
 // surfacing only "exit 1" with no diagnosis.
 func ensureFailureArtifacts(logDir string, jobID int64, ei runner.ExitInfo, runErr error) {

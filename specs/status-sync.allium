@@ -460,11 +460,11 @@ rule RemoteJobResumed {
 }
 
 -- ==========================================================================
--- Preflight rejection (runner → agent → coordinator)
+-- Preflight rejection (runner → agent → sync)
 -- ==========================================================================
 
--- The agent's `batch-status` subcommand, called by the coordinator over
--- SSH, detects the runner's preflight rejection sentinel
+-- The agent's `batch-status` subcommand, called by Weft over SSH, detects
+-- the runner's preflight rejection sentinel
 -- (<jobid>.preflight_rejected in the agent's log dir) and emits a wire
 -- line distinct from COMPLETED, carrying the failure_reason text the
 -- runner wrote alongside the sentinel.
@@ -497,7 +497,7 @@ rule AgentBatchStatusReportsPreflightRejection {
         --                                 § PreflightRejected).
 }
 
--- Coordinator handling for PREFLIGHT_REJECTED. The attempt is closed as
+-- Sync-side handling for PREFLIGHT_REJECTED. The attempt is closed as
 -- failed with exit_code = NULL and end_time = 0; the job stays queued
 -- (no RecordJobCompletion call). A dedup-windowed
 -- EventQueueDispatchFailed lifecycle event is inserted so `weft job
@@ -896,7 +896,7 @@ invariant ProcessedMarkerIsPerAttempt {
     @guidance
         -- Implementation: HasUnprocessedComplete in internal/r2/client.go;
         -- gated at internal/syncorch/cloud_results.go and
-        -- internal/coordinator/vastai_sweep.go. Pairing helper:
+        -- the deprecated internal/coordinator/vastai_sweep.go. Pairing helper:
         -- r2.PairedProcessedKey(completeKey).
         --
         -- Regression: TestJobMarkers_HasUnprocessedComplete_NewAttemptAfter
@@ -951,7 +951,7 @@ rule AgentReportsHeartbeat {
         -- Written to: instance/<instanceID>/heartbeat
         -- JSON with: timestamp, phase, GPU utilization, GPU memory,
         -- GPU temperature, host RSS, host total memory, disk free/total.
-        -- Read by coordinator to detect stale/dead agents and disk full.
+        -- Read by sync to detect stale/dead agents and disk full.
         --
         -- A separate, sample-free liveness key is written before any
         -- expensive sample collection on each tick:
@@ -1071,7 +1071,7 @@ rule NormalizePendingPlacementAfterLaunchProgress {
         -- Normalize pending_status to queued unless the latest attempt is a
         -- completed non-orphaned/non-canceled cloud outcome.
         -- This prevents jobs from being shown as "launching" forever when
-        -- launch status has already advanced and coordinator updates lag.
+        -- launch status has already advanced and sync updates lag.
 }
 
 -- R2 completion can authoritatively override terminal job states.
@@ -1454,7 +1454,7 @@ rule TUIPeriodicSync {
 -- ==========================================================================
 
 -- Cloud sync lease: prevents redundant provider API calls when multiple
--- commands, TUIs, monitors, or coordinators run simultaneously.
+-- commands, TUIs, monitors, or legacy coordinator paths run simultaneously.
 rule CloudSyncLease {
     when: CloudSyncRequested()
 

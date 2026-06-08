@@ -318,7 +318,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			if len(updates) == 0 {
 				fmt.Printf("No changes made to job %s\n", ids.FormatJobID(jobID))
 			} else {
-				fmt.Printf("Updated job %s via coordinator relay:\n", ids.FormatJobID(jobID))
+				fmt.Printf("Updated job %s via legacy relay:\n", ids.FormatJobID(jobID))
 				for _, u := range updates {
 					fmt.Printf("  %s\n", u)
 				}

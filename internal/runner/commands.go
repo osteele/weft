@@ -150,7 +150,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 					// archive would rename live .heartbeat/.timeseries/.pid
 					// out from under the running monitor. A duplicate OpAdd
 					// for a live job is legitimate (host_sync forward
-					// reconcile, coordinator retries) — mergeResourceFields
+					// reconcile, retry paths) — mergeResourceFields
 					// in writeJobFile already covers that case.
 					if cp.logDir != "" && !cp.jobIsLive(state, cmd.Job.ID) {
 						if err := ArchiveExistingFiles(cp.logDir, cmd.Job.ID); err != nil {

@@ -641,7 +641,7 @@ func TestProcessCommands_Add_ArchivesPriorArtifactsForNewRun(t *testing.T) {
 // TestProcessCommands_Add_SkipsArchiveForLiveJob verifies that a duplicate
 // OpAdd for a job currently in state.Running does not rename the live
 // attempt's in-flight artifacts (.heartbeat, .timeseries.jsonl, .pid, …).
-// Duplicate OpAdds are legitimate (host_sync forward reconcile, coordinator
+// Duplicate OpAdds are legitimate (host_sync forward reconcile, retry
 // retries) — mergeResourceFields in writeJobFile already handles them.
 func TestProcessCommands_Add_SkipsArchiveForLiveJob(t *testing.T) {
 	dir := t.TempDir()

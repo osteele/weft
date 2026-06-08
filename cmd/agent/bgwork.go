@@ -253,7 +253,7 @@ func (m *bgWorkManager) CleanupWorkdirs() {
 }
 
 // reuploadCompletion reads the patched completion.json from the log snapshot
-// and writes it back to R2 so the coordinator sees the final upload metadata.
+// and writes it back to R2 so local sync sees the final upload metadata.
 func reuploadCompletion(bucket string, jobID, runID int64, snapshotDir string) {
 	paths := runner.NewJobPaths(snapshotDir, jobID)
 	data, err := os.ReadFile(paths.Completion)

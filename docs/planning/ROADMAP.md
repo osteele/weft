@@ -1,5 +1,9 @@
 # Campaign System Roadmap
 
+> Status note: this is a planning document. Older bullets may mention a
+> coordinator service; current operation uses local CLI/TUI sync, autopilot,
+> and durable agents instead of an always-on coordinator daemon.
+
 Gaps between weft's campaign system and llm-performance-models' Vast.ai
 management. Filling these would let llm-performance-models run on top of weft
 instead of maintaining its own provisioning infrastructure.

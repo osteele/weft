@@ -27,7 +27,7 @@ func fetchDiskFailureReportFromR2(r2Client *r2.Client, instanceID int64) (data [
 }
 
 // diskFailureReport mirrors the agent's disk failure report structure
-// for the fields we need on the coordinator side.
+// for the fields we need during sync-side reconciliation.
 type diskFailureReport struct {
 	HFCacheModels []hfCacheEntry `json:"hf_cache_models"`
 }

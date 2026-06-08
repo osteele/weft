@@ -63,7 +63,7 @@ cause is that the working copy was moved off the revision that holds the file.
 ## Declaring data dependencies
 
 Jobs that need HuggingFace models, datasets, or other data assets should declare
-them with `--input`. The coordinator uses these declarations to:
+them with `--input`. Weft uses these declarations to:
 
 1. **Pick the best host** — prefer hosts that already have the data cached
 2. **Pre-stage data** — rsync assets from another host if needed
@@ -85,8 +85,8 @@ Use `hf:<repo>` for Hugging Face model repositories and
 `hf:`, Weft treats it as a model and the Hugging Face model lookup can fail
 before staging starts.
 
-If the model is on atlas but not titan, the coordinator places the job on
-atlas. If neither host has it, the coordinator can download it before the job
+If the model is on atlas but not titan, Weft places the job on
+atlas. If neither host has it, Weft can download it before the job
 starts using `huggingface-cli`, after checking that the target HF cache volume
 has enough free space. When you want to warm a cache ahead of time or ensure a
 specific host has the asset, use `weft data fetch`; you do not need a separate
@@ -206,7 +206,7 @@ directory publishing is planned. R2 must be configured.
 ### Declaring outputs
 
 Use `--output` to declare what a job produces. This lets downstream jobs find
-the data and lets the coordinator pre-stage it to the right host:
+the data and lets Weft pre-stage it to the right host:
 
 ```
 laptop$ weft run titan \
@@ -221,11 +221,11 @@ laptop$ weft run atlas \
   -m "Analyze traces on A100" \
   'uv run python scripts/analyze_traces.py --input ~/outputs/traces/entropy-sweep/'
 # Job 4675 queued (depends on 4674)
-# Coordinator rsyncs traces from titan → atlas before starting
+# Weft rsyncs traces from titan → atlas before starting
 ```
 
-The coordinator handles the cross-host rsync automatically. You declare what the
-job needs and what it produces; the coordinator figures out the rest.
+Weft handles the cross-host rsync automatically. You declare what the
+job needs and what it produces; Weft figures out the rest.
 
 ### Script metadata
 

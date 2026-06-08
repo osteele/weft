@@ -3239,7 +3239,7 @@ func formatQuickLaunchEventLine(event campaign.LaunchEvent) string {
 // effectiveBlockedDetail merges the freshest structured blocked breakdown for
 // every unplaced job. The in-memory result of this session's last autopilot
 // pass takes precedence; the persisted placement_blocked column covers jobs no
-// local pass has seen yet (before the first pass, or when the coordinator ran
+// local pass has seen yet (before the first pass, or when another sync path ran
 // the pass).
 func (m listTUIModel) effectiveBlockedDetail() map[int64]*blockreason.Structured {
 	detail := make(map[int64]*blockreason.Structured)

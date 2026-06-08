@@ -536,6 +536,6 @@ weft instance launch --dry-run
 - [Workflow Guide](../guides/workflow-guide.md)
 - [Campaigns](../guides/campaigns.md)
 - [Architecture](../design/architecture.md)
-- [Coordinator Architecture](../design/coordinator-architecture.md)
+- [Deprecated Coordinator Architecture](../design/coordinator-architecture.md)
 - [Placement Telemetry](../design/placement-telemetry.md)
 - [Future Ideas](../planning/IDEAS.md)

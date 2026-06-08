@@ -59,7 +59,7 @@ func (m Model) requeueJobCmd(job *db.Job, mkMsg func(int64, bool, error) tea.Msg
 		if _, relayClient, err := m.coordinatorRelay(); err != nil {
 			return mkMsg(job.ID, false, err)
 		} else if relayClient != nil {
-			// Relay path: update DB locally, then notify coordinator
+			// Relay path: update DB locally, then notify the legacy relay target.
 			if err := db.RequeueByID(database, job.ID); err != nil {
 				return mkMsg(job.ID, false, err)
 			}

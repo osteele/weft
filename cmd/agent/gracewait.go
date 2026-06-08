@@ -188,7 +188,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		// otherwise a resubmitted job that runs longer than the
 		// remaining grace causes self-destruction the instant it
 		// finishes (and leaves grace_deadline < grace_started_at on
-		// the coordinator side once the next grace entry refreshes
+		// the sync side once the next grace entry refreshes
 		// grace_started_at against a stale R2 deadline).
 		jobStart := time.Now()
 		seqResult := runJobSequence(jobs, jobSequenceConfig{
@@ -216,7 +216,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 
 		// Some jobs failed — resume waiting. Write the refreshed
 		// status (with extended deadline) BEFORE writing phase=grace
-		// so the coordinator can't observe phase=grace with a stale
+		// so sync can't observe phase=grace with a stale
 		// deadline still in R2.
 		fmt.Printf("Some jobs failed. Resuming grace period until %s\n", deadline.Format(time.RFC3339))
 		writeGraceStatus(r2Bucket, prefix, graceStatus{
@@ -274,7 +274,7 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 	}
 
 	// The .complete marker is written synchronously in runJobSequence
-	// (before background uploads start) so the coordinator sees jobs
+	// (before background uploads start) so sync sees jobs
 	// finish in order. This function only handles result uploads.
 	return summary
 }

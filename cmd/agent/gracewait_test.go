@@ -11,7 +11,7 @@ import (
 // then running resubmitted jobs against that same clock. A 21-minute
 // resubmitted job inside a 15-minute grace window caused the agent to
 // self-destruct the instant the job finished, even though the grace clock
-// should only count idle wait time between failures. On the coordinator
+// should only count idle wait time between failures. On the sync side
 // side this produced `grace_deadline < grace_started_at` in the launches
 // table (deadline frozen from the original R2 payload; grace_started_at
 // refreshed by the next reconcile pass).

@@ -5,9 +5,9 @@ import (
 )
 
 func TestCheckDiskCap_Disabled(t *testing.T) {
-	// requestedDiskGB=0 means the coordinator didn't populate the field
-	// (older coordinator, or local backend). Probe must be a no-op so we
-	// don't terminate instances launched by older coordinators.
+	// requestedDiskGB=0 means the launcher didn't populate the field
+	// (older Weft, or local backend). Probe must be a no-op so we
+	// don't terminate instances launched by older versions.
 	if checkDiskCap("", 0, 0, t.TempDir(), "") {
 		t.Fatal("checkDiskCap returned true with requested=0; should skip")
 	}

@@ -13,7 +13,7 @@ import (
 
 func TestCheckInstance_GraceExpired_ForceDestroyAfterTimeout(t *testing.T) {
 	// Grace expired well past the shutdown timeout — no termination intent from agent.
-	// Coordinator should force-destroy.
+	// Weft should force-destroy.
 	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
@@ -46,7 +46,7 @@ func TestCheckInstance_GraceExpired_ForceDestroyAfterTimeout(t *testing.T) {
 
 func TestCheckInstance_GraceExpired_WaitForAgentShutdown(t *testing.T) {
 	// Grace expired recently (within shutdown timeout) and no termination intent.
-	// Coordinator should wait, not destroy.
+	// Weft should wait, not destroy.
 	recentDeadline := time.Now().Add(-30 * time.Second).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{

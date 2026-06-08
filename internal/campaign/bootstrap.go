@@ -250,7 +250,7 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 	writeStageMarker(b, manifest.DBInstanceID, "ready")
 
 	// Write ready marker to R2
-	b.WriteString("# Signal readiness to coordinator\n")
+	b.WriteString("# Signal readiness to Weft\n")
 	b.WriteString(fmt.Sprintf(
 		"echo 'ready' | rclone rcat \"r2:$R2_BUCKET/donor/%s/.ready\"\n",
 		manifest.DonorID,

@@ -442,7 +442,7 @@ rule ResyncAfterRemediation {
 --   * <jobid>.preflight_rejected — sentinel carrying the rejection ts
 -- The status file, meta file, and log header are NOT written. The job
 -- file is removed from the runner queue so the runner does not retry it.
--- The job remains queued in the coordinator's view, so the autopilot or
+-- The job remains queued in Weft's view, so the autopilot or
 -- user can replan it.
 --
 -- R2-isolated jobs (queue entry has source_r2_key) skip the marker
@@ -497,8 +497,8 @@ rule RunnerPreflightProvenanceCheck {
 
 -- Record a preflight rejection. No JobAttempt fields are mutated here;
 -- the runner just writes the two sidecar files and removes the job
--- from its queue. The corresponding attempt closure on the coordinator
--- side lives in status-sync.allium (PreflightRejectionReconciled).
+-- from its queue. The corresponding attempt closure on the sync side lives
+-- in status-sync.allium (PreflightRejectionReconciled).
 rule PreflightRejected {
     when: PreflightRejected(job, outcome, reason)
 
@@ -514,7 +514,7 @@ rule PreflightRejected {
         -- wire, distinct from the COMPLETED line. See status-sync.allium
         -- § AgentBatchStatusReportsPreflightRejection for the wire
         -- contract and § PreflightRejectionReconciled for what the
-        -- coordinator does with it.
+        -- sync path does with it.
 }
 
 -- ==========================================================================
@@ -1071,8 +1071,8 @@ invariant DeclaredInputsCoverDownloads {
 -- Surfaces
 -- ==========================================================================
 
--- The boundary between weft (the scheduler running on the coordinator)
--- and the cloud agent (running on a rental instance). weft fulfils the
+-- The boundary between Weft's local sync/launch path and the cloud agent
+-- (running on a rental instance). Weft fulfils the
 -- staging contract; the agent demands it by refusing to start a job
 -- whose declared inputs are not all resolvable.
 surface AgentStagingInterface {

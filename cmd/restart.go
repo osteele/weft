@@ -829,7 +829,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Restarted job %s via coordinator relay\n", ids.FormatJobID(jobID))
+		fmt.Printf("Restarted job %s via legacy relay\n", ids.FormatJobID(jobID))
 		fmt.Printf("  Status: %s → queued\n", oldStatus)
 		printRestartModeLine()
 		if ack != nil && ack.Message != "" {

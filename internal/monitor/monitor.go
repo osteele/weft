@@ -145,7 +145,7 @@ type Monitor struct {
 
 	hostRefreshing sync.Map // host name → struct{}, guards concurrent refreshHostInfo
 
-	// Optional embedded coordinator services
+	// Optional embedded legacy services
 	appConfig  *config.Config
 	remediator *services.Remediator
 	svcCancel  context.CancelFunc
@@ -165,8 +165,8 @@ func New(database *sql.DB, cfg Config) *Monitor {
 }
 
 // EnableRemediation starts the remediator service that diagnoses failed jobs
-// and attempts auto-remediation. This enables coordinator-level diagnostics
-// without requiring a separate coordinator daemon.
+// and attempts auto-remediation. This enables shared diagnostics without
+// requiring the deprecated coordinator daemon.
 func (m *Monitor) EnableRemediation(appConfig *config.Config) {
 	logger := slog.Default().With("component", "remediator")
 	m.EnableRemediationWithLogger(appConfig, logger)
@@ -221,7 +221,7 @@ func (m *Monitor) Start() {
 	m.wg.Add(1)
 	go m.runJobDetailTicker()
 
-	// Start optional embedded coordinator services
+	// Start optional embedded legacy services
 	if m.remediator != nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		m.svcCancel = cancel

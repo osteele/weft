@@ -25,8 +25,7 @@ Use **weft** when:
   rentals
 - You need data-locality-aware placement, runtime estimates, rental setup-cost
   estimates, and survival-risk-adjusted cloud offer selection
-- You want jobs to keep running when your laptop sleeps, VPN drops, or the
-  coordinator is temporarily unreachable
+- You want jobs to keep running when your laptop sleeps or VPN drops
 - You need automatic relaunch, stall detection, and runaway protection for
   unreliable rental instances
 
@@ -50,13 +49,13 @@ surface above it.
 
 | Aspect | weft | SLURM |
 |--------|------|-------|
-| **Architecture** | Federated SSH/coordinator model for unmanaged hosts and cloud rentals | Centralized cluster management |
+| **Architecture** | Federated CLI/TUI, SSH, queue-runner, and cloud-agent model for unmanaged hosts and cloud rentals | Centralized cluster management |
 | **Capacity model** | Inventory hosts, existing cloud instances, and new rental offers | Fixed managed nodes grouped into partitions |
-| **Controller** | Optional coordinator plus CLI fallback; edge runners/agents keep jobs moving | `slurmctld` controller plus `slurmd` on each node |
-| **Database** | SQLite on the client/coordinator, remote queue state, and cloud live-state markers | Cluster-wide controller/accounting state |
+| **Controller** | Local CLI/TUI/autopilot; edge runners/agents keep jobs moving | `slurmctld` controller plus `slurmd` on each node |
+| **Database** | Local SQLite, remote queue state, and cloud live-state markers | Cluster-wide controller/accounting state |
 | **Communication** | SSH, provider APIs, and R2/live-state sync where needed | Nodes continuously report to controller |
 | **Failure model** | Unreliable hosts and rentals are expected; retry, relaunch, survival scoring, and deferred operations are part of the workflow | Nodes are managed by the cluster; failures are handled inside an administrative domain |
-| **Client requirements** | SSH/provider credentials; coordinator is useful but optional | Access to the SLURM login/controller network |
+| **Client requirements** | SSH/provider credentials; no always-on controller required | Access to the SLURM login/controller network |
 | **Daemon installation** | Queue runner or agent is deployed as needed per host/instance | Daemons must be installed and configured on all nodes |
 | **Resource enforcement** | Cooperative placement and queue-runner concurrency; no cgroup reservation | Scheduler-enforced CPU, GPU, memory, and wall-time limits |
 | **SLURM integration** | Optional `sbatch`/`squeue`/`scancel` backend | Native |
@@ -70,13 +69,11 @@ The core difference is where authority and failure recovery live.
 ```text
 Laptop CLI/TUI
    │
-   ├──intent──> Coordinator (when reachable)
-   │              ├── scores lab hosts
-   │              ├── reuses existing rentals
-   │              ├── launches Vast.ai/RunPod rentals
-   │              └── records placement reasons
-   │
-   └──fallback──> Direct SSH placement/dispatch
+   ├── scores lab hosts
+   ├── reuses existing rentals
+   ├── launches Vast.ai/RunPod rentals
+   ├── dispatches via SSH / queue files / R2
+   └── records placement reasons
 
 Lab host or rental instance
    ├── queue runner / weft agent
@@ -85,7 +82,7 @@ Lab host or rental instance
    └── cloud live-state / result sync when applicable
 ```
 
-When the laptop or coordinator disconnects, already-dispatched jobs keep
+When the laptop disconnects, already-dispatched jobs keep
 running. Deferred operations replay when contact returns. Rental launches can be
 watched, diagnosed, retried, and replaced without assuming the original instance
 will survive.
@@ -113,7 +110,7 @@ designed to be one administered system.
 
 **weft:**
 
-- Jobs may omit a host; the coordinator or local fallback scores eligible
+- Jobs may omit a host; Weft scores eligible
   inventory hosts, existing cloud instances, and possible new rental instances
 - Placement uses GPU constraints (`--gpu`, `--gpu-class`, `--gpu-mem`), CPU
   allotment, queue depth, live utilization, data locality, transfer estimates,
@@ -277,7 +274,7 @@ sbatch --array=1-100%10 sweep.sh
 | Feature | weft | SLURM |
 |---------|------|-------|
 | **Submit job** | `weft run <cmd>` or `weft run <host> <cmd>` | `sbatch script.sh` |
-| **Automatic placement** | Omit host; coordinator/fallback scores targets | Scheduler allocates nodes from requested resources |
+| **Automatic placement** | Omit host; Weft scores targets | Scheduler allocates nodes from requested resources |
 | **Force rental** | `weft run --tag rental --gpu a100 <cmd>` | Site-specific cloud integration |
 | **Interactive work** | `ssh <host>` or connect to instance | `srun --pty bash` |
 | **Job array** | Not supported | `--array=1-100` |
@@ -299,7 +296,7 @@ sbatch --array=1-100%10 sweep.sh
 
 - Grouped TUI for jobs, unplaced work, launching instances, running jobs, and
   completions
-- Web dashboard for cluster view, coordinator status, GPU utilization, placement
+- Web dashboard for cluster view, GPU utilization, placement
   decisions, and job details
 - Real-time CPU/GPU stats for running jobs
 - Progress tracking from job logs (`Progress: N%`, `Progress: N/M`, tqdm-style

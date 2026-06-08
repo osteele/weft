@@ -82,7 +82,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	mon := monitor.New(database, monCfg)
 
 	// Enable embedded remediation so failed jobs get diagnosed
-	// even without the coordinator daemon running.
+	// without requiring the deprecated coordinator daemon.
 	mon.EnableRemediationWithLogger(cfg, logging.Discard())
 
 	// Suppress log output and capture stdout/stderr while the TUI runs to

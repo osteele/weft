@@ -529,7 +529,7 @@ reconciliation owns success or rollback.
      preventing I/O interference with measurements.
 4. **Result upload**: After each job, the wrapper uploads results (logs,
    completion record, timeseries, phases) to R2 under `jobs/<job-id>/`.
-5. **Sweep**: The coordinator's sweep loop polls R2 for completed markers,
+5. **Sweep**: The local sync/autopilot sweep polls R2 for completed markers,
    downloads results, extracts phase timings and GPU stats into the
    `job_phase_timings` table, updates job statuses, and cleans up R2.
 6. **Teardown**: The instance self-destructs after the wrapper completes.

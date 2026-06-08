@@ -39,7 +39,7 @@ const (
 	ActionTerminalLivePhase                        // live phase reports running job that is already terminal in DB
 )
 
-// graceShutdownTimeout is how long after the grace deadline the coordinator
+// graceShutdownTimeout is how long after the grace deadline Weft
 // waits for the agent to write a termination intent before force-destroying.
 // The agent normally self-destructs within seconds of its deadline; this
 // timeout is a safety net for unresponsive agents.
@@ -246,7 +246,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// "failed" instead.
 	//
 	// Instead of immediately destroying, we give the agent time to shut down
-	// gracefully (upload logs, write termination intent). The coordinator
+	// gracefully (upload logs, write termination intent). Weft
 	// only force-destroys after graceShutdownTimeout with no agent response.
 	if ci.Status == db.LaunchStatusGrace && ci.GraceDeadline != nil && p.Now.Unix() > *ci.GraceDeadline {
 		if p.TerminationIntent != nil {

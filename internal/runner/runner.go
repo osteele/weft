@@ -504,7 +504,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		// before startTime is stamped so a rejection isn't recorded as a
 		// 0-second "completed" attempt. On failure: write the
 		// failure_reason file (read by the agent's batch-status) and the
-		// preflight_rejected sentinel (signals to the coordinator that
+		// preflight_rejected sentinel (signals to sync that
 		// this attempt never started), then return.
 		markerSHA, err := srcsync.ReadSourceMarkerForJob(expandedDir, jobID)
 		if err != nil {
@@ -545,7 +545,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 
-	// Write gpu_devices to meta file so the coordinator can discover them
+	// Write gpu_devices to meta file so sync can discover them
 	if len(gpuDevices) > 0 {
 		if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 			fmt.Fprintf(f, "gpu_devices=%s\n", strings.Join(gpuDevices, ","))
@@ -673,7 +673,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 // attempt as started. It writes the failure_reason file and a
 // preflight_rejected sentinel (no status file, no meta, no log header), emits
 // oplog.OpJobStartFailed, and removes the job from the runner queue so it
-// won't be re-attempted on the next sweep. The coordinator's batch-status
+// won't be re-attempted on the next sweep. The batch-status
 // reconciler picks up the sentinel and closes the attempt with NULL
 // timestamps and the populated failure reason.
 func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason string) error {

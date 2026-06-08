@@ -22,7 +22,7 @@ type ErrorDiagnosis struct {
 	Message           string         `json:"message"`                // human-readable summary
 	Solution          string         `json:"solution,omitempty"`     // next action to make the job runnable
 	MissingAssets     []string       `json:"missing_assets"`         // for data errors: ["hf:meta-llama/Llama-3-8B"]
-	Remediable        bool           `json:"remediable"`             // can the coordinator auto-fix this?
+	Remediable        bool           `json:"remediable"`             // can Weft auto-fix this?
 	Details           string         `json:"-"`                      // raw error text that matched
 	StructuredDetails map[string]any `json:"-"`                      // per-pattern structured detail object
 	DetectedBy        string         `json:"detected_by,omitempty"`  // "agent", "wrapper", "post", "backfill"

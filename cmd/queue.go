@@ -883,7 +883,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		_ = db.SetQueuedAtBefore(database, jobID, job.Host)
-		fmt.Printf("Job %s submitted to coordinator to move to the front on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
+		fmt.Printf("Job %s submitted via legacy relay to move to the front on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
 		return nil
 	}
 
@@ -1356,7 +1356,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Updated job %s via coordinator relay\n", ids.FormatJobID(jobID))
+		fmt.Printf("Updated job %s via legacy relay\n", ids.FormatJobID(jobID))
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
 		}

@@ -279,7 +279,7 @@ entity Instance {
 -- ==========================================================================
 
 -- Grace period control messages exchanged via R2 object storage
--- between the coordinator (laptop) and the agent (cloud instance).
+-- between Weft's local control path and the agent (cloud instance).
 
 value GraceJobsRequest {
     jobs: List<jobs/Job>
@@ -954,8 +954,8 @@ rule BeginLaunching {
         -- (injectNonInteractiveSSHOptions).
 
         -- Provider credentials fall back to the provider's standard
-        -- config file. Agent launchers (coordinator daemon, autopilot
-        -- sync loop, interactive CLI) MUST load provider credentials
+        -- config file. Agent launchers (autopilot sync loop,
+        -- interactive CLI, or legacy coordinator path) MUST load provider credentials
         -- from the provider's conventional config path when the
         -- corresponding environment variable is absent — e.g. RunPod
         -- loads RUNPOD_API_KEY from ~/.runpod/config.toml if not in
@@ -991,7 +991,7 @@ rule InstanceStartsRunning {
 -- The manifest carries:
 --   * requested_disk_gb: the container disk weft asked the provider for
 --     (matches Instance.disk_gb). Zero means "skip the disk-cap probe" —
---     used by older coordinators and the local backend that don't
+--     used by older Weft versions and the local backend that don't
 --     populate this field.
 --   * for each job, an `inputs` list of declared asset refs (the union
 --     across all jobs in the manifest is the instance's allowed asset
@@ -1035,7 +1035,7 @@ rule HFCacheHygiene {
 
 rule DiskCapProbe {
     when: AgentBoots(instance)
-    requires: manifest.requested_disk_gb > 0   -- skipped on older coordinators
+    requires: manifest.requested_disk_gb > 0   -- skipped on older launchers
 
     -- The agent runs `df` on the container disk and compares the total
     -- capacity to the manifest's requested_disk_gb. If actual total is
@@ -1202,7 +1202,7 @@ rule ExtendGracePeriod {
     ensures: instance.grace_deadline = instance.grace_deadline + additional_duration
 
     @guidance
-        -- Coordinator writes duration string to R2 at
+        -- Weft writes duration string to R2 at
         -- grace/<instanceID>/extend/<requestID>.txt.
         -- Agent reads and updates its local deadline.
         -- Default extension: 15 minutes.
@@ -1217,7 +1217,7 @@ rule ReleaseGraceInstance {
     ensures: instance.ended_at = now
 
     @guidance
-        -- Coordinator writes to grace/<instanceID>/release/<requestID>.txt.
+        -- Weft writes to grace/<instanceID>/release/<requestID>.txt.
         -- Agent self-destructs cleanly.
 }
 
@@ -1237,7 +1237,7 @@ rule GracePeriodExpires {
         ensures: instance.ended_at = now
 
     @guidance
-        -- After grace deadline passes, the coordinator waits up to
+        -- After grace deadline passes, Weft waits up to
         -- grace_shutdown_timeout (2 min) for the agent to write its
         -- termination intent and upload final logs. Only force-destroys
         -- the provider instance if no agent response after the window.
@@ -2851,14 +2851,14 @@ invariant ResubmittedJobRuntimeDoesNotConsumeGrace {
     -- jobStart before runJobSequence and calls
     -- extendGraceDeadlineForJobs(deadline, jobStart, now) after.
     -- The refreshed deadline is written to R2 BEFORE phase=grace
-    -- so the coordinator never reads phase=grace alongside a
+    -- so sync never reads phase=grace alongside a
     -- stale deadline.
     --
     -- Violating this invariant produces the wj2297 failure mode
     -- (2026-05-31): a 21-min resubmitted job inside a 15-min
     -- grace window caused the agent to self-destruct the instant
     -- the job finished, and left grace_deadline < grace_started_at
-    -- on the coordinator side after the next reconcile refresh.
+    -- on the sync side after the next reconcile refresh.
     for instance in Instances:
         if instance.status = grace:
             instance.grace_deadline >= instance.grace_started_at
@@ -3002,7 +3002,7 @@ rule AutoPilotManualResume {
 --      all weft processes that share the database. A pass holder
 --      heartbeats every few seconds; an aged-out claim is reclaimed.
 --   2. Pause: a sticky `paused` flag halts every autopilot runner
---      (list TUI, watch TUI, future coordinator daemon) without
+--      (list TUI, watch TUI, autopilot, sync loop) without
 --      requiring any process to exit. This is the single, global
 --      autopilot enabled/disabled state — there is no per-TUI toggle.
 --

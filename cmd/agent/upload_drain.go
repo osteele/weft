@@ -175,9 +175,9 @@ var (
 // Upload-stall self-destruct: when R2 uploads stall repeatedly with no
 // successful traffic in between, this instance has lost effective R2
 // connectivity. The wrapper writes failure markers (best-effort, also via
-// R2), but those markers may never reach the coordinator. Rather than wait
+// R2), but those markers may never reach local sync. Rather than wait
 // for the heartbeat-staleness reconciler to notice (which can take hours),
-// the agent triggers its own teardown so the coordinator can place jobs on
+// the agent triggers its own teardown so Weft can place jobs on
 // a fresh instance with working network.
 //
 // Trigger policy (both must be true):

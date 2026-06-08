@@ -297,7 +297,7 @@ func TestStartJob_SourceProvenanceMismatchFails(t *testing.T) {
 
 	paths := NewJobPaths(r.logDir, jobID)
 	// Preflight rejection must NOT write a status file. A status file would
-	// surface to the coordinator as exit_code=1 / duration=0s, masking the
+	// surface to sync as exit_code=1 / duration=0s, masking the
 	// fact that the attempt never started.
 	if _, statErr := os.Stat(paths.Status); statErr == nil {
 		t.Fatal("preflight rejection wrote a status file; expected none")

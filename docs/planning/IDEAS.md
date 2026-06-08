@@ -1,6 +1,8 @@
 # Future Ideas
 
 Ideas for future enhancements that are not currently prioritized.
+Older ideas may mention a coordinator service as an optional/historical design;
+current operation uses local CLI/TUI sync, autopilot, and durable agents.
 
 ## Disk Full Recovery
 
@@ -82,8 +84,8 @@ Ideas for future enhancements that are not currently prioritized.
 - Intent: run persistent on-prem agents that pull and execute queued work
   without requiring a continuously connected laptop.
 - User benefit: cloud-like autonomy for on-prem hosts.
-- Important design judgment: keep a coordinator optional as an optimization
-  layer for global placement, not a hard dependency for basic execution.
+- Important design judgment: keep any pull-based control layer optional; it
+  must not become a hard dependency for basic execution.
 
 ## Interruptible / Spot Instance Support
 

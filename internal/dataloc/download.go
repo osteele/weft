@@ -275,7 +275,7 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 
 	// Expand PATH so hf/hf_xet and Python tools installed by mise, Homebrew,
 	// or user-local installers are found in non-interactive SSH sessions.
-	// Forward HF token: prefer local coordinator token (so gated models work
+	// Forward HF token: prefer local Weft token (so gated models work
 	// even if the remote host has no token), fall back to the remote host's
 	// cached token file.
 	var tokenExport string
