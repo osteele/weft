@@ -1336,8 +1336,9 @@ const (
 	// failureAwaitingPlacement: the chain is exhausted but the job is
 	// re-queued and waiting for placement — the bucket that needs attention.
 	failureAwaitingPlacement
-	// failureOngoing: the chain is still live, or the job is running again.
-	failureOngoing
+	// failureReplacedRunning: the failed instance's affected work has a live
+	// successor, or the job is running again.
+	failureReplacedRunning
 	// failureSeriesSucceeded: the chain/job ultimately completed.
 	failureSeriesSucceeded
 	// failureDud: the instance never carried a job — it failed before it
@@ -1347,7 +1348,7 @@ const (
 
 // failureOutcomeOrder lists buckets in attention-first display order.
 var failureOutcomeOrder = []failureOutcome{
-	failureSeriesFailed, failureAwaitingPlacement, failureOngoing,
+	failureSeriesFailed, failureAwaitingPlacement, failureReplacedRunning,
 	failureSeriesSucceeded, failureDud,
 }
 
@@ -1361,8 +1362,8 @@ func failureGroupLabel(o failureOutcome) string {
 		return "failed"
 	case failureAwaitingPlacement:
 		return "awaiting placement"
-	case failureOngoing:
-		return "ongoing"
+	case failureReplacedRunning:
+		return "replaced/running"
 	case failureSeriesSucceeded:
 		return "succeeded"
 	default:
@@ -1394,13 +1395,13 @@ func classifyFailureOutcome(f *db.Launch, failures *recentFailedInstances) failu
 		// Chain exhausted (or unknown) — fall through to the job's status.
 	default:
 		// running / paused / grace / launching — the chain is still live.
-		return failureOngoing
+		return failureReplacedRunning
 	}
 	switch failures.jobOutcomeByLaunchID[f.ID].Status {
 	case db.StatusCompleted:
 		return failureSeriesSucceeded
 	case db.StatusRunning, db.StatusStarting:
-		return failureOngoing
+		return failureReplacedRunning
 	case db.StatusQueued, db.StatusPendingPlacement, "orphaned":
 		// "orphaned" is a job_status-view value: the job's instance died and
 		// it is waiting to be re-placed.
@@ -1649,7 +1650,7 @@ func appendRecentFailedInstanceRows(
 	}
 
 	// Attention buckets always render in full.
-	for _, o := range []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureOngoing} {
+	for _, o := range []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureReplacedRunning} {
 		rows = appendGroup(rows, o)
 	}
 
@@ -1720,7 +1721,7 @@ func formatLaunchFailureRow(
 	if detail == "" {
 		detail = "unknown failure"
 	}
-	if outcome == failureOngoing {
+	if outcome == failureReplacedRunning {
 		detail += ", relaunching"
 	}
 
@@ -1747,7 +1748,7 @@ func formatLaunchFailureRow(
 	}
 
 	switch outcome {
-	case failureOngoing, failureSeriesSucceeded, failureDud:
+	case failureReplacedRunning, failureSeriesSucceeded, failureDud:
 		line = failureDimStyle.Render(line)
 	}
 	return line

@@ -1732,13 +1732,13 @@ func TestRenderJobListGroupedStatusPlainAt_RecentFailedInstancesSection(t *testi
 
 	for _, want := range []string{
 		"Recent failed instances — last 10m (3):",
-		"1 failed · 1 awaiting placement · 1 ongoing — last 10m",
+		"1 failed · 1 awaiting placement · 1 replaced/running — last 10m",
 		"failed (1) — 10m ago:",
 		"awaiting placement (1) — 6m ago:",
-		"ongoing (1) — 8m ago:",
+		"replaced/running (1) — 8m ago:",
 		"container exit 1",
 		"agent never reached ready",
-		// An ongoing series annotates the row so the user knows work continues.
+		// A replaced/running series annotates the row so the user knows work continues.
 		"ssh handshake refused, relaunching",
 	} {
 		if !strings.Contains(out, want) {
@@ -1795,7 +1795,7 @@ func TestAppendRecentFailedInstanceRows_ChainTerminalOverridesJobStatus(t *testi
 			{ID: 501, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "y", EndedAt: testInt64Ptr(9_500)},
 		},
 		// Both jobs are currently queued, but the relaunch chain's terminal
-		// launch is authoritative: a live successor ⇒ ongoing, a completed
+		// launch is authoritative: a live successor ⇒ replaced/running, a completed
 		// successor ⇒ succeeded.
 		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
 			500: {JobID: 1, Status: db.StatusQueued},
@@ -1808,7 +1808,7 @@ func TestAppendRecentFailedInstanceRows_ChainTerminalOverridesJobStatus(t *testi
 	}
 
 	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
-	for _, want := range []string{"ongoing (1)", "succeeded (1)"} {
+	for _, want := range []string{"replaced/running (1)", "succeeded (1)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
