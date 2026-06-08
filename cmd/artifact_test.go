@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
@@ -175,7 +176,7 @@ func (s *fakeCloudArtifactStore) DownloadObjectToFileWithIdleTimeout(ctx context
 	return n, nil
 }
 
-func setupLaunchArtifactJob(t *testing.T) *db.Job {
+func setupLaunchArtifactJobWithDB(t *testing.T) (*sql.DB, *db.Job) {
 	t.Helper()
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
@@ -193,6 +194,12 @@ func setupLaunchArtifactJob(t *testing.T) *db.Job {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
+	return database, job
+}
+
+func setupLaunchArtifactJob(t *testing.T) *db.Job {
+	t.Helper()
+	_, job := setupLaunchArtifactJobWithDB(t)
 	return job
 }
 
@@ -239,6 +246,112 @@ func TestFetchCloudArtifactByToken_BasenameMatchesArtifactsConventionOutput(t *t
 	}
 	if got := out.String(); got != "summary\n" {
 		t.Fatalf("stdout = %q, want summary", got)
+	}
+}
+
+func TestRunArtifactCatFallsBackToCloudOutputPath(t *testing.T) {
+	_, job := setupLaunchArtifactJobWithDB(t)
+	runID := int64(0)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/exp049/summary.md": []byte("summary\n"),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runArtifactCat(cmd, []string{strconv.FormatInt(job.ID, 10), "output/exp049/summary.md"}); err != nil {
+		t.Fatalf("runArtifactCat: %v", err)
+	}
+	if got := out.String(); got != "summary\n" {
+		t.Fatalf("stdout = %q, want summary", got)
+	}
+}
+
+func TestRunArtifactCatFallsBackToCloudArtifactsAliasPath(t *testing.T) {
+	_, job := setupLaunchArtifactJobWithDB(t)
+	runID := int64(0)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "artifacts/summary.md": []byte("summary\n"),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runArtifactCat(cmd, []string{strconv.FormatInt(job.ID, 10), "artifacts/summary.md"}); err != nil {
+		t.Fatalf("runArtifactCat: %v", err)
+	}
+	if got := out.String(); got != "summary\n" {
+		t.Fatalf("stdout = %q, want summary", got)
+	}
+}
+
+func TestFetchAllArtifactsDownloadsCachedAndCloudOutputs(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
+	t.Setenv("HOME", t.TempDir())
+	runID := int64(0)
+	sourceDir := t.TempDir()
+	cachedSource := filepath.Join(sourceDir, "cached.txt")
+	if err := os.WriteFile(cachedSource, []byte("cached\n"), 0o644); err != nil {
+		t.Fatalf("write cached source: %v", err)
+	}
+	if err := artifacts.StoreLocalArtifact(database, job.ID, "output/cached.txt", cachedSource); err != nil {
+		t.Fatalf("StoreLocalArtifact: %v", err)
+	}
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/cached.txt": []byte("cloud duplicate\n"),
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/cloud.txt":  []byte("cloud\n"),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	oldOutput := artifactOutput
+	oldParallel := artifactParallel
+	outputDir := t.TempDir()
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	artifactOutput = outputDir
+	artifactParallel = 1
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		artifactOutput = oldOutput
+		artifactParallel = oldParallel
+	})
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := fetchAllArtifactsForJobs(cmd, []int64{job.ID}); err != nil {
+		t.Fatalf("fetchAllArtifactsForJobs: %v", err)
+	}
+
+	cachedDest := filepath.Join(outputDir, ids.FormatJobID(job.ID), "output", "cached.txt")
+	cachedData, err := os.ReadFile(cachedDest)
+	if err != nil {
+		t.Fatalf("read cached dest: %v", err)
+	}
+	if string(cachedData) != "cached\n" {
+		t.Fatalf("cached dest = %q, want cached content", cachedData)
+	}
+
+	cloudDest := filepath.Join(outputDir, ids.FormatJobID(job.ID), "output", "cloud.txt")
+	cloudData, err := os.ReadFile(cloudDest)
+	if err != nil {
+		t.Fatalf("read cloud dest: %v", err)
+	}
+	if string(cloudData) != "cloud\n" {
+		t.Fatalf("cloud dest = %q, want cloud content", cloudData)
 	}
 }
 

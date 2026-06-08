@@ -393,14 +393,14 @@ weft artifact sync wj2073
 # Sync all outstanding artifacts across jobs
 weft artifact sync
 
-# List cached artifacts
+# List cached artifacts and cloud outputs
 weft artifact list wj2073
 
 # Retrieve by name or path
 weft artifact get wj2073 selectivity_results -o ./results.json
 weft artifact get wj2073 output/selectivity_results.json -o ./results.json
 
-# Write artifact to stdout
+# Write artifact or output file to stdout
 weft artifact get wj2073 selectivity_results -o -
 weft artifact cat wj2073 selectivity_results | jq '.metric'
 
