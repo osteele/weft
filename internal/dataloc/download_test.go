@@ -232,6 +232,41 @@ func TestDownloadAssetToHost_FinalCacheScanUsesCallerContext(t *testing.T) {
 	}
 }
 
+func TestDownloadAssetToHost_ReportsIncompleteCacheAfterSuccessfulDownload(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+	origInterval := detachedPollInterval
+	detachedPollInterval = 1 * time.Millisecond
+	t.Cleanup(func() { detachedPollInterval = origInterval })
+
+	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
+		switch {
+		case strings.Contains(command, "df -Pk"):
+			return "123456789\n", "", nil
+		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+			return "OK\n", "", nil
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "STATUS=0\n---STDERR---\n", "", nil
+		case strings.Contains(command, "_dirs=()") && strings.Contains(command, "du -sb"):
+			return "2276341\tincomplete\t/home/test/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B-Instruct\n", "", nil
+		default:
+			return "", "", fmt.Errorf("unexpected command in test mock: %s", command)
+		}
+	}
+
+	_, err := DownloadAssetToHost(context.Background(), "cool30", DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3.1-8B-Instruct"}, "main")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "cache entry on cool30 is incomplete after download") {
+		t.Fatalf("unexpected error: %q", msg)
+	}
+	if strings.Contains(msg, "downloaded on cool30 but not found") {
+		t.Fatalf("error should not use misleading not-found wording: %q", msg)
+	}
+}
+
 // TestRunDetachedRemoteCommand_CancelKillsRemote verifies that when the
 // caller's context is cancelled mid-poll, the helper sends a SIGTERM to
 // the remote PID before returning ctx.Err(). Without this, weft data fetch

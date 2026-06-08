@@ -36,12 +36,10 @@ func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
 // ScanHFCacheDetailedContext is ScanHFCacheDetailed with caller-provided
 // cancellation and timeout control for the remote scan command.
 func ScanHFCacheDetailedContext(ctx context.Context, host string) ([]HostDataEntry, error) {
-	cmd := hfCacheScanCommand()
-	stdout, _, err := hostCommandRunner(ctx, host, cmd)
+	results, err := scanHFCacheResultsContext(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
+		return nil, err
 	}
-	results := parseHFCacheDetailedOutput(stdout)
 	entries := make([]HostDataEntry, 0, len(results))
 	for _, r := range results {
 		if r.Status != "ok" {
@@ -49,14 +47,18 @@ func ScanHFCacheDetailedContext(ctx context.Context, host string) ([]HostDataEnt
 				"host", host, "asset", r.Asset.Ref(), "path", r.Path, "status", r.Status)
 			continue
 		}
-		entries = append(entries, HostDataEntry{
-			Host:      host,
-			Asset:     r.Asset,
-			Path:      r.Path,
-			SizeBytes: r.SizeBytes,
-		})
+		entries = append(entries, hostDataEntryFromScanResult(host, r))
 	}
 	return entries, nil
+}
+
+func scanHFCacheResultsContext(ctx context.Context, host string) ([]hfScanResult, error) {
+	cmd := hfCacheScanCommand()
+	stdout, _, err := hostCommandRunner(ctx, host, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
+	}
+	return parseHFCacheDetailedOutput(stdout), nil
 }
 
 func hfCacheScanCommand() string {
@@ -103,6 +105,15 @@ type hfScanResult struct {
 	Path      string
 	SizeBytes int64
 	Status    string
+}
+
+func hostDataEntryFromScanResult(host string, r hfScanResult) HostDataEntry {
+	return HostDataEntry{
+		Host:      host,
+		Asset:     r.Asset,
+		Path:      r.Path,
+		SizeBytes: r.SizeBytes,
+	}
 }
 
 // parseHFCacheDetailedOutput parses lines of the form

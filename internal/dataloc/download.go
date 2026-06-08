@@ -53,17 +53,21 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 		return HostDataEntry{}, formatHFDownloadError(host, asset, stderr, fmt.Errorf("remote download exited %d", exitCode))
 	}
 
-	entries, err := ScanHFCacheDetailedContext(ctx, host)
+	results, err := scanHFCacheResultsContext(ctx, host)
 	if err != nil {
 		return HostDataEntry{}, err
 	}
-	for _, entry := range entries {
-		if entry.Asset == asset {
-			return entry, nil
+	for _, result := range results {
+		if result.Asset != asset {
+			continue
 		}
+		if result.Status == "ok" {
+			return hostDataEntryFromScanResult(host, result), nil
+		}
+		return HostDataEntry{}, fmt.Errorf("asset %s cache entry on %s is %s after download", asset, host, result.Status)
 	}
 
-	return HostDataEntry{}, fmt.Errorf("asset %s downloaded on %s but not found in HF cache scan", asset, host)
+	return HostDataEntry{}, fmt.Errorf("asset %s downloaded on %s but no HF cache entry was found", asset, host)
 }
 
 // detachedPollInterval is how long runDetachedRemoteCommand waits between
