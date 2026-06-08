@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -24,7 +25,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const hostInfoLiveProbeTimeout = 2 * time.Second
+const (
+	hostInfoLiveProbeTimeout = 2 * time.Second
+	hostDataScanTimeout      = 10 * time.Minute
+)
 
 var hostCmd = &cobra.Command{
 	Use:     "host",
@@ -524,7 +528,9 @@ func runHostData(cmd *cobra.Command, args []string) error {
 
 	if hostDataScan {
 		fmt.Printf("Scanning HuggingFace cache on %s...\n", host)
-		entries, err := dataloc.ScanHFCacheDetailed(host)
+		ctx, cancel := context.WithTimeout(context.Background(), hostDataScanTimeout)
+		defer cancel()
+		entries, err := dataloc.ScanHFCacheDetailedContext(ctx, host)
 		if err != nil {
 			return fmt.Errorf("scan HF cache: %w", err)
 		}

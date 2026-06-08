@@ -36,39 +36,7 @@ func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
 // ScanHFCacheDetailedContext is ScanHFCacheDetailed with caller-provided
 // cancellation and timeout control for the remote scan command.
 func ScanHFCacheDetailedContext(ctx context.Context, host string) ([]HostDataEntry, error) {
-	cmd := ResolveHFCacheDirShellVar() + `
-_dirs=()
-for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
-[ ${#_dirs[@]} -eq 0 ] && exit 0
-for _d in "${_dirs[@]}"; do
-  _name=$(basename "$_d")
-  _status="ok"
-  if [ -d "$_d/$_name" ]; then
-    _status="nested"
-  elif [ ! -d "$_d/snapshots" ]; then
-    _status="no-snapshots"
-  fi
-  _bytes=""
-  if _g=$(du -sb "$_d" 2>/dev/null) && [ -n "$_g" ]; then
-    _bytes=$(printf '%s' "$_g" | awk 'NR==1{print $1}')
-    _inc=$(find "$_d" -name '*.incomplete' -type f -print0 2>/dev/null | xargs -0 du -sb 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
-    if [ -n "$_inc" ] && [ "$_inc" != "0" ]; then
-      _bytes=$((_bytes - _inc))
-      if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
-    fi
-  fi
-  if [ -z "$_bytes" ]; then
-    if _g=$(du -sk "$_d" 2>/dev/null) && [ -n "$_g" ]; then
-      _bytes=$(printf '%s' "$_g" | awk 'NR==1{printf "%d", $1*1024}')
-      _inc_kb=$(find "$_d" -name '*.incomplete' -type f -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
-      if [ -n "$_inc_kb" ] && [ "$_inc_kb" != "0" ]; then
-        _bytes=$((_bytes - _inc_kb*1024))
-        if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
-      fi
-    fi
-  fi
-  printf '%s\t%s\t%s\n' "${_bytes:-0}" "$_status" "$_d"
-done`
+	cmd := hfCacheScanCommand()
 	stdout, _, err := hostCommandRunner(ctx, host, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
@@ -89,6 +57,42 @@ done`
 		})
 	}
 	return entries, nil
+}
+
+func hfCacheScanCommand() string {
+	return ResolveHFCacheDirShellVar() + `
+_dirs=()
+for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
+[ ${#_dirs[@]} -eq 0 ] && exit 0
+for _d in "${_dirs[@]}"; do
+  _name=$(basename "$_d")
+  _status="ok"
+  if [ -d "$_d/$_name" ]; then
+    _status="nested"
+  elif [ ! -d "$_d/snapshots" ]; then
+    _status="no-snapshots"
+  fi
+  _bytes=""
+  if _g=$(du -sb "$_d" 2>/dev/null) && [ -n "$_g" ]; then
+    _bytes=$(printf '%s' "$_g" | awk 'NR==1{print $1}')
+    _inc=$(find "$_d" -name '*.incomplete' -type f -exec du -sb {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+    if [ -n "$_inc" ] && [ "$_inc" != "0" ]; then
+      _bytes=$((_bytes - _inc))
+      if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
+    fi
+  fi
+  if [ -z "$_bytes" ]; then
+    if _g=$(du -sk "$_d" 2>/dev/null) && [ -n "$_g" ]; then
+      _bytes=$(printf '%s' "$_g" | awk 'NR==1{printf "%d", $1*1024}')
+      _inc_kb=$(find "$_d" -name '*.incomplete' -type f -exec du -sk {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+      if [ -n "$_inc_kb" ] && [ "$_inc_kb" != "0" ]; then
+        _bytes=$((_bytes - _inc_kb*1024))
+        if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
+      fi
+    fi
+  fi
+  printf '%s\t%s\t%s\n' "${_bytes:-0}" "$_status" "$_d"
+done`
 }
 
 // hfScanResult is the parsed form of a single line emitted by the

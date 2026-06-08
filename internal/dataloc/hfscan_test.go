@@ -1,6 +1,9 @@
 package dataloc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseHFDirName(t *testing.T) {
 	tests := []struct {
@@ -31,6 +34,21 @@ func TestParseHFDirName(t *testing.T) {
 				t.Errorf("ParseHFDirName(%q) = %v, want %v", tt.name, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHFCacheScanCommand_DoesNotRunDuWhenIncompleteListIsEmpty(t *testing.T) {
+	cmd := hfCacheScanCommand()
+	if strings.Contains(cmd, "xargs -0 du") {
+		t.Fatalf("scan command uses xargs for incomplete blobs; empty matches make du measure the current directory:\n%s", cmd)
+	}
+	for _, want := range []string{
+		"find \"$_d\" -name '*.incomplete' -type f -exec du -sb {} +",
+		"find \"$_d\" -name '*.incomplete' -type f -exec du -sk {} +",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("scan command missing safe incomplete-size fragment %q:\n%s", want, cmd)
+		}
 	}
 }
 
