@@ -167,9 +167,34 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 
 	now := time.Now().Unix()
 	for jobID, s := range state {
-		reasons[jobID] = annotateBlockedReason(s.detail, s.occurredAt, s.retryCount, now)
+		reasons[jobID] = annotateBlockedReason(displayDispatchBlockedDetail(s.detail), s.occurredAt, s.retryCount, now)
 	}
 	return reasons
+}
+
+func displayDispatchBlockedDetail(detail string) string {
+	const prefix = "input staging failed: scan HF cache on "
+	rest, ok := strings.CutPrefix(detail, prefix)
+	if !ok {
+		return detail
+	}
+	host, rest, ok := strings.Cut(rest, ": command on ")
+	if !ok {
+		return detail
+	}
+	commandHost, rest, ok := strings.Cut(rest, " after ")
+	if !ok || commandHost != host {
+		return detail
+	}
+	duration, reason, ok := strings.Cut(rest, ": ")
+	if !ok || strings.TrimSpace(reason) != "command timeout" {
+		return detail
+	}
+	duration = strings.TrimSpace(duration)
+	if duration == "" {
+		return "input staging failed: HF cache scan timed out"
+	}
+	return "input staging failed: HF cache scan timed out after " + duration
 }
 
 // annotateBlockedReason prepends `[<rel> ago]` (and merges in `retry #N`

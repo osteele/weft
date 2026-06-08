@@ -384,7 +384,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			syncLog.Debug("failed to record host sync time", "host", host, "error", err)
 		}
 		if mode == SyncModeFull {
-			scanHFCacheDuringSync(database, host)
+			scanHFCacheDuringSync(database, host, timeout)
 		}
 	}
 
@@ -1640,11 +1640,11 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 		return nil
 	}
 
+	stageTimeout := hfInputStageTimeout(timeout)
 	// Refresh target-host cache state first so we do not re-download assets that
 	// are already present but missing from the local inventory DB.
-	scanHFCacheDuringSync(database, host)
+	scanHFCacheDuringSync(database, host, stageTimeout)
 
-	stageTimeout := hfInputStageTimeout(timeout)
 	plan, err := prestage.BuildPlan(database, host, inventory.HostHFCacheDir(host), inputs)
 	if err != nil {
 		return err
@@ -1653,7 +1653,7 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 		return err
 	}
 	if len(plan.Transfers) > 0 {
-		scanHFCacheDuringSync(database, host)
+		scanHFCacheDuringSync(database, host, stageTimeout)
 	}
 
 	for _, asset := range hfInputs {
@@ -1692,8 +1692,14 @@ func hfInputStageTimeout(timeout time.Duration) time.Duration {
 // scanHFCacheDuringSync scans the remote HF cache and records discovered assets
 // with their paths and sizes. Failures are silently ignored to avoid disrupting
 // the sync flow.
-func scanHFCacheDuringSync(database *sql.DB, host string) {
-	entries, err := dataloc.ScanHFCacheDetailed(host)
+func scanHFCacheDuringSync(database *sql.DB, host string, timeout time.Duration) {
+	ctx := context.Background()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	entries, err := dataloc.ScanHFCacheDetailedContext(ctx, host)
 	if err != nil {
 		return
 	}

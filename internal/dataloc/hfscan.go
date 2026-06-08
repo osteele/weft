@@ -30,6 +30,12 @@ func ScanHFCache(host string) ([]DataAsset, error) {
 // snapshots/) are logged and dropped — they are not loadable via the normal
 // HF resolver. Sizes exclude *.incomplete blobs (partial downloads).
 func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
+	return ScanHFCacheDetailedContext(context.Background(), host)
+}
+
+// ScanHFCacheDetailedContext is ScanHFCacheDetailed with caller-provided
+// cancellation and timeout control for the remote scan command.
+func ScanHFCacheDetailedContext(ctx context.Context, host string) ([]HostDataEntry, error) {
 	cmd := ResolveHFCacheDirShellVar() + `
 _dirs=()
 for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
@@ -63,7 +69,7 @@ for _d in "${_dirs[@]}"; do
   fi
   printf '%s\t%s\t%s\n' "${_bytes:-0}" "$_status" "$_d"
 done`
-	stdout, _, err := hostCommandRunner(context.Background(), host, cmd)
+	stdout, _, err := hostCommandRunner(ctx, host, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
 	}

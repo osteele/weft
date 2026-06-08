@@ -53,7 +53,7 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 		return HostDataEntry{}, formatHFDownloadError(host, asset, stderr, fmt.Errorf("remote download exited %d", exitCode))
 	}
 
-	entries, err := ScanHFCacheDetailed(host)
+	entries, err := ScanHFCacheDetailedContext(ctx, host)
 	if err != nil {
 		return HostDataEntry{}, err
 	}

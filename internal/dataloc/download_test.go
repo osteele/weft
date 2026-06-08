@@ -195,6 +195,43 @@ func TestDownloadAssetToHost_IncludesStdoutRetryLoop(t *testing.T) {
 	}
 }
 
+func TestDownloadAssetToHost_FinalCacheScanUsesCallerContext(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+	origInterval := detachedPollInterval
+	detachedPollInterval = 1 * time.Millisecond
+	t.Cleanup(func() { detachedPollInterval = origInterval })
+
+	var scanSawDeadline bool
+	hostCommandRunner = func(ctx context.Context, _ string, command string) (string, string, error) {
+		switch {
+		case strings.Contains(command, "df -Pk"):
+			return "123456789\n", "", nil
+		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+			return "OK\n", "", nil
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "STATUS=0\n---STDERR---\n", "", nil
+		case strings.Contains(command, "_dirs=()") && strings.Contains(command, "du -sb"):
+			if _, ok := ctx.Deadline(); ok {
+				scanSawDeadline = true
+			}
+			return "2048\tok\t/home/test/.cache/huggingface/hub/models--gpt2\n", "", nil
+		default:
+			return "", "", fmt.Errorf("unexpected command in test mock: %s", command)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	_, err := DownloadAssetToHost(ctx, "cool30", DataAsset{Kind: AssetHFModel, ID: "gpt2"}, "main")
+	if err != nil {
+		t.Fatalf("DownloadAssetToHost: %v", err)
+	}
+	if !scanSawDeadline {
+		t.Fatal("expected final HF cache scan to inherit caller context deadline")
+	}
+}
+
 // TestRunDetachedRemoteCommand_CancelKillsRemote verifies that when the
 // caller's context is cancelled mid-poll, the helper sends a SIGTERM to
 // the remote PID before returning ctx.Err(). Without this, weft data fetch

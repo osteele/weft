@@ -586,6 +586,37 @@ func TestDispatchBlockedReasons_AnnotatesRetryCount(t *testing.T) {
 	}
 }
 
+func TestDispatchBlockedReasons_CompactsHFCacheScanTimeout(t *testing.T) {
+	database := db.SetupTestDB(t)
+	const jobID = int64(1814)
+	if _, err := db.RecordQueued(database, "cool30", "/tmp", "consumer", "consumer"); err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	now := time.Now().Unix()
+	for _, ago := range []int64{600, 60} {
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind:  db.EventQueueDispatchFailed,
+			JobID:      jobID,
+			Detail:     "input staging failed: scan HF cache on cool30: command on cool30 after 30s: command timeout",
+			OccurredAt: now - ago,
+		}); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	reasons := dispatchBlockedReasonsFromEvents(database, map[int64]int64{jobID: 0})
+	got := reasons[jobID]
+	if !strings.Contains(got, "input staging failed: HF cache scan timed out after 30s") {
+		t.Fatalf("reasons[%d] = %q, want compact HF cache timeout", jobID, got)
+	}
+	if strings.Contains(got, "scan HF cache on cool30: command on cool30") {
+		t.Fatalf("reasons[%d] still leaks repeated low-level command context: %q", jobID, got)
+	}
+	if !strings.Contains(got, "retry #2") {
+		t.Fatalf("reasons[%d] = %q, want retry count preserved", jobID, got)
+	}
+}
+
 func TestDispatchBlockedReasons_DifferentDetailResetsRetryCount(t *testing.T) {
 	database := db.SetupTestDB(t)
 	const jobID = int64(1813)
