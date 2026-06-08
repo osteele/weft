@@ -1239,15 +1239,17 @@ rule TUIPeriodicSync {
         --   - In grouped unprocessed outcome triage, canceled rows are
         --     omitted while killed rows remain visible.
         --
-        -- Blocked-reason consolidation (Queued and Unplaced sections only):
-        -- within each of these sections, jobs carrying a QueueBlockedReason
-        -- are grouped by that reason and emitted under a subheader of the
-        -- form "  blocked: <reason> (<count>)" followed by their indented
-        -- job rows ("  - wj<id> — …"). Reason groups appear in first-seen
-        -- order (matching the section's job order). Jobs without a blocked
-        -- reason trail the grouped output at the normal indent, without a
-        -- subheader. No per-job "    blocked: …" line is emitted — the
-        -- reason is surfaced once per group, not per job.
+        -- Blocked/waiting-reason consolidation (Queued and Unplaced sections
+        -- only): within each of these sections, jobs carrying a visible
+        -- reason are grouped by that reason and emitted under a subheader of
+        -- the form "  blocked: <reason> (<count>)" for actionable blockers or
+        -- "  waiting: <reason> (<count>)" for routine handoff/wait states,
+        -- followed by their indented job rows ("  - wj<id> — …"). Reason
+        -- groups appear in first-seen order (matching the section's job
+        -- order). Jobs without a visible reason trail the grouped output at
+        -- the normal indent, without a subheader. No per-job
+        -- "    blocked: …" line is emitted — the reason is surfaced once per
+        -- group, not per job.
         -- Implementation: appendBlockedGroupedJobRows in
         -- internal/ui/terminal/list_grouped_status.go.
         --

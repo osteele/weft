@@ -323,6 +323,52 @@ func TestRenderJobListGroupedStatusPlainAt_UsesPersistedPlacementReason(t *testi
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_RendersDaemonPlacementPendingAsWaiting(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:               2583,
+			Status:           db.StatusQueued,
+			Project:          "semantic-composition",
+			Description:      "EXP-050",
+			CreatedAt:        4_400,
+			PlacementReasons: []string{"daemon placement pending"},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	waitingWant := "  waiting: daemon placement pending (1)"
+	if !strings.Contains(out, waitingWant) {
+		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
+	}
+	if strings.Contains(out, "blocked: daemon placement pending") {
+		t.Fatalf("daemon placement pending rendered as blocked:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_RendersInventoryHandoffAsWaiting(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:               2584,
+			Status:           db.StatusQueued,
+			Project:          "inventory",
+			Description:      "await host",
+			CreatedAt:        4_400,
+			PlacementReasons: []string{"inventory-tagged: waiting for on-prem host"},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	waitingWant := "  waiting: inventory-tagged: waiting for on-prem host (1)"
+	if !strings.Contains(out, waitingWant) {
+		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
+	}
+	if strings.Contains(out, "blocked: inventory-tagged: waiting for on-prem host") {
+		t.Fatalf("inventory handoff rendered as blocked:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_HidesOnPremOnlyPlacementReasonForRentalEligibleJob(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{
@@ -432,6 +478,25 @@ func TestRenderJobListGroupedStatusPlainAt_HidesFailedCloudResetPlacementReason(
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 	if strings.Contains(out, "blocked:") {
 		t.Fatalf("unexpected blocked reason for failed cloud reset:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_HidesReplanResetPlacementReason(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:               2026,
+			Status:           db.StatusQueued,
+			Project:          "proj",
+			Description:      "needs replan",
+			CreatedAt:        4_400,
+			PlacementReasons: []string{"replan requested; previous rental placement canceled"},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if strings.Contains(out, "blocked:") || strings.Contains(out, "waiting:") {
+		t.Fatalf("unexpected reason header for replan reset:\n%s", out)
 	}
 }
 

@@ -18,6 +18,15 @@ const (
 	SourcePlacement Source = "placement"
 )
 
+// Kind identifies how a visible reason should be labeled in compact UI.
+type Kind string
+
+const (
+	KindNone    Kind = ""
+	KindBlocked Kind = "blocked"
+	KindWaiting Kind = "waiting"
+)
+
 // Options controls blocker resolution for a UI surface.
 type Options struct {
 	// AutoPilotReason is the latest in-memory blocker returned by an
@@ -35,6 +44,7 @@ type Options struct {
 // Result is the resolved current blocker for a compact UI label.
 type Result struct {
 	Blocked bool
+	Kind    Kind
 	Reason  string
 	Source  Source
 }
@@ -48,18 +58,31 @@ func Resolve(job *db.Job, opts Options) Result {
 		return Result{}
 	}
 	if reason := visibleReason(job, job.QueueBlockedReason, opts); reason != "" {
-		return Result{Blocked: true, Reason: reason, Source: SourceLive}
+		return Result{Blocked: true, Kind: ReasonKind(reason), Reason: reason, Source: SourceLive}
 	}
 	if reason := visibleReason(job, opts.AutoPilotReason, opts); reason != "" {
-		return Result{Blocked: true, Reason: reason, Source: SourceAutoPilot}
+		return Result{Blocked: true, Kind: ReasonKind(reason), Reason: reason, Source: SourceAutoPilot}
 	}
 	if !job.IsUnplacedAwaitingPlacement() {
 		return Result{}
 	}
 	if reason := LatestPlacementReason(job, opts); reason != "" {
-		return Result{Blocked: true, Reason: reason, Source: SourcePlacement}
+		return Result{Blocked: true, Kind: ReasonKind(reason), Reason: reason, Source: SourcePlacement}
 	}
 	return Result{}
+}
+
+// ReasonKind classifies a visible reason for compact UI labels.
+func ReasonKind(reason string) Kind {
+	switch strings.TrimSpace(campaign.SanitizeBlockedReason(reason)) {
+	case "daemon placement pending",
+		"inventory-tagged: waiting for on-prem host":
+		return KindWaiting
+	case "":
+		return KindNone
+	default:
+		return KindBlocked
+	}
 }
 
 // Reasons returns all visible blocker reasons for a detail view.
@@ -153,6 +176,9 @@ var cloudInstanceReturnedToQueuePattern = regexp.MustCompile(`^cloud instance \d
 
 func isUnplacedResetReason(reason string) bool {
 	r := strings.TrimSpace(reason)
+	if r == "replan requested; previous rental placement canceled" {
+		return true
+	}
 	if cloudInstanceReturnedToQueuePattern.MatchString(r) {
 		return true
 	}

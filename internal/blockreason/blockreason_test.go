@@ -14,6 +14,7 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 		job    *db.Job
 		opts   Options
 		want   string
+		kind   Kind
 		source Source
 	}{
 		{
@@ -26,6 +27,7 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 				PlacementReasons:   []string{"planner: no offers"},
 			},
 			want:   "gpu gate: no GPU with 26GB free",
+			kind:   KindBlocked,
 			source: SourceLive,
 		},
 		{
@@ -37,6 +39,7 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			},
 			opts:   Options{AutoPilotReason: "planner: current reason", Compact: true},
 			want:   "planner: current reason",
+			kind:   KindBlocked,
 			source: SourceAutoPilot,
 		},
 		{
@@ -47,7 +50,38 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 				PlacementReasons: []string{"planner: older reason", "planner: no offers"},
 			},
 			want:   "planner: no offers",
+			kind:   KindBlocked,
 			source: SourcePlacement,
+		},
+		{
+			name: "daemon placement pending is waiting",
+			job: &db.Job{
+				ID:               7,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"daemon placement pending"},
+			},
+			want:   "daemon placement pending",
+			kind:   KindWaiting,
+			source: SourcePlacement,
+		},
+		{
+			name: "inventory handoff is waiting",
+			job: &db.Job{
+				ID:               8,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"inventory-tagged: waiting for on-prem host"},
+			},
+			want:   "inventory-tagged: waiting for on-prem host",
+			kind:   KindWaiting,
+			source: SourcePlacement,
+		},
+		{
+			name: "replan reset history is hidden",
+			job: &db.Job{
+				ID:               9,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"replan requested; previous rental placement canceled"},
+			},
 		},
 		{
 			name: "placed queued ignores stale reuse failure history",
@@ -85,6 +119,7 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 				PlacementReasons: []string{"3 hosts: host is opt-in only (specify with --host)"},
 			},
 			want:   "3 hosts: host is opt-in only (specify with --host)",
+			kind:   KindBlocked,
 			source: SourcePlacement,
 		},
 	}
@@ -95,6 +130,9 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			got := Resolve(tc.job, opts)
 			if got.Reason != tc.want || got.Source != tc.source {
 				t.Fatalf("Resolve() = (%q, %q), want (%q, %q)", got.Reason, got.Source, tc.want, tc.source)
+			}
+			if got.Kind != tc.kind {
+				t.Fatalf("Kind = %q, want %q", got.Kind, tc.kind)
 			}
 			if got.Blocked != (tc.want != "") {
 				t.Fatalf("Blocked = %v, want %v", got.Blocked, tc.want != "")

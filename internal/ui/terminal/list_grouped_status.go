@@ -342,9 +342,10 @@ var blockedDetailStyle = lipgloss.NewStyle().Faint(true)
 var moveAttemptDimStyle = lipgloss.NewStyle().Faint(true)
 
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
-// jobs by their blocked reason. Each distinct reason becomes a subheader
-// ("  blocked: <reason> (N)") followed by indented job rows. Jobs with no
-// blocked reason are emitted last without a subheader at the normal indent.
+// jobs by their blocked or waiting reason. Each distinct reason becomes a
+// subheader ("  blocked: <reason> (N)" or "  waiting: <reason> (N)") followed
+// by indented job rows. Jobs with no reason are emitted last without a
+// subheader at the normal indent.
 //
 // When every placement-failure job in the section shares the same launch
 // blocker, that blocker is hoisted to a single section-level line and the
@@ -371,22 +372,22 @@ func appendBlockedGroupedJobRows(
 			section:   section.key,
 		})
 	}
-	order := make([]string, 0, len(section.jobs))
-	buckets := make(map[string][]*db.Job, len(section.jobs))
+	order := make([]blockedReasonBucketKey, 0, len(section.jobs))
+	buckets := make(map[blockedReasonBucketKey][]*db.Job, len(section.jobs))
 	for _, job := range section.jobs {
-		reason := blockedBucketKey(job, section.key, opts.blockedDetail, sharedLaunch != "")
-		if _, ok := buckets[reason]; !ok {
-			order = append(order, reason)
+		key := blockedBucketKey(job, section.key, opts.blockedDetail, sharedLaunch != "")
+		if _, ok := buckets[key]; !ok {
+			order = append(order, key)
 		}
-		buckets[reason] = append(buckets[reason], job)
+		buckets[key] = append(buckets[key], job)
 	}
-	for _, reason := range order {
-		if reason == "" {
+	for _, key := range order {
+		if key.reason == "" {
 			continue
 		}
-		jobs := buckets[reason]
+		jobs := buckets[key]
 		rows = append(rows, groupedStatusRow{
-			text:      fmt.Sprintf("  blocked: %s (%d)", reason, len(jobs)),
+			text:      fmt.Sprintf("  %s: %s (%d)", key.kind, key.reason, len(jobs)),
 			isBlocked: true,
 			section:   section.key,
 		})
@@ -395,7 +396,7 @@ func appendBlockedGroupedJobRows(
 			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 		}
 	}
-	for _, job := range buckets[""] {
+	for _, job := range buckets[blockedReasonBucketKey{}] {
 		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
 		rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 	}
@@ -599,7 +600,12 @@ func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structure
 // rendered in human-readable form (the launch reason or the fingerprint
 // itself) — the raw fingerprint string is the bucket identity, but display
 // stays close to today's compact reason text.
-func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockreason.Structured, launchHoisted bool) string {
+type blockedReasonBucketKey struct {
+	kind   blockreason.Kind
+	reason string
+}
+
+func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockreason.Structured, launchHoisted bool) blockedReasonBucketKey {
 	if job != nil {
 		if d := detail[job.ID]; d != nil {
 			if launchHoisted && d.IsPlacementFailure() {
@@ -609,12 +615,12 @@ func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockrea
 				// blocked. Falling through to "" lets the renderer place the
 				// jobs inline under the hoist without a redundant subheader.
 				if len(d.Reuse) == 0 {
-					return ""
+					return blockedReasonBucketKey{}
 				}
-				return d.ReuseHeadline()
+				return blockedReasonBucketKey{kind: blockreason.KindBlocked, reason: d.ReuseHeadline()}
 			}
 			if fp := strings.TrimSpace(d.Fingerprint); fp != "" {
-				return fp
+				return blockedReasonBucketKey{kind: blockreason.KindBlocked, reason: fp}
 			}
 		}
 	}
@@ -785,14 +791,22 @@ func launchingInstanceHeaderRow(bucket *launchingJobBucket, sectionKey string, w
 	}
 }
 
-func groupedStatusBlockedReason(job *db.Job, sectionKey string) string {
+func groupedStatusBlockedReason(job *db.Job, sectionKey string) blockedReasonBucketKey {
 	if job == nil {
-		return ""
+		return blockedReasonBucketKey{}
 	}
 	if sectionKey != "queued" && sectionKey != "unplaced" {
-		return ""
+		return blockedReasonBucketKey{}
 	}
-	return blockreason.Resolve(job, blockreason.Options{Compact: true}).Reason
+	resolved := blockreason.Resolve(job, blockreason.Options{Compact: true})
+	if resolved.Reason == "" {
+		return blockedReasonBucketKey{}
+	}
+	kind := resolved.Kind
+	if kind == blockreason.KindNone {
+		kind = blockreason.KindBlocked
+	}
+	return blockedReasonBucketKey{kind: kind, reason: resolved.Reason}
 }
 
 func appendGroupedStatusJobRow(
