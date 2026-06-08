@@ -63,11 +63,17 @@ Examples:
 			}
 			return nil
 		}
-		// Normal mode: exactly 1 arg (command)
-		if len(args) != 1 {
-			return fmt.Errorf("requires <command> argument")
+		// Normal mode: command, or the legacy/documented <host> <command> form.
+		if len(args) == 1 {
+			return nil
 		}
-		return nil
+		if len(args) == 2 && runHost == "" {
+			return nil
+		}
+		if len(args) == 2 {
+			return fmt.Errorf("cannot use both --host and positional host")
+		}
+		return fmt.Errorf("requires <command> argument")
 	}),
 	RunE: runRun,
 }
@@ -371,6 +377,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		// Parse positional args
 		if len(args) == 1 {
 			command = args[0]
+		} else if len(args) == 2 && host == "" {
+			host = args[0]
+			command = args[1]
 		}
 	}
 

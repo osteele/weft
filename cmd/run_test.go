@@ -293,6 +293,59 @@ func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
 	}
 }
 
+func TestRunDraftWithPositionalHostRecordsHost(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	resetRunGlobals(t)
+	runDraft = true
+	runDir = dir
+	runDescription = "draft positional host"
+	runGPU = "nvidia>=24GB"
+
+	cmd := newRunTestCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runCmd.Args(cmd, []string{"cool30", "python train.py"}); err != nil {
+		t.Fatalf("run args: %v", err)
+	}
+	if err := runRun(cmd, []string{"cool30", "python train.py"}); err != nil {
+		t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(jobs))
+	}
+	job := jobs[0]
+	if job.Host != "cool30" {
+		t.Fatalf("host = %q, want cool30", job.Host)
+	}
+	if job.GPUClass != "nvidia" {
+		t.Fatalf("gpu_class = %q, want nvidia", job.GPUClass)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
+		t.Fatalf("gpu_mem_gb = %v, want 24", job.GPUMemGB)
+	}
+	if job.CLIResourceOverrides == nil || job.CLIResourceOverrides.Host != "cool30" {
+		t.Fatalf("cli host override = %#v, want cool30", job.CLIResourceOverrides)
+	}
+	if !strings.Contains(out.String(), "saved for cool30") {
+		t.Fatalf("output missing host confirmation:\n%s", out.String())
+	}
+}
+
 func TestEvaluateRecentOnPremPlacementRequiresFreshMetrics(t *testing.T) {
 	database := db.SetupTestDB(t)
 	inventory.UseTestHosts(t)
