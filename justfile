@@ -92,6 +92,8 @@ install:
     trap cleanup EXIT
     echo "Scheduling predictor schema check (non-blocking)..."
     (go run . retrain --if-schema-changed >/dev/null 2>&1 || true) &
+    echo "Building local ./weft..."
+    go build -o weft .
     echo "Installing weft..."
     start_agent_prewarm "install"
     go install .
@@ -104,6 +106,13 @@ install:
     trap - EXIT
     echo "Docs installed to ${WEFT_DOCS_DIR}"
     echo "Install complete."
+
+# Run the current sources and refresh ./weft so local probes don't leave a stale binary behind
+run *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    go build -o weft .
+    go run . {{ args }}
 
 # Run tests (skips slow build tests; use test-all for full suite)
 test:
