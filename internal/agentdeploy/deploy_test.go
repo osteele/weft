@@ -228,23 +228,35 @@ func TestEnsureBuilt_ConcurrentCalls_SingleExtraction(t *testing.T) {
 }
 
 func TestEnsureBuilt_ExtractFromFilesystem(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping filesystem extraction test in short mode")
+	originalRepoRoot := buildRepoRootFunc
+	t.Cleanup(func() {
+		buildRepoRootFunc = originalRepoRoot
+	})
+
+	root := t.TempDir()
+	binDir := filepath.Join(root, "internal", "agentdeploy", "binaries")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	// This test only works if agent binaries have been built with "just build-agents"
-	// and the VERSION file matches the current agent version.
-	localVersion, err := LocalAgentVersion()
-	if err != nil {
-		t.Skipf("cannot determine local agent version: %v", err)
+	version := "test-filesystem-extract-" + t.Name()
+	if err := os.WriteFile(filepath.Join(binDir, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "weft-agent-linux-amd64"), []byte("fake-agent-binary"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	path := CachePath(localVersion, "linux", "amd64")
+	buildRepoRootFunc = func() (string, error) {
+		return root, nil
+	}
+
+	path := CachePath(version, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(localVersion, "linux", "amd64")
+	got, err := EnsureBuilt(version, "linux", "amd64")
 	if err != nil {
-		t.Skipf("agent binary not available (run 'just build-agents' first): %v", err)
+		t.Fatalf("EnsureBuilt: %v", err)
 	}
 
 	info, err := os.Stat(got)

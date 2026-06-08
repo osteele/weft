@@ -107,21 +107,21 @@ install:
 
 # Run tests (skips slow build tests; use test-all for full suite)
 test:
-    go test -short ./...
+    cgo-test -short ./...
 
 # Run all tests including slow build tests
 test-all:
-    go test ./...
+    cgo-test ./...
 
 # Run tests with verbose output
 test-verbose:
-    go test -short -v ./...
+    cgo-test -short -v ./...
 
 # Regenerate internal/db/testdata/schema.txt, the table-schema golden the
 # schema-guard test compares against. Run after a goose migration intentionally
 # changes the schema.
 regen-schema-golden:
-    WEFT_UPDATE_SCHEMA_GOLDEN=1 go test ./internal/db -run TestSchemaMatchesGolden -count=1 -v
+    WEFT_UPDATE_SCHEMA_GOLDEN=1 cgo-test ./internal/db -run TestSchemaMatchesGolden -count=1 -v
 
 # Run integration tests (requires .env with SSH_TEST_HOST)
 # Note: SLURM tests skipped due to SLURM scheduler issues on test server

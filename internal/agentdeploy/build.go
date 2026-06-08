@@ -22,7 +22,10 @@ var ErrAgentNotAvailable = errors.New("agent binary not available for this platf
 // Tests can replace it with SetExtractFunc to avoid requiring real binaries.
 type ExtractFunc func(version, goos, goarch, outputPath string) error
 
-var extractFunc ExtractFunc = defaultExtractFunc
+var (
+	extractFunc       ExtractFunc = defaultExtractFunc
+	buildRepoRootFunc             = RepoRoot
+)
 
 // SetExtractFunc replaces the extract execution function.
 // Returns a cleanup function that restores the original.
@@ -166,7 +169,7 @@ func shouldReclaimBuildLock(lockFile string) bool {
 // BinariesVersion returns the version recorded in the binaries/ directory.
 // Returns os.ErrNotExist if no VERSION file is present.
 func BinariesVersion() (string, error) {
-	root, err := RepoRoot()
+	root, err := buildRepoRootFunc()
 	if err != nil {
 		return "", err
 	}
@@ -200,7 +203,7 @@ func CheckAgentBinariesCurrent() error {
 }
 
 func defaultExtractFunc(version, goos, goarch, outputPath string) error {
-	root, err := RepoRoot()
+	root, err := buildRepoRootFunc()
 	if err != nil {
 		return fmt.Errorf("%w: source tree unavailable: %w", ErrAgentNotAvailable, err)
 	}
