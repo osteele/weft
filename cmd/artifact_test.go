@@ -607,6 +607,57 @@ func TestSyncJobOutputsCachesDeclaredOutputDirectoryWithoutCompletionRecord(t *t
 	}
 }
 
+func TestSyncArtifactsForJobFallsBackToDeclaredOutputFilesWhenManifestDirectorySyncFails(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	outDir := filepath.Join(workDir, "output", "artifact-smoke")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "result.json"), []byte(`{"ok": true}`), 0o644); err != nil {
+		t.Fatalf("write output file: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "studio", workDir, "python artifact_smoke_test.py", "artifact smoke")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobOutputs(database, jobID, []string{"local:output/artifact-smoke/"}); err != nil {
+		t.Fatalf("SetJobOutputs: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevSync := syncLocalJobArtifacts
+	prevCompletion := completionOutputFilesFunc
+	t.Cleanup(func() {
+		syncLocalJobArtifacts = prevSync
+		completionOutputFilesFunc = prevCompletion
+	})
+	syncLocalJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, errors.New("scp: output/artifact-smoke/: not a regular file")
+	}
+	completionOutputFilesFunc = func(*db.Job) []runner.OutputFile {
+		return nil
+	}
+
+	if err := syncArtifactsForJob(database, job, nil, time.Second); err != nil {
+		t.Fatalf("syncArtifactsForJob: %v", err)
+	}
+
+	entry, err := db.FindArtifactByNameOrPath(database, jobID, "output/artifact-smoke/result.json")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	if entry.Path != "output/artifact-smoke/result.json" {
+		t.Fatalf("path = %q, want output/artifact-smoke/result.json", entry.Path)
+	}
+}
+
 func TestSyncCloudJobArtifactsWithStore_FallsBackToRunZeroManifest(t *testing.T) {
 	database := db.SetupTestDB(t)
 	home := t.TempDir()

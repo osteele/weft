@@ -244,6 +244,14 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", ids.FormatJobID(jobID)))
 				continue
 			}
+			if hasFilesystemOutputDeclarations(job) {
+				if outResult, syncErr := syncJobOutputsFunc(database, job); syncErr == nil {
+					if outResult.Added > 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d declared outputs\n", ids.FormatJobID(jobID), outResult.Added)
+						continue
+					}
+				}
+			}
 			if ssh.IsConnectionError(err.Error()) {
 				errorsList = append(errorsList, fmt.Sprintf("host %s unreachable while syncing artifacts for job %s", job.Host, ids.FormatJobID(jobID)))
 				continue
@@ -1959,11 +1967,30 @@ func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, tim
 	_, err := syncLocalJobArtifacts(database, job, timeout)
 	if errors.Is(err, artifacts.ErrManifestMissing) {
 		_, err = syncJobOutputsFunc(database, job)
+	} else if err != nil && hasFilesystemOutputDeclarations(job) {
+		if result, outputErr := syncJobOutputsFunc(database, job); outputErr == nil && result.Added > 0 {
+			err = nil
+		}
 	}
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+func hasFilesystemOutputDeclarations(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	if len(job.OutputDirs) > 0 {
+		return true
+	}
+	for _, ref := range job.Outputs {
+		if _, ok := runner.FilesystemOutputRefPath(ref); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // syncCloudJobArtifacts fetches the artifact manifest from R2, downloads each
