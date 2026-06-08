@@ -61,7 +61,7 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	if errors.Is(err, ErrAgentIncompatible) {
 		// Binary exists but is broken (e.g. wrong arch or libc mismatch).
 		// Redeploy using a build path that can produce a runnable binary.
-		slog.Warn("agent incompatible, redeploying", "component", "agentdeploy", "host", host, "error", err)
+		slog.Debug("agent incompatible, redeploying", "component", "agentdeploy", "host", host, "error", err)
 	} else if err != nil {
 		return false, fmt.Errorf("remote agent version on %s: %w", host, err)
 	}
@@ -73,7 +73,8 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	binaryPath, err := EnsureBuiltWithProgress(localVer, spec.OS, spec.Arch, output, onProgress)
 	if errors.Is(err, ErrAgentNotAvailable) {
 		// No pre-built binary — build natively on the remote host.
-		if err := BuildOnHost(host, localVer, spec.OS, spec.Arch); err != nil {
+		onProgress("no compatible cached agent; building natively")
+		if err := BuildOnHostWithProgress(host, localVer, spec.OS, spec.Arch, onProgress); err != nil {
 			return false, fmt.Errorf("native build on %s: %w", host, err)
 		}
 		// Binary was built directly into place; skip SCP.
@@ -102,8 +103,9 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	deployedVer, err := RemoteAgentVersion(host)
 	if errors.Is(err, ErrAgentIncompatible) {
 		// Cross-compiled binary doesn't run (e.g. GLIBC mismatch). Fall back to native build.
-		slog.Warn("cross-compiled agent incompatible, building natively", "component", "agentdeploy", "host", host, "error", err)
-		if err := BuildOnHost(host, localVer, spec.OS, spec.Arch); err != nil {
+		slog.Debug("cross-compiled agent incompatible, building natively", "component", "agentdeploy", "host", host, "error", err)
+		onProgress("cached agent is not runnable there; building natively")
+		if err := BuildOnHostWithProgress(host, localVer, spec.OS, spec.Arch, onProgress); err != nil {
 			return false, fmt.Errorf("native build on %s: %w", host, err)
 		}
 		deployedVer, err = RemoteAgentVersion(host)

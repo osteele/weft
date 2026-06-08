@@ -743,7 +743,13 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 1: deploy the latest agent binary if the remote version differs.
-	deployed, err := agentdeploy.EnsureAgentUpToDate(host, *spec)
+	progress := func(phase string) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", host, phase)
+	}
+	deployed, err := agentdeploy.EnsureAgentUpToDateWithOptions(host, *spec, agentdeploy.EnsureAgentOptions{
+		Output:     cmd.ErrOrStderr(),
+		OnProgress: progress,
+	})
 	if err != nil {
 		return fmt.Errorf("deploy agent on %s: %w", host, err)
 	}

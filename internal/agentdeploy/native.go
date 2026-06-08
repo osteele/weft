@@ -2,7 +2,6 @@ package agentdeploy
 
 import (
 	"fmt"
-	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,32 +12,54 @@ import (
 const remoteAgentBuildDir = "~/.cache/weft/agent-build"
 const remoteGoDir = "~/.local/go"
 
+var (
+	repoRootFunc           = RepoRoot
+	rsyncSourcesToHostFunc = rsyncSourcesToHost
+	ensureGoOnHostFunc     = ensureGoOnHostWithProgress
+	sshRunWithTimeoutFunc  = ssh.RunWithTimeout
+	sshRunFunc             = ssh.Run
+	sshRunWithStdinFunc    = ssh.RunWithStdin
+	localGoVersionFunc     = localGoVersion
+)
+
 // BuildOnHost builds the agent natively on a remote inventory host.
 // It rsyncs the source tree, ensures Go is installed, and compiles the agent
 // binary directly into the remote bin directory.
 func BuildOnHost(host, version, goos, goarch string) error {
-	root, err := RepoRoot()
+	return BuildOnHostWithProgress(host, version, goos, goarch, nil)
+}
+
+// BuildOnHostWithProgress is like BuildOnHost but reports coarse phase changes
+// to onProgress. It keeps remote command output in returned errors so callers
+// can show terse progress during successful fallback and detailed diagnostics
+// only when the build fails.
+func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress BuildProgressFunc) error {
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
+
+	root, err := repoRootFunc()
 	if err != nil {
 		return fmt.Errorf("locate repo root: %w", err)
 	}
 
-	slog.Info("syncing sources to remote", "component", "agentdeploy", "host", host, "dir", remoteAgentBuildDir)
-	if err := rsyncSourcesToHost(root, host); err != nil {
+	onProgress("syncing source for native agent build")
+	if err := rsyncSourcesToHostFunc(root, host); err != nil {
 		return fmt.Errorf("rsync sources: %w", err)
 	}
 
-	slog.Debug("ensuring Go is available", "component", "agentdeploy", "host", host)
-	gobin, err := ensureGoOnHost(host, goos, goarch)
+	onProgress("checking Go on remote")
+	gobin, err := ensureGoOnHostFunc(host, goos, goarch, onProgress)
 	if err != nil {
 		return fmt.Errorf("ensure Go: %w", err)
 	}
 
-	slog.Info("building agent on remote", "component", "agentdeploy", "host", host, "version", version)
+	onProgress("building agent on remote")
 	buildCmd := fmt.Sprintf(
 		`mkdir -p %s && cd %s && %s build -ldflags "-X main.version=%s" -o %s ./cmd/agent`,
 		remoteBinDir, remoteAgentBuildDir, gobin, version, remoteAgentPath,
 	)
-	_, stderr, err := ssh.RunWithTimeout(host, buildCmd, 10*time.Minute)
+	_, stderr, err := sshRunWithTimeoutFunc(host, buildCmd, 10*time.Minute)
 	if err != nil {
 		return fmt.Errorf("build: %s", strings.TrimSpace(stderr))
 	}
@@ -73,28 +94,36 @@ func rsyncSourcesToHost(localRoot, host string) error {
 // ensureGoOnHost checks whether Go is available on the remote host, installing
 // it under ~/.local/go if needed. Returns the path to the go binary.
 func ensureGoOnHost(host, goos, goarch string) (string, error) {
+	return ensureGoOnHostWithProgress(host, goos, goarch, nil)
+}
+
+func ensureGoOnHostWithProgress(host, goos, goarch string, onProgress BuildProgressFunc) (string, error) {
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
+
 	// Check common locations: PATH, then ~/.local/go/bin/go.
 	checkCmd := fmt.Sprintf(
 		`if command -v go >/dev/null 2>&1; then command -v go; elif [ -x %s/bin/go ]; then echo %s/bin/go; fi`,
 		remoteGoDir, remoteGoDir,
 	)
-	stdout, _, err := ssh.Run(host, checkCmd)
+	stdout, _, err := sshRunFunc(host, checkCmd)
 	gobin := strings.TrimSpace(stdout)
 
 	// Verify the binary actually runs.
 	if gobin != "" {
-		if _, _, err = ssh.Run(host, gobin+" version"); err == nil {
+		if _, _, err = sshRunFunc(host, gobin+" version"); err == nil {
 			return gobin, nil
 		}
 	}
 
 	// Go is not available; install it.
-	goVersion, err := localGoVersion()
+	goVersion, err := localGoVersionFunc()
 	if err != nil {
 		return "", fmt.Errorf("determine Go version: %w", err)
 	}
 
-	slog.Info("Go not found, installing", "component", "agentdeploy", "host", host, "go_version", goVersion)
+	onProgress("installing Go on remote")
 	installScript := fmt.Sprintf(`set -euo pipefail
 VERSION=%s
 URL="https://go.dev/dl/go${VERSION}.%s-%s.tar.gz"
@@ -112,7 +141,7 @@ fi
 echo "installed Go $("$DEST/bin/go" version)"
 `, goVersion, goos, goarch, remoteGoDir)
 
-	_, stderr, err := ssh.RunWithStdin(host, "bash -s", installScript)
+	_, stderr, err := sshRunWithStdinFunc(host, "bash -s", installScript)
 	if err != nil {
 		return "", fmt.Errorf("install Go %s: %s", goVersion, strings.TrimSpace(stderr))
 	}
