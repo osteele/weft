@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,126 @@ func TestSyncHostWaitTimeout(t *testing.T) {
 	}
 	if NormalSyncHostTimeout < 5*time.Minute {
 		t.Fatalf("NormalSyncHostTimeout = %s, want a generous full-sync timeout", NormalSyncHostTimeout)
+	}
+}
+
+func TestTargetedSyncJobsSyncsOnlyRequestedInventoryJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	requestedID, err := db.RecordQueuedWithGPU(database, "alpha", "/tmp", "echo requested", "requested", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU requested: %v", err)
+	}
+	if _, err := db.RecordQueuedWithGPU(database, "alpha", "/tmp", "echo unrelated", "unrelated", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPU unrelated: %v", err)
+	}
+	requested, err := db.GetJobByID(database, requestedID)
+	if err != nil || requested == nil {
+		t.Fatalf("GetJobByID requested: %v", err)
+	}
+
+	origSyncJob := syncJobForDisplayFunc
+	t.Cleanup(func() { syncJobForDisplayFunc = origSyncJob })
+
+	var synced []int64
+	syncJobForDisplayFunc = func(_ *sql.DB, job *db.Job, opts ops.SyncOptions) (ops.SyncResult, error) {
+		if opts.Timeout != 5*time.Second {
+			t.Fatalf("timeout = %v, want 5s", opts.Timeout)
+		}
+		if !opts.SkipSamples {
+			t.Fatal("targeted display sync should skip samples")
+		}
+		synced = append(synced, job.ID)
+		return ops.SyncResult{HostContacted: true}, nil
+	}
+
+	outcome := targetedSyncJobs(database, []*db.Job{requested}, 5*time.Second, time.Second, time.Second)
+
+	if !outcome.completed() {
+		t.Fatalf("outcome = %+v, want completed", outcome)
+	}
+	if len(synced) != 1 || synced[0] != requestedID {
+		t.Fatalf("synced jobs = %v, want only %d", synced, requestedID)
+	}
+}
+
+func TestTargetedSyncJobsPendingUsesReconcile(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "alpha", "/tmp", "echo hi", "pending", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetPendingStatus(database, jobID, db.StatusCanceled); err != nil {
+		t.Fatalf("SetPendingStatus: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	origSyncJob := syncJobForDisplayFunc
+	origReconcile := syncAndReconcileForDisplayFunc
+	t.Cleanup(func() {
+		syncJobForDisplayFunc = origSyncJob
+		syncAndReconcileForDisplayFunc = origReconcile
+	})
+
+	syncCalls := 0
+	reconcileCalls := 0
+	syncJobForDisplayFunc = func(_ *sql.DB, _ *db.Job, _ ops.SyncOptions) (ops.SyncResult, error) {
+		syncCalls++
+		return ops.SyncResult{}, nil
+	}
+	syncAndReconcileForDisplayFunc = func(_ *sql.DB, got *db.Job, opts ops.ReconcileOptions) (*ops.ReconcileResult, error) {
+		reconcileCalls++
+		if got.ID != jobID {
+			t.Fatalf("reconciled job = %d, want %d", got.ID, jobID)
+		}
+		if opts.Timeout != 5*time.Second {
+			t.Fatalf("timeout = %v, want 5s", opts.Timeout)
+		}
+		return &ops.ReconcileResult{}, nil
+	}
+
+	outcome := targetedSyncJobs(database, []*db.Job{job}, 5*time.Second, time.Second, time.Second)
+
+	if !outcome.completed() {
+		t.Fatalf("outcome = %+v, want completed", outcome)
+	}
+	if reconcileCalls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", reconcileCalls)
+	}
+	if syncCalls != 0 {
+		t.Fatalf("sync calls = %d, want 0", syncCalls)
+	}
+}
+
+func TestTargetedStaleDataNoteDistinguishesDeadlineAndError(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now()
+	for _, host := range []string{"alpha", "beta"} {
+		if err := db.SaveCachedHostInfo(database, &db.CachedHostInfo{
+			Name:        host,
+			LastUpdated: now.Add(-90 * time.Second).Unix(),
+		}); err != nil {
+			t.Fatalf("SaveCachedHostInfo %s: %v", host, err)
+		}
+	}
+
+	note := buildTargetedStaleDataNote(database, targetedSyncOutcome{
+		deadline: []string{"alpha"},
+		errors: map[string][]string{
+			"beta": {summarizeSyncError(errors.New("parse output: unexpected token"))},
+		},
+	})
+
+	if !strings.Contains(note, "did not finish within the quick-refresh budget") {
+		t.Fatalf("missing deadline clause: %q", note)
+	}
+	if !strings.Contains(note, "failed during status probe (parse output: unexpected token)") {
+		t.Fatalf("missing error clause: %q", note)
+	}
+	if strings.Contains(note, "may be reachable but slow") {
+		t.Fatalf("note uses old slow phrasing: %q", note)
 	}
 }
 

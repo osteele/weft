@@ -184,21 +184,6 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		jobsForSync = append(jobsForSync, job)
 	}
 	needsSync := liveSyncNeededForJobs(database, jobsForSync, statusSync || statusWait, statusNoSync)
-	hostsToSync := make(map[string]struct{})
-	needsRentalSync := false
-	if needsSync {
-		for _, job := range jobsForSync {
-			if status.IsTerminal(job.Status) {
-				continue
-			}
-			if job.HasInventoryHost() {
-				hostsToSync[job.Host] = struct{}{}
-			}
-			if job.IsRentalJob() {
-				needsRentalSync = true
-			}
-		}
-	}
 
 	// Queue-runner startup is only needed when actively progressing work
 	// (e.g. --wait); plain read-only status checks should not pay the
@@ -207,18 +192,40 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 
 	// Sync logic: default bounded quick sync, --fast/--sync/--ssh-timeout tune the bound.
 	if needsSync {
-		hosts := mapKeys(hostsToSync)
-		if len(hosts) > 0 {
-			sshTimeout, hostTimeout := statusHostSyncBounds()
-			completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, startRunners)
-			if !completed {
-				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
+		sshTimeout, hostTimeout := statusHostSyncBounds()
+		if statusWait {
+			hostsToSync := make(map[string]struct{})
+			needsRentalSync := false
+			for _, job := range jobsForSync {
+				if status.IsTerminal(job.Status) {
+					continue
+				}
+				if job.HasInventoryHost() {
+					hostsToSync[job.Host] = struct{}{}
+				}
+				if job.IsRentalJob() {
+					needsRentalSync = true
+				}
+			}
+			hosts := mapKeys(hostsToSync)
+			if len(hosts) > 0 {
+				completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, startRunners)
+				if !completed {
+					if note := buildStaleDataNote(database, unreachable, slow); note != "" {
+						fmt.Fprintln(os.Stderr, note)
+					}
+				}
+			}
+			if needsRentalSync {
+				syncRentalJobsStatusFunc(database, preDisplayCloudSyncTimeout(statusSync))
+			}
+		} else {
+			outcome := targetedSyncJobs(database, jobsForSync, sshTimeout, hostTimeout, preDisplayCloudSyncTimeout(statusSync))
+			if !outcome.completed() {
+				if note := buildTargetedStaleDataNote(database, outcome); note != "" {
 					fmt.Fprintln(os.Stderr, note)
 				}
 			}
-		}
-		if needsRentalSync {
-			syncRentalJobsStatusFunc(database, preDisplayCloudSyncTimeout(statusSync))
 		}
 	}
 

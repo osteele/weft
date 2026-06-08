@@ -983,7 +983,7 @@ var (
 	jobInfoAllAttempts bool
 )
 
-var quickSyncJobsFunc = quickSyncJobs
+var quickSyncJobsFunc = targetedSyncJobs
 var runJobInfoFromInfoFunc = runJobInfo
 var runInstanceStatusFromInfoFunc = runInstanceStatus
 
@@ -1031,8 +1031,13 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			if targets := remoteLiveTargets(jobsToSync); targets != "" {
 				doneNotice = remoteWaitNotice(cmd, "Refreshing live state from %s; use --no-sync for cached DB state.", targets)
 			}
-			quickSyncJobsFunc(database, jobsToSync, timeout, cloudTimeout)
+			outcome := quickSyncJobsFunc(database, jobsToSync, timeout, FastSyncHostTimeout, cloudTimeout)
 			doneNotice()
+			if !outcome.completed() {
+				if note := buildTargetedStaleDataNote(database, outcome); note != "" {
+					fmt.Fprintln(cmd.ErrOrStderr(), note)
+				}
+			}
 		}
 	}
 

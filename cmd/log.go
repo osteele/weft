@@ -207,8 +207,13 @@ func runLog(cmd *cobra.Command, args []string) error {
 			if targets := remoteLiveTargets(jobsToSync); targets != "" {
 				doneNotice = remoteWaitNotice(cmd, "Refreshing live state from %s; use --no-sync for cached DB state.", targets)
 			}
-			quickSyncJobs(database, jobsToSync, timeout, cloudTimeout)
+			outcome := targetedSyncJobs(database, jobsToSync, timeout, FastSyncHostTimeout, cloudTimeout)
 			doneNotice()
+			if !outcome.completed() {
+				if note := buildTargetedStaleDataNote(database, outcome); note != "" {
+					fmt.Fprintln(cmd.ErrOrStderr(), note)
+				}
+			}
 		}
 	}
 

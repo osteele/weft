@@ -260,6 +260,22 @@ type hostSyncOutcome struct {
 	err    error
 }
 
+type targetedSyncOutcome struct {
+	refreshed   int
+	unreachable []string
+	deadline    []string
+	errors      map[string][]string
+}
+
+func (o targetedSyncOutcome) completed() bool {
+	return len(o.unreachable) == 0 && len(o.deadline) == 0 && len(o.errors) == 0
+}
+
+var (
+	syncJobForDisplayFunc          = ops.SyncJob
+	syncAndReconcileForDisplayFunc = ops.SyncAndReconcile
+)
+
 func syncHostWaitTimeout(startQueueRunner bool) time.Duration {
 	if startQueueRunner {
 		return NormalSyncHostTimeout
@@ -329,6 +345,56 @@ func buildStaleDataNote(database *sql.DB, unreachable, slow []string) string {
 		clauses = append(clauses, c)
 	}
 	return strings.Join(clauses, " ")
+}
+
+func buildTargetedStaleDataNote(database *sql.DB, outcome targetedSyncOutcome) string {
+	var clauses []string
+	if c := targetedStaleClause(database, outcome.unreachable, "Could not reach %s; showing cached status (%s)."); c != "" {
+		clauses = append(clauses, c)
+	}
+	if c := targetedStaleClause(database, outcome.deadline, "Live refresh for %s did not finish within the quick-refresh budget; showing cached status (%s)."); c != "" {
+		clauses = append(clauses, c)
+	}
+	if len(outcome.errors) > 0 {
+		hosts := make([]string, 0, len(outcome.errors))
+		for host := range outcome.errors {
+			hosts = append(hosts, host)
+		}
+		sort.Strings(hosts)
+		summaries := hostAgeSummaries(database, hosts)
+		for _, host := range hosts {
+			detail := strings.Join(outcome.errors[host], "; ")
+			if detail == "" {
+				detail = "status probe failed"
+			}
+			age := "unknown"
+			for _, summary := range summaries {
+				if strings.HasPrefix(summary, host+": ") {
+					age = strings.TrimPrefix(summary, host+": ")
+					break
+				}
+			}
+			clauses = append(clauses, fmt.Sprintf("Live refresh for %s failed during status probe (%s); showing cached status (%s).", host, detail, age))
+		}
+	}
+	return strings.Join(clauses, " ")
+}
+
+func targetedStaleClause(database *sql.DB, hosts []string, tmpl string) string {
+	names := uniqueHosts(hosts)
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	summaries := hostAgeSummaries(database, names)
+	if len(summaries) == 0 {
+		return ""
+	}
+	subject := strings.Join(names, ", ")
+	if len(names) > 1 {
+		subject = "hosts " + subject
+	}
+	return fmt.Sprintf(tmpl, subject, strings.Join(summaries, ", "))
 }
 
 func uniqueHosts(hosts []string) []string {
@@ -439,4 +505,73 @@ func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout ti
 	if needsRentalSync {
 		syncRentalJobsStatusFunc(database, cloudTimeout)
 	}
+}
+
+func targetedSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, hostTimeout, cloudTimeout time.Duration) targetedSyncOutcome {
+	outcome := targetedSyncOutcome{errors: make(map[string][]string)}
+	if hostTimeout <= 0 {
+		hostTimeout = FastSyncHostTimeout
+	}
+	needsRentalSync := false
+
+	for _, job := range jobs {
+		if job == nil || status.IsTerminal(job.Status) {
+			continue
+		}
+		if job.IsRentalJob() {
+			needsRentalSync = true
+			continue
+		}
+		if !job.HasInventoryHost() {
+			continue
+		}
+
+		done := make(chan error, 1)
+		go func(job *db.Job) {
+			if job.PendingStatus != nil {
+				_, err := syncAndReconcileForDisplayFunc(database, job, ops.ReconcileOptions{Timeout: sshTimeout})
+				done <- err
+				return
+			}
+			_, err := syncJobForDisplayFunc(database, job, ops.SyncOptions{Timeout: sshTimeout, SkipSamples: true})
+			done <- err
+		}(job)
+
+		select {
+		case err := <-done:
+			if err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					outcome.unreachable = append(outcome.unreachable, job.Host)
+				} else {
+					outcome.errors[job.Host] = append(outcome.errors[job.Host], summarizeSyncError(err))
+				}
+				continue
+			}
+			outcome.refreshed++
+		case <-time.After(hostTimeout):
+			outcome.deadline = append(outcome.deadline, job.Host)
+		}
+	}
+
+	if needsRentalSync {
+		if syncRentalJobsStatusFunc(database, cloudTimeout) {
+			outcome.refreshed++
+		}
+	}
+	return outcome
+}
+
+func summarizeSyncError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "status probe failed"
+	}
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	if len(msg) > 120 {
+		msg = msg[:117] + "..."
+	}
+	return msg
 }

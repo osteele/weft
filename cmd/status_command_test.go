@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -94,21 +95,19 @@ func TestRunStatusInventorySyncUsesBoundedStatusTimeout(t *testing.T) {
 	restoreStatusFlags(t)
 	statusSync = true
 
-	originalSyncHosts := statusSyncHostsFunc
+	originalSyncJob := syncJobForDisplayFunc
 	t.Cleanup(func() {
-		statusSyncHostsFunc = originalSyncHosts
+		syncJobForDisplayFunc = originalSyncJob
 	})
 
-	var gotHosts []string
-	var gotSSHTimeout time.Duration
-	var gotHostTimeout time.Duration
-	var gotStartQueueRunners bool
-	statusSyncHostsFunc = func(_ *sql.DB, hosts []string, sshTimeout, hostTimeout time.Duration, startQueueRunners bool) (bool, []string, []string) {
-		gotHosts = append([]string(nil), hosts...)
-		gotSSHTimeout = sshTimeout
-		gotHostTimeout = hostTimeout
-		gotStartQueueRunners = startQueueRunners
-		return true, nil, nil
+	var gotJobID int64
+	var gotTimeout time.Duration
+	var gotSkipSamples bool
+	syncJobForDisplayFunc = func(_ *sql.DB, job *db.Job, opts ops.SyncOptions) (ops.SyncResult, error) {
+		gotJobID = job.ID
+		gotTimeout = opts.Timeout
+		gotSkipSamples = opts.SkipSamples
+		return ops.SyncResult{HostContacted: true}, nil
 	}
 
 	captureStdout(t, func() {
@@ -117,17 +116,14 @@ func TestRunStatusInventorySyncUsesBoundedStatusTimeout(t *testing.T) {
 		}
 	})
 
-	if strings.Join(gotHosts, ",") != "studio" {
-		t.Fatalf("synced hosts = %v, want [studio]", gotHosts)
+	if gotJobID != jobID {
+		t.Fatalf("synced job = %d, want %d", gotJobID, jobID)
 	}
-	if gotSSHTimeout != NormalSyncTimeout {
-		t.Fatalf("ssh timeout = %v, want %v", gotSSHTimeout, NormalSyncTimeout)
+	if gotTimeout != NormalSyncTimeout {
+		t.Fatalf("sync timeout = %v, want %v", gotTimeout, NormalSyncTimeout)
 	}
-	if gotHostTimeout != NormalSyncTimeout {
-		t.Fatalf("host timeout = %v, want %v", gotHostTimeout, NormalSyncTimeout)
-	}
-	if gotStartQueueRunners {
-		t.Fatal("read-only status should not start queue runners")
+	if !gotSkipSamples {
+		t.Fatal("targeted read-only status should skip sample collection")
 	}
 }
 
@@ -144,15 +140,15 @@ func TestRunStatusSkipsLiveSyncWhenDaemonSyncIsFresh(t *testing.T) {
 	restoreStatusFlags(t)
 	daemonLiveFunc = func() bool { return true }
 
-	originalSyncHosts := statusSyncHostsFunc
+	originalSyncJob := syncJobForDisplayFunc
 	t.Cleanup(func() {
-		statusSyncHostsFunc = originalSyncHosts
+		syncJobForDisplayFunc = originalSyncJob
 	})
 
 	calls := 0
-	statusSyncHostsFunc = func(_ *sql.DB, _ []string, _, _ time.Duration, _ bool) (bool, []string, []string) {
+	syncJobForDisplayFunc = func(_ *sql.DB, _ *db.Job, _ ops.SyncOptions) (ops.SyncResult, error) {
 		calls++
-		return true, nil, nil
+		return ops.SyncResult{HostContacted: true}, nil
 	}
 
 	captureStdout(t, func() {
@@ -180,15 +176,15 @@ func TestRunStatusForceSyncIgnoresFreshDaemonSync(t *testing.T) {
 	statusSync = true
 	daemonLiveFunc = func() bool { return true }
 
-	originalSyncHosts := statusSyncHostsFunc
+	originalSyncJob := syncJobForDisplayFunc
 	t.Cleanup(func() {
-		statusSyncHostsFunc = originalSyncHosts
+		syncJobForDisplayFunc = originalSyncJob
 	})
 
 	calls := 0
-	statusSyncHostsFunc = func(_ *sql.DB, _ []string, _, _ time.Duration, _ bool) (bool, []string, []string) {
+	syncJobForDisplayFunc = func(_ *sql.DB, _ *db.Job, _ ops.SyncOptions) (ops.SyncResult, error) {
 		calls++
-		return true, nil, nil
+		return ops.SyncResult{HostContacted: true}, nil
 	}
 
 	captureStdout(t, func() {
@@ -198,7 +194,7 @@ func TestRunStatusForceSyncIgnoresFreshDaemonSync(t *testing.T) {
 	})
 
 	if calls != 1 {
-		t.Fatalf("status sync calls = %d, want 1 with --sync", calls)
+		t.Fatalf("targeted sync calls = %d, want 1 with --sync", calls)
 	}
 }
 
@@ -272,8 +268,9 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 	})
 
 	var gotSSHTimeout time.Duration
+	var gotHostTimeout time.Duration
 	var gotCloudTimeout time.Duration
-	quickSyncJobsFunc = func(_ *sql.DB, jobs []*db.Job, sshTimeout, cloudTimeout time.Duration) {
+	quickSyncJobsFunc = func(_ *sql.DB, jobs []*db.Job, sshTimeout, hostTimeout, cloudTimeout time.Duration) targetedSyncOutcome {
 		if len(jobs) != 1 {
 			t.Fatalf("quickSyncJobs got %d jobs, want 1", len(jobs))
 		}
@@ -281,7 +278,9 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 			t.Fatalf("quickSyncJobs job ID = %d, want %d", jobs[0].ID, jobID)
 		}
 		gotSSHTimeout = sshTimeout
+		gotHostTimeout = hostTimeout
 		gotCloudTimeout = cloudTimeout
+		return targetedSyncOutcome{}
 	}
 
 	captureStdout(t, func() {
@@ -292,6 +291,9 @@ func TestRunJobInfoFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 
 	if gotSSHTimeout != NormalSyncTimeout {
 		t.Fatalf("job info SSH timeout = %v, want %v", gotSSHTimeout, NormalSyncTimeout)
+	}
+	if gotHostTimeout != FastSyncHostTimeout {
+		t.Fatalf("job info host timeout = %v, want %v", gotHostTimeout, FastSyncHostTimeout)
 	}
 	if gotCloudTimeout != NormalCloudSyncTimeout {
 		t.Fatalf("job info cloud timeout = %v, want %v", gotCloudTimeout, NormalCloudSyncTimeout)
@@ -314,8 +316,9 @@ func TestRunJobInfoSkipsQuickSyncWhenDaemonSyncIsFresh(t *testing.T) {
 	})
 
 	calls := 0
-	quickSyncJobsFunc = func(_ *sql.DB, _ []*db.Job, _, _ time.Duration) {
+	quickSyncJobsFunc = func(_ *sql.DB, _ []*db.Job, _, _, _ time.Duration) targetedSyncOutcome {
 		calls++
+		return targetedSyncOutcome{}
 	}
 
 	captureStdout(t, func() {
