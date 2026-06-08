@@ -1797,11 +1797,11 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 
 	outputFiles := completionOutputFilesFunc(job)
 	if len(outputFiles) > 0 {
-		dirs := topLevelOutputPaths(outputFiles)
 		totalMB := runner.TotalSizeMB(outputFiles)
-		if err := srcsync.SyncOutputsBack(job.Host, job.WorkingDir, localDir, dirs, totalMB, 0); err != nil {
+		if err := srcsync.SyncOutputFilesBack(job.Host, job.WorkingDir, localDir, outputFilePaths(outputFiles), totalMB, 0); err != nil {
 			return artifacts.SyncResult{}, err
 		}
+		outputFiles = runner.FilterOutputFilesSince(localDir, outputFiles, outputSyncThreshold(job))
 	}
 	if len(outputFiles) == 0 {
 		var err error
@@ -1871,20 +1871,22 @@ func completionOutputFiles(job *db.Job) []runner.OutputFile {
 	return rec.OutputFiles
 }
 
-func topLevelOutputPaths(files []runner.OutputFile) []string {
-	dirSet := map[string]bool{}
+func outputFilePaths(files []runner.OutputFile) []string {
+	paths := make([]string, 0, len(files))
 	for _, f := range files {
-		topDir := strings.SplitN(f.RelPath, "/", 2)[0]
-		if topDir != "" {
-			dirSet[topDir] = true
+		if strings.TrimSpace(f.RelPath) == "" {
+			continue
 		}
+		paths = append(paths, filepath.ToSlash(f.RelPath))
 	}
-	dirs := make([]string, 0, len(dirSet))
-	for d := range dirSet {
-		dirs = append(dirs, d)
+	return paths
+}
+
+func outputSyncThreshold(job *db.Job) time.Time {
+	if job == nil || job.StartTime == 0 {
+		return time.Time{}
 	}
-	sort.Strings(dirs)
-	return dirs
+	return time.Unix(job.StartTime, 0).Add(-time.Second)
 }
 
 func discoverLocalJobOutputFiles(job *db.Job, localDir string) ([]runner.OutputFile, error) {
@@ -1892,7 +1894,7 @@ func discoverLocalJobOutputFiles(job *db.Job, localDir string) ([]runner.OutputF
 	if len(dirs) == 0 {
 		dirs = config.DefaultOutputDirs
 	}
-	return runner.DiscoverJobOutputs(localDir, dirs, job.Outputs)
+	return runner.DiscoverJobOutputsSince(localDir, dirs, job.Outputs, outputSyncThreshold(job))
 }
 
 func storeLocalOutputFiles(database *sql.DB, jobID int64, localDir string, files []runner.OutputFile) (artifacts.SyncResult, error) {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDiscoverOutputs(t *testing.T) {
@@ -194,5 +195,43 @@ func TestDiscoverOutputRefs_LocalOutputRef(t *testing.T) {
 	}
 	if files[0].RelPath != "output/exp-231/summary.json" {
 		t.Fatalf("path = %q, want output/exp-231/summary.json", files[0].RelPath)
+	}
+}
+
+func TestDiscoverJobOutputsSinceFiltersStaleSharedOutputFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+
+	oldFile := filepath.Join(outputDir, "stale.csv")
+	newFile := filepath.Join(outputDir, "fresh.csv")
+	if err := os.WriteFile(oldFile, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	if err := os.WriteFile(newFile, []byte("new"), 0o644); err != nil {
+		t.Fatalf("write new: %v", err)
+	}
+
+	threshold := time.Now().Add(-time.Minute)
+	oldTime := threshold.Add(-time.Minute)
+	newTime := threshold.Add(time.Minute)
+	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes old: %v", err)
+	}
+	if err := os.Chtimes(newFile, newTime, newTime); err != nil {
+		t.Fatalf("chtimes new: %v", err)
+	}
+
+	files, err := DiscoverJobOutputsSince(tmpDir, []string{"output/"}, nil, threshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("file count = %d, want 1: %+v", len(files), files)
+	}
+	if files[0].RelPath != "output/fresh.csv" {
+		t.Fatalf("path = %q, want output/fresh.csv", files[0].RelPath)
 	}
 }

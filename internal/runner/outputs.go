@@ -122,6 +122,39 @@ func DiscoverJobOutputs(workDir string, dirs, refs []string) ([]OutputFile, erro
 	return deduped, nil
 }
 
+// DiscoverJobOutputsSince discovers job outputs and keeps only files modified
+// at or after threshold. Use for attempt-scoped completion records so stale
+// files in shared output directories are not attributed to a later job.
+func DiscoverJobOutputsSince(workDir string, dirs, refs []string, threshold time.Time) ([]OutputFile, error) {
+	files, err := DiscoverJobOutputs(workDir, dirs, refs)
+	if err != nil {
+		return nil, err
+	}
+	return FilterOutputFilesSince(workDir, files, threshold), nil
+}
+
+// FilterOutputFilesSince keeps output files whose mtime is at or after
+// threshold. A zero threshold leaves the list unchanged.
+func FilterOutputFilesSince(workDir string, files []OutputFile, threshold time.Time) []OutputFile {
+	if threshold.IsZero() || workDir == "" || len(files) == 0 {
+		return files
+	}
+	workDir = ExpandTilde(workDir)
+	filtered := make([]OutputFile, 0, len(files))
+	for _, file := range files {
+		path := filepath.Join(workDir, filepath.FromSlash(file.RelPath))
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if info.ModTime().Before(threshold) {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
 func discoverOutputDir(workDir, dir string) ([]OutputFile, error) {
 	absDir := filepath.Join(workDir, dir)
 
