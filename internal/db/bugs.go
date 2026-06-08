@@ -357,6 +357,14 @@ func ReportBug(database *sql.DB, report BugReport) (*Bug, bool, error) {
 	}
 	created := false
 	if errors.Is(err, sql.ErrNoRows) {
+		var closedID int64
+		closedErr := tx.QueryRow(`SELECT id FROM bugs WHERE status = 'closed' AND fingerprint = ? ORDER BY id LIMIT 1`, report.Fingerprint).Scan(&closedID)
+		if closedErr != nil && !errors.Is(closedErr, sql.ErrNoRows) {
+			return nil, false, closedErr
+		}
+		if closedErr == nil {
+			return nil, false, fmt.Errorf("bug %s with fingerprint %q is closed; use `weft bug reopen %s` to reopen it, or report with a different --fingerprint", FormatBugID(closedID), report.Fingerprint, FormatBugID(closedID))
+		}
 		result, err := tx.Exec(`
 			INSERT INTO bugs
 			    (status, title, kind, scope, likelihood, severity, fingerprint,
@@ -433,11 +441,49 @@ func AddBugNote(database *sql.DB, id int64, body string) error {
 }
 
 func CloseBug(database *sql.DB, id int64, reason string) error {
+	now := time.Now().Unix()
 	result, err := database.Exec(`
 		UPDATE bugs
 		   SET status = 'closed', closed_at = ?, close_reason = ?, updated_at = ?
 		 WHERE id = ? AND status = 'open'`,
-		time.Now().Unix(), strings.TrimSpace(reason), time.Now().Unix(), id,
+		now, strings.TrimSpace(reason), now, id,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func ReopenBug(database *sql.DB, id int64) error {
+	bug, err := GetBug(database, id)
+	if err != nil {
+		return err
+	}
+	if bug.Status != "closed" {
+		return sql.ErrNoRows
+	}
+	if bug.Fingerprint != "" {
+		var openID int64
+		err := database.QueryRow(
+			`SELECT id FROM bugs WHERE status = 'open' AND fingerprint = ? AND id != ? LIMIT 1`,
+			bug.Fingerprint, id,
+		).Scan(&openID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			return fmt.Errorf("cannot reopen %s: open bug %s has the same fingerprint", FormatBugID(id), FormatBugID(openID))
+		}
+	}
+	result, err := database.Exec(`
+		UPDATE bugs
+		   SET status = 'open', closed_at = NULL, close_reason = '', updated_at = ?
+		 WHERE id = ? AND status = 'closed'`,
+		time.Now().Unix(), id,
 	)
 	if err != nil {
 		return err

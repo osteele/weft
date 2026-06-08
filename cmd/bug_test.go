@@ -57,6 +57,24 @@ func TestBugCommandsLifecycle(t *testing.T) {
 	if !strings.Contains(out, "Closed wb1") {
 		t.Fatalf("close output = %q", out)
 	}
+
+	out = captureStdout(t, func() {
+		if err := runBugReopen(&cobra.Command{}, []string{"wb1"}); err != nil {
+			t.Fatalf("runBugReopen: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Reopened wb1") {
+		t.Fatalf("reopen output = %q", out)
+	}
+
+	out = captureStdout(t, func() {
+		if err := runBugList(&cobra.Command{}, nil); err != nil {
+			t.Fatalf("runBugList after reopen: %v", err)
+		}
+	})
+	if !strings.Contains(out, "wb1") || !strings.Contains(out, "open") {
+		t.Fatalf("list after reopen output = %q", out)
+	}
 }
 
 func TestBugReportDoesNotOpenMainJobsDB(t *testing.T) {

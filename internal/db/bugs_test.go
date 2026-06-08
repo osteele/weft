@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,67 @@ func TestReportBugDedupesOpenFingerprint(t *testing.T) {
 	}
 	if second.Detail != "second" {
 		t.Fatalf("detail = %q, want latest detail", second.Detail)
+	}
+}
+
+func TestReportBugErrorsOnClosedFingerprint(t *testing.T) {
+	database := SetupTestDB(t)
+
+	bug, created, err := ReportBug(database, BugReport{
+		Title:       "artifact cat cannot read listed path",
+		Fingerprint: "artifact.cat.closed",
+	})
+	if err != nil {
+		t.Fatalf("ReportBug first: %v", err)
+	}
+	if !created {
+		t.Fatal("first report should create bug")
+	}
+	if err := CloseBug(database, bug.ID, "fixed"); err != nil {
+		t.Fatalf("CloseBug: %v", err)
+	}
+
+	_, _, err = ReportBug(database, BugReport{
+		Title:       "artifact cat cannot read listed path",
+		Fingerprint: "artifact.cat.closed",
+	})
+	if err == nil {
+		t.Fatal("expected closed fingerprint error")
+	}
+	if got := err.Error(); !strings.Contains(got, "weft bug reopen wb1") || !strings.Contains(got, "different --fingerprint") {
+		t.Fatalf("error = %q, want reopen guidance", got)
+	}
+}
+
+func TestReopenBug(t *testing.T) {
+	database := SetupTestDB(t)
+
+	bug, _, err := ReportBug(database, BugReport{
+		Title:       "artifact cat cannot read listed path",
+		Fingerprint: "artifact.cat.reopen",
+	})
+	if err != nil {
+		t.Fatalf("ReportBug: %v", err)
+	}
+	if err := CloseBug(database, bug.ID, "fixed"); err != nil {
+		t.Fatalf("CloseBug: %v", err)
+	}
+	if err := ReopenBug(database, bug.ID); err != nil {
+		t.Fatalf("ReopenBug: %v", err)
+	}
+
+	reopened, err := GetBug(database, bug.ID)
+	if err != nil {
+		t.Fatalf("GetBug: %v", err)
+	}
+	if reopened.Status != "open" {
+		t.Fatalf("status = %q, want open", reopened.Status)
+	}
+	if reopened.ClosedAt != nil {
+		t.Fatalf("closed_at = %v, want nil", *reopened.ClosedAt)
+	}
+	if reopened.CloseReason != "" {
+		t.Fatalf("close_reason = %q, want empty", reopened.CloseReason)
 	}
 }
 

@@ -69,6 +69,13 @@ var bugCloseCmd = &cobra.Command{
 	RunE:  runBugClose,
 }
 
+var bugReopenCmd = &cobra.Command{
+	Use:   "reopen <bug-id>",
+	Short: "Reopen a closed Weft bug",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runBugReopen,
+}
+
 func init() {
 	rootCmd.AddCommand(bugCmd)
 	bugCmd.AddCommand(bugReportCmd)
@@ -76,6 +83,7 @@ func init() {
 	bugCmd.AddCommand(bugListCmd)
 	bugCmd.AddCommand(bugShowCmd)
 	bugCmd.AddCommand(bugCloseCmd)
+	bugCmd.AddCommand(bugReopenCmd)
 
 	bugReportCmd.Flags().StringVar(&bugReportTitle, "title", "", "bug title")
 	bugReportCmd.Flags().StringVar(&bugReportKind, "kind", "bug", "bug kind")
@@ -222,6 +230,26 @@ func runBugClose(_ *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Closed %s\n", db.FormatBugID(id))
+	return nil
+}
+
+func runBugReopen(_ *cobra.Command, args []string) error {
+	database, err := db.OpenBugDB()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	id, err := db.ParseBugID(args[0])
+	if err != nil {
+		return err
+	}
+	if err := db.ReopenBug(database, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("closed bug %s not found", db.FormatBugID(id))
+		}
+		return err
+	}
+	fmt.Printf("Reopened %s\n", db.FormatBugID(id))
 	return nil
 }
 

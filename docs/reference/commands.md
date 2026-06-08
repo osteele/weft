@@ -595,11 +595,14 @@ weft bug list
 weft bug list --all
 weft bug show wb123
 weft bug close wb123 --reason "fixed in e95f1f4e"
+weft bug reopen wb123
 ```
 
 `report` returns a bug number. If another open bug has the same fingerprint,
 Weft updates that bug instead of creating a duplicate, increments its occurrence
-count, and refreshes the stored context.
+count, and refreshes the stored context. If the fingerprint belongs to a closed
+bug, `report` fails and tells you to reopen that bug or choose a different
+fingerprint.
 
 Important fields:
 
