@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var repairCloudCompletionsCmd = &cobra.Command{
-	Use:   "repair-cloud-completions",
+var repairCloudCompletionsNestedCmd = &cobra.Command{
+	Use:   "cloud-completions",
 	Short: "Re-arm cloud completion backfill for jobs poisoned by sync-time end_time",
 	Long: `Clear last_synced_status on terminal cloud jobs whose start_time is 0
 and end_time is set. These rows are the signature of an earlier marker-only
@@ -25,8 +25,8 @@ authoritative timestamps have been ingested.`,
 var repairCloudCompletionsDryRun bool
 
 func init() {
-	jobCmd.AddCommand(repairCloudCompletionsCmd)
-	repairCloudCompletionsCmd.Flags().BoolVar(&repairCloudCompletionsDryRun, "dry-run", false, "Print affected job IDs without modifying the database")
+	jobRepairCmd.AddCommand(repairCloudCompletionsNestedCmd)
+	repairCloudCompletionsNestedCmd.Flags().BoolVar(&repairCloudCompletionsDryRun, "dry-run", false, "Print affected job IDs without modifying the database")
 }
 
 func runRepairCloudCompletions(_ *cobra.Command, _ []string) error {

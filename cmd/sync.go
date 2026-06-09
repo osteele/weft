@@ -86,7 +86,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	var hosts []string
-	if len(syncHosts) > 0 || len(args) > 0 {
+	explicitHosts := len(syncHosts) > 0 || len(args) > 0
+	if explicitHosts {
 		// Merge --host flags and positional args, deduplicating
 		seen := make(map[string]bool)
 		for _, h := range append(syncHosts, args...) {
@@ -110,7 +111,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		Hosts:             hosts,
 		SSHTimeout:        syncTimeout,
 		HostTimeout:       NormalSyncHostTimeout,
-		CloudMode:         syncorch.CloudUnbounded,
+		CloudMode:         syncCloudMode(explicitHosts),
 		Verbose:           syncVerbose,
 		Full:              syncFull,
 		StartQueueRunner:  false,
@@ -153,6 +154,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func syncCloudMode(explicitHosts bool) syncorch.CloudMode {
+	if explicitHosts {
+		return syncorch.CloudDisabled
+	}
+	return syncorch.CloudUnbounded
 }
 
 // syncHost syncs all active jobs (running and queued) for a host and returns the count of updated jobs

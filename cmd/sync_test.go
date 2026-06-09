@@ -30,6 +30,15 @@ func TestSyncHostWaitTimeout(t *testing.T) {
 	}
 }
 
+func TestSyncCloudModeDisabledForExplicitHosts(t *testing.T) {
+	if got := syncCloudMode(true); got != syncorch.CloudDisabled {
+		t.Fatalf("syncCloudMode(true) = %s, want %s", got, syncorch.CloudDisabled)
+	}
+	if got := syncCloudMode(false); got != syncorch.CloudUnbounded {
+		t.Fatalf("syncCloudMode(false) = %s, want %s", got, syncorch.CloudUnbounded)
+	}
+}
+
 func TestTargetedSyncJobsSyncsOnlyRequestedInventoryJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 	requestedID, err := db.RecordQueuedWithGPU(database, "alpha", "/tmp", "echo requested", "requested", "")
