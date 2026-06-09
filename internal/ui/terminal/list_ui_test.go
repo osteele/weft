@@ -347,6 +347,25 @@ func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T
 	}
 }
 
+func TestListTUIPruneAutoBlockReasonsKeepsCloudAssignedQueued(t *testing.T) {
+	launchID := int64(42)
+	m := listTUIModel{
+		autoBlockReasons: map[int64]string{
+			1: "cool100 overloaded; cool30 driver too old",
+		},
+		jobs: []*db.Job{
+			// Job queued on a cloud instance (has LaunchID) but not yet running.
+			{ID: 1, Status: db.StatusQueued, LaunchID: &launchID},
+		},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	if got := m.autoBlockReasons[1]; got == "" {
+		t.Fatal("expected cloud-assigned queued job to keep block reason during transient window")
+	}
+}
+
 func TestListTUIPruneAutoBlockReasonsDropsStaleRunRateHeadroom(t *testing.T) {
 	database := db.SetupTestDB(t)
 	if _, err := db.CreateLaunch(database, &db.Launch{

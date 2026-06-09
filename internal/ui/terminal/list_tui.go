@@ -737,8 +737,27 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the result rather than acting on it.
 			return m, nil
 		}
-		m.autoBlockReasons = msg.blockedReasons
-		m.autoBlockDetail = msg.structuredBlocked
+		// Merge rather than replace: jobs temporarily absent from
+		// msg.blockedReasons (because they just got a launch_id and
+		// left the unplaced candidate list) keep their last known reason
+		// until pruneAutoBlockReasons drops them once the job actually
+		// starts running or reaches a terminal state.
+		if len(msg.blockedReasons) > 0 {
+			if m.autoBlockReasons == nil {
+				m.autoBlockReasons = make(map[int64]string, len(msg.blockedReasons))
+			}
+			for jobID, reason := range msg.blockedReasons {
+				m.autoBlockReasons[jobID] = reason
+			}
+		}
+		if len(msg.structuredBlocked) > 0 {
+			if m.autoBlockDetail == nil {
+				m.autoBlockDetail = make(map[int64]*blockreason.Structured, len(msg.structuredBlocked))
+			}
+			for jobID, detail := range msg.structuredBlocked {
+				m.autoBlockDetail[jobID] = detail
+			}
+		}
 		if msg.err != nil {
 			m.lastAutoPilotErrorRaw = msg.err.Error()
 			m.showAutoPilotErrorDetails = false
@@ -3262,10 +3281,26 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	if len(m.autoBlockReasons) == 0 && len(m.autoBlockDetail) == 0 && len(m.expandedBlocked) == 0 {
 		return
 	}
+	// visibleUnplaced: jobs that are actively unplaced and awaiting placement.
+	// visibleBlockedReasons: jobs whose cached block reason should be retained.
+	// This extends beyond visibleUnplaced to include jobs temporarily assigned
+	// to a cloud instance (TargetKind == rental_instance) that haven't started
+	// running yet, so reasons survive the transient window where the AP assigns
+	// a launch_id but the job hasn't actually executed. Reasons are dropped once
+	// the job starts running, gets an on-prem host, pauses, or reaches a terminal
+	// state.
 	visibleUnplaced := make(map[int64]struct{}, len(m.jobs))
+	visibleBlockedReasons := make(map[int64]struct{}, len(m.jobs))
 	for _, job := range m.jobs {
 		if job.IsUnplacedAwaitingPlacement() {
 			visibleUnplaced[job.ID] = struct{}{}
+			visibleBlockedReasons[job.ID] = struct{}{}
+			continue
+		}
+		s := job.EffectiveStatus()
+		if (s == db.StatusQueued || s == db.StatusPendingPlacement) &&
+			job.TargetKind() == db.JobTargetRentalInstance {
+			visibleBlockedReasons[job.ID] = struct{}{}
 		}
 	}
 	for jobID := range m.autoBlockDetail {
@@ -3284,7 +3319,7 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	headroom, hasRunRateHeadroom := m.currentRunRateHeadroomCents()
 	changed := false
 	for jobID, reason := range m.autoBlockReasons {
-		if _, ok := visibleUnplaced[jobID]; !ok {
+		if _, ok := visibleBlockedReasons[jobID]; !ok {
 			delete(m.autoBlockReasons, jobID)
 			changed = true
 			continue
