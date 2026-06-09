@@ -286,6 +286,27 @@ weft instance status <instance-id>      # Single instance details
 weft instance info <instance-id>        # Alias for status
 ```
 
+### Cost reporting
+
+```bash
+weft cost instances                     # Rate, duration, and actual cost per instance
+weft cost jobs                          # Job cost with instance context and overhead breakdown
+weft cost campaigns                     # Estimated vs actual cost per campaign batch
+```
+
+Noun-verb aliases also work:
+
+```bash
+weft instance cost
+weft job cost
+weft campaign cost
+```
+
+`weft cost jobs` shows the instance each job ran on, how many jobs shared that
+instance, the instance's total cost, and the per-job overhead — useful for
+deciding how much of the instance cost to attribute to a given job, particularly
+when it was the only job on the instance.
+
 ### Unattended runaway protection
 
 While the autopilot is enabled, weft includes a runaway breaker to prevent

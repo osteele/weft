@@ -693,6 +693,20 @@ weft job churn --recent 200
 weft job recommend --recent 100
 ```
 
+### weft job cost
+
+Show cost for each job that has a recorded cost, with instance context.
+
+```bash
+weft job cost
+weft cost jobs      # Alias
+```
+
+Output is one block per job (matching `weft job status` style) showing the job
+cost, the instance it ran on, how many jobs shared that instance, the instance's
+total cost, and per-job overhead. Useful for attributing cloud spend to
+individual jobs, especially when a job was the sole occupant of an instance.
+
 ### weft job list
 
 Query and search job history from the local database. On an interactive
@@ -1242,6 +1256,7 @@ Per-instance commands.
 weft instance watch [instance-id]                       # Watch active instances (or one)
 weft instance list                                      # List instances
 weft instance status <instance-id>                      # Single instance details
+weft instance cost                                      # Rate, duration, and actual cost per instance
 weft instance ssh <instance-id>                         # SSH in
 weft instance terminate <instance-id>                   # Destroy a single instance
 weft instance cordon <instance-id> [--reason "..."]    # Stop new jobs from landing here
@@ -1326,11 +1341,31 @@ weft campaign watch [campaign-id] [--plain|--tui]   # Watch a batch (incl. relau
 weft campaign list [--plain|--tui]                  # List batches
 weft campaign show <campaign-id>                    # Inspect a batch
 weft campaign terminate <campaign-id>               # Terminate every instance in the batch
+weft campaign cost                                  # Estimated vs actual cost per campaign
 ```
 
 See [Cloud GPU Instances](../guides/instances.md) for lifecycle, grace
 periods, interruptible jobs, and survival-based offer selection, and
 [Campaigns](../guides/campaigns.md) for the batching concept.
+
+### weft cost
+
+Cross-cutting cost summaries. Each subcommand also has a noun-verb alias.
+
+```bash
+weft cost instances                     # Rate, duration, and actual cost per instance
+weft cost jobs                          # Per-job cost with instance context and overhead
+weft cost campaigns                     # Estimated vs actual cost per campaign batch
+
+# Noun-verb aliases
+weft instance cost
+weft job cost
+weft campaign cost
+```
+
+`weft cost jobs` / `weft job cost` shows a detail block per job (matching
+`weft job status` style) with job cost, instance, jobs-on-instance count,
+instance total cost, and per-job overhead.
 
 ### weft narrate
 
