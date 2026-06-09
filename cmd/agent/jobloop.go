@@ -94,6 +94,26 @@ func hfOfflineEnv(inputs []string) []string {
 	return nil
 }
 
+func hfProvisioningEnv(inputs []string) []string {
+	if !hasDeclaredHFInput(inputs) {
+		return nil
+	}
+	return []string{
+		"HF_HUB_OFFLINE=0",
+		"TRANSFORMERS_OFFLINE=0",
+		"HF_DATASETS_OFFLINE=0",
+	}
+}
+
+func hfDownloadPrewarmEnv(baseEnv []string, inputs []string) []string {
+	if !hasDeclaredHFInput(inputs) {
+		return baseEnv
+	}
+	env := append([]string(nil), baseEnv...)
+	env = append(env, hfProvisioningEnv(inputs)...)
+	return env
+}
+
 // pickWatchdogTimeouts selects GPU-idle and stdout-silence timeouts based on
 // the cost-per-hour of the current host. Expensive cloud hosts (>= $2/hr) get
 // aggressive thresholds so hangs are caught before they burn significant money.
@@ -368,7 +388,8 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	didWork := false
 	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
 		didWork = true
-		if ei, err := runner.RunSetupCommand(hfDownloadScript(assets), job.ID, workDir, env, paths, pickSetupTimeout(cfg)); err != nil {
+		hfEnv := hfDownloadPrewarmEnv(env, job.Inputs)
+		if ei, err := runner.RunSetupCommand(hfDownloadScript(assets), job.ID, workDir, hfEnv, paths, pickSetupTimeout(cfg)); err != nil {
 			return setupPrewarmResult{
 				didWork:  true,
 				logPath:  paths.Log,

@@ -925,6 +925,11 @@ rule HFAssetsPrestagedOnCloud {
         -- setupPrewarmManager downloads hf:/hf-dataset: inputs before
         -- RunSingleJob, and can do this in the background for the next
         -- eligible job once the current job reaches the running phase.
+        -- The managed HF staging subprocess must be online-capable even when
+        -- the job runtime requests offline mode. Preserve auth/cache/proxy
+        -- env such as HF_TOKEN, HF_HOME, and HTTPS_PROXY, but override
+        -- HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE / HF_DATASETS_OFFLINE only
+        -- for staging. The job command itself still receives the user env.
 }
 
 rule CloudPrewarmRespectsJobOrder {

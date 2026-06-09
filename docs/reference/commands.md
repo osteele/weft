@@ -638,6 +638,13 @@ mining high-churn retry sequences where the command stayed similar but metadata
 changed, such as `HF_HOME`, `HF_HUB_OFFLINE`, input declarations, GPU
 constraints, or placement target.
 
+For jobs with declared `hf:` / `hf-dataset:` inputs, Weft's managed staging
+download may contact Hugging Face before the job command starts. Runtime offline
+flags such as `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and
+`HF_DATASETS_OFFLINE=1` are preserved for the job process, but Weft overrides
+them only for that staging subprocess so declared inputs can be provisioned on
+rentals with Hub access.
+
 **Examples:**
 ```bash
 weft job inspect wj1877 --json

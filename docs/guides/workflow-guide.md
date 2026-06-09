@@ -92,6 +92,23 @@ has enough free space. When you want to warm a cache ahead of time or ensure a
 specific host has the asset, use `weft data fetch`; you do not need a separate
 prefetch job.
 
+For declared `hf:` / `hf-dataset:` inputs on cloud rentals, Weft's staging
+download runs before the job command and is allowed to contact the Hub even if
+the job itself requests offline runtime mode. Weft preserves credentials and
+cache/proxy settings such as `HF_TOKEN`, `HF_HOME`, `HTTPS_PROXY`, and custom
+certificate variables, but forces Hugging Face offline toggles off only for the
+managed staging subprocess. The job command still receives the environment you
+declared, so this pattern is portable across hosts with and without direct Hub
+access:
+
+```
+laptop$ weft run \
+  --input hf:gpt2 \
+  --env HF_HUB_OFFLINE=1 \
+  --env TRANSFORMERS_OFFLINE=1 \
+  'uv run python train.py'
+```
+
 On shared filesystems, Hugging Face cache directories can be owned by a
 different UID than the job process. If cache writes fail with `PermissionError`,
 use a project-local cache:

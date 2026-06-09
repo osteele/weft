@@ -237,6 +237,75 @@ func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 }
 
+func TestHFDownloadPrewarmEnvOverridesRuntimeOfflineFlags(t *testing.T) {
+	base := []string{
+		"HF_TOKEN=secret",
+		"HF_HUB_OFFLINE=1",
+		"TRANSFORMERS_OFFLINE=1",
+		"HF_DATASETS_OFFLINE=1",
+	}
+	envGot := hfDownloadPrewarmEnv(base, []string{"hf:gpt2"})
+
+	for _, tt := range []struct {
+		key  string
+		want string
+	}{
+		{"HF_TOKEN", "secret"},
+		{"HF_HUB_OFFLINE", "0"},
+		{"TRANSFORMERS_OFFLINE", "0"},
+		{"HF_DATASETS_OFFLINE", "0"},
+	} {
+		if got := lastEnvValue(envGot, tt.key); got != tt.want {
+			t.Fatalf("%s = %q, want %q in %v", tt.key, got, tt.want, envGot)
+		}
+	}
+}
+
+func TestHFDownloadPrewarmEnvLeavesNonHFJobsAlone(t *testing.T) {
+	base := []string{"HF_HUB_OFFLINE=1"}
+	got := hfDownloadPrewarmEnv(base, []string{"asset:local-tokenizer"})
+	if !reflect.DeepEqual(got, base) {
+		t.Fatalf("env = %v, want %v", got, base)
+	}
+}
+
+func TestRuntimeJobEnvPreservesOfflineFlags(t *testing.T) {
+	cfg := jobSequenceConfig{
+		R2Bucket:  "bucket",
+		PhaseKey:  "phase",
+		LogDir:    "/tmp/logs",
+		StartTime: time.Now(),
+	}
+	job := cloud.AgentJob{
+		ID:      42,
+		Command: "python train.py",
+		Inputs:  []string{"hf:gpt2"},
+		Env: []string{
+			"HF_HUB_OFFLINE=1",
+			"TRANSFORMERS_OFFLINE=1",
+			"HF_DATASETS_OFFLINE=1",
+		},
+	}
+
+	got := singleJobConfigForAgentJob(job, cfg, "/tmp/work", 5*time.Minute)
+
+	for _, key := range []string{"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE"} {
+		if got := lastEnvValue(got.Job.Env, key); got != "1" {
+			t.Fatalf("%s = %q, want runtime env to preserve offline mode in %v", key, got, got)
+		}
+	}
+}
+
+func lastEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix)
+		}
+	}
+	return ""
+}
+
 func TestPrewarmLogTailIncludesRecentOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "prewarm.log")
 	if err := os.WriteFile(path, []byte("first\nFetching 52 files...\nNo local file found. Retrying...\n"), 0o644); err != nil {
