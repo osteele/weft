@@ -1280,7 +1280,7 @@ func (m listTUIModel) groupedView() string {
 	selectedRow := m.selectedGroupedRow()
 	mateJobs, matesActive := hostMatesForGroupedView(m.selectedGroupedJob(), m.jobs)
 	rowWidth := m.width
-	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines)
+	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines, selectedRow)
 	bodyLinesWritten := 0
 	for _, row := range visibleRows {
 		line := truncateDisplayWidth(row.text, rowWidth)
@@ -1713,7 +1713,7 @@ func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
 	}
 	footerLines := baseFooterLines + len(errorDetailsLines)
 	maxBodyLines := max(0, m.height-1-footerLines)
-	return selectGroupedRowsForViewport(rows, maxBodyLines)
+	return selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow())
 }
 
 func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -3601,16 +3601,233 @@ func parseGroupedViewportSections(rows []groupedStatusRow) []groupedViewportSect
 	return sections
 }
 
-// selectGroupedRowsForViewport keeps grouped sections in order and, when needed,
-// abbreviates section tails with "..." or collapses a fully elided section to
-// "Section (N)" (without a trailing colon).
-func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []groupedViewportLine {
+// sectionFalloffPow controls how sharply non-cursor section budgets fall off
+// with index distance from the cursor section. The allocation weight is
+// 1/(1+d^sectionFalloffPow); a higher power concentrates rows nearer the cursor.
+const sectionFalloffPow = 2
+
+// absDistance returns |a-b|.
+func absDistance(a, b int) int {
+	if d := a - b; d < 0 {
+		return -d
+	} else {
+		return d
+	}
+}
+
+// sectionMinVisible is the 0-collapse floor for a section: it is either
+// collapsed to its header (0 job rows) or shows at least this many job rows.
+// Sections with 1-2 rows are shown whole (an ellipsis would save nothing);
+// larger sections show at least 2 rows before a trailing "...".
+func sectionMinVisible(total int) int {
+	if total <= 2 {
+		return total
+	}
+	return 2
+}
+
+// sectionAlloc describes one section's allocation request for
+// allocateSectionBudgets.
+type sectionAlloc struct {
+	total      int // selectable/job rows available in the section
+	minVisible int // 0-collapse floor (see sectionMinVisible)
+}
+
+// allocateSectionBudgets distributes available job-row lines across sections,
+// biased toward the cursor's section so navigation always has room to reveal the
+// selected row. Each returned count is either 0 (collapse to header) or in
+// [minVisible, total]. Non-cursor sections are weighted by index distance from
+// the cursor (1/(1+d^2)) so nearer sections keep rows while distant sections
+// collapse first; a single tall nearby section is trimmed rather than collapsed.
+func allocateSectionBudgets(secs []sectionAlloc, cursorIdx, available int) []int {
+	n := len(secs)
+	out := make([]int, n)
+	if n == 0 {
+		return out
+	}
+	if cursorIdx < 0 || cursorIdx >= n {
+		cursorIdx = 0
+	}
+	if available < 0 {
+		available = 0
+	}
+	// Reserve the cursor section's minimum first.
+	cursorMin := min(secs[cursorIdx].minVisible, secs[cursorIdx].total)
+	cursorMin = min(cursorMin, available)
+	out[cursorIdx] = cursorMin
+	remaining := available - cursorMin
+
+	// Precompute each section's distance-falloff weight once (read repeatedly by
+	// the sort comparators below).
+	weights := make([]float64, n)
+	for i := range secs {
+		w := 1.0
+		for p := 0; p < sectionFalloffPow; p++ {
+			w *= float64(absDistance(i, cursorIdx))
+		}
+		weights[i] = 1.0 / (1.0 + w)
+	}
+
+	// Phase 1: fractional ideal per non-cursor section, proportional to weight.
+	var wsum float64
+	for i := range secs {
+		if i == cursorIdx || secs[i].total == 0 {
+			continue
+		}
+		wsum += weights[i]
+	}
+	ideal := make([]float64, n)
+	for i := range secs {
+		if i == cursorIdx || secs[i].total == 0 {
+			continue
+		}
+		f := 0.0
+		if wsum > 0 {
+			f = float64(remaining) * weights[i] / wsum
+		}
+		ideal[i] = min(f, float64(secs[i].total))
+	}
+
+	// Phase 2: snap each fractional value to 0 or [minVisible, total].
+	spent := 0
+	for i := range secs {
+		if i == cursorIdx || secs[i].total == 0 {
+			continue
+		}
+		f := ideal[i]
+		mv := secs[i].minVisible
+		switch {
+		case f < 1:
+			out[i] = 0
+		case f < float64(mv):
+			if f < float64(mv)-f { // closer to 0 than to minVisible
+				out[i] = 0
+			} else {
+				out[i] = mv
+			}
+		default:
+			out[i] = min(int(f), secs[i].total)
+		}
+		spent += out[i]
+	}
+
+	// Phase 3: reconcile snap drift against the remaining budget.
+	order := make([]int, 0, n)
+	for i := range secs {
+		if i != cursorIdx && secs[i].total > 0 {
+			order = append(order, i)
+		}
+	}
+	switch {
+	case spent > remaining: // over budget: cut from furthest (lowest weight) first
+		sort.SliceStable(order, func(a, b int) bool { return weights[order[a]] < weights[order[b]] })
+		over := spent - remaining
+		for _, i := range order {
+			if over <= 0 {
+				break
+			}
+			if out[i] == 0 {
+				continue
+			}
+			mv := secs[i].minVisible
+			if reducible := out[i] - mv; reducible > 0 {
+				cut := min(reducible, over)
+				out[i] -= cut
+				over -= cut
+			}
+			if over > 0 && out[i] == mv {
+				out[i] = 0
+				over -= mv
+			}
+		}
+	case spent < remaining: // under budget: add to nearest (highest weight) first
+		sort.SliceStable(order, func(a, b int) bool { return weights[order[a]] > weights[order[b]] })
+		under := remaining - spent
+		for _, i := range order {
+			if under <= 0 {
+				break
+			}
+			if out[i] == 0 {
+				mv := min(secs[i].minVisible, secs[i].total)
+				if mv > 0 && mv <= under {
+					out[i] = mv
+					under -= mv
+				}
+				continue
+			}
+			if room := secs[i].total - out[i]; room > 0 {
+				add := min(room, under)
+				out[i] += add
+				under -= add
+			}
+		}
+	}
+
+	// Hand any budget the non-cursor sections did not absorb to the cursor
+	// section, so a lone or dominant section fills the available rows.
+	used := 0
+	for i, b := range out {
+		if i != cursorIdx {
+			used += b
+		}
+	}
+	if extra := min(available-used, secs[cursorIdx].total); extra > out[cursorIdx] {
+		out[cursorIdx] = extra
+	}
+	return out
+}
+
+// viewportContains reports whether any emitted line maps to rowIdx. A negative
+// rowIdx (no selection) is vacuously contained.
+func viewportContains(lines []groupedViewportLine, rowIdx int) bool {
+	if rowIdx < 0 {
+		return true
+	}
+	for _, l := range lines {
+		if l.rowIdx == rowIdx {
+			return true
+		}
+	}
+	return false
+}
+
+// capViewportKeepingRow hard-truncates lines to maxLines while keeping the line
+// for rowIdx on screen. Reached only when a single section is taller than the
+// entire viewport.
+func capViewportKeepingRow(lines []groupedViewportLine, maxLines, rowIdx int) []groupedViewportLine {
+	if len(lines) <= maxLines {
+		return lines
+	}
+	ci := -1
+	for i, l := range lines {
+		if l.rowIdx == rowIdx {
+			ci = i
+			break
+		}
+	}
+	if ci < 0 {
+		return lines[:maxLines]
+	}
+	start, end := visibleWindow(ci, len(lines), maxLines)
+	return lines[start:end]
+}
+
+// selectGroupedRowsForViewport keeps grouped sections in order and abbreviates
+// them to fit maxLines. When cursorRowIdx is a valid groupedRows index the fit is
+// cursor-aware: the cursor's section is guaranteed room and a window anchored on
+// the cursor, while distant sections collapse first (see allocateSectionBudgets).
+// The returned viewport always contains cursorRowIdx, so keyboard navigation can
+// never land on an unrendered row. When cursorRowIdx < 0 the legacy positional
+// abbreviation (collapse the last section first) is used.
+func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowIdx int) []groupedViewportLine {
 	if maxLines <= 0 || len(rows) == 0 {
 		return nil
 	}
 	type sectionState struct {
 		groupedViewportSection
-		rowIdxs []int
+		rowIdxs         []int
+		windowStart     int
+		leadingEllipsis bool
 	}
 	parsed := parseGroupedViewportSections(rows)
 	sections := make([]sectionState, 0, len(parsed))
@@ -3636,17 +3853,26 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []group
 	render := func() []groupedViewportLine {
 		out := make([]groupedViewportLine, 0, maxLines)
 		prevAbbreviated := false
-		for idx, section := range sections {
-			currAbbreviated := section.abbreviated()
-			if idx > 0 && !(prevAbbreviated && currAbbreviated) {
+		for idx := range sections {
+			section := sections[idx]
+			currAbbreviated := section.abbreviated() || section.leadingEllipsis
+			// Collapsed (header-only) sections pack tightly: no blank above them.
+			if idx > 0 && !(prevAbbreviated && currAbbreviated) && !section.summaryOnly {
 				out = append(out, groupedViewportLine{text: "", rowIdx: -1})
 			}
 			if section.summaryOnly {
 				out = append(out, groupedViewportLine{text: fmt.Sprintf("%s (%d)", section.title, section.itemCount), rowIdx: -1})
 			} else {
 				out = append(out, groupedViewportLine{text: rows[section.headerRowIndex].text, rowIdx: section.headerRowIndex})
-				for i := 0; i < section.shownRows && i < len(section.rows) && i < len(section.rowIdxs); i++ {
-					out = append(out, groupedViewportLine{text: section.rows[i].text, rowIdx: section.rowIdxs[i]})
+				if section.leadingEllipsis {
+					out = append(out, groupedViewportLine{text: "...", rowIdx: -1})
+				}
+				for i := 0; i < section.shownRows; i++ {
+					ri := section.windowStart + i
+					if ri < 0 || ri >= len(section.rows) || ri >= len(section.rowIdxs) {
+						break
+					}
+					out = append(out, groupedViewportLine{text: section.rows[ri].text, rowIdx: section.rowIdxs[ri]})
 				}
 				if section.ellipsis {
 					out = append(out, groupedViewportLine{text: "...", rowIdx: -1})
@@ -3660,46 +3886,158 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines int) []group
 		return out
 	}
 
-	lines := render()
-	for len(lines) > maxLines {
-		changed := false
-		for i := len(sections) - 1; i >= 0; i-- {
-			s := &sections[i]
-			total := len(s.rows)
-			if s.summaryOnly {
-				continue
-			}
-			switch {
-			case s.ellipsis:
-				if s.shownRows > 1 {
-					s.shownRows--
-					changed = true
-				} else {
-					s.summaryOnly = true
-					s.ellipsis = false
-					s.shownRows = 0
-					changed = true
+	// Locate the cursor's section and its offset within that section.
+	cursorSection, cursorOffset := -1, -1
+	if cursorRowIdx >= 0 {
+		for si := range sections {
+			for oi, ri := range sections[si].rowIdxs {
+				if ri == cursorRowIdx {
+					cursorSection, cursorOffset = si, oi
+					break
 				}
-			case total >= 3:
-				s.ellipsis = true
-				s.shownRows = total - 2
-				changed = true
-			default:
-				s.summaryOnly = true
-				s.shownRows = 0
-				changed = true
 			}
-			if changed {
+			if cursorSection >= 0 {
 				break
 			}
 		}
-		if !changed {
-			break
+	}
+
+	if cursorSection < 0 {
+		// Legacy positional abbreviation: collapse from the last section back.
+		lines := render()
+		for len(lines) > maxLines {
+			changed := false
+			for i := len(sections) - 1; i >= 0; i-- {
+				s := &sections[i]
+				total := len(s.rows)
+				if s.summaryOnly {
+					continue
+				}
+				switch {
+				case s.ellipsis:
+					if s.shownRows > 1 {
+						s.shownRows--
+						changed = true
+					} else {
+						s.summaryOnly = true
+						s.ellipsis = false
+						s.shownRows = 0
+						changed = true
+					}
+				case total >= 3:
+					s.ellipsis = true
+					s.shownRows = total - 2
+					changed = true
+				default:
+					s.summaryOnly = true
+					s.shownRows = 0
+					changed = true
+				}
+				if changed {
+					break
+				}
+			}
+			if !changed {
+				break
+			}
+			lines = render()
+		}
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+		}
+		return lines
+	}
+
+	// Cursor-aware allocation: hand each section a job-row budget, then anchor a
+	// window on the cursor within its section.
+	allocs := make([]sectionAlloc, len(sections))
+	for i := range sections {
+		total := len(sections[i].rowIdxs)
+		allocs[i] = sectionAlloc{total: total, minVisible: sectionMinVisible(total)}
+	}
+	budgets := allocateSectionBudgets(allocs, cursorSection, max(0, maxLines-len(sections)))
+	for i := range sections {
+		s := &sections[i]
+		total := len(s.rowIdxs)
+		s.windowStart = 0
+		s.leadingEllipsis = false
+		switch b := budgets[i]; {
+		case b <= 0:
+			s.summaryOnly = true
+			s.ellipsis = false
+			s.shownRows = 0
+		case b >= total:
+			s.summaryOnly = false
+			s.ellipsis = false
+			s.shownRows = total
+		default:
+			s.summaryOnly = false
+			s.ellipsis = true
+			s.shownRows = b
+		}
+	}
+	// anchorCursorWindow positions the cursor section's visible window so it
+	// contains the cursor, centering it (via visibleWindow) and setting the
+	// leading/trailing ellipsis flags. Safe to re-call after shrinking shownRows.
+	anchorCursorWindow := func(s *sectionState) {
+		total := len(s.rowIdxs)
+		s.summaryOnly = false
+		if s.shownRows < 1 {
+			s.shownRows = 1
+		}
+		b := s.shownRows
+		if b >= total {
+			s.shownRows = total
+			s.windowStart = 0
+			s.ellipsis = false
+			s.leadingEllipsis = false
+			return
+		}
+		start, _ := visibleWindow(cursorOffset, total, b)
+		s.windowStart = start
+		s.leadingEllipsis = start > 0
+		s.ellipsis = start+b < total
+	}
+	// Show the cursor's row only when the viewport has room beyond one header per
+	// section; at the extreme where headers alone fill the viewport, preserve the
+	// section skeleton (budget 0 for every section) rather than dropping a header.
+	if budgets[cursorSection] > 0 {
+		anchorCursorWindow(&sections[cursorSection])
+	}
+
+	lines := render()
+	for len(lines) > maxLines {
+		// Collapse the furthest non-cursor, non-collapsed section first.
+		victim, bestDist := -1, -1
+		for i := range sections {
+			if i == cursorSection || sections[i].summaryOnly {
+				continue
+			}
+			if d := absDistance(i, cursorSection); d > bestDist {
+				bestDist = d
+				victim = i
+			}
+		}
+		if victim < 0 {
+			// Only the cursor section (plus collapsed others) remains and it is
+			// still too tall: shrink its window and re-anchor around the cursor.
+			s := &sections[cursorSection]
+			if s.shownRows <= 1 {
+				break
+			}
+			s.shownRows--
+			anchorCursorWindow(s)
+		} else {
+			v := &sections[victim]
+			v.summaryOnly = true
+			v.ellipsis = false
+			v.leadingEllipsis = false
+			v.shownRows = 0
 		}
 		lines = render()
 	}
 	if len(lines) > maxLines {
-		lines = lines[:maxLines]
+		lines = capViewportKeepingRow(lines, maxLines, cursorRowIdx)
 	}
 	return lines
 }

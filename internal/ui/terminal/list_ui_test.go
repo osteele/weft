@@ -3,6 +3,7 @@ package terminal
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1136,7 +1137,7 @@ func TestGroupedViewportCountsFailedInstanceRows(t *testing.T) {
 		now:             now,
 	})
 
-	lines := selectGroupedRowsForViewport(rows, 20)
+	lines := selectGroupedRowsForViewport(rows, 20, -1)
 	if len(lines) == 0 {
 		t.Fatal("selectGroupedRowsForViewport returned no lines")
 	}
@@ -1291,7 +1292,7 @@ func TestListTUIRecentFailedInstancesViewportKeepsHeader(t *testing.T) {
 	}
 	m.rebuildGroupedRows()
 
-	lines := selectGroupedRowsForViewport(m.groupedRows, 20)
+	lines := selectGroupedRowsForViewport(m.groupedRows, 20, -1)
 	if len(lines) == 0 {
 		t.Fatal("selectGroupedRowsForViewport returned no lines")
 	}
@@ -1353,7 +1354,7 @@ func TestSelectGroupedRowsForViewport_EllidesSectionTailWithDots(t *testing.T) {
 		{ID: 4, Status: db.StatusRunning, Host: "cool30", Description: "run 4", Project: "proj"},
 	}, 120, nil, nil)
 
-	lines := selectGroupedRowsForViewport(rows, 4)
+	lines := selectGroupedRowsForViewport(rows, 4, -1)
 	if len(lines) != 4 {
 		t.Fatalf("line count = %d, want 4", len(lines))
 	}
@@ -1371,7 +1372,7 @@ func TestSelectGroupedRowsForViewport_FullyElidedGroupShowsHeaderWithoutColon(t 
 		{ID: 11, Status: db.StatusQueued, Host: "", Description: "u2", Project: "proj"},
 	}, 120, nil, nil)
 
-	lines := selectGroupedRowsForViewport(rows, 1)
+	lines := selectGroupedRowsForViewport(rows, 1, -1)
 	if len(lines) != 1 {
 		t.Fatalf("line count = %d, want 1", len(lines))
 	}
@@ -1388,12 +1389,211 @@ func TestSelectGroupedRowsForViewport_RemovesBlankLinesBetweenAbbreviatedGroups(
 		{ID: 31, Status: db.StatusQueued, Host: "", Description: "u2", Project: "proj"},
 	}, 120, nil, nil)
 
-	lines := selectGroupedRowsForViewport(rows, 3)
+	lines := selectGroupedRowsForViewport(rows, 3, -1)
 	if len(lines) != 2 {
 		t.Fatalf("line count = %d, want 2", len(lines))
 	}
 	if strings.TrimSpace(lines[0].text) == "" || strings.TrimSpace(lines[1].text) == "" {
 		t.Fatalf("expected no blank separator between abbreviated groups, got: %+v", lines)
+	}
+}
+
+// groupedRowIndexForJob returns the index of the row carrying the given job ID,
+// i.e. a valid cursorRowIdx for selectGroupedRowsForViewport.
+func groupedRowIndexForJob(rows []groupedStatusRow, jobID int64) int {
+	for i := range rows {
+		if rows[i].job != nil && rows[i].job.ID == jobID {
+			return i
+		}
+	}
+	return -1
+}
+
+func joinViewportText(lines []groupedViewportLine) string {
+	parts := make([]string, len(lines))
+	for i, l := range lines {
+		parts[i] = stripANSI(l.text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// reportedGroupedJobs reproduces the bug-report layout: Running(4), Queued(1),
+// Completed(5), Failed(10).
+func reportedGroupedJobs() []*db.Job {
+	jobs := make([]*db.Job, 0, 20)
+	for i := 1; i <= 4; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(i), Status: db.StatusRunning, Host: "cool30", Description: fmt.Sprintf("run %d", i), Project: "proj"})
+	}
+	jobs = append(jobs, &db.Job{ID: 50, Status: db.StatusQueued, Host: "cool30", Description: "queued 1", Project: "proj"})
+	for i := 0; i < 5; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(100 + i), Status: db.StatusCompleted, ExitCode: testIntPtr(0), Description: fmt.Sprintf("done %d", i), Project: "proj"})
+	}
+	for i := 0; i < 10; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(200 + i), Status: db.StatusFailed, Description: fmt.Sprintf("fail %d", i), Project: "proj"})
+	}
+	return jobs
+}
+
+// TestSelectGroupedRowsForViewport_CursorRowAlwaysVisible is the regression test
+// for the reported bug: arrow navigation onto a job in an abbreviated section
+// must keep that job on screen. The cursor sits on the last Completed job, which
+// the cursor-agnostic abbreviation would have elided behind "...".
+func TestSelectGroupedRowsForViewport_CursorRowAlwaysVisible(t *testing.T) {
+	rows := buildGroupedStatusRows(reportedGroupedJobs(), 120, nil, nil)
+
+	for _, tc := range []struct {
+		name  string
+		jobID int64
+	}{
+		{"last completed (abbreviated tail)", 104},
+		{"middle failed (legacy collapses first)", 205},
+		{"last failed", 209},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cursorRowIdx := groupedRowIndexForJob(rows, tc.jobID)
+			if cursorRowIdx < 0 {
+				t.Fatalf("job %d row not found", tc.jobID)
+			}
+			lines := selectGroupedRowsForViewport(rows, 12, cursorRowIdx)
+			if !viewportContains(lines, cursorRowIdx) {
+				t.Fatalf("cursor row for job %d not visible:\n%s", tc.jobID, joinViewportText(lines))
+			}
+			if len(lines) > 12 {
+				t.Fatalf("viewport exceeded budget: %d > 12", len(lines))
+			}
+		})
+	}
+}
+
+// TestSelectGroupedRowsForViewport_AnchorsWindowWithinSection verifies the cursor
+// section shows a window centered on the cursor with a leading "..." when the
+// window starts past the section head.
+func TestSelectGroupedRowsForViewport_AnchorsWindowWithinSection(t *testing.T) {
+	jobs := make([]*db.Job, 0, 10)
+	for i := 0; i < 10; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(300 + i), Status: db.StatusCompleted, ExitCode: testIntPtr(0), Description: fmt.Sprintf("done %d", i), Project: "proj"})
+	}
+	rows := buildGroupedStatusRows(jobs, 120, nil, nil)
+	cursorRowIdx := groupedRowIndexForJob(rows, 307) // a middle-tail job
+	if cursorRowIdx < 0 {
+		t.Fatal("cursor job row not found")
+	}
+
+	lines := selectGroupedRowsForViewport(rows, 6, cursorRowIdx)
+	if !viewportContains(lines, cursorRowIdx) {
+		t.Fatalf("cursor row not visible:\n%s", joinViewportText(lines))
+	}
+	cursorLine, firstEllipsis := -1, -1
+	for i, l := range lines {
+		if l.rowIdx == cursorRowIdx {
+			cursorLine = i
+		}
+		if firstEllipsis < 0 && strings.TrimSpace(l.text) == "..." {
+			firstEllipsis = i
+		}
+	}
+	if firstEllipsis < 0 || firstEllipsis >= cursorLine {
+		t.Fatalf("expected a leading ellipsis before the cursor row, got:\n%s", joinViewportText(lines))
+	}
+}
+
+// TestListTUIGroupedViewRevealsCursorInAbbreviatedSection drives the full
+// View() pipeline: with the cursor on a job that a height-limited viewport would
+// abbreviate, the rendered output must still contain that job.
+func TestListTUIGroupedViewRevealsCursorInAbbreviatedSection(t *testing.T) {
+	resetProviderCreditWarningCacheForTest(t)
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           120,
+		height:          16,
+		jobs:            reportedGroupedJobs(),
+	}
+	m.rebuildGroupedRows()
+
+	// Place the cursor on the last Completed job (wj104), which sits behind the
+	// "..." tail of an abbreviated section.
+	target := -1
+	for pos, rowIdx := range m.groupedSelectableRows {
+		if j := m.groupedRows[rowIdx].job; j != nil && j.ID == 104 {
+			target = pos
+			break
+		}
+	}
+	if target < 0 {
+		t.Fatal("completed job wj104 not selectable")
+	}
+	m.cursor = target
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "wj104") {
+		t.Fatalf("cursor job wj104 not visible in rendered view:\n%s", out)
+	}
+}
+
+func TestAllocateSectionBudgets_Invariants(t *testing.T) {
+	secs := []sectionAlloc{
+		{total: 20, minVisible: 2},
+		{total: 3, minVisible: 2},
+		{total: 8, minVisible: 2},
+	}
+	for cursor := 0; cursor < len(secs); cursor++ {
+		for avail := 0; avail <= 35; avail++ {
+			got := allocateSectionBudgets(secs, cursor, avail)
+			sum := 0
+			for i, b := range got {
+				// The cursor section may show a single row to keep the cursor
+				// visible even when its minVisible is higher; other sections must
+				// be 0 or at least minVisible.
+				floor := secs[i].minVisible
+				if i == cursor {
+					floor = 1
+				}
+				if b != 0 && (b < floor || b > secs[i].total) {
+					t.Fatalf("cursor=%d avail=%d: section %d budget %d violates 0|[%d,%d]", cursor, avail, i, b, floor, secs[i].total)
+				}
+				sum += b
+			}
+			if sum > avail {
+				t.Fatalf("cursor=%d avail=%d: total %d exceeds available", cursor, avail, sum)
+			}
+		}
+	}
+}
+
+// TestAllocateSectionBudgets_TrimsNearTallSection: a single tall adjacent section
+// is trimmed (kept partially visible) rather than collapsed.
+func TestAllocateSectionBudgets_TrimsNearTallSection(t *testing.T) {
+	secs := []sectionAlloc{
+		{total: 20, minVisible: 2}, // tall, adjacent to cursor
+		{total: 3, minVisible: 2},  // cursor section
+		{total: 8, minVisible: 2},
+	}
+	got := allocateSectionBudgets(secs, 1, 10)
+	if got[1] < 2 {
+		t.Fatalf("cursor section below min: %v", got)
+	}
+	if got[0] == 0 {
+		t.Fatalf("adjacent tall section should be trimmed, not collapsed: %v", got)
+	}
+}
+
+// TestAllocateSectionBudgets_CollapsesFarSectionsFirst: distant small sections
+// collapse before nearer ones.
+func TestAllocateSectionBudgets_CollapsesFarSectionsFirst(t *testing.T) {
+	secs := []sectionAlloc{
+		{total: 5, minVisible: 2}, // distance 3 (farthest)
+		{total: 5, minVisible: 2}, // distance 2
+		{total: 5, minVisible: 2}, // distance 1
+		{total: 5, minVisible: 2}, // cursor
+		{total: 5, minVisible: 2}, // distance 1
+	}
+	got := allocateSectionBudgets(secs, 3, 8)
+	if got[3] < 2 {
+		t.Fatalf("cursor section below min: %v", got)
+	}
+	if got[0] != 0 {
+		t.Fatalf("farthest section should collapse first, got: %v", got)
 	}
 }
 
