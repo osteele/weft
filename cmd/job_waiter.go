@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
@@ -83,7 +82,7 @@ func followQueuedJob(database *sql.DB, jobID int64, host string, deferred bool) 
 	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 1; done; tail -n 50 -F %s",
 		shellQuote(logFile), shellQuote(logFile))
 	remoteCmd := fmt.Sprintf("sh -c %s", shellQuote(script))
-	sshCmd := exec.Command("ssh", host, remoteCmd)
+	sshCmd := ssh.Command(host, remoteCmd)
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr
 	return streamCommandUntilJobDone(database, jobID, sshCmd)

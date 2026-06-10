@@ -93,6 +93,29 @@ func TestIdentityArgs_PerHostWithoutCloudFallback(t *testing.T) {
 	}
 }
 
+// TestCommand_AppliesHostOverride is a regression test for log-follow and
+// job-wait streaming, which need an *exec.Cmd for direct process control.
+// Command() must carry user@host and IdentityAgent=none so the configured
+// per-host service key is used rather than ssh falling back to ~/.ssh/config
+// (the wrong user, which triggers an agent auth prompt).
+func TestCommand_AppliesHostOverride(t *testing.T) {
+	resetIdentityGlobals(t)
+	sshUserByHost = map[string]string{"studio": "agent"}
+	sshIdentityByHost = map[string]string{"studio": "/path/to/agent_studio_key"}
+
+	cmd := Command("studio", "tail -F log")
+	args := cmd.Args
+	if !slices.Contains(args, "agent@studio") {
+		t.Fatalf("Command args = %v, want target agent@studio", args)
+	}
+	if slices.Contains(args, "studio") {
+		t.Fatalf("Command args = %v, must not pass bare host (bypasses override)", args)
+	}
+	if !slices.Contains(args, "IdentityAgent=none") || !slices.Contains(args, "/path/to/agent_studio_key") {
+		t.Fatalf("Command args = %v, want IdentityAgent=none and the per-host key", args)
+	}
+}
+
 // TestHostTarget_NoOverride: with no per-host user override the host
 // is returned unchanged so ssh resolves the user via ~/.ssh/config or
 // the local username.

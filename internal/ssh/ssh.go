@@ -35,6 +35,17 @@ func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
 	return exec.Command("ssh", args...)
 }
 
+// Command returns an *exec.Cmd for an interactive or streaming SSH call to
+// host, with the per-host user override and identity flags applied (the same
+// hosts.<name>.ssh_user / ssh_identity_file resolution used by the pool).
+// Use this instead of exec.Command("ssh", host, ...) for callers that need
+// direct process control (setting Stdout/Stderr, killing on completion) and
+// therefore can't go through RunStreaming; the bare host name bypasses the
+// override and lets ssh fall back to ~/.ssh/config.
+func Command(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
+	return sshCommand(host, remoteCmd, extraArgs...)
+}
+
 // scpCommand creates an exec.Cmd for SCP. Identity flags are injected
 // up-front so per-host weft auth applies; per-call -q comes after.
 // scp targets are file paths (host:path), constructed by callers, so

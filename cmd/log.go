@@ -349,7 +349,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 	if follow {
 		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
-		sshCmd := exec.Command("ssh", job.Host, remoteCmd)
+		sshCmd := ssh.Command(job.Host, remoteCmd)
 		sshCmd.Stdout = os.Stdout
 		sshCmd.Stderr = os.Stderr
 		return streamCommandUntilJobDone(database, job.ID, sshCmd)
