@@ -423,6 +423,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Load output directories from .weft.toml for convention-based output collection
 	localDir := workdir.ResolveLocal(workingDir)
+
+	// Fail fast when the command directly execs a local script that lacks the
+	// +x bit; otherwise the job dies at runtime with exit 126 "Permission denied".
+	if err := dataloc.CheckBareScriptExecutable(localDir, command); err != nil {
+		return err
+	}
+
 	outputDirs := config.ProjectOutputDirs(localDir)
 
 	// Merge project-level inputs with CLI --input flags
